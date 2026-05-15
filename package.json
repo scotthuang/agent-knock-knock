@@ -1,0 +1,15 @@
+{
+  "name": "agent-knock-knock",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "agent-knock-knock": "./bin/agent-knock-knock.js"
+  },
+  "scripts": {
+    "test": "node --test 'test/**/*.test.js'"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
