@@ -30,6 +30,15 @@ Send the task through `acpx`:
 scripts/bidirectional-delegate.sh --send --request "Implement a small feature"
 ```
 
+Record a Claude Code callback without delivering it to OpenClaw:
+
+```bash
+node bin/agent-knock-knock.js callback \
+  --state .agent-knock-knock/conversations/<conversation-id>/state.json \
+  --record-only \
+  --message-json '{"type":"progress","body":"Working on it."}'
+```
+
 Install the OpenClaw skill template when ready:
 
 ```bash

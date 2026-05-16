@@ -19,6 +19,8 @@ Claude Code owns engineering execution. OpenClaw owns product direction, require
 
 ## Start A Conversation
 
+Run these commands from the `agent-knock-knock` repository root, or from a workspace where `scripts/bidirectional-delegate.sh` is available.
+
 Create or reuse a Claude Code session:
 
 ```bash
@@ -38,6 +40,23 @@ If you only want to inspect the payload before sending:
 ```bash
 scripts/bidirectional-delegate.sh --request '<user task>'
 ```
+
+## Communication Contract
+
+Do not use OpenClaw's internal Claude session tools, such as `sessions_send`, to send the task or follow-up messages directly to Claude Code.
+
+All OpenClaw-to-Claude task delivery must go through `scripts/bidirectional-delegate.sh` or an equivalent `agent-knock-knock delegate` command. This command builds the required Claude bootstrap prompt, embeds the OpenClaw callback command, creates durable conversation state, and records the initial task message.
+
+Claude Code must communicate back to OpenClaw by executing the callback command included in its bootstrap prompt. Claude Code should not rely on OpenClaw's session tools, chat memory, or an out-of-band reply path.
+
+The required routing is:
+
+1. OpenClaw starts delegation with `scripts/bidirectional-delegate.sh --send ...`.
+2. The script sends the bootstrap prompt and task to the Claude Code session through `acpx`.
+3. Claude Code sends `question`, `progress`, `blocked`, `done`, or `error` messages back by running the provided callback command.
+4. OpenClaw answers `question` or `blocked` messages with structured `answer` messages through the same protocol path.
+
+If the delegation script is unavailable, stop and report that the `agent-knock-knock` project path is required. Do not fall back to direct `sessions_send` delivery.
 
 ## Message Rules
 

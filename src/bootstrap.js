@@ -32,5 +32,7 @@ Response budget:
 Send messages back to OpenClaw by executing this command with a single structured JSON message as the final argument:
 
 ${callbackCommand}
+
+Replace <structured-message-json> with one shell-quoted JSON object. If the JSON contains single quotes, escape them using standard shell quoting before executing the command.
 `;
 }

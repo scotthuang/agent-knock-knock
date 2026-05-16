@@ -4,7 +4,6 @@
 
 - Install or wire the generated skill template into `~/.openclaw/skills/bidirectional-chat/SKILL.md`.
 - Replace Manager Claude simulation with real OpenClaw session delivery through `openclaw acp`.
-- Add a driver that sends Claude Code messages back to OpenClaw using the Gateway callback command.
 - Verify that OpenClaw receives `question`, `blocked`, `progress`, and `done` messages.
 - Verify that OpenClaw autonomously answers Claude Code questions without asking the user.
 
@@ -48,6 +47,7 @@
 - Store conversation state under `<workspace>/.agent-knock-knock/conversations/<conversation-id>/`.
 - Support transcript rendering from a conversation directory.
 - Add validation for manager/developer role consistency and conversation routing.
+- Add a callback driver that records Claude Code messages before delivering them to OpenClaw.
 
 ## Future UI
 

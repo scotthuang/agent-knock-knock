@@ -6,6 +6,7 @@ import {
   budgetAction,
   createConversation,
   createMessage,
+  extractStructuredMessage,
   parseMessageJson
 } from "../src/protocol.js";
 import { claudeBootstrapPrompt } from "../src/bootstrap.js";
@@ -35,6 +36,8 @@ try {
     runDelegate(args);
   } else if (command === "transcript") {
     runTranscript(args);
+  } else if (command === "callback") {
+    runCallback(args);
   } else {
     usage();
     process.exit(command ? 1 : 0);
@@ -145,7 +148,21 @@ function runDelegate(options) {
   const token = options.token ?? "<token>";
   const openclawSession = options.openclawSession ?? "agent:main:main";
   const claudeSession = options.claudeSession ?? "bidirectional";
-  const callbackCommand = `acpx --agent 'openclaw acp --url ${gatewayUrl} --token ${token} --session ${openclawSession}' '<structured-message-json>'`;
+  const callbackCommand = [
+    shellQuote(process.execPath),
+    shellQuote(new URL(import.meta.url).pathname),
+    "callback",
+    "--state",
+    shellQuote(newResult.paths.statePath),
+    "--gateway-url",
+    shellQuote(gatewayUrl),
+    "--token",
+    shellQuote(token),
+    "--openclaw-session",
+    shellQuote(openclawSession),
+    "--message-json",
+    "'<structured-message-json>'"
+  ].join(" ");
   const conversationWithCallback = {
     ...newResult.conversation,
     gateway_url: gatewayUrl,
@@ -186,6 +203,93 @@ function runTranscript(options) {
   process.stdout.write(formatTranscript(events, {
     includeRaw: Boolean(options.includeRaw)
   }));
+}
+
+function runCallback(options) {
+  const statePath = expandHome(required(options.state, "--state is required"));
+  const messageInput = required(options.messageJson, "--message-json is required");
+  const logPath = expandHome(options.log ?? logPathForStatePath(statePath));
+  const conversation = loadState(statePath);
+  const message = extractStructuredMessage({
+    conversation,
+    input: messageInput,
+    defaultFrom: "claude-code",
+    defaultTo: "openclaw"
+  });
+  const nextConversation = applyMessageToConversation(conversation, message);
+
+  appendEvent(logPath, messageEvent(message));
+  saveState(statePath, nextConversation);
+
+  const result = {
+    conversation: nextConversation,
+    message,
+    budget: budgetAction(nextConversation),
+    delivered: false
+  };
+
+  if (options.recordOnly) {
+    printJson(result);
+    return;
+  }
+
+  const gatewayUrl = options.gatewayUrl ?? conversation.gateway_url;
+  const token = options.token ?? conversation.gateway_token;
+  const openclawSession = options.openclawSession ?? conversation.openclaw_session;
+
+  if (!gatewayUrl) {
+    throw new Error("--gateway-url is required unless state has gateway_url");
+  }
+  if (!token || token === "<token>") {
+    throw new Error("--token is required for callback delivery");
+  }
+  if (!openclawSession) {
+    throw new Error("--openclaw-session is required unless state has openclaw_session");
+  }
+
+  const delivery = deliverToOpenClaw({ gatewayUrl, token, openclawSession, message });
+  appendEvent(logPath, {
+    ts: new Date().toISOString(),
+    conversation_id: conversation.conversation_id,
+    event: "callback_delivery",
+    from: "claude-code",
+    to: "openclaw",
+    round: message.round,
+    status: delivery.status,
+    stdout: delivery.stdout,
+    stderr: delivery.stderr
+  });
+
+  if (delivery.status !== 0) {
+    throw new Error(delivery.stderr || delivery.stdout || `callback delivery failed with status ${delivery.status}`);
+  }
+
+  printJson({
+    ...result,
+    delivered: true
+  });
+}
+
+function deliverToOpenClaw({ gatewayUrl, token, openclawSession, message }) {
+  const agent = `openclaw acp --url ${gatewayUrl} --token ${token} --session ${openclawSession}`;
+  const result = spawnSync("acpx", ["--agent", agent, JSON.stringify(message)], {
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024 * 10
+  });
+
+  if (result.error) {
+    return {
+      status: 1,
+      stdout: result.stdout ?? "",
+      stderr: result.error.message
+    };
+  }
+
+  return {
+    status: result.status ?? 1,
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? ""
+  };
 }
 
 function captureJson(argv) {
@@ -249,6 +353,10 @@ function printJson(value) {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
 function withStoragePaths(conversation, paths) {
   return {
     ...conversation,
@@ -265,6 +373,7 @@ function usage() {
   agent-knock-knock record --state <file> --message-json <json>
   agent-knock-knock bootstrap-prompt --callback-command <command>
   agent-knock-knock delegate --request <text> [--store-dir <dir>] [--token <gateway-token>] [--send]
+  agent-knock-knock callback --state <file> --message-json <json> [--record-only]
   agent-knock-knock transcript --log <file> [--include-raw]
   agent-knock-knock transcript --conversation <dir> [--include-raw]
 `);
