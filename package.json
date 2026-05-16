@@ -3,6 +3,15 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "openclaw": {
+    "extensions": [
+      "./src/openclaw-plugin.js"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.3.24-beta.2",
+      "minGatewayVersion": "2026.3.24-beta.2"
+    }
+  },
   "bin": {
     "agent-knock-knock": "./bin/agent-knock-knock.js"
   },

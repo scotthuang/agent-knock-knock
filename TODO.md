@@ -2,7 +2,7 @@
 
 ## Next Milestone: Real OpenClaw Integration
 
-- Design a minimal OpenClaw plugin for strict message isolation. Skill+exec can leak Claude stdout/stderr and tool output to OpenClaw; plugin actions should hide raw Claude output and expose only protocol messages.
+- Add plugin-native callback delivery so Claude Code protocol messages flow back through OpenClaw without exposing stdout/stderr.
 - Install or wire the generated skill template into `~/.openclaw/skills/bidirectional-chat/SKILL.md`.
 - Replace Manager Claude simulation with real OpenClaw session delivery through `openclaw acp`.
 - Verify that OpenClaw receives `question`, `blocked`, `progress`, and `done` messages.
@@ -51,6 +51,7 @@
 - Add a callback driver that records Claude Code messages before delivering them to OpenClaw.
 - Add callback idempotency/de-duplication for repeated Claude messages.
 - Protect `events.ndjson` from appending to corrupted/non-NDJSON event logs.
+- Add an OpenClaw plugin with a controlled `agent_knock_knock_delegate` tool that launches Claude Code in the background without returning raw Claude output.
 
 ## Future UI
 

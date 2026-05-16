@@ -30,6 +30,14 @@ Send the task through `acpx`:
 scripts/bidirectional-delegate.sh --send --request "Implement a small feature"
 ```
 
+Launch Claude Code in the background and return only protocol metadata:
+
+```bash
+node bin/agent-knock-knock.js delegate \
+  --background \
+  --request "Implement a small feature"
+```
+
 Record a Claude Code callback without delivering it to OpenClaw:
 
 ```bash
@@ -45,6 +53,29 @@ Install the OpenClaw skill template when ready:
 mkdir -p ~/.openclaw/skills/bidirectional-chat
 cp templates/openclaw-skills/bidirectional-chat/SKILL.md ~/.openclaw/skills/bidirectional-chat/SKILL.md
 ```
+
+## OpenClaw Plugin
+
+This package also includes a native OpenClaw plugin. The plugin registers the optional tool `agent_knock_knock_delegate`, which lets OpenClaw delegate an implementation task to Claude Code without exposing Claude's raw terminal output as the tool result.
+
+Install it locally during development:
+
+```bash
+openclaw plugins install --link .
+openclaw plugins enable agent-knock-knock
+```
+
+If your OpenClaw config uses a restrictive tool allowlist, allow the tool:
+
+```json5
+{
+  tools: {
+    allow: ["agent_knock_knock_delegate"]
+  }
+}
+```
+
+The tool launches Claude Code in the background and returns `conversation_id`, `state_path`, `event_log_path`, launch status, and the Claude session name. Follow-up communication should happen through structured protocol callbacks, not by reading the Claude process stdout/stderr.
 
 Run tests:
 

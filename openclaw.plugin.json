@@ -1,0 +1,60 @@
+{
+  "id": "agent-knock-knock",
+  "name": "Agent Knock Knock",
+  "description": "Controlled delegation from OpenClaw to Claude Code through a structured protocol.",
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "tools": ["agent_knock_knock_delegate"]
+  },
+  "toolMetadata": {
+    "agent_knock_knock_delegate": {
+      "optional": true
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "binPath": {
+        "type": "string",
+        "description": "Path to agent-knock-knock CLI. Defaults to this package's bin/agent-knock-knock.js."
+      },
+      "workspace": {
+        "type": "string",
+        "description": "Default workspace for delegated Claude Code tasks."
+      },
+      "storeDir": {
+        "type": "string",
+        "description": "Default conversation store directory."
+      },
+      "claudeSession": {
+        "type": "string",
+        "description": "Default Claude Code session name."
+      },
+      "openclawSession": {
+        "type": "string",
+        "description": "Default OpenClaw session label stored in the protocol state."
+      },
+      "gatewayUrl": {
+        "type": "string",
+        "description": "Gateway URL used by the legacy CLI callback delivery path."
+      },
+      "gatewayToken": {
+        "type": "string",
+        "description": "Gateway token used by the legacy CLI callback delivery path."
+      },
+      "callbackCommand": {
+        "type": "string",
+        "description": "Optional callback command template. {statePath} and {state_path} are replaced with the shell-quoted state path."
+      },
+      "softLimit": {
+        "type": "number"
+      },
+      "hardLimit": {
+        "type": "number"
+      }
+    }
+  }
+}

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import path from "node:path";
 import process from "node:process";
 import {
   applyMessageToConversation,
@@ -146,24 +147,16 @@ function runDelegate(options) {
     throw new Error("--token is required when using --send");
   }
 
-  const token = options.token ?? "<token>";
   const openclawSession = options.openclawSession ?? "agent:main:main";
   const claudeSession = options.claudeSession ?? "bidirectional";
-  const callbackCommand = [
-    shellQuote(process.execPath),
-    shellQuote(new URL(import.meta.url).pathname),
-    "callback",
-    "--state",
-    shellQuote(newResult.paths.statePath),
-    "--gateway-url",
-    shellQuote(gatewayUrl),
-    "--token",
-    shellQuote(token),
-    "--openclaw-session",
-    shellQuote(openclawSession),
-    "--message-json",
-    "'<structured-message-json>'"
-  ].join(" ");
+  const callbackCommand = options.callbackCommand
+    ? expandCallbackCommandTemplate(options.callbackCommand, { statePath: newResult.paths.statePath })
+    : buildCallbackCommand({
+        statePath: newResult.paths.statePath,
+        gatewayUrl,
+        token: options.token,
+        openclawSession
+      });
   const conversationWithCallback = {
     ...newResult.conversation,
     gateway_url: gatewayUrl,
@@ -181,6 +174,32 @@ function runDelegate(options) {
 
   const acpxArgs = ["--approve-all", "claude", "-s", claudeSession, payload];
 
+  if (options.background) {
+    const acpxPath = resolveExecutable("acpx");
+    const child = spawn(acpxPath, acpxArgs, {
+      detached: true,
+      stdio: "ignore"
+    });
+    child.unref();
+
+    appendEvent(newResult.paths.logPath, {
+      ts: new Date().toISOString(),
+      conversation_id: newResult.conversation.conversation_id,
+      event: "claude_launch",
+      mode: "background",
+      pid: child.pid ?? null,
+      claude_session: claudeSession
+    });
+
+    printJson({
+      ...newResult,
+      launched: true,
+      background: true,
+      pid: child.pid ?? null
+    });
+    return;
+  }
+
   if (options.send) {
     const result = spawnSync("acpx", acpxArgs, { stdio: "inherit" });
     process.exitCode = result.status ?? 1;
@@ -193,6 +212,57 @@ function runDelegate(options) {
     acpx_command: ["acpx", ...acpxArgs],
     note: "Run again with --send to send this task through acpx."
   });
+}
+
+function resolveExecutable(command) {
+  if (command.includes(path.sep)) {
+    return command;
+  }
+
+  const paths = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
+  for (const dir of paths) {
+    const candidate = path.join(dir, command);
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch {
+      // Continue searching PATH.
+    }
+  }
+
+  throw new Error(`executable not found on PATH: ${command}`);
+}
+
+function buildCallbackCommand({ statePath, gatewayUrl, token, openclawSession }) {
+  const parts = [
+    shellQuote(process.execPath),
+    shellQuote(new URL(import.meta.url).pathname),
+    "callback",
+    "--state",
+    shellQuote(statePath)
+  ];
+
+  if (token) {
+    parts.push(
+      "--gateway-url",
+      shellQuote(gatewayUrl),
+      "--token",
+      shellQuote(token),
+      "--openclaw-session",
+      shellQuote(openclawSession)
+    );
+  } else {
+    parts.push("--record-only");
+  }
+
+  parts.push("--message-json", "'<structured-message-json>'");
+  return parts.join(" ");
+}
+
+function expandCallbackCommandTemplate(template, { statePath }) {
+  return template
+    .replaceAll("{statePath}", shellQuote(statePath))
+    .replaceAll("{state_path}", shellQuote(statePath));
 }
 
 function runTranscript(options) {
@@ -459,7 +529,7 @@ function usage() {
   agent-knock-knock new --request <text> [--workspace <path>] [--store-dir <dir>]
   agent-knock-knock record --state <file> --message-json <json>
   agent-knock-knock bootstrap-prompt --callback-command <command>
-  agent-knock-knock delegate --request <text> [--store-dir <dir>] [--token <gateway-token>] [--send]
+  agent-knock-knock delegate --request <text> [--store-dir <dir>] [--token <gateway-token>] [--send|--background]
   agent-knock-knock callback --state <file> --message-json <json> [--record-only]
   agent-knock-knock transcript --log <file> [--include-raw]
   agent-knock-knock transcript --conversation <dir> [--include-raw]
