@@ -55,9 +55,11 @@ export default definePluginEntry({
           const result = await handleCallback(api, params);
           respond(true, result);
         } catch (error) {
-          respond(false, {
+          const message = error instanceof Error ? error.message : String(error);
+          api.logger.warn?.(`agent-knock-knock callback failed: ${message}`);
+          respond(false, undefined, {
             code: "AGENT_KNOCK_KNOCK_CALLBACK_FAILED",
-            message: error instanceof Error ? error.message : String(error)
+            message
           });
         }
       },
@@ -184,9 +186,9 @@ async function handleCallback(api, params) {
 
   return {
     ok: true,
-    enqueued: injection.enqueued,
-    injection_id: injection.id,
-    session_key: injection.sessionKey,
+    enqueued: injection?.enqueued ?? true,
+    injection_id: injection?.id,
+    session_key: injection?.sessionKey ?? sessionKey,
     conversation_id: conversationId,
     message_id: messageId,
     message_type: stringValue(message.type) ?? "unknown"
