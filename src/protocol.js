@@ -24,6 +24,11 @@ export const DEFAULT_REQUIRES_RESPONSE = {
   control: false
 };
 
+export const ALLOWED_MESSAGE_TYPES_BY_ROUTE = {
+  "openclaw->claude-code": new Set(["task", "answer", "control", "error"]),
+  "claude-code->openclaw": new Set(["question", "progress", "blocked", "done", "error"])
+};
+
 export function createConversation({
   userRequest,
   workspace = process.cwd(),
@@ -130,8 +135,32 @@ export function validateMessage(message) {
   return true;
 }
 
-export function applyMessageToConversation(conversation, message, now = new Date()) {
+export function validateMessageForConversation(conversation, message) {
+  if (!conversation?.conversation_id) {
+    throw new Error("conversation is required");
+  }
+
   validateMessage(message);
+
+  if (message.conversation_id !== conversation.conversation_id) {
+    throw new Error(`message.conversation_id ${message.conversation_id} does not match conversation ${conversation.conversation_id}`);
+  }
+
+  const route = `${message.from}->${message.to}`;
+  const allowedTypes = ALLOWED_MESSAGE_TYPES_BY_ROUTE[route];
+  if (!allowedTypes) {
+    throw new Error(`invalid message route: ${route}`);
+  }
+
+  if (!allowedTypes.has(message.type)) {
+    throw new Error(`message type ${message.type} is not allowed for route ${route}`);
+  }
+
+  return true;
+}
+
+export function applyMessageToConversation(conversation, message, now = new Date()) {
+  validateMessageForConversation(conversation, message);
 
   const next = {
     ...conversation,
@@ -210,6 +239,59 @@ export function parseMessageJson(input) {
   return parsed;
 }
 
+export function extractStructuredMessage({
+  conversation,
+  input,
+  defaultFrom,
+  defaultTo,
+  now = new Date()
+}) {
+  const parsed = extractJsonObject(input);
+
+  const from = parsed.from ?? defaultFrom;
+  const to = parsed.to ?? defaultTo;
+  const type = parsed.type;
+  const body = typeof parsed.body === "string" ? parsed.body : JSON.stringify(parsed.body);
+
+  return createMessage({
+    conversation,
+    from,
+    to,
+    type,
+    body,
+    requiresResponse: parsed.requires_response,
+    metadata: parsed.metadata,
+    now
+  });
+}
+
+export function extractJsonObject(input) {
+  if (typeof input !== "string" || input.trim().length === 0) {
+    throw new Error("structured message input must be a non-empty string");
+  }
+
+  const candidates = [
+    input.trim(),
+    ...jsonFenceCandidates(input),
+    ...balancedObjectCandidates(input)
+  ];
+
+  const errors = [];
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed;
+      }
+      errors.push("candidate is not a JSON object");
+    } catch (error) {
+      errors.push(error.message);
+    }
+  }
+
+  throw new Error(`no structured JSON message found: ${errors[0] ?? "no candidates"}`);
+}
+
 function nextRound(conversation, requiresResponse) {
   if (!requiresResponse) {
     return conversation.response_rounds_used;
@@ -220,4 +302,49 @@ function nextRound(conversation, requiresResponse) {
 
 function formatTimestamp(date) {
   return date.toISOString().replace(/[-:]/g, "").replace(/\..+$/, "Z");
+}
+
+function jsonFenceCandidates(input) {
+  const matches = input.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi);
+  return Array.from(matches, (match) => match[1].trim()).filter(Boolean);
+}
+
+function balancedObjectCandidates(input) {
+  const candidates = [];
+  let start = -1;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < input.length; index += 1) {
+    const char = input[index];
+
+    if (depth === 0) {
+      if (char === "{") {
+        start = index;
+        depth = 1;
+        inString = false;
+        escaped = false;
+      }
+      continue;
+    }
+
+    if (escaped) {
+      escaped = false;
+    } else if (char === "\\" && inString) {
+      escaped = true;
+    } else if (char === "\"") {
+      inString = !inString;
+    } else if (!inString && char === "{") {
+      depth += 1;
+    } else if (!inString && char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        candidates.push(input.slice(start, index + 1));
+        start = -1;
+      }
+    }
+  }
+
+  return candidates;
 }

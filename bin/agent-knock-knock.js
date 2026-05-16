@@ -9,12 +9,15 @@ import {
   parseMessageJson
 } from "../src/protocol.js";
 import { claudeBootstrapPrompt } from "../src/bootstrap.js";
+import { formatTranscript, readNdjsonLog } from "../src/transcript.js";
 import {
   appendEvent,
-  defaultLogDir,
+  defaultStoreDir,
+  logPathForStatePath,
   loadState,
   messageEvent,
   pathsForConversation,
+  pathsForConversationDir,
   saveState
 } from "../src/store.js";
 
@@ -30,6 +33,8 @@ try {
     runBootstrapPrompt(args);
   } else if (command === "delegate") {
     runDelegate(args);
+  } else if (command === "transcript") {
+    runTranscript(args);
   } else {
     usage();
     process.exit(command ? 1 : 0);
@@ -41,9 +46,10 @@ try {
 
 function runNew(options) {
   const request = required(options.request, "--request is required");
+  const workspace = options.workspace ?? process.cwd();
   const conversation = createConversation({
     userRequest: request,
-    workspace: options.workspace ?? process.cwd(),
+    workspace,
     openclawSession: options.openclawSession ?? "agent:main:main",
     claudeSession: options.claudeSession ?? "bidirectional",
     softLimit: Number(options.softLimit ?? 50),
@@ -59,29 +65,31 @@ function runNew(options) {
   });
 
   const nextConversation = applyMessageToConversation(conversation, taskMessage);
-  const paths = pathsForConversation(conversation.conversation_id, expandHome(options.logDir ?? defaultLogDir()));
+  const storeDir = expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(workspace));
+  const paths = pathsForConversation(conversation.conversation_id, storeDir);
+  const storedConversation = withStoragePaths(nextConversation, paths);
 
-  saveState(paths.statePath, nextConversation);
+  saveState(paths.statePath, storedConversation);
   appendEvent(paths.logPath, {
     ts: conversation.created_at,
     conversation_id: conversation.conversation_id,
     event: "conversation_created",
-    conversation: nextConversation
+    conversation: storedConversation
   });
   appendEvent(paths.logPath, messageEvent(taskMessage));
 
   printJson({
-    conversation: nextConversation,
+    conversation: storedConversation,
     paths,
     task_message: taskMessage,
-    budget: budgetAction(nextConversation)
+    budget: budgetAction(storedConversation)
   });
 }
 
 function runRecord(options) {
   const statePath = required(options.state, "--state is required");
   const messageInput = required(options.messageJson, "--message-json is required");
-  const logPath = options.log ?? statePath.replace(/\.state\.json$/, ".ndjson");
+  const logPath = options.log ?? logPathForStatePath(statePath);
 
   const conversation = loadState(expandHome(statePath));
   const message = parseMessageJson(messageInput);
@@ -109,13 +117,14 @@ function runBootstrapPrompt(options) {
 
 function runDelegate(options) {
   const request = required(options.request, "--request is required");
-  const logDir = expandHome(options.logDir ?? defaultLogDir());
+  const workspace = options.workspace ?? process.cwd();
+  const storeDir = expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(workspace));
   const newResult = captureJson([
     "new",
     "--request",
     request,
     "--workspace",
-    options.workspace ?? process.cwd(),
+    workspace,
     "--openclaw-session",
     options.openclawSession ?? "agent:main:main",
     "--claude-session",
@@ -124,8 +133,8 @@ function runDelegate(options) {
     String(options.softLimit ?? 50),
     "--hard-limit",
     String(options.hardLimit ?? 100),
-    "--log-dir",
-    logDir
+    "--store-dir",
+    storeDir
   ]);
 
   const gatewayUrl = options.gatewayUrl ?? "ws://127.0.0.1:18789";
@@ -137,6 +146,14 @@ function runDelegate(options) {
   const openclawSession = options.openclawSession ?? "agent:main:main";
   const claudeSession = options.claudeSession ?? "bidirectional";
   const callbackCommand = `acpx --agent 'openclaw acp --url ${gatewayUrl} --token ${token} --session ${openclawSession}' '<structured-message-json>'`;
+  const conversationWithCallback = {
+    ...newResult.conversation,
+    gateway_url: gatewayUrl,
+    callback_command: callbackCommand
+  };
+  saveState(newResult.paths.statePath, conversationWithCallback);
+  newResult.conversation = conversationWithCallback;
+
   const bootstrap = claudeBootstrapPrompt({
     callbackCommand,
     softLimit: Number(options.softLimit ?? 50),
@@ -158,6 +175,17 @@ function runDelegate(options) {
     acpx_command: ["acpx", ...acpxArgs],
     note: "Run again with --send to send this task through acpx."
   });
+}
+
+function runTranscript(options) {
+  const conversationDir = options.conversation ? expandHome(options.conversation) : null;
+  const logPath = conversationDir
+    ? pathsForConversationDir(conversationDir).logPath
+    : required(options.log ?? options.path, "--log or --conversation is required");
+  const events = readNdjsonLog(expandHome(logPath));
+  process.stdout.write(formatTranscript(events, {
+    includeRaw: Boolean(options.includeRaw)
+  }));
 }
 
 function captureJson(argv) {
@@ -221,11 +249,23 @@ function printJson(value) {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
+function withStoragePaths(conversation, paths) {
+  return {
+    ...conversation,
+    store_dir: paths.storeDir,
+    conversation_dir: paths.conversationDir,
+    event_log_path: paths.logPath,
+    state_path: paths.statePath
+  };
+}
+
 function usage() {
   process.stdout.write(`Usage:
-  agent-knock-knock new --request <text> [--workspace <path>]
+  agent-knock-knock new --request <text> [--workspace <path>] [--store-dir <dir>]
   agent-knock-knock record --state <file> --message-json <json>
   agent-knock-knock bootstrap-prompt --callback-command <command>
-  agent-knock-knock delegate --request <text> [--token <gateway-token>] [--send]
+  agent-knock-knock delegate --request <text> [--store-dir <dir>] [--token <gateway-token>] [--send]
+  agent-knock-knock transcript --log <file> [--include-raw]
+  agent-knock-knock transcript --conversation <dir> [--include-raw]
 `);
 }

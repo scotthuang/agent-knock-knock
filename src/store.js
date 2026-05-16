@@ -1,21 +1,45 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
-export function defaultLogDir() {
-  return path.join(os.homedir(), ".openclaw", "logs", "bidirectional");
+export function defaultStoreDir(workspace = process.cwd()) {
+  return path.join(workspace, ".agent-knock-knock", "conversations");
+}
+
+export function defaultLogDir(workspace = process.cwd()) {
+  return defaultStoreDir(workspace);
 }
 
 export function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true });
 }
 
-export function pathsForConversation(conversationId, logDir = defaultLogDir()) {
+export function pathsForConversation(conversationId, storeDir = defaultStoreDir()) {
+  const conversationDir = path.join(storeDir, conversationId);
   return {
-    logDir,
-    logPath: path.join(logDir, `${conversationId}.ndjson`),
-    statePath: path.join(logDir, `${conversationId}.state.json`)
+    storeDir,
+    logDir: storeDir,
+    conversationDir,
+    logPath: path.join(conversationDir, "events.ndjson"),
+    statePath: path.join(conversationDir, "state.json")
   };
+}
+
+export function pathsForConversationDir(conversationDir) {
+  return {
+    storeDir: path.dirname(conversationDir),
+    logDir: path.dirname(conversationDir),
+    conversationDir,
+    logPath: path.join(conversationDir, "events.ndjson"),
+    statePath: path.join(conversationDir, "state.json")
+  };
+}
+
+export function logPathForStatePath(statePath) {
+  if (path.basename(statePath) === "state.json") {
+    return path.join(path.dirname(statePath), "events.ndjson");
+  }
+
+  return statePath.replace(/\.state\.json$/, ".ndjson");
 }
 
 export function saveState(statePath, conversation) {

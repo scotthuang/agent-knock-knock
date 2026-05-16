@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import process from "node:process";
+import { normalizeAcpxOutput } from "../src/acpx-output.js";
 import {
   applyMessageToConversation,
   createConversation,
-  createMessage
+  createMessage,
+  extractStructuredMessage
 } from "../src/protocol.js";
 import {
   appendEvent,
+  defaultStoreDir,
   messageEvent,
   pathsForConversation,
   rawExchangeEvent,
@@ -17,7 +20,7 @@ import {
 const args = parseArgs(process.argv.slice(2));
 const managerSession = args.managerSession ?? "akk-manager-weather";
 const developerSession = args.developerSession ?? "akk-developer-weather";
-const logDir = args.logDir ?? "/private/tmp/agent-knock-knock-logs";
+const storeDir = args.storeDir ?? args.logDir ?? defaultStoreDir(process.cwd());
 const location = args.location ?? "广州";
 const dryRun = Boolean(args.dryRun);
 const timeoutMs = Number(args.timeoutMs ?? 45000);
@@ -29,10 +32,14 @@ const conversation = createConversation({
   claudeSession: developerSession,
   workspace: process.cwd()
 });
-const paths = pathsForConversation(conversation.conversation_id, logDir);
+const paths = pathsForConversation(conversation.conversation_id, storeDir);
 
 let state = {
   ...conversation,
+  store_dir: paths.storeDir,
+  conversation_dir: paths.conversationDir,
+  event_log_path: paths.logPath,
+  state_path: paths.statePath,
   manager_session: managerSession,
   developer_session: developerSession,
   status: "running"
@@ -81,6 +88,7 @@ process.stdout.write(JSON.stringify({
   status: state.status,
   log_path: paths.logPath,
   state_path: paths.statePath,
+  conversation_dir: paths.conversationDir,
   manager_session: managerSession,
   developer_session: developerSession,
   runner,
@@ -106,26 +114,22 @@ ${JSON.stringify(taskMessage)}
 Use available tools or knowledge to answer today's weather for ${location}. If live lookup is unavailable, say so clearly.`;
 
   const developerResponse = dryRun
-    ? "[dry-run] Developer Claude would check weather and return a structured done/blocked message."
+    ? '{"from":"claude-code","to":"openclaw","type":"blocked","body":"[dry-run] Developer Claude would check weather and return a structured done/blocked message."}'
     : callClaude({ session: developerSession, prompt: developerPrompt, timeoutMs, runner });
 
-  appendEvent(paths.logPath, rawExchangeEvent({
+  appendRawExchange({
     conversationId: state.conversation_id,
     from: "openclaw",
     to: "claude-code",
     round: 1,
     prompt: developerPrompt,
     response: developerResponse
-  }));
+  });
 
-  const developerMessageType = inferDoneOrBlocked(developerResponse);
-  const developerMessage = createMessage({
-    conversation: state,
-    from: "claude-code",
-    to: "openclaw",
-    type: developerMessageType,
-    requiresResponse: developerMessageType === "blocked",
-    body: developerResponse.trim()
+  const developerMessage = structuredMessageFromResponse({
+    response: developerResponse,
+    defaultFrom: "claude-code",
+    defaultTo: "openclaw"
   });
   state = applyAndLog(state, developerMessage);
 
@@ -145,11 +149,11 @@ ${developerResponse}`;
 
   if (/runner failed|timed out|timeout|API Error/i.test(managerResponse)) {
     markFailed();
-  } else if (developerMessageType === "blocked") {
+  } else if (developerMessage.type === "blocked") {
     markFailed();
   }
 
-  appendEvent(paths.logPath, rawExchangeEvent({
+  appendRawExchange({
     conversationId: state.conversation_id,
     from: "claude-code",
     to: "openclaw",
@@ -157,7 +161,7 @@ ${developerResponse}`;
     prompt: managerPrompt,
     response: managerResponse,
     type: "manager_final"
-  }));
+  });
 
   closeConversation(managerResponse.trim());
 }
@@ -199,7 +203,7 @@ ${step.developerInstruction}`;
       ? dryRunDeveloperResponse(index)
       : callClaude({ session: developerSession, prompt: developerPrompt, timeoutMs, runner });
 
-    appendEvent(paths.logPath, rawExchangeEvent({
+    appendRawExchange({
       conversationId: state.conversation_id,
       from: "openclaw",
       to: "claude-code",
@@ -207,19 +211,15 @@ ${step.developerInstruction}`;
       prompt: developerPrompt,
       response: developerResponse,
       type: `developer_step_${index + 1}`
-    }));
+    });
 
-    const developerType = index < 2 ? "question" : "done";
-    const developerMessage = createMessage({
-      conversation: state,
-      from: "claude-code",
-      to: "openclaw",
-      type: developerType,
-      requiresResponse: developerType === "question",
-      body: developerResponse.trim()
+    const developerMessage = structuredMessageFromResponse({
+      response: developerResponse,
+      defaultFrom: "claude-code",
+      defaultTo: "openclaw"
     });
     state = applyAndLog(state, developerMessage);
-    transcript.push({ from: "developer", type: developerType, body: developerResponse.trim() });
+    transcript.push({ from: "developer", type: developerMessage.type, body: developerMessage.body });
 
     if (!step.managerInstruction) {
       continue;
@@ -240,7 +240,7 @@ ${step.managerInstruction}`;
       ? dryRunManagerResponse(index)
       : callClaude({ session: managerSession, prompt: managerPrompt, timeoutMs, runner });
 
-    appendEvent(paths.logPath, rawExchangeEvent({
+    appendRawExchange({
       conversationId: state.conversation_id,
       from: "claude-code",
       to: "openclaw",
@@ -248,21 +248,43 @@ ${step.managerInstruction}`;
       prompt: managerPrompt,
       response: managerResponse,
       type: `manager_step_${index + 1}`
-    }));
+    });
 
-    const managerMessage = createMessage({
-      conversation: state,
-      from: "openclaw",
-      to: "claude-code",
-      type: "answer",
-      requiresResponse: true,
-      body: managerResponse.trim()
+    const managerMessage = structuredMessageFromResponse({
+      response: managerResponse,
+      defaultFrom: "openclaw",
+      defaultTo: "claude-code"
     });
     state = applyAndLog(state, managerMessage);
-    transcript.push({ from: "manager", type: "answer", body: managerResponse.trim() });
+    transcript.push({ from: "manager", type: managerMessage.type, body: managerMessage.body });
   }
 
   closeConversation("Architecture questions scenario completed.");
+}
+
+function structuredMessageFromResponse({ response, defaultFrom, defaultTo }) {
+  return extractStructuredMessage({
+    conversation: state,
+    input: response,
+    defaultFrom,
+    defaultTo
+  });
+}
+
+function appendRawExchange({ conversationId, from, to, prompt, response, round, type }) {
+  appendEvent(paths.logPath, rawExchangeEvent({
+    conversationId,
+    from,
+    to,
+    prompt,
+    response,
+    round,
+    type
+  }));
+
+  for (const event of normalizeAcpxOutput({ conversationId, from, to, round, output: response })) {
+    appendEvent(paths.logPath, event);
+  }
 }
 
 function applyAndLog(currentState, message) {
@@ -296,9 +318,16 @@ function markFailed() {
 function developerProtocolPrompt() {
   return `You are Developer Claude in a two-Claude managed delegation test.
 
+Role:
+- You are the engineering implementation agent.
+- OpenClaw/Manager owns product direction, requirements interpretation, acceptance criteria, and delivery tradeoffs.
+- You own code changes, commands, tests, and implementation tactics.
+
 Protocol:
-- OpenClaw/Manager is the final technical decision maker.
-- You may ask question messages only for architecture, product, risk, permission, or blocking issues.
+- Ask question messages for ambiguous requirements, product behavior, UX, scope, acceptance criteria, architecture/risk/permission decisions, or engineering constraints that would require a product compromise.
+- Do not silently narrow scope, degrade quality, accept a workaround, or change delivery standards because of an engineering problem. Ask OpenClaw/Manager first.
+- Decide ordinary implementation details yourself when they do not affect product outcome.
+- Follow OpenClaw/Manager's answer as the product decision.
 - Use the fewest response-requiring rounds possible.
 - Only messages with requires_response=true consume response rounds.
 - Soft response limit: 50.
@@ -311,10 +340,16 @@ Protocol:
 function managerProtocolPrompt() {
   return `You are Manager Claude simulating OpenClaw.
 
+Role:
+- You are the autonomous product manager, requirements owner, and final acceptance decision maker.
+- Developer Claude owns engineering execution.
+- You own product direction, requirements interpretation, acceptance criteria, delivery scope, UX behavior, and any compromise or degradation decision.
+
 Protocol:
-- You are the autonomous manager and final technical decision maker.
+- Answer Developer Claude's question/blocker directly from the product and acceptance perspective.
 - Do not ask the human user for process decisions.
-- Answer Developer Claude's question/blocker directly.
+- Avoid taking over implementation details unless they affect product outcome.
+- Prefer small shippable scope when it still satisfies the user's intent.
 - Track response rounds using requires_response=true messages.
 - Soft response limit: 50.
 - Hard response limit: 100.
@@ -340,10 +375,6 @@ function dryRunManagerResponse(index) {
     '{"from":"openclaw","to":"claude-code","type":"answer","requires_response":true,"body":"选择 REST。需求简单、调试直接、客户端生成和测试成本更低。"}'
   ];
   return responses[index];
-}
-
-function inferDoneOrBlocked(response) {
-  return /blocked|不能联网|无法|失败|unavailable|cannot|timed out|timeout|runner failed/i.test(response) ? "blocked" : "done";
 }
 
 function callClaude({ session, prompt, timeoutMs, runner }) {

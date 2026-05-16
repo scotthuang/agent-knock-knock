@@ -49,6 +49,45 @@ Run a two-Claude simulation:
 node scripts/two-claude-weather-test.js --location 广州
 ```
 
+Run named simulations:
+
+```bash
+npm run simulate:architecture
+npm run simulate:weather
+```
+
+Print a readable transcript from an NDJSON log:
+
+```bash
+npm run transcript -- --conversation .agent-knock-knock/conversations/<conversation-id>
+```
+
+You can also read a specific event log file:
+
+```bash
+npm run transcript -- --log .agent-knock-knock/conversations/<conversation-id>/events.ndjson
+```
+
+Include raw model exchange events when debugging prompt/response payloads:
+
+```bash
+npm run transcript -- --conversation .agent-knock-knock/conversations/<conversation-id> --include-raw
+```
+
+## Storage
+
+Conversation state is stored under the workspace so a new OpenClaw session can recover the shared context:
+
+```text
+.agent-knock-knock/
+  conversations/
+    <conversation-id>/
+      state.json
+      events.ndjson
+```
+
+Use `--store-dir <dir>` to override the conversation store location. `--log-dir <dir>` is still accepted as a compatibility alias.
+
 ## Defaults
 
 - OpenClaw session: `agent:main:main`
@@ -56,4 +95,4 @@ node scripts/two-claude-weather-test.js --location 广州
 - Gateway URL: `ws://127.0.0.1:18789`
 - Soft response limit: `50`
 - Hard response limit: `100`
-- Log directory: `~/.openclaw/logs/bidirectional`
+- Store directory: `<workspace>/.agent-knock-knock/conversations`

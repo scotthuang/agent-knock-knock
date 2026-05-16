@@ -2,10 +2,13 @@
 
 This protocol supports managed bidirectional delegation:
 
-- OpenClaw is the manager and final decision maker.
-- Claude Code is the developer and can directly edit code.
+- OpenClaw is the product manager, requirements owner, and final acceptance decision maker.
+- Claude Code is the engineering implementation agent and can directly edit code.
+- OpenClaw decides product direction, requirements interpretation, acceptance criteria, delivery scope, UX behavior, and acceptable compromises.
+- Claude Code decides ordinary implementation details, but must ask OpenClaw before changing product behavior, narrowing scope, degrading quality, accepting a workaround, or changing delivery standards.
 - Only messages requiring a response consume the response budget.
-- NDJSON logs are the source for future visualization.
+- Workspace conversation storage is the durable source of truth for recovery and future visualization.
+- NDJSON event logs live at `.agent-knock-knock/conversations/<conversation-id>/events.ndjson`.
 
 ## Message
 
@@ -40,6 +43,17 @@ This protocol supports managed bidirectional delegation:
 | `error` | no | Tool, protocol, or runtime error |
 | `control` | no | Budget warnings and lifecycle control |
 
+## Routes
+
+Messages must match the active `conversation_id`.
+
+Allowed routes:
+
+| Route | Allowed types |
+| --- | --- |
+| `openclaw -> claude-code` | `task`, `answer`, `control`, `error` |
+| `claude-code -> openclaw` | `question`, `progress`, `blocked`, `done`, `error` |
+
 ## Budget
 
 - `0-29`: normal collaboration
@@ -47,4 +61,3 @@ This protocol supports managed bidirectional delegation:
 - `40`: OpenClaw warns Claude Code to finish, degrade, or fail within 10 response rounds
 - `50`: soft stop unless OpenClaw explicitly extends
 - `100`: hard stop
-
