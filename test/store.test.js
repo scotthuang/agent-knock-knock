@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import {
+  appendEvent,
+  assertAppendableEventLog,
   defaultStoreDir,
   logPathForStatePath,
   pathsForConversation,
@@ -13,6 +17,34 @@ test("defaults store under workspace .agent-knock-knock conversations", () => {
     defaultStoreDir("/workspace/project"),
     path.join("/workspace/project", ".agent-knock-knock", "conversations")
   );
+});
+
+test("appendEvent refuses to append to a corrupted event log", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-store-"));
+  const logPath = path.join(dir, "events.ndjson");
+
+  try {
+    fs.writeFileSync(logPath, JSON.stringify({ event: "conversation_created" }, null, 2), "utf8");
+
+    assert.throws(
+      () => appendEvent(logPath, { event: "message", conversation_id: "task-1" }),
+      /event log is not valid NDJSON at line 1/
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("assertAppendableEventLog accepts valid NDJSON events", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-store-"));
+  const logPath = path.join(dir, "events.ndjson");
+
+  try {
+    fs.writeFileSync(logPath, '{"event":"conversation_created"}\n{"event":"message"}\n', "utf8");
+    assert.equal(assertAppendableEventLog(logPath), true);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("uses one directory per conversation", () => {

@@ -53,7 +53,32 @@ export function loadState(statePath) {
 
 export function appendEvent(logPath, event) {
   ensureDir(path.dirname(logPath));
+  assertAppendableEventLog(logPath);
   fs.appendFileSync(logPath, `${JSON.stringify(event)}\n`, "utf8");
+}
+
+export function assertAppendableEventLog(logPath) {
+  if (!fs.existsSync(logPath)) {
+    return true;
+  }
+
+  const text = fs.readFileSync(logPath, "utf8");
+  const lines = text.split(/\r?\n/).filter((line) => line.trim().length > 0);
+
+  for (const [index, line] of lines.entries()) {
+    let parsed;
+    try {
+      parsed = JSON.parse(line);
+    } catch (error) {
+      throw new Error(`event log is not valid NDJSON at line ${index + 1}: ${error.message}`);
+    }
+
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || typeof parsed.event !== "string") {
+      throw new Error(`event log line ${index + 1} is not an event object`);
+    }
+  }
+
+  return true;
 }
 
 export function messageEvent(message) {

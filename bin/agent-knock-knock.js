@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
 import process from "node:process";
 import {
   applyMessageToConversation,
@@ -207,25 +208,48 @@ function runTranscript(options) {
 
 function runCallback(options) {
   const statePath = expandHome(required(options.state, "--state is required"));
+  const releaseLock = acquireFileLock(`${statePath}.lock`);
+  try {
+    runLockedCallback({ ...options, statePath });
+  } finally {
+    releaseLock();
+  }
+}
+
+function runLockedCallback(options) {
   const messageInput = required(options.messageJson, "--message-json is required");
-  const logPath = expandHome(options.log ?? logPathForStatePath(statePath));
-  const conversation = loadState(statePath);
+  const logPath = expandHome(options.log ?? logPathForStatePath(options.statePath));
+  const conversation = loadState(options.statePath);
   const message = extractStructuredMessage({
     conversation,
     input: messageInput,
     defaultFrom: "claude-code",
     defaultTo: "openclaw"
   });
+
+  const existingEvents = readExistingEvents(logPath);
+  if (isDuplicateMessage(existingEvents, message)) {
+    printJson({
+      conversation,
+      message,
+      budget: budgetAction(conversation),
+      delivered: false,
+      duplicate: true
+    });
+    return;
+  }
+
   const nextConversation = applyMessageToConversation(conversation, message);
 
   appendEvent(logPath, messageEvent(message));
-  saveState(statePath, nextConversation);
+  saveState(options.statePath, nextConversation);
 
   const result = {
     conversation: nextConversation,
     message,
     budget: budgetAction(nextConversation),
-    delivered: false
+    delivered: false,
+    duplicate: false
   };
 
   if (options.recordOnly) {
@@ -267,6 +291,69 @@ function runCallback(options) {
   printJson({
     ...result,
     delivered: true
+  });
+}
+
+function acquireFileLock(lockPath, { timeoutMs = 5000, retryMs = 50 } = {}) {
+  const started = Date.now();
+
+  while (true) {
+    try {
+      const fd = fs.openSync(lockPath, "wx");
+      fs.closeSync(fd);
+      return () => {
+        fs.rmSync(lockPath, { force: true });
+      };
+    } catch (error) {
+      if (error.code !== "EEXIST") {
+        throw error;
+      }
+      if (Date.now() - started >= timeoutMs) {
+        throw new Error(`timed out waiting for callback lock: ${lockPath}`);
+      }
+      sleepSync(retryMs);
+    }
+  }
+}
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function readExistingEvents(logPath) {
+  try {
+    return readNdjsonLog(logPath);
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return [];
+    }
+    throw error;
+  }
+}
+
+function isDuplicateMessage(events, message) {
+  return events.some((event) => {
+    if (event.event !== "message") {
+      return false;
+    }
+
+    const existing = event.message ?? event;
+    if (existing.id && existing.id === message.id) {
+      return true;
+    }
+
+    return messageFingerprint(existing) === messageFingerprint(message);
+  });
+}
+
+function messageFingerprint(message) {
+  return JSON.stringify({
+    conversation_id: message.conversation_id,
+    from: message.from,
+    to: message.to,
+    type: message.type,
+    requires_response: message.requires_response,
+    body: message.body
   });
 }
 
