@@ -77,6 +77,8 @@ If your OpenClaw config uses a restrictive tool allowlist, allow the tool:
 
 The tool launches Claude Code in the background and returns `conversation_id`, `state_path`, `event_log_path`, launch status, and the Claude session name. Follow-up communication should happen through structured protocol callbacks, not by reading the Claude process stdout/stderr.
 
+The plugin also registers the Gateway method `agent-knock-knock.callback`. Claude Code callback commands use this method to enqueue a durable next-turn injection for the OpenClaw session, so OpenClaw receives only the structured protocol message.
+
 Run tests:
 
 ```bash

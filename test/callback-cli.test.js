@@ -191,9 +191,86 @@ test("callback serializes concurrent duplicate messages", async () => {
   }
 });
 
-function runCli(args) {
+test("callback can deliver recorded messages through a plugin gateway method", () => {
+  const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-"));
+  const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-openclaw-"));
+  const gatewayCallPath = path.join(fakeBinDir, "gateway-call.json");
+
+  try {
+    const fakeOpenClaw = path.join(fakeBinDir, "openclaw");
+    fs.writeFileSync(
+      fakeOpenClaw,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.writeFileSync(${JSON.stringify(gatewayCallPath)}, JSON.stringify(process.argv.slice(2)), "utf8");
+console.log(JSON.stringify({ ok: true }));
+`,
+      "utf8"
+    );
+    fs.chmodSync(fakeOpenClaw, 0o755);
+
+    const created = runCli([
+      "new",
+      "--request",
+      "Callback gateway method test",
+      "--store-dir",
+      storeDir,
+      "--openclaw-session",
+      "agent:main:main"
+    ]);
+
+    const callback = runCli([
+      "callback",
+      "--state",
+      created.paths.statePath,
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      "agent:main:main",
+      "--message-json",
+      JSON.stringify({
+        from: "claude-code",
+        to: "openclaw",
+        type: "question",
+        body: "Should the export include CSV?"
+      })
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+
+    assert.equal(callback.delivered, true);
+    assert.equal(callback.delivery, "gateway_method");
+
+    const gatewayArgs = JSON.parse(fs.readFileSync(gatewayCallPath, "utf8"));
+    assert.deepEqual(gatewayArgs.slice(0, 3), ["gateway", "call", "agent-knock-knock.callback"]);
+    const params = JSON.parse(gatewayArgs[gatewayArgs.indexOf("--params") + 1]);
+    assert.equal(params.sessionKey, "agent:main:main");
+    assert.equal(params.message.type, "question");
+    assert.equal(params.message.body, "Should the export include CSV?");
+    assert.equal(params.statePath, created.paths.statePath);
+
+    const events = fs.readFileSync(created.paths.logPath, "utf8")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line));
+    assert.equal(events.some((event) =>
+      event.event === "callback_gateway_method_delivery" &&
+      event.method === "agent-knock-knock.callback" &&
+      event.status === 0
+    ), true);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(fakeBinDir, { recursive: true, force: true });
+  }
+});
+
+function runCli(args, env = {}) {
   const result = spawnSync(process.execPath, [binPath, ...args], {
-    encoding: "utf8"
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      ...env
+    }
   });
 
   assert.equal(result.status, 0, result.stderr || result.stdout);

@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 
+const CALLBACK_METHOD = "agent-knock-knock.callback";
 const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const defaultBinPath = path.join(pluginRoot, "bin", "agent-knock-knock.js");
 
@@ -47,6 +48,22 @@ export default definePluginEntry({
   name: "Agent Knock Knock",
   description: "Controlled delegation from OpenClaw to Claude Code.",
   register(api) {
+    api.registerGatewayMethod(
+      CALLBACK_METHOD,
+      async ({ params, respond }) => {
+        try {
+          const result = await handleCallback(api, params);
+          respond(true, result);
+        } catch (error) {
+          respond(false, {
+            code: "AGENT_KNOCK_KNOCK_CALLBACK_FAILED",
+            message: error instanceof Error ? error.message : String(error)
+          });
+        }
+      },
+      { scope: "operator.write" }
+    );
+
     api.registerTool(
       {
         name: "agent_knock_knock_delegate",
@@ -89,6 +106,12 @@ function runDelegate(api, params) {
   pushOptional(args, "--openclaw-session", stringValue(params.openclawSession) ?? stringValue(config.openclawSession));
   pushOptional(args, "--gateway-url", stringValue(config.gatewayUrl));
   pushOptional(args, "--token", stringValue(config.gatewayToken));
+  pushOptional(args, "--gateway-method", CALLBACK_METHOD);
+  pushOptional(
+    args,
+    "--gateway-session",
+    stringValue(params.openclawSession) ?? stringValue(config.openclawSession)
+  );
   pushOptional(args, "--callback-command", stringValue(config.callbackCommand));
   pushOptional(args, "--soft-limit", numberString(params.softLimit) ?? numberString(config.softLimit));
   pushOptional(args, "--hard-limit", numberString(params.hardLimit) ?? numberString(config.hardLimit));
@@ -120,6 +143,74 @@ function runDelegate(api, params) {
     note:
       "Claude Code was launched in the background. Only structured protocol callbacks should be used for follow-up messages."
   };
+}
+
+async function handleCallback(api, params) {
+  if (!isRecord(params)) {
+    throw new Error("callback params must be an object");
+  }
+
+  const message = isRecord(params.message) ? params.message : undefined;
+  const conversation = isRecord(params.conversation) ? params.conversation : undefined;
+  const sessionKey =
+    stringValue(params.sessionKey) ??
+    stringValue(conversation?.openclaw_session) ??
+    stringValue(message?.metadata?.openclaw_session);
+
+  if (!sessionKey) {
+    throw new Error("callback params.sessionKey is required");
+  }
+  if (!message) {
+    throw new Error("callback params.message is required");
+  }
+
+  const conversationId = stringValue(message.conversation_id) ?? stringValue(conversation?.conversation_id);
+  const messageId = stringValue(message.id) ?? `${conversationId ?? "unknown"}:${stringValue(message.type) ?? "message"}:${Date.now()}`;
+  const injection = await api.session.workflow.enqueueNextTurnInjection({
+    sessionKey,
+    text: formatCallbackInjection({ conversation, message, statePath: stringValue(params.statePath) }),
+    idempotencyKey: `agent-knock-knock:${conversationId ?? "unknown"}:${messageId}`,
+    placement: "append_context",
+    ttlMs: 24 * 60 * 60 * 1000,
+    metadata: {
+      kind: "agent-knock-knock-callback",
+      conversation_id: conversationId,
+      message_id: messageId,
+      message_type: stringValue(message.type) ?? "unknown",
+      state_path: stringValue(params.statePath),
+      log_path: stringValue(params.logPath)
+    }
+  });
+
+  return {
+    ok: true,
+    enqueued: injection.enqueued,
+    injection_id: injection.id,
+    session_key: injection.sessionKey,
+    conversation_id: conversationId,
+    message_id: messageId,
+    message_type: stringValue(message.type) ?? "unknown"
+  };
+}
+
+function formatCallbackInjection({ conversation, message, statePath }) {
+  const conversationId = stringValue(message.conversation_id) ?? stringValue(conversation?.conversation_id) ?? "unknown";
+  const type = stringValue(message.type) ?? "unknown";
+  const body = stringValue(message.body) ?? JSON.stringify(message.body ?? "");
+  const requiresResponse = message.requires_response === true ? "yes" : "no";
+  const round = typeof message.round === "number" ? String(message.round) : "unknown";
+  const stateLine = statePath ? `State: ${statePath}\n` : "";
+
+  return [
+    "[Agent Knock Knock callback]",
+    `Conversation: ${conversationId}`,
+    `Message type: ${type}`,
+    `Requires OpenClaw response: ${requiresResponse}`,
+    `Round: ${round}`,
+    stateLine.trimEnd(),
+    "",
+    body
+  ].filter((line) => line !== "").join("\n");
 }
 
 function pushOptional(args, flag, value) {

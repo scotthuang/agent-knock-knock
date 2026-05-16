@@ -155,7 +155,9 @@ function runDelegate(options) {
         statePath: newResult.paths.statePath,
         gatewayUrl,
         token: options.token,
-        openclawSession
+        openclawSession,
+        gatewayMethod: options.gatewayMethod,
+        gatewaySession: options.gatewaySession
       });
   const conversationWithCallback = {
     ...newResult.conversation,
@@ -233,7 +235,14 @@ function resolveExecutable(command) {
   throw new Error(`executable not found on PATH: ${command}`);
 }
 
-function buildCallbackCommand({ statePath, gatewayUrl, token, openclawSession }) {
+function buildCallbackCommand({
+  statePath,
+  gatewayUrl,
+  token,
+  openclawSession,
+  gatewayMethod,
+  gatewaySession
+}) {
   const parts = [
     shellQuote(process.execPath),
     shellQuote(new URL(import.meta.url).pathname),
@@ -253,6 +262,15 @@ function buildCallbackCommand({ statePath, gatewayUrl, token, openclawSession })
     );
   } else {
     parts.push("--record-only");
+  }
+
+  if (gatewayMethod) {
+    parts.push(
+      "--gateway-method",
+      shellQuote(gatewayMethod),
+      "--gateway-session",
+      shellQuote(gatewaySession ?? openclawSession)
+    );
   }
 
   parts.push("--message-json", "'<structured-message-json>'");
@@ -321,6 +339,42 @@ function runLockedCallback(options) {
     delivered: false,
     duplicate: false
   };
+
+  if (options.gatewayMethod) {
+    const delivery = deliverToGatewayMethod({
+      method: options.gatewayMethod,
+      gatewayUrl: options.gatewayUrl,
+      token: options.token,
+      sessionKey: options.gatewaySession ?? options.openclawSession ?? conversation.openclaw_session,
+      statePath: options.statePath,
+      logPath,
+      conversation: nextConversation,
+      message
+    });
+    appendEvent(logPath, {
+      ts: new Date().toISOString(),
+      conversation_id: conversation.conversation_id,
+      event: "callback_gateway_method_delivery",
+      from: "claude-code",
+      to: "openclaw",
+      round: message.round,
+      method: options.gatewayMethod,
+      status: delivery.status,
+      stdout: delivery.stdout,
+      stderr: delivery.stderr
+    });
+
+    if (delivery.status !== 0) {
+      throw new Error(delivery.stderr || delivery.stdout || `gateway method delivery failed with status ${delivery.status}`);
+    }
+
+    printJson({
+      ...result,
+      delivered: true,
+      delivery: "gateway_method"
+    });
+    return;
+  }
 
   if (options.recordOnly) {
     printJson(result);
@@ -430,6 +484,49 @@ function messageFingerprint(message) {
 function deliverToOpenClaw({ gatewayUrl, token, openclawSession, message }) {
   const agent = `openclaw acp --url ${gatewayUrl} --token ${token} --session ${openclawSession}`;
   const result = spawnSync("acpx", ["--agent", agent, JSON.stringify(message)], {
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024 * 10
+  });
+
+  if (result.error) {
+    return {
+      status: 1,
+      stdout: result.stdout ?? "",
+      stderr: result.error.message
+    };
+  }
+
+  return {
+    status: result.status ?? 1,
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? ""
+  };
+}
+
+function deliverToGatewayMethod({ method, gatewayUrl, token, sessionKey, statePath, logPath, conversation, message }) {
+  const args = [
+    "gateway",
+    "call",
+    method,
+    "--params",
+    JSON.stringify({
+      sessionKey,
+      statePath,
+      logPath,
+      conversation,
+      message
+    }),
+    "--json"
+  ];
+
+  if (gatewayUrl) {
+    args.push("--url", gatewayUrl);
+  }
+  if (token && token !== "<token>") {
+    args.push("--token", token);
+  }
+
+  const result = spawnSync("openclaw", args, {
     encoding: "utf8",
     maxBuffer: 1024 * 1024 * 10
   });
