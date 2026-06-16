@@ -52,6 +52,35 @@ export function loadState(statePath) {
   return JSON.parse(fs.readFileSync(statePath, "utf8"));
 }
 
+export function statePathForConversationId(conversationId, storeDir = defaultStoreDir()) {
+  return path.join(storeDir, conversationId, "state.json");
+}
+
+export function loadConversationById(conversationId, storeDir = defaultStoreDir()) {
+  return loadState(statePathForConversationId(conversationId, storeDir));
+}
+
+export function listConversations(storeDir = defaultStoreDir()) {
+  if (!fs.existsSync(storeDir)) {
+    return [];
+  }
+
+  return fs.readdirSync(storeDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(storeDir, entry.name, "state.json"))
+    .filter((statePath) => fs.existsSync(statePath))
+    .map((statePath) => {
+      const conversation = loadState(statePath);
+      return {
+        ...conversation,
+        state_path: conversation.state_path ?? statePath,
+        event_log_path: conversation.event_log_path ?? logPathForStatePath(statePath),
+        conversation_dir: conversation.conversation_dir ?? path.dirname(statePath)
+      };
+    })
+    .sort((left, right) => String(right.updated_at ?? "").localeCompare(String(left.updated_at ?? "")));
+}
+
 export function appendEvent(logPath, event) {
   ensureDir(path.dirname(logPath));
   assertAppendableEventLog(logPath);

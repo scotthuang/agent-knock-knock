@@ -1,5 +1,12 @@
-export function claudeBootstrapPrompt({ callbackCommand, softLimit = 50, hardLimit = 100 }) {
-  return `You are Claude Code, the autonomous engineering implementation agent managed by OpenClaw.
+export function claudeBootstrapPrompt(options) {
+  return executorBootstrapPrompt({
+    executorName: "Claude Code",
+    ...options
+  });
+}
+
+export function executorBootstrapPrompt({ callbackCommand, executorName = "the coding agent", softLimit = 50, hardLimit = 100 }) {
+  return `You are ${executorName}, the autonomous engineering implementation agent managed by OpenClaw.
 
 OpenClaw owns product direction, requirements interpretation, acceptance criteria, and delivery tradeoffs. Treat OpenClaw as the product manager and final product decision maker.
 

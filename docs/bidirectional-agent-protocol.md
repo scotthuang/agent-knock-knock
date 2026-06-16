@@ -3,12 +3,12 @@
 This protocol supports managed bidirectional delegation:
 
 - OpenClaw is the product manager, requirements owner, and final acceptance decision maker.
-- Claude Code is the engineering implementation agent and can directly edit code.
+- Claude Code or Codex is the engineering implementation agent and can directly edit code.
 - OpenClaw decides product direction, requirements interpretation, acceptance criteria, delivery scope, UX behavior, and acceptable compromises.
-- Claude Code decides ordinary implementation details, but must ask OpenClaw before changing product behavior, narrowing scope, degrading quality, accepting a workaround, or changing delivery standards.
+- The selected coding agent decides ordinary implementation details, but must ask OpenClaw before changing product behavior, narrowing scope, degrading quality, accepting a workaround, or changing delivery standards.
 - Only messages requiring a response consume the response budget.
-- Workspace conversation storage is the durable source of truth for recovery and future visualization.
-- NDJSON event logs live at `.agent-knock-knock/conversations/<conversation-id>/events.ndjson`.
+- Conversation storage is the durable source of truth for recovery, task listing, and future visualization.
+- NDJSON event logs live at `~/.agent-knock-knock/conversations/<conversation-id>/events.ndjson` by default.
 
 ## Message
 
@@ -25,8 +25,27 @@ This protocol supports managed bidirectional delegation:
   "body": "Implement the requested change.",
   "metadata": {
     "workspace": "/path/to/project",
-    "task_id": "task-..."
+    "task_id": "task-...",
+    "executor_kind": "claude",
+    "executor_session": "bidirectional"
   }
+}
+```
+
+Conversation state records the selected executor:
+
+```json
+{
+  "conversation_id": "task-...",
+  "openclaw_session": "agent:main:main",
+  "executor": {
+    "kind": "claude",
+    "actor": "claude-code",
+    "session": "bidirectional",
+    "transport": "acpx"
+  },
+  "workspace": "/path/to/project",
+  "status": "waiting_for_agent"
 }
 ```
 
@@ -35,11 +54,11 @@ This protocol supports managed bidirectional delegation:
 | Type | Requires response by default | Purpose |
 | --- | --- | --- |
 | `task` | yes | OpenClaw delegates work |
-| `question` | yes | Claude Code asks OpenClaw to decide |
+| `question` | yes | Coding agent asks OpenClaw to decide |
 | `answer` | yes | OpenClaw answers or directs |
-| `progress` | no | Claude Code reports progress |
-| `blocked` | yes | Claude Code cannot continue |
-| `done` | no | Claude Code reports completion |
+| `progress` | no | Coding agent reports progress |
+| `blocked` | yes | Coding agent cannot continue |
+| `done` | no | Coding agent reports completion |
 | `error` | no | Tool, protocol, or runtime error |
 | `control` | no | Budget warnings and lifecycle control |
 
@@ -53,6 +72,8 @@ Allowed routes:
 | --- | --- |
 | `openclaw -> claude-code` | `task`, `answer`, `control`, `error` |
 | `claude-code -> openclaw` | `question`, `progress`, `blocked`, `done`, `error` |
+| `openclaw -> codex` | `task`, `answer`, `control`, `error` |
+| `codex -> openclaw` | `question`, `progress`, `blocked`, `done`, `error` |
 
 ## Budget
 

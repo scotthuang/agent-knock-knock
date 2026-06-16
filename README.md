@@ -1,14 +1,15 @@
 # agent-knock-knock
 
-Minimal MVP for managed bidirectional delegation between OpenClaw and Claude Code.
+Minimal MVP for managed bidirectional delegation between OpenClaw and local coding agents.
 
-OpenClaw acts as the autonomous manager. Claude Code acts as the autonomous developer. The project provides:
+OpenClaw acts as the autonomous manager. Claude Code or Codex acts as the autonomous developer. The project provides:
 
 - Structured message protocol
 - Conversation state and budget tracking
 - NDJSON logging
 - Bootstrap prompt generation
-- A delegation script that can send the first task to Claude Code through `acpx`
+- ACPX-backed delegation to Claude Code and Codex
+- Task listing, status, follow-up messaging, and local close operations
 
 ## Quick Start
 
@@ -24,6 +25,14 @@ Start a Claude Code delegation without sending it:
 scripts/bidirectional-delegate.sh --request "Implement a small feature"
 ```
 
+Create a Codex delegation payload:
+
+```bash
+node bin/agent-knock-knock.js delegate \
+  --agent codex \
+  --request "Implement a small feature"
+```
+
 Send the task through `acpx`:
 
 ```bash
@@ -36,6 +45,28 @@ Launch Claude Code in the background and return only protocol metadata:
 node bin/agent-knock-knock.js delegate \
   --background \
   --request "Implement a small feature"
+```
+
+List active coding-agent tasks:
+
+```bash
+node bin/agent-knock-knock.js list
+```
+
+Send a follow-up message to an existing task:
+
+```bash
+node bin/agent-knock-knock.js send \
+  --conversation <conversation-id> \
+  --message "Use the smaller implementation."
+```
+
+Close a task locally without terminating the underlying ACPX session:
+
+```bash
+node bin/agent-knock-knock.js close \
+  --conversation <conversation-id> \
+  --reason "No longer needed"
 ```
 
 Record a Claude Code callback without delivering it to OpenClaw:
@@ -56,7 +87,7 @@ cp templates/openclaw-skills/bidirectional-chat/SKILL.md ~/.openclaw/skills/bidi
 
 ## OpenClaw Plugin
 
-This package also includes a native OpenClaw plugin. The plugin registers the optional tool `agent_knock_knock_delegate`, which lets OpenClaw delegate an implementation task to Claude Code without exposing Claude's raw terminal output as the tool result.
+This package also includes a native OpenClaw plugin. The plugin registers optional tools that let OpenClaw delegate implementation tasks to Claude Code or Codex, list active tasks, send follow-up messages, inspect status, and close tasks without exposing raw terminal output as tool results.
 
 Install it locally during development:
 
@@ -70,14 +101,20 @@ If your OpenClaw config uses a restrictive tool allowlist, allow the tool:
 ```json5
 {
   tools: {
-    allow: ["agent_knock_knock_delegate"]
+    allow: [
+      "agent_knock_knock_delegate",
+      "agent_knock_knock_list",
+      "agent_knock_knock_status",
+      "agent_knock_knock_send",
+      "agent_knock_knock_close"
+    ]
   }
 }
 ```
 
-The tool launches Claude Code in the background and returns `status: "async_pending"`, `conversation_id`, `state_path`, `event_log_path`, launch status, and the Claude session name. OpenClaw should yield after receiving this tool result and wait for the callback turn; follow-up communication should happen through structured protocol callbacks, not by reading event logs, processes, files, session internals, stdout, or stderr.
+The delegate tool launches the selected coding agent in the background and returns `status: "async_pending"`, `conversation_id`, `state_path`, `event_log_path`, launch status, and executor metadata. OpenClaw should yield after receiving this tool result and wait for the callback turn; follow-up communication should happen through structured protocol callbacks or `agent_knock_knock_send`, not by reading event logs, processes, files, session internals, stdout, or stderr.
 
-The plugin also registers the Gateway method `agent-knock-knock.callback`. Claude Code callback commands use this method to enqueue a durable next-turn injection for the OpenClaw session. Actionable callbacks such as `question`, `blocked`, `done`, `error`, or any message with `requires_response: true` are delivered into the OpenClaw session through Gateway `sessions.send`, so OpenClaw receives only the structured protocol message without polling Claude's raw execution channel.
+The plugin also registers the Gateway method `agent-knock-knock.callback`. Coding-agent callback commands use this method to enqueue a durable next-turn injection for the OpenClaw session. Actionable callbacks such as `question`, `blocked`, `done`, `error`, or any message with `requires_response: true` are delivered into the OpenClaw session through Gateway `sessions.send`, so OpenClaw receives only the structured protocol message without polling the raw execution channel.
 
 Run tests:
 
@@ -126,16 +163,17 @@ Conversation state is stored under the user's home directory so a new OpenClaw s
     <conversation-id>/
       state.json
       events.ndjson
-      claude-output.log
+      <agent>-output.log
 ```
 
-Use `--store-dir <dir>` to override the conversation store location. `--log-dir <dir>` is still accepted as a compatibility alias. `claude-output.log` is diagnostic-only; OpenClaw should not read it as part of agent communication.
+Use `--store-dir <dir>` to override the conversation store location. `--log-dir <dir>` is still accepted as a compatibility alias. `<agent>-output.log` is diagnostic-only; OpenClaw should not read it as part of agent communication.
 
 ## Defaults
 
 - OpenClaw session: `agent:main:main`
 - Claude session: `bidirectional`
+- Codex session: `codex`
 - Gateway URL: `ws://127.0.0.1:18789`
 - Soft response limit: `50`
 - Hard response limit: `100`
-- Store directory: `<workspace>/.agent-knock-knock/conversations`
+- Store directory: `~/.agent-knock-knock/conversations`

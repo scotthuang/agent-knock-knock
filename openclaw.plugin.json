@@ -6,10 +6,28 @@
     "onStartup": true
   },
   "contracts": {
-    "tools": ["agent_knock_knock_delegate"]
+    "tools": [
+      "agent_knock_knock_delegate",
+      "agent_knock_knock_list",
+      "agent_knock_knock_status",
+      "agent_knock_knock_send",
+      "agent_knock_knock_close"
+    ]
   },
   "toolMetadata": {
     "agent_knock_knock_delegate": {
+      "optional": true
+    },
+    "agent_knock_knock_list": {
+      "optional": true
+    },
+    "agent_knock_knock_status": {
+      "optional": true
+    },
+    "agent_knock_knock_send": {
+      "optional": true
+    },
+    "agent_knock_knock_close": {
       "optional": true
     }
   },
@@ -32,6 +50,23 @@
       "claudeSession": {
         "type": "string",
         "description": "Default Claude Code session name."
+      },
+      "codexSession": {
+        "type": "string",
+        "description": "Default Codex session name."
+      },
+      "defaultAgent": {
+        "type": "string",
+        "enum": ["claude", "codex"],
+        "description": "Default coding agent for delegation."
+      },
+      "defaultClaudeSession": {
+        "type": "string",
+        "description": "Default Claude Code session name. claudeSession remains supported as a compatibility alias."
+      },
+      "defaultCodexSession": {
+        "type": "string",
+        "description": "Default Codex session name."
       },
       "openclawSession": {
         "type": "string",

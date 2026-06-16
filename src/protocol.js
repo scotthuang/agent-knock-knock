@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-export const ACTORS = new Set(["openclaw", "claude-code"]);
+export const ACTORS = new Set(["openclaw", "claude-code", "codex"]);
 
 export const MESSAGE_TYPES = new Set([
   "task",
@@ -26,7 +26,24 @@ export const DEFAULT_REQUIRES_RESPONSE = {
 
 export const ALLOWED_MESSAGE_TYPES_BY_ROUTE = {
   "openclaw->claude-code": new Set(["task", "answer", "control", "error"]),
-  "claude-code->openclaw": new Set(["question", "progress", "blocked", "done", "error"])
+  "claude-code->openclaw": new Set(["question", "progress", "blocked", "done", "error"]),
+  "openclaw->codex": new Set(["task", "answer", "control", "error"]),
+  "codex->openclaw": new Set(["question", "progress", "blocked", "done", "error"])
+};
+
+export const EXECUTORS = {
+  claude: {
+    kind: "claude",
+    actor: "claude-code",
+    defaultSession: "bidirectional",
+    displayName: "Claude Code"
+  },
+  codex: {
+    kind: "codex",
+    actor: "codex",
+    defaultSession: "codex",
+    displayName: "Codex"
+  }
 };
 
 export function createConversation({
@@ -34,17 +51,21 @@ export function createConversation({
   workspace = process.cwd(),
   openclawSession = "agent:main:main",
   claudeSession = "bidirectional",
+  executorKind = "claude",
+  executorSession,
   softLimit = 50,
   hardLimit = 100,
   now = new Date()
 }) {
   const conversationId = `task-${formatTimestamp(now)}-${randomUUID().slice(0, 8)}`;
+  const executor = resolveExecutor({ kind: executorKind, session: executorSession ?? claudeSession });
 
   return {
     conversation_id: conversationId,
     user_request: userRequest,
     openclaw_session: openclawSession,
-    claude_session: claudeSession,
+    claude_session: executor.kind === "claude" ? executor.session : claudeSession,
+    executor,
     workspace,
     status: "created",
     response_rounds_used: 0,
@@ -53,6 +74,33 @@ export function createConversation({
     created_at: now.toISOString(),
     updated_at: now.toISOString()
   };
+}
+
+export function resolveExecutor({ kind = "claude", session } = {}) {
+  const normalizedKind = String(kind || "claude").toLowerCase();
+  const definition = EXECUTORS[normalizedKind];
+  if (!definition) {
+    throw new Error(`unsupported executor: ${kind}`);
+  }
+
+  return {
+    kind: definition.kind,
+    actor: definition.actor,
+    session: session || definition.defaultSession,
+    display_name: definition.displayName,
+    transport: "acpx"
+  };
+}
+
+export function executorForConversation(conversation) {
+  if (conversation?.executor) {
+    return resolveExecutor(conversation.executor);
+  }
+
+  return resolveExecutor({
+    kind: "claude",
+    session: conversation?.claude_session
+  });
 }
 
 export function createMessage({
@@ -179,8 +227,8 @@ export function applyMessageToConversation(conversation, message, now = new Date
     next.status = "waiting_for_openclaw";
   } else if (message.to === "openclaw" && message.requires_response) {
     next.status = "waiting_for_openclaw";
-  } else if (message.to === "claude-code" && message.requires_response) {
-    next.status = "waiting_for_claude";
+  } else if (message.to !== "openclaw" && message.requires_response) {
+    next.status = "waiting_for_agent";
   } else if (next.status === "created") {
     next.status = "running";
   }

@@ -12,9 +12,14 @@ const delegateParameters = {
   additionalProperties: false,
   required: ["request"],
   properties: {
+    agent: {
+      type: "string",
+      enum: ["claude", "codex"],
+      description: "Coding agent to delegate to. Defaults to plugin config or claude."
+    },
     request: {
       type: "string",
-      description: "Implementation task for Claude Code."
+      description: "Implementation task for the coding agent."
     },
     workspace: {
       type: "string",
@@ -28,6 +33,14 @@ const delegateParameters = {
       type: "string",
       description: "Claude Code session name."
     },
+    codexSession: {
+      type: "string",
+      description: "Codex session name."
+    },
+    session: {
+      type: "string",
+      description: "Explicit coding agent session name."
+    },
     openclawSession: {
       type: "string",
       description: "OpenClaw session label recorded in the protocol state."
@@ -39,6 +52,78 @@ const delegateParameters = {
     hardLimit: {
       type: "number",
       description: "Hard response-requiring round limit."
+    }
+  }
+};
+
+const listParameters = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    agent: {
+      type: "string",
+      enum: ["claude", "codex"]
+    },
+    status: {
+      type: "string"
+    },
+    all: {
+      type: "boolean"
+    },
+    storeDir: {
+      type: "string"
+    }
+  }
+};
+
+const statusParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["conversation_id"],
+  properties: {
+    conversation_id: {
+      type: "string"
+    },
+    storeDir: {
+      type: "string"
+    }
+  }
+};
+
+const sendParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["conversation_id", "message"],
+  properties: {
+    conversation_id: {
+      type: "string"
+    },
+    message: {
+      type: "string"
+    },
+    type: {
+      type: "string",
+      enum: ["answer", "task", "control", "error"]
+    },
+    storeDir: {
+      type: "string"
+    }
+  }
+};
+
+const closeParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["conversation_id"],
+  properties: {
+    conversation_id: {
+      type: "string"
+    },
+    reason: {
+      type: "string"
+    },
+    storeDir: {
+      type: "string"
     }
   }
 };
@@ -70,7 +155,7 @@ export default definePluginEntry({
       (toolContext) => ({
         name: "agent_knock_knock_delegate",
         description:
-          "Delegate an implementation task to Claude Code. Use this when OpenClaw has decided the product requirements and wants an engineering agent to implement them. The tool starts Claude Code in the background and returns only protocol metadata, not Claude's raw terminal output.",
+          "Delegate an implementation task to a local coding agent such as Claude Code or Codex. Use this when OpenClaw has decided the product requirements and wants an engineering agent to implement them. The tool starts the coding agent in the background and returns only protocol metadata, not raw terminal output.",
         parameters: delegateParameters,
         async execute(_toolCallId, params) {
           const result = runDelegate(api, params, toolContext);
@@ -86,6 +171,64 @@ export default definePluginEntry({
       }),
       { name: "agent_knock_knock_delegate", optional: true }
     );
+
+    registerCliTool(api, {
+      name: "agent_knock_knock_list",
+      description: "List active or historical Agent Knock Knock coding-agent tasks.",
+      parameters: listParameters,
+      buildArgs: (params) => {
+        const args = ["list"];
+        pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
+        pushOptional(args, "--agent", stringValue(params.agent));
+        pushOptional(args, "--status", stringValue(params.status));
+        if (params.all === true) {
+          args.push("--all");
+        }
+        return args;
+      }
+    });
+
+    registerCliTool(api, {
+      name: "agent_knock_knock_status",
+      description: "Get detailed status for one Agent Knock Knock coding-agent task.",
+      parameters: statusParameters,
+      buildArgs: (params) => {
+        const args = ["status", "--conversation", requiredString(params.conversation_id, "conversation_id")];
+        pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
+        return args;
+      }
+    });
+
+    registerCliTool(api, {
+      name: "agent_knock_knock_send",
+      description: "Send a follow-up message to an existing Agent Knock Knock coding-agent task.",
+      parameters: sendParameters,
+      buildArgs: (params) => {
+        const args = [
+          "send",
+          "--conversation",
+          requiredString(params.conversation_id, "conversation_id"),
+          "--message",
+          requiredString(params.message, "message"),
+          "--background"
+        ];
+        pushOptional(args, "--type", stringValue(params.type));
+        pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
+        return args;
+      }
+    });
+
+    registerCliTool(api, {
+      name: "agent_knock_knock_close",
+      description: "Close an Agent Knock Knock coding-agent task without terminating the underlying ACPX session.",
+      parameters: closeParameters,
+      buildArgs: (params) => {
+        const args = ["close", "--conversation", requiredString(params.conversation_id, "conversation_id")];
+        pushOptional(args, "--reason", stringValue(params.reason));
+        pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
+        return args;
+      }
+    });
   }
 });
 
@@ -93,6 +236,12 @@ function runDelegate(api, params, toolContext) {
   const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
   const binPath = stringValue(config.binPath) ?? defaultBinPath;
   const workspace = stringValue(params.workspace) ?? stringValue(config.workspace) ?? process.cwd();
+  const agent = stringValue(params.agent) ?? stringValue(config.defaultAgent) ?? "claude";
+  const agentSession =
+    stringValue(params.session) ??
+    (agent === "codex"
+      ? stringValue(params.codexSession) ?? stringValue(config.codexSession) ?? stringValue(config.defaultCodexSession)
+      : stringValue(params.claudeSession) ?? stringValue(config.claudeSession) ?? stringValue(config.defaultClaudeSession));
   const openclawSession =
     stringValue(toolContext?.sessionKey) ??
     stringValue(config.openclawSession) ??
@@ -101,6 +250,8 @@ function runDelegate(api, params, toolContext) {
   const args = [
     binPath,
     "delegate",
+    "--agent",
+    agent,
     "--request",
     requiredString(params.request, "request"),
     "--workspace",
@@ -109,7 +260,7 @@ function runDelegate(api, params, toolContext) {
   ];
 
   pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(config.storeDir));
-  pushOptional(args, "--claude-session", stringValue(params.claudeSession) ?? stringValue(config.claudeSession));
+  pushOptional(args, "--session", agentSession);
   pushOptional(args, "--openclaw-session", openclawSession);
   pushOptional(args, "--gateway-url", stringValue(config.gatewayUrl));
   pushOptional(args, "--token", stringValue(config.gatewayToken));
@@ -144,6 +295,9 @@ function runDelegate(api, params, toolContext) {
     conversation_status: parsed.conversation?.status,
     state_path: statePath,
     event_log_path: logPath,
+    agent,
+    executor: parsed.conversation?.executor,
+    session: parsed.conversation?.executor?.session ?? parsed.conversation?.claude_session,
     claude_session: parsed.conversation?.claude_session,
     openclaw_session: openclawSession,
     launched: parsed.launched === true,
@@ -153,15 +307,56 @@ function runDelegate(api, params, toolContext) {
     openclaw_next_action: {
       action: "yield",
       reason:
-        "Claude Code is running asynchronously. End this OpenClaw turn now and wait for an Agent Knock Knock callback.",
+        "The delegated coding agent is running asynchronously. End this OpenClaw turn now and wait for an Agent Knock Knock callback.",
       do_not:
         "Do not inspect event logs, process lists, session internals, files, stdout, or stderr while waiting. Follow-up communication must only use structured callbacks from agent-knock-knock.",
       expected_callback:
         "The callback will be injected and scheduled into this OpenClaw session by the agent-knock-knock.callback Gateway method."
     },
     note:
-      "Claude Code was launched in the background. This is an async delegation; OpenClaw should yield now and wait for the scheduled callback turn."
+      "The coding agent was launched in the background. This is an async delegation; OpenClaw should yield now and wait for the scheduled callback turn."
   };
+}
+
+function registerCliTool(api, { name, description, parameters, buildArgs }) {
+  api.registerTool(
+    () => ({
+      name,
+      description,
+      parameters,
+      async execute(_toolCallId, params) {
+        const result = runCli(api, buildArgs(isRecord(params) ? params : {}));
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2)
+            }
+          ]
+        };
+      }
+    }),
+    { name, optional: true }
+  );
+}
+
+function runCli(api, cliArgs, { cwd = process.cwd() } = {}) {
+  const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+  const binPath = stringValue(config.binPath) ?? defaultBinPath;
+  const spawned = spawnSync(process.execPath, [binPath, ...cliArgs], {
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024 * 10,
+    cwd
+  });
+
+  if (spawned.error) {
+    throw new Error(`agent-knock-knock ${cliArgs[0]} failed to start: ${spawned.error.message}`);
+  }
+  if (spawned.status !== 0) {
+    throw new Error(cleanError(spawned.stderr || spawned.stdout || `agent-knock-knock ${cliArgs[0]} exited with status ${spawned.status}`));
+  }
+
+  return parseJson(spawned.stdout);
 }
 
 async function handleCallback(api, params) {

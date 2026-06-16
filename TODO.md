@@ -43,7 +43,7 @@
   - `node --check src/openclaw-plugin.js`
   - `node --check bin/agent-knock-knock.js`
   - `git diff --check`
-  - `npm test` passes 33 tests.
+  - `npm test` passes 35 tests.
 - Worktree note:
   - `tmp/` is an untracked test artifact directory.
   - Current changes are not committed yet.
@@ -97,6 +97,9 @@
 - Deliver actionable callback messages into OpenClaw sessions through Gateway `sessions.send`.
 - Store conversations under `~/.agent-knock-knock/conversations` by default.
 - Capture background Claude Code/acpx stdout and stderr to per-conversation `claude-output.log` for local diagnostics only.
+- Add executor metadata so delegations can target Claude Code or Codex through ACPX.
+- Add CLI task management commands: `list`, `status`, `send`, and `close`.
+- Add OpenClaw plugin tools for task listing, status, follow-up sends, and local close.
 
 ## Future UI
 

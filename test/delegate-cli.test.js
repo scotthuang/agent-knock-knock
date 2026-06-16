@@ -75,6 +75,70 @@ fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify(process.argv.s
   }
 });
 
+test("delegate background can launch Codex through acpx", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-delegate-"));
+  const fakeBinDir = path.join(tempDir, "bin");
+  const workspace = path.join(tempDir, "workspace");
+  const launchedPath = path.join(tempDir, "acpx-args.json");
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    const fakeAcpx = path.join(fakeBinDir, "acpx");
+    fs.writeFileSync(
+      fakeAcpx,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify(process.argv.slice(2)) + "\\n", "utf8");
+`,
+      "utf8"
+    );
+    fs.chmodSync(fakeAcpx, 0o755);
+
+    const result = spawnSync(process.execPath, [
+      binPath,
+      "delegate",
+      "--agent",
+      "codex",
+      "--session",
+      "codex-task",
+      "--request",
+      "Implement a Codex-backed task",
+      "--workspace",
+      workspace,
+      "--store-dir",
+      path.join(tempDir, "conversations"),
+      "--background"
+    ], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+      }
+    });
+
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.conversation.executor.kind, "codex");
+    assert.equal(parsed.conversation.executor.session, "codex-task");
+
+    const acpxCalls = await waitForCalls(launchedPath, 2);
+    assert.deepEqual(acpxCalls[0], ["codex", "sessions", "ensure", "--name", "codex-task"]);
+    assert.deepEqual(acpxCalls.at(-1).slice(0, 4), ["--approve-all", "codex", "-s", "codex-task"]);
+
+    const events = fs.readFileSync(parsed.paths.logPath, "utf8")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line));
+    assert.equal(events.some((event) =>
+      event.event === "executor_launch" &&
+      event.executor.kind === "codex"
+    ), true);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 function waitForCalls(filePath, minCount, timeoutMs = 2000) {
   const started = Date.now();
   return new Promise((resolve, reject) => {
