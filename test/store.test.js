@@ -12,10 +12,10 @@ import {
   pathsForConversationDir
 } from "../src/store.js";
 
-test("defaults store under workspace .agent-knock-knock conversations", () => {
+test("defaults store under user home .agent-knock-knock conversations", () => {
   assert.equal(
     defaultStoreDir("/workspace/project"),
-    path.join("/workspace/project", ".agent-knock-knock", "conversations")
+    path.join(os.homedir(), ".agent-knock-knock", "conversations")
   );
 });
 

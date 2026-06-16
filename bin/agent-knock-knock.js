@@ -149,6 +149,7 @@ function runDelegate(options) {
 
   const openclawSession = options.openclawSession ?? "agent:main:main";
   const claudeSession = options.claudeSession ?? "bidirectional";
+  const openclawBin = options.openclawBin ?? resolveOptionalExecutable("openclaw");
   const callbackCommand = options.callbackCommand
     ? expandCallbackCommandTemplate(options.callbackCommand, { statePath: newResult.paths.statePath })
     : buildCallbackCommand({
@@ -157,7 +158,8 @@ function runDelegate(options) {
         token: options.token,
         openclawSession,
         gatewayMethod: options.gatewayMethod,
-        gatewaySession: options.gatewaySession
+        gatewaySession: options.gatewaySession,
+        openclawBin
       });
   const conversationWithCallback = {
     ...newResult.conversation,
@@ -178,11 +180,34 @@ function runDelegate(options) {
 
   if (options.background) {
     const acpxPath = resolveExecutable("acpx");
+    const ensureSession = spawnSync(acpxPath, ["claude", "sessions", "ensure", "--name", claudeSession], {
+      encoding: "utf8",
+      cwd: workspace
+    });
+    appendEvent(newResult.paths.logPath, {
+      ts: new Date().toISOString(),
+      conversation_id: newResult.conversation.conversation_id,
+      event: "claude_session_ensure",
+      status: ensureSession.status ?? null,
+      claude_session: claudeSession,
+      stdout: cleanProcessText(ensureSession.stdout),
+      stderr: cleanProcessText(ensureSession.stderr)
+    });
+    if (ensureSession.error) {
+      throw new Error(`acpx claude session ensure failed to start: ${ensureSession.error.message}`);
+    }
+    if (ensureSession.status !== 0) {
+      throw new Error(cleanProcessText(ensureSession.stderr || ensureSession.stdout || `acpx claude sessions ensure exited with status ${ensureSession.status}`));
+    }
+
+    const outputPath = path.join(newResult.paths.conversationDir, "claude-output.log");
+    const outputFd = fs.openSync(outputPath, "a");
     const child = spawn(acpxPath, acpxArgs, {
       detached: true,
-      stdio: "ignore"
+      stdio: ["ignore", outputFd, outputFd]
     });
     child.unref();
+    fs.closeSync(outputFd);
 
     appendEvent(newResult.paths.logPath, {
       ts: new Date().toISOString(),
@@ -190,14 +215,16 @@ function runDelegate(options) {
       event: "claude_launch",
       mode: "background",
       pid: child.pid ?? null,
-      claude_session: claudeSession
+      claude_session: claudeSession,
+      output_path: outputPath
     });
 
     printJson({
       ...newResult,
       launched: true,
       background: true,
-      pid: child.pid ?? null
+      pid: child.pid ?? null,
+      output_path: outputPath
     });
     return;
   }
@@ -221,7 +248,7 @@ function resolveExecutable(command) {
     return command;
   }
 
-  const paths = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
+  const paths = executableSearchPaths();
   for (const dir of paths) {
     const candidate = path.join(dir, command);
     try {
@@ -235,13 +262,35 @@ function resolveExecutable(command) {
   throw new Error(`executable not found on PATH: ${command}`);
 }
 
+function executableSearchPaths() {
+  const home = process.env.HOME;
+  return [
+    ...(process.env.PATH ?? "").split(path.delimiter).filter(Boolean),
+    ...(home ? [
+      path.join(home, ".npm-global", "bin"),
+      path.join(home, ".local", "bin")
+    ] : []),
+    "/opt/homebrew/bin",
+    "/usr/local/bin"
+  ];
+}
+
+function resolveOptionalExecutable(command) {
+  try {
+    return resolveExecutable(command);
+  } catch {
+    return command;
+  }
+}
+
 function buildCallbackCommand({
   statePath,
   gatewayUrl,
   token,
   openclawSession,
   gatewayMethod,
-  gatewaySession
+  gatewaySession,
+  openclawBin
 }) {
   const parts = [
     shellQuote(process.execPath),
@@ -271,6 +320,9 @@ function buildCallbackCommand({
       "--gateway-session",
       shellQuote(gatewaySession ?? openclawSession)
     );
+    if (openclawBin) {
+      parts.push("--openclaw-bin", shellQuote(openclawBin));
+    }
   }
 
   parts.push("--message-json", "'<structured-message-json>'");
@@ -343,6 +395,7 @@ function runLockedCallback(options) {
   if (options.gatewayMethod) {
     const delivery = deliverToGatewayMethod({
       method: options.gatewayMethod,
+      openclawBin: options.openclawBin,
       gatewayUrl: options.gatewayUrl,
       token: options.token,
       sessionKey: options.gatewaySession ?? options.openclawSession ?? conversation.openclaw_session,
@@ -368,10 +421,37 @@ function runLockedCallback(options) {
       throw new Error(delivery.stderr || delivery.stdout || `gateway method delivery failed with status ${delivery.status}`);
     }
 
+    const gatewayPayload = parseOptionalJson(delivery.stdout);
+    const sessionSendParams = isRecord(gatewayPayload?.session_send) ? gatewayPayload.session_send : undefined;
+    let sessionSendDelivery;
+    if (sessionSendParams) {
+      sessionSendDelivery = deliverToSessionSend({
+        openclawBin: options.openclawBin,
+        gatewayUrl: options.gatewayUrl,
+        token: options.token,
+        params: sessionSendParams
+      });
+      appendEvent(logPath, {
+        ts: new Date().toISOString(),
+        conversation_id: conversation.conversation_id,
+        event: "callback_session_send_delivery",
+        from: "claude-code",
+        to: "openclaw",
+        round: message.round,
+        status: sessionSendDelivery.status,
+        stdout: sessionSendDelivery.stdout,
+        stderr: sessionSendDelivery.stderr
+      });
+
+      if (sessionSendDelivery.status !== 0) {
+        throw new Error(sessionSendDelivery.stderr || sessionSendDelivery.stdout || `session callback delivery failed with status ${sessionSendDelivery.status}`);
+      }
+    }
+
     printJson({
       ...result,
       delivered: true,
-      delivery: "gateway_method"
+      delivery: sessionSendDelivery ? "gateway_method+sessions_send" : "gateway_method"
     });
     return;
   }
@@ -503,7 +583,7 @@ function deliverToOpenClaw({ gatewayUrl, token, openclawSession, message }) {
   };
 }
 
-function deliverToGatewayMethod({ method, gatewayUrl, token, sessionKey, statePath, logPath, conversation, message }) {
+function deliverToGatewayMethod({ method, openclawBin, gatewayUrl, token, sessionKey, statePath, logPath, conversation, message }) {
   const args = [
     "gateway",
     "call",
@@ -526,7 +606,44 @@ function deliverToGatewayMethod({ method, gatewayUrl, token, sessionKey, statePa
     args.push("--token", token);
   }
 
-  const result = spawnSync("openclaw", args, {
+  const result = spawnSync(openclawBin ?? "openclaw", args, {
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024 * 10
+  });
+
+  if (result.error) {
+    return {
+      status: 1,
+      stdout: result.stdout ?? "",
+      stderr: result.error.message
+    };
+  }
+
+  return {
+    status: result.status ?? 1,
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? ""
+  };
+}
+
+function deliverToSessionSend({ openclawBin, gatewayUrl, token, params }) {
+  const args = [
+    "gateway",
+    "call",
+    "sessions.send",
+    "--params",
+    JSON.stringify(params),
+    "--json"
+  ];
+
+  if (gatewayUrl) {
+    args.push("--url", gatewayUrl);
+  }
+  if (token && token !== "<token>") {
+    args.push("--token", token);
+  }
+
+  const result = spawnSync(openclawBin ?? "openclaw", args, {
     encoding: "utf8",
     maxBuffer: 1024 * 1024 * 10
   });
@@ -591,6 +708,18 @@ function required(value, message) {
   return value;
 }
 
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseOptionalJson(text) {
+  try {
+    return JSON.parse(String(text));
+  } catch {
+    return undefined;
+  }
+}
+
 function expandHome(filePath) {
   if (filePath === "~") {
     return process.env.HOME;
@@ -605,6 +734,11 @@ function expandHome(filePath) {
 
 function printJson(value) {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+function cleanProcessText(text) {
+  const value = String(text ?? "").trim();
+  return value ? value.slice(0, 2000) : undefined;
 }
 
 function shellQuote(value) {

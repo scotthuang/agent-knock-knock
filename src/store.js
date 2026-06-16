@@ -1,8 +1,9 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
-export function defaultStoreDir(workspace = process.cwd()) {
-  return path.join(workspace, ".agent-knock-knock", "conversations");
+export function defaultStoreDir(_workspace = process.cwd()) {
+  return path.join(os.homedir(), ".agent-knock-knock", "conversations");
 }
 
 export function defaultLogDir(workspace = process.cwd()) {

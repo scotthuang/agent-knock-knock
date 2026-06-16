@@ -45,6 +45,10 @@
         "type": "string",
         "description": "Gateway token used by the legacy CLI callback delivery path."
       },
+      "openclawBin": {
+        "type": "string",
+        "description": "Path to the OpenClaw CLI used by callback delivery. Defaults to PATH plus common user install locations."
+      },
       "callbackCommand": {
         "type": "string",
         "description": "Optional callback command template. {statePath} and {state_path} are replaced with the shell-quoted state path."

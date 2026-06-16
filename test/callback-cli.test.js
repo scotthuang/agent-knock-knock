@@ -264,6 +264,95 @@ console.log(JSON.stringify({ ok: true }));
   }
 });
 
+test("callback delivers session_send requested by plugin gateway method", () => {
+  const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-session-send-"));
+  const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-fake-openclaw-"));
+  const gatewayCallPath = path.join(fakeBinDir, "calls.ndjson");
+  try {
+    const fakeOpenClaw = path.join(fakeBinDir, "openclaw");
+    fs.writeFileSync(
+      fakeOpenClaw,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(gatewayCallPath)}, JSON.stringify(args) + "\\n", "utf8");
+const method = args[2];
+if (method === "agent-knock-knock.callback") {
+  console.log(JSON.stringify({
+    ok: true,
+    session_send: {
+      key: "agent:main:main",
+      message: "structured callback payload",
+      idempotencyKey: "akk-test-session-send"
+    }
+  }));
+} else if (method === "sessions.send") {
+  console.log(JSON.stringify({ runId: "akk-test-session-send", status: "started", messageSeq: 2 }));
+} else {
+  console.log(JSON.stringify({ ok: true }));
+}
+`,
+      "utf8"
+    );
+    fs.chmodSync(fakeOpenClaw, 0o755);
+
+    const created = runCli([
+      "new",
+      "--request",
+      "Callback session send test",
+      "--store-dir",
+      storeDir,
+      "--openclaw-session",
+      "agent:main:main"
+    ]);
+
+    const callback = runCli([
+      "callback",
+      "--state",
+      created.paths.statePath,
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      "agent:main:main",
+      "--message-json",
+      JSON.stringify({
+        from: "claude-code",
+        to: "openclaw",
+        type: "done",
+        body: "Implemented"
+      })
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+
+    assert.equal(callback.delivered, true);
+    assert.equal(callback.delivery, "gateway_method+sessions_send");
+
+    const calls = fs.readFileSync(gatewayCallPath, "utf8")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line));
+    assert.equal(calls.length, 2);
+    assert.deepEqual(calls[0].slice(0, 3), ["gateway", "call", "agent-knock-knock.callback"]);
+    assert.deepEqual(calls[1].slice(0, 3), ["gateway", "call", "sessions.send"]);
+    const sessionSendParams = JSON.parse(calls[1][calls[1].indexOf("--params") + 1]);
+    assert.equal(sessionSendParams.idempotencyKey, "akk-test-session-send");
+    assert.equal(sessionSendParams.message, "structured callback payload");
+
+    const events = fs.readFileSync(created.paths.logPath, "utf8")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line));
+    assert.equal(events.some((event) =>
+      event.event === "callback_session_send_delivery" &&
+      event.status === 0
+    ), true);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(fakeBinDir, { recursive: true, force: true });
+  }
+});
+
 function runCli(args, env = {}) {
   const result = spawnSync(process.execPath, [binPath, ...args], {
     encoding: "utf8",

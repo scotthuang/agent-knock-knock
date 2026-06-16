@@ -75,9 +75,9 @@ If your OpenClaw config uses a restrictive tool allowlist, allow the tool:
 }
 ```
 
-The tool launches Claude Code in the background and returns `conversation_id`, `state_path`, `event_log_path`, launch status, and the Claude session name. Follow-up communication should happen through structured protocol callbacks, not by reading the Claude process stdout/stderr.
+The tool launches Claude Code in the background and returns `status: "async_pending"`, `conversation_id`, `state_path`, `event_log_path`, launch status, and the Claude session name. OpenClaw should yield after receiving this tool result and wait for the callback turn; follow-up communication should happen through structured protocol callbacks, not by reading event logs, processes, files, session internals, stdout, or stderr.
 
-The plugin also registers the Gateway method `agent-knock-knock.callback`. Claude Code callback commands use this method to enqueue a durable next-turn injection for the OpenClaw session, so OpenClaw receives only the structured protocol message.
+The plugin also registers the Gateway method `agent-knock-knock.callback`. Claude Code callback commands use this method to enqueue a durable next-turn injection for the OpenClaw session. Actionable callbacks such as `question`, `blocked`, `done`, `error`, or any message with `requires_response: true` are delivered into the OpenClaw session through Gateway `sessions.send`, so OpenClaw receives only the structured protocol message without polling Claude's raw execution channel.
 
 Run tests:
 
@@ -118,17 +118,18 @@ npm run transcript -- --conversation .agent-knock-knock/conversations/<conversat
 
 ## Storage
 
-Conversation state is stored under the workspace so a new OpenClaw session can recover the shared context:
+Conversation state is stored under the user's home directory so a new OpenClaw session can recover the shared context independently from OpenClaw's own app state:
 
 ```text
-.agent-knock-knock/
+~/.agent-knock-knock/
   conversations/
     <conversation-id>/
       state.json
       events.ndjson
+      claude-output.log
 ```
 
-Use `--store-dir <dir>` to override the conversation store location. `--log-dir <dir>` is still accepted as a compatibility alias.
+Use `--store-dir <dir>` to override the conversation store location. `--log-dir <dir>` is still accepted as a compatibility alias. `claude-output.log` is diagnostic-only; OpenClaw should not read it as part of agent communication.
 
 ## Defaults
 

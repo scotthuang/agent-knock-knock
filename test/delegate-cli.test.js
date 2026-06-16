@@ -21,7 +21,7 @@ test("delegate background launches acpx without returning raw Claude output", as
       fakeAcpx,
       `#!/usr/bin/env node
 const fs = require("node:fs");
-fs.writeFileSync(${JSON.stringify(launchedPath)}, JSON.stringify(process.argv.slice(2)), "utf8");
+fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify(process.argv.slice(2)) + "\\n", "utf8");
 `,
       "utf8"
     );
@@ -34,6 +34,10 @@ fs.writeFileSync(${JSON.stringify(launchedPath)}, JSON.stringify(process.argv.sl
       "Implement a controlled plugin test",
       "--workspace",
       workspace,
+      "--store-dir",
+      path.join(tempDir, "conversations"),
+      "--gateway-method",
+      "agent-knock-knock.callback",
       "--background"
     ], {
       encoding: "utf8",
@@ -49,32 +53,42 @@ fs.writeFileSync(${JSON.stringify(launchedPath)}, JSON.stringify(process.argv.sl
     assert.equal(parsed.background, true);
     assert.equal(parsed.acpx_command, undefined);
 
-    await waitForFile(launchedPath);
-    const acpxArgs = JSON.parse(fs.readFileSync(launchedPath, "utf8"));
+    const acpxCalls = await waitForCalls(launchedPath, 2);
+    assert.deepEqual(acpxCalls[0], ["claude", "sessions", "ensure", "--name", "bidirectional"]);
+    const acpxArgs = acpxCalls.at(-1);
     assert.deepEqual(acpxArgs.slice(0, 4), ["--approve-all", "claude", "-s", "bidirectional"]);
     assert.match(acpxArgs[4], /Initial task message:/);
 
     const state = JSON.parse(fs.readFileSync(parsed.paths.statePath, "utf8"));
     assert.match(state.callback_command, /--record-only/);
+    assert.match(state.callback_command, /--openclaw-bin/);
     assert.doesNotMatch(state.callback_command, /<token>/);
 
     const events = fs.readFileSync(parsed.paths.logPath, "utf8")
       .trim()
       .split(/\r?\n/)
       .map((line) => JSON.parse(line));
+    assert.equal(events.some((event) => event.event === "claude_session_ensure" && event.status === 0), true);
     assert.equal(events.some((event) => event.event === "claude_launch" && event.mode === "background"), true);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
 
-function waitForFile(filePath, timeoutMs = 2000) {
+function waitForCalls(filePath, minCount, timeoutMs = 2000) {
   const started = Date.now();
   return new Promise((resolve, reject) => {
     const check = () => {
       if (fs.existsSync(filePath)) {
-        resolve();
-        return;
+        const calls = fs.readFileSync(filePath, "utf8")
+          .trim()
+          .split(/\r?\n/)
+          .filter(Boolean)
+          .map((line) => JSON.parse(line));
+        if (calls.length >= minCount) {
+          resolve(calls);
+          return;
+        }
       }
       if (Date.now() - started >= timeoutMs) {
         reject(new Error(`timed out waiting for ${filePath}`));
