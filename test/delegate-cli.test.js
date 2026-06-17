@@ -89,7 +89,10 @@ test("delegate background can launch Codex through acpx", async () => {
       fakeAcpx,
       `#!/usr/bin/env node
 const fs = require("node:fs");
-fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify(process.argv.slice(2)) + "\\n", "utf8");
+fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify({
+  args: process.argv.slice(2),
+  allProxy: process.env.ALL_PROXY
+}) + "\\n", "utf8");
 `,
       "utf8"
     );
@@ -108,6 +111,10 @@ fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify(process.argv.s
       workspace,
       "--store-dir",
       path.join(tempDir, "conversations"),
+      "--all-proxy",
+      "socks5h://127.0.0.1:1082",
+      "--model",
+      "gpt-5.5/medium",
       "--background"
     ], {
       encoding: "utf8",
@@ -121,10 +128,14 @@ fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify(process.argv.s
     const parsed = JSON.parse(result.stdout);
     assert.equal(parsed.conversation.executor.kind, "codex");
     assert.equal(parsed.conversation.executor.session, "codex-task");
+    assert.equal(parsed.conversation.executor_all_proxy, "socks5h://127.0.0.1:1082");
+    assert.equal(parsed.conversation.executor_model, "gpt-5.5/medium");
 
     const acpxCalls = await waitForCalls(launchedPath, 2);
-    assert.deepEqual(acpxCalls[0], ["codex", "sessions", "ensure", "--name", "codex-task"]);
-    assert.deepEqual(acpxCalls.at(-1).slice(0, 4), ["--approve-all", "codex", "-s", "codex-task"]);
+    assert.deepEqual(acpxCalls[0].args, ["codex", "sessions", "ensure", "--name", "codex-task"]);
+    assert.equal(acpxCalls[0].allProxy, "socks5h://127.0.0.1:1082");
+    assert.deepEqual(acpxCalls.at(-1).args.slice(0, 6), ["--approve-all", "--model", "gpt-5.5/medium", "codex", "-s", "codex-task"]);
+    assert.equal(acpxCalls.at(-1).allProxy, "socks5h://127.0.0.1:1082");
 
     const events = fs.readFileSync(parsed.paths.logPath, "utf8")
       .trim()

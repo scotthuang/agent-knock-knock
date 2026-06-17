@@ -211,6 +211,10 @@ console.log(JSON.stringify({ ok: true }));
 
     const created = runCli([
       "new",
+      "--agent",
+      "codex",
+      "--session",
+      "codex-callback",
       "--request",
       "Callback gateway method test",
       "--store-dir",
@@ -229,7 +233,7 @@ console.log(JSON.stringify({ ok: true }));
       "agent:main:main",
       "--message-json",
       JSON.stringify({
-        from: "claude-code",
+        from: "codex",
         to: "openclaw",
         type: "question",
         body: "Should the export include CSV?"
@@ -255,6 +259,7 @@ console.log(JSON.stringify({ ok: true }));
       .map((line) => JSON.parse(line));
     assert.equal(events.some((event) =>
       event.event === "callback_gateway_method_delivery" &&
+      event.from === "codex" &&
       event.method === "agent-knock-knock.callback" &&
       event.status === 0
     ), true);

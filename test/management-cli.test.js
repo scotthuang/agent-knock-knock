@@ -20,7 +20,10 @@ test("list status send and close manage agent delegations", () => {
       fakeAcpx,
       `#!/usr/bin/env node
 const fs = require("node:fs");
-fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify(process.argv.slice(2)) + "\\n", "utf8");
+fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify({
+  args: process.argv.slice(2),
+  allProxy: process.env.ALL_PROXY
+}) + "\\n", "utf8");
 `,
       "utf8"
     );
@@ -72,7 +75,11 @@ fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify(process.argv.
       "--message",
       "Continue with the smaller implementation.",
       "--type",
-      "answer"
+      "answer",
+      "--all-proxy",
+      "socks5h://127.0.0.1:1082",
+      "--model",
+      "gpt-5.5/medium"
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     });
@@ -84,8 +91,10 @@ fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify(process.argv.
       .trim()
       .split(/\r?\n/)
       .map((line) => JSON.parse(line));
-    assert.deepEqual(acpxCalls[0], ["codex", "sessions", "ensure", "--name", "codex-work"]);
-    assert.deepEqual(acpxCalls[1].slice(0, 4), ["--approve-all", "codex", "-s", "codex-work"]);
+    assert.deepEqual(acpxCalls[0].args, ["codex", "sessions", "ensure", "--name", "codex-work"]);
+    assert.equal(acpxCalls[0].allProxy, "socks5h://127.0.0.1:1082");
+    assert.deepEqual(acpxCalls[1].args.slice(0, 6), ["--approve-all", "--model", "gpt-5.5/medium", "codex", "-s", "codex-work"]);
+    assert.equal(acpxCalls[1].allProxy, "socks5h://127.0.0.1:1082");
 
     const closed = runCli([
       "close",

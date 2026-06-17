@@ -183,6 +183,9 @@ function runDelegate(options) {
 
   const openclawSession = options.openclawSession ?? "agent:main:main";
   const openclawBin = options.openclawBin ?? resolveOptionalExecutable("openclaw");
+  const executorEnv = environmentForExecutor(executor, options);
+  const executorAllProxy = proxyForExecutor(executor, options);
+  const executorModel = modelForExecutor(executor, options);
   const callbackCommand = options.callbackCommand
     ? expandCallbackCommandTemplate(options.callbackCommand, { statePath: newResult.paths.statePath })
     : buildCallbackCommand({
@@ -197,7 +200,9 @@ function runDelegate(options) {
   const conversationWithCallback = {
     ...newResult.conversation,
     gateway_url: gatewayUrl,
-    callback_command: callbackCommand
+    callback_command: callbackCommand,
+    executor_all_proxy: executorAllProxy,
+    executor_model: executorModel
   };
   saveState(newResult.paths.statePath, conversationWithCallback);
   newResult.conversation = conversationWithCallback;
@@ -210,14 +215,15 @@ function runDelegate(options) {
   });
   const payload = `${bootstrap}\n\nInitial task message:\n${JSON.stringify(newResult.task_message)}`;
 
-  const acpxArgs = ["--approve-all", executor.kind, "-s", executor.session, payload];
+  const acpxArgs = buildAcpxPromptArgs({ executor, payload, model: executorModel });
 
   if (options.background) {
     const acpxPath = resolveExecutable("acpx");
     const ensureSession = ensureExecutorSession({
       acpxPath,
       executor,
-      cwd: workspace
+      cwd: workspace,
+      env: executorEnv
     });
     appendEvent(newResult.paths.logPath, {
       ts: new Date().toISOString(),
@@ -250,7 +256,9 @@ function runDelegate(options) {
     const outputFd = fs.openSync(outputPath, "a");
     const child = spawn(acpxPath, acpxArgs, {
       detached: true,
-      stdio: ["ignore", outputFd, outputFd]
+      stdio: ["ignore", outputFd, outputFd],
+      env: executorEnv,
+      cwd: workspace
     });
     child.unref();
     fs.closeSync(outputFd);
@@ -291,7 +299,8 @@ function runDelegate(options) {
     const ensureSession = ensureExecutorSession({
       acpxPath,
       executor,
-      cwd: workspace
+      cwd: workspace,
+      env: executorEnv
     });
     if (ensureSession.error) {
       throw new Error(`acpx ${executor.kind} session ensure failed to start: ${ensureSession.error.message}`);
@@ -301,7 +310,8 @@ function runDelegate(options) {
     }
     const result = spawnSync(acpxPath, acpxArgs, {
       stdio: "inherit",
-      cwd: workspace
+      cwd: workspace,
+      env: executorEnv
     });
     process.exitCode = result.status ?? 1;
     return;
@@ -315,11 +325,56 @@ function runDelegate(options) {
   });
 }
 
-function ensureExecutorSession({ acpxPath, executor, cwd }) {
+function ensureExecutorSession({ acpxPath, executor, cwd, env }) {
   return spawnSync(acpxPath, [executor.kind, "sessions", "ensure", "--name", executor.session], {
     encoding: "utf8",
-    cwd
+    cwd,
+    env
   });
+}
+
+function buildAcpxPromptArgs({ executor, payload, model }) {
+  const args = ["--approve-all"];
+  if (model) {
+    args.push("--model", model);
+  }
+  args.push(executor.kind, "-s", executor.session, payload);
+  return args;
+}
+
+function proxyForExecutor(executor, options = {}) {
+  const explicit = options.allProxy ?? options.proxy;
+  if (explicit) {
+    return explicit;
+  }
+  if (executor.kind === "codex") {
+    return process.env.CODEX_ALL_PROXY ?? process.env.ALL_PROXY ?? process.env.all_proxy;
+  }
+  return undefined;
+}
+
+function modelForExecutor(executor, options = {}) {
+  const explicit = options.model ?? options.codexModel;
+  if (explicit) {
+    return explicit;
+  }
+  if (executor.kind === "codex") {
+    return process.env.CODEX_ACPX_MODEL;
+  }
+  return undefined;
+}
+
+function environmentForExecutor(executor, options = {}) {
+  const proxy = proxyForExecutor(executor, options);
+  if (!proxy) {
+    return process.env;
+  }
+
+  return {
+    ...process.env,
+    ALL_PROXY: proxy,
+    all_proxy: proxy
+  };
 }
 
 function runList(options) {
@@ -381,10 +436,17 @@ function runSend(options) {
   appendEvent(logPath, messageEvent(message));
 
   const acpxPath = resolveExecutable("acpx");
+  const executorEnv = environmentForExecutor(executor, {
+    allProxy: options.allProxy ?? conversation.executor_all_proxy
+  });
+  const executorModel = modelForExecutor(executor, {
+    model: options.model ?? conversation.executor_model
+  });
   const ensureSession = ensureExecutorSession({
     acpxPath,
     executor,
-    cwd: conversation.workspace ?? process.cwd()
+    cwd: conversation.workspace ?? process.cwd(),
+    env: executorEnv
   });
   appendEvent(logPath, {
     ts: new Date().toISOString(),
@@ -409,7 +471,7 @@ function runSend(options) {
     "",
     JSON.stringify(message)
   ].join("\n");
-  const acpxArgs = ["--approve-all", executor.kind, "-s", executor.session, payload];
+  const acpxArgs = buildAcpxPromptArgs({ executor, payload, model: executorModel });
 
   if (options.background) {
     const outputPath = path.join(path.dirname(logPath), `${executor.kind}-followup-output.log`);
@@ -417,7 +479,8 @@ function runSend(options) {
     const child = spawn(acpxPath, acpxArgs, {
       detached: true,
       stdio: ["ignore", outputFd, outputFd],
-      cwd: conversation.workspace ?? process.cwd()
+      cwd: conversation.workspace ?? process.cwd(),
+      env: executorEnv
     });
     child.unref();
     fs.closeSync(outputFd);
@@ -445,10 +508,11 @@ function runSend(options) {
     return;
   }
 
-  const sendResult = spawnSync(acpxPath, ["--approve-all", executor.kind, "-s", executor.session, payload], {
+  const sendResult = spawnSync(acpxPath, acpxArgs, {
     encoding: "utf8",
     maxBuffer: 1024 * 1024 * 10,
-    cwd: conversation.workspace ?? process.cwd()
+    cwd: conversation.workspace ?? process.cwd(),
+    env: executorEnv
   });
   appendEvent(logPath, {
     ts: new Date().toISOString(),
@@ -665,7 +729,7 @@ function runLockedCallback(options) {
       ts: new Date().toISOString(),
       conversation_id: conversation.conversation_id,
       event: "callback_gateway_method_delivery",
-      from: "claude-code",
+      from: message.from,
       to: "openclaw",
       round: message.round,
       method: options.gatewayMethod,
@@ -692,7 +756,7 @@ function runLockedCallback(options) {
         ts: new Date().toISOString(),
         conversation_id: conversation.conversation_id,
         event: "callback_session_send_delivery",
-        from: "claude-code",
+        from: message.from,
         to: "openclaw",
         round: message.round,
         status: sessionSendDelivery.status,
@@ -737,7 +801,7 @@ function runLockedCallback(options) {
     ts: new Date().toISOString(),
     conversation_id: conversation.conversation_id,
     event: "callback_delivery",
-    from: "claude-code",
+    from: message.from,
     to: "openclaw",
     round: message.round,
     status: delivery.status,
@@ -1074,10 +1138,10 @@ function usage() {
   agent-knock-knock new --request <text> [--agent claude|codex] [--workspace <path>] [--store-dir <dir>]
   agent-knock-knock record --state <file> --message-json <json>
   agent-knock-knock bootstrap-prompt --callback-command <command> [--agent claude|codex]
-  agent-knock-knock delegate --request <text> [--agent claude|codex] [--store-dir <dir>] [--token <gateway-token>] [--send|--background]
+  agent-knock-knock delegate --request <text> [--agent claude|codex] [--store-dir <dir>] [--all-proxy <url>] [--token <gateway-token>] [--send|--background]
   agent-knock-knock list [--store-dir <dir>] [--agent claude|codex] [--status <status>] [--all]
   agent-knock-knock status --conversation <id> [--store-dir <dir>]
-  agent-knock-knock send --conversation <id> --message <text> [--type answer|task|control]
+  agent-knock-knock send --conversation <id> --message <text> [--type answer|task|control] [--all-proxy <url>]
   agent-knock-knock close --conversation <id> [--reason <text>]
   agent-knock-knock callback --state <file> --message-json <json> [--record-only]
   agent-knock-knock transcript --log <file> [--include-raw]

@@ -68,6 +68,22 @@
         "type": "string",
         "description": "Default Codex session name."
       },
+      "codexAllProxy": {
+        "type": "string",
+        "description": "ALL_PROXY value used when launching Codex through ACPX."
+      },
+      "codexModel": {
+        "type": "string",
+        "description": "ACPX model id used when launching Codex."
+      },
+      "model": {
+        "type": "string",
+        "description": "ACPX model id used when launching coding agents."
+      },
+      "allProxy": {
+        "type": "string",
+        "description": "ALL_PROXY value used when launching coding agents through ACPX."
+      },
       "openclawSession": {
         "type": "string",
         "description": "Default OpenClaw session label stored in the protocol state."

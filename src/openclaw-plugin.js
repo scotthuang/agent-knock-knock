@@ -37,6 +37,22 @@ const delegateParameters = {
       type: "string",
       description: "Codex session name."
     },
+    codexAllProxy: {
+      type: "string",
+      description: "ALL_PROXY value used when launching Codex through ACPX."
+    },
+    codexModel: {
+      type: "string",
+      description: "ACPX model id used when launching Codex."
+    },
+    model: {
+      type: "string",
+      description: "ACPX model id used when launching the selected coding agent."
+    },
+    allProxy: {
+      type: "string",
+      description: "ALL_PROXY value used when launching the selected coding agent through ACPX."
+    },
     session: {
       type: "string",
       description: "Explicit coding agent session name."
@@ -104,6 +120,12 @@ const sendParameters = {
     type: {
       type: "string",
       enum: ["answer", "task", "control", "error"]
+    },
+    allProxy: {
+      type: "string"
+    },
+    model: {
+      type: "string"
     },
     storeDir: {
       type: "string"
@@ -213,6 +235,8 @@ export default definePluginEntry({
           "--background"
         ];
         pushOptional(args, "--type", stringValue(params.type));
+        pushOptional(args, "--all-proxy", stringValue(params.allProxy) ?? stringValue(api.pluginConfig?.codexAllProxy) ?? stringValue(api.pluginConfig?.allProxy));
+        pushOptional(args, "--model", stringValue(params.model) ?? stringValue(api.pluginConfig?.codexModel) ?? stringValue(api.pluginConfig?.model));
         pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
         return args;
       }
@@ -242,6 +266,14 @@ function runDelegate(api, params, toolContext) {
     (agent === "codex"
       ? stringValue(params.codexSession) ?? stringValue(config.codexSession) ?? stringValue(config.defaultCodexSession)
       : stringValue(params.claudeSession) ?? stringValue(config.claudeSession) ?? stringValue(config.defaultClaudeSession));
+  const allProxy =
+    stringValue(params.allProxy) ??
+    (agent === "codex" ? stringValue(params.codexAllProxy) ?? stringValue(config.codexAllProxy) : undefined) ??
+    stringValue(config.allProxy);
+  const model =
+    stringValue(params.model) ??
+    (agent === "codex" ? stringValue(params.codexModel) ?? stringValue(config.codexModel) : undefined) ??
+    stringValue(config.model);
   const openclawSession =
     stringValue(toolContext?.sessionKey) ??
     stringValue(config.openclawSession) ??
@@ -261,6 +293,8 @@ function runDelegate(api, params, toolContext) {
 
   pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(config.storeDir));
   pushOptional(args, "--session", agentSession);
+  pushOptional(args, "--all-proxy", allProxy);
+  pushOptional(args, "--model", model);
   pushOptional(args, "--openclaw-session", openclawSession);
   pushOptional(args, "--gateway-url", stringValue(config.gatewayUrl));
   pushOptional(args, "--token", stringValue(config.gatewayToken));

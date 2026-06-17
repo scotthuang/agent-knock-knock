@@ -8,6 +8,7 @@
 - Added CLI task management commands: `list`, `status`, `send`, and `close`.
 - Added OpenClaw plugin tools for task listing, task status, follow-up sends, and local task close.
 - Added manifest contracts and tool metadata for the new OpenClaw plugin tools.
+- Added Codex ACPX proxy and model configuration support for environments that require `ALL_PROXY` or a ChatGPT-compatible model id.
 - Added tests for Codex-backed delegation and task management flows.
 
 ### Changed
@@ -19,6 +20,7 @@
 
 - `npm test` passes 35 tests.
 - Live OpenClaw validation created a Claude task, listed Claude tasks, sent a follow-up message, and closed the task through plugin tools.
+- Live OpenClaw validation created a Codex task with `ALL_PROXY=socks5h://127.0.0.1:1082` and `model=gpt-5.5/medium`, listed Codex tasks, sent a follow-up message, received Codex `done`, and closed the task through plugin tools.
 
 ## 0.1.0 - 2026-05-16
 

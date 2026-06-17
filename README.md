@@ -173,6 +173,8 @@ Use `--store-dir <dir>` to override the conversation store location. `--log-dir 
 - OpenClaw session: `agent:main:main`
 - Claude session: `bidirectional`
 - Codex session: `codex`
+- Codex proxy, when needed: pass `allProxy`/`codexAllProxy` such as `socks5h://127.0.0.1:1082`
+- Codex model, when needed for ChatGPT-account compatibility: pass `model`/`codexModel` such as `gpt-5.5/medium`
 - Gateway URL: `ws://127.0.0.1:18789`
 - Soft response limit: `50`
 - Hard response limit: `100`
