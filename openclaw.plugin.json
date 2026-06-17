@@ -1,7 +1,7 @@
 {
   "id": "agent-knock-knock",
   "name": "Agent Knock Knock",
-  "description": "Controlled delegation from OpenClaw to Claude Code through a structured protocol.",
+  "description": "Agent Knock Knock (AKK/akk) delegates OpenClaw coding work to local Codex or Claude agents. Use this plugin when the user says AKK, akk, Agent Knock Knock, asks to hand work to Codex or Claude, asks what agent tasks are running, sends a follow-up to an agent task, or closes an agent task. Default delegation target is Codex; use Claude only when the user explicitly asks for Claude.",
   "activation": {
     "onStartup": true
   },
@@ -41,7 +41,7 @@
       },
       "workspace": {
         "type": "string",
-        "description": "Default workspace for delegated Claude Code tasks."
+        "description": "Default workspace for delegated coding-agent tasks."
       },
       "storeDir": {
         "type": "string",
@@ -58,7 +58,7 @@
       "defaultAgent": {
         "type": "string",
         "enum": ["claude", "codex"],
-        "description": "Default coding agent for delegation."
+        "description": "Default coding agent for delegation. Use codex unless explicitly configured otherwise."
       },
       "defaultClaudeSession": {
         "type": "string",

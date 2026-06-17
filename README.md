@@ -89,6 +89,19 @@ cp templates/openclaw-skills/bidirectional-chat/SKILL.md ~/.openclaw/skills/bidi
 
 This package also includes a native OpenClaw plugin. The plugin registers optional tools that let OpenClaw delegate implementation tasks to Claude Code or Codex, list active tasks, send follow-up messages, inspect status, and close tasks without exposing raw terminal output as tool results.
 
+Natural-language routing is designed around the short name `AKK`; lowercase `akk` should be treated the same way. When a user says `AKK` without naming an agent, OpenClaw should delegate to Codex. Use Claude only for explicit requests such as `AKK Claude`.
+
+Useful chat-style prompts:
+
+```text
+akk: fix the failing tests in this project
+AKK Codex: review the current branch and propose a small fix
+AKK Claude: review the latest commit
+akk list
+akk send <conversation-id>: continue with the smaller implementation
+akk close <conversation-id>
+```
+
 Install it locally during development:
 
 ```bash
@@ -171,6 +184,7 @@ Use `--store-dir <dir>` to override the conversation store location. `--log-dir 
 ## Defaults
 
 - OpenClaw session: `agent:main:main`
+- OpenClaw plugin default agent: `codex`
 - Claude session: `bidirectional`
 - Codex session: `codex`
 - Codex proxy, when needed: pass `allProxy`/`codexAllProxy` such as `socks5h://127.0.0.1:1082`

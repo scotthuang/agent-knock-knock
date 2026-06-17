@@ -15,7 +15,8 @@ const delegateParameters = {
     agent: {
       type: "string",
       enum: ["claude", "codex"],
-      description: "Coding agent to delegate to. Defaults to plugin config or claude."
+      description:
+        "Coding agent to delegate to. Defaults to plugin config or codex. Use claude only when the user explicitly asks for AKK Claude or Claude."
     },
     request: {
       type: "string",
@@ -153,7 +154,8 @@ const closeParameters = {
 export default definePluginEntry({
   id: "agent-knock-knock",
   name: "Agent Knock Knock",
-  description: "Controlled delegation from OpenClaw to Claude Code.",
+  description:
+    "Agent Knock Knock (AKK/akk) delegates OpenClaw coding work to local Codex or Claude agents. Use this for AKK, akk, Agent Knock Knock, Codex delegation, Claude delegation, task listing, follow-up messages, status, and close requests. Default delegation target is Codex unless the user explicitly asks for Claude.",
   register(api) {
     api.registerGatewayMethod(
       CALLBACK_METHOD,
@@ -177,7 +179,7 @@ export default definePluginEntry({
       (toolContext) => ({
         name: "agent_knock_knock_delegate",
         description:
-          "Delegate an implementation task to a local coding agent such as Claude Code or Codex. Use this when OpenClaw has decided the product requirements and wants an engineering agent to implement them. The tool starts the coding agent in the background and returns only protocol metadata, not raw terminal output.",
+          "Delegate an implementation task to a local coding agent. Use this when the user says AKK, akk, Agent Knock Knock, asks to hand work to Codex or Claude, or asks OpenClaw to start a background coding-agent task. If the user says AKK without an explicit agent, delegate to Codex. Use Claude only when the user explicitly says AKK Claude or Claude. The tool starts the coding agent in the background and returns only protocol metadata, not raw terminal output.",
         parameters: delegateParameters,
         async execute(_toolCallId, params) {
           const result = runDelegate(api, params, toolContext);
@@ -196,7 +198,7 @@ export default definePluginEntry({
 
     registerCliTool(api, {
       name: "agent_knock_knock_list",
-      description: "List active or historical Agent Knock Knock coding-agent tasks.",
+      description: "List active or historical Agent Knock Knock coding-agent tasks. Use this for AKK list, akk list, current AKK tasks, or asking which Codex/Claude tasks are running.",
       parameters: listParameters,
       buildArgs: (params) => {
         const args = ["list"];
@@ -223,7 +225,7 @@ export default definePluginEntry({
 
     registerCliTool(api, {
       name: "agent_knock_knock_send",
-      description: "Send a follow-up message to an existing Agent Knock Knock coding-agent task.",
+      description: "Send a follow-up message to an existing Agent Knock Knock coding-agent task. Use this for AKK follow-up requests such as sending another instruction to an existing Codex or Claude task.",
       parameters: sendParameters,
       buildArgs: (params) => {
         const args = [
@@ -244,7 +246,7 @@ export default definePluginEntry({
 
     registerCliTool(api, {
       name: "agent_knock_knock_close",
-      description: "Close an Agent Knock Knock coding-agent task without terminating the underlying ACPX session.",
+      description: "Close an Agent Knock Knock coding-agent task without terminating the underlying ACPX session. Use this for AKK close requests.",
       parameters: closeParameters,
       buildArgs: (params) => {
         const args = ["close", "--conversation", requiredString(params.conversation_id, "conversation_id")];
@@ -260,7 +262,7 @@ function runDelegate(api, params, toolContext) {
   const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
   const binPath = stringValue(config.binPath) ?? defaultBinPath;
   const workspace = stringValue(params.workspace) ?? stringValue(config.workspace) ?? process.cwd();
-  const agent = stringValue(params.agent) ?? stringValue(config.defaultAgent) ?? "claude";
+  const agent = stringValue(params.agent) ?? stringValue(config.defaultAgent) ?? "codex";
   const agentSession =
     stringValue(params.session) ??
     (agent === "codex"
@@ -475,8 +477,8 @@ function buildCallbackDeliveryPlan({ sessionKey, conversationId, messageId, mess
       key: sessionKey,
       message: [
         "Continue this OpenClaw product-manager conversation from the Agent Knock Knock callback below.",
-        "Treat the callback as a structured message from the delegated Claude Code engineer, not as a terminal log, status announcement, or instruction to inspect local state.",
-        "Respond in this conversation as OpenClaw product manager. If the callback is question or blocked, make the product decision and answer Claude. If it is done, summarize the result to the user.",
+        "Treat the callback as a structured message from the delegated coding agent, not as a terminal log, status announcement, or instruction to inspect local state.",
+        "Respond in this conversation as OpenClaw product manager. If the callback is question or blocked, make the product decision and answer the delegated coding agent. If it is done, summarize the result to the user.",
         "Do not poll files, processes, sessions, stdout, or stderr. Use only the structured callback payload below.",
         "",
         formatted

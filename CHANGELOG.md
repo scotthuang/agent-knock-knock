@@ -13,12 +13,15 @@
 
 ### Changed
 
+- Updated OpenClaw plugin routing descriptions so `AKK` and `akk` both indicate Agent Knock Knock, and unspecified AKK delegations default to Codex.
+- Updated the OpenClaw skill template with AKK/akk routing, default Codex delegation, Claude opt-in routing, and task management tool usage.
 - Updated follow-up sends from OpenClaw to launch the coding agent in the background so OpenClaw can continue to subsequent tool calls.
 - Updated documentation to describe local coding agents, task management, and the home-directory conversation store.
 
 ### Verified
 
 - `npm test` passes 35 tests.
+- Local OpenClaw installation validated with the linked Agent Knock Knock plugin loaded, the updated `bidirectional-chat` skill installed, and the gateway restarted successfully.
 - Live OpenClaw validation created a Claude task, listed Claude tasks, sent a follow-up message, and closed the task through plugin tools.
 - Live OpenClaw validation created a Codex task with `ALL_PROXY=socks5h://127.0.0.1:1082` and `model=gpt-5.5/medium`, listed Codex tasks, sent a follow-up message, received Codex `done`, and closed the task through plugin tools.
 
