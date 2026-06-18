@@ -175,6 +175,20 @@ export default definePluginEntry({
       { scope: "operator.write" }
     );
 
+    api.registerCommand?.({
+      name: "akk",
+      description: "Delegate coding work to Agent Knock Knock, list tasks, send follow-ups, and close tasks.",
+      acceptsArgs: true,
+      requireAuth: true,
+      nativeProgressMessages: {
+        default: "AKK is handling the request..."
+      },
+      agentPromptGuidance: [
+        "Use /akk <task> to delegate coding work to Agent Knock Knock. /akk defaults to Codex; use /akk claude <task> only when Claude is explicitly requested."
+      ],
+      handler: async (ctx) => handleAkkCommand(api, ctx)
+    });
+
     api.registerTool(
       (toolContext) => ({
         name: "agent_knock_knock_delegate",
@@ -257,6 +271,205 @@ export default definePluginEntry({
     });
   }
 });
+
+async function handleAkkCommand(api, ctx) {
+  try {
+    const parsed = parseAkkCommand(ctx.args);
+    if (parsed.action === "help") {
+      return { text: akkUsageText() };
+    }
+    if (parsed.action === "delegate") {
+      const result = runDelegate(api, {
+        agent: parsed.agent,
+        request: parsed.request
+      }, {
+        sessionKey: ctx.sessionKey
+      });
+      return { text: formatDelegateCommandResult(result) };
+    }
+    if (parsed.action === "list") {
+      const result = runCli(api, ["list"]);
+      return { text: formatListCommandResult(result) };
+    }
+    if (parsed.action === "status") {
+      const result = runCli(api, ["status", "--conversation", parsed.conversationId]);
+      return { text: formatStatusCommandResult(result) };
+    }
+    if (parsed.action === "send") {
+      const args = [
+        "send",
+        "--conversation",
+        parsed.conversationId,
+        "--message",
+        parsed.message,
+        "--background"
+      ];
+      const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+      pushOptional(args, "--all-proxy", stringValue(config.codexAllProxy) ?? stringValue(config.allProxy));
+      pushOptional(args, "--model", stringValue(config.codexModel) ?? stringValue(config.model));
+      const result = runCli(api, args);
+      return { text: formatSendCommandResult(result) };
+    }
+    if (parsed.action === "close") {
+      const result = runCli(api, [
+        "close",
+        "--conversation",
+        parsed.conversationId,
+        "--reason",
+        parsed.reason
+      ]);
+      return { text: formatCloseCommandResult(result) };
+    }
+    return { text: akkUsageText(), isError: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      text: `AKK command failed: ${message}`,
+      isError: true
+    };
+  }
+}
+
+function parseAkkCommand(args) {
+  const input = String(args ?? "").trim();
+  if (!input || input === "help" || input === "-h" || input === "--help") {
+    return { action: "help" };
+  }
+
+  const { token, rest } = takeToken(input);
+  const action = token.toLowerCase();
+  if (action === "list" || action === "ls" || action === "tasks") {
+    return { action: "list" };
+  }
+  if (action === "status" || action === "show") {
+    const { token: conversationId } = takeRequiredToken(rest, "Usage: /akk status <conversation-id>");
+    return { action: "status", conversationId };
+  }
+  if (action === "send" || action === "reply") {
+    const { token: conversationId, rest: message } = takeRequiredToken(rest, "Usage: /akk send <conversation-id> <message>");
+    const body = message.trim();
+    if (!body) {
+      throw new Error("Usage: /akk send <conversation-id> <message>");
+    }
+    return { action: "send", conversationId, message: body };
+  }
+  if (action === "close" || action === "done") {
+    const { token: conversationId, rest: reason } = takeRequiredToken(rest, "Usage: /akk close <conversation-id> [reason]");
+    return { action: "close", conversationId, reason: reason.trim() || "Closed from /akk command" };
+  }
+  if (action === "codex" || action === "c") {
+    const request = rest.trim();
+    if (!request) {
+      throw new Error("Usage: /akk codex <task>");
+    }
+    return { action: "delegate", agent: "codex", request };
+  }
+  if (action === "claude") {
+    const request = rest.trim();
+    if (!request) {
+      throw new Error("Usage: /akk claude <task>");
+    }
+    return { action: "delegate", agent: "claude", request };
+  }
+  return { action: "delegate", agent: "codex", request: input };
+}
+
+function takeRequiredToken(input, usage) {
+  const parsed = takeToken(input);
+  if (!parsed.token) {
+    throw new Error(usage);
+  }
+  return parsed;
+}
+
+function takeToken(input) {
+  const value = String(input ?? "").trimStart();
+  const match = value.match(/^(\S+)(?:\s+([\s\S]*))?$/);
+  if (!match) {
+    return { token: "", rest: "" };
+  }
+  return {
+    token: match[1],
+    rest: match[2] ?? ""
+  };
+}
+
+function akkUsageText() {
+  return [
+    "AKK usage:",
+    "/akk <task>",
+    "/akk codex <task>",
+    "/akk claude <task>",
+    "/akk list",
+    "/akk status <conversation-id>",
+    "/akk send <conversation-id> <message>",
+    "/akk close <conversation-id> [reason]"
+  ].join("\n");
+}
+
+function formatDelegateCommandResult(result) {
+  const agent = result.agent === "claude" ? "Claude" : "Codex";
+  return [
+    `AKK 已交给 ${agent}。`,
+    `conversation: ${result.conversation_id ?? "unknown"}`,
+    `session: ${result.session ?? "unknown"}`,
+    `status: ${result.conversation_status ?? result.status ?? "unknown"}`,
+    "结果会通过 OpenClaw 回调返回当前会话。"
+  ].join("\n");
+}
+
+function formatListCommandResult(result) {
+  const tasks = Array.isArray(result.tasks) ? result.tasks : [];
+  if (!tasks.length) {
+    return "AKK 当前没有活跃任务。";
+  }
+  return [
+    `AKK active tasks (${tasks.length}):`,
+    ...tasks.slice(0, 20).map(formatTaskLine)
+  ].join("\n");
+}
+
+function formatStatusCommandResult(result) {
+  const summary = result.summary ?? result.conversation ?? {};
+  const lines = [
+    `AKK status: ${summary.conversation_id ?? "unknown"}`,
+    `agent: ${summary.agent ?? summary.executor?.kind ?? "unknown"}`,
+    `status: ${summary.status ?? "unknown"}`,
+    `session: ${summary.session ?? summary.executor?.session ?? "unknown"}`
+  ];
+  if (summary.request) {
+    lines.push(`request: ${truncateText(summary.request, 180)}`);
+  }
+  return lines.join("\n");
+}
+
+function formatSendCommandResult(result) {
+  const conversation = result.conversation ?? {};
+  return [
+    "AKK follow-up sent.",
+    `conversation: ${conversation.conversation_id ?? "unknown"}`,
+    `status: ${conversation.status ?? "unknown"}`,
+    `launched: ${result.launched === true ? "yes" : "no"}`
+  ].join("\n");
+}
+
+function formatCloseCommandResult(result) {
+  const conversation = result.conversation ?? {};
+  return [
+    "AKK task closed.",
+    `conversation: ${conversation.conversation_id ?? "unknown"}`,
+    `status: ${conversation.status ?? "unknown"}`
+  ].join("\n");
+}
+
+function formatTaskLine(task) {
+  return [
+    task.conversation_id ?? "unknown",
+    task.agent ?? task.executor?.kind ?? "agent",
+    task.status ?? "unknown",
+    truncateText(task.request ?? "", 90)
+  ].filter(Boolean).join(" | ");
+}
 
 function runDelegate(api, params, toolContext) {
   const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
@@ -524,6 +737,14 @@ function stringValue(value) {
 
 function numberString(value) {
   return typeof value === "number" && Number.isFinite(value) ? String(value) : undefined;
+}
+
+function truncateText(value, maxLength) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (text.length <= maxLength) {
+    return text;
+  }
+  return `${text.slice(0, Math.max(0, maxLength - 1))}...`;
 }
 
 function requiredString(value, name) {

@@ -60,7 +60,8 @@ fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify(process.argv.s
     assert.match(acpxArgs[4], /Initial task message:/);
 
     const state = JSON.parse(fs.readFileSync(parsed.paths.statePath, "utf8"));
-    assert.match(state.callback_command, /--record-only/);
+    assert.doesNotMatch(state.callback_command, /--record-only/);
+    assert.match(state.callback_command, /--gateway-method/);
     assert.match(state.callback_command, /--openclaw-bin/);
     assert.doesNotMatch(state.callback_command, /<token>/);
 

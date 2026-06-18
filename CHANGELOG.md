@@ -7,6 +7,7 @@
 - Added ACPX executor metadata so delegations can target Claude Code or Codex.
 - Added CLI task management commands: `list`, `status`, `send`, and `close`.
 - Added OpenClaw plugin tools for task listing, task status, follow-up sends, and local task close.
+- Added the `/akk` OpenClaw command for direct delegation, task listing, status, follow-up sends, and task close from command-capable chat surfaces.
 - Added manifest contracts and tool metadata for the new OpenClaw plugin tools.
 - Added Codex ACPX proxy and model configuration support for environments that require `ALL_PROXY` or a ChatGPT-compatible model id.
 - Added tests for Codex-backed delegation and task management flows.
@@ -17,6 +18,10 @@
 - Updated the OpenClaw skill template with AKK/akk routing, default Codex delegation, Claude opt-in routing, and task management tool usage.
 - Updated follow-up sends from OpenClaw to launch the coding agent in the background so OpenClaw can continue to subsequent tool calls.
 - Updated documentation to describe local coding agents, task management, and the home-directory conversation store.
+
+### Fixed
+
+- Fixed OpenClaw plugin delegations generating `--record-only` callback commands even when Gateway callback delivery was configured, which caused completed Codex tasks to be logged locally without returning results to OpenClaw.
 
 ### Verified
 

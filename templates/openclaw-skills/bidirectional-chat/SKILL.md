@@ -25,7 +25,19 @@ The delegated coding agent owns engineering execution. OpenClaw owns product dir
 
 ## Chat Routing
 
-Use the native OpenClaw plugin tools whenever they are available.
+Use the native `/akk` command when the user invokes slash-command syntax. Use the native OpenClaw plugin tools when the user uses natural language instead of a slash command.
+
+Slash command forms:
+
+- `/akk <task>`: delegate to Codex.
+- `/akk codex <task>`: delegate to Codex.
+- `/akk claude <task>`: delegate to Claude.
+- `/akk list`: list active AKK tasks.
+- `/akk status <conversation-id>`: inspect one AKK task.
+- `/akk send <conversation-id> <message>`: send a follow-up to one AKK task.
+- `/akk close <conversation-id> [reason]`: close one AKK task.
+
+Natural-language forms:
 
 - `AKK: <task>` or `akk: <task>`: call `agent_knock_knock_delegate` with `request=<task>` and no `agent` parameter, so the plugin default Codex is used.
 - `AKK Codex: <task>`: call `agent_knock_knock_delegate` with `agent="codex"`.

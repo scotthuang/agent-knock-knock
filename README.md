@@ -91,6 +91,18 @@ This package also includes a native OpenClaw plugin. The plugin registers option
 
 Natural-language routing is designed around the short name `AKK`; lowercase `akk` should be treated the same way. When a user says `AKK` without naming an agent, OpenClaw should delegate to Codex. Use Claude only for explicit requests such as `AKK Claude`.
 
+The plugin also registers the `/akk` slash command for channel surfaces that support OpenClaw native commands:
+
+```text
+/akk <task>
+/akk codex <task>
+/akk claude <task>
+/akk list
+/akk status <conversation-id>
+/akk send <conversation-id> <message>
+/akk close <conversation-id> [reason]
+```
+
 Useful chat-style prompts:
 
 ```text

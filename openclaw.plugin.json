@@ -6,6 +6,9 @@
     "onStartup": true
   },
   "contracts": {
+    "commands": [
+      "akk"
+    ],
     "tools": [
       "agent_knock_knock_delegate",
       "agent_knock_knock_list",

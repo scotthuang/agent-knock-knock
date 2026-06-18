@@ -629,7 +629,7 @@ function buildCallbackCommand({
       "--openclaw-session",
       shellQuote(openclawSession)
     );
-  } else {
+  } else if (!gatewayMethod) {
     parts.push("--record-only");
   }
 
