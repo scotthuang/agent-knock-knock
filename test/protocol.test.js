@@ -48,7 +48,7 @@ test("budget action escalates at documented thresholds", () => {
   assert.equal(budgetAction({ ...base, response_rounds_used: 100 }).level, "hard_stop");
 });
 
-test("done message closes conversation without consuming a new round", () => {
+test("done message idles conversation without consuming a new round", () => {
   let conversation = createConversation({ userRequest: "Build feature" });
   const done = createMessage({
     conversation,
@@ -62,7 +62,8 @@ test("done message closes conversation without consuming a new round", () => {
 
   assert.equal(done.requires_response, false);
   assert.equal(conversation.response_rounds_used, 0);
-  assert.equal(conversation.status, "done");
+  assert.equal(conversation.status, "idle");
+  assert.match(conversation.idle_since, /^\d{4}-\d{2}-\d{2}T/);
 });
 
 test("extracts structured message from plain JSON", () => {

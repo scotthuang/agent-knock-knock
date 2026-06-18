@@ -107,6 +107,10 @@
         "type": "string",
         "description": "Optional callback command template. {statePath} and {state_path} are replaced with the shell-quoted state path."
       },
+      "idleTimeoutMinutes": {
+        "type": "number",
+        "description": "Minutes an idle AKK session remains open before lazy cleanup closes it. Defaults to 10080."
+      },
       "softLimit": {
         "type": "number"
       },

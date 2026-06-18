@@ -36,10 +36,11 @@ test("callback records a structured Claude message before delivery", () => {
 
     assert.equal(callback.delivered, false);
     assert.equal(callback.message.type, "done");
-    assert.equal(callback.conversation.status, "done");
+    assert.equal(callback.conversation.status, "idle");
 
     const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
-    assert.equal(state.status, "done");
+    assert.equal(state.status, "idle");
+    assert.match(state.idle_since, /^\d{4}-\d{2}-\d{2}T/);
 
     const log = fs.readFileSync(created.paths.logPath, "utf8");
     assert.match(log, /Implemented callback recording/);
@@ -269,8 +270,8 @@ console.log(JSON.stringify({ ok: true }));
   }
 });
 
-test("callback delivers session_send requested by plugin gateway method", () => {
-  const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-session-send-"));
+test("callback delivers chat_send requested by plugin gateway method", () => {
+  const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-chat-send-"));
   const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-fake-openclaw-"));
   const gatewayCallPath = path.join(fakeBinDir, "calls.ndjson");
   try {
@@ -285,14 +286,15 @@ const method = args[2];
 if (method === "agent-knock-knock.callback") {
   console.log(JSON.stringify({
     ok: true,
-    session_send: {
-      key: "agent:main:main",
+    chat_send: {
+      sessionKey: "agent:main:main",
       message: "structured callback payload",
-      idempotencyKey: "akk-test-session-send"
+      idempotencyKey: "akk-test-chat-send",
+      deliver: true
     }
   }));
-} else if (method === "sessions.send") {
-  console.log(JSON.stringify({ runId: "akk-test-session-send", status: "started", messageSeq: 2 }));
+} else if (method === "chat.send") {
+  console.log(JSON.stringify({ runId: "akk-test-chat-send", status: "started", messageSeq: 2 }));
 } else {
   console.log(JSON.stringify({ ok: true }));
 }
@@ -331,7 +333,7 @@ if (method === "agent-knock-knock.callback") {
     });
 
     assert.equal(callback.delivered, true);
-    assert.equal(callback.delivery, "gateway_method+sessions_send");
+    assert.equal(callback.delivery, "gateway_method+chat_send");
 
     const calls = fs.readFileSync(gatewayCallPath, "utf8")
       .trim()
@@ -339,17 +341,19 @@ if (method === "agent-knock-knock.callback") {
       .map((line) => JSON.parse(line));
     assert.equal(calls.length, 2);
     assert.deepEqual(calls[0].slice(0, 3), ["gateway", "call", "agent-knock-knock.callback"]);
-    assert.deepEqual(calls[1].slice(0, 3), ["gateway", "call", "sessions.send"]);
-    const sessionSendParams = JSON.parse(calls[1][calls[1].indexOf("--params") + 1]);
-    assert.equal(sessionSendParams.idempotencyKey, "akk-test-session-send");
-    assert.equal(sessionSendParams.message, "structured callback payload");
+    assert.deepEqual(calls[1].slice(0, 3), ["gateway", "call", "chat.send"]);
+    const chatSendParams = JSON.parse(calls[1][calls[1].indexOf("--params") + 1]);
+    assert.equal(chatSendParams.sessionKey, "agent:main:main");
+    assert.equal(chatSendParams.idempotencyKey, "akk-test-chat-send");
+    assert.equal(chatSendParams.message, "structured callback payload");
+    assert.equal(chatSendParams.deliver, true);
 
     const events = fs.readFileSync(created.paths.logPath, "utf8")
       .trim()
       .split(/\r?\n/)
       .map((line) => JSON.parse(line));
     assert.equal(events.some((event) =>
-      event.event === "callback_session_send_delivery" &&
+      event.event === "callback_chat_send_delivery" &&
       event.status === 0
     ), true);
   } finally {

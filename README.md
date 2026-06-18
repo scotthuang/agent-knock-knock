@@ -47,13 +47,13 @@ node bin/agent-knock-knock.js delegate \
   --request "Implement a small feature"
 ```
 
-List active coding-agent tasks:
+List open coding-agent sessions:
 
 ```bash
 node bin/agent-knock-knock.js list
 ```
 
-Send a follow-up message to an existing task:
+Send a follow-up message to an existing open session:
 
 ```bash
 node bin/agent-knock-knock.js send \
@@ -87,7 +87,7 @@ cp templates/openclaw-skills/bidirectional-chat/SKILL.md ~/.openclaw/skills/bidi
 
 ## OpenClaw Plugin
 
-This package also includes a native OpenClaw plugin. The plugin registers optional tools that let OpenClaw delegate implementation tasks to Claude Code or Codex, list active tasks, send follow-up messages, inspect status, and close tasks without exposing raw terminal output as tool results.
+This package also includes a native OpenClaw plugin. The plugin registers optional tools that let OpenClaw delegate implementation work to Claude Code or Codex, list open sessions, send follow-up messages, inspect status, and close sessions without exposing raw terminal output as tool results.
 
 Natural-language routing is designed around the short name `AKK`; lowercase `akk` should be treated the same way. When a user says `AKK` without naming an agent, OpenClaw should delegate to Codex. Use Claude only for explicit requests such as `AKK Claude`.
 
@@ -139,7 +139,9 @@ If your OpenClaw config uses a restrictive tool allowlist, allow the tool:
 
 The delegate tool launches the selected coding agent in the background and returns `status: "async_pending"`, `conversation_id`, `state_path`, `event_log_path`, launch status, and executor metadata. OpenClaw should yield after receiving this tool result and wait for the callback turn; follow-up communication should happen through structured protocol callbacks or `agent_knock_knock_send`, not by reading event logs, processes, files, session internals, stdout, or stderr.
 
-The plugin also registers the Gateway method `agent-knock-knock.callback`. Coding-agent callback commands use this method to enqueue a durable next-turn injection for the OpenClaw session. Actionable callbacks such as `question`, `blocked`, `done`, `error`, or any message with `requires_response: true` are delivered into the OpenClaw session through Gateway `sessions.send`, so OpenClaw receives only the structured protocol message without polling the raw execution channel.
+The plugin also registers the Gateway method `agent-knock-knock.callback`. Coding-agent callback commands use this method to enqueue a durable next-turn injection for the OpenClaw session. Actionable callbacks such as `question`, `blocked`, `done`, `error`, or any message with `requires_response: true` are delivered into the OpenClaw session through Gateway `chat.send` with `deliver: true`, so OpenClaw receives only the structured protocol message and can route the final reply back through the original channel without polling the raw execution channel.
+
+Coding-agent `done` callbacks mark the AKK conversation `idle`, not closed. Idle conversations remain visible in the default list and can receive `send` follow-ups until they are manually closed or lazily closed by the idle timeout. The default idle timeout is 10080 minutes.
 
 Run tests:
 

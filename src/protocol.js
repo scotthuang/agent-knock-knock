@@ -220,17 +220,23 @@ export function applyMessageToConversation(conversation, message, now = new Date
   }
 
   if (message.type === "done") {
-    next.status = "done";
+    next.status = "idle";
+    next.idle_since = now.toISOString();
   } else if (message.type === "error") {
     next.status = "failed";
+    delete next.idle_since;
   } else if (message.type === "blocked") {
     next.status = "waiting_for_openclaw";
+    delete next.idle_since;
   } else if (message.to === "openclaw" && message.requires_response) {
     next.status = "waiting_for_openclaw";
+    delete next.idle_since;
   } else if (message.to !== "openclaw" && message.requires_response) {
     next.status = "waiting_for_agent";
+    delete next.idle_since;
   } else if (next.status === "created") {
     next.status = "running";
+    delete next.idle_since;
   }
 
   return next;

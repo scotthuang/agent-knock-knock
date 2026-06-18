@@ -29,6 +29,8 @@ import {
   statePathForConversationId
 } from "../src/store.js";
 
+const DEFAULT_IDLE_TIMEOUT_MINUTES = 10080;
+
 const command = process.argv[2];
 const args = parseArgs(process.argv.slice(3));
 
@@ -65,6 +67,7 @@ try {
 function runNew(options) {
   const request = required(options.request, "--request is required");
   const workspace = options.workspace ?? process.cwd();
+  cleanupIdleConversations(expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(workspace)), options);
   const executor = resolveExecutor({
     kind: options.agent ?? "claude",
     session: options.session ?? options.executorSession ?? options.claudeSession
@@ -152,6 +155,7 @@ function runDelegate(options) {
   const request = required(options.request, "--request is required");
   const workspace = options.workspace ?? process.cwd();
   const storeDir = expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(workspace));
+  cleanupIdleConversations(storeDir, options);
   const executor = resolveExecutor({
     kind: options.agent ?? "claude",
     session: options.session ?? options.executorSession ?? options.claudeSession
@@ -379,6 +383,7 @@ function environmentForExecutor(executor, options = {}) {
 
 function runList(options) {
   const storeDir = expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(process.cwd()));
+  const cleanup = cleanupIdleConversations(storeDir, options);
   const includeAll = Boolean(options.all);
   const agentFilter = options.agent ? resolveExecutor({ kind: options.agent }).kind : undefined;
   const statusFilter = options.status;
@@ -390,11 +395,13 @@ function runList(options) {
 
   printJson({
     store_dir: storeDir,
+    cleanup,
     tasks: conversations
   });
 }
 
 function runStatus(options) {
+  cleanupIdleConversations(storeDirFromOptions(options), options);
   const { conversation, statePath, logPath } = loadConversationFromOptions(options);
   const events = readExistingEvents(logPath);
   printJson({
@@ -409,6 +416,7 @@ function runStatus(options) {
 
 function runSend(options) {
   const messageBody = required(options.message ?? options.request, "--message is required");
+  cleanupIdleConversations(storeDirFromOptions(options), options);
   const { conversation, statePath, logPath } = loadConversationFromOptions(options);
   if (["done", "failed", "closed", "cancelled"].includes(conversation.status)) {
     throw new Error(`cannot send to ${conversation.conversation_id}; conversation is ${conversation.status}`);
@@ -743,9 +751,33 @@ function runLockedCallback(options) {
     }
 
     const gatewayPayload = parseOptionalJson(delivery.stdout);
+    const chatSendParams = isRecord(gatewayPayload?.chat_send) ? gatewayPayload.chat_send : undefined;
     const sessionSendParams = isRecord(gatewayPayload?.session_send) ? gatewayPayload.session_send : undefined;
+    let chatSendDelivery;
     let sessionSendDelivery;
-    if (sessionSendParams) {
+    if (chatSendParams) {
+      chatSendDelivery = deliverToChatSend({
+        openclawBin: options.openclawBin,
+        gatewayUrl: options.gatewayUrl,
+        token: options.token,
+        params: chatSendParams
+      });
+      appendEvent(logPath, {
+        ts: new Date().toISOString(),
+        conversation_id: conversation.conversation_id,
+        event: "callback_chat_send_delivery",
+        from: message.from,
+        to: "openclaw",
+        round: message.round,
+        status: chatSendDelivery.status,
+        stdout: chatSendDelivery.stdout,
+        stderr: chatSendDelivery.stderr
+      });
+
+      if (chatSendDelivery.status !== 0) {
+        throw new Error(chatSendDelivery.stderr || chatSendDelivery.stdout || `chat callback delivery failed with status ${chatSendDelivery.status}`);
+      }
+    } else if (sessionSendParams) {
       sessionSendDelivery = deliverToSessionSend({
         openclawBin: options.openclawBin,
         gatewayUrl: options.gatewayUrl,
@@ -772,7 +804,11 @@ function runLockedCallback(options) {
     printJson({
       ...result,
       delivered: true,
-      delivery: sessionSendDelivery ? "gateway_method+sessions_send" : "gateway_method"
+      delivery: chatSendDelivery
+        ? "gateway_method+chat_send"
+        : sessionSendDelivery
+          ? "gateway_method+sessions_send"
+          : "gateway_method"
     });
     return;
   }
@@ -857,7 +893,7 @@ function readExistingEvents(logPath) {
 }
 
 function loadConversationFromOptions(options) {
-  const storeDir = expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(process.cwd()));
+  const storeDir = storeDirFromOptions(options);
   const conversationId = options.conversation ?? options.conversationId;
   const statePath = expandHome(options.state ?? (conversationId ? statePathForConversationId(conversationId, storeDir) : undefined));
   if (!statePath) {
@@ -872,6 +908,10 @@ function loadConversationFromOptions(options) {
     statePath,
     logPath: logPathForStatePath(statePath)
   };
+}
+
+function storeDirFromOptions(options) {
+  return expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(process.cwd()));
 }
 
 function summarizeConversation(conversation) {
@@ -890,6 +930,7 @@ function summarizeConversation(conversation) {
     hard_limit: conversation.hard_limit,
     created_at: conversation.created_at,
     updated_at: conversation.updated_at,
+    idle_since: conversation.idle_since,
     closed_at: conversation.closed_at,
     state_path: conversation.state_path,
     event_log_path: conversation.event_log_path
@@ -911,6 +952,57 @@ function summarizeEvent(event) {
 
 function isActiveStatus(status) {
   return !["done", "failed", "closed", "cancelled"].includes(status);
+}
+
+function cleanupIdleConversations(storeDir, options = {}, now = new Date()) {
+  const timeoutMinutes = Number(options.idleTimeoutMinutes ?? DEFAULT_IDLE_TIMEOUT_MINUTES);
+  if (!Number.isFinite(timeoutMinutes) || timeoutMinutes <= 0) {
+    return { checked: 0, closed: 0, idle_timeout_minutes: timeoutMinutes };
+  }
+
+  const conversations = listConversations(storeDir);
+  let closed = 0;
+  for (const conversation of conversations) {
+    if (conversation.status !== "idle" || !conversation.idle_since) {
+      continue;
+    }
+
+    const idleSinceMs = Date.parse(conversation.idle_since);
+    if (!Number.isFinite(idleSinceMs)) {
+      continue;
+    }
+
+    if (now.getTime() - idleSinceMs < timeoutMinutes * 60 * 1000) {
+      continue;
+    }
+
+    const statePath = conversation.state_path ?? statePathForConversationId(conversation.conversation_id, storeDir);
+    const logPath = conversation.event_log_path ?? logPathForStatePath(statePath);
+    const closedConversation = {
+      ...conversation,
+      status: "closed",
+      closed_at: now.toISOString(),
+      close_reason: `idle timeout after ${timeoutMinutes} minutes`,
+      updated_at: now.toISOString()
+    };
+    delete closedConversation.idle_since;
+    saveState(statePath, closedConversation);
+    appendEvent(logPath, {
+      ts: now.toISOString(),
+      conversation_id: conversation.conversation_id,
+      event: "conversation_closed",
+      status: "closed",
+      reason: closedConversation.close_reason,
+      idle_timeout_minutes: timeoutMinutes
+    });
+    closed += 1;
+  }
+
+  return {
+    checked: conversations.length,
+    closed,
+    idle_timeout_minutes: timeoutMinutes
+  };
 }
 
 function isDuplicateMessage(events, message) {
@@ -1009,6 +1101,43 @@ function deliverToSessionSend({ openclawBin, gatewayUrl, token, params }) {
     "gateway",
     "call",
     "sessions.send",
+    "--params",
+    JSON.stringify(params),
+    "--json"
+  ];
+
+  if (gatewayUrl) {
+    args.push("--url", gatewayUrl);
+  }
+  if (token && token !== "<token>") {
+    args.push("--token", token);
+  }
+
+  const result = spawnSync(openclawBin ?? "openclaw", args, {
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024 * 10
+  });
+
+  if (result.error) {
+    return {
+      status: 1,
+      stdout: result.stdout ?? "",
+      stderr: result.error.message
+    };
+  }
+
+  return {
+    status: result.status ?? 1,
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? ""
+  };
+}
+
+function deliverToChatSend({ openclawBin, gatewayUrl, token, params }) {
+  const args = [
+    "gateway",
+    "call",
+    "chat.send",
     "--params",
     JSON.stringify(params),
     "--json"

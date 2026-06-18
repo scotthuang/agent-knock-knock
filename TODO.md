@@ -5,29 +5,23 @@
 - Run a fresh end-to-end OpenClaw delegate test after the latest callback delivery change:
   - OpenClaw calls `agent_knock_knock_delegate`.
   - Claude Code completes work and invokes the generated callback command.
-  - `agent-knock-knock.callback` returns a `session_send` delivery plan.
-  - CLI follows with Gateway `sessions.send`.
-  - OpenClaw receives the callback as a visible session message and responds without polling logs/stdout/stderr.
-- Fix callback delivery semantics so callbacks are treated as a real continuation of the current OpenClaw conversation, not as a CLI/announce-style injected message:
-  - Current `sessions.send` delivery starts an agent run, but the persisted user message is prefixed with `Sender (untrusted metadata): {"label":"cli","id":"cli"}`.
-  - This makes the callback look like an external CLI injection rather than the current Control UI/webchat user turn.
-  - `sessions.send` does not expose `originatingChannel` or `systemInputProvenance`; direct `chat.send` has those fields, but they require admin/system provenance and the public `openclaw gateway call` CLI connects as `cli`.
-  - `scheduleSessionTurn` is also not a clean replacement because plugin scheduled turns default to `deliveryMode: "announce"` and do not model a normal user chat continuation.
-  - Likely required OpenClaw-side capability: a plugin/runtime API or Gateway method that can enqueue a session chat turn with trusted session-local provenance, without exposing raw stdout/stderr and without labeling the callback as CLI sender metadata.
+  - `agent-knock-knock.callback` returns a `chat_send` delivery plan.
+  - CLI follows with Gateway `chat.send` and `deliver: true`.
+  - OpenClaw receives the callback as a visible session message, responds without polling logs/stdout/stderr, and sends the response through the original channel.
 - Verify that OpenClaw receives `question`, `blocked`, `progress`, and `done` messages.
 - Verify that OpenClaw autonomously answers Claude Code questions without asking the user.
 - Diagnose and document the local OpenClaw `scheduleSessionTurn`/cron path failing on stale `node-host v2026.5.5` protocol mismatch.
-- Decide whether to keep or remove `enqueueNextTurnInjection` now that `sessions.send` is the active delivery path; current code keeps it as durable context.
+- Decide whether to keep or remove `enqueueNextTurnInjection` now that `chat.send` is the active delivery path; current code keeps it as durable context.
 
 ## Current Handoff Notes
 
 - Current callback delivery design:
   - The CLI records the Claude message into `~/.agent-knock-knock/conversations/<id>/events.ndjson`.
   - The CLI calls Gateway method `agent-knock-knock.callback`.
-  - The plugin validates/enqueues durable context and returns `session_send` params.
-  - The CLI then calls Gateway `sessions.send` with that structured callback payload.
+  - The plugin validates/enqueues durable context and returns `chat_send` params.
+  - The CLI then calls Gateway `chat.send` with that structured callback payload and `deliver: true`.
 - This avoids exposing Claude stdout/stderr to OpenClaw and avoids OpenClaw polling files/processes.
-- New caveat found on 2026-05-17:
+- Caveat found on 2026-05-17 with the previous `sessions.send` path:
   - The `sessions.send` leg is only a wake-up workaround.
   - OpenClaw persists that wake-up as a CLI-sender user message, so it can be interpreted as an injected/announce-like message rather than a normal conversational reply path.
   - A raw WebSocket probe showed trying to impersonate `openclaw-control-ui` from a non-UI client is rejected with `CONTROL_UI_ORIGIN_NOT_ALLOWED`; trying `gateway-client` backend without device identity is rejected with `DEVICE_IDENTITY_REQUIRED`.
@@ -94,7 +88,7 @@
 - Add an OpenClaw plugin with a controlled `agent_knock_knock_delegate` tool that launches Claude Code in the background without returning raw Claude output.
 - Add plugin-native callback delivery so Claude Code protocol messages flow back through OpenClaw without exposing stdout/stderr.
 - Return async-pending delegate metadata that tells OpenClaw to yield instead of polling logs/processes.
-- Deliver actionable callback messages into OpenClaw sessions through Gateway `sessions.send`.
+- Deliver actionable callback messages into OpenClaw sessions through Gateway `chat.send` with external delivery enabled.
 - Store conversations under `~/.agent-knock-knock/conversations` by default.
 - Capture background Claude Code/acpx stdout and stderr to per-conversation `claude-output.log` for local diagnostics only.
 - Add executor metadata so delegations can target Claude Code or Codex through ACPX.

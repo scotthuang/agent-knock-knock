@@ -119,6 +119,100 @@ fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify({
   }
 });
 
+test("done conversations become idle, accept follow-up sends, and lazily time out", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-idle-management-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const acpxCallsPath = path.join(tempDir, "acpx-calls.ndjson");
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    const fakeAcpx = path.join(fakeBinDir, "acpx");
+    fs.writeFileSync(
+      fakeAcpx,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify({
+  args: process.argv.slice(2)
+}) + "\\n", "utf8");
+`,
+      "utf8"
+    );
+    fs.chmodSync(fakeAcpx, 0o755);
+
+    const created = runCli([
+      "new",
+      "--agent",
+      "codex",
+      "--session",
+      "codex-idle",
+      "--request",
+      "Initial task",
+      "--store-dir",
+      storeDir
+    ]);
+
+    const callback = runCli([
+      "callback",
+      "--state",
+      created.paths.statePath,
+      "--record-only",
+      "--message-json",
+      JSON.stringify({
+        from: "codex",
+        to: "openclaw",
+        type: "done",
+        body: "Completed first round."
+      })
+    ]);
+    assert.equal(callback.conversation.status, "idle");
+
+    const listed = runCli(["list", "--store-dir", storeDir]);
+    assert.deepEqual(listed.tasks.map((task) => [task.conversation_id, task.status]), [
+      [created.conversation.conversation_id, "idle"]
+    ]);
+
+    const sent = runCli([
+      "send",
+      "--conversation",
+      created.conversation.conversation_id,
+      "--store-dir",
+      storeDir,
+      "--message",
+      "Second task in same session."
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(sent.delivered, true);
+    assert.equal(sent.conversation.status, "waiting_for_agent");
+
+    const state = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
+    const stale = {
+      ...state,
+      status: "idle",
+      idle_since: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z"
+    };
+    fs.writeFileSync(created.paths.statePath, `${JSON.stringify(stale, null, 2)}\n`, "utf8");
+
+    const afterTimeout = runCli([
+      "list",
+      "--store-dir",
+      storeDir,
+      "--idle-timeout-minutes",
+      "1"
+    ]);
+    assert.equal(afterTimeout.cleanup.closed, 1);
+    assert.deepEqual(afterTimeout.tasks, []);
+
+    const closedState = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
+    assert.equal(closedState.status, "closed");
+    assert.equal(closedState.close_reason, "idle timeout after 1 minutes");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 function runCli(args, env = {}) {
   const result = spawnSync(process.execPath, [binPath, ...args], {
     encoding: "utf8",

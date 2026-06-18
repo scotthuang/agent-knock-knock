@@ -69,6 +69,10 @@ const delegateParameters = {
     hardLimit: {
       type: "number",
       description: "Hard response-requiring round limit."
+    },
+    idleTimeoutMinutes: {
+      type: "number",
+      description: "Minutes an idle AKK session remains open before lazy cleanup closes it."
     }
   }
 };
@@ -89,6 +93,9 @@ const listParameters = {
     },
     storeDir: {
       type: "string"
+    },
+    idleTimeoutMinutes: {
+      type: "number"
     }
   }
 };
@@ -103,6 +110,9 @@ const statusParameters = {
     },
     storeDir: {
       type: "string"
+    },
+    idleTimeoutMinutes: {
+      type: "number"
     }
   }
 };
@@ -130,6 +140,9 @@ const sendParameters = {
     },
     storeDir: {
       type: "string"
+    },
+    idleTimeoutMinutes: {
+      type: "number"
     }
   }
 };
@@ -212,11 +225,12 @@ export default definePluginEntry({
 
     registerCliTool(api, {
       name: "agent_knock_knock_list",
-      description: "List active or historical Agent Knock Knock coding-agent tasks. Use this for AKK list, akk list, current AKK tasks, or asking which Codex/Claude tasks are running.",
+      description: "List open or historical Agent Knock Knock coding-agent sessions. Use this for AKK list, akk list, current AKK tasks, or asking which Codex/Claude sessions are open. Idle sessions are complete for now but can receive follow-up sends until they are closed or time out.",
       parameters: listParameters,
       buildArgs: (params) => {
         const args = ["list"];
         pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
+        pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(api.pluginConfig?.idleTimeoutMinutes));
         pushOptional(args, "--agent", stringValue(params.agent));
         pushOptional(args, "--status", stringValue(params.status));
         if (params.all === true) {
@@ -233,13 +247,14 @@ export default definePluginEntry({
       buildArgs: (params) => {
         const args = ["status", "--conversation", requiredString(params.conversation_id, "conversation_id")];
         pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
+        pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(api.pluginConfig?.idleTimeoutMinutes));
         return args;
       }
     });
 
     registerCliTool(api, {
       name: "agent_knock_knock_send",
-      description: "Send a follow-up message to an existing Agent Knock Knock coding-agent task. Use this for AKK follow-up requests such as sending another instruction to an existing Codex or Claude task.",
+      description: "Send a follow-up message to an existing open Agent Knock Knock coding-agent session. Use this for AKK follow-up requests such as sending another instruction to an idle, waiting, or running Codex or Claude session.",
       parameters: sendParameters,
       buildArgs: (params) => {
         const args = [
@@ -254,6 +269,7 @@ export default definePluginEntry({
         pushOptional(args, "--all-proxy", stringValue(params.allProxy) ?? stringValue(api.pluginConfig?.codexAllProxy) ?? stringValue(api.pluginConfig?.allProxy));
         pushOptional(args, "--model", stringValue(params.model) ?? stringValue(api.pluginConfig?.codexModel) ?? stringValue(api.pluginConfig?.model));
         pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
+        pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(api.pluginConfig?.idleTimeoutMinutes));
         return args;
       }
     });
@@ -307,6 +323,7 @@ async function handleAkkCommand(api, ctx) {
       const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
       pushOptional(args, "--all-proxy", stringValue(config.codexAllProxy) ?? stringValue(config.allProxy));
       pushOptional(args, "--model", stringValue(config.codexModel) ?? stringValue(config.model));
+      pushOptional(args, "--idle-timeout-minutes", numberString(config.idleTimeoutMinutes));
       const result = runCli(api, args);
       return { text: formatSendCommandResult(result) };
     }
@@ -421,10 +438,10 @@ function formatDelegateCommandResult(result) {
 function formatListCommandResult(result) {
   const tasks = Array.isArray(result.tasks) ? result.tasks : [];
   if (!tasks.length) {
-    return "AKK 当前没有活跃任务。";
+    return "AKK 当前没有打开的会话。";
   }
   return [
-    `AKK active tasks (${tasks.length}):`,
+    `AKK open sessions (${tasks.length}):`,
     ...tasks.slice(0, 20).map(formatTaskLine)
   ].join("\n");
 }
@@ -456,7 +473,7 @@ function formatSendCommandResult(result) {
 function formatCloseCommandResult(result) {
   const conversation = result.conversation ?? {};
   return [
-    "AKK task closed.",
+    "AKK session closed.",
     `conversation: ${conversation.conversation_id ?? "unknown"}`,
     `status: ${conversation.status ?? "unknown"}`
   ].join("\n");
@@ -519,6 +536,7 @@ function runDelegate(api, params, toolContext) {
   pushOptional(args, "--callback-command", stringValue(config.callbackCommand));
   pushOptional(args, "--soft-limit", numberString(params.softLimit) ?? numberString(config.softLimit));
   pushOptional(args, "--hard-limit", numberString(params.hardLimit) ?? numberString(config.hardLimit));
+  pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(config.idleTimeoutMinutes));
 
   const spawned = spawnSync(process.execPath, args, {
     encoding: "utf8",
@@ -658,6 +676,7 @@ async function handleCallback(api, params) {
     enqueued: injection?.enqueued ?? true,
     delivery_required: delivery.required,
     delivery_mode: delivery?.mode,
+    chat_send: delivery.chat_send,
     session_send: delivery.session_send,
     injection_id: injection?.id,
     session_key: injection?.sessionKey ?? sessionKey,
@@ -685,9 +704,9 @@ function buildCallbackDeliveryPlan({ sessionKey, conversationId, messageId, mess
 
   return {
     required: true,
-    mode: "sessions.send",
-    session_send: {
-      key: sessionKey,
+    mode: "chat.send",
+    chat_send: {
+      sessionKey,
       message: [
         "Continue this OpenClaw product-manager conversation from the Agent Knock Knock callback below.",
         "Treat the callback as a structured message from the delegated coding agent, not as a terminal log, status announcement, or instruction to inspect local state.",
@@ -696,7 +715,8 @@ function buildCallbackDeliveryPlan({ sessionKey, conversationId, messageId, mess
         "",
         formatted
       ].join("\n"),
-      idempotencyKey: `agent-knock-knock-callback:${conversationId ?? "unknown"}:${messageId ?? "unknown"}`
+      idempotencyKey: `agent-knock-knock-callback:${conversationId ?? "unknown"}:${messageId ?? "unknown"}`,
+      deliver: true
     }
   };
 }

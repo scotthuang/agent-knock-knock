@@ -32,20 +32,27 @@ Slash command forms:
 - `/akk <task>`: delegate to Codex.
 - `/akk codex <task>`: delegate to Codex.
 - `/akk claude <task>`: delegate to Claude.
-- `/akk list`: list active AKK tasks.
-- `/akk status <conversation-id>`: inspect one AKK task.
-- `/akk send <conversation-id> <message>`: send a follow-up to one AKK task.
-- `/akk close <conversation-id> [reason]`: close one AKK task.
+- `/akk list`: list open AKK sessions.
+- `/akk status <conversation-id>`: inspect one AKK session.
+- `/akk send <conversation-id> <message>`: send a follow-up to one open AKK session.
+- `/akk close <conversation-id> [reason]`: close one AKK session.
 
 Natural-language forms:
 
 - `AKK: <task>` or `akk: <task>`: call `agent_knock_knock_delegate` with `request=<task>` and no `agent` parameter, so the plugin default Codex is used.
 - `AKK Codex: <task>`: call `agent_knock_knock_delegate` with `agent="codex"`.
 - `AKK Claude: <task>`: call `agent_knock_knock_delegate` with `agent="claude"`.
-- `AKK list`, `akk list`, or questions such as "what AKK tasks are running": call `agent_knock_knock_list`.
+- `AKK list`, `akk list`, or questions such as "what AKK sessions are open": call `agent_knock_knock_list`.
 - `AKK status <conversation-id>`: call `agent_knock_knock_status`.
-- `AKK send <conversation-id>: <message>` or follow-up requests for an existing agent task: call `agent_knock_knock_send`.
+- `AKK send <conversation-id>: <message>` or follow-up requests for an existing open agent session: call `agent_knock_knock_send`.
 - `AKK close <conversation-id>`: call `agent_knock_knock_close`.
+
+Session reuse rule:
+
+- If the user asks to continue, add, follow up, "send another task", "let it also", "tell it", "ask Codex/Claude to also", "再让它", "继续让它", "给刚才那个", or otherwise refers to an existing AKK agent, reuse the most recent matching open AKK session instead of creating a new delegation.
+- When the user gives a follow-up without a `conversation_id`, first call `agent_knock_knock_list`, choose the most recent open session that matches the requested agent if one is named, and then call `agent_knock_knock_send` with that `conversation_id`.
+- `idle` means the agent completed the previous round but the AKK session is still open and should be reused for follow-ups.
+- Call `agent_knock_knock_delegate` only when the user clearly asks for a new independent AKK task/session, names a different agent that does not already have a suitable open session, or there is no matching open session to reuse.
 
 Useful examples:
 
@@ -55,6 +62,7 @@ AKK Codex: review the current branch and propose a small fix
 AKK Claude: review the latest commit
 akk list
 akk send task-20260618T010203Z-abcdef12: continue with the smaller implementation
+再让刚才那个 Codex 分析 ~/chrome-debug 为什么占空间
 akk close task-20260618T010203Z-abcdef12
 ```
 
@@ -104,7 +112,7 @@ Use structured JSON messages with these types:
 - `answer`: OpenClaw gives a decision
 - `progress`: the coding agent reports progress and does not require a response
 - `blocked`: the coding agent cannot continue without a decision
-- `done`: the coding agent reports completion
+- `done`: the coding agent reports the current round is complete; AKK marks the session `idle`, and OpenClaw may send later follow-ups until the session is closed or times out
 - `error`: runtime, tool, or protocol failure
 - `control`: budget warning or lifecycle control
 
