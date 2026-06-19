@@ -46,8 +46,6 @@ mkdir -p ~/.openclaw/skills/bidirectional-chat
 cp templates/openclaw-skills/bidirectional-chat/SKILL.md ~/.openclaw/skills/bidirectional-chat/SKILL.md
 ```
 
-If Codex needs a local proxy in your environment, pass it through the plugin options or set it for the AKK command path, for example `socks5h://127.0.0.1:1082`.
-
 ## OpenClaw Plugin
 
 The native OpenClaw plugin registers tools that let OpenClaw delegate implementation work to Claude Code or Codex, list open sessions, send follow-up messages, inspect status, request cooperative cancellation, and close sessions without exposing raw terminal output as tool results.
@@ -222,7 +220,6 @@ Runtime logs are diagnostic-only and are safe to use for local troubleshooting. 
 - OpenClaw plugin default agent: `codex`
 - Claude session: `bidirectional`
 - Codex session: `codex`
-- Codex proxy, when needed: pass `allProxy`/`codexAllProxy` such as `socks5h://127.0.0.1:1082`
 - Codex model, when needed for ChatGPT-account compatibility: pass `model`/`codexModel` such as `gpt-5.5/medium`
 - Gateway URL: `ws://127.0.0.1:18789`
 - Soft response limit: `50`
