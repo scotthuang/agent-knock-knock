@@ -13,6 +13,12 @@ OpenClaw acts as the autonomous manager. Claude Code or Codex acts as the autono
 
 See [ROADMAP.md](ROADMAP.md) for planned reliability work and future orchestration features.
 
+## Architecture
+
+OpenClaw is the top-level orchestrator. Agent Knock Knock runs as the OpenClaw plugin bridge, uses ACPX / ACP to communicate with local coding agents, and keeps enough task state for OpenClaw to list active work, send follow-up messages, request cancellation, and close sessions.
+
+![Agent Knock Knock architecture](docs/assets/architecture.png)
+
 ## Quick Start
 
 Create a conversation and print the task payload:
