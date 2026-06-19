@@ -11,6 +11,8 @@ OpenClaw acts as the autonomous manager. Claude Code or Codex acts as the autono
 - ACPX-backed delegation to Claude Code and Codex
 - Task listing, status, follow-up messaging, cooperative cancellation, and local close operations
 
+See [ROADMAP.md](ROADMAP.md) for planned reliability work and future orchestration features.
+
 ## Quick Start
 
 Create a conversation and print the task payload:
