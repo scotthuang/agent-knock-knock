@@ -24,7 +24,8 @@
 - Updated the OpenClaw skill template with AKK cancel routing for stopping current in-flight work without closing the reusable AKK session.
 - Updated the OpenClaw skill template with AKK/akk routing, default Codex delegation, Claude opt-in routing, and task management tool usage.
 - Updated follow-up sends from OpenClaw to launch the coding agent in the background so OpenClaw can continue to subsequent tool calls.
-- Updated documentation to describe local coding agents, task management, and the home-directory conversation store.
+- Updated documentation to describe local coding agents, task management, cooperative cancellation, and the home-directory conversation store.
+- Documented ACPX approval behavior: Claude Code permission requests work with `--approve-all`, while some Codex sensitive operations can fail directly under AKK's non-interactive/background path instead of surfacing an approvable ACPX permission request.
 
 ### Fixed
 

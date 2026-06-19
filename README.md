@@ -9,7 +9,7 @@ OpenClaw acts as the autonomous manager. Claude Code or Codex acts as the autono
 - NDJSON logging
 - Bootstrap prompt generation
 - ACPX-backed delegation to Claude Code and Codex
-- Task listing, status, follow-up messaging, and local close operations
+- Task listing, status, follow-up messaging, cooperative cancellation, and local close operations
 
 ## Quick Start
 
@@ -69,6 +69,13 @@ node bin/agent-knock-knock.js close \
   --reason "No longer needed"
 ```
 
+Request cooperative cancellation of the current in-flight prompt without closing the AKK session:
+
+```bash
+node bin/agent-knock-knock.js cancel \
+  --conversation <conversation-id>
+```
+
 Record a Claude Code callback without delivering it to OpenClaw:
 
 ```bash
@@ -87,7 +94,7 @@ cp templates/openclaw-skills/bidirectional-chat/SKILL.md ~/.openclaw/skills/bidi
 
 ## OpenClaw Plugin
 
-This package also includes a native OpenClaw plugin. The plugin registers optional tools that let OpenClaw delegate implementation work to Claude Code or Codex, list open sessions, send follow-up messages, inspect status, and close sessions without exposing raw terminal output as tool results.
+This package also includes a native OpenClaw plugin. The plugin registers optional tools that let OpenClaw delegate implementation work to Claude Code or Codex, list open sessions, send follow-up messages, inspect status, request cooperative cancellation, and close sessions without exposing raw terminal output as tool results.
 
 Natural-language routing is designed around the short name `AKK`; lowercase `akk` should be treated the same way. When a user says `AKK` without naming an agent, OpenClaw should delegate to Codex. Use Claude only for explicit requests such as `AKK Claude`.
 
@@ -100,6 +107,7 @@ The plugin also registers the `/akk` slash command for channel surfaces that sup
 /akk list
 /akk status <conversation-id>
 /akk send <conversation-id> <message>
+/akk cancel <conversation-id>
 /akk close <conversation-id> [reason]
 ```
 
@@ -111,6 +119,7 @@ AKK Codex: review the current branch and propose a small fix
 AKK Claude: review the latest commit
 akk list
 akk send <conversation-id>: continue with the smaller implementation
+akk cancel <conversation-id>
 akk close <conversation-id>
 ```
 
@@ -131,6 +140,7 @@ If your OpenClaw config uses a restrictive tool allowlist, allow the tool:
       "agent_knock_knock_list",
       "agent_knock_knock_status",
       "agent_knock_knock_send",
+      "agent_knock_knock_cancel",
       "agent_knock_knock_close"
     ]
   }
@@ -142,6 +152,14 @@ The delegate tool launches the selected coding agent in the background and retur
 The plugin also registers the Gateway method `agent-knock-knock.callback`. Coding-agent callback commands use this method to enqueue a durable next-turn injection for the OpenClaw session. Actionable callbacks such as `question`, `blocked`, `done`, `error`, or any message with `requires_response: true` are delivered into the OpenClaw session through Gateway `chat.send` with `deliver: true`, so OpenClaw receives only the structured protocol message and can route the final reply back through the original channel without polling the raw execution channel.
 
 Coding-agent `done` callbacks mark the AKK conversation `idle`, not closed. Idle conversations remain visible in the default list and can receive `send` follow-ups until they are manually closed or lazily closed by the idle timeout. The default idle timeout is 10080 minutes.
+
+## Approval Behavior
+
+AKK sends ACPX-backed coding-agent prompts with `--approve-all` so ACPX permission requests can proceed without an additional OpenClaw turn.
+
+Claude Code permission requests work with this model. For example, a Claude Code write outside the repository workspace triggers ACPX `session/request_permission`; with `--approve-all`, ACPX approves the request and the write can complete.
+
+Codex does not currently behave the same way for every sensitive operation under AKK. Some Codex sandbox-sensitive actions, such as writing outside the workspace in non-interactive execution, may fail directly with sandbox or permission errors instead of surfacing an ACPX permission request that AKK can approve. In those cases the action is currently unavailable through AKK's background Codex path; prefer Claude Code for tasks that require ACPX-approved filesystem access outside the workspace, or redesign the task to stay inside the configured workspace.
 
 Run tests:
 
