@@ -44,7 +44,7 @@
     "properties": {
       "binPath": {
         "type": "string",
-        "description": "Path to agent-knock-knock CLI. Defaults to this package's bin/agent-knock-knock.js."
+        "description": "Path to agent-knock-knock CLI. Defaults to this package's dist/src/cli.js build output."
       },
       "workspace": {
         "type": "string",

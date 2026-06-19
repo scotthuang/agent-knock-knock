@@ -7,7 +7,7 @@ import {
   createMessage,
   extractStructuredMessage,
   validateMessageForConversation
-} from "../src/protocol.js";
+} from "../dist/src/protocol.js";
 
 test("only response-requiring messages consume rounds", () => {
   let conversation = createConversation({

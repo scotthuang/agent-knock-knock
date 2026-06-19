@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import process from "node:process";
-import { normalizeAcpxOutput } from "../src/acpx-output.js";
+import { normalizeAcpxOutput } from "../dist/src/acpx-output.js";
 import {
   applyMessageToConversation,
   createConversation,
   createMessage,
   extractStructuredMessage
-} from "../src/protocol.js";
+} from "../dist/src/protocol.js";
 import {
   appendEvent,
   defaultStoreDir,
@@ -15,7 +15,7 @@ import {
   pathsForConversation,
   rawExchangeEvent,
   saveState
-} from "../src/store.js";
+} from "../dist/src/store.js";
 
 const args = parseArgs(process.argv.slice(2));
 const managerSession = args.managerSession ?? "akk-manager-weather";

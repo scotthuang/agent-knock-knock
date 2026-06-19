@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { normalizeAcpxOutput } from "../src/acpx-output.js";
+import { normalizeAcpxOutput } from "../dist/src/acpx-output.js";
 
 const base = {
   conversationId: "task-1",

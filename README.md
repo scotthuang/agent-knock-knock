@@ -109,13 +109,13 @@ The CLI is useful for local debugging, tests, and scripting outside OpenClaw.
 Create a conversation and print the task payload:
 
 ```bash
-node bin/agent-knock-knock.js new --request "Implement a small feature"
+node dist/src/cli.js new --request "Implement a small feature"
 ```
 
 Delegate a Codex task through ACPX:
 
 ```bash
-node bin/agent-knock-knock.js delegate \
+node dist/src/cli.js delegate \
   --agent codex \
   --request "Implement a small feature" \
   --background
@@ -124,13 +124,13 @@ node bin/agent-knock-knock.js delegate \
 List open coding-agent tasks:
 
 ```bash
-node bin/agent-knock-knock.js list
+node dist/src/cli.js list
 ```
 
 Send a follow-up message to an existing task:
 
 ```bash
-node bin/agent-knock-knock.js send \
+node dist/src/cli.js send \
   --conversation <conversation-id> \
   --message "Use the smaller implementation."
 ```
@@ -138,14 +138,14 @@ node bin/agent-knock-knock.js send \
 Request cooperative cancellation of the current in-flight prompt:
 
 ```bash
-node bin/agent-knock-knock.js cancel \
+node dist/src/cli.js cancel \
   --conversation <conversation-id>
 ```
 
 Close a task locally:
 
 ```bash
-node bin/agent-knock-knock.js close \
+node dist/src/cli.js close \
   --conversation <conversation-id> \
   --reason "No longer needed"
 ```
@@ -172,7 +172,7 @@ Run type checking without writing `dist/`:
 npm run typecheck
 ```
 
-Run the full test suite. This builds first, then runs the JavaScript tests against the compiled output through the stable wrapper entrypoints:
+Run the full test suite. This builds first, then runs the JavaScript tests against the compiled `dist/src` output:
 
 ```bash
 npm test

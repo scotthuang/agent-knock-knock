@@ -34,8 +34,8 @@
   - OpenClaw logs showed stale `node-host v2026.5.5` protocol mismatch against Gateway `2026.5.12`.
   - Calling `sessions.send` synchronously from inside the plugin handler deadlocked/timed out because it re-entered the Gateway from the Gateway process.
 - Verification already run:
-  - `node --check src/openclaw-plugin.js`
-  - `node --check bin/agent-knock-knock.js`
+  - `node --check dist/src/openclaw-plugin.js`
+  - `node --check dist/src/cli.js`
   - `git diff --check`
   - `npm test` passes 35 tests.
 - Worktree note:

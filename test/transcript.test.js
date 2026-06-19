@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { formatTranscript, parseNdjson } from "../src/transcript.js";
+import { formatTranscript, parseNdjson } from "../dist/src/transcript.js";
 
 test("parses NDJSON logs", () => {
   const events = parseNdjson([

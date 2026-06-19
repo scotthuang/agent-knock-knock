@@ -5,7 +5,7 @@
   "type": "module",
   "openclaw": {
     "extensions": [
-      "./src/openclaw-plugin.js"
+      "./dist/src/openclaw-plugin.js"
     ],
     "compat": {
       "pluginApi": ">=2026.3.24-beta.2",
@@ -13,7 +13,7 @@
     }
   },
   "bin": {
-    "agent-knock-knock": "./bin/agent-knock-knock.js"
+    "agent-knock-knock": "./dist/src/cli.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -21,7 +21,7 @@
     "test": "npm run build && node --test 'test/**/*.test.js'",
     "simulate:architecture": "node scripts/two-claude-weather-test.js --scenario architecture-questions",
     "simulate:weather": "node scripts/two-claude-weather-test.js --scenario weather",
-    "transcript": "node bin/agent-knock-knock.js transcript"
+    "transcript": "node dist/src/cli.js transcript"
   },
   "engines": {
     "node": ">=20"

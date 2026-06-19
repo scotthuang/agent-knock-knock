@@ -4,8 +4,8 @@ import { fileURLToPath } from "node:url";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 
 const CALLBACK_METHOD = "agent-knock-knock.callback";
-const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const defaultBinPath = path.join(pluginRoot, "bin", "agent-knock-knock.js");
+const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const defaultBinPath = path.join(pluginRoot, "dist", "src", "cli.js");
 
 const delegateParameters = {
   type: "object",

@@ -10,7 +10,7 @@ import {
   logPathForStatePath,
   pathsForConversation,
   pathsForConversationDir
-} from "../src/store.js";
+} from "../dist/src/store.js";
 
 test("defaults store under user home .agent-knock-knock conversations", () => {
   assert.equal(

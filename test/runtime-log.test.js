@@ -12,9 +12,9 @@ import {
   redactString,
   runtimeLogPath,
   writeRuntimeLog
-} from "../src/runtime-log.js";
+} from "../dist/src/runtime-log.js";
 
-const binPath = new URL("../bin/agent-knock-knock.js", import.meta.url).pathname;
+const binPath = new URL("../dist/src/cli.js", import.meta.url).pathname;
 
 test("runtime logs use local timestamps and preserve absolute paths", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-runtime-log-"));

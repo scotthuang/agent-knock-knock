@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 
-const binPath = new URL("../bin/agent-knock-knock.js", import.meta.url).pathname;
+const binPath = new URL("../dist/src/cli.js", import.meta.url).pathname;
 
 test("callback records a structured Claude message before delivery", () => {
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-"));
