@@ -1,123 +1,58 @@
 # agent-knock-knock
 
-Minimal MVP for managed bidirectional delegation between OpenClaw and local coding agents.
+Agent Knock Knock lets OpenClaw delegate work to local coding agents such as Codex and Claude Code, keep those delegations alive as reusable tasks, and route follow-up messages or results back through OpenClaw.
 
-OpenClaw acts as the autonomous manager. Claude Code or Codex acts as the autonomous developer. The project provides:
+The name is literal: OpenClaw knocks on the door of another coding agent, hands it a task, waits for the callback, and can knock again later with follow-up instructions. AKK provides the persistent task layer that makes that workflow practical across chat channels.
 
-- Structured message protocol
-- Conversation state and budget tracking
-- NDJSON logging
-- Bootstrap prompt generation
-- ACPX-backed delegation to Claude Code and Codex
-- Task listing, status, follow-up messaging, cooperative cancellation, and local close operations
+## Why This Exists
+
+OpenClaw already has built-in session spawning, but persistent ACP sessions can depend on thread-bound channels such as Discord or Telegram. That model works well when the external channel can attach replies to a stable thread.
+
+Channels such as WeChat and many direct-message surfaces do not provide that same thread primitive. Without an external thread, OpenClaw needs another durable place to remember which coding agents are working, which task each agent owns, and where follow-up messages should go.
+
+Agent Knock Knock fills that gap. It keeps local task state outside the chat channel, uses ACPX / ACP to talk to coding agents, and gives OpenClaw tools to delegate, list, inspect, continue, cancel, and close work without relying on any external channel feature.
+
+## What It Provides
+
+- ACPX-backed delegation to Codex and Claude Code
+- Reusable task sessions for follow-up messages after the first result
+- Task listing, status inspection, follow-up send, cooperative cancellation, and local close
+- Structured callbacks back into OpenClaw through the plugin Gateway method
+- Conversation state stored in the user's home directory for recovery across OpenClaw turns
+- Runtime diagnostics logs with local timestamps, redaction, and retention cleanup
+- A short `AKK` routing convention for chat and `/akk` command surfaces
 
 See [ROADMAP.md](ROADMAP.md) for planned reliability work and future orchestration features.
 
 ## Architecture
 
-OpenClaw is the top-level orchestrator. Agent Knock Knock runs as the OpenClaw plugin bridge, uses ACPX / ACP to communicate with local coding agents, and keeps enough task state for OpenClaw to list active work, send follow-up messages, request cancellation, and close sessions.
+OpenClaw is the top-level orchestrator. Agent Knock Knock runs as the OpenClaw plugin bridge, uses ACPX / ACP to communicate with local coding agents, and keeps enough local task state for OpenClaw to manage many concurrent coding-agent sessions.
 
 ![Agent Knock Knock architecture](docs/assets/architecture.png)
 
-## Quick Start
+## Install
 
-Create a conversation and print the task payload:
-
-```bash
-node bin/agent-knock-knock.js new --request "Implement a small feature"
-```
-
-Start a Claude Code delegation without sending it:
+Install the plugin into OpenClaw during local development:
 
 ```bash
-scripts/bidirectional-delegate.sh --request "Implement a small feature"
+openclaw plugins install --link .
+openclaw plugins enable agent-knock-knock
 ```
 
-Create a Codex delegation payload:
-
-```bash
-node bin/agent-knock-knock.js delegate \
-  --agent codex \
-  --request "Implement a small feature"
-```
-
-Send the task through `acpx`:
-
-```bash
-scripts/bidirectional-delegate.sh --send --request "Implement a small feature"
-```
-
-Launch Claude Code in the background and return only protocol metadata:
-
-```bash
-node bin/agent-knock-knock.js delegate \
-  --background \
-  --request "Implement a small feature"
-```
-
-List open coding-agent sessions:
-
-```bash
-node bin/agent-knock-knock.js list
-```
-
-Send a follow-up message to an existing open session:
-
-```bash
-node bin/agent-knock-knock.js send \
-  --conversation <conversation-id> \
-  --message "Use the smaller implementation."
-```
-
-Close a task locally without terminating the underlying ACPX session:
-
-```bash
-node bin/agent-knock-knock.js close \
-  --conversation <conversation-id> \
-  --reason "No longer needed"
-```
-
-Request cooperative cancellation of the current in-flight prompt without closing the AKK session:
-
-```bash
-node bin/agent-knock-knock.js cancel \
-  --conversation <conversation-id>
-```
-
-Record a Claude Code callback without delivering it to OpenClaw:
-
-```bash
-node bin/agent-knock-knock.js callback \
-  --state .agent-knock-knock/conversations/<conversation-id>/state.json \
-  --record-only \
-  --message-json '{"type":"progress","body":"Working on it."}'
-```
-
-Install the OpenClaw skill template when ready:
+Install the OpenClaw skill template so OpenClaw learns when to route chat requests to AKK:
 
 ```bash
 mkdir -p ~/.openclaw/skills/bidirectional-chat
 cp templates/openclaw-skills/bidirectional-chat/SKILL.md ~/.openclaw/skills/bidirectional-chat/SKILL.md
 ```
 
+If Codex needs a local proxy in your environment, pass it through the plugin options or set it for the AKK command path, for example `socks5h://127.0.0.1:1082`.
+
 ## OpenClaw Plugin
 
-This package also includes a native OpenClaw plugin. The plugin registers optional tools that let OpenClaw delegate implementation work to Claude Code or Codex, list open sessions, send follow-up messages, inspect status, request cooperative cancellation, and close sessions without exposing raw terminal output as tool results.
+The native OpenClaw plugin registers tools that let OpenClaw delegate implementation work to Claude Code or Codex, list open sessions, send follow-up messages, inspect status, request cooperative cancellation, and close sessions without exposing raw terminal output as tool results.
 
 Natural-language routing is designed around the short name `AKK`; lowercase `akk` should be treated the same way. When a user says `AKK` without naming an agent, OpenClaw should delegate to Codex. Use Claude only for explicit requests such as `AKK Claude`.
-
-The plugin also registers the `/akk` slash command for channel surfaces that support OpenClaw native commands:
-
-```text
-/akk <task>
-/akk codex <task>
-/akk claude <task>
-/akk list
-/akk status <conversation-id>
-/akk send <conversation-id> <message>
-/akk cancel <conversation-id>
-/akk close <conversation-id> [reason]
-```
 
 Useful chat-style prompts:
 
@@ -131,11 +66,17 @@ akk cancel <conversation-id>
 akk close <conversation-id>
 ```
 
-Install it locally during development:
+The plugin also registers the `/akk` slash command for channel surfaces that support OpenClaw native commands:
 
-```bash
-openclaw plugins install --link .
-openclaw plugins enable agent-knock-knock
+```text
+/akk <task>
+/akk codex <task>
+/akk claude <task>
+/akk list
+/akk status <conversation-id>
+/akk send <conversation-id> <message>
+/akk cancel <conversation-id>
+/akk close <conversation-id> [reason]
 ```
 
 If your OpenClaw config uses a restrictive tool allowlist, allow the tool:
@@ -161,6 +102,54 @@ The plugin also registers the Gateway method `agent-knock-knock.callback`. Codin
 
 Coding-agent `done` callbacks mark the AKK conversation `idle`, not closed. Idle conversations remain visible in the default list and can receive `send` follow-ups until they are manually closed or lazily closed by the idle timeout. The default idle timeout is 10080 minutes.
 
+## CLI Examples
+
+The CLI is useful for local debugging, tests, and scripting outside OpenClaw.
+
+Create a conversation and print the task payload:
+
+```bash
+node bin/agent-knock-knock.js new --request "Implement a small feature"
+```
+
+Delegate a Codex task through ACPX:
+
+```bash
+node bin/agent-knock-knock.js delegate \
+  --agent codex \
+  --request "Implement a small feature" \
+  --background
+```
+
+List open coding-agent tasks:
+
+```bash
+node bin/agent-knock-knock.js list
+```
+
+Send a follow-up message to an existing task:
+
+```bash
+node bin/agent-knock-knock.js send \
+  --conversation <conversation-id> \
+  --message "Use the smaller implementation."
+```
+
+Request cooperative cancellation of the current in-flight prompt:
+
+```bash
+node bin/agent-knock-knock.js cancel \
+  --conversation <conversation-id>
+```
+
+Close a task locally:
+
+```bash
+node bin/agent-knock-knock.js close \
+  --conversation <conversation-id> \
+  --reason "No longer needed"
+```
+
 ## Approval Behavior
 
 AKK sends ACPX-backed coding-agent prompts with `--approve-all` so ACPX permission requests can proceed without an additional OpenClaw turn.
@@ -168,6 +157,8 @@ AKK sends ACPX-backed coding-agent prompts with `--approve-all` so ACPX permissi
 Claude Code permission requests work with this model. For example, a Claude Code write outside the repository workspace triggers ACPX `session/request_permission`; with `--approve-all`, ACPX approves the request and the write can complete.
 
 Codex does not currently behave the same way for every sensitive operation under AKK. Some Codex sandbox-sensitive actions, such as writing outside the workspace in non-interactive execution, may fail directly with sandbox or permission errors instead of surfacing an ACPX permission request that AKK can approve. In those cases the action is currently unavailable through AKK's background Codex path; prefer Claude Code for tasks that require ACPX-approved filesystem access outside the workspace, or redesign the task to stay inside the configured workspace.
+
+## Development
 
 Run tests:
 
@@ -217,9 +208,13 @@ Conversation state is stored under the user's home directory so a new OpenClaw s
       state.json
       events.ndjson
       <agent>-output.log
+  logs/
+    runtime-YYYY-MM-DD.ndjson
 ```
 
 Use `--store-dir <dir>` to override the conversation store location. `--log-dir <dir>` is still accepted as a compatibility alias. `<agent>-output.log` is diagnostic-only; OpenClaw should not read it as part of agent communication.
+
+Runtime logs are diagnostic-only and are safe to use for local troubleshooting. They keep local timestamps, preserve useful absolute paths, redact common secrets, and are cleaned up by retention policy. Use `AKK_LOG_DIR`, `AKK_LOG_LEVEL`, and `AKK_LOG_RETENTION_DAYS` to override the defaults.
 
 ## Defaults
 
@@ -233,3 +228,5 @@ Use `--store-dir <dir>` to override the conversation store location. `--log-dir 
 - Soft response limit: `50`
 - Hard response limit: `100`
 - Store directory: `~/.agent-knock-knock/conversations`
+- Runtime log directory: `~/.agent-knock-knock/logs`
+- Runtime log retention: `14` days
