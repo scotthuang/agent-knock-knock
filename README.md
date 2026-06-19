@@ -35,6 +35,8 @@ OpenClaw is the top-level orchestrator. Agent Knock Knock runs as the OpenClaw p
 Install the plugin into OpenClaw during local development:
 
 ```bash
+npm install
+npm run build
 openclaw plugins install --link .
 openclaw plugins enable agent-knock-knock
 ```
@@ -158,7 +160,19 @@ Codex does not currently behave the same way for every sensitive operation under
 
 ## Development
 
-Run tests:
+Build TypeScript sources:
+
+```bash
+npm run build
+```
+
+Run type checking without writing `dist/`:
+
+```bash
+npm run typecheck
+```
+
+Run the full test suite. This builds first, then runs the JavaScript tests against the compiled output through the stable wrapper entrypoints:
 
 ```bash
 npm test

@@ -1,0 +1,863 @@
+import { spawnSync } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+
+const CALLBACK_METHOD = "agent-knock-knock.callback";
+const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const defaultBinPath = path.join(pluginRoot, "bin", "agent-knock-knock.js");
+
+const delegateParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["request"],
+  properties: {
+    agent: {
+      type: "string",
+      enum: ["claude", "codex"],
+      description:
+        "Coding agent to delegate to. Defaults to plugin config or codex. Use claude only when the user explicitly asks for AKK Claude or Claude."
+    },
+    request: {
+      type: "string",
+      description: "Implementation task for the coding agent."
+    },
+    workspace: {
+      type: "string",
+      description: "Workspace path for Claude Code. Defaults to plugin config or the current process directory."
+    },
+    storeDir: {
+      type: "string",
+      description: "Conversation store directory. Defaults to <workspace>/.agent-knock-knock/conversations."
+    },
+    claudeSession: {
+      type: "string",
+      description: "Claude Code session name."
+    },
+    codexSession: {
+      type: "string",
+      description: "Codex session name."
+    },
+    codexAllProxy: {
+      type: "string",
+      description: "ALL_PROXY value used when launching Codex through ACPX."
+    },
+    codexModel: {
+      type: "string",
+      description: "ACPX model id used when launching Codex."
+    },
+    model: {
+      type: "string",
+      description: "ACPX model id used when launching the selected coding agent."
+    },
+    allProxy: {
+      type: "string",
+      description: "ALL_PROXY value used when launching the selected coding agent through ACPX."
+    },
+    session: {
+      type: "string",
+      description: "Explicit coding agent session name."
+    },
+    openclawSession: {
+      type: "string",
+      description: "OpenClaw session label recorded in the protocol state."
+    },
+    softLimit: {
+      type: "number",
+      description: "Soft response-requiring round limit."
+    },
+    hardLimit: {
+      type: "number",
+      description: "Hard response-requiring round limit."
+    },
+    idleTimeoutMinutes: {
+      type: "number",
+      description: "Minutes an idle AKK session remains open before lazy cleanup closes it."
+    }
+  }
+};
+
+const listParameters = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    agent: {
+      type: "string",
+      enum: ["claude", "codex"]
+    },
+    status: {
+      type: "string"
+    },
+    all: {
+      type: "boolean"
+    },
+    storeDir: {
+      type: "string"
+    },
+    idleTimeoutMinutes: {
+      type: "number"
+    }
+  }
+};
+
+const statusParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["conversation_id"],
+  properties: {
+    conversation_id: {
+      type: "string"
+    },
+    storeDir: {
+      type: "string"
+    },
+    idleTimeoutMinutes: {
+      type: "number"
+    }
+  }
+};
+
+const sendParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["conversation_id", "message"],
+  properties: {
+    conversation_id: {
+      type: "string"
+    },
+    message: {
+      type: "string"
+    },
+    type: {
+      type: "string",
+      enum: ["answer", "task", "control", "error"]
+    },
+    allProxy: {
+      type: "string"
+    },
+    model: {
+      type: "string"
+    },
+    storeDir: {
+      type: "string"
+    },
+    idleTimeoutMinutes: {
+      type: "number"
+    }
+  }
+};
+
+const cancelParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["conversation_id"],
+  properties: {
+    conversation_id: {
+      type: "string"
+    },
+    allProxy: {
+      type: "string"
+    },
+    storeDir: {
+      type: "string"
+    },
+    idleTimeoutMinutes: {
+      type: "number"
+    }
+  }
+};
+
+const closeParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["conversation_id"],
+  properties: {
+    conversation_id: {
+      type: "string"
+    },
+    reason: {
+      type: "string"
+    },
+    storeDir: {
+      type: "string"
+    }
+  }
+};
+
+export default definePluginEntry({
+  id: "agent-knock-knock",
+  name: "Agent Knock Knock",
+  description:
+    "Agent Knock Knock (AKK/akk) delegates OpenClaw coding work to local Codex or Claude agents. Use this for AKK, akk, Agent Knock Knock, Codex delegation, Claude delegation, task listing, follow-up messages, status, cancel requests, and close requests. Default delegation target is Codex unless the user explicitly asks for Claude.",
+  register(api) {
+    api.registerGatewayMethod(
+      CALLBACK_METHOD,
+      async ({ params, respond }) => {
+        try {
+          const result = await handleCallback(api, params);
+          respond(true, result);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          api.logger.warn?.(`agent-knock-knock callback failed: ${message}`);
+          respond(false, undefined, {
+            code: "AGENT_KNOCK_KNOCK_CALLBACK_FAILED",
+            message
+          });
+        }
+      },
+      { scope: "operator.write" }
+    );
+
+    api.registerCommand?.({
+      name: "akk",
+      description: "Delegate coding work to Agent Knock Knock, list tasks, send follow-ups, cancel running work, and close tasks.",
+      acceptsArgs: true,
+      requireAuth: true,
+      nativeProgressMessages: {
+        default: "AKK is handling the request..."
+      },
+      agentPromptGuidance: [
+        "Use /akk <task> to delegate coding work to Agent Knock Knock. /akk defaults to Codex; use /akk claude <task> only when Claude is explicitly requested."
+      ],
+      handler: async (ctx) => handleAkkCommand(api, ctx)
+    });
+
+    api.registerTool(
+      (toolContext) => ({
+        name: "agent_knock_knock_delegate",
+        description:
+          "Delegate an implementation task to a local coding agent. Use this when the user says AKK, akk, Agent Knock Knock, asks to hand work to Codex or Claude, or asks OpenClaw to start a background coding-agent task. If the user says AKK without an explicit agent, delegate to Codex. Use Claude only when the user explicitly says AKK Claude or Claude. The tool starts the coding agent in the background and returns only protocol metadata, not raw terminal output.",
+        parameters: delegateParameters,
+        async execute(_toolCallId, params) {
+          const result = runDelegate(api, params, toolContext);
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(result, null, 2)
+              }
+            ]
+          };
+        }
+      }),
+      { name: "agent_knock_knock_delegate", optional: true }
+    );
+
+    registerCliTool(api, {
+      name: "agent_knock_knock_list",
+      description: "List open or historical Agent Knock Knock coding-agent sessions. Use this for AKK list, akk list, current AKK tasks, or asking which Codex/Claude sessions are open. Idle sessions are complete for now but can receive follow-up sends until they are closed or time out.",
+      parameters: listParameters,
+      buildArgs: (params) => {
+        const args = ["list"];
+        pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
+        pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(api.pluginConfig?.idleTimeoutMinutes));
+        pushOptional(args, "--agent", stringValue(params.agent));
+        pushOptional(args, "--status", stringValue(params.status));
+        if (params.all === true) {
+          args.push("--all");
+        }
+        return args;
+      }
+    });
+
+    registerCliTool(api, {
+      name: "agent_knock_knock_status",
+      description: "Get detailed status for one Agent Knock Knock coding-agent task.",
+      parameters: statusParameters,
+      buildArgs: (params) => {
+        const args = ["status", "--conversation", requiredString(params.conversation_id, "conversation_id")];
+        pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
+        pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(api.pluginConfig?.idleTimeoutMinutes));
+        return args;
+      }
+    });
+
+    registerCliTool(api, {
+      name: "agent_knock_knock_send",
+      description: "Send a follow-up message to an existing open Agent Knock Knock coding-agent session. Use this for AKK follow-up requests such as sending another instruction to an idle, waiting, or running Codex or Claude session.",
+      parameters: sendParameters,
+      buildArgs: (params) => {
+        const args = [
+          "send",
+          "--conversation",
+          requiredString(params.conversation_id, "conversation_id"),
+          "--message",
+          requiredString(params.message, "message"),
+          "--background"
+        ];
+        pushOptional(args, "--type", stringValue(params.type));
+        pushOptional(args, "--all-proxy", stringValue(params.allProxy) ?? stringValue(api.pluginConfig?.codexAllProxy) ?? stringValue(api.pluginConfig?.allProxy));
+        pushOptional(args, "--model", stringValue(params.model) ?? stringValue(api.pluginConfig?.codexModel) ?? stringValue(api.pluginConfig?.model));
+        pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
+        pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(api.pluginConfig?.idleTimeoutMinutes));
+        return args;
+      }
+    });
+
+    registerCliTool(api, {
+      name: "agent_knock_knock_cancel",
+      description: "Request cooperative cancellation of the current in-flight prompt for an existing Agent Knock Knock Codex or Claude session. This does not close the AKK session; use close when the session should no longer be reused.",
+      parameters: cancelParameters,
+      buildArgs: (params) => {
+        const args = ["cancel", "--conversation", requiredString(params.conversation_id, "conversation_id")];
+        pushOptional(args, "--all-proxy", stringValue(params.allProxy) ?? stringValue(api.pluginConfig?.codexAllProxy) ?? stringValue(api.pluginConfig?.allProxy));
+        pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
+        pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(api.pluginConfig?.idleTimeoutMinutes));
+        return args;
+      }
+    });
+
+    registerCliTool(api, {
+      name: "agent_knock_knock_close",
+      description: "Close an Agent Knock Knock coding-agent task without terminating the underlying ACPX session. Use this for AKK close requests.",
+      parameters: closeParameters,
+      buildArgs: (params) => {
+        const args = ["close", "--conversation", requiredString(params.conversation_id, "conversation_id")];
+        pushOptional(args, "--reason", stringValue(params.reason));
+        pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
+        return args;
+      }
+    });
+  }
+});
+
+async function handleAkkCommand(api, ctx) {
+  try {
+    const parsed = parseAkkCommand(ctx.args);
+    if (parsed.action === "help") {
+      return { text: akkUsageText() };
+    }
+    if (parsed.action === "delegate") {
+      const result = runDelegate(api, {
+        agent: parsed.agent,
+        request: parsed.request
+      }, {
+        sessionKey: ctx.sessionKey
+      });
+      return { text: formatDelegateCommandResult(result) };
+    }
+    if (parsed.action === "list") {
+      const result = runCli(api, ["list"]);
+      return { text: formatListCommandResult(result) };
+    }
+    if (parsed.action === "status") {
+      const result = runCli(api, ["status", "--conversation", parsed.conversationId]);
+      return { text: formatStatusCommandResult(result) };
+    }
+    if (parsed.action === "send") {
+      const args = [
+        "send",
+        "--conversation",
+        parsed.conversationId,
+        "--message",
+        parsed.message,
+        "--background"
+      ];
+      const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+      pushOptional(args, "--all-proxy", stringValue(config.codexAllProxy) ?? stringValue(config.allProxy));
+      pushOptional(args, "--model", stringValue(config.codexModel) ?? stringValue(config.model));
+      pushOptional(args, "--idle-timeout-minutes", numberString(config.idleTimeoutMinutes));
+      const result = runCli(api, args);
+      return { text: formatSendCommandResult(result) };
+    }
+    if (parsed.action === "cancel") {
+      const args = [
+        "cancel",
+        "--conversation",
+        parsed.conversationId
+      ];
+      const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+      pushOptional(args, "--all-proxy", stringValue(config.codexAllProxy) ?? stringValue(config.allProxy));
+      pushOptional(args, "--idle-timeout-minutes", numberString(config.idleTimeoutMinutes));
+      const result = runCli(api, args);
+      return { text: formatCancelCommandResult(result) };
+    }
+    if (parsed.action === "close") {
+      const result = runCli(api, [
+        "close",
+        "--conversation",
+        parsed.conversationId,
+        "--reason",
+        parsed.reason
+      ]);
+      return { text: formatCloseCommandResult(result) };
+    }
+    return { text: akkUsageText(), isError: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      text: `AKK command failed: ${message}`,
+      isError: true
+    };
+  }
+}
+
+function parseAkkCommand(args) {
+  const input = String(args ?? "").trim();
+  if (!input || input === "help" || input === "-h" || input === "--help") {
+    return { action: "help" };
+  }
+
+  const { token, rest } = takeToken(input);
+  const action = String(token).toLowerCase();
+  if (action === "list" || action === "ls" || action === "tasks") {
+    return { action: "list" };
+  }
+  if (action === "status" || action === "show") {
+    const { token: conversationId } = takeRequiredToken(rest, "Usage: /akk status <conversation-id>");
+    return { action: "status", conversationId };
+  }
+  if (action === "send" || action === "reply") {
+    const { token: conversationId, rest: message } = takeRequiredToken(rest, "Usage: /akk send <conversation-id> <message>");
+    const body = message.trim();
+    if (!body) {
+      throw new Error("Usage: /akk send <conversation-id> <message>");
+    }
+    return { action: "send", conversationId, message: body };
+  }
+  if (action === "cancel" || action === "stop") {
+    const { token: conversationId } = takeRequiredToken(rest, "Usage: /akk cancel <conversation-id>");
+    return { action: "cancel", conversationId };
+  }
+  if (action === "close" || action === "done") {
+    const { token: conversationId, rest: reason } = takeRequiredToken(rest, "Usage: /akk close <conversation-id> [reason]");
+    return { action: "close", conversationId, reason: reason.trim() || "Closed from /akk command" };
+  }
+  if (action === "codex" || action === "c") {
+    const request = rest.trim();
+    if (!request) {
+      throw new Error("Usage: /akk codex <task>");
+    }
+    return { action: "delegate", agent: "codex", request };
+  }
+  if (action === "claude") {
+    const request = rest.trim();
+    if (!request) {
+      throw new Error("Usage: /akk claude <task>");
+    }
+    return { action: "delegate", agent: "claude", request };
+  }
+  return { action: "delegate", agent: "codex", request: input };
+}
+
+function takeRequiredToken(input, usage) {
+  const parsed = takeToken(input);
+  if (!parsed.token) {
+    throw new Error(usage);
+  }
+  return parsed;
+}
+
+function takeToken(input) {
+  const value = String(input ?? "").trimStart();
+  const match = value.match(/^(\S+)(?:\s+([\s\S]*))?$/);
+  if (!match) {
+    return { token: "", rest: "" };
+  }
+  return {
+    token: match[1],
+    rest: match[2] ?? ""
+  };
+}
+
+function akkUsageText() {
+  return [
+    "AKK usage:",
+    "/akk <task>",
+    "/akk codex <task>",
+    "/akk claude <task>",
+    "/akk list",
+    "/akk status <conversation-id>",
+    "/akk send <conversation-id> <message>",
+    "/akk cancel <conversation-id>",
+    "/akk close <conversation-id> [reason]"
+  ].join("\n");
+}
+
+function formatDelegateCommandResult(result) {
+  const agent = result.agent === "claude" ? "Claude" : "Codex";
+  return [
+    `AKK 已交给 ${agent}。`,
+    `conversation: ${result.conversation_id ?? "unknown"}`,
+    `session: ${result.session ?? "unknown"}`,
+    `status: ${result.conversation_status ?? result.status ?? "unknown"}`,
+    "结果会通过 OpenClaw 回调返回当前会话。"
+  ].join("\n");
+}
+
+function formatListCommandResult(result) {
+  const tasks = Array.isArray(result.tasks) ? result.tasks : [];
+  if (!tasks.length) {
+    return "AKK 当前没有打开的会话。";
+  }
+  return [
+    `AKK open sessions (${tasks.length}):`,
+    ...tasks.slice(0, 20).map(formatTaskLine)
+  ].join("\n");
+}
+
+function formatStatusCommandResult(result) {
+  const summary = result.summary ?? result.conversation ?? {};
+  const lines = [
+    `AKK status: ${summary.conversation_id ?? "unknown"}`,
+    `agent: ${summary.agent ?? summary.executor?.kind ?? "unknown"}`,
+    `status: ${summary.status ?? "unknown"}`,
+    `session: ${summary.session ?? summary.executor?.session ?? "unknown"}`
+  ];
+  if (summary.request) {
+    lines.push(`request: ${truncateText(summary.request, 180)}`);
+  }
+  return lines.join("\n");
+}
+
+function formatSendCommandResult(result) {
+  const conversation = result.conversation ?? {};
+  return [
+    "AKK follow-up sent.",
+    `conversation: ${conversation.conversation_id ?? "unknown"}`,
+    `status: ${conversation.status ?? "unknown"}`,
+    `launched: ${result.launched === true ? "yes" : "no"}`
+  ].join("\n");
+}
+
+function formatCancelCommandResult(result) {
+  const conversation = result.conversation ?? {};
+  return [
+    "AKK cancel requested.",
+    `conversation: ${conversation.conversation_id ?? "unknown"}`,
+    `agent: ${result.executor?.kind ?? conversation.executor?.kind ?? "unknown"}`,
+    `session: ${result.executor?.session ?? conversation.executor?.session ?? "unknown"}`,
+    `status: ${conversation.status ?? "unknown"}`
+  ].join("\n");
+}
+
+function formatCloseCommandResult(result) {
+  const conversation = result.conversation ?? {};
+  return [
+    "AKK session closed.",
+    `conversation: ${conversation.conversation_id ?? "unknown"}`,
+    `status: ${conversation.status ?? "unknown"}`
+  ].join("\n");
+}
+
+function formatTaskLine(task) {
+  return [
+    task.conversation_id ?? "unknown",
+    task.agent ?? task.executor?.kind ?? "agent",
+    task.status ?? "unknown",
+    truncateText(task.request ?? "", 90)
+  ].filter(Boolean).join(" | ");
+}
+
+function runDelegate(api, params, toolContext) {
+  const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+  const binPath = stringValue(config.binPath) ?? defaultBinPath;
+  const workspace = stringValue(params.workspace) ?? stringValue(config.workspace) ?? process.cwd();
+  const agent = stringValue(params.agent) ?? stringValue(config.defaultAgent) ?? "codex";
+  const agentSession =
+    stringValue(params.session) ??
+    (agent === "codex"
+      ? stringValue(params.codexSession) ?? stringValue(config.codexSession) ?? stringValue(config.defaultCodexSession)
+      : stringValue(params.claudeSession) ?? stringValue(config.claudeSession) ?? stringValue(config.defaultClaudeSession));
+  const allProxy =
+    stringValue(params.allProxy) ??
+    (agent === "codex" ? stringValue(params.codexAllProxy) ?? stringValue(config.codexAllProxy) : undefined) ??
+    stringValue(config.allProxy);
+  const model =
+    stringValue(params.model) ??
+    (agent === "codex" ? stringValue(params.codexModel) ?? stringValue(config.codexModel) : undefined) ??
+    stringValue(config.model);
+  const openclawSession =
+    stringValue(toolContext?.sessionKey) ??
+    stringValue(config.openclawSession) ??
+    stringValue(params.openclawSession) ??
+    "agent:main:main";
+  const args = [
+    binPath,
+    "delegate",
+    "--agent",
+    agent,
+    "--request",
+    requiredString(params.request, "request"),
+    "--workspace",
+    workspace,
+    "--background"
+  ];
+
+  pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(config.storeDir));
+  pushOptional(args, "--session", agentSession);
+  pushOptional(args, "--all-proxy", allProxy);
+  pushOptional(args, "--model", model);
+  pushOptional(args, "--openclaw-session", openclawSession);
+  pushOptional(args, "--gateway-url", stringValue(config.gatewayUrl));
+  pushOptional(args, "--token", stringValue(config.gatewayToken));
+  pushOptional(args, "--gateway-method", CALLBACK_METHOD);
+  pushOptional(args, "--gateway-session", openclawSession);
+  pushOptional(args, "--openclaw-bin", stringValue(config.openclawBin));
+  pushOptional(args, "--callback-command", stringValue(config.callbackCommand));
+  pushOptional(args, "--soft-limit", numberString(params.softLimit) ?? numberString(config.softLimit));
+  pushOptional(args, "--hard-limit", numberString(params.hardLimit) ?? numberString(config.hardLimit));
+  pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(config.idleTimeoutMinutes));
+
+  const spawned = spawnSync(process.execPath, args, {
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024 * 10,
+    cwd: workspace
+  });
+
+  if (spawned.error) {
+    throw new Error(`agent-knock-knock delegate failed to start: ${spawned.error.message}`);
+  }
+  if (spawned.status !== 0) {
+    throw new Error(cleanError(spawned.stderr || spawned.stdout || `agent-knock-knock delegate exited with status ${spawned.status}`));
+  }
+
+  const parsed = parseJson(spawned.stdout);
+  const conversationId = parsed.conversation?.conversation_id;
+  const statePath = parsed.paths?.statePath;
+  const logPath = parsed.paths?.logPath;
+  return {
+    status: "async_pending",
+    delegation_status: "delegated",
+    conversation_id: conversationId,
+    conversation_status: parsed.conversation?.status,
+    state_path: statePath,
+    event_log_path: logPath,
+    agent,
+    executor: parsed.conversation?.executor,
+    session: parsed.conversation?.executor?.session ?? parsed.conversation?.claude_session,
+    claude_session: parsed.conversation?.claude_session,
+    openclaw_session: openclawSession,
+    launched: parsed.launched === true,
+    background: parsed.background === true,
+    pid: parsed.pid ?? null,
+    callback_method: CALLBACK_METHOD,
+    openclaw_next_action: {
+      action: "yield",
+      reason:
+        "The delegated coding agent is running asynchronously. End this OpenClaw turn now and wait for an Agent Knock Knock callback.",
+      do_not:
+        "Do not inspect event logs, process lists, session internals, files, stdout, or stderr while waiting. Follow-up communication must only use structured callbacks from agent-knock-knock.",
+      expected_callback:
+        "The callback will be injected and scheduled into this OpenClaw session by the agent-knock-knock.callback Gateway method."
+    },
+    note:
+      "The coding agent was launched in the background. This is an async delegation; OpenClaw should yield now and wait for the scheduled callback turn."
+  };
+}
+
+function registerCliTool(api, { name, description, parameters, buildArgs }) {
+  api.registerTool(
+    () => ({
+      name,
+      description,
+      parameters,
+      async execute(_toolCallId, params) {
+        const result = runCli(api, buildArgs(isRecord(params) ? params : {}));
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2)
+            }
+          ]
+        };
+      }
+    }),
+    { name, optional: true }
+  );
+}
+
+function runCli(api, cliArgs, { cwd = process.cwd() } = {}) {
+  const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+  const binPath = stringValue(config.binPath) ?? defaultBinPath;
+  const spawned = spawnSync(process.execPath, [binPath, ...cliArgs], {
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024 * 10,
+    cwd
+  });
+
+  if (spawned.error) {
+    throw new Error(`agent-knock-knock ${cliArgs[0]} failed to start: ${spawned.error.message}`);
+  }
+  if (spawned.status !== 0) {
+    throw new Error(cleanError(spawned.stderr || spawned.stdout || `agent-knock-knock ${cliArgs[0]} exited with status ${spawned.status}`));
+  }
+
+  return parseJson(spawned.stdout);
+}
+
+async function handleCallback(api, params) {
+  if (!isRecord(params)) {
+    throw new Error("callback params must be an object");
+  }
+
+  const message = isRecord(params.message) ? params.message : undefined;
+  const conversation = isRecord(params.conversation) ? params.conversation : undefined;
+  const sessionKey =
+    stringValue(params.sessionKey) ??
+    stringValue(conversation?.openclaw_session) ??
+    stringValue(message?.metadata?.openclaw_session);
+
+  if (!sessionKey) {
+    throw new Error("callback params.sessionKey is required");
+  }
+  if (!message) {
+    throw new Error("callback params.message is required");
+  }
+
+  const conversationId = stringValue(message.conversation_id) ?? stringValue(conversation?.conversation_id);
+  const messageId = stringValue(message.id) ?? `${conversationId ?? "unknown"}:${stringValue(message.type) ?? "message"}:${Date.now()}`;
+  const formatted = formatCallbackInjection({ conversation, message, statePath: stringValue(params.statePath) });
+  const injection = await api.session.workflow.enqueueNextTurnInjection({
+    sessionKey,
+    text: formatted,
+    idempotencyKey: `agent-knock-knock:${conversationId ?? "unknown"}:${messageId}`,
+    placement: "append_context",
+    ttlMs: 24 * 60 * 60 * 1000,
+    metadata: {
+      kind: "agent-knock-knock-callback",
+      conversation_id: conversationId,
+      message_id: messageId,
+      message_type: stringValue(message.type) ?? "unknown",
+      state_path: stringValue(params.statePath),
+      log_path: stringValue(params.logPath)
+    }
+  });
+  const delivery = buildCallbackDeliveryPlan({
+    sessionKey,
+    conversationId,
+    messageId,
+    message,
+    formatted
+  });
+
+  return {
+    ok: true,
+    enqueued: injection?.enqueued ?? true,
+    delivery_required: delivery.required,
+    delivery_mode: delivery?.mode,
+    chat_send: delivery.chat_send,
+    session_send: "session_send" in delivery ? delivery.session_send : undefined,
+    injection_id: injection?.id,
+    session_key: injection?.sessionKey ?? sessionKey,
+    conversation_id: conversationId,
+    message_id: messageId,
+    message_type: stringValue(message.type) ?? "unknown"
+  };
+}
+
+function buildCallbackDeliveryPlan({ sessionKey, conversationId, messageId, message, formatted }) {
+  const type = stringValue(message.type) ?? "unknown";
+  const shouldWake =
+    message.requires_response === true ||
+    type === "question" ||
+    type === "blocked" ||
+    type === "done" ||
+    type === "error";
+
+  if (!shouldWake) {
+    return {
+      required: false,
+      mode: "none"
+    };
+  }
+
+  return {
+    required: true,
+    mode: "chat.send",
+    chat_send: {
+      sessionKey,
+      message: [
+        "Continue this OpenClaw product-manager conversation from the Agent Knock Knock callback below.",
+        "Treat the callback as a structured message from the delegated coding agent, not as a terminal log, status announcement, or instruction to inspect local state.",
+        "Respond in this conversation as OpenClaw product manager. If the callback is question or blocked, make the product decision and answer the delegated coding agent. If it is done, summarize the result to the user.",
+        "Do not poll files, processes, sessions, stdout, or stderr. Use only the structured callback payload below.",
+        "",
+        formatted
+      ].join("\n"),
+      idempotencyKey: `agent-knock-knock-callback:${conversationId ?? "unknown"}:${messageId ?? "unknown"}`,
+      deliver: true
+    }
+  };
+}
+
+function formatCallbackInjection({ conversation, message, statePath }) {
+  const conversationId = stringValue(message.conversation_id) ?? stringValue(conversation?.conversation_id) ?? "unknown";
+  const type = stringValue(message.type) ?? "unknown";
+  const body = stringValue(message.body) ?? JSON.stringify(message.body ?? "");
+  const requiresResponse = message.requires_response === true ? "yes" : "no";
+  const round = typeof message.round === "number" ? String(message.round) : "unknown";
+  const stateLine = statePath ? `State: ${statePath}\n` : "";
+  const shortcuts = type === "done" ? formatDoneShortcuts(conversationId) : "";
+
+  return [
+    "[Agent Knock Knock callback]",
+    `Conversation: ${conversationId}`,
+    `Message type: ${type}`,
+    `Requires OpenClaw response: ${requiresResponse}`,
+    `Round: ${round}`,
+    stateLine.trimEnd(),
+    "",
+    body,
+    shortcuts
+  ].filter((line) => line !== "").join("\n");
+}
+
+function formatDoneShortcuts(conversationId) {
+  return [
+    "",
+    "[AKK convenience commands]",
+    "When summarizing this result to the user, include these short next-step commands:",
+    "- `AKK list` lists open AKK sessions.",
+    `- \`AKK send ${conversationId}: <message>\` sends a follow-up to this same AKK session.`,
+    `- \`AKK status ${conversationId}\` shows this session status.`,
+    `- \`AKK cancel ${conversationId}\` requests cancellation of current running work without closing this AKK session.`,
+    `- \`AKK close ${conversationId}\` closes this AKK session.`
+  ].join("\n");
+}
+
+function pushOptional(args, flag, value) {
+  if (value !== undefined && value !== "") {
+    args.push(flag, value);
+  }
+}
+
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function stringValue(value) {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function numberString(value) {
+  return typeof value === "number" && Number.isFinite(value) ? String(value) : undefined;
+}
+
+function truncateText(value, maxLength) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (text.length <= maxLength) {
+    return text;
+  }
+  return `${text.slice(0, Math.max(0, maxLength - 1))}...`;
+}
+
+function requiredString(value, name) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`${name} is required`);
+  }
+  return value;
+}
+
+function parseJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    throw new Error(`agent-knock-knock delegate returned invalid JSON: ${error.message}`);
+  }
+}
+
+function cleanError(text) {
+  return String(text).trim().slice(0, 2000);
+}

@@ -16,12 +16,18 @@
     "agent-knock-knock": "./bin/agent-knock-knock.js"
   },
   "scripts": {
-    "test": "node --test 'test/**/*.test.js'",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test 'test/**/*.test.js'",
     "simulate:architecture": "node scripts/two-claude-weather-test.js --scenario architecture-questions",
     "simulate:weather": "node scripts/two-claude-weather-test.js --scenario weather",
     "transcript": "node bin/agent-knock-knock.js transcript"
   },
   "engines": {
     "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0",
+    "typescript": "^6.0.3"
   }
 }
