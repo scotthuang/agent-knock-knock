@@ -284,11 +284,25 @@ const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(gatewayCallPath)}, JSON.stringify(args) + "\\n", "utf8");
 const method = args[2];
 if (method === "agent-knock-knock.callback") {
+  const params = JSON.parse(args[args.indexOf("--params") + 1]);
   console.log(JSON.stringify({
     ok: true,
     chat_send: {
-      sessionKey: "agent:main:main",
-      message: "structured callback payload",
+      sessionKey: params.sessionKey,
+      message: [
+        "[Agent Knock Knock callback]",
+        \`Conversation: \${params.message.conversation_id}\`,
+        "Message type: done",
+        "",
+        params.message.body,
+        "",
+        "[AKK convenience commands]",
+        "When summarizing this result to the user, include these short next-step commands:",
+        "- \`AKK list\` lists open AKK sessions.",
+        \`- \\\`AKK send \${params.message.conversation_id}: <message>\\\` sends a follow-up to this same AKK session.\`,
+        \`- \\\`AKK status \${params.message.conversation_id}\\\` shows this session status.\`,
+        \`- \\\`AKK close \${params.message.conversation_id}\\\` closes this AKK session.\`
+      ].join("\\n"),
       idempotencyKey: "akk-test-chat-send",
       deliver: true
     }
@@ -345,7 +359,9 @@ if (method === "agent-knock-knock.callback") {
     const chatSendParams = JSON.parse(calls[1][calls[1].indexOf("--params") + 1]);
     assert.equal(chatSendParams.sessionKey, "agent:main:main");
     assert.equal(chatSendParams.idempotencyKey, "akk-test-chat-send");
-    assert.equal(chatSendParams.message, "structured callback payload");
+    assert.match(chatSendParams.message, /AKK convenience commands/);
+    assert.match(chatSendParams.message, /AKK list/);
+    assert.match(chatSendParams.message, new RegExp(`AKK send ${created.conversation.conversation_id}: <message>`));
     assert.equal(chatSendParams.deliver, true);
 
     const events = fs.readFileSync(created.paths.logPath, "utf8")

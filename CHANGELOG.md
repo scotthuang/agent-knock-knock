@@ -17,6 +17,7 @@
 
 - Changed actionable callback delivery from Gateway `sessions.send` to `chat.send` with `deliver: true`, so callbacks injected into channel-scoped OpenClaw sessions can use the original outbound channel route.
 - Changed coding-agent `done` callbacks to move AKK conversations to `idle` instead of terminal `done`, allowing follow-up sends to continue the same session until manual close or idle timeout.
+- Updated `done` callback messages to include concise AKK convenience commands such as `AKK list`, `AKK send <conversation-id>: <message>`, `AKK status`, and `AKK close`.
 - Updated OpenClaw plugin routing descriptions so `AKK` and `akk` both indicate Agent Knock Knock, and unspecified AKK delegations default to Codex.
 - Updated the OpenClaw skill template so follow-up language such as "continue", "再让它", or "给刚才那个" defaults to reusing the most recent matching open AKK session through `agent_knock_knock_send`.
 - Updated the OpenClaw skill template with AKK/akk routing, default Codex delegation, Claude opt-in routing, and task management tool usage.

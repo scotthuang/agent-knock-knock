@@ -728,6 +728,7 @@ function formatCallbackInjection({ conversation, message, statePath }) {
   const requiresResponse = message.requires_response === true ? "yes" : "no";
   const round = typeof message.round === "number" ? String(message.round) : "unknown";
   const stateLine = statePath ? `State: ${statePath}\n` : "";
+  const shortcuts = type === "done" ? formatDoneShortcuts(conversationId) : "";
 
   return [
     "[Agent Knock Knock callback]",
@@ -737,8 +738,21 @@ function formatCallbackInjection({ conversation, message, statePath }) {
     `Round: ${round}`,
     stateLine.trimEnd(),
     "",
-    body
+    body,
+    shortcuts
   ].filter((line) => line !== "").join("\n");
+}
+
+function formatDoneShortcuts(conversationId) {
+  return [
+    "",
+    "[AKK convenience commands]",
+    "When summarizing this result to the user, include these short next-step commands:",
+    "- `AKK list` lists open AKK sessions.",
+    `- \`AKK send ${conversationId}: <message>\` sends a follow-up to this same AKK session.`,
+    `- \`AKK status ${conversationId}\` shows this session status.`,
+    `- \`AKK close ${conversationId}\` closes this AKK session.`
+  ].join("\n");
 }
 
 function pushOptional(args, flag, value) {
