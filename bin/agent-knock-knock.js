@@ -14,6 +14,7 @@ import {
   resolveExecutor
 } from "../src/protocol.js";
 import { executorBootstrapPrompt } from "../src/bootstrap.js";
+import { writeRuntimeLog } from "../src/runtime-log.js";
 import { formatTranscript, readNdjsonLog } from "../src/transcript.js";
 import {
   appendEvent,
@@ -34,36 +35,55 @@ const DEFAULT_IDLE_TIMEOUT_MINUTES = 10080;
 const command = process.argv[2];
 const args = parseArgs(process.argv.slice(3));
 
+runtimeLog("info", "cli_start", {
+  command: command ?? "help",
+  cwd: process.cwd(),
+  option_keys: Object.keys(args).sort()
+});
+
 try {
-  if (command === "new") {
-    runNew(args);
-  } else if (command === "record") {
-    runRecord(args);
-  } else if (command === "bootstrap-prompt") {
-    runBootstrapPrompt(args);
-  } else if (command === "delegate") {
-    runDelegate(args);
-  } else if (command === "list") {
-    runList(args);
-  } else if (command === "status") {
-    runStatus(args);
-  } else if (command === "send") {
-    runSend(args);
-  } else if (command === "cancel") {
-    runCancel(args);
-  } else if (command === "close") {
-    runClose(args);
-  } else if (command === "transcript") {
-    runTranscript(args);
-  } else if (command === "callback") {
-    runCallback(args);
-  } else {
-    usage();
-    process.exit(command ? 1 : 0);
-  }
+  runCommand(command, args);
+  runtimeLog("info", "cli_finish", {
+    command: command ?? "help",
+    exit_code: process.exitCode ?? 0
+  });
 } catch (error) {
+  runtimeLog("error", "cli_error", {
+    command: command ?? "help",
+    message: error.message,
+    stack: error.stack
+  });
   console.error(error.message);
   process.exit(1);
+}
+
+function runCommand(commandName, options) {
+  if (commandName === "new") {
+    runNew(options);
+  } else if (commandName === "record") {
+    runRecord(options);
+  } else if (commandName === "bootstrap-prompt") {
+    runBootstrapPrompt(options);
+  } else if (commandName === "delegate") {
+    runDelegate(options);
+  } else if (commandName === "list") {
+    runList(options);
+  } else if (commandName === "status") {
+    runStatus(options);
+  } else if (commandName === "send") {
+    runSend(options);
+  } else if (commandName === "cancel") {
+    runCancel(options);
+  } else if (commandName === "close") {
+    runClose(options);
+  } else if (commandName === "transcript") {
+    runTranscript(options);
+  } else if (commandName === "callback") {
+    runCallback(options);
+  } else {
+    usage();
+    process.exitCode = commandName ? 1 : 0;
+  }
 }
 
 function runNew(options) {
@@ -110,6 +130,16 @@ function runNew(options) {
     conversation: storedConversation
   });
   appendEvent(paths.logPath, messageEvent(taskMessage));
+  runtimeLog("info", "conversation_created", {
+    conversation_id: conversation.conversation_id,
+    agent: executor.kind,
+    executor_session: executor.session,
+    workspace,
+    store_dir: storeDir,
+    state_path: paths.statePath,
+    event_log_path: paths.logPath,
+    request: textSummary(request)
+  });
 
   printJson({
     conversation: storedConversation,
@@ -212,6 +242,17 @@ function runDelegate(options) {
   };
   saveState(newResult.paths.statePath, conversationWithCallback);
   newResult.conversation = conversationWithCallback;
+  runtimeLog("info", "delegate_created", {
+    conversation_id: newResult.conversation.conversation_id,
+    agent: executor.kind,
+    executor_session: executor.session,
+    workspace,
+    store_dir: storeDir,
+    state_path: newResult.paths.statePath,
+    gateway_method: options.gatewayMethod,
+    background: Boolean(options.background),
+    request: textSummary(request)
+  });
 
   const bootstrap = executorBootstrapPrompt({
     callbackCommand,
@@ -239,6 +280,15 @@ function runDelegate(options) {
       executor,
       stdout: cleanProcessText(ensureSession.stdout),
       stderr: cleanProcessText(ensureSession.stderr)
+    });
+    runtimeLog("info", "executor_session_ensure", {
+      conversation_id: newResult.conversation.conversation_id,
+      agent: executor.kind,
+      executor_session: executor.session,
+      status: ensureSession.status ?? null,
+      failure_kind: classifyProcessFailure(ensureSession),
+      stdout: textSummary(cleanProcessText(ensureSession.stdout)),
+      stderr: textSummary(cleanProcessText(ensureSession.stderr))
     });
     if (executor.kind === "claude") {
       appendEvent(newResult.paths.logPath, {
@@ -276,6 +326,14 @@ function runDelegate(options) {
       mode: "background",
       pid: child.pid ?? null,
       executor,
+      output_path: outputPath
+    });
+    runtimeLog("info", "executor_launch", {
+      conversation_id: newResult.conversation.conversation_id,
+      agent: executor.kind,
+      executor_session: executor.session,
+      mode: "background",
+      pid: child.pid ?? null,
       output_path: outputPath
     });
     if (executor.kind === "claude") {
@@ -319,10 +377,22 @@ function runDelegate(options) {
       cwd: workspace,
       env: executorEnv
     });
+    runtimeLog("info", "executor_send", {
+      conversation_id: newResult.conversation.conversation_id,
+      agent: executor.kind,
+      executor_session: executor.session,
+      status: result.status ?? null,
+      failure_kind: classifyProcessFailure(result)
+    });
     process.exitCode = result.status ?? 1;
     return;
   }
 
+  runtimeLog("info", "delegate_dry_run", {
+    conversation_id: newResult.conversation.conversation_id,
+    agent: executor.kind,
+    executor_session: executor.session
+  });
   printJson({
     ...newResult,
     dry_run: true,
@@ -400,6 +470,14 @@ function runList(options) {
     cleanup,
     tasks: conversations
   });
+  runtimeLog("info", "tasks_listed", {
+    store_dir: storeDir,
+    returned_count: conversations.length,
+    include_all: includeAll,
+    agent_filter: agentFilter,
+    status_filter: statusFilter,
+    cleanup
+  });
 }
 
 function runStatus(options) {
@@ -413,6 +491,13 @@ function runStatus(options) {
     event_log_path: logPath,
     budget: budgetAction(conversation),
     recent_events: events.slice(-10).map(summarizeEvent)
+  });
+  runtimeLog("info", "task_status_read", {
+    conversation_id: conversation.conversation_id,
+    status: conversation.status,
+    state_path: statePath,
+    event_log_path: logPath,
+    recent_event_count: Math.min(events.length, 10)
   });
 }
 
@@ -444,6 +529,15 @@ function runSend(options) {
   };
   saveState(statePath, nextConversation);
   appendEvent(logPath, messageEvent(message));
+  runtimeLog("info", "message_created", {
+    conversation_id: conversation.conversation_id,
+    agent: executor.kind,
+    executor_session: executor.session,
+    message_type: type,
+    state_path: statePath,
+    event_log_path: logPath,
+    message: textSummary(messageBody)
+  });
 
   const acpxPath = resolveExecutable("acpx");
   const executorEnv = environmentForExecutor(executor, {
@@ -466,6 +560,15 @@ function runSend(options) {
     executor,
     stdout: cleanProcessText(ensureSession.stdout),
     stderr: cleanProcessText(ensureSession.stderr)
+  });
+  runtimeLog("info", "executor_session_ensure", {
+    conversation_id: conversation.conversation_id,
+    agent: executor.kind,
+    executor_session: executor.session,
+    status: ensureSession.status ?? null,
+    failure_kind: classifyProcessFailure(ensureSession),
+    stdout: textSummary(cleanProcessText(ensureSession.stdout)),
+    stderr: textSummary(cleanProcessText(ensureSession.stderr))
   });
   if (ensureSession.error) {
     throw new Error(`acpx ${executor.kind} session ensure failed to start: ${ensureSession.error.message}`);
@@ -504,6 +607,14 @@ function runSend(options) {
       executor,
       output_path: outputPath
     });
+    runtimeLog("info", "executor_message_launch", {
+      conversation_id: conversation.conversation_id,
+      agent: executor.kind,
+      executor_session: executor.session,
+      mode: "background",
+      pid: child.pid ?? null,
+      output_path: outputPath
+    });
 
     printJson({
       conversation: nextConversation,
@@ -532,6 +643,15 @@ function runSend(options) {
     executor,
     stdout: cleanProcessText(sendResult.stdout),
     stderr: cleanProcessText(sendResult.stderr)
+  });
+  runtimeLog("info", "executor_message_send", {
+    conversation_id: conversation.conversation_id,
+    agent: executor.kind,
+    executor_session: executor.session,
+    status: sendResult.status ?? null,
+    failure_kind: classifyProcessFailure(sendResult),
+    stdout: textSummary(cleanProcessText(sendResult.stdout)),
+    stderr: textSummary(cleanProcessText(sendResult.stderr))
   });
   if (sendResult.error) {
     throw new Error(`acpx ${executor.kind} send failed to start: ${sendResult.error.message}`);
@@ -577,6 +697,15 @@ function runCancel(options) {
     stdout: cleanProcessText(cancelResult.stdout),
     stderr: cleanProcessText(cancelResult.stderr)
   });
+  runtimeLog("info", "executor_cancel_requested", {
+    conversation_id: conversation.conversation_id,
+    agent: executor.kind,
+    executor_session: executor.session,
+    status: cancelResult.status ?? null,
+    failure_kind: classifyProcessFailure(cancelResult),
+    stdout: textSummary(cleanProcessText(cancelResult.stdout)),
+    stderr: textSummary(cleanProcessText(cancelResult.stderr))
+  });
   if (cancelResult.error) {
     throw new Error(`acpx ${executor.kind} cancel failed to start: ${cancelResult.error.message}`);
   }
@@ -591,6 +720,12 @@ function runCancel(options) {
     updated_at: now
   };
   saveState(statePath, nextConversation);
+  runtimeLog("info", "conversation_cancelling", {
+    conversation_id: conversation.conversation_id,
+    agent: executor.kind,
+    executor_session: executor.session,
+    state_path: statePath
+  });
 
   printJson({
     conversation: nextConversation,
@@ -618,6 +753,13 @@ function runClose(options) {
     event: "conversation_closed",
     status: "closed",
     reason: closed.close_reason
+  });
+  runtimeLog("info", "conversation_closed", {
+    conversation_id: conversation.conversation_id,
+    status: "closed",
+    reason: closed.close_reason,
+    state_path: statePath,
+    event_log_path: logPath
   });
   printJson({
     conversation: closed,
@@ -752,6 +894,16 @@ function runLockedCallback(options) {
 
   const existingEvents = readExistingEvents(logPath);
   if (isDuplicateMessage(existingEvents, message)) {
+    runtimeLog("info", "callback_duplicate", {
+      conversation_id: conversation.conversation_id,
+      agent: executor.kind,
+      executor_session: executor.session,
+      from: message.from,
+      type: message.type,
+      round: message.round,
+      state_path: options.statePath,
+      event_log_path: logPath
+    });
     printJson({
       conversation,
       message,
@@ -766,6 +918,19 @@ function runLockedCallback(options) {
 
   appendEvent(logPath, messageEvent(message));
   saveState(options.statePath, nextConversation);
+  runtimeLog("info", "callback_received", {
+    conversation_id: conversation.conversation_id,
+    agent: executor.kind,
+    executor_session: executor.session,
+    from: message.from,
+    type: message.type,
+    round: message.round,
+    status: nextConversation.status,
+    requires_response: message.requires_response,
+    state_path: options.statePath,
+    event_log_path: logPath,
+    message: textSummary(message.body)
+  });
 
   const result = {
     conversation: nextConversation,
@@ -799,6 +964,14 @@ function runLockedCallback(options) {
       stdout: delivery.stdout,
       stderr: delivery.stderr
     });
+    runtimeLog("info", "callback_gateway_method_delivery", {
+      conversation_id: conversation.conversation_id,
+      method: options.gatewayMethod,
+      status: delivery.status,
+      failure_kind: classifyProcessFailure(delivery),
+      stdout: textSummary(delivery.stdout),
+      stderr: textSummary(delivery.stderr)
+    });
 
     if (delivery.status !== 0) {
       throw new Error(delivery.stderr || delivery.stdout || `gateway method delivery failed with status ${delivery.status}`);
@@ -827,6 +1000,13 @@ function runLockedCallback(options) {
         stdout: chatSendDelivery.stdout,
         stderr: chatSendDelivery.stderr
       });
+      runtimeLog("info", "callback_chat_send_delivery", {
+        conversation_id: conversation.conversation_id,
+        status: chatSendDelivery.status,
+        failure_kind: classifyProcessFailure(chatSendDelivery),
+        stdout: textSummary(chatSendDelivery.stdout),
+        stderr: textSummary(chatSendDelivery.stderr)
+      });
 
       if (chatSendDelivery.status !== 0) {
         throw new Error(chatSendDelivery.stderr || chatSendDelivery.stdout || `chat callback delivery failed with status ${chatSendDelivery.status}`);
@@ -849,6 +1029,13 @@ function runLockedCallback(options) {
         stdout: sessionSendDelivery.stdout,
         stderr: sessionSendDelivery.stderr
       });
+      runtimeLog("info", "callback_session_send_delivery", {
+        conversation_id: conversation.conversation_id,
+        status: sessionSendDelivery.status,
+        failure_kind: classifyProcessFailure(sessionSendDelivery),
+        stdout: textSummary(sessionSendDelivery.stdout),
+        stderr: textSummary(sessionSendDelivery.stderr)
+      });
 
       if (sessionSendDelivery.status !== 0) {
         throw new Error(sessionSendDelivery.stderr || sessionSendDelivery.stdout || `session callback delivery failed with status ${sessionSendDelivery.status}`);
@@ -868,6 +1055,10 @@ function runLockedCallback(options) {
   }
 
   if (options.recordOnly) {
+    runtimeLog("info", "callback_recorded_only", {
+      conversation_id: conversation.conversation_id,
+      status: nextConversation.status
+    });
     printJson(result);
     return;
   }
@@ -897,6 +1088,13 @@ function runLockedCallback(options) {
     status: delivery.status,
     stdout: delivery.stdout,
     stderr: delivery.stderr
+  });
+  runtimeLog("info", "callback_delivery", {
+    conversation_id: conversation.conversation_id,
+    status: delivery.status,
+    failure_kind: classifyProcessFailure(delivery),
+    stdout: textSummary(delivery.stdout),
+    stderr: textSummary(delivery.stderr)
   });
 
   if (delivery.status !== 0) {
@@ -1048,6 +1246,16 @@ function cleanupIdleConversations(storeDir, options = {}, now = new Date()) {
       status: "closed",
       reason: closedConversation.close_reason,
       idle_timeout_minutes: timeoutMinutes
+    });
+    runtimeLog("info", "idle_conversation_closed", {
+      conversation_id: conversation.conversation_id,
+      agent: executorForConversation(conversation).kind,
+      executor_session: executorForConversation(conversation).session,
+      state_path: statePath,
+      event_log_path: logPath,
+      idle_since: conversation.idle_since,
+      idle_timeout_minutes: timeoutMinutes,
+      reason: closedConversation.close_reason
     });
     closed += 1;
   }
@@ -1300,6 +1508,55 @@ function printJson(value) {
 function cleanProcessText(text) {
   const value = String(text ?? "").trim();
   return value ? value.slice(0, 2000) : undefined;
+}
+
+function textSummary(text, maxLength = 240) {
+  const value = String(text ?? "");
+  return {
+    length: value.length,
+    preview: value ? value.slice(0, maxLength) : undefined
+  };
+}
+
+function classifyProcessFailure(result) {
+  const status = result?.status ?? 0;
+  const combined = [
+    result?.error?.message,
+    result?.stderr,
+    result?.stdout
+  ].filter(Boolean).join("\n").toLowerCase();
+
+  if (!combined && status === 0) {
+    return undefined;
+  }
+  if (combined.includes("agent needs reconnect") || combined.includes("internal error")) {
+    return "agent_reconnect_required";
+  }
+  if (combined.includes("permission denied") || combined.includes("operation not permitted")) {
+    return "permission_denied";
+  }
+  if (combined.includes("sandbox") || combined.includes("outside workspace")) {
+    return "sandbox_denied";
+  }
+  if (combined.includes("timed out") || combined.includes("timeout")) {
+    return "timeout";
+  }
+  if (status !== 0) {
+    return "nonzero_exit";
+  }
+  return undefined;
+}
+
+function runtimeLog(level, event, fields = {}) {
+  try {
+    writeRuntimeLog({
+      level,
+      event,
+      ...fields
+    });
+  } catch {
+    // Runtime logging must never break the user-facing CLI command.
+  }
 }
 
 function shellQuote(value) {
