@@ -119,6 +119,97 @@ fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify({
   }
 });
 
+test("cancel requests cooperative ACPX cancellation for Codex and Claude sessions", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-cancel-management-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const acpxCallsPath = path.join(tempDir, "acpx-calls.ndjson");
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    const fakeAcpx = path.join(fakeBinDir, "acpx");
+    fs.writeFileSync(
+      fakeAcpx,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify({
+  args: process.argv.slice(2),
+  allProxy: process.env.ALL_PROXY
+}) + "\\n", "utf8");
+`,
+      "utf8"
+    );
+    fs.chmodSync(fakeAcpx, 0o755);
+
+    const codex = runCli([
+      "new",
+      "--agent",
+      "codex",
+      "--session",
+      "codex-cancellable",
+      "--request",
+      "Codex long task",
+      "--store-dir",
+      storeDir
+    ]);
+    const claude = runCli([
+      "new",
+      "--agent",
+      "claude",
+      "--session",
+      "claude-cancellable",
+      "--request",
+      "Claude long task",
+      "--store-dir",
+      storeDir
+    ]);
+
+    const cancelledCodex = runCli([
+      "cancel",
+      "--conversation",
+      codex.conversation.conversation_id,
+      "--store-dir",
+      storeDir,
+      "--all-proxy",
+      "socks5h://127.0.0.1:1082"
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(cancelledCodex.cancel_requested, true);
+    assert.equal(cancelledCodex.conversation.status, "cancelling");
+    assert.equal(cancelledCodex.executor.kind, "codex");
+
+    const cancelledClaude = runCli([
+      "cancel",
+      "--conversation",
+      claude.conversation.conversation_id,
+      "--store-dir",
+      storeDir
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(cancelledClaude.cancel_requested, true);
+    assert.equal(cancelledClaude.conversation.status, "cancelling");
+    assert.equal(cancelledClaude.executor.kind, "claude");
+
+    const acpxCalls = fs.readFileSync(acpxCallsPath, "utf8")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line));
+    assert.deepEqual(acpxCalls.map((call) => call.args), [
+      ["codex", "cancel", "-s", "codex-cancellable"],
+      ["claude", "cancel", "-s", "claude-cancellable"]
+    ]);
+    assert.equal(acpxCalls[0].allProxy, "socks5h://127.0.0.1:1082");
+
+    const codexStatus = runCli(["status", "--conversation", codex.conversation.conversation_id, "--store-dir", storeDir]);
+    assert.equal(codexStatus.summary.status, "cancelling");
+    assert.equal(codexStatus.recent_events.at(-1).event, "executor_cancel_requested");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("done conversations become idle, accept follow-up sends, and lazily time out", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-idle-management-"));
   const storeDir = path.join(tempDir, "conversations");

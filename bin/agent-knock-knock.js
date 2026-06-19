@@ -49,6 +49,8 @@ try {
     runStatus(args);
   } else if (command === "send") {
     runSend(args);
+  } else if (command === "cancel") {
+    runCancel(args);
   } else if (command === "close") {
     runClose(args);
   } else if (command === "transcript") {
@@ -543,6 +545,58 @@ function runSend(options) {
     message,
     delivered: true,
     executor,
+    budget: budgetAction(nextConversation)
+  });
+}
+
+function runCancel(options) {
+  cleanupIdleConversations(storeDirFromOptions(options), options);
+  const { conversation, statePath, logPath } = loadConversationFromOptions(options);
+  if (["closed", "cancelled"].includes(conversation.status)) {
+    throw new Error(`cannot cancel ${conversation.conversation_id}; conversation is ${conversation.status}`);
+  }
+
+  const executor = executorForConversation(conversation);
+  const acpxPath = resolveExecutable("acpx");
+  const executorEnv = environmentForExecutor(executor, {
+    allProxy: options.allProxy ?? conversation.executor_all_proxy
+  });
+  const cancelResult = spawnSync(acpxPath, [executor.kind, "cancel", "-s", executor.session], {
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024 * 10,
+    cwd: conversation.workspace ?? process.cwd(),
+    env: executorEnv
+  });
+  const now = new Date().toISOString();
+  appendEvent(logPath, {
+    ts: now,
+    conversation_id: conversation.conversation_id,
+    event: "executor_cancel_requested",
+    status: cancelResult.status ?? null,
+    executor,
+    stdout: cleanProcessText(cancelResult.stdout),
+    stderr: cleanProcessText(cancelResult.stderr)
+  });
+  if (cancelResult.error) {
+    throw new Error(`acpx ${executor.kind} cancel failed to start: ${cancelResult.error.message}`);
+  }
+  if (cancelResult.status !== 0) {
+    throw new Error(cleanProcessText(cancelResult.stderr || cancelResult.stdout || `acpx ${executor.kind} cancel exited with status ${cancelResult.status}`));
+  }
+
+  const nextConversation = {
+    ...conversation,
+    status: "cancelling",
+    cancel_requested_at: now,
+    updated_at: now
+  };
+  saveState(statePath, nextConversation);
+
+  printJson({
+    conversation: nextConversation,
+    cancel_requested: true,
+    executor,
+    acpx_command: ["acpx", executor.kind, "cancel", "-s", executor.session],
     budget: budgetAction(nextConversation)
   });
 }
@@ -1271,6 +1325,7 @@ function usage() {
   agent-knock-knock list [--store-dir <dir>] [--agent claude|codex] [--status <status>] [--all]
   agent-knock-knock status --conversation <id> [--store-dir <dir>]
   agent-knock-knock send --conversation <id> --message <text> [--type answer|task|control] [--all-proxy <url>]
+  agent-knock-knock cancel --conversation <id> [--all-proxy <url>]
   agent-knock-knock close --conversation <id> [--reason <text>]
   agent-knock-knock callback --state <file> --message-json <json> [--record-only]
   agent-knock-knock transcript --log <file> [--include-raw]

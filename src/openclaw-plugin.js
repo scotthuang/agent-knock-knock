@@ -147,6 +147,26 @@ const sendParameters = {
   }
 };
 
+const cancelParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["conversation_id"],
+  properties: {
+    conversation_id: {
+      type: "string"
+    },
+    allProxy: {
+      type: "string"
+    },
+    storeDir: {
+      type: "string"
+    },
+    idleTimeoutMinutes: {
+      type: "number"
+    }
+  }
+};
+
 const closeParameters = {
   type: "object",
   additionalProperties: false,
@@ -168,7 +188,7 @@ export default definePluginEntry({
   id: "agent-knock-knock",
   name: "Agent Knock Knock",
   description:
-    "Agent Knock Knock (AKK/akk) delegates OpenClaw coding work to local Codex or Claude agents. Use this for AKK, akk, Agent Knock Knock, Codex delegation, Claude delegation, task listing, follow-up messages, status, and close requests. Default delegation target is Codex unless the user explicitly asks for Claude.",
+    "Agent Knock Knock (AKK/akk) delegates OpenClaw coding work to local Codex or Claude agents. Use this for AKK, akk, Agent Knock Knock, Codex delegation, Claude delegation, task listing, follow-up messages, status, cancel requests, and close requests. Default delegation target is Codex unless the user explicitly asks for Claude.",
   register(api) {
     api.registerGatewayMethod(
       CALLBACK_METHOD,
@@ -190,7 +210,7 @@ export default definePluginEntry({
 
     api.registerCommand?.({
       name: "akk",
-      description: "Delegate coding work to Agent Knock Knock, list tasks, send follow-ups, and close tasks.",
+      description: "Delegate coding work to Agent Knock Knock, list tasks, send follow-ups, cancel running work, and close tasks.",
       acceptsArgs: true,
       requireAuth: true,
       nativeProgressMessages: {
@@ -275,6 +295,19 @@ export default definePluginEntry({
     });
 
     registerCliTool(api, {
+      name: "agent_knock_knock_cancel",
+      description: "Request cooperative cancellation of the current in-flight prompt for an existing Agent Knock Knock Codex or Claude session. This does not close the AKK session; use close when the session should no longer be reused.",
+      parameters: cancelParameters,
+      buildArgs: (params) => {
+        const args = ["cancel", "--conversation", requiredString(params.conversation_id, "conversation_id")];
+        pushOptional(args, "--all-proxy", stringValue(params.allProxy) ?? stringValue(api.pluginConfig?.codexAllProxy) ?? stringValue(api.pluginConfig?.allProxy));
+        pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
+        pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(api.pluginConfig?.idleTimeoutMinutes));
+        return args;
+      }
+    });
+
+    registerCliTool(api, {
       name: "agent_knock_knock_close",
       description: "Close an Agent Knock Knock coding-agent task without terminating the underlying ACPX session. Use this for AKK close requests.",
       parameters: closeParameters,
@@ -327,6 +360,18 @@ async function handleAkkCommand(api, ctx) {
       const result = runCli(api, args);
       return { text: formatSendCommandResult(result) };
     }
+    if (parsed.action === "cancel") {
+      const args = [
+        "cancel",
+        "--conversation",
+        parsed.conversationId
+      ];
+      const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+      pushOptional(args, "--all-proxy", stringValue(config.codexAllProxy) ?? stringValue(config.allProxy));
+      pushOptional(args, "--idle-timeout-minutes", numberString(config.idleTimeoutMinutes));
+      const result = runCli(api, args);
+      return { text: formatCancelCommandResult(result) };
+    }
     if (parsed.action === "close") {
       const result = runCli(api, [
         "close",
@@ -369,6 +414,10 @@ function parseAkkCommand(args) {
       throw new Error("Usage: /akk send <conversation-id> <message>");
     }
     return { action: "send", conversationId, message: body };
+  }
+  if (action === "cancel" || action === "stop") {
+    const { token: conversationId } = takeRequiredToken(rest, "Usage: /akk cancel <conversation-id>");
+    return { action: "cancel", conversationId };
   }
   if (action === "close" || action === "done") {
     const { token: conversationId, rest: reason } = takeRequiredToken(rest, "Usage: /akk close <conversation-id> [reason]");
@@ -420,6 +469,7 @@ function akkUsageText() {
     "/akk list",
     "/akk status <conversation-id>",
     "/akk send <conversation-id> <message>",
+    "/akk cancel <conversation-id>",
     "/akk close <conversation-id> [reason]"
   ].join("\n");
 }
@@ -467,6 +517,17 @@ function formatSendCommandResult(result) {
     `conversation: ${conversation.conversation_id ?? "unknown"}`,
     `status: ${conversation.status ?? "unknown"}`,
     `launched: ${result.launched === true ? "yes" : "no"}`
+  ].join("\n");
+}
+
+function formatCancelCommandResult(result) {
+  const conversation = result.conversation ?? {};
+  return [
+    "AKK cancel requested.",
+    `conversation: ${conversation.conversation_id ?? "unknown"}`,
+    `agent: ${result.executor?.kind ?? conversation.executor?.kind ?? "unknown"}`,
+    `session: ${result.executor?.session ?? conversation.executor?.session ?? "unknown"}`,
+    `status: ${conversation.status ?? "unknown"}`
   ].join("\n");
 }
 
@@ -751,6 +812,7 @@ function formatDoneShortcuts(conversationId) {
     "- `AKK list` lists open AKK sessions.",
     `- \`AKK send ${conversationId}: <message>\` sends a follow-up to this same AKK session.`,
     `- \`AKK status ${conversationId}\` shows this session status.`,
+    `- \`AKK cancel ${conversationId}\` requests cancellation of current running work without closing this AKK session.`,
     `- \`AKK close ${conversationId}\` closes this AKK session.`
   ].join("\n");
 }

@@ -5,7 +5,7 @@ description: Manage Agent Knock Knock (AKK/akk) delegation from OpenClaw to loca
 
 # Agent Knock Knock Delegation
 
-Use this skill when the user says `AKK`, `akk`, `Agent Knock Knock`, asks OpenClaw to delegate coding work to Codex or Claude, asks what agent tasks are running, sends a follow-up to an agent task, or closes an agent task.
+Use this skill when the user says `AKK`, `akk`, `Agent Knock Knock`, asks OpenClaw to delegate coding work to Codex or Claude, asks what agent tasks are running, sends a follow-up to an agent task, cancels a running agent task, or closes an agent task.
 
 Treat `AKK` and `akk` the same way.
 
@@ -35,6 +35,7 @@ Slash command forms:
 - `/akk list`: list open AKK sessions.
 - `/akk status <conversation-id>`: inspect one AKK session.
 - `/akk send <conversation-id> <message>`: send a follow-up to one open AKK session.
+- `/akk cancel <conversation-id>`: request cooperative cancellation of the current in-flight prompt for one AKK session without closing it.
 - `/akk close <conversation-id> [reason]`: close one AKK session.
 
 Natural-language forms:
@@ -45,6 +46,7 @@ Natural-language forms:
 - `AKK list`, `akk list`, or questions such as "what AKK sessions are open": call `agent_knock_knock_list`.
 - `AKK status <conversation-id>`: call `agent_knock_knock_status`.
 - `AKK send <conversation-id>: <message>` or follow-up requests for an existing open agent session: call `agent_knock_knock_send`.
+- `AKK cancel <conversation-id>` or requests to stop the current running work without closing the session: call `agent_knock_knock_cancel`.
 - `AKK close <conversation-id>`: call `agent_knock_knock_close`.
 
 Session reuse rule:
@@ -63,6 +65,7 @@ AKK Claude: review the latest commit
 akk list
 akk send task-20260618T010203Z-abcdef12: continue with the smaller implementation
 再让刚才那个 Codex 分析 ~/chrome-debug 为什么占空间
+akk cancel task-20260618T010203Z-abcdef12
 akk close task-20260618T010203Z-abcdef12
 ```
 
@@ -115,6 +118,8 @@ Use structured JSON messages with these types:
 - `done`: the coding agent reports the current round is complete; AKK marks the session `idle`, and OpenClaw may send later follow-ups until the session is closed or times out
 - `error`: runtime, tool, or protocol failure
 - `control`: budget warning or lifecycle control
+
+`cancel` is lifecycle control outside the agent message protocol. It asks ACPX to cooperatively cancel the current in-flight prompt for the existing Codex or Claude session. It does not close the AKK session; use `close` only when the session should no longer be reused.
 
 Only messages with `requires_response=true` consume response rounds.
 
