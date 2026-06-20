@@ -89,24 +89,24 @@ test("agent takeover safe_resume can attach a native session as an AKK conversat
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
   const workspace = path.join(tempDir, "workspace");
-  const acpxCallsPath = path.join(tempDir, "acpx-calls.ndjson");
+  const codexCallsPath = path.join(tempDir, "codex-calls.ndjson");
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
-    const fakeAcpx = path.join(fakeBinDir, "acpx");
+    const fakeCodex = path.join(fakeBinDir, "codex");
     fs.writeFileSync(
-      fakeAcpx,
+      fakeCodex,
       `#!/usr/bin/env node
 const fs = require("node:fs");
-fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify({
+fs.appendFileSync(${JSON.stringify(codexCallsPath)}, JSON.stringify({
   args: process.argv.slice(2),
   allProxy: process.env.ALL_PROXY
 }) + "\\n", "utf8");
 `,
       "utf8"
     );
-    fs.chmodSync(fakeAcpx, 0o755);
+    fs.chmodSync(fakeCodex, 0o755);
 
     const attached = runAgentCli([
       "agent",
@@ -167,15 +167,15 @@ fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify({
     assert.equal(sentParsed.delivered, true);
     assert.equal(sentParsed.conversation.native_session_takeover.needs_bootstrap, false);
 
-    const calls = fs.readFileSync(acpxCallsPath, "utf8")
+    const calls = fs.readFileSync(codexCallsPath, "utf8")
       .trim()
       .split(/\r?\n/)
       .map((line) => JSON.parse(line));
-    assert.deepEqual(calls[0].args, ["codex", "sessions", "ensure", "--resume-session", sessionId]);
-    assert.deepEqual(calls[1].args.slice(0, 6), ["--approve-all", "--model", "gpt-5.5[medium]", "codex", "-s", sessionId]);
-    assert.match(calls[1].args[6], /managed by OpenClaw/);
-    assert.match(calls[1].args[6], /agent-knock-knock\.callback/);
-    assert.match(calls[1].args[6], /Initial AKK takeover message/);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].args.slice(0, 6), ["exec", "resume", "--model", "gpt-5.5", "--skip-git-repo-check", sessionId]);
+    assert.match(calls[0].args[6], /managed by OpenClaw/);
+    assert.match(calls[0].args[6], /agent-knock-knock\.callback/);
+    assert.match(calls[0].args[6], /Initial AKK takeover message/);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

@@ -1193,10 +1193,35 @@ function runSend(options) {
     message: textSummary(messageBody)
   });
 
-  const acpxPath = resolveExecutable("acpx");
   const executorEnv = environmentForExecutor(executor, {
     allProxy: options.allProxy ?? conversation.executor_all_proxy
   });
+  const payload = buildAgentSendPayload({
+    conversation,
+    executor,
+    message,
+    includeNativeTakeoverBootstrap: needsNativeTakeoverBootstrap,
+    includeForkTakeoverBootstrap: needsForkTakeoverBootstrap,
+    forkTakeover: forkTakeoverForSend
+  });
+  if (nativeTakeoverForSend?.["native_session_id"] && executor.kind === "codex") {
+    runNativeCodexResumeSend({
+      options,
+      conversation,
+      nextConversation,
+      statePath,
+      logPath,
+      executor,
+      executorEnv,
+      message,
+      payload,
+      nativeTakeover: nativeTakeoverForSend,
+      needsNativeTakeoverBootstrap
+    });
+    return;
+  }
+
+  const acpxPath = resolveExecutable("acpx");
   const executorModel = modelForExecutor(executor, {
     model: options.model ?? conversation.executor_model
   });
@@ -1258,14 +1283,6 @@ function runSend(options) {
     throw new Error(cleanProcessText(ensureSession.stderr || ensureSession.stdout || `acpx ${executor.kind} sessions ensure exited with status ${ensureSession.status}`));
   }
 
-  const payload = buildAgentSendPayload({
-    conversation,
-    executor,
-    message,
-    includeNativeTakeoverBootstrap: needsNativeTakeoverBootstrap,
-    includeForkTakeoverBootstrap: needsForkTakeoverBootstrap,
-    forkTakeover: forkTakeoverForSend
-  });
   const acpxArgs = buildAcpxPromptArgs({ executor, payload, model: executorModel });
 
   if (options.background) {
@@ -1410,6 +1427,200 @@ function runSend(options) {
     executor,
     budget: budgetAction(deliveredConversation)
   });
+}
+
+function runNativeCodexResumeSend({
+  options,
+  conversation,
+  nextConversation,
+  statePath,
+  logPath,
+  executor,
+  executorEnv,
+  message,
+  payload,
+  nativeTakeover,
+  needsNativeTakeoverBootstrap
+}) {
+  const codexPath = resolveExecutable("codex");
+  const nativeSessionId = String(nativeTakeover["native_session_id"]);
+  const nativeModel = nativeCodexModelForSend({ options, conversation, nativeTakeover });
+  const codexArgs = buildCodexExecResumeArgs({
+    nativeSessionId,
+    payload,
+    model: nativeModel
+  });
+
+  appendEvent(logPath, {
+    ts: new Date().toISOString(),
+    conversation_id: conversation.conversation_id,
+    event: "native_executor_resume_prepare",
+    executor,
+    native_session_id: nativeSessionId,
+    model: nativeModel ?? null
+  });
+  runtimeLog("info", "native_executor_resume_prepare", {
+    conversation_id: conversation.conversation_id,
+    agent: executor.kind,
+    executor_session: executor.session,
+    native_session_id: nativeSessionId,
+    model: nativeModel
+  });
+
+  if (options.background) {
+    const outputPath = path.join(path.dirname(logPath), `${executor.kind}-native-resume-output.log`);
+    const outputFd = fs.openSync(outputPath, "a");
+    const child = spawn(codexPath, codexArgs, {
+      detached: true,
+      stdio: ["ignore", outputFd, outputFd],
+      cwd: conversation.workspace ?? process.cwd(),
+      env: executorEnv
+    });
+    child.unref();
+    fs.closeSync(outputFd);
+
+    appendEvent(logPath, {
+      ts: new Date().toISOString(),
+      conversation_id: conversation.conversation_id,
+      event: "native_executor_resume_launch",
+      mode: "background",
+      pid: child.pid ?? null,
+      executor,
+      native_session_id: nativeSessionId,
+      output_path: outputPath
+    });
+    runtimeLog("info", "native_executor_resume_launch", {
+      conversation_id: conversation.conversation_id,
+      agent: executor.kind,
+      executor_session: executor.session,
+      native_session_id: nativeSessionId,
+      mode: "background",
+      pid: child.pid ?? null,
+      output_path: outputPath
+    });
+    const monitor = startExecutorMonitor({
+      statePath,
+      logPath,
+      pid: child.pid,
+      outputPath,
+      agentTimeoutMinutes: Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES),
+      pollIntervalMs: Number(options.monitorPollIntervalMs ?? DEFAULT_MONITOR_POLL_INTERVAL_MS)
+    });
+    appendEvent(logPath, {
+      ts: new Date().toISOString(),
+      conversation_id: conversation.conversation_id,
+      event: "executor_monitor_launch",
+      pid: monitor.pid ?? null,
+      executor_pid: child.pid ?? null,
+      agent_timeout_minutes: Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES)
+    });
+
+    const deliveredConversation = markTakeoverBootstrapped({
+      conversation: nextConversation,
+      statePath,
+      logPath,
+      executor,
+      native: needsNativeTakeoverBootstrap,
+      fork: false
+    });
+
+    printJson({
+      conversation: deliveredConversation,
+      message,
+      delivered: true,
+      background: true,
+      native_resume: true,
+      pid: child.pid ?? null,
+      monitor_pid: monitor.pid ?? null,
+      output_path: outputPath,
+      executor,
+      budget: budgetAction(deliveredConversation)
+    });
+    return;
+  }
+
+  const sendResult = spawnSync(codexPath, codexArgs, {
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024 * 10,
+    cwd: conversation.workspace ?? process.cwd(),
+    env: executorEnv
+  });
+  appendEvent(logPath, {
+    ts: new Date().toISOString(),
+    conversation_id: conversation.conversation_id,
+    event: "native_executor_resume_send",
+    status: sendResult.status ?? null,
+    executor,
+    native_session_id: nativeSessionId,
+    stdout: cleanProcessText(sendResult.stdout),
+    stderr: cleanProcessText(sendResult.stderr)
+  });
+  runtimeLog("info", "native_executor_resume_send", {
+    conversation_id: conversation.conversation_id,
+    agent: executor.kind,
+    executor_session: executor.session,
+    native_session_id: nativeSessionId,
+    status: sendResult.status ?? null,
+    failure_kind: classifyProcessFailure(sendResult),
+    stdout: textSummary(cleanProcessText(sendResult.stdout)),
+    stderr: textSummary(cleanProcessText(sendResult.stderr))
+  });
+  if (sendResult.error) {
+    throw new Error(`codex exec resume failed to start: ${sendResult.error.message}`);
+  }
+  if (sendResult.status !== 0) {
+    throw new Error(cleanProcessText(sendResult.stderr || sendResult.stdout || `codex exec resume exited with status ${sendResult.status}`));
+  }
+
+  const deliveredConversation = markTakeoverBootstrapped({
+    conversation: nextConversation,
+    statePath,
+    logPath,
+    executor,
+    native: needsNativeTakeoverBootstrap,
+    fork: false
+  });
+
+  printJson({
+    conversation: deliveredConversation,
+    message,
+    delivered: true,
+    native_resume: true,
+    executor,
+    budget: budgetAction(deliveredConversation)
+  });
+}
+
+function buildCodexExecResumeArgs({ nativeSessionId, payload, model }) {
+  const args = ["exec", "resume"];
+  if (model) {
+    args.push("--model", model);
+  }
+  args.push("--skip-git-repo-check", nativeSessionId, payload);
+  return args;
+}
+
+function nativeCodexModelForSend({ options, conversation, nativeTakeover }) {
+  const explicit = options.model ?? options.codexModel;
+  if (explicit) {
+    return normalizeNativeCodexModel(explicit);
+  }
+
+  const nativeModel = isRecord(nativeTakeover) ? nativeTakeover["native_model"] : undefined;
+  if (typeof nativeModel === "string" && nativeModel.trim()) {
+    return normalizeNativeCodexModel(nativeModel);
+  }
+
+  return normalizeNativeCodexModel(conversation.executor_model);
+}
+
+function normalizeNativeCodexModel(model) {
+  const value = typeof model === "string" ? model.trim() : "";
+  if (!value) {
+    return undefined;
+  }
+
+  return value.replace(/\[[^\]]+\]$/u, "").replace(/\/(?:low|medium|high|xhigh)$/u, "");
 }
 
 function buildAgentSendPayload({ conversation, executor, message, includeNativeTakeoverBootstrap, includeForkTakeoverBootstrap, forkTakeover }) {
