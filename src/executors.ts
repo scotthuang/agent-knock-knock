@@ -111,6 +111,25 @@ export function executorDefinitionForAlias(alias: string): ExecutorDefinition | 
     .find((definition) => definition.aliases.includes(normalizedAlias));
 }
 
+export function parseLeadingExecutorAlias(input: string): { kind: ExecutorKind; request: string } | undefined {
+  const trimmed = String(input || "").trim();
+  const match = /^([A-Za-z][A-Za-z0-9_-]*)(?:\s+|[:：]\s*)([\s\S]+)$/u.exec(trimmed);
+  if (!match) {
+    return undefined;
+  }
+
+  const definition = executorDefinitionForAlias(match[1]);
+  const request = match[2].trim();
+  if (!definition || !request) {
+    return undefined;
+  }
+
+  return {
+    kind: definition.kind,
+    request
+  };
+}
+
 export function resolveExecutor({ kind = "claude", session }: ResolveExecutorOptions = {}): Executor {
   const definition = executorDefinitionForKind(kind);
   return {

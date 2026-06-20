@@ -5,6 +5,7 @@ import {
   acpxCommandForExecutor,
   executorDefinitionForAlias,
   executorDefinitionForKind,
+  parseLeadingExecutorAlias,
   resolveExecutor,
   sessionRecoveryStrategyForExecutor
 } from "../src/executors.js";
@@ -35,6 +36,22 @@ test("executor registry resolves slash command aliases", () => {
   assert.equal(executorDefinitionForAlias("codex")?.kind, "codex");
   assert.equal(executorDefinitionForAlias("c")?.kind, "codex");
   assert.equal(executorDefinitionForAlias("cursor")?.kind, "cursor");
+});
+
+test("executor registry parses leading agent aliases from delegated request text", () => {
+  assert.deepEqual(parseLeadingExecutorAlias("cursor 帮我启动cursor做个测试"), {
+    kind: "cursor",
+    request: "帮我启动cursor做个测试"
+  });
+  assert.deepEqual(parseLeadingExecutorAlias("Cursor: say hello"), {
+    kind: "cursor",
+    request: "say hello"
+  });
+  assert.deepEqual(parseLeadingExecutorAlias("claude-code：review this patch"), {
+    kind: "claude",
+    request: "review this patch"
+  });
+  assert.equal(parseLeadingExecutorAlias("please ask cursor to say hello"), undefined);
 });
 
 test("resolved executors keep the stable protocol shape", () => {

@@ -5,7 +5,8 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import {
   EXECUTOR_KINDS,
   executorDefinitionForAlias,
-  executorDefinitionForKind
+  executorDefinitionForKind,
+  parseLeadingExecutorAlias
 } from "./executors.js";
 
 const CALLBACK_METHOD = "agent-knock-knock.callback";
@@ -662,7 +663,12 @@ function runDelegate(api, params, toolContext) {
   const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
   const binPath = stringValue(config.binPath) ?? defaultBinPath;
   const workspace = stringValue(params.workspace) ?? stringValue(config.workspace) ?? process.cwd();
-  const agent = executorDefinitionForKind(stringValue(params.agent) ?? stringValue(config.defaultAgent) ?? "codex").kind;
+  const rawRequest = requiredString(params.request, "request");
+  const prefixedRequest = stringValue(params.agent) ? undefined : parseLeadingExecutorAlias(rawRequest);
+  const request = prefixedRequest?.request ?? rawRequest;
+  const agent = executorDefinitionForKind(
+    stringValue(params.agent) ?? prefixedRequest?.kind ?? stringValue(config.defaultAgent) ?? "codex"
+  ).kind;
   const executorDefinition = executorDefinitionForKind(agent);
   const agentSession =
     stringValue(params.session) ??
@@ -689,7 +695,7 @@ function runDelegate(api, params, toolContext) {
     "--agent",
     agent,
     "--request",
-    requiredString(params.request, "request"),
+    request,
     "--workspace",
     workspace,
     "--background"

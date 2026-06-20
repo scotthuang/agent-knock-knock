@@ -48,6 +48,7 @@
 ### Fixed
 
 - Fixed OpenClaw plugin delegations generating `--record-only` callback commands even when Gateway callback delivery was configured, which caused completed Codex tasks to be logged locally without returning results to OpenClaw.
+- Fixed chat-routed `/akk cursor ...`, `/akk claude ...`, and `/akk codex ...` requests being treated as unspecified delegations when OpenClaw called the delegate tool without an explicit `agent` parameter.
 
 ### Verified
 
