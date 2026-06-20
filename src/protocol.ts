@@ -1,18 +1,19 @@
 import { randomUUID } from "node:crypto";
+import {
+  ACTORS,
+  CODING_AGENT_ACTORS,
+  EXECUTORS,
+  type Actor,
+  type Executor,
+  type ExecutorKind,
+  resolveExecutor
+} from "./executors.js";
 
-export type Actor = "openclaw" | "claude-code" | "codex";
 export type MessageType = "task" | "question" | "answer" | "progress" | "blocked" | "done" | "error" | "control";
-export type ExecutorKind = "claude" | "codex";
 export type ConversationStatus = "created" | "running" | "waiting_for_agent" | "waiting_for_openclaw" | "idle" | "stalled" | "failed" | "closed" | "cancelled" | "cancelling";
 export type BudgetLevel = "normal" | "converge" | "warning" | "soft_stop" | "hard_stop";
-
-export interface Executor {
-  kind: ExecutorKind;
-  actor: Actor;
-  session: string;
-  display_name: string;
-  transport: "acpx";
-}
+export type { Actor, Executor, ExecutorKind } from "./executors.js";
+export { ACTORS, EXECUTORS, resolveExecutor } from "./executors.js";
 
 export interface Conversation {
   conversation_id: string;
@@ -77,11 +78,6 @@ interface CreateConversationOptions {
   now?: Date;
 }
 
-interface ResolveExecutorOptions {
-  kind?: ExecutorKind | string;
-  session?: string | undefined;
-}
-
 interface CreateMessageOptions {
   conversation: Conversation;
   from: Actor;
@@ -100,15 +96,6 @@ interface ExtractStructuredMessageOptions {
   defaultTo?: Actor;
   now?: Date;
 }
-
-interface ExecutorDefinition {
-  kind: ExecutorKind;
-  actor: Actor;
-  defaultSession: string;
-  displayName: string;
-}
-
-export const ACTORS = new Set<Actor>(["openclaw", "claude-code", "codex"]);
 
 export const MESSAGE_TYPES = new Set<MessageType>([
   "task",
@@ -132,27 +119,12 @@ export const DEFAULT_REQUIRES_RESPONSE: Record<MessageType, boolean> = {
   control: false
 };
 
-export const ALLOWED_MESSAGE_TYPES_BY_ROUTE: Record<string, Set<MessageType>> = {
-  "openclaw->claude-code": new Set(["task", "answer", "control", "error"]),
-  "claude-code->openclaw": new Set(["question", "progress", "blocked", "done", "error"]),
-  "openclaw->codex": new Set(["task", "answer", "control", "error"]),
-  "codex->openclaw": new Set(["question", "progress", "blocked", "done", "error"])
-};
-
-export const EXECUTORS: Record<ExecutorKind, ExecutorDefinition> = {
-  claude: {
-    kind: "claude",
-    actor: "claude-code",
-    defaultSession: "bidirectional",
-    displayName: "Claude Code"
-  },
-  codex: {
-    kind: "codex",
-    actor: "codex",
-    defaultSession: "codex",
-    displayName: "Codex"
-  }
-};
+export const ALLOWED_MESSAGE_TYPES_BY_ROUTE: Record<string, Set<MessageType>> = Object.fromEntries(
+  CODING_AGENT_ACTORS.flatMap((actor) => [
+    [`openclaw->${actor}`, new Set<MessageType>(["task", "answer", "control", "error"])],
+    [`${actor}->openclaw`, new Set<MessageType>(["question", "progress", "blocked", "done", "error"])]
+  ])
+);
 
 export function createConversation({
   userRequest,
@@ -181,22 +153,6 @@ export function createConversation({
     hard_limit: Number(hardLimit),
     created_at: now.toISOString(),
     updated_at: now.toISOString()
-  };
-}
-
-export function resolveExecutor({ kind = "claude", session }: ResolveExecutorOptions = {}): Executor {
-  const normalizedKind = String(kind || "claude").toLowerCase();
-  const definition = isExecutorKind(normalizedKind) ? EXECUTORS[normalizedKind] : undefined;
-  if (!definition) {
-    throw new Error(`unsupported executor: ${kind}`);
-  }
-
-  return {
-    kind: definition.kind,
-    actor: definition.actor,
-    session: session || definition.defaultSession,
-    display_name: definition.displayName,
-    transport: "acpx"
   };
 }
 
@@ -522,10 +478,6 @@ function balancedObjectCandidates(input: string): string[] {
   }
 
   return candidates;
-}
-
-function isExecutorKind(value: string): value is ExecutorKind {
-  return value === "claude" || value === "codex";
 }
 
 function isActor(value: unknown): value is Actor {

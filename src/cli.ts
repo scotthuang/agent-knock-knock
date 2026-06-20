@@ -14,6 +14,13 @@ import {
   parseMessageJson,
   resolveExecutor
 } from "./protocol.js";
+import {
+  EXECUTOR_KINDS,
+  acpxCommandForExecutor,
+  executorDefinitionForKind,
+  modelEnvForExecutor,
+  proxyEnvForExecutor
+} from "./executors.js";
 import { executorBootstrapPrompt } from "./bootstrap.js";
 import { writeRuntimeLog } from "./runtime-log.js";
 import { formatTranscript, readNdjsonLog } from "./transcript.js";
@@ -434,7 +441,7 @@ function runDelegate(options) {
 }
 
 function ensureExecutorSession({ acpxPath, executor, cwd, env }) {
-  return spawnSync(acpxPath, [executor.kind, "sessions", "ensure", "--name", executor.session], {
+  return spawnSync(acpxPath, [acpxCommandForExecutor(executor), "sessions", "ensure", "--name", executor.session], {
     encoding: "utf8",
     cwd,
     env
@@ -472,9 +479,9 @@ function startExecutorMonitor({ statePath, logPath, pid, outputPath, agentTimeou
 }
 
 function uniqueDelegateSessionName(kind) {
-  const normalizedKind = String(kind || "claude").toLowerCase().replace(/[^a-z0-9-]+/g, "-");
+  const { sessionPrefix } = executorDefinitionForKind(kind || "claude");
   const timestamp = new Date().toISOString().replace(/\D/g, "").slice(0, 14);
-  return `akk-${normalizedKind}-${timestamp}-${randomUUID().slice(0, 8)}`;
+  return `${sessionPrefix}-${timestamp}-${randomUUID().slice(0, 8)}`;
 }
 
 function buildAcpxPromptArgs({ executor, payload, model }) {
@@ -482,7 +489,7 @@ function buildAcpxPromptArgs({ executor, payload, model }) {
   if (model) {
     args.push("--model", model);
   }
-  args.push(executor.kind, "-s", executor.session, payload);
+  args.push(acpxCommandForExecutor(executor), "-s", executor.session, payload);
   return args;
 }
 
@@ -491,10 +498,7 @@ function proxyForExecutor(executor, options: Record<string, any> = {}) {
   if (explicit) {
     return explicit;
   }
-  if (executor.kind === "codex") {
-    return process.env.CODEX_ALL_PROXY ?? process.env.ALL_PROXY ?? process.env.all_proxy;
-  }
-  return undefined;
+  return proxyEnvForExecutor(executor, process.env);
 }
 
 function modelForExecutor(executor, options: Record<string, any> = {}) {
@@ -502,10 +506,7 @@ function modelForExecutor(executor, options: Record<string, any> = {}) {
   if (explicit) {
     return explicit;
   }
-  if (executor.kind === "codex") {
-    return process.env.CODEX_ACPX_MODEL;
-  }
-  return undefined;
+  return modelEnvForExecutor(executor, process.env);
 }
 
 function environmentForExecutor(executor, options = {}) {
@@ -771,7 +772,8 @@ function runCancel(options) {
   const executorEnv = environmentForExecutor(executor, {
     allProxy: options.allProxy ?? conversation.executor_all_proxy
   });
-  const cancelResult = spawnSync(acpxPath, [executor.kind, "cancel", "-s", executor.session], {
+  const acpxCommand = acpxCommandForExecutor(executor);
+  const cancelResult = spawnSync(acpxPath, [acpxCommand, "cancel", "-s", executor.session], {
     encoding: "utf8",
     maxBuffer: 1024 * 1024 * 10,
     cwd: conversation.workspace ?? process.cwd(),
@@ -821,7 +823,7 @@ function runCancel(options) {
     conversation: nextConversation,
     cancel_requested: true,
     executor,
-    acpx_command: ["acpx", executor.kind, "cancel", "-s", executor.session],
+    acpx_command: ["acpx", acpxCommand, "cancel", "-s", executor.session],
     budget: budgetAction(nextConversation)
   });
 }
@@ -2132,12 +2134,13 @@ function withStoragePaths(conversation, paths) {
 }
 
 function usage() {
+  const agentList = EXECUTOR_KINDS.join("|");
   process.stdout.write(`Usage:
-  agent-knock-knock new --request <text> [--agent claude|codex] [--workspace <path>] [--store-dir <dir>]
+  agent-knock-knock new --request <text> [--agent ${agentList}] [--workspace <path>] [--store-dir <dir>]
   agent-knock-knock record --state <file> --message-json <json>
-  agent-knock-knock bootstrap-prompt --callback-command <command> [--agent claude|codex]
-  agent-knock-knock delegate --request <text> [--agent claude|codex] [--store-dir <dir>] [--all-proxy <url>] [--agent-timeout-minutes <minutes>] [--token <gateway-token>] [--send|--background]
-  agent-knock-knock list [--store-dir <dir>] [--agent claude|codex] [--status <status>] [--all]
+  agent-knock-knock bootstrap-prompt --callback-command <command> [--agent ${agentList}]
+  agent-knock-knock delegate --request <text> [--agent ${agentList}] [--store-dir <dir>] [--all-proxy <url>] [--agent-timeout-minutes <minutes>] [--token <gateway-token>] [--send|--background]
+  agent-knock-knock list [--store-dir <dir>] [--agent ${agentList}] [--status <status>] [--all]
   agent-knock-knock status --conversation <id> [--store-dir <dir>] [--trace]
   agent-knock-knock send --conversation <id> --message <text> [--type answer|task|control] [--all-proxy <url>] [--agent-timeout-minutes <minutes>]
   agent-knock-knock cancel --conversation <id> [--all-proxy <url>]

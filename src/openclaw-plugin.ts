@@ -2,6 +2,11 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+import {
+  EXECUTOR_KINDS,
+  executorDefinitionForAlias,
+  executorDefinitionForKind
+} from "./executors.js";
 
 const CALLBACK_METHOD = "agent-knock-knock.callback";
 const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -14,7 +19,7 @@ const delegateParameters = {
   properties: {
     agent: {
       type: "string",
-      enum: ["claude", "codex"],
+      enum: EXECUTOR_KINDS,
       description:
         "Coding agent to delegate to. Defaults to plugin config or codex. Use claude only when the user explicitly asks for AKK Claude or Claude."
     },
@@ -87,7 +92,7 @@ const listParameters = {
   properties: {
     agent: {
       type: "string",
-      enum: ["claude", "codex"]
+      enum: EXECUTOR_KINDS
     },
     status: {
       type: "string"
@@ -438,19 +443,13 @@ function parseAkkCommand(args) {
     const { token: conversationId, rest: reason } = takeRequiredToken(rest, "Usage: /akk close <conversation-id> [reason]");
     return { action: "close", conversationId, reason: reason.trim() || "Closed from /akk command" };
   }
-  if (action === "codex" || action === "c") {
+  const executorDefinition = executorDefinitionForAlias(action);
+  if (executorDefinition) {
     const request = rest.trim();
     if (!request) {
-      throw new Error("Usage: /akk codex <task>");
+      throw new Error(`Usage: /akk ${executorDefinition.kind} <task>`);
     }
-    return { action: "delegate", agent: "codex", request };
-  }
-  if (action === "claude") {
-    const request = rest.trim();
-    if (!request) {
-      throw new Error("Usage: /akk claude <task>");
-    }
-    return { action: "delegate", agent: "claude", request };
+    return { action: "delegate", agent: executorDefinition.kind, request };
   }
   return { action: "delegate", agent: "codex", request: input };
 }
@@ -490,7 +489,7 @@ function akkUsageText() {
 }
 
 function formatDelegateCommandResult(result) {
-  const agent = result.agent === "claude" ? "Claude" : "Codex";
+  const agent = executorDisplayName(result.agent);
   return [
     `AKK 已交给 ${agent}。`,
     `conversation: ${result.conversation_id ?? "unknown"}`,
@@ -498,6 +497,14 @@ function formatDelegateCommandResult(result) {
     `status: ${result.conversation_status ?? result.status ?? "unknown"}`,
     "结果会通过 OpenClaw 回调返回当前会话。"
   ].join("\n");
+}
+
+function executorDisplayName(kind) {
+  try {
+    return executorDefinitionForKind(String(kind ?? "codex")).displayName;
+  } catch {
+    return String(kind ?? "agent");
+  }
 }
 
 function formatListCommandResult(result) {
@@ -568,19 +575,21 @@ function runDelegate(api, params, toolContext) {
   const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
   const binPath = stringValue(config.binPath) ?? defaultBinPath;
   const workspace = stringValue(params.workspace) ?? stringValue(config.workspace) ?? process.cwd();
-  const agent = stringValue(params.agent) ?? stringValue(config.defaultAgent) ?? "codex";
+  const agent = executorDefinitionForKind(stringValue(params.agent) ?? stringValue(config.defaultAgent) ?? "codex").kind;
+  const executorDefinition = executorDefinitionForKind(agent);
   const agentSession =
     stringValue(params.session) ??
-    (agent === "codex"
-      ? stringValue(params.codexSession) ?? stringValue(config.codexSession) ?? stringValue(config.defaultCodexSession)
-      : stringValue(params.claudeSession) ?? stringValue(config.claudeSession) ?? stringValue(config.defaultClaudeSession));
+    firstStringForKeys(params, executorDefinition.sessionConfigKeys) ??
+    firstStringForKeys(config, executorDefinition.sessionConfigKeys);
   const allProxy =
     stringValue(params.allProxy) ??
-    (agent === "codex" ? stringValue(params.codexAllProxy) ?? stringValue(config.codexAllProxy) : undefined) ??
+    firstStringForKeys(params, executorDefinition.proxyConfigKeys) ??
+    firstStringForKeys(config, executorDefinition.proxyConfigKeys) ??
     stringValue(config.allProxy);
   const model =
     stringValue(params.model) ??
-    (agent === "codex" ? stringValue(params.codexModel) ?? stringValue(config.codexModel) : undefined) ??
+    firstStringForKeys(params, executorDefinition.modelConfigKeys) ??
+    firstStringForKeys(config, executorDefinition.modelConfigKeys) ??
     stringValue(config.model);
   const openclawSession =
     stringValue(toolContext?.sessionKey) ??
@@ -845,6 +854,19 @@ function isRecord(value) {
 
 function stringValue(value) {
   return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function firstStringForKeys(source, keys) {
+  if (!isRecord(source)) {
+    return undefined;
+  }
+  for (const key of keys) {
+    const value = stringValue(source[key]);
+    if (value) {
+      return value;
+    }
+  }
+  return undefined;
 }
 
 function numberString(value) {

@@ -84,6 +84,18 @@ mkdir -p ~/.openclaw/skills/agent-knock-knock
 cp templates/openclaw-skills/agent-knock-knock/SKILL.md ~/.openclaw/skills/agent-knock-knock/SKILL.md
 ```
 
+Apply local project updates to OpenClaw:
+
+```bash
+npm install
+npm run build
+openclaw plugins install --link .
+openclaw plugins enable agent-knock-knock
+openclaw gateway restart
+```
+
+Run this after pulling new code or editing TypeScript/plugin files. The OpenClaw plugin loads compiled files from `dist/`, so source changes do not take effect until `npm run build` has run and the Gateway has reloaded the linked plugin. If the skill template changes, copy `templates/openclaw-skills/agent-knock-knock/SKILL.md` to `~/.openclaw/skills/agent-knock-knock/SKILL.md` again.
+
 ## OpenClaw Plugin
 
 The native OpenClaw plugin registers tools that let OpenClaw delegate implementation work to Claude Code or Codex, list open sessions, send follow-up messages, inspect status, request cooperative cancellation, and close sessions without exposing raw terminal output as tool results.

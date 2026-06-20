@@ -14,7 +14,9 @@
 - Added lazy idle-timeout cleanup for idle AKK sessions, configurable with `idleTimeoutMinutes` and defaulting to 10080 minutes.
 - Added runtime diagnostics logs under `~/.agent-knock-knock/logs`, with local timestamps, daily NDJSON files, secret redaction, log-level filtering, and retention cleanup.
 - Added safe executor trace support through `agent-knock-knock status --trace` and the OpenClaw status tool's `trace` parameter, summarizing tool calls, permission requests, client events, monitor events, and redacted thinking markers.
+- Added a coding-agent executor registry that centralizes Codex and Claude Code ACPX metadata, aliases, protocol actors, session naming, and proxy/model configuration.
 - Added tests for Codex-backed delegation and task management flows.
+- Added tests for the executor registry used by Codex and Claude Code.
 - Added tests for runtime diagnostics logging, redaction, retention cleanup, and CLI log emission.
 
 ### Changed
@@ -33,6 +35,7 @@
 - Added a background executor monitor that marks agent-waiting tasks `stalled` when the launched process exits without a callback or when the configurable `agentTimeoutMinutes` callback timeout is reached, then attempts to notify the original OpenClaw session.
 - Renamed the OpenClaw skill template from `bidirectional-chat` to `agent-knock-knock` so the installed skill matches the project and plugin name.
 - Updated documentation to describe local coding agents, task management, cooperative cancellation, and the home-directory conversation store.
+- Updated documentation with the local update flow required to rebuild and reload the linked OpenClaw plugin after project changes.
 - Documented ACPX approval behavior: Claude Code permission requests work with `--approve-all`, while some Codex sensitive operations can fail directly under AKK's non-interactive/background path instead of surfacing an approvable ACPX permission request.
 
 ### Fixed
