@@ -19,7 +19,8 @@ import {
   acpxCommandForExecutor,
   executorDefinitionForKind,
   modelEnvForExecutor,
-  proxyEnvForExecutor
+  proxyEnvForExecutor,
+  sessionRecoveryStrategyForExecutor
 } from "./executors.js";
 import { executorBootstrapPrompt } from "./bootstrap.js";
 import { writeRuntimeLog } from "./runtime-log.js";
@@ -84,6 +85,10 @@ function runCommand(commandName, options) {
     runSend(options);
   } else if (commandName === "cancel") {
     runCancel(options);
+  } else if (commandName === "recover") {
+    runRecover(options);
+  } else if (commandName === "restart") {
+    runRestart(options);
   } else if (commandName === "close") {
     runClose(options);
   } else if (commandName === "transcript") {
@@ -582,6 +587,9 @@ function runSend(options) {
   if (["done", "failed", "closed", "cancelled"].includes(conversation.status)) {
     throw new Error(`cannot send to ${conversation.conversation_id}; conversation is ${conversation.status}`);
   }
+  if (conversation.status === "needs_recovery") {
+    throw new Error(`cannot send to ${conversation.conversation_id}; choose recover, restart, or close first`);
+  }
 
   const executor = executorForConversation(conversation);
   const type = options.type ?? (conversation.status === "waiting_for_openclaw" ? "answer" : "task");
@@ -645,9 +653,35 @@ function runSend(options) {
     stderr: textSummary(cleanProcessText(ensureSession.stderr))
   });
   if (ensureSession.error) {
+    if (requiresExplicitRecoveryDecision(executor, options)) {
+      printJson(markConversationNeedsRecovery({
+        conversation: nextConversation,
+        statePath,
+        logPath,
+        executor,
+        message,
+        failedStage: "session_ensure",
+        result: ensureSession,
+        reason: `acpx ${executor.kind} session ensure failed to start: ${ensureSession.error.message}`
+      }));
+      return;
+    }
     throw new Error(`acpx ${executor.kind} session ensure failed to start: ${ensureSession.error.message}`);
   }
   if (ensureSession.status !== 0) {
+    if (requiresExplicitRecoveryDecision(executor, options)) {
+      printJson(markConversationNeedsRecovery({
+        conversation: nextConversation,
+        statePath,
+        logPath,
+        executor,
+        message,
+        failedStage: "session_ensure",
+        result: ensureSession,
+        reason: cleanProcessText(ensureSession.stderr || ensureSession.stdout || `acpx ${executor.kind} sessions ensure exited with status ${ensureSession.status}`)
+      }));
+      return;
+    }
     throw new Error(cleanProcessText(ensureSession.stderr || ensureSession.stdout || `acpx ${executor.kind} sessions ensure exited with status ${ensureSession.status}`));
   }
 
@@ -745,9 +779,35 @@ function runSend(options) {
     stderr: textSummary(cleanProcessText(sendResult.stderr))
   });
   if (sendResult.error) {
+    if (requiresExplicitRecoveryDecision(executor, options)) {
+      printJson(markConversationNeedsRecovery({
+        conversation: nextConversation,
+        statePath,
+        logPath,
+        executor,
+        message,
+        failedStage: "message_send",
+        result: sendResult,
+        reason: `acpx ${executor.kind} send failed to start: ${sendResult.error.message}`
+      }));
+      return;
+    }
     throw new Error(`acpx ${executor.kind} send failed to start: ${sendResult.error.message}`);
   }
   if (sendResult.status !== 0) {
+    if (requiresExplicitRecoveryDecision(executor, options)) {
+      printJson(markConversationNeedsRecovery({
+        conversation: nextConversation,
+        statePath,
+        logPath,
+        executor,
+        message,
+        failedStage: "message_send",
+        result: sendResult,
+        reason: cleanProcessText(sendResult.stderr || sendResult.stdout || `acpx ${executor.kind} send exited with status ${sendResult.status}`)
+      }));
+      return;
+    }
     throw new Error(cleanProcessText(sendResult.stderr || sendResult.stdout || `acpx ${executor.kind} send exited with status ${sendResult.status}`));
   }
 
@@ -758,6 +818,63 @@ function runSend(options) {
     executor,
     budget: budgetAction(nextConversation)
   });
+}
+
+function requiresExplicitRecoveryDecision(executor, options: Record<string, any> = {}) {
+  if (options.recoveryPolicy === "explicit" || options.recoveryPolicy === "explicit-decision") {
+    return true;
+  }
+  return sessionRecoveryStrategyForExecutor(executor) === "explicit-decision";
+}
+
+function markConversationNeedsRecovery({ conversation, statePath, logPath, executor, message, failedStage, result, reason }) {
+  const now = new Date().toISOString();
+  const failureKind = classifyProcessFailure(result);
+  const recovery = {
+    reason: "executor_session_unavailable",
+    detail: reason,
+    failed_at: now,
+    failed_stage: failedStage,
+    failure_kind: failureKind,
+    failed_message_id: message.id,
+    pending_message: message,
+    previous_executor: executor,
+    options: ["recover", "restart", "close"]
+  };
+  const nextConversation = {
+    ...conversation,
+    status: "needs_recovery" as const,
+    recovery,
+    updated_at: now
+  };
+  saveState(statePath, nextConversation);
+  appendEvent(logPath, {
+    ts: now,
+    conversation_id: conversation.conversation_id,
+    event: "conversation_needs_recovery",
+    status: "needs_recovery",
+    executor,
+    failed_stage: failedStage,
+    failure_kind: failureKind,
+    reason
+  });
+  runtimeLog("warn", "conversation_needs_recovery", {
+    conversation_id: conversation.conversation_id,
+    agent: executor.kind,
+    executor_session: executor.session,
+    failed_stage: failedStage,
+    failure_kind: failureKind,
+    reason: textSummary(reason)
+  });
+  return {
+    conversation: nextConversation,
+    message,
+    delivered: false,
+    requires_recovery_decision: true,
+    recovery,
+    executor,
+    budget: budgetAction(nextConversation)
+  };
 }
 
 function runCancel(options) {
@@ -826,6 +943,199 @@ function runCancel(options) {
     acpx_command: ["acpx", acpxCommand, "cancel", "-s", executor.session],
     budget: budgetAction(nextConversation)
   });
+}
+
+function runRecover(options) {
+  runRecoveryDecision({ ...options, mode: "recover" });
+}
+
+function runRestart(options) {
+  runRecoveryDecision({ ...options, mode: "restart" });
+}
+
+function runRecoveryDecision(options) {
+  cleanupIdleConversations(storeDirFromOptions(options), options);
+  const { conversation, statePath, logPath } = loadConversationFromOptions(options);
+  if (conversation.status !== "needs_recovery") {
+    throw new Error(`cannot ${options.mode} ${conversation.conversation_id}; conversation is ${conversation.status}`);
+  }
+  const pendingMessage = conversation.recovery?.pending_message;
+  if (!isRecord(pendingMessage)) {
+    throw new Error(`cannot ${options.mode} ${conversation.conversation_id}; recovery pending message is missing`);
+  }
+
+  const previousExecutor = executorForConversation(conversation);
+  const executor = resolveExecutor({
+    kind: previousExecutor.kind,
+    session: options.session ?? uniqueDelegateSessionName(previousExecutor.kind)
+  });
+  const now = new Date().toISOString();
+  const recoveredConversation = {
+    ...conversation,
+    executor,
+    claude_session: executor.kind === "claude" ? executor.session : conversation.claude_session,
+    status: "waiting_for_agent" as const,
+    recovery: {
+      ...conversation.recovery,
+      resolved_at: now,
+      resolution: options.mode,
+      previous_session: previousExecutor.session,
+      new_session: executor.session
+    },
+    updated_at: now
+  };
+  saveState(statePath, recoveredConversation);
+
+  const payload = options.mode === "recover"
+    ? buildRecoverPayload({ conversation, pendingMessage, logPath })
+    : buildRestartPayload({ pendingMessage });
+  const acpxPath = resolveExecutable("acpx");
+  const executorEnv = environmentForExecutor(executor, {
+    allProxy: options.allProxy ?? conversation.executor_all_proxy
+  });
+  const executorModel = modelForExecutor(executor, {
+    model: options.model ?? conversation.executor_model
+  });
+  const ensureSession = ensureExecutorSession({
+    acpxPath,
+    executor,
+    cwd: conversation.workspace ?? process.cwd(),
+    env: executorEnv
+  });
+  appendEvent(logPath, {
+    ts: new Date().toISOString(),
+    conversation_id: conversation.conversation_id,
+    event: "executor_recovery_session_ensure",
+    mode: options.mode,
+    status: ensureSession.status ?? null,
+    executor,
+    stdout: cleanProcessText(ensureSession.stdout),
+    stderr: cleanProcessText(ensureSession.stderr)
+  });
+  if (ensureSession.error) {
+    throw new Error(`acpx ${executor.kind} recovery session ensure failed to start: ${ensureSession.error.message}`);
+  }
+  if (ensureSession.status !== 0) {
+    throw new Error(cleanProcessText(ensureSession.stderr || ensureSession.stdout || `acpx ${executor.kind} recovery sessions ensure exited with status ${ensureSession.status}`));
+  }
+
+  const acpxArgs = buildAcpxPromptArgs({ executor, payload, model: executorModel });
+  if (options.background) {
+    const outputPath = path.join(path.dirname(logPath), `${executor.kind}-${options.mode}-output.log`);
+    const outputFd = fs.openSync(outputPath, "a");
+    const child = spawn(acpxPath, acpxArgs, {
+      detached: true,
+      stdio: ["ignore", outputFd, outputFd],
+      cwd: conversation.workspace ?? process.cwd(),
+      env: executorEnv
+    });
+    child.unref();
+    fs.closeSync(outputFd);
+    appendEvent(logPath, {
+      ts: new Date().toISOString(),
+      conversation_id: conversation.conversation_id,
+      event: "executor_recovery_launch",
+      mode: options.mode,
+      run_mode: "background",
+      pid: child.pid ?? null,
+      executor,
+      output_path: outputPath
+    });
+    const monitor = startExecutorMonitor({
+      statePath,
+      logPath,
+      pid: child.pid,
+      outputPath,
+      agentTimeoutMinutes: Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES),
+      pollIntervalMs: Number(options.monitorPollIntervalMs ?? DEFAULT_MONITOR_POLL_INTERVAL_MS)
+    });
+    printJson({
+      conversation: recoveredConversation,
+      recovered: options.mode === "recover",
+      restarted: options.mode === "restart",
+      background: true,
+      pid: child.pid ?? null,
+      monitor_pid: monitor.pid ?? null,
+      output_path: outputPath,
+      executor,
+      budget: budgetAction(recoveredConversation)
+    });
+    return;
+  }
+
+  const sendResult = spawnSync(acpxPath, acpxArgs, {
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024 * 10,
+    cwd: conversation.workspace ?? process.cwd(),
+    env: executorEnv
+  });
+  appendEvent(logPath, {
+    ts: new Date().toISOString(),
+    conversation_id: conversation.conversation_id,
+    event: "executor_recovery_send",
+    mode: options.mode,
+    status: sendResult.status ?? null,
+    executor,
+    stdout: cleanProcessText(sendResult.stdout),
+    stderr: cleanProcessText(sendResult.stderr)
+  });
+  if (sendResult.error) {
+    throw new Error(`acpx ${executor.kind} recovery send failed to start: ${sendResult.error.message}`);
+  }
+  if (sendResult.status !== 0) {
+    throw new Error(cleanProcessText(sendResult.stderr || sendResult.stdout || `acpx ${executor.kind} recovery send exited with status ${sendResult.status}`));
+  }
+
+  printJson({
+    conversation: recoveredConversation,
+    recovered: options.mode === "recover",
+    restarted: options.mode === "restart",
+    delivered: true,
+    executor,
+    budget: budgetAction(recoveredConversation)
+  });
+}
+
+function buildRecoverPayload({ conversation, pendingMessage, logPath }) {
+  return [
+    "Recover this Agent Knock Knock task in a new ACPX session.",
+    "The previous coding-agent session was unavailable. This is AKK replay recovery, not native agent session resume.",
+    "Use the saved protocol history summary below as context, then continue with the pending OpenClaw message.",
+    "Continue to report back only through the callback command already provided for this conversation.",
+    "",
+    "Task:",
+    conversation.user_request,
+    "",
+    "Saved protocol history:",
+    formatProtocolHistoryForRecovery(readExistingEvents(logPath)),
+    "",
+    "Pending OpenClaw message:",
+    JSON.stringify(pendingMessage)
+  ].join("\n");
+}
+
+function buildRestartPayload({ pendingMessage }) {
+  return [
+    "Restart this Agent Knock Knock task in a new ACPX session.",
+    "Do not assume the previous coding-agent session context is available.",
+    "Follow only the pending OpenClaw message below.",
+    "Continue to report back only through the callback command already provided for this conversation.",
+    "",
+    JSON.stringify(pendingMessage)
+  ].join("\n");
+}
+
+function formatProtocolHistoryForRecovery(events) {
+  const lines = events
+    .filter((event) => event.event === "message")
+    .map((event) => event.message ?? event)
+    .filter((message) => message?.from && message?.to && message?.type)
+    .slice(-40)
+    .map((message) => {
+      const body = String(message.body ?? "").replace(/\s+/g, " ").trim().slice(0, 700);
+      return `- round ${message.round ?? "?"}: ${message.from} -> ${message.to} ${message.type}: ${body}`;
+    });
+  return lines.length ? lines.join("\n") : "- No prior protocol messages were recorded.";
 }
 
 function runClose(options) {
@@ -1365,6 +1675,7 @@ function summarizeConversation(conversation) {
     updated_at: conversation.updated_at,
     idle_since: conversation.idle_since,
     closed_at: conversation.closed_at,
+    recovery: conversation.recovery,
     state_path: conversation.state_path,
     event_log_path: conversation.event_log_path
   };
@@ -2144,6 +2455,8 @@ function usage() {
   agent-knock-knock status --conversation <id> [--store-dir <dir>] [--trace]
   agent-knock-knock send --conversation <id> --message <text> [--type answer|task|control] [--all-proxy <url>] [--agent-timeout-minutes <minutes>]
   agent-knock-knock cancel --conversation <id> [--all-proxy <url>]
+  agent-knock-knock recover --conversation <id> [--session <name>] [--all-proxy <url>]
+  agent-knock-knock restart --conversation <id> [--session <name>] [--all-proxy <url>]
   agent-knock-knock close --conversation <id> [--reason <text>]
   agent-knock-knock callback --state <file> --message-json <json> [--record-only]
   agent-knock-knock transcript --log <file> [--include-raw]

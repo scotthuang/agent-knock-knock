@@ -111,6 +111,8 @@ AKK Claude: review the latest commit
 akk list
 akk send <conversation-id>: continue with the smaller implementation
 akk cancel <conversation-id>
+akk recover <conversation-id>
+akk restart <conversation-id>
 akk close <conversation-id>
 ```
 
@@ -124,6 +126,8 @@ The plugin also registers the `/akk` slash command for channel surfaces that sup
 /akk status <conversation-id>
 /akk send <conversation-id> <message>
 /akk cancel <conversation-id>
+/akk recover <conversation-id>
+/akk restart <conversation-id>
 /akk close <conversation-id> [reason]
 ```
 
@@ -138,6 +142,8 @@ If your OpenClaw config uses a restrictive tool allowlist, allow the tool:
       "agent_knock_knock_status",
       "agent_knock_knock_send",
       "agent_knock_knock_cancel",
+      "agent_knock_knock_recover",
+      "agent_knock_knock_restart",
       "agent_knock_knock_close"
     ]
   }
@@ -153,6 +159,14 @@ Coding-agent `done` callbacks mark the AKK conversation `idle`, not closed. Idle
 New delegations create a fresh ACPX session by default, using a name like `akk-codex-20260620183511-88811e97` or `akk-claude-...`. This keeps concurrent AKK tasks isolated. Reuse happens through `AKK send <conversation-id>: <message>` against an existing AKK conversation, or by explicitly configuring/passing a fixed coding-agent session.
 
 Background launches also start a small AKK monitor process. The monitor exits when the conversation receives a callback or otherwise leaves the agent-waiting state. If the executor process disappears before a callback, or if no callback arrives before `agentTimeoutMinutes`, the conversation is marked `stalled` and AKK attempts to notify the original OpenClaw session through the callback Gateway route. The default agent timeout is 60 minutes.
+
+Some coding agents may not reliably resume a named ACPX session after their backing process disappears. Executors can opt into an explicit recovery decision flow. In that mode, a failed follow-up send marks the AKK conversation `needs_recovery` instead of automatically replaying history or starting a new session. The user can then choose:
+
+- `AKK recover <conversation-id>`: start a new coding-agent session with AKK's saved protocol history summary plus the pending message.
+- `AKK restart <conversation-id>`: start a new coding-agent session with only the pending message.
+- `AKK close <conversation-id>`: close the AKK task without recovery.
+
+Codex and Claude Code currently use native named-session recovery through ACPX. The explicit decision flow is the conservative fallback intended for agents whose native session resume is unreliable.
 
 Task status can include a safe executor trace with `--trace` or the OpenClaw status tool's `trace: true` parameter. Trace summaries show client lifecycle events, tool call names and statuses, permission-request markers, monitor events, and short sanitized output previews. Agent thinking content is never returned; it is counted and marked as redacted.
 
@@ -201,6 +215,16 @@ Request cooperative cancellation of the current in-flight prompt:
 
 ```bash
 node dist/src/cli.js cancel \
+  --conversation <conversation-id>
+```
+
+Recover or restart a task that is waiting for an explicit recovery decision:
+
+```bash
+node dist/src/cli.js recover \
+  --conversation <conversation-id>
+
+node dist/src/cli.js restart \
   --conversation <conversation-id>
 ```
 

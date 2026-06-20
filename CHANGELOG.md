@@ -15,8 +15,10 @@
 - Added runtime diagnostics logs under `~/.agent-knock-knock/logs`, with local timestamps, daily NDJSON files, secret redaction, log-level filtering, and retention cleanup.
 - Added safe executor trace support through `agent-knock-knock status --trace` and the OpenClaw status tool's `trace` parameter, summarizing tool calls, permission requests, client events, monitor events, and redacted thinking markers.
 - Added a coding-agent executor registry that centralizes Codex and Claude Code ACPX metadata, aliases, protocol actors, session naming, and proxy/model configuration.
+- Added an explicit recovery-decision foundation with `needs_recovery`, `agent-knock-knock recover`, `agent-knock-knock restart`, `agent_knock_knock_recover`, `agent_knock_knock_restart`, `/akk recover`, and `/akk restart`.
 - Added tests for Codex-backed delegation and task management flows.
 - Added tests for the executor registry used by Codex and Claude Code.
+- Added tests for explicit recovery decisions, AKK history replay recovery, and restart without history replay.
 - Added tests for runtime diagnostics logging, redaction, retention cleanup, and CLI log emission.
 
 ### Changed
@@ -36,6 +38,7 @@
 - Renamed the OpenClaw skill template from `bidirectional-chat` to `agent-knock-knock` so the installed skill matches the project and plugin name.
 - Updated documentation to describe local coding agents, task management, cooperative cancellation, and the home-directory conversation store.
 - Updated documentation with the local update flow required to rebuild and reload the linked OpenClaw plugin after project changes.
+- Updated the OpenClaw skill template and README with conservative recovery guidance for coding agents whose native session resume is unreliable.
 - Documented ACPX approval behavior: Claude Code permission requests work with `--approve-all`, while some Codex sensitive operations can fail directly under AKK's non-interactive/background path instead of surfacing an approvable ACPX permission request.
 
 ### Fixed
@@ -44,7 +47,7 @@
 
 ### Verified
 
-- `npm test` passes 46 tests.
+- `npm test` passes 51 tests.
 - Local OpenClaw installation validated with the linked Agent Knock Knock plugin loaded, the updated `agent-knock-knock` skill installed, and the gateway restarted successfully.
 - Live OpenClaw validation created a Claude task, listed Claude tasks, sent a follow-up message, and closed the task through plugin tools.
 - Live OpenClaw validation created a Codex task with a configured `ALL_PROXY` value and `model=gpt-5.5/medium`, listed Codex tasks, sent a follow-up message, received Codex `done`, and closed the task through plugin tools.

@@ -183,6 +183,32 @@ const cancelParameters = {
   }
 };
 
+const recoveryParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["conversation_id"],
+  properties: {
+    conversation_id: {
+      type: "string"
+    },
+    session: {
+      type: "string"
+    },
+    allProxy: {
+      type: "string"
+    },
+    model: {
+      type: "string"
+    },
+    storeDir: {
+      type: "string"
+    },
+    idleTimeoutMinutes: {
+      type: "number"
+    }
+  }
+};
+
 const closeParameters = {
   type: "object",
   additionalProperties: false,
@@ -328,6 +354,20 @@ export default definePluginEntry({
     });
 
     registerCliTool(api, {
+      name: "agent_knock_knock_recover",
+      description: "Recover an Agent Knock Knock task whose coding-agent session is unavailable by starting a new session with AKK's saved protocol history summary plus the pending message. Use only after the user chooses recovery.",
+      parameters: recoveryParameters,
+      buildArgs: (params) => buildRecoveryArgs(api, "recover", params)
+    });
+
+    registerCliTool(api, {
+      name: "agent_knock_knock_restart",
+      description: "Restart an Agent Knock Knock task whose coding-agent session is unavailable by starting a new session with only the pending message. Use only after the user chooses restart instead of history recovery.",
+      parameters: recoveryParameters,
+      buildArgs: (params) => buildRecoveryArgs(api, "restart", params)
+    });
+
+    registerCliTool(api, {
       name: "agent_knock_knock_close",
       description: "Close an Agent Knock Knock coding-agent task without terminating the underlying ACPX session. Use this for AKK close requests.",
       parameters: closeParameters,
@@ -392,6 +432,20 @@ async function handleAkkCommand(api, ctx) {
       const result = runCli(api, args);
       return { text: formatCancelCommandResult(result) };
     }
+    if (parsed.action === "recover" || parsed.action === "restart") {
+      const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+      const args = [
+        parsed.action,
+        "--conversation",
+        parsed.conversationId,
+        "--background"
+      ];
+      pushOptional(args, "--all-proxy", stringValue(config.codexAllProxy) ?? stringValue(config.allProxy));
+      pushOptional(args, "--model", stringValue(config.codexModel) ?? stringValue(config.model));
+      pushOptional(args, "--idle-timeout-minutes", numberString(config.idleTimeoutMinutes));
+      const result = runCli(api, args);
+      return { text: formatRecoveryCommandResult(result, parsed.action) };
+    }
     if (parsed.action === "close") {
       const result = runCli(api, [
         "close",
@@ -439,6 +493,14 @@ function parseAkkCommand(args) {
     const { token: conversationId } = takeRequiredToken(rest, "Usage: /akk cancel <conversation-id>");
     return { action: "cancel", conversationId };
   }
+  if (action === "recover") {
+    const { token: conversationId } = takeRequiredToken(rest, "Usage: /akk recover <conversation-id>");
+    return { action: "recover", conversationId };
+  }
+  if (action === "restart") {
+    const { token: conversationId } = takeRequiredToken(rest, "Usage: /akk restart <conversation-id>");
+    return { action: "restart", conversationId };
+  }
   if (action === "close" || action === "done") {
     const { token: conversationId, rest: reason } = takeRequiredToken(rest, "Usage: /akk close <conversation-id> [reason]");
     return { action: "close", conversationId, reason: reason.trim() || "Closed from /akk command" };
@@ -484,6 +546,8 @@ function akkUsageText() {
     "/akk status <conversation-id>",
     "/akk send <conversation-id> <message>",
     "/akk cancel <conversation-id>",
+    "/akk recover <conversation-id>",
+    "/akk restart <conversation-id>",
     "/akk close <conversation-id> [reason]"
   ].join("\n");
 }
@@ -546,6 +610,17 @@ function formatCancelCommandResult(result) {
   const conversation = result.conversation ?? {};
   return [
     "AKK cancel requested.",
+    `conversation: ${conversation.conversation_id ?? "unknown"}`,
+    `agent: ${result.executor?.kind ?? conversation.executor?.kind ?? "unknown"}`,
+    `session: ${result.executor?.session ?? conversation.executor?.session ?? "unknown"}`,
+    `status: ${conversation.status ?? "unknown"}`
+  ].join("\n");
+}
+
+function formatRecoveryCommandResult(result, action) {
+  const conversation = result.conversation ?? {};
+  return [
+    action === "recover" ? "AKK recovery started." : "AKK restart started.",
     `conversation: ${conversation.conversation_id ?? "unknown"}`,
     `agent: ${result.executor?.kind ?? conversation.executor?.kind ?? "unknown"}`,
     `session: ${result.executor?.session ?? conversation.executor?.session ?? "unknown"}`,
@@ -691,6 +766,16 @@ function registerCliTool(api, { name, description, parameters, buildArgs }) {
     }),
     { name, optional: true }
   );
+}
+
+function buildRecoveryArgs(api, command, params) {
+  const args = [command, "--conversation", requiredString(params.conversation_id, "conversation_id"), "--background"];
+  pushOptional(args, "--session", stringValue(params.session));
+  pushOptional(args, "--all-proxy", stringValue(params.allProxy) ?? stringValue(api.pluginConfig?.codexAllProxy) ?? stringValue(api.pluginConfig?.allProxy));
+  pushOptional(args, "--model", stringValue(params.model) ?? stringValue(api.pluginConfig?.codexModel) ?? stringValue(api.pluginConfig?.model));
+  pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
+  pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(api.pluginConfig?.idleTimeoutMinutes));
+  return args;
 }
 
 function runCli(api, cliArgs, { cwd = process.cwd() } = {}) {

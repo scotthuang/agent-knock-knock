@@ -2,6 +2,7 @@ export type OpenClawActor = "openclaw";
 export type CodingAgentActor = "claude-code" | "codex";
 export type Actor = OpenClawActor | CodingAgentActor;
 export type ExecutorKind = "claude" | "codex";
+export type SessionRecoveryStrategy = "native-session" | "explicit-decision";
 
 export interface Executor {
   kind: ExecutorKind;
@@ -23,6 +24,9 @@ export interface ExecutorDefinition {
   proxyConfigKeys: readonly string[];
   modelConfigKeys: readonly string[];
   proxyEnvKeys: readonly string[];
+  sessionRecoveryStrategy: SessionRecoveryStrategy;
+  supportsSessionEnsure: boolean;
+  supportsCancel: boolean;
   modelEnvKey?: string;
 }
 
@@ -43,7 +47,10 @@ export const EXECUTORS = {
     sessionConfigKeys: ["claudeSession", "defaultClaudeSession"],
     proxyConfigKeys: [],
     modelConfigKeys: [],
-    proxyEnvKeys: []
+    proxyEnvKeys: [],
+    sessionRecoveryStrategy: "native-session",
+    supportsSessionEnsure: true,
+    supportsCancel: true
   },
   codex: {
     kind: "codex",
@@ -57,6 +64,9 @@ export const EXECUTORS = {
     proxyConfigKeys: ["codexAllProxy"],
     modelConfigKeys: ["codexModel"],
     proxyEnvKeys: ["CODEX_ALL_PROXY", "ALL_PROXY", "all_proxy"],
+    sessionRecoveryStrategy: "native-session",
+    supportsSessionEnsure: true,
+    supportsCancel: true,
     modelEnvKey: "CODEX_ACPX_MODEL"
   }
 } as const satisfies Record<ExecutorKind, ExecutorDefinition>;
@@ -97,6 +107,10 @@ export function resolveExecutor({ kind = "claude", session }: ResolveExecutorOpt
 
 export function acpxCommandForExecutor(executor: Pick<Executor, "kind">): string {
   return executorDefinitionForKind(executor.kind).acpxCommand;
+}
+
+export function sessionRecoveryStrategyForExecutor(executor: Pick<Executor, "kind">): SessionRecoveryStrategy {
+  return executorDefinitionForKind(executor.kind).sessionRecoveryStrategy;
 }
 
 export function proxyEnvForExecutor(executor: Pick<Executor, "kind">, env: NodeJS.ProcessEnv): string | undefined {

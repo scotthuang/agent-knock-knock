@@ -304,6 +304,174 @@ fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify({
   }
 });
 
+test("explicit recovery policy asks for a recovery decision before replaying history", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-needs-recovery-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const acpxCallsPath = path.join(tempDir, "acpx-calls.ndjson");
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    const fakeAcpx = path.join(fakeBinDir, "acpx");
+    fs.writeFileSync(
+      fakeAcpx,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (process.env.FAIL_ENSURE === "1" && args.includes("sessions") && args.includes("ensure")) {
+  console.error("Cursor session unavailable");
+  process.exit(9);
+}
+fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify(args) + "\\n", "utf8");
+`,
+      "utf8"
+    );
+    fs.chmodSync(fakeAcpx, 0o755);
+
+    const created = runCli([
+      "new",
+      "--agent",
+      "codex",
+      "--session",
+      "codex-recovery",
+      "--request",
+      "Initial recovery task",
+      "--store-dir",
+      storeDir
+    ]);
+    runCli([
+      "callback",
+      "--state",
+      created.paths.statePath,
+      "--record-only",
+      "--message-json",
+      JSON.stringify({
+        from: "codex",
+        to: "openclaw",
+        type: "done",
+        body: "Initial work completed."
+      })
+    ]);
+
+    const needsRecovery = runCli([
+      "send",
+      "--conversation",
+      created.conversation.conversation_id,
+      "--store-dir",
+      storeDir,
+      "--message",
+      "Pending follow-up that cannot reach the old session.",
+      "--recovery-policy",
+      "explicit"
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      FAIL_ENSURE: "1"
+    });
+    assert.equal(needsRecovery.delivered, false);
+    assert.equal(needsRecovery.requires_recovery_decision, true);
+    assert.equal(needsRecovery.conversation.status, "needs_recovery");
+    assert.equal(needsRecovery.recovery.failed_stage, "session_ensure");
+    assert.equal(needsRecovery.recovery.pending_message.body, "Pending follow-up that cannot reach the old session.");
+
+    const blockedSend = runCliFailure([
+      "send",
+      "--conversation",
+      created.conversation.conversation_id,
+      "--store-dir",
+      storeDir,
+      "--message",
+      "Do not send until the user chooses."
+    ]);
+    assert.match(blockedSend.stderr, /choose recover, restart, or close first/);
+
+    const recovered = runCli([
+      "recover",
+      "--conversation",
+      created.conversation.conversation_id,
+      "--store-dir",
+      storeDir
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(recovered.recovered, true);
+    assert.equal(recovered.delivered, true);
+    assert.equal(recovered.conversation.status, "waiting_for_agent");
+    assert.match(recovered.executor.session, /^akk-codex-\d{14}-[0-9a-f]{8}$/);
+    assert.equal(recovered.conversation.recovery.resolution, "recover");
+    assert.equal(recovered.conversation.recovery.previous_session, "codex-recovery");
+
+    const acpxCalls = fs.readFileSync(acpxCallsPath, "utf8")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line));
+    assert.deepEqual(acpxCalls[0], ["codex", "sessions", "ensure", "--name", recovered.executor.session]);
+    assert.deepEqual(acpxCalls[1].slice(0, 4), ["--approve-all", "codex", "-s", recovered.executor.session]);
+    assert.match(acpxCalls[1][4], /AKK replay recovery/);
+    assert.match(acpxCalls[1][4], /Initial work completed/);
+    assert.match(acpxCalls[1][4], /Pending follow-up that cannot reach the old session/);
+
+    fs.writeFileSync(acpxCallsPath, "", "utf8");
+    const restartCreated = runCli([
+      "new",
+      "--agent",
+      "codex",
+      "--session",
+      "codex-restart",
+      "--request",
+      "Initial restart task",
+      "--store-dir",
+      storeDir
+    ]);
+    runCli([
+      "callback",
+      "--state",
+      restartCreated.paths.statePath,
+      "--record-only",
+      "--message-json",
+      JSON.stringify({
+        from: "codex",
+        to: "openclaw",
+        type: "done",
+        body: "History that restart should not replay."
+      })
+    ]);
+    runCli([
+      "send",
+      "--conversation",
+      restartCreated.conversation.conversation_id,
+      "--store-dir",
+      storeDir,
+      "--message",
+      "Restart-only pending instruction.",
+      "--recovery-policy",
+      "explicit"
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      FAIL_ENSURE: "1"
+    });
+    const restarted = runCli([
+      "restart",
+      "--conversation",
+      restartCreated.conversation.conversation_id,
+      "--store-dir",
+      storeDir
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(restarted.restarted, true);
+    assert.equal(restarted.conversation.recovery.resolution, "restart");
+    const restartCalls = fs.readFileSync(acpxCallsPath, "utf8")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line));
+    assert.match(restartCalls[1][4], /Restart this Agent Knock Knock task/);
+    assert.match(restartCalls[1][4], /Restart-only pending instruction/);
+    assert.doesNotMatch(restartCalls[1][4], /History that restart should not replay/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("monitor marks waiting conversations stalled when the executor process is gone", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-monitor-exit-"));
   const storeDir = path.join(tempDir, "conversations");
@@ -461,4 +629,17 @@ function runCli(args, env = {}) {
 
   assert.equal(result.status, 0, result.stderr || result.stdout);
   return JSON.parse(result.stdout);
+}
+
+function runCliFailure(args, env = {}) {
+  const result = spawnSync(process.execPath, [binPath, ...args], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      ...env
+    }
+  });
+
+  assert.notEqual(result.status, 0, result.stdout);
+  return result;
 }

@@ -1,7 +1,7 @@
 {
   "id": "agent-knock-knock",
   "name": "Agent Knock Knock",
-  "description": "Agent Knock Knock (AKK/akk) delegates OpenClaw coding work to local Codex or Claude agents. Use this plugin when the user says AKK, akk, Agent Knock Knock, asks to hand work to Codex or Claude, asks what agent tasks are running, sends a follow-up to an agent task, cancels a running agent task, or closes an agent task. Default delegation target is Codex; use Claude only when the user explicitly asks for Claude.",
+  "description": "Agent Knock Knock (AKK/akk) delegates OpenClaw coding work to local Codex or Claude agents. Use this plugin when the user says AKK, akk, Agent Knock Knock, asks to hand work to Codex or Claude, asks what agent tasks are running, sends a follow-up to an agent task, recovers or restarts an unavailable agent session, cancels a running agent task, or closes an agent task. Default delegation target is Codex; use Claude only when the user explicitly asks for Claude.",
   "activation": {
     "onStartup": true
   },
@@ -15,6 +15,8 @@
       "agent_knock_knock_status",
       "agent_knock_knock_send",
       "agent_knock_knock_cancel",
+      "agent_knock_knock_recover",
+      "agent_knock_knock_restart",
       "agent_knock_knock_close"
     ]
   },
@@ -32,6 +34,12 @@
       "optional": true
     },
     "agent_knock_knock_cancel": {
+      "optional": true
+    },
+    "agent_knock_knock_recover": {
+      "optional": true
+    },
+    "agent_knock_knock_restart": {
       "optional": true
     },
     "agent_knock_knock_close": {

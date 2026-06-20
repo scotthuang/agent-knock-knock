@@ -10,7 +10,7 @@ import {
 } from "./executors.js";
 
 export type MessageType = "task" | "question" | "answer" | "progress" | "blocked" | "done" | "error" | "control";
-export type ConversationStatus = "created" | "running" | "waiting_for_agent" | "waiting_for_openclaw" | "idle" | "stalled" | "failed" | "closed" | "cancelled" | "cancelling";
+export type ConversationStatus = "created" | "running" | "waiting_for_agent" | "waiting_for_openclaw" | "idle" | "stalled" | "needs_recovery" | "failed" | "closed" | "cancelled" | "cancelling";
 export type BudgetLevel = "normal" | "converge" | "warning" | "soft_stop" | "hard_stop";
 export type { Actor, Executor, ExecutorKind } from "./executors.js";
 export { ACTORS, EXECUTORS, resolveExecutor } from "./executors.js";
@@ -32,6 +32,7 @@ export interface Conversation {
   closed_at?: string;
   close_reason?: string;
   cancel_requested_at?: string;
+  recovery?: Record<string, unknown>;
   gateway_url?: string;
   gateway_method?: string;
   gateway_session?: string;

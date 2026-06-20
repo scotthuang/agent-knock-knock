@@ -5,7 +5,7 @@ description: Delegate OpenClaw tasks to local Codex and Claude Code agents throu
 
 # Agent Knock Knock
 
-Use this skill when the user says `AKK`, `akk`, `Agent Knock Knock`, asks OpenClaw to delegate coding work to Codex or Claude, asks what agent tasks are running, sends a follow-up to an agent task, cancels a running agent task, or closes an agent task.
+Use this skill when the user says `AKK`, `akk`, `Agent Knock Knock`, asks OpenClaw to delegate coding work to Codex or Claude, asks what agent tasks are running, sends a follow-up to an agent task, recovers or restarts an unavailable agent session, cancels a running agent task, or closes an agent task.
 
 Treat `AKK` and `akk` the same way.
 
@@ -36,6 +36,8 @@ Slash command forms:
 - `/akk status <conversation-id>`: inspect one AKK session.
 - `/akk send <conversation-id> <message>`: send a follow-up to one open AKK session.
 - `/akk cancel <conversation-id>`: request cooperative cancellation of the current in-flight prompt for one AKK session without closing it.
+- `/akk recover <conversation-id>`: recover a session that is waiting for a recovery decision by starting a new agent session with AKK's saved protocol history summary.
+- `/akk restart <conversation-id>`: restart a session that is waiting for a recovery decision by starting a new agent session with only the pending message.
 - `/akk close <conversation-id> [reason]`: close one AKK session.
 
 Natural-language forms:
@@ -47,6 +49,8 @@ Natural-language forms:
 - `AKK status <conversation-id>`: call `agent_knock_knock_status`.
 - `AKK send <conversation-id>: <message>` or follow-up requests for an existing open agent session: call `agent_knock_knock_send`.
 - `AKK cancel <conversation-id>` or requests to stop the current running work without closing the session: call `agent_knock_knock_cancel`.
+- `AKK recover <conversation-id>`: call `agent_knock_knock_recover`.
+- `AKK restart <conversation-id>`: call `agent_knock_knock_restart`.
 - `AKK close <conversation-id>`: call `agent_knock_knock_close`.
 
 Session reuse rule:
@@ -54,6 +58,7 @@ Session reuse rule:
 - If the user asks to continue, add, follow up, "send another task", "let it also", "tell it", "ask Codex/Claude to also", "再让它", "继续让它", "给刚才那个", or otherwise refers to an existing AKK agent, reuse the most recent matching open AKK session instead of creating a new delegation.
 - When the user gives a follow-up without a `conversation_id`, first call `agent_knock_knock_list`, choose the most recent open session that matches the requested agent if one is named, and then call `agent_knock_knock_send` with that `conversation_id`.
 - `idle` means the agent completed the previous round but the AKK session is still open and should be reused for follow-ups.
+- `needs_recovery` means AKK could not reach the previous coding-agent session and must not automatically replay history or start a new session. Ask the user to choose `AKK recover <conversation-id>`, `AKK restart <conversation-id>`, or `AKK close <conversation-id>`.
 - Call `agent_knock_knock_delegate` only when the user clearly asks for a new independent AKK task/session, names a different agent that does not already have a suitable open session, or there is no matching open session to reuse.
 
 Useful examples:
@@ -66,6 +71,8 @@ akk list
 akk send task-20260618T010203Z-abcdef12: continue with the smaller implementation
 再让刚才那个 Codex 分析 ~/chrome-debug 为什么占空间
 akk cancel task-20260618T010203Z-abcdef12
+akk recover task-20260618T010203Z-abcdef12
+akk restart task-20260618T010203Z-abcdef12
 akk close task-20260618T010203Z-abcdef12
 ```
 
@@ -105,6 +112,16 @@ The required routing is:
 4. OpenClaw answers `question` or `blocked` messages with structured `answer` messages through the same protocol path.
 
 If the plugin tool and delegation script are unavailable, stop and report that Agent Knock Knock is not available. Do not fall back to direct `sessions_send` delivery.
+
+## Recovery Decisions
+
+When AKK reports that a conversation is `needs_recovery`, do not automatically recover, replay history, restart, or close it. Explain the options and let the user choose:
+
+- `AKK recover <conversation-id>`: use `agent_knock_knock_recover` to start a new coding-agent session with AKK's saved protocol history summary plus the pending message.
+- `AKK restart <conversation-id>`: use `agent_knock_knock_restart` to start a new coding-agent session with only the pending message.
+- `AKK close <conversation-id>`: use `agent_knock_knock_close` to close the task.
+
+Make clear that `recover` is AKK replay recovery, not guaranteed native coding-agent session resume.
 
 ## Message Rules
 
