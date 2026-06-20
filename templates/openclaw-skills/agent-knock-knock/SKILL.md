@@ -9,7 +9,7 @@ Use this skill when the user says `AKK`, `akk`, `Agent Knock Knock`, asks OpenCl
 
 Treat `AKK` and `akk` the same way.
 
-Default delegation target: Codex.
+Default delegation target: plugin-configured `defaultAgent`. If `defaultAgent` is unset, Agent Knock Knock falls back to Codex.
 
 Use Claude only when the user explicitly says `AKK Claude`, `Claude`, or asks to delegate to Claude. Use Cursor only when the user explicitly says `AKK Cursor`, `Cursor`, or asks to delegate to Cursor.
 
@@ -29,7 +29,7 @@ Use the native `/akk` command when the user invokes slash-command syntax. Use th
 
 Slash command forms:
 
-- `/akk <task>`: delegate to Codex.
+- `/akk <task>`: delegate to the plugin-configured default agent, falling back to Codex when unset.
 - `/akk codex <task>`: delegate to Codex.
 - `/akk claude <task>`: delegate to Claude.
 - `/akk cursor <task>`: delegate to Cursor.
@@ -43,7 +43,7 @@ Slash command forms:
 
 Natural-language forms:
 
-- `AKK: <task>` or `akk: <task>`: call `agent_knock_knock_delegate` with `request=<task>` and no `agent` parameter, so the plugin default Codex is used.
+- `AKK: <task>` or `akk: <task>`: call `agent_knock_knock_delegate` with `request=<task>` and no `agent` parameter, so the plugin-configured `defaultAgent` is used. If unset, AKK falls back to Codex.
 - `AKK Codex: <task>`: call `agent_knock_knock_delegate` with `agent="codex"`.
 - `AKK Claude: <task>`: call `agent_knock_knock_delegate` with `agent="claude"`.
 - `AKK Cursor: <task>`: call `agent_knock_knock_delegate` with `agent="cursor"`.

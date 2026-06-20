@@ -101,7 +101,23 @@ Run this after pulling new code or editing TypeScript/plugin files. The OpenClaw
 
 The native OpenClaw plugin registers tools that let OpenClaw delegate implementation work to Codex, Claude Code, or Cursor, list open sessions, send follow-up messages, inspect status, request cooperative cancellation, and close sessions without exposing raw terminal output as tool results.
 
-Natural-language routing is designed around the short name `AKK`; lowercase `akk` should be treated the same way. When a user says `AKK` without naming an agent, OpenClaw should delegate to Codex. Use Claude or Cursor only for explicit requests such as `AKK Claude` or `AKK Cursor`.
+Natural-language routing is designed around the short name `AKK`; lowercase `akk` should be treated the same way. When a user says `AKK` without naming an agent, OpenClaw should omit the agent parameter and let the plugin use `defaultAgent`. If `defaultAgent` is not configured, AKK falls back to Codex. Explicit requests such as `AKK Claude`, `AKK Cursor`, or `AKK Codex` override the default.
+
+Configure the default coding agent in the plugin config:
+
+```json5
+{
+  plugins: {
+    entries: {
+      "agent-knock-knock": {
+        config: {
+          defaultAgent: "cursor" // "codex", "claude", or "cursor"
+        }
+      }
+    }
+  }
+}
+```
 
 Useful chat-style prompts:
 
@@ -329,7 +345,7 @@ Runtime logs are diagnostic-only and are safe to use for local troubleshooting. 
 ## Defaults
 
 - OpenClaw session: `agent:main:main`
-- OpenClaw plugin default agent: `codex`
+- OpenClaw plugin default agent: configured with `defaultAgent`; fallback is `codex`
 - Delegated ACPX session: generated per new task, unless explicitly configured with `session`, `codexSession`, `claudeSession`, or `cursorSession`
 - CLI `new` fallback Claude session: `bidirectional`
 - CLI `new` fallback Codex session: `codex`

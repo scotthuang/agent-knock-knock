@@ -31,7 +31,7 @@
 - Updated OpenClaw plugin routing descriptions so `AKK` and `akk` both indicate Agent Knock Knock, and unspecified AKK delegations default to Codex.
 - Updated the OpenClaw skill template so follow-up language such as "continue", "再让它", or "给刚才那个" defaults to reusing the most recent matching open AKK session through `agent_knock_knock_send`.
 - Updated the OpenClaw skill template with AKK cancel routing for stopping current in-flight work without closing the reusable AKK session.
-- Updated the OpenClaw skill template with AKK/akk routing, default Codex delegation, Claude opt-in routing, and task management tool usage.
+- Updated the OpenClaw skill template with AKK/akk routing, configurable default-agent delegation, explicit agent routing, and task management tool usage.
 - Updated follow-up sends from OpenClaw to launch the coding agent in the background so OpenClaw can continue to subsequent tool calls.
 - Migrated the implementation source to TypeScript and moved runtime entrypoints to compiled `dist/src` output.
 - Migrated the Node test suite to TypeScript and updated `npm test` to build before running compiled tests from `dist/test`.
@@ -42,6 +42,7 @@
 - Updated documentation with the local update flow required to rebuild and reload the linked OpenClaw plugin after project changes.
 - Updated the OpenClaw skill template and README with conservative recovery guidance for coding agents whose native session resume is unreliable.
 - Updated the OpenClaw skill template, README, plugin manifest, and protocol docs for Cursor routing and task management.
+- Updated README, plugin metadata, and skill guidance to document the configurable `defaultAgent` flow for unspecified AKK delegations.
 - Documented ACPX approval behavior: Claude Code permission requests work with `--approve-all`, while some Codex sensitive operations can fail directly under AKK's non-interactive/background path instead of surfacing an approvable ACPX permission request.
 
 ### Fixed

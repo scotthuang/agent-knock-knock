@@ -21,7 +21,7 @@ const delegateParameters = {
       type: "string",
       enum: EXECUTOR_KINDS,
       description:
-        "Coding agent to delegate to. Defaults to plugin config or codex. Use claude only when the user explicitly asks for AKK Claude or Claude."
+        "Coding agent to delegate to. Defaults to plugin config defaultAgent, falling back to codex when unset. Explicit user agent requests override the default."
     },
     request: {
       type: "string",
@@ -242,7 +242,7 @@ export default definePluginEntry({
   id: "agent-knock-knock",
   name: "Agent Knock Knock",
   description:
-    "Agent Knock Knock (AKK/akk) delegates OpenClaw coding work to local Codex, Claude, or Cursor agents. Use this for AKK, akk, Agent Knock Knock, Codex delegation, Claude delegation, Cursor delegation, task listing, follow-up messages, status, recovery, restart, cancel requests, and close requests. Default delegation target is Codex unless the user explicitly asks for another agent.",
+    "Agent Knock Knock (AKK/akk) delegates OpenClaw coding work to local Codex, Claude, or Cursor agents. Use this for AKK, akk, Agent Knock Knock, Codex delegation, Claude delegation, Cursor delegation, task listing, follow-up messages, status, recovery, restart, cancel requests, and close requests. Default delegation target comes from plugin config defaultAgent and falls back to Codex when unset; explicit user agent requests override it.",
   register(api) {
     api.registerGatewayMethod(
       CALLBACK_METHOD,
@@ -271,7 +271,7 @@ export default definePluginEntry({
         default: "AKK is handling the request..."
       },
       agentPromptGuidance: [
-        "Use /akk <task> to delegate coding work to Agent Knock Knock. /akk defaults to Codex; use /akk claude <task> or /akk cursor <task> only when that agent is explicitly requested."
+        "Use /akk <task> to delegate coding work to Agent Knock Knock. /akk uses the plugin-configured defaultAgent and falls back to Codex when unset; use /akk claude <task>, /akk cursor <task>, or /akk codex <task> when the user explicitly requests that agent."
       ],
       handler: async (ctx) => handleAkkCommand(api, ctx)
     });
@@ -280,7 +280,7 @@ export default definePluginEntry({
       (toolContext) => ({
         name: "agent_knock_knock_delegate",
         description:
-          "Delegate an implementation task to a local coding agent. Use this when the user says AKK, akk, Agent Knock Knock, asks to hand work to Codex, Claude, or Cursor, or asks OpenClaw to start a background coding-agent task. If the user says AKK without an explicit agent, delegate to Codex. Use Claude or Cursor only when the user explicitly names that agent. The tool starts the coding agent in the background and returns only protocol metadata, not raw terminal output.",
+          "Delegate an implementation task to a local coding agent. Use this when the user says AKK, akk, Agent Knock Knock, asks to hand work to Codex, Claude, or Cursor, or asks OpenClaw to start a background coding-agent task. If the user says AKK without an explicit agent, omit the agent parameter so the plugin-configured defaultAgent is used, falling back to Codex when unset. The tool starts the coding agent in the background and returns only protocol metadata, not raw terminal output.",
         parameters: delegateParameters,
         async execute(_toolCallId, params) {
           const result = runDelegate(api, params, toolContext);
