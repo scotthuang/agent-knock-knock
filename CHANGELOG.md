@@ -13,6 +13,7 @@
 - Added Codex ACPX proxy and model configuration support for environments that require `ALL_PROXY` or a ChatGPT-compatible model id.
 - Added lazy idle-timeout cleanup for idle AKK sessions, configurable with `idleTimeoutMinutes` and defaulting to 10080 minutes.
 - Added runtime diagnostics logs under `~/.agent-knock-knock/logs`, with local timestamps, daily NDJSON files, secret redaction, log-level filtering, and retention cleanup.
+- Added safe executor trace support through `agent-knock-knock status --trace` and the OpenClaw status tool's `trace` parameter, summarizing tool calls, permission requests, client events, monitor events, and redacted thinking markers.
 - Added tests for Codex-backed delegation and task management flows.
 - Added tests for runtime diagnostics logging, redaction, retention cleanup, and CLI log emission.
 
@@ -39,7 +40,7 @@
 
 ### Verified
 
-- `npm test` passes 42 tests.
+- `npm test` passes 46 tests.
 - Local OpenClaw installation validated with the linked Agent Knock Knock plugin loaded, the updated `bidirectional-chat` skill installed, and the gateway restarted successfully.
 - Live OpenClaw validation created a Claude task, listed Claude tasks, sent a follow-up message, and closed the task through plugin tools.
 - Live OpenClaw validation created a Codex task with `ALL_PROXY=socks5h://127.0.0.1:1082` and `model=gpt-5.5/medium`, listed Codex tasks, sent a follow-up message, received Codex `done`, and closed the task through plugin tools.

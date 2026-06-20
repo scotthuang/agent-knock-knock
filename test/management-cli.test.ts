@@ -389,6 +389,67 @@ test("monitor marks waiting conversations stalled after callback timeout", () =>
   }
 });
 
+test("status trace summarizes executor output without exposing thinking text", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-status-trace-"));
+  const storeDir = path.join(tempDir, "conversations");
+
+  try {
+    const created = runCli([
+      "new",
+      "--agent",
+      "codex",
+      "--session",
+      "codex-trace",
+      "--request",
+      "Trace task",
+      "--store-dir",
+      storeDir
+    ]);
+    const outputPath = path.join(path.dirname(created.paths.logPath), "codex-output.log");
+    fs.writeFileSync(outputPath, [
+      "[acpx] session codex-trace (abc) · /tmp/workspace · agent needs reconnect",
+      "[client] initialize (running)",
+      "[thinking] private chain of thought that must not be exposed",
+      "[client] session/request_permission (running)",
+      "[tool] pwd (running)",
+      "  input: {\"command\":[\"pwd\"]}",
+      "[tool] pwd (completed)",
+      "  output:",
+      "    /tmp/workspace",
+      "[tool] /usr/local/bin/node callback --message-json '{\"body\":\"secret callback\"}' (completed)",
+      "  output:",
+      "    callback ok",
+      "Agent visible progress message.",
+      "[done] end_turn"
+    ].join("\n"), "utf8");
+    fs.appendFileSync(created.paths.logPath, `${JSON.stringify({
+      ts: "2026-06-20T00:00:01.000Z",
+      conversation_id: created.conversation.conversation_id,
+      event: "executor_launch",
+      output_path: outputPath
+    })}\n`, "utf8");
+
+    const status = runCli([
+      "status",
+      "--conversation",
+      created.conversation.conversation_id,
+      "--store-dir",
+      storeDir,
+      "--trace"
+    ]);
+
+    assert.equal(status.trace.source, "executor_output_log");
+    assert.equal(status.trace.thinking_redacted_count, 1);
+    assert.deepEqual(status.trace.agent_messages.some((message) => message.body.includes("private chain")), false);
+    assert.equal(status.trace.permission_requests.length, 1);
+    assert.equal(status.trace.tool_calls.some((tool) => tool.name === "pwd" && tool.status === "completed"), true);
+    assert.equal(status.trace.tool_calls.some((tool) => String(tool.name).includes("secret callback")), false);
+    assert.equal(status.trace.done_events.at(-1).status, "end_turn");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 function runCli(args, env = {}) {
   const result = spawnSync(process.execPath, [binPath, ...args], {
     encoding: "utf8",

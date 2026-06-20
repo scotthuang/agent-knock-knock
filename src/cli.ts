@@ -552,20 +552,25 @@ function runStatus(options) {
   cleanupIdleConversations(storeDirFromOptions(options), options);
   const { conversation, statePath, logPath } = loadConversationFromOptions(options);
   const events = readExistingEvents(logPath);
-  printJson({
+  const result: Record<string, any> = {
     conversation,
     summary: summarizeConversation(conversation),
     state_path: statePath,
     event_log_path: logPath,
     budget: budgetAction(conversation),
     recent_events: events.slice(-10).map(summarizeEvent)
-  });
+  };
+  if (options.trace) {
+    result.trace = buildConversationTrace({ conversation, events, logPath });
+  }
+  printJson(result);
   runtimeLog("info", "task_status_read", {
     conversation_id: conversation.conversation_id,
     status: conversation.status,
     state_path: statePath,
     event_log_path: logPath,
-    recent_event_count: Math.min(events.length, 10)
+    recent_event_count: Math.min(events.length, 10),
+    trace: Boolean(options.trace)
   });
 }
 
@@ -1376,6 +1381,235 @@ function summarizeEvent(event) {
   };
 }
 
+function buildConversationTrace({ conversation, events, logPath }) {
+  const outputPath = traceOutputPath({ conversation, events, logPath });
+  const output = outputPath && fs.existsSync(outputPath)
+    ? fs.readFileSync(outputPath, "utf8").slice(-256 * 1024)
+    : "";
+  const parsed = parseExecutorTraceOutput(output);
+  const monitorEvents = events
+    .filter((event) => [
+      "executor_launch",
+      "executor_message_launch",
+      "executor_monitor_launch",
+      "executor_monitor_started",
+      "conversation_stalled",
+      "callback_delivery",
+      "callback_gateway_method_delivery",
+      "callback_chat_send_delivery",
+      "callback_session_send_delivery"
+    ].includes(event.event))
+    .slice(-20)
+    .map((event) => ({
+      ts: event.ts,
+      event: event.event,
+      status: event.status,
+      pid: event.pid,
+      executor_pid: event.executor_pid,
+      reason: event.reason,
+      output_path: event.output_path
+    }));
+
+  return {
+    source: output ? "executor_output_log" : "events_only",
+    output_path: outputPath,
+    thinking_redacted_count: parsed.thinkingRedactedCount,
+    client_events: parsed.clientEvents.slice(-20),
+    permission_requests: parsed.permissionRequests.slice(-10),
+    tool_calls: parsed.toolCalls.slice(-20),
+    agent_messages: parsed.agentMessages.slice(-8),
+    done_events: parsed.doneEvents.slice(-5),
+    monitor_events: monitorEvents,
+    safety: {
+      thinking: "redacted",
+      tool_output: "summarized",
+      callback_payloads: "redacted"
+    }
+  };
+}
+
+function traceOutputPath({ conversation, events, logPath }) {
+  const launch = [...events].reverse().find((event) =>
+    ["executor_message_launch", "executor_launch"].includes(event.event) &&
+    typeof event.output_path === "string"
+  );
+  if (launch?.output_path) {
+    return launch.output_path;
+  }
+
+  const executor = executorForConversation(conversation);
+  const conversationDir = conversation.conversation_dir ?? path.dirname(logPath);
+  const candidates = [
+    path.join(conversationDir, `${executor.kind}-followup-output.log`),
+    path.join(conversationDir, `${executor.kind}-output.log`)
+  ];
+  return candidates.find((candidate) => fs.existsSync(candidate)) ?? candidates.at(-1);
+}
+
+function parseExecutorTraceOutput(output) {
+  const toolCalls: Record<string, any>[] = [];
+  const clientEvents: Record<string, any>[] = [];
+  const permissionRequests: Record<string, any>[] = [];
+  const agentMessages: Record<string, any>[] = [];
+  const doneEvents: Record<string, any>[] = [];
+  let thinkingRedactedCount = 0;
+  let currentTool: Record<string, any> | null = null;
+  let captureOutputFor: Record<string, any> | null = null;
+  let capturedOutputLines: string[] = [];
+
+  const flushToolOutput = () => {
+    if (captureOutputFor && capturedOutputLines.length > 0) {
+      captureOutputFor.output_preview = sanitizeTraceText(capturedOutputLines.join("\n"), 500);
+    }
+    captureOutputFor = null;
+    capturedOutputLines = [];
+  };
+
+  for (const rawLine of String(output ?? "").split(/\r?\n/)) {
+    const line = rawLine.trimEnd();
+    const text = line.trim();
+    if (!text) {
+      continue;
+    }
+
+    if (text.startsWith("[") && captureOutputFor) {
+      flushToolOutput();
+    }
+
+    const client = text.match(/^\[client\]\s+(.+?)(?:\s+\(([^)]+)\))?$/);
+    if (client) {
+      if (isPermissionTraceLine(text)) {
+        permissionRequests.push({
+          body: sanitizeTraceText(text, 240)
+        });
+      }
+      clientEvents.push({
+        name: sanitizeTraceText(client[1], 160),
+        status: client[2] ? sanitizeTraceText(client[2], 80) : undefined
+      });
+      continue;
+    }
+
+    const acpx = text.match(/^\[acpx\]\s+(.+)$/);
+    if (acpx) {
+      clientEvents.push({
+        name: "acpx",
+        status: sanitizeTraceText(acpx[1], 220)
+      });
+      continue;
+    }
+
+    if (text.startsWith("[thinking]")) {
+      thinkingRedactedCount += 1;
+      agentMessages.push({
+        kind: "thinking",
+        body: "[redacted]"
+      });
+      continue;
+    }
+
+    const done = text.match(/^\[done\]\s*(.*)$/);
+    if (done) {
+      doneEvents.push({
+        status: sanitizeTraceText(done[1] || "done", 120)
+      });
+      continue;
+    }
+
+    const tool = text.match(/^\[tool\]\s+(.+?)\s+\(([^)]+)\)$/);
+    if (tool) {
+      const toolCall = {
+        name: sanitizeToolName(tool[1]),
+        status: sanitizeTraceText(tool[2], 80)
+      };
+      toolCalls.push(toolCall);
+      currentTool = toolCall;
+      continue;
+    }
+
+    if (currentTool && text.startsWith("input:")) {
+      currentTool.input_preview = sanitizeTraceText(text.slice("input:".length).trim(), 360);
+      continue;
+    }
+
+    if (currentTool && text.startsWith("output:")) {
+      captureOutputFor = currentTool;
+      capturedOutputLines = [];
+      continue;
+    }
+
+    if (captureOutputFor && !text.startsWith("[")) {
+      if (capturedOutputLines.length < 8) {
+        capturedOutputLines.push(text);
+      }
+      continue;
+    }
+
+    if (isPermissionTraceLine(text)) {
+      permissionRequests.push({
+        body: sanitizeTraceText(text, 240)
+      });
+      continue;
+    }
+
+    if (isAgentMessageTraceLine(text)) {
+      agentMessages.push({
+        kind: "message",
+        body: sanitizeTraceText(text, 360)
+      });
+    }
+  }
+
+  flushToolOutput();
+
+  return {
+    toolCalls,
+    clientEvents,
+    permissionRequests,
+    agentMessages,
+    doneEvents,
+    thinkingRedactedCount
+  };
+}
+
+function sanitizeToolName(value) {
+  return sanitizeTraceText(
+    String(value ?? "")
+      .replace(/--message-json\s+(['"]).*?\1/g, "--message-json <redacted>")
+      .replace(/--message-json\s+.*/g, "--message-json <redacted>")
+      .replace(/--token\s+\S+/g, "--token <redacted>"),
+    220
+  );
+}
+
+function sanitizeTraceText(value, maxLength = 240) {
+  return String(value ?? "")
+    .replace(/--message-json\s+(['"]).*?\1/g, "--message-json <redacted>")
+    .replace(/--message-json\s+.*/g, "--message-json <redacted>")
+    .replace(/--token\s+\S+/g, "--token <redacted>")
+    .replace(/(gateway[_-]?token|api[_-]?key|token|password|secret)=\S+/gi, "$1=<redacted>")
+    .slice(0, maxLength);
+}
+
+function isPermissionTraceLine(text) {
+  const lower = text.toLowerCase();
+  return lower.includes("session/request_permission") ||
+    (lower.includes("permission") && (lower.includes("request") || lower.includes("approve") || lower.includes("allow")));
+}
+
+function isAgentMessageTraceLine(text) {
+  if (text.startsWith("[") || text.startsWith("{") || text.startsWith("}") || text.startsWith("```")) {
+    return false;
+  }
+  if (text.startsWith("input:") || text.startsWith("output:") || text.startsWith("kind:")) {
+    return false;
+  }
+  if (/^(call_id|process_id|turn_id|command|cwd):/i.test(text)) {
+    return false;
+  }
+  return text.length >= 12;
+}
+
 function isActiveStatus(status) {
   return !["done", "failed", "closed", "cancelled"].includes(status);
 }
@@ -1904,7 +2138,7 @@ function usage() {
   agent-knock-knock bootstrap-prompt --callback-command <command> [--agent claude|codex]
   agent-knock-knock delegate --request <text> [--agent claude|codex] [--store-dir <dir>] [--all-proxy <url>] [--agent-timeout-minutes <minutes>] [--token <gateway-token>] [--send|--background]
   agent-knock-knock list [--store-dir <dir>] [--agent claude|codex] [--status <status>] [--all]
-  agent-knock-knock status --conversation <id> [--store-dir <dir>]
+  agent-knock-knock status --conversation <id> [--store-dir <dir>] [--trace]
   agent-knock-knock send --conversation <id> --message <text> [--type answer|task|control] [--all-proxy <url>] [--agent-timeout-minutes <minutes>]
   agent-knock-knock cancel --conversation <id> [--all-proxy <url>]
   agent-knock-knock close --conversation <id> [--reason <text>]

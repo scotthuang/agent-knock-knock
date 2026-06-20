@@ -106,6 +106,8 @@ New delegations create a fresh ACPX session by default, using a name like `akk-c
 
 Background launches also start a small AKK monitor process. The monitor exits when the conversation receives a callback or otherwise leaves the agent-waiting state. If the executor process disappears before a callback, or if no callback arrives before `agentTimeoutMinutes`, the conversation is marked `stalled` and AKK attempts to notify the original OpenClaw session through the callback Gateway route. The default agent timeout is 60 minutes.
 
+Task status can include a safe executor trace with `--trace` or the OpenClaw status tool's `trace: true` parameter. Trace summaries show client lifecycle events, tool call names and statuses, permission-request markers, monitor events, and short sanitized output previews. Agent thinking content is never returned; it is counted and marked as redacted.
+
 ## CLI Examples
 
 The CLI is useful for local debugging, tests, and scripting outside OpenClaw.
@@ -129,6 +131,14 @@ List open coding-agent tasks:
 
 ```bash
 node dist/src/cli.js list
+```
+
+Inspect a task with a safe executor trace:
+
+```bash
+node dist/src/cli.js status \
+  --conversation <conversation-id> \
+  --trace
 ```
 
 Send a follow-up message to an existing task:

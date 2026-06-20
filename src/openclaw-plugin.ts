@@ -120,6 +120,10 @@ const statusParameters = {
     },
     agentTimeoutMinutes: {
       type: "number"
+    },
+    trace: {
+      type: "boolean",
+      description: "Include a safe executor trace summary with tool calls, permission requests, monitor events, and redacted thinking markers."
     }
   }
 };
@@ -275,6 +279,9 @@ export default definePluginEntry({
         const args = ["status", "--conversation", requiredString(params.conversation_id, "conversation_id")];
         pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
         pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(api.pluginConfig?.idleTimeoutMinutes));
+        if (params.trace === true) {
+          args.push("--trace");
+        }
         return args;
       }
     });
