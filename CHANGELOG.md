@@ -4,21 +4,23 @@
 
 ### Added
 
-- Added ACPX executor metadata so delegations can target Claude Code or Codex.
+- Added ACPX executor metadata so delegations can target Claude Code, Codex, or Cursor.
 - Added CLI task management commands: `list`, `status`, `send`, and `close`.
 - Added OpenClaw plugin tools for task listing, task status, follow-up sends, and local task close.
 - Added the `/akk` OpenClaw command for direct delegation, task listing, status, follow-up sends, and task close from command-capable chat surfaces.
 - Added manifest contracts and tool metadata for the new OpenClaw plugin tools.
-- Added cooperative AKK cancellation through `agent-knock-knock cancel`, `agent_knock_knock_cancel`, and `/akk cancel <conversation-id>` for Codex and Claude ACPX sessions.
+- Added cooperative AKK cancellation through `agent-knock-knock cancel`, `agent_knock_knock_cancel`, and `/akk cancel <conversation-id>` for Codex, Claude, and Cursor ACPX sessions.
 - Added Codex ACPX proxy and model configuration support for environments that require `ALL_PROXY` or a ChatGPT-compatible model id.
 - Added lazy idle-timeout cleanup for idle AKK sessions, configurable with `idleTimeoutMinutes` and defaulting to 10080 minutes.
 - Added runtime diagnostics logs under `~/.agent-knock-knock/logs`, with local timestamps, daily NDJSON files, secret redaction, log-level filtering, and retention cleanup.
 - Added safe executor trace support through `agent-knock-knock status --trace` and the OpenClaw status tool's `trace` parameter, summarizing tool calls, permission requests, client events, monitor events, and redacted thinking markers.
-- Added a coding-agent executor registry that centralizes Codex and Claude Code ACPX metadata, aliases, protocol actors, session naming, and proxy/model configuration.
+- Added a coding-agent executor registry that centralizes Codex, Claude Code, and Cursor ACPX metadata, aliases, protocol actors, session naming, and proxy/model configuration.
 - Added an explicit recovery-decision foundation with `needs_recovery`, `agent-knock-knock recover`, `agent-knock-knock restart`, `agent_knock_knock_recover`, `agent_knock_knock_restart`, `/akk recover`, and `/akk restart`.
+- Added Cursor as a supported ACPX coding-agent executor with `AKK Cursor`, `/akk cursor`, `agent="cursor"`, Cursor session/model/proxy config keys, and conservative explicit recovery decisions.
 - Added tests for Codex-backed delegation and task management flows.
-- Added tests for the executor registry used by Codex and Claude Code.
+- Added tests for the executor registry used by Codex, Claude Code, and Cursor.
 - Added tests for explicit recovery decisions, AKK history replay recovery, and restart without history replay.
+- Added tests for Cursor delegate, send, cancel, route metadata, and unavailable-session recovery decision behavior.
 - Added tests for runtime diagnostics logging, redaction, retention cleanup, and CLI log emission.
 
 ### Changed
@@ -33,12 +35,13 @@
 - Updated follow-up sends from OpenClaw to launch the coding agent in the background so OpenClaw can continue to subsequent tool calls.
 - Migrated the implementation source to TypeScript and moved runtime entrypoints to compiled `dist/src` output.
 - Migrated the Node test suite to TypeScript and updated `npm test` to build before running compiled tests from `dist/test`.
-- Changed `delegate` to generate a unique ACPX session for each new coding-agent task unless a session is explicitly configured, preventing concurrent AKK tasks from sharing the same default Codex or Claude session.
+- Changed `delegate` to generate a unique ACPX session for each new coding-agent task unless a session is explicitly configured, preventing concurrent AKK tasks from sharing the same default Codex, Claude, or Cursor session.
 - Added a background executor monitor that marks agent-waiting tasks `stalled` when the launched process exits without a callback or when the configurable `agentTimeoutMinutes` callback timeout is reached, then attempts to notify the original OpenClaw session.
 - Renamed the OpenClaw skill template from `bidirectional-chat` to `agent-knock-knock` so the installed skill matches the project and plugin name.
 - Updated documentation to describe local coding agents, task management, cooperative cancellation, and the home-directory conversation store.
 - Updated documentation with the local update flow required to rebuild and reload the linked OpenClaw plugin after project changes.
 - Updated the OpenClaw skill template and README with conservative recovery guidance for coding agents whose native session resume is unreliable.
+- Updated the OpenClaw skill template, README, plugin manifest, and protocol docs for Cursor routing and task management.
 - Documented ACPX approval behavior: Claude Code permission requests work with `--approve-all`, while some Codex sensitive operations can fail directly under AKK's non-interactive/background path instead of surfacing an approvable ACPX permission request.
 
 ### Fixed
@@ -47,7 +50,7 @@
 
 ### Verified
 
-- `npm test` passes 51 tests.
+- `npm test` passes 52 tests.
 - Local OpenClaw installation validated with the linked Agent Knock Knock plugin loaded, the updated `agent-knock-knock` skill installed, and the gateway restarted successfully.
 - Live OpenClaw validation created a Claude task, listed Claude tasks, sent a follow-up message, and closed the task through plugin tools.
 - Live OpenClaw validation created a Codex task with a configured `ALL_PROXY` value and `model=gpt-5.5/medium`, listed Codex tasks, sent a follow-up message, received Codex `done`, and closed the task through plugin tools.

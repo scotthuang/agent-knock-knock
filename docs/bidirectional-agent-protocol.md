@@ -3,7 +3,7 @@
 This protocol supports managed bidirectional delegation:
 
 - OpenClaw is the product manager, requirements owner, and final acceptance decision maker.
-- Claude Code or Codex is the engineering implementation agent and can directly edit code.
+- Claude Code, Codex, or Cursor is the engineering implementation agent and can directly edit code.
 - OpenClaw decides product direction, requirements interpretation, acceptance criteria, delivery scope, UX behavior, and acceptable compromises.
 - The selected coding agent decides ordinary implementation details, but must ask OpenClaw before changing product behavior, narrowing scope, degrading quality, accepting a workaround, or changing delivery standards.
 - Only messages requiring a response consume the response budget.
@@ -74,6 +74,8 @@ Allowed routes:
 | `claude-code -> openclaw` | `question`, `progress`, `blocked`, `done`, `error` |
 | `openclaw -> codex` | `task`, `answer`, `control`, `error` |
 | `codex -> openclaw` | `question`, `progress`, `blocked`, `done`, `error` |
+| `openclaw -> cursor` | `task`, `answer`, `control`, `error` |
+| `cursor -> openclaw` | `question`, `progress`, `blocked`, `done`, `error` |
 
 ## Budget
 

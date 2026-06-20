@@ -51,13 +51,25 @@ fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify({
       "--store-dir",
       storeDir
     ]);
+    const cursor = runCli([
+      "new",
+      "--agent",
+      "cursor",
+      "--session",
+      "cursor-work",
+      "--request",
+      "Cursor task",
+      "--store-dir",
+      storeDir
+    ]);
 
     const listed = runCli(["list", "--store-dir", storeDir]);
     assert.deepEqual(
       listed.tasks.map((task) => [task.agent, task.session, task.status]).sort(),
       [
         ["claude", "claude-work", "waiting_for_agent"],
-        ["codex", "codex-work", "waiting_for_agent"]
+        ["codex", "codex-work", "waiting_for_agent"],
+        ["cursor", "cursor-work", "waiting_for_agent"]
       ]
     );
 
@@ -96,6 +108,37 @@ fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify({
     assert.deepEqual(acpxCalls[1].args.slice(0, 6), ["--approve-all", "--model", "gpt-5.5/medium", "codex", "-s", "codex-work"]);
     assert.equal(acpxCalls[1].allProxy, "socks5h://127.0.0.1:1082");
 
+    const cursorSent = runCli([
+      "send",
+      "--conversation",
+      cursor.conversation.conversation_id,
+      "--store-dir",
+      storeDir,
+      "--message",
+      "Continue in Cursor.",
+      "--type",
+      "task",
+      "--all-proxy",
+      "socks5h://127.0.0.1:1083",
+      "--model",
+      "cursor-model"
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(cursorSent.delivered, true);
+    assert.equal(cursorSent.executor.kind, "cursor");
+    assert.equal(cursorSent.message.to, "cursor");
+
+    const cursorAcpxCalls = fs.readFileSync(acpxCallsPath, "utf8")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line))
+      .slice(2);
+    assert.deepEqual(cursorAcpxCalls[0].args, ["cursor", "sessions", "ensure", "--name", "cursor-work"]);
+    assert.equal(cursorAcpxCalls[0].allProxy, "socks5h://127.0.0.1:1083");
+    assert.deepEqual(cursorAcpxCalls[1].args.slice(0, 6), ["--approve-all", "--model", "cursor-model", "cursor", "-s", "cursor-work"]);
+    assert.equal(cursorAcpxCalls[1].allProxy, "socks5h://127.0.0.1:1083");
+
     const closed = runCli([
       "close",
       "--conversation",
@@ -109,17 +152,20 @@ fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify({
     assert.equal(closed.conversation.status, "closed");
 
     const activeAfterClose = runCli(["list", "--store-dir", storeDir]);
-    assert.deepEqual(activeAfterClose.tasks.map((task) => task.conversation_id), [codex.conversation.conversation_id]);
+    assert.deepEqual(activeAfterClose.tasks.map((task) => task.conversation_id).sort(), [
+      codex.conversation.conversation_id,
+      cursor.conversation.conversation_id
+    ].sort());
 
     const allAfterClose = runCli(["list", "--store-dir", storeDir, "--all"]);
-    assert.equal(allAfterClose.tasks.length, 2);
+    assert.equal(allAfterClose.tasks.length, 3);
     assert.equal(allAfterClose.tasks.some((task) => task.status === "closed"), true);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
 
-test("cancel requests cooperative ACPX cancellation for Codex and Claude sessions", () => {
+test("cancel requests cooperative ACPX cancellation for Codex, Claude, and Cursor sessions", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-cancel-management-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -163,6 +209,17 @@ fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify({
       "--store-dir",
       storeDir
     ]);
+    const cursor = runCli([
+      "new",
+      "--agent",
+      "cursor",
+      "--session",
+      "cursor-cancellable",
+      "--request",
+      "Cursor long task",
+      "--store-dir",
+      storeDir
+    ]);
 
     const cancelledCodex = runCli([
       "cancel",
@@ -192,13 +249,27 @@ fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify({
     assert.equal(cancelledClaude.conversation.status, "cancelling");
     assert.equal(cancelledClaude.executor.kind, "claude");
 
+    const cancelledCursor = runCli([
+      "cancel",
+      "--conversation",
+      cursor.conversation.conversation_id,
+      "--store-dir",
+      storeDir
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(cancelledCursor.cancel_requested, true);
+    assert.equal(cancelledCursor.conversation.status, "cancelling");
+    assert.equal(cancelledCursor.executor.kind, "cursor");
+
     const acpxCalls = fs.readFileSync(acpxCallsPath, "utf8")
       .trim()
       .split(/\r?\n/)
       .map((line) => JSON.parse(line));
     assert.deepEqual(acpxCalls.map((call) => call.args), [
       ["codex", "cancel", "-s", "codex-cancellable"],
-      ["claude", "cancel", "-s", "claude-cancellable"]
+      ["claude", "cancel", "-s", "claude-cancellable"],
+      ["cursor", "cancel", "-s", "cursor-cancellable"]
     ]);
     assert.equal(acpxCalls[0].allProxy, "socks5h://127.0.0.1:1082");
 
@@ -467,6 +538,88 @@ fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify(args) + "\\n"
     assert.match(restartCalls[1][4], /Restart this Agent Knock Knock task/);
     assert.match(restartCalls[1][4], /Restart-only pending instruction/);
     assert.doesNotMatch(restartCalls[1][4], /History that restart should not replay/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("Cursor send requires recovery decision when its ACPX session is unavailable", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-cursor-recovery-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const acpxCallsPath = path.join(tempDir, "acpx-calls.ndjson");
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    const fakeAcpx = path.join(fakeBinDir, "acpx");
+    fs.writeFileSync(
+      fakeAcpx,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (args[0] === "cursor" && args.includes("sessions") && args.includes("ensure")) {
+  console.error("Cursor session unavailable");
+  process.exit(9);
+}
+fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify(args) + "\\n", "utf8");
+`,
+      "utf8"
+    );
+    fs.chmodSync(fakeAcpx, 0o755);
+
+    const created = runCli([
+      "new",
+      "--agent",
+      "cursor",
+      "--session",
+      "cursor-recovery",
+      "--request",
+      "Cursor recovery task",
+      "--store-dir",
+      storeDir
+    ]);
+    runCli([
+      "callback",
+      "--state",
+      created.paths.statePath,
+      "--record-only",
+      "--message-json",
+      JSON.stringify({
+        from: "cursor",
+        to: "openclaw",
+        type: "done",
+        body: "Cursor first round completed."
+      })
+    ]);
+
+    const result = runCli([
+      "send",
+      "--conversation",
+      created.conversation.conversation_id,
+      "--store-dir",
+      storeDir,
+      "--message",
+      "Follow up after Cursor session disappeared."
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+
+    assert.equal(result.delivered, false);
+    assert.equal(result.requires_recovery_decision, true);
+    assert.equal(result.executor.kind, "cursor");
+    assert.equal(result.conversation.status, "needs_recovery");
+    assert.equal(result.recovery.previous_executor.kind, "cursor");
+    assert.equal(result.recovery.pending_message.to, "cursor");
+
+    const status = runCli([
+      "status",
+      "--conversation",
+      created.conversation.conversation_id,
+      "--store-dir",
+      storeDir
+    ]);
+    assert.equal(status.summary.status, "needs_recovery");
+    assert.deepEqual(status.summary.recovery.options, ["recover", "restart", "close"]);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

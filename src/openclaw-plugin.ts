@@ -43,13 +43,25 @@ const delegateParameters = {
       type: "string",
       description: "Codex session name."
     },
+    cursorSession: {
+      type: "string",
+      description: "Cursor session name."
+    },
     codexAllProxy: {
       type: "string",
       description: "ALL_PROXY value used when launching Codex through ACPX."
     },
+    cursorAllProxy: {
+      type: "string",
+      description: "ALL_PROXY value used when launching Cursor through ACPX."
+    },
     codexModel: {
       type: "string",
       description: "ACPX model id used when launching Codex."
+    },
+    cursorModel: {
+      type: "string",
+      description: "ACPX model id used when launching Cursor."
     },
     model: {
       type: "string",
@@ -230,7 +242,7 @@ export default definePluginEntry({
   id: "agent-knock-knock",
   name: "Agent Knock Knock",
   description:
-    "Agent Knock Knock (AKK/akk) delegates OpenClaw coding work to local Codex or Claude agents. Use this for AKK, akk, Agent Knock Knock, Codex delegation, Claude delegation, task listing, follow-up messages, status, cancel requests, and close requests. Default delegation target is Codex unless the user explicitly asks for Claude.",
+    "Agent Knock Knock (AKK/akk) delegates OpenClaw coding work to local Codex, Claude, or Cursor agents. Use this for AKK, akk, Agent Knock Knock, Codex delegation, Claude delegation, Cursor delegation, task listing, follow-up messages, status, recovery, restart, cancel requests, and close requests. Default delegation target is Codex unless the user explicitly asks for another agent.",
   register(api) {
     api.registerGatewayMethod(
       CALLBACK_METHOD,
@@ -259,7 +271,7 @@ export default definePluginEntry({
         default: "AKK is handling the request..."
       },
       agentPromptGuidance: [
-        "Use /akk <task> to delegate coding work to Agent Knock Knock. /akk defaults to Codex; use /akk claude <task> only when Claude is explicitly requested."
+        "Use /akk <task> to delegate coding work to Agent Knock Knock. /akk defaults to Codex; use /akk claude <task> or /akk cursor <task> only when that agent is explicitly requested."
       ],
       handler: async (ctx) => handleAkkCommand(api, ctx)
     });
@@ -268,7 +280,7 @@ export default definePluginEntry({
       (toolContext) => ({
         name: "agent_knock_knock_delegate",
         description:
-          "Delegate an implementation task to a local coding agent. Use this when the user says AKK, akk, Agent Knock Knock, asks to hand work to Codex or Claude, or asks OpenClaw to start a background coding-agent task. If the user says AKK without an explicit agent, delegate to Codex. Use Claude only when the user explicitly says AKK Claude or Claude. The tool starts the coding agent in the background and returns only protocol metadata, not raw terminal output.",
+          "Delegate an implementation task to a local coding agent. Use this when the user says AKK, akk, Agent Knock Knock, asks to hand work to Codex, Claude, or Cursor, or asks OpenClaw to start a background coding-agent task. If the user says AKK without an explicit agent, delegate to Codex. Use Claude or Cursor only when the user explicitly names that agent. The tool starts the coding agent in the background and returns only protocol metadata, not raw terminal output.",
         parameters: delegateParameters,
         async execute(_toolCallId, params) {
           const result = runDelegate(api, params, toolContext);
@@ -287,7 +299,7 @@ export default definePluginEntry({
 
     registerCliTool(api, {
       name: "agent_knock_knock_list",
-      description: "List open or historical Agent Knock Knock coding-agent sessions. Use this for AKK list, akk list, current AKK tasks, or asking which Codex/Claude sessions are open. Idle sessions are complete for now but can receive follow-up sends until they are closed or time out.",
+      description: "List open or historical Agent Knock Knock coding-agent sessions. Use this for AKK list, akk list, current AKK tasks, or asking which Codex/Claude/Cursor sessions are open. Idle sessions are complete for now but can receive follow-up sends until they are closed or time out.",
       parameters: listParameters,
       buildArgs: (params) => {
         const args = ["list"];
@@ -319,7 +331,7 @@ export default definePluginEntry({
 
     registerCliTool(api, {
       name: "agent_knock_knock_send",
-      description: "Send a follow-up message to an existing open Agent Knock Knock coding-agent session. Use this for AKK follow-up requests such as sending another instruction to an idle, waiting, or running Codex or Claude session.",
+      description: "Send a follow-up message to an existing open Agent Knock Knock coding-agent session. Use this for AKK follow-up requests such as sending another instruction to an idle, waiting, or running Codex, Claude, or Cursor session.",
       parameters: sendParameters,
       buildArgs: (params) => {
         const args = [
@@ -342,7 +354,7 @@ export default definePluginEntry({
 
     registerCliTool(api, {
       name: "agent_knock_knock_cancel",
-      description: "Request cooperative cancellation of the current in-flight prompt for an existing Agent Knock Knock Codex or Claude session. This does not close the AKK session; use close when the session should no longer be reused.",
+      description: "Request cooperative cancellation of the current in-flight prompt for an existing Agent Knock Knock Codex, Claude, or Cursor session. This does not close the AKK session; use close when the session should no longer be reused.",
       parameters: cancelParameters,
       buildArgs: (params) => {
         const args = ["cancel", "--conversation", requiredString(params.conversation_id, "conversation_id")];
