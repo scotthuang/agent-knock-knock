@@ -48,7 +48,7 @@ test("runtime logs use local timestamps and preserve absolute paths", () => {
 });
 
 test("runtime log redaction removes secrets but not ordinary paths", () => {
-  const absolutePath = "/Users/scotthuang/github/agent-knock-knock/state.json";
+  const absolutePath = "/Users/example/projects/agent-knock-knock/state.json";
   const redacted = redactRecord({
     state_path: absolutePath,
     gatewayToken: "secret-token",

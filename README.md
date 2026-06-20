@@ -24,6 +24,10 @@ Agent Knock Knock fills that gap. It keeps local task state outside the chat cha
 
 See [ROADMAP.md](ROADMAP.md) for planned reliability work and future orchestration features.
 
+## Project Status
+
+Agent Knock Knock is an early public project. The core local OpenClaw delegation flow is usable, but the OpenClaw plugin and skill are still installed from a local checkout rather than a packaged plugin registry.
+
 ## Architecture
 
 OpenClaw is the top-level orchestrator. Agent Knock Knock runs as the OpenClaw plugin bridge, uses ACPX / ACP to communicate with local coding agents, and keeps enough local task state for OpenClaw to manage many concurrent coding-agent sessions.
@@ -257,3 +261,15 @@ Runtime logs are diagnostic-only and are safe to use for local troubleshooting. 
 - Store directory: `~/.agent-knock-knock/conversations`
 - Runtime log directory: `~/.agent-knock-knock/logs`
 - Runtime log retention: `14` days
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for local development, test, and pull request guidance.
+
+## Security
+
+Please do not open public issues for sensitive security reports. See [SECURITY.md](SECURITY.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE).

@@ -43,7 +43,7 @@
 - `npm test` passes 46 tests.
 - Local OpenClaw installation validated with the linked Agent Knock Knock plugin loaded, the updated `bidirectional-chat` skill installed, and the gateway restarted successfully.
 - Live OpenClaw validation created a Claude task, listed Claude tasks, sent a follow-up message, and closed the task through plugin tools.
-- Live OpenClaw validation created a Codex task with `ALL_PROXY=socks5h://127.0.0.1:1082` and `model=gpt-5.5/medium`, listed Codex tasks, sent a follow-up message, received Codex `done`, and closed the task through plugin tools.
+- Live OpenClaw validation created a Codex task with a configured `ALL_PROXY` value and `model=gpt-5.5/medium`, listed Codex tasks, sent a follow-up message, received Codex `done`, and closed the task through plugin tools.
 - Live ACPX validation created smoke sessions for Codex and Claude Code, called AKK cancel for each, observed `executor_cancel_requested` events with status 0, and closed the smoke ACPX sessions.
 
 ## 0.1.0 - 2026-05-16
