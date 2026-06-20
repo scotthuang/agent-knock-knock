@@ -7,7 +7,7 @@ import {
   createMessage,
   extractStructuredMessage,
   validateMessageForConversation
-} from "../dist/src/protocol.js";
+} from "../src/protocol.js";
 
 test("only response-requiring messages consume rounds", () => {
   let conversation = createConversation({
@@ -63,6 +63,7 @@ test("done message idles conversation without consuming a new round", () => {
   assert.equal(done.requires_response, false);
   assert.equal(conversation.response_rounds_used, 0);
   assert.equal(conversation.status, "idle");
+  assert.ok(conversation.idle_since);
   assert.match(conversation.idle_since, /^\d{4}-\d{2}-\d{2}T/);
 });
 
@@ -194,11 +195,11 @@ test("rejects message types on the wrong route", () => {
   };
 
   assert.throws(
-    () => validateMessageForConversation(conversation, invalidDeveloperAnswer),
+    () => validateMessageForConversation(conversation, invalidDeveloperAnswer as any),
     /message type answer is not allowed for route claude-code->openclaw/
   );
   assert.throws(
-    () => validateMessageForConversation(conversation, invalidManagerDone),
+    () => validateMessageForConversation(conversation, invalidManagerDone as any),
     /message type done is not allowed for route openclaw->claude-code/
   );
 });

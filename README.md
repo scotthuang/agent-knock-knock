@@ -102,6 +102,10 @@ The plugin also registers the Gateway method `agent-knock-knock.callback`. Codin
 
 Coding-agent `done` callbacks mark the AKK conversation `idle`, not closed. Idle conversations remain visible in the default list and can receive `send` follow-ups until they are manually closed or lazily closed by the idle timeout. The default idle timeout is 10080 minutes.
 
+New delegations create a fresh ACPX session by default, using a name like `akk-codex-20260620183511-88811e97` or `akk-claude-...`. This keeps concurrent AKK tasks isolated. Reuse happens through `AKK send <conversation-id>: <message>` against an existing AKK conversation, or by explicitly configuring/passing a fixed coding-agent session.
+
+Background launches also start a small AKK monitor process. The monitor exits when the conversation receives a callback or otherwise leaves the agent-waiting state. If the executor process disappears before a callback, or if no callback arrives before `agentTimeoutMinutes`, the conversation is marked `stalled` and AKK attempts to notify the original OpenClaw session through the callback Gateway route. The default agent timeout is 60 minutes.
+
 ## CLI Examples
 
 The CLI is useful for local debugging, tests, and scripting outside OpenClaw.
@@ -172,7 +176,7 @@ Run type checking without writing `dist/`:
 npm run typecheck
 ```
 
-Run the full test suite. This builds first, then runs the JavaScript tests against the compiled `dist/src` output:
+Run the full test suite. This builds first, then runs the compiled TypeScript tests from `dist/test` against the compiled `dist/src` output:
 
 ```bash
 npm test
@@ -232,10 +236,12 @@ Runtime logs are diagnostic-only and are safe to use for local troubleshooting. 
 
 - OpenClaw session: `agent:main:main`
 - OpenClaw plugin default agent: `codex`
-- Claude session: `bidirectional`
-- Codex session: `codex`
+- Delegated ACPX session: generated per new task, unless explicitly configured with `session`, `codexSession`, or `claudeSession`
+- CLI `new` fallback Claude session: `bidirectional`
+- CLI `new` fallback Codex session: `codex`
 - Codex model, when needed for ChatGPT-account compatibility: pass `model`/`codexModel` such as `gpt-5.5/medium`
 - Gateway URL: `ws://127.0.0.1:18789`
+- Agent callback timeout: `60` minutes
 - Soft response limit: `50`
 - Hard response limit: `100`
 - Store directory: `~/.agent-knock-knock/conversations`

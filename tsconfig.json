@@ -15,10 +15,10 @@
     "rootDir": ".",
     "outDir": "dist",
     "declaration": true,
-    "sourceMap": true,
-    "noUncheckedIndexedAccess": true
+    "sourceMap": true
   },
   "include": [
-    "src/**/*.ts"
+    "src/**/*.ts",
+    "test/**/*.ts"
   ]
 }

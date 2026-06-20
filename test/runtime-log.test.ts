@@ -12,9 +12,9 @@ import {
   redactString,
   runtimeLogPath,
   writeRuntimeLog
-} from "../dist/src/runtime-log.js";
+} from "../src/runtime-log.js";
 
-const binPath = new URL("../dist/src/cli.js", import.meta.url).pathname;
+const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 
 test("runtime logs use local timestamps and preserve absolute paths", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-runtime-log-"));
@@ -57,7 +57,15 @@ test("runtime log redaction removes secrets but not ordinary paths", () => {
       callback_command: "agent-knock-knock callback --token sk-abcdefghijklmnopqrstuvwxyz --state /tmp/state.json",
       proxy_url: "socks5h://user:pass@127.0.0.1:1082"
     }
-  });
+  }) as {
+    state_path: string;
+    gatewayToken: string;
+    nested: {
+      authorization: string;
+      callback_command: string;
+      proxy_url: string;
+    };
+  };
 
   assert.equal(redacted.state_path, absolutePath);
   assert.equal(redacted.gatewayToken, "[REDACTED]");
@@ -117,6 +125,7 @@ test("runtime log level can suppress lower-severity entries", () => {
 
     assert.equal(info.written, false);
     assert.equal(warn.written, true);
+    assert.ok(warn.path);
     const lines = fs.readFileSync(warn.path, "utf8").trim().split(/\r?\n/);
     assert.equal(lines.length, 1);
     assert.equal(JSON.parse(lines[0]).event, "written");

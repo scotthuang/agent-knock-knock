@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 export type Actor = "openclaw" | "claude-code" | "codex";
 export type MessageType = "task" | "question" | "answer" | "progress" | "blocked" | "done" | "error" | "control";
 export type ExecutorKind = "claude" | "codex";
-export type ConversationStatus = "created" | "running" | "waiting_for_agent" | "waiting_for_openclaw" | "idle" | "failed" | "closed" | "cancelled" | "cancelling";
+export type ConversationStatus = "created" | "running" | "waiting_for_agent" | "waiting_for_openclaw" | "idle" | "stalled" | "failed" | "closed" | "cancelled" | "cancelling";
 export type BudgetLevel = "normal" | "converge" | "warning" | "soft_stop" | "hard_stop";
 
 export interface Executor {
@@ -32,7 +32,10 @@ export interface Conversation {
   close_reason?: string;
   cancel_requested_at?: string;
   gateway_url?: string;
+  gateway_method?: string;
+  gateway_session?: string;
   callback_command?: string;
+  openclaw_bin?: string;
   gateway_token?: string;
   executor_all_proxy?: string;
   executor_model?: string;
@@ -93,8 +96,8 @@ interface CreateMessageOptions {
 interface ExtractStructuredMessageOptions {
   conversation: Conversation;
   input: string;
-  defaultFrom: Actor;
-  defaultTo: Actor;
+  defaultFrom?: Actor;
+  defaultTo?: Actor;
   now?: Date;
 }
 
@@ -405,8 +408,8 @@ export function parseMessageJson(input: string): AgentMessage {
 export function extractStructuredMessage({
   conversation,
   input,
-  defaultFrom,
-  defaultTo,
+  defaultFrom = "claude-code",
+  defaultTo = "openclaw",
   now = new Date()
 }: ExtractStructuredMessageOptions): AgentMessage {
   const parsed = extractJsonObject(input);

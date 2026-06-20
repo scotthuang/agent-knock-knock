@@ -73,6 +73,10 @@ const delegateParameters = {
     idleTimeoutMinutes: {
       type: "number",
       description: "Minutes an idle AKK session remains open before lazy cleanup closes it."
+    },
+    agentTimeoutMinutes: {
+      type: "number",
+      description: "Minutes AKK waits for a coding-agent callback before marking the task stalled."
     }
   }
 };
@@ -112,6 +116,9 @@ const statusParameters = {
       type: "string"
     },
     idleTimeoutMinutes: {
+      type: "number"
+    },
+    agentTimeoutMinutes: {
       type: "number"
     }
   }
@@ -290,6 +297,7 @@ export default definePluginEntry({
         pushOptional(args, "--model", stringValue(params.model) ?? stringValue(api.pluginConfig?.codexModel) ?? stringValue(api.pluginConfig?.model));
         pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
         pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(api.pluginConfig?.idleTimeoutMinutes));
+        pushOptional(args, "--agent-timeout-minutes", numberString(params.agentTimeoutMinutes) ?? numberString(api.pluginConfig?.agentTimeoutMinutes));
         return args;
       }
     });
@@ -598,6 +606,7 @@ function runDelegate(api, params, toolContext) {
   pushOptional(args, "--soft-limit", numberString(params.softLimit) ?? numberString(config.softLimit));
   pushOptional(args, "--hard-limit", numberString(params.hardLimit) ?? numberString(config.hardLimit));
   pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(config.idleTimeoutMinutes));
+  pushOptional(args, "--agent-timeout-minutes", numberString(params.agentTimeoutMinutes) ?? numberString(config.agentTimeoutMinutes));
 
   const spawned = spawnSync(process.execPath, args, {
     encoding: "utf8",

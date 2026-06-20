@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
-const binPath = new URL("../dist/src/cli.js", import.meta.url).pathname;
+const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 
 test("list status send and close manage agent delegations", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-management-"));
@@ -299,6 +299,91 @@ fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify({
     const closedState = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
     assert.equal(closedState.status, "closed");
     assert.equal(closedState.close_reason, "idle timeout after 1 minutes");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("monitor marks waiting conversations stalled when the executor process is gone", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-monitor-exit-"));
+  const storeDir = path.join(tempDir, "conversations");
+
+  try {
+    const created = runCli([
+      "new",
+      "--agent",
+      "codex",
+      "--session",
+      "codex-stalled",
+      "--request",
+      "Long task",
+      "--store-dir",
+      storeDir
+    ]);
+
+    runCli([
+      "monitor",
+      "--state",
+      created.paths.statePath,
+      "--pid",
+      "999999",
+      "--poll-interval-ms",
+      "50",
+      "--agent-timeout-minutes",
+      "60"
+    ]);
+
+    const state = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
+    assert.equal(state.status, "stalled");
+    assert.match(state.stalled_reason, /executor process 999999 exited before callback/);
+
+    const events = fs.readFileSync(created.paths.logPath, "utf8")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line));
+    assert.equal(events.some((event) => event.event === "executor_monitor_started"), true);
+    assert.equal(events.some((event) => event.event === "conversation_stalled"), true);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("monitor marks waiting conversations stalled after callback timeout", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-monitor-timeout-"));
+  const storeDir = path.join(tempDir, "conversations");
+
+  try {
+    const created = runCli([
+      "new",
+      "--agent",
+      "claude",
+      "--session",
+      "claude-stalled",
+      "--request",
+      "Long task",
+      "--store-dir",
+      storeDir
+    ]);
+
+    const state = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
+    fs.writeFileSync(created.paths.statePath, `${JSON.stringify({
+      ...state,
+      updated_at: "2026-01-01T00:00:00.000Z"
+    }, null, 2)}\n`, "utf8");
+
+    runCli([
+      "monitor",
+      "--state",
+      created.paths.statePath,
+      "--poll-interval-ms",
+      "50",
+      "--agent-timeout-minutes",
+      "0.001"
+    ]);
+
+    const stalled = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
+    assert.equal(stalled.status, "stalled");
+    assert.match(stalled.stalled_reason, /no callback after 0.001 minutes/);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

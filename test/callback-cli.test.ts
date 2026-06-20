@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 
-const binPath = new URL("../dist/src/cli.js", import.meta.url).pathname;
+const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 
 test("callback records a structured Claude message before delivery", () => {
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-"));
@@ -391,7 +391,13 @@ function runCli(args, env = {}) {
   return JSON.parse(result.stdout);
 }
 
-function runCliAsync(args) {
+interface CliAsyncResult {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+function runCliAsync(args): Promise<CliAsyncResult> {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [binPath, ...args], {
       stdio: ["ignore", "pipe", "pipe"]

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -31,6 +32,8 @@ import {
 } from "./store.js";
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 10080;
+const DEFAULT_AGENT_TIMEOUT_MINUTES = 60;
+const DEFAULT_MONITOR_POLL_INTERVAL_MS = 5000;
 
 const command = process.argv[2];
 const args = parseArgs(process.argv.slice(3));
@@ -80,6 +83,8 @@ function runCommand(commandName, options) {
     runTranscript(options);
   } else if (commandName === "callback") {
     runCallback(options);
+  } else if (commandName === "monitor") {
+    runMonitor(options);
   } else {
     usage();
     process.exitCode = commandName ? 1 : 0;
@@ -188,9 +193,10 @@ function runDelegate(options) {
   const workspace = options.workspace ?? process.cwd();
   const storeDir = expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(workspace));
   cleanupIdleConversations(storeDir, options);
+  const explicitExecutorSession = options.session ?? options.executorSession ?? options.claudeSession;
   const executor = resolveExecutor({
     kind: options.agent ?? "claude",
-    session: options.session ?? options.executorSession ?? options.claudeSession
+    session: explicitExecutorSession ?? uniqueDelegateSessionName(options.agent ?? "claude")
   });
   const newResult = captureJson([
     "new",
@@ -237,6 +243,9 @@ function runDelegate(options) {
     ...newResult.conversation,
     gateway_url: gatewayUrl,
     callback_command: callbackCommand,
+    gateway_method: options.gatewayMethod,
+    gateway_session: options.gatewaySession ?? openclawSession,
+    openclaw_bin: openclawBin,
     executor_all_proxy: executorAllProxy,
     executor_model: executorModel
   };
@@ -347,12 +356,35 @@ function runDelegate(options) {
         output_path: outputPath
       });
     }
+    const monitor = startExecutorMonitor({
+      statePath: newResult.paths.statePath,
+      logPath: newResult.paths.logPath,
+      pid: child.pid,
+      outputPath,
+      agentTimeoutMinutes: Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES),
+      pollIntervalMs: Number(options.monitorPollIntervalMs ?? DEFAULT_MONITOR_POLL_INTERVAL_MS)
+    });
+    appendEvent(newResult.paths.logPath, {
+      ts: new Date().toISOString(),
+      conversation_id: newResult.conversation.conversation_id,
+      event: "executor_monitor_launch",
+      pid: monitor.pid ?? null,
+      executor_pid: child.pid ?? null,
+      agent_timeout_minutes: Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES)
+    });
+    runtimeLog("info", "executor_monitor_launch", {
+      conversation_id: newResult.conversation.conversation_id,
+      monitor_pid: monitor.pid ?? null,
+      executor_pid: child.pid ?? null,
+      agent_timeout_minutes: Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES)
+    });
 
     printJson({
       ...newResult,
       launched: true,
       background: true,
       pid: child.pid ?? null,
+      monitor_pid: monitor.pid ?? null,
       output_path: outputPath
     });
     return;
@@ -407,6 +439,42 @@ function ensureExecutorSession({ acpxPath, executor, cwd, env }) {
     cwd,
     env
   });
+}
+
+function startExecutorMonitor({ statePath, logPath, pid, outputPath, agentTimeoutMinutes, pollIntervalMs }) {
+  const args = [
+    new URL(import.meta.url).pathname,
+    "monitor",
+    "--state",
+    statePath,
+    "--log",
+    logPath,
+    "--agent-timeout-minutes",
+    String(agentTimeoutMinutes),
+    "--poll-interval-ms",
+    String(pollIntervalMs)
+  ];
+  if (pid) {
+    args.push("--pid", String(pid));
+  }
+  if (outputPath) {
+    args.push("--output-path", outputPath);
+  }
+
+  const child = spawn(process.execPath, args, {
+    detached: true,
+    stdio: "ignore",
+    cwd: process.cwd(),
+    env: process.env
+  });
+  child.unref();
+  return child;
+}
+
+function uniqueDelegateSessionName(kind) {
+  const normalizedKind = String(kind || "claude").toLowerCase().replace(/[^a-z0-9-]+/g, "-");
+  const timestamp = new Date().toISOString().replace(/\D/g, "").slice(0, 14);
+  return `akk-${normalizedKind}-${timestamp}-${randomUUID().slice(0, 8)}`;
 }
 
 function buildAcpxPromptArgs({ executor, payload, model }) {
@@ -615,6 +683,22 @@ function runSend(options) {
       pid: child.pid ?? null,
       output_path: outputPath
     });
+    const monitor = startExecutorMonitor({
+      statePath,
+      logPath,
+      pid: child.pid,
+      outputPath,
+      agentTimeoutMinutes: Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES),
+      pollIntervalMs: Number(options.monitorPollIntervalMs ?? DEFAULT_MONITOR_POLL_INTERVAL_MS)
+    });
+    appendEvent(logPath, {
+      ts: new Date().toISOString(),
+      conversation_id: conversation.conversation_id,
+      event: "executor_monitor_launch",
+      pid: monitor.pid ?? null,
+      executor_pid: child.pid ?? null,
+      agent_timeout_minutes: Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES)
+    });
 
     printJson({
       conversation: nextConversation,
@@ -622,6 +706,7 @@ function runSend(options) {
       delivered: true,
       background: true,
       pid: child.pid ?? null,
+      monitor_pid: monitor.pid ?? null,
       output_path: outputPath,
       executor,
       budget: budgetAction(nextConversation)
@@ -765,6 +850,95 @@ function runClose(options) {
     conversation: closed,
     closed: true
   });
+}
+
+function runMonitor(options) {
+  const statePath = expandHome(required(options.state, "--state is required"));
+  const logPath = expandHome(options.log ?? logPathForStatePath(statePath));
+  const pid = options.pid ? Number(options.pid) : undefined;
+  const timeoutMinutes = Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES);
+  const pollIntervalMs = Math.max(50, Number(options.pollIntervalMs ?? DEFAULT_MONITOR_POLL_INTERVAL_MS));
+
+  let conversation = loadState(statePath);
+  const executor = executorForConversation(conversation);
+  appendEvent(logPath, {
+    ts: new Date().toISOString(),
+    conversation_id: conversation.conversation_id,
+    event: "executor_monitor_started",
+    executor,
+    executor_pid: Number.isFinite(pid) ? pid : null,
+    agent_timeout_minutes: timeoutMinutes,
+    poll_interval_ms: pollIntervalMs,
+    output_path: options.outputPath
+  });
+  runtimeLog("info", "executor_monitor_started", {
+    conversation_id: conversation.conversation_id,
+    agent: executor.kind,
+    executor_session: executor.session,
+    executor_pid: Number.isFinite(pid) ? pid : null,
+    agent_timeout_minutes: timeoutMinutes
+  });
+
+  while (true) {
+    conversation = loadState(statePath);
+    if (!isWaitingForAgent(conversation.status)) {
+      runtimeLog("info", "executor_monitor_finished", {
+        conversation_id: conversation.conversation_id,
+        status: conversation.status,
+        reason: "conversation_no_longer_waiting"
+      });
+      printJson({
+        conversation,
+        monitored: true,
+        stalled: false,
+        reason: "conversation_no_longer_waiting"
+      });
+      return;
+    }
+
+    if (Number.isFinite(pid) && !isProcessAlive(pid)) {
+      const stalledConversation = markConversationStalled({
+        statePath,
+        logPath,
+        reason: `executor process ${pid} exited before callback`,
+        detail: {
+          executor_pid: pid,
+          output_path: options.outputPath
+        }
+      });
+      printJson({
+        conversation: stalledConversation,
+        monitored: true,
+        stalled: true,
+        reason: stalledConversation?.stalled_reason
+      });
+      return;
+    }
+
+    if (Number.isFinite(timeoutMinutes) && timeoutMinutes > 0) {
+      const updatedAtMs = Date.parse(String(conversation.updated_at ?? conversation.created_at));
+      if (Number.isFinite(updatedAtMs) && Date.now() - updatedAtMs >= timeoutMinutes * 60 * 1000) {
+        const stalledConversation = markConversationStalled({
+          statePath,
+          logPath,
+          reason: `no callback after ${timeoutMinutes} minutes`,
+          detail: {
+            agent_timeout_minutes: timeoutMinutes,
+            output_path: options.outputPath
+          }
+        });
+        printJson({
+          conversation: stalledConversation,
+          monitored: true,
+          stalled: true,
+          reason: stalledConversation?.stalled_reason
+        });
+        return;
+      }
+    }
+
+    sleepSync(pollIntervalMs);
+  }
 }
 
 function resolveExecutable(command) {
@@ -1206,6 +1380,156 @@ function isActiveStatus(status) {
   return !["done", "failed", "closed", "cancelled"].includes(status);
 }
 
+function isWaitingForAgent(status) {
+  return ["created", "running", "waiting_for_agent", "cancelling"].includes(status);
+}
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+function markConversationStalled({ statePath, logPath, reason, detail = {} }) {
+  const releaseLock = acquireFileLock(`${statePath}.lock`);
+  let stalledConversation;
+  try {
+    const conversation = loadState(statePath);
+    if (!isWaitingForAgent(conversation.status)) {
+      runtimeLog("info", "executor_monitor_finished", {
+        conversation_id: conversation.conversation_id,
+        status: conversation.status,
+        reason: "conversation_changed_before_stall"
+      });
+      return conversation;
+    }
+
+    const now = new Date().toISOString();
+    stalledConversation = {
+      ...conversation,
+      status: "stalled" as const,
+      stalled_at: now,
+      stalled_reason: reason,
+      updated_at: now
+    };
+    saveState(statePath, stalledConversation);
+    appendEvent(logPath, {
+      ts: now,
+      conversation_id: conversation.conversation_id,
+      event: "conversation_stalled",
+      status: "stalled",
+      reason,
+      ...detail
+    });
+    runtimeLog("warn", "conversation_stalled", {
+      conversation_id: conversation.conversation_id,
+      agent: executorForConversation(conversation).kind,
+      executor_session: executorForConversation(conversation).session,
+      state_path: statePath,
+      event_log_path: logPath,
+      reason,
+      ...detail
+    });
+  } finally {
+    releaseLock();
+  }
+
+  if (stalledConversation) {
+    deliverStalledNotification({
+      statePath,
+      logPath,
+      conversation: stalledConversation,
+      reason
+    });
+  }
+  return stalledConversation;
+}
+
+function deliverStalledNotification({ statePath, logPath, conversation, reason }) {
+  if (!conversation.gateway_method) {
+    return;
+  }
+
+  const executor = executorForConversation(conversation);
+  const message = createMessage({
+    conversation,
+    from: executor.actor,
+    to: "openclaw",
+    type: "error",
+    requiresResponse: false,
+    body: [
+      `AKK marked this ${executor.display_name} task as stalled: ${reason}.`,
+      "",
+      `Conversation: ${conversation.conversation_id}`,
+      `Session: ${executor.session}`,
+      "Use `AKK status` for details, `AKK send` to retry/follow up, or `AKK close` to close it."
+    ].join("\n")
+  });
+
+  const delivery = deliverToGatewayMethod({
+    method: conversation.gateway_method,
+    openclawBin: conversation.openclaw_bin,
+    gatewayUrl: conversation.gateway_url,
+    token: conversation.gateway_token,
+    sessionKey: conversation.gateway_session ?? conversation.openclaw_session,
+    statePath,
+    logPath,
+    conversation,
+    message
+  });
+  appendEvent(logPath, {
+    ts: new Date().toISOString(),
+    conversation_id: conversation.conversation_id,
+    event: "stalled_gateway_method_delivery",
+    method: conversation.gateway_method,
+    status: delivery.status,
+    stdout: delivery.stdout,
+    stderr: delivery.stderr
+  });
+  runtimeLog("info", "stalled_gateway_method_delivery", {
+    conversation_id: conversation.conversation_id,
+    method: conversation.gateway_method,
+    status: delivery.status,
+    failure_kind: classifyProcessFailure(delivery),
+    stdout: textSummary(delivery.stdout),
+    stderr: textSummary(delivery.stderr)
+  });
+  if (delivery.status !== 0) {
+    return;
+  }
+
+  const gatewayPayload = parseOptionalJson(delivery.stdout);
+  const chatSendParams = isRecord(gatewayPayload?.chat_send) ? gatewayPayload.chat_send : undefined;
+  if (!chatSendParams) {
+    return;
+  }
+
+  const chatSendDelivery = deliverToChatSend({
+    openclawBin: conversation.openclaw_bin,
+    gatewayUrl: conversation.gateway_url,
+    token: conversation.gateway_token,
+    params: chatSendParams
+  });
+  appendEvent(logPath, {
+    ts: new Date().toISOString(),
+    conversation_id: conversation.conversation_id,
+    event: "stalled_chat_send_delivery",
+    status: chatSendDelivery.status,
+    stdout: chatSendDelivery.stdout,
+    stderr: chatSendDelivery.stderr
+  });
+  runtimeLog("info", "stalled_chat_send_delivery", {
+    conversation_id: conversation.conversation_id,
+    status: chatSendDelivery.status,
+    failure_kind: classifyProcessFailure(chatSendDelivery),
+    stdout: textSummary(chatSendDelivery.stdout),
+    stderr: textSummary(chatSendDelivery.stderr)
+  });
+}
+
 function cleanupIdleConversations(storeDir, options: Record<string, any> = {}, now = new Date()) {
   const timeoutMinutes = Number(options.idleTimeoutMinutes ?? DEFAULT_IDLE_TIMEOUT_MINUTES);
   if (!Number.isFinite(timeoutMinutes) || timeoutMinutes <= 0) {
@@ -1578,10 +1902,10 @@ function usage() {
   agent-knock-knock new --request <text> [--agent claude|codex] [--workspace <path>] [--store-dir <dir>]
   agent-knock-knock record --state <file> --message-json <json>
   agent-knock-knock bootstrap-prompt --callback-command <command> [--agent claude|codex]
-  agent-knock-knock delegate --request <text> [--agent claude|codex] [--store-dir <dir>] [--all-proxy <url>] [--token <gateway-token>] [--send|--background]
+  agent-knock-knock delegate --request <text> [--agent claude|codex] [--store-dir <dir>] [--all-proxy <url>] [--agent-timeout-minutes <minutes>] [--token <gateway-token>] [--send|--background]
   agent-knock-knock list [--store-dir <dir>] [--agent claude|codex] [--status <status>] [--all]
   agent-knock-knock status --conversation <id> [--store-dir <dir>]
-  agent-knock-knock send --conversation <id> --message <text> [--type answer|task|control] [--all-proxy <url>]
+  agent-knock-knock send --conversation <id> --message <text> [--type answer|task|control] [--all-proxy <url>] [--agent-timeout-minutes <minutes>]
   agent-knock-knock cancel --conversation <id> [--all-proxy <url>]
   agent-knock-knock close --conversation <id> [--reason <text>]
   agent-knock-knock callback --state <file> --message-json <json> [--record-only]

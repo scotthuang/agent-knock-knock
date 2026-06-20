@@ -27,7 +27,9 @@
 - Updated the OpenClaw skill template with AKK/akk routing, default Codex delegation, Claude opt-in routing, and task management tool usage.
 - Updated follow-up sends from OpenClaw to launch the coding agent in the background so OpenClaw can continue to subsequent tool calls.
 - Migrated the implementation source to TypeScript and moved runtime entrypoints to compiled `dist/src` output.
-- Updated `npm test` to build TypeScript sources before running the Node test suite.
+- Migrated the Node test suite to TypeScript and updated `npm test` to build before running compiled tests from `dist/test`.
+- Changed `delegate` to generate a unique ACPX session for each new coding-agent task unless a session is explicitly configured, preventing concurrent AKK tasks from sharing the same default Codex or Claude session.
+- Added a background executor monitor that marks agent-waiting tasks `stalled` when the launched process exits without a callback or when the configurable `agentTimeoutMinutes` callback timeout is reached, then attempts to notify the original OpenClaw session.
 - Updated documentation to describe local coding agents, task management, cooperative cancellation, and the home-directory conversation store.
 - Documented ACPX approval behavior: Claude Code permission requests work with `--approve-all`, while some Codex sensitive operations can fail directly under AKK's non-interactive/background path instead of surfacing an approvable ACPX permission request.
 

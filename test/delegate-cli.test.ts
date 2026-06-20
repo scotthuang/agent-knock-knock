@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
-const binPath = new URL("../dist/src/cli.js", import.meta.url).pathname;
+const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 
 test("delegate background launches acpx without returning raw Claude output", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-delegate-"));
@@ -54,9 +54,11 @@ fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify(process.argv.s
     assert.equal(parsed.acpx_command, undefined);
 
     const acpxCalls = await waitForCalls(launchedPath, 2);
-    assert.deepEqual(acpxCalls[0], ["claude", "sessions", "ensure", "--name", "bidirectional"]);
+    const generatedSession = acpxCalls[0][4];
+    assert.match(generatedSession, /^akk-claude-\d{14}-[0-9a-f]{8}$/);
+    assert.deepEqual(acpxCalls[0], ["claude", "sessions", "ensure", "--name", generatedSession]);
     const acpxArgs = acpxCalls.at(-1);
-    assert.deepEqual(acpxArgs.slice(0, 4), ["--approve-all", "claude", "-s", "bidirectional"]);
+    assert.deepEqual(acpxArgs.slice(0, 4), ["--approve-all", "claude", "-s", generatedSession]);
     assert.match(acpxArgs[4], /Initial task message:/);
 
     const state = JSON.parse(fs.readFileSync(parsed.paths.statePath, "utf8"));
@@ -71,6 +73,58 @@ fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify(process.argv.s
       .map((line) => JSON.parse(line));
     assert.equal(events.some((event) => event.event === "claude_session_ensure" && event.status === 0), true);
     assert.equal(events.some((event) => event.event === "claude_launch" && event.mode === "background"), true);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("delegate background generates a unique Codex session when no session is provided", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-unique-delegate-"));
+  const fakeBinDir = path.join(tempDir, "bin");
+  const workspace = path.join(tempDir, "workspace");
+  const launchedPath = path.join(tempDir, "acpx-args.json");
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    const fakeAcpx = path.join(fakeBinDir, "acpx");
+    fs.writeFileSync(
+      fakeAcpx,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify(process.argv.slice(2)) + "\\n", "utf8");
+`,
+      "utf8"
+    );
+    fs.chmodSync(fakeAcpx, 0o755);
+
+    const result = spawnSync(process.execPath, [
+      binPath,
+      "delegate",
+      "--agent",
+      "codex",
+      "--request",
+      "Run an isolated Codex task",
+      "--workspace",
+      workspace,
+      "--store-dir",
+      path.join(tempDir, "conversations"),
+      "--background"
+    ], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+      }
+    });
+
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const parsed = JSON.parse(result.stdout);
+    assert.match(parsed.conversation.executor.session, /^akk-codex-\d{14}-[0-9a-f]{8}$/);
+
+    const acpxCalls = await waitForCalls(launchedPath, 2);
+    assert.deepEqual(acpxCalls[0], ["codex", "sessions", "ensure", "--name", parsed.conversation.executor.session]);
+    assert.deepEqual(acpxCalls.at(-1).slice(0, 4), ["--approve-all", "codex", "-s", parsed.conversation.executor.session]);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -151,7 +205,7 @@ fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify({
   }
 });
 
-function waitForCalls(filePath, minCount, timeoutMs = 2000) {
+function waitForCalls(filePath, minCount, timeoutMs = 2000): Promise<any[]> {
   const started = Date.now();
   return new Promise((resolve, reject) => {
     const check = () => {
