@@ -848,6 +848,55 @@ test("status trace summarizes executor output without exposing thinking text", (
   }
 });
 
+test("monitor marks Codex model failures as needing model selection", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-model-selection-"));
+  const storeDir = path.join(tempDir, "conversations");
+
+  try {
+    const created = runCli([
+      "new",
+      "--agent",
+      "codex",
+      "--session",
+      "codex-model-selection",
+      "--request",
+      "Codex task",
+      "--store-dir",
+      storeDir
+    ]);
+    const outputPath = path.join(path.dirname(created.paths.logPath), "codex-output.log");
+    fs.writeFileSync(outputPath, [
+      "[error] Cannot apply --model \"gpt-5\": the ACP agent did not advertise that model. Available models: gpt-5.5[low], gpt-5.5[medium], gpt-5.5[high]"
+    ].join("\n"), "utf8");
+
+    const monitored = runCli([
+      "monitor",
+      "--state",
+      created.paths.statePath,
+      "--log",
+      created.paths.logPath,
+      "--pid",
+      "999999",
+      "--output-path",
+      outputPath,
+      "--poll-interval-ms",
+      "50"
+    ]);
+
+    assert.equal(monitored.needs_model_selection, true);
+    assert.equal(monitored.stalled, false);
+    assert.equal(monitored.conversation.status, "needs_model_selection");
+    assert.equal(monitored.conversation.model_selection.attempted_model, "gpt-5");
+    assert.deepEqual(monitored.conversation.model_selection.available_models, [
+      "gpt-5.5[low]",
+      "gpt-5.5[medium]",
+      "gpt-5.5[high]"
+    ]);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 function runCli(args, env = {}) {
   const result = spawnSync(process.execPath, [binPath, ...args], {
     encoding: "utf8",

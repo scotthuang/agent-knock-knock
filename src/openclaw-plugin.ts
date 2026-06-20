@@ -239,6 +239,84 @@ const closeParameters = {
   }
 };
 
+const agentDiscoverParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["agent", "scope"],
+  properties: {
+    agent: {
+      type: "string",
+      enum: ["codex"],
+      description: "Local coding agent session provider to inspect. Currently supports Codex."
+    },
+    scope: {
+      type: "string",
+      enum: ["capabilities", "sessions", "active"],
+      description: "Discovery scope: provider capabilities, historical sessions, or active local CLI processes."
+    },
+    codexHome: {
+      type: "string",
+      description: "Optional Codex home directory. Defaults to ~/.codex."
+    }
+  }
+};
+
+const agentTakeoverParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["agent", "sessionId", "strategy"],
+  properties: {
+    agent: {
+      type: "string",
+      enum: ["codex"],
+      description: "Local coding agent session provider to plan takeover for. Currently supports Codex."
+    },
+    sessionId: {
+      type: "string",
+      description: "Native Codex session id to inspect or take over."
+    },
+    strategy: {
+      type: "string",
+      enum: ["safe_resume", "terminate_then_resume", "fork"],
+      description:
+        "Takeover strategy. safe_resume only works when no matching CLI is active. terminate_then_resume returns a confirmation plan to stop the exact active CLI before resume. fork returns bounded context for OpenClaw summary confirmation."
+    },
+    createConversation: {
+      type: "boolean",
+      description:
+        "When true and the selected strategy is ready, create an AKK-managed conversation bound to the native session so later AKK send/status/close can use it."
+    },
+    request: {
+      type: "string",
+      description: "Optional user-visible request label stored on the created AKK conversation."
+    },
+    storeDir: {
+      type: "string",
+      description: "Conversation store directory. Defaults to plugin config or <workspace>/.agent-knock-knock/conversations."
+    },
+    openclawSession: {
+      type: "string",
+      description: "OpenClaw session label recorded in the created AKK conversation."
+    },
+    codexHome: {
+      type: "string",
+      description: "Optional Codex home directory. Defaults to ~/.codex."
+    },
+    maxMessages: {
+      type: "number",
+      description: "Maximum rollout messages to include for fork context."
+    },
+    maxCommands: {
+      type: "number",
+      description: "Maximum rollout command records to include for fork context."
+    },
+    maxTextLength: {
+      type: "number",
+      description: "Maximum text length per fork-context message."
+    }
+  }
+};
+
 export default definePluginEntry({
   id: "agent-knock-knock",
   name: "Agent Knock Knock",
@@ -388,6 +466,70 @@ export default definePluginEntry({
         const args = ["close", "--conversation", requiredString(params.conversation_id, "conversation_id")];
         pushOptional(args, "--reason", stringValue(params.reason));
         pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
+        return args;
+      }
+    });
+
+    registerCliTool(api, {
+      name: "agent_knock_knock_agent_discover",
+      description:
+        "Discover native local coding-agent sessions managed outside AKK. Use this to inspect Codex provider capabilities, historical Codex sessions, or active Codex CLI processes before taking over an existing local session.",
+      parameters: agentDiscoverParameters,
+      buildArgs: (params) => {
+        const args = [
+          "agent",
+          "discover",
+          "--agent",
+          requiredString(params.agent, "agent"),
+          "--scope",
+          requiredString(params.scope, "scope")
+        ];
+        pushOptional(args, "--codex-home", stringValue(params.codexHome) ?? stringValue(api.pluginConfig?.codexHome));
+        return args;
+      }
+    });
+
+    registerCliTool(api, {
+      name: "agent_knock_knock_agent_takeover",
+      description:
+        "Build a takeover plan for an existing native local coding-agent session. Use this for AKK takeover requests. By default it is side-effect-free and returns the plan; with createConversation=true it can attach a ready native session to an AKK-managed conversation. It does not kill processes or create forked sessions.",
+      parameters: agentTakeoverParameters,
+      buildArgs: (params, toolContext) => {
+        const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+        const openclawSession =
+          stringValue(toolContext?.sessionKey) ??
+          stringValue(config.openclawSession) ??
+          stringValue(params.openclawSession) ??
+          "agent:main:main";
+        const args = [
+          "agent",
+          "takeover",
+          "--agent",
+          requiredString(params.agent, "agent"),
+          "--session-id",
+          requiredString(params.sessionId, "sessionId"),
+          "--strategy",
+          requiredString(params.strategy, "strategy")
+        ];
+        if (params.createConversation === true) {
+          args.push("--create-conversation");
+        }
+        pushOptional(args, "--request", stringValue(params.request));
+        pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(config.storeDir));
+        pushOptional(args, "--openclaw-session", openclawSession);
+        pushOptional(args, "--gateway-url", stringValue(config.gatewayUrl));
+        pushOptional(args, "--token", stringValue(config.gatewayToken));
+        pushOptional(args, "--gateway-method", CALLBACK_METHOD);
+        pushOptional(args, "--gateway-session", openclawSession);
+        pushOptional(args, "--openclaw-bin", stringValue(config.openclawBin));
+        pushOptional(args, "--callback-command", stringValue(config.callbackCommand));
+        pushOptional(args, "--soft-limit", numberString(config.softLimit));
+        pushOptional(args, "--hard-limit", numberString(config.hardLimit));
+        pushOptional(args, "--idle-timeout-minutes", numberString(config.idleTimeoutMinutes));
+        pushOptional(args, "--codex-home", stringValue(params.codexHome) ?? stringValue(api.pluginConfig?.codexHome));
+        pushOptional(args, "--max-messages", numberString(params.maxMessages));
+        pushOptional(args, "--max-commands", numberString(params.maxCommands));
+        pushOptional(args, "--max-text-length", numberString(params.maxTextLength));
         return args;
       }
     });
@@ -766,12 +908,12 @@ function runDelegate(api, params, toolContext) {
 
 function registerCliTool(api, { name, description, parameters, buildArgs }) {
   api.registerTool(
-    () => ({
+    (toolContext) => ({
       name,
       description,
       parameters,
       async execute(_toolCallId, params) {
-        const result = runCli(api, buildArgs(isRecord(params) ? params : {}));
+        const result = runCli(api, buildArgs(isRecord(params) ? params : {}, toolContext));
         return {
           content: [
             {

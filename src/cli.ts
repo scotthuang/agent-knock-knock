@@ -5,6 +5,9 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import type { CodexProcessSnapshot, CodexThreadRow } from "./codex-session-provider.js";
+import { CodexLocalSessionProvider, type CodexLocalSessionAdapter } from "./codex-local-session-provider.js";
+import { CodexStoreAdapter } from "./codex-store-adapter.js";
 import {
   applyMessageToConversation,
   budgetAction,
@@ -40,13 +43,49 @@ import {
   saveState,
   statePathForConversationId
 } from "./store.js";
+import { planFork, planSafeResume, planTakeover } from "./session-takeover-planner.js";
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 10080;
 const DEFAULT_AGENT_TIMEOUT_MINUTES = 60;
 const DEFAULT_MONITOR_POLL_INTERVAL_MS = 5000;
 
+class InlineCodexSessionAdapter implements CodexLocalSessionAdapter {
+  private readonly threads: CodexThreadRow[];
+  private readonly processes: CodexProcessSnapshot[];
+  private readonly rollouts: Map<string, string>;
+
+  constructor({
+    threads,
+    processes,
+    rollouts
+  }: {
+    threads?: CodexThreadRow[];
+    processes?: CodexProcessSnapshot[];
+    rollouts?: Record<string, string>;
+  }) {
+    this.threads = Array.isArray(threads) ? threads : [];
+    this.processes = Array.isArray(processes) ? processes : [];
+    this.rollouts = new Map(Object.entries(rollouts ?? {}));
+  }
+
+  async listThreadRows(): Promise<CodexThreadRow[]> {
+    return this.threads;
+  }
+
+  async readRollout(rolloutPath: string): Promise<string | undefined> {
+    return this.rollouts.get(rolloutPath);
+  }
+
+  async listProcessSnapshots(): Promise<CodexProcessSnapshot[]> {
+    return this.processes;
+  }
+}
+
 const command = process.argv[2];
-const args = parseArgs(process.argv.slice(3));
+const rawArgs = process.argv.slice(3);
+const args = command === "agent"
+  ? { agentCommand: rawArgs[0], ...parseArgs(rawArgs.slice(1)) }
+  : parseArgs(rawArgs);
 
 runtimeLog("info", "cli_start", {
   command: command ?? "help",
@@ -55,7 +94,7 @@ runtimeLog("info", "cli_start", {
 });
 
 try {
-  runCommand(command, args);
+  await runCommand(command, args);
   runtimeLog("info", "cli_finish", {
     command: command ?? "help",
     exit_code: process.exitCode ?? 0
@@ -70,7 +109,7 @@ try {
   process.exit(1);
 }
 
-function runCommand(commandName, options) {
+async function runCommand(commandName, options) {
   if (commandName === "new") {
     runNew(options);
   } else if (commandName === "record") {
@@ -103,6 +142,8 @@ function runCommand(commandName, options) {
     runCallback(options);
   } else if (commandName === "monitor") {
     runMonitor(options);
+  } else if (commandName === "agent") {
+    await runAgent(options);
   } else {
     usage();
     process.exitCode = commandName ? 1 : 0;
@@ -194,6 +235,238 @@ function runDoctor(options) {
     ],
     options
   });
+}
+
+async function runAgent(options) {
+  const agentCommand = required(options.agentCommand, "agent subcommand is required: discover or takeover");
+  if (agentCommand === "discover") {
+    printJson(await runAgentDiscover(options));
+    return;
+  }
+  if (agentCommand === "takeover") {
+    printJson(await runAgentTakeover(options));
+    return;
+  }
+  throw new Error(`unsupported agent subcommand: ${agentCommand}`);
+}
+
+async function runAgentDiscover(options) {
+  const agent = required(options.agent, "--agent is required");
+  const scope = required(options.scope, "--scope is required");
+  const provider = createAgentSessionProvider(agent, options);
+  const capabilities = await provider.getCapabilities();
+
+  if (scope === "capabilities") {
+    return {
+      agent,
+      scope,
+      capabilities
+    };
+  }
+  if (scope === "sessions") {
+    return {
+      agent,
+      scope,
+      capabilities,
+      sessions: await provider.listHistoricalSessions()
+    };
+  }
+  if (scope === "active") {
+    return {
+      agent,
+      scope,
+      capabilities,
+      active: await provider.listActiveSessions()
+    };
+  }
+
+  throw new Error(`unsupported discover scope: ${scope}`);
+}
+
+async function runAgentTakeover(options) {
+  const agent = required(options.agent, "--agent is required");
+  const sessionId = required(options.sessionId, "--session-id is required");
+  const strategy = options.strategy ?? "terminate_then_resume";
+  const provider = createAgentSessionProvider(agent, options);
+  const session = await provider.getSession(sessionId);
+  if (!session) {
+    return {
+      agent,
+      sessionId,
+      strategy,
+      status: "blocked",
+      sideEffectsExecuted: false,
+      error: {
+        code: "session_not_found",
+        message: `No ${agent} session found for ${sessionId}`
+      }
+    };
+  }
+
+  if (strategy === "safe_resume") {
+    const plan = planSafeResume(session, await provider.listActiveSessions());
+    if (plan.allowed && options.createConversation) {
+      const modelInfo = await provider.getSessionModel(session.id);
+      const attached = createNativeSessionConversation({
+        agent,
+        strategy,
+        session,
+        modelInfo,
+        options
+      });
+      return {
+        agent,
+        sessionId,
+        strategy,
+        status: "attached",
+        sideEffectsExecuted: true,
+        plan,
+        ...attached
+      };
+    }
+
+    return {
+      agent,
+      sessionId,
+      strategy,
+      status: plan.allowed ? "ready" : "blocked",
+      sideEffectsExecuted: false,
+      plan
+    };
+  }
+
+  if (strategy === "terminate_then_resume") {
+    const plan = planTakeover(session, await provider.listActiveSessions());
+    return {
+      agent,
+      sessionId,
+      strategy,
+      status: plan.requiresConfirmation ? "requires_confirmation" : "blocked",
+      sideEffectsExecuted: false,
+      plan
+    };
+  }
+
+  if (strategy === "fork") {
+    const contextPackage = await provider.getForkContext({
+      sessionId,
+      maxMessages: Number(options.maxMessages ?? 12),
+      maxCommands: Number(options.maxCommands ?? 8),
+      maxTextLength: Number(options.maxTextLength ?? 1200)
+    });
+    if (!contextPackage) {
+      return {
+        agent,
+        sessionId,
+        strategy,
+        status: "blocked",
+        sideEffectsExecuted: false,
+        error: {
+          code: "fork_context_unavailable",
+          message: `No fork context could be built for ${sessionId}`
+        }
+      };
+    }
+
+    return {
+      agent,
+      sessionId,
+      strategy,
+      status: "awaiting_openclaw_summary",
+      sideEffectsExecuted: false,
+      plan: planFork(session, contextPackage),
+      next: "Summarize the bounded context package for the user and ask for confirmation before creating a forked AKK-managed session."
+    };
+  }
+
+  throw new Error(`unsupported takeover strategy: ${strategy}`);
+}
+
+function createNativeSessionConversation({ agent, strategy, session, modelInfo, options }) {
+  const workspace = session.cwd;
+  const storeDir = expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(workspace));
+  cleanupIdleConversations(storeDir, options);
+  const executor = resolveExecutor({
+    kind: agent,
+    session: session.id
+  });
+  const now = new Date();
+  const conversation = createConversation({
+    userRequest: options.request ?? `Attach native ${agent} session ${session.id}`,
+    workspace,
+    openclawSession: options.openclawSession ?? "agent:main:main",
+    executorKind: executor.kind,
+    executorSession: executor.session,
+    softLimit: Number(options.softLimit ?? 50),
+    hardLimit: Number(options.hardLimit ?? 100),
+    now
+  });
+  const paths = pathsForConversation(conversation.conversation_id, storeDir);
+  const callbackCommand = options.callbackCommand
+    ? expandCallbackCommandTemplate(options.callbackCommand, { statePath: paths.statePath })
+    : buildCallbackCommand({
+        statePath: paths.statePath,
+        gatewayUrl: options.gatewayUrl ?? "ws://127.0.0.1:18789",
+        token: options.token,
+        openclawSession: options.openclawSession ?? "agent:main:main",
+        gatewayMethod: options.gatewayMethod,
+        gatewaySession: options.gatewaySession,
+        openclawBin: options.openclawBin ?? resolveOptionalExecutable("openclaw")
+      });
+  const explicitModel = options.model ?? options.codexModel;
+  const executorModel = explicitModel ?? modelInfo?.acpxModel ?? modelEnvForExecutor(executor, process.env);
+  const attachedConversation = withStoragePaths({
+    ...conversation,
+    executor,
+    status: "idle" as const,
+    idle_since: now.toISOString(),
+    updated_at: now.toISOString(),
+    callback_command: callbackCommand,
+    gateway_url: options.gatewayUrl ?? "ws://127.0.0.1:18789",
+    gateway_method: options.gatewayMethod,
+    gateway_session: options.gatewaySession ?? options.openclawSession ?? "agent:main:main",
+    openclaw_bin: options.openclawBin ?? resolveOptionalExecutable("openclaw"),
+    executor_all_proxy: proxyForExecutor(executor, options),
+    executor_model: executorModel,
+    native_session_takeover: {
+      agent,
+      native_session_id: session.id,
+      source_cwd: session.cwd,
+      source_title: session.title,
+      strategy,
+      attached_at: now.toISOString(),
+      native_model: modelInfo?.model,
+      acpx_model: modelInfo?.acpxModel,
+      model_source: modelInfo?.source,
+      needs_bootstrap: true
+    }
+  }, paths);
+
+  saveState(paths.statePath, attachedConversation);
+  appendEvent(paths.logPath, {
+    ts: now.toISOString(),
+    conversation_id: attachedConversation.conversation_id,
+    event: "native_session_attached",
+    agent,
+    strategy,
+    native_session_id: session.id,
+    source_cwd: session.cwd,
+    executor
+  });
+  runtimeLog("info", "native_session_attached", {
+    conversation_id: attachedConversation.conversation_id,
+    agent,
+    strategy,
+    native_session_id: session.id,
+    state_path: paths.statePath,
+    event_log_path: paths.logPath
+  });
+
+  return {
+    conversation: attachedConversation,
+    paths,
+    next: `Use AKK send ${attachedConversation.conversation_id}: <message> to continue this native ${agent} session through AKK.`
+  };
 }
 
 function runNew(options) {
@@ -538,8 +811,26 @@ function runDelegate(options) {
   });
 }
 
-function ensureExecutorSession({ acpxPath, executor, cwd, env }) {
-  return spawnSync(acpxPath, [acpxCommandForExecutor(executor), "sessions", "ensure", "--name", executor.session], {
+function ensureExecutorSession({
+  acpxPath,
+  executor,
+  cwd,
+  env,
+  resumeSessionId
+}: {
+  acpxPath: string;
+  executor: any;
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  resumeSessionId?: string;
+}) {
+  const args = [acpxCommandForExecutor(executor), "sessions", "ensure"];
+  if (resumeSessionId) {
+    args.push("--resume-session", resumeSessionId);
+  } else {
+    args.push("--name", executor.session);
+  }
+  return spawnSync(acpxPath, args, {
     encoding: "utf8",
     cwd,
     env
@@ -683,9 +974,16 @@ function runSend(options) {
   if (conversation.status === "needs_recovery") {
     throw new Error(`cannot send to ${conversation.conversation_id}; choose recover, restart, or close first`);
   }
+  if (conversation.status === "needs_model_selection" && !options.model) {
+    throw new Error(`cannot send to ${conversation.conversation_id}; choose a supported model with --model first`);
+  }
 
   const executor = executorForConversation(conversation);
   const type = options.type ?? (conversation.status === "waiting_for_openclaw" ? "answer" : "task");
+  const nativeTakeoverForSend = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const needsNativeTakeoverBootstrap = nativeTakeoverForSend?.["needs_bootstrap"] === true;
   const message = createMessage({
     conversation,
     from: "openclaw",
@@ -697,10 +995,21 @@ function runSend(options) {
       executor_session: executor.session
     }
   });
+  const previousModelSelection = isRecord(conversation.model_selection)
+    ? conversation.model_selection as Record<string, unknown>
+    : {};
   const nextConversation = {
     ...applyMessageToConversation(conversation, message),
     executor,
-    claude_session: executor.kind === "claude" ? executor.session : conversation.claude_session
+    claude_session: executor.kind === "claude" ? executor.session : conversation.claude_session,
+    executor_model: options.model ?? conversation.executor_model,
+    model_selection: conversation.status === "needs_model_selection"
+      ? {
+          ...previousModelSelection,
+          resolved_at: new Date().toISOString(),
+          selected_model: options.model
+        }
+      : conversation.model_selection
   };
   saveState(statePath, nextConversation);
   appendEvent(logPath, messageEvent(message));
@@ -725,7 +1034,8 @@ function runSend(options) {
     acpxPath,
     executor,
     cwd: conversation.workspace ?? process.cwd(),
-    env: executorEnv
+    env: executorEnv,
+    resumeSessionId: nativeTakeoverForSend?.["native_session_id"]
   });
   appendEvent(logPath, {
     ts: new Date().toISOString(),
@@ -778,13 +1088,12 @@ function runSend(options) {
     throw new Error(cleanProcessText(ensureSession.stderr || ensureSession.stdout || `acpx ${executor.kind} sessions ensure exited with status ${ensureSession.status}`));
   }
 
-  const payload = [
-    "Continue the existing Agent Knock Knock delegation using this structured OpenClaw message.",
-    "If this message answers a question or blocker, follow it as the product decision.",
-    "Continue to report back only through the callback command already provided for this conversation.",
-    "",
-    JSON.stringify(message)
-  ].join("\n");
+  const payload = buildAgentSendPayload({
+    conversation,
+    executor,
+    message,
+    includeNativeTakeoverBootstrap: needsNativeTakeoverBootstrap
+  });
   const acpxArgs = buildAcpxPromptArgs({ executor, payload, model: executorModel });
 
   if (options.background) {
@@ -833,8 +1142,12 @@ function runSend(options) {
       agent_timeout_minutes: Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES)
     });
 
+    const deliveredConversation = needsNativeTakeoverBootstrap
+      ? markNativeSessionBootstrapped({ conversation: nextConversation, statePath, logPath, executor })
+      : nextConversation;
+
     printJson({
-      conversation: nextConversation,
+      conversation: deliveredConversation,
       message,
       delivered: true,
       background: true,
@@ -904,13 +1217,74 @@ function runSend(options) {
     throw new Error(cleanProcessText(sendResult.stderr || sendResult.stdout || `acpx ${executor.kind} send exited with status ${sendResult.status}`));
   }
 
+  const deliveredConversation = needsNativeTakeoverBootstrap
+    ? markNativeSessionBootstrapped({ conversation: nextConversation, statePath, logPath, executor })
+    : nextConversation;
+
   printJson({
-    conversation: nextConversation,
+    conversation: deliveredConversation,
     message,
     delivered: true,
     executor,
-    budget: budgetAction(nextConversation)
+    budget: budgetAction(deliveredConversation)
   });
+}
+
+function buildAgentSendPayload({ conversation, executor, message, includeNativeTakeoverBootstrap }) {
+  const messageJson = JSON.stringify(message);
+  if (!includeNativeTakeoverBootstrap) {
+    return [
+      "Continue the existing Agent Knock Knock delegation using this structured OpenClaw message.",
+      "If this message answers a question or blocker, follow it as the product decision.",
+      "Continue to report back only through the callback command already provided for this conversation.",
+      "",
+      messageJson
+    ].join("\n");
+  }
+
+  return [
+    executorBootstrapPrompt({
+      callbackCommand: conversation.callback_command,
+      executorName: executor.display_name,
+      softLimit: Number(conversation.soft_limit ?? 50),
+      hardLimit: Number(conversation.hard_limit ?? 100)
+    }),
+    "",
+    "This AKK conversation is attaching to an existing native coding-agent session. Continue from the native session context if it is available, and use the callback command above for all replies to OpenClaw.",
+    "",
+    "Initial AKK takeover message:",
+    messageJson
+  ].join("\n");
+}
+
+function markNativeSessionBootstrapped({ conversation, statePath, logPath, executor }) {
+  const nativeTakeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : {};
+  const now = new Date().toISOString();
+  const nextConversation = {
+    ...conversation,
+    native_session_takeover: {
+      ...nativeTakeover,
+      needs_bootstrap: false,
+      bootstrapped_at: now
+    },
+    updated_at: now
+  };
+  saveState(statePath, nextConversation);
+  appendEvent(logPath, {
+    ts: now,
+    conversation_id: conversation.conversation_id,
+    event: "native_session_bootstrapped",
+    executor
+  });
+  runtimeLog("info", "native_session_bootstrapped", {
+    conversation_id: conversation.conversation_id,
+    agent: executor.kind,
+    executor_session: executor.session,
+    state_path: statePath
+  });
+  return nextConversation;
 }
 
 function requiresExplicitRecoveryDecision(executor, options: Record<string, any> = {}) {
@@ -1307,6 +1681,27 @@ function runMonitor(options) {
     }
 
     if (Number.isFinite(pid) && !isProcessAlive(pid)) {
+      const modelSelection = detectModelSelectionError(readOutputTail(options.outputPath));
+      if (modelSelection) {
+        const modelSelectionConversation = markConversationNeedsModelSelection({
+          statePath,
+          logPath,
+          reason: modelSelection.message,
+          detail: {
+            executor_pid: pid,
+            output_path: options.outputPath,
+            model_selection: modelSelection
+          }
+        });
+        printJson({
+          conversation: modelSelectionConversation,
+          monitored: true,
+          stalled: false,
+          needs_model_selection: true,
+          reason: modelSelectionConversation?.model_selection?.message ?? modelSelection.message
+        });
+        return;
+      }
       const stalledConversation = markConversationStalled({
         statePath,
         logPath,
@@ -2125,6 +2520,60 @@ function markConversationStalled({ statePath, logPath, reason, detail = {} }) {
   return stalledConversation;
 }
 
+function markConversationNeedsModelSelection({ statePath, logPath, reason, detail = {} }) {
+  const releaseLock = acquireFileLock(`${statePath}.lock`);
+  let modelSelectionConversation;
+  try {
+    const conversation = loadState(statePath);
+    if (!isWaitingForAgent(conversation.status)) {
+      runtimeLog("info", "executor_monitor_finished", {
+        conversation_id: conversation.conversation_id,
+        status: conversation.status,
+        reason: "conversation_changed_before_model_selection"
+      });
+      return conversation;
+    }
+
+    const now = new Date().toISOString();
+    const detailRecord = detail as Record<string, unknown>;
+    const modelSelection = isRecord(detailRecord.model_selection)
+      ? detailRecord.model_selection as Record<string, unknown>
+      : {};
+    modelSelectionConversation = {
+      ...conversation,
+      status: "needs_model_selection" as const,
+      model_selection: {
+        detected_at: now,
+        message: reason,
+        ...modelSelection
+      },
+      updated_at: now
+    };
+    saveState(statePath, modelSelectionConversation);
+    appendEvent(logPath, {
+      ts: now,
+      conversation_id: conversation.conversation_id,
+      event: "conversation_needs_model_selection",
+      status: "needs_model_selection",
+      reason,
+      ...detailRecord
+    });
+    runtimeLog("warn", "conversation_needs_model_selection", {
+      conversation_id: conversation.conversation_id,
+      agent: executorForConversation(conversation).kind,
+      executor_session: executorForConversation(conversation).session,
+      state_path: statePath,
+      event_log_path: logPath,
+      reason,
+      ...detailRecord
+    });
+  } finally {
+    releaseLock();
+  }
+
+  return modelSelectionConversation;
+}
+
 function deliverStalledNotification({ statePath, logPath, conversation, reason, detail = {} }) {
   if (!conversation.gateway_method) {
     return;
@@ -2535,6 +2984,36 @@ function parseOptionalJson(text) {
   }
 }
 
+function createAgentSessionProvider(agent, options) {
+  if (agent !== "codex") {
+    throw new Error(`unsupported agent session provider: ${agent}`);
+  }
+
+  if (options.threadsJson || options.processesJson || options.rolloutsJson) {
+    return new CodexLocalSessionProvider(new InlineCodexSessionAdapter({
+      threads: parseJsonOption(options.threadsJson, "--threads-json"),
+      processes: parseJsonOption(options.processesJson, "--processes-json"),
+      rollouts: parseJsonOption(options.rolloutsJson, "--rollouts-json")
+    }));
+  }
+
+  return new CodexLocalSessionProvider(new CodexStoreAdapter({
+    codexHome: expandHome(options.codexHome)
+  }));
+}
+
+function parseJsonOption(value, optionName) {
+  if (!value) {
+    return undefined;
+  }
+
+  try {
+    return JSON.parse(String(value));
+  } catch (error) {
+    throw new Error(`${optionName} must be valid JSON: ${error.message}`);
+  }
+}
+
 function expandHome(filePath) {
   if (filePath === "~") {
     return process.env.HOME;
@@ -2593,6 +3072,60 @@ function classifyProcessFailure(result) {
   return undefined;
 }
 
+function readOutputTail(outputPath, maxBytes = 65536) {
+  if (!outputPath) {
+    return "";
+  }
+
+  try {
+    const resolvedPath = expandHome(outputPath);
+    const stat = fs.statSync(resolvedPath);
+    const start = Math.max(0, stat.size - maxBytes);
+    const length = stat.size - start;
+    const fd = fs.openSync(resolvedPath, "r");
+    try {
+      const buffer = Buffer.alloc(length);
+      fs.readSync(fd, buffer, 0, length, start);
+      return buffer.toString("utf8");
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return "";
+  }
+}
+
+function detectModelSelectionError(text) {
+  const cleaned = cleanProcessText(text);
+  if (!cleaned) {
+    return undefined;
+  }
+
+  const unsupportedAccount = /The '([^']+)' model is not supported when using Codex with a ChatGPT account/i.exec(cleaned);
+  if (unsupportedAccount) {
+    return {
+      kind: "unsupported_chatgpt_account_model",
+      attempted_model: unsupportedAccount[1],
+      message: unsupportedAccount[0]
+    };
+  }
+
+  const unadvertised = /Cannot apply --model "([^"]+)": the ACP agent did not advertise that model\. Available models:\s*([^\n\r]+)/i.exec(cleaned);
+  if (unadvertised) {
+    return {
+      kind: "unadvertised_acpx_model",
+      attempted_model: unadvertised[1],
+      available_models: unadvertised[2]
+        .split(",")
+        .map((model) => model.trim())
+        .filter(Boolean),
+      message: unadvertised[0]
+    };
+  }
+
+  return undefined;
+}
+
 function runtimeLog(level, event, fields = {}) {
   try {
     writeRuntimeLog({
@@ -2635,6 +3168,8 @@ function usage() {
   agent-knock-knock close --conversation <id> [--reason <text>]
   agent-knock-knock install-openclaw [--openclaw-bin <path>] [--skill-path <path>] [--no-restart]
   agent-knock-knock doctor
+  agent-knock-knock agent discover --agent codex --scope capabilities|sessions|active
+  agent-knock-knock agent takeover --agent codex --session-id <id> --strategy safe_resume|terminate_then_resume|fork [--create-conversation]
   agent-knock-knock callback --state <file> --message-json <json> [--record-only]
   agent-knock-knock transcript --log <file> [--include-raw]
   agent-knock-knock transcript --conversation <dir> [--include-raw]

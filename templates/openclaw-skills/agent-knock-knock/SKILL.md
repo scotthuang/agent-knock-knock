@@ -5,7 +5,7 @@ description: Delegate OpenClaw tasks to local Codex, Claude Code, and Cursor age
 
 # Agent Knock Knock
 
-Use this skill when the user says `AKK`, `akk`, `Agent Knock Knock`, asks OpenClaw to delegate coding work to Codex, Claude, or Cursor, asks what agent tasks are running, sends a follow-up to an agent task, recovers or restarts an unavailable agent session, cancels a running agent task, or closes an agent task.
+Use this skill when the user says `AKK`, `akk`, `Agent Knock Knock`, asks OpenClaw to delegate coding work to Codex, Claude, or Cursor, asks what agent tasks are running, sends a follow-up to an agent task, discovers existing local coding-agent sessions, takes over an existing native Codex session, recovers or restarts an unavailable agent session, cancels a running agent task, or closes an agent task.
 
 Treat `AKK` and `akk` the same way.
 
@@ -54,6 +54,12 @@ Natural-language forms:
 - `AKK recover <conversation-id>`: call `agent_knock_knock_recover`.
 - `AKK restart <conversation-id>`: call `agent_knock_knock_restart`.
 - `AKK close <conversation-id>`: call `agent_knock_knock_close`.
+- `AKK Codex sessions`, `AKK Codex history`, or requests to list existing native Codex sessions outside AKK: call `agent_knock_knock_agent_discover` with `agent="codex"` and `scope="sessions"`.
+- `AKK Codex active` or requests to list currently running local Codex CLI processes: call `agent_knock_knock_agent_discover` with `agent="codex"` and `scope="active"`.
+- `AKK Codex capabilities` or requests to inspect Codex takeover support: call `agent_knock_knock_agent_discover` with `agent="codex"` and `scope="capabilities"`.
+- `AKK takeover Codex <session-id>` or requests to take over an active Codex CLI session: call `agent_knock_knock_agent_takeover` with `agent="codex"` and `strategy="terminate_then_resume"`.
+- `AKK safe resume Codex <session-id>` or requests to resume only after the original Codex CLI has already exited: call `agent_knock_knock_agent_takeover` with `agent="codex"` and `strategy="safe_resume"`.
+- `AKK takeover Codex <session-id> with fork`, `AKK fork takeover Codex <session-id>`, or requests to take over without stopping the original Codex CLI: call `agent_knock_knock_agent_takeover` with `agent="codex"` and `strategy="fork"`.
 
 Session reuse rule:
 
@@ -77,6 +83,9 @@ akk cancel task-20260618T010203Z-abcdef12
 akk recover task-20260618T010203Z-abcdef12
 akk restart task-20260618T010203Z-abcdef12
 akk close task-20260618T010203Z-abcdef12
+akk codex sessions
+akk codex active
+akk takeover codex 019ee559-7bb8-7fd1-970c-0f7b6978c44e
 ```
 
 ## Start A Conversation
@@ -127,6 +136,26 @@ When AKK reports that a conversation is `needs_recovery`, do not automatically r
 Make clear that `recover` is AKK replay recovery, not guaranteed native coding-agent session resume.
 
 Cursor uses this conservative recovery flow by default when AKK cannot reach its previous ACPX session. Do not automatically recover or restart Cursor work without the user's explicit choice.
+
+## Native Session Takeover
+
+Native session takeover is for Codex sessions that were created outside AKK, such as a user-run terminal Codex CLI. It is separate from AKK managed conversation recovery.
+
+Use `agent_knock_knock_agent_discover`, not `agent_knock_knock_list`, when the user asks about native Codex sessions outside AKK:
+
+- `scope="sessions"` lists historical native Codex sessions from the local Codex store.
+- `scope="active"` lists currently running local Codex CLI processes that AKK can identify.
+- `scope="capabilities"` explains the supported takeover strategies.
+
+Use `agent_knock_knock_agent_takeover` when the user wants AKK to take over an existing native Codex session. By default this tool is side-effect-free and returns a plan. When the plan is ready and the user explicitly wants AKK to manage the session, call it with `createConversation=true` to create an AKK conversation bound to the native session:
+
+- `safe_resume`: allowed only when no active Codex CLI matches the session. If the result is `ready`, explain that this is safe to resume because AKK did not find an active conflicting CLI. If the user confirms attaching it to AKK, call again with `createConversation=true`, then use the returned `conversation_id` for `AKK send`, `AKK status`, and `AKK close`.
+- `terminate_then_resume`: use when the user wants to take over an active native Codex CLI. If the result is `requires_confirmation`, explain which process would need to be stopped and ask for explicit user confirmation before any future action that terminates it.
+- `fork`: use when the user wants to avoid stopping the original Codex CLI. This returns a bounded context package. Summarize that package as OpenClaw, ask the user to confirm whether to create a forked AKK-managed session later, and do not inject raw full rollout history directly.
+
+Do not present `fork` as a standalone command or standalone feature. It is a takeover strategy.
+
+Do not use `resume-anyway` or start a second live client on the same native Codex session while another Codex CLI is active. That can create mixed session history where multiple clients do not see each other's live context until a later resume.
 
 ## Message Rules
 
