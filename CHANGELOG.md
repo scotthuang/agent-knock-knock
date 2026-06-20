@@ -31,6 +31,7 @@
 - Migrated the Node test suite to TypeScript and updated `npm test` to build before running compiled tests from `dist/test`.
 - Changed `delegate` to generate a unique ACPX session for each new coding-agent task unless a session is explicitly configured, preventing concurrent AKK tasks from sharing the same default Codex or Claude session.
 - Added a background executor monitor that marks agent-waiting tasks `stalled` when the launched process exits without a callback or when the configurable `agentTimeoutMinutes` callback timeout is reached, then attempts to notify the original OpenClaw session.
+- Renamed the OpenClaw skill template from `bidirectional-chat` to `agent-knock-knock` so the installed skill matches the project and plugin name.
 - Updated documentation to describe local coding agents, task management, cooperative cancellation, and the home-directory conversation store.
 - Documented ACPX approval behavior: Claude Code permission requests work with `--approve-all`, while some Codex sensitive operations can fail directly under AKK's non-interactive/background path instead of surfacing an approvable ACPX permission request.
 
@@ -41,7 +42,7 @@
 ### Verified
 
 - `npm test` passes 46 tests.
-- Local OpenClaw installation validated with the linked Agent Knock Knock plugin loaded, the updated `bidirectional-chat` skill installed, and the gateway restarted successfully.
+- Local OpenClaw installation validated with the linked Agent Knock Knock plugin loaded, the updated `agent-knock-knock` skill installed, and the gateway restarted successfully.
 - Live OpenClaw validation created a Claude task, listed Claude tasks, sent a follow-up message, and closed the task through plugin tools.
 - Live OpenClaw validation created a Codex task with a configured `ALL_PROXY` value and `model=gpt-5.5/medium`, listed Codex tasks, sent a follow-up message, received Codex `done`, and closed the task through plugin tools.
 - Live ACPX validation created smoke sessions for Codex and Claude Code, called AKK cancel for each, observed `executor_cancel_requested` events with status 0, and closed the smoke ACPX sessions.

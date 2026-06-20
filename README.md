@@ -36,6 +36,19 @@ OpenClaw is the top-level orchestrator. Agent Knock Knock runs as the OpenClaw p
 
 ## Install
 
+After cloning this repository, you can ask OpenClaw to install it for you:
+
+```text
+Install this Agent Knock Knock project into my local OpenClaw:
+1. Run npm install.
+2. Run npm run build.
+3. Link and enable the OpenClaw plugin from this repository.
+4. Install the Agent Knock Knock skill template into ~/.openclaw/skills/agent-knock-knock/SKILL.md.
+5. Restart the OpenClaw Gateway.
+```
+
+Manual installation:
+
 Install the plugin into OpenClaw during local development:
 
 ```bash
@@ -48,8 +61,8 @@ openclaw plugins enable agent-knock-knock
 Install the OpenClaw skill template so OpenClaw learns when to route chat requests to AKK:
 
 ```bash
-mkdir -p ~/.openclaw/skills/bidirectional-chat
-cp templates/openclaw-skills/bidirectional-chat/SKILL.md ~/.openclaw/skills/bidirectional-chat/SKILL.md
+mkdir -p ~/.openclaw/skills/agent-knock-knock
+cp templates/openclaw-skills/agent-knock-knock/SKILL.md ~/.openclaw/skills/agent-knock-knock/SKILL.md
 ```
 
 ## OpenClaw Plugin

@@ -1,9 +1,9 @@
 ---
-name: bidirectional-chat
-description: Manage Agent Knock Knock (AKK/akk) delegation from OpenClaw to local Codex or Claude coding agents.
+name: agent-knock-knock
+description: Delegate OpenClaw tasks to local Codex and Claude Code agents through Agent Knock Knock.
 ---
 
-# Agent Knock Knock Delegation
+# Agent Knock Knock
 
 Use this skill when the user says `AKK`, `akk`, `Agent Knock Knock`, asks OpenClaw to delegate coding work to Codex or Claude, asks what agent tasks are running, sends a follow-up to an agent task, cancels a running agent task, or closes an agent task.
 
