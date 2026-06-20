@@ -290,6 +290,11 @@ const agentTakeoverParameters = {
       type: "string",
       description: "Optional user-visible request label stored on the created AKK conversation."
     },
+    forkSummary: {
+      type: "string",
+      description:
+        "Required when strategy=fork and createConversation=true. OpenClaw-approved summary of the bounded source context to inject into the new forked AKK session."
+    },
     storeDir: {
       type: "string",
       description: "Conversation store directory. Defaults to plugin config or <workspace>/.agent-knock-knock/conversations."
@@ -492,7 +497,7 @@ export default definePluginEntry({
     registerCliTool(api, {
       name: "agent_knock_knock_agent_takeover",
       description:
-        "Build a takeover plan for an existing native local coding-agent session. Use this for AKK takeover requests. By default it is side-effect-free and returns the plan; with createConversation=true it can attach a ready native session to an AKK-managed conversation. It does not kill processes or create forked sessions.",
+        "Build a takeover plan for an existing native local coding-agent session. Use this for AKK takeover requests. By default it is side-effect-free and returns the plan; with createConversation=true it can attach a ready native session or create a confirmed forked AKK-managed conversation. It never kills processes.",
       parameters: agentTakeoverParameters,
       buildArgs: (params, toolContext) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
@@ -515,6 +520,7 @@ export default definePluginEntry({
           args.push("--create-conversation");
         }
         pushOptional(args, "--request", stringValue(params.request));
+        pushOptional(args, "--fork-summary", stringValue(params.forkSummary));
         pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(config.storeDir));
         pushOptional(args, "--openclaw-session", openclawSession);
         pushOptional(args, "--gateway-url", stringValue(config.gatewayUrl));

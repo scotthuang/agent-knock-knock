@@ -368,6 +368,29 @@ async function runAgentTakeover(options) {
       };
     }
 
+    if (options.createConversation) {
+      const forkSummary = String(required(options.forkSummary ?? options.summary, "--fork-summary is required when creating a fork conversation"));
+      const modelInfo = await provider.getSessionModel(session.id);
+      const attached = createForkConversation({
+        agent,
+        strategy,
+        session,
+        contextPackage,
+        forkSummary,
+        modelInfo,
+        options
+      });
+      return {
+        agent,
+        sessionId,
+        strategy,
+        status: "forked",
+        sideEffectsExecuted: true,
+        plan: planFork(session, contextPackage),
+        ...attached
+      };
+    }
+
     return {
       agent,
       sessionId,
@@ -375,11 +398,154 @@ async function runAgentTakeover(options) {
       status: "awaiting_openclaw_summary",
       sideEffectsExecuted: false,
       plan: planFork(session, contextPackage),
-      next: "Summarize the bounded context package for the user and ask for confirmation before creating a forked AKK-managed session."
+      summaryPrompt: buildForkSummaryPrompt({ agent, session, contextPackage }),
+      nextAction: {
+        actor: "openclaw",
+        action: "summarize_and_confirm_fork",
+        instructions: [
+          "Summarize plan.contextPackage for the user before creating a forked AKK-managed session.",
+          "Do not inject the raw rollout or full contextPackage into the new coding agent.",
+          "Ask the user to confirm the summary.",
+          "After confirmation, call this tool again with strategy=fork, createConversation=true, and forkSummary set to the confirmed summary."
+        ],
+        followUpTool: "agent_knock_knock_agent_takeover",
+        followUpParams: {
+          agent,
+          sessionId,
+          strategy: "fork",
+          createConversation: true,
+          forkSummary: "<confirmed OpenClaw summary>"
+        }
+      },
+      next: "Use summaryPrompt to summarize the bounded context package for the user, ask for confirmation, then create the forked AKK-managed session with forkSummary."
     };
   }
 
   throw new Error(`unsupported takeover strategy: ${strategy}`);
+}
+
+function buildForkSummaryPrompt({ agent, session, contextPackage }) {
+  return [
+    "You are OpenClaw summarizing a bounded native coding-agent session context before Agent Knock Knock forks it into a new managed session.",
+    "",
+    "Goal:",
+    "- Produce a concise, user-reviewable summary that can be safely injected into a new AKK-managed coding-agent session after the user confirms it.",
+    "- The new session must use the summary only; do not pass raw rollout history or the full context package to the coding agent.",
+    "",
+    "Source:",
+    `- Agent: ${agent}`,
+    `- Session id: ${session.id}`,
+    `- Workspace: ${session.cwd}`,
+    `- Title: ${session.title ?? session.preview ?? session.firstUserMessage ?? "(unknown)"}`,
+    `- Context messages included: ${contextPackage.messages.length}`,
+    `- Commands included: ${contextPackage.commands.length}`,
+    `- Context truncated: ${contextPackage.truncated ? "yes" : "no"}`,
+    "",
+    "Summary format:",
+    "1. Original user goal",
+    "2. Work already completed",
+    "3. Current state and important findings",
+    "4. Constraints, risks, or files/workspace details the forked agent must preserve",
+    "5. Recommended next step for the forked agent",
+    "",
+    "After writing the summary, ask the user to confirm. If confirmed, call agent_knock_knock_agent_takeover with strategy=\"fork\", createConversation=true, and forkSummary equal to the confirmed summary."
+  ].join("\n");
+}
+
+function createForkConversation({ agent, strategy, session, contextPackage, forkSummary, modelInfo, options }) {
+  const workspace = session.cwd;
+  const storeDir = expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(workspace));
+  cleanupIdleConversations(storeDir, options);
+  const executor = resolveExecutor({
+    kind: agent,
+    session: options.session ?? options.executorSession ?? uniqueDelegateSessionName(agent)
+  });
+  const now = new Date();
+  const conversation = createConversation({
+    userRequest: options.request ?? `Fork native ${agent} session ${session.id}`,
+    workspace,
+    openclawSession: options.openclawSession ?? "agent:main:main",
+    executorKind: executor.kind,
+    executorSession: executor.session,
+    softLimit: Number(options.softLimit ?? 50),
+    hardLimit: Number(options.hardLimit ?? 100),
+    now
+  });
+  const paths = pathsForConversation(conversation.conversation_id, storeDir);
+  const callbackCommand = options.callbackCommand
+    ? expandCallbackCommandTemplate(options.callbackCommand, { statePath: paths.statePath })
+    : buildCallbackCommand({
+        statePath: paths.statePath,
+        gatewayUrl: options.gatewayUrl ?? "ws://127.0.0.1:18789",
+        token: options.token,
+        openclawSession: options.openclawSession ?? "agent:main:main",
+        gatewayMethod: options.gatewayMethod,
+        gatewaySession: options.gatewaySession,
+        openclawBin: options.openclawBin ?? resolveOptionalExecutable("openclaw")
+      });
+  const explicitModel = options.model ?? options.codexModel;
+  const executorModel = explicitModel ?? modelInfo?.acpxModel ?? modelEnvForExecutor(executor, process.env);
+  const forkedConversation = withStoragePaths({
+    ...conversation,
+    executor,
+    status: "idle" as const,
+    idle_since: now.toISOString(),
+    updated_at: now.toISOString(),
+    callback_command: callbackCommand,
+    gateway_url: options.gatewayUrl ?? "ws://127.0.0.1:18789",
+    gateway_method: options.gatewayMethod,
+    gateway_session: options.gatewaySession ?? options.openclawSession ?? "agent:main:main",
+    openclaw_bin: options.openclawBin ?? resolveOptionalExecutable("openclaw"),
+    executor_all_proxy: proxyForExecutor(executor, options),
+    executor_model: executorModel,
+    fork_context_takeover: {
+      agent,
+      source_session_id: session.id,
+      source_cwd: session.cwd,
+      source_title: session.title,
+      source_updated_at_ms: session.updatedAtMs,
+      strategy,
+      forked_at: now.toISOString(),
+      summary: forkSummary,
+      context_message_count: contextPackage.messages.length,
+      context_command_count: contextPackage.commands.length,
+      context_truncated: contextPackage.truncated,
+      native_model: modelInfo?.model,
+      acpx_model: modelInfo?.acpxModel,
+      model_source: modelInfo?.source,
+      needs_bootstrap: true
+    }
+  }, paths);
+
+  saveState(paths.statePath, forkedConversation);
+  appendEvent(paths.logPath, {
+    ts: now.toISOString(),
+    conversation_id: forkedConversation.conversation_id,
+    event: "native_session_forked",
+    agent,
+    strategy,
+    source_session_id: session.id,
+    source_cwd: session.cwd,
+    executor,
+    context_message_count: contextPackage.messages.length,
+    context_command_count: contextPackage.commands.length,
+    context_truncated: contextPackage.truncated
+  });
+  runtimeLog("info", "native_session_forked", {
+    conversation_id: forkedConversation.conversation_id,
+    agent,
+    strategy,
+    source_session_id: session.id,
+    executor_session: executor.session,
+    state_path: paths.statePath,
+    event_log_path: paths.logPath
+  });
+
+  return {
+    conversation: forkedConversation,
+    paths,
+    next: `Use AKK send ${forkedConversation.conversation_id}: <message> to start the forked ${agent} session with the approved summary.`
+  };
 }
 
 function createNativeSessionConversation({ agent, strategy, session, modelInfo, options }) {
@@ -983,7 +1149,11 @@ function runSend(options) {
   const nativeTakeoverForSend = isRecord(conversation.native_session_takeover)
     ? conversation.native_session_takeover
     : undefined;
+  const forkTakeoverForSend = isRecord(conversation.fork_context_takeover)
+    ? conversation.fork_context_takeover
+    : undefined;
   const needsNativeTakeoverBootstrap = nativeTakeoverForSend?.["needs_bootstrap"] === true;
+  const needsForkTakeoverBootstrap = forkTakeoverForSend?.["needs_bootstrap"] === true;
   const message = createMessage({
     conversation,
     from: "openclaw",
@@ -1092,7 +1262,9 @@ function runSend(options) {
     conversation,
     executor,
     message,
-    includeNativeTakeoverBootstrap: needsNativeTakeoverBootstrap
+    includeNativeTakeoverBootstrap: needsNativeTakeoverBootstrap,
+    includeForkTakeoverBootstrap: needsForkTakeoverBootstrap,
+    forkTakeover: forkTakeoverForSend
   });
   const acpxArgs = buildAcpxPromptArgs({ executor, payload, model: executorModel });
 
@@ -1142,9 +1314,14 @@ function runSend(options) {
       agent_timeout_minutes: Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES)
     });
 
-    const deliveredConversation = needsNativeTakeoverBootstrap
-      ? markNativeSessionBootstrapped({ conversation: nextConversation, statePath, logPath, executor })
-      : nextConversation;
+    const deliveredConversation = markTakeoverBootstrapped({
+      conversation: nextConversation,
+      statePath,
+      logPath,
+      executor,
+      native: needsNativeTakeoverBootstrap,
+      fork: needsForkTakeoverBootstrap
+    });
 
     printJson({
       conversation: deliveredConversation,
@@ -1217,9 +1394,14 @@ function runSend(options) {
     throw new Error(cleanProcessText(sendResult.stderr || sendResult.stdout || `acpx ${executor.kind} send exited with status ${sendResult.status}`));
   }
 
-  const deliveredConversation = needsNativeTakeoverBootstrap
-    ? markNativeSessionBootstrapped({ conversation: nextConversation, statePath, logPath, executor })
-    : nextConversation;
+  const deliveredConversation = markTakeoverBootstrapped({
+    conversation: nextConversation,
+    statePath,
+    logPath,
+    executor,
+    native: needsNativeTakeoverBootstrap,
+    fork: needsForkTakeoverBootstrap
+  });
 
   printJson({
     conversation: deliveredConversation,
@@ -1230,14 +1412,34 @@ function runSend(options) {
   });
 }
 
-function buildAgentSendPayload({ conversation, executor, message, includeNativeTakeoverBootstrap }) {
+function buildAgentSendPayload({ conversation, executor, message, includeNativeTakeoverBootstrap, includeForkTakeoverBootstrap, forkTakeover }) {
   const messageJson = JSON.stringify(message);
-  if (!includeNativeTakeoverBootstrap) {
+  if (!includeNativeTakeoverBootstrap && !includeForkTakeoverBootstrap) {
     return [
       "Continue the existing Agent Knock Knock delegation using this structured OpenClaw message.",
       "If this message answers a question or blocker, follow it as the product decision.",
       "Continue to report back only through the callback command already provided for this conversation.",
       "",
+      messageJson
+    ].join("\n");
+  }
+
+  if (includeForkTakeoverBootstrap) {
+    const summary = forkTakeoverSummaryText(forkTakeover);
+    return [
+      executorBootstrapPrompt({
+        callbackCommand: conversation.callback_command,
+        executorName: executor.display_name,
+        softLimit: Number(conversation.soft_limit ?? 50),
+        hardLimit: Number(conversation.hard_limit ?? 100)
+      }),
+      "",
+      "This AKK conversation is a fork of an existing native coding-agent session. Do not resume the original native session. Treat the approved summary below as the only imported context from the source session, then continue as a new AKK-managed session in this workspace.",
+      "",
+      "Approved source-session summary:",
+      summary || "(No approved summary was provided.)",
+      "",
+      "Initial AKK fork message:",
       messageJson
     ].join("\n");
   }
@@ -1255,6 +1457,21 @@ function buildAgentSendPayload({ conversation, executor, message, includeNativeT
     "Initial AKK takeover message:",
     messageJson
   ].join("\n");
+}
+
+function forkTakeoverSummaryText(forkTakeover) {
+  return String(isRecord(forkTakeover) ? forkTakeover.summary ?? "" : "").trim();
+}
+
+function markTakeoverBootstrapped({ conversation, statePath, logPath, executor, native, fork }) {
+  let nextConversation = conversation;
+  if (native) {
+    nextConversation = markNativeSessionBootstrapped({ conversation: nextConversation, statePath, logPath, executor });
+  }
+  if (fork) {
+    nextConversation = markForkSessionBootstrapped({ conversation: nextConversation, statePath, logPath, executor });
+  }
+  return nextConversation;
 }
 
 function markNativeSessionBootstrapped({ conversation, statePath, logPath, executor }) {
@@ -1279,6 +1496,36 @@ function markNativeSessionBootstrapped({ conversation, statePath, logPath, execu
     executor
   });
   runtimeLog("info", "native_session_bootstrapped", {
+    conversation_id: conversation.conversation_id,
+    agent: executor.kind,
+    executor_session: executor.session,
+    state_path: statePath
+  });
+  return nextConversation;
+}
+
+function markForkSessionBootstrapped({ conversation, statePath, logPath, executor }) {
+  const forkTakeover = isRecord(conversation.fork_context_takeover)
+    ? conversation.fork_context_takeover
+    : {};
+  const now = new Date().toISOString();
+  const nextConversation = {
+    ...conversation,
+    fork_context_takeover: {
+      ...forkTakeover,
+      needs_bootstrap: false,
+      bootstrapped_at: now
+    },
+    updated_at: now
+  };
+  saveState(statePath, nextConversation);
+  appendEvent(logPath, {
+    ts: now,
+    conversation_id: conversation.conversation_id,
+    event: "fork_session_bootstrapped",
+    executor
+  });
+  runtimeLog("info", "fork_session_bootstrapped", {
     conversation_id: conversation.conversation_id,
     agent: executor.kind,
     executor_session: executor.session,

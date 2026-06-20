@@ -151,7 +151,7 @@ Use `agent_knock_knock_agent_takeover` when the user wants AKK to take over an e
 
 - `safe_resume`: allowed only when no active Codex CLI matches the session. If the result is `ready`, explain that this is safe to resume because AKK did not find an active conflicting CLI. If the user confirms attaching it to AKK, call again with `createConversation=true`, then use the returned `conversation_id` for `AKK send`, `AKK status`, and `AKK close`.
 - `terminate_then_resume`: use when the user wants to take over an active native Codex CLI. If the result is `requires_confirmation`, explain which process would need to be stopped and ask for explicit user confirmation before any future action that terminates it.
-- `fork`: use when the user wants to avoid stopping the original Codex CLI. This returns a bounded context package. Summarize that package as OpenClaw, ask the user to confirm whether to create a forked AKK-managed session later, and do not inject raw full rollout history directly.
+- `fork`: use when the user wants to avoid stopping the original Codex CLI. First call returns a bounded context package plus `summaryPrompt` and `nextAction`; use that prompt to summarize as OpenClaw, ask the user to confirm, and do not inject raw full rollout history directly. After the user confirms the summary, call `agent_knock_knock_agent_takeover` again with `strategy="fork"`, `createConversation=true`, and `forkSummary=<approved summary>` to create the forked AKK-managed session. Then use the returned `conversation_id` with `AKK send` for follow-up work.
 
 Do not present `fork` as a standalone command or standalone feature. It is a takeover strategy.
 

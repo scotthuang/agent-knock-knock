@@ -240,6 +240,123 @@ test("agent takeover fork returns bounded context for OpenClaw summary confirmat
   assert.equal(parsed.plan.requiresOpenClawSummary, true);
   assert.equal(parsed.plan.contextPackage.source.sessionId, sessionId);
   assert.equal(parsed.plan.contextPackage.messages.length, 2);
+  assert.match(parsed.summaryPrompt, /Produce a concise, user-reviewable summary/);
+  assert.match(parsed.summaryPrompt, /do not pass raw rollout history/);
+  assert.equal(parsed.nextAction.action, "summarize_and_confirm_fork");
+  assert.equal(parsed.nextAction.followUpTool, "agent_knock_knock_agent_takeover");
+  assert.deepEqual(parsed.nextAction.followUpParams, {
+    agent: "codex",
+    sessionId,
+    strategy: "fork",
+    createConversation: true,
+    forkSummary: "<confirmed OpenClaw summary>"
+  });
+});
+
+test("agent takeover fork can create a new AKK conversation from approved summary", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-agent-fork-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const workspace = path.join(tempDir, "workspace");
+  const acpxCallsPath = path.join(tempDir, "acpx-calls.ndjson");
+  const rollout = [
+    JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "raw private source context" } }),
+    JSON.stringify({ type: "event_msg", payload: { type: "agent_message", message: "raw assistant context" } }),
+    nativeModelRollout()
+  ].join("\n");
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    const fakeAcpx = path.join(fakeBinDir, "acpx");
+    fs.writeFileSync(
+      fakeAcpx,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify({
+  args: process.argv.slice(2)
+}) + "\\n", "utf8");
+`,
+      "utf8"
+    );
+    fs.chmodSync(fakeAcpx, 0o755);
+
+    const forked = runAgentCli([
+      "agent",
+      "takeover",
+      "--agent",
+      "codex",
+      "--session-id",
+      sessionId,
+      "--strategy",
+      "fork",
+      "--create-conversation",
+      "--request",
+      "Fork my terminal Codex session",
+      "--fork-summary",
+      "Approved summary: inspect the ACPX branch and continue carefully.",
+      "--store-dir",
+      storeDir,
+      "--openclaw-session",
+      "agent:main:wechat",
+      "--threads-json",
+      JSON.stringify([threadRow({ cwd: workspace })]),
+      "--rollouts-json",
+      JSON.stringify({ [rolloutPath]: rollout }),
+      "--processes-json",
+      JSON.stringify([{
+        pid: 2000,
+        ppid: 1,
+        command: "codex",
+        cwd: workspace
+      }])
+    ]);
+
+    assert.equal(forked.status, 0, forked.stderr || forked.stdout);
+    const parsed = JSON.parse(forked.stdout);
+    assert.equal(parsed.status, "forked");
+    assert.equal(parsed.sideEffectsExecuted, true);
+    assert.equal(parsed.conversation.status, "idle");
+    assert.equal(parsed.conversation.executor.kind, "codex");
+    assert.notEqual(parsed.conversation.executor.session, sessionId);
+    assert.match(parsed.conversation.executor.session, /^akk-codex-/);
+    assert.equal(parsed.conversation.executor_model, "gpt-5.5[medium]");
+    assert.equal(parsed.conversation.fork_context_takeover.source_session_id, sessionId);
+    assert.equal(parsed.conversation.fork_context_takeover.summary, "Approved summary: inspect the ACPX branch and continue carefully.");
+    assert.equal(parsed.conversation.fork_context_takeover.needs_bootstrap, true);
+
+    const sent = runAgentCli([
+      "send",
+      "--conversation",
+      parsed.conversation.conversation_id,
+      "--store-dir",
+      storeDir,
+      "--message",
+      "Start from the approved fork summary.",
+      "--type",
+      "task"
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    const sentParsed = JSON.parse(sent.stdout);
+    assert.equal(sentParsed.delivered, true);
+    assert.equal(sentParsed.conversation.fork_context_takeover.needs_bootstrap, false);
+
+    const calls = fs.readFileSync(acpxCallsPath, "utf8")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line));
+    assert.deepEqual(calls[0].args, ["codex", "sessions", "ensure", "--name", parsed.conversation.executor.session]);
+    assert.deepEqual(calls[1].args.slice(0, 6), ["--approve-all", "--model", "gpt-5.5[medium]", "codex", "-s", parsed.conversation.executor.session]);
+    assert.match(calls[1].args[6], /This AKK conversation is a fork/);
+    assert.match(calls[1].args[6], /Approved summary: inspect the ACPX branch/);
+    assert.doesNotMatch(calls[1].args[6], /raw private source context/);
+    assert.doesNotMatch(calls[1].args[6], /--resume-session/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 function runAgentCli(args: string[], env: NodeJS.ProcessEnv = {}) {
