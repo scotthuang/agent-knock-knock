@@ -5,11 +5,12 @@ import {
   acpxCommandForExecutor,
   executorDefinitionForAlias,
   executorDefinitionForKind,
-  resolveExecutor
+  resolveExecutor,
+  sessionRecoveryStrategyForExecutor
 } from "../src/executors.js";
 
 test("executor registry exposes the supported coding agents", () => {
-  assert.deepEqual(EXECUTOR_KINDS, ["claude", "codex"]);
+  assert.deepEqual(EXECUTOR_KINDS, ["claude", "codex", "cursor"]);
 
   const claude = executorDefinitionForKind("claude");
   assert.equal(claude.actor, "claude-code");
@@ -20,6 +21,12 @@ test("executor registry exposes the supported coding agents", () => {
   assert.equal(codex.actor, "codex");
   assert.equal(codex.acpxCommand, "codex");
   assert.equal(codex.sessionPrefix, "akk-codex");
+
+  const cursor = executorDefinitionForKind("cursor");
+  assert.equal(cursor.actor, "cursor");
+  assert.equal(cursor.acpxCommand, "cursor");
+  assert.equal(cursor.sessionPrefix, "akk-cursor");
+  assert.equal(cursor.sessionRecoveryStrategy, "explicit-decision");
 });
 
 test("executor registry resolves slash command aliases", () => {
@@ -27,7 +34,7 @@ test("executor registry resolves slash command aliases", () => {
   assert.equal(executorDefinitionForAlias("claude-code")?.kind, "claude");
   assert.equal(executorDefinitionForAlias("codex")?.kind, "codex");
   assert.equal(executorDefinitionForAlias("c")?.kind, "codex");
-  assert.equal(executorDefinitionForAlias("cursor"), undefined);
+  assert.equal(executorDefinitionForAlias("cursor")?.kind, "cursor");
 });
 
 test("resolved executors keep the stable protocol shape", () => {
@@ -40,4 +47,6 @@ test("resolved executors keep the stable protocol shape", () => {
     transport: "acpx"
   });
   assert.equal(acpxCommandForExecutor(codex), "codex");
+  assert.equal(sessionRecoveryStrategyForExecutor(codex), "native-session");
+  assert.equal(sessionRecoveryStrategyForExecutor(resolveExecutor({ kind: "cursor" })), "explicit-decision");
 });

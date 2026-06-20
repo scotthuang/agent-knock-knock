@@ -1,6 +1,6 @@
 # agent-knock-knock
 
-Agent Knock Knock lets OpenClaw delegate work to local coding agents such as Codex and Claude Code, keep those delegations alive as reusable tasks, and route follow-up messages or results back through OpenClaw.
+Agent Knock Knock lets OpenClaw delegate work to local coding agents such as Codex, Claude Code, and Cursor, keep those delegations alive as reusable tasks, and route follow-up messages or results back through OpenClaw.
 
 The name is literal: OpenClaw knocks on the door of another coding agent, hands it a task, waits for the callback, and can knock again later with follow-up instructions. AKK provides the persistent task layer that makes that workflow practical across chat channels.
 
@@ -14,7 +14,7 @@ Agent Knock Knock fills that gap. It keeps local task state outside the chat cha
 
 ## What It Provides
 
-- ACPX-backed delegation to Codex and Claude Code
+- ACPX-backed delegation to Codex, Claude Code, and Cursor
 - Reusable task sessions for follow-up messages after the first result
 - Task listing, status inspection, follow-up send, cooperative cancellation, and local close
 - Structured callbacks back into OpenClaw through the plugin Gateway method
@@ -48,8 +48,9 @@ OpenClaw is the top-level orchestrator. Agent Knock Knock runs as the OpenClaw p
 - At least one local coding agent:
   - Codex, if you want Codex delegation
   - Claude Code, if you want Claude delegation
+  - Cursor, if you want Cursor delegation
 
-Agent Knock Knock does not manage Codex or Claude Code authentication. Make sure the agent you want to use is already installed and logged in before delegating tasks.
+Agent Knock Knock does not manage Codex, Claude Code, or Cursor authentication. Make sure the agent you want to use is already installed and logged in before delegating tasks.
 
 ## Install
 
@@ -57,7 +58,7 @@ After cloning this repository, you can ask OpenClaw to install it for you:
 
 ```text
 Install this Agent Knock Knock project into my local OpenClaw:
-1. Make sure Node.js 20+, OpenClaw, and at least one local coding agent such as Codex or Claude Code are installed.
+1. Make sure Node.js 20+, OpenClaw, and at least one local coding agent such as Codex, Claude Code, or Cursor are installed.
 2. Install ACPX globally if it is missing: npm install -g acpx.
 3. Run npm install.
 4. Run npm run build.
@@ -98,9 +99,9 @@ Run this after pulling new code or editing TypeScript/plugin files. The OpenClaw
 
 ## OpenClaw Plugin
 
-The native OpenClaw plugin registers tools that let OpenClaw delegate implementation work to Claude Code or Codex, list open sessions, send follow-up messages, inspect status, request cooperative cancellation, and close sessions without exposing raw terminal output as tool results.
+The native OpenClaw plugin registers tools that let OpenClaw delegate implementation work to Codex, Claude Code, or Cursor, list open sessions, send follow-up messages, inspect status, request cooperative cancellation, and close sessions without exposing raw terminal output as tool results.
 
-Natural-language routing is designed around the short name `AKK`; lowercase `akk` should be treated the same way. When a user says `AKK` without naming an agent, OpenClaw should delegate to Codex. Use Claude only for explicit requests such as `AKK Claude`.
+Natural-language routing is designed around the short name `AKK`; lowercase `akk` should be treated the same way. When a user says `AKK` without naming an agent, OpenClaw should delegate to Codex. Use Claude or Cursor only for explicit requests such as `AKK Claude` or `AKK Cursor`.
 
 Useful chat-style prompts:
 
@@ -108,6 +109,7 @@ Useful chat-style prompts:
 akk: fix the failing tests in this project
 AKK Codex: review the current branch and propose a small fix
 AKK Claude: review the latest commit
+AKK Cursor: fix the flaky UI test
 akk list
 akk send <conversation-id>: continue with the smaller implementation
 akk cancel <conversation-id>
@@ -122,6 +124,7 @@ The plugin also registers the `/akk` slash command for channel surfaces that sup
 /akk <task>
 /akk codex <task>
 /akk claude <task>
+/akk cursor <task>
 /akk list
 /akk status <conversation-id>
 /akk send <conversation-id> <message>
@@ -156,7 +159,7 @@ The plugin also registers the Gateway method `agent-knock-knock.callback`. Codin
 
 Coding-agent `done` callbacks mark the AKK conversation `idle`, not closed. Idle conversations remain visible in the default list and can receive `send` follow-ups until they are manually closed or lazily closed by the idle timeout. The default idle timeout is 10080 minutes.
 
-New delegations create a fresh ACPX session by default, using a name like `akk-codex-20260620183511-88811e97` or `akk-claude-...`. This keeps concurrent AKK tasks isolated. Reuse happens through `AKK send <conversation-id>: <message>` against an existing AKK conversation, or by explicitly configuring/passing a fixed coding-agent session.
+New delegations create a fresh ACPX session by default, using a name like `akk-codex-20260620183511-88811e97`, `akk-claude-...`, or `akk-cursor-...`. This keeps concurrent AKK tasks isolated. Reuse happens through `AKK send <conversation-id>: <message>` against an existing AKK conversation, or by explicitly configuring/passing a fixed coding-agent session.
 
 Background launches also start a small AKK monitor process. The monitor exits when the conversation receives a callback or otherwise leaves the agent-waiting state. If the executor process disappears before a callback, or if no callback arrives before `agentTimeoutMinutes`, the conversation is marked `stalled` and AKK attempts to notify the original OpenClaw session through the callback Gateway route. The default agent timeout is 60 minutes.
 
@@ -166,7 +169,7 @@ Some coding agents may not reliably resume a named ACPX session after their back
 - `AKK restart <conversation-id>`: start a new coding-agent session with only the pending message.
 - `AKK close <conversation-id>`: close the AKK task without recovery.
 
-Codex and Claude Code currently use native named-session recovery through ACPX. The explicit decision flow is the conservative fallback intended for agents whose native session resume is unreliable.
+Codex and Claude Code currently use native named-session recovery through ACPX. Cursor uses the explicit decision flow because its native session resume can be unreliable after the backing process disappears.
 
 Task status can include a safe executor trace with `--trace` or the OpenClaw status tool's `trace: true` parameter. Trace summaries show client lifecycle events, tool call names and statuses, permission-request markers, monitor events, and short sanitized output previews. Agent thinking content is never returned; it is counted and marked as redacted.
 
@@ -185,6 +188,15 @@ Delegate a Codex task through ACPX:
 ```bash
 node dist/src/cli.js delegate \
   --agent codex \
+  --request "Implement a small feature" \
+  --background
+```
+
+Delegate a Cursor task through ACPX:
+
+```bash
+node dist/src/cli.js delegate \
+  --agent cursor \
   --request "Implement a small feature" \
   --background
 ```
@@ -318,10 +330,12 @@ Runtime logs are diagnostic-only and are safe to use for local troubleshooting. 
 
 - OpenClaw session: `agent:main:main`
 - OpenClaw plugin default agent: `codex`
-- Delegated ACPX session: generated per new task, unless explicitly configured with `session`, `codexSession`, or `claudeSession`
+- Delegated ACPX session: generated per new task, unless explicitly configured with `session`, `codexSession`, `claudeSession`, or `cursorSession`
 - CLI `new` fallback Claude session: `bidirectional`
 - CLI `new` fallback Codex session: `codex`
+- CLI `new` fallback Cursor session: `cursor`
 - Codex model, when needed for ChatGPT-account compatibility: pass `model`/`codexModel` such as `gpt-5.5/medium`
+- Cursor model, when needed: pass `model`/`cursorModel`
 - Gateway URL: `ws://127.0.0.1:18789`
 - Agent callback timeout: `60` minutes
 - Soft response limit: `50`

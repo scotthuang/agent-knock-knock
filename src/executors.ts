@@ -1,7 +1,7 @@
 export type OpenClawActor = "openclaw";
-export type CodingAgentActor = "claude-code" | "codex";
+export type CodingAgentActor = "claude-code" | "codex" | "cursor";
 export type Actor = OpenClawActor | CodingAgentActor;
-export type ExecutorKind = "claude" | "codex";
+export type ExecutorKind = "claude" | "codex" | "cursor";
 export type SessionRecoveryStrategy = "native-session" | "explicit-decision";
 
 export interface Executor {
@@ -68,6 +68,23 @@ export const EXECUTORS = {
     supportsSessionEnsure: true,
     supportsCancel: true,
     modelEnvKey: "CODEX_ACPX_MODEL"
+  },
+  cursor: {
+    kind: "cursor",
+    actor: "cursor",
+    acpxCommand: "cursor",
+    defaultSession: "cursor",
+    sessionPrefix: "akk-cursor",
+    displayName: "Cursor",
+    aliases: ["cursor"],
+    sessionConfigKeys: ["cursorSession", "defaultCursorSession"],
+    proxyConfigKeys: ["cursorAllProxy"],
+    modelConfigKeys: ["cursorModel"],
+    proxyEnvKeys: ["CURSOR_ALL_PROXY", "ALL_PROXY", "all_proxy"],
+    sessionRecoveryStrategy: "explicit-decision",
+    supportsSessionEnsure: true,
+    supportsCancel: true,
+    modelEnvKey: "CURSOR_ACPX_MODEL"
   }
 } as const satisfies Record<ExecutorKind, ExecutorDefinition>;
 
