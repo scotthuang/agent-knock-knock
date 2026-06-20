@@ -34,17 +34,36 @@ OpenClaw is the top-level orchestrator. Agent Knock Knock runs as the OpenClaw p
 
 ![Agent Knock Knock architecture](docs/assets/architecture.png)
 
+## Prerequisites
+
+- Node.js 20+
+- OpenClaw installed and running
+- ACPX installed globally:
+
+  ```bash
+  npm install -g acpx
+  acpx --version
+  ```
+
+- At least one local coding agent:
+  - Codex, if you want Codex delegation
+  - Claude Code, if you want Claude delegation
+
+Agent Knock Knock does not manage Codex or Claude Code authentication. Make sure the agent you want to use is already installed and logged in before delegating tasks.
+
 ## Install
 
 After cloning this repository, you can ask OpenClaw to install it for you:
 
 ```text
 Install this Agent Knock Knock project into my local OpenClaw:
-1. Run npm install.
-2. Run npm run build.
-3. Link and enable the OpenClaw plugin from this repository.
-4. Install the Agent Knock Knock skill template into ~/.openclaw/skills/agent-knock-knock/SKILL.md.
-5. Restart the OpenClaw Gateway.
+1. Make sure Node.js 20+, OpenClaw, and at least one local coding agent such as Codex or Claude Code are installed.
+2. Install ACPX globally if it is missing: npm install -g acpx.
+3. Run npm install.
+4. Run npm run build.
+5. Link and enable the OpenClaw plugin from this repository.
+6. Install the Agent Knock Knock skill template into ~/.openclaw/skills/agent-knock-knock/SKILL.md.
+7. Restart the OpenClaw Gateway.
 ```
 
 Manual installation:
