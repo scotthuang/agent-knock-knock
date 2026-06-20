@@ -111,7 +111,7 @@ Configure the default coding agent in the plugin config:
     entries: {
       "agent-knock-knock": {
         config: {
-          defaultAgent: "cursor" // "codex", "claude", or "cursor"
+          defaultAgent: "codex" // "codex", "claude", or "cursor"
         }
       }
     }
