@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+No unreleased changes.
+
+## 0.1.2 - 2026-06-21
+
 ### Fixed
 
 - Fixed stalled-task notifications from the background monitor when no explicit Gateway token is stored, allowing local OpenClaw CLI credentials to deliver the stalled callback and including a short executor-output trace in the notification.
