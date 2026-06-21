@@ -30,7 +30,7 @@
     }
   },
   "bin": {
-    "agent-knock-knock": "./dist/src/cli.js"
+    "agent-knock-knock": "dist/src/cli.js"
   },
   "files": [
     "dist/src",
