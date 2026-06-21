@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+No unreleased changes.
+
+## 0.1.0 - 2026-06-21
+
+First public npm release for Agent Knock Knock, including OpenClaw plugin integration, local coding-agent delegation, task management, Cursor support, diagnostics, and packaged installation.
+
 ### Added
 
 - Added ACPX executor metadata so delegations can target Claude Code, Codex, or Cursor.
@@ -58,16 +64,18 @@
 
 - `npm test` passes 53 tests.
 - `npm --cache /private/tmp/akk-npm-cache pack --dry-run` verifies the scoped npm package contents.
-- Local OpenClaw installation validated with the linked Agent Knock Knock plugin loaded, the updated `agent-knock-knock` skill installed, and the gateway restarted successfully.
+- Local OpenClaw installation validated with the npm-installed Agent Knock Knock plugin loaded, the updated `agent-knock-knock` skill installed, and the gateway restarted successfully.
 - Live OpenClaw validation created a Claude task, listed Claude tasks, sent a follow-up message, and closed the task through plugin tools.
 - Live OpenClaw validation created a Codex task with a configured `ALL_PROXY` value and `model=gpt-5.5/medium`, listed Codex tasks, sent a follow-up message, received Codex `done`, and closed the task through plugin tools.
 - Live ACPX validation created smoke sessions for Codex and Claude Code, called AKK cancel for each, observed `executor_cancel_requested` events with status 0, and closed the smoke ACPX sessions.
+- Published `@scotthuang/agent-knock-knock@0.1.0` to npm.
+- Created GitHub Release `v0.1.0`.
 
-## 0.1.0 - 2026-05-16
+### Initial MVP Baseline
 
 Initial MVP for managed bidirectional agent delegation.
 
-### Added
+#### Added
 
 - Added a minimal Node.js project with no runtime dependencies.
 - Added structured bidirectional message protocol for OpenClaw manager and Claude Code developer roles.
@@ -86,7 +94,7 @@ Initial MVP for managed bidirectional agent delegation.
 - Added two-Claude simulation script for weather lookup and multi-round architecture decision scenarios.
 - Added tests for response-round accounting, budget escalation, and done-message closure behavior.
 
-### Verified
+#### Verified
 
 - `npm test` passes.
 - Conversation creation writes state and NDJSON logs.
@@ -96,7 +104,7 @@ Initial MVP for managed bidirectional agent delegation.
   - `done` does not increment response rounds.
 - Two-Claude weather scenario records blocked/failure flows when live weather lookup is unavailable.
 
-### Known Issues
+#### Known Issues
 
 - `blocked` handling was corrected after the first weather test; older logs may show `blocked` as `requires_response=false`.
 - The two-Claude simulation currently stores full raw `acpx` output in logs, including client/tool status lines.
