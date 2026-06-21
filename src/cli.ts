@@ -4,6 +4,7 @@ import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import {
   applyMessageToConversation,
   budgetAction,
@@ -93,6 +94,10 @@ function runCommand(commandName, options) {
     runClose(options);
   } else if (commandName === "transcript") {
     runTranscript(options);
+  } else if (commandName === "install-openclaw") {
+    runInstallOpenClaw(options);
+  } else if (commandName === "doctor") {
+    runDoctor(options);
   } else if (commandName === "callback") {
     runCallback(options);
   } else if (commandName === "monitor") {
@@ -101,6 +106,93 @@ function runCommand(commandName, options) {
     usage();
     process.exitCode = commandName ? 1 : 0;
   }
+}
+
+function runInstallOpenClaw(options) {
+  const root = packageRootDir();
+  const openclawBin = options.openclawBin ?? resolveExecutable("openclaw");
+  const skillSource = path.join(root, "templates", "openclaw-skills", "agent-knock-knock", "SKILL.md");
+  const skillDest = expandHome(options.skillPath ?? "~/.openclaw/skills/agent-knock-knock/SKILL.md");
+  const steps: Array<Record<string, unknown>> = [];
+
+  runCheckedCommand(openclawBin, ["plugins", "install", "--link", root], {
+    label: "openclaw plugins install"
+  });
+  steps.push({
+    name: "plugin_installed",
+    path: root
+  });
+
+  runCheckedCommand(openclawBin, ["plugins", "enable", "agent-knock-knock"], {
+    label: "openclaw plugins enable"
+  });
+  steps.push({
+    name: "plugin_enabled",
+    plugin: "agent-knock-knock"
+  });
+
+  fs.mkdirSync(path.dirname(skillDest), { recursive: true });
+  fs.copyFileSync(skillSource, skillDest);
+  steps.push({
+    name: "skill_installed",
+    path: skillDest
+  });
+
+  if (options.noRestart !== true) {
+    runCheckedCommand(openclawBin, ["gateway", "restart"], {
+      label: "openclaw gateway restart"
+    });
+    steps.push({
+      name: "gateway_restarted"
+    });
+  }
+
+  printJson({
+    installed: true,
+    package_root: root,
+    openclaw_bin: openclawBin,
+    steps,
+    next: options.noRestart === true
+      ? "Restart the OpenClaw Gateway before using Agent Knock Knock."
+      : "Agent Knock Knock is installed. Try: AKK list"
+  });
+}
+
+function runDoctor(options) {
+  const commands = ["node", "openclaw", "acpx", "codex", "claude", "cursor"];
+  const checks = commands.map((commandName) => executableCheck(commandName));
+  const root = packageRootDir();
+  const packageFiles = [
+    "dist/src/cli.js",
+    "dist/src/openclaw-plugin.js",
+    "templates/openclaw-skills/agent-knock-knock/SKILL.md",
+    "openclaw.plugin.json"
+  ].map((relativePath) => {
+    const filePath = path.join(root, relativePath);
+    return {
+      path: filePath,
+      exists: fs.existsSync(filePath)
+    };
+  });
+  const requiredOk = checks
+    .filter((check) => ["node", "openclaw", "acpx"].includes(check.command))
+    .every((check) => check.available);
+  const agentOk = checks
+    .filter((check) => ["codex", "claude", "cursor"].includes(check.command))
+    .some((check) => check.available);
+  const filesOk = packageFiles.every((check) => check.exists);
+
+  printJson({
+    ok: requiredOk && agentOk && filesOk,
+    package_root: root,
+    checks,
+    package_files: packageFiles,
+    notes: [
+      "node, openclaw, and acpx are required.",
+      "At least one local coding agent command should be available: codex, claude, or cursor."
+    ],
+    options
+  });
 }
 
 function runNew(options) {
@@ -1298,6 +1390,42 @@ function resolveOptionalExecutable(command) {
   }
 }
 
+function packageRootDir() {
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+}
+
+function runCheckedCommand(command, args, { label }) {
+  const result = spawnSync(command, args, {
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024 * 10
+  });
+  if (result.error) {
+    throw new Error(`${label} failed to start: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    throw new Error(cleanProcessText(result.stderr || result.stdout || `${label} exited with status ${result.status}`));
+  }
+
+  return result;
+}
+
+function executableCheck(commandName) {
+  try {
+    const executable = resolveExecutable(commandName);
+    return {
+      command: commandName,
+      available: true,
+      path: executable
+    };
+  } catch (error) {
+    return {
+      command: commandName,
+      available: false,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
 function buildCallbackCommand({
   statePath,
   gatewayUrl,
@@ -2458,6 +2586,8 @@ function usage() {
   agent-knock-knock recover --conversation <id> [--session <name>] [--all-proxy <url>]
   agent-knock-knock restart --conversation <id> [--session <name>] [--all-proxy <url>]
   agent-knock-knock close --conversation <id> [--reason <text>]
+  agent-knock-knock install-openclaw [--openclaw-bin <path>] [--skill-path <path>] [--no-restart]
+  agent-knock-knock doctor
   agent-knock-knock callback --state <file> --message-json <json> [--record-only]
   agent-knock-knock transcript --log <file> [--include-raw]
   agent-knock-knock transcript --conversation <dir> [--include-raw]

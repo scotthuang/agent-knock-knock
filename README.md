@@ -26,7 +26,7 @@ See [ROADMAP.md](ROADMAP.md) for planned reliability work and future orchestrati
 
 ## Project Status
 
-Agent Knock Knock is an early public project. The core local OpenClaw delegation flow is usable, but the OpenClaw plugin and skill are still installed from a local checkout rather than a packaged plugin registry.
+Agent Knock Knock is an early public project. The core local OpenClaw delegation flow is usable, and the package can be installed globally from npm. The OpenClaw plugin and skill are still installed locally by the `agent-knock-knock install-openclaw` helper rather than through an OpenClaw plugin registry.
 
 ## Architecture
 
@@ -54,7 +54,17 @@ Agent Knock Knock does not manage Codex, Claude Code, or Cursor authentication. 
 
 ## Install
 
-After cloning this repository, you can ask OpenClaw to install it for you:
+Install Agent Knock Knock globally:
+
+```bash
+npm install -g @scotthuang/agent-knock-knock
+agent-knock-knock install-openclaw
+agent-knock-knock doctor
+```
+
+`install-openclaw` installs and enables the OpenClaw plugin from the npm package, installs the Agent Knock Knock skill template, and restarts the OpenClaw Gateway by default. Use `--no-restart` if you want to restart the Gateway yourself.
+
+If you are developing from a local checkout, you can ask OpenClaw to install it for you:
 
 ```text
 Install this Agent Knock Knock project into my local OpenClaw:
@@ -67,7 +77,7 @@ Install this Agent Knock Knock project into my local OpenClaw:
 7. Restart the OpenClaw Gateway.
 ```
 
-Manual installation:
+Local development installation:
 
 Install the plugin into OpenClaw during local development:
 
@@ -359,6 +369,20 @@ Runtime logs are diagnostic-only and are safe to use for local troubleshooting. 
 - Store directory: `~/.agent-knock-knock/conversations`
 - Runtime log directory: `~/.agent-knock-knock/logs`
 - Runtime log retention: `14` days
+
+## Release
+
+`package.json` is the version source. Create releases with npm's version command so the version commit and git tag stay aligned:
+
+```bash
+npm version patch
+git push
+git push --tags
+```
+
+Use `minor` for feature releases and `major` for breaking changes. Tags matching `v*` trigger the GitHub Actions release workflow, which runs the test suite, publishes `@scotthuang/agent-knock-knock` to npm with public access, and creates a GitHub Release from the tag notes.
+
+The release workflow requires an `NPM_TOKEN` repository secret with permission to publish the npm package. GitHub's built-in `GITHUB_TOKEN` is used for creating the GitHub Release.
 
 ## Contributing
 

@@ -17,6 +17,9 @@
 - Added a coding-agent executor registry that centralizes Codex, Claude Code, and Cursor ACPX metadata, aliases, protocol actors, session naming, and proxy/model configuration.
 - Added an explicit recovery-decision foundation with `needs_recovery`, `agent-knock-knock recover`, `agent-knock-knock restart`, `agent_knock_knock_recover`, `agent_knock_knock_restart`, `/akk recover`, and `/akk restart`.
 - Added Cursor as a supported ACPX coding-agent executor with `AKK Cursor`, `/akk cursor`, `agent="cursor"`, Cursor session/model/proxy config keys, and conservative explicit recovery decisions.
+- Added npm package metadata, public package file allowlist, and a tag-driven GitHub Actions release workflow for publishing `@scotthuang/agent-knock-knock`.
+- Added `agent-knock-knock install-openclaw` for installing the packaged OpenClaw plugin and skill template locally.
+- Added `agent-knock-knock doctor` for checking required local commands, available coding agents, and packaged runtime files.
 - Added tests for Codex-backed delegation and task management flows.
 - Added tests for the executor registry used by Codex, Claude Code, and Cursor.
 - Added tests for explicit recovery decisions, AKK history replay recovery, and restart without history replay.
@@ -35,6 +38,7 @@
 - Updated follow-up sends from OpenClaw to launch the coding agent in the background so OpenClaw can continue to subsequent tool calls.
 - Migrated the implementation source to TypeScript and moved runtime entrypoints to compiled `dist/src` output.
 - Migrated the Node test suite to TypeScript and updated `npm test` to build before running compiled tests from `dist/test`.
+- Updated `npm run build` to clean stale compiled output before TypeScript compilation, and added `prepack` so npm publish/pack builds fresh runtime files.
 - Changed `delegate` to generate a unique ACPX session for each new coding-agent task unless a session is explicitly configured, preventing concurrent AKK tasks from sharing the same default Codex, Claude, or Cursor session.
 - Added a background executor monitor that marks agent-waiting tasks `stalled` when the launched process exits without a callback or when the configurable `agentTimeoutMinutes` callback timeout is reached, then attempts to notify the original OpenClaw session.
 - Renamed the OpenClaw skill template from `bidirectional-chat` to `agent-knock-knock` so the installed skill matches the project and plugin name.
@@ -52,7 +56,8 @@
 
 ### Verified
 
-- `npm test` passes 52 tests.
+- `npm test` passes 53 tests.
+- `npm --cache /private/tmp/akk-npm-cache pack --dry-run` verifies the scoped npm package contents.
 - Local OpenClaw installation validated with the linked Agent Knock Knock plugin loaded, the updated `agent-knock-knock` skill installed, and the gateway restarted successfully.
 - Live OpenClaw validation created a Claude task, listed Claude tasks, sent a follow-up message, and closed the task through plugin tools.
 - Live OpenClaw validation created a Codex task with a configured `ALL_PROXY` value and `model=gpt-5.5/medium`, listed Codex tasks, sent a follow-up message, received Codex `done`, and closed the task through plugin tools.

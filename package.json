@@ -1,9 +1,25 @@
 {
-  "name": "agent-knock-knock",
+  "name": "@scotthuang/agent-knock-knock",
   "version": "0.1.0",
-  "private": true,
+  "description": "OpenClaw plugin bridge for delegating work to local coding agents through ACPX.",
   "license": "MIT",
   "type": "module",
+  "homepage": "https://github.com/scotthuang/agent-knock-knock#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/scotthuang/agent-knock-knock.git"
+  },
+  "bugs": {
+    "url": "https://github.com/scotthuang/agent-knock-knock/issues"
+  },
+  "keywords": [
+    "openclaw",
+    "acpx",
+    "codex",
+    "claude-code",
+    "cursor",
+    "coding-agent"
+  ],
   "openclaw": {
     "extensions": [
       "./dist/src/openclaw-plugin.js"
@@ -16,8 +32,21 @@
   "bin": {
     "agent-knock-knock": "./dist/src/cli.js"
   },
+  "files": [
+    "dist/src",
+    "templates",
+    "openclaw.plugin.json",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "clean": "node -e \"fs.rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc -p tsconfig.json",
+    "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test 'dist/test/**/*.test.js'",
     "simulate:architecture": "node scripts/two-claude-weather-test.js --scenario architecture-questions",
