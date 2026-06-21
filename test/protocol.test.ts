@@ -10,13 +10,15 @@ import {
 } from "../src/protocol.js";
 
 test("conversation ids use local wall-clock time", () => {
-  const conversation = createConversation({
-    userRequest: "Build feature",
-    now: new Date("2026-06-20T10:01:56.000Z")
-  });
+  withTimezone("Asia/Shanghai", () => {
+    const conversation = createConversation({
+      userRequest: "Build feature",
+      now: new Date("2026-06-20T10:01:56.000Z")
+    });
 
-  assert.match(conversation.conversation_id, /^task-20260620T180156-[0-9a-f]{8}$/);
-  assert.equal(conversation.created_at, "2026-06-20T10:01:56.000Z");
+    assert.match(conversation.conversation_id, /^task-20260620T180156-[0-9a-f]{8}$/);
+    assert.equal(conversation.created_at, "2026-06-20T10:01:56.000Z");
+  });
 });
 
 test("only response-requiring messages consume rounds", () => {
@@ -213,3 +215,17 @@ test("rejects message types on the wrong route", () => {
     /message type done is not allowed for route openclaw->claude-code/
   );
 });
+
+function withTimezone(timezone, fn) {
+  const previousTimezone = process.env.TZ;
+  process.env.TZ = timezone;
+  try {
+    fn();
+  } finally {
+    if (previousTimezone === undefined) {
+      delete process.env.TZ;
+    } else {
+      process.env.TZ = previousTimezone;
+    }
+  }
+}
