@@ -74,7 +74,7 @@ fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify(process.argv.s
     assert.equal(events.some((event) => event.event === "claude_session_ensure" && event.status === 0), true);
     assert.equal(events.some((event) => event.event === "claude_launch" && event.mode === "background"), true);
   } finally {
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    removeTempDir(tempDir);
   }
 });
 
@@ -126,7 +126,7 @@ fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify(process.argv.s
     assert.deepEqual(acpxCalls[0], ["codex", "sessions", "ensure", "--name", parsed.conversation.executor.session]);
     assert.deepEqual(acpxCalls.at(-1).slice(0, 4), ["--approve-all", "codex", "-s", parsed.conversation.executor.session]);
   } finally {
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    removeTempDir(tempDir);
   }
 });
 
@@ -201,7 +201,7 @@ fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify({
       event.executor.kind === "codex"
     ), true);
   } finally {
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    removeTempDir(tempDir);
   }
 });
 
@@ -227,5 +227,14 @@ function waitForCalls(filePath, minCount, timeoutMs = 2000): Promise<any[]> {
       setTimeout(check, 25);
     };
     check();
+  });
+}
+
+function removeTempDir(dirPath) {
+  fs.rmSync(dirPath, {
+    recursive: true,
+    force: true,
+    maxRetries: 3,
+    retryDelay: 50
   });
 }
