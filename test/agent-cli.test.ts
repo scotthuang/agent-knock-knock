@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 const sessionId = "019ee559-7bb8-7fd1-970c-0f7b6978c44e";
@@ -209,6 +209,162 @@ test("agent takeover terminate_then_resume returns a confirmation plan for an ex
   assert.equal(parsed.plan.mode, "takeover");
   assert.equal(parsed.plan.targets[0].pid, 2000);
   assert.equal(parsed.plan.resumeAfterExit.sessionId, sessionId);
+});
+
+test("agent takeover terminate_then_resume requires explicit pid confirmation before terminating", () => {
+  const result = runAgentCli([
+    "agent",
+    "takeover",
+    "--agent",
+    "codex",
+    "--session-id",
+    sessionId,
+    "--strategy",
+    "terminate_then_resume",
+    "--create-conversation",
+    "--confirm-terminate",
+    "--threads-json",
+    JSON.stringify([threadRow()]),
+    "--processes-json",
+    JSON.stringify([{
+      pid: 2000,
+      ppid: 1,
+      command: `codex resume ${sessionId}`,
+      cwd
+    }])
+  ]);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /--expected-pid is required/);
+});
+
+test("agent takeover terminate_then_resume can terminate a confirmed process and attach a conversation", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-agent-terminate-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const workspace = path.join(tempDir, "workspace");
+  fs.mkdirSync(workspace, { recursive: true });
+  const child = spawn("/bin/sleep", ["60"], {
+    stdio: "ignore",
+    detached: false
+  });
+
+  try {
+    assert.ok(child.pid);
+    const result = runAgentCli([
+      "agent",
+      "takeover",
+      "--agent",
+      "codex",
+      "--session-id",
+      sessionId,
+      "--strategy",
+      "terminate_then_resume",
+      "--create-conversation",
+      "--confirm-terminate",
+      "--expected-pid",
+      String(child.pid),
+      "--terminate-timeout-ms",
+      "50",
+      "--request",
+      "Take over active terminal Codex",
+      "--store-dir",
+      storeDir,
+      "--threads-json",
+      JSON.stringify([threadRow({ cwd: workspace })]),
+      "--rollouts-json",
+      JSON.stringify({ [rolloutPath]: nativeModelRollout() }),
+      "--processes-json",
+      JSON.stringify([[{
+        pid: child.pid,
+        ppid: 1,
+        command: `codex resume ${sessionId}`,
+        cwd: workspace
+      }], []])
+    ]);
+
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.status, "attached", result.stdout);
+    assert.equal(parsed.sideEffectsExecuted, true);
+    assert.equal(parsed.termination.target.pid, child.pid);
+    assert.equal(parsed.termination.signals[0].status, "sent");
+    assert.equal(parsed.conversation.status, "idle");
+    assert.equal(parsed.conversation.executor.session, sessionId);
+    assert.equal(parsed.conversation.native_session_takeover.strategy, "terminate_then_resume");
+    assert.equal(parsed.conversation.native_session_takeover.needs_bootstrap, true);
+  } finally {
+    try {
+      if (child.pid) {
+        process.kill(child.pid, "SIGKILL");
+      }
+    } catch {
+      // Already terminated by the command under test.
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("agent takeover terminate_then_resume can explicitly accept a cwd-only confirmed pid", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-agent-cwd-only-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const workspace = path.join(tempDir, "workspace");
+  fs.mkdirSync(workspace, { recursive: true });
+  const child = spawn("/bin/sleep", ["60"], {
+    stdio: "ignore",
+    detached: false
+  });
+
+  try {
+    assert.ok(child.pid);
+    const result = runAgentCli([
+      "agent",
+      "takeover",
+      "--agent",
+      "codex",
+      "--session-id",
+      sessionId,
+      "--strategy",
+      "terminate_then_resume",
+      "--create-conversation",
+      "--confirm-terminate",
+      "--allow-cwd-only",
+      "--expected-pid",
+      String(child.pid),
+      "--terminate-timeout-ms",
+      "50",
+      "--request",
+      "Take over cwd-only terminal Codex",
+      "--store-dir",
+      storeDir,
+      "--threads-json",
+      JSON.stringify([threadRow({ cwd: workspace })]),
+      "--rollouts-json",
+      JSON.stringify({ [rolloutPath]: nativeModelRollout() }),
+      "--processes-json",
+      JSON.stringify([[{
+        pid: child.pid,
+        ppid: 1,
+        command: "codex",
+        cwd: workspace
+      }], []])
+    ]);
+
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.status, "attached", result.stdout);
+    assert.equal(parsed.matchKind, "cwd_only_confirmed");
+    assert.equal(parsed.conversation.native_session_takeover.takeover_match_kind, "cwd_only_confirmed");
+    assert.equal(parsed.conversation.native_session_takeover.needs_bootstrap, true);
+  } finally {
+    try {
+      if (child.pid) {
+        process.kill(child.pid, "SIGKILL");
+      }
+    } catch {
+      // Already terminated by the command under test.
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("agent takeover fork returns bounded context for OpenClaw summary confirmation", () => {

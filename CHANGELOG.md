@@ -43,6 +43,9 @@ First public npm release for Agent Knock Knock, including OpenClaw plugin integr
 - Added tests for explicit recovery decisions, AKK history replay recovery, and restart without history replay.
 - Added tests for Cursor delegate, send, cancel, route metadata, and unavailable-session recovery decision behavior.
 - Added tests for runtime diagnostics logging, redaction, retention cleanup, and CLI log emission.
+- Added native Codex session discovery and takeover flows, including safe resume, OpenClaw-summarized fork, and confirmed terminate-then-resume adoption for active Codex CLI sessions.
+- Added an explicit `allowCwdOnly` terminate-then-resume fallback for Codex TUI processes that do not expose a session id in argv; it still requires a user-confirmed pid and cwd re-scan before termination.
+- Added tests for Codex native session takeover planning, confirmed termination safeguards, fork summary confirmation, and native `codex exec resume` follow-up delivery.
 
 ### Changed
 
@@ -65,6 +68,7 @@ First public npm release for Agent Knock Knock, including OpenClaw plugin integr
 - Updated the OpenClaw skill template and README with conservative recovery guidance for coding agents whose native session resume is unreliable.
 - Updated the OpenClaw skill template, README, plugin manifest, and protocol docs for Cursor routing and task management.
 - Updated README, plugin metadata, and skill guidance to document the configurable `defaultAgent` flow for unspecified AKK delegations.
+- Updated Codex takeover sends to use native `codex exec resume` for adopted Codex sessions, avoiding ACPX session binding issues when resuming existing terminal Codex sessions.
 - Documented ACPX approval behavior: Claude Code permission requests work with `--approve-all`, while some Codex sensitive operations can fail directly under AKK's non-interactive/background path instead of surfacing an approvable ACPX permission request.
 
 ### Fixed

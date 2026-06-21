@@ -286,6 +286,21 @@ const agentTakeoverParameters = {
       description:
         "When true and the selected strategy is ready, create an AKK-managed conversation bound to the native session so later AKK send/status/close can use it."
     },
+    confirmTerminate: {
+      type: "boolean",
+      description:
+        "Only for strategy=terminate_then_resume. When true, AKK will terminate the exact expected Codex CLI pid after rechecking that it still matches the requested session, then create the AKK conversation."
+    },
+    expectedPid: {
+      type: "number",
+      description:
+        "Required with confirmTerminate=true. The exact Codex CLI pid from the previous takeover plan that the user confirmed may be terminated."
+    },
+    allowCwdOnly: {
+      type: "boolean",
+      description:
+        "Only for strategy=terminate_then_resume with confirmTerminate=true. Allows terminating the expected pid when Codex does not expose a session id in argv, as long as the pid still runs in the target session cwd. Use only after explaining the higher risk to the user."
+    },
     request: {
       type: "string",
       description: "Optional user-visible request label stored on the created AKK conversation."
@@ -497,7 +512,7 @@ export default definePluginEntry({
     registerCliTool(api, {
       name: "agent_knock_knock_agent_takeover",
       description:
-        "Build a takeover plan for an existing native local coding-agent session. Use this for AKK takeover requests. By default it is side-effect-free and returns the plan; with createConversation=true it can attach a ready native session or create a confirmed forked AKK-managed conversation. It never kills processes.",
+        "Build or execute a takeover plan for an existing native local coding-agent session. Use this for AKK takeover requests. By default it is side-effect-free and returns the plan; with createConversation=true it can attach a ready native session or create a confirmed forked AKK-managed conversation. For terminate_then_resume, only call with confirmTerminate=true and expectedPid after the user explicitly confirms stopping that exact Codex CLI pid. If Codex does not expose a session id, allowCwdOnly=true is a higher-risk explicit-pid fallback.",
       parameters: agentTakeoverParameters,
       buildArgs: (params, toolContext) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
@@ -519,6 +534,13 @@ export default definePluginEntry({
         if (params.createConversation === true) {
           args.push("--create-conversation");
         }
+        if (params.confirmTerminate === true) {
+          args.push("--confirm-terminate");
+        }
+        if (params.allowCwdOnly === true) {
+          args.push("--allow-cwd-only");
+        }
+        pushOptional(args, "--expected-pid", numberString(params.expectedPid));
         pushOptional(args, "--request", stringValue(params.request));
         pushOptional(args, "--fork-summary", stringValue(params.forkSummary));
         pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(config.storeDir));

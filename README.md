@@ -266,6 +266,35 @@ node dist/src/cli.js restart \
   --conversation <conversation-id>
 ```
 
+Inspect and take over native Codex sessions that were started outside AKK:
+
+```bash
+node dist/src/cli.js agent discover \
+  --agent codex \
+  --scope active
+
+node dist/src/cli.js agent takeover \
+  --agent codex \
+  --session-id <native-codex-session-id> \
+  --strategy terminate_then_resume
+```
+
+`terminate_then_resume` is intentionally two-step. The first command returns the exact pid, cwd, and session that would be stopped. After confirming that plan, execute the takeover:
+
+```bash
+node dist/src/cli.js agent takeover \
+  --agent codex \
+  --session-id <native-codex-session-id> \
+  --strategy terminate_then_resume \
+  --create-conversation \
+  --confirm-terminate \
+  --expected-pid <confirmed-pid>
+```
+
+AKK re-scans before terminating and only proceeds when the confirmed pid is still an exact match for the requested Codex session. After the process exits, AKK creates a managed conversation and future sends use native `codex exec resume`.
+
+Some Codex TUI processes do not expose the native session id in argv. In that case the default takeover remains blocked as ambiguous. For a deliberate local test or an operator-confirmed handoff, add `--allow-cwd-only` with `--expected-pid`; AKK will still re-scan and require that pid to be active in the target session cwd before terminating it.
+
 Close a task locally:
 
 ```bash

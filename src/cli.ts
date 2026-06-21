@@ -52,6 +52,8 @@ const DEFAULT_MONITOR_POLL_INTERVAL_MS = 5000;
 class InlineCodexSessionAdapter implements CodexLocalSessionAdapter {
   private readonly threads: CodexThreadRow[];
   private readonly processes: CodexProcessSnapshot[];
+  private readonly processBatches: CodexProcessSnapshot[][];
+  private processBatchIndex = 0;
   private readonly rollouts: Map<string, string>;
 
   constructor({
@@ -60,11 +62,14 @@ class InlineCodexSessionAdapter implements CodexLocalSessionAdapter {
     rollouts
   }: {
     threads?: CodexThreadRow[];
-    processes?: CodexProcessSnapshot[];
+    processes?: CodexProcessSnapshot[] | CodexProcessSnapshot[][];
     rollouts?: Record<string, string>;
   }) {
     this.threads = Array.isArray(threads) ? threads : [];
-    this.processes = Array.isArray(processes) ? processes : [];
+    this.processBatches = Array.isArray(processes?.[0])
+      ? processes as CodexProcessSnapshot[][]
+      : [];
+    this.processes = Array.isArray(processes) && !Array.isArray(processes[0]) ? processes as CodexProcessSnapshot[] : [];
     this.rollouts = new Map(Object.entries(rollouts ?? {}));
   }
 
@@ -77,6 +82,12 @@ class InlineCodexSessionAdapter implements CodexLocalSessionAdapter {
   }
 
   async listProcessSnapshots(): Promise<CodexProcessSnapshot[]> {
+    if (this.processBatches.length > 0) {
+      const batch = this.processBatches[Math.min(this.processBatchIndex, this.processBatches.length - 1)];
+      this.processBatchIndex += 1;
+      return batch;
+    }
+
     return this.processes;
   }
 }
@@ -336,7 +347,83 @@ async function runAgentTakeover(options) {
   }
 
   if (strategy === "terminate_then_resume") {
-    const plan = planTakeover(session, await provider.listActiveSessions());
+    const activeSessions = await provider.listActiveSessions();
+    const plan = planTakeover(session, activeSessions);
+    if (options.confirmTerminate === true) {
+      const expectedPid = Number(required(options.expectedPid, "--expected-pid is required with --confirm-terminate"));
+      if (!Number.isInteger(expectedPid) || expectedPid <= 0) {
+        throw new Error("--expected-pid must be a positive integer");
+      }
+      if (!options.createConversation) {
+        throw new Error("--create-conversation is required with --confirm-terminate");
+      }
+      const targetSelection = selectTerminateTarget({
+        plan,
+        session,
+        activeSessions,
+        expectedPid,
+        allowCwdOnly: options.allowCwdOnly === true
+      });
+      if (!targetSelection.allowed) {
+        return {
+          agent,
+          sessionId,
+          strategy,
+          status: "blocked",
+          sideEffectsExecuted: false,
+          plan,
+          error: {
+            code: targetSelection.code,
+            message: targetSelection.message
+          }
+        };
+      }
+
+      const { target, matchKind } = targetSelection;
+
+      const termination = terminateProcessTarget(target, {
+        timeoutMs: Number(options.terminateTimeoutMs ?? 3000)
+      });
+      const activeAfterTermination = await provider.listActiveSessions();
+      const afterTerminationPlan = planTakeover(session, activeAfterTermination);
+      if (afterTerminationPlan.targets.some((candidate) => candidate.sessionId === session.id || candidate.pid === expectedPid)) {
+        return {
+          agent,
+          sessionId,
+          strategy,
+          status: "blocked",
+          sideEffectsExecuted: true,
+          plan: afterTerminationPlan,
+          termination,
+          error: {
+            code: "target_still_active",
+            message: `Codex process ${expectedPid} still appears active after termination.`
+          }
+        };
+      }
+
+      const modelInfo = await provider.getSessionModel(session.id);
+      const attached = createNativeSessionConversation({
+        agent,
+        strategy,
+        session,
+        modelInfo,
+        options,
+        takeoverMatchKind: matchKind
+      });
+      return {
+        agent,
+        sessionId,
+        strategy,
+        status: "attached",
+        sideEffectsExecuted: true,
+        plan,
+        termination,
+        matchKind,
+        ...attached
+      };
+    }
+
     return {
       agent,
       sessionId,
@@ -452,6 +539,51 @@ function buildForkSummaryPrompt({ agent, session, contextPackage }) {
   ].join("\n");
 }
 
+function selectTerminateTarget({ plan, session, activeSessions, expectedPid, allowCwdOnly }) {
+  const exactTarget = plan.targets.find((candidate) => candidate.pid === expectedPid && candidate.sessionId === session.id);
+  if (exactTarget) {
+    return {
+      allowed: true,
+      target: exactTarget,
+      matchKind: "exact_session"
+    };
+  }
+
+  if (!allowCwdOnly) {
+    return {
+      allowed: false,
+      code: plan.allowed && plan.requiresConfirmation ? "expected_pid_mismatch" : "takeover_not_confirmable",
+      message: plan.allowed && plan.requiresConfirmation
+        ? `Expected pid ${expectedPid} is no longer the exact active Codex process for session ${session.id}.`
+        : "The current active Codex process no longer has an exact session match that can be safely terminated."
+    };
+  }
+
+  const cwdOnlyTarget = plan.targets.find((candidate) =>
+    candidate.pid === expectedPid &&
+    candidate.cwd === session.cwd &&
+    candidate.sessionId === undefined
+  );
+  const stillActive = activeSessions.some((candidate) =>
+    candidate.pid === expectedPid &&
+    candidate.cwd === session.cwd &&
+    candidate.sessionId === undefined
+  );
+  if (!cwdOnlyTarget || !stillActive) {
+    return {
+      allowed: false,
+      code: "expected_pid_mismatch",
+      message: `Expected pid ${expectedPid} is no longer an active Codex process in ${session.cwd}.`
+    };
+  }
+
+  return {
+    allowed: true,
+    target: cwdOnlyTarget,
+    matchKind: "cwd_only_confirmed"
+  };
+}
+
 function createForkConversation({ agent, strategy, session, contextPackage, forkSummary, modelInfo, options }) {
   const workspace = session.cwd;
   const storeDir = expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(workspace));
@@ -548,7 +680,7 @@ function createForkConversation({ agent, strategy, session, contextPackage, fork
   };
 }
 
-function createNativeSessionConversation({ agent, strategy, session, modelInfo, options }) {
+function createNativeSessionConversation({ agent, strategy, session, modelInfo, options, takeoverMatchKind = strategy }) {
   const workspace = session.cwd;
   const storeDir = expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(workspace));
   cleanupIdleConversations(storeDir, options);
@@ -602,10 +734,11 @@ function createNativeSessionConversation({ agent, strategy, session, modelInfo, 
       strategy,
       attached_at: now.toISOString(),
       native_model: modelInfo?.model,
-      acpx_model: modelInfo?.acpxModel,
-      model_source: modelInfo?.source,
-      needs_bootstrap: true
-    }
+	      acpx_model: modelInfo?.acpxModel,
+	      model_source: modelInfo?.source,
+	      takeover_match_kind: takeoverMatchKind,
+	      needs_bootstrap: true
+	    }
   }, paths);
 
   saveState(paths.statePath, attachedConversation);
@@ -2916,10 +3049,68 @@ function isWaitingForAgent(status) {
 function isProcessAlive(pid) {
   try {
     process.kill(pid, 0);
-    return true;
+    return !isZombieProcess(pid);
   } catch (error) {
     return error?.code === "EPERM";
   }
+}
+
+function isZombieProcess(pid) {
+  const result = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], {
+    encoding: "utf8"
+  });
+  if (result.status !== 0) {
+    return false;
+  }
+
+  return result.stdout.trim().toUpperCase().startsWith("Z");
+}
+
+function terminateProcessTarget(target, { timeoutMs = 3000 } = {}) {
+  const pids = [...target.childPids, target.pid]
+    .filter((pid, index, all) => Number.isInteger(pid) && pid > 0 && all.indexOf(pid) === index);
+  const signals: Array<Record<string, unknown>> = [];
+  for (const pid of pids) {
+    signals.push(sendSignalToPid(pid, "SIGTERM"));
+  }
+
+  const exited = waitForPidsToExit(pids, timeoutMs);
+  return {
+    target,
+    signal: "SIGTERM",
+    signals,
+    exited,
+    remainingPids: pids.filter((pid) => isProcessAlive(pid))
+  };
+}
+
+function sendSignalToPid(pid, signal) {
+  try {
+    process.kill(pid, signal);
+    return {
+      pid,
+      signal,
+      status: "sent"
+    };
+  } catch (error) {
+    return {
+      pid,
+      signal,
+      status: "failed",
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+function waitForPidsToExit(pids, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (pids.every((pid) => !isProcessAlive(pid))) {
+      return true;
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  }
+  return pids.every((pid) => !isProcessAlive(pid));
 }
 
 function markConversationStalled({ statePath, logPath, reason, detail = {} }) {
