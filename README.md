@@ -268,6 +268,8 @@ node dist/src/cli.js restart \
 
 Inspect and take over native Codex sessions that were started outside AKK:
 
+Experimental: native Codex takeover depends on best-effort local Codex session metadata, process scanning, and Codex CLI resume behavior. It may be unstable across Codex versions or unusual terminal states, so review the returned plan before confirming any takeover.
+
 ```bash
 node dist/src/cli.js agent discover \
   --agent codex \
