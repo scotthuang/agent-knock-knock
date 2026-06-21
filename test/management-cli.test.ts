@@ -453,7 +453,7 @@ fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify(args) + "\\n"
       "--message",
       "Do not send until the user chooses."
     ]);
-    assert.match(blockedSend.stderr, /choose recover, restart, or close first/);
+    assert.match(blockedSend.stderr, /choose recover, close, or delegate a new task first/);
 
     const recovered = runCli([
       "recover",
@@ -480,70 +480,12 @@ fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify(args) + "\\n"
     assert.match(acpxCalls[1][4], /AKK replay recovery/);
     assert.match(acpxCalls[1][4], /Initial work completed/);
     assert.match(acpxCalls[1][4], /Pending follow-up that cannot reach the old session/);
-
-    fs.writeFileSync(acpxCallsPath, "", "utf8");
-    const restartCreated = runCli([
-      "new",
-      "--agent",
-      "codex",
-      "--session",
-      "codex-restart",
-      "--request",
-      "Initial restart task",
-      "--store-dir",
-      storeDir
-    ]);
-    runCli([
-      "callback",
-      "--state",
-      restartCreated.paths.statePath,
-      "--record-only",
-      "--message-json",
-      JSON.stringify({
-        from: "codex",
-        to: "openclaw",
-        type: "done",
-        body: "History that restart should not replay."
-      })
-    ]);
-    runCli([
-      "send",
-      "--conversation",
-      restartCreated.conversation.conversation_id,
-      "--store-dir",
-      storeDir,
-      "--message",
-      "Restart-only pending instruction.",
-      "--recovery-policy",
-      "explicit"
-    ], {
-      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
-      FAIL_ENSURE: "1"
-    });
-    const restarted = runCli([
-      "restart",
-      "--conversation",
-      restartCreated.conversation.conversation_id,
-      "--store-dir",
-      storeDir
-    ], {
-      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
-    });
-    assert.equal(restarted.restarted, true);
-    assert.equal(restarted.conversation.recovery.resolution, "restart");
-    const restartCalls = fs.readFileSync(acpxCallsPath, "utf8")
-      .trim()
-      .split(/\r?\n/)
-      .map((line) => JSON.parse(line));
-    assert.match(restartCalls[1][4], /Restart this Agent Knock Knock task/);
-    assert.match(restartCalls[1][4], /Restart-only pending instruction/);
-    assert.doesNotMatch(restartCalls[1][4], /History that restart should not replay/);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
 
-test("Cursor send requires recovery decision when its ACPX session is unavailable", () => {
+test("Cursor send auto-recovers when its ACPX session is unavailable", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-cursor-recovery-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -557,7 +499,7 @@ test("Cursor send requires recovery decision when its ACPX session is unavailabl
       `#!/usr/bin/env node
 const fs = require("node:fs");
 const args = process.argv.slice(2);
-if (args[0] === "cursor" && args.includes("sessions") && args.includes("ensure")) {
+if (args[0] === "cursor" && args.includes("sessions") && args.includes("ensure") && args.includes("cursor-recovery")) {
   console.error("Cursor session unavailable");
   process.exit(9);
 }
@@ -604,12 +546,15 @@ fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify(args) + "\\n"
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     });
 
-    assert.equal(result.delivered, false);
-    assert.equal(result.requires_recovery_decision, true);
+    assert.equal(result.delivered, true);
+    assert.equal(result.recovered, true);
+    assert.equal(result.auto_recovered, true);
     assert.equal(result.executor.kind, "cursor");
-    assert.equal(result.conversation.status, "needs_recovery");
-    assert.equal(result.recovery.previous_executor.kind, "cursor");
-    assert.equal(result.recovery.pending_message.to, "cursor");
+    assert.equal(result.conversation.status, "waiting_for_agent");
+    assert.equal(result.conversation.recovery.previous_executor.kind, "cursor");
+    assert.equal(result.conversation.recovery.pending_message.to, "cursor");
+    assert.equal(result.conversation.recovery.resolution, "recover");
+    assert.match(result.executor.session, /^akk-cursor-\d{14}-[0-9a-f]{8}$/);
 
     const status = runCli([
       "status",
@@ -618,8 +563,7 @@ fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify(args) + "\\n"
       "--store-dir",
       storeDir
     ]);
-    assert.equal(status.summary.status, "needs_recovery");
-    assert.deepEqual(status.summary.recovery.options, ["recover", "restart", "close"]);
+    assert.equal(status.summary.status, "waiting_for_agent");
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

@@ -24,8 +24,7 @@ import {
   executorDefinitionForKind,
   modelEnvForExecutor,
   normalizeModelForExecutor,
-  proxyEnvForExecutor,
-  sessionRecoveryStrategyForExecutor
+  proxyEnvForExecutor
 } from "./executors.js";
 import { executorBootstrapPrompt } from "./bootstrap.js";
 import { writeRuntimeLog } from "./runtime-log.js";
@@ -139,8 +138,6 @@ async function runCommand(commandName, options) {
     runCancel(options);
   } else if (commandName === "recover") {
     runRecover(options);
-  } else if (commandName === "restart") {
-    runRestart(options);
   } else if (commandName === "close") {
     runClose(options);
   } else if (commandName === "transcript") {
@@ -1271,7 +1268,7 @@ function runSend(options) {
     throw new Error(`cannot send to ${conversation.conversation_id}; conversation is ${conversation.status}`);
   }
   if (conversation.status === "needs_recovery") {
-    throw new Error(`cannot send to ${conversation.conversation_id}; choose recover, restart, or close first`);
+    throw new Error(`cannot send to ${conversation.conversation_id}; choose recover, close, or delegate a new task first`);
   }
   if (conversation.status === "needs_model_selection" && !options.model) {
     throw new Error(`cannot send to ${conversation.conversation_id}; choose a supported model with --model first`);
@@ -1384,7 +1381,7 @@ function runSend(options) {
     stderr: textSummary(cleanProcessText(ensureSession.stderr))
   });
   if (ensureSession.error) {
-    if (requiresExplicitRecoveryDecision(executor, options)) {
+    if (requiresExplicitRecoveryDecision(options)) {
       printJson(markConversationNeedsRecovery({
         conversation: nextConversation,
         statePath,
@@ -1397,10 +1394,22 @@ function runSend(options) {
       }));
       return;
     }
-    throw new Error(`acpx ${executor.kind} session ensure failed to start: ${ensureSession.error.message}`);
+    autoRecoverSendFailure({
+      options,
+      conversation: nextConversation,
+      statePath,
+      logPath,
+      executor,
+      message,
+      failedStage: "session_ensure",
+      result: ensureSession,
+      reason: `acpx ${executor.kind} session ensure failed to start: ${ensureSession.error.message}`
+    });
+    return;
   }
   if (ensureSession.status !== 0) {
-    if (requiresExplicitRecoveryDecision(executor, options)) {
+    const reason = cleanProcessText(ensureSession.stderr || ensureSession.stdout || `acpx ${executor.kind} sessions ensure exited with status ${ensureSession.status}`);
+    if (requiresExplicitRecoveryDecision(options)) {
       printJson(markConversationNeedsRecovery({
         conversation: nextConversation,
         statePath,
@@ -1409,11 +1418,22 @@ function runSend(options) {
         message,
         failedStage: "session_ensure",
         result: ensureSession,
-        reason: cleanProcessText(ensureSession.stderr || ensureSession.stdout || `acpx ${executor.kind} sessions ensure exited with status ${ensureSession.status}`)
+        reason
       }));
       return;
     }
-    throw new Error(cleanProcessText(ensureSession.stderr || ensureSession.stdout || `acpx ${executor.kind} sessions ensure exited with status ${ensureSession.status}`));
+    autoRecoverSendFailure({
+      options,
+      conversation: nextConversation,
+      statePath,
+      logPath,
+      executor,
+      message,
+      failedStage: "session_ensure",
+      result: ensureSession,
+      reason
+    });
+    return;
   }
 
   const acpxArgs = buildAcpxPromptArgs({ executor, payload, model: executorModel });
@@ -1512,7 +1532,7 @@ function runSend(options) {
     stderr: textSummary(cleanProcessText(sendResult.stderr))
   });
   if (sendResult.error) {
-    if (requiresExplicitRecoveryDecision(executor, options)) {
+    if (requiresExplicitRecoveryDecision(options)) {
       printJson(markConversationNeedsRecovery({
         conversation: nextConversation,
         statePath,
@@ -1525,10 +1545,22 @@ function runSend(options) {
       }));
       return;
     }
-    throw new Error(`acpx ${executor.kind} send failed to start: ${sendResult.error.message}`);
+    autoRecoverSendFailure({
+      options,
+      conversation: nextConversation,
+      statePath,
+      logPath,
+      executor,
+      message,
+      failedStage: "message_send",
+      result: sendResult,
+      reason: `acpx ${executor.kind} send failed to start: ${sendResult.error.message}`
+    });
+    return;
   }
   if (sendResult.status !== 0) {
-    if (requiresExplicitRecoveryDecision(executor, options)) {
+    const reason = cleanProcessText(sendResult.stderr || sendResult.stdout || `acpx ${executor.kind} send exited with status ${sendResult.status}`);
+    if (requiresExplicitRecoveryDecision(options)) {
       printJson(markConversationNeedsRecovery({
         conversation: nextConversation,
         statePath,
@@ -1537,11 +1569,22 @@ function runSend(options) {
         message,
         failedStage: "message_send",
         result: sendResult,
-        reason: cleanProcessText(sendResult.stderr || sendResult.stdout || `acpx ${executor.kind} send exited with status ${sendResult.status}`)
+        reason
       }));
       return;
     }
-    throw new Error(cleanProcessText(sendResult.stderr || sendResult.stdout || `acpx ${executor.kind} send exited with status ${sendResult.status}`));
+    autoRecoverSendFailure({
+      options,
+      conversation: nextConversation,
+      statePath,
+      logPath,
+      executor,
+      message,
+      failedStage: "message_send",
+      result: sendResult,
+      reason
+    });
+    return;
   }
 
   const deliveredConversation = markTakeoverBootstrapped({
@@ -1878,11 +1921,36 @@ function markForkSessionBootstrapped({ conversation, statePath, logPath, executo
   return nextConversation;
 }
 
-function requiresExplicitRecoveryDecision(executor, options: Record<string, any> = {}) {
+function requiresExplicitRecoveryDecision(options: Record<string, any> = {}) {
   if (options.recoveryPolicy === "explicit" || options.recoveryPolicy === "explicit-decision") {
     return true;
   }
-  return sessionRecoveryStrategyForExecutor(executor) === "explicit-decision";
+  return false;
+}
+
+function autoRecoverSendFailure({ options, conversation, statePath, logPath, executor, message, failedStage, result, reason }) {
+  markConversationNeedsRecovery({
+    conversation,
+    statePath,
+    logPath,
+    executor,
+    message,
+    failedStage,
+    result,
+    reason
+  });
+  runtimeLog("info", "conversation_auto_recovery_start", {
+    conversation_id: conversation.conversation_id,
+    agent: executor.kind,
+    executor_session: executor.session,
+    failed_stage: failedStage,
+    reason: textSummary(reason)
+  });
+  runRecoveryDecision({
+    ...options,
+    mode: "recover",
+    autoRecovered: true
+  });
 }
 
 function markConversationNeedsRecovery({ conversation, statePath, logPath, executor, message, failedStage, result, reason }) {
@@ -1897,7 +1965,7 @@ function markConversationNeedsRecovery({ conversation, statePath, logPath, execu
     failed_message_id: message.id,
     pending_message: message,
     previous_executor: executor,
-    options: ["recover", "restart", "close"]
+    options: ["recover", "close", "delegate"]
   };
   const nextConversation = {
     ...conversation,
@@ -2007,10 +2075,6 @@ function runRecover(options) {
   runRecoveryDecision({ ...options, mode: "recover" });
 }
 
-function runRestart(options) {
-  runRecoveryDecision({ ...options, mode: "restart" });
-}
-
 function runRecoveryDecision(options) {
   cleanupIdleConversations(storeDirFromOptions(options), options);
   const { conversation, statePath, logPath } = loadConversationFromOptions(options);
@@ -2044,9 +2108,7 @@ function runRecoveryDecision(options) {
   };
   saveState(statePath, recoveredConversation);
 
-  const payload = options.mode === "recover"
-    ? buildRecoverPayload({ conversation, pendingMessage, logPath })
-    : buildRestartPayload({ pendingMessage });
+  const payload = buildRecoverPayload({ conversation, pendingMessage, logPath });
   const acpxPath = resolveExecutable("acpx");
   const executorEnv = environmentForExecutor(executor, {
     allProxy: options.allProxy ?? conversation.executor_all_proxy
@@ -2109,8 +2171,8 @@ function runRecoveryDecision(options) {
     });
     printJson({
       conversation: recoveredConversation,
-      recovered: options.mode === "recover",
-      restarted: options.mode === "restart",
+      recovered: true,
+      auto_recovered: Boolean(options.autoRecovered),
       background: true,
       pid: child.pid ?? null,
       monitor_pid: monitor.pid ?? null,
@@ -2146,8 +2208,8 @@ function runRecoveryDecision(options) {
 
   printJson({
     conversation: recoveredConversation,
-    recovered: options.mode === "recover",
-    restarted: options.mode === "restart",
+    recovered: true,
+    auto_recovered: Boolean(options.autoRecovered),
     delivered: true,
     executor,
     budget: budgetAction(recoveredConversation)
@@ -2168,17 +2230,6 @@ function buildRecoverPayload({ conversation, pendingMessage, logPath }) {
     formatProtocolHistoryForRecovery(readExistingEvents(logPath)),
     "",
     "Pending OpenClaw message:",
-    JSON.stringify(pendingMessage)
-  ].join("\n");
-}
-
-function buildRestartPayload({ pendingMessage }) {
-  return [
-    "Restart this Agent Knock Knock task in a new ACPX session.",
-    "Do not assume the previous coding-agent session context is available.",
-    "Follow only the pending OpenClaw message below.",
-    "Continue to report back only through the callback command already provided for this conversation.",
-    "",
     JSON.stringify(pendingMessage)
   ].join("\n");
 }
@@ -3813,7 +3864,6 @@ function usage() {
   agent-knock-knock send --conversation <id> --message <text> [--type answer|task|control] [--all-proxy <url>] [--agent-timeout-minutes <minutes>]
   agent-knock-knock cancel --conversation <id> [--all-proxy <url>]
   agent-knock-knock recover --conversation <id> [--session <name>] [--all-proxy <url>]
-  agent-knock-knock restart --conversation <id> [--session <name>] [--all-proxy <url>]
   agent-knock-knock close --conversation <id> [--reason <text>]
   agent-knock-knock install-openclaw [--openclaw-bin <path>] [--skill-path <path>] [--no-restart]
   agent-knock-knock doctor

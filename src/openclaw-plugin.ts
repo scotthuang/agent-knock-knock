@@ -341,7 +341,7 @@ export default definePluginEntry({
   id: "agent-knock-knock",
   name: "Agent Knock Knock",
   description:
-    "Agent Knock Knock (AKK/akk) delegates OpenClaw coding work to local Codex, Claude, or Cursor agents. Use this for AKK, akk, Agent Knock Knock, Codex delegation, Claude delegation, Cursor delegation, task listing, follow-up messages, status, recovery, restart, cancel requests, and close requests. Default delegation target comes from plugin config defaultAgent and falls back to Codex when unset; explicit user agent requests override it.",
+    "Agent Knock Knock (AKK/akk) delegates OpenClaw coding work to local Codex, Claude, or Cursor agents. Use this for AKK, akk, Agent Knock Knock, Codex delegation, Claude delegation, Cursor delegation, task listing, follow-up messages, status, recovery, cancel requests, and close requests. Default delegation target comes from plugin config defaultAgent and falls back to Codex when unset; explicit user agent requests override it.",
   register(api) {
     api.registerGatewayMethod(
       CALLBACK_METHOD,
@@ -469,13 +469,6 @@ export default definePluginEntry({
       description: "Recover an Agent Knock Knock task whose coding-agent session is unavailable by starting a new session with AKK's saved protocol history summary plus the pending message. Use only after the user chooses recovery.",
       parameters: recoveryParameters,
       buildArgs: (params) => buildRecoveryArgs(api, "recover", params)
-    });
-
-    registerCliTool(api, {
-      name: "agent_knock_knock_restart",
-      description: "Restart an Agent Knock Knock task whose coding-agent session is unavailable by starting a new session with only the pending message. Use only after the user chooses restart instead of history recovery.",
-      parameters: recoveryParameters,
-      buildArgs: (params) => buildRecoveryArgs(api, "restart", params)
     });
 
     registerCliTool(api, {
@@ -615,10 +608,10 @@ async function handleAkkCommand(api, ctx) {
       const result = runCli(api, args);
       return { text: formatCancelCommandResult(result) };
     }
-    if (parsed.action === "recover" || parsed.action === "restart") {
+    if (parsed.action === "recover") {
       const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
       const args = [
-        parsed.action,
+        "recover",
         "--conversation",
         parsed.conversationId,
         "--background"
@@ -627,7 +620,7 @@ async function handleAkkCommand(api, ctx) {
       pushOptional(args, "--model", stringValue(config.codexModel) ?? stringValue(config.model));
       pushOptional(args, "--idle-timeout-minutes", numberString(config.idleTimeoutMinutes));
       const result = runCli(api, args);
-      return { text: formatRecoveryCommandResult(result, parsed.action) };
+      return { text: formatRecoveryCommandResult(result) };
     }
     if (parsed.action === "close") {
       const result = runCli(api, [
@@ -680,10 +673,6 @@ function parseAkkCommand(args) {
     const { token: conversationId } = takeRequiredToken(rest, "Usage: /akk recover <conversation-id>");
     return { action: "recover", conversationId };
   }
-  if (action === "restart") {
-    const { token: conversationId } = takeRequiredToken(rest, "Usage: /akk restart <conversation-id>");
-    return { action: "restart", conversationId };
-  }
   if (action === "close" || action === "done") {
     const { token: conversationId, rest: reason } = takeRequiredToken(rest, "Usage: /akk close <conversation-id> [reason]");
     return { action: "close", conversationId, reason: reason.trim() || "Closed from /akk command" };
@@ -730,7 +719,6 @@ function akkUsageText() {
     "/akk send <conversation-id> <message>",
     "/akk cancel <conversation-id>",
     "/akk recover <conversation-id>",
-    "/akk restart <conversation-id>",
     "/akk close <conversation-id> [reason]"
   ].join("\n");
 }
@@ -800,10 +788,10 @@ function formatCancelCommandResult(result) {
   ].join("\n");
 }
 
-function formatRecoveryCommandResult(result, action) {
+function formatRecoveryCommandResult(result) {
   const conversation = result.conversation ?? {};
   return [
-    action === "recover" ? "AKK recovery started." : "AKK restart started.",
+    "AKK recovery started.",
     `conversation: ${conversation.conversation_id ?? "unknown"}`,
     `agent: ${result.executor?.kind ?? conversation.executor?.kind ?? "unknown"}`,
     `session: ${result.executor?.session ?? conversation.executor?.session ?? "unknown"}`,

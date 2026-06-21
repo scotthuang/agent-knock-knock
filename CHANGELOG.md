@@ -1,8 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.2.1 - 2026-06-22
 
-No unreleased changes.
+### Changed
+
+- Deprecated the standalone restart recovery path from the OpenClaw-facing tool, slash command, skill, and docs. Conversations that need recovery now present `recover`, `close`, or starting a new independent delegation.
+- Changed `send` to automatically fall back to AKK replay recovery when the previous ACPX session is unavailable. Explicit recovery decisions remain available only through `--recovery-policy explicit`.
 
 ## 0.2.0 - 2026-06-22
 

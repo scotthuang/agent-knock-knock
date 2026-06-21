@@ -140,7 +140,6 @@ akk list
 akk send <conversation-id>: continue with the smaller implementation
 akk cancel <conversation-id>
 akk recover <conversation-id>
-akk restart <conversation-id>
 akk close <conversation-id>
 ```
 
@@ -156,7 +155,6 @@ The plugin also registers the `/akk` slash command for channel surfaces that sup
 /akk send <conversation-id> <message>
 /akk cancel <conversation-id>
 /akk recover <conversation-id>
-/akk restart <conversation-id>
 /akk close <conversation-id> [reason]
 ```
 
@@ -172,7 +170,6 @@ If your OpenClaw config uses a restrictive tool allowlist, allow the tool:
       "agent_knock_knock_send",
       "agent_knock_knock_cancel",
       "agent_knock_knock_recover",
-      "agent_knock_knock_restart",
       "agent_knock_knock_close"
     ]
   }
@@ -189,13 +186,15 @@ New delegations create a fresh ACPX session by default, using a name like `akk-c
 
 Background launches also start a small AKK monitor process. The monitor exits when the conversation receives a callback or otherwise leaves the agent-waiting state. If the executor process disappears before a callback, or if no callback arrives before `agentTimeoutMinutes`, the conversation is marked `stalled` and AKK attempts to notify the original OpenClaw session through the callback Gateway route. The default agent timeout is 60 minutes.
 
-Some coding agents may not reliably resume a named ACPX session after their backing process disappears. Executors can opt into an explicit recovery decision flow. In that mode, a failed follow-up send marks the AKK conversation `needs_recovery` instead of automatically replaying history or starting a new session. The user can then choose:
+Some coding agents may not reliably resume a named ACPX session after their backing process disappears. By default, `AKK send <conversation-id>: <message>` automatically falls back to AKK replay recovery: it starts a fresh ACPX session, gives the agent a bounded summary of AKK's saved protocol history, and includes the pending message. The result includes `auto_recovered: true` when this happens.
+
+If a caller uses the explicit recovery policy, or if automatic recovery cannot complete, the AKK conversation can enter `needs_recovery`. The user can then choose:
 
 - `AKK recover <conversation-id>`: start a new coding-agent session with AKK's saved protocol history summary plus the pending message.
-- `AKK restart <conversation-id>`: start a new coding-agent session with only the pending message.
 - `AKK close <conversation-id>`: close the AKK task without recovery.
+- Start a new independent AKK delegation if the old task should not be recovered.
 
-Codex and Claude Code currently use native named-session recovery through ACPX. Cursor uses the explicit decision flow because its native session resume can be unreliable after the backing process disappears.
+Recover is AKK replay recovery, not guaranteed native coding-agent session resume. Codex, Claude Code, and Cursor all use the same default `send` auto-recovery behavior when the existing ACPX session is unavailable.
 
 Task status can include a safe executor trace with `--trace` or the OpenClaw status tool's `trace: true` parameter. Trace summaries show client lifecycle events, tool call names and statuses, permission-request markers, monitor events, and short sanitized output previews. Agent thinking content is never returned; it is counted and marked as redacted.
 
@@ -256,13 +255,10 @@ node dist/src/cli.js cancel \
   --conversation <conversation-id>
 ```
 
-Recover or restart a task that is waiting for an explicit recovery decision:
+Recover a task that is waiting for an explicit recovery decision:
 
 ```bash
 node dist/src/cli.js recover \
-  --conversation <conversation-id>
-
-node dist/src/cli.js restart \
   --conversation <conversation-id>
 ```
 
