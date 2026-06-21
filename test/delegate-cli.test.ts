@@ -184,12 +184,12 @@ fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify({
     assert.equal(parsed.conversation.executor.kind, "codex");
     assert.equal(parsed.conversation.executor.session, "codex-task");
     assert.equal(parsed.conversation.executor_all_proxy, "socks5h://127.0.0.1:1082");
-    assert.equal(parsed.conversation.executor_model, "gpt-5.5/medium");
+    assert.equal(parsed.conversation.executor_model, "gpt-5.5[medium]");
 
     const acpxCalls = await waitForCalls(launchedPath, 2);
     assert.deepEqual(acpxCalls[0].args, ["codex", "sessions", "ensure", "--name", "codex-task"]);
     assert.equal(acpxCalls[0].allProxy, "socks5h://127.0.0.1:1082");
-    assert.deepEqual(acpxCalls.at(-1).args.slice(0, 6), ["--approve-all", "--model", "gpt-5.5/medium", "codex", "-s", "codex-task"]);
+    assert.deepEqual(acpxCalls.at(-1).args.slice(0, 6), ["--approve-all", "--model", "gpt-5.5[medium]", "codex", "-s", "codex-task"]);
     assert.equal(acpxCalls.at(-1).allProxy, "socks5h://127.0.0.1:1082");
 
     const events = fs.readFileSync(parsed.paths.logPath, "utf8")

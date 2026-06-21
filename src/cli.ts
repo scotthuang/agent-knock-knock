@@ -20,6 +20,7 @@ import {
   acpxCommandForExecutor,
   executorDefinitionForKind,
   modelEnvForExecutor,
+  normalizeModelForExecutor,
   proxyEnvForExecutor,
   sessionRecoveryStrategyForExecutor
 } from "./executors.js";
@@ -601,9 +602,9 @@ function proxyForExecutor(executor, options: Record<string, any> = {}) {
 function modelForExecutor(executor, options: Record<string, any> = {}) {
   const explicit = options.model ?? options.codexModel;
   if (explicit) {
-    return explicit;
+    return normalizeModelForExecutor(executor, explicit);
   }
-  return modelEnvForExecutor(executor, process.env);
+  return normalizeModelForExecutor(executor, modelEnvForExecutor(executor, process.env));
 }
 
 function environmentForExecutor(executor, options = {}) {

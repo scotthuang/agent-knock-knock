@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-No unreleased changes.
+### Fixed
+
+- Normalized Codex ACPX slash-style model shorthands such as `gpt-5.5/medium` to ACPX bracket model ids such as `gpt-5.5[medium]`, preventing Codex tasks from stalling before callback when a configured model uses the older shorthand.
 
 ## 0.1.0 - 2026-06-21
 

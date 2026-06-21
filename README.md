@@ -360,7 +360,7 @@ Runtime logs are diagnostic-only and are safe to use for local troubleshooting. 
 - CLI `new` fallback Claude session: `bidirectional`
 - CLI `new` fallback Codex session: `codex`
 - CLI `new` fallback Cursor session: `cursor`
-- Codex model, when needed for ChatGPT-account compatibility: pass `model`/`codexModel` such as `gpt-5.5/medium`
+- Codex model, when needed for ChatGPT-account compatibility: pass `model`/`codexModel` using ACPX's bracket form such as `gpt-5.5[medium]`. AKK also normalizes the older slash shorthand `gpt-5.5/medium` to `gpt-5.5[medium]`.
 - Cursor model, when needed: pass `model`/`cursorModel`
 - Gateway URL: `ws://127.0.0.1:18789`
 - Agent callback timeout: `60` minutes

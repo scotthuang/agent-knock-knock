@@ -5,6 +5,7 @@ import {
   acpxCommandForExecutor,
   executorDefinitionForAlias,
   executorDefinitionForKind,
+  normalizeModelForExecutor,
   parseLeadingExecutorAlias,
   resolveExecutor,
   sessionRecoveryStrategyForExecutor
@@ -66,4 +67,15 @@ test("resolved executors keep the stable protocol shape", () => {
   assert.equal(acpxCommandForExecutor(codex), "codex");
   assert.equal(sessionRecoveryStrategyForExecutor(codex), "native-session");
   assert.equal(sessionRecoveryStrategyForExecutor(resolveExecutor({ kind: "cursor" })), "explicit-decision");
+});
+
+test("normalizes Codex ACPX model aliases", () => {
+  const codex = resolveExecutor({ kind: "codex" });
+  const cursor = resolveExecutor({ kind: "cursor" });
+
+  assert.equal(normalizeModelForExecutor(codex, "gpt-5.5/medium"), "gpt-5.5[medium]");
+  assert.equal(normalizeModelForExecutor(codex, "gpt-5.3-codex/XHIGH"), "gpt-5.3-codex[xhigh]");
+  assert.equal(normalizeModelForExecutor(codex, "gpt-5.5[medium]"), "gpt-5.5[medium]");
+  assert.equal(normalizeModelForExecutor(cursor, "cursor-model/medium"), "cursor-model/medium");
+  assert.equal(normalizeModelForExecutor(codex, undefined), undefined);
 });

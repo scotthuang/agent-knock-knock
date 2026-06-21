@@ -105,7 +105,7 @@ fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify({
       .map((line) => JSON.parse(line));
     assert.deepEqual(acpxCalls[0].args, ["codex", "sessions", "ensure", "--name", "codex-work"]);
     assert.equal(acpxCalls[0].allProxy, "socks5h://127.0.0.1:1082");
-    assert.deepEqual(acpxCalls[1].args.slice(0, 6), ["--approve-all", "--model", "gpt-5.5/medium", "codex", "-s", "codex-work"]);
+    assert.deepEqual(acpxCalls[1].args.slice(0, 6), ["--approve-all", "--model", "gpt-5.5[medium]", "codex", "-s", "codex-work"]);
     assert.equal(acpxCalls[1].allProxy, "socks5h://127.0.0.1:1082");
 
     const cursorSent = runCli([

@@ -164,3 +164,21 @@ export function modelEnvForExecutor(executor: Pick<Executor, "kind">, env: NodeJ
   const key = executorDefinitionForKind(executor.kind).modelEnvKey;
   return key ? env[key] : undefined;
 }
+
+export function normalizeModelForExecutor(executor: Pick<Executor, "kind">, model: string | undefined): string | undefined {
+  if (!model) {
+    return undefined;
+  }
+
+  const trimmed = model.trim();
+  if (executor.kind !== "codex") {
+    return trimmed;
+  }
+
+  const match = /^(.+)\/(low|medium|high|xhigh)$/i.exec(trimmed);
+  if (!match) {
+    return trimmed;
+  }
+
+  return `${match[1]}[${match[2].toLowerCase()}]`;
+}
