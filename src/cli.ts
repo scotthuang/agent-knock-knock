@@ -2118,18 +2118,20 @@ function markConversationStalled({ statePath, logPath, reason, detail = {} }) {
       statePath,
       logPath,
       conversation: stalledConversation,
-      reason
+      reason,
+      detail
     });
   }
   return stalledConversation;
 }
 
-function deliverStalledNotification({ statePath, logPath, conversation, reason }) {
+function deliverStalledNotification({ statePath, logPath, conversation, reason, detail = {} }) {
   if (!conversation.gateway_method) {
     return;
   }
 
   const executor = executorForConversation(conversation);
+  const trace = buildStalledTraceSummary({ conversation, logPath, detail });
   const message = createMessage({
     conversation,
     from: executor.actor,
@@ -2141,15 +2143,18 @@ function deliverStalledNotification({ statePath, logPath, conversation, reason }
       "",
       `Conversation: ${conversation.conversation_id}`,
       `Session: ${executor.session}`,
+      trace ? `Trace: ${trace}` : "",
       "Use `AKK status` for details, `AKK send` to retry/follow up, or `AKK close` to close it."
-    ].join("\n")
+    ].filter(Boolean).join("\n")
   });
 
+  const gatewayToken = conversation.gateway_token;
+  const gatewayUrl = gatewayToken ? conversation.gateway_url : undefined;
   const delivery = deliverToGatewayMethod({
     method: conversation.gateway_method,
     openclawBin: conversation.openclaw_bin,
-    gatewayUrl: conversation.gateway_url,
-    token: conversation.gateway_token,
+    gatewayUrl,
+    token: gatewayToken,
     sessionKey: conversation.gateway_session ?? conversation.openclaw_session,
     statePath,
     logPath,
@@ -2185,8 +2190,8 @@ function deliverStalledNotification({ statePath, logPath, conversation, reason }
 
   const chatSendDelivery = deliverToChatSend({
     openclawBin: conversation.openclaw_bin,
-    gatewayUrl: conversation.gateway_url,
-    token: conversation.gateway_token,
+    gatewayUrl,
+    token: gatewayToken,
     params: chatSendParams
   });
   appendEvent(logPath, {
@@ -2204,6 +2209,47 @@ function deliverStalledNotification({ statePath, logPath, conversation, reason }
     stdout: textSummary(chatSendDelivery.stdout),
     stderr: textSummary(chatSendDelivery.stderr)
   });
+}
+
+function buildStalledTraceSummary({ conversation, logPath, detail = {} }) {
+  const detailRecord = isRecord(detail) ? detail as Record<string, unknown> : {};
+  const outputPath = typeof detailRecord.output_path === "string"
+    ? detailRecord.output_path
+    : traceOutputPath({
+        conversation,
+        events: safeReadEvents(logPath),
+        logPath
+      });
+  if (!outputPath || !fs.existsSync(outputPath)) {
+    return undefined;
+  }
+
+  const output = fs.readFileSync(outputPath, "utf8").slice(-64 * 1024);
+  const parts = output
+    .split(/\r?\n/)
+    .map((line) => sanitizeTraceText(line.trim(), 220))
+    .filter((line) =>
+      line &&
+      !line.startsWith("input:") &&
+      !line.startsWith("output:") &&
+      !line.startsWith("{") &&
+      !line.startsWith("}") &&
+      !line.includes("--message-json")
+    )
+    .slice(-6);
+  if (parts.length === 0) {
+    return undefined;
+  }
+
+  return cleanProcessText(parts.join(" | "))?.slice(0, 500);
+}
+
+function safeReadEvents(logPath) {
+  try {
+    return readNdjsonLog(logPath);
+  } catch {
+    return [];
+  }
 }
 
 function cleanupIdleConversations(storeDir, options: Record<string, any> = {}, now = new Date()) {

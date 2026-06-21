@@ -669,6 +669,83 @@ test("monitor marks waiting conversations stalled when the executor process is g
   }
 });
 
+test("monitor stalled notification uses default gateway credentials when no token is stored", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-monitor-notify-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const gatewayCallPath = path.join(tempDir, "gateway-call.json");
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    const fakeOpenClaw = path.join(fakeBinDir, "openclaw");
+    fs.writeFileSync(
+      fakeOpenClaw,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.writeFileSync(${JSON.stringify(gatewayCallPath)}, JSON.stringify(process.argv.slice(2)), "utf8");
+console.log(JSON.stringify({ ok: true }));
+`,
+      "utf8"
+    );
+    fs.chmodSync(fakeOpenClaw, 0o755);
+
+    const created = runCli([
+      "new",
+      "--agent",
+      "codex",
+      "--session",
+      "codex-stalled-notify",
+      "--request",
+      "Long task",
+      "--store-dir",
+      storeDir,
+      "--openclaw-session",
+      "agent:main:main"
+    ]);
+    const state = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
+    fs.writeFileSync(created.paths.statePath, `${JSON.stringify({
+      ...state,
+      gateway_url: "ws://127.0.0.1:18789",
+      gateway_method: "agent-knock-knock.callback",
+      gateway_session: "agent:main:main",
+      openclaw_bin: fakeOpenClaw
+    }, null, 2)}\n`, "utf8");
+    fs.writeFileSync(
+      path.join(path.dirname(created.paths.logPath), "codex-output.log"),
+      [
+        "[client] session/request_permission (running)",
+        "Reconnecting... 5/5",
+        "stream disconnected before completion: Transport error: network error"
+      ].join("\n"),
+      "utf8"
+    );
+
+    runCli([
+      "monitor",
+      "--state",
+      created.paths.statePath,
+      "--pid",
+      "999999",
+      "--poll-interval-ms",
+      "50",
+      "--agent-timeout-minutes",
+      "60"
+    ]);
+
+    const gatewayArgs = JSON.parse(fs.readFileSync(gatewayCallPath, "utf8"));
+    assert.deepEqual(gatewayArgs.slice(0, 3), ["gateway", "call", "agent-knock-knock.callback"]);
+    assert.equal(gatewayArgs.includes("--url"), false);
+    assert.equal(gatewayArgs.includes("--token"), false);
+    const params = JSON.parse(gatewayArgs[gatewayArgs.indexOf("--params") + 1]);
+    assert.equal(params.sessionKey, "agent:main:main");
+    assert.equal(params.message.type, "error");
+    assert.match(params.message.body, /executor process 999999 exited before callback/);
+    assert.match(params.message.body, /stream disconnected before completion/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("monitor marks waiting conversations stalled after callback timeout", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-monitor-timeout-"));
   const storeDir = path.join(tempDir, "conversations");
