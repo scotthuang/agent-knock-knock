@@ -27,15 +27,18 @@ The priority order is intentional: reliability comes first. New orchestration fe
 
 ## Priority 3: Agent Session Discovery And Adoption
 
-- Discover active local coding-agent CLIs, starting with Codex, by scanning same-user processes, cwd, argv, and child process trees.
-- Discover inactive or historical coding-agent sessions from agent-local stores, starting with Codex `threads` metadata and rollout JSONL files.
-- Separate process discovery from resumable-session discovery. Active processes identify likely workspaces; stable session ids are the real anchor for resume, takeover, and fork.
-- Add `AKK codex active` and `AKK codex sessions` style flows that list candidates with pid, cwd, session id when known, last activity, title, confidence, and risk.
-- Add session adoption so an existing Codex session can be registered as an AKK-managed conversation without immediately sending a message.
-- Support safe resume when the original CLI is no longer active.
-- Support explicit takeover for active CLI sessions by asking for confirmation, terminating the original same-user process tree, verifying exit, and then resuming the selected session.
-- Support OpenClaw-mediated fork as a safer alternative: AKK extracts bounded source context from the original session, OpenClaw summarizes it for user review, the user confirms, and only then AKK creates a new managed session in the same workspace using the approved summary.
-- Store adoption metadata in AKK state, including source agent, source session id, workspace, active pid when known, risk level, and whether the conversation was resumed, taken over, or forked.
+- Done for Codex: discover active local Codex CLIs by scanning same-user processes, cwd, argv, and child process trees.
+- Done for Codex: discover inactive or historical Codex sessions from `threads` metadata and rollout JSONL files.
+- Done for Codex: separate process discovery from resumable-session discovery. Active processes identify likely workspaces; stable session ids are the real anchor for resume, takeover, and fork.
+- Done for Codex: expose `agent_knock_knock_agent_discover` flows for capabilities, active processes, and historical sessions, including pid, cwd, visible session id when available, title, confidence, and risk-relevant metadata.
+- Done for Codex: register an existing native Codex session as an AKK-managed conversation without immediately sending a message.
+- Done for Codex: support safe resume when the original CLI is no longer active.
+- Done for Codex: support explicit takeover for active CLI sessions by asking for confirmation, terminating the selected same-user process tree, verifying exit, and then resuming the selected session.
+- Done for Codex: support a higher-risk `allowCwdOnly` fallback for Codex TUI processes that do not expose a session id in argv; this requires a user-confirmed pid and cwd re-scan before termination.
+- Done for Codex: support OpenClaw-mediated fork as a safer alternative. AKK extracts bounded source context from the original session, OpenClaw summarizes it for user review, the user confirms, and only then AKK creates a new managed session in the same workspace using the approved summary.
+- Done for Codex: store adoption metadata in AKK state, including source agent, source session id, workspace, native model, strategy, and takeover match kind.
+- Remaining: validate the full takeover flow through installed OpenClaw plugin tools, not only the local CLI.
+- Remaining: define equivalent discovery and adoption adapters for Cursor and Claude Code after their local-store and native resume behavior is verified.
 
 ## Priority 4: Agent Compatibility Layer
 
