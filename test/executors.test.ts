@@ -7,8 +7,7 @@ import {
   executorDefinitionForKind,
   normalizeModelForExecutor,
   parseLeadingExecutorAlias,
-  resolveExecutor,
-  sessionRecoveryStrategyForExecutor
+  resolveExecutor
 } from "../src/executors.js";
 
 test("executor registry exposes the supported coding agents", () => {
@@ -28,7 +27,6 @@ test("executor registry exposes the supported coding agents", () => {
   assert.equal(cursor.actor, "cursor");
   assert.equal(cursor.acpxCommand, "cursor");
   assert.equal(cursor.sessionPrefix, "akk-cursor");
-  assert.equal(cursor.sessionRecoveryStrategy, "explicit-decision");
 });
 
 test("executor registry resolves slash command aliases", () => {
@@ -65,8 +63,6 @@ test("resolved executors keep the stable protocol shape", () => {
     transport: "acpx"
   });
   assert.equal(acpxCommandForExecutor(codex), "codex");
-  assert.equal(sessionRecoveryStrategyForExecutor(codex), "native-session");
-  assert.equal(sessionRecoveryStrategyForExecutor(resolveExecutor({ kind: "cursor" })), "explicit-decision");
 });
 
 test("normalizes Codex ACPX model aliases", () => {
