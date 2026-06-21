@@ -12,6 +12,8 @@ Channels such as WeChat and many direct-message surfaces do not provide that sam
 
 Agent Knock Knock fills that gap. It keeps local task state outside the chat channel, uses ACPX / ACP to talk to coding agents, and gives OpenClaw tools to delegate, list, inspect, continue, cancel, and close work without relying on any external channel feature.
 
+BTW, it can also [take over a Codex task](#native-codex-takeover) you started in a terminal, so when you are away from your computer, OpenClaw can still pick it up and keep going.
+
 ## What It Provides
 
 - ACPX-backed delegation to Codex, Claude Code, and Cursor
@@ -23,10 +25,6 @@ Agent Knock Knock fills that gap. It keeps local task state outside the chat cha
 - A short `AKK` routing convention for chat and `/akk` command surfaces
 
 See [ROADMAP.md](ROADMAP.md) for planned reliability work and future orchestration features.
-
-## Project Status
-
-Agent Knock Knock is an early public project. The core local OpenClaw delegation flow is usable, and the package can be installed globally from npm. The OpenClaw plugin and skill are still installed locally by the `agent-knock-knock install-openclaw` helper rather than through an OpenClaw plugin registry.
 
 ## Architecture
 
@@ -109,11 +107,36 @@ Run this after pulling new code or editing TypeScript/plugin files. The OpenClaw
 
 ## OpenClaw Plugin
 
-The native OpenClaw plugin registers tools that let OpenClaw delegate implementation work to Codex, Claude Code, or Cursor, list open sessions, send follow-up messages, inspect status, request cooperative cancellation, and close sessions without exposing raw terminal output as tool results.
+Use `AKK` or `akk` in OpenClaw chat to delegate coding work. If no agent is named, AKK uses the plugin `defaultAgent`; if that is unset, it falls back to Codex. Explicit agent names override the default.
 
-Natural-language routing is designed around the short name `AKK`; lowercase `akk` should be treated the same way. When a user says `AKK` without naming an agent, OpenClaw should omit the agent parameter and let the plugin use `defaultAgent`. If `defaultAgent` is not configured, AKK falls back to Codex. Explicit requests such as `AKK Claude`, `AKK Cursor`, or `AKK Codex` override the default.
+Useful chat-style prompts:
 
-Configure the default coding agent in the plugin config:
+```text
+akk: fix the failing tests in this project
+AKK Codex: review the current branch and propose a small fix
+AKK Claude: review the latest commit
+AKK Cursor: fix the flaky UI test
+akk list
+akk send <conversation-id>: continue with the smaller implementation
+akk cancel <conversation-id>
+akk close <conversation-id>
+```
+
+Surfaces that support OpenClaw native commands can use the same workflow through `/akk`:
+
+```text
+/akk <task>
+/akk codex <task>
+/akk claude <task>
+/akk cursor <task>
+/akk list
+/akk status <conversation-id>
+/akk send <conversation-id> <message>
+/akk cancel <conversation-id>
+/akk close <conversation-id> [reason]
+```
+
+Optional default-agent config:
 
 ```json5
 {
@@ -129,177 +152,33 @@ Configure the default coding agent in the plugin config:
 }
 ```
 
-Useful chat-style prompts:
+## Native Codex Takeover
+
+Experimental: AKK can discover and take over Codex CLI sessions that were started outside AKK. This is useful when you started Codex in a terminal, left the machine, and want OpenClaw to continue managing that work from chat.
+
+Discovery prompts:
 
 ```text
-akk: fix the failing tests in this project
-AKK Codex: review the current branch and propose a small fix
-AKK Claude: review the latest commit
-AKK Cursor: fix the flaky UI test
-akk list
-akk send <conversation-id>: continue with the smaller implementation
-akk cancel <conversation-id>
-akk recover <conversation-id>
-akk close <conversation-id>
+AKK Codex sessions
+AKK Codex active
+AKK Codex capabilities
 ```
 
-The plugin also registers the `/akk` slash command for channel surfaces that support OpenClaw native commands:
+Takeover prompts:
 
 ```text
-/akk <task>
-/akk codex <task>
-/akk claude <task>
-/akk cursor <task>
-/akk list
-/akk status <conversation-id>
-/akk send <conversation-id> <message>
-/akk cancel <conversation-id>
-/akk recover <conversation-id>
-/akk close <conversation-id> [reason]
+AKK safe resume Codex <native-session-id>
+AKK takeover Codex <native-session-id>
+AKK fork takeover Codex <native-session-id>
 ```
 
-If your OpenClaw config uses a restrictive tool allowlist, allow the tool:
+Strategies:
 
-```json5
-{
-  tools: {
-    allow: [
-      "agent_knock_knock_delegate",
-      "agent_knock_knock_list",
-      "agent_knock_knock_status",
-      "agent_knock_knock_send",
-      "agent_knock_knock_cancel",
-      "agent_knock_knock_recover",
-      "agent_knock_knock_close"
-    ]
-  }
-}
-```
+- `safe resume`: attach a stopped/inactive Codex session to AKK.
+- `takeover`: stop an active matching Codex CLI after explicit confirmation, then resume it under AKK.
+- `fork takeover`: keep the original Codex CLI running, ask OpenClaw to summarize bounded source context, then create a new AKK-managed fork from that summary.
 
-The delegate tool launches the selected coding agent in the background and returns `status: "async_pending"`, `conversation_id`, `state_path`, `event_log_path`, launch status, and executor metadata. OpenClaw should yield after receiving this tool result and wait for the callback turn; follow-up communication should happen through structured protocol callbacks or `agent_knock_knock_send`, not by reading event logs, processes, files, session internals, stdout, or stderr.
-
-The plugin also registers the Gateway method `agent-knock-knock.callback`. Coding-agent callback commands use this method to enqueue a durable next-turn injection for the OpenClaw session. Actionable callbacks such as `question`, `blocked`, `done`, `error`, or any message with `requires_response: true` are delivered into the OpenClaw session through Gateway `chat.send` with `deliver: true`, so OpenClaw receives only the structured protocol message and can route the final reply back through the original channel without polling the raw execution channel.
-
-Coding-agent `done` callbacks mark the AKK conversation `idle`, not closed. Idle conversations remain visible in the default list and can receive `send` follow-ups until they are manually closed or lazily closed by the idle timeout. The default idle timeout is 10080 minutes.
-
-New delegations create a fresh ACPX session by default, using a name like `akk-codex-20260620183511-88811e97`, `akk-claude-...`, or `akk-cursor-...`. This keeps concurrent AKK tasks isolated. Reuse happens through `AKK send <conversation-id>: <message>` against an existing AKK conversation, or by explicitly configuring/passing a fixed coding-agent session.
-
-Background launches also start a small AKK monitor process. The monitor exits when the conversation receives a callback or otherwise leaves the agent-waiting state. If the executor process disappears before a callback, or if no callback arrives before `agentTimeoutMinutes`, the conversation is marked `stalled` and AKK attempts to notify the original OpenClaw session through the callback Gateway route. The default agent timeout is 60 minutes.
-
-Some coding agents may not reliably resume a named ACPX session after their backing process disappears. By default, `AKK send <conversation-id>: <message>` automatically falls back to AKK replay recovery: it starts a fresh ACPX session, gives the agent a bounded summary of AKK's saved protocol history, and includes the pending message. The result includes `auto_recovered: true` when this happens.
-
-If a caller uses the explicit recovery policy, or if automatic recovery cannot complete, the AKK conversation can enter `needs_recovery`. The user can then choose:
-
-- `AKK recover <conversation-id>`: start a new coding-agent session with AKK's saved protocol history summary plus the pending message.
-- `AKK close <conversation-id>`: close the AKK task without recovery.
-- Start a new independent AKK delegation if the old task should not be recovered.
-
-Recover is AKK replay recovery, not guaranteed native coding-agent session resume. Codex, Claude Code, and Cursor all use the same default `send` auto-recovery behavior when the existing ACPX session is unavailable.
-
-Task status can include a safe executor trace with `--trace` or the OpenClaw status tool's `trace: true` parameter. Trace summaries show client lifecycle events, tool call names and statuses, permission-request markers, monitor events, and short sanitized output previews. Agent thinking content is never returned; it is counted and marked as redacted.
-
-## CLI Examples
-
-The CLI is useful for local debugging, tests, and scripting outside OpenClaw.
-
-Create a conversation and print the task payload:
-
-```bash
-node dist/src/cli.js new --request "Implement a small feature"
-```
-
-Delegate a Codex task through ACPX:
-
-```bash
-node dist/src/cli.js delegate \
-  --agent codex \
-  --request "Implement a small feature" \
-  --background
-```
-
-Delegate a Cursor task through ACPX:
-
-```bash
-node dist/src/cli.js delegate \
-  --agent cursor \
-  --request "Implement a small feature" \
-  --background
-```
-
-List open coding-agent tasks:
-
-```bash
-node dist/src/cli.js list
-```
-
-Inspect a task with a safe executor trace:
-
-```bash
-node dist/src/cli.js status \
-  --conversation <conversation-id> \
-  --trace
-```
-
-Send a follow-up message to an existing task:
-
-```bash
-node dist/src/cli.js send \
-  --conversation <conversation-id> \
-  --message "Use the smaller implementation."
-```
-
-Request cooperative cancellation of the current in-flight prompt:
-
-```bash
-node dist/src/cli.js cancel \
-  --conversation <conversation-id>
-```
-
-Recover a task that is waiting for an explicit recovery decision:
-
-```bash
-node dist/src/cli.js recover \
-  --conversation <conversation-id>
-```
-
-Inspect and take over native Codex sessions that were started outside AKK:
-
-Experimental: native Codex takeover depends on best-effort local Codex session metadata, process scanning, and Codex CLI resume behavior. It may be unstable across Codex versions or unusual terminal states, so review the returned plan before confirming any takeover.
-
-```bash
-node dist/src/cli.js agent discover \
-  --agent codex \
-  --scope active
-
-node dist/src/cli.js agent takeover \
-  --agent codex \
-  --session-id <native-codex-session-id> \
-  --strategy terminate_then_resume
-```
-
-`terminate_then_resume` is intentionally two-step. The first command returns the exact pid, cwd, and session that would be stopped. After confirming that plan, execute the takeover:
-
-```bash
-node dist/src/cli.js agent takeover \
-  --agent codex \
-  --session-id <native-codex-session-id> \
-  --strategy terminate_then_resume \
-  --create-conversation \
-  --confirm-terminate \
-  --expected-pid <confirmed-pid>
-```
-
-AKK re-scans before terminating and only proceeds when the confirmed pid is still an exact match for the requested Codex session. After the process exits, AKK creates a managed conversation and future sends use native `codex exec resume`.
-
-Some Codex TUI processes do not expose the native session id in argv. In that case the default takeover remains blocked as ambiguous. For a deliberate local test or an operator-confirmed handoff, add `--allow-cwd-only` with `--expected-pid`; AKK will still re-scan and require that pid to be active in the target session cwd before terminating it.
-
-Close a task locally:
-
-```bash
-node dist/src/cli.js close \
-  --conversation <conversation-id> \
-  --reason "No longer needed"
-```
+Avoid starting a second live client on the same active Codex session. It can mix session history in ways that neither live client sees until a later resume.
 
 ## Approval Behavior
 
@@ -381,21 +260,18 @@ Runtime logs are diagnostic-only and are safe to use for local troubleshooting. 
 
 ## Defaults
 
-- OpenClaw session: `agent:main:main`
-- OpenClaw plugin default agent: configured with `defaultAgent`; fallback is `codex`
-- Delegated ACPX session: generated per new task, unless explicitly configured with `session`, `codexSession`, `claudeSession`, or `cursorSession`
-- CLI `new` fallback Claude session: `bidirectional`
-- CLI `new` fallback Codex session: `codex`
-- CLI `new` fallback Cursor session: `cursor`
-- Codex model, when needed for ChatGPT-account compatibility: pass `model`/`codexModel` using ACPX's bracket form such as `gpt-5.5[medium]`. AKK also normalizes the older slash shorthand `gpt-5.5/medium` to `gpt-5.5[medium]`.
-- Cursor model, when needed: pass `model`/`cursorModel`
-- Gateway URL: `ws://127.0.0.1:18789`
-- Agent callback timeout: `60` minutes
-- Soft response limit: `50`
-- Hard response limit: `100`
+- Default agent: configured with `defaultAgent`; fallback is `codex`
+- OpenClaw session: inherited from the current OpenClaw session; fallback is `agent:main:main`
+- Delegated ACPX session: generated per new task, unless `session`, `codexSession`, `claudeSession`, or `cursorSession` is configured
+- Agent callback timeout: `60` minutes before a waiting task is marked `stalled`
+- Idle timeout: `10080` minutes before an idle task is lazily closed
+- Soft response limit: `50` rounds
+- Hard response limit: `100` rounds
 - Store directory: `~/.agent-knock-knock/conversations`
 - Runtime log directory: `~/.agent-knock-knock/logs`
 - Runtime log retention: `14` days
+- Codex model: unset by default; configure `codexModel` only when your ACPX Codex setup requires one
+- Cursor model: unset by default; configure `cursorModel` only when your ACPX Cursor setup requires one
 
 ## Release
 
