@@ -48,7 +48,7 @@
     "build": "npm run clean && tsc -p tsconfig.json",
     "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test 'dist/test/**/*.test.js'",
+    "test": "npm run build && node --test dist/test/*.test.js",
     "simulate:architecture": "node scripts/two-claude-weather-test.js --scenario architecture-questions",
     "simulate:weather": "node scripts/two-claude-weather-test.js --scenario weather",
     "transcript": "node dist/src/cli.js transcript"
