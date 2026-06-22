@@ -56,6 +56,8 @@ Natural-language forms:
 - `AKK Codex active` or requests to list currently running local Codex CLI processes: call `agent_knock_knock_agent_discover` with `agent="codex"` and `scope="active"`.
 - `AKK Codex capabilities` or requests to inspect Codex takeover support: call `agent_knock_knock_agent_discover` with `agent="codex"` and `scope="capabilities"`.
 - `AKK takeover Codex <session-id>` or requests to take over an active Codex CLI session: call `agent_knock_knock_agent_takeover` with `agent="codex"` and `strategy="terminate_then_resume"`.
+- `AKK terminal takeover Codex <session-id>`, `AKK tmux takeover Codex <session-id>`, or requests to take over a Codex CLI that is running inside tmux without stopping it: call `agent_knock_knock_agent_takeover` with `agent="codex"` and `strategy="terminal_control"`.
+- `AKK approve <conversation-id>` or requests to approve the current visible Codex permission/command prompt for a terminal-controlled session: first call `agent_knock_knock_status` for that conversation and show the terminal screen excerpt to the user. Only after the user explicitly approves that prompt, call `agent_knock_knock_approve`.
 - `AKK safe resume Codex <session-id>` or requests to resume only after the original Codex CLI has already exited: call `agent_knock_knock_agent_takeover` with `agent="codex"` and `strategy="safe_resume"`.
 - `AKK takeover Codex <session-id> with fork`, `AKK fork takeover Codex <session-id>`, or requests to take over without stopping the original Codex CLI: call `agent_knock_knock_agent_takeover` with `agent="codex"` and `strategy="fork"`.
 
@@ -83,6 +85,8 @@ akk close task-20260618T010203Z-abcdef12
 akk codex sessions
 akk codex active
 akk takeover codex 019ee559-7bb8-7fd1-970c-0f7b6978c44e
+akk terminal takeover codex 019ee559-7bb8-7fd1-970c-0f7b6978c44e
+akk approve task-20260618T010203Z-abcdef12
 ```
 
 ## Start A Conversation
@@ -150,6 +154,7 @@ Use `agent_knock_knock_agent_takeover` when the user wants AKK to take over an e
 
 - `safe_resume`: allowed only when no active Codex CLI matches the session. If the result is `ready`, explain that this is safe to resume because AKK did not find an active conflicting CLI. If the user confirms attaching it to AKK, call again with `createConversation=true`, then use the returned `conversation_id` for `AKK send`, `AKK status`, and `AKK close`.
 - `terminate_then_resume`: use when the user wants to take over an active native Codex CLI. The first call is side-effect-free. If the result is `requires_confirmation`, explain the exact pid, cwd, and session that would be stopped. Only after explicit user confirmation, call `agent_knock_knock_agent_takeover` again with `strategy="terminate_then_resume"`, `createConversation=true`, `confirmTerminate=true`, and `expectedPid=<confirmed pid>`. AKK will re-scan before terminating and will only stop an exact session match. If Codex does not expose a session id and the user still explicitly confirms a specific pid in the target cwd, you may add `allowCwdOnly=true`; explain that this is higher risk because it relies on pid and cwd rather than a visible session id.
+- `terminal_control`: use when the target Codex CLI is running inside tmux and the user wants AKK to operate the existing TUI without stopping or resuming it. The first call is side-effect-free. If the result is `requires_confirmation`, show the exact tmux target, pid, cwd, and current terminal-control metadata. Only after explicit user confirmation, call again with `strategy="terminal_control"`, `createConversation=true`, `confirmTerminal=true`, and `terminalTarget=<confirmed target>`. Follow-up `AKK send` messages will be typed into the tmux pane. Before `agent_knock_knock_approve`, call `agent_knock_knock_status`, show the terminal screen excerpt, and ask for explicit approval.
 - `fork`: use when the user wants to avoid stopping the original Codex CLI. First call returns a bounded context package plus `summaryPrompt` and `nextAction`; use that prompt to summarize as OpenClaw, ask the user to confirm, and do not inject raw full rollout history directly. After the user confirms the summary, call `agent_knock_knock_agent_takeover` again with `strategy="fork"`, `createConversation=true`, and `forkSummary=<approved summary>` to create the forked AKK-managed session. Then use the returned `conversation_id` with `AKK send` for follow-up work.
 
 Do not present `fork` as a standalone command or standalone feature. It is a takeover strategy.
