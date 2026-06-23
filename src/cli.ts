@@ -731,6 +731,7 @@ function terminalControlFromTakeover(nativeTakeover): TerminalControlRef | undef
     panePid,
     currentCommand: stringValue(terminalControl.currentCommand),
     currentPath: stringValue(terminalControl.currentPath),
+    socketPath: stringValue(terminalControl.socketPath),
     capabilities: ["capture_screen", "send_keys", "terminal_approval"]
   };
 }
@@ -1464,7 +1465,8 @@ async function runStatus(options) {
     result.terminal_control = terminalControl;
     try {
       const screen = await createTerminalControlProvider(options).capture(terminalControl.target, {
-        scrollbackLines: Number(options.scrollbackLines ?? 120)
+        scrollbackLines: Number(options.scrollbackLines ?? 120),
+        socketPath: terminalControl.socketPath
       });
       result.terminal_screen = {
         excerpt: screenExcerpt(screen),
@@ -1860,7 +1862,8 @@ async function runApprove(options) {
 
   const provider = createTerminalControlProvider(options);
   const screen = await provider.capture(terminalControl.target, {
-    scrollbackLines: Number(options.scrollbackLines ?? 120)
+    scrollbackLines: Number(options.scrollbackLines ?? 120),
+    socketPath: terminalControl.socketPath
   });
   const approval = detectCodexApprovalPrompt(screen);
   if (!approval.approvable) {
@@ -1875,7 +1878,9 @@ async function runApprove(options) {
     return;
   }
 
-  await provider.sendKeys(terminalControl.target, [approval.key]);
+  await provider.sendKeys(terminalControl.target, [approval.key], {
+    socketPath: terminalControl.socketPath
+  });
   appendEvent(logPath, {
     ts: new Date().toISOString(),
     conversation_id: conversation.conversation_id,
@@ -1916,8 +1921,12 @@ async function runTerminalControlSend({
   needsNativeTakeoverBootstrap
 }) {
   const provider = createTerminalControlProvider(options);
-  await provider.sendText(terminalControl.target, String(message.body ?? ""));
-  await provider.sendKeys(terminalControl.target, ["Enter"]);
+  await provider.sendText(terminalControl.target, String(message.body ?? ""), {
+    socketPath: terminalControl.socketPath
+  });
+  await provider.sendKeys(terminalControl.target, ["Enter"], {
+    socketPath: terminalControl.socketPath
+  });
   appendEvent(logPath, {
     ts: new Date().toISOString(),
     conversation_id: conversation.conversation_id,

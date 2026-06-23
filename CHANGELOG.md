@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.4 - 2026-06-24
+
+### Fixed
+
+- Added tmux socket fallback discovery for OpenClaw Gateway environments whose service `TMPDIR` differs from the user's interactive terminal, allowing active discovery to mark tmux-controlled Codex panes reliably.
+- Preserved the discovered tmux socket path through terminal-control takeover, status, send, and approve operations so follow-up terminal actions use the same tmux server.
+
 ## 0.2.3 - 2026-06-24
 
 ### Fixed

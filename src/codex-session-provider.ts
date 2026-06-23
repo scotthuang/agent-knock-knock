@@ -59,6 +59,7 @@ export interface ActiveCodexProcess {
 export interface TerminalControlRef {
   kind: "tmux";
   target: string;
+  socketPath?: string;
   session: string;
   window: number;
   pane: number;
