@@ -53,6 +53,19 @@ export interface ActiveCodexProcess {
   sessionId?: string;
   confidence: DiscoveryConfidence;
   reason: string;
+  terminalControl?: TerminalControlRef;
+}
+
+export interface TerminalControlRef {
+  kind: "tmux";
+  target: string;
+  session: string;
+  window: number;
+  pane: number;
+  panePid: number;
+  currentCommand?: string;
+  currentPath?: string;
+  capabilities: ("capture_screen" | "send_keys" | "terminal_approval")[];
 }
 
 export interface RolloutMessageExcerpt {

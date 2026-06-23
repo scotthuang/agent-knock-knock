@@ -5,7 +5,12 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import type { CodexProcessSnapshot, CodexThreadRow } from "./codex-session-provider.js";
+import type {
+  ActiveCodexProcess,
+  CodexProcessSnapshot,
+  CodexThreadRow,
+  TerminalControlRef
+} from "./codex-session-provider.js";
 import { CodexLocalSessionProvider, type CodexLocalSessionAdapter } from "./codex-local-session-provider.js";
 import { CodexStoreAdapter } from "./codex-store-adapter.js";
 import {
@@ -43,6 +48,12 @@ import {
   statePathForConversationId
 } from "./store.js";
 import { planFork, planSafeResume, planTakeover } from "./session-takeover-planner.js";
+import {
+  StaticTerminalControlProvider,
+  TmuxTerminalControlProvider,
+  enrichActiveProcessesWithTerminalControl,
+  type TerminalControlProvider
+} from "./terminal-control-provider.js";
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 10080;
 const DEFAULT_AGENT_TIMEOUT_MINUTES = 60;
@@ -131,9 +142,11 @@ async function runCommand(commandName, options) {
   } else if (commandName === "list") {
     runList(options);
   } else if (commandName === "status") {
-    runStatus(options);
+    await runStatus(options);
   } else if (commandName === "send") {
-    runSend(options);
+    await runSend(options);
+  } else if (commandName === "approve") {
+    await runApprove(options);
   } else if (commandName === "cancel") {
     runCancel(options);
   } else if (commandName === "recover") {
@@ -284,7 +297,7 @@ async function runAgentDiscover(options) {
       agent,
       scope,
       capabilities,
-      active: await provider.listActiveSessions()
+      active: await listActiveSessionsWithTerminalControl(provider, options)
     };
   }
 
@@ -312,7 +325,7 @@ async function runAgentTakeover(options) {
   }
 
   if (strategy === "safe_resume") {
-    const plan = planSafeResume(session, await provider.listActiveSessions());
+    const plan = planSafeResume(session, await listActiveSessionsWithTerminalControl(provider, options));
     if (plan.allowed && options.createConversation) {
       const modelInfo = await provider.getSessionModel(session.id);
       const attached = createNativeSessionConversation({
@@ -344,7 +357,7 @@ async function runAgentTakeover(options) {
   }
 
   if (strategy === "terminate_then_resume") {
-    const activeSessions = await provider.listActiveSessions();
+    const activeSessions = await listActiveSessionsWithTerminalControl(provider, options);
     const plan = planTakeover(session, activeSessions);
     if (options.confirmTerminate === true) {
       const expectedPid = Number(required(options.expectedPid, "--expected-pid is required with --confirm-terminate"));
@@ -381,7 +394,7 @@ async function runAgentTakeover(options) {
       const termination = terminateProcessTarget(target, {
         timeoutMs: Number(options.terminateTimeoutMs ?? 3000)
       });
-      const activeAfterTermination = await provider.listActiveSessions();
+      const activeAfterTermination = await listActiveSessionsWithTerminalControl(provider, options);
       const afterTerminationPlan = planTakeover(session, activeAfterTermination);
       if (afterTerminationPlan.targets.some((candidate) => candidate.sessionId === session.id || candidate.pid === expectedPid)) {
         return {
@@ -426,6 +439,62 @@ async function runAgentTakeover(options) {
       sessionId,
       strategy,
       status: plan.requiresConfirmation ? "requires_confirmation" : "blocked",
+      sideEffectsExecuted: false,
+      plan
+    };
+  }
+
+  if (strategy === "terminal_control") {
+    const activeSessions = await listActiveSessionsWithTerminalControl(provider, options);
+    const plan = planTerminalControlTakeover(session, activeSessions);
+    if (options.confirmTerminal === true) {
+      const terminalTarget = String(required(options.terminalTarget, "--terminal-target is required with --confirm-terminal"));
+      if (!options.createConversation) {
+        throw new Error("--create-conversation is required with --confirm-terminal");
+      }
+      const target = plan.targets.find((candidate) => candidate.terminalControl?.target === terminalTarget);
+      if (!plan.allowed || !target?.terminalControl) {
+        return {
+          agent,
+          sessionId,
+          strategy,
+          status: "blocked",
+          sideEffectsExecuted: false,
+          plan,
+          error: {
+            code: "terminal_target_unavailable",
+            message: `No matching tmux-controlled Codex process was found for ${terminalTarget}`
+          }
+        };
+      }
+      const modelInfo = await provider.getSessionModel(session.id);
+      const attached = createNativeSessionConversation({
+        agent,
+        strategy,
+        session,
+        modelInfo,
+        options,
+        takeoverMatchKind: "terminal_control",
+        terminalControl: target.terminalControl,
+        needsBootstrap: false
+      });
+      return {
+        agent,
+        sessionId,
+        strategy,
+        status: "attached",
+        sideEffectsExecuted: true,
+        plan,
+        terminalControl: target.terminalControl,
+        ...attached
+      };
+    }
+
+    return {
+      agent,
+      sessionId,
+      strategy,
+      status: plan.allowed ? "requires_confirmation" : "blocked",
       sideEffectsExecuted: false,
       plan
     };
@@ -581,6 +650,135 @@ function selectTerminateTarget({ plan, session, activeSessions, expectedPid, all
   };
 }
 
+async function listActiveSessionsWithTerminalControl(provider, options): Promise<ActiveCodexProcess[]> {
+  const activeSessions = await provider.listActiveSessions();
+  return enrichActiveProcessesWithTerminalControl(activeSessions, createTerminalControlProvider(options));
+}
+
+function createTerminalControlProvider(options): TerminalControlProvider {
+  if (options.terminalsJson || options.terminalScreensJson) {
+    return new StaticTerminalControlProvider({
+      panes: parseJsonOption(options.terminalsJson, "--terminals-json"),
+      screens: parseJsonOption(options.terminalScreensJson, "--terminal-screens-json")
+    });
+  }
+
+  return new TmuxTerminalControlProvider();
+}
+
+function planTerminalControlTakeover(session, activeSessions: ActiveCodexProcess[]) {
+  const matched = activeSessions
+    .filter((process) =>
+      process.kind === "codex_cli" &&
+      process.terminalControl &&
+      (
+        process.sessionId === session.id ||
+        (!process.sessionId && process.cwd === session.cwd)
+      )
+    );
+  const matchedPidSet = new Set(matched.map((process) => process.pid));
+  const targets = matched
+    .filter((process) => !process.ppid || !matchedPidSet.has(process.ppid))
+    .map((process) => ({
+      pid: process.pid,
+      childPids: matched
+        .filter((child) => child.ppid === process.pid)
+        .map((child) => child.pid),
+      cwd: process.cwd,
+      command: process.command,
+      sessionId: process.sessionId,
+      terminalControl: process.terminalControl
+    }));
+
+  const exactTargets = targets.filter((target) => target.sessionId === session.id);
+  const selectableTargets = exactTargets.length > 0 ? exactTargets : targets;
+
+  return {
+    mode: "terminal_control",
+    allowed: selectableTargets.length === 1,
+    requiresConfirmation: selectableTargets.length === 1,
+    reason: selectableTargets.length === 0
+      ? "no_terminal_control_target"
+      : selectableTargets.length === 1
+        ? "terminal_control_available"
+        : "ambiguous_terminal_control_target",
+    targets: selectableTargets
+  };
+}
+
+function terminalControlFromTakeover(nativeTakeover): TerminalControlRef | undefined {
+  if (!isRecord(nativeTakeover)) {
+    return undefined;
+  }
+  const terminalControl = nativeTakeover["terminal_control"];
+  if (!isRecord(terminalControl) || terminalControl.kind !== "tmux") {
+    return undefined;
+  }
+  const target = stringValue(terminalControl.target);
+  const session = stringValue(terminalControl.session);
+  const window = Number(terminalControl.window);
+  const pane = Number(terminalControl.pane);
+  const panePid = Number(terminalControl.panePid);
+  if (!target || !session || !Number.isInteger(window) || !Number.isInteger(pane) || !Number.isInteger(panePid)) {
+    return undefined;
+  }
+  return {
+    kind: "tmux",
+    target,
+    session,
+    window,
+    pane,
+    panePid,
+    currentCommand: stringValue(terminalControl.currentCommand),
+    currentPath: stringValue(terminalControl.currentPath),
+    capabilities: ["capture_screen", "send_keys", "terminal_approval"]
+  };
+}
+
+function detectCodexApprovalPrompt(screen: string): { approvable: true; key: string; label: string } | { approvable: false; reason: string } {
+  const approvalMarkers = [
+    "Would you like to run the following command?",
+    "Would you like to make the following edits?",
+    "Would you like to grant these permissions?",
+    "needs your approval."
+  ];
+  if (!approvalMarkers.some((marker) => screen.includes(marker))) {
+    return {
+      approvable: false,
+      reason: "no Codex approval prompt was detected in the terminal screen"
+    };
+  }
+
+  for (const line of screen.split(/\r?\n/)) {
+    const match = /^[\s›]*1\.\s+(Yes,[^(]+)\(([^)]+)\)/u.exec(line.trim());
+    if (!match) {
+      continue;
+    }
+    const key = match[2].trim();
+    if (key !== "y") {
+      return {
+        approvable: false,
+        reason: `primary approval shortcut is ${key}, not y`
+      };
+    }
+    return {
+      approvable: true,
+      key,
+      label: match[1].trim()
+    };
+  }
+
+  return {
+    approvable: false,
+    reason: "no primary approve option with a shortcut was detected"
+  };
+}
+
+function screenExcerpt(screen: string, maxLength = 4000): string {
+  const lines = screen.trimEnd().split(/\r?\n/);
+  return lines.slice(Math.max(0, lines.length - 80)).join("\n").slice(-maxLength);
+}
+
 function createForkConversation({ agent, strategy, session, contextPackage, forkSummary, modelInfo, options }) {
   const workspace = session.cwd;
   const storeDir = expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(workspace));
@@ -677,7 +875,16 @@ function createForkConversation({ agent, strategy, session, contextPackage, fork
   };
 }
 
-function createNativeSessionConversation({ agent, strategy, session, modelInfo, options, takeoverMatchKind = strategy }) {
+function createNativeSessionConversation({
+  agent,
+  strategy,
+  session,
+  modelInfo,
+  options,
+  takeoverMatchKind = strategy,
+  terminalControl = undefined as TerminalControlRef | undefined,
+  needsBootstrap = true
+}) {
   const workspace = session.cwd;
   const storeDir = expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(workspace));
   cleanupIdleConversations(storeDir, options);
@@ -734,7 +941,8 @@ function createNativeSessionConversation({ agent, strategy, session, modelInfo, 
 	      acpx_model: modelInfo?.acpxModel,
 	      model_source: modelInfo?.source,
 	      takeover_match_kind: takeoverMatchKind,
-	      needs_bootstrap: true
+	      terminal_control: terminalControl,
+	      needs_bootstrap: needsBootstrap
 	    }
   }, paths);
 
@@ -1234,7 +1442,7 @@ function runList(options) {
   });
 }
 
-function runStatus(options) {
+async function runStatus(options) {
   cleanupIdleConversations(storeDirFromOptions(options), options);
   const { conversation, statePath, logPath } = loadConversationFromOptions(options);
   const events = readExistingEvents(logPath);
@@ -1249,6 +1457,25 @@ function runStatus(options) {
   if (options.trace) {
     result.trace = buildConversationTrace({ conversation, events, logPath });
   }
+  const terminalControl = terminalControlFromTakeover(
+    isRecord(conversation.native_session_takeover) ? conversation.native_session_takeover : undefined
+  );
+  if (terminalControl) {
+    result.terminal_control = terminalControl;
+    try {
+      const screen = await createTerminalControlProvider(options).capture(terminalControl.target, {
+        scrollbackLines: Number(options.scrollbackLines ?? 120)
+      });
+      result.terminal_screen = {
+        excerpt: screenExcerpt(screen),
+        approval: detectCodexApprovalPrompt(screen)
+      };
+    } catch (error) {
+      result.terminal_screen = {
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
   printJson(result);
   runtimeLog("info", "task_status_read", {
     conversation_id: conversation.conversation_id,
@@ -1260,7 +1487,7 @@ function runStatus(options) {
   });
 }
 
-function runSend(options) {
+async function runSend(options) {
   const messageBody = required(options.message ?? options.request, "--message is required");
   cleanupIdleConversations(storeDirFromOptions(options), options);
   const { conversation, statePath, logPath } = loadConversationFromOptions(options);
@@ -1334,6 +1561,21 @@ function runSend(options) {
     includeForkTakeoverBootstrap: needsForkTakeoverBootstrap,
     forkTakeover: forkTakeoverForSend
   });
+  const terminalControlForSend = terminalControlFromTakeover(nativeTakeoverForSend);
+  if (terminalControlForSend) {
+    await runTerminalControlSend({
+      options,
+      conversation,
+      nextConversation,
+      statePath,
+      logPath,
+      executor,
+      message,
+      terminalControl: terminalControlForSend,
+      needsNativeTakeoverBootstrap
+    });
+    return;
+  }
   if (nativeTakeoverForSend?.["native_session_id"] && executor.kind === "codex") {
     runNativeCodexResumeSend({
       options,
@@ -1600,6 +1842,109 @@ function runSend(options) {
     conversation: deliveredConversation,
     message,
     delivered: true,
+    executor,
+    budget: budgetAction(deliveredConversation)
+  });
+}
+
+async function runApprove(options) {
+  cleanupIdleConversations(storeDirFromOptions(options), options);
+  const { conversation, statePath, logPath } = loadConversationFromOptions(options);
+  const nativeTakeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const terminalControl = terminalControlFromTakeover(nativeTakeover);
+  if (!terminalControl) {
+    throw new Error(`conversation ${conversation.conversation_id} is not controlled through a terminal`);
+  }
+
+  const provider = createTerminalControlProvider(options);
+  const screen = await provider.capture(terminalControl.target, {
+    scrollbackLines: Number(options.scrollbackLines ?? 120)
+  });
+  const approval = detectCodexApprovalPrompt(screen);
+  if (!approval.approvable) {
+    printJson({
+      conversation,
+      approved: false,
+      blocked: true,
+      reason: approval.reason,
+      terminal_control: terminalControl,
+      screen_excerpt: screenExcerpt(screen)
+    });
+    return;
+  }
+
+  await provider.sendKeys(terminalControl.target, [approval.key]);
+  appendEvent(logPath, {
+    ts: new Date().toISOString(),
+    conversation_id: conversation.conversation_id,
+    event: "terminal_approval_send",
+    terminal_control: terminalControl,
+    key: approval.key,
+    label: approval.label
+  });
+  runtimeLog("info", "terminal_approval_send", {
+    conversation_id: conversation.conversation_id,
+    terminal_target: terminalControl.target,
+    key: approval.key,
+    label: approval.label
+  });
+  saveState(statePath, {
+    ...conversation,
+    updated_at: new Date().toISOString()
+  });
+
+  printJson({
+    conversation,
+    approved: true,
+    terminal_control: terminalControl,
+    key: approval.key,
+    label: approval.label
+  });
+}
+
+async function runTerminalControlSend({
+  options,
+  conversation,
+  nextConversation,
+  statePath,
+  logPath,
+  executor,
+  message,
+  terminalControl,
+  needsNativeTakeoverBootstrap
+}) {
+  const provider = createTerminalControlProvider(options);
+  await provider.sendText(terminalControl.target, String(message.body ?? ""));
+  await provider.sendKeys(terminalControl.target, ["Enter"]);
+  appendEvent(logPath, {
+    ts: new Date().toISOString(),
+    conversation_id: conversation.conversation_id,
+    event: "terminal_message_send",
+    executor,
+    terminal_control: terminalControl,
+    message: textSummary(message.body)
+  });
+  runtimeLog("info", "terminal_message_send", {
+    conversation_id: conversation.conversation_id,
+    agent: executor.kind,
+    terminal_target: terminalControl.target,
+    message: textSummary(message.body)
+  });
+  const deliveredConversation = markTakeoverBootstrapped({
+    conversation: nextConversation,
+    statePath,
+    logPath,
+    executor,
+    native: needsNativeTakeoverBootstrap,
+    fork: false
+  });
+  printJson({
+    conversation: deliveredConversation,
+    message,
+    delivered: true,
+    terminal_control: terminalControl,
     executor,
     budget: budgetAction(deliveredConversation)
   });
@@ -3676,6 +4021,10 @@ function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+function stringValue(value) {
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
 function parseOptionalJson(text) {
   try {
     return JSON.parse(String(text));
@@ -3862,13 +4211,14 @@ function usage() {
   agent-knock-knock list [--store-dir <dir>] [--agent ${agentList}] [--status <status>] [--all]
   agent-knock-knock status --conversation <id> [--store-dir <dir>] [--trace]
   agent-knock-knock send --conversation <id> --message <text> [--type answer|task|control] [--all-proxy <url>] [--agent-timeout-minutes <minutes>]
+  agent-knock-knock approve --conversation <id>
   agent-knock-knock cancel --conversation <id> [--all-proxy <url>]
   agent-knock-knock recover --conversation <id> [--session <name>] [--all-proxy <url>]
   agent-knock-knock close --conversation <id> [--reason <text>]
   agent-knock-knock install-openclaw [--openclaw-bin <path>] [--skill-path <path>] [--no-restart]
   agent-knock-knock doctor
   agent-knock-knock agent discover --agent codex --scope capabilities|sessions|active
-  agent-knock-knock agent takeover --agent codex --session-id <id> --strategy safe_resume|terminate_then_resume|fork [--create-conversation]
+  agent-knock-knock agent takeover --agent codex --session-id <id> --strategy safe_resume|terminate_then_resume|terminal_control|fork [--create-conversation]
   agent-knock-knock callback --state <file> --message-json <json> [--record-only]
   agent-knock-knock transcript --log <file> [--include-raw]
   agent-knock-knock transcript --conversation <dir> [--include-raw]

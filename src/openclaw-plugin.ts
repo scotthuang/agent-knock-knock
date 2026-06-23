@@ -277,9 +277,9 @@ const agentTakeoverParameters = {
     },
     strategy: {
       type: "string",
-      enum: ["safe_resume", "terminate_then_resume", "fork"],
+      enum: ["safe_resume", "terminate_then_resume", "fork", "terminal_control"],
       description:
-        "Takeover strategy. safe_resume only works when no matching CLI is active. terminate_then_resume returns a confirmation plan to stop the exact active CLI before resume. fork returns bounded context for OpenClaw summary confirmation."
+        "Takeover strategy. safe_resume only works when no matching CLI is active. terminate_then_resume returns a confirmation plan to stop the exact active CLI before resume. terminal_control attaches to an existing tmux-controlled CLI after confirmation. fork returns bounded context for OpenClaw summary confirmation."
     },
     createConversation: {
       type: "boolean",
@@ -300,6 +300,16 @@ const agentTakeoverParameters = {
       type: "boolean",
       description:
         "Only for strategy=terminate_then_resume with confirmTerminate=true. Allows terminating the expected pid when Codex does not expose a session id in argv, as long as the pid still runs in the target session cwd. Use only after explaining the higher risk to the user."
+    },
+    confirmTerminal: {
+      type: "boolean",
+      description:
+        "Only for strategy=terminal_control. When true, AKK attaches to the exact terminalTarget after the user confirms that tmux pane."
+    },
+    terminalTarget: {
+      type: "string",
+      description:
+        "Required with confirmTerminal=true. The exact tmux target from the previous terminal_control plan, such as codex-work:0.0."
     },
     request: {
       type: "string",
@@ -333,6 +343,20 @@ const agentTakeoverParameters = {
     maxTextLength: {
       type: "number",
       description: "Maximum text length per fork-context message."
+    }
+  }
+};
+
+const approveParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["conversation_id"],
+  properties: {
+    conversation_id: {
+      type: "string"
+    },
+    storeDir: {
+      type: "string"
     }
   }
 };
@@ -452,6 +476,18 @@ export default definePluginEntry({
     });
 
     registerCliTool(api, {
+      name: "agent_knock_knock_approve",
+      description:
+        "Approve the current visible terminal approval prompt for an AKK terminal-controlled session. Use only after showing the user the detected prompt and receiving explicit approval. This sends the primary approve shortcut to the tmux pane.",
+      parameters: approveParameters,
+      buildArgs: (params) => {
+        const args = ["approve", "--conversation", requiredString(params.conversation_id, "conversation_id")];
+        pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
+        return args;
+      }
+    });
+
+    registerCliTool(api, {
       name: "agent_knock_knock_cancel",
       description: "Request cooperative cancellation of the current in-flight prompt for an existing Agent Knock Knock Codex, Claude, or Cursor session. This does not close the AKK session; use close when the session should no longer be reused.",
       parameters: cancelParameters,
@@ -533,7 +569,11 @@ export default definePluginEntry({
         if (params.allowCwdOnly === true) {
           args.push("--allow-cwd-only");
         }
+        if (params.confirmTerminal === true) {
+          args.push("--confirm-terminal");
+        }
         pushOptional(args, "--expected-pid", numberString(params.expectedPid));
+        pushOptional(args, "--terminal-target", stringValue(params.terminalTarget));
         pushOptional(args, "--request", stringValue(params.request));
         pushOptional(args, "--fork-summary", stringValue(params.forkSummary));
         pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(config.storeDir));

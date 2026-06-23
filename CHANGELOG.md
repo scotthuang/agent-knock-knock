@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.2 - 2026-06-24
+
+### Added
+
+- Added tmux-backed terminal-control takeover for native Codex sessions, including tmux pane metadata in active discovery, confirmed `terminal_control` attachment, direct follow-up sends to the existing pane, and a conservative `approve` command for the currently visible Codex approval prompt.
+
 ## 0.2.1 - 2026-06-22
 
 ### Changed
