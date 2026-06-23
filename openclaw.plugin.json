@@ -16,7 +16,10 @@
       "agent_knock_knock_send",
       "agent_knock_knock_cancel",
       "agent_knock_knock_recover",
-      "agent_knock_knock_close"
+      "agent_knock_knock_close",
+      "agent_knock_knock_approve",
+      "agent_knock_knock_agent_discover",
+      "agent_knock_knock_agent_takeover"
     ]
   },
   "toolMetadata": {
@@ -39,6 +42,15 @@
       "optional": true
     },
     "agent_knock_knock_close": {
+      "optional": true
+    },
+    "agent_knock_knock_approve": {
+      "optional": true
+    },
+    "agent_knock_knock_agent_discover": {
+      "optional": true
+    },
+    "agent_knock_knock_agent_takeover": {
       "optional": true
     }
   },

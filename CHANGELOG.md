@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.3 - 2026-06-24
+
+### Fixed
+
+- Added the tmux takeover tools to the OpenClaw plugin manifest contracts, allowing OpenClaw to expose `agent_knock_knock_agent_discover`, `agent_knock_knock_agent_takeover`, and `agent_knock_knock_approve` after installation.
+
 ## 0.2.2 - 2026-06-24
 
 ### Added
