@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.8 - 2026-06-25
+
+### Added
+
+- Added `AKK list --terminal-debug` and the OpenClaw `terminalDebug` list parameter to expose tmux command, socket, pane, and spawn-attempt diagnostics when terminal-controlled sessions are not detected through the Gateway.
+- Added `scripts/verify-terminal-control.mjs` to validate local Codex/tmux PID mapping against either the source build or an installed package before publishing.
+
 ## 0.2.7 - 2026-06-25
 
 ### Fixed
