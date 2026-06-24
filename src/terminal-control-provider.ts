@@ -30,33 +30,41 @@ export interface CommandResult {
 export class TmuxTerminalControlProvider implements TerminalControlProvider {
   private readonly runCommand: (command: string, args: string[]) => CommandResult;
   private readonly socketPaths: string[];
+  private readonly commands: string[];
 
-  constructor(options: { runCommand?: (command: string, args: string[]) => CommandResult; socketPaths?: string[] } = {}) {
+  constructor(options: {
+    runCommand?: (command: string, args: string[]) => CommandResult;
+    socketPaths?: string[];
+    commands?: string[];
+  } = {}) {
     this.runCommand = options.runCommand ?? runCommand;
     this.socketPaths = options.socketPaths ?? defaultTmuxSocketPaths();
+    this.commands = uniqueStrings(options.commands ?? defaultTmuxCommands());
   }
 
   async listPanes(): Promise<TerminalPane[]> {
     const panes: TerminalPane[] = [];
     const seenTargets = new Set<string>();
     const attempts: (string | undefined)[] = [undefined, ...this.socketPaths];
-    for (const socketPath of attempts) {
-      const result = this.runCommand("tmux", tmuxArgs(socketPath, [
-        "list-panes",
-        "-a",
-        "-F",
-        "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}"
-      ]));
-      if (result.status !== 0) {
-        continue;
-      }
-      for (const pane of parseTmuxListPanes(result.stdout, socketPath)) {
-        const key = `${pane.socketPath ?? ""}\t${pane.target}\t${pane.panePid}`;
-        if (seenTargets.has(key)) {
+    for (const command of this.commands) {
+      for (const socketPath of attempts) {
+        const result = this.runCommand(command, tmuxArgs(socketPath, [
+          "list-panes",
+          "-a",
+          "-F",
+          "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}"
+        ]));
+        if (result.status !== 0) {
           continue;
         }
-        seenTargets.add(key);
-        panes.push(pane);
+        for (const pane of parseTmuxListPanes(result.stdout, socketPath)) {
+          const key = `${pane.socketPath ?? ""}\t${pane.target}\t${pane.panePid}`;
+          if (seenTargets.has(key)) {
+            continue;
+          }
+          seenTargets.add(key);
+          panes.push(pane);
+        }
       }
     }
     return panes;
@@ -64,32 +72,46 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
 
   async capture(target: string, options: { scrollbackLines?: number; socketPath?: string } = {}): Promise<string> {
     const scrollbackLines = Math.max(0, Math.floor(options.scrollbackLines ?? 200));
-    const result = this.runCommand("tmux", tmuxArgs(options.socketPath, [
-      "capture-pane",
-      "-t",
-      target,
-      "-p",
-      "-S",
-      `-${scrollbackLines}`
-    ]));
-    if (result.status !== 0) {
-      throw new Error(result.stderr || result.error?.message || `tmux capture-pane failed for ${target}`);
+    let lastResult: CommandResult | undefined;
+    for (const command of this.commands) {
+      const result = this.runCommand(command, tmuxArgs(options.socketPath, [
+        "capture-pane",
+        "-t",
+        target,
+        "-p",
+        "-S",
+        `-${scrollbackLines}`
+      ]));
+      if (result.status === 0) {
+        return result.stdout;
+      }
+      lastResult = result;
     }
-    return result.stdout;
+    throw new Error(lastResult?.stderr || lastResult?.error?.message || `tmux capture-pane failed for ${target}`);
   }
 
   async sendKeys(target: string, keys: string[], options: { socketPath?: string } = {}): Promise<void> {
-    const result = this.runCommand("tmux", tmuxArgs(options.socketPath, ["send-keys", "-t", target, ...keys]));
-    if (result.status !== 0) {
-      throw new Error(result.stderr || result.error?.message || `tmux send-keys failed for ${target}`);
+    let lastResult: CommandResult | undefined;
+    for (const command of this.commands) {
+      const result = this.runCommand(command, tmuxArgs(options.socketPath, ["send-keys", "-t", target, ...keys]));
+      if (result.status === 0) {
+        return;
+      }
+      lastResult = result;
     }
+    throw new Error(lastResult?.stderr || lastResult?.error?.message || `tmux send-keys failed for ${target}`);
   }
 
   async sendText(target: string, text: string, options: { socketPath?: string } = {}): Promise<void> {
-    const result = this.runCommand("tmux", tmuxArgs(options.socketPath, ["send-keys", "-t", target, "-l", text]));
-    if (result.status !== 0) {
-      throw new Error(result.stderr || result.error?.message || `tmux send-keys failed for ${target}`);
+    let lastResult: CommandResult | undefined;
+    for (const command of this.commands) {
+      const result = this.runCommand(command, tmuxArgs(options.socketPath, ["send-keys", "-t", target, "-l", text]));
+      if (result.status === 0) {
+        return;
+      }
+      lastResult = result;
     }
+    throw new Error(lastResult?.stderr || lastResult?.error?.message || `tmux send-keys failed for ${target}`);
   }
 }
 
@@ -230,6 +252,19 @@ function defaultTmuxSocketPaths(): string[] {
     uidSocketPath("/tmp")
   ].filter((value): value is string => Boolean(value));
   return [...new Set(paths)];
+}
+
+function defaultTmuxCommands(): string[] {
+  return [
+    "tmux",
+    "/opt/homebrew/bin/tmux",
+    "/usr/local/bin/tmux",
+    "/usr/bin/tmux"
+  ];
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))];
 }
 
 function tmuxSocketFromEnvironment(value: string | undefined): string | undefined {
