@@ -1,4 +1,6 @@
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 import type { ActiveCodexProcess, TerminalControlRef } from "./codex-session-provider.js";
 
 export interface TerminalPane {
@@ -249,9 +251,22 @@ function defaultTmuxSocketPaths(): string[] {
     process.env.AKK_TMUX_SOCKET,
     tmuxSocketFromEnvironment(process.env.TMUX),
     uidSocketPath("/private/tmp"),
-    uidSocketPath("/tmp")
+    uidSocketPath("/tmp"),
+    ...discoverTmuxSocketPaths("/private/tmp"),
+    ...discoverTmuxSocketPaths("/tmp")
   ].filter((value): value is string => Boolean(value));
   return [...new Set(paths)];
+}
+
+export function discoverTmuxSocketPaths(root: string): string[] {
+  try {
+    return fs.readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith("tmux-"))
+      .map((entry) => path.join(root, entry.name, "default"))
+      .filter((socketPath) => fs.existsSync(socketPath));
+  } catch {
+    return [];
+  }
 }
 
 function defaultTmuxCommands(): string[] {

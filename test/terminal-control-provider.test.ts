@@ -1,8 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   StaticTerminalControlProvider,
   TmuxTerminalControlProvider,
+  discoverTmuxSocketPaths,
   enrichActiveProcessesWithTerminalControl,
   parseTmuxListPanes
 } from "../src/terminal-control-provider.js";
@@ -114,6 +118,22 @@ test("tmux provider falls back to absolute tmux command paths", async () => {
     "/usr/local/bin/tmux",
     "/usr/local/bin/tmux"
   ]);
+});
+
+test("discovers tmux default sockets across uid directories", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-tmux-sockets-"));
+  try {
+    fs.mkdirSync(path.join(root, "tmux-501"));
+    fs.writeFileSync(path.join(root, "tmux-501", "default"), "");
+    fs.mkdirSync(path.join(root, "not-tmux"));
+    fs.writeFileSync(path.join(root, "not-tmux", "default"), "");
+
+    assert.deepEqual(discoverTmuxSocketPaths(root), [
+      path.join(root, "tmux-501", "default")
+    ]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("tmux provider uses socket path for capture and sends", async () => {
