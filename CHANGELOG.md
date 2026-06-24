@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.9 - 2026-06-25
+
+### Fixed
+
+- Added a whitespace-delimited tmux pane parser fallback for environments where `tmux list-panes` output is not parsed by the tab-delimited path, and included a bounded `stdoutPreview` in terminal diagnostics.
+
 ## 0.2.8 - 2026-06-25
 
 ### Added
