@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.10 - 2026-06-25
+
+### Fixed
+
+- Added parsing for underscore-delimited tmux pane output observed in OpenClaw Gateway terminal diagnostics, allowing those panes to be matched back to Codex processes.
+
 ## 0.2.9 - 2026-06-25
 
 ### Fixed
