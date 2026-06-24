@@ -52,6 +52,7 @@ test("tmux provider falls back to explicit socket paths", async () => {
   const calls: string[][] = [];
   const provider = new TmuxTerminalControlProvider({
     socketPaths: ["/private/tmp/tmux-501/default"],
+    commands: ["tmux"],
     runCommand(_command, args) {
       calls.push(args);
       if (args[0] === "-S" && args[1] === "/private/tmp/tmux-501/default" && args[2] === "list-panes") {
@@ -77,6 +78,41 @@ test("tmux provider falls back to explicit socket paths", async () => {
   assert.deepEqual(calls.map((args) => args.slice(0, 3)), [
     ["list-panes", "-a", "-F"],
     ["-S", "/private/tmp/tmux-501/default", "list-panes"]
+  ]);
+});
+
+test("tmux provider falls back to absolute tmux command paths", async () => {
+  const calls: { command: string; args: string[] }[] = [];
+  const provider = new TmuxTerminalControlProvider({
+    socketPaths: ["/private/tmp/tmux-501/default"],
+    commands: ["tmux", "/usr/local/bin/tmux"],
+    runCommand(command, args) {
+      calls.push({ command, args });
+      if (command === "/usr/local/bin/tmux" && args[0] === "-S" && args[1] === "/private/tmp/tmux-501/default") {
+        return {
+          status: 0,
+          stdout: "codex-work\t0\t0\t36017\tnode\t/Users/me/github/codex\n",
+          stderr: ""
+        };
+      }
+      return {
+        status: command === "tmux" ? null : 1,
+        stdout: "",
+        stderr: "",
+        error: command === "tmux" ? new Error("spawnSync tmux ENOENT") : undefined
+      };
+    }
+  });
+
+  const panes = await provider.listPanes();
+
+  assert.equal(panes.length, 1);
+  assert.equal(panes[0].target, "codex-work:0.0");
+  assert.deepEqual(calls.map((call) => call.command), [
+    "tmux",
+    "tmux",
+    "/usr/local/bin/tmux",
+    "/usr/local/bin/tmux"
   ]);
 });
 
