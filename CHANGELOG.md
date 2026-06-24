@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.6 - 2026-06-25
+
+### Fixed
+
+- Added tmux executable path fallback for OpenClaw Gateway environments whose service `PATH` cannot resolve `tmux`, allowing `AKK list` and terminal-control actions to discover and operate tmux panes via common absolute install paths.
+
 ## 0.2.5 - 2026-06-25
 
 ### Added
