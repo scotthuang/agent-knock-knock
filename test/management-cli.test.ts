@@ -252,6 +252,34 @@ test("list groups delegated native and terminal-controlled sessions", () => {
     assert.equal(listed.native_scan.native_count, 1);
     assert.equal(listed.native_scan.terminal_controlled_count, 1);
 
+    const debugListed = runCli([
+      "list",
+      "--store-dir",
+      storeDir,
+      "--terminal-debug",
+      "--processes-json",
+      JSON.stringify([{
+        pid: 2222,
+        ppid: 9999,
+        elapsed: "00:30",
+        command: "codex",
+        cwd: "/repo/tmux"
+      }]),
+      "--terminals-json",
+      JSON.stringify([{
+        kind: "tmux",
+        target: "codex-work:0.0",
+        session: "codex-work",
+        window: 0,
+        pane: 0,
+        panePid: 9999,
+        currentCommand: "node",
+        currentPath: "/repo/tmux"
+      }])
+    ]);
+    assert.equal(debugListed.native_scan.terminal_scan.provider, "static");
+    assert.equal(debugListed.native_scan.terminal_scan.paneCount, 1);
+
     const managedOnly = runCli([
       "list",
       "--store-dir",
