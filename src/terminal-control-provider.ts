@@ -37,6 +37,7 @@ export interface TmuxTerminalControlDiagnostics {
     socketPath?: string;
     status: number | null;
     stdoutBytes: number;
+    stdoutPreview?: string;
     stderr?: string;
     error?: string;
     paneCount: number;
@@ -83,6 +84,7 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
           socketPath,
           status: result.status,
           stdoutBytes: (result.stdout ?? "").length,
+          stdoutPreview: cleanDiagnosticText(result.stdout),
           stderr: cleanDiagnosticText(result.stderr),
           error: cleanDiagnosticText(result.error?.message),
           paneCount: parsedPanes.length
@@ -187,26 +189,56 @@ export function parseTmuxListPanes(output: string, socketPath?: string): Termina
     if (line.trim().length === 0) {
       continue;
     }
-    const [session, windowIndex, paneIndex, panePid, currentCommand, currentPath] = line.split("\t");
-      const window = Number(windowIndex);
-      const pane = Number(paneIndex);
-      const parsedPanePid = Number(panePid);
-      if (!session || !Number.isInteger(window) || !Number.isInteger(pane) || !Number.isInteger(parsedPanePid)) {
-        continue;
-      }
-      panes.push({
-        kind: "tmux" as const,
-        target: `${session}:${window}.${pane}`,
-        socketPath,
-        session,
-        window,
-        pane,
-        panePid: parsedPanePid,
-        currentCommand: currentCommand || undefined,
-        currentPath: currentPath || undefined
-      });
+    const parsed = parseTmuxPaneLine(line);
+    if (!parsed) {
+      continue;
+    }
+    panes.push({
+      kind: "tmux" as const,
+      target: `${parsed.session}:${parsed.window}.${parsed.pane}`,
+      socketPath,
+      ...parsed
+    });
   }
   return panes;
+}
+
+function parseTmuxPaneLine(line: string): Omit<TerminalPane, "kind" | "target" | "socketPath"> | undefined {
+  const tabFields = line.split("\t");
+  const fields = tabFields.length >= 6
+    ? [
+        tabFields[0],
+        tabFields[1],
+        tabFields[2],
+        tabFields[3],
+        tabFields[4],
+        tabFields.slice(5).join("\t")
+      ]
+    : parseWhitespaceTmuxPaneLine(line);
+  if (!fields) {
+    return undefined;
+  }
+
+  const [session, windowIndex, paneIndex, panePid, currentCommand, currentPath] = fields;
+  const window = Number(windowIndex);
+  const pane = Number(paneIndex);
+  const parsedPanePid = Number(panePid);
+  if (!session || !Number.isInteger(window) || !Number.isInteger(pane) || !Number.isInteger(parsedPanePid)) {
+    return undefined;
+  }
+  return {
+    session,
+    window,
+    pane,
+    panePid: parsedPanePid,
+    currentCommand: currentCommand || undefined,
+    currentPath: currentPath || undefined
+  };
+}
+
+function parseWhitespaceTmuxPaneLine(line: string): string[] | undefined {
+  const match = /^(\S+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/u.exec(line.trim());
+  return match ? match.slice(1) : undefined;
 }
 
 export async function enrichActiveProcessesWithTerminalControl(
