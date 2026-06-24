@@ -29,6 +29,22 @@ export interface CommandResult {
   error?: Error;
 }
 
+export interface TmuxTerminalControlDiagnostics {
+  commands: string[];
+  socketPaths: string[];
+  attempts: Array<{
+    command: string;
+    socketPath?: string;
+    status: number | null;
+    stdoutBytes: number;
+    stderr?: string;
+    error?: string;
+    paneCount: number;
+  }>;
+  paneCount: number;
+  panes: TerminalPane[];
+}
+
 export class TmuxTerminalControlProvider implements TerminalControlProvider {
   private readonly runCommand: (command: string, args: string[]) => CommandResult;
   private readonly socketPaths: string[];
@@ -45,7 +61,12 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
   }
 
   async listPanes(): Promise<TerminalPane[]> {
+    return (await this.diagnose()).panes;
+  }
+
+  async diagnose(): Promise<TmuxTerminalControlDiagnostics> {
     const panes: TerminalPane[] = [];
+    const diagnosticAttempts: TmuxTerminalControlDiagnostics["attempts"] = [];
     const seenTargets = new Set<string>();
     const attempts: (string | undefined)[] = [undefined, ...this.socketPaths];
     for (const command of this.commands) {
@@ -56,10 +77,20 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
           "-F",
           "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}"
         ]));
+        const parsedPanes = result.status === 0 ? parseTmuxListPanes(result.stdout, socketPath) : [];
+        diagnosticAttempts.push({
+          command,
+          socketPath,
+          status: result.status,
+          stdoutBytes: (result.stdout ?? "").length,
+          stderr: cleanDiagnosticText(result.stderr),
+          error: cleanDiagnosticText(result.error?.message),
+          paneCount: parsedPanes.length
+        });
         if (result.status !== 0) {
           continue;
         }
-        for (const pane of parseTmuxListPanes(result.stdout, socketPath)) {
+        for (const pane of parsedPanes) {
           const key = `${pane.socketPath ?? ""}\t${pane.target}\t${pane.panePid}`;
           if (seenTargets.has(key)) {
             continue;
@@ -69,7 +100,13 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
         }
       }
     }
-    return panes;
+    return {
+      commands: this.commands,
+      socketPaths: this.socketPaths,
+      attempts: diagnosticAttempts,
+      paneCount: panes.length,
+      panes
+    };
   }
 
   async capture(target: string, options: { scrollbackLines?: number; socketPath?: string } = {}): Promise<string> {
@@ -236,8 +273,8 @@ function runCommand(command: string, args: string[]): CommandResult {
   });
   return {
     status: result.status,
-    stdout: result.stdout,
-    stderr: result.stderr,
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
     error: result.error
   };
 }
@@ -280,6 +317,14 @@ function defaultTmuxCommands(): string[] {
 
 function uniqueStrings(values: string[]): string[] {
   return [...new Set(values.filter(Boolean))];
+}
+
+function cleanDiagnosticText(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  return trimmed.slice(0, 500);
 }
 
 function tmuxSocketFromEnvironment(value: string | undefined): string | undefined {

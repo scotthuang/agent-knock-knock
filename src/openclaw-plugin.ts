@@ -121,6 +121,10 @@ const listParameters = {
       type: "boolean",
       description: "When true, list terminal-controlled sessions without capturing panes to detect approval prompts."
     },
+    terminalDebug: {
+      type: "boolean",
+      description: "When true, include tmux terminal discovery diagnostics for debugging Gateway environment issues."
+    },
     storeDir: {
       type: "string"
     },
@@ -446,6 +450,9 @@ export default definePluginEntry({
         }
         if (params.noApprovalScan === true) {
           args.push("--no-approval-scan");
+        }
+        if (params.terminalDebug === true) {
+          args.push("--terminal-debug");
         }
         return args;
       }

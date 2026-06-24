@@ -650,16 +650,20 @@ function selectTerminateTarget({ plan, session, activeSessions, expectedPid, all
   };
 }
 
-async function listActiveSessionsWithTerminalControl(provider, options): Promise<ActiveCodexProcess[]> {
+async function listActiveSessionsWithTerminalControl(
+  provider,
+  options,
+  terminalProvider: TerminalControlProvider = createTerminalControlProvider(options)
+): Promise<ActiveCodexProcess[]> {
   const activeSessions = await provider.listActiveSessions();
-  return enrichActiveProcessesWithTerminalControl(activeSessions, createTerminalControlProvider(options));
+  return enrichActiveProcessesWithTerminalControl(activeSessions, terminalProvider);
 }
 
 function createTerminalControlProvider(options): TerminalControlProvider {
-  if (options.terminalsJson || options.terminalScreensJson) {
+  if (options.terminalsJson || options.terminalScreensJson || options.processesJson) {
     return new StaticTerminalControlProvider({
-      panes: parseJsonOption(options.terminalsJson, "--terminals-json"),
-      screens: parseJsonOption(options.terminalScreensJson, "--terminal-screens-json")
+      panes: options.terminalsJson ? parseJsonOption(options.terminalsJson, "--terminals-json") : [],
+      screens: options.terminalScreensJson ? parseJsonOption(options.terminalScreensJson, "--terminal-screens-json") : {}
     });
   }
 
@@ -1492,7 +1496,9 @@ async function buildNativeListGroups({ options, agentFilter, statusFilter }) {
 
   try {
     const provider = createAgentSessionProvider("codex", options);
-    const activeSessions = await listActiveSessionsWithTerminalControl(provider, options);
+    const terminalProvider = createTerminalControlProvider(options);
+    const terminalScan = options.terminalDebug ? await terminalControlDiagnostics(terminalProvider) : undefined;
+    const activeSessions = await listActiveSessionsWithTerminalControl(provider, options, terminalProvider);
     const rootSessions = rootActiveProcesses(activeSessions);
     const terminalControlled: Record<string, any>[] = [];
     const native: Record<string, any>[] = [];
@@ -1513,7 +1519,8 @@ async function buildNativeListGroups({ options, agentFilter, statusFilter }) {
         active_count: activeSessions.length,
         native_count: native.length,
         terminal_controlled_count: terminalControlled.length,
-        approval_scan: options.noApprovalScan ? "disabled" : "enabled"
+        approval_scan: options.noApprovalScan ? "disabled" : "enabled",
+        terminal_scan: terminalScan
       }
     };
   } catch (error) {
@@ -1527,6 +1534,16 @@ async function buildNativeListGroups({ options, agentFilter, statusFilter }) {
       }
     };
   }
+}
+
+async function terminalControlDiagnostics(provider: TerminalControlProvider) {
+  if (provider instanceof TmuxTerminalControlProvider) {
+    return provider.diagnose();
+  }
+  return {
+    provider: "static",
+    paneCount: (await provider.listPanes()).length
+  };
 }
 
 function delegatedListEntry(task) {
@@ -4443,7 +4460,7 @@ function usage() {
   agent-knock-knock record --state <file> --message-json <json>
   agent-knock-knock bootstrap-prompt --callback-command <command> [--agent ${agentList}]
   agent-knock-knock delegate --request <text> [--agent ${agentList}] [--store-dir <dir>] [--all-proxy <url>] [--agent-timeout-minutes <minutes>] [--token <gateway-token>] [--send|--background]
-  agent-knock-knock list [--store-dir <dir>] [--agent ${agentList}] [--status <status>] [--all] [--managed-only] [--no-approval-scan]
+  agent-knock-knock list [--store-dir <dir>] [--agent ${agentList}] [--status <status>] [--all] [--managed-only] [--no-approval-scan] [--terminal-debug]
   agent-knock-knock status --conversation <id> [--store-dir <dir>] [--trace]
   agent-knock-knock send --conversation <id> --message <text> [--type answer|task|control] [--all-proxy <url>] [--agent-timeout-minutes <minutes>]
   agent-knock-knock approve --conversation <id>
