@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Added grouped `AKK list` output for `delegated`, `native`, and `terminal_controlled` sessions while preserving the legacy `tasks` field.
+- Added terminal-controlled approval state to `AKK list`, allowing tmux-backed Codex sessions to show when an approval prompt is visible and approvable.
+
+### Changed
+
+- Updated OpenClaw routing guidance so active/native Codex session questions use `AKK list` instead of the separate native discover tool.
+
 ## 0.2.4 - 2026-06-24
 
 ### Fixed

@@ -140,7 +140,7 @@ async function runCommand(commandName, options) {
   } else if (commandName === "delegate") {
     runDelegate(options);
   } else if (commandName === "list") {
-    runList(options);
+    await runList(options);
   } else if (commandName === "status") {
     await runStatus(options);
   } else if (commandName === "send") {
@@ -737,13 +737,7 @@ function terminalControlFromTakeover(nativeTakeover): TerminalControlRef | undef
 }
 
 function detectCodexApprovalPrompt(screen: string): { approvable: true; key: string; label: string } | { approvable: false; reason: string } {
-  const approvalMarkers = [
-    "Would you like to run the following command?",
-    "Would you like to make the following edits?",
-    "Would you like to grant these permissions?",
-    "needs your approval."
-  ];
-  if (!approvalMarkers.some((marker) => screen.includes(marker))) {
+  if (!isCodexApprovalPromptVisible(screen)) {
     return {
       approvable: false,
       reason: "no Codex approval prompt was detected in the terminal screen"
@@ -773,6 +767,16 @@ function detectCodexApprovalPrompt(screen: string): { approvable: true; key: str
     approvable: false,
     reason: "no primary approve option with a shortcut was detected"
   };
+}
+
+function isCodexApprovalPromptVisible(screen: string): boolean {
+  const approvalMarkers = [
+    "Would you like to run the following command?",
+    "Would you like to make the following edits?",
+    "Would you like to grant these permissions?",
+    "needs your approval."
+  ];
+  return approvalMarkers.some((marker) => screen.includes(marker));
 }
 
 function screenExcerpt(screen: string, maxLength = 4000): string {
@@ -1416,7 +1420,7 @@ function environmentForExecutor(executor, options = {}) {
   };
 }
 
-function runList(options) {
+async function runList(options) {
   const storeDir = expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(process.cwd()));
   const cleanup = cleanupIdleConversations(storeDir, options);
   const includeAll = Boolean(options.all);
@@ -1427,20 +1431,242 @@ function runList(options) {
     .filter((conversation) => includeAll || isActiveStatus(conversation.status))
     .filter((conversation) => !agentFilter || conversation.agent === agentFilter)
     .filter((conversation) => !statusFilter || conversation.status === statusFilter);
+  const delegated = conversations.map(delegatedListEntry);
+  const nativeScan = await buildNativeListGroups({ options, agentFilter, statusFilter });
 
   printJson({
     store_dir: storeDir,
     cleanup,
+    delegated,
+    native: nativeScan.native,
+    terminal_controlled: nativeScan.terminalControlled,
+    native_scan: nativeScan.summary,
     tasks: conversations
   });
   runtimeLog("info", "tasks_listed", {
     store_dir: storeDir,
     returned_count: conversations.length,
+    native_count: nativeScan.native.length,
+    terminal_controlled_count: nativeScan.terminalControlled.length,
+    native_scan_error: nativeScan.summary.error,
     include_all: includeAll,
     agent_filter: agentFilter,
     status_filter: statusFilter,
     cleanup
   });
+}
+
+async function buildNativeListGroups({ options, agentFilter, statusFilter }) {
+  const empty = {
+    native: [],
+    terminalControlled: [],
+    summary: {
+      enabled: false,
+      agents: [],
+      error: undefined
+    }
+  };
+  if (options.managedOnly) {
+    return empty;
+  }
+  if (statusFilter && statusFilter !== "active") {
+    return {
+      ...empty,
+      summary: {
+        enabled: false,
+        agents: [],
+        skipped: `native active discovery skipped for status filter ${statusFilter}`
+      }
+    };
+  }
+  if (agentFilter && agentFilter !== "codex") {
+    return {
+      ...empty,
+      summary: {
+        enabled: true,
+        agents: [],
+        skipped: `native active discovery is not implemented for ${agentFilter}`
+      }
+    };
+  }
+
+  try {
+    const provider = createAgentSessionProvider("codex", options);
+    const activeSessions = await listActiveSessionsWithTerminalControl(provider, options);
+    const rootSessions = rootActiveProcesses(activeSessions);
+    const terminalControlled: Record<string, any>[] = [];
+    const native: Record<string, any>[] = [];
+    for (const session of rootSessions) {
+      if (session.terminalControl) {
+        terminalControlled.push(await terminalControlledListEntry(session, activeSessions, options));
+      } else {
+        native.push(nativeListEntry(session, activeSessions));
+      }
+    }
+
+    return {
+      native,
+      terminalControlled,
+      summary: {
+        enabled: true,
+        agents: ["codex"],
+        active_count: activeSessions.length,
+        native_count: native.length,
+        terminal_controlled_count: terminalControlled.length,
+        approval_scan: options.noApprovalScan ? "disabled" : "enabled"
+      }
+    };
+  } catch (error) {
+    return {
+      native: [],
+      terminalControlled: [],
+      summary: {
+        enabled: true,
+        agents: ["codex"],
+        error: error instanceof Error ? error.message : String(error)
+      }
+    };
+  }
+}
+
+function delegatedListEntry(task) {
+  return {
+    ...task,
+    id: task.conversation_id,
+    source: "akk_delegate",
+    commands: {
+      send: canSendDelegated(task.status),
+      cancel: isWaitingForAgent(task.status),
+      close: task.status !== "closed",
+      status: true,
+      approve: false,
+      capture_screen: false
+    }
+  };
+}
+
+function nativeListEntry(session: ActiveCodexProcess, activeSessions: ActiveCodexProcess[]) {
+  return {
+    id: `native:codex:${session.pid}`,
+    source: "native_active",
+    agent: "codex",
+    status: "active",
+    pid: session.pid,
+    child_pids: childPidsForRoot(session, activeSessions),
+    command: session.command,
+    cwd: session.cwd,
+    workspace: session.cwd,
+    elapsed: session.elapsed,
+    session_id: session.sessionId,
+    confidence: session.confidence,
+    reason: session.reason,
+    commands: {
+      safe_resume: Boolean(session.sessionId),
+      terminate_then_resume: true,
+      fork: Boolean(session.sessionId),
+      terminal_control_attach: false,
+      send: false,
+      cancel: false,
+      approve: false,
+      close: false,
+      status: false
+    }
+  };
+}
+
+async function terminalControlledListEntry(session: ActiveCodexProcess, activeSessions: ActiveCodexProcess[], options) {
+  const terminalControl = session.terminalControl;
+  if (!terminalControl) {
+    throw new Error(`process ${session.pid} is not terminal-controlled`);
+  }
+  const approvalState = await approvalStateForTerminal(terminalControl, options);
+  return {
+    id: `terminal:${terminalControl.kind}:${terminalControl.target}:${session.pid}`,
+    source: "terminal_control",
+    agent: "codex",
+    status: "active",
+    pid: session.pid,
+    child_pids: childPidsForRoot(session, activeSessions),
+    command: session.command,
+    cwd: session.cwd,
+    workspace: session.cwd,
+    elapsed: session.elapsed,
+    session_id: session.sessionId,
+    confidence: session.confidence,
+    reason: session.reason,
+    terminal_control: terminalControl,
+    approval_state: approvalState,
+    commands: {
+      send: true,
+      capture_screen: true,
+      approve: approvalState.approvable === true,
+      status: true,
+      cancel: false,
+      close: false
+    }
+  };
+}
+
+async function approvalStateForTerminal(terminalControl: TerminalControlRef, options) {
+  if (options.noApprovalScan) {
+    return {
+      scanned: false,
+      blocked: false,
+      approvable: false,
+      reason: "approval scan disabled"
+    };
+  }
+  try {
+    const screen = await createTerminalControlProvider(options).capture(terminalControl.target, {
+      scrollbackLines: Number(options.scrollbackLines ?? 120),
+      socketPath: terminalControl.socketPath
+    });
+    const approval = detectCodexApprovalPrompt(screen);
+    const blocked = isCodexApprovalPromptVisible(screen);
+    return {
+      scanned: true,
+      blocked,
+      approvable: approval.approvable,
+      key: approval.approvable ? approval.key : undefined,
+      label: approval.approvable ? approval.label : undefined,
+      reason: approval.approvable ? undefined : approval.reason,
+      screen_excerpt: blocked ? screenExcerpt(screen, 1000) : undefined
+    };
+  } catch (error) {
+    return {
+      scanned: false,
+      blocked: false,
+      approvable: false,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+function rootActiveProcesses(processes: ActiveCodexProcess[]): ActiveCodexProcess[] {
+  const pids = new Set(processes.map((process) => process.pid));
+  const roots = processes.filter((process) => !process.ppid || !pids.has(process.ppid));
+  const seenTerminalTargets = new Set<string>();
+  return roots.filter((process) => {
+    const terminalTarget = process.terminalControl?.target;
+    if (!terminalTarget) {
+      return true;
+    }
+    if (seenTerminalTargets.has(terminalTarget)) {
+      return false;
+    }
+    seenTerminalTargets.add(terminalTarget);
+    return true;
+  });
+}
+
+function childPidsForRoot(root: ActiveCodexProcess, processes: ActiveCodexProcess[]): number[] {
+  return processes
+    .filter((process) => process.ppid === root.pid)
+    .map((process) => process.pid);
+}
+
+function canSendDelegated(status) {
+  return !["failed", "closed", "cancelled"].includes(status);
 }
 
 async function runStatus(options) {
@@ -4217,7 +4443,7 @@ function usage() {
   agent-knock-knock record --state <file> --message-json <json>
   agent-knock-knock bootstrap-prompt --callback-command <command> [--agent ${agentList}]
   agent-knock-knock delegate --request <text> [--agent ${agentList}] [--store-dir <dir>] [--all-proxy <url>] [--agent-timeout-minutes <minutes>] [--token <gateway-token>] [--send|--background]
-  agent-knock-knock list [--store-dir <dir>] [--agent ${agentList}] [--status <status>] [--all]
+  agent-knock-knock list [--store-dir <dir>] [--agent ${agentList}] [--status <status>] [--all] [--managed-only] [--no-approval-scan]
   agent-knock-knock status --conversation <id> [--store-dir <dir>] [--trace]
   agent-knock-knock send --conversation <id> --message <text> [--type answer|task|control] [--all-proxy <url>] [--agent-timeout-minutes <minutes>]
   agent-knock-knock approve --conversation <id>

@@ -113,6 +113,14 @@ const listParameters = {
     all: {
       type: "boolean"
     },
+    managedOnly: {
+      type: "boolean",
+      description: "When true, only list AKK-managed delegated tasks and skip native/terminal active discovery."
+    },
+    noApprovalScan: {
+      type: "boolean",
+      description: "When true, list terminal-controlled sessions without capturing panes to detect approval prompts."
+    },
     storeDir: {
       type: "string"
     },
@@ -422,7 +430,7 @@ export default definePluginEntry({
 
     registerCliTool(api, {
       name: "agent_knock_knock_list",
-      description: "List open or historical Agent Knock Knock coding-agent sessions. Use this for AKK list, akk list, current AKK tasks, or asking which Codex/Claude/Cursor sessions are open. Idle sessions are complete for now but can receive follow-up sends until they are closed or time out.",
+      description: "List Agent Knock Knock work and local active coding-agent sessions. Use this for AKK list, akk list, current AKK tasks, native Codex active/session questions, or asking which Codex/Claude/Cursor sessions are open. The result separates delegated AKK tasks, native active processes, and terminal-controlled sessions; terminal-controlled entries include approval state when available.",
       parameters: listParameters,
       buildArgs: (params) => {
         const args = ["list"];
@@ -432,6 +440,12 @@ export default definePluginEntry({
         pushOptional(args, "--status", stringValue(params.status));
         if (params.all === true) {
           args.push("--all");
+        }
+        if (params.managedOnly === true) {
+          args.push("--managed-only");
+        }
+        if (params.noApprovalScan === true) {
+          args.push("--no-approval-scan");
         }
         return args;
       }
