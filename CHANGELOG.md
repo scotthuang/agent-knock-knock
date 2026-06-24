@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.7 - 2026-06-25
+
+### Fixed
+
+- Added tmux socket discovery across `/private/tmp/tmux-*` and `/tmp/tmux-*` directories so OpenClaw Gateway environments do not need to infer the interactive terminal user's tmux socket from their own process UID.
+
 ## 0.2.6 - 2026-06-25
 
 ### Fixed
