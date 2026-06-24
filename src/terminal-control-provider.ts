@@ -214,7 +214,7 @@ function parseTmuxPaneLine(line: string): Omit<TerminalPane, "kind" | "target" |
         tabFields[4],
         tabFields.slice(5).join("\t")
       ]
-    : parseWhitespaceTmuxPaneLine(line);
+    : parseWhitespaceTmuxPaneLine(line) ?? parseUnderscoreTmuxPaneLine(line);
   if (!fields) {
     return undefined;
   }
@@ -238,6 +238,11 @@ function parseTmuxPaneLine(line: string): Omit<TerminalPane, "kind" | "target" |
 
 function parseWhitespaceTmuxPaneLine(line: string): string[] | undefined {
   const match = /^(\S+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/u.exec(line.trim());
+  return match ? match.slice(1) : undefined;
+}
+
+function parseUnderscoreTmuxPaneLine(line: string): string[] | undefined {
+  const match = /^(.+)_(\d+)_(\d+)_(\d+)_([^_]+)_(.+?)\s*$/u.exec(line.trim());
   return match ? match.slice(1) : undefined;
 }
 

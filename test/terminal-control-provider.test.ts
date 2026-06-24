@@ -32,6 +32,16 @@ test("parseTmuxListPanes falls back to whitespace-delimited output", () => {
   assert.equal(panes[0].currentPath, "/Users/me/github/codex");
 });
 
+test("parseTmuxListPanes falls back to underscore-delimited output", () => {
+  const panes = parseTmuxListPanes("codex-work_0_0_36017_node_/Users/me/github/codex\n");
+
+  assert.equal(panes.length, 1);
+  assert.equal(panes[0].target, "codex-work:0.0");
+  assert.equal(panes[0].panePid, 36017);
+  assert.equal(panes[0].currentCommand, "node");
+  assert.equal(panes[0].currentPath, "/Users/me/github/codex");
+});
+
 test("enrichActiveProcessesWithTerminalControl attaches tmux metadata by pid ancestry", async () => {
   const processes: ActiveCodexProcess[] = [{
     pid: 101,
