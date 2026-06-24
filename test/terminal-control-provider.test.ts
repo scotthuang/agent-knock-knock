@@ -23,6 +23,15 @@ test("parseTmuxListPanes parses stable tmux targets", () => {
   assert.equal(panes[0].currentCommand, "node");
 });
 
+test("parseTmuxListPanes falls back to whitespace-delimited output", () => {
+  const panes = parseTmuxListPanes("codex-work 0 0 36017 node /Users/me/github/codex\n");
+
+  assert.equal(panes.length, 1);
+  assert.equal(panes[0].target, "codex-work:0.0");
+  assert.equal(panes[0].panePid, 36017);
+  assert.equal(panes[0].currentPath, "/Users/me/github/codex");
+});
+
 test("enrichActiveProcessesWithTerminalControl attaches tmux metadata by pid ancestry", async () => {
   const processes: ActiveCodexProcess[] = [{
     pid: 101,
