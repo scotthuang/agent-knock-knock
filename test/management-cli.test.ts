@@ -165,6 +165,116 @@ fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify({
   }
 });
 
+test("list groups delegated native and terminal-controlled sessions", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-list-groups-"));
+  const storeDir = path.join(tempDir, "conversations");
+
+  try {
+    const codex = runCli([
+      "new",
+      "--agent",
+      "codex",
+      "--session",
+      "codex-managed",
+      "--request",
+      "Managed Codex task",
+      "--store-dir",
+      storeDir
+    ]);
+    const approvalScreen = [
+      "Would you like to run the following command?",
+      "",
+      "› 1. Yes, allow (y)",
+      "  2. No (n)"
+    ].join("\n");
+    const listed = runCli([
+      "list",
+      "--store-dir",
+      storeDir,
+      "--processes-json",
+      JSON.stringify([
+        {
+          pid: 1234,
+          ppid: 1,
+          elapsed: "00:12",
+          command: "codex",
+          cwd: "/repo/native"
+        },
+        {
+          pid: 2222,
+          ppid: 9999,
+          elapsed: "00:30",
+          command: "codex",
+          cwd: "/repo/tmux"
+        }
+      ]),
+      "--terminals-json",
+      JSON.stringify([{
+        kind: "tmux",
+        target: "codex-work:0.0",
+        session: "codex-work",
+        window: 0,
+        pane: 0,
+        panePid: 9999,
+        currentCommand: "node",
+        currentPath: "/repo/tmux"
+      }]),
+      "--terminal-screens-json",
+      JSON.stringify({
+        "codex-work:0.0": approvalScreen
+      })
+    ]);
+
+    assert.equal(listed.tasks.length, 1);
+    assert.equal(listed.delegated.length, 1);
+    assert.equal(listed.delegated[0].id, codex.conversation.conversation_id);
+    assert.deepEqual(listed.delegated[0].commands, {
+      send: true,
+      cancel: true,
+      close: true,
+      status: true,
+      approve: false,
+      capture_screen: false
+    });
+    assert.equal(listed.native.length, 1);
+    assert.equal(listed.native[0].id, "native:codex:1234");
+    assert.equal(listed.native[0].commands.send, false);
+    assert.equal(listed.native[0].commands.terminate_then_resume, true);
+    assert.equal(listed.terminal_controlled.length, 1);
+    assert.equal(listed.terminal_controlled[0].id, "terminal:tmux:codex-work:0.0:2222");
+    assert.equal(listed.terminal_controlled[0].terminal_control.target, "codex-work:0.0");
+    assert.equal(listed.terminal_controlled[0].approval_state.blocked, true);
+    assert.equal(listed.terminal_controlled[0].approval_state.approvable, true);
+    assert.equal(listed.terminal_controlled[0].commands.send, true);
+    assert.equal(listed.terminal_controlled[0].commands.approve, true);
+    assert.equal(listed.terminal_controlled[0].commands.cancel, false);
+    assert.equal("detach" in listed.terminal_controlled[0].commands, false);
+    assert.equal(listed.native_scan.native_count, 1);
+    assert.equal(listed.native_scan.terminal_controlled_count, 1);
+
+    const managedOnly = runCli([
+      "list",
+      "--store-dir",
+      storeDir,
+      "--managed-only",
+      "--processes-json",
+      JSON.stringify([{
+        pid: 1234,
+        ppid: 1,
+        elapsed: "00:12",
+        command: "codex",
+        cwd: "/repo/native"
+      }])
+    ]);
+    assert.equal(managedOnly.delegated.length, 1);
+    assert.deepEqual(managedOnly.native, []);
+    assert.deepEqual(managedOnly.terminal_controlled, []);
+    assert.equal(managedOnly.native_scan.enabled, false);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("cancel requests cooperative ACPX cancellation for Codex, Claude, and Cursor sessions", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-cancel-management-"));
   const storeDir = path.join(tempDir, "conversations");

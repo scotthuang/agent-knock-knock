@@ -46,14 +46,13 @@ Natural-language forms:
 - `AKK Codex: <task>`: call `agent_knock_knock_delegate` with `agent="codex"`.
 - `AKK Claude: <task>`: call `agent_knock_knock_delegate` with `agent="claude"`.
 - `AKK Cursor: <task>`: call `agent_knock_knock_delegate` with `agent="cursor"`.
-- `AKK list`, `akk list`, or questions such as "what AKK sessions are open": call `agent_knock_knock_list`.
+- `AKK list`, `akk list`, `AKK Codex active`, questions such as "what AKK sessions are open", "which Codex sessions are currently running", "tmux Codex sessions", or requests to list active local coding-agent work: call `agent_knock_knock_list`.
 - `AKK status <conversation-id>`: call `agent_knock_knock_status`.
 - `AKK send <conversation-id>: <message>` or follow-up requests for an existing open agent session: call `agent_knock_knock_send`.
 - `AKK cancel <conversation-id>` or requests to stop the current running work without closing the session: call `agent_knock_knock_cancel`.
 - `AKK recover <conversation-id>`: call `agent_knock_knock_recover`.
 - `AKK close <conversation-id>`: call `agent_knock_knock_close`.
 - `AKK Codex sessions`, `AKK Codex history`, or requests to list existing native Codex sessions outside AKK: call `agent_knock_knock_agent_discover` with `agent="codex"` and `scope="sessions"`.
-- `AKK Codex active` or requests to list currently running local Codex CLI processes: call `agent_knock_knock_agent_discover` with `agent="codex"` and `scope="active"`.
 - `AKK Codex capabilities` or requests to inspect Codex takeover support: call `agent_knock_knock_agent_discover` with `agent="codex"` and `scope="capabilities"`.
 - `AKK takeover Codex <session-id>` or requests to take over an active Codex CLI session: call `agent_knock_knock_agent_takeover` with `agent="codex"` and `strategy="terminate_then_resume"`.
 - `AKK terminal takeover Codex <session-id>`, `AKK tmux takeover Codex <session-id>`, or requests to take over a Codex CLI that is running inside tmux without stopping it: call `agent_knock_knock_agent_takeover` with `agent="codex"` and `strategy="terminal_control"`.
@@ -144,10 +143,15 @@ Do not start a replacement task without the user's explicit choice.
 
 Native session takeover is for Codex sessions that were created outside AKK, such as a user-run terminal Codex CLI. It is separate from AKK managed conversation recovery.
 
-Use `agent_knock_knock_agent_discover`, not `agent_knock_knock_list`, when the user asks about native Codex sessions outside AKK:
+Use `agent_knock_knock_list` when the user asks about current active native Codex sessions, tmux-controlled Codex sessions, or which local coding-agent work is currently open. The list result separates:
+
+- `delegated`: AKK-managed tasks.
+- `native`: discovered local native sessions that AKK cannot directly control.
+- `terminal_controlled`: discovered local native sessions in a controllable terminal provider such as tmux.
+
+Only use `agent_knock_knock_agent_discover` for lower-level Codex takeover inspection that `AKK list` does not cover:
 
 - `scope="sessions"` lists historical native Codex sessions from the local Codex store.
-- `scope="active"` lists currently running local Codex CLI processes that AKK can identify.
 - `scope="capabilities"` explains the supported takeover strategies.
 
 Use `agent_knock_knock_agent_takeover` when the user wants AKK to take over an existing native Codex session. By default this tool is side-effect-free and returns a plan. When the plan is ready and the user explicitly wants AKK to manage the session, call it with `createConversation=true` to create an AKK conversation bound to the native session:

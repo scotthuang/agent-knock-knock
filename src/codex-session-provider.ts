@@ -175,6 +175,9 @@ export function classifyCodexProcess(process: CodexProcessSnapshot): ActiveCodex
   if (!commandInvokesCodexCli(command)) {
     return undefined;
   }
+  if (commandInvokesCodexAppServer(command)) {
+    return undefined;
+  }
 
   const sessionId = extractResumeSessionId(command);
   return {
@@ -338,6 +341,12 @@ function commandInvokesCodexCli(command: string): boolean {
   }
 
   return pathBasename(first) === "node" && pathBasename(second) === "codex";
+}
+
+function commandInvokesCodexAppServer(command: string): boolean {
+  const tokens = command.split(/\s+/).filter(Boolean);
+  const codexIndex = tokens.findIndex((token) => pathBasename(token) === "codex");
+  return codexIndex >= 0 && tokens.slice(codexIndex + 1).includes("app-server");
 }
 
 function pathBasename(value: string | undefined): string | undefined {

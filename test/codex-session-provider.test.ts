@@ -70,6 +70,11 @@ test("Codex process discovery separates native CLI from ACP adapter processes", 
       command: "/Users/me/.npm/_npx/pkg/node_modules/@zed-industries/codex-acp-darwin-arm64/bin/codex-acp"
     },
     {
+      pid: 350,
+      cwd: "/repo/openclaw",
+      command: "node /Users/me/.npm-global/bin/codex app-server --listen stdio://"
+    },
+    {
       pid: 400,
       cwd: "/repo/openclaw",
       command: "rg codex"
