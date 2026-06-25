@@ -12,6 +12,7 @@ test("delegate background launches acpx without returning raw Claude output", as
   const fakeBinDir = path.join(tempDir, "bin");
   const workspace = path.join(tempDir, "workspace");
   const launchedPath = path.join(tempDir, "acpx-args.json");
+  const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
@@ -26,6 +27,17 @@ fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify(process.argv.s
       "utf8"
     );
     fs.chmodSync(fakeAcpx, 0o755);
+    const fakeOpenClaw = path.join(fakeBinDir, "openclaw");
+    fs.writeFileSync(
+      fakeOpenClaw,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.appendFileSync(${JSON.stringify(openclawCallsPath)}, JSON.stringify(process.argv.slice(2)) + "\\n", "utf8");
+console.log(JSON.stringify({ ok: true }));
+`,
+      "utf8"
+    );
+    fs.chmodSync(fakeOpenClaw, 0o755);
 
     const result = spawnSync(process.execPath, [
       binPath,
@@ -38,6 +50,10 @@ fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify(process.argv.s
       path.join(tempDir, "conversations"),
       "--gateway-method",
       "agent-knock-knock.callback",
+      "--openclaw-bin",
+      fakeOpenClaw,
+      "--monitor-poll-interval-ms",
+      "50",
       "--background"
     ], {
       encoding: "utf8",
@@ -73,6 +89,13 @@ fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify(process.argv.s
       .map((line) => JSON.parse(line));
     assert.equal(events.some((event) => event.event === "claude_session_ensure" && event.status === 0), true);
     assert.equal(events.some((event) => event.event === "claude_launch" && event.mode === "background"), true);
+    await waitForEvent(parsed.paths.logPath, "stalled_gateway_method_delivery");
+    const openclawCalls = fs.readFileSync(openclawCallsPath, "utf8")
+      .trim()
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    assert.deepEqual(openclawCalls[0].slice(0, 3), ["gateway", "call", "agent-knock-knock.callback"]);
   } finally {
     removeTempDir(tempDir);
   }
@@ -222,6 +245,32 @@ function waitForCalls(filePath, minCount, timeoutMs = 2000): Promise<any[]> {
       }
       if (Date.now() - started >= timeoutMs) {
         reject(new Error(`timed out waiting for ${filePath}`));
+        return;
+      }
+      setTimeout(check, 25);
+    };
+    check();
+  });
+}
+
+function waitForEvent(logPath, eventName, timeoutMs = 2000): Promise<any> {
+  const started = Date.now();
+  return new Promise((resolve, reject) => {
+    const check = () => {
+      if (fs.existsSync(logPath)) {
+        const event = fs.readFileSync(logPath, "utf8")
+          .trim()
+          .split(/\r?\n/)
+          .filter(Boolean)
+          .map((line) => JSON.parse(line))
+          .find((entry) => entry.event === eventName);
+        if (event) {
+          resolve(event);
+          return;
+        }
+      }
+      if (Date.now() - started >= timeoutMs) {
+        reject(new Error(`timed out waiting for ${eventName} in ${logPath}`));
         return;
       }
       setTimeout(check, 25);
