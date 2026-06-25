@@ -10,6 +10,7 @@
 ### Removed
 
 - Removed the public `agent discover` CLI path and `agent_knock_knock_agent_discover` OpenClaw tool; use `AKK list` for active/local session visibility.
+- Removed the legacy `safe_resume` takeover strategy; native takeover now uses active process-based terminate, terminal-control, or fork paths.
 
 ## 0.2.10 - 2026-06-25
 

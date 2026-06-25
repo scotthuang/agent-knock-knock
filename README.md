@@ -171,7 +171,6 @@ AKK list
 Takeover prompts:
 
 ```text
-AKK safe resume Codex <native-session-id>
 AKK takeover Codex <native-session-id>
 AKK terminal takeover Codex <native-session-id>
 AKK fork takeover Codex <native-session-id>
@@ -180,7 +179,6 @@ AKK approve <conversation-id>
 
 Strategies:
 
-- `safe resume`: attach a stopped/inactive Codex session to AKK.
 - `takeover`: stop an active matching Codex CLI after explicit confirmation, then resume it under AKK.
 - `terminal takeover`: attach an active Codex CLI running inside tmux after explicit confirmation. AKK sends follow-ups directly to the tmux pane and can approve the currently visible Codex approval prompt.
 - `fork takeover`: keep the original Codex CLI running, ask OpenClaw to summarize bounded source context, then create a new AKK-managed fork from that summary.

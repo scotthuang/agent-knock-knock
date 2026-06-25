@@ -47,7 +47,7 @@ import {
   saveState,
   statePathForConversationId
 } from "./store.js";
-import { planFork, planSafeResume, planTakeover } from "./session-takeover-planner.js";
+import { planFork, planTakeover } from "./session-takeover-planner.js";
 import {
   StaticTerminalControlProvider,
   TmuxTerminalControlProvider,
@@ -284,38 +284,6 @@ async function runAgentTakeover(options) {
         code: "session_not_found",
         message: `No ${agent} session found for ${sessionId}`
       }
-    };
-  }
-
-  if (strategy === "safe_resume") {
-    const plan = planSafeResume(session, await listActiveSessionsWithTerminalControl(provider, options));
-    if (plan.allowed && options.createConversation) {
-      const modelInfo = await provider.getSessionModel(session.id);
-      const attached = createNativeSessionConversation({
-        agent,
-        strategy,
-        session,
-        modelInfo,
-        options
-      });
-      return {
-        agent,
-        sessionId,
-        strategy,
-        status: "attached",
-        sideEffectsExecuted: true,
-        plan,
-        ...attached
-      };
-    }
-
-    return {
-      agent,
-      sessionId,
-      strategy,
-      status: plan.allowed ? "ready" : "blocked",
-      sideEffectsExecuted: false,
-      plan
     };
   }
 
@@ -1541,7 +1509,6 @@ function nativeListEntry(session: ActiveCodexProcess, activeSessions: ActiveCode
     confidence: session.confidence,
     reason: session.reason,
     commands: {
-      safe_resume: Boolean(session.sessionId),
       terminate_then_resume: true,
       fork: Boolean(session.sessionId),
       terminal_control_attach: false,
@@ -4513,7 +4480,7 @@ function usage() {
   agent-knock-knock close --conversation <id> [--reason <text>]
   agent-knock-knock install-openclaw [--openclaw-bin <path>] [--skill-path <path>] [--no-restart]
   agent-knock-knock doctor
-  agent-knock-knock agent takeover --agent codex --session-id <id> --strategy safe_resume|terminate_then_resume|terminal_control|fork [--create-conversation]
+  agent-knock-knock agent takeover --agent codex --session-id <id> --strategy terminate_then_resume|terminal_control|fork [--create-conversation]
   agent-knock-knock callback --state <file> --message-json <json> [--record-only]
   agent-knock-knock transcript --log <file> [--include-raw]
   agent-knock-knock transcript --conversation <dir> [--include-raw]

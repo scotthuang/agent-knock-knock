@@ -8,7 +8,6 @@ import type {
 import {
   matchingActiveProcesses,
   planFork,
-  planSafeResume,
   planTakeover
 } from "../src/session-takeover-planner.js";
 
@@ -21,30 +20,6 @@ const session: CodexSessionSummary = {
   archived: false,
   capability: "full"
 };
-
-test("safe resume is allowed only when no active Codex CLI matches the session", () => {
-  assert.deepEqual(planSafeResume(session, []), {
-    mode: "safe_resume",
-    allowed: true,
-    requiresConfirmation: false,
-    reason: "no_active_cli",
-    resume: {
-      sessionId: session.id,
-      cwd: session.cwd
-    },
-    conflicts: []
-  });
-
-  const blocked = planSafeResume(session, [activeCodex({
-    pid: 10,
-    sessionId: session.id,
-    cwd: session.cwd
-  })]);
-
-  assert.equal(blocked.allowed, false);
-  assert.equal(blocked.reason, "active_cli_conflict");
-  assert.equal(blocked.conflicts[0].pid, 10);
-});
 
 test("takeover requires an exact active session match before planning termination", () => {
   const plan = planTakeover(session, [

@@ -4,8 +4,8 @@ import type {
   ForkContextPackage
 } from "./codex-session-provider.js";
 
-export type SessionControlMode = "safe_resume" | "takeover" | "fork";
-export type SessionControlPlan = SafeResumePlan | TakeoverPlan | ForkPlan;
+export type SessionControlMode = "takeover" | "fork";
+export type SessionControlPlan = TakeoverPlan | ForkPlan;
 
 export interface ProcessTarget {
   pid: number;
@@ -13,18 +13,6 @@ export interface ProcessTarget {
   cwd?: string;
   command: string;
   sessionId?: string;
-}
-
-export interface SafeResumePlan {
-  mode: "safe_resume";
-  allowed: boolean;
-  requiresConfirmation: false;
-  reason: "no_active_cli" | "active_cli_conflict";
-  resume?: {
-    sessionId: string;
-    cwd: string;
-  };
-  conflicts: ProcessTarget[];
 }
 
 export interface TakeoverPlan {
@@ -51,31 +39,6 @@ export interface ForkPlan {
     cwd: string;
   };
   contextPackage: ForkContextPackage;
-}
-
-export function planSafeResume(session: CodexSessionSummary, activeProcesses: ActiveCodexProcess[]): SafeResumePlan {
-  const conflicts = matchingActiveProcesses(session, activeProcesses);
-  if (conflicts.length > 0) {
-    return {
-      mode: "safe_resume",
-      allowed: false,
-      requiresConfirmation: false,
-      reason: "active_cli_conflict",
-      conflicts
-    };
-  }
-
-  return {
-    mode: "safe_resume",
-    allowed: true,
-    requiresConfirmation: false,
-    reason: "no_active_cli",
-    resume: {
-      sessionId: session.id,
-      cwd: session.cwd
-    },
-    conflicts: []
-  };
 }
 
 export function planTakeover(session: CodexSessionSummary, activeProcesses: ActiveCodexProcess[]): TakeoverPlan {

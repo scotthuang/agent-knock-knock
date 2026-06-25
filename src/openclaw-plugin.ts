@@ -267,9 +267,9 @@ const agentTakeoverParameters = {
     },
     strategy: {
       type: "string",
-      enum: ["safe_resume", "terminate_then_resume", "fork", "terminal_control"],
+      enum: ["terminate_then_resume", "fork", "terminal_control"],
       description:
-        "Takeover strategy. safe_resume only works when no matching CLI is active. terminate_then_resume returns a confirmation plan to stop the exact active CLI before resume. terminal_control attaches to an existing tmux-controlled CLI after confirmation. fork returns bounded context for OpenClaw summary confirmation."
+        "Takeover strategy. terminate_then_resume returns a confirmation plan to stop the exact active CLI before resume. terminal_control attaches to an existing tmux-controlled CLI after confirmation. fork returns bounded context for OpenClaw summary confirmation."
     },
     createConversation: {
       type: "boolean",
