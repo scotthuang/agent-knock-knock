@@ -3775,6 +3775,7 @@ function waitForPidsToExit(pids, timeoutMs) {
 function markConversationStalled({ statePath, logPath, reason, detail = {} }) {
   const releaseLock = acquireFileLock(`${statePath}.lock`);
   let stalledConversation;
+  let stalledMessage;
   try {
     const conversation = loadState(statePath);
     if (!isWaitingForAgent(conversation.status)) {
@@ -3787,11 +3788,31 @@ function markConversationStalled({ statePath, logPath, reason, detail = {} }) {
     }
 
     const now = new Date().toISOString();
+    const executor = executorForConversation(conversation);
+    const shouldNotify = Boolean(conversation.gateway_method && !conversation.stalled_notification_sent_at);
+    stalledMessage = shouldNotify
+      ? createMessage({
+          conversation,
+          from: executor.actor,
+          to: "openclaw",
+          type: "error",
+          requiresResponse: false,
+          body: [
+            `AKK marked this ${executor.display_name} task as stalled: ${reason}.`,
+            "",
+            `Conversation: ${conversation.conversation_id}`,
+            `Session: ${executor.session}`,
+            "Use `AKK status` for details, `AKK send` to retry/follow up, or `AKK close` to close it."
+          ].join("\n")
+        })
+      : undefined;
     stalledConversation = {
       ...conversation,
       status: "stalled" as const,
       stalled_at: now,
       stalled_reason: reason,
+      stalled_notification_sent_at: shouldNotify ? now : conversation.stalled_notification_sent_at,
+      stalled_notification_message_id: stalledMessage?.id ?? conversation.stalled_notification_message_id,
       updated_at: now
     };
     saveState(statePath, stalledConversation);
@@ -3816,13 +3837,12 @@ function markConversationStalled({ statePath, logPath, reason, detail = {} }) {
     releaseLock();
   }
 
-  if (stalledConversation) {
+  if (stalledConversation && stalledMessage) {
     deliverStalledNotification({
       statePath,
       logPath,
       conversation: stalledConversation,
-      reason,
-      detail
+      message: stalledMessage
     });
   }
   return stalledConversation;
@@ -3882,28 +3902,10 @@ function markConversationNeedsModelSelection({ statePath, logPath, reason, detai
   return modelSelectionConversation;
 }
 
-function deliverStalledNotification({ statePath, logPath, conversation, reason, detail = {} }) {
+function deliverStalledNotification({ statePath, logPath, conversation, message }) {
   if (!conversation.gateway_method) {
     return;
   }
-
-  const executor = executorForConversation(conversation);
-  const trace = buildStalledTraceSummary({ conversation, logPath, detail });
-  const message = createMessage({
-    conversation,
-    from: executor.actor,
-    to: "openclaw",
-    type: "error",
-    requiresResponse: false,
-    body: [
-      `AKK marked this ${executor.display_name} task as stalled: ${reason}.`,
-      "",
-      `Conversation: ${conversation.conversation_id}`,
-      `Session: ${executor.session}`,
-      trace ? `Trace: ${trace}` : "",
-      "Use `AKK status` for details, `AKK send` to retry/follow up, or `AKK close` to close it."
-    ].filter(Boolean).join("\n")
-  });
 
   const gatewayToken = conversation.gateway_token;
   const gatewayUrl = gatewayToken ? conversation.gateway_url : undefined;
@@ -3923,6 +3925,7 @@ function deliverStalledNotification({ statePath, logPath, conversation, reason, 
     conversation_id: conversation.conversation_id,
     event: "stalled_gateway_method_delivery",
     method: conversation.gateway_method,
+    message_id: message.id,
     status: delivery.status,
     stdout: delivery.stdout,
     stderr: delivery.stderr
@@ -3930,6 +3933,7 @@ function deliverStalledNotification({ statePath, logPath, conversation, reason, 
   runtimeLog("info", "stalled_gateway_method_delivery", {
     conversation_id: conversation.conversation_id,
     method: conversation.gateway_method,
+    message_id: message.id,
     status: delivery.status,
     failure_kind: classifyProcessFailure(delivery),
     stdout: textSummary(delivery.stdout),
@@ -3955,50 +3959,19 @@ function deliverStalledNotification({ statePath, logPath, conversation, reason, 
     ts: new Date().toISOString(),
     conversation_id: conversation.conversation_id,
     event: "stalled_chat_send_delivery",
+    message_id: message.id,
     status: chatSendDelivery.status,
     stdout: chatSendDelivery.stdout,
     stderr: chatSendDelivery.stderr
   });
   runtimeLog("info", "stalled_chat_send_delivery", {
     conversation_id: conversation.conversation_id,
+    message_id: message.id,
     status: chatSendDelivery.status,
     failure_kind: classifyProcessFailure(chatSendDelivery),
     stdout: textSummary(chatSendDelivery.stdout),
     stderr: textSummary(chatSendDelivery.stderr)
   });
-}
-
-function buildStalledTraceSummary({ conversation, logPath, detail = {} }) {
-  const detailRecord = isRecord(detail) ? detail as Record<string, unknown> : {};
-  const outputPath = typeof detailRecord.output_path === "string"
-    ? detailRecord.output_path
-    : traceOutputPath({
-        conversation,
-        events: safeReadEvents(logPath),
-        logPath
-      });
-  if (!outputPath || !fs.existsSync(outputPath)) {
-    return undefined;
-  }
-
-  const output = fs.readFileSync(outputPath, "utf8").slice(-64 * 1024);
-  const parts = output
-    .split(/\r?\n/)
-    .map((line) => sanitizeTraceText(line.trim(), 220))
-    .filter((line) =>
-      line &&
-      !line.startsWith("input:") &&
-      !line.startsWith("output:") &&
-      !line.startsWith("{") &&
-      !line.startsWith("}") &&
-      !line.includes("--message-json")
-    )
-    .slice(-6);
-  if (parts.length === 0) {
-    return undefined;
-  }
-
-  return cleanProcessText(parts.join(" | "))?.slice(0, 500);
 }
 
 function safeReadEvents(logPath) {
