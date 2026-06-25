@@ -5,6 +5,7 @@
 ### Added
 
 - Added terminal-controlled `AKK cancel` support by sending Control-C to the controlled tmux pane.
+- Added `AKK terminal-status` and the OpenClaw terminal status tool to inspect tmux reachability, screen excerpts, and approval state without sending input.
 
 ## 0.2.10 - 2026-06-25
 

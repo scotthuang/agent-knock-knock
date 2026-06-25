@@ -143,6 +143,8 @@ async function runCommand(commandName, options) {
     await runList(options);
   } else if (commandName === "status") {
     await runStatus(options);
+  } else if (commandName === "terminal-status") {
+    await runTerminalStatus(options);
   } else if (commandName === "send") {
     await runSend(options);
   } else if (commandName === "approve") {
@@ -1706,20 +1708,8 @@ async function runStatus(options) {
   );
   if (terminalControl) {
     result.terminal_control = terminalControl;
-    try {
-      const screen = await createTerminalControlProvider(options).capture(terminalControl.target, {
-        scrollbackLines: Number(options.scrollbackLines ?? 120),
-        socketPath: terminalControl.socketPath
-      });
-      result.terminal_screen = {
-        excerpt: screenExcerpt(screen),
-        approval: detectCodexApprovalPrompt(screen)
-      };
-    } catch (error) {
-      result.terminal_screen = {
-        error: error instanceof Error ? error.message : String(error)
-      };
-    }
+    result.terminal_status = await terminalStatusForControl(terminalControl, options);
+    result.terminal_screen = result.terminal_status.screen;
   }
   printJson(result);
   runtimeLog("info", "task_status_read", {
@@ -1730,6 +1720,94 @@ async function runStatus(options) {
     recent_event_count: Math.min(events.length, 10),
     trace: Boolean(options.trace)
   });
+}
+
+async function runTerminalStatus(options) {
+  cleanupIdleConversations(storeDirFromOptions(options), options);
+  const { conversation, terminalControl } = terminalControlTargetFromOptions(options);
+  const terminalStatus = await terminalStatusForControl(terminalControl, options);
+  printJson({
+    conversation,
+    terminal_control: terminalControl,
+    terminal_status: terminalStatus,
+    status: terminalStatus.reachable ? "reachable" : "unreachable"
+  });
+  runtimeLog("info", "terminal_status_read", {
+    conversation_id: conversation?.conversation_id,
+    terminal_target: terminalControl.target,
+    reachable: terminalStatus.reachable,
+    approval_blocked: terminalStatus.approval_state.blocked
+  });
+}
+
+function terminalControlTargetFromOptions(options) {
+  if (options.conversation) {
+    const { conversation } = loadConversationFromOptions(options);
+    const terminalControl = terminalControlFromTakeover(
+      isRecord(conversation.native_session_takeover) ? conversation.native_session_takeover : undefined
+    );
+    if (!terminalControl) {
+      throw new Error(`conversation ${conversation.conversation_id} is not controlled through a terminal`);
+    }
+    return { conversation, terminalControl };
+  }
+
+  const target = stringValue(options.target);
+  if (!target) {
+    throw new Error("--conversation or --target is required");
+  }
+
+  return {
+    conversation: undefined,
+    terminalControl: {
+      kind: "tmux",
+      target,
+      socketPath: stringValue(options.socketPath),
+      capabilities: ["capture_screen", "send_keys", "terminal_approval"]
+    }
+  };
+}
+
+async function terminalStatusForControl(terminalControl, options) {
+  try {
+    const screen = await createTerminalControlProvider(options).capture(terminalControl.target, {
+      scrollbackLines: Number(options.scrollbackLines ?? 120),
+      socketPath: terminalControl.socketPath
+    });
+    const approval = detectCodexApprovalPrompt(screen);
+    const blocked = isCodexApprovalPromptVisible(screen);
+    return {
+      provider: terminalControl.kind,
+      target: terminalControl.target,
+      reachable: true,
+      approval_state: {
+        scanned: true,
+        blocked,
+        approvable: approval.approvable,
+        key: approval.approvable ? approval.key : undefined,
+        label: approval.approvable ? approval.label : undefined,
+        reason: approval.approvable ? undefined : approval.reason
+      },
+      screen: {
+        excerpt: screenExcerpt(screen),
+        approval
+      }
+    };
+  } catch (error) {
+    return {
+      provider: terminalControl.kind,
+      target: terminalControl.target,
+      reachable: false,
+      approval_state: {
+        scanned: false,
+        blocked: false,
+        approvable: false
+      },
+      screen: {
+        error: error instanceof Error ? error.message : String(error)
+      }
+    };
+  }
 }
 
 async function runSend(options) {
@@ -4513,6 +4591,8 @@ function usage() {
   agent-knock-knock delegate --request <text> [--agent ${agentList}] [--store-dir <dir>] [--all-proxy <url>] [--agent-timeout-minutes <minutes>] [--token <gateway-token>] [--send|--background]
   agent-knock-knock list [--store-dir <dir>] [--agent ${agentList}] [--status <status>] [--all] [--managed-only] [--no-approval-scan] [--terminal-debug]
   agent-knock-knock status --conversation <id> [--store-dir <dir>] [--trace]
+  agent-knock-knock terminal-status --conversation <id> [--store-dir <dir>]
+  agent-knock-knock terminal-status --target <tmux-target> [--socket-path <path>]
   agent-knock-knock send --conversation <id> --message <text> [--type answer|task|control] [--all-proxy <url>] [--agent-timeout-minutes <minutes>]
   agent-knock-knock approve --conversation <id>
   agent-knock-knock cancel --conversation <id> [--all-proxy <url>]
