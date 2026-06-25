@@ -229,6 +229,69 @@ test("approve sends y only when the terminal screen shows a primary Codex approv
   }
 });
 
+test("approve supports terminal-controlled conversation ids without AKK state", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-approve-"));
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, [
+      "  Would you like to run the following command?",
+      "",
+      "  $ ls -la",
+      "",
+      "› 1. Yes, proceed (y)",
+      "  2. No, and tell Codex what to do differently (esc)"
+    ].join("\n"));
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `codex-work\t0\t1\t33389\tnode\t${workspace}\n`
+    );
+
+    const conversationId = "terminal:tmux:codex-work:0.1:33389";
+    const status = runAgentCli([
+      "status",
+      "--conversation",
+      conversationId
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(status.status, 0, status.stderr || status.stdout);
+    const statusParsed = JSON.parse(status.stdout);
+    assert.equal(statusParsed.conversation_id, conversationId);
+    assert.equal(statusParsed.source, "terminal_control");
+    assert.equal(statusParsed.terminal_status.reachable, true);
+    assert.equal(statusParsed.terminal_status.approval_state.approvable, true);
+
+    const approved = runAgentCli([
+      "approve",
+      "--conversation",
+      conversationId
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+
+    assert.equal(approved.status, 0, approved.stderr || approved.stdout);
+    const approvedParsed = JSON.parse(approved.stdout);
+    assert.equal(approvedParsed.conversation_id, conversationId);
+    assert.equal(approvedParsed.source, "terminal_control");
+    assert.equal(approvedParsed.approved, true);
+    assert.equal(approvedParsed.key, "y");
+    assert.equal(approvedParsed.terminal_control.target, "codex-work:0.1");
+
+    const calls = readJsonLines(tmuxCallsPath);
+    assert.deepEqual(calls.at(-1).args, ["send-keys", "-t", "codex-work:0.1", "y"]);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 
 test("agent takeover terminate_then_resume returns a confirmation plan for an exact active session", () => {
   const result = runAgentCli([
@@ -610,7 +673,7 @@ function tmuxPane(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function writeFakeTmux(fakeBinDir: string, callsPath: string, screenPath?: string) {
+function writeFakeTmux(fakeBinDir: string, callsPath: string, screenPath?: string, listPanesOutput = "") {
   const fakeTmux = path.join(fakeBinDir, "tmux");
   fs.writeFileSync(
     fakeTmux,
@@ -620,6 +683,8 @@ const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({ args }) + "\\n", "utf8");
 if (args[0] === "capture-pane") {
   process.stdout.write(fs.existsSync(${JSON.stringify(screenPath ?? "")}) ? fs.readFileSync(${JSON.stringify(screenPath ?? "")}, "utf8") : "");
+} else if (args[0] === "list-panes") {
+  process.stdout.write(${JSON.stringify(listPanesOutput)});
 }
 `,
     "utf8"

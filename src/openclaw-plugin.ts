@@ -140,7 +140,9 @@ const statusParameters = {
   required: ["conversation_id"],
   properties: {
     conversation_id: {
-      type: "string"
+      type: "string",
+      description:
+        "AKK-managed conversation id, or a terminal-controlled id from AKK list such as terminal:tmux:codex-work:0.1:33389."
     },
     storeDir: {
       type: "string"
@@ -343,7 +345,9 @@ const approveParameters = {
   required: ["conversation_id"],
   properties: {
     conversation_id: {
-      type: "string"
+      type: "string",
+      description:
+        "AKK-managed conversation id, or a terminal-controlled id from AKK list such as terminal:tmux:codex-work:0.1:33389."
     },
     storeDir: {
       type: "string"

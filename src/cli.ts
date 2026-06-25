@@ -52,6 +52,7 @@ import {
   StaticTerminalControlProvider,
   TmuxTerminalControlProvider,
   enrichActiveProcessesWithTerminalControl,
+  terminalRefFromPane,
   type TerminalControlProvider
 } from "./terminal-control-provider.js";
 
@@ -1616,8 +1617,72 @@ function canSendDelegated(status) {
   return !["failed", "closed", "cancelled"].includes(status);
 }
 
+async function resolveTerminalConversationFromOptions(options): Promise<{ conversationId: string; terminalControl: TerminalControlRef } | undefined> {
+  const parsed = parseTerminalConversationId(stringValue(options.conversation));
+  if (!parsed) {
+    return undefined;
+  }
+
+  const provider = createTerminalControlProvider(options);
+  const panes = await provider.listPanes();
+  const pane = panes.find((candidate) =>
+    candidate.kind === parsed.kind &&
+    candidate.target === parsed.target &&
+    candidate.panePid === parsed.pid
+  );
+  if (!pane) {
+    throw new Error(`terminal-controlled session ${parsed.conversationId} is no longer available`);
+  }
+
+  return {
+    conversationId: parsed.conversationId,
+    terminalControl: terminalRefFromPane(pane)
+  };
+}
+
+function parseTerminalConversationId(conversationId: string | undefined): { conversationId: string; kind: "tmux"; target: string; pid: number } | undefined {
+  const prefix = "terminal:tmux:";
+  if (!conversationId?.startsWith(prefix)) {
+    return undefined;
+  }
+  const rest = conversationId.slice(prefix.length);
+  const pidSeparator = rest.lastIndexOf(":");
+  if (pidSeparator <= 0 || pidSeparator === rest.length - 1) {
+    throw new Error(`invalid terminal-controlled conversation id: ${conversationId}`);
+  }
+  const target = rest.slice(0, pidSeparator);
+  const pid = Number(rest.slice(pidSeparator + 1));
+  if (!target || !Number.isInteger(pid)) {
+    throw new Error(`invalid terminal-controlled conversation id: ${conversationId}`);
+  }
+  return {
+    conversationId,
+    kind: "tmux",
+    target,
+    pid
+  };
+}
+
 async function runStatus(options) {
   cleanupIdleConversations(storeDirFromOptions(options), options);
+  const terminalConversation = await resolveTerminalConversationFromOptions(options);
+  if (terminalConversation) {
+    const terminalStatus = await terminalStatusForControl(terminalConversation.terminalControl, options);
+    printJson({
+      conversation_id: terminalConversation.conversationId,
+      source: "terminal_control",
+      terminal_control: terminalConversation.terminalControl,
+      terminal_status: terminalStatus,
+      terminal_screen: terminalStatus.screen
+    });
+    runtimeLog("info", "terminal_status_read", {
+      conversation_id: terminalConversation.conversationId,
+      terminal_target: terminalConversation.terminalControl.target,
+      reachable: terminalStatus.reachable
+    });
+    return;
+  }
+
   const { conversation, statePath, logPath } = loadConversationFromOptions(options);
   const events = readExistingEvents(logPath);
   const result: Record<string, any> = {
@@ -2054,6 +2119,16 @@ async function runSend(options) {
 
 async function runApprove(options) {
   cleanupIdleConversations(storeDirFromOptions(options), options);
+  const terminalConversation = await resolveTerminalConversationFromOptions(options);
+  if (terminalConversation) {
+    await runTerminalConversationApprove({
+      options,
+      conversationId: terminalConversation.conversationId,
+      terminalControl: terminalConversation.terminalControl
+    });
+    return;
+  }
+
   const { conversation, statePath, logPath } = loadConversationFromOptions(options);
   const nativeTakeover = isRecord(conversation.native_session_takeover)
     ? conversation.native_session_takeover
@@ -2105,6 +2180,46 @@ async function runApprove(options) {
 
   printJson({
     conversation,
+    approved: true,
+    terminal_control: terminalControl,
+    key: approval.key,
+    label: approval.label
+  });
+}
+
+async function runTerminalConversationApprove({ options, conversationId, terminalControl }) {
+  const provider = createTerminalControlProvider(options);
+  const screen = await provider.capture(terminalControl.target, {
+    scrollbackLines: Number(options.scrollbackLines ?? 120),
+    socketPath: terminalControl.socketPath
+  });
+  const approval = detectCodexApprovalPrompt(screen);
+  if (!approval.approvable) {
+    printJson({
+      conversation_id: conversationId,
+      source: "terminal_control",
+      approved: false,
+      blocked: true,
+      reason: approval.reason,
+      terminal_control: terminalControl,
+      screen_excerpt: screenExcerpt(screen)
+    });
+    return;
+  }
+
+  await provider.sendKeys(terminalControl.target, [approval.key], {
+    socketPath: terminalControl.socketPath
+  });
+  runtimeLog("info", "terminal_approval_send", {
+    conversation_id: conversationId,
+    terminal_target: terminalControl.target,
+    key: approval.key,
+    label: approval.label
+  });
+
+  printJson({
+    conversation_id: conversationId,
+    source: "terminal_control",
     approved: true,
     terminal_control: terminalControl,
     key: approval.key,

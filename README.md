@@ -171,6 +171,7 @@ AKK list
 - `delegated`: AKK-managed background tasks.
 - `native`: local native sessions that AKK can discover but cannot directly control.
 - `terminal_controlled`: local sessions running in a controllable terminal provider. The current provider is tmux. These entries include terminal metadata, command capabilities, and concise approval state when a visible approval prompt is detected.
+- `terminal_controlled` entries can be addressed directly by their `id` from `AKK list` for `AKK status <id>` and `AKK approve <id>`. They do not need an AKK state file before approval.
 
 Takeover prompts:
 
