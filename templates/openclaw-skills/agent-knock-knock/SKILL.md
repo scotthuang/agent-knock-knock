@@ -53,7 +53,7 @@ Natural-language forms:
 - `AKK recover <conversation-id>`: call `agent_knock_knock_recover`.
 - `AKK close <conversation-id>`: call `agent_knock_knock_close`.
 - `AKK takeover Codex <session-id>` or requests to take over an active Codex CLI session: call `agent_knock_knock_agent_takeover` with `agent="codex"` and `strategy="terminate_then_resume"`.
-- `AKK terminal takeover Codex <session-id>`, `AKK tmux takeover Codex <session-id>`, or requests to take over a Codex CLI that is running inside tmux without stopping it: call `agent_knock_knock_agent_takeover` with `agent="codex"` and `strategy="terminal_control"`.
+- `AKK terminal takeover Codex <session-id>` or requests to take over a Codex CLI that is running inside a controllable terminal provider without stopping it: call `agent_knock_knock_agent_takeover` with `agent="codex"` and `strategy="terminal_control"`.
 - `AKK approve <conversation-id>` or requests to approve the current visible Codex permission/command prompt for a terminal-controlled session: first call `agent_knock_knock_status` for that conversation and show the terminal screen excerpt to the user. Only after the user explicitly approves that prompt, call `agent_knock_knock_approve`.
 - `AKK takeover Codex <session-id> with fork`, `AKK fork takeover Codex <session-id>`, or requests to take over without stopping the original Codex CLI: call `agent_knock_knock_agent_takeover` with `agent="codex"` and `strategy="fork"`.
 
