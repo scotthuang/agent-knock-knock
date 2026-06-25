@@ -401,40 +401,6 @@ test("approve sends y only when the terminal screen shows a primary Codex approv
     assert.match(statusParsed.terminal_screen.excerpt, /Would you like to run the following command/);
     assert.equal(statusParsed.terminal_screen.approval.approvable, true);
 
-    const terminalStatus = runAgentCli([
-      "terminal-status",
-      "--conversation",
-      parsed.conversation.conversation_id,
-      "--store-dir",
-      storeDir
-    ], {
-      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
-    });
-    assert.equal(terminalStatus.status, 0, terminalStatus.stderr || terminalStatus.stdout);
-    const terminalStatusParsed = JSON.parse(terminalStatus.stdout);
-    assert.equal(terminalStatusParsed.status, "reachable");
-    assert.equal(terminalStatusParsed.terminal_control.target, "codex-work:0.0");
-    assert.equal(terminalStatusParsed.terminal_status.approval_state.blocked, true);
-    assert.equal(terminalStatusParsed.terminal_status.approval_state.approvable, true);
-    assert.match(terminalStatusParsed.terminal_status.screen.excerpt, /Would you like to run the following command/);
-
-    const directTerminalStatus = runAgentCli([
-      "terminal-status",
-      "--target",
-      "codex-work:0.0",
-      "--terminals-json",
-      JSON.stringify([tmuxPane({ panePid: 999, currentPath: workspace })]),
-      "--terminal-screens-json",
-      JSON.stringify({
-        "codex-work:0.0": fs.readFileSync(screenPath, "utf8")
-      })
-    ]);
-    assert.equal(directTerminalStatus.status, 0, directTerminalStatus.stderr || directTerminalStatus.stdout);
-    const directTerminalStatusParsed = JSON.parse(directTerminalStatus.stdout);
-    assert.equal(directTerminalStatusParsed.status, "reachable");
-    assert.equal(directTerminalStatusParsed.terminal_control.target, "codex-work:0.0");
-    assert.equal(directTerminalStatusParsed.terminal_status.approval_state.approvable, true);
-
     const approved = runAgentCli([
       "approve",
       "--conversation",

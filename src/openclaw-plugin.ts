@@ -158,33 +158,6 @@ const statusParameters = {
   }
 };
 
-const terminalStatusParameters = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    conversation_id: {
-      type: "string",
-      description: "AKK terminal-controlled conversation id to inspect."
-    },
-    target: {
-      type: "string",
-      description: "Direct tmux target to inspect, such as codex-work:0.0. Use conversation_id when available."
-    },
-    socketPath: {
-      type: "string"
-    },
-    storeDir: {
-      type: "string"
-    },
-    scrollbackLines: {
-      type: "number"
-    },
-    idleTimeoutMinutes: {
-      type: "number"
-    }
-  }
-};
-
 const sendParameters = {
   type: "object",
   additionalProperties: false,
@@ -496,27 +469,6 @@ export default definePluginEntry({
         if (params.trace === true) {
           args.push("--trace");
         }
-        return args;
-      }
-    });
-
-    registerCliTool(api, {
-      name: "agent_knock_knock_terminal_status",
-      description: "Inspect a terminal-controlled AKK session or tmux target. Returns terminal reachability, current screen excerpt, and Codex approval state without sending input.",
-      parameters: terminalStatusParameters,
-      buildArgs: (params) => {
-        const conversationId = stringValue(params.conversation_id);
-        const target = stringValue(params.target);
-        if (!conversationId && !target) {
-          throw new Error("conversation_id or target is required");
-        }
-        const args = ["terminal-status"];
-        pushOptional(args, "--conversation", conversationId);
-        pushOptional(args, "--target", target);
-        pushOptional(args, "--socket-path", stringValue(params.socketPath));
-        pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
-        pushOptional(args, "--scrollback-lines", numberString(params.scrollbackLines));
-        pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(api.pluginConfig?.idleTimeoutMinutes));
         return args;
       }
     });
