@@ -46,10 +46,10 @@ Natural-language forms:
 - `AKK Codex: <task>`: call `agent_knock_knock_delegate` with `agent="codex"`.
 - `AKK Claude: <task>`: call `agent_knock_knock_delegate` with `agent="claude"`.
 - `AKK Cursor: <task>`: call `agent_knock_knock_delegate` with `agent="cursor"`.
-- `AKK list`, `akk list`, questions such as "what AKK sessions are open", "which Codex sessions are currently running", "tmux Codex sessions", or requests to list active local coding-agent work: call `agent_knock_knock_list`.
+- `AKK list`, `akk list`, questions such as "what AKK sessions are open", "which Codex sessions are currently running", "terminal-controlled Codex sessions", or requests to list active local coding-agent work: call `agent_knock_knock_list`.
 - `AKK status <conversation-id>`: call `agent_knock_knock_status`.
 - `AKK send <conversation-id>: <message>` or follow-up requests for an existing open agent session: call `agent_knock_knock_send`.
-- `AKK cancel <conversation-id>` or requests to stop the current running work without closing the session: call `agent_knock_knock_cancel`. For terminal-controlled sessions, this sends Control-C to the controlled tmux pane.
+- `AKK cancel <conversation-id>` or requests to stop the current running work without closing the session: call `agent_knock_knock_cancel`. For terminal-controlled sessions, this sends Control-C to the controlled terminal pane.
 - `AKK recover <conversation-id>`: call `agent_knock_knock_recover`.
 - `AKK close <conversation-id>`: call `agent_knock_knock_close`.
 - `AKK takeover Codex <session-id>` or requests to take over an active Codex CLI session: call `agent_knock_knock_agent_takeover` with `agent="codex"` and `strategy="terminate_then_resume"`.
@@ -138,16 +138,16 @@ Do not start a replacement task without the user's explicit choice.
 
 Native session takeover is for Codex sessions that were created outside AKK, such as a user-run terminal Codex CLI. It is separate from AKK managed conversation recovery.
 
-Use `agent_knock_knock_list` when the user asks about current active native Codex sessions, tmux-controlled Codex sessions, or which local coding-agent work is currently open. The list result separates:
+Use `agent_knock_knock_list` when the user asks about current active native Codex sessions, terminal-controlled Codex sessions, or which local coding-agent work is currently open. The list result separates:
 
 - `delegated`: AKK-managed tasks.
 - `native`: discovered local native sessions that AKK cannot directly control.
-- `terminal_controlled`: discovered local native sessions in a controllable terminal provider such as tmux.
+- `terminal_controlled`: discovered local native sessions in a controllable terminal provider. The current provider is tmux.
 
 Use `agent_knock_knock_agent_takeover` when the user wants AKK to take over an existing native Codex session. By default this tool is side-effect-free and returns a plan. When the plan is ready and the user explicitly wants AKK to manage the session, call it with `createConversation=true` to create an AKK conversation bound to the native session:
 
 - `terminate_then_resume`: use when the user wants to take over an active native Codex CLI. The first call is side-effect-free. If the result is `requires_confirmation`, explain the exact pid, cwd, and session that would be stopped. Only after explicit user confirmation, call `agent_knock_knock_agent_takeover` again with `strategy="terminate_then_resume"`, `createConversation=true`, `confirmTerminate=true`, and `expectedPid=<confirmed pid>`. AKK will re-scan before terminating and will only stop an exact session match. If Codex does not expose a session id and the user still explicitly confirms a specific pid in the target cwd, you may add `allowCwdOnly=true`; explain that this is higher risk because it relies on pid and cwd rather than a visible session id.
-- `terminal_control`: use when the target Codex CLI is running inside tmux and the user wants AKK to operate the existing TUI without stopping or resuming it. The first call is side-effect-free. If the result is `requires_confirmation`, show the exact tmux target, pid, cwd, and current terminal-control metadata. Only after explicit user confirmation, call again with `strategy="terminal_control"`, `createConversation=true`, `confirmTerminal=true`, and `terminalTarget=<confirmed target>`. Follow-up `AKK send` messages will be typed into the tmux pane. `AKK cancel` sends Control-C to the controlled tmux pane. Before `agent_knock_knock_approve`, call `agent_knock_knock_status`, show the terminal screen excerpt, and ask for explicit approval.
+- `terminal_control`: use when the target Codex CLI is running inside a controllable terminal provider and the user wants AKK to operate the existing TUI without stopping or resuming it. The first call is side-effect-free. If the result is `requires_confirmation`, show the exact terminal target, pid, cwd, and current terminal-control metadata. Only after explicit user confirmation, call again with `strategy="terminal_control"`, `createConversation=true`, `confirmTerminal=true`, and `terminalTarget=<confirmed target>`. Follow-up `AKK send` messages will be typed into the terminal pane. `AKK cancel` sends Control-C to the controlled terminal pane. Before `agent_knock_knock_approve`, call `agent_knock_knock_status`, show the terminal screen excerpt, and ask for explicit approval.
 - `fork`: use when the user wants to avoid stopping the original Codex CLI. First call returns a bounded context package plus `summaryPrompt` and `nextAction`; use that prompt to summarize as OpenClaw, ask the user to confirm, and do not inject raw full rollout history directly. After the user confirms the summary, call `agent_knock_knock_agent_takeover` again with `strategy="fork"`, `createConversation=true`, and `forkSummary=<approved summary>` to create the forked AKK-managed session. Then use the returned `conversation_id` with `AKK send` for follow-up work.
 
 Do not present `fork` as a standalone command or standalone feature. It is a takeover strategy.
@@ -167,7 +167,7 @@ Use structured JSON messages with these types:
 - `error`: runtime, tool, or protocol failure
 - `control`: budget warning or lifecycle control
 
-`cancel` is lifecycle control outside the agent message protocol. It asks ACPX to cooperatively cancel the current in-flight prompt for the existing Codex, Claude, or Cursor session. It does not close the AKK session; use `close` only when the session should no longer be reused.
+`cancel` is lifecycle control outside the agent message protocol. For delegated sessions, it asks ACPX to cooperatively cancel the current in-flight prompt for the existing Codex, Claude, or Cursor session. For terminal-controlled sessions, it sends Control-C to the controlled terminal pane. It does not close the AKK session; use `close` only when the session should no longer be reused.
 
 Only messages with `requires_response=true` consume response rounds.
 

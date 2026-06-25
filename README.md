@@ -117,9 +117,13 @@ AKK Codex: review the current branch and propose a small fix
 AKK Claude: review the latest commit
 AKK Cursor: fix the flaky UI test
 akk list
+akk status <conversation-id>
 akk send <conversation-id>: continue with the smaller implementation
 akk cancel <conversation-id>
+akk recover <conversation-id>
 akk close <conversation-id>
+AKK terminal takeover Codex <native-session-id>
+AKK approve <conversation-id>
 ```
 
 Surfaces that support OpenClaw native commands can use the same workflow through `/akk`:
@@ -154,7 +158,7 @@ Optional default-agent config:
 
 ## Native Codex Takeover
 
-Experimental: AKK can discover and take over Codex CLI sessions that were started outside AKK. This is useful when you started Codex in a terminal, left the machine, and want OpenClaw to continue managing that work from chat.
+Experimental: AKK can list and take over Codex CLI sessions that were started outside AKK. This is useful when you started Codex in a terminal, left the machine, and want OpenClaw to continue managing that work from chat.
 
 List current AKK-managed and local agent work:
 
@@ -166,7 +170,7 @@ AKK list
 
 - `delegated`: AKK-managed background tasks.
 - `native`: local native sessions that AKK can discover but cannot directly control.
-- `terminal_controlled`: local sessions running in a controllable terminal provider such as tmux. These entries include terminal metadata, command capabilities, and concise approval state when a visible approval prompt is detected.
+- `terminal_controlled`: local sessions running in a controllable terminal provider. The current provider is tmux. These entries include terminal metadata, command capabilities, and concise approval state when a visible approval prompt is detected.
 
 Takeover prompts:
 
@@ -180,7 +184,7 @@ AKK approve <conversation-id>
 Strategies:
 
 - `takeover`: stop an active matching Codex CLI after explicit confirmation, then resume it under AKK.
-- `terminal takeover`: attach an active Codex CLI running inside tmux after explicit confirmation. AKK sends follow-ups directly to the tmux pane and can approve the currently visible Codex approval prompt.
+- `terminal takeover`: attach an active Codex CLI running inside a controllable terminal provider after explicit confirmation. AKK sends follow-ups directly to the terminal pane, can send Control-C for cancel, and can approve the currently visible Codex approval prompt.
 - `fork takeover`: keep the original Codex CLI running, ask OpenClaw to summarize bounded source context, then create a new AKK-managed fork from that summary.
 
 For long-running local Codex sessions that you may want OpenClaw to operate from WeChat, run Codex inside tmux. AKK does not require tmux, but tmux enables terminal-control takeover without stopping the original process:

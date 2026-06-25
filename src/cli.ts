@@ -394,7 +394,7 @@ async function runAgentTakeover(options) {
           plan,
           error: {
             code: "terminal_target_unavailable",
-            message: `No matching tmux-controlled Codex process was found for ${terminalTarget}`
+            message: `No matching terminal-controlled Codex process was found for ${terminalTarget}`
           }
         };
       }

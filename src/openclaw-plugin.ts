@@ -269,7 +269,7 @@ const agentTakeoverParameters = {
       type: "string",
       enum: ["terminate_then_resume", "fork", "terminal_control"],
       description:
-        "Takeover strategy. terminate_then_resume returns a confirmation plan to stop the exact active CLI before resume. terminal_control attaches to an existing tmux-controlled CLI after confirmation. fork returns bounded context for OpenClaw summary confirmation."
+        "Takeover strategy. terminate_then_resume returns a confirmation plan to stop the exact active CLI before resume. terminal_control attaches to an existing controllable terminal session after confirmation. fork returns bounded context for OpenClaw summary confirmation."
     },
     createConversation: {
       type: "boolean",
@@ -294,7 +294,7 @@ const agentTakeoverParameters = {
     confirmTerminal: {
       type: "boolean",
       description:
-        "Only for strategy=terminal_control. When true, AKK attaches to the exact terminalTarget after the user confirms that tmux pane."
+        "Only for strategy=terminal_control. When true, AKK attaches to the exact terminalTarget after the user confirms that terminal pane."
     },
     terminalTarget: {
       type: "string",
@@ -412,7 +412,7 @@ export default definePluginEntry({
 
     registerCliTool(api, {
       name: "agent_knock_knock_list",
-      description: "List Agent Knock Knock work and local active coding-agent sessions. Use this for AKK list, akk list, current AKK tasks, native Codex active/session questions, or asking which Codex/Claude/Cursor sessions are open. The result separates delegated AKK tasks, native active processes, and terminal-controlled sessions; terminal-controlled entries include approval state when available.",
+      description: "List Agent Knock Knock work and local active coding-agent sessions. Use this for AKK list, akk list, current AKK tasks, native Codex active work, terminal-controlled Codex work, or asking which Codex/Claude/Cursor sessions are open. The result separates delegated AKK tasks, native active processes, and terminal-controlled sessions; terminal-controlled entries include approval state when available.",
       parameters: listParameters,
       buildArgs: (params) => {
         const args = ["list"];
@@ -477,7 +477,7 @@ export default definePluginEntry({
     registerCliTool(api, {
       name: "agent_knock_knock_approve",
       description:
-        "Approve the current visible terminal approval prompt for an AKK terminal-controlled session. Use only after showing the user the detected prompt and receiving explicit approval. This sends the primary approve shortcut to the tmux pane.",
+        "Approve the current visible terminal approval prompt for an AKK terminal-controlled session. Use only after showing the user the detected prompt and receiving explicit approval. This sends the primary approve shortcut to the controlled terminal pane.",
       parameters: approveParameters,
       buildArgs: (params) => {
         const args = ["approve", "--conversation", requiredString(params.conversation_id, "conversation_id")];
@@ -488,7 +488,7 @@ export default definePluginEntry({
 
     registerCliTool(api, {
       name: "agent_knock_knock_cancel",
-      description: "Request cancellation for an existing Agent Knock Knock Codex, Claude, or Cursor session. Delegated sessions use cooperative ACPX cancellation. Terminal-controlled sessions send Control-C to the controlled tmux pane. This does not close the AKK session; use close when the session should no longer be reused.",
+      description: "Request cancellation for an existing Agent Knock Knock Codex, Claude, or Cursor session. Delegated sessions use cooperative ACPX cancellation. Terminal-controlled sessions send Control-C to the controlled terminal pane. This does not close the AKK session; use close when the session should no longer be reused.",
       parameters: cancelParameters,
       buildArgs: (params) => {
         const args = ["cancel", "--conversation", requiredString(params.conversation_id, "conversation_id")];
