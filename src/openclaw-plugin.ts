@@ -119,7 +119,7 @@ const listParameters = {
     },
     noApprovalScan: {
       type: "boolean",
-      description: "When true, list terminal-controlled sessions without capturing panes to detect approval prompts."
+      description: "When true, list terminal-controlled sessions without scanning terminal panes for approval prompts."
     },
     terminalDebug: {
       type: "boolean",
@@ -166,7 +166,9 @@ const sendParameters = {
   required: ["conversation_id", "message"],
   properties: {
     conversation_id: {
-      type: "string"
+      type: "string",
+      description:
+        "AKK-managed conversation id, or a terminal-controlled id from AKK list such as terminal:tmux:codex-work:0.1:33389."
     },
     message: {
       type: "string"
@@ -196,7 +198,9 @@ const cancelParameters = {
   required: ["conversation_id"],
   properties: {
     conversation_id: {
-      type: "string"
+      type: "string",
+      description:
+        "AKK-managed conversation id, or a terminal-controlled id from AKK list such as terminal:tmux:codex-work:0.1:33389."
     },
     allProxy: {
       type: "string"
@@ -442,7 +446,7 @@ export default definePluginEntry({
 
     registerCliTool(api, {
       name: "agent_knock_knock_status",
-      description: "Get detailed status for one Agent Knock Knock coding-agent task.",
+      description: "Get detailed status for one Agent Knock Knock coding-agent task or terminal-controlled session. For terminal-controlled ids from AKK list, this is the only read-result/screen-inspection command: AKK captures the terminal pane internally and returns terminal_screen.",
       parameters: statusParameters,
       buildArgs: (params) => {
         const args = ["status", "--conversation", requiredString(params.conversation_id, "conversation_id")];

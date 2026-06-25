@@ -68,7 +68,7 @@ test("enrichActiveProcessesWithTerminalControl attaches tmux metadata by pid anc
 
   const enriched = await enrichActiveProcessesWithTerminalControl(processes, provider);
   assert.equal(enriched[0].terminalControl?.target, "codex-work:0.0");
-  assert.deepEqual(enriched[0].terminalControl?.capabilities, ["capture_screen", "send_keys", "terminal_approval"]);
+  assert.deepEqual(enriched[0].terminalControl?.capabilities, ["screen_status", "send_keys", "terminal_approval"]);
 });
 
 test("tmux provider falls back to explicit socket paths", async () => {

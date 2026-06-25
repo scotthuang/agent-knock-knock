@@ -668,7 +668,7 @@ function terminalControlFromTakeover(nativeTakeover): TerminalControlRef | undef
     currentCommand: stringValue(terminalControl.currentCommand),
     currentPath: stringValue(terminalControl.currentPath),
     socketPath: stringValue(terminalControl.socketPath),
-    capabilities: ["capture_screen", "send_keys", "terminal_approval"]
+    capabilities: ["screen_status", "send_keys", "terminal_approval"]
   };
 }
 
@@ -1488,8 +1488,7 @@ function delegatedListEntry(task) {
       cancel: isWaitingForAgent(task.status),
       close: task.status !== "closed",
       status: true,
-      approve: false,
-      capture_screen: false
+      approve: false
     }
   };
 }
@@ -1546,7 +1545,6 @@ async function terminalControlledListEntry(session: ActiveCodexProcess, activeSe
     approval_state: approvalState,
     commands: {
       send: true,
-      capture_screen: true,
       approve: approvalState.approvable === true,
       status: true,
       cancel: true,
@@ -1760,6 +1758,17 @@ async function terminalStatusForControl(terminalControl, options) {
 async function runSend(options) {
   const messageBody = required(options.message ?? options.request, "--message is required");
   cleanupIdleConversations(storeDirFromOptions(options), options);
+  const terminalConversation = await resolveTerminalConversationFromOptions(options);
+  if (terminalConversation) {
+    await runTerminalConversationSend({
+      options,
+      conversationId: terminalConversation.conversationId,
+      messageBody,
+      terminalControl: terminalConversation.terminalControl
+    });
+    return;
+  }
+
   const { conversation, statePath, logPath } = loadConversationFromOptions(options);
   if (["done", "failed", "closed", "cancelled"].includes(conversation.status)) {
     throw new Error(`cannot send to ${conversation.conversation_id}; conversation is ${conversation.status}`);
@@ -2227,6 +2236,31 @@ async function runTerminalConversationApprove({ options, conversationId, termina
   });
 }
 
+async function runTerminalConversationSend({ options, conversationId, messageBody, terminalControl }) {
+  const provider = createTerminalControlProvider(options);
+  await provider.sendText(terminalControl.target, String(messageBody), {
+    socketPath: terminalControl.socketPath
+  });
+  await provider.sendKeys(terminalControl.target, ["Enter"], {
+    socketPath: terminalControl.socketPath
+  });
+  runtimeLog("info", "terminal_message_send", {
+    conversation_id: conversationId,
+    terminal_target: terminalControl.target,
+    message: textSummary(messageBody)
+  });
+
+  printJson({
+    conversation_id: conversationId,
+    source: "terminal_control",
+    delivered: true,
+    terminal_control: terminalControl,
+    message: {
+      body: messageBody
+    }
+  });
+}
+
 async function runTerminalControlSend({
   options,
   conversation,
@@ -2677,6 +2711,16 @@ function markConversationNeedsRecovery({ conversation, statePath, logPath, execu
 
 async function runCancel(options) {
   cleanupIdleConversations(storeDirFromOptions(options), options);
+  const terminalConversation = await resolveTerminalConversationFromOptions(options);
+  if (terminalConversation) {
+    await runTerminalConversationCancel({
+      options,
+      conversationId: terminalConversation.conversationId,
+      terminalControl: terminalConversation.terminalControl
+    });
+    return;
+  }
+
   const { conversation, statePath, logPath } = loadConversationFromOptions(options);
   if (["closed", "cancelled"].includes(conversation.status)) {
     throw new Error(`cannot cancel ${conversation.conversation_id}; conversation is ${conversation.status}`);
@@ -2755,6 +2799,26 @@ async function runCancel(options) {
     executor,
     acpx_command: ["acpx", acpxCommand, "cancel", "-s", executor.session],
     budget: budgetAction(nextConversation)
+  });
+}
+
+async function runTerminalConversationCancel({ options, conversationId, terminalControl }) {
+  const provider = createTerminalControlProvider(options);
+  await provider.sendKeys(terminalControl.target, ["C-c"], {
+    socketPath: terminalControl.socketPath
+  });
+  runtimeLog("info", "terminal_cancel_requested", {
+    conversation_id: conversationId,
+    terminal_target: terminalControl.target,
+    key: "C-c"
+  });
+
+  printJson({
+    conversation_id: conversationId,
+    source: "terminal_control",
+    cancel_requested: true,
+    terminal_control: terminalControl,
+    key: "C-c"
   });
 }
 

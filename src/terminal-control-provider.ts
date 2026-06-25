@@ -278,7 +278,7 @@ export function terminalRefFromPane(pane: TerminalPane): TerminalControlRef {
     panePid: pane.panePid,
     currentCommand: pane.currentCommand,
     currentPath: pane.currentPath,
-    capabilities: ["capture_screen", "send_keys", "terminal_approval"]
+    capabilities: ["screen_status", "send_keys", "terminal_approval"]
   };
 }
 

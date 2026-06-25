@@ -292,6 +292,68 @@ test("approve supports terminal-controlled conversation ids without AKK state", 
   }
 });
 
+test("send and cancel support terminal-controlled conversation ids without AKK state", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-send-"));
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "Codex is ready\n");
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `codex-work\t0\t1\t33389\tnode\t${workspace}\n`
+    );
+
+    const conversationId = "terminal:tmux:codex-work:0.1:33389";
+    const sent = runAgentCli([
+      "send",
+      "--conversation",
+      conversationId,
+      "--message",
+      "你好"
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    const sentParsed = JSON.parse(sent.stdout);
+    assert.equal(sentParsed.conversation_id, conversationId);
+    assert.equal(sentParsed.source, "terminal_control");
+    assert.equal(sentParsed.delivered, true);
+    assert.equal(sentParsed.terminal_control.target, "codex-work:0.1");
+
+    const calls = readJsonLines(tmuxCallsPath);
+    assert.deepEqual(calls.at(-2).args, ["send-keys", "-t", "codex-work:0.1", "-l", "你好"]);
+    assert.deepEqual(calls.at(-1).args, ["send-keys", "-t", "codex-work:0.1", "Enter"]);
+
+    const cancelled = runAgentCli([
+      "cancel",
+      "--conversation",
+      conversationId
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+
+    assert.equal(cancelled.status, 0, cancelled.stderr || cancelled.stdout);
+    const cancelledParsed = JSON.parse(cancelled.stdout);
+    assert.equal(cancelledParsed.conversation_id, conversationId);
+    assert.equal(cancelledParsed.source, "terminal_control");
+    assert.equal(cancelledParsed.cancel_requested, true);
+    assert.equal(cancelledParsed.key, "C-c");
+
+    const callsAfterCancel = readJsonLines(tmuxCallsPath);
+    assert.deepEqual(callsAfterCancel.at(-1).args, ["send-keys", "-t", "codex-work:0.1", "C-c"]);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 
 test("agent takeover terminate_then_resume returns a confirmation plan for an exact active session", () => {
   const result = runAgentCli([

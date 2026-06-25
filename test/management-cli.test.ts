@@ -233,8 +233,7 @@ test("list groups delegated native and terminal-controlled sessions", () => {
       cancel: true,
       close: true,
       status: true,
-      approve: false,
-      capture_screen: false
+      approve: false
     });
     assert.equal(listed.native.length, 1);
     assert.equal(listed.native[0].id, "native:codex:1234");
@@ -248,6 +247,8 @@ test("list groups delegated native and terminal-controlled sessions", () => {
     assert.equal(listed.terminal_controlled[0].commands.send, true);
     assert.equal(listed.terminal_controlled[0].commands.approve, true);
     assert.equal(listed.terminal_controlled[0].commands.cancel, true);
+    assert.equal(listed.terminal_controlled[0].commands.status, true);
+    assert.equal("capture_screen" in listed.terminal_controlled[0].commands, false);
     assert.equal("detach" in listed.terminal_controlled[0].commands, false);
     assert.equal(listed.native_scan.native_count, 1);
     assert.equal(listed.native_scan.terminal_controlled_count, 1);

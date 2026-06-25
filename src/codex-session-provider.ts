@@ -66,7 +66,7 @@ export interface TerminalControlRef {
   panePid: number;
   currentCommand?: string;
   currentPath?: string;
-  capabilities: ("capture_screen" | "send_keys" | "terminal_approval")[];
+  capabilities: ("screen_status" | "send_keys" | "terminal_approval")[];
 }
 
 export interface RolloutMessageExcerpt {
