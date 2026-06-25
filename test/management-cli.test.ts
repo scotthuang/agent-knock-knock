@@ -751,7 +751,7 @@ test("monitor marks waiting conversations stalled when the executor process is g
   }
 });
 
-test("monitor stalled notification uses default gateway credentials when no token is stored", () => {
+test("monitor notifies the original OpenClaw channel when a conversation first stalls", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-monitor-notify-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -782,14 +782,14 @@ console.log(JSON.stringify({ ok: true }));
       "--store-dir",
       storeDir,
       "--openclaw-session",
-      "agent:main:main"
+      "agent:channel:original"
     ]);
-    const state = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
+    const initialState = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
     fs.writeFileSync(created.paths.statePath, `${JSON.stringify({
-      ...state,
+      ...initialState,
       gateway_url: "ws://127.0.0.1:18789",
       gateway_method: "agent-knock-knock.callback",
-      gateway_session: "agent:main:main",
+      gateway_session: "agent:channel:original",
       openclaw_bin: fakeOpenClaw
     }, null, 2)}\n`, "utf8");
     fs.writeFileSync(
@@ -819,10 +819,30 @@ console.log(JSON.stringify({ ok: true }));
     assert.equal(gatewayArgs.includes("--url"), false);
     assert.equal(gatewayArgs.includes("--token"), false);
     const params = JSON.parse(gatewayArgs[gatewayArgs.indexOf("--params") + 1]);
-    assert.equal(params.sessionKey, "agent:main:main");
+    assert.equal(params.sessionKey, "agent:channel:original");
     assert.equal(params.message.type, "error");
+    assert.equal(params.message.requires_response, false);
     assert.match(params.message.body, /executor process 999999 exited before callback/);
-    assert.match(params.message.body, /stream disconnected before completion/);
+
+    const stalledState = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
+    assert.equal(stalledState.status, "stalled");
+    assert.match(stalledState.stalled_reason, /executor process 999999 exited before callback/);
+    assert.equal(typeof stalledState.stalled_notification_sent_at, "string");
+    assert.equal(stalledState.stalled_notification_message_id, params.message.id);
+
+    fs.rmSync(gatewayCallPath, { force: true });
+    runCli([
+      "monitor",
+      "--state",
+      created.paths.statePath,
+      "--pid",
+      "999999",
+      "--poll-interval-ms",
+      "50",
+      "--agent-timeout-minutes",
+      "60"
+    ]);
+    assert.equal(fs.existsSync(gatewayCallPath), false);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
