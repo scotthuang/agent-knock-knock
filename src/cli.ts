@@ -1625,8 +1625,7 @@ async function resolveTerminalConversationFromOptions(options): Promise<{ conver
   const panes = await provider.listPanes();
   const pane = panes.find((candidate) =>
     candidate.kind === parsed.kind &&
-    candidate.target === parsed.target &&
-    candidate.panePid === parsed.pid
+    candidate.target === parsed.target
   );
   if (!pane) {
     throw new Error(`terminal-controlled session ${parsed.conversationId} is no longer available`);

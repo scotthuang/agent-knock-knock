@@ -354,6 +354,57 @@ test("send and cancel support terminal-controlled conversation ids without AKK s
   }
 });
 
+test("terminal-controlled conversation ids use Codex pid, not tmux pane pid", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-pid-"));
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "Codex is ready\n");
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `codex-work\t0\t0\t999\tnode\t${workspace}\n`
+    );
+
+    const conversationId = "terminal:tmux:codex-work:0.0:33389";
+    const sent = runAgentCli([
+      "send",
+      "--conversation",
+      conversationId,
+      "--message",
+      "继续",
+      "--processes-json",
+      JSON.stringify([{
+        pid: 33389,
+        ppid: 999,
+        command: "node /Users/scotthuang/.npm-global/bin/codex",
+        cwd: workspace
+      }]),
+      "--terminals-json",
+      JSON.stringify([tmuxPane({
+        target: "codex-work:0.0",
+        panePid: 999,
+        currentPath: workspace
+      })])
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    const sentParsed = JSON.parse(sent.stdout);
+    assert.equal(sentParsed.conversation_id, conversationId);
+    assert.equal(sentParsed.terminal_control.panePid, 999);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 
 test("agent takeover terminate_then_resume returns a confirmation plan for an exact active session", () => {
   const result = runAgentCli([
