@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.13 - 2026-06-25
+
+### Fixed
+
+- Allowed terminal-controlled `AKK status` and `AKK approve` to use `terminal_controlled` ids from `AKK list` directly without requiring an AKK delegated state file.
+- Revalidated the current tmux target and pane pid before reading the terminal screen or sending the approval key.
+
 ## 0.2.11 - 2026-06-25
 
 ### Added
