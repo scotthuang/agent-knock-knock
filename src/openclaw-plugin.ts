@@ -510,7 +510,7 @@ export default definePluginEntry({
 
     registerCliTool(api, {
       name: "agent_knock_knock_cancel",
-      description: "Request cooperative cancellation of the current in-flight prompt for an existing Agent Knock Knock Codex, Claude, or Cursor session. This does not close the AKK session; use close when the session should no longer be reused.",
+      description: "Request cancellation for an existing Agent Knock Knock Codex, Claude, or Cursor session. Delegated sessions use cooperative ACPX cancellation. Terminal-controlled sessions send Control-C to the controlled tmux pane. This does not close the AKK session; use close when the session should no longer be reused.",
       parameters: cancelParameters,
       buildArgs: (params) => {
         const args = ["cancel", "--conversation", requiredString(params.conversation_id, "conversation_id")];

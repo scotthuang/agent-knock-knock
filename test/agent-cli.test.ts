@@ -307,9 +307,28 @@ test("agent takeover terminal_control attaches tmux pane and send writes to the 
     const sentParsed = JSON.parse(sent.stdout);
     assert.equal(sentParsed.delivered, true);
     assert.equal(sentParsed.terminal_control.target, "codex-work:0.0");
-    const calls = readJsonLines(tmuxCallsPath);
+    let calls = readJsonLines(tmuxCallsPath);
     assert.deepEqual(calls.at(-2).args, ["send-keys", "-t", "codex-work:0.0", "-l", "继续当前任务"]);
     assert.deepEqual(calls.at(-1).args, ["send-keys", "-t", "codex-work:0.0", "Enter"]);
+
+    const cancelled = runAgentCli([
+      "cancel",
+      "--conversation",
+      parsed.conversation.conversation_id,
+      "--store-dir",
+      storeDir
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+
+    assert.equal(cancelled.status, 0, cancelled.stderr || cancelled.stdout);
+    const cancelledParsed = JSON.parse(cancelled.stdout);
+    assert.equal(cancelledParsed.cancel_requested, true);
+    assert.equal(cancelledParsed.terminal_control.target, "codex-work:0.0");
+    assert.equal(cancelledParsed.key, "C-c");
+    assert.equal(cancelledParsed.conversation.status, sentParsed.conversation.status);
+    calls = readJsonLines(tmuxCallsPath);
+    assert.deepEqual(calls.at(-1).args, ["send-keys", "-t", "codex-work:0.0", "C-c"]);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

@@ -148,7 +148,7 @@ async function runCommand(commandName, options) {
   } else if (commandName === "approve") {
     await runApprove(options);
   } else if (commandName === "cancel") {
-    runCancel(options);
+    await runCancel(options);
   } else if (commandName === "recover") {
     runRecover(options);
   } else if (commandName === "close") {
@@ -1618,7 +1618,7 @@ async function terminalControlledListEntry(session: ActiveCodexProcess, activeSe
       capture_screen: true,
       approve: approvalState.approvable === true,
       status: true,
-      cancel: false,
+      cancel: true,
       close: false
     }
   };
@@ -2600,11 +2600,26 @@ function markConversationNeedsRecovery({ conversation, statePath, logPath, execu
   };
 }
 
-function runCancel(options) {
+async function runCancel(options) {
   cleanupIdleConversations(storeDirFromOptions(options), options);
   const { conversation, statePath, logPath } = loadConversationFromOptions(options);
   if (["closed", "cancelled"].includes(conversation.status)) {
     throw new Error(`cannot cancel ${conversation.conversation_id}; conversation is ${conversation.status}`);
+  }
+
+  const nativeTakeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const terminalControl = terminalControlFromTakeover(nativeTakeover);
+  if (terminalControl) {
+    await runTerminalControlCancel({
+      options,
+      conversation,
+      statePath,
+      logPath,
+      terminalControl
+    });
+    return;
   }
 
   const executor = executorForConversation(conversation);
@@ -2664,6 +2679,42 @@ function runCancel(options) {
     cancel_requested: true,
     executor,
     acpx_command: ["acpx", acpxCommand, "cancel", "-s", executor.session],
+    budget: budgetAction(nextConversation)
+  });
+}
+
+async function runTerminalControlCancel({ options, conversation, statePath, logPath, terminalControl }) {
+  const provider = createTerminalControlProvider(options);
+  await provider.sendKeys(terminalControl.target, ["C-c"], {
+    socketPath: terminalControl.socketPath
+  });
+
+  const now = new Date().toISOString();
+  appendEvent(logPath, {
+    ts: now,
+    conversation_id: conversation.conversation_id,
+    event: "terminal_cancel_requested",
+    terminal_control: terminalControl,
+    key: "C-c"
+  });
+  runtimeLog("info", "terminal_cancel_requested", {
+    conversation_id: conversation.conversation_id,
+    terminal_target: terminalControl.target,
+    key: "C-c"
+  });
+
+  const nextConversation = {
+    ...conversation,
+    terminal_cancel_requested_at: now,
+    updated_at: now
+  };
+  saveState(statePath, nextConversation);
+
+  printJson({
+    conversation: nextConversation,
+    cancel_requested: true,
+    terminal_control: terminalControl,
+    key: "C-c",
     budget: budgetAction(nextConversation)
   });
 }

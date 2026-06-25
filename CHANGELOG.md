@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Added terminal-controlled `AKK cancel` support by sending Control-C to the controlled tmux pane.
+
 ## 0.2.10 - 2026-06-25
 
 ### Fixed

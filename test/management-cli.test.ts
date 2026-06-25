@@ -247,7 +247,7 @@ test("list groups delegated native and terminal-controlled sessions", () => {
     assert.equal(listed.terminal_controlled[0].approval_state.approvable, true);
     assert.equal(listed.terminal_controlled[0].commands.send, true);
     assert.equal(listed.terminal_controlled[0].commands.approve, true);
-    assert.equal(listed.terminal_controlled[0].commands.cancel, false);
+    assert.equal(listed.terminal_controlled[0].commands.cancel, true);
     assert.equal("detach" in listed.terminal_controlled[0].commands, false);
     assert.equal(listed.native_scan.native_count, 1);
     assert.equal(listed.native_scan.terminal_controlled_count, 1);
