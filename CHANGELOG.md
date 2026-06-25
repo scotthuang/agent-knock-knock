@@ -5,6 +5,7 @@
 ### Added
 
 - Added terminal-controlled `AKK cancel` support by sending Control-C to the controlled tmux pane.
+- Added structured terminal reachability, screen, and approval state to `AKK status` for terminal-controlled sessions.
 
 ## 0.2.10 - 2026-06-25
 

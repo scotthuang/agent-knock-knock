@@ -1706,20 +1706,8 @@ async function runStatus(options) {
   );
   if (terminalControl) {
     result.terminal_control = terminalControl;
-    try {
-      const screen = await createTerminalControlProvider(options).capture(terminalControl.target, {
-        scrollbackLines: Number(options.scrollbackLines ?? 120),
-        socketPath: terminalControl.socketPath
-      });
-      result.terminal_screen = {
-        excerpt: screenExcerpt(screen),
-        approval: detectCodexApprovalPrompt(screen)
-      };
-    } catch (error) {
-      result.terminal_screen = {
-        error: error instanceof Error ? error.message : String(error)
-      };
-    }
+    result.terminal_status = await terminalStatusForControl(terminalControl, options);
+    result.terminal_screen = result.terminal_status.screen;
   }
   printJson(result);
   runtimeLog("info", "task_status_read", {
@@ -1730,6 +1718,48 @@ async function runStatus(options) {
     recent_event_count: Math.min(events.length, 10),
     trace: Boolean(options.trace)
   });
+}
+
+async function terminalStatusForControl(terminalControl, options) {
+  try {
+    const screen = await createTerminalControlProvider(options).capture(terminalControl.target, {
+      scrollbackLines: Number(options.scrollbackLines ?? 120),
+      socketPath: terminalControl.socketPath
+    });
+    const approval = detectCodexApprovalPrompt(screen);
+    const blocked = isCodexApprovalPromptVisible(screen);
+    return {
+      provider: terminalControl.kind,
+      target: terminalControl.target,
+      reachable: true,
+      approval_state: {
+        scanned: true,
+        blocked,
+        approvable: approval.approvable,
+        key: approval.approvable ? approval.key : undefined,
+        label: approval.approvable ? approval.label : undefined,
+        reason: approval.approvable ? undefined : approval.reason
+      },
+      screen: {
+        excerpt: screenExcerpt(screen),
+        approval
+      }
+    };
+  } catch (error) {
+    return {
+      provider: terminalControl.kind,
+      target: terminalControl.target,
+      reachable: false,
+      approval_state: {
+        scanned: false,
+        blocked: false,
+        approvable: false
+      },
+      screen: {
+        error: error instanceof Error ? error.message : String(error)
+      }
+    };
+  }
 }
 
 async function runSend(options) {

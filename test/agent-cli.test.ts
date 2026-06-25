@@ -400,6 +400,10 @@ test("approve sends y only when the terminal screen shows a primary Codex approv
     const statusParsed = JSON.parse(status.stdout);
     assert.match(statusParsed.terminal_screen.excerpt, /Would you like to run the following command/);
     assert.equal(statusParsed.terminal_screen.approval.approvable, true);
+    assert.equal(statusParsed.terminal_status.reachable, true);
+    assert.equal(statusParsed.terminal_status.target, "codex-work:0.0");
+    assert.equal(statusParsed.terminal_status.approval_state.blocked, true);
+    assert.equal(statusParsed.terminal_status.approval_state.approvable, true);
 
     const approved = runAgentCli([
       "approve",
