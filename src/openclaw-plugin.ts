@@ -251,28 +251,6 @@ const closeParameters = {
   }
 };
 
-const agentDiscoverParameters = {
-  type: "object",
-  additionalProperties: false,
-  required: ["agent", "scope"],
-  properties: {
-    agent: {
-      type: "string",
-      enum: ["codex"],
-      description: "Local coding agent session provider to inspect. Currently supports Codex."
-    },
-    scope: {
-      type: "string",
-      enum: ["capabilities", "sessions", "active"],
-      description: "Discovery scope: provider capabilities, historical sessions, or active local CLI processes."
-    },
-    codexHome: {
-      type: "string",
-      description: "Optional Codex home directory. Defaults to ~/.codex."
-    }
-  }
-};
-
 const agentTakeoverParameters = {
   type: "object",
   additionalProperties: false,
@@ -536,25 +514,6 @@ export default definePluginEntry({
         const args = ["close", "--conversation", requiredString(params.conversation_id, "conversation_id")];
         pushOptional(args, "--reason", stringValue(params.reason));
         pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
-        return args;
-      }
-    });
-
-    registerCliTool(api, {
-      name: "agent_knock_knock_agent_discover",
-      description:
-        "Discover native local coding-agent sessions managed outside AKK. Use this to inspect Codex provider capabilities, historical Codex sessions, or active Codex CLI processes before taking over an existing local session.",
-      parameters: agentDiscoverParameters,
-      buildArgs: (params) => {
-        const args = [
-          "agent",
-          "discover",
-          "--agent",
-          requiredString(params.agent, "agent"),
-          "--scope",
-          requiredString(params.scope, "scope")
-        ];
-        pushOptional(args, "--codex-home", stringValue(params.codexHome) ?? stringValue(api.pluginConfig?.codexHome));
         return args;
       }
     });

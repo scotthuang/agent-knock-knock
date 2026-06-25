@@ -7,6 +7,10 @@
 - Added terminal-controlled `AKK cancel` support by sending Control-C to the controlled tmux pane.
 - Added structured terminal reachability, screen, and approval state to `AKK status` for terminal-controlled sessions.
 
+### Removed
+
+- Removed the public `agent discover` CLI path and `agent_knock_knock_agent_discover` OpenClaw tool; use `AKK list` for active/local session visibility.
+
 ## 0.2.10 - 2026-06-25
 
 ### Fixed

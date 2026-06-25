@@ -259,49 +259,12 @@ function runDoctor(options) {
 }
 
 async function runAgent(options) {
-  const agentCommand = required(options.agentCommand, "agent subcommand is required: discover or takeover");
-  if (agentCommand === "discover") {
-    printJson(await runAgentDiscover(options));
-    return;
-  }
+  const agentCommand = required(options.agentCommand, "agent subcommand is required: takeover");
   if (agentCommand === "takeover") {
     printJson(await runAgentTakeover(options));
     return;
   }
   throw new Error(`unsupported agent subcommand: ${agentCommand}`);
-}
-
-async function runAgentDiscover(options) {
-  const agent = required(options.agent, "--agent is required");
-  const scope = required(options.scope, "--scope is required");
-  const provider = createAgentSessionProvider(agent, options);
-  const capabilities = await provider.getCapabilities();
-
-  if (scope === "capabilities") {
-    return {
-      agent,
-      scope,
-      capabilities
-    };
-  }
-  if (scope === "sessions") {
-    return {
-      agent,
-      scope,
-      capabilities,
-      sessions: await provider.listHistoricalSessions()
-    };
-  }
-  if (scope === "active") {
-    return {
-      agent,
-      scope,
-      capabilities,
-      active: await listActiveSessionsWithTerminalControl(provider, options)
-    };
-  }
-
-  throw new Error(`unsupported discover scope: ${scope}`);
 }
 
 async function runAgentTakeover(options) {
@@ -4550,7 +4513,6 @@ function usage() {
   agent-knock-knock close --conversation <id> [--reason <text>]
   agent-knock-knock install-openclaw [--openclaw-bin <path>] [--skill-path <path>] [--no-restart]
   agent-knock-knock doctor
-  agent-knock-knock agent discover --agent codex --scope capabilities|sessions|active
   agent-knock-knock agent takeover --agent codex --session-id <id> --strategy safe_resume|terminate_then_resume|terminal_control|fork [--create-conversation]
   agent-knock-knock callback --state <file> --message-json <json> [--record-only]
   agent-knock-knock transcript --log <file> [--include-raw]

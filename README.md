@@ -160,7 +160,6 @@ List current AKK-managed and local agent work:
 
 ```text
 AKK list
-AKK Codex active
 ```
 
 `AKK list` returns separate groups for:
@@ -168,13 +167,6 @@ AKK Codex active
 - `delegated`: AKK-managed background tasks.
 - `native`: local native sessions that AKK can discover but cannot directly control.
 - `terminal_controlled`: local sessions running in a controllable terminal provider such as tmux. These entries include terminal metadata, command capabilities, and concise approval state when a visible approval prompt is detected.
-
-Lower-level discovery prompts remain available for historical session and capability inspection:
-
-```text
-AKK Codex sessions
-AKK Codex capabilities
-```
 
 Takeover prompts:
 

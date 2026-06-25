@@ -5,7 +5,7 @@ description: Delegate OpenClaw tasks to local Codex, Claude Code, and Cursor age
 
 # Agent Knock Knock
 
-Use this skill when the user says `AKK`, `akk`, `Agent Knock Knock`, asks OpenClaw to delegate coding work to Codex, Claude, or Cursor, asks what agent tasks are running, sends a follow-up to an agent task, discovers existing local coding-agent sessions, takes over an existing native Codex session, recovers an unavailable agent session, cancels a running agent task, or closes an agent task.
+Use this skill when the user says `AKK`, `akk`, `Agent Knock Knock`, asks OpenClaw to delegate coding work to Codex, Claude, or Cursor, asks what agent tasks are running, sends a follow-up to an agent task, lists existing local coding-agent sessions, takes over an existing native Codex session, recovers an unavailable agent session, cancels a running agent task, or closes an agent task.
 
 Treat `AKK` and `akk` the same way.
 
@@ -144,8 +144,6 @@ Use `agent_knock_knock_list` when the user asks about current active native Code
 - `delegated`: AKK-managed tasks.
 - `native`: discovered local native sessions that AKK cannot directly control.
 - `terminal_controlled`: discovered local native sessions in a controllable terminal provider such as tmux.
-
-Do not route user-facing active/session/capability listing requests to `agent_knock_knock_agent_discover`. Prefer `agent_knock_knock_list` for current work and `agent_knock_knock_agent_takeover` for explicit takeover requests. Keep `agent_knock_knock_agent_discover` as a lower-level compatibility tool only when another workflow explicitly requires its raw historical Codex store inspection.
 
 Use `agent_knock_knock_agent_takeover` when the user wants AKK to take over an existing native Codex session. By default this tool is side-effect-free and returns a plan. When the plan is ready and the user explicitly wants AKK to manage the session, call it with `createConversation=true` to create an AKK conversation bound to the native session:
 
