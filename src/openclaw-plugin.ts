@@ -461,7 +461,7 @@ export default definePluginEntry({
 
     registerCliTool(api, {
       name: "agent_knock_knock_send",
-      description: "Send a follow-up message to an existing open Agent Knock Knock coding-agent session. Use this for AKK follow-up requests such as sending another instruction to an idle, waiting, or running Codex, Claude, or Cursor session.",
+      description: "Send a follow-up message to an existing open Agent Knock Knock coding-agent session or terminal-controlled session. This is an asynchronous handoff: after the message is accepted, end the OpenClaw turn and wait for an Agent Knock Knock callback or a later explicit status request. Do not poll terminal output or wait for the coding agent's final result in the same OpenClaw turn.",
       parameters: sendParameters,
       buildArgs: (params) => {
         const args = [
@@ -797,11 +797,22 @@ function formatStatusCommandResult(result) {
 
 function formatSendCommandResult(result) {
   const conversation = result.conversation ?? {};
-  return [
+  const conversationId = conversation.conversation_id ?? result.conversation_id ?? "unknown";
+  const status = conversation.status ?? result.status ?? "unknown";
+  const nextAction = isRecord(result.openclaw_next_action) ? result.openclaw_next_action : undefined;
+  const lines = [
     "AKK follow-up sent.",
-    `conversation: ${conversation.conversation_id ?? "unknown"}`,
-    `status: ${conversation.status ?? "unknown"}`,
-    `launched: ${result.launched === true ? "yes" : "no"}`
+    `conversation: ${conversationId}`,
+    `status: ${status}`
+  ];
+  if (result.source) {
+    lines.push(`source: ${result.source}`);
+  }
+  return [
+    ...lines,
+    nextAction?.action === "yield"
+      ? "next: yield now and wait for the AKK callback or an explicit status request."
+      : `launched: ${result.launched === true ? "yes" : "no"}`
   ].join("\n");
 }
 

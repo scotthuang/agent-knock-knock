@@ -2018,11 +2018,17 @@ async function runSend(options) {
       message,
       delivered: true,
       background: true,
+      status: "async_pending",
       pid: child.pid ?? null,
       monitor_pid: monitor.pid ?? null,
       output_path: outputPath,
       executor,
-      budget: budgetAction(nextConversation)
+      budget: budgetAction(nextConversation),
+      openclaw_next_action: openClawYieldNextAction({
+        conversationId: deliveredConversation.conversation_id,
+        source: "executor_background",
+        callbackExpected: Boolean(deliveredConversation.callback_command || deliveredConversation.gateway_method)
+      })
     });
     return;
   }
@@ -2253,10 +2259,18 @@ async function runTerminalConversationSend({ options, conversationId, messageBod
     conversation_id: conversationId,
     source: "terminal_control",
     delivered: true,
+    status: "async_pending",
+    background: true,
+    callback_expected: false,
     terminal_control: terminalControl,
     message: {
       body: messageBody
-    }
+    },
+    openclaw_next_action: openClawYieldNextAction({
+      conversationId,
+      source: "terminal_control",
+      callbackExpected: false
+    })
   });
 }
 
@@ -2304,9 +2318,17 @@ async function runTerminalControlSend({
     conversation: deliveredConversation,
     message,
     delivered: true,
+    status: "async_pending",
+    background: true,
+    callback_expected: Boolean(deliveredConversation.callback_command || deliveredConversation.gateway_method),
     terminal_control: terminalControl,
     executor,
-    budget: budgetAction(deliveredConversation)
+    budget: budgetAction(deliveredConversation),
+    openclaw_next_action: openClawYieldNextAction({
+      conversationId: deliveredConversation.conversation_id,
+      source: "terminal_control",
+      callbackExpected: Boolean(deliveredConversation.callback_command || deliveredConversation.gateway_method)
+    })
   });
 }
 
@@ -2410,12 +2432,18 @@ function runNativeCodexResumeSend({
       message,
       delivered: true,
       background: true,
+      status: "async_pending",
       native_resume: true,
       pid: child.pid ?? null,
       monitor_pid: monitor.pid ?? null,
       output_path: outputPath,
       executor,
-      budget: budgetAction(deliveredConversation)
+      budget: budgetAction(deliveredConversation),
+      openclaw_next_action: openClawYieldNextAction({
+        conversationId: deliveredConversation.conversation_id,
+        source: "native_resume_background",
+        callbackExpected: Boolean(deliveredConversation.callback_command || deliveredConversation.gateway_method)
+      })
     });
     return;
   }
@@ -2479,6 +2507,23 @@ function buildCodexExecResumeArgs({ nativeSessionId, payload, model }) {
   }
   args.push("--skip-git-repo-check", nativeSessionId, payload);
   return args;
+}
+
+function openClawYieldNextAction({ conversationId, source, callbackExpected }) {
+  const callbackText = callbackExpected
+    ? "The coding agent should report completion, questions, or errors through the existing Agent Knock Knock callback for this conversation."
+    : "No AKK-managed callback is registered for this raw terminal-controlled id; do not wait synchronously. Use AKK status/list later or attach/create an AKK conversation when callback delivery is required.";
+  return {
+    action: "yield",
+    reason:
+      "The follow-up was handed off asynchronously. End this OpenClaw turn now instead of waiting, polling, or treating the send as a synchronous agent result.",
+    source,
+    conversation_id: conversationId,
+    callback_expected: callbackExpected,
+    do_not:
+      "Do not inspect event logs, process lists, terminal screens, files, stdout, or stderr while waiting unless the user explicitly asks for status.",
+    expected_callback: callbackText
+  };
 }
 
 function nativeCodexModelForSend({ options, conversation, nativeTakeover }) {

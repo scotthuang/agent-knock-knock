@@ -109,6 +109,11 @@ test("agent takeover terminal_control attaches tmux pane and send writes to the 
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
     const sentParsed = JSON.parse(sent.stdout);
     assert.equal(sentParsed.delivered, true);
+    assert.equal(sentParsed.status, "async_pending");
+    assert.equal(sentParsed.background, true);
+    assert.equal(sentParsed.callback_expected, true);
+    assert.equal(sentParsed.openclaw_next_action.action, "yield");
+    assert.equal(sentParsed.openclaw_next_action.callback_expected, true);
     assert.equal(sentParsed.terminal_control.target, "codex-work:0.0");
     let calls = readJsonLines(tmuxCallsPath);
     assert.deepEqual(calls.at(-2).args, ["send-keys", "-t", "codex-work:0.0", "-l", "继续当前任务"]);
@@ -326,6 +331,11 @@ test("send and cancel support terminal-controlled conversation ids without AKK s
     assert.equal(sentParsed.conversation_id, conversationId);
     assert.equal(sentParsed.source, "terminal_control");
     assert.equal(sentParsed.delivered, true);
+    assert.equal(sentParsed.status, "async_pending");
+    assert.equal(sentParsed.background, true);
+    assert.equal(sentParsed.callback_expected, false);
+    assert.equal(sentParsed.openclaw_next_action.action, "yield");
+    assert.equal(sentParsed.openclaw_next_action.callback_expected, false);
     assert.equal(sentParsed.terminal_control.target, "codex-work:0.1");
 
     const calls = readJsonLines(tmuxCallsPath);
