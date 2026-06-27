@@ -1759,6 +1759,26 @@ async function runSend(options) {
   cleanupIdleConversations(storeDirFromOptions(options), options);
   const terminalConversation = await resolveTerminalConversationFromOptions(options);
   if (terminalConversation) {
+    if (options.background) {
+      const managed = createManagedTerminalConversationFromRawId({
+        options,
+        conversationId: terminalConversation.conversationId,
+        messageBody,
+        terminalControl: terminalConversation.terminalControl
+      });
+      await runTerminalControlSend({
+        options,
+        conversation: managed.conversation,
+        nextConversation: managed.nextConversation,
+        statePath: managed.statePath,
+        logPath: managed.logPath,
+        executor: managed.executor,
+        message: managed.message,
+        terminalControl: terminalConversation.terminalControl,
+        needsNativeTakeoverBootstrap: true
+      });
+      return;
+    }
     await runTerminalConversationSend({
       options,
       conversationId: terminalConversation.conversationId,
@@ -2286,7 +2306,17 @@ async function runTerminalControlSend({
   needsNativeTakeoverBootstrap
 }) {
   const provider = createTerminalControlProvider(options);
-  await provider.sendText(terminalControl.target, String(message.body ?? ""), {
+  const terminalPayload = needsNativeTakeoverBootstrap
+    ? buildAgentSendPayload({
+        conversation,
+        executor,
+        message,
+        includeNativeTakeoverBootstrap: true,
+        includeForkTakeoverBootstrap: false,
+        forkTakeover: undefined
+      })
+    : String(message.body ?? "");
+  await provider.sendText(terminalControl.target, terminalPayload, {
     socketPath: terminalControl.socketPath
   });
   await provider.sendKeys(terminalControl.target, ["Enter"], {
@@ -2298,13 +2328,15 @@ async function runTerminalControlSend({
     event: "terminal_message_send",
     executor,
     terminal_control: terminalControl,
-    message: textSummary(message.body)
+    message: textSummary(message.body),
+    payload: textSummary(terminalPayload)
   });
   runtimeLog("info", "terminal_message_send", {
     conversation_id: conversation.conversation_id,
     agent: executor.kind,
     terminal_target: terminalControl.target,
-    message: textSummary(message.body)
+    message: textSummary(message.body),
+    payload: textSummary(terminalPayload)
   });
   const deliveredConversation = markTakeoverBootstrapped({
     conversation: nextConversation,
@@ -2330,6 +2362,114 @@ async function runTerminalControlSend({
       callbackExpected: Boolean(deliveredConversation.callback_command || deliveredConversation.gateway_method)
     })
   });
+}
+
+function createManagedTerminalConversationFromRawId({ options, conversationId, messageBody, terminalControl }) {
+  const workspace = terminalControl.currentPath ?? process.cwd();
+  const storeDir = expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(workspace));
+  cleanupIdleConversations(storeDir, options);
+  const executor = resolveExecutor({
+    kind: "codex",
+    session: conversationId
+  });
+  const now = new Date();
+  const conversation = createConversation({
+    userRequest: String(messageBody),
+    workspace,
+    openclawSession: options.openclawSession ?? "agent:main:main",
+    executorKind: executor.kind,
+    executorSession: executor.session,
+    softLimit: Number(options.softLimit ?? 50),
+    hardLimit: Number(options.hardLimit ?? 100),
+    now
+  });
+  const paths = pathsForConversation(conversation.conversation_id, storeDir);
+  const callbackCommand = options.callbackCommand
+    ? expandCallbackCommandTemplate(options.callbackCommand, { statePath: paths.statePath })
+    : buildCallbackCommand({
+        statePath: paths.statePath,
+        gatewayUrl: options.gatewayUrl ?? "ws://127.0.0.1:18789",
+        token: options.token,
+        openclawSession: options.openclawSession ?? "agent:main:main",
+        gatewayMethod: options.gatewayMethod,
+        gatewaySession: options.gatewaySession,
+        openclawBin: options.openclawBin ?? resolveOptionalExecutable("openclaw")
+      });
+  const attachedConversation = withStoragePaths({
+    ...conversation,
+    executor,
+    status: "idle" as const,
+    idle_since: now.toISOString(),
+    updated_at: now.toISOString(),
+    callback_command: callbackCommand,
+    gateway_url: options.gatewayUrl ?? "ws://127.0.0.1:18789",
+    gateway_method: options.gatewayMethod,
+    gateway_session: options.gatewaySession ?? options.openclawSession ?? "agent:main:main",
+    openclaw_bin: options.openclawBin ?? resolveOptionalExecutable("openclaw"),
+    executor_all_proxy: proxyForExecutor(executor, options),
+    executor_model: options.model ?? options.codexModel,
+    native_session_takeover: {
+      agent: "codex",
+      native_session_id: conversationId,
+      source_cwd: workspace,
+      source_title: `Terminal-controlled Codex ${terminalControl.target}`,
+      strategy: "terminal_control",
+      attached_at: now.toISOString(),
+      takeover_match_kind: "raw_terminal_send",
+      terminal_control: terminalControl,
+      needs_bootstrap: true
+    }
+  }, paths);
+  saveState(paths.statePath, attachedConversation);
+  appendEvent(paths.logPath, {
+    ts: now.toISOString(),
+    conversation_id: attachedConversation.conversation_id,
+    event: "raw_terminal_session_attached",
+    source_conversation_id: conversationId,
+    agent: "codex",
+    terminal_control: terminalControl,
+    executor
+  });
+  runtimeLog("info", "raw_terminal_session_attached", {
+    conversation_id: attachedConversation.conversation_id,
+    source_conversation_id: conversationId,
+    terminal_target: terminalControl.target,
+    state_path: paths.statePath,
+    event_log_path: paths.logPath
+  });
+  const message = createMessage({
+    conversation: attachedConversation,
+    from: "openclaw",
+    to: executor.actor,
+    type: options.type ?? "task",
+    body: String(messageBody),
+    metadata: {
+      executor_kind: executor.kind,
+      executor_session: executor.session,
+      source_conversation_id: conversationId
+    }
+  });
+  const nextConversation = applyMessageToConversation(attachedConversation, message);
+  saveState(paths.statePath, nextConversation);
+  appendEvent(paths.logPath, messageEvent(message));
+  runtimeLog("info", "message_created", {
+    conversation_id: nextConversation.conversation_id,
+    source_conversation_id: conversationId,
+    agent: executor.kind,
+    executor_session: executor.session,
+    message_type: message.type,
+    state_path: paths.statePath,
+    event_log_path: paths.logPath,
+    message: textSummary(messageBody)
+  });
+  return {
+    conversation: attachedConversation,
+    nextConversation,
+    statePath: paths.statePath,
+    logPath: paths.logPath,
+    executor,
+    message
+  };
 }
 
 function runNativeCodexResumeSend({

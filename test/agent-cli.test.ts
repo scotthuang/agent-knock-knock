@@ -364,6 +364,76 @@ test("send and cancel support terminal-controlled conversation ids without AKK s
   }
 });
 
+test("background send to raw terminal id creates managed callback conversation", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-background-send-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "Codex is ready\n");
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `codex-work\t0\t1\t33389\tnode\t${workspace}\n`
+    );
+
+    const rawConversationId = "terminal:tmux:codex-work:0.1:33389";
+    const sent = runAgentCli([
+      "send",
+      "--conversation",
+      rawConversationId,
+      "--message",
+      "查一下最新 tag",
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      "agent:channel:original",
+      "--openclaw-session",
+      "agent:channel:original",
+      "--openclaw-bin",
+      "/usr/bin/true"
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    const sentParsed = JSON.parse(sent.stdout);
+    assert.equal(sentParsed.delivered, true);
+    assert.equal(sentParsed.status, "async_pending");
+    assert.equal(sentParsed.background, true);
+    assert.equal(sentParsed.callback_expected, true);
+    assert.equal(sentParsed.openclaw_next_action.action, "yield");
+    assert.equal(sentParsed.openclaw_next_action.callback_expected, true);
+    assert.notEqual(sentParsed.conversation.conversation_id, rawConversationId);
+    assert.equal(sentParsed.conversation.openclaw_session, "agent:channel:original");
+    assert.equal(sentParsed.conversation.gateway_session, "agent:channel:original");
+    assert.equal(sentParsed.conversation.native_session_takeover.native_session_id, rawConversationId);
+    assert.equal(sentParsed.conversation.native_session_takeover.needs_bootstrap, false);
+
+    const statePath = path.join(storeDir, sentParsed.conversation.conversation_id, "state.json");
+    assert.equal(JSON.parse(fs.readFileSync(statePath, "utf8")).conversation_id, sentParsed.conversation.conversation_id);
+
+    const calls = readJsonLines(tmuxCallsPath);
+    assert.deepEqual(calls.at(-1).args, ["send-keys", "-t", "codex-work:0.1", "Enter"]);
+    assert.deepEqual(calls.at(-2).args.slice(0, 4), ["send-keys", "-t", "codex-work:0.1", "-l"]);
+    const injectedPayload = calls.at(-2).args[4];
+    assert.match(injectedPayload, /callback --state/);
+    assert.match(injectedPayload, /agent-knock-knock\.callback/);
+    assert.match(injectedPayload, /查一下最新 tag/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("terminal-controlled conversation ids use Codex pid, not tmux pane pid", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-pid-"));
   const fakeBinDir = path.join(tempDir, "bin");

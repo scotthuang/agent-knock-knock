@@ -463,7 +463,12 @@ export default definePluginEntry({
       name: "agent_knock_knock_send",
       description: "Send a follow-up message to an existing open Agent Knock Knock coding-agent session or terminal-controlled session. This is an asynchronous handoff: after the message is accepted, end the OpenClaw turn and wait for an Agent Knock Knock callback or a later explicit status request. Do not poll terminal output or wait for the coding agent's final result in the same OpenClaw turn.",
       parameters: sendParameters,
-      buildArgs: (params) => {
+      buildArgs: (params, toolContext) => {
+        const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+        const openclawSession =
+          stringValue(toolContext?.sessionKey) ??
+          stringValue(config.openclawSession) ??
+          "agent:main:main";
         const args = [
           "send",
           "--conversation",
@@ -473,11 +478,20 @@ export default definePluginEntry({
           "--background"
         ];
         pushOptional(args, "--type", stringValue(params.type));
-        pushOptional(args, "--all-proxy", stringValue(params.allProxy) ?? stringValue(api.pluginConfig?.codexAllProxy) ?? stringValue(api.pluginConfig?.allProxy));
-        pushOptional(args, "--model", stringValue(params.model) ?? stringValue(api.pluginConfig?.codexModel) ?? stringValue(api.pluginConfig?.model));
-        pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
-        pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(api.pluginConfig?.idleTimeoutMinutes));
-        pushOptional(args, "--agent-timeout-minutes", numberString(params.agentTimeoutMinutes) ?? numberString(api.pluginConfig?.agentTimeoutMinutes));
+        pushOptional(args, "--all-proxy", stringValue(params.allProxy) ?? stringValue(config.codexAllProxy) ?? stringValue(config.allProxy));
+        pushOptional(args, "--model", stringValue(params.model) ?? stringValue(config.codexModel) ?? stringValue(config.model));
+        pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(config.storeDir));
+        pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(config.idleTimeoutMinutes));
+        pushOptional(args, "--agent-timeout-minutes", numberString(params.agentTimeoutMinutes) ?? numberString(config.agentTimeoutMinutes));
+        pushOptional(args, "--openclaw-session", openclawSession);
+        pushOptional(args, "--gateway-url", stringValue(config.gatewayUrl));
+        pushOptional(args, "--token", stringValue(config.gatewayToken));
+        pushOptional(args, "--gateway-method", CALLBACK_METHOD);
+        pushOptional(args, "--gateway-session", openclawSession);
+        pushOptional(args, "--openclaw-bin", stringValue(config.openclawBin));
+        pushOptional(args, "--callback-command", stringValue(config.callbackCommand));
+        pushOptional(args, "--soft-limit", numberString(config.softLimit));
+        pushOptional(args, "--hard-limit", numberString(config.hardLimit));
         return args;
       }
     });
