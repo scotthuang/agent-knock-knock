@@ -752,6 +752,91 @@ test("monitor marks waiting conversations stalled when the executor process is g
   }
 });
 
+test("monitor turns Codex remote compact disconnects into recoverable conversations", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-monitor-compact-recovery-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const acpxCallsPath = path.join(tempDir, "acpx-calls.ndjson");
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    const fakeAcpx = path.join(fakeBinDir, "acpx");
+    fs.writeFileSync(
+      fakeAcpx,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify(args) + "\\n", "utf8");
+`,
+      "utf8"
+    );
+    fs.chmodSync(fakeAcpx, 0o755);
+
+    const created = runCli([
+      "new",
+      "--agent",
+      "codex",
+      "--session",
+      "codex-compact",
+      "--request",
+      "Initial task before compact failure",
+      "--store-dir",
+      storeDir
+    ]);
+    const outputPath = path.join(path.dirname(created.paths.logPath), "codex-output.log");
+    fs.writeFileSync(outputPath, [
+      "Some visible progress.",
+      "Error running remote compact task: stream disconnected before completion: error sending request for url (https://chatgpt.com/backend-api/codex/responses/compact)"
+    ].join("\n"), "utf8");
+
+    const monitored = runCli([
+      "monitor",
+      "--state",
+      created.paths.statePath,
+      "--log",
+      created.paths.logPath,
+      "--pid",
+      "999999",
+      "--output-path",
+      outputPath,
+      "--poll-interval-ms",
+      "50"
+    ]);
+
+    assert.equal(monitored.needs_recovery, true);
+    assert.equal(monitored.stalled, false);
+    assert.equal(monitored.conversation.status, "needs_recovery");
+    assert.equal(monitored.conversation.recovery.failed_stage, "executor_monitor");
+    assert.equal(monitored.conversation.recovery.failure_kind, "transient_remote_compact_failure");
+    assert.equal(monitored.conversation.recovery.pending_message.body, "Initial task before compact failure");
+
+    const recovered = runCli([
+      "recover",
+      "--conversation",
+      created.conversation.conversation_id,
+      "--store-dir",
+      storeDir
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+
+    assert.equal(recovered.recovered, true);
+    assert.equal(recovered.conversation.status, "waiting_for_agent");
+    assert.match(recovered.executor.session, /^akk-codex-\d{14}-[0-9a-f]{8}$/);
+
+    const acpxCalls = fs.readFileSync(acpxCallsPath, "utf8")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line));
+    assert.deepEqual(acpxCalls[0], ["codex", "sessions", "ensure", "--name", recovered.executor.session]);
+    assert.deepEqual(acpxCalls[1].slice(0, 4), ["--approve-all", "codex", "-s", recovered.executor.session]);
+    assert.match(acpxCalls[1][4], /AKK replay recovery/);
+    assert.match(acpxCalls[1][4], /Initial task before compact failure/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("monitor notifies the original OpenClaw channel when a conversation first stalls", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-monitor-notify-"));
   const storeDir = path.join(tempDir, "conversations");

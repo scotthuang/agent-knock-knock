@@ -3294,7 +3294,8 @@ function runMonitor(options) {
     }
 
     if (Number.isFinite(pid) && !isProcessAlive(pid)) {
-      const modelSelection = detectModelSelectionError(readOutputTail(options.outputPath));
+      const outputTail = readOutputTail(options.outputPath);
+      const modelSelection = detectModelSelectionError(outputTail);
       if (modelSelection) {
         const modelSelectionConversation = markConversationNeedsModelSelection({
           statePath,
@@ -3314,6 +3315,30 @@ function runMonitor(options) {
           reason: modelSelectionConversation?.model_selection?.message ?? modelSelection.message
         });
         return;
+      }
+      const transientFailure = detectTransientExecutorFailure(outputTail);
+      if (transientFailure) {
+        const recoveryResult = markMonitorFailureNeedsRecovery({
+          statePath,
+          logPath,
+          reason: transientFailure.message,
+          detail: {
+            executor_pid: pid,
+            output_path: options.outputPath,
+            transient_failure: transientFailure
+          },
+          outputTail
+        });
+        if (recoveryResult) {
+          printJson({
+            conversation: recoveryResult.conversation,
+            monitored: true,
+            stalled: false,
+            needs_recovery: true,
+            reason: transientFailure.message
+          });
+          return;
+        }
       }
       const stalledConversation = markConversationStalled({
         statePath,
@@ -4211,6 +4236,117 @@ function markConversationStalled({ statePath, logPath, reason, detail = {} }) {
   return stalledConversation;
 }
 
+function markMonitorFailureNeedsRecovery({ statePath, logPath, reason, detail = {}, outputTail = "" }) {
+  const releaseLock = acquireFileLock(`${statePath}.lock`);
+  let recoveryResult;
+  let recoveryMessage;
+  try {
+    const conversation = loadState(statePath);
+    if (!isWaitingForAgent(conversation.status)) {
+      runtimeLog("info", "executor_monitor_finished", {
+        conversation_id: conversation.conversation_id,
+        status: conversation.status,
+        reason: "conversation_changed_before_recovery"
+      });
+      return undefined;
+    }
+
+    const executor = executorForConversation(conversation);
+    const pendingMessage = latestPendingExecutorMessage({
+      events: readExistingEvents(logPath),
+      executor
+    });
+    if (!pendingMessage) {
+      runtimeLog("warn", "monitor_recovery_skipped", {
+        conversation_id: conversation.conversation_id,
+        agent: executor.kind,
+        executor_session: executor.session,
+        reason: "pending_message_missing"
+      });
+      return undefined;
+    }
+
+    recoveryResult = markConversationNeedsRecovery({
+      conversation,
+      statePath,
+      logPath,
+      executor,
+      message: pendingMessage,
+      failedStage: "executor_monitor",
+      result: {
+        status: 1,
+        stderr: outputTail
+      },
+      reason
+    });
+    const recoveredConversation = recoveryResult.conversation;
+    const shouldNotify = Boolean(recoveredConversation.gateway_method && !recoveredConversation.recovery_notification_sent_at);
+    if (shouldNotify) {
+      recoveryMessage = createMessage({
+        conversation: recoveredConversation,
+        from: executor.actor,
+        to: "openclaw",
+        type: "error",
+        requiresResponse: false,
+        body: [
+          `AKK marked this ${executor.display_name} task as needing recovery: ${reason}.`,
+          "",
+          `Conversation: ${recoveredConversation.conversation_id}`,
+          `Session: ${executor.session}`,
+          "Use `AKK recover` to replay saved AKK history in a new session, or `AKK close` to close it."
+        ].join("\n")
+      });
+      const now = new Date().toISOString();
+      recoveryResult.conversation = {
+        ...recoveredConversation,
+        recovery_notification_sent_at: now,
+        recovery_notification_message_id: recoveryMessage.id,
+        updated_at: now
+      };
+      saveState(statePath, recoveryResult.conversation);
+    }
+    appendEvent(logPath, {
+      ts: new Date().toISOString(),
+      conversation_id: conversation.conversation_id,
+      event: "monitor_recovery_classified",
+      status: "needs_recovery",
+      reason,
+      ...detail
+    });
+  } finally {
+    releaseLock();
+  }
+
+  if (recoveryResult?.conversation && recoveryMessage) {
+    deliverMonitorFailureNotification({
+      statePath,
+      logPath,
+      conversation: recoveryResult.conversation,
+      message: recoveryMessage,
+      eventPrefix: "recovery"
+    });
+  }
+  return recoveryResult;
+}
+
+function latestPendingExecutorMessage({ events, executor }) {
+  for (const event of [...events].reverse()) {
+    if (event.event !== "message") {
+      continue;
+    }
+
+    const message = event.message ?? event;
+    if (
+      message?.from === "openclaw" &&
+      message?.to === executor.actor &&
+      message?.requires_response !== false
+    ) {
+      return message;
+    }
+  }
+  return undefined;
+}
+
 function markConversationNeedsModelSelection({ statePath, logPath, reason, detail = {} }) {
   const releaseLock = acquireFileLock(`${statePath}.lock`);
   let modelSelectionConversation;
@@ -4265,7 +4401,11 @@ function markConversationNeedsModelSelection({ statePath, logPath, reason, detai
   return modelSelectionConversation;
 }
 
-function deliverStalledNotification({ statePath, logPath, conversation, message }) {
+function deliverMonitorFailureNotification({ statePath, logPath, conversation, message, eventPrefix }) {
+  deliverStalledNotification({ statePath, logPath, conversation, message, eventPrefix });
+}
+
+function deliverStalledNotification({ statePath, logPath, conversation, message, eventPrefix = "stalled" }) {
   if (!conversation.gateway_method) {
     return;
   }
@@ -4286,14 +4426,14 @@ function deliverStalledNotification({ statePath, logPath, conversation, message 
   appendEvent(logPath, {
     ts: new Date().toISOString(),
     conversation_id: conversation.conversation_id,
-    event: "stalled_gateway_method_delivery",
+    event: `${eventPrefix}_gateway_method_delivery`,
     method: conversation.gateway_method,
     message_id: message.id,
     status: delivery.status,
     stdout: delivery.stdout,
     stderr: delivery.stderr
   });
-  runtimeLog("info", "stalled_gateway_method_delivery", {
+  runtimeLog("info", `${eventPrefix}_gateway_method_delivery`, {
     conversation_id: conversation.conversation_id,
     method: conversation.gateway_method,
     message_id: message.id,
@@ -4321,13 +4461,13 @@ function deliverStalledNotification({ statePath, logPath, conversation, message 
   appendEvent(logPath, {
     ts: new Date().toISOString(),
     conversation_id: conversation.conversation_id,
-    event: "stalled_chat_send_delivery",
+    event: `${eventPrefix}_chat_send_delivery`,
     message_id: message.id,
     status: chatSendDelivery.status,
     stdout: chatSendDelivery.stdout,
     stderr: chatSendDelivery.stderr
   });
-  runtimeLog("info", "stalled_chat_send_delivery", {
+  runtimeLog("info", `${eventPrefix}_chat_send_delivery`, {
     conversation_id: conversation.conversation_id,
     message_id: message.id,
     status: chatSendDelivery.status,
@@ -4702,6 +4842,9 @@ function classifyProcessFailure(result) {
   if (!combined && status === 0) {
     return undefined;
   }
+  if (isRemoteCompactStreamDisconnect(combined)) {
+    return "transient_remote_compact_failure";
+  }
   if (combined.includes("agent needs reconnect") || combined.includes("internal error")) {
     return "agent_reconnect_required";
   }
@@ -4772,6 +4915,31 @@ function detectModelSelectionError(text) {
   }
 
   return undefined;
+}
+
+function detectTransientExecutorFailure(text) {
+  const cleaned = cleanProcessText(text);
+  if (!cleaned) {
+    return undefined;
+  }
+
+  if (isRemoteCompactStreamDisconnect(cleaned.toLowerCase())) {
+    return {
+      kind: "remote_compact_stream_disconnect",
+      message: "Codex remote compact stream disconnected before completion"
+    };
+  }
+
+  return undefined;
+}
+
+function isRemoteCompactStreamDisconnect(text) {
+  const value = String(text ?? "").toLowerCase();
+  return (
+    value.includes("error running remote compact task") &&
+    value.includes("stream disconnected") &&
+    value.includes("/codex/responses/compact")
+  );
 }
 
 function runtimeLog(level, event, fields = {}) {

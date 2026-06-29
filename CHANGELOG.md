@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.18 - 2026-06-30
+
+### Fixed
+
+- Classified Codex remote compact stream disconnects as recoverable executor failures instead of leaving AKK tasks stuck as generic `stalled` conversations.
+- Allowed `AKK recover` to replay saved AKK history and the pending OpenClaw message after a recognized monitor-time executor failure.
+
 ## 0.2.13 - 2026-06-25
 
 ### Fixed
