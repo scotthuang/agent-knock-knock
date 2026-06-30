@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.19 - 2026-06-30
+
+### Fixed
+
+- Added a guarded cwd-based tmux pane fallback so wrapper-launched Codex sessions, such as sidecar-managed panes, are detected as `terminal_controlled` when their process cwd uniquely matches a tmux pane path.
+- Preserved existing pid ancestry matching and avoided cwd fallback when multiple panes share the same cwd, preventing ambiguous terminal-control attachment.
+
 ## 0.2.18 - 2026-06-30
 
 ### Fixed

@@ -71,6 +71,88 @@ test("enrichActiveProcessesWithTerminalControl attaches tmux metadata by pid anc
   assert.deepEqual(enriched[0].terminalControl?.capabilities, ["screen_status", "send_keys", "terminal_approval"]);
 });
 
+test("enrichActiveProcessesWithTerminalControl falls back to unique pane cwd for wrapper-launched Codex", async () => {
+  const processes: ActiveCodexProcess[] = [{
+    pid: 34663,
+    ppid: 34654,
+    command: "node /Users/me/.npm-global/bin/codex --",
+    cwd: "/Users/me/github/talk-to-shadow",
+    kind: "codex_cli",
+    confidence: "medium",
+    reason: "test"
+  }];
+  const provider = new StaticTerminalControlProvider({
+    panes: [
+      {
+        kind: "tmux",
+        target: "codex-work:0.2",
+        session: "codex-work",
+        window: 0,
+        pane: 2,
+        panePid: 85361,
+        currentCommand: "node",
+        currentPath: "/Users/me/github/talk-to-shadow"
+      },
+      {
+        kind: "tmux",
+        target: "codex-work:0.2",
+        socketPath: "/private/tmp/tmux-501/default",
+        session: "codex-work",
+        window: 0,
+        pane: 2,
+        panePid: 85361,
+        currentCommand: "node",
+        currentPath: "/Users/me/github/talk-to-shadow"
+      }
+    ]
+  });
+
+  const enriched = await enrichActiveProcessesWithTerminalControl(processes, provider);
+
+  assert.equal(enriched[0].terminalControl?.target, "codex-work:0.2");
+  assert.equal(enriched[0].terminalControl?.panePid, 85361);
+});
+
+test("enrichActiveProcessesWithTerminalControl does not use ambiguous cwd fallback", async () => {
+  const processes: ActiveCodexProcess[] = [{
+    pid: 500,
+    ppid: 400,
+    command: "node /Users/me/.npm-global/bin/codex",
+    cwd: "/repo",
+    kind: "codex_cli",
+    confidence: "medium",
+    reason: "test"
+  }];
+  const provider = new StaticTerminalControlProvider({
+    panes: [
+      {
+        kind: "tmux",
+        target: "codex-work:0.0",
+        session: "codex-work",
+        window: 0,
+        pane: 0,
+        panePid: 100,
+        currentCommand: "node",
+        currentPath: "/repo"
+      },
+      {
+        kind: "tmux",
+        target: "codex-work:0.1",
+        session: "codex-work",
+        window: 0,
+        pane: 1,
+        panePid: 200,
+        currentCommand: "node",
+        currentPath: "/repo"
+      }
+    ]
+  });
+
+  const enriched = await enrichActiveProcessesWithTerminalControl(processes, provider);
+
+  assert.equal(enriched[0].terminalControl, undefined);
+});
+
 test("tmux provider falls back to explicit socket paths", async () => {
   const calls: string[][] = [];
   const provider = new TmuxTerminalControlProvider({

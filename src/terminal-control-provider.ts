@@ -255,8 +255,27 @@ export async function enrichActiveProcessesWithTerminalControl(
     return processes;
   }
 
-  return processes.map((process) => {
+  const matches = new Map<number, TerminalPane>();
+  for (const process of processes) {
     const pane = panes.find((candidate) => processBelongsToPane(process, candidate, processes));
+    if (!pane) {
+      continue;
+    }
+    matches.set(process.pid, pane);
+  }
+
+  for (const process of processes) {
+    if (matches.has(process.pid)) {
+      continue;
+    }
+    const pane = uniquePaneByCwd(process, panes);
+    if (pane) {
+      matches.set(process.pid, pane);
+    }
+  }
+
+  return processes.map((process) => {
+    const pane = matches.get(process.pid);
     if (!pane) {
       return process;
     }
@@ -301,6 +320,34 @@ function processBelongsToPane(process: ActiveCodexProcess, pane: TerminalPane, p
     current = parent;
   }
   return false;
+}
+
+function uniquePaneByCwd(process: ActiveCodexProcess, panes: TerminalPane[]): TerminalPane | undefined {
+  const processCwd = normalizedPath(process.cwd);
+  if (!processCwd) {
+    return undefined;
+  }
+
+  const matchesByPane = new Map<string, TerminalPane>();
+  for (const pane of panes) {
+    const key = paneIdentityKey(pane);
+    if (normalizedPath(pane.currentPath) !== processCwd) {
+      continue;
+    }
+    if (!matchesByPane.has(key)) {
+      matchesByPane.set(key, pane);
+    }
+  }
+  const matches = [...matchesByPane.values()];
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function paneIdentityKey(pane: TerminalPane): string {
+  return `${pane.target}\t${pane.panePid}`;
+}
+
+function normalizedPath(value: string | undefined): string | undefined {
+  return value ? path.resolve(value) : undefined;
 }
 
 function runCommand(command: string, args: string[]): CommandResult {
