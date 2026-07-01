@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.20 - 2026-07-02
+
+### Fixed
+
+- Ignored stale Codex approval prompts left in tmux scrollback after later terminal activity, preventing `AKK list`, `AKK status`, and `AKK approve` from treating already-approved prompts as pending.
+- Added regression coverage to ensure stale approval scrollback does not mark terminal-controlled sessions as blocked or send an approval key.
+
 ## 0.2.19 - 2026-06-30
 
 ### Fixed

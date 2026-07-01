@@ -234,6 +234,70 @@ test("approve sends y only when the terminal screen shows a primary Codex approv
   }
 });
 
+test("approval scan ignores stale Codex prompts left in terminal scrollback", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-agent-stale-approve-"));
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, [
+      "  Would you like to run the following command?",
+      "",
+      "  $ git status -sb",
+      "",
+      "› 1. Yes, proceed (y)",
+      "  2. No, and tell Codex what to do differently (esc)",
+      "",
+      "✔ You approved codex to run git status -sb",
+      "• Working (12s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close",
+      "",
+      "› Find and fix a bug in @filename"
+    ].join("\n"));
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `codex-work\t0\t1\t33389\tnode\t${workspace}\n`
+    );
+
+    const conversationId = "terminal:tmux:codex-work:0.1:33389";
+    const status = runAgentCli([
+      "status",
+      "--conversation",
+      conversationId
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+
+    assert.equal(status.status, 0, status.stderr || status.stdout);
+    const statusParsed = JSON.parse(status.stdout);
+    assert.equal(statusParsed.terminal_status.approval_state.blocked, false);
+    assert.equal(statusParsed.terminal_status.approval_state.approvable, false);
+    assert.match(statusParsed.terminal_status.approval_state.reason, /stale/);
+    assert.equal(statusParsed.terminal_screen.approval.approvable, false);
+
+    const approved = runAgentCli([
+      "approve",
+      "--conversation",
+      conversationId
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+
+    assert.equal(approved.status, 0, approved.stderr || approved.stdout);
+    const approvedParsed = JSON.parse(approved.stdout);
+    assert.equal(approvedParsed.approved, false);
+    assert.match(approvedParsed.reason, /stale/);
+    assert.deepEqual(readJsonLines(tmuxCallsPath).filter((call) => call.args[0] === "send-keys"), []);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("approve supports terminal-controlled conversation ids without AKK state", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-approve-"));
   const fakeBinDir = path.join(tempDir, "bin");

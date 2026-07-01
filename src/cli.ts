@@ -673,14 +673,15 @@ function terminalControlFromTakeover(nativeTakeover): TerminalControlRef | undef
 }
 
 function detectCodexApprovalPrompt(screen: string): { approvable: true; key: string; label: string } | { approvable: false; reason: string } {
-  if (!isCodexApprovalPromptVisible(screen)) {
+  const prompt = codexApprovalPromptRegion(screen);
+  if (!prompt.visible) {
     return {
       approvable: false,
-      reason: "no Codex approval prompt was detected in the terminal screen"
+      reason: prompt.reason
     };
   }
 
-  for (const line of screen.split(/\r?\n/)) {
+  for (const line of prompt.region.split(/\r?\n/)) {
     const match = /^[\s›]*1\.\s+(Yes,[^(]+)\(([^)]+)\)/u.exec(line.trim());
     if (!match) {
       continue;
@@ -706,13 +707,62 @@ function detectCodexApprovalPrompt(screen: string): { approvable: true; key: str
 }
 
 function isCodexApprovalPromptVisible(screen: string): boolean {
+  return codexApprovalPromptRegion(screen).visible;
+}
+
+function codexApprovalPromptRegion(screen: string): { visible: true; region: string } | { visible: false; reason: string } {
   const approvalMarkers = [
     "Would you like to run the following command?",
     "Would you like to make the following edits?",
     "Would you like to grant these permissions?",
     "needs your approval."
   ];
-  return approvalMarkers.some((marker) => screen.includes(marker));
+  const lines = screen.split(/\r?\n/);
+  let markerIndex = -1;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (approvalMarkers.some((marker) => lines[index].includes(marker))) {
+      markerIndex = index;
+      break;
+    }
+  }
+
+  if (markerIndex < 0) {
+    return {
+      visible: false,
+      reason: "no Codex approval prompt was detected in the terminal screen"
+    };
+  }
+
+  const regionLines = lines.slice(markerIndex);
+  const staleLine = regionLines.slice(1).find((line) => isPostApprovalActivityLine(line));
+  if (staleLine) {
+    return {
+      visible: false,
+      reason: `Codex approval prompt appears stale after later terminal activity: ${staleLine.trim()}`
+    };
+  }
+
+  return {
+    visible: true,
+    region: regionLines.join("\n")
+  };
+}
+
+function isPostApprovalActivityLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return false;
+  }
+  if (/^✔\s+You approved\b/u.test(trimmed)) {
+    return true;
+  }
+  if (/^›\s+(?!1\.)\S/u.test(trimmed)) {
+    return true;
+  }
+  if (/^•\s+(Working|Ran|Explored|Edited|Read|Called|Searching|Planning|Updated|Added|Deleted|Modified|Running|Thinking)\b/u.test(trimmed)) {
+    return true;
+  }
+  return /^─\s*Worked for\b/u.test(trimmed);
 }
 
 function screenExcerpt(screen: string, maxLength = 4000): string {
