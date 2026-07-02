@@ -242,6 +242,8 @@ test("list groups delegated native and terminal-controlled sessions", () => {
     assert.equal(listed.terminal_controlled.length, 1);
     assert.equal(listed.terminal_controlled[0].id, "terminal:tmux:codex-work:0.0:2222");
     assert.equal(listed.terminal_controlled[0].terminal_control.target, "codex-work:0.0");
+    assert.equal(listed.terminal_controlled[0].activity_state, "awaiting_approval");
+    assert.match(listed.terminal_controlled[0].activity_reason, /approval prompt/);
     assert.equal(listed.terminal_controlled[0].approval_state.blocked, true);
     assert.equal(listed.terminal_controlled[0].approval_state.approvable, true);
     assert.equal(listed.terminal_controlled[0].commands.send, true);
@@ -299,6 +301,56 @@ test("list groups delegated native and terminal-controlled sessions", () => {
     assert.deepEqual(managedOnly.native, []);
     assert.deepEqual(managedOnly.terminal_controlled, []);
     assert.equal(managedOnly.native_scan.enabled, false);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("list exposes terminal-controlled Codex working activity state", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-list-activity-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const workingScreen = [
+    "• Working (8s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close",
+    "",
+    "› Continue implementation"
+  ].join("\n");
+
+  try {
+    const listed = runCli([
+      "list",
+      "--store-dir",
+      storeDir,
+      "--processes-json",
+      JSON.stringify([{
+        pid: 2222,
+        ppid: 9999,
+        elapsed: "00:30",
+        command: "codex",
+        cwd: "/repo/tmux"
+      }]),
+      "--terminals-json",
+      JSON.stringify([{
+        kind: "tmux",
+        target: "codex-work:0.0",
+        session: "codex-work",
+        window: 0,
+        pane: 0,
+        panePid: 9999,
+        currentCommand: "node",
+        currentPath: "/repo/tmux"
+      }]),
+      "--terminal-screens-json",
+      JSON.stringify({
+        "codex-work:0.0": workingScreen
+      })
+    ]);
+
+    assert.equal(listed.terminal_controlled.length, 1);
+    assert.equal(listed.terminal_controlled[0].activity_state, "working");
+    assert.match(listed.terminal_controlled[0].activity_reason, /Working/);
+    assert.equal(listed.terminal_controlled[0].approval_state.blocked, false);
+    assert.equal(listed.terminal_controlled[0].approval_state.approvable, false);
+    assert.equal(listed.terminal_controlled[0].commands.approve, false);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

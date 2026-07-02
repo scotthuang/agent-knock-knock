@@ -765,6 +765,62 @@ function isPostApprovalActivityLine(line: string): boolean {
   return /^─\s*Worked for\b/u.test(trimmed);
 }
 
+function detectCodexActivityState(
+  screen: string,
+  approval = detectCodexApprovalPrompt(screen)
+): { state: "awaiting_approval" | "working" | "idle" | "unknown"; reason: string } {
+  if (approval.approvable || isCodexApprovalPromptVisible(screen)) {
+    return {
+      state: "awaiting_approval",
+      reason: "current Codex approval prompt is visible"
+    };
+  }
+
+  const tailLines = screen.trimEnd().split(/\r?\n/).slice(-30);
+  const workingLine = tailLines.find((line) => isCodexWorkingLine(line));
+  if (workingLine) {
+    return {
+      state: "working",
+      reason: `Codex working marker detected: ${workingLine.trim()}`
+    };
+  }
+
+  const lastLine = tailLines
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .at(-1);
+  if (lastLine && isCodexIdlePromptLine(lastLine)) {
+    return {
+      state: "idle",
+      reason: `Codex input prompt detected: ${lastLine}`
+    };
+  }
+
+  return {
+    state: "unknown",
+    reason: "no current Codex working, idle, or approval marker was detected in the terminal screen"
+  };
+}
+
+function isCodexWorkingLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return false;
+  }
+  if (/^•\s+Working\b/u.test(trimmed)) {
+    return true;
+  }
+  if (/\besc to interrupt\b/u.test(trimmed) && (/\bWorking\b/u.test(trimmed) || /\b\/stop to close\b/u.test(trimmed))) {
+    return true;
+  }
+  return /\bbackground terminal running\b/u.test(trimmed);
+}
+
+function isCodexIdlePromptLine(line: string): boolean {
+  const trimmed = line.trim();
+  return /^›(?:\s|$)/u.test(trimmed) && !/^›\s*1\./u.test(trimmed);
+}
+
 function screenExcerpt(screen: string, maxLength = 4000): string {
   const lines = screen.trimEnd().split(/\r?\n/);
   return lines.slice(Math.max(0, lines.length - 80)).join("\n").slice(-maxLength);
@@ -1576,7 +1632,7 @@ async function terminalControlledListEntry(session: ActiveCodexProcess, activeSe
   if (!terminalControl) {
     throw new Error(`process ${session.pid} is not terminal-controlled`);
   }
-  const approvalState = await approvalStateForTerminal(terminalControl, options);
+  const terminalState = await listStateForTerminal(terminalControl, options);
   return {
     id: `terminal:${terminalControl.kind}:${terminalControl.target}:${session.pid}`,
     source: "terminal_control",
@@ -1592,10 +1648,12 @@ async function terminalControlledListEntry(session: ActiveCodexProcess, activeSe
     confidence: session.confidence,
     reason: session.reason,
     terminal_control: terminalControl,
-    approval_state: approvalState,
+    approval_state: terminalState.approval_state,
+    activity_state: terminalState.activity_state,
+    activity_reason: terminalState.activity_reason,
     commands: {
       send: true,
-      approve: approvalState.approvable === true,
+      approve: terminalState.approval_state.approvable === true,
       status: true,
       cancel: true,
       close: false
@@ -1603,13 +1661,17 @@ async function terminalControlledListEntry(session: ActiveCodexProcess, activeSe
   };
 }
 
-async function approvalStateForTerminal(terminalControl: TerminalControlRef, options) {
+async function listStateForTerminal(terminalControl: TerminalControlRef, options) {
   if (options.noApprovalScan) {
     return {
-      scanned: false,
-      blocked: false,
-      approvable: false,
-      reason: "approval scan disabled"
+      approval_state: {
+        scanned: false,
+        blocked: false,
+        approvable: false,
+        reason: "approval scan disabled"
+      },
+      activity_state: "unknown",
+      activity_reason: "terminal screen scan disabled"
     };
   }
   try {
@@ -1619,21 +1681,30 @@ async function approvalStateForTerminal(terminalControl: TerminalControlRef, opt
     });
     const approval = detectCodexApprovalPrompt(screen);
     const blocked = isCodexApprovalPromptVisible(screen);
+    const activity = detectCodexActivityState(screen, approval);
     return {
-      scanned: true,
-      blocked,
-      approvable: approval.approvable,
-      key: approval.approvable ? approval.key : undefined,
-      label: approval.approvable ? approval.label : undefined,
-      reason: approval.approvable ? undefined : approval.reason,
-      screen_excerpt: blocked ? screenExcerpt(screen, 1000) : undefined
+      approval_state: {
+        scanned: true,
+        blocked,
+        approvable: approval.approvable,
+        key: approval.approvable ? approval.key : undefined,
+        label: approval.approvable ? approval.label : undefined,
+        reason: approval.approvable ? undefined : approval.reason,
+        screen_excerpt: blocked ? screenExcerpt(screen, 1000) : undefined
+      },
+      activity_state: activity.state,
+      activity_reason: activity.reason
     };
   } catch (error) {
     return {
-      scanned: false,
-      blocked: false,
-      approvable: false,
-      error: error instanceof Error ? error.message : String(error)
+      approval_state: {
+        scanned: false,
+        blocked: false,
+        approvable: false,
+        error: error instanceof Error ? error.message : String(error)
+      },
+      activity_state: "unknown",
+      activity_reason: error instanceof Error ? error.message : String(error)
     };
   }
 }
@@ -1770,10 +1841,13 @@ async function terminalStatusForControl(terminalControl, options) {
     });
     const approval = detectCodexApprovalPrompt(screen);
     const blocked = isCodexApprovalPromptVisible(screen);
+    const activity = detectCodexActivityState(screen, approval);
     return {
       provider: terminalControl.kind,
       target: terminalControl.target,
       reachable: true,
+      activity_state: activity.state,
+      activity_reason: activity.reason,
       approval_state: {
         scanned: true,
         blocked,
@@ -1792,6 +1866,8 @@ async function terminalStatusForControl(terminalControl, options) {
       provider: terminalControl.kind,
       target: terminalControl.target,
       reachable: false,
+      activity_state: "unknown",
+      activity_reason: error instanceof Error ? error.message : String(error),
       approval_state: {
         scanned: false,
         blocked: false,

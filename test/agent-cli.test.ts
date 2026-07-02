@@ -210,6 +210,7 @@ test("approve sends y only when the terminal screen shows a primary Codex approv
     assert.equal(statusParsed.terminal_screen.approval.approvable, true);
     assert.equal(statusParsed.terminal_status.reachable, true);
     assert.equal(statusParsed.terminal_status.target, "codex-work:0.0");
+    assert.equal(statusParsed.terminal_status.activity_state, "awaiting_approval");
     assert.equal(statusParsed.terminal_status.approval_state.blocked, true);
     assert.equal(statusParsed.terminal_status.approval_state.approvable, true);
 
@@ -279,6 +280,7 @@ test("approval scan ignores stale Codex prompts left in terminal scrollback", ()
     assert.equal(statusParsed.terminal_status.approval_state.approvable, false);
     assert.match(statusParsed.terminal_status.approval_state.reason, /stale/);
     assert.equal(statusParsed.terminal_screen.approval.approvable, false);
+    assert.equal(statusParsed.terminal_status.activity_state, "working");
 
     const approved = runAgentCli([
       "approve",
@@ -293,6 +295,80 @@ test("approval scan ignores stale Codex prompts left in terminal scrollback", ()
     assert.equal(approvedParsed.approved, false);
     assert.match(approvedParsed.reason, /stale/);
     assert.deepEqual(readJsonLines(tmuxCallsPath).filter((call) => call.args[0] === "send-keys"), []);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("status detects tmux Codex working idle and unknown activity states", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-agent-activity-state-"));
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+  const conversationId = "terminal:tmux:codex-work:0.1:33389";
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `codex-work\t0\t1\t33389\tnode\t${workspace}\n`
+    );
+
+    fs.writeFileSync(screenPath, [
+      "• Working (12s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close",
+      "",
+      "› Find and fix a bug in @filename"
+    ].join("\n"));
+    let status = runAgentCli([
+      "status",
+      "--conversation",
+      conversationId
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(status.status, 0, status.stderr || status.stdout);
+    let statusParsed = JSON.parse(status.stdout);
+    assert.equal(statusParsed.terminal_status.activity_state, "working");
+    assert.match(statusParsed.terminal_status.activity_reason, /Working/);
+    assert.equal(statusParsed.terminal_status.approval_state.blocked, false);
+
+    fs.writeFileSync(screenPath, [
+      "  Model: GPT-5",
+      "",
+      "› "
+    ].join("\n"));
+    status = runAgentCli([
+      "status",
+      "--conversation",
+      conversationId
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(status.status, 0, status.stderr || status.stdout);
+    statusParsed = JSON.parse(status.stdout);
+    assert.equal(statusParsed.terminal_status.activity_state, "idle");
+    assert.match(statusParsed.terminal_status.activity_reason, /input prompt/);
+    assert.equal(statusParsed.terminal_status.approval_state.blocked, false);
+
+    fs.writeFileSync(screenPath, [
+      "last command output",
+      "no recognizable Codex tui footer"
+    ].join("\n"));
+    status = runAgentCli([
+      "status",
+      "--conversation",
+      conversationId
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(status.status, 0, status.stderr || status.stdout);
+    statusParsed = JSON.parse(status.stdout);
+    assert.equal(statusParsed.terminal_status.activity_state, "unknown");
+    assert.equal(statusParsed.terminal_status.approval_state.blocked, false);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
