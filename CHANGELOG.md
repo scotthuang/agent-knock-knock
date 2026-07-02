@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.21 - 2026-07-03
+
+### Added
+
+- Added structured tmux Codex activity detection for terminal-controlled sessions, exposing `activity_state` and `activity_reason` in `AKK status` and `AKK list`.
+- Classified terminal-controlled Codex panes as `awaiting_approval`, `working`, `idle`, or `unknown` using conservative current-screen heuristics.
+- Added regression coverage for approval, stale approval scrollback, working, idle, unknown, and list activity-state output.
+
 ## 0.2.20 - 2026-07-02
 
 ### Fixed
