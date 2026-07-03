@@ -960,6 +960,168 @@ fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify({
   }
 });
 
+test("describe terminal-controlled Codex session from rollout history", () => {
+  const rollout = [
+    JSON.stringify({
+      timestamp: "2026-07-04T00:00:00.000Z",
+      type: "event_msg",
+      payload: {
+        type: "user_message",
+        message: "Add AKK describe command"
+      }
+    }),
+    JSON.stringify({
+      timestamp: "2026-07-04T00:01:00.000Z",
+      type: "event_msg",
+      payload: {
+        type: "agent_message",
+        message: "I am wiring the OpenClaw tool."
+      }
+    }),
+    JSON.stringify({
+      timestamp: "2026-07-04T00:02:00.000Z",
+      type: "response_item",
+      payload: {
+        command: "npm test",
+        status: "completed"
+      }
+    })
+  ].join("\n");
+
+  const described = runAgentCli([
+    "describe",
+    "--conversation",
+    "terminal:tmux:codex-work:0.0:33389",
+    "--threads-json",
+    JSON.stringify([threadRow()]),
+    "--processes-json",
+    JSON.stringify([{
+      pid: 33389,
+      ppid: 999,
+      command: `codex resume ${sessionId}`,
+      cwd
+    }]),
+    "--terminals-json",
+    JSON.stringify([tmuxPane()]),
+    "--terminal-screens-json",
+    JSON.stringify({
+      "codex-work:0.0": "Working\n"
+    }),
+    "--rollouts-json",
+    JSON.stringify({ [rolloutPath]: rollout })
+  ]);
+
+  assert.equal(described.status, 0, described.stderr || described.stdout);
+  const parsed = JSON.parse(described.stdout);
+  assert.equal(parsed.source, "terminal_control");
+  assert.equal(parsed.confidence, "high");
+  assert.equal(parsed.match, "session_id");
+  assert.match(parsed.about, /Add AKK describe command/);
+  assert.match(parsed.about, /OpenClaw tool/);
+  assert.equal(parsed.evidence.initial_request, "Add AKK describe command");
+  assert.equal(parsed.evidence.recent_commands.at(-1).command, "npm test");
+});
+
+test("describe native Codex session falls back to cwd match", () => {
+  const otherSessionId = "019ee559-7bb8-7fd1-970c-0f7b6978c44f";
+  const otherRolloutPath = "/tmp/other-codex-rollout.jsonl";
+  const rollout = JSON.stringify({
+    timestamp: "2026-07-04T00:00:00.000Z",
+    type: "event_msg",
+    payload: {
+      type: "user_message",
+      message: "Most recent cwd task"
+    }
+  });
+
+  const described = runAgentCli([
+    "describe",
+    "--conversation",
+    "native:codex:4444",
+    "--threads-json",
+    JSON.stringify([
+      threadRow({ updated_at_ms: 1000, title: "older task" }),
+      {
+        id: otherSessionId,
+        cwd,
+        rollout_path: otherRolloutPath,
+        title: "newer task",
+        updated_at_ms: 2000,
+        archived: false
+      }
+    ]),
+    "--processes-json",
+    JSON.stringify([{
+      pid: 4444,
+      ppid: 1,
+      command: "codex",
+      cwd
+    }]),
+    "--rollouts-json",
+    JSON.stringify({ [otherRolloutPath]: rollout })
+  ]);
+
+  assert.equal(described.status, 0, described.stderr || described.stdout);
+  const parsed = JSON.parse(described.stdout);
+  assert.equal(parsed.source, "native_active");
+  assert.equal(parsed.confidence, "low");
+  assert.equal(parsed.match, "cwd_latest");
+  assert.match(parsed.about, /Most recent cwd task/);
+  assert.equal(parsed.evidence.candidates.length, 2);
+  assert.match(parsed.limitations[0], /most recent of 2 sessions/);
+});
+
+test("describe prefers Codex title over injected environment context", () => {
+  const rollout = [
+    JSON.stringify({
+      timestamp: "2026-07-04T00:00:00.000Z",
+      type: "event_msg",
+      payload: {
+        type: "user_message",
+        message: "<environment_context> <cwd>/repo/project</cwd> </environment_context>"
+      }
+    }),
+    JSON.stringify({
+      timestamp: "2026-07-04T00:01:00.000Z",
+      type: "event_msg",
+      payload: {
+        type: "agent_message",
+        message: "I checked the README and summarized the project."
+      }
+    })
+  ].join("\n");
+
+  const described = runAgentCli([
+    "describe",
+    "--conversation",
+    "terminal:tmux:codex-work:0.0:33389",
+    "--threads-json",
+    JSON.stringify([threadRow({ title: "Read the README and explain this project" })]),
+    "--processes-json",
+    JSON.stringify([{
+      pid: 33389,
+      ppid: 999,
+      command: `codex resume ${sessionId}`,
+      cwd
+    }]),
+    "--terminals-json",
+    JSON.stringify([tmuxPane()]),
+    "--terminal-screens-json",
+    JSON.stringify({
+      "codex-work:0.0": "Codex is ready\n"
+    }),
+    "--rollouts-json",
+    JSON.stringify({ [rolloutPath]: rollout })
+  ]);
+
+  assert.equal(described.status, 0, described.stderr || described.stdout);
+  const parsed = JSON.parse(described.stdout);
+  assert.equal(parsed.evidence.initial_request, "Read the README and explain this project");
+  assert.match(parsed.about, /Read the README and explain this project/);
+  assert.doesNotMatch(parsed.about, /environment_context/);
+  assert.equal(parsed.evidence.recent_messages.some((message) => message.text.includes("environment_context")), false);
+});
+
 function runAgentCli(args: string[], env: NodeJS.ProcessEnv = {}) {
   return spawnSync(process.execPath, [binPath, ...args], {
     encoding: "utf8",

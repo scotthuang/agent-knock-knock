@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.24 - 2026-07-04
+
+### Fixed
+
+- Ignored injected Codex `<environment_context>` messages when choosing the initial request for `AKK describe`, falling back to the Codex thread title when no real user message is available.
+
+## 0.2.23 - 2026-07-04
+
+### Fixed
+
+- Declared `agent_knock_knock_describe` in the OpenClaw plugin contract and metadata so OpenClaw exposes the new describe tool.
+- Updated the installed AKK skill routing rules to use `agent_knock_knock_describe` for session-content summary requests instead of falling back to direct terminal inspection.
+
+## 0.2.22 - 2026-07-04
+
+### Added
+
+- Added `AKK describe` / `AKK summary` to summarize what an AKK-managed, native Codex, or terminal-controlled Codex session is about.
+- Added the `agent_knock_knock_describe` OpenClaw tool and `/akk describe <conversation-id>` command.
+- Reused Codex rollout history for exact session matches, added cwd-based fallback matching, and returned screen-only summaries with explicit low-confidence limitations when no history can be found.
+
 ## 0.2.21 - 2026-07-03
 
 ### Added

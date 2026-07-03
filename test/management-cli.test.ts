@@ -1088,6 +1088,59 @@ test("status trace summarizes executor output without exposing thinking text", (
   }
 });
 
+test("describe summarizes AKK-managed conversation content", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-describe-managed-"));
+  const storeDir = path.join(tempDir, "conversations");
+
+  try {
+    const created = runCli([
+      "new",
+      "--agent",
+      "codex",
+      "--session",
+      "codex-describe",
+      "--request",
+      "Implement session description support",
+      "--store-dir",
+      storeDir
+    ]);
+    runCli([
+      "record",
+      "--state",
+      created.paths.statePath,
+      "--message-json",
+      JSON.stringify({
+        id: "reply-1",
+        conversation_id: created.conversation.conversation_id,
+        from: "codex",
+        to: "openclaw",
+        type: "question",
+        requires_response: true,
+        round: 1,
+        body: "I found the Codex rollout parser and will reuse it.",
+        ts: "2026-07-04T00:00:00.000Z"
+      })
+    ]);
+
+    const described = runCli([
+      "describe",
+      "--conversation",
+      created.conversation.conversation_id,
+      "--store-dir",
+      storeDir
+    ]);
+
+    assert.equal(described.source, "akk_managed");
+    assert.equal(described.confidence, "high");
+    assert.match(described.about, /Implement session description support/);
+    assert.match(described.about, /rollout parser/);
+    assert.equal(described.evidence.initial_request, "Implement session description support");
+    assert.equal(described.evidence.recent_messages.at(-1).body, "I found the Codex rollout parser and will reuse it.");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("monitor marks Codex model failures as needing model selection", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-model-selection-"));
   const storeDir = path.join(tempDir, "conversations");

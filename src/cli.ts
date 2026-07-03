@@ -9,6 +9,7 @@ import type {
   ActiveCodexProcess,
   CodexProcessSnapshot,
   CodexThreadRow,
+  ForkContextPackage,
   TerminalControlRef
 } from "./codex-session-provider.js";
 import { CodexLocalSessionProvider, type CodexLocalSessionAdapter } from "./codex-local-session-provider.js";
@@ -144,6 +145,8 @@ async function runCommand(commandName, options) {
     await runList(options);
   } else if (commandName === "status") {
     await runStatus(options);
+  } else if (commandName === "describe" || commandName === "summary") {
+    await runDescribe(options);
   } else if (commandName === "send") {
     await runSend(options);
   } else if (commandName === "approve") {
@@ -1781,6 +1784,22 @@ function parseTerminalConversationId(conversationId: string | undefined): { conv
   };
 }
 
+function parseNativeConversationId(conversationId: string | undefined): { conversationId: string; agent: "codex"; pid: number } | undefined {
+  const prefix = "native:codex:";
+  if (!conversationId?.startsWith(prefix)) {
+    return undefined;
+  }
+  const pid = Number(conversationId.slice(prefix.length));
+  if (!Number.isInteger(pid)) {
+    throw new Error(`invalid native conversation id: ${conversationId}`);
+  }
+  return {
+    conversationId,
+    agent: "codex",
+    pid
+  };
+}
+
 async function runStatus(options) {
   cleanupIdleConversations(storeDirFromOptions(options), options);
   const terminalConversation = await resolveTerminalConversationFromOptions(options);
@@ -1830,6 +1849,60 @@ async function runStatus(options) {
     event_log_path: logPath,
     recent_event_count: Math.min(events.length, 10),
     trace: Boolean(options.trace)
+  });
+}
+
+async function runDescribe(options) {
+  cleanupIdleConversations(storeDirFromOptions(options), options);
+  const conversationId = required(options.conversation ?? options.conversationId, "--conversation is required");
+  const terminalConversation = await resolveTerminalConversationFromOptions(options);
+  if (terminalConversation) {
+    const terminalStatus = await terminalStatusForControl(terminalConversation.terminalControl, options);
+    const process = await activeCodexProcessForPid(options, parseTerminalConversationId(conversationId)?.pid);
+    printJson(await describeNativeCodexSession({
+      id: conversationId,
+      source: "terminal_control",
+      process,
+      options,
+      terminalControl: terminalConversation.terminalControl,
+      terminalStatus
+    }));
+    return;
+  }
+
+  const nativeConversation = parseNativeConversationId(conversationId);
+  if (nativeConversation) {
+    const process = await activeCodexProcessForPid(options, nativeConversation.pid);
+    printJson(await describeNativeCodexSession({
+      id: conversationId,
+      source: "native_active",
+      process,
+      options
+    }));
+    return;
+  }
+
+  const { conversation, statePath, logPath } = loadConversationFromOptions(options);
+  const events = readExistingEvents(logPath);
+  const terminalControl = terminalControlFromTakeover(
+    isRecord(conversation.native_session_takeover) ? conversation.native_session_takeover : undefined
+  );
+  const terminalStatus = terminalControl ? await terminalStatusForControl(terminalControl, options) : undefined;
+  printJson({
+    conversation_id: conversation.conversation_id,
+    source: "akk_managed",
+    confidence: "high",
+    about: managedConversationAbout(conversation, events, terminalStatus),
+    summary: summarizeConversation(conversation),
+    evidence: {
+      initial_request: conversation.user_request,
+      recent_messages: recentMessageEvidence(events),
+      trace: buildConversationTrace({ conversation, events, logPath }),
+      terminal_screen: terminalStatus?.screen
+    },
+    limitations: terminalStatus?.reachable === false ? ["terminal status unavailable"] : [],
+    state_path: statePath,
+    event_log_path: logPath
   });
 }
 
@@ -3982,6 +4055,236 @@ function summarizeEvent(event) {
   };
 }
 
+async function activeCodexProcessForPid(options, pid: number | undefined): Promise<ActiveCodexProcess | undefined> {
+  if (!Number.isInteger(pid)) {
+    return undefined;
+  }
+  const provider = createAgentSessionProvider("codex", options);
+  const activeSessions = await listActiveSessionsWithTerminalControl(provider, options);
+  return activeSessions.find((process) => process.pid === pid);
+}
+
+async function describeNativeCodexSession({
+  id,
+  source,
+  process,
+  options,
+  terminalControl,
+  terminalStatus
+}: {
+  id: string;
+  source: "native_active" | "terminal_control";
+  process?: ActiveCodexProcess;
+  options: Record<string, any>;
+  terminalControl?: TerminalControlRef;
+  terminalStatus?: Record<string, any>;
+}) {
+  const provider = createAgentSessionProvider("codex", options);
+  const directSessionId = process?.sessionId;
+  if (directSessionId) {
+    const context = await provider.getForkContext({
+      sessionId: directSessionId,
+      maxMessages: Number(options.maxMessages ?? 16),
+      maxCommands: Number(options.maxCommands ?? 10),
+      maxTextLength: Number(options.maxTextLength ?? 1200)
+    });
+    if (context) {
+      return nativeDescriptionFromContext({
+        id,
+        source,
+        confidence: "high",
+        match: "session_id",
+        process,
+        context,
+        terminalControl,
+        terminalStatus,
+        limitations: []
+      });
+    }
+  }
+
+  const cwd = process?.cwd ?? terminalControl?.currentPath;
+  const sessions = (await provider.listHistoricalSessions())
+    .filter((session) => session.cwd === cwd)
+    .sort((left, right) => Number(right.updatedAtMs ?? 0) - Number(left.updatedAtMs ?? 0));
+  if (sessions.length > 0) {
+    const selected = sessions[0];
+    const context = await provider.getForkContext({
+      sessionId: selected.id,
+      maxMessages: Number(options.maxMessages ?? 16),
+      maxCommands: Number(options.maxCommands ?? 10),
+      maxTextLength: Number(options.maxTextLength ?? 1200)
+    });
+    if (context) {
+      return nativeDescriptionFromContext({
+        id,
+        source,
+        confidence: sessions.length === 1 ? "medium" : "low",
+        match: sessions.length === 1 ? "cwd" : "cwd_latest",
+        process,
+        context,
+        terminalControl,
+        terminalStatus,
+        limitations: sessions.length === 1
+          ? ["Codex session inferred from matching cwd because the active process did not expose a session id."]
+          : [`Codex session inferred from the most recent of ${sessions.length} sessions with the same cwd.`],
+        candidates: sessions.slice(0, 5).map((session) => ({
+          session_id: session.id,
+          cwd: session.cwd,
+          title: session.title ?? session.preview ?? session.firstUserMessage,
+          updated_at_ms: session.updatedAtMs,
+          capability: session.capability
+        }))
+      });
+    }
+  }
+
+  return {
+    conversation_id: id,
+    source,
+    confidence: "screen_only",
+    match: "terminal_screen",
+    about: screenOnlyAbout({ process, terminalStatus }),
+    evidence: {
+      process,
+      terminal_control: terminalControl,
+      terminal_status: terminalStatus
+    },
+    limitations: [
+      "No exact Codex session id was available.",
+      cwd ? "No matching Codex rollout history was found for this cwd." : "No process cwd was available for Codex history matching.",
+      "Summary is limited to active process metadata and the visible terminal screen."
+    ]
+  };
+}
+
+function nativeDescriptionFromContext({
+  id,
+  source,
+  confidence,
+  match,
+  process,
+  context,
+  terminalControl,
+  terminalStatus,
+  limitations,
+  candidates
+}: {
+  id: string;
+  source: "native_active" | "terminal_control";
+  confidence: "high" | "medium" | "low";
+  match: string;
+  process?: ActiveCodexProcess;
+  context: ForkContextPackage;
+  terminalControl?: TerminalControlRef;
+  terminalStatus?: Record<string, any>;
+  limitations: string[];
+  candidates?: Record<string, any>[];
+}) {
+  return {
+    conversation_id: id,
+    source,
+    confidence,
+    match,
+    about: rolloutAbout(context, terminalStatus),
+    codex_session: context.source,
+    evidence: {
+      process,
+      terminal_control: terminalControl,
+      terminal_status: terminalStatus,
+      initial_request: bestSessionIntent(context),
+      title: context.source.title,
+      recent_messages: visibleRolloutMessages(context).slice(-8),
+      recent_commands: context.commands.slice(-8),
+      candidates
+    },
+    limitations
+  };
+}
+
+function managedConversationAbout(conversation, events, terminalStatus?: Record<string, any>): string {
+  const request = truncateText(String(conversation.user_request ?? "").trim(), 220);
+  const recent = recentMessageEvidence(events).at(-1)?.body;
+  const parts = [
+    request ? `Initial request: ${request}` : undefined,
+    recent ? `Latest visible message: ${truncateText(recent, 180)}` : undefined,
+    terminalStatus?.activity_state ? `Current terminal state: ${terminalStatus.activity_state}.` : undefined
+  ].filter(Boolean);
+  return parts.length > 0 ? parts.join(" ") : "No durable task content is available for this AKK-managed session.";
+}
+
+function rolloutAbout(context: ForkContextPackage, terminalStatus?: Record<string, any>): string {
+  const title = truncateText(String(context.source.title ?? "").trim(), 180);
+  const intent = bestSessionIntent(context);
+  const latestAssistant = [...visibleRolloutMessages(context)].reverse().find((message) => message.role === "assistant")?.text;
+  const latestCommand = context.commands.at(-1)?.command;
+  const parts = [
+    intent ? `Initial request: ${truncateText(intent, 220)}` : title ? `Codex title: ${title}` : undefined,
+    latestAssistant ? `Latest visible progress: ${truncateText(latestAssistant, 180)}` : undefined,
+    latestCommand ? `Recent command: ${truncateText(latestCommand, 140)}` : undefined,
+    terminalStatus?.activity_state ? `Current terminal state: ${terminalStatus.activity_state}.` : undefined
+  ].filter(Boolean);
+  return parts.length > 0 ? parts.join(" ") : "Codex history was found, but it did not include enough visible message content to summarize the session.";
+}
+
+function screenOnlyAbout({ process, terminalStatus }: { process?: ActiveCodexProcess; terminalStatus?: Record<string, any> }): string {
+  const activity = terminalStatus?.activity_reason ?? terminalStatus?.activity_state;
+  const excerpt = terminalStatus?.screen?.excerpt;
+  const parts = [
+    process?.cwd ? `This Codex process is running in ${process.cwd}.` : undefined,
+    activity ? `Terminal activity: ${truncateText(String(activity), 180)}` : undefined,
+    excerpt ? `Visible screen: ${truncateText(String(excerpt), 220)}` : undefined
+  ].filter(Boolean);
+  return parts.length > 0 ? parts.join(" ") : "Only active process metadata is available; no Codex conversation history or terminal screen content could be read.";
+}
+
+function bestSessionIntent(context: ForkContextPackage): string | undefined {
+  const firstUser = visibleRolloutMessages(context).find((message) => message.role === "user")?.text;
+  if (firstUser) {
+    return firstUser;
+  }
+  const title = cleanIntentText(context.source.title);
+  if (title) {
+    return title;
+  }
+  return undefined;
+}
+
+function visibleRolloutMessages(context: ForkContextPackage) {
+  return context.messages.filter((message) => !isEnvironmentContextMessage(message.text));
+}
+
+function cleanIntentText(value: string | undefined): string | undefined {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return text && !isEnvironmentContextMessage(text) ? text : undefined;
+}
+
+function isEnvironmentContextMessage(value: string | undefined): boolean {
+  return /^\s*<environment_context[\s>]/u.test(String(value ?? ""));
+}
+
+function recentMessageEvidence(events) {
+  return events
+    .filter((event) => event.event === "message" && typeof event.body === "string")
+    .slice(-8)
+    .map((event) => ({
+      ts: event.ts,
+      from: event.from,
+      to: event.to,
+      type: event.type,
+      round: event.round,
+      body: truncateText(event.body, 800)
+    }));
+}
+
+function truncateText(value, maxLength) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (text.length <= maxLength) {
+    return text;
+  }
+  return `${text.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
 function buildConversationTrace({ conversation, events, logPath }) {
   const outputPath = traceOutputPath({ conversation, events, logPath });
   const output = outputPath && fs.existsSync(outputPath)
@@ -5103,6 +5406,7 @@ function usage() {
   agent-knock-knock delegate --request <text> [--agent ${agentList}] [--store-dir <dir>] [--all-proxy <url>] [--agent-timeout-minutes <minutes>] [--token <gateway-token>] [--send|--background]
   agent-knock-knock list [--store-dir <dir>] [--agent ${agentList}] [--status <status>] [--all] [--managed-only] [--no-approval-scan] [--terminal-debug]
   agent-knock-knock status --conversation <id> [--store-dir <dir>] [--trace]
+  agent-knock-knock describe --conversation <id> [--store-dir <dir>]
   agent-knock-knock send --conversation <id> --message <text> [--type answer|task|control] [--all-proxy <url>] [--agent-timeout-minutes <minutes>]
   agent-knock-knock approve --conversation <id>
   agent-knock-knock cancel --conversation <id> [--all-proxy <url>]
