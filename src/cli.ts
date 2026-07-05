@@ -60,6 +60,7 @@ import {
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 10080;
 const DEFAULT_AGENT_TIMEOUT_MINUTES = 60;
 const DEFAULT_MONITOR_POLL_INTERVAL_MS = 5000;
+const DEFAULT_CODEX_ACPX_AGENT_COMMAND = "npx -y @agentclientprotocol/codex-acp@^1.1.0";
 
 class InlineCodexSessionAdapter implements CodexLocalSessionAdapter {
   private readonly threads: CodexThreadRow[];
@@ -1378,8 +1379,7 @@ function ensureExecutorSession({
   env: NodeJS.ProcessEnv;
   resumeSessionId?: string;
 }) {
-  assertSafeAcpxExecutorLaunch({ acpxPath, executor });
-  const args = [acpxCommandForExecutor(executor), "sessions", "ensure"];
+  const args = [...acpxAgentSelectorArgs(executor), "sessions", "ensure"];
   if (resumeSessionId) {
     args.push("--resume-session", resumeSessionId);
   } else {
@@ -1433,110 +1433,33 @@ function buildAcpxPromptArgs({ executor, payload, model }) {
   if (model) {
     args.push("--model", model);
   }
-  args.push(acpxCommandForExecutor(executor), "-s", executor.session, payload);
+  args.push(...acpxAgentSelectorArgs(executor), "-s", executor.session, payload);
   return args;
 }
 
-function assertSafeAcpxExecutorLaunch({ acpxPath, executor }: { acpxPath: string; executor: any }) {
+function acpxCancelArgs({ executor }: { executor: any }) {
+  return [...acpxAgentSelectorArgs(executor), "cancel", "-s", executor.session];
+}
+
+function acpxAgentSelectorArgs(executor: any): string[] {
   if (executor.kind !== "codex") {
-    return;
+    return [acpxCommandForExecutor(executor)];
   }
 
-  const issue = detectUnsafeCodexAcpxInstall(acpxPath);
-  if (!issue) {
-    return;
+  const command = codexAcpxAgentCommand();
+  if (/@zed-industries\/codex-acp\b/u.test(command)) {
+    throw new Error([
+      "Refusing to start Codex through deprecated @zed-industries/codex-acp.",
+      "Use @agentclientprotocol/codex-acp for AKK Codex ACPX delegation.",
+      "Set AKK_CODEX_ACPX_AGENT_COMMAND to a supported ACP adapter command if you need an override."
+    ].join(" "));
   }
 
-  throw new Error([
-    "Refusing to start Codex through ACPX because this ACPX installation references the deprecated @zed-industries/codex-acp adapter.",
-    "This adapter has caused Codex native binaries to be launched from stale or quarantined paths on this machine.",
-    `Evidence: ${issue}`,
-    "Upgrade or reconfigure ACPX to use @agentclientprotocol/codex-acp, then retry the AKK Codex task."
-  ].join(" "));
+  return ["--agent", command];
 }
 
-function detectUnsafeCodexAcpxInstall(acpxPath: string): string | undefined {
-  const candidates = acpxInspectionCandidates(acpxPath);
-  for (const candidate of candidates) {
-    const evidence = fileContainsLegacyZedCodexAcp(candidate);
-    if (evidence) {
-      return evidence;
-    }
-  }
-
-  for (const root of acpxPackageRootCandidates(acpxPath)) {
-    const legacyPackage = path.join(root, "node_modules", "@zed-industries", "codex-acp", "package.json");
-    if (fs.existsSync(legacyPackage)) {
-      return legacyPackage;
-    }
-    const legacyDarwinPackage = path.join(root, "node_modules", "@zed-industries", "codex-acp-darwin-arm64", "package.json");
-    if (fs.existsSync(legacyDarwinPackage)) {
-      return legacyDarwinPackage;
-    }
-  }
-
-  return undefined;
-}
-
-function acpxInspectionCandidates(acpxPath: string): string[] {
-  const candidates = new Set<string>();
-  for (const root of acpxPackageRootCandidates(acpxPath)) {
-    candidates.add(path.join(root, "package.json"));
-    candidates.add(path.join(root, "package-lock.json"));
-    candidates.add(path.join(root, "npm-shrinkwrap.json"));
-  }
-  candidates.add(acpxPath);
-  try {
-    candidates.add(fs.realpathSync(acpxPath));
-  } catch {
-    // Ignore unreadable shims; absence of static evidence should not block launch.
-  }
-  return [...candidates];
-}
-
-function acpxPackageRootCandidates(acpxPath: string): string[] {
-  const roots = new Set<string>();
-  for (const start of acpxPathCandidates(acpxPath)) {
-    let dir = fs.existsSync(start) && fs.statSync(start).isDirectory()
-      ? start
-      : path.dirname(start);
-    for (let i = 0; i < 8; i += 1) {
-      if (!dir || dir === path.dirname(dir)) {
-        break;
-      }
-      const packageJson = path.join(dir, "package.json");
-      if (fs.existsSync(packageJson)) {
-        roots.add(dir);
-      }
-      if (path.basename(dir) === "node_modules") {
-        break;
-      }
-      dir = path.dirname(dir);
-    }
-  }
-  return [...roots];
-}
-
-function acpxPathCandidates(acpxPath: string): string[] {
-  const candidates = new Set<string>([acpxPath]);
-  try {
-    candidates.add(fs.realpathSync(acpxPath));
-  } catch {
-    // Keep the unresolved path.
-  }
-  return [...candidates];
-}
-
-function fileContainsLegacyZedCodexAcp(filePath: string): string | undefined {
-  try {
-    if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
-      return undefined;
-    }
-    const content = fs.readFileSync(filePath, "utf8");
-    return content.includes("@zed-industries/codex-acp") ? filePath : undefined;
-  } catch {
-    return undefined;
-  }
+function codexAcpxAgentCommand(): string {
+  return process.env.AKK_CODEX_ACPX_AGENT_COMMAND?.trim() || DEFAULT_CODEX_ACPX_AGENT_COMMAND;
 }
 
 function proxyForExecutor(executor, options: Record<string, any> = {}) {
@@ -3232,9 +3155,8 @@ async function runCancel(options) {
   const executorEnv = environmentForExecutor(executor, {
     allProxy: options.allProxy ?? conversation.executor_all_proxy
   });
-  const acpxCommand = acpxCommandForExecutor(executor);
-  assertSafeAcpxExecutorLaunch({ acpxPath, executor });
-  const cancelResult = spawnSync(acpxPath, [acpxCommand, "cancel", "-s", executor.session], {
+  const cancelArgs = acpxCancelArgs({ executor });
+  const cancelResult = spawnSync(acpxPath, cancelArgs, {
     encoding: "utf8",
     maxBuffer: 1024 * 1024 * 10,
     cwd: conversation.workspace ?? process.cwd(),
@@ -3284,7 +3206,7 @@ async function runCancel(options) {
     conversation: nextConversation,
     cancel_requested: true,
     executor,
-    acpx_command: ["acpx", acpxCommand, "cancel", "-s", executor.session],
+    acpx_command: ["acpx", ...cancelArgs],
     budget: budgetAction(nextConversation)
   });
 }

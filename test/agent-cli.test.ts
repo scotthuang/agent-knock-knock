@@ -6,6 +6,7 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
+const CODEX_ACPX_SELECTOR = ["--agent", "npx -y @agentclientprotocol/codex-acp@^1.1.0"];
 const sessionId = "019ee559-7bb8-7fd1-970c-0f7b6978c44e";
 const cwd = "/repo/agent-knock-knock";
 const rolloutPath = "/tmp/codex-rollout.jsonl";
@@ -949,12 +950,13 @@ fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify({
       .trim()
       .split(/\r?\n/)
       .map((line) => JSON.parse(line));
-    assert.deepEqual(calls[0].args, ["codex", "sessions", "ensure", "--name", parsed.conversation.executor.session]);
-    assert.deepEqual(calls[1].args.slice(0, 6), ["--approve-all", "--model", "gpt-5.5[medium]", "codex", "-s", parsed.conversation.executor.session]);
-    assert.match(calls[1].args[6], /This AKK conversation is a fork/);
-    assert.match(calls[1].args[6], /Approved summary: inspect the ACPX branch/);
-    assert.doesNotMatch(calls[1].args[6], /raw private source context/);
-    assert.doesNotMatch(calls[1].args[6], /--resume-session/);
+    assert.deepEqual(calls[0].args, [...CODEX_ACPX_SELECTOR, "sessions", "ensure", "--name", parsed.conversation.executor.session]);
+    assert.deepEqual(calls[1].args.slice(0, 6), ["--approve-all", "--model", "gpt-5.5[medium]", ...CODEX_ACPX_SELECTOR, "-s"]);
+    assert.equal(calls[1].args[6], parsed.conversation.executor.session);
+    assert.match(calls[1].args[7], /This AKK conversation is a fork/);
+    assert.match(calls[1].args[7], /Approved summary: inspect the ACPX branch/);
+    assert.doesNotMatch(calls[1].args[7], /raw private source context/);
+    assert.doesNotMatch(calls[1].args[7], /--resume-session/);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

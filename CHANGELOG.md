@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.26 - 2026-07-06
+
+### Fixed
+
+- Routed AKK Codex ACPX delegation through the supported `@agentclientprotocol/codex-acp` adapter with an explicit `--agent` command, avoiding OpenClaw ACPX installs that still bundle deprecated `@zed-industries/codex-acp`.
+- Kept `AKK_CODEX_ACPX_AGENT_COMMAND` as an override for custom Codex ACP adapters while refusing explicit `@zed-industries/codex-acp` overrides.
+
 ## 0.2.25 - 2026-07-06
 
 ### Fixed
