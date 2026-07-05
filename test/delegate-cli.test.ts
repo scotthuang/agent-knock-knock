@@ -228,6 +228,65 @@ fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify({
   }
 });
 
+test("delegate blocks Codex when acpx install references deprecated zed codex-acp", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-legacy-acpx-"));
+  const fakeBinDir = path.join(tempDir, "bin");
+  const workspace = path.join(tempDir, "workspace");
+  const launchedPath = path.join(tempDir, "acpx-args.json");
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(
+      path.join(tempDir, "package.json"),
+      JSON.stringify({
+        name: "acpx",
+        dependencies: {
+          "@zed-industries/codex-acp": "0.15.0"
+        }
+      }),
+      "utf8"
+    );
+    const fakeAcpx = path.join(fakeBinDir, "acpx");
+    fs.writeFileSync(
+      fakeAcpx,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify(process.argv.slice(2)) + "\\n", "utf8");
+`,
+      "utf8"
+    );
+    fs.chmodSync(fakeAcpx, 0o755);
+
+    const result = spawnSync(process.execPath, [
+      binPath,
+      "delegate",
+      "--agent",
+      "codex",
+      "--request",
+      "Run a Codex task",
+      "--workspace",
+      workspace,
+      "--store-dir",
+      path.join(tempDir, "conversations"),
+      "--background"
+    ], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+      }
+    });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Refusing to start Codex through ACPX/);
+    assert.match(result.stderr, /@zed-industries\/codex-acp/);
+    assert.equal(fs.existsSync(launchedPath), false);
+  } finally {
+    removeTempDir(tempDir);
+  }
+});
+
 function waitForCalls(filePath, minCount, timeoutMs = 2000): Promise<any[]> {
   const started = Date.now();
   return new Promise((resolve, reject) => {

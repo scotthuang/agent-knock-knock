@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.25 - 2026-07-06
+
+### Fixed
+
+- Refused to start Codex through ACPX installations that still reference deprecated `@zed-industries/codex-acp`, preventing AKK from repeatedly launching stale or quarantined Codex adapter binaries.
+
 ## 0.2.24 - 2026-07-04
 
 ### Fixed
