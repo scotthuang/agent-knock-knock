@@ -106,8 +106,8 @@ fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify({
       .map((line) => JSON.parse(line));
     assert.deepEqual(acpxCalls[0].args, [...CODEX_ACPX_SELECTOR, "sessions", "ensure", "--name", "codex-work"]);
     assert.equal(acpxCalls[0].allProxy, "socks5h://127.0.0.1:1082");
-    assert.deepEqual(acpxCalls[1].args.slice(0, 6), ["--approve-all", "--model", "gpt-5.5[medium]", ...CODEX_ACPX_SELECTOR, "-s"]);
-    assert.equal(acpxCalls[1].args[6], "codex-work");
+    assert.deepEqual(acpxCalls[1].args.slice(0, 7), ["--approve-all", "--model", "gpt-5.5[medium]", ...CODEX_ACPX_SELECTOR, "prompt", "-s"]);
+    assert.equal(acpxCalls[1].args[7], "codex-work");
     assert.equal(acpxCalls[1].allProxy, "socks5h://127.0.0.1:1082");
 
     const cursorSent = runCli([
@@ -669,11 +669,11 @@ fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify(args) + "\\n"
       .split(/\r?\n/)
       .map((line) => JSON.parse(line));
     assert.deepEqual(acpxCalls[0], [...CODEX_ACPX_SELECTOR, "sessions", "ensure", "--name", recovered.executor.session]);
-    assert.deepEqual(acpxCalls[1].slice(0, 4), ["--approve-all", ...CODEX_ACPX_SELECTOR, "-s"]);
-    assert.equal(acpxCalls[1][4], recovered.executor.session);
-    assert.match(acpxCalls[1][5], /AKK replay recovery/);
-    assert.match(acpxCalls[1][5], /Initial work completed/);
-    assert.match(acpxCalls[1][5], /Pending follow-up that cannot reach the old session/);
+    assert.deepEqual(acpxCalls[1].slice(0, 5), ["--approve-all", ...CODEX_ACPX_SELECTOR, "prompt", "-s"]);
+    assert.equal(acpxCalls[1][5], recovered.executor.session);
+    assert.match(acpxCalls[1][6], /AKK replay recovery/);
+    assert.match(acpxCalls[1][6], /Initial work completed/);
+    assert.match(acpxCalls[1][6], /Pending follow-up that cannot reach the old session/);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -884,10 +884,10 @@ fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify(args) + "\\n"
       .split(/\r?\n/)
       .map((line) => JSON.parse(line));
     assert.deepEqual(acpxCalls[0], [...CODEX_ACPX_SELECTOR, "sessions", "ensure", "--name", recovered.executor.session]);
-    assert.deepEqual(acpxCalls[1].slice(0, 4), ["--approve-all", ...CODEX_ACPX_SELECTOR, "-s"]);
-    assert.equal(acpxCalls[1][4], recovered.executor.session);
-    assert.match(acpxCalls[1][5], /AKK replay recovery/);
-    assert.match(acpxCalls[1][5], /Initial task before compact failure/);
+    assert.deepEqual(acpxCalls[1].slice(0, 5), ["--approve-all", ...CODEX_ACPX_SELECTOR, "prompt", "-s"]);
+    assert.equal(acpxCalls[1][5], recovered.executor.session);
+    assert.match(acpxCalls[1][6], /AKK replay recovery/);
+    assert.match(acpxCalls[1][6], /Initial task before compact failure/);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

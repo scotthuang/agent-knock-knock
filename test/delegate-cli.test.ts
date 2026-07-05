@@ -148,8 +148,8 @@ fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify(process.argv.s
 
     const acpxCalls = await waitForCalls(launchedPath, 2);
     assert.deepEqual(acpxCalls[0], [...CODEX_ACPX_SELECTOR, "sessions", "ensure", "--name", parsed.conversation.executor.session]);
-    assert.deepEqual(acpxCalls.at(-1).slice(0, 4), ["--approve-all", ...CODEX_ACPX_SELECTOR, "-s"]);
-    assert.equal(acpxCalls.at(-1)[4], parsed.conversation.executor.session);
+    assert.deepEqual(acpxCalls.at(-1).slice(0, 5), ["--approve-all", ...CODEX_ACPX_SELECTOR, "prompt", "-s"]);
+    assert.equal(acpxCalls.at(-1)[5], parsed.conversation.executor.session);
   } finally {
     removeTempDir(tempDir);
   }
@@ -214,8 +214,8 @@ fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify({
     const acpxCalls = await waitForCalls(launchedPath, 2);
     assert.deepEqual(acpxCalls[0].args, [...CODEX_ACPX_SELECTOR, "sessions", "ensure", "--name", "codex-task"]);
     assert.equal(acpxCalls[0].allProxy, "socks5h://127.0.0.1:1082");
-    assert.deepEqual(acpxCalls.at(-1).args.slice(0, 6), ["--approve-all", "--model", "gpt-5.5[medium]", ...CODEX_ACPX_SELECTOR, "-s"]);
-    assert.equal(acpxCalls.at(-1).args[6], "codex-task");
+    assert.deepEqual(acpxCalls.at(-1).args.slice(0, 7), ["--approve-all", "--model", "gpt-5.5[medium]", ...CODEX_ACPX_SELECTOR, "prompt", "-s"]);
+    assert.equal(acpxCalls.at(-1).args[7], "codex-task");
     assert.equal(acpxCalls.at(-1).allProxy, "socks5h://127.0.0.1:1082");
 
     const events = fs.readFileSync(parsed.paths.logPath, "utf8")
@@ -285,7 +285,7 @@ fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify(process.argv.s
     const parsed = JSON.parse(result.stdout);
     const acpxCalls = await waitForCalls(launchedPath, 2);
     assert.deepEqual(acpxCalls[0], [...CODEX_ACPX_SELECTOR, "sessions", "ensure", "--name", parsed.conversation.executor.session]);
-    assert.deepEqual(acpxCalls.at(-1).slice(0, 4), ["--approve-all", ...CODEX_ACPX_SELECTOR, "-s"]);
+    assert.deepEqual(acpxCalls.at(-1).slice(0, 5), ["--approve-all", ...CODEX_ACPX_SELECTOR, "prompt", "-s"]);
   } finally {
     removeTempDir(tempDir);
   }

@@ -951,12 +951,12 @@ fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify({
       .split(/\r?\n/)
       .map((line) => JSON.parse(line));
     assert.deepEqual(calls[0].args, [...CODEX_ACPX_SELECTOR, "sessions", "ensure", "--name", parsed.conversation.executor.session]);
-    assert.deepEqual(calls[1].args.slice(0, 6), ["--approve-all", "--model", "gpt-5.5[medium]", ...CODEX_ACPX_SELECTOR, "-s"]);
-    assert.equal(calls[1].args[6], parsed.conversation.executor.session);
-    assert.match(calls[1].args[7], /This AKK conversation is a fork/);
-    assert.match(calls[1].args[7], /Approved summary: inspect the ACPX branch/);
-    assert.doesNotMatch(calls[1].args[7], /raw private source context/);
-    assert.doesNotMatch(calls[1].args[7], /--resume-session/);
+    assert.deepEqual(calls[1].args.slice(0, 7), ["--approve-all", "--model", "gpt-5.5[medium]", ...CODEX_ACPX_SELECTOR, "prompt", "-s"]);
+    assert.equal(calls[1].args[7], parsed.conversation.executor.session);
+    assert.match(calls[1].args[8], /This AKK conversation is a fork/);
+    assert.match(calls[1].args[8], /Approved summary: inspect the ACPX branch/);
+    assert.doesNotMatch(calls[1].args[8], /raw private source context/);
+    assert.doesNotMatch(calls[1].args[8], /--resume-session/);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

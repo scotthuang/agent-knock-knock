@@ -1433,12 +1433,19 @@ function buildAcpxPromptArgs({ executor, payload, model }) {
   if (model) {
     args.push("--model", model);
   }
-  args.push(...acpxAgentSelectorArgs(executor), "-s", executor.session, payload);
+  args.push(...acpxPromptArgs({ executor, payload }));
   return args;
 }
 
 function acpxCancelArgs({ executor }: { executor: any }) {
   return [...acpxAgentSelectorArgs(executor), "cancel", "-s", executor.session];
+}
+
+function acpxPromptArgs({ executor, payload }: { executor: any; payload: string }) {
+  if (executor.kind === "codex") {
+    return [...acpxAgentSelectorArgs(executor), "prompt", "-s", executor.session, payload];
+  }
+  return [...acpxAgentSelectorArgs(executor), "-s", executor.session, payload];
 }
 
 function acpxAgentSelectorArgs(executor: any): string[] {

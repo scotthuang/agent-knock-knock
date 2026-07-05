@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.27 - 2026-07-06
+
+### Fixed
+
+- Fixed Codex prompt delivery when using an explicit ACPX `--agent` adapter by invoking the top-level `prompt` subcommand before `-s <session>`.
+
 ## 0.2.26 - 2026-07-06
 
 ### Fixed
