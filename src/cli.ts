@@ -2495,10 +2495,11 @@ async function runTerminalConversationApprove({ options, conversationId, termina
 
 async function runTerminalConversationSend({ options, conversationId, messageBody, terminalControl }) {
   const provider = createTerminalControlProvider(options);
-  await provider.sendText(terminalControl.target, String(messageBody), {
+  const terminalPayload = terminalSubmissionPayload(String(messageBody));
+  await provider.sendText(terminalControl.target, terminalPayload, {
     socketPath: terminalControl.socketPath
   });
-  await provider.sendKeys(terminalControl.target, ["Enter"], {
+  await provider.sendKeys(terminalControl.target, ["C-m"], {
     socketPath: terminalControl.socketPath
   });
   runtimeLog("info", "terminal_message_send", {
@@ -2539,19 +2540,19 @@ async function runTerminalControlSend({
 }) {
   const provider = createTerminalControlProvider(options);
   const terminalPayload = needsNativeTakeoverBootstrap
-    ? buildAgentSendPayload({
+    ? terminalSubmissionPayload(buildAgentSendPayload({
         conversation,
         executor,
         message,
         includeNativeTakeoverBootstrap: true,
         includeForkTakeoverBootstrap: false,
         forkTakeover: undefined
-      })
-    : String(message.body ?? "");
+      }))
+    : terminalSubmissionPayload(String(message.body ?? ""));
   await provider.sendText(terminalControl.target, terminalPayload, {
     socketPath: terminalControl.socketPath
   });
-  await provider.sendKeys(terminalControl.target, ["Enter"], {
+  await provider.sendKeys(terminalControl.target, ["C-m"], {
     socketPath: terminalControl.socketPath
   });
   appendEvent(logPath, {
@@ -2594,6 +2595,10 @@ async function runTerminalControlSend({
       callbackExpected: Boolean(deliveredConversation.callback_command || deliveredConversation.gateway_method)
     })
   });
+}
+
+function terminalSubmissionPayload(payload: string): string {
+  return payload.replace(/[\r\n]+$/u, "");
 }
 
 function createManagedTerminalConversationFromRawId({ options, conversationId, messageBody, terminalControl }) {

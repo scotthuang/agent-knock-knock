@@ -118,7 +118,7 @@ test("agent takeover terminal_control attaches tmux pane and send writes to the 
     assert.equal(sentParsed.terminal_control.target, "codex-work:0.0");
     let calls = readJsonLines(tmuxCallsPath);
     assert.deepEqual(calls.at(-2).args, ["send-keys", "-t", "codex-work:0.0", "-l", "继续当前任务"]);
-    assert.deepEqual(calls.at(-1).args, ["send-keys", "-t", "codex-work:0.0", "Enter"]);
+    assert.deepEqual(calls.at(-1).args, ["send-keys", "-t", "codex-work:0.0", "C-m"]);
 
     const cancelled = runAgentCli([
       "cancel",
@@ -462,7 +462,7 @@ test("send and cancel support terminal-controlled conversation ids without AKK s
       "--conversation",
       conversationId,
       "--message",
-      "你好"
+      "你好\n"
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     });
@@ -481,7 +481,7 @@ test("send and cancel support terminal-controlled conversation ids without AKK s
 
     const calls = readJsonLines(tmuxCallsPath);
     assert.deepEqual(calls.at(-2).args, ["send-keys", "-t", "codex-work:0.1", "-l", "你好"]);
-    assert.deepEqual(calls.at(-1).args, ["send-keys", "-t", "codex-work:0.1", "Enter"]);
+    assert.deepEqual(calls.at(-1).args, ["send-keys", "-t", "codex-work:0.1", "C-m"]);
 
     const cancelled = runAgentCli([
       "cancel",
@@ -564,12 +564,13 @@ test("background send to raw terminal id creates managed callback conversation",
     assert.equal(JSON.parse(fs.readFileSync(statePath, "utf8")).conversation_id, sentParsed.conversation.conversation_id);
 
     const calls = readJsonLines(tmuxCallsPath);
-    assert.deepEqual(calls.at(-1).args, ["send-keys", "-t", "codex-work:0.1", "Enter"]);
+    assert.deepEqual(calls.at(-1).args, ["send-keys", "-t", "codex-work:0.1", "C-m"]);
     assert.deepEqual(calls.at(-2).args.slice(0, 4), ["send-keys", "-t", "codex-work:0.1", "-l"]);
     const injectedPayload = calls.at(-2).args[4];
     assert.match(injectedPayload, /callback --state/);
     assert.match(injectedPayload, /agent-knock-knock\.callback/);
     assert.match(injectedPayload, /查一下最新 tag/);
+    assert.doesNotMatch(injectedPayload, /[\r\n]$/u);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

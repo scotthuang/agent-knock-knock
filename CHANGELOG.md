@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.28 - 2026-07-07
+
+### Fixed
+
+- Trimmed trailing newlines before sending terminal-controlled Codex messages through tmux and submitted with `C-m`, preventing payload newlines from being left in the Codex input box without starting the task.
+
 ## 0.2.27 - 2026-07-06
 
 ### Fixed
