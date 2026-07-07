@@ -160,6 +160,34 @@ const statusParameters = {
   }
 };
 
+const describeParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["conversation_id"],
+  properties: {
+    conversation_id: {
+      type: "string",
+      description:
+        "AKK-managed conversation id, native Codex id, or terminal-controlled id from AKK list. Use this when the user asks what a listed AKK/Codex session is about."
+    },
+    storeDir: {
+      type: "string"
+    },
+    idleTimeoutMinutes: {
+      type: "number"
+    },
+    maxMessages: {
+      type: "number"
+    },
+    maxCommands: {
+      type: "number"
+    },
+    maxTextLength: {
+      type: "number"
+    }
+  }
+};
+
 const sendParameters = {
   type: "object",
   additionalProperties: false,
@@ -168,7 +196,7 @@ const sendParameters = {
     conversation_id: {
       type: "string",
       description:
-        "AKK-managed conversation id, or a terminal-controlled id from AKK list such as terminal:tmux:codex-work:0.1:33389."
+        "AKK-managed conversation id, or a terminal-controlled id from AKK list such as terminal:tmux:codex-work:0.1:33389. When the user refers to a listed tmux target like my-work:0.1, resolve it to the terminal-controlled id from AKK list before sending."
     },
     message: {
       type: "string"
@@ -460,8 +488,23 @@ export default definePluginEntry({
     });
 
     registerCliTool(api, {
+      name: "agent_knock_knock_describe",
+      description: "Describe what a listed Agent Knock Knock or local Codex session is about. Use this when the user asks what a session/task/drawing is doing, what the original work was, or wants a reminder of a session's content. It summarizes AKK history when available, otherwise Codex rollout history, cwd-based inferred history, or terminal screen fallback with confidence and limitations.",
+      parameters: describeParameters,
+      buildArgs: (params) => {
+        const args = ["describe", "--conversation", requiredString(params.conversation_id, "conversation_id")];
+        pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
+        pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(api.pluginConfig?.idleTimeoutMinutes));
+        pushOptional(args, "--max-messages", numberString(params.maxMessages));
+        pushOptional(args, "--max-commands", numberString(params.maxCommands));
+        pushOptional(args, "--max-text-length", numberString(params.maxTextLength));
+        return args;
+      }
+    });
+
+    registerCliTool(api, {
       name: "agent_knock_knock_send",
-      description: "Send a follow-up message to an existing open Agent Knock Knock coding-agent session or terminal-controlled session. This is an asynchronous handoff: after the message is accepted, end the OpenClaw turn and wait for an Agent Knock Knock callback or a later explicit status request. Do not poll terminal output or wait for the coding agent's final result in the same OpenClaw turn.",
+      description: "Send a message, follow-up, or new task to an existing open Agent Knock Knock coding-agent session or terminal-controlled session from AKK list. Use this when the user says to send/tell/ask/forward/add/continue work in a listed session, a listed Codex terminal, a tmux target such as my-work:0.1, or the one from AKK list. Do not start a new delegate for those requests. This is an asynchronous handoff: after the message is accepted, end the OpenClaw turn and wait for an Agent Knock Knock callback or a later explicit status request. Do not poll terminal output or wait for the coding agent's final result in the same OpenClaw turn.",
       parameters: sendParameters,
       buildArgs: (params, toolContext) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
@@ -622,6 +665,10 @@ async function handleAkkCommand(api, ctx) {
       const result = runCli(api, ["status", "--conversation", parsed.conversationId]);
       return { text: formatStatusCommandResult(result) };
     }
+    if (parsed.action === "describe") {
+      const result = runCli(api, ["describe", "--conversation", parsed.conversationId]);
+      return { text: formatDescribeCommandResult(result) };
+    }
     if (parsed.action === "send") {
       const args = [
         "send",
@@ -699,6 +746,10 @@ function parseAkkCommand(args) {
     const { token: conversationId } = takeRequiredToken(rest, "Usage: /akk status <conversation-id>");
     return { action: "status", conversationId };
   }
+  if (action === "describe" || action === "summary" || action === "about") {
+    const { token: conversationId } = takeRequiredToken(rest, "Usage: /akk describe <conversation-id>");
+    return { action: "describe", conversationId };
+  }
   if (action === "send" || action === "reply") {
     const { token: conversationId, rest: message } = takeRequiredToken(rest, "Usage: /akk send <conversation-id> <message>");
     const body = message.trim();
@@ -758,6 +809,7 @@ function akkUsageText() {
     "/akk claude <task>",
     "/akk list",
     "/akk status <conversation-id>",
+    "/akk describe <conversation-id>",
     "/akk send <conversation-id> <message>",
     "/akk cancel <conversation-id>",
     "/akk recover <conversation-id>",
@@ -805,6 +857,22 @@ function formatStatusCommandResult(result) {
   ];
   if (summary.request) {
     lines.push(`request: ${truncateText(summary.request, 180)}`);
+  }
+  return lines.join("\n");
+}
+
+function formatDescribeCommandResult(result) {
+  const lines = [
+    `AKK description: ${result.conversation_id ?? "unknown"}`,
+    `source: ${result.source ?? "unknown"}`,
+    `confidence: ${result.confidence ?? "unknown"}`
+  ];
+  if (result.about) {
+    lines.push(`about: ${truncateText(result.about, 500)}`);
+  }
+  const limitations = Array.isArray(result.limitations) ? result.limitations.filter(Boolean) : [];
+  if (limitations.length > 0) {
+    lines.push(`limitations: ${limitations.slice(0, 3).join("; ")}`);
   }
   return lines.join("\n");
 }

@@ -6,6 +6,7 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
+const CODEX_ACPX_SELECTOR = ["--agent", "npx -y @agentclientprotocol/codex-acp@^1.1.0"];
 const sessionId = "019ee559-7bb8-7fd1-970c-0f7b6978c44e";
 const cwd = "/repo/agent-knock-knock";
 const rolloutPath = "/tmp/codex-rollout.jsonl";
@@ -117,7 +118,7 @@ test("agent takeover terminal_control attaches tmux pane and send writes to the 
     assert.equal(sentParsed.terminal_control.target, "codex-work:0.0");
     let calls = readJsonLines(tmuxCallsPath);
     assert.deepEqual(calls.at(-2).args, ["send-keys", "-t", "codex-work:0.0", "-l", "继续当前任务"]);
-    assert.deepEqual(calls.at(-1).args, ["send-keys", "-t", "codex-work:0.0", "Enter"]);
+    assert.deepEqual(calls.at(-1).args, ["send-keys", "-t", "codex-work:0.0", "C-m"]);
 
     const cancelled = runAgentCli([
       "cancel",
@@ -461,7 +462,7 @@ test("send and cancel support terminal-controlled conversation ids without AKK s
       "--conversation",
       conversationId,
       "--message",
-      "你好"
+      "你好\n"
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     });
@@ -480,7 +481,7 @@ test("send and cancel support terminal-controlled conversation ids without AKK s
 
     const calls = readJsonLines(tmuxCallsPath);
     assert.deepEqual(calls.at(-2).args, ["send-keys", "-t", "codex-work:0.1", "-l", "你好"]);
-    assert.deepEqual(calls.at(-1).args, ["send-keys", "-t", "codex-work:0.1", "Enter"]);
+    assert.deepEqual(calls.at(-1).args, ["send-keys", "-t", "codex-work:0.1", "C-m"]);
 
     const cancelled = runAgentCli([
       "cancel",
@@ -563,12 +564,13 @@ test("background send to raw terminal id creates managed callback conversation",
     assert.equal(JSON.parse(fs.readFileSync(statePath, "utf8")).conversation_id, sentParsed.conversation.conversation_id);
 
     const calls = readJsonLines(tmuxCallsPath);
-    assert.deepEqual(calls.at(-1).args, ["send-keys", "-t", "codex-work:0.1", "Enter"]);
+    assert.deepEqual(calls.at(-1).args, ["send-keys", "-t", "codex-work:0.1", "C-m"]);
     assert.deepEqual(calls.at(-2).args.slice(0, 4), ["send-keys", "-t", "codex-work:0.1", "-l"]);
     const injectedPayload = calls.at(-2).args[4];
     assert.match(injectedPayload, /callback --state/);
     assert.match(injectedPayload, /agent-knock-knock\.callback/);
     assert.match(injectedPayload, /查一下最新 tag/);
+    assert.doesNotMatch(injectedPayload, /[\r\n]$/u);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -949,15 +951,178 @@ fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify({
       .trim()
       .split(/\r?\n/)
       .map((line) => JSON.parse(line));
-    assert.deepEqual(calls[0].args, ["codex", "sessions", "ensure", "--name", parsed.conversation.executor.session]);
-    assert.deepEqual(calls[1].args.slice(0, 6), ["--approve-all", "--model", "gpt-5.5[medium]", "codex", "-s", parsed.conversation.executor.session]);
-    assert.match(calls[1].args[6], /This AKK conversation is a fork/);
-    assert.match(calls[1].args[6], /Approved summary: inspect the ACPX branch/);
-    assert.doesNotMatch(calls[1].args[6], /raw private source context/);
-    assert.doesNotMatch(calls[1].args[6], /--resume-session/);
+    assert.deepEqual(calls[0].args, [...CODEX_ACPX_SELECTOR, "sessions", "ensure", "--name", parsed.conversation.executor.session]);
+    assert.deepEqual(calls[1].args.slice(0, 7), ["--approve-all", "--model", "gpt-5.5[medium]", ...CODEX_ACPX_SELECTOR, "prompt", "-s"]);
+    assert.equal(calls[1].args[7], parsed.conversation.executor.session);
+    assert.match(calls[1].args[8], /This AKK conversation is a fork/);
+    assert.match(calls[1].args[8], /Approved summary: inspect the ACPX branch/);
+    assert.doesNotMatch(calls[1].args[8], /raw private source context/);
+    assert.doesNotMatch(calls[1].args[8], /--resume-session/);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+test("describe terminal-controlled Codex session from rollout history", () => {
+  const rollout = [
+    JSON.stringify({
+      timestamp: "2026-07-04T00:00:00.000Z",
+      type: "event_msg",
+      payload: {
+        type: "user_message",
+        message: "Add AKK describe command"
+      }
+    }),
+    JSON.stringify({
+      timestamp: "2026-07-04T00:01:00.000Z",
+      type: "event_msg",
+      payload: {
+        type: "agent_message",
+        message: "I am wiring the OpenClaw tool."
+      }
+    }),
+    JSON.stringify({
+      timestamp: "2026-07-04T00:02:00.000Z",
+      type: "response_item",
+      payload: {
+        command: "npm test",
+        status: "completed"
+      }
+    })
+  ].join("\n");
+
+  const described = runAgentCli([
+    "describe",
+    "--conversation",
+    "terminal:tmux:codex-work:0.0:33389",
+    "--threads-json",
+    JSON.stringify([threadRow()]),
+    "--processes-json",
+    JSON.stringify([{
+      pid: 33389,
+      ppid: 999,
+      command: `codex resume ${sessionId}`,
+      cwd
+    }]),
+    "--terminals-json",
+    JSON.stringify([tmuxPane()]),
+    "--terminal-screens-json",
+    JSON.stringify({
+      "codex-work:0.0": "Working\n"
+    }),
+    "--rollouts-json",
+    JSON.stringify({ [rolloutPath]: rollout })
+  ]);
+
+  assert.equal(described.status, 0, described.stderr || described.stdout);
+  const parsed = JSON.parse(described.stdout);
+  assert.equal(parsed.source, "terminal_control");
+  assert.equal(parsed.confidence, "high");
+  assert.equal(parsed.match, "session_id");
+  assert.match(parsed.about, /Add AKK describe command/);
+  assert.match(parsed.about, /OpenClaw tool/);
+  assert.equal(parsed.evidence.initial_request, "Add AKK describe command");
+  assert.equal(parsed.evidence.recent_commands.at(-1).command, "npm test");
+});
+
+test("describe native Codex session falls back to cwd match", () => {
+  const otherSessionId = "019ee559-7bb8-7fd1-970c-0f7b6978c44f";
+  const otherRolloutPath = "/tmp/other-codex-rollout.jsonl";
+  const rollout = JSON.stringify({
+    timestamp: "2026-07-04T00:00:00.000Z",
+    type: "event_msg",
+    payload: {
+      type: "user_message",
+      message: "Most recent cwd task"
+    }
+  });
+
+  const described = runAgentCli([
+    "describe",
+    "--conversation",
+    "native:codex:4444",
+    "--threads-json",
+    JSON.stringify([
+      threadRow({ updated_at_ms: 1000, title: "older task" }),
+      {
+        id: otherSessionId,
+        cwd,
+        rollout_path: otherRolloutPath,
+        title: "newer task",
+        updated_at_ms: 2000,
+        archived: false
+      }
+    ]),
+    "--processes-json",
+    JSON.stringify([{
+      pid: 4444,
+      ppid: 1,
+      command: "codex",
+      cwd
+    }]),
+    "--rollouts-json",
+    JSON.stringify({ [otherRolloutPath]: rollout })
+  ]);
+
+  assert.equal(described.status, 0, described.stderr || described.stdout);
+  const parsed = JSON.parse(described.stdout);
+  assert.equal(parsed.source, "native_active");
+  assert.equal(parsed.confidence, "low");
+  assert.equal(parsed.match, "cwd_latest");
+  assert.match(parsed.about, /Most recent cwd task/);
+  assert.equal(parsed.evidence.candidates.length, 2);
+  assert.match(parsed.limitations[0], /most recent of 2 sessions/);
+});
+
+test("describe prefers Codex title over injected environment context", () => {
+  const rollout = [
+    JSON.stringify({
+      timestamp: "2026-07-04T00:00:00.000Z",
+      type: "event_msg",
+      payload: {
+        type: "user_message",
+        message: "<environment_context> <cwd>/repo/project</cwd> </environment_context>"
+      }
+    }),
+    JSON.stringify({
+      timestamp: "2026-07-04T00:01:00.000Z",
+      type: "event_msg",
+      payload: {
+        type: "agent_message",
+        message: "I checked the README and summarized the project."
+      }
+    })
+  ].join("\n");
+
+  const described = runAgentCli([
+    "describe",
+    "--conversation",
+    "terminal:tmux:codex-work:0.0:33389",
+    "--threads-json",
+    JSON.stringify([threadRow({ title: "Read the README and explain this project" })]),
+    "--processes-json",
+    JSON.stringify([{
+      pid: 33389,
+      ppid: 999,
+      command: `codex resume ${sessionId}`,
+      cwd
+    }]),
+    "--terminals-json",
+    JSON.stringify([tmuxPane()]),
+    "--terminal-screens-json",
+    JSON.stringify({
+      "codex-work:0.0": "Codex is ready\n"
+    }),
+    "--rollouts-json",
+    JSON.stringify({ [rolloutPath]: rollout })
+  ]);
+
+  assert.equal(described.status, 0, described.stderr || described.stdout);
+  const parsed = JSON.parse(described.stdout);
+  assert.equal(parsed.evidence.initial_request, "Read the README and explain this project");
+  assert.match(parsed.about, /Read the README and explain this project/);
+  assert.doesNotMatch(parsed.about, /environment_context/);
+  assert.equal(parsed.evidence.recent_messages.some((message) => message.text.includes("environment_context")), false);
 });
 
 function runAgentCli(args: string[], env: NodeJS.ProcessEnv = {}) {

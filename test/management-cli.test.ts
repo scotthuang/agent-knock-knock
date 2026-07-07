@@ -6,6 +6,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
+const CODEX_ACPX_SELECTOR = ["--agent", "npx -y @agentclientprotocol/codex-acp@^1.1.0"];
 
 test("list status send and close manage agent delegations", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-management-"));
@@ -103,9 +104,10 @@ fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify({
       .trim()
       .split(/\r?\n/)
       .map((line) => JSON.parse(line));
-    assert.deepEqual(acpxCalls[0].args, ["codex", "sessions", "ensure", "--name", "codex-work"]);
+    assert.deepEqual(acpxCalls[0].args, [...CODEX_ACPX_SELECTOR, "sessions", "ensure", "--name", "codex-work"]);
     assert.equal(acpxCalls[0].allProxy, "socks5h://127.0.0.1:1082");
-    assert.deepEqual(acpxCalls[1].args.slice(0, 6), ["--approve-all", "--model", "gpt-5.5[medium]", "codex", "-s", "codex-work"]);
+    assert.deepEqual(acpxCalls[1].args.slice(0, 7), ["--approve-all", "--model", "gpt-5.5[medium]", ...CODEX_ACPX_SELECTOR, "prompt", "-s"]);
+    assert.equal(acpxCalls[1].args[7], "codex-work");
     assert.equal(acpxCalls[1].allProxy, "socks5h://127.0.0.1:1082");
 
     const cursorSent = runCli([
@@ -458,7 +460,7 @@ fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify({
       .split(/\r?\n/)
       .map((line) => JSON.parse(line));
     assert.deepEqual(acpxCalls.map((call) => call.args), [
-      ["codex", "cancel", "-s", "codex-cancellable"],
+      [...CODEX_ACPX_SELECTOR, "cancel", "-s", "codex-cancellable"],
       ["claude", "cancel", "-s", "claude-cancellable"],
       ["cursor", "cancel", "-s", "cursor-cancellable"]
     ]);
@@ -666,11 +668,12 @@ fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify(args) + "\\n"
       .trim()
       .split(/\r?\n/)
       .map((line) => JSON.parse(line));
-    assert.deepEqual(acpxCalls[0], ["codex", "sessions", "ensure", "--name", recovered.executor.session]);
-    assert.deepEqual(acpxCalls[1].slice(0, 4), ["--approve-all", "codex", "-s", recovered.executor.session]);
-    assert.match(acpxCalls[1][4], /AKK replay recovery/);
-    assert.match(acpxCalls[1][4], /Initial work completed/);
-    assert.match(acpxCalls[1][4], /Pending follow-up that cannot reach the old session/);
+    assert.deepEqual(acpxCalls[0], [...CODEX_ACPX_SELECTOR, "sessions", "ensure", "--name", recovered.executor.session]);
+    assert.deepEqual(acpxCalls[1].slice(0, 5), ["--approve-all", ...CODEX_ACPX_SELECTOR, "prompt", "-s"]);
+    assert.equal(acpxCalls[1][5], recovered.executor.session);
+    assert.match(acpxCalls[1][6], /AKK replay recovery/);
+    assert.match(acpxCalls[1][6], /Initial work completed/);
+    assert.match(acpxCalls[1][6], /Pending follow-up that cannot reach the old session/);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -880,10 +883,11 @@ fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify(args) + "\\n"
       .trim()
       .split(/\r?\n/)
       .map((line) => JSON.parse(line));
-    assert.deepEqual(acpxCalls[0], ["codex", "sessions", "ensure", "--name", recovered.executor.session]);
-    assert.deepEqual(acpxCalls[1].slice(0, 4), ["--approve-all", "codex", "-s", recovered.executor.session]);
-    assert.match(acpxCalls[1][4], /AKK replay recovery/);
-    assert.match(acpxCalls[1][4], /Initial task before compact failure/);
+    assert.deepEqual(acpxCalls[0], [...CODEX_ACPX_SELECTOR, "sessions", "ensure", "--name", recovered.executor.session]);
+    assert.deepEqual(acpxCalls[1].slice(0, 5), ["--approve-all", ...CODEX_ACPX_SELECTOR, "prompt", "-s"]);
+    assert.equal(acpxCalls[1][5], recovered.executor.session);
+    assert.match(acpxCalls[1][6], /AKK replay recovery/);
+    assert.match(acpxCalls[1][6], /Initial task before compact failure/);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -1083,6 +1087,59 @@ test("status trace summarizes executor output without exposing thinking text", (
     assert.equal(status.trace.tool_calls.some((tool) => tool.name === "pwd" && tool.status === "completed"), true);
     assert.equal(status.trace.tool_calls.some((tool) => String(tool.name).includes("secret callback")), false);
     assert.equal(status.trace.done_events.at(-1).status, "end_turn");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("describe summarizes AKK-managed conversation content", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-describe-managed-"));
+  const storeDir = path.join(tempDir, "conversations");
+
+  try {
+    const created = runCli([
+      "new",
+      "--agent",
+      "codex",
+      "--session",
+      "codex-describe",
+      "--request",
+      "Implement session description support",
+      "--store-dir",
+      storeDir
+    ]);
+    runCli([
+      "record",
+      "--state",
+      created.paths.statePath,
+      "--message-json",
+      JSON.stringify({
+        id: "reply-1",
+        conversation_id: created.conversation.conversation_id,
+        from: "codex",
+        to: "openclaw",
+        type: "question",
+        requires_response: true,
+        round: 1,
+        body: "I found the Codex rollout parser and will reuse it.",
+        ts: "2026-07-04T00:00:00.000Z"
+      })
+    ]);
+
+    const described = runCli([
+      "describe",
+      "--conversation",
+      created.conversation.conversation_id,
+      "--store-dir",
+      storeDir
+    ]);
+
+    assert.equal(described.source, "akk_managed");
+    assert.equal(described.confidence, "high");
+    assert.match(described.about, /Implement session description support/);
+    assert.match(described.about, /rollout parser/);
+    assert.equal(described.evidence.initial_request, "Implement session description support");
+    assert.equal(described.evidence.recent_messages.at(-1).body, "I found the Codex rollout parser and will reuse it.");
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

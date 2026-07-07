@@ -6,6 +6,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
+const CODEX_ACPX_SELECTOR = ["--agent", "npx -y @agentclientprotocol/codex-acp@^1.1.0"];
 
 test("delegate background launches acpx without returning raw Claude output", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-delegate-"));
@@ -146,8 +147,9 @@ fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify(process.argv.s
     assert.match(parsed.conversation.executor.session, /^akk-codex-\d{14}-[0-9a-f]{8}$/);
 
     const acpxCalls = await waitForCalls(launchedPath, 2);
-    assert.deepEqual(acpxCalls[0], ["codex", "sessions", "ensure", "--name", parsed.conversation.executor.session]);
-    assert.deepEqual(acpxCalls.at(-1).slice(0, 4), ["--approve-all", "codex", "-s", parsed.conversation.executor.session]);
+    assert.deepEqual(acpxCalls[0], [...CODEX_ACPX_SELECTOR, "sessions", "ensure", "--name", parsed.conversation.executor.session]);
+    assert.deepEqual(acpxCalls.at(-1).slice(0, 5), ["--approve-all", ...CODEX_ACPX_SELECTOR, "prompt", "-s"]);
+    assert.equal(acpxCalls.at(-1)[5], parsed.conversation.executor.session);
   } finally {
     removeTempDir(tempDir);
   }
@@ -210,9 +212,10 @@ fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify({
     assert.equal(parsed.conversation.executor_model, "gpt-5.5[medium]");
 
     const acpxCalls = await waitForCalls(launchedPath, 2);
-    assert.deepEqual(acpxCalls[0].args, ["codex", "sessions", "ensure", "--name", "codex-task"]);
+    assert.deepEqual(acpxCalls[0].args, [...CODEX_ACPX_SELECTOR, "sessions", "ensure", "--name", "codex-task"]);
     assert.equal(acpxCalls[0].allProxy, "socks5h://127.0.0.1:1082");
-    assert.deepEqual(acpxCalls.at(-1).args.slice(0, 6), ["--approve-all", "--model", "gpt-5.5[medium]", "codex", "-s", "codex-task"]);
+    assert.deepEqual(acpxCalls.at(-1).args.slice(0, 7), ["--approve-all", "--model", "gpt-5.5[medium]", ...CODEX_ACPX_SELECTOR, "prompt", "-s"]);
+    assert.equal(acpxCalls.at(-1).args[7], "codex-task");
     assert.equal(acpxCalls.at(-1).allProxy, "socks5h://127.0.0.1:1082");
 
     const events = fs.readFileSync(parsed.paths.logPath, "utf8")
@@ -223,6 +226,115 @@ fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify({
       event.event === "executor_launch" &&
       event.executor.kind === "codex"
     ), true);
+  } finally {
+    removeTempDir(tempDir);
+  }
+});
+
+test("delegate uses supported Codex ACP adapter even when acpx install references deprecated zed codex-acp", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-legacy-acpx-"));
+  const fakeBinDir = path.join(tempDir, "bin");
+  const workspace = path.join(tempDir, "workspace");
+  const launchedPath = path.join(tempDir, "acpx-args.json");
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(
+      path.join(tempDir, "package.json"),
+      JSON.stringify({
+        name: "acpx",
+        dependencies: {
+          "@zed-industries/codex-acp": "0.15.0"
+        }
+      }),
+      "utf8"
+    );
+    const fakeAcpx = path.join(fakeBinDir, "acpx");
+    fs.writeFileSync(
+      fakeAcpx,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify(process.argv.slice(2)) + "\\n", "utf8");
+`,
+      "utf8"
+    );
+    fs.chmodSync(fakeAcpx, 0o755);
+
+    const result = spawnSync(process.execPath, [
+      binPath,
+      "delegate",
+      "--agent",
+      "codex",
+      "--request",
+      "Run a Codex task",
+      "--workspace",
+      workspace,
+      "--store-dir",
+      path.join(tempDir, "conversations"),
+      "--background"
+    ], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+      }
+    });
+
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const parsed = JSON.parse(result.stdout);
+    const acpxCalls = await waitForCalls(launchedPath, 2);
+    assert.deepEqual(acpxCalls[0], [...CODEX_ACPX_SELECTOR, "sessions", "ensure", "--name", parsed.conversation.executor.session]);
+    assert.deepEqual(acpxCalls.at(-1).slice(0, 5), ["--approve-all", ...CODEX_ACPX_SELECTOR, "prompt", "-s"]);
+  } finally {
+    removeTempDir(tempDir);
+  }
+});
+
+test("delegate blocks explicit legacy zed Codex ACP adapter override", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-legacy-agent-"));
+  const fakeBinDir = path.join(tempDir, "bin");
+  const workspace = path.join(tempDir, "workspace");
+  const launchedPath = path.join(tempDir, "acpx-args.json");
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    const fakeAcpx = path.join(fakeBinDir, "acpx");
+    fs.writeFileSync(
+      fakeAcpx,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify(process.argv.slice(2)) + "\\n", "utf8");
+`,
+      "utf8"
+    );
+    fs.chmodSync(fakeAcpx, 0o755);
+
+    const result = spawnSync(process.execPath, [
+      binPath,
+      "delegate",
+      "--agent",
+      "codex",
+      "--request",
+      "Run a Codex task",
+      "--workspace",
+      workspace,
+      "--store-dir",
+      path.join(tempDir, "conversations"),
+      "--background"
+    ], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
+        AKK_CODEX_ACPX_AGENT_COMMAND: "npx -y @zed-industries/codex-acp"
+      }
+    });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Refusing to start Codex through deprecated @zed-industries\/codex-acp/);
+    assert.equal(fs.existsSync(launchedPath), false);
   } finally {
     removeTempDir(tempDir);
   }

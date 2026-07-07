@@ -118,6 +118,7 @@ AKK Claude: review the latest commit
 AKK Cursor: fix the flaky UI test
 akk list
 akk status <conversation-id>
+akk describe <conversation-id>
 akk send <conversation-id>: continue with the smaller implementation
 akk cancel <conversation-id>
 akk recover <conversation-id>
@@ -173,6 +174,7 @@ AKK list
 - `terminal_controlled`: local sessions running in a controllable terminal provider. The current provider is tmux. These entries include terminal metadata, command capabilities, and concise approval state when a visible approval prompt is detected.
 - `terminal_controlled` entries can be addressed directly by their `id` from `AKK list` for `AKK send <id>`, `AKK status <id>`, `AKK cancel <id>`, and `AKK approve <id>`. They do not need an AKK state file before terminal control.
 - `AKK status <terminal-controlled-id>` is the unified way to inspect current terminal output. AKK captures the terminal pane internally and returns `terminal_screen`; there is no separate public screen-capture command.
+- `AKK describe <id>` summarizes what a listed session is about. AKK-managed sessions use saved conversation history; native and terminal-controlled Codex sessions use exact Codex rollout history when a session id is available, fall back to cwd-matched rollout history when needed, and otherwise report only visible terminal/process context with lower confidence.
 
 Takeover prompts:
 

@@ -5,7 +5,7 @@ description: Delegate OpenClaw tasks to local Codex, Claude Code, and Cursor age
 
 # Agent Knock Knock
 
-Use this skill when the user says `AKK`, `akk`, `Agent Knock Knock`, asks OpenClaw to delegate coding work to Codex, Claude, or Cursor, asks what agent tasks are running, sends a follow-up to an agent task, lists existing local coding-agent sessions, takes over an existing native Codex session, recovers an unavailable agent session, cancels a running agent task, or closes an agent task.
+Use this skill when the user says `AKK`, `akk`, `Agent Knock Knock`, asks OpenClaw to delegate coding work to Codex, Claude, or Cursor, asks what agent tasks are running, asks what a listed AKK/Codex session is about, sends a follow-up to an agent task, lists existing local coding-agent sessions, takes over an existing native Codex session, recovers an unavailable agent session, cancels a running agent task, or closes an agent task.
 
 Treat `AKK` and `akk` the same way.
 
@@ -35,6 +35,7 @@ Slash command forms:
 - `/akk cursor <task>`: delegate to Cursor.
 - `/akk list`: list open AKK sessions.
 - `/akk status <conversation-id>`: inspect one AKK session.
+- `/akk describe <conversation-id>`: summarize what one AKK-managed, native Codex, or terminal-controlled Codex session is about.
 - `/akk send <conversation-id> <message>`: send a follow-up to one open AKK session.
 - `/akk cancel <conversation-id>`: request cooperative cancellation of the current in-flight prompt for one AKK session without closing it.
 - `/akk recover <conversation-id>`: recover a session that is waiting for a recovery decision by starting a new agent session with AKK's saved protocol history summary.
@@ -48,7 +49,8 @@ Natural-language forms:
 - `AKK Cursor: <task>`: call `agent_knock_knock_delegate` with `agent="cursor"`.
 - `AKK list`, `akk list`, questions such as "what AKK sessions are open", "which Codex sessions are currently running", "terminal-controlled Codex sessions", or requests to list active local coding-agent work: call `agent_knock_knock_list`.
 - `AKK status <conversation-id>` or requests to view current output, execution result, terminal screen, or "what is it doing now": call `agent_knock_knock_status`. For `terminal_controlled` entries, status internally captures the terminal pane and returns `terminal_screen`; do not call tmux or shell commands directly to inspect the pane unless AKK status fails.
-- `AKK send <conversation-id>: <message>` or follow-up requests for an existing open agent session: call `agent_knock_knock_send`. If the target comes from a `terminal_controlled` entry in `AKK list`, use that entry's `id` directly; AKK will type the message into the controlled terminal pane and press Enter.
+- `AKK describe <conversation-id>`, `AKK summary <conversation-id>`, or requests such as "what is this session about", "what was this task doing", "remind me what this drawing/session is for", or "这个会话/绘画大概在做什么": call `agent_knock_knock_describe`. Prefer this over direct terminal/tmux inspection because AKK can combine saved conversation history, Codex rollout history, cwd-matched history, and terminal-screen fallback with explicit confidence.
+- `AKK send <conversation-id>: <message>` or follow-up requests for an existing open agent session: call `agent_knock_knock_send`. Also use `agent_knock_knock_send` when the user says to send/tell/ask/forward/add/continue a message or task to a listed AKK session, a listed Codex session, a terminal-controlled entry, a tmux target such as `my-work:0.1`, or "the one from the list". If the target comes from a `terminal_controlled` entry in `AKK list`, use that entry's `id` directly; AKK will type the message into the controlled terminal pane and submit it. Do not call `agent_knock_knock_delegate` for these requests unless the user explicitly asks for a new independent session.
 - `AKK cancel <conversation-id>` or requests to stop the current running work without closing the session: call `agent_knock_knock_cancel`. If the target comes from a `terminal_controlled` entry in `AKK list`, use that entry's `id` directly; AKK sends Control-C to the controlled terminal pane.
 - `AKK recover <conversation-id>`: call `agent_knock_knock_recover`.
 - `AKK close <conversation-id>`: call `agent_knock_knock_close`.
@@ -61,6 +63,7 @@ Session reuse rule:
 
 - If the user asks to continue, add, follow up, "send another task", "let it also", "tell it", "ask Codex/Claude/Cursor to also", "再让它", "继续让它", "给刚才那个", or otherwise refers to an existing AKK agent, reuse the most recent matching open AKK session instead of creating a new delegation.
 - When the user gives a follow-up without a `conversation_id`, first call `agent_knock_knock_list`, choose the most recent open session that matches the requested agent if one is named, and then call `agent_knock_knock_send` with that `conversation_id`.
+- After `AKK list`, if the user refers to any listed row by id, tmux target, pane number, session name, ordinal ("first/second/that one"), cwd, or visible description and asks to send or assign work to it, resolve that listed row and call `agent_knock_knock_send`. For `terminal_controlled` rows, pass the row's `id` such as `terminal:tmux:my-work:0.1:38140`; do not create a new AKK delegation.
 - `idle` means the agent completed the previous round but the AKK session is still open and should be reused for follow-ups.
 - `send` automatically falls back to AKK replay recovery when the previous coding-agent session is unavailable. If AKK still reports `needs_recovery`, ask the user to choose `AKK recover <conversation-id>`, `AKK close <conversation-id>`, or starting a new independent AKK delegation.
 - Call `agent_knock_knock_delegate` only when the user clearly asks for a new independent AKK task/session, names a different agent that does not already have a suitable open session, or there is no matching open session to reuse.
@@ -73,7 +76,10 @@ AKK Codex: review the current branch and propose a small fix
 AKK Claude: review the latest commit
 AKK Cursor: fix the flaky UI test
 akk list
+akk describe task-20260618T010203Z-abcdef12
 akk send task-20260618T010203Z-abcdef12: continue with the smaller implementation
+akk send terminal:tmux:my-work:0.1:38140: hello 测试一下通信
+给 AKK list 里的 my-work:0.1 发一条消息：继续刚才的任务
 再让刚才那个 Codex 分析 ~/chrome-debug 为什么占空间
 akk cancel task-20260618T010203Z-abcdef12
 akk recover task-20260618T010203Z-abcdef12
@@ -143,6 +149,8 @@ Use `agent_knock_knock_list` when the user asks about current active native Code
 - `delegated`: AKK-managed tasks.
 - `native`: discovered local native sessions that AKK cannot directly control.
 - `terminal_controlled`: discovered local native sessions in a controllable terminal provider. The current provider is tmux.
+
+Use `agent_knock_knock_describe` when the user asks what a listed session is about. AKK-managed sessions use durable AKK conversation history. Native and terminal-controlled Codex sessions use exact Codex rollout history when a session id is available, fall back to cwd-matched rollout history when needed, and otherwise return visible terminal/process context with lower confidence. Do not use raw tmux, shell, or peek tools for this summary unless `agent_knock_knock_describe` is unavailable or fails.
 
 Use `agent_knock_knock_agent_takeover` when the user wants AKK to take over an existing native Codex session. By default this tool is side-effect-free and returns a plan. When the plan is ready and the user explicitly wants AKK to manage the session, call it with `createConversation=true` to create an AKK conversation bound to the native session:
 
