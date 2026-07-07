@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.29 - 2026-07-08
+
+### Fixed
+
+- Clarified AKK skill and `agent_knock_knock_send` tool routing so messages to listed AKK/Codex sessions, terminal-controlled rows, or tmux targets such as `my-work:0.1` use `send` instead of starting a new delegation.
+
 ## 0.2.28 - 2026-07-07
 
 ### Fixed

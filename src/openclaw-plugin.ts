@@ -196,7 +196,7 @@ const sendParameters = {
     conversation_id: {
       type: "string",
       description:
-        "AKK-managed conversation id, or a terminal-controlled id from AKK list such as terminal:tmux:codex-work:0.1:33389."
+        "AKK-managed conversation id, or a terminal-controlled id from AKK list such as terminal:tmux:codex-work:0.1:33389. When the user refers to a listed tmux target like my-work:0.1, resolve it to the terminal-controlled id from AKK list before sending."
     },
     message: {
       type: "string"
@@ -504,7 +504,7 @@ export default definePluginEntry({
 
     registerCliTool(api, {
       name: "agent_knock_knock_send",
-      description: "Send a follow-up message to an existing open Agent Knock Knock coding-agent session or terminal-controlled session. This is an asynchronous handoff: after the message is accepted, end the OpenClaw turn and wait for an Agent Knock Knock callback or a later explicit status request. Do not poll terminal output or wait for the coding agent's final result in the same OpenClaw turn.",
+      description: "Send a message, follow-up, or new task to an existing open Agent Knock Knock coding-agent session or terminal-controlled session from AKK list. Use this when the user says to send/tell/ask/forward/add/continue work in a listed session, a listed Codex terminal, a tmux target such as my-work:0.1, or the one from AKK list. Do not start a new delegate for those requests. This is an asynchronous handoff: after the message is accepted, end the OpenClaw turn and wait for an Agent Knock Knock callback or a later explicit status request. Do not poll terminal output or wait for the coding agent's final result in the same OpenClaw turn.",
       parameters: sendParameters,
       buildArgs: (params, toolContext) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
