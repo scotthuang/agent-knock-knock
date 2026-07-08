@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.31 - 2026-07-09
+
+### Fixed
+
+- Fixed terminal bridge callback delivery by avoiding unauthenticated gateway URL overrides and persisting the bridge send baseline so stale cwd-matched Codex rollout messages are not treated as the current task result.
+
 ## 0.2.30 - 2026-07-09
 
 ### Added

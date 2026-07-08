@@ -2640,6 +2640,7 @@ async function runTerminalControlSend({
     native: needsNativeTakeoverBootstrap && !bridge,
     fork: false
   });
+  saveState(statePath, deliveredConversation);
   const bridgeMonitor = bridge && deliveredConversation.gateway_method && options.disableTerminalBridgeMonitor !== true
     ? startTerminalBridgeMonitor({
         statePath,
@@ -3842,8 +3843,8 @@ async function runTerminalBridgeMonitor(options) {
         gatewaySession: conversation.gateway_session,
         openclawSession: conversation.openclaw_session,
         openclawBin: conversation.openclaw_bin,
-        gatewayUrl: conversation.gateway_url,
-        token: conversation.gateway_token
+        gatewayUrl: stringValue(conversation.gateway_token) ? conversation.gateway_url : undefined,
+        token: stringValue(conversation.gateway_token)
       });
       return;
     }
@@ -3880,6 +3881,7 @@ async function runTerminalBridgeMonitor(options) {
 async function terminalBridgeCodexContext({ conversation, nativeTakeover, options }) {
   const provider = createAgentSessionProvider("codex", options);
   const nativeSessionId = stringValue(nativeTakeover?.["native_session_id"]);
+  const startedAtMs = Date.parse(String(nativeTakeover?.["terminal_bridge_started_at"] ?? ""));
   const terminalConversation = parseTerminalConversationId(nativeSessionId);
   const activeProcess = await activeCodexProcessForPid(options, terminalConversation?.pid);
   const directSessionId = activeProcess?.sessionId ?? (terminalConversation ? undefined : nativeSessionId);
@@ -3907,6 +3909,12 @@ async function terminalBridgeCodexContext({ conversation, nativeTakeover, option
 
   const sessions = (await provider.listHistoricalSessions())
     .filter((session) => session.cwd === cwd)
+    .filter((session) => {
+      if (!Number.isFinite(startedAtMs)) {
+        return true;
+      }
+      return Number(session.updatedAtMs ?? 0) >= startedAtMs;
+    })
     .sort((left, right) => Number(right.updatedAtMs ?? 0) - Number(left.updatedAtMs ?? 0));
   const selected = sessions[0];
   if (!selected) {

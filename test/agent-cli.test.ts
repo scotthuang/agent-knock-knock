@@ -443,6 +443,7 @@ test("send and cancel support terminal-controlled conversation ids without AKK s
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-send-"));
   const fakeBinDir = path.join(tempDir, "bin");
   const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
   const screenPath = path.join(tempDir, "screen.txt");
   const workspace = path.join(tempDir, "workspace");
 
@@ -450,6 +451,7 @@ test("send and cancel support terminal-controlled conversation ids without AKK s
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
     fs.writeFileSync(screenPath, "Codex is ready\n");
+    const openclawBin = writeFakeOpenClaw(fakeBinDir, openclawCallsPath);
     writeFakeTmux(
       fakeBinDir,
       tmuxCallsPath,
@@ -565,7 +567,10 @@ test("background send to raw terminal id creates managed callback conversation",
     assert.equal(sentParsed.monitor_pid, null);
 
     const statePath = path.join(storeDir, sentParsed.conversation.conversation_id, "state.json");
-    assert.equal(JSON.parse(fs.readFileSync(statePath, "utf8")).conversation_id, sentParsed.conversation.conversation_id);
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    assert.equal(state.conversation_id, sentParsed.conversation.conversation_id);
+    assert.equal(typeof state.native_session_takeover.terminal_bridge_started_at, "string");
+    assert.equal(state.native_session_takeover.terminal_bridge_message_id, sentParsed.message.id);
 
     const calls = readJsonLines(tmuxCallsPath);
     assert.deepEqual(calls.at(-1).args, ["send-keys", "-t", "codex-work:0.1", "C-m"]);
@@ -585,6 +590,7 @@ test("terminal bridge monitor callbacks from new rollout assistant output", () =
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
   const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
   const screenPath = path.join(tempDir, "screen.txt");
   const workspace = path.join(tempDir, "workspace");
 
@@ -592,6 +598,7 @@ test("terminal bridge monitor callbacks from new rollout assistant output", () =
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
     fs.writeFileSync(screenPath, "Codex is ready\n");
+    const openclawBin = writeFakeOpenClaw(fakeBinDir, openclawCallsPath);
     writeFakeTmux(
       fakeBinDir,
       tmuxCallsPath,
@@ -616,7 +623,7 @@ test("terminal bridge monitor callbacks from new rollout assistant output", () =
       "--openclaw-session",
       "agent:channel:original",
       "--openclaw-bin",
-      "/usr/bin/true",
+      openclawBin,
       "--disable-terminal-bridge-monitor"
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
@@ -657,7 +664,7 @@ test("terminal bridge monitor callbacks from new rollout assistant output", () =
       "--agent-timeout-minutes",
       "60",
       "--threads-json",
-      JSON.stringify([threadRow({ cwd: workspace })]),
+      JSON.stringify([threadRow({ cwd: workspace, updated_at_ms: Date.parse("2099-07-04T00:01:00.000Z") })]),
       "--processes-json",
       JSON.stringify([{
         pid: 33389,
@@ -690,6 +697,9 @@ test("terminal bridge monitor callbacks from new rollout assistant output", () =
     const events = fs.readFileSync(logPath, "utf8");
     assert.match(events, /terminal_bridge_completion_detected/);
     assert.match(events, /callback_gateway_method_delivery/);
+    const openclawCalls = readJsonLines(openclawCallsPath);
+    assert.deepEqual(openclawCalls[0].args.slice(0, 3), ["gateway", "call", "agent-knock-knock.callback"]);
+    assert.equal(openclawCalls[0].args.includes("--url"), false);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -1307,6 +1317,22 @@ if (args[0] === "capture-pane") {
     "utf8"
   );
   fs.chmodSync(fakeTmux, 0o755);
+}
+
+function writeFakeOpenClaw(fakeBinDir: string, callsPath: string) {
+  const fakeOpenClaw = path.join(fakeBinDir, "openclaw");
+  fs.writeFileSync(
+    fakeOpenClaw,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({ args }) + "\\n", "utf8");
+process.stdout.write(JSON.stringify({ ok: true }) + "\\n");
+`,
+    "utf8"
+  );
+  fs.chmodSync(fakeOpenClaw, 0o755);
+  return fakeOpenClaw;
 }
 
 function readJsonLines(filePath: string) {
