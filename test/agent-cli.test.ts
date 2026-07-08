@@ -93,6 +93,7 @@ test("agent takeover terminal_control attaches tmux pane and send writes to the 
     assert.equal(parsed.status, "attached");
     assert.equal(parsed.conversation.native_session_takeover.strategy, "terminal_control");
     assert.equal(parsed.conversation.native_session_takeover.needs_bootstrap, false);
+    assert.equal(parsed.conversation.native_session_takeover.terminal_bridge, true);
     assert.equal(parsed.conversation.native_session_takeover.terminal_control.target, "codex-work:0.0");
 
     const sent = runAgentCli([
@@ -541,7 +542,8 @@ test("background send to raw terminal id creates managed callback conversation",
       "--openclaw-session",
       "agent:channel:original",
       "--openclaw-bin",
-      "/usr/bin/true"
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor"
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     });
@@ -559,6 +561,8 @@ test("background send to raw terminal id creates managed callback conversation",
     assert.equal(sentParsed.conversation.gateway_session, "agent:channel:original");
     assert.equal(sentParsed.conversation.native_session_takeover.native_session_id, rawConversationId);
     assert.equal(sentParsed.conversation.native_session_takeover.needs_bootstrap, false);
+    assert.equal(sentParsed.conversation.native_session_takeover.terminal_bridge, true);
+    assert.equal(sentParsed.monitor_pid, null);
 
     const statePath = path.join(storeDir, sentParsed.conversation.conversation_id, "state.json");
     assert.equal(JSON.parse(fs.readFileSync(statePath, "utf8")).conversation_id, sentParsed.conversation.conversation_id);
@@ -567,10 +571,125 @@ test("background send to raw terminal id creates managed callback conversation",
     assert.deepEqual(calls.at(-1).args, ["send-keys", "-t", "codex-work:0.1", "C-m"]);
     assert.deepEqual(calls.at(-2).args.slice(0, 4), ["send-keys", "-t", "codex-work:0.1", "-l"]);
     const injectedPayload = calls.at(-2).args[4];
-    assert.match(injectedPayload, /callback --state/);
-    assert.match(injectedPayload, /agent-knock-knock\.callback/);
-    assert.match(injectedPayload, /查一下最新 tag/);
+    assert.equal(injectedPayload, "查一下最新 tag");
+    assert.doesNotMatch(injectedPayload, /callback --state/);
+    assert.doesNotMatch(injectedPayload, /agent-knock-knock\.callback/);
     assert.doesNotMatch(injectedPayload, /[\r\n]$/u);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("terminal bridge monitor callbacks from new rollout assistant output", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-bridge-monitor-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "Codex is ready\n");
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `codex-work\t0\t1\t33389\tnode\t${workspace}\n`
+    );
+
+    const rawConversationId = "terminal:tmux:codex-work:0.1:33389";
+    const sent = runAgentCli([
+      "send",
+      "--conversation",
+      rawConversationId,
+      "--message",
+      "查一下最新 tag",
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      "agent:channel:original",
+      "--openclaw-session",
+      "agent:channel:original",
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor"
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    const sentParsed = JSON.parse(sent.stdout);
+    const statePath = path.join(storeDir, sentParsed.conversation.conversation_id, "state.json");
+    const logPath = path.join(storeDir, sentParsed.conversation.conversation_id, "events.ndjson");
+
+    const rollout = [
+      JSON.stringify({
+        timestamp: "2099-07-04T00:00:00.000Z",
+        type: "event_msg",
+        payload: {
+          type: "user_message",
+          message: "查一下最新 tag"
+        }
+      }),
+      JSON.stringify({
+        timestamp: "2099-07-04T00:01:00.000Z",
+        type: "event_msg",
+        payload: {
+          type: "agent_message",
+          message: "最新 tag 是 v0.2.29。"
+        }
+      })
+    ].join("\n");
+
+    const monitored = runAgentCli([
+      "monitor",
+      "--terminal-bridge",
+      "--state",
+      statePath,
+      "--log",
+      logPath,
+      "--poll-interval-ms",
+      "50",
+      "--agent-timeout-minutes",
+      "60",
+      "--threads-json",
+      JSON.stringify([threadRow({ cwd: workspace })]),
+      "--processes-json",
+      JSON.stringify([{
+        pid: 33389,
+        ppid: 999,
+        command: `codex resume ${sessionId}`,
+        cwd: workspace
+      }]),
+      "--terminals-json",
+      JSON.stringify([tmuxPane({
+        target: "codex-work:0.1",
+        pane: 1,
+        panePid: 999,
+        currentPath: workspace
+      })]),
+      "--terminal-screens-json",
+      JSON.stringify({
+        "codex-work:0.1": "Codex is ready\n"
+      }),
+      "--rollouts-json",
+      JSON.stringify({ [rolloutPath]: rollout })
+    ]);
+
+    assert.equal(monitored.status, 0, monitored.stderr || monitored.stdout);
+    const parsed = JSON.parse(monitored.stdout);
+    assert.equal(parsed.delivered, true);
+    assert.equal(parsed.message.type, "done");
+    assert.equal(parsed.message.body, "最新 tag 是 v0.2.29。");
+    assert.equal(parsed.conversation.status, "idle");
+
+    const events = fs.readFileSync(logPath, "utf8");
+    assert.match(events, /terminal_bridge_completion_detected/);
+    assert.match(events, /callback_gateway_method_delivery/);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

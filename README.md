@@ -173,6 +173,7 @@ AKK list
 - `native`: local native sessions that AKK can discover but cannot directly control.
 - `terminal_controlled`: local sessions running in a controllable terminal provider. The current provider is tmux. These entries include terminal metadata, command capabilities, and concise approval state when a visible approval prompt is detected.
 - `terminal_controlled` entries can be addressed directly by their `id` from `AKK list` for `AKK send <id>`, `AKK status <id>`, `AKK cancel <id>`, and `AKK approve <id>`. They do not need an AKK state file before terminal control.
+- Background sends to terminal-controlled Codex sessions use terminal bridge mode: AKK types only the user-facing task text into the tmux pane, monitors Codex rollout/terminal state, and delivers the OpenClaw callback itself when it observes completion.
 - `AKK status <terminal-controlled-id>` is the unified way to inspect current terminal output. AKK captures the terminal pane internally and returns `terminal_screen`; there is no separate public screen-capture command.
 - `AKK describe <id>` summarizes what a listed session is about. AKK-managed sessions use saved conversation history; native and terminal-controlled Codex sessions use exact Codex rollout history when a session id is available, fall back to cwd-matched rollout history when needed, and otherwise report only visible terminal/process context with lower confidence.
 
@@ -283,7 +284,7 @@ Runtime logs are diagnostic-only and are safe to use for local troubleshooting. 
 - Default agent: configured with `defaultAgent`; fallback is `codex`
 - OpenClaw session: inherited from the current OpenClaw session; fallback is `agent:main:main`
 - Delegated ACPX session: generated per new task, unless `session`, `codexSession`, `claudeSession`, or `cursorSession` is configured
-- Agent callback timeout: `60` minutes before a waiting task is marked `stalled`
+- Agent callback timeout: `60` minutes before a waiting task or terminal bridge monitor is marked `stalled`
 - Idle timeout: `10080` minutes before an idle task is lazily closed
 - Soft response limit: `50` rounds
 - Hard response limit: `100` rounds

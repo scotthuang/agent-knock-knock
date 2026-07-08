@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Added terminal bridge monitoring for tmux-controlled Codex conversations so AKK can send only the user-facing task text, observe Codex rollout/terminal state, and deliver the OpenClaw callback itself.
+
 ## 0.2.29 - 2026-07-08
 
 ### Fixed
