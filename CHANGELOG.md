@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.32 - 2026-07-09
+
+### Fixed
+
+- Added an idle terminal-screen fallback for terminal bridge callbacks when Codex rollout history is unavailable or does not expose the current tmux task result.
+
+## 0.2.31 - 2026-07-09
+
+### Fixed
+
+- Fixed terminal bridge callback delivery by avoiding unauthenticated gateway URL overrides and persisting the bridge send baseline so stale cwd-matched Codex rollout messages are not treated as the current task result.
+
+## 0.2.30 - 2026-07-09
+
+### Added
+
+- Added terminal bridge monitoring for tmux-controlled Codex conversations so AKK can send only the user-facing task text, observe Codex rollout/terminal state, and deliver the OpenClaw callback itself.
+
 ## 0.2.29 - 2026-07-08
 
 ### Fixed

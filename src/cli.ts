@@ -167,7 +167,7 @@ async function runCommand(commandName, options) {
   } else if (commandName === "callback") {
     runCallback(options);
   } else if (commandName === "monitor") {
-    runMonitor(options);
+    await runMonitor(options);
   } else if (commandName === "agent") {
     await runAgent(options);
   } else {
@@ -993,7 +993,8 @@ function createNativeSessionConversation({
 	      model_source: modelInfo?.source,
 	      takeover_match_kind: takeoverMatchKind,
 	      terminal_control: terminalControl,
-	      needs_bootstrap: needsBootstrap
+	      needs_bootstrap: needsBootstrap,
+	      terminal_bridge: strategy === "terminal_control"
 	    }
   }, paths);
 
@@ -1420,6 +1421,57 @@ function startExecutorMonitor({ statePath, logPath, pid, outputPath, agentTimeou
   });
   child.unref();
   return child;
+}
+
+function startTerminalBridgeMonitor({ statePath, logPath, agentTimeoutMinutes, pollIntervalMs, codexHome }) {
+  const args = [
+    new URL(import.meta.url).pathname,
+    "monitor",
+    "--terminal-bridge",
+    "--state",
+    statePath,
+    "--log",
+    logPath,
+    "--agent-timeout-minutes",
+    String(agentTimeoutMinutes),
+    "--poll-interval-ms",
+    String(pollIntervalMs)
+  ];
+  if (codexHome) {
+    args.push("--codex-home", codexHome);
+  }
+
+  const child = spawn(process.execPath, args, {
+    detached: true,
+    stdio: "ignore",
+    cwd: process.cwd(),
+    env: process.env
+  });
+  child.unref();
+  return child;
+}
+
+function terminalBridgeEnabled(conversation): boolean {
+  const nativeTakeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  return nativeTakeover?.["terminal_bridge"] === true;
+}
+
+function withTerminalBridgeState({ conversation, message, startedAt }) {
+  const nativeTakeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : {};
+  return {
+    ...conversation,
+    native_session_takeover: {
+      ...nativeTakeover,
+      terminal_bridge: true,
+      terminal_bridge_started_at: startedAt,
+      terminal_bridge_message_id: message.id
+    },
+    updated_at: startedAt
+  };
 }
 
 function uniqueDelegateSessionName(kind) {
@@ -2539,7 +2591,9 @@ async function runTerminalControlSend({
   needsNativeTakeoverBootstrap
 }) {
   const provider = createTerminalControlProvider(options);
-  const terminalPayload = needsNativeTakeoverBootstrap
+  const bridge = terminalBridgeEnabled(conversation);
+  const bridgeStartedAt = new Date().toISOString();
+  const terminalPayload = needsNativeTakeoverBootstrap && !bridge
     ? terminalSubmissionPayload(buildAgentSendPayload({
         conversation,
         executor,
@@ -2571,14 +2625,46 @@ async function runTerminalControlSend({
     message: textSummary(message.body),
     payload: textSummary(terminalPayload)
   });
+  const bridgeConversation = bridge
+    ? withTerminalBridgeState({
+        conversation: nextConversation,
+        message,
+        startedAt: bridgeStartedAt
+      })
+    : nextConversation;
   const deliveredConversation = markTakeoverBootstrapped({
-    conversation: nextConversation,
+    conversation: bridgeConversation,
     statePath,
     logPath,
     executor,
-    native: needsNativeTakeoverBootstrap,
+    native: needsNativeTakeoverBootstrap && !bridge,
     fork: false
   });
+  saveState(statePath, deliveredConversation);
+  const bridgeMonitor = bridge && deliveredConversation.gateway_method && options.disableTerminalBridgeMonitor !== true
+    ? startTerminalBridgeMonitor({
+        statePath,
+        logPath,
+        agentTimeoutMinutes: Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES),
+        pollIntervalMs: Number(options.monitorPollIntervalMs ?? DEFAULT_MONITOR_POLL_INTERVAL_MS),
+        codexHome: options.codexHome
+      })
+    : undefined;
+  if (bridgeMonitor) {
+    appendEvent(logPath, {
+      ts: new Date().toISOString(),
+      conversation_id: deliveredConversation.conversation_id,
+      event: "terminal_bridge_monitor_launch",
+      pid: bridgeMonitor.pid ?? null,
+      terminal_control: terminalControl,
+      agent_timeout_minutes: Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES)
+    });
+    runtimeLog("info", "terminal_bridge_monitor_launch", {
+      conversation_id: deliveredConversation.conversation_id,
+      monitor_pid: bridgeMonitor.pid ?? null,
+      terminal_target: terminalControl.target
+    });
+  }
   printJson({
     conversation: deliveredConversation,
     message,
@@ -2587,6 +2673,7 @@ async function runTerminalControlSend({
     background: true,
     callback_expected: Boolean(deliveredConversation.callback_command || deliveredConversation.gateway_method),
     terminal_control: terminalControl,
+    monitor_pid: bridgeMonitor?.pid ?? null,
     executor,
     budget: budgetAction(deliveredConversation),
     openclaw_next_action: openClawYieldNextAction({
@@ -2654,7 +2741,8 @@ function createManagedTerminalConversationFromRawId({ options, conversationId, m
       attached_at: now.toISOString(),
       takeover_match_kind: "raw_terminal_send",
       terminal_control: terminalControl,
-      needs_bootstrap: true
+      needs_bootstrap: false,
+      terminal_bridge: true
     }
   }, paths);
   saveState(paths.statePath, attachedConversation);
@@ -3486,7 +3574,11 @@ function runClose(options) {
   });
 }
 
-function runMonitor(options) {
+async function runMonitor(options) {
+  if (options.terminalBridge) {
+    return await runTerminalBridgeMonitor(options);
+  }
+
   const statePath = expandHome(required(options.state, "--state is required"));
   const logPath = expandHome(options.log ?? logPathForStatePath(statePath));
   const pid = options.pid ? Number(options.pid) : undefined;
@@ -3619,6 +3711,291 @@ function runMonitor(options) {
 
     sleepSync(pollIntervalMs);
   }
+}
+
+async function runTerminalBridgeMonitor(options) {
+  const statePath = expandHome(required(options.state, "--state is required"));
+  const logPath = expandHome(options.log ?? logPathForStatePath(statePath));
+  const timeoutMinutes = Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES);
+  const pollIntervalMs = Math.max(50, Number(options.pollIntervalMs ?? DEFAULT_MONITOR_POLL_INTERVAL_MS));
+
+  let conversation = loadState(statePath);
+  const executor = executorForConversation(conversation);
+  appendEvent(logPath, {
+    ts: new Date().toISOString(),
+    conversation_id: conversation.conversation_id,
+    event: "terminal_bridge_monitor_started",
+    executor,
+    agent_timeout_minutes: timeoutMinutes,
+    poll_interval_ms: pollIntervalMs
+  });
+  runtimeLog("info", "terminal_bridge_monitor_started", {
+    conversation_id: conversation.conversation_id,
+    agent: executor.kind,
+    executor_session: executor.session,
+    agent_timeout_minutes: timeoutMinutes
+  });
+
+  while (true) {
+    conversation = loadState(statePath);
+    if (!isWaitingForAgent(conversation.status)) {
+      runtimeLog("info", "terminal_bridge_monitor_finished", {
+        conversation_id: conversation.conversation_id,
+        status: conversation.status,
+        reason: "conversation_no_longer_waiting"
+      });
+      printJson({
+        conversation,
+        monitored: true,
+        terminal_bridge: true,
+        completed: false,
+        reason: "conversation_no_longer_waiting"
+      });
+      return;
+    }
+
+    const nativeTakeover = isRecord(conversation.native_session_takeover)
+      ? conversation.native_session_takeover
+      : undefined;
+    const terminalControl = terminalControlFromTakeover(nativeTakeover);
+    if (!terminalControl || nativeTakeover?.["terminal_bridge"] !== true) {
+      const stalledConversation = markConversationStalled({
+        statePath,
+        logPath,
+        reason: "terminal bridge monitor could not find terminal bridge metadata",
+        detail: {
+          terminal_bridge: true
+        }
+      });
+      printJson({
+        conversation: stalledConversation,
+        monitored: true,
+        terminal_bridge: true,
+        stalled: true,
+        reason: stalledConversation?.stalled_reason
+      });
+      return;
+    }
+
+    const terminalStatus = await terminalStatusForControl(terminalControl, options);
+    const approval = terminalStatus.approval_state;
+    if (isRecord(approval) && approval.blocked === true) {
+      appendEvent(logPath, {
+        ts: new Date().toISOString(),
+        conversation_id: conversation.conversation_id,
+        event: "terminal_bridge_approval_detected",
+        terminal_control: terminalControl,
+        activity_state: terminalStatus.activity_state,
+        activity_reason: terminalStatus.activity_reason
+      });
+      printJson({
+        conversation,
+        monitored: true,
+        terminal_bridge: true,
+        awaiting_approval: true,
+        terminal_control: terminalControl,
+        terminal_status: terminalStatus
+      });
+      return;
+    }
+
+    const contextMatch = await terminalBridgeCodexContext({
+      conversation,
+      nativeTakeover,
+      options
+    });
+    const startedAt = stringValue(nativeTakeover?.["terminal_bridge_started_at"]);
+    const assistantMessage = contextMatch?.context
+      ? latestAssistantAfter(contextMatch.context, startedAt)
+      : undefined;
+    const terminalStillWorking = terminalStatus.activity_state === "working";
+    const screenMessage = !assistantMessage && !terminalStillWorking
+      ? terminalBridgeScreenMessage({ conversation, terminalStatus })
+      : undefined;
+    if ((assistantMessage || screenMessage) && !terminalStillWorking) {
+      const completion = assistantMessage ?? screenMessage;
+      appendEvent(logPath, {
+        ts: new Date().toISOString(),
+        conversation_id: conversation.conversation_id,
+        event: "terminal_bridge_completion_detected",
+        terminal_control: terminalControl,
+        match: assistantMessage ? contextMatch?.match : "terminal_screen",
+        codex_session: contextMatch?.context.source,
+        assistant_timestamp: completion?.timestamp
+      });
+      const callbackMessage = createMessage({
+        conversation,
+        from: executor.actor,
+        to: "openclaw",
+        type: "done",
+        requiresResponse: false,
+        body: completion?.text ?? "",
+        metadata: {
+          source: "terminal_bridge",
+          terminal_control: terminalControl,
+          codex_session: contextMatch?.context.source,
+          confidence: assistantMessage ? contextMatch?.confidence : "screen_only",
+          match: assistantMessage ? contextMatch?.match : "terminal_screen",
+          assistant_timestamp: completion?.timestamp
+        }
+      });
+      runLockedCallback({
+        ...options,
+        statePath,
+        log: logPath,
+        messageJson: JSON.stringify(callbackMessage),
+        gatewayMethod: conversation.gateway_method,
+        gatewaySession: conversation.gateway_session,
+        openclawSession: conversation.openclaw_session,
+        openclawBin: conversation.openclaw_bin,
+        gatewayUrl: stringValue(conversation.gateway_token) ? conversation.gateway_url : undefined,
+        token: stringValue(conversation.gateway_token)
+      });
+      return;
+    }
+
+    if (Number.isFinite(timeoutMinutes) && timeoutMinutes > 0) {
+      const updatedAtMs = Date.parse(String(conversation.updated_at ?? conversation.created_at));
+      if (Number.isFinite(updatedAtMs) && Date.now() - updatedAtMs >= timeoutMinutes * 60 * 1000) {
+        const stalledConversation = markConversationStalled({
+          statePath,
+          logPath,
+          reason: `terminal bridge did not observe completion after ${timeoutMinutes} minutes`,
+          detail: {
+            terminal_bridge: true,
+            terminal_control: terminalControl,
+            match: contextMatch?.match,
+            terminal_activity_state: terminalStatus.activity_state
+          }
+        });
+        printJson({
+          conversation: stalledConversation,
+          monitored: true,
+          terminal_bridge: true,
+          stalled: true,
+          reason: stalledConversation?.stalled_reason
+        });
+        return;
+      }
+    }
+
+    sleepSync(pollIntervalMs);
+  }
+}
+
+async function terminalBridgeCodexContext({ conversation, nativeTakeover, options }) {
+  const provider = createAgentSessionProvider("codex", options);
+  const nativeSessionId = stringValue(nativeTakeover?.["native_session_id"]);
+  const startedAtMs = Date.parse(String(nativeTakeover?.["terminal_bridge_started_at"] ?? ""));
+  const terminalConversation = parseTerminalConversationId(nativeSessionId);
+  const activeProcess = await activeCodexProcessForPid(options, terminalConversation?.pid);
+  const directSessionId = activeProcess?.sessionId ?? (terminalConversation ? undefined : nativeSessionId);
+  if (directSessionId) {
+    const context = await provider.getForkContext({
+      sessionId: directSessionId,
+      maxMessages: Number(options.maxMessages ?? 16),
+      maxCommands: Number(options.maxCommands ?? 10),
+      maxTextLength: Number(options.maxTextLength ?? 4000)
+    });
+    if (context) {
+      return {
+        context,
+        process: activeProcess,
+        match: activeProcess?.sessionId ? "process_session_id" : "native_session_id",
+        confidence: "high"
+      };
+    }
+  }
+
+  const cwd = activeProcess?.cwd ?? stringValue(nativeTakeover?.["source_cwd"]);
+  if (!cwd) {
+    return undefined;
+  }
+
+  const sessions = (await provider.listHistoricalSessions())
+    .filter((session) => session.cwd === cwd)
+    .filter((session) => {
+      if (!Number.isFinite(startedAtMs)) {
+        return true;
+      }
+      return Number(session.updatedAtMs ?? 0) >= startedAtMs;
+    })
+    .sort((left, right) => Number(right.updatedAtMs ?? 0) - Number(left.updatedAtMs ?? 0));
+  const selected = sessions[0];
+  if (!selected) {
+    return undefined;
+  }
+
+  const context = await provider.getForkContext({
+    sessionId: selected.id,
+    maxMessages: Number(options.maxMessages ?? 16),
+    maxCommands: Number(options.maxCommands ?? 10),
+    maxTextLength: Number(options.maxTextLength ?? 4000)
+  });
+  if (!context) {
+    return undefined;
+  }
+
+  return {
+    context,
+    process: activeProcess,
+    match: sessions.length === 1 ? "cwd" : "cwd_latest",
+    confidence: sessions.length === 1 ? "medium" : "low"
+  };
+}
+
+function latestAssistantAfter(context: ForkContextPackage, startedAt: string | undefined) {
+  const threshold = startedAt ? Date.parse(startedAt) : undefined;
+  return [...visibleRolloutMessages(context)]
+    .reverse()
+    .find((message) => {
+      if (message.role !== "assistant") {
+        return false;
+      }
+      if (!Number.isFinite(threshold)) {
+        return true;
+      }
+      const messageTime = message.timestamp ? Date.parse(message.timestamp) : NaN;
+      return Number.isFinite(messageTime) && messageTime >= Number(threshold);
+    });
+}
+
+function terminalBridgeScreenMessage({ conversation, terminalStatus }) {
+  const excerpt = stringValue(terminalStatus?.screen?.excerpt);
+  if (!excerpt) {
+    return undefined;
+  }
+
+  const request = String(conversation.user_request ?? "").trim();
+  const promptIndex = request ? excerpt.lastIndexOf(request) : -1;
+  const afterPrompt = promptIndex >= 0
+    ? excerpt.slice(promptIndex + request.length)
+    : excerpt;
+  const cleaned = cleanTerminalBridgeScreenText(afterPrompt);
+  if (!cleaned || cleaned.length < 40 || !/[•└]/u.test(cleaned)) {
+    return undefined;
+  }
+
+  return {
+    role: "assistant" as const,
+    text: truncateText(cleaned, 4000),
+    timestamp: undefined
+  };
+}
+
+function cleanTerminalBridgeScreenText(text: string): string | undefined {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+$/u, ""))
+    .filter((line) => {
+      const trimmed = line.trim();
+      return trimmed &&
+        !trimmed.startsWith("› Use /skills") &&
+        !/^gpt-[\w.-]+/u.test(trimmed) &&
+        !/^[-\w.]+ default ·/u.test(trimmed);
+    });
+  const cleaned = lines.join("\n").trim();
+  return cleaned || undefined;
 }
 
 function resolveExecutable(command) {

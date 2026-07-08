@@ -93,6 +93,7 @@ test("agent takeover terminal_control attaches tmux pane and send writes to the 
     assert.equal(parsed.status, "attached");
     assert.equal(parsed.conversation.native_session_takeover.strategy, "terminal_control");
     assert.equal(parsed.conversation.native_session_takeover.needs_bootstrap, false);
+    assert.equal(parsed.conversation.native_session_takeover.terminal_bridge, true);
     assert.equal(parsed.conversation.native_session_takeover.terminal_control.target, "codex-work:0.0");
 
     const sent = runAgentCli([
@@ -442,6 +443,7 @@ test("send and cancel support terminal-controlled conversation ids without AKK s
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-send-"));
   const fakeBinDir = path.join(tempDir, "bin");
   const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
   const screenPath = path.join(tempDir, "screen.txt");
   const workspace = path.join(tempDir, "workspace");
 
@@ -449,6 +451,7 @@ test("send and cancel support terminal-controlled conversation ids without AKK s
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
     fs.writeFileSync(screenPath, "Codex is ready\n");
+    const openclawBin = writeFakeOpenClaw(fakeBinDir, openclawCallsPath);
     writeFakeTmux(
       fakeBinDir,
       tmuxCallsPath,
@@ -541,7 +544,8 @@ test("background send to raw terminal id creates managed callback conversation",
       "--openclaw-session",
       "agent:channel:original",
       "--openclaw-bin",
-      "/usr/bin/true"
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor"
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     });
@@ -559,18 +563,258 @@ test("background send to raw terminal id creates managed callback conversation",
     assert.equal(sentParsed.conversation.gateway_session, "agent:channel:original");
     assert.equal(sentParsed.conversation.native_session_takeover.native_session_id, rawConversationId);
     assert.equal(sentParsed.conversation.native_session_takeover.needs_bootstrap, false);
+    assert.equal(sentParsed.conversation.native_session_takeover.terminal_bridge, true);
+    assert.equal(sentParsed.monitor_pid, null);
 
     const statePath = path.join(storeDir, sentParsed.conversation.conversation_id, "state.json");
-    assert.equal(JSON.parse(fs.readFileSync(statePath, "utf8")).conversation_id, sentParsed.conversation.conversation_id);
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    assert.equal(state.conversation_id, sentParsed.conversation.conversation_id);
+    assert.equal(typeof state.native_session_takeover.terminal_bridge_started_at, "string");
+    assert.equal(state.native_session_takeover.terminal_bridge_message_id, sentParsed.message.id);
 
     const calls = readJsonLines(tmuxCallsPath);
     assert.deepEqual(calls.at(-1).args, ["send-keys", "-t", "codex-work:0.1", "C-m"]);
     assert.deepEqual(calls.at(-2).args.slice(0, 4), ["send-keys", "-t", "codex-work:0.1", "-l"]);
     const injectedPayload = calls.at(-2).args[4];
-    assert.match(injectedPayload, /callback --state/);
-    assert.match(injectedPayload, /agent-knock-knock\.callback/);
-    assert.match(injectedPayload, /查一下最新 tag/);
+    assert.equal(injectedPayload, "查一下最新 tag");
+    assert.doesNotMatch(injectedPayload, /callback --state/);
+    assert.doesNotMatch(injectedPayload, /agent-knock-knock\.callback/);
     assert.doesNotMatch(injectedPayload, /[\r\n]$/u);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("terminal bridge monitor callbacks from new rollout assistant output", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-bridge-monitor-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "Codex is ready\n");
+    const openclawBin = writeFakeOpenClaw(fakeBinDir, openclawCallsPath);
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `codex-work\t0\t1\t33389\tnode\t${workspace}\n`
+    );
+
+    const rawConversationId = "terminal:tmux:codex-work:0.1:33389";
+    const sent = runAgentCli([
+      "send",
+      "--conversation",
+      rawConversationId,
+      "--message",
+      "查一下最新 tag",
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      "agent:channel:original",
+      "--openclaw-session",
+      "agent:channel:original",
+      "--openclaw-bin",
+      openclawBin,
+      "--disable-terminal-bridge-monitor"
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    const sentParsed = JSON.parse(sent.stdout);
+    const statePath = path.join(storeDir, sentParsed.conversation.conversation_id, "state.json");
+    const logPath = path.join(storeDir, sentParsed.conversation.conversation_id, "events.ndjson");
+
+    const rollout = [
+      JSON.stringify({
+        timestamp: "2099-07-04T00:00:00.000Z",
+        type: "event_msg",
+        payload: {
+          type: "user_message",
+          message: "查一下最新 tag"
+        }
+      }),
+      JSON.stringify({
+        timestamp: "2099-07-04T00:01:00.000Z",
+        type: "event_msg",
+        payload: {
+          type: "agent_message",
+          message: "最新 tag 是 v0.2.29。"
+        }
+      })
+    ].join("\n");
+
+    const monitored = runAgentCli([
+      "monitor",
+      "--terminal-bridge",
+      "--state",
+      statePath,
+      "--log",
+      logPath,
+      "--poll-interval-ms",
+      "50",
+      "--agent-timeout-minutes",
+      "60",
+      "--threads-json",
+      JSON.stringify([threadRow({ cwd: workspace, updated_at_ms: Date.parse("2099-07-04T00:01:00.000Z") })]),
+      "--processes-json",
+      JSON.stringify([{
+        pid: 33389,
+        ppid: 999,
+        command: `codex resume ${sessionId}`,
+        cwd: workspace
+      }]),
+      "--terminals-json",
+      JSON.stringify([tmuxPane({
+        target: "codex-work:0.1",
+        pane: 1,
+        panePid: 999,
+        currentPath: workspace
+      })]),
+      "--terminal-screens-json",
+      JSON.stringify({
+        "codex-work:0.1": "Codex is ready\n"
+      }),
+      "--rollouts-json",
+      JSON.stringify({ [rolloutPath]: rollout })
+    ]);
+
+    assert.equal(monitored.status, 0, monitored.stderr || monitored.stdout);
+    const parsed = JSON.parse(monitored.stdout);
+    assert.equal(parsed.delivered, true);
+    assert.equal(parsed.message.type, "done");
+    assert.equal(parsed.message.body, "最新 tag 是 v0.2.29。");
+    assert.equal(parsed.conversation.status, "idle");
+
+    const events = fs.readFileSync(logPath, "utf8");
+    assert.match(events, /terminal_bridge_completion_detected/);
+    assert.match(events, /callback_gateway_method_delivery/);
+    const openclawCalls = readJsonLines(openclawCallsPath);
+    assert.deepEqual(openclawCalls[0].args.slice(0, 3), ["gateway", "call", "agent-knock-knock.callback"]);
+    assert.equal(openclawCalls[0].args.includes("--url"), false);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("terminal bridge monitor callbacks from idle terminal screen when rollout is unavailable", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-bridge-screen-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    const request = "git pull 完后看一下最近的 commits，告诉我都更新了哪些特性";
+    fs.writeFileSync(screenPath, "Codex is ready\n");
+    const openclawBin = writeFakeOpenClaw(fakeBinDir, openclawCallsPath);
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `my-work\t0\t0\t33389\tnode\t${workspace}\n`
+    );
+
+    const rawConversationId = "terminal:tmux:my-work:0.0:33389";
+    const sent = runAgentCli([
+      "send",
+      "--conversation",
+      rawConversationId,
+      "--message",
+      request,
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      "agent:channel:original",
+      "--openclaw-session",
+      "agent:channel:original",
+      "--openclaw-bin",
+      openclawBin,
+      "--disable-terminal-bridge-monitor"
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    const sentParsed = JSON.parse(sent.stdout);
+    const statePath = path.join(storeDir, sentParsed.conversation.conversation_id, "state.json");
+    const logPath = path.join(storeDir, sentParsed.conversation.conversation_id, "events.ndjson");
+
+    fs.writeFileSync(screenPath, [
+      `› ${request}`,
+      "",
+      "• 这次 pull 实际只更新了 1 个 commit：",
+      "",
+      "  71afa78 fix(daemon): stop logging client disconnects as connection errors (#328)",
+      "",
+      "  更新内容：",
+      "  - 新增 is_client_disconnect() 识别客户端主动断开连接",
+      "  - daemon 不再把 BrokenPipe/ConnectionReset 等正常断连记录为服务端错误",
+      "",
+      "› Use /skills to list available skills",
+      "",
+      "  gpt-5.5 default · ~/github/coven"
+    ].join("\n"));
+
+    const monitored = runAgentCli([
+      "monitor",
+      "--terminal-bridge",
+      "--state",
+      statePath,
+      "--log",
+      logPath,
+      "--poll-interval-ms",
+      "50",
+      "--agent-timeout-minutes",
+      "60",
+      "--processes-json",
+      JSON.stringify([{
+        pid: 33389,
+        ppid: 999,
+        command: "codex",
+        cwd: workspace
+      }]),
+      "--terminals-json",
+      JSON.stringify([tmuxPane({
+        target: "my-work:0.0",
+        session: "my-work",
+        window: 0,
+        pane: 0,
+        panePid: 33389,
+        currentPath: workspace
+      })]),
+      "--terminal-screens-json",
+      JSON.stringify({
+        "my-work:0.0": fs.readFileSync(screenPath, "utf8")
+      })
+    ]);
+
+    assert.equal(monitored.status, 0, monitored.stderr || monitored.stdout);
+    const parsed = JSON.parse(monitored.stdout);
+    assert.equal(parsed.delivered, true);
+    assert.equal(parsed.message.type, "done");
+    assert.match(parsed.message.body, /这次 pull 实际只更新了 1 个 commit/);
+    assert.doesNotMatch(parsed.message.body, /Use \/skills/);
+    assert.equal(parsed.message.metadata.confidence, "screen_only");
+    assert.equal(parsed.conversation.status, "idle");
+
+    const events = fs.readFileSync(logPath, "utf8");
+    assert.match(events, /terminal_bridge_completion_detected/);
+    assert.match(events, /"match":"terminal_screen"/);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -1188,6 +1432,22 @@ if (args[0] === "capture-pane") {
     "utf8"
   );
   fs.chmodSync(fakeTmux, 0o755);
+}
+
+function writeFakeOpenClaw(fakeBinDir: string, callsPath: string) {
+  const fakeOpenClaw = path.join(fakeBinDir, "openclaw");
+  fs.writeFileSync(
+    fakeOpenClaw,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({ args }) + "\\n", "utf8");
+process.stdout.write(JSON.stringify({ ok: true }) + "\\n");
+`,
+    "utf8"
+  );
+  fs.chmodSync(fakeOpenClaw, 0o755);
+  return fakeOpenClaw;
 }
 
 function readJsonLines(filePath: string) {
