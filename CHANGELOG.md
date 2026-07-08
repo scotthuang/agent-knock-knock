@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.32 - 2026-07-09
+
+### Fixed
+
+- Added an idle terminal-screen fallback for terminal bridge callbacks when Codex rollout history is unavailable or does not expose the current tmux task result.
+
 ## 0.2.31 - 2026-07-09
 
 ### Fixed

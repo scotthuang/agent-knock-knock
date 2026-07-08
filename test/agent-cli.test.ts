@@ -705,6 +705,121 @@ test("terminal bridge monitor callbacks from new rollout assistant output", () =
   }
 });
 
+test("terminal bridge monitor callbacks from idle terminal screen when rollout is unavailable", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-bridge-screen-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    const request = "git pull 完后看一下最近的 commits，告诉我都更新了哪些特性";
+    fs.writeFileSync(screenPath, "Codex is ready\n");
+    const openclawBin = writeFakeOpenClaw(fakeBinDir, openclawCallsPath);
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `my-work\t0\t0\t33389\tnode\t${workspace}\n`
+    );
+
+    const rawConversationId = "terminal:tmux:my-work:0.0:33389";
+    const sent = runAgentCli([
+      "send",
+      "--conversation",
+      rawConversationId,
+      "--message",
+      request,
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      "agent:channel:original",
+      "--openclaw-session",
+      "agent:channel:original",
+      "--openclaw-bin",
+      openclawBin,
+      "--disable-terminal-bridge-monitor"
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    const sentParsed = JSON.parse(sent.stdout);
+    const statePath = path.join(storeDir, sentParsed.conversation.conversation_id, "state.json");
+    const logPath = path.join(storeDir, sentParsed.conversation.conversation_id, "events.ndjson");
+
+    fs.writeFileSync(screenPath, [
+      `› ${request}`,
+      "",
+      "• 这次 pull 实际只更新了 1 个 commit：",
+      "",
+      "  71afa78 fix(daemon): stop logging client disconnects as connection errors (#328)",
+      "",
+      "  更新内容：",
+      "  - 新增 is_client_disconnect() 识别客户端主动断开连接",
+      "  - daemon 不再把 BrokenPipe/ConnectionReset 等正常断连记录为服务端错误",
+      "",
+      "› Use /skills to list available skills",
+      "",
+      "  gpt-5.5 default · ~/github/coven"
+    ].join("\n"));
+
+    const monitored = runAgentCli([
+      "monitor",
+      "--terminal-bridge",
+      "--state",
+      statePath,
+      "--log",
+      logPath,
+      "--poll-interval-ms",
+      "50",
+      "--agent-timeout-minutes",
+      "60",
+      "--processes-json",
+      JSON.stringify([{
+        pid: 33389,
+        ppid: 999,
+        command: "codex",
+        cwd: workspace
+      }]),
+      "--terminals-json",
+      JSON.stringify([tmuxPane({
+        target: "my-work:0.0",
+        session: "my-work",
+        window: 0,
+        pane: 0,
+        panePid: 33389,
+        currentPath: workspace
+      })]),
+      "--terminal-screens-json",
+      JSON.stringify({
+        "my-work:0.0": fs.readFileSync(screenPath, "utf8")
+      })
+    ]);
+
+    assert.equal(monitored.status, 0, monitored.stderr || monitored.stdout);
+    const parsed = JSON.parse(monitored.stdout);
+    assert.equal(parsed.delivered, true);
+    assert.equal(parsed.message.type, "done");
+    assert.match(parsed.message.body, /这次 pull 实际只更新了 1 个 commit/);
+    assert.doesNotMatch(parsed.message.body, /Use \/skills/);
+    assert.equal(parsed.message.metadata.confidence, "screen_only");
+    assert.equal(parsed.conversation.status, "idle");
+
+    const events = fs.readFileSync(logPath, "utf8");
+    assert.match(events, /terminal_bridge_completion_detected/);
+    assert.match(events, /"match":"terminal_screen"/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("terminal-controlled conversation ids use Codex pid, not tmux pane pid", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-pid-"));
   const fakeBinDir = path.join(tempDir, "bin");

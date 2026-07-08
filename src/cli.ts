@@ -3809,15 +3809,19 @@ async function runTerminalBridgeMonitor(options) {
       ? latestAssistantAfter(contextMatch.context, startedAt)
       : undefined;
     const terminalStillWorking = terminalStatus.activity_state === "working";
-    if (assistantMessage && !terminalStillWorking) {
+    const screenMessage = !assistantMessage && !terminalStillWorking
+      ? terminalBridgeScreenMessage({ conversation, terminalStatus })
+      : undefined;
+    if ((assistantMessage || screenMessage) && !terminalStillWorking) {
+      const completion = assistantMessage ?? screenMessage;
       appendEvent(logPath, {
         ts: new Date().toISOString(),
         conversation_id: conversation.conversation_id,
         event: "terminal_bridge_completion_detected",
         terminal_control: terminalControl,
-        match: contextMatch?.match,
+        match: assistantMessage ? contextMatch?.match : "terminal_screen",
         codex_session: contextMatch?.context.source,
-        assistant_timestamp: assistantMessage.timestamp
+        assistant_timestamp: completion?.timestamp
       });
       const callbackMessage = createMessage({
         conversation,
@@ -3825,13 +3829,14 @@ async function runTerminalBridgeMonitor(options) {
         to: "openclaw",
         type: "done",
         requiresResponse: false,
-        body: assistantMessage.text,
+        body: completion?.text ?? "",
         metadata: {
           source: "terminal_bridge",
           terminal_control: terminalControl,
           codex_session: contextMatch?.context.source,
-          confidence: contextMatch?.confidence,
-          assistant_timestamp: assistantMessage.timestamp
+          confidence: assistantMessage ? contextMatch?.confidence : "screen_only",
+          match: assistantMessage ? contextMatch?.match : "terminal_screen",
+          assistant_timestamp: completion?.timestamp
         }
       });
       runLockedCallback({
@@ -3953,6 +3958,44 @@ function latestAssistantAfter(context: ForkContextPackage, startedAt: string | u
       const messageTime = message.timestamp ? Date.parse(message.timestamp) : NaN;
       return Number.isFinite(messageTime) && messageTime >= Number(threshold);
     });
+}
+
+function terminalBridgeScreenMessage({ conversation, terminalStatus }) {
+  const excerpt = stringValue(terminalStatus?.screen?.excerpt);
+  if (!excerpt) {
+    return undefined;
+  }
+
+  const request = String(conversation.user_request ?? "").trim();
+  const promptIndex = request ? excerpt.lastIndexOf(request) : -1;
+  const afterPrompt = promptIndex >= 0
+    ? excerpt.slice(promptIndex + request.length)
+    : excerpt;
+  const cleaned = cleanTerminalBridgeScreenText(afterPrompt);
+  if (!cleaned || cleaned.length < 40 || !/[•└]/u.test(cleaned)) {
+    return undefined;
+  }
+
+  return {
+    role: "assistant" as const,
+    text: truncateText(cleaned, 4000),
+    timestamp: undefined
+  };
+}
+
+function cleanTerminalBridgeScreenText(text: string): string | undefined {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+$/u, ""))
+    .filter((line) => {
+      const trimmed = line.trim();
+      return trimmed &&
+        !trimmed.startsWith("› Use /skills") &&
+        !/^gpt-[\w.-]+/u.test(trimmed) &&
+        !/^[-\w.]+ default ·/u.test(trimmed);
+    });
+  const cleaned = lines.join("\n").trim();
+  return cleaned || undefined;
 }
 
 function resolveExecutable(command) {
