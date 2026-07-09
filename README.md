@@ -227,6 +227,8 @@ Claude Code permission requests work with this model. For example, a Claude Code
 
 Codex does not currently behave the same way for every sensitive operation under AKK. Some Codex sandbox-sensitive actions, such as writing outside the workspace in non-interactive execution, may fail directly with sandbox or permission errors instead of surfacing an ACPX permission request that AKK can approve. In those cases the action is currently unavailable through AKK's background Codex path; prefer Claude Code for tasks that require ACPX-approved filesystem access outside the workspace, or redesign the task to stay inside the configured workspace.
 
+For terminal bridge sends to tmux-backed Codex sessions, AKK watches the terminal pane. If Codex shows an approval prompt, AKK sends OpenClaw a `question` callback with a safe terminal excerpt and explicit routing instructions: approve with `AKK approve <conversation-id>` / `agent_knock_knock_approve`, or deny/stop with `AKK cancel <conversation-id>` / `agent_knock_knock_cancel`. After an approval is sent, AKK resumes terminal bridge monitoring and waits for the final Codex result callback.
+
 ## Development
 
 Build TypeScript sources:

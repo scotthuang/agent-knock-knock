@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Notify OpenClaw when a terminal bridge Codex session is waiting for approval, including explicit approve and deny instructions.
+
+### Fixed
+
+- Resume terminal bridge monitoring after `AKK approve` succeeds so approved Codex work can still deliver its final callback.
+
 ## 0.2.35 - 2026-07-09
 
 ### Added

@@ -820,6 +820,148 @@ test("terminal bridge monitor callbacks from idle terminal screen when rollout i
   }
 });
 
+test("terminal bridge monitor callbacks for Codex approval and approve resumes waiting", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-bridge-approval-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    const approvalScreen = [
+      "  Would you like to run the following command?",
+      "",
+      "  $ npm install",
+      "",
+      "› 1. Yes, proceed (y)",
+      "  2. No, and tell Codex what to do differently (esc)",
+      "",
+      "  Press enter to confirm or esc to cancel"
+    ].join("\n");
+    fs.writeFileSync(screenPath, approvalScreen);
+    const openclawBin = writeFakeOpenClaw(fakeBinDir, openclawCallsPath);
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `codex-work\t0\t1\t33389\tnode\t${workspace}\n`
+    );
+
+    const rawConversationId = "terminal:tmux:codex-work:0.1:33389";
+    const sent = runAgentCli([
+      "send",
+      "--conversation",
+      rawConversationId,
+      "--message",
+      "Install dependencies if needed",
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      "agent:channel:original",
+      "--openclaw-session",
+      "agent:channel:original",
+      "--openclaw-bin",
+      openclawBin,
+      "--disable-terminal-bridge-monitor"
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    const sentParsed = JSON.parse(sent.stdout);
+    const conversationId = sentParsed.conversation.conversation_id;
+    const statePath = path.join(storeDir, conversationId, "state.json");
+    const logPath = path.join(storeDir, conversationId, "events.ndjson");
+
+    const monitored = runAgentCli([
+      "monitor",
+      "--terminal-bridge",
+      "--state",
+      statePath,
+      "--log",
+      logPath,
+      "--poll-interval-ms",
+      "50",
+      "--agent-timeout-minutes",
+      "60",
+      "--processes-json",
+      JSON.stringify([{
+        pid: 33389,
+        ppid: 999,
+        command: "codex",
+        cwd: workspace
+      }]),
+      "--terminals-json",
+      JSON.stringify([tmuxPane({
+        target: "codex-work:0.1",
+        session: "codex-work",
+        window: 0,
+        pane: 1,
+        panePid: 33389,
+        currentPath: workspace
+      })]),
+      "--terminal-screens-json",
+      JSON.stringify({
+        "codex-work:0.1": approvalScreen
+      })
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+
+    assert.equal(monitored.status, 0, monitored.stderr || monitored.stdout);
+    const monitoredParsed = JSON.parse(monitored.stdout);
+    assert.equal(monitoredParsed.delivered, true);
+    assert.equal(monitoredParsed.message.type, "question");
+    assert.equal(monitoredParsed.message.metadata.reason, "approval_required");
+    assert.match(monitoredParsed.message.body, new RegExp(`AKK approve ${conversationId}`));
+    assert.match(monitoredParsed.message.body, new RegExp(`AKK cancel ${conversationId}`));
+    assert.match(monitoredParsed.message.body, /agent_knock_knock_approve/);
+    assert.match(monitoredParsed.message.body, /agent_knock_knock_cancel/);
+    assert.match(monitoredParsed.message.body, /\$ npm install/);
+    assert.equal(monitoredParsed.conversation.status, "waiting_for_openclaw");
+
+    const openclawCalls = readJsonLines(openclawCallsPath);
+    const paramsIndex = openclawCalls[0].args.indexOf("--params");
+    assert.notEqual(paramsIndex, -1);
+    const gatewayParams = JSON.parse(openclawCalls[0].args[paramsIndex + 1]);
+    assert.equal(gatewayParams.message.type, "question");
+    assert.equal(gatewayParams.message.metadata.approve_command, `AKK approve ${conversationId}`);
+    assert.equal(gatewayParams.message.metadata.deny_command, `AKK cancel ${conversationId}`);
+
+    const approved = runAgentCli([
+      "approve",
+      "--conversation",
+      conversationId,
+      "--store-dir",
+      storeDir,
+      "--disable-terminal-bridge-monitor"
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(approved.status, 0, approved.stderr || approved.stdout);
+    const approvedParsed = JSON.parse(approved.stdout);
+    assert.equal(approvedParsed.approved, true);
+    assert.equal(approvedParsed.key, "y");
+    assert.equal(approvedParsed.conversation.status, "waiting_for_agent");
+    assert.equal(approvedParsed.conversation.native_session_takeover.terminal_bridge_approval, undefined);
+    const calls = readJsonLines(tmuxCallsPath);
+    assert.deepEqual(calls.at(-1).args, ["send-keys", "-t", "codex-work:0.1", "y"]);
+
+    const events = fs.readFileSync(logPath, "utf8");
+    assert.match(events, /terminal_bridge_approval_detected/);
+    assert.match(events, /terminal_bridge_approval_notification_recorded/);
+    assert.match(events, /callback_gateway_method_delivery/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("terminal-controlled conversation ids use Codex pid, not tmux pane pid", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-pid-"));
   const fakeBinDir = path.join(tempDir, "bin");
