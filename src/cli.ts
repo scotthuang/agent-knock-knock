@@ -33,7 +33,7 @@ import {
   proxyEnvForExecutor
 } from "./executors.js";
 import { executorBootstrapPrompt } from "./bootstrap.js";
-import { writeRuntimeLog } from "./runtime-log.js";
+import { redactString, writeRuntimeLog } from "./runtime-log.js";
 import { formatTranscript, readNdjsonLog } from "./transcript.js";
 import {
   appendEvent,
@@ -796,14 +796,14 @@ function detectCodexActivityState(
     };
   }
 
-  const lastLine = tailLines
+  const idleLine = tailLines
+    .slice(-6)
     .map((line) => line.trim())
-    .filter(Boolean)
-    .at(-1);
-  if (lastLine && isCodexIdlePromptLine(lastLine)) {
+    .find((line) => isCodexIdlePromptLine(line));
+  if (idleLine) {
     return {
       state: "idle",
-      reason: `Codex input prompt detected: ${lastLine}`
+      reason: `Codex input prompt detected: ${idleLine}`
     };
   }
 
@@ -834,7 +834,8 @@ function isCodexIdlePromptLine(line: string): boolean {
 
 function screenExcerpt(screen: string, maxLength = 4000): string {
   const lines = screen.trimEnd().split(/\r?\n/);
-  return lines.slice(Math.max(0, lines.length - 80)).join("\n").slice(-maxLength);
+  const excerpt = lines.slice(Math.max(0, lines.length - 80)).join("\n");
+  return redactString(excerpt).slice(-maxLength);
 }
 
 function createForkConversation({ agent, strategy, session, contextPackage, forkSummary, modelInfo, options }) {
@@ -3889,6 +3890,7 @@ async function runTerminalBridgeMonitor(options) {
     agent_timeout_minutes: timeoutMinutes
   });
 
+  let idleCompletionFingerprint: string | undefined;
   while (true) {
     conversation = loadState(statePath);
     if (!isWaitingForAgent(conversation.status)) {
@@ -4023,12 +4025,23 @@ async function runTerminalBridgeMonitor(options) {
     const assistantMessage = contextMatch?.context
       ? latestAssistantAfter(contextMatch.context, startedAt)
       : undefined;
-    const terminalStillWorking = terminalStatus.activity_state === "working";
-    const screenMessage = !assistantMessage && !terminalStillWorking
+    const terminalIdle = terminalStatus.activity_state === "idle";
+    const screenMessage = !assistantMessage && terminalIdle
       ? terminalBridgeScreenMessage({ conversation, terminalStatus })
       : undefined;
-    if ((assistantMessage || screenMessage) && !terminalStillWorking) {
-      const completion = assistantMessage ?? screenMessage;
+    const completion = terminalIdle ? assistantMessage ?? screenMessage : undefined;
+    const completionFingerprint = completion
+      ? createHash("sha256")
+        .update(JSON.stringify({
+          text: completion.text,
+          timestamp: completion.timestamp,
+          match: assistantMessage ? contextMatch?.match : "terminal_screen"
+        }))
+        .digest("hex")
+      : undefined;
+    const completionStable = completionFingerprint !== undefined && completionFingerprint === idleCompletionFingerprint;
+    idleCompletionFingerprint = completionFingerprint;
+    if (completion && completionStable) {
       appendEvent(logPath, {
         ts: new Date().toISOString(),
         conversation_id: conversation.conversation_id,

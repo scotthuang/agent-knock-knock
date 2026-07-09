@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.39 - 2026-07-10
+
+### Fixed
+
+- Prevent terminal bridge monitors from treating intermediate Codex progress as completion while terminal activity is unknown, and redact environment-style secrets from terminal excerpts.
+
 ## 0.2.38 - 2026-07-10
 
 ### Fixed

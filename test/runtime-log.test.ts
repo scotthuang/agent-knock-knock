@@ -78,6 +78,10 @@ test("runtime log redaction removes secrets but not ordinary paths", () => {
     redactString("Authorization: Bearer abcdef and url socks5h://user:pass@127.0.0.1:1082"),
     "Authorization: Bearer [REDACTED] and url socks5h://[REDACTED]@127.0.0.1:1082"
   );
+  assert.equal(
+    redactString("ARK_API_KEY=ark-test-secret-value HOME=/Users/example"),
+    "ARK_API_KEY=[REDACTED] HOME=/Users/example"
+  );
 });
 
 test("runtime log cleanup removes old daily files", () => {

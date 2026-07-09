@@ -156,6 +156,8 @@ test("approve sends y only when the terminal screen shows a primary Codex approv
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
     fs.writeFileSync(screenPath, [
+      "  ARK_API_KEY=ark-test-secret-value",
+      "",
       "  Would you like to run the following command?",
       "",
       "  $ curl -I https://example.com",
@@ -209,6 +211,8 @@ test("approve sends y only when the terminal screen shows a primary Codex approv
     assert.equal(status.status, 0, status.stderr || status.stdout);
     const statusParsed = JSON.parse(status.stdout);
     assert.match(statusParsed.terminal_screen.excerpt, /Would you like to run the following command/);
+    assert.match(statusParsed.terminal_screen.excerpt, /ARK_API_KEY=\[REDACTED\]/);
+    assert.doesNotMatch(statusParsed.terminal_screen.excerpt, /ark-test-secret-value/);
     assert.equal(statusParsed.terminal_screen.approval.approvable, true);
     assert.equal(statusParsed.terminal_status.reachable, true);
     assert.equal(statusParsed.terminal_status.target, "codex-work:0.0");
@@ -703,7 +707,7 @@ test("terminal bridge monitor callbacks from new rollout assistant output", () =
       })]),
       "--terminal-screens-json",
       JSON.stringify({
-        "codex-work:0.1": "Codex is ready\n"
+        "codex-work:0.1": "› \n"
       }),
       "--rollouts-json",
       JSON.stringify({ [rolloutPath]: rollout })
@@ -723,6 +727,120 @@ test("terminal bridge monitor callbacks from new rollout assistant output", () =
     const openclawCalls = readJsonLines(openclawCallsPath);
     assert.deepEqual(openclawCalls[0].args.slice(0, 3), ["gateway", "call", "agent-knock-knock.callback"]);
     assert.equal(openclawCalls[0].args.includes("--url"), false);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("terminal bridge monitor does not complete from assistant progress while terminal state is unknown", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-bridge-progress-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "• Waited for background terminal · git merge --ff-only origin/main\n");
+    const openclawBin = writeFakeOpenClaw(fakeBinDir, openclawCallsPath);
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `codex-work\t0\t1\t33389\tnode\t${workspace}\n`
+    );
+
+    const sent = runAgentCli([
+      "send",
+      "--conversation",
+      "terminal:tmux:codex-work:0.1:33389",
+      "--message",
+      "Pull main and inspect the changes",
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      "agent:channel:original",
+      "--openclaw-session",
+      "agent:channel:original",
+      "--openclaw-bin",
+      openclawBin,
+      "--disable-terminal-bridge-monitor"
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    const sentParsed = JSON.parse(sent.stdout);
+    const statePath = path.join(storeDir, sentParsed.conversation.conversation_id, "state.json");
+    const logPath = path.join(storeDir, sentParsed.conversation.conversation_id, "events.ndjson");
+    const rollout = [
+      JSON.stringify({
+        timestamp: "2099-07-04T00:00:00.000Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: "Pull main and inspect the changes" }
+      }),
+      JSON.stringify({
+        timestamp: "2099-07-04T00:01:00.000Z",
+        type: "event_msg",
+        payload: {
+          type: "agent_message",
+          message: "I found the proxy issue and will retry after the current command returns."
+        }
+      })
+    ].join("\n");
+
+    const monitored = runAgentCli([
+      "monitor",
+      "--terminal-bridge",
+      "--state",
+      statePath,
+      "--log",
+      logPath,
+      "--poll-interval-ms",
+      "50",
+      "--agent-timeout-minutes",
+      "0.001",
+      "--threads-json",
+      JSON.stringify([threadRow({ cwd: workspace, updated_at_ms: Date.parse("2099-07-04T00:01:00.000Z") })]),
+      "--processes-json",
+      JSON.stringify([{
+        pid: 33389,
+        ppid: 999,
+        command: `codex resume ${sessionId}`,
+        cwd: workspace
+      }]),
+      "--terminals-json",
+      JSON.stringify([tmuxPane({
+        target: "codex-work:0.1",
+        pane: 1,
+        panePid: 999,
+        currentPath: workspace
+      })]),
+      "--terminal-screens-json",
+      JSON.stringify({
+        "codex-work:0.1": "• Waited for background terminal · git merge --ff-only origin/main\n"
+      }),
+      "--rollouts-json",
+      JSON.stringify({ [rolloutPath]: rollout })
+    ]);
+
+    assert.equal(monitored.status, 0, monitored.stderr || monitored.stdout);
+    const parsed = JSON.parse(monitored.stdout);
+    assert.equal(parsed.stalled, true);
+    assert.match(parsed.reason, /did not observe completion/);
+    const events = fs.readFileSync(logPath, "utf8");
+    assert.doesNotMatch(events, /terminal_bridge_completion_detected/);
+    const openclawCalls = readJsonLines(openclawCallsPath);
+    const callbackParamsIndex = openclawCalls[0].args.indexOf("--params");
+    assert.notEqual(callbackParamsIndex, -1);
+    const callbackParams = JSON.parse(openclawCalls[0].args[callbackParamsIndex + 1]);
+    assert.equal(callbackParams.message.type, "error");
+    assert.notEqual(callbackParams.message.type, "done");
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
