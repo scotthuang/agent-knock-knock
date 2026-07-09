@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.34 - 2026-07-09
+
+### Fixed
+
+- Replace the README architecture image with an inline Mermaid diagram so the diagram renders without depending on raw GitHub image delivery.
+
 ## 0.2.33 - 2026-07-09
 
 ### Fixed
