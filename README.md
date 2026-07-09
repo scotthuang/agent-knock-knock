@@ -1,5 +1,7 @@
 # agent-knock-knock
 
+![Agent Knock Knock cover: OpenClaw knocking on coding agents' door](docs/assets/agent-knock-knock-cover.jpg)
+
 Agent Knock Knock lets OpenClaw delegate work to local coding agents such as Codex, Claude Code, and Cursor, keep those delegations alive as reusable tasks, and route follow-up messages or results back through OpenClaw.
 
 The name is literal: OpenClaw knocks on the door of another coding agent, hands it a task, waits for the callback, and can knock again later with follow-up instructions. AKK provides the persistent task layer that makes that workflow practical across chat channels.
