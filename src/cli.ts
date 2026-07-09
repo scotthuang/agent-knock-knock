@@ -188,12 +188,11 @@ function runInstallOpenClaw(options) {
   const steps: Array<Record<string, unknown>> = [];
 
   if (!skillOnly) {
-    runCheckedCommand(openclawBin, ["plugins", "install", "--link", "--force", root], {
-      label: "openclaw plugins install"
-    });
+    const pluginInstall = installOpenClawPlugin(openclawBin, root);
     steps.push({
       name: "plugin_installed",
-      path: root
+      path: root,
+      mode: pluginInstall.mode
     });
 
     runCheckedCommand(openclawBin, ["plugins", "enable", "agent-knock-knock"], {
@@ -231,6 +230,30 @@ function runInstallOpenClaw(options) {
       ? "Restart the OpenClaw Gateway before using Agent Knock Knock."
       : "Agent Knock Knock is installed. Try: AKK list"
   });
+}
+
+function installOpenClawPlugin(openclawBin, root) {
+  const linked = spawnSync(openclawBin, ["plugins", "install", "--link", root], {
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024 * 10
+  });
+  if (linked.error) {
+    throw new Error(`openclaw plugins install failed to start: ${linked.error.message}`);
+  }
+  if (linked.status === 0) {
+    return { mode: "linked" };
+  }
+
+  const failure = cleanProcessText(linked.stderr || linked.stdout)
+    ?? `openclaw plugins install exited with status ${linked.status}`;
+  if (!/plugin already exists:/i.test(failure)) {
+    throw new Error(failure);
+  }
+
+  runCheckedCommand(openclawBin, ["plugins", "install", "--force", root], {
+    label: "openclaw plugins replace"
+  });
+  return { mode: "replaced" };
 }
 
 function runDoctor(options) {

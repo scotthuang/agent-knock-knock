@@ -9,7 +9,7 @@ const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 const packageRoot = path.resolve(path.dirname(binPath), "../..");
 const skillSource = path.join(packageRoot, "templates", "openclaw-skills", "agent-knock-knock", "SKILL.md");
 
-test("install-openclaw force-updates an existing plugin and installs its skill", () => {
+test("install-openclaw replaces an existing plugin and installs its skill", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-install-openclaw-"));
   const callsPath = path.join(tempDir, "calls.ndjson");
   const fakeOpenClaw = path.join(tempDir, "openclaw");
@@ -26,8 +26,10 @@ test("install-openclaw force-updates an existing plugin and installs its skill",
     ]);
 
     assert.equal(result.mode, "full");
+    assert.equal(result.steps[0].mode, "replaced");
     assert.deepEqual(readCalls(callsPath), [
-      ["plugins", "install", "--link", "--force", packageRoot],
+      ["plugins", "install", "--link", packageRoot],
+      ["plugins", "install", "--force", packageRoot],
       ["plugins", "enable", "agent-knock-knock"],
       ["gateway", "restart"]
     ]);
@@ -68,8 +70,12 @@ function writeFakeOpenClaw(filePath: string, callsPath: string) {
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(args) + "\\n", "utf8");
-if (args[0] === "plugins" && args[1] === "install" && !args.includes("--force")) {
-  process.stderr.write("plugin already exists; use --force\\n");
+if (args[0] === "plugins" && args[1] === "install" && args.includes("--link")) {
+  process.stderr.write("plugin already exists: /tmp/agent-knock-knock (delete it first)\\n");
+  process.exit(1);
+}
+if (args.includes("--link") && args.includes("--force")) {
+  process.stderr.write("--force is not supported with --link\\n");
   process.exit(1);
 }
 `,

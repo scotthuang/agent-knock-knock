@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.40 - 2026-07-10
+
+### Fixed
+
+- Reinstall existing OpenClaw plugins with a supported force-replace command instead of combining incompatible `--force` and `--link` flags.
+
 ## 0.2.39 - 2026-07-10
 
 ### Fixed
