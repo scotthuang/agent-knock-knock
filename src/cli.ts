@@ -178,26 +178,32 @@ async function runCommand(commandName, options) {
 
 function runInstallOpenClaw(options) {
   const root = packageRootDir();
-  const openclawBin = options.openclawBin ?? resolveExecutable("openclaw");
+  const skillOnly = options.skillOnly === true;
+  const needsOpenClaw = !skillOnly || options.noRestart !== true;
+  const openclawBin = needsOpenClaw
+    ? options.openclawBin ?? resolveExecutable("openclaw")
+    : options.openclawBin;
   const skillSource = path.join(root, "templates", "openclaw-skills", "agent-knock-knock", "SKILL.md");
   const skillDest = expandHome(options.skillPath ?? "~/.openclaw/skills/agent-knock-knock/SKILL.md");
   const steps: Array<Record<string, unknown>> = [];
 
-  runCheckedCommand(openclawBin, ["plugins", "install", "--link", root], {
-    label: "openclaw plugins install"
-  });
-  steps.push({
-    name: "plugin_installed",
-    path: root
-  });
+  if (!skillOnly) {
+    runCheckedCommand(openclawBin, ["plugins", "install", "--link", "--force", root], {
+      label: "openclaw plugins install"
+    });
+    steps.push({
+      name: "plugin_installed",
+      path: root
+    });
 
-  runCheckedCommand(openclawBin, ["plugins", "enable", "agent-knock-knock"], {
-    label: "openclaw plugins enable"
-  });
-  steps.push({
-    name: "plugin_enabled",
-    plugin: "agent-knock-knock"
-  });
+    runCheckedCommand(openclawBin, ["plugins", "enable", "agent-knock-knock"], {
+      label: "openclaw plugins enable"
+    });
+    steps.push({
+      name: "plugin_enabled",
+      plugin: "agent-knock-knock"
+    });
+  }
 
   fs.mkdirSync(path.dirname(skillDest), { recursive: true });
   fs.copyFileSync(skillSource, skillDest);
@@ -217,8 +223,9 @@ function runInstallOpenClaw(options) {
 
   printJson({
     installed: true,
+    mode: skillOnly ? "skill_only" : "full",
     package_root: root,
-    openclaw_bin: openclawBin,
+    openclaw_bin: openclawBin ?? null,
     steps,
     next: options.noRestart === true
       ? "Restart the OpenClaw Gateway before using Agent Knock Knock."
@@ -6054,7 +6061,7 @@ function usage() {
   agent-knock-knock cancel --conversation <id> [--all-proxy <url>]
   agent-knock-knock recover --conversation <id> [--session <name>] [--all-proxy <url>]
   agent-knock-knock close --conversation <id> [--reason <text>]
-  agent-knock-knock install-openclaw [--openclaw-bin <path>] [--skill-path <path>] [--no-restart]
+  agent-knock-knock install-openclaw [--openclaw-bin <path>] [--skill-path <path>] [--skill-only] [--no-restart]
   agent-knock-knock doctor
   agent-knock-knock agent takeover --agent codex --session-id <id> --strategy terminate_then_resume|terminal_control|fork [--create-conversation]
   agent-knock-knock callback --state <file> --message-json <json> [--record-only]

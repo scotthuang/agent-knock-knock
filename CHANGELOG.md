@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.38 - 2026-07-10
+
+### Fixed
+
+- Make `install-openclaw` reusable for existing plugin installations and add `--skill-only` for synchronizing the OpenClaw skill without reinstalling the plugin.
+
 ## 0.2.37 - 2026-07-10
 
 ### Fixed

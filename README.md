@@ -78,7 +78,7 @@ agent-knock-knock install-openclaw
 agent-knock-knock doctor
 ```
 
-`install-openclaw` installs and enables the OpenClaw plugin from the npm package, installs the Agent Knock Knock skill template, and restarts the OpenClaw Gateway by default. Use `--no-restart` if you want to restart the Gateway yourself.
+`install-openclaw` installs or updates and enables the OpenClaw plugin from the npm package, installs the Agent Knock Knock skill template, and restarts the OpenClaw Gateway by default. The command is safe to rerun when the plugin is already installed. Use `--skill-only` to update only the skill template, or `--no-restart` if you want to restart the Gateway yourself.
 
 If you are developing from a local checkout, you can ask OpenClaw to install it for you:
 
