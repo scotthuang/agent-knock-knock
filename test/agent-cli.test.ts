@@ -580,6 +580,28 @@ test("background send to raw terminal id creates managed callback conversation",
     assert.doesNotMatch(injectedPayload, /callback --state/);
     assert.doesNotMatch(injectedPayload, /agent-knock-knock\.callback/);
     assert.doesNotMatch(injectedPayload, /[\r\n]$/u);
+
+    const idleState = {
+      ...state,
+      status: "idle",
+      idle_since: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    };
+    fs.writeFileSync(statePath, `${JSON.stringify(idleState, null, 2)}\n`);
+
+    const listed = runAgentCli([
+      "list",
+      "--store-dir",
+      storeDir,
+      "--managed-only"
+    ]);
+    assert.equal(listed.status, 0, listed.stderr || listed.stdout);
+    const listedParsed = JSON.parse(listed.stdout);
+    assert.equal(listedParsed.cleanup.closed, 1);
+    assert.deepEqual(listedParsed.delegated, []);
+    const closedState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    assert.equal(closedState.status, "closed");
+    assert.equal(closedState.close_reason, "terminal bridge task completed");
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -692,7 +714,8 @@ test("terminal bridge monitor callbacks from new rollout assistant output", () =
     assert.equal(parsed.delivered, true);
     assert.equal(parsed.message.type, "done");
     assert.equal(parsed.message.body, "最新 tag 是 v0.2.29。");
-    assert.equal(parsed.conversation.status, "idle");
+    assert.equal(parsed.conversation.status, "closed");
+    assert.equal(parsed.conversation.close_reason, "terminal bridge task completed");
 
     const events = fs.readFileSync(logPath, "utf8");
     assert.match(events, /terminal_bridge_completion_detected/);
@@ -810,7 +833,8 @@ test("terminal bridge monitor callbacks from idle terminal screen when rollout i
     assert.match(parsed.message.body, /这次 pull 实际只更新了 1 个 commit/);
     assert.doesNotMatch(parsed.message.body, /Use \/skills/);
     assert.equal(parsed.message.metadata.confidence, "screen_only");
-    assert.equal(parsed.conversation.status, "idle");
+    assert.equal(parsed.conversation.status, "closed");
+    assert.equal(parsed.conversation.close_reason, "terminal bridge task completed");
 
     const events = fs.readFileSync(logPath, "utf8");
     assert.match(events, /terminal_bridge_completion_detected/);
