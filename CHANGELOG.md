@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.33 - 2026-07-09
+
+### Fixed
+
+- Include the README architecture diagram asset in the published npm package so relative image links resolve on package readme surfaces.
+
 ## 0.2.32 - 2026-07-09
 
 ### Fixed
