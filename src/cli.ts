@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -1451,6 +1451,19 @@ function startTerminalBridgeMonitor({ statePath, logPath, agentTimeoutMinutes, p
   return child;
 }
 
+function startTerminalBridgeMonitorForConversation({ conversation, statePath, logPath, options }) {
+  if (!terminalBridgeEnabled(conversation) || !conversation.gateway_method || options.disableTerminalBridgeMonitor === true) {
+    return undefined;
+  }
+  return startTerminalBridgeMonitor({
+    statePath,
+    logPath,
+    agentTimeoutMinutes: Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES),
+    pollIntervalMs: Number(options.monitorPollIntervalMs ?? DEFAULT_MONITOR_POLL_INTERVAL_MS),
+    codexHome: options.codexHome
+  });
+}
+
 function terminalBridgeEnabled(conversation): boolean {
   const nativeTakeover = isRecord(conversation.native_session_takeover)
     ? conversation.native_session_takeover
@@ -2038,6 +2051,103 @@ async function terminalStatusForControl(terminalControl, options) {
   }
 }
 
+function terminalBridgeApprovalFingerprint({ terminalControl, terminalStatus }) {
+  const approval = isRecord(terminalStatus?.approval_state) ? terminalStatus.approval_state : {};
+  const screen = isRecord(terminalStatus?.screen) ? terminalStatus.screen : {};
+  return createHash("sha256")
+    .update(JSON.stringify({
+      target: terminalControl.target,
+      key: approval.key,
+      label: approval.label,
+      excerpt: screen.excerpt
+    }))
+    .digest("hex")
+    .slice(0, 16);
+}
+
+function terminalBridgeApprovalInstructions({ conversation, terminalControl, terminalStatus }) {
+  const approval = isRecord(terminalStatus?.approval_state) ? terminalStatus.approval_state : {};
+  const screen = isRecord(terminalStatus?.screen) ? terminalStatus.screen : {};
+  const label = stringValue(approval.label) || "the current Codex approval prompt";
+  const key = stringValue(approval.key) || "the detected approve key";
+  const excerpt = stringValue(screen.excerpt) || "(No terminal excerpt was available.)";
+  return [
+    "Codex is waiting for approval in a terminal-controlled AKK session.",
+    "",
+    `Conversation: ${conversation.conversation_id}`,
+    `Terminal: ${terminalControl.kind}:${terminalControl.target}`,
+    `Approval option: ${label} (${key})`,
+    "",
+    "Safe terminal excerpt:",
+    "```text",
+    excerpt,
+    "```",
+    "",
+    "Ask the user whether to approve or deny this Codex request.",
+    "",
+    "If the user approves, call `agent_knock_knock_approve` with:",
+    `- conversation_id: ${conversation.conversation_id}`,
+    "",
+    "Equivalent user command: `AKK approve " + conversation.conversation_id + "`",
+    "",
+    "If the user denies or wants to stop this request, call `agent_knock_knock_cancel` with:",
+    `- conversation_id: ${conversation.conversation_id}`,
+    "",
+    "Equivalent user command: `AKK cancel " + conversation.conversation_id + "`",
+    "",
+    "Do not use raw tmux, shell, or manual key presses for this approval. Do not approve without explicit user confirmation."
+  ].join("\n");
+}
+
+function recordTerminalBridgeApprovalNotification({ statePath, logPath, terminalControl, terminalStatus, fingerprint }) {
+  const releaseLock = acquireFileLock(`${statePath}.lock`);
+  try {
+    const conversation = loadState(statePath);
+    const nativeTakeover: Record<string, unknown> = isRecord(conversation.native_session_takeover)
+      ? { ...conversation.native_session_takeover }
+      : {};
+    const previousApproval = isRecord(nativeTakeover.terminal_bridge_approval)
+      ? nativeTakeover.terminal_bridge_approval
+      : undefined;
+    if (previousApproval?.fingerprint === fingerprint && previousApproval?.notified_at) {
+      return {
+        conversation,
+        duplicate: true,
+        previousApproval
+      };
+    }
+
+    const now = new Date().toISOString();
+    const nextConversation = {
+      ...conversation,
+      native_session_takeover: {
+        ...nativeTakeover,
+        terminal_bridge_approval: {
+          fingerprint,
+          notified_at: now,
+          terminal_control: terminalControl,
+          approval_state: terminalStatus.approval_state
+        }
+      },
+      updated_at: now
+    };
+    saveState(statePath, nextConversation);
+    appendEvent(logPath, {
+      ts: now,
+      conversation_id: conversation.conversation_id,
+      event: "terminal_bridge_approval_notification_recorded",
+      terminal_control: terminalControl,
+      fingerprint
+    });
+    return {
+      conversation: nextConversation,
+      duplicate: false
+    };
+  } finally {
+    releaseLock();
+  }
+}
+
 async function runSend(options) {
   const messageBody = required(options.message ?? options.request, "--message is required");
   cleanupIdleConversations(storeDirFromOptions(options), options);
@@ -2184,7 +2294,7 @@ async function runSend(options) {
     executor,
     cwd: conversation.workspace ?? process.cwd(),
     env: executorEnv,
-    resumeSessionId: nativeTakeoverForSend?.["native_session_id"]
+    resumeSessionId: stringValue(nativeTakeoverForSend?.["native_session_id"])
   });
   appendEvent(logPath, {
     ts: new Date().toISOString(),
@@ -2491,17 +2601,54 @@ async function runApprove(options) {
     key: approval.key,
     label: approval.label
   });
-  saveState(statePath, {
+  const nativeTakeoverForUpdate: Record<string, unknown> = isRecord(conversation.native_session_takeover)
+    ? { ...conversation.native_session_takeover }
+    : {};
+  const nextNativeTakeover = {
+    ...nativeTakeoverForUpdate,
+    terminal_bridge_approval: undefined,
+    terminal_bridge_approval_resolved_at: new Date().toISOString()
+  };
+  delete nextNativeTakeover.terminal_bridge_approval;
+  const nextConversation = {
     ...conversation,
+    status: terminalBridgeEnabled(conversation) ? "waiting_for_agent" as const : conversation.status,
+    native_session_takeover: nextNativeTakeover,
     updated_at: new Date().toISOString()
+  };
+  saveState(statePath, nextConversation);
+
+  const bridgeMonitor = startTerminalBridgeMonitorForConversation({
+    conversation: nextConversation,
+    statePath,
+    logPath,
+    options
   });
+  if (bridgeMonitor) {
+    appendEvent(logPath, {
+      ts: new Date().toISOString(),
+      conversation_id: conversation.conversation_id,
+      event: "terminal_bridge_monitor_launch",
+      pid: bridgeMonitor.pid ?? null,
+      terminal_control: terminalControl,
+      reason: "approval_resolved",
+      agent_timeout_minutes: Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES)
+    });
+    runtimeLog("info", "terminal_bridge_monitor_launch", {
+      conversation_id: conversation.conversation_id,
+      monitor_pid: bridgeMonitor.pid ?? null,
+      terminal_target: terminalControl.target,
+      reason: "approval_resolved"
+    });
+  }
 
   printJson({
-    conversation,
+    conversation: nextConversation,
     approved: true,
     terminal_control: terminalControl,
     key: approval.key,
-    label: approval.label
+    label: approval.label,
+    monitor_pid: bridgeMonitor?.pid ?? null
   });
 }
 
@@ -2641,13 +2788,12 @@ async function runTerminalControlSend({
     fork: false
   });
   saveState(statePath, deliveredConversation);
-  const bridgeMonitor = bridge && deliveredConversation.gateway_method && options.disableTerminalBridgeMonitor !== true
-    ? startTerminalBridgeMonitor({
+  const bridgeMonitor = bridge
+    ? startTerminalBridgeMonitorForConversation({
+        conversation: deliveredConversation,
         statePath,
         logPath,
-        agentTimeoutMinutes: Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES),
-        pollIntervalMs: Number(options.monitorPollIntervalMs ?? DEFAULT_MONITOR_POLL_INTERVAL_MS),
-        codexHome: options.codexHome
+        options
       })
     : undefined;
   if (bridgeMonitor) {
@@ -3780,19 +3926,81 @@ async function runTerminalBridgeMonitor(options) {
     const terminalStatus = await terminalStatusForControl(terminalControl, options);
     const approval = terminalStatus.approval_state;
     if (isRecord(approval) && approval.blocked === true) {
+      const fingerprint = terminalBridgeApprovalFingerprint({ terminalControl, terminalStatus });
       appendEvent(logPath, {
         ts: new Date().toISOString(),
         conversation_id: conversation.conversation_id,
         event: "terminal_bridge_approval_detected",
         terminal_control: terminalControl,
         activity_state: terminalStatus.activity_state,
-        activity_reason: terminalStatus.activity_reason
+        activity_reason: terminalStatus.activity_reason,
+        fingerprint
       });
+      const notification = recordTerminalBridgeApprovalNotification({
+        statePath,
+        logPath,
+        terminalControl,
+        terminalStatus,
+        fingerprint
+      });
+      if (notification.duplicate) {
+        printJson({
+          conversation: notification.conversation,
+          monitored: true,
+          terminal_bridge: true,
+          awaiting_approval: true,
+          duplicate: true,
+          terminal_control: terminalControl,
+          terminal_status: terminalStatus
+        });
+        return;
+      }
+      const callbackMessage = createMessage({
+        conversation: notification.conversation,
+        from: executor.actor,
+        to: "openclaw",
+        type: "question",
+        requiresResponse: true,
+        body: terminalBridgeApprovalInstructions({
+          conversation: notification.conversation,
+          terminalControl,
+          terminalStatus
+        }),
+        metadata: {
+          source: "terminal_bridge",
+          reason: "approval_required",
+          terminal_control: terminalControl,
+          terminal_status: terminalStatus,
+          approval_fingerprint: fingerprint,
+          approve_command: `AKK approve ${notification.conversation.conversation_id}`,
+          deny_command: `AKK cancel ${notification.conversation.conversation_id}`,
+          approve_tool: "agent_knock_knock_approve",
+          deny_tool: "agent_knock_knock_cancel"
+        }
+      });
+      if (notification.conversation.gateway_method) {
+        runLockedCallback({
+          ...options,
+          statePath,
+          log: logPath,
+          messageJson: JSON.stringify(callbackMessage),
+          gatewayMethod: notification.conversation.gateway_method,
+          gatewaySession: notification.conversation.gateway_session,
+          openclawSession: notification.conversation.openclaw_session,
+          openclawBin: notification.conversation.openclaw_bin,
+          gatewayUrl: stringValue(notification.conversation.gateway_token) ? notification.conversation.gateway_url : undefined,
+          token: stringValue(notification.conversation.gateway_token)
+        });
+        return;
+      }
       printJson({
-        conversation,
+        conversation: notification.conversation,
         monitored: true,
         terminal_bridge: true,
         awaiting_approval: true,
+        delivered: false,
+        message: callbackMessage,
+        reason: "gateway_method_missing",
         terminal_control: terminalControl,
         terminal_status: terminalStatus
       });
@@ -5600,7 +5808,7 @@ function required(value, message) {
   return value;
 }
 
-function isRecord(value) {
+function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
