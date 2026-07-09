@@ -1,6 +1,6 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.2.34",
+  "version": "0.2.35",
   "description": "OpenClaw plugin bridge for delegating work to local coding agents through ACPX.",
   "license": "MIT",
   "type": "module",
@@ -35,6 +35,7 @@
   "files": [
     "dist/src",
     "templates",
+    "docs/assets/agent-knock-knock-cover.jpg",
     "openclaw.plugin.json",
     "README.md",
     "LICENSE",

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.35 - 2026-07-09
+
+### Added
+
+- Add a README cover illustration for Agent Knock Knock and include the optimized cover asset in the npm package.
+
 ## 0.2.34 - 2026-07-09
 
 ### Fixed
