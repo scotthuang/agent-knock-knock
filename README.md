@@ -30,7 +30,23 @@ See [ROADMAP.md](ROADMAP.md) for planned reliability work and future orchestrati
 
 OpenClaw is the top-level orchestrator. Agent Knock Knock runs as the OpenClaw plugin bridge, uses ACPX / ACP to communicate with local coding agents, and keeps enough local task state for OpenClaw to manage many concurrent coding-agent sessions.
 
-![Agent Knock Knock architecture](docs/assets/architecture.png)
+```mermaid
+flowchart LR
+  user["User / chat surface"] --> openclaw["OpenClaw"]
+  openclaw --> plugin["Agent Knock Knock<br/>OpenClaw plugin"]
+  plugin --> state["Local task state<br/>~/.agent-knock-knock"]
+  plugin --> acpx["ACPX / ACP"]
+  plugin --> terminal["Terminal bridge<br/>tmux Codex"]
+  acpx --> codex["Codex"]
+  acpx --> claude["Claude Code"]
+  acpx --> cursor["Cursor"]
+  terminal --> codex
+  codex --> plugin
+  claude --> plugin
+  cursor --> plugin
+  plugin --> callback["OpenClaw callback"]
+  callback --> openclaw
+```
 
 ## Prerequisites
 
