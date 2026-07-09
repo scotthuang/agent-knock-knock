@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Close completed terminal bridge callback conversations so one-shot tmux sends do not remain in the default delegated list.
+
 ## 0.2.36 - 2026-07-10
 
 ### Added

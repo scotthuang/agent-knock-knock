@@ -4051,6 +4051,7 @@ async function runTerminalBridgeMonitor(options) {
         ...options,
         statePath,
         log: logPath,
+        closeTerminalBridgeOnDone: true,
         messageJson: JSON.stringify(callbackMessage),
         gatewayMethod: conversation.gateway_method,
         gatewaySession: conversation.gateway_session,
@@ -4389,7 +4390,18 @@ function runLockedCallback(options) {
     return;
   }
 
-  const nextConversation = applyMessageToConversation(conversation, message);
+  let nextConversation = applyMessageToConversation(conversation, message);
+  if (message.type === "done" && options.closeTerminalBridgeOnDone === true) {
+    const now = new Date().toISOString();
+    nextConversation = {
+      ...nextConversation,
+      status: "closed" as const,
+      closed_at: now,
+      close_reason: "terminal bridge task completed",
+      updated_at: now
+    };
+    delete nextConversation.idle_since;
+  }
 
   appendEvent(logPath, messageEvent(message));
   saveState(options.statePath, nextConversation);
@@ -5555,17 +5567,23 @@ function cleanupIdleConversations(storeDir, options: Record<string, any> = {}, n
       continue;
     }
 
-    if (now.getTime() - idleSinceMs < timeoutMinutes * 60 * 1000) {
+    const terminalBridge = terminalBridgeEnabled(conversation) &&
+      isRecord(conversation.native_session_takeover) &&
+      typeof conversation.native_session_takeover.terminal_bridge_message_id === "string";
+    if (!terminalBridge && now.getTime() - idleSinceMs < timeoutMinutes * 60 * 1000) {
       continue;
     }
 
     const statePath = conversation.state_path ?? statePathForConversationId(conversation.conversation_id, storeDir);
     const logPath = conversation.event_log_path ?? logPathForStatePath(statePath);
+    const closeReason = terminalBridge
+      ? "terminal bridge task completed"
+      : `idle timeout after ${timeoutMinutes} minutes`;
     const closedConversation = {
       ...conversation,
       status: "closed" as const,
       closed_at: now.toISOString(),
-      close_reason: `idle timeout after ${timeoutMinutes} minutes`,
+      close_reason: closeReason,
       updated_at: now.toISOString()
     };
     delete closedConversation.idle_since;
@@ -5576,7 +5594,8 @@ function cleanupIdleConversations(storeDir, options: Record<string, any> = {}, n
       event: "conversation_closed",
       status: "closed",
       reason: closedConversation.close_reason,
-      idle_timeout_minutes: timeoutMinutes
+      idle_timeout_minutes: timeoutMinutes,
+      terminal_bridge: terminalBridge
     });
     runtimeLog("info", "idle_conversation_closed", {
       conversation_id: conversation.conversation_id,
