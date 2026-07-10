@@ -706,7 +706,9 @@ function terminalControlFromTakeover(nativeTakeover): TerminalControlRef | undef
   };
 }
 
-function detectCodexApprovalPrompt(screen: string): { approvable: true; key: string; label: string } | { approvable: false; reason: string } {
+function detectCodexApprovalPrompt(screen: string):
+  | { approvable: true; key: string; label: string; promptKind: string; command?: string }
+  | { approvable: false; reason: string; promptKind?: string; command?: string } {
   const prompt = codexApprovalPromptRegion(screen);
   if (!prompt.visible) {
     return {
@@ -724,19 +726,22 @@ function detectCodexApprovalPrompt(screen: string): { approvable: true; key: str
     if (key !== "y") {
       return {
         approvable: false,
-        reason: `primary approval shortcut is ${key}, not y`
+        reason: `primary approval shortcut is ${key}, not y`,
+        ...approvalCandidateFromPrompt(prompt.marker, prompt.region)
       };
     }
     return {
       approvable: true,
       key,
-      label: match[1].trim()
+      label: match[1].trim(),
+      ...approvalCandidateFromPrompt(prompt.marker, prompt.region)
     };
   }
 
   return {
     approvable: false,
-    reason: "no primary approve option with a shortcut was detected"
+    reason: "no primary approve option with a shortcut was detected",
+    ...approvalCandidateFromPrompt(prompt.marker, prompt.region)
   };
 }
 
@@ -744,7 +749,7 @@ function isCodexApprovalPromptVisible(screen: string): boolean {
   return codexApprovalPromptRegion(screen).visible;
 }
 
-function codexApprovalPromptRegion(screen: string): { visible: true; region: string } | { visible: false; reason: string } {
+function codexApprovalPromptRegion(screen: string): { visible: true; region: string; marker: string } | { visible: false; reason: string } {
   const approvalMarkers = [
     "Would you like to run the following command?",
     "Would you like to make the following edits?",
@@ -753,9 +758,12 @@ function codexApprovalPromptRegion(screen: string): { visible: true; region: str
   ];
   const lines = screen.split(/\r?\n/);
   let markerIndex = -1;
+  let matchedMarker = "";
   for (let index = lines.length - 1; index >= 0; index -= 1) {
-    if (approvalMarkers.some((marker) => lines[index].includes(marker))) {
+    const marker = approvalMarkers.find((candidate) => lines[index].includes(candidate));
+    if (marker) {
       markerIndex = index;
+      matchedMarker = marker;
       break;
     }
   }
@@ -778,8 +786,42 @@ function codexApprovalPromptRegion(screen: string): { visible: true; region: str
 
   return {
     visible: true,
-    region: regionLines.join("\n")
+    region: regionLines.join("\n"),
+    marker: matchedMarker
   };
+}
+
+function approvalCandidateFromPrompt(marker: string, region: string): { promptKind: string; command?: string } {
+  const promptKind = marker === "Would you like to run the following command?"
+    ? "run_command"
+    : marker === "Would you like to make the following edits?"
+      ? "file_edit"
+      : marker === "Would you like to grant these permissions?"
+        ? "grant_permissions"
+        : "unknown";
+  return {
+    promptKind,
+    command: promptKind === "run_command" ? commandFromApprovalRegion(region) : undefined
+  };
+}
+
+function commandFromApprovalRegion(region: string): string | undefined {
+  const lines = region.split(/\r?\n/);
+  const commandStart = lines.findIndex((line) => /^\s*\$\s+/u.test(line));
+  if (commandStart < 0) {
+    return undefined;
+  }
+
+  const parts: string[] = [];
+  for (let index = commandStart; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (index > commandStart && (!line.trim() || /^[\s›]*\d+\.\s+/u.test(line) || /Press enter to confirm/u.test(line))) {
+      break;
+    }
+    parts.push(index === commandStart ? line.replace(/^\s*\$\s+/u, "").trim() : line.trim());
+  }
+  const command = parts.filter(Boolean).join(" ").trim();
+  return command ? redactString(command) : undefined;
 }
 
 function isPostApprovalActivityLine(line: string): boolean {
@@ -1821,6 +1863,8 @@ async function listStateForTerminal(terminalControl: TerminalControlRef, options
         approvable: approval.approvable,
         key: approval.approvable ? approval.key : undefined,
         label: approval.approvable ? approval.label : undefined,
+        prompt_kind: approval.promptKind,
+        command: approval.command,
         reason: approval.approvable ? undefined : approval.reason,
         screen_excerpt: blocked ? screenExcerpt(screen, 1000) : undefined
       },
@@ -2056,6 +2100,8 @@ async function terminalStatusForControl(terminalControl, options) {
         approvable: approval.approvable,
         key: approval.approvable ? approval.key : undefined,
         label: approval.approvable ? approval.label : undefined,
+        prompt_kind: approval.promptKind,
+        command: approval.command,
         reason: approval.approvable ? undefined : approval.reason
       },
       screen: {
@@ -2090,10 +2136,29 @@ function terminalBridgeApprovalFingerprint({ terminalControl, terminalStatus }) 
       target: terminalControl.target,
       key: approval.key,
       label: approval.label,
+      prompt_kind: approval.prompt_kind,
+      command: approval.command,
       excerpt: screen.excerpt
     }))
     .digest("hex")
     .slice(0, 16);
+}
+
+function terminalBridgeApprovalFingerprintForScreen({ terminalControl, screen, approval }) {
+  return terminalBridgeApprovalFingerprint({
+    terminalControl,
+    terminalStatus: {
+      approval_state: {
+        key: approval.key,
+        label: approval.label,
+        prompt_kind: approval.promptKind,
+        command: approval.command
+      },
+      screen: {
+        excerpt: screenExcerpt(screen)
+      }
+    }
+  });
 }
 
 function terminalBridgeApprovalInstructions({ conversation, terminalControl, terminalStatus }) {
@@ -2615,6 +2680,39 @@ async function runApprove(options) {
     return;
   }
 
+  const expectedFingerprint = stringValue(options.expectedApprovalFingerprint);
+  const actualFingerprint = terminalBridgeApprovalFingerprintForScreen({ terminalControl, screen, approval });
+  const autoApproved = options.autoApproved === true;
+  const policyRuleId = stringValue(options.policyRuleId);
+  const policyFingerprint = stringValue(options.policyFingerprint);
+  if (expectedFingerprint && actualFingerprint !== expectedFingerprint) {
+    if (autoApproved) {
+      appendEvent(logPath, {
+        ts: new Date().toISOString(),
+        conversation_id: conversation.conversation_id,
+        event: "terminal_auto_approval_decision",
+        action: "rejected",
+        reason: "approval fingerprint changed before execution",
+        terminal_control: terminalControl,
+        expected_fingerprint: expectedFingerprint,
+        actual_fingerprint: actualFingerprint,
+        policy_rule_id: policyRuleId,
+        policy_fingerprint: policyFingerprint
+      });
+    }
+    printJson({
+      conversation,
+      approved: false,
+      blocked: true,
+      reason: "approval fingerprint changed before execution",
+      terminal_control: terminalControl,
+      expected_approval_fingerprint: expectedFingerprint,
+      actual_approval_fingerprint: actualFingerprint,
+      screen_excerpt: screenExcerpt(screen)
+    });
+    return;
+  }
+
   await provider.sendKeys(terminalControl.target, [approval.key], {
     socketPath: terminalControl.socketPath
   });
@@ -2624,13 +2722,33 @@ async function runApprove(options) {
     event: "terminal_approval_send",
     terminal_control: terminalControl,
     key: approval.key,
-    label: approval.label
+    label: approval.label,
+    approval_fingerprint: actualFingerprint,
+    auto_approved: autoApproved,
+    policy_rule_id: policyRuleId,
+    policy_fingerprint: policyFingerprint
   });
+  if (autoApproved) {
+    appendEvent(logPath, {
+      ts: new Date().toISOString(),
+      conversation_id: conversation.conversation_id,
+      event: "terminal_auto_approval_decision",
+      action: "approved",
+      terminal_control: terminalControl,
+      approval_fingerprint: actualFingerprint,
+      policy_rule_id: policyRuleId,
+      policy_fingerprint: policyFingerprint
+    });
+  }
   runtimeLog("info", "terminal_approval_send", {
     conversation_id: conversation.conversation_id,
     terminal_target: terminalControl.target,
     key: approval.key,
-    label: approval.label
+    label: approval.label,
+    approval_fingerprint: actualFingerprint,
+    auto_approved: autoApproved,
+    policy_rule_id: policyRuleId,
+    policy_fingerprint: policyFingerprint
   });
   const nativeTakeoverForUpdate: Record<string, unknown> = isRecord(conversation.native_session_takeover)
     ? { ...conversation.native_session_takeover }
@@ -2679,6 +2797,9 @@ async function runApprove(options) {
     terminal_control: terminalControl,
     key: approval.key,
     label: approval.label,
+    approval_fingerprint: actualFingerprint,
+    auto_approved: autoApproved,
+    policy_rule_id: policyRuleId,
     monitor_pid: bridgeMonitor?.pid ?? null
   });
 }
@@ -4004,6 +4125,12 @@ async function runTerminalBridgeMonitor(options) {
           terminal_control: terminalControl,
           terminal_status: terminalStatus,
           approval_fingerprint: fingerprint,
+          approval_candidate: terminalBridgeApprovalCandidate({
+            executor,
+            terminalControl,
+            terminalStatus,
+            fingerprint
+          }),
           approve_command: `AKK approve ${notification.conversation.conversation_id}`,
           deny_command: `AKK cancel ${notification.conversation.conversation_id}`,
           approve_tool: "agent_knock_knock_approve",
@@ -4133,6 +4260,21 @@ async function runTerminalBridgeMonitor(options) {
 
     sleepSync(pollIntervalMs);
   }
+}
+
+function terminalBridgeApprovalCandidate({ executor, terminalControl, terminalStatus, fingerprint }) {
+  const approval = isRecord(terminalStatus?.approval_state) ? terminalStatus.approval_state : {};
+  if (approval.approvable !== true) {
+    return undefined;
+  }
+  return {
+    agent: executor.kind,
+    kind: stringValue(approval.prompt_kind) ?? "unknown",
+    command: stringValue(approval.command),
+    cwd: terminalControl.currentPath,
+    fingerprint,
+    terminal_target: terminalControl.target
+  };
 }
 
 async function terminalBridgeCodexContext({ conversation, nativeTakeover, options }) {

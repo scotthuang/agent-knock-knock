@@ -175,6 +175,38 @@ Optional default-agent config:
 }
 ```
 
+Optional deterministic auto-approval policy for terminal-controlled Codex sessions:
+
+```json5
+{
+  plugins: {
+    entries: {
+      "agent-knock-knock": {
+        config: {
+          autoApprove: {
+            enabled: true,
+            rules: [
+              {
+                id: "project-read-status",
+                agents: ["codex"],
+                workspaces: ["/Users/scott/project"],
+                commands: [
+                  ["pwd"],
+                  ["git", "status"],
+                  ["git", "diff", "--stat"]
+                ]
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Auto-approval is disabled by default. Rules use exact argument-vector matching and apply only to Codex `run command` prompts in the configured workspace. Shell composition, command substitution, glob expansion, environment assignments, unparseable commands, and paths outside the workspace always fall back to user approval. The OpenClaw plugin reads this trusted configuration inside the Gateway; it is not exposed as model-controlled tool input. AKK rechecks the visible prompt fingerprint immediately before sending the approval key and records the matched rule and policy fingerprint in the conversation event log.
+
 ## Native Codex Takeover
 
 Experimental: AKK can list and take over Codex CLI sessions that were started outside AKK. This is useful when you started Codex in a terminal, left the machine, and want OpenClaw to continue managing that work from chat.

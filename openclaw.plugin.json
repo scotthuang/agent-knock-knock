@@ -151,6 +151,58 @@
         "type": "number",
         "description": "Minutes an idle AKK session remains open before lazy cleanup closes it. Defaults to 10080."
       },
+      "autoApprove": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Deterministic terminal approval policy. Disabled by default and never exposed as model-controlled tool parameters.",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": false
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "agents", "workspaces", "commands"],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "agents": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "string",
+                    "enum": ["codex"]
+                  }
+                },
+                "workspaces": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "commands": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
       "softLimit": {
         "type": "number"
       },
