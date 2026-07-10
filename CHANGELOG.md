@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Add deterministic, default-disabled auto-approval policies for terminal-controlled Codex command prompts, with exact command and workspace rules configured through the trusted OpenClaw plugin config.
+
+### Security
+
+- Revalidate approval fingerprints immediately before automatic approval, reject shell composition and workspace escapes, and audit the matched rule and policy fingerprint without involving an LLM.
+
 ## 0.2.40 - 2026-07-10
 
 ### Fixed

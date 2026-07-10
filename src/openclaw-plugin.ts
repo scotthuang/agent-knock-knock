@@ -8,6 +8,9 @@ import {
   executorDefinitionForKind,
   parseLeadingExecutorAlias
 } from "./executors.js";
+import {
+  attemptAutoApproval
+} from "./approval-policy.js";
 
 const CALLBACK_METHOD = "agent-knock-knock.callback";
 const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -1115,6 +1118,26 @@ async function handleCallback(api, params) {
 
   const conversationId = stringValue(message.conversation_id) ?? stringValue(conversation?.conversation_id);
   const messageId = stringValue(message.id) ?? `${conversationId ?? "unknown"}:${stringValue(message.type) ?? "message"}:${Date.now()}`;
+  const autoApproval = tryAutoApproveCallback({
+    api,
+    message,
+    conversationId,
+    statePath: stringValue(params.statePath)
+  });
+  if (autoApproval?.approved === true) {
+    return {
+      ok: true,
+      enqueued: false,
+      delivery_required: false,
+      delivery_mode: "none",
+      session_key: sessionKey,
+      conversation_id: conversationId,
+      message_id: messageId,
+      message_type: stringValue(message.type) ?? "unknown",
+      auto_approved: true,
+      approval: autoApproval
+    };
+  }
   const formatted = formatCallbackInjection({ conversation, message, statePath: stringValue(params.statePath) });
   const injection = await api.session.workflow.enqueueNextTurnInjection({
     sessionKey,
@@ -1152,6 +1175,22 @@ async function handleCallback(api, params) {
     message_id: messageId,
     message_type: stringValue(message.type) ?? "unknown"
   };
+}
+
+function tryAutoApproveCallback({ api, message, conversationId, statePath }) {
+  const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+  const result = attemptAutoApproval({
+    message,
+    policy: config.autoApprove,
+    statePath,
+    execute: (args) => runCli(api, args)
+  });
+  if (result) {
+    api.logger.info?.(
+      `agent-knock-knock approval policy for ${conversationId ?? "unknown"}: ${result.action} (${result.reason})`
+    );
+  }
+  return result;
 }
 
 function buildCallbackDeliveryPlan({ sessionKey, conversationId, messageId, message, formatted }) {

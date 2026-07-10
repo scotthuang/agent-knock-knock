@@ -1061,6 +1061,14 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
     assert.equal(monitoredParsed.delivered, true);
     assert.equal(monitoredParsed.message.type, "question");
     assert.equal(monitoredParsed.message.metadata.reason, "approval_required");
+    assert.deepEqual(monitoredParsed.message.metadata.approval_candidate, {
+      agent: "codex",
+      kind: "run_command",
+      command: "npm install",
+      cwd: workspace,
+      fingerprint: monitoredParsed.message.metadata.approval_fingerprint,
+      terminal_target: "codex-work:0.1"
+    });
     assert.match(monitoredParsed.message.body, new RegExp(`AKK approve ${conversationId}`));
     assert.match(monitoredParsed.message.body, new RegExp(`AKK cancel ${conversationId}`));
     assert.match(monitoredParsed.message.body, /agent_knock_knock_approve/);
@@ -1075,13 +1083,43 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
     assert.equal(gatewayParams.message.type, "question");
     assert.equal(gatewayParams.message.metadata.approve_command, `AKK approve ${conversationId}`);
     assert.equal(gatewayParams.message.metadata.deny_command, `AKK cancel ${conversationId}`);
+    assert.equal(gatewayParams.message.metadata.approval_candidate.command, "npm install");
+
+    const fingerprintMismatch = runAgentCli([
+      "approve",
+      "--state",
+      statePath,
+      "--expected-approval-fingerprint",
+      "different-fingerprint",
+      "--auto-approved",
+      "--policy-rule-id",
+      "test-rule",
+      "--policy-fingerprint",
+      "policy-123",
+      "--disable-terminal-bridge-monitor"
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(fingerprintMismatch.status, 0, fingerprintMismatch.stderr || fingerprintMismatch.stdout);
+    const mismatchParsed = JSON.parse(fingerprintMismatch.stdout);
+    assert.equal(mismatchParsed.approved, false);
+    assert.match(mismatchParsed.reason, /fingerprint changed/);
+    assert.equal(
+      readJsonLines(tmuxCallsPath).some((call) => call.args[0] === "send-keys" && call.args.at(-1) === "y"),
+      false
+    );
 
     const approved = runAgentCli([
       "approve",
-      "--conversation",
-      conversationId,
-      "--store-dir",
-      storeDir,
+      "--state",
+      statePath,
+      "--expected-approval-fingerprint",
+      monitoredParsed.message.metadata.approval_fingerprint,
+      "--auto-approved",
+      "--policy-rule-id",
+      "test-rule",
+      "--policy-fingerprint",
+      "policy-123",
       "--disable-terminal-bridge-monitor"
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
@@ -1090,6 +1128,8 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
     const approvedParsed = JSON.parse(approved.stdout);
     assert.equal(approvedParsed.approved, true);
     assert.equal(approvedParsed.key, "y");
+    assert.equal(approvedParsed.auto_approved, true);
+    assert.equal(approvedParsed.policy_rule_id, "test-rule");
     assert.equal(approvedParsed.conversation.status, "waiting_for_agent");
     assert.equal(approvedParsed.conversation.native_session_takeover.terminal_bridge_approval, undefined);
     const calls = readJsonLines(tmuxCallsPath);
@@ -1098,6 +1138,9 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
     const events = fs.readFileSync(logPath, "utf8");
     assert.match(events, /terminal_bridge_approval_detected/);
     assert.match(events, /terminal_bridge_approval_notification_recorded/);
+    assert.match(events, /terminal_auto_approval_decision/);
+    assert.match(events, /"action":"rejected"/);
+    assert.match(events, /"action":"approved"/);
     assert.match(events, /callback_gateway_method_delivery/);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
