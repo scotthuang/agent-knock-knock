@@ -4365,8 +4365,13 @@ function terminalBridgeScreenMessage({ conversation, terminalStatus }) {
   const afterPrompt = promptIndex >= 0
     ? excerpt.slice(promptIndex + request.length)
     : excerpt;
-  const cleaned = cleanTerminalBridgeScreenText(afterPrompt);
-  if (!cleaned || cleaned.length < 40 || !/[•└]/u.test(cleaned)) {
+  const completionBoundary = terminalBridgeCompletionBoundary(afterPrompt);
+  const completionText = completionBoundary === undefined
+    ? afterPrompt
+    : afterPrompt.slice(0, completionBoundary);
+  const cleaned = cleanTerminalBridgeScreenText(completionText);
+  const hasCompletionEvidence = completionBoundary !== undefined || /[•└]/u.test(cleaned ?? "");
+  if (!cleaned || cleaned.length < 40 || !hasCompletionEvidence) {
     return undefined;
   }
 
@@ -4375,6 +4380,11 @@ function terminalBridgeScreenMessage({ conversation, terminalStatus }) {
     text: truncateText(cleaned, 4000),
     timestamp: undefined
   };
+}
+
+function terminalBridgeCompletionBoundary(text: string): number | undefined {
+  const matches = [...text.matchAll(/^[ \t]*[─━-]+\s+Worked for\b.*$/gmu)];
+  return matches.at(-1)?.index;
 }
 
 function cleanTerminalBridgeScreenText(text: string): string | undefined {

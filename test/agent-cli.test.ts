@@ -896,9 +896,7 @@ test("terminal bridge monitor callbacks from idle terminal screen when rollout i
     const logPath = path.join(storeDir, sentParsed.conversation.conversation_id, "events.ndjson");
 
     fs.writeFileSync(screenPath, [
-      `› ${request}`,
-      "",
-      "• 这次 pull 实际只更新了 1 个 commit：",
+      "  这次 pull 实际只更新了 1 个 commit：",
       "",
       "  71afa78 fix(daemon): stop logging client disconnects as connection errors (#328)",
       "",
@@ -906,9 +904,11 @@ test("terminal bridge monitor callbacks from idle terminal screen when rollout i
       "  - 新增 is_client_disconnect() 识别客户端主动断开连接",
       "  - daemon 不再把 BrokenPipe/ConnectionReset 等正常断连记录为服务端错误",
       "",
-      "› Use /skills to list available skills",
+      "─ Worked for 4m 48s ───────────────────────────────────────────────",
       "",
-      "  gpt-5.5 default · ~/github/coven"
+      "› Find and fix a bug in @filename",
+      "",
+      "  gpt-5.6-sol high · ~/github/coven"
     ].join("\n"));
 
     const monitored = runAgentCli([
@@ -949,7 +949,7 @@ test("terminal bridge monitor callbacks from idle terminal screen when rollout i
     assert.equal(parsed.delivered, true);
     assert.equal(parsed.message.type, "done");
     assert.match(parsed.message.body, /这次 pull 实际只更新了 1 个 commit/);
-    assert.doesNotMatch(parsed.message.body, /Use \/skills/);
+    assert.doesNotMatch(parsed.message.body, /Worked for|Find and fix|gpt-5\.6/);
     assert.equal(parsed.message.metadata.confidence, "screen_only");
     assert.equal(parsed.conversation.status, "closed");
     assert.equal(parsed.conversation.close_reason, "terminal bridge task completed");
