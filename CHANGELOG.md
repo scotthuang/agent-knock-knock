@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.42 - 2026-07-13
+
+### Fixed
+
+- Detect idle Codex terminal completion from the `Worked for ...` divider when rollout history is unavailable and the visible final answer contains no progress bullet markers.
+- Exclude the completion divider, input placeholder, and model footer from terminal-screen fallback callbacks.
+
 ## 0.2.41 - 2026-07-11
 
 ### Added
