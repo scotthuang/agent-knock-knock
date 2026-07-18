@@ -886,16 +886,13 @@ function isCodexWorkingLine(line: string): boolean {
   if (!trimmed) {
     return false;
   }
-  if (/^•\s+Working\b/u.test(trimmed)) {
+  if (/^•\s+Working\b/u.test(trimmed) && (/\besc to interrupt\b/u.test(trimmed) || trimmed === "• Working")) {
     return true;
   }
-  if (/\besc to interrupt\b/u.test(trimmed) && (/\bWorking\b/u.test(trimmed) || /\b\/stop to close\b/u.test(trimmed))) {
+  if (/^•\s+Waiting for background terminals?\b(?:\s*·|$)/u.test(trimmed)) {
     return true;
   }
-  if (/^•?\s*Waiting for background terminals?\b/u.test(trimmed)) {
-    return true;
-  }
-  return /^•?\s*(?:\d+\s+)?background terminals? running\b/u.test(trimmed);
+  return /^\d+\s+background terminals? running\b/u.test(trimmed) && /\/(?:ps|stop)\b/u.test(trimmed);
 }
 
 function isCodexIdlePromptLine(line: string): boolean {
@@ -1576,7 +1573,8 @@ function withTerminalBridgeState({
   message,
   startedAt,
   agentTimeoutMinutes,
-  agentHardTimeoutMinutes
+  agentHardTimeoutMinutes,
+  preSendScreenFingerprint
 }) {
   const nativeTakeover = isRecord(conversation.native_session_takeover)
     ? conversation.native_session_takeover
@@ -1588,6 +1586,9 @@ function withTerminalBridgeState({
       terminal_bridge: true,
       terminal_bridge_started_at: startedAt,
       terminal_bridge_message_id: message.id,
+      terminal_bridge_request_text: String(message.body ?? ""),
+      terminal_bridge_request_hash: terminalBridgeRequestFingerprint(message.body),
+      terminal_bridge_pre_send_screen_fingerprint: preSendScreenFingerprint,
       terminal_bridge_monitor_started_at: startedAt,
       terminal_bridge_last_activity_at: startedAt,
       terminal_bridge_inactivity_timeout_minutes: agentTimeoutMinutes,
@@ -2952,10 +2953,34 @@ async function runTerminalControlSend({
   executor,
   message,
   terminalControl,
-  needsNativeTakeoverBootstrap
+  needsNativeTakeoverBootstrap,
+  terminalSendLockHeld = false
 }) {
-  const provider = createTerminalControlProvider(options);
   const bridge = terminalBridgeEnabled(conversation);
+  if (bridge && !terminalSendLockHeld) {
+    const releaseTerminalLock = acquireFileLock(
+      terminalBridgeSendLockPath(storeDirFromOptions(options), terminalControl),
+      { timeoutMs: 30000 }
+    );
+    try {
+      return await runTerminalControlSend({
+        options,
+        conversation,
+        nextConversation,
+        statePath,
+        logPath,
+        executor,
+        message,
+        terminalControl,
+        needsNativeTakeoverBootstrap,
+        terminalSendLockHeld: true
+      });
+    } finally {
+      releaseTerminalLock();
+    }
+  }
+
+  const provider = createTerminalControlProvider(options);
   const bridgeStartedAt = new Date().toISOString();
   const agentTimeoutMinutes = Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES);
   const agentHardTimeoutMinutes = positiveMinutes(
@@ -2972,12 +2997,31 @@ async function runTerminalControlSend({
         forkTakeover: undefined
       }))
     : terminalSubmissionPayload(String(message.body ?? ""));
+  let preSendScreenFingerprint: string | undefined;
+  if (bridge) {
+    try {
+      const screen = await provider.capture(terminalControl.target, {
+        scrollbackLines: Number(options.scrollbackLines ?? 120),
+        socketPath: terminalControl.socketPath
+      });
+      preSendScreenFingerprint = terminalBridgeScreenFingerprint(screenExcerpt(screen));
+    } catch {
+      // Delivery can still succeed when capture is unavailable; prompt matching remains the fallback boundary.
+    }
+  }
   await provider.sendText(terminalControl.target, terminalPayload, {
     socketPath: terminalControl.socketPath
   });
   await provider.sendKeys(terminalControl.target, ["C-m"], {
     socketPath: terminalControl.socketPath
   });
+  const supersededConversationIds = bridge
+    ? supersedeTerminalBridgeConversations({
+        storeDir: storeDirFromOptions(options),
+        terminalControl,
+        replacementConversationId: conversation.conversation_id
+      })
+    : [];
   appendEvent(logPath, {
     ts: new Date().toISOString(),
     conversation_id: conversation.conversation_id,
@@ -2985,14 +3029,16 @@ async function runTerminalControlSend({
     executor,
     terminal_control: terminalControl,
     message: textSummary(message.body),
-    payload: textSummary(terminalPayload)
+    payload: textSummary(terminalPayload),
+    superseded_conversation_ids: supersededConversationIds
   });
   runtimeLog("info", "terminal_message_send", {
     conversation_id: conversation.conversation_id,
     agent: executor.kind,
     terminal_target: terminalControl.target,
     message: textSummary(message.body),
-    payload: textSummary(terminalPayload)
+    payload: textSummary(terminalPayload),
+    superseded_conversation_ids: supersededConversationIds
   });
   const bridgeConversation = bridge
     ? withTerminalBridgeState({
@@ -3000,7 +3046,8 @@ async function runTerminalControlSend({
         message,
         startedAt: bridgeStartedAt,
         agentTimeoutMinutes,
-        agentHardTimeoutMinutes
+        agentHardTimeoutMinutes,
+        preSendScreenFingerprint
       })
     : nextConversation;
   const deliveredConversation = markTakeoverBootstrapped({
@@ -3166,6 +3213,82 @@ function createManagedTerminalConversationFromRawId({ options, conversationId, m
     executor,
     message
   };
+}
+
+function supersedeTerminalBridgeConversations({
+  storeDir,
+  terminalControl,
+  replacementConversationId
+}): string[] {
+  const activeStatuses = new Set([
+    "created",
+    "running",
+    "waiting_for_agent",
+    "waiting_for_openclaw",
+    "stalled",
+    "cancelling"
+  ]);
+  const superseded: string[] = [];
+  for (const candidate of listConversations(storeDir)) {
+    if (candidate.conversation_id === replacementConversationId || !activeStatuses.has(candidate.status)) {
+      continue;
+    }
+    const candidateTakeover = isRecord(candidate.native_session_takeover)
+      ? candidate.native_session_takeover
+      : undefined;
+    const candidateControl = terminalControlFromTakeover(candidateTakeover);
+    if (
+      candidateTakeover?.["terminal_bridge"] !== true ||
+      candidateControl?.target !== terminalControl.target ||
+      candidateControl?.socketPath !== terminalControl.socketPath
+    ) {
+      continue;
+    }
+
+    const candidateStatePath = stringValue(candidate.state_path);
+    if (!candidateStatePath) {
+      continue;
+    }
+    const releaseLock = acquireFileLock(`${candidateStatePath}.lock`);
+    try {
+      const current = loadState(candidateStatePath);
+      if (!activeStatuses.has(current.status)) {
+        continue;
+      }
+      const currentTakeover = isRecord(current.native_session_takeover)
+        ? current.native_session_takeover
+        : undefined;
+      const currentControl = terminalControlFromTakeover(currentTakeover);
+      if (
+        currentTakeover?.["terminal_bridge"] !== true ||
+        currentControl?.target !== terminalControl.target ||
+        currentControl?.socketPath !== terminalControl.socketPath
+      ) {
+        continue;
+      }
+
+      const now = new Date().toISOString();
+      saveState(candidateStatePath, {
+        ...current,
+        status: "closed" as const,
+        closed_at: now,
+        close_reason: "terminal bridge superseded by a newer task on the same terminal",
+        superseded_by_conversation_id: replacementConversationId,
+        updated_at: now
+      });
+      appendEvent(logPathForStatePath(candidateStatePath), {
+        ts: now,
+        conversation_id: current.conversation_id,
+        event: "terminal_bridge_superseded",
+        terminal_control: terminalControl,
+        replacement_conversation_id: replacementConversationId
+      });
+      superseded.push(current.conversation_id);
+    } finally {
+      releaseLock();
+    }
+  }
+  return superseded;
 }
 
 function runNativeCodexResumeSend({
@@ -4230,11 +4353,15 @@ async function runTerminalBridgeMonitor(options) {
     "--agent-hard-timeout-minutes"
   );
   const monitorStartedAtMs = Date.now();
+  const monitorMessageId = stringValue(initialNativeTakeover?.["terminal_bridge_message_id"]);
   const taskStartedAtMs = validTimestampMs(initialNativeTakeover?.["terminal_bridge_started_at"]) ?? monitorStartedAtMs;
   let lastActivityAtMs = validTimestampMs(initialNativeTakeover?.["terminal_bridge_last_activity_at"]) ?? taskStartedAtMs;
   let lastPersistedActivityAtMs = lastActivityAtMs;
   const activityPersistIntervalMs = terminalBridgeActivityPersistIntervalMs(timeoutMinutes, pollIntervalMs);
-  let previousScreenFingerprint: string | undefined;
+  const preSendScreenFingerprint = stringValue(
+    initialNativeTakeover?.["terminal_bridge_pre_send_screen_fingerprint"]
+  );
+  let previousScreenFingerprint: string | undefined = preSendScreenFingerprint;
   let previousRolloutFingerprint: string | undefined;
   let persistedActivityReason = stringValue(initialNativeTakeover?.["terminal_bridge_last_activity_reason"]);
   const executor = executorForConversation(conversation);
@@ -4285,6 +4412,24 @@ async function runTerminalBridgeMonitor(options) {
     const nativeTakeover = isRecord(conversation.native_session_takeover)
       ? conversation.native_session_takeover
       : undefined;
+    const currentMessageId = stringValue(nativeTakeover?.["terminal_bridge_message_id"]);
+    if (monitorMessageId && currentMessageId !== monitorMessageId) {
+      appendEvent(logPath, {
+        ts: new Date().toISOString(),
+        conversation_id: conversation.conversation_id,
+        event: "terminal_bridge_monitor_superseded",
+        monitor_message_id: monitorMessageId,
+        current_message_id: currentMessageId
+      });
+      printJson({
+        conversation,
+        monitored: true,
+        terminal_bridge: true,
+        completed: false,
+        reason: "terminal_bridge_task_replaced"
+      });
+      return;
+    }
     const terminalControl = terminalControlFromTakeover(nativeTakeover);
     if (!terminalControl || nativeTakeover?.["terminal_bridge"] !== true) {
       const stalledConversation = markConversationStalled({
@@ -4395,10 +4540,13 @@ async function runTerminalBridgeMonitor(options) {
       return;
     }
 
-    const screenFingerprint = terminalBridgeActivityFingerprint(terminalStatus?.screen?.excerpt);
+    const screenFingerprint = terminalBridgeScreenFingerprint(terminalStatus?.screen?.excerpt);
     const screenChanged = previousScreenFingerprint !== undefined &&
       screenFingerprint !== undefined &&
       screenFingerprint !== previousScreenFingerprint;
+    const screenChangedSinceSend = preSendScreenFingerprint !== undefined &&
+      screenFingerprint !== undefined &&
+      screenFingerprint !== preSendScreenFingerprint;
     previousScreenFingerprint = screenFingerprint;
 
     const contextMatch = await terminalBridgeCodexContext({
@@ -4407,13 +4555,22 @@ async function runTerminalBridgeMonitor(options) {
       options
     });
     const startedAt = stringValue(nativeTakeover?.["terminal_bridge_started_at"]);
+    const rolloutCompletion = contextMatch?.context
+      ? latestCompletedRolloutTurn({
+          context: contextMatch.context,
+          conversation,
+          nativeTakeover,
+          startedAt
+        })
+      : undefined;
     const assistantMessage = contextMatch?.context
       ? latestAssistantAfter(contextMatch.context, startedAt)
       : undefined;
-    const rolloutFingerprint = assistantMessage
+    const rolloutFingerprint = rolloutCompletion || assistantMessage
       ? terminalBridgeActivityFingerprint(JSON.stringify({
-          text: assistantMessage.text,
-          timestamp: assistantMessage.timestamp
+          text: rolloutCompletion?.text ?? assistantMessage?.text,
+          timestamp: rolloutCompletion?.timestamp ?? assistantMessage?.timestamp,
+          turn_id: rolloutCompletion?.turnId
         }))
       : undefined;
     const rolloutChanged = rolloutFingerprint !== undefined && rolloutFingerprint !== previousRolloutFingerprint;
@@ -4451,16 +4608,28 @@ async function runTerminalBridgeMonitor(options) {
     }
 
     const terminalIdle = terminalStatus.activity_state === "idle";
-    const screenMessage = !assistantMessage && terminalIdle
-      ? terminalBridgeScreenMessage({ conversation, terminalStatus })
+    const screenMessage = !rolloutCompletion && !assistantMessage && terminalIdle
+      ? terminalBridgeScreenMessage({
+          conversation,
+          nativeTakeover,
+          terminalStatus,
+          screenChangedSinceSend
+        })
       : undefined;
-    const completion = terminalIdle ? assistantMessage ?? screenMessage : undefined;
+    const completion = rolloutCompletion ?? (terminalIdle ? assistantMessage ?? screenMessage : undefined);
+    const completionMatch = rolloutCompletion
+      ? "rollout_task_complete"
+      : assistantMessage
+        ? contextMatch?.match
+        : "terminal_screen";
     const completionFingerprint = completion
       ? createHash("sha256")
         .update(JSON.stringify({
           text: completion.text,
           timestamp: completion.timestamp,
-          match: assistantMessage ? contextMatch?.match : "terminal_screen"
+          match: completionMatch,
+          turn_id: rolloutCompletion?.turnId,
+          message_id: currentMessageId
         }))
         .digest("hex")
       : undefined;
@@ -4472,9 +4641,11 @@ async function runTerminalBridgeMonitor(options) {
         conversation_id: conversation.conversation_id,
         event: "terminal_bridge_completion_detected",
         terminal_control: terminalControl,
-        match: assistantMessage ? contextMatch?.match : "terminal_screen",
+        match: completionMatch,
         codex_session: contextMatch?.context.source,
-        assistant_timestamp: completion?.timestamp
+        assistant_timestamp: completion?.timestamp,
+        rollout_turn_id: rolloutCompletion?.turnId,
+        terminal_bridge_message_id: currentMessageId
       });
       const callbackMessage = createMessage({
         conversation,
@@ -4487,9 +4658,11 @@ async function runTerminalBridgeMonitor(options) {
           source: "terminal_bridge",
           terminal_control: terminalControl,
           codex_session: contextMatch?.context.source,
-          confidence: assistantMessage ? contextMatch?.confidence : "screen_only",
-          match: assistantMessage ? contextMatch?.match : "terminal_screen",
-          assistant_timestamp: completion?.timestamp
+          confidence: rolloutCompletion || assistantMessage ? contextMatch?.confidence : "screen_only",
+          match: completionMatch,
+          assistant_timestamp: completion?.timestamp,
+          rollout_turn_id: rolloutCompletion?.turnId,
+          terminal_bridge_message_id: currentMessageId
         }
       });
       runLockedCallback({
@@ -4595,6 +4768,28 @@ function deadlineAt(startedAt, timeoutMinutes: number): string | undefined {
 
 function terminalBridgeActivityFingerprint(value): string | undefined {
   const text = stringValue(value);
+  return text ? createHash("sha256").update(text).digest("hex") : undefined;
+}
+
+function terminalBridgeScreenFingerprint(value): string | undefined {
+  return typeof value === "string"
+    ? createHash("sha256").update(value).digest("hex")
+    : undefined;
+}
+
+function terminalBridgeSendLockPath(storeDir: string, terminalControl): string {
+  const terminalKey = createHash("sha256")
+    .update(JSON.stringify({
+      target: terminalControl.target,
+      socket_path: terminalControl.socketPath
+    }))
+    .digest("hex")
+    .slice(0, 20);
+  return path.join(storeDir, `.terminal-bridge-send-${terminalKey}.lock`);
+}
+
+function terminalBridgeRequestFingerprint(value): string | undefined {
+  const text = String(value ?? "").replace(/\s+/gu, " ").trim();
   return text ? createHash("sha256").update(text).digest("hex") : undefined;
 }
 
@@ -4772,23 +4967,71 @@ function latestAssistantAfter(context: ForkContextPackage, startedAt: string | u
     });
 }
 
-function terminalBridgeScreenMessage({ conversation, terminalStatus }) {
+function latestCompletedRolloutTurn({ context, conversation, nativeTakeover, startedAt }) {
+  const threshold = validTimestampMs(startedAt);
+  const expectedRequestHash = stringValue(nativeTakeover?.["terminal_bridge_request_hash"]) ??
+    terminalBridgeRequestFingerprint(
+      nativeTakeover?.["terminal_bridge_request_text"] ?? conversation.user_request
+    );
+  if (threshold === undefined || !expectedRequestHash) {
+    return undefined;
+  }
+
+  const turn = [...(context.turns ?? [])]
+    .reverse()
+    .find((candidate) => {
+      const userTimestamp = validTimestampMs(candidate.userTimestamp);
+      const completedAt = validTimestampMs(candidate.completedAt);
+      return candidate.userTextHash === expectedRequestHash &&
+        userTimestamp !== undefined &&
+        completedAt !== undefined &&
+        userTimestamp >= threshold &&
+        completedAt >= userTimestamp &&
+        Boolean(candidate.lastAssistantMessage);
+    });
+  if (!turn?.lastAssistantMessage) {
+    return undefined;
+  }
+  return {
+    role: "assistant" as const,
+    text: turn.lastAssistantMessage,
+    timestamp: turn.completedAt,
+    turnId: turn.turnId,
+    userTimestamp: turn.userTimestamp
+  };
+}
+
+function terminalBridgeScreenMessage({
+  conversation,
+  nativeTakeover,
+  terminalStatus,
+  screenChangedSinceSend
+}) {
   const excerpt = stringValue(terminalStatus?.screen?.excerpt);
   if (!excerpt) {
     return undefined;
   }
 
-  const request = String(conversation.user_request ?? "").trim();
-  const promptIndex = request ? excerpt.lastIndexOf(request) : -1;
-  const afterPrompt = promptIndex >= 0
-    ? excerpt.slice(promptIndex + request.length)
-    : excerpt;
-  const completionBoundary = terminalBridgeCompletionBoundary(afterPrompt);
-  const completionText = completionBoundary === undefined
-    ? afterPrompt
-    : afterPrompt.slice(0, completionBoundary);
+  const request = String(
+    nativeTakeover?.["terminal_bridge_request_text"] ?? conversation.user_request ?? ""
+  ).trim();
+  const promptEnd = request ? whitespaceInsensitiveMatchEnd(excerpt, request) : undefined;
+  const afterPrompt = promptEnd === undefined ? undefined : excerpt.slice(promptEnd);
+  const completionBoundary = afterPrompt === undefined
+    ? undefined
+    : terminalBridgeCompletionBoundary(afterPrompt);
+  const completionText = afterPrompt === undefined
+    ? screenChangedSinceSend
+      ? terminalBridgeLatestCompletedSegment(excerpt)
+      : undefined
+    : completionBoundary === undefined
+      ? afterPrompt
+      : afterPrompt.slice(0, completionBoundary);
+  if (completionText === undefined) {
+    return undefined;
+  }
   const cleaned = cleanTerminalBridgeScreenText(completionText);
-  const hasCompletionEvidence = completionBoundary !== undefined || /[•└]/u.test(cleaned ?? "");
+  const hasCompletionEvidence = promptEnd === undefined || completionBoundary !== undefined || /[•└]/u.test(cleaned ?? "");
   if (!cleaned || cleaned.length < 40 || !hasCompletionEvidence) {
     return undefined;
   }
@@ -4798,6 +5041,56 @@ function terminalBridgeScreenMessage({ conversation, terminalStatus }) {
     text: truncateText(cleaned, 4000),
     timestamp: undefined
   };
+}
+
+function whitespaceInsensitiveMatchEnd(text: string, expected: string): number | undefined {
+  const normalizedExpected = expected.replace(/\s/gu, "");
+  if (!normalizedExpected) {
+    return undefined;
+  }
+
+  let normalizedText = "";
+  const sourceEnds: number[] = [];
+  for (let index = 0; index < text.length;) {
+    const codePoint = text.codePointAt(index);
+    if (codePoint === undefined) {
+      break;
+    }
+    const character = String.fromCodePoint(codePoint);
+    if (!/\s/u.test(character)) {
+      normalizedText += character;
+      for (let codeUnit = 0; codeUnit < character.length; codeUnit += 1) {
+        sourceEnds.push(index + character.length);
+      }
+    }
+    index += character.length;
+  }
+
+  const matchIndex = normalizedText.lastIndexOf(normalizedExpected);
+  if (matchIndex < 0) {
+    return undefined;
+  }
+  return sourceEnds[matchIndex + normalizedExpected.length - 1];
+}
+
+function terminalBridgeLatestCompletedSegment(text: string): string | undefined {
+  const matches = [...text.matchAll(/^[ \t]*[─━-]+\s+Worked for\b.*$/gmu)];
+  const completion = matches.at(-1);
+  if (completion?.index === undefined) {
+    return undefined;
+  }
+
+  const previousCompletion = matches.at(-2);
+  let start = previousCompletion?.index === undefined
+    ? 0
+    : previousCompletion.index + previousCompletion[0].length;
+  const beforeCompletion = text.slice(0, completion.index);
+  const prompts = [...beforeCompletion.matchAll(/^[ \t]*›(?:\s|$).*$/gmu)];
+  const latestPrompt = prompts.at(-1);
+  if (latestPrompt?.index !== undefined && latestPrompt.index >= start) {
+    start = latestPrompt.index + latestPrompt[0].length;
+  }
+  return text.slice(start, completion.index);
 }
 
 function terminalBridgeCompletionBoundary(text: string): number | undefined {
@@ -5222,7 +5515,7 @@ function acquireFileLock(lockPath, { timeoutMs = 5000, retryMs = 50 } = {}) {
         throw error;
       }
       if (Date.now() - started >= timeoutMs) {
-        throw new Error(`timed out waiting for callback lock: ${lockPath}`);
+        throw new Error(`timed out waiting for file lock: ${lockPath}`);
       }
       sleepSync(retryMs);
     }
