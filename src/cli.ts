@@ -249,7 +249,9 @@ function installOpenClawPlugin(openclawBin, root) {
 
   const failure = cleanProcessText(linked.stderr || linked.stdout)
     ?? `openclaw plugins install exited with status ${linked.status}`;
-  if (!/plugin already exists:/i.test(failure)) {
+  const canRetryWithForce = /plugin already exists:/i.test(failure) ||
+    /install cancelled;\s*rerun with --force\b/i.test(failure);
+  if (!canRetryWithForce) {
     throw new Error(failure);
   }
 
