@@ -139,6 +139,7 @@ akk status <conversation-id>
 akk describe <conversation-id>
 akk send <conversation-id>: continue with the smaller implementation
 akk cancel <conversation-id>
+akk renew <conversation-id> --minutes 180
 akk recover <conversation-id>
 akk close <conversation-id>
 AKK terminal takeover Codex <native-session-id>
@@ -156,6 +157,7 @@ Surfaces that support OpenClaw native commands can use the same workflow through
 /akk status <conversation-id>
 /akk send <conversation-id> <message>
 /akk cancel <conversation-id>
+/akk renew <conversation-id> [minutes]
 /akk close <conversation-id> [reason]
 ```
 
@@ -167,7 +169,9 @@ Optional default-agent config:
     entries: {
       "agent-knock-knock": {
         config: {
-          defaultAgent: "codex" // "codex", "claude", or "cursor"
+          defaultAgent: "codex", // "codex", "claude", or "cursor"
+          agentTimeoutMinutes: 60, // terminal inactivity timeout
+          agentHardTimeoutMinutes: 720 // terminal task lifetime ceiling
         }
       }
     }
@@ -224,6 +228,8 @@ AKK list
 - `terminal_controlled`: local sessions running in a controllable terminal provider. The current provider is tmux. These entries include terminal metadata, command capabilities, and concise approval state when a visible approval prompt is detected.
 - `terminal_controlled` entries can be addressed directly by their `id` from `AKK list` for `AKK send <id>`, `AKK status <id>`, `AKK cancel <id>`, and `AKK approve <id>`. They do not need an AKK state file before terminal control.
 - Background sends to terminal-controlled Codex sessions use terminal bridge mode: AKK types only the user-facing task text into the tmux pane, monitors Codex rollout/terminal state, and delivers the OpenClaw callback itself when it observes completion.
+- Terminal bridge timeout is activity-aware. Visible Codex work, active background terminals, rollout updates, and meaningful terminal changes extend the inactivity deadline. A separate hard lifetime still stops permanently running monitors.
+- If a live terminal task is marked `stalled`, `AKK renew <conversation-id> --minutes <minutes>` restarts monitoring without sending text or keys to Codex. Renewal preserves the original callback destination and task hard deadline.
 - `AKK status <terminal-controlled-id>` is the unified way to inspect current terminal output. AKK captures the terminal pane internally and returns `terminal_screen`; there is no separate public screen-capture command.
 - `AKK describe <id>` summarizes what a listed session is about. AKK-managed sessions use saved conversation history; native and terminal-controlled Codex sessions use exact Codex rollout history when a session id is available, fall back to cwd-matched rollout history when needed, and otherwise report only visible terminal/process context with lower confidence.
 
@@ -336,7 +342,8 @@ Runtime logs are diagnostic-only and are safe to use for local troubleshooting. 
 - Default agent: configured with `defaultAgent`; fallback is `codex`
 - OpenClaw session: inherited from the current OpenClaw session; fallback is `agent:main:main`
 - Delegated ACPX session: generated per new task, unless `session`, `codexSession`, `claudeSession`, or `cursorSession` is configured
-- Agent callback timeout: `60` minutes before a waiting task or terminal bridge monitor is marked `stalled`
+- Agent callback/terminal inactivity timeout: `60` minutes before an inactive waiting task is marked `stalled`
+- Terminal bridge hard lifetime: `720` minutes for a still-running monitor with no approval or completion result, even if other activity continues
 - Idle timeout: `10080` minutes before an idle task is lazily closed
 - Soft response limit: `50` rounds
 - Hard response limit: `100` rounds

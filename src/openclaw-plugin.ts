@@ -97,7 +97,7 @@ const delegateParameters = {
     },
     agentTimeoutMinutes: {
       type: "number",
-      description: "Minutes AKK waits for a coding-agent callback before marking the task stalled."
+      description: "Callback timeout in minutes; terminal bridge tasks treat it as an inactivity timeout."
     }
   }
 };
@@ -133,6 +133,26 @@ const listParameters = {
     },
     idleTimeoutMinutes: {
       type: "number"
+    }
+  }
+};
+
+const renewParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["conversation_id"],
+  properties: {
+    conversation_id: {
+      type: "string",
+      description: "Stalled AKK-managed terminal bridge conversation id."
+    },
+    minutes: {
+      type: "number",
+      exclusiveMinimum: 0,
+      description: "New terminal inactivity timeout in minutes."
+    },
+    storeDir: {
+      type: "string"
     }
   }
 };
@@ -219,6 +239,15 @@ const sendParameters = {
     },
     idleTimeoutMinutes: {
       type: "number"
+    },
+    agentTimeoutMinutes: {
+      type: "number",
+      description: "Terminal bridge inactivity timeout override in minutes."
+    },
+    agentHardTimeoutMinutes: {
+      type: "number",
+      exclusiveMinimum: 0,
+      description: "Terminal bridge fallback lifetime ceiling override in minutes."
     }
   }
 };
@@ -394,7 +423,7 @@ export default definePluginEntry({
   id: "agent-knock-knock",
   name: "Agent Knock Knock",
   description:
-    "Agent Knock Knock (AKK/akk) delegates OpenClaw coding work to local Codex, Claude, or Cursor agents. Use this for AKK, akk, Agent Knock Knock, Codex delegation, Claude delegation, Cursor delegation, task listing, follow-up messages, status, recovery, cancel requests, and close requests. Default delegation target comes from plugin config defaultAgent and falls back to Codex when unset; explicit user agent requests override it.",
+    "Agent Knock Knock (AKK/akk) delegates OpenClaw coding work to local Codex, Claude, or Cursor agents. Use this for AKK, akk, Agent Knock Knock, Codex delegation, Claude delegation, Cursor delegation, task listing, follow-up messages, status, stalled terminal-monitor renewal, recovery, cancel requests, and close requests. Default delegation target comes from plugin config defaultAgent and falls back to Codex when unset; explicit user agent requests override it.",
   register(api) {
     api.registerGatewayMethod(
       CALLBACK_METHOD,
@@ -529,6 +558,7 @@ export default definePluginEntry({
         pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(config.storeDir));
         pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(config.idleTimeoutMinutes));
         pushOptional(args, "--agent-timeout-minutes", numberString(params.agentTimeoutMinutes) ?? numberString(config.agentTimeoutMinutes));
+        pushOptional(args, "--agent-hard-timeout-minutes", numberString(params.agentHardTimeoutMinutes) ?? numberString(config.agentHardTimeoutMinutes));
         pushOptional(args, "--openclaw-session", openclawSession);
         pushOptional(args, "--gateway-url", stringValue(config.gatewayUrl));
         pushOptional(args, "--token", stringValue(config.gatewayToken));
@@ -550,6 +580,19 @@ export default definePluginEntry({
       buildArgs: (params) => {
         const args = ["approve", "--conversation", requiredString(params.conversation_id, "conversation_id")];
         pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
+        return args;
+      }
+    });
+
+    registerCliTool(api, {
+      name: "agent_knock_knock_renew",
+      description: "Renew monitoring for a stalled AKK-managed terminal bridge task without sending text or keys to Codex. Use this when the user wants a still-live long-running terminal task to keep monitoring after an inactivity stall.",
+      parameters: renewParameters,
+      buildArgs: (params) => {
+        const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+        const args = ["renew", "--conversation", requiredString(params.conversation_id, "conversation_id")];
+        pushOptional(args, "--minutes", numberString(params.minutes) ?? numberString(config.agentTimeoutMinutes));
+        pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(config.storeDir));
         return args;
       }
     });
@@ -685,8 +728,18 @@ async function handleAkkCommand(api, ctx) {
       pushOptional(args, "--all-proxy", stringValue(config.codexAllProxy) ?? stringValue(config.allProxy));
       pushOptional(args, "--model", stringValue(config.codexModel) ?? stringValue(config.model));
       pushOptional(args, "--idle-timeout-minutes", numberString(config.idleTimeoutMinutes));
+      pushOptional(args, "--agent-timeout-minutes", numberString(config.agentTimeoutMinutes));
+      pushOptional(args, "--agent-hard-timeout-minutes", numberString(config.agentHardTimeoutMinutes));
       const result = runCli(api, args);
       return { text: formatSendCommandResult(result) };
+    }
+    if (parsed.action === "renew") {
+      const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+      const args = ["renew", "--conversation", parsed.conversationId];
+      pushOptional(args, "--minutes", parsed.minutes ?? numberString(config.agentTimeoutMinutes));
+      pushOptional(args, "--store-dir", stringValue(config.storeDir));
+      const result = runCli(api, args);
+      return { text: formatRenewCommandResult(result) };
     }
     if (parsed.action === "cancel") {
       const args = [
@@ -765,6 +818,14 @@ function parseAkkCommand(args) {
     const { token: conversationId } = takeRequiredToken(rest, "Usage: /akk cancel <conversation-id>");
     return { action: "cancel", conversationId };
   }
+  if (action === "renew") {
+    const { token: conversationId, rest: minutesInput } = takeRequiredToken(rest, "Usage: /akk renew <conversation-id> [minutes]");
+    const minutes = minutesInput.trim();
+    if (minutes && (!Number.isFinite(Number(minutes)) || Number(minutes) <= 0)) {
+      throw new Error("Usage: /akk renew <conversation-id> [positive-minutes]");
+    }
+    return { action: "renew", conversationId, minutes: minutes || undefined };
+  }
   if (action === "recover") {
     const { token: conversationId } = takeRequiredToken(rest, "Usage: /akk recover <conversation-id>");
     return { action: "recover", conversationId };
@@ -815,6 +876,7 @@ function akkUsageText() {
     "/akk describe <conversation-id>",
     "/akk send <conversation-id> <message>",
     "/akk cancel <conversation-id>",
+    "/akk renew <conversation-id> [minutes]",
     "/akk recover <conversation-id>",
     "/akk close <conversation-id> [reason]"
   ].join("\n");
@@ -862,6 +924,15 @@ function formatStatusCommandResult(result) {
     lines.push(`request: ${truncateText(summary.request, 180)}`);
   }
   return lines.join("\n");
+}
+
+function formatRenewCommandResult(result) {
+  return [
+    `AKK monitoring renewed: ${result.conversation?.conversation_id ?? "unknown"}`,
+    `inactivity timeout: ${result.agent_timeout_minutes ?? "unknown"} minutes`,
+    `hard lifetime: ${result.agent_hard_timeout_minutes ?? "unknown"} minutes`,
+    "No message or key was sent to the coding agent."
+  ].join("\n");
 }
 
 function formatDescribeCommandResult(result) {

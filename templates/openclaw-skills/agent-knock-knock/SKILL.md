@@ -52,6 +52,7 @@ Natural-language forms:
 - `AKK describe <conversation-id>`, `AKK summary <conversation-id>`, or requests such as "what is this session about", "what was this task doing", "remind me what this drawing/session is for", or "这个会话/绘画大概在做什么": call `agent_knock_knock_describe`. Prefer this over direct terminal/tmux inspection because AKK can combine saved conversation history, Codex rollout history, cwd-matched history, and terminal-screen fallback with explicit confidence.
 - `AKK send <conversation-id>: <message>` or follow-up requests for an existing open agent session: call `agent_knock_knock_send`. Also use `agent_knock_knock_send` when the user says to send/tell/ask/forward/add/continue a message or task to a listed AKK session, a listed Codex session, a terminal-controlled entry, a tmux target such as `my-work:0.1`, or "the one from the list". If the target comes from a `terminal_controlled` entry in `AKK list`, use that entry's `id` directly; AKK will type the message into the controlled terminal pane and submit it. Do not call `agent_knock_knock_delegate` for these requests unless the user explicitly asks for a new independent session.
 - `AKK cancel <conversation-id>` or requests to stop the current running work without closing the session: call `agent_knock_knock_cancel`. If the target comes from a `terminal_controlled` entry in `AKK list`, use that entry's `id` directly; AKK sends Control-C to the controlled terminal pane.
+- `AKK renew <conversation-id>` or requests to extend/restart monitoring for a stalled but still-live terminal task: call `agent_knock_knock_renew`. This is only for an AKK-managed terminal bridge conversation already marked `stalled`; it does not send a message or key to Codex. Pass `minutes` only when the user requests a specific new inactivity timeout.
 - `AKK recover <conversation-id>`: call `agent_knock_knock_recover`.
 - `AKK close <conversation-id>`: call `agent_knock_knock_close`.
 - `AKK takeover Codex <session-id>` or requests to take over an active Codex CLI session: call `agent_knock_knock_agent_takeover` with `agent="codex"` and `strategy="terminate_then_resume"`.
@@ -134,6 +135,7 @@ When AKK still reports that a conversation is `needs_recovery`, do not automatic
 
 - `AKK recover <conversation-id>`: use `agent_knock_knock_recover` to start a new coding-agent session with AKK's saved protocol history summary plus the pending message.
 - `AKK close <conversation-id>`: use `agent_knock_knock_close` to close the task.
+- `AKK renew <conversation-id>`: use `agent_knock_knock_renew` when a live terminal bridge task was marked stalled and monitoring should resume without injecting another task.
 - Start a new independent `AKK <task>` delegation if the old task should not be recovered.
 
 Make clear that `recover` is AKK replay recovery, not guaranteed native coding-agent session resume.
