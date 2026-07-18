@@ -53,6 +53,34 @@ test("install-openclaw replaces an existing plugin and installs its skill", () =
   }
 });
 
+test("install-openclaw confirms the trusted local source when OpenClaw requires force", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-install-openclaw-trust-"));
+  const callsPath = path.join(tempDir, "calls.ndjson");
+  const fakeOpenClaw = path.join(tempDir, "openclaw");
+  const skillDest = path.join(tempDir, "skills", "agent-knock-knock", "SKILL.md");
+
+  try {
+    writeFakeOpenClaw(fakeOpenClaw, callsPath, "trust_required");
+    const result = runCli([
+      "install-openclaw",
+      "--openclaw-bin",
+      fakeOpenClaw,
+      "--skill-path",
+      skillDest
+    ]);
+
+    assert.equal(result.steps[0].mode, "replaced");
+    assert.deepEqual(readCalls(callsPath), [
+      ["plugins", "install", "--link", packageRoot],
+      ["plugins", "install", "--force", packageRoot],
+      ["plugins", "enable", "agent-knock-knock"],
+      ["gateway", "restart"]
+    ]);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("install-openclaw skill-only can synchronize the skill without OpenClaw", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-install-skill-"));
   const skillDest = path.join(tempDir, "skills", "agent-knock-knock", "SKILL.md");
@@ -77,7 +105,14 @@ test("install-openclaw skill-only can synchronize the skill without OpenClaw", (
   }
 });
 
-function writeFakeOpenClaw(filePath: string, callsPath: string) {
+function writeFakeOpenClaw(
+  filePath: string,
+  callsPath: string,
+  linkFailure: "already_exists" | "trust_required" = "already_exists"
+) {
+  const failure = linkFailure === "trust_required"
+    ? "Install cancelled; rerun with --force after reviewing the source.\n"
+    : "plugin already exists: /tmp/agent-knock-knock (delete it first)\n";
   fs.writeFileSync(
     filePath,
     `#!/usr/bin/env node
@@ -85,7 +120,7 @@ const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(args) + "\\n", "utf8");
 if (args[0] === "plugins" && args[1] === "install" && args.includes("--link")) {
-  process.stderr.write("plugin already exists: /tmp/agent-knock-knock (delete it first)\\n");
+  process.stderr.write(${JSON.stringify(failure)});
   process.exit(1);
 }
 if (args.includes("--link") && args.includes("--force")) {
