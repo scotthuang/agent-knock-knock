@@ -9,6 +9,20 @@ const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 const packageRoot = path.resolve(path.dirname(binPath), "../..");
 const skillSource = path.join(packageRoot, "templates", "openclaw-skills", "agent-knock-knock", "SKILL.md");
 
+test("OpenClaw contract exposes terminal timeout configuration and renewal", () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(packageRoot, "openclaw.plugin.json"), "utf8"));
+  assert.equal(manifest.configSchema.properties.agentTimeoutMinutes.type, "number");
+  assert.equal(manifest.configSchema.properties.agentHardTimeoutMinutes.type, "number");
+  assert.equal(manifest.configSchema.properties.agentHardTimeoutMinutes.exclusiveMinimum, 0);
+  assert.equal(manifest.contracts.tools.includes("agent_knock_knock_renew"), true);
+  assert.equal(manifest.toolMetadata.agent_knock_knock_renew.optional, true);
+
+  const pluginSource = fs.readFileSync(path.join(packageRoot, "src", "openclaw-plugin.ts"), "utf8");
+  assert.match(pluginSource, /const sendParameters =[\s\S]*?agentTimeoutMinutes:[\s\S]*?agentHardTimeoutMinutes:/u);
+  assert.match(pluginSource, /name: "agent_knock_knock_renew"/u);
+  assert.match(fs.readFileSync(skillSource, "utf8"), /agent_knock_knock_renew/u);
+});
+
 test("install-openclaw replaces an existing plugin and installs its skill", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-install-openclaw-"));
   const callsPath = path.join(tempDir, "calls.ndjson");

@@ -59,6 +59,7 @@ import {
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 10080;
 const DEFAULT_AGENT_TIMEOUT_MINUTES = 60;
+const DEFAULT_AGENT_HARD_TIMEOUT_MINUTES = 720;
 const DEFAULT_MONITOR_POLL_INTERVAL_MS = 5000;
 const DEFAULT_CODEX_ACPX_AGENT_COMMAND = "npx -y @agentclientprotocol/codex-acp@^1.1.0";
 
@@ -154,6 +155,8 @@ async function runCommand(commandName, options) {
     await runApprove(options);
   } else if (commandName === "cancel") {
     await runCancel(options);
+  } else if (commandName === "renew") {
+    await runRenew(options);
   } else if (commandName === "recover") {
     runRecover(options);
   } else if (commandName === "close") {
@@ -889,7 +892,10 @@ function isCodexWorkingLine(line: string): boolean {
   if (/\besc to interrupt\b/u.test(trimmed) && (/\bWorking\b/u.test(trimmed) || /\b\/stop to close\b/u.test(trimmed))) {
     return true;
   }
-  return /\bbackground terminal running\b/u.test(trimmed);
+  if (/^•?\s*Waiting for background terminals?\b/u.test(trimmed)) {
+    return true;
+  }
+  return /^•?\s*(?:\d+\s+)?background terminals? running\b/u.test(trimmed);
 }
 
 function isCodexIdlePromptLine(line: string): boolean {
@@ -1496,7 +1502,14 @@ function startExecutorMonitor({ statePath, logPath, pid, outputPath, agentTimeou
   return child;
 }
 
-function startTerminalBridgeMonitor({ statePath, logPath, agentTimeoutMinutes, pollIntervalMs, codexHome }) {
+function startTerminalBridgeMonitor({
+  statePath,
+  logPath,
+  agentTimeoutMinutes,
+  agentHardTimeoutMinutes,
+  pollIntervalMs,
+  codexHome
+}) {
   const args = [
     new URL(import.meta.url).pathname,
     "monitor",
@@ -1507,6 +1520,8 @@ function startTerminalBridgeMonitor({ statePath, logPath, agentTimeoutMinutes, p
     logPath,
     "--agent-timeout-minutes",
     String(agentTimeoutMinutes),
+    "--agent-hard-timeout-minutes",
+    String(agentHardTimeoutMinutes),
     "--poll-interval-ms",
     String(pollIntervalMs)
   ];
@@ -1528,10 +1543,22 @@ function startTerminalBridgeMonitorForConversation({ conversation, statePath, lo
   if (!terminalBridgeEnabled(conversation) || !conversation.gateway_method || options.disableTerminalBridgeMonitor === true) {
     return undefined;
   }
+  const nativeTakeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
   return startTerminalBridgeMonitor({
     statePath,
     logPath,
-    agentTimeoutMinutes: Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES),
+    agentTimeoutMinutes: Number(
+      options.agentTimeoutMinutes ??
+        nativeTakeover?.["terminal_bridge_inactivity_timeout_minutes"] ??
+        DEFAULT_AGENT_TIMEOUT_MINUTES
+    ),
+    agentHardTimeoutMinutes: Number(
+      options.agentHardTimeoutMinutes ??
+        nativeTakeover?.["terminal_bridge_hard_timeout_minutes"] ??
+        DEFAULT_AGENT_HARD_TIMEOUT_MINUTES
+    ),
     pollIntervalMs: Number(options.monitorPollIntervalMs ?? DEFAULT_MONITOR_POLL_INTERVAL_MS),
     codexHome: options.codexHome
   });
@@ -1544,7 +1571,13 @@ function terminalBridgeEnabled(conversation): boolean {
   return nativeTakeover?.["terminal_bridge"] === true;
 }
 
-function withTerminalBridgeState({ conversation, message, startedAt }) {
+function withTerminalBridgeState({
+  conversation,
+  message,
+  startedAt,
+  agentTimeoutMinutes,
+  agentHardTimeoutMinutes
+}) {
   const nativeTakeover = isRecord(conversation.native_session_takeover)
     ? conversation.native_session_takeover
     : {};
@@ -1554,7 +1587,13 @@ function withTerminalBridgeState({ conversation, message, startedAt }) {
       ...nativeTakeover,
       terminal_bridge: true,
       terminal_bridge_started_at: startedAt,
-      terminal_bridge_message_id: message.id
+      terminal_bridge_message_id: message.id,
+      terminal_bridge_monitor_started_at: startedAt,
+      terminal_bridge_last_activity_at: startedAt,
+      terminal_bridge_inactivity_timeout_minutes: agentTimeoutMinutes,
+      terminal_bridge_hard_timeout_minutes: agentHardTimeoutMinutes,
+      terminal_bridge_inactivity_deadline_at: deadlineAt(startedAt, agentTimeoutMinutes),
+      terminal_bridge_hard_deadline_at: deadlineAt(startedAt, agentHardTimeoutMinutes)
     },
     updated_at: startedAt
   };
@@ -2246,6 +2285,9 @@ function recordTerminalBridgeApprovalNotification({ statePath, logPath, terminal
 
 async function runSend(options) {
   const messageBody = required(options.message ?? options.request, "--message is required");
+  if (options.agentHardTimeoutMinutes !== undefined) {
+    positiveMinutes(options.agentHardTimeoutMinutes, "--agent-hard-timeout-minutes");
+  }
   cleanupIdleConversations(storeDirFromOptions(options), options);
   const terminalConversation = await resolveTerminalConversationFromOptions(options);
   if (terminalConversation) {
@@ -2753,17 +2795,39 @@ async function runApprove(options) {
   const nativeTakeoverForUpdate: Record<string, unknown> = isRecord(conversation.native_session_takeover)
     ? { ...conversation.native_session_takeover }
     : {};
+  const approvalResolvedAt = new Date().toISOString();
+  const agentTimeoutMinutes = Number(
+    options.agentTimeoutMinutes ??
+      nativeTakeoverForUpdate.terminal_bridge_inactivity_timeout_minutes ??
+      DEFAULT_AGENT_TIMEOUT_MINUTES
+  );
+  const agentHardTimeoutMinutes = positiveMinutes(
+    options.agentHardTimeoutMinutes ??
+      nativeTakeoverForUpdate.terminal_bridge_hard_timeout_minutes ??
+      DEFAULT_AGENT_HARD_TIMEOUT_MINUTES,
+    "--agent-hard-timeout-minutes"
+  );
   const nextNativeTakeover = {
     ...nativeTakeoverForUpdate,
     terminal_bridge_approval: undefined,
-    terminal_bridge_approval_resolved_at: new Date().toISOString()
+    terminal_bridge_approval_resolved_at: approvalResolvedAt,
+    terminal_bridge_monitor_started_at: approvalResolvedAt,
+    terminal_bridge_last_activity_at: approvalResolvedAt,
+    terminal_bridge_last_activity_reason: "approval resolved",
+    terminal_bridge_inactivity_timeout_minutes: agentTimeoutMinutes,
+    terminal_bridge_hard_timeout_minutes: agentHardTimeoutMinutes,
+    terminal_bridge_inactivity_deadline_at: deadlineAt(approvalResolvedAt, agentTimeoutMinutes),
+    terminal_bridge_hard_deadline_at: deadlineAt(
+      stringValue(nativeTakeoverForUpdate.terminal_bridge_started_at) ?? approvalResolvedAt,
+      agentHardTimeoutMinutes
+    )
   };
   delete nextNativeTakeover.terminal_bridge_approval;
   const nextConversation = {
     ...conversation,
     status: terminalBridgeEnabled(conversation) ? "waiting_for_agent" as const : conversation.status,
     native_session_takeover: nextNativeTakeover,
-    updated_at: new Date().toISOString()
+    updated_at: approvalResolvedAt
   };
   saveState(statePath, nextConversation);
 
@@ -2781,7 +2845,8 @@ async function runApprove(options) {
       pid: bridgeMonitor.pid ?? null,
       terminal_control: terminalControl,
       reason: "approval_resolved",
-      agent_timeout_minutes: Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES)
+      agent_timeout_minutes: agentTimeoutMinutes,
+      agent_hard_timeout_minutes: agentHardTimeoutMinutes
     });
     runtimeLog("info", "terminal_bridge_monitor_launch", {
       conversation_id: conversation.conversation_id,
@@ -2892,6 +2957,11 @@ async function runTerminalControlSend({
   const provider = createTerminalControlProvider(options);
   const bridge = terminalBridgeEnabled(conversation);
   const bridgeStartedAt = new Date().toISOString();
+  const agentTimeoutMinutes = Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES);
+  const agentHardTimeoutMinutes = positiveMinutes(
+    options.agentHardTimeoutMinutes ?? DEFAULT_AGENT_HARD_TIMEOUT_MINUTES,
+    "--agent-hard-timeout-minutes"
+  );
   const terminalPayload = needsNativeTakeoverBootstrap && !bridge
     ? terminalSubmissionPayload(buildAgentSendPayload({
         conversation,
@@ -2928,7 +2998,9 @@ async function runTerminalControlSend({
     ? withTerminalBridgeState({
         conversation: nextConversation,
         message,
-        startedAt: bridgeStartedAt
+        startedAt: bridgeStartedAt,
+        agentTimeoutMinutes,
+        agentHardTimeoutMinutes
       })
     : nextConversation;
   const deliveredConversation = markTakeoverBootstrapped({
@@ -2955,7 +3027,8 @@ async function runTerminalControlSend({
       event: "terminal_bridge_monitor_launch",
       pid: bridgeMonitor.pid ?? null,
       terminal_control: terminalControl,
-      agent_timeout_minutes: Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES)
+      agent_timeout_minutes: agentTimeoutMinutes,
+      agent_hard_timeout_minutes: agentHardTimeoutMinutes
     });
     runtimeLog("info", "terminal_bridge_monitor_launch", {
       conversation_id: deliveredConversation.conversation_id,
@@ -3516,6 +3589,131 @@ function markConversationNeedsRecovery({ conversation, statePath, logPath, execu
   };
 }
 
+async function runRenew(options) {
+  const { conversation, statePath, logPath } = loadConversationFromOptions(options);
+  if (conversation.status === "closed") {
+    throw new Error(`cannot renew ${conversation.conversation_id}; conversation is closed`);
+  }
+  if (conversation.status !== "stalled") {
+    throw new Error(`cannot renew ${conversation.conversation_id}; conversation is ${conversation.status}, not stalled`);
+  }
+
+  const nativeTakeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const terminalControl = terminalControlFromTakeover(nativeTakeover);
+  if (!terminalControl || nativeTakeover?.["terminal_bridge"] !== true) {
+    throw new Error(`cannot renew ${conversation.conversation_id}; conversation is not a terminal bridge task`);
+  }
+
+  const panes = await createTerminalControlProvider(options).listPanes();
+  const terminalExists = panes.some((pane) =>
+    pane.target === terminalControl.target &&
+    (terminalControl.socketPath === undefined || pane.socketPath === terminalControl.socketPath)
+  );
+  if (!terminalExists) {
+    throw new Error(`cannot renew ${conversation.conversation_id}; terminal ${terminalControl.target} is no longer available`);
+  }
+
+  const inactivityTimeoutMinutes = positiveMinutes(
+    options.minutes ??
+      options.agentTimeoutMinutes ??
+      nativeTakeover?.["terminal_bridge_inactivity_timeout_minutes"] ??
+      DEFAULT_AGENT_TIMEOUT_MINUTES,
+    "--minutes"
+  );
+  const hardTimeoutMinutes = positiveMinutes(
+    nativeTakeover?.["terminal_bridge_hard_timeout_minutes"] ??
+      DEFAULT_AGENT_HARD_TIMEOUT_MINUTES,
+    "--agent-hard-timeout-minutes"
+  );
+  const startedAt = stringValue(nativeTakeover?.["terminal_bridge_started_at"]);
+  const startedAtMs = startedAt ? Date.parse(startedAt) : NaN;
+  if (Number.isFinite(startedAtMs) && Date.now() - startedAtMs >= hardTimeoutMinutes * 60 * 1000) {
+    throw new Error(
+      `cannot renew ${conversation.conversation_id}; terminal bridge hard lifetime of ${hardTimeoutMinutes} minutes has elapsed`
+    );
+  }
+
+  const now = new Date().toISOString();
+  const renewed = {
+    ...conversation,
+    status: "waiting_for_agent" as const,
+    native_session_takeover: {
+      ...nativeTakeover,
+      terminal_bridge_monitor_started_at: now,
+      terminal_bridge_last_activity_at: now,
+      terminal_bridge_inactivity_timeout_minutes: inactivityTimeoutMinutes,
+      terminal_bridge_hard_timeout_minutes: hardTimeoutMinutes,
+      terminal_bridge_inactivity_deadline_at: deadlineAt(now, inactivityTimeoutMinutes),
+      terminal_bridge_hard_deadline_at: deadlineAt(startedAt ?? now, hardTimeoutMinutes),
+      terminal_bridge_renewed_at: now
+    },
+    updated_at: now
+  };
+  Reflect.deleteProperty(renewed, "stalled_at");
+  Reflect.deleteProperty(renewed, "stalled_reason");
+  Reflect.deleteProperty(renewed, "stalled_notification_sent_at");
+  Reflect.deleteProperty(renewed, "stalled_notification_message_id");
+  saveState(statePath, renewed);
+  appendEvent(logPath, {
+    ts: now,
+    conversation_id: conversation.conversation_id,
+    event: "terminal_bridge_renewed",
+    previous_status: conversation.status,
+    terminal_control: terminalControl,
+    agent_timeout_minutes: inactivityTimeoutMinutes,
+    agent_hard_timeout_minutes: hardTimeoutMinutes,
+    last_activity_at: now
+  });
+  runtimeLog("info", "terminal_bridge_renewed", {
+    conversation_id: conversation.conversation_id,
+    terminal_target: terminalControl.target,
+    agent_timeout_minutes: inactivityTimeoutMinutes,
+    agent_hard_timeout_minutes: hardTimeoutMinutes
+  });
+
+  const monitor = startTerminalBridgeMonitorForConversation({
+    conversation: renewed,
+    statePath,
+    logPath,
+    options: {
+      ...options,
+      agentTimeoutMinutes: inactivityTimeoutMinutes,
+      agentHardTimeoutMinutes: hardTimeoutMinutes
+    }
+  });
+  if (monitor) {
+    appendEvent(logPath, {
+      ts: new Date().toISOString(),
+      conversation_id: conversation.conversation_id,
+      event: "terminal_bridge_monitor_launch",
+      pid: monitor.pid ?? null,
+      terminal_control: terminalControl,
+      reason: "renewal",
+      agent_timeout_minutes: inactivityTimeoutMinutes,
+      agent_hard_timeout_minutes: hardTimeoutMinutes
+    });
+  }
+
+  printJson({
+    conversation: renewed,
+    renewed: true,
+    terminal_control: terminalControl,
+    agent_timeout_minutes: inactivityTimeoutMinutes,
+    agent_hard_timeout_minutes: hardTimeoutMinutes,
+    monitor_pid: monitor?.pid ?? null
+  });
+}
+
+function positiveMinutes(value, optionName: string): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${optionName} must be a positive number`);
+  }
+  return parsed;
+}
+
 async function runCancel(options) {
   cleanupIdleConversations(storeDirFromOptions(options), options);
   const terminalConversation = await resolveTerminalConversationFromOptions(options);
@@ -4014,10 +4212,31 @@ async function runMonitor(options) {
 async function runTerminalBridgeMonitor(options) {
   const statePath = expandHome(required(options.state, "--state is required"));
   const logPath = expandHome(options.log ?? logPathForStatePath(statePath));
-  const timeoutMinutes = Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES);
   const pollIntervalMs = Math.max(50, Number(options.pollIntervalMs ?? DEFAULT_MONITOR_POLL_INTERVAL_MS));
 
   let conversation = loadState(statePath);
+  const initialNativeTakeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const timeoutMinutes = Number(
+    options.agentTimeoutMinutes ??
+      initialNativeTakeover?.["terminal_bridge_inactivity_timeout_minutes"] ??
+      DEFAULT_AGENT_TIMEOUT_MINUTES
+  );
+  const hardTimeoutMinutes = positiveMinutes(
+    options.agentHardTimeoutMinutes ??
+      initialNativeTakeover?.["terminal_bridge_hard_timeout_minutes"] ??
+      DEFAULT_AGENT_HARD_TIMEOUT_MINUTES,
+    "--agent-hard-timeout-minutes"
+  );
+  const monitorStartedAtMs = Date.now();
+  const taskStartedAtMs = validTimestampMs(initialNativeTakeover?.["terminal_bridge_started_at"]) ?? monitorStartedAtMs;
+  let lastActivityAtMs = validTimestampMs(initialNativeTakeover?.["terminal_bridge_last_activity_at"]) ?? taskStartedAtMs;
+  let lastPersistedActivityAtMs = lastActivityAtMs;
+  const activityPersistIntervalMs = terminalBridgeActivityPersistIntervalMs(timeoutMinutes, pollIntervalMs);
+  let previousScreenFingerprint: string | undefined;
+  let previousRolloutFingerprint: string | undefined;
+  let persistedActivityReason = stringValue(initialNativeTakeover?.["terminal_bridge_last_activity_reason"]);
   const executor = executorForConversation(conversation);
   appendEvent(logPath, {
     ts: new Date().toISOString(),
@@ -4025,13 +4244,23 @@ async function runTerminalBridgeMonitor(options) {
     event: "terminal_bridge_monitor_started",
     executor,
     agent_timeout_minutes: timeoutMinutes,
-    poll_interval_ms: pollIntervalMs
+    agent_hard_timeout_minutes: hardTimeoutMinutes,
+    poll_interval_ms: pollIntervalMs,
+    task_started_at: new Date(taskStartedAtMs).toISOString(),
+    last_activity_at: new Date(lastActivityAtMs).toISOString(),
+    inactivity_deadline_at: timeoutMinutes > 0
+      ? new Date(lastActivityAtMs + timeoutMinutes * 60 * 1000).toISOString()
+      : null,
+    hard_deadline_at: hardTimeoutMinutes > 0
+      ? new Date(taskStartedAtMs + hardTimeoutMinutes * 60 * 1000).toISOString()
+      : null
   });
   runtimeLog("info", "terminal_bridge_monitor_started", {
     conversation_id: conversation.conversation_id,
     agent: executor.kind,
     executor_session: executor.session,
-    agent_timeout_minutes: timeoutMinutes
+    agent_timeout_minutes: timeoutMinutes,
+    agent_hard_timeout_minutes: hardTimeoutMinutes
   });
 
   let idleCompletionFingerprint: string | undefined;
@@ -4166,6 +4395,12 @@ async function runTerminalBridgeMonitor(options) {
       return;
     }
 
+    const screenFingerprint = terminalBridgeActivityFingerprint(terminalStatus?.screen?.excerpt);
+    const screenChanged = previousScreenFingerprint !== undefined &&
+      screenFingerprint !== undefined &&
+      screenFingerprint !== previousScreenFingerprint;
+    previousScreenFingerprint = screenFingerprint;
+
     const contextMatch = await terminalBridgeCodexContext({
       conversation,
       nativeTakeover,
@@ -4175,6 +4410,46 @@ async function runTerminalBridgeMonitor(options) {
     const assistantMessage = contextMatch?.context
       ? latestAssistantAfter(contextMatch.context, startedAt)
       : undefined;
+    const rolloutFingerprint = assistantMessage
+      ? terminalBridgeActivityFingerprint(JSON.stringify({
+          text: assistantMessage.text,
+          timestamp: assistantMessage.timestamp
+        }))
+      : undefined;
+    const rolloutChanged = rolloutFingerprint !== undefined && rolloutFingerprint !== previousRolloutFingerprint;
+    previousRolloutFingerprint = rolloutFingerprint;
+
+    const activityReasons = [
+      terminalStatus.activity_state === "working" ? terminalStatus.activity_reason : undefined,
+      screenChanged ? "terminal screen changed" : undefined,
+      rolloutChanged ? "Codex rollout assistant output changed" : undefined
+    ].filter((value): value is string => Boolean(value));
+    if (activityReasons.length > 0) {
+      const observedAtMs = Date.now();
+      lastActivityAtMs = observedAtMs;
+      const activityReason = activityReasons.join("; ");
+      if (
+        persistedActivityReason === undefined ||
+        observedAtMs - lastPersistedActivityAtMs >= activityPersistIntervalMs
+      ) {
+        conversation = persistTerminalBridgeActivity({
+          conversation,
+          statePath,
+          logPath,
+          observedAtMs,
+          reason: activityReason,
+          activityState: terminalStatus.activity_state,
+          timeoutMinutes,
+          hardTimeoutMinutes
+        });
+        lastPersistedActivityAtMs = observedAtMs;
+        persistedActivityReason = activityReason;
+        if (!isWaitingForAgent(conversation.status)) {
+          continue;
+        }
+      }
+    }
+
     const terminalIdle = terminalStatus.activity_state === "idle";
     const screenMessage = !assistantMessage && terminalIdle
       ? terminalBridgeScreenMessage({ conversation, terminalStatus })
@@ -4233,18 +4508,62 @@ async function runTerminalBridgeMonitor(options) {
       return;
     }
 
+    // A concrete approval or completion observed on this poll wins over a timeout boundary.
+    const nowMs = Date.now();
+    if (
+      Number.isFinite(hardTimeoutMinutes) &&
+      hardTimeoutMinutes > 0 &&
+      nowMs - taskStartedAtMs >= hardTimeoutMinutes * 60 * 1000
+    ) {
+      appendEvent(logPath, {
+        ts: new Date(nowMs).toISOString(),
+        conversation_id: conversation.conversation_id,
+        event: "terminal_bridge_hard_timeout_reached",
+        terminal_control: terminalControl,
+        task_started_at: new Date(taskStartedAtMs).toISOString(),
+        hard_deadline_at: new Date(taskStartedAtMs + hardTimeoutMinutes * 60 * 1000).toISOString(),
+        agent_hard_timeout_minutes: hardTimeoutMinutes,
+        last_activity_at: new Date(lastActivityAtMs).toISOString(),
+        terminal_activity_state: terminalStatus.activity_state
+      });
+      const stalledConversation = markConversationStalled({
+        statePath,
+        logPath,
+        reason: `terminal bridge reached its hard lifetime of ${hardTimeoutMinutes} minutes`,
+        detail: {
+          terminal_bridge: true,
+          terminal_control: terminalControl,
+          task_started_at: new Date(taskStartedAtMs).toISOString(),
+          last_activity_at: new Date(lastActivityAtMs).toISOString(),
+          agent_hard_timeout_minutes: hardTimeoutMinutes,
+          terminal_activity_state: terminalStatus.activity_state
+        }
+      });
+      printJson({
+        conversation: stalledConversation,
+        monitored: true,
+        terminal_bridge: true,
+        stalled: true,
+        hard_timeout: true,
+        reason: stalledConversation?.stalled_reason
+      });
+      return;
+    }
+
     if (Number.isFinite(timeoutMinutes) && timeoutMinutes > 0) {
-      const updatedAtMs = Date.parse(String(conversation.updated_at ?? conversation.created_at));
-      if (Number.isFinite(updatedAtMs) && Date.now() - updatedAtMs >= timeoutMinutes * 60 * 1000) {
+      if (nowMs - lastActivityAtMs >= timeoutMinutes * 60 * 1000) {
         const stalledConversation = markConversationStalled({
           statePath,
           logPath,
-          reason: `terminal bridge did not observe completion after ${timeoutMinutes} minutes`,
+          reason: `terminal bridge observed no activity for ${timeoutMinutes} minutes`,
           detail: {
             terminal_bridge: true,
             terminal_control: terminalControl,
             match: contextMatch?.match,
-            terminal_activity_state: terminalStatus.activity_state
+            terminal_activity_state: terminalStatus.activity_state,
+            last_activity_at: new Date(lastActivityAtMs).toISOString(),
+            inactivity_deadline_at: new Date(lastActivityAtMs + timeoutMinutes * 60 * 1000).toISOString(),
+            agent_timeout_minutes: timeoutMinutes
           }
         });
         printJson({
@@ -4259,6 +4578,105 @@ async function runTerminalBridgeMonitor(options) {
     }
 
     sleepSync(pollIntervalMs);
+  }
+}
+
+function validTimestampMs(value): number | undefined {
+  const parsed = Date.parse(String(value ?? ""));
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function deadlineAt(startedAt, timeoutMinutes: number): string | undefined {
+  const startedAtMs = validTimestampMs(startedAt);
+  return startedAtMs !== undefined && Number.isFinite(timeoutMinutes) && timeoutMinutes > 0
+    ? new Date(startedAtMs + timeoutMinutes * 60 * 1000).toISOString()
+    : undefined;
+}
+
+function terminalBridgeActivityFingerprint(value): string | undefined {
+  const text = stringValue(value);
+  return text ? createHash("sha256").update(text).digest("hex") : undefined;
+}
+
+function terminalBridgeActivityPersistIntervalMs(timeoutMinutes: number, pollIntervalMs: number): number {
+  if (!Number.isFinite(timeoutMinutes) || timeoutMinutes <= 0) {
+    return 5 * 60 * 1000;
+  }
+  return Math.max(pollIntervalMs, Math.min(timeoutMinutes * 30 * 1000, 5 * 60 * 1000));
+}
+
+function persistTerminalBridgeActivity({
+  conversation,
+  statePath,
+  logPath,
+  observedAtMs,
+  reason,
+  activityState,
+  timeoutMinutes,
+  hardTimeoutMinutes
+}) {
+  const releaseLock = acquireFileLock(`${statePath}.lock`);
+  try {
+    const currentConversation = loadState(statePath);
+    if (!isWaitingForAgent(currentConversation.status)) {
+      return currentConversation;
+    }
+    const expectedNativeTakeover = isRecord(conversation.native_session_takeover)
+      ? conversation.native_session_takeover
+      : {};
+    const nativeTakeover = isRecord(currentConversation.native_session_takeover)
+      ? currentConversation.native_session_takeover
+      : {};
+    if (
+      nativeTakeover["terminal_bridge_message_id"] !==
+      expectedNativeTakeover["terminal_bridge_message_id"]
+    ) {
+      return currentConversation;
+    }
+
+    const previousActivityAtMs = validTimestampMs(nativeTakeover["terminal_bridge_last_activity_at"]);
+    const observedAt = new Date(observedAtMs).toISOString();
+    const inactivityDeadlineAt = Number.isFinite(timeoutMinutes) && timeoutMinutes > 0
+      ? new Date(observedAtMs + timeoutMinutes * 60 * 1000).toISOString()
+      : undefined;
+    const nextConversation = {
+      ...currentConversation,
+      native_session_takeover: {
+        ...nativeTakeover,
+        terminal_bridge_last_activity_at: observedAt,
+        terminal_bridge_last_activity_reason: reason,
+        terminal_bridge_inactivity_deadline_at: inactivityDeadlineAt,
+        terminal_bridge_inactivity_timeout_minutes: timeoutMinutes,
+        terminal_bridge_hard_timeout_minutes: hardTimeoutMinutes
+      },
+      updated_at: observedAt
+    };
+    saveState(statePath, nextConversation);
+    appendEvent(logPath, {
+      ts: observedAt,
+      conversation_id: currentConversation.conversation_id,
+      event: "terminal_bridge_activity_observed",
+      reason,
+      last_activity_at: observedAt,
+      terminal_activity_state: activityState
+    });
+    if (inactivityDeadlineAt) {
+      appendEvent(logPath, {
+        ts: observedAt,
+        conversation_id: currentConversation.conversation_id,
+        event: "terminal_bridge_inactivity_deadline_extended",
+        reason,
+        previous_last_activity_at: previousActivityAtMs === undefined
+          ? null
+          : new Date(previousActivityAtMs).toISOString(),
+        last_activity_at: observedAt,
+        inactivity_deadline_at: inactivityDeadlineAt,
+        agent_timeout_minutes: timeoutMinutes
+      });
+    }
+    return nextConversation;
+  } finally {
+    releaseLock();
   }
 }
 
@@ -5436,6 +5854,7 @@ function markConversationStalled({ statePath, logPath, reason, detail = {} }) {
 
     const now = new Date().toISOString();
     const executor = executorForConversation(conversation);
+    const terminalBridge = terminalBridgeEnabled(conversation);
     const shouldNotify = Boolean(conversation.gateway_method && !conversation.stalled_notification_sent_at);
     stalledMessage = shouldNotify
       ? createMessage({
@@ -5449,7 +5868,9 @@ function markConversationStalled({ statePath, logPath, reason, detail = {} }) {
             "",
             `Conversation: ${conversation.conversation_id}`,
             `Session: ${executor.session}`,
-            "Use `AKK status` for details, `AKK send` to retry/follow up, or `AKK close` to close it."
+            terminalBridge
+              ? `Use \`AKK status ${conversation.conversation_id}\` for details, \`AKK renew ${conversation.conversation_id}\` to resume monitoring without sending another task, or \`AKK close ${conversation.conversation_id}\` to close it.`
+              : "Use `AKK status` for details, `AKK send` to retry/follow up, or `AKK close` to close it."
           ].join("\n")
         })
       : undefined;
@@ -6244,9 +6665,10 @@ function usage() {
   agent-knock-knock list [--store-dir <dir>] [--agent ${agentList}] [--status <status>] [--all] [--managed-only] [--no-approval-scan] [--terminal-debug]
   agent-knock-knock status --conversation <id> [--store-dir <dir>] [--trace]
   agent-knock-knock describe --conversation <id> [--store-dir <dir>]
-  agent-knock-knock send --conversation <id> --message <text> [--type answer|task|control] [--all-proxy <url>] [--agent-timeout-minutes <minutes>]
+  agent-knock-knock send --conversation <id> --message <text> [--type answer|task|control] [--all-proxy <url>] [--agent-timeout-minutes <minutes>] [--agent-hard-timeout-minutes <minutes>]
   agent-knock-knock approve --conversation <id>
   agent-knock-knock cancel --conversation <id> [--all-proxy <url>]
+  agent-knock-knock renew --conversation <id> [--minutes <inactivity-minutes>]
   agent-knock-knock recover --conversation <id> [--session <name>] [--all-proxy <url>]
   agent-knock-knock close --conversation <id> [--reason <text>]
   agent-knock-knock install-openclaw [--openclaw-bin <path>] [--skill-path <path>] [--skill-only] [--no-restart]

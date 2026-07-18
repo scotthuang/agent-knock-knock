@@ -343,6 +343,24 @@ test("status detects tmux Codex working idle and unknown activity states", () =>
     assert.equal(statusParsed.terminal_status.approval_state.blocked, false);
 
     fs.writeFileSync(screenPath, [
+      "• Waiting for background terminal · autoreview",
+      "  3 background terminals running · /ps to view · /stop to close",
+      "",
+      "› Steer the current task"
+    ].join("\n"));
+    status = runAgentCli([
+      "status",
+      "--conversation",
+      conversationId
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(status.status, 0, status.stderr || status.stdout);
+    statusParsed = JSON.parse(status.stdout);
+    assert.equal(statusParsed.terminal_status.activity_state, "working");
+    assert.match(statusParsed.terminal_status.activity_reason, /Waiting for background terminal/);
+
+    fs.writeFileSync(screenPath, [
       "  Model: GPT-5",
       "",
       "› "
@@ -532,6 +550,24 @@ test("background send to raw terminal id creates managed callback conversation",
     );
 
     const rawConversationId = "terminal:tmux:codex-work:0.1:33389";
+    const rejected = runAgentCli([
+      "send",
+      "--conversation",
+      rawConversationId,
+      "--message",
+      "Do not send this",
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--agent-hard-timeout-minutes",
+      "0"
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(rejected.status, 1);
+    assert.match(rejected.stderr, /must be a positive number/);
+    assert.equal(fs.existsSync(tmuxCallsPath), false);
+
     const sent = runAgentCli([
       "send",
       "--conversation",
@@ -832,7 +868,7 @@ test("terminal bridge monitor does not complete from assistant progress while te
     assert.equal(monitored.status, 0, monitored.stderr || monitored.stdout);
     const parsed = JSON.parse(monitored.stdout);
     assert.equal(parsed.stalled, true);
-    assert.match(parsed.reason, /did not observe completion/);
+    assert.match(parsed.reason, /observed no activity/);
     const events = fs.readFileSync(logPath, "utf8");
     assert.doesNotMatch(events, /terminal_bridge_completion_detected/);
     const openclawCalls = readJsonLines(openclawCallsPath);
@@ -841,6 +877,284 @@ test("terminal bridge monitor does not complete from assistant progress while te
     const callbackParams = JSON.parse(openclawCalls[0].args[callbackParamsIndex + 1]);
     assert.equal(callbackParams.message.type, "error");
     assert.notEqual(callbackParams.message.type, "done");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("terminal bridge working markers extend inactivity until the hard lifetime", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-bridge-activity-timeout-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+  const workingScreen = [
+    "• Waiting for background terminal · autoreview",
+    "  3 background terminals running · /ps to view · /stop to close",
+    "",
+    "› Steer the current task"
+  ].join("\n");
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, workingScreen);
+    const openclawBin = writeFakeOpenClaw(fakeBinDir, openclawCallsPath);
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `codex-work\t0\t1\t33389\tnode\t${workspace}\n`
+    );
+
+    const sent = runAgentCli([
+      "send",
+      "--conversation",
+      "terminal:tmux:codex-work:0.1:33389",
+      "--message",
+      "Run all review passes",
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      "agent:channel:original",
+      "--openclaw-session",
+      "agent:channel:original",
+      "--openclaw-bin",
+      openclawBin,
+      "--agent-timeout-minutes",
+      "0.001",
+      "--agent-hard-timeout-minutes",
+      "0.004",
+      "--disable-terminal-bridge-monitor"
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    const sentParsed = JSON.parse(sent.stdout);
+    const statePath = path.join(storeDir, sentParsed.conversation.conversation_id, "state.json");
+    const logPath = path.join(storeDir, sentParsed.conversation.conversation_id, "events.ndjson");
+    const startedAt = JSON.parse(fs.readFileSync(statePath, "utf8"))
+      .native_session_takeover.terminal_bridge_started_at;
+
+    const monitored = runAgentCli([
+      "monitor",
+      "--terminal-bridge",
+      "--state",
+      statePath,
+      "--log",
+      logPath,
+      "--poll-interval-ms",
+      "50",
+      "--agent-timeout-minutes",
+      "0.001",
+      "--agent-hard-timeout-minutes",
+      "0.004",
+      "--processes-json",
+      JSON.stringify([{
+        pid: 33389,
+        ppid: 999,
+        command: "codex",
+        cwd: workspace
+      }]),
+      "--terminals-json",
+      JSON.stringify([tmuxPane({
+        target: "codex-work:0.1",
+        session: "codex-work",
+        window: 0,
+        pane: 1,
+        panePid: 33389,
+        currentPath: workspace
+      })]),
+      "--terminal-screens-json",
+      JSON.stringify({ "codex-work:0.1": workingScreen })
+    ]);
+
+    assert.equal(monitored.status, 0, monitored.stderr || monitored.stdout);
+    const parsed = JSON.parse(monitored.stdout);
+    assert.equal(parsed.stalled, true);
+    assert.equal(parsed.hard_timeout, true);
+    assert.match(parsed.reason, /hard lifetime/);
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    assert.equal(state.status, "stalled");
+    assert.ok(
+      Date.parse(state.native_session_takeover.terminal_bridge_last_activity_at) > Date.parse(startedAt)
+    );
+    const events = fs.readFileSync(logPath, "utf8");
+    assert.match(events, /terminal_bridge_activity_observed/);
+    assert.match(events, /terminal_bridge_inactivity_deadline_extended/);
+    assert.match(events, /terminal_bridge_hard_timeout_reached/);
+    assert.doesNotMatch(parsed.reason, /no activity/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("renew restarts a stalled terminal bridge without input and completion callbacks once", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-bridge-renew-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "› \n");
+    const openclawBin = writeFakeOpenClaw(fakeBinDir, openclawCallsPath);
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `codex-work\t0\t1\t33389\tnode\t${workspace}\n`
+    );
+
+    const sent = runAgentCli([
+      "send",
+      "--conversation",
+      "terminal:tmux:codex-work:0.1:33389",
+      "--message",
+      "Finish the long task",
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      "agent:channel:original",
+      "--openclaw-session",
+      "agent:channel:original",
+      "--openclaw-bin",
+      openclawBin,
+      "--agent-hard-timeout-minutes",
+      "60",
+      "--disable-terminal-bridge-monitor"
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    const sentParsed = JSON.parse(sent.stdout);
+    const conversationId = sentParsed.conversation.conversation_id;
+    const statePath = path.join(storeDir, conversationId, "state.json");
+    const logPath = path.join(storeDir, conversationId, "events.ndjson");
+    const waitingState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    fs.writeFileSync(statePath, `${JSON.stringify({
+      ...waitingState,
+      status: "stalled",
+      stalled_at: new Date().toISOString(),
+      stalled_reason: "test inactivity timeout",
+      stalled_notification_sent_at: new Date().toISOString(),
+      stalled_notification_message_id: "msg-stalled"
+    }, null, 2)}\n`);
+
+    const missingTerminal = runAgentCli([
+      "renew",
+      "--state",
+      statePath,
+      "--minutes",
+      "5",
+      "--terminals-json",
+      "[]",
+      "--disable-terminal-bridge-monitor"
+    ]);
+    assert.equal(missingTerminal.status, 1);
+    assert.match(missingTerminal.stderr, /no longer available/);
+    assert.equal(JSON.parse(fs.readFileSync(statePath, "utf8")).status, "stalled");
+
+    const sendKeyCountBeforeRenew = readJsonLines(tmuxCallsPath)
+      .filter((call) => call.args[0] === "send-keys").length;
+    const renewed = runAgentCli([
+      "renew",
+      "--state",
+      statePath,
+      "--minutes",
+      "5",
+      "--agent-hard-timeout-minutes",
+      "120",
+      "--disable-terminal-bridge-monitor"
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(renewed.status, 0, renewed.stderr || renewed.stdout);
+    const renewedParsed = JSON.parse(renewed.stdout);
+    assert.equal(renewedParsed.renewed, true);
+    assert.equal(renewedParsed.agent_timeout_minutes, 5);
+    assert.equal(renewedParsed.agent_hard_timeout_minutes, 60);
+    assert.equal(renewedParsed.monitor_pid, null);
+    assert.equal(renewedParsed.conversation.status, "waiting_for_agent");
+    assert.equal(renewedParsed.conversation.stalled_reason, undefined);
+    const sendKeyCountAfterRenew = readJsonLines(tmuxCallsPath)
+      .filter((call) => call.args[0] === "send-keys").length;
+    assert.equal(sendKeyCountAfterRenew, sendKeyCountBeforeRenew);
+
+    const rollout = [
+      JSON.stringify({
+        timestamp: "2099-07-04T00:00:00.000Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: "Finish the long task" }
+      }),
+      JSON.stringify({
+        timestamp: "2099-07-04T00:01:00.000Z",
+        type: "event_msg",
+        payload: { type: "agent_message", message: "The long task is complete." }
+      })
+    ].join("\n");
+    const monitorArgs = [
+      "monitor",
+      "--terminal-bridge",
+      "--state",
+      statePath,
+      "--log",
+      logPath,
+      "--poll-interval-ms",
+      "50",
+      "--agent-timeout-minutes",
+      "5",
+      "--agent-hard-timeout-minutes",
+      "60",
+      "--threads-json",
+      JSON.stringify([threadRow({ cwd: workspace, updated_at_ms: Date.parse("2099-07-04T00:01:00.000Z") })]),
+      "--processes-json",
+      JSON.stringify([{
+        pid: 33389,
+        ppid: 999,
+        command: `codex resume ${sessionId}`,
+        cwd: workspace
+      }]),
+      "--terminals-json",
+      JSON.stringify([tmuxPane({
+        target: "codex-work:0.1",
+        session: "codex-work",
+        window: 0,
+        pane: 1,
+        panePid: 33389,
+        currentPath: workspace
+      })]),
+      "--terminal-screens-json",
+      JSON.stringify({ "codex-work:0.1": "› \n" }),
+      "--rollouts-json",
+      JSON.stringify({ [rolloutPath]: rollout })
+    ];
+    const monitored = runAgentCli(monitorArgs);
+    assert.equal(monitored.status, 0, monitored.stderr || monitored.stdout);
+    const monitoredParsed = JSON.parse(monitored.stdout);
+    assert.equal(monitoredParsed.delivered, true);
+    assert.equal(monitoredParsed.message.body, "The long task is complete.");
+    assert.equal(monitoredParsed.conversation.status, "closed");
+
+    const monitoredAgain = runAgentCli(monitorArgs);
+    assert.equal(monitoredAgain.status, 0, monitoredAgain.stderr || monitoredAgain.stdout);
+    assert.equal(JSON.parse(monitoredAgain.stdout).reason, "conversation_no_longer_waiting");
+    assert.equal(readJsonLines(openclawCallsPath).length, 1);
+    const events = fs.readFileSync(logPath, "utf8");
+    assert.match(events, /terminal_bridge_renewed/);
+    assert.match(events, /terminal_bridge_completion_detected/);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
