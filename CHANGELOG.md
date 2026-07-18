@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.43 - 2026-07-19
+
+### Added
+
+- Make terminal bridge inactivity timeouts activity-aware, retain a separate 12-hour hard lifetime, and add `AKK renew` plus matching OpenClaw skill and tool support for explicitly extending long-running tasks.
+- Persist timeout deadlines and activity evidence so renewals and stalls remain auditable without sending any input to the coding agent.
+
+### Fixed
+
+- Bind Codex terminal callbacks to a matching rollout `task_complete` turn and request hash so final-answer prose cannot be mistaken for a working marker or a result from another task.
+- Atomically supersede older bridge tasks when a tmux pane is reused, while preserving the previous callback path if replacement delivery fails and serializing concurrent sends.
+- Preserve terminal-screen completion fallback for wrapped or scrolled prompts by comparing the completed screen with a pre-send fingerprint.
+
 ## 0.2.42 - 2026-07-13
 
 ### Fixed
