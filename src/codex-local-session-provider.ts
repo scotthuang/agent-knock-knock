@@ -99,6 +99,7 @@ export class CodexLocalSessionProvider implements CodingAgentSessionProvider {
       return buildForkContextPackage(session, {
         messages: [],
         commands: [],
+        turns: [],
         skippedLines: 0,
         truncated: false
       });
@@ -109,6 +110,7 @@ export class CodexLocalSessionProvider implements CodingAgentSessionProvider {
       return buildForkContextPackage(session, {
         messages: [],
         commands: [],
+        turns: [],
         skippedLines: 0,
         truncated: false
       });

@@ -82,9 +82,19 @@ export interface RolloutCommandSummary {
   timestamp?: string;
 }
 
+export interface RolloutTurnSummary {
+  userText: string;
+  userTextHash: string;
+  userTimestamp?: string;
+  turnId?: string;
+  completedAt?: string;
+  lastAssistantMessage?: string;
+}
+
 export interface RolloutExcerpt {
   messages: RolloutMessageExcerpt[];
   commands: RolloutCommandSummary[];
+  turns: RolloutTurnSummary[];
   skippedLines: number;
   truncated: boolean;
 }
@@ -99,6 +109,7 @@ export interface ForkContextPackage {
   };
   messages: RolloutMessageExcerpt[];
   commands: RolloutCommandSummary[];
+  turns: RolloutTurnSummary[];
   truncated: boolean;
 }
 
@@ -106,6 +117,7 @@ export interface RolloutExcerptOptions {
   maxMessages?: number;
   maxCommands?: number;
   maxTextLength?: number;
+  maxTurns?: number;
 }
 
 const UUID_PATTERN = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
@@ -197,8 +209,10 @@ export function parseCodexRolloutJsonl(text: string, options: RolloutExcerptOpti
   const maxMessages = options.maxMessages ?? 12;
   const maxCommands = options.maxCommands ?? 8;
   const maxTextLength = options.maxTextLength ?? 1200;
+  const maxTurns = options.maxTurns ?? 12;
   const messages: RolloutMessageExcerpt[] = [];
   const commands: RolloutCommandSummary[] = [];
+  const turns: RolloutTurnSummary[] = [];
   let skippedLines = 0;
   let truncated = false;
 
@@ -230,6 +244,20 @@ export function parseCodexRolloutJsonl(text: string, options: RolloutExcerptOpti
       }
     }
 
+    const userTurn = userTurnFromRolloutRecord(record, maxTextLength);
+    if (userTurn) {
+      turns.push(userTurn);
+      if (turns.length > maxTurns) {
+        turns.shift();
+        truncated = true;
+      }
+    }
+
+    const completion = taskCompletionFromRolloutRecord(record, maxTextLength);
+    if (completion && turns.length > 0) {
+      Object.assign(turns[turns.length - 1], completion);
+    }
+
     const command = commandSummaryFromRolloutRecord(record, maxTextLength);
     if (command) {
       if (commands.length < maxCommands) {
@@ -243,6 +271,7 @@ export function parseCodexRolloutJsonl(text: string, options: RolloutExcerptOpti
   return {
     messages,
     commands,
+    turns,
     skippedLines,
     truncated
   };
@@ -313,6 +342,7 @@ export function buildForkContextPackage(session: CodexSessionSummary, rollout: R
     },
     messages: rollout.messages,
     commands: rollout.commands,
+    turns: rollout.turns,
     truncated: rollout.truncated
   };
 }
@@ -347,6 +377,49 @@ function commandInvokesCodexAppServer(command: string): boolean {
   const tokens = command.split(/\s+/).filter(Boolean);
   const codexIndex = tokens.findIndex((token) => pathBasename(token) === "codex");
   return codexIndex >= 0 && tokens.slice(codexIndex + 1).includes("app-server");
+}
+
+function userTurnFromRolloutRecord(
+  record: Record<string, unknown>,
+  maxTextLength: number
+): RolloutTurnSummary | undefined {
+  if (record.type !== "event_msg") {
+    return undefined;
+  }
+  const payload = asRecord(record.payload);
+  if (payload?.type !== "user_message") {
+    return undefined;
+  }
+  const userText = cleanText(stringValue(payload.message));
+  if (!userText) {
+    return undefined;
+  }
+  return {
+    userText: truncateText(userText, maxTextLength),
+    userTextHash: createHash("sha256").update(userText).digest("hex"),
+    userTimestamp: stringValue(record.timestamp)
+  };
+}
+
+function taskCompletionFromRolloutRecord(
+  record: Record<string, unknown>,
+  maxTextLength: number
+): Partial<RolloutTurnSummary> | undefined {
+  if (record.type !== "event_msg") {
+    return undefined;
+  }
+  const payload = asRecord(record.payload);
+  if (payload?.type !== "task_complete") {
+    return undefined;
+  }
+  const lastAssistantMessage = cleanText(stringValue(payload.last_agent_message));
+  return {
+    turnId: stringValue(payload.turn_id),
+    completedAt: stringValue(record.timestamp),
+    lastAssistantMessage: lastAssistantMessage
+      ? truncateText(lastAssistantMessage, maxTextLength)
+      : undefined
+  };
 }
 
 function pathBasename(value: string | undefined): string | undefined {
@@ -468,3 +541,4 @@ function stringValue(value: unknown): string | undefined {
 function numberValue(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
+import { createHash } from "node:crypto";

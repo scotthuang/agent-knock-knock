@@ -109,6 +109,7 @@ test("fork plan uses OpenClaw summary confirmation instead of direct raw rollout
       cwd: session.cwd,
       status: "0"
     }],
+    turns: [],
     truncated: false
   };
 

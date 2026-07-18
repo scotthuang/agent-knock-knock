@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   buildForkContextPackage,
   codexSessionsFromThreadRows,
@@ -127,6 +128,15 @@ test("Codex rollout parser extracts bounded user assistant and command context",
       }
     }),
     JSON.stringify({
+      timestamp: "2026-06-20T14:05:39.000Z",
+      type: "event_msg",
+      payload: {
+        type: "task_complete",
+        turn_id: "turn-1",
+        last_agent_message: "已经拉取并总结完成"
+      }
+    }),
+    JSON.stringify({
       timestamp: "2026-06-20T14:05:40.000Z",
       type: "response_item",
       payload: {
@@ -154,7 +164,41 @@ test("Codex rollout parser extracts bounded user assistant and command context",
     status: "0",
     timestamp: "2026-06-20T14:05:40.000Z"
   }]);
+  assert.deepEqual(excerpt.turns, [{
+    userText: "帮我拉取一下最新的代码",
+    userTextHash: createHash("sha256").update("帮我拉取一下最新的代码").digest("hex"),
+    userTimestamp: "2026-06-20T14:05:25.758Z",
+    turnId: "turn-1",
+    completedAt: "2026-06-20T14:05:39.000Z",
+    lastAssistantMessage: "已经拉取并总结完成"
+  }]);
   assert.equal(excerpt.skippedLines, 1);
+});
+
+test("Codex rollout parser retains the latest bounded task-completion turns", () => {
+  const rollout = ["first", "second", "third"].flatMap((message, index) => [
+    JSON.stringify({
+      timestamp: `2026-06-20T14:0${index}:00.000Z`,
+      type: "event_msg",
+      payload: { type: "user_message", message }
+    }),
+    JSON.stringify({
+      timestamp: `2026-06-20T14:0${index}:30.000Z`,
+      type: "event_msg",
+      payload: {
+        type: "task_complete",
+        turn_id: `turn-${index}`,
+        last_agent_message: `${message} complete`
+      }
+    })
+  ]).join("\n");
+
+  const excerpt = parseCodexRolloutJsonl(rollout, { maxTurns: 2 });
+  assert.deepEqual(excerpt.turns.map((turn) => [turn.userText, turn.lastAssistantMessage]), [
+    ["second", "second complete"],
+    ["third", "third complete"]
+  ]);
+  assert.equal(excerpt.truncated, true);
 });
 
 test("Codex rollout parser discovers the native model for ACPX resume", () => {
