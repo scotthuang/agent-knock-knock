@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.44 - 2026-07-19
+
+### Fixed
+
+- Retry local OpenClaw plugin installation with the supported `--force` flow when OpenClaw explicitly requires trust confirmation for a reviewed local source.
+
 ## 0.2.43 - 2026-07-19
 
 ### Added
