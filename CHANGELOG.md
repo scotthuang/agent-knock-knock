@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.45 - 2026-07-20
+
+### Added
+
+- Persist terminal callback delivery state and add bounded automatic retries plus `AKK retry-callback` / `agent_knock_knock_retry_callback` for idempotent manual recovery after delivery failures.
+
+### Fixed
+
+- Require a request-hash-matched Codex rollout `task_complete` (or terminal-screen completion fallback) before closing terminal bridge tasks, preventing same-workspace assistant progress from another or unfinished turn from being reported as done.
+- Keep terminal bridge tasks in `callback_pending` or `callback_failed` until their OpenClaw callback is actually delivered, and close them only after successful delivery.
+
 ## 0.2.44 - 2026-07-19
 
 ### Fixed

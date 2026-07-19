@@ -1023,7 +1023,7 @@ test("terminal bridge monitor trusts matching task_complete despite stale workin
   }
 });
 
-test("terminal bridge monitor rejects task_complete for a different request boundary", () => {
+test("terminal bridge monitor rejects low-confidence assistant and task_complete for a different request", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-bridge-progress-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -1123,7 +1123,7 @@ test("terminal bridge monitor rejects task_complete for a different request boun
       })]),
       "--terminal-screens-json",
       JSON.stringify({
-        "codex-work:0.1": "• Waited for background terminal · git merge --ff-only origin/main\n"
+        "codex-work:0.1": "› \n"
       }),
       "--rollouts-json",
       JSON.stringify({ [rolloutPath]: rollout })
@@ -1367,6 +1367,15 @@ test("renew restarts a stalled terminal bridge without input and completion call
         timestamp: "2099-07-04T00:01:00.000Z",
         type: "event_msg",
         payload: { type: "agent_message", message: "The long task is complete." }
+      }),
+      JSON.stringify({
+        timestamp: "2099-07-04T00:01:01.000Z",
+        type: "event_msg",
+        payload: {
+          type: "task_complete",
+          turn_id: "turn-renewed-task",
+          last_agent_message: "The long task is complete."
+        }
       })
     ].join("\n");
     const monitorArgs = [

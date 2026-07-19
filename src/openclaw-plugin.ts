@@ -157,6 +157,21 @@ const renewParameters = {
   }
 };
 
+const retryCallbackParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["conversation_id"],
+  properties: {
+    conversation_id: {
+      type: "string",
+      description: "AKK-managed conversation whose persisted callback delivery is pending or failed."
+    },
+    storeDir: {
+      type: "string"
+    }
+  }
+};
+
 const statusParameters = {
   type: "object",
   additionalProperties: false,
@@ -598,6 +613,18 @@ export default definePluginEntry({
     });
 
     registerCliTool(api, {
+      name: "agent_knock_knock_retry_callback",
+      description: "Retry a persisted AKK callback that failed before reaching OpenClaw. The original callback message id is reused for idempotent delivery, and the task closes only after delivery succeeds.",
+      parameters: retryCallbackParameters,
+      buildArgs: (params) => {
+        const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+        const args = ["retry-callback", "--conversation", requiredString(params.conversation_id, "conversation_id")];
+        pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(config.storeDir));
+        return args;
+      }
+    });
+
+    registerCliTool(api, {
       name: "agent_knock_knock_cancel",
       description: "Request cancellation for an existing Agent Knock Knock Codex, Claude, or Cursor session. Delegated sessions use cooperative ACPX cancellation. Terminal-controlled sessions send Control-C to the controlled terminal pane. This does not close the AKK session; use close when the session should no longer be reused.",
       parameters: cancelParameters,
@@ -741,6 +768,13 @@ async function handleAkkCommand(api, ctx) {
       const result = runCli(api, args);
       return { text: formatRenewCommandResult(result) };
     }
+    if (parsed.action === "retry-callback" || parsed.action === "retry") {
+      const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+      const args = ["retry-callback", "--conversation", parsed.conversationId];
+      pushOptional(args, "--store-dir", stringValue(config.storeDir));
+      const result = runCli(api, args);
+      return { text: formatRetryCallbackCommandResult(result) };
+    }
     if (parsed.action === "cancel") {
       const args = [
         "cancel",
@@ -826,6 +860,10 @@ function parseAkkCommand(args) {
     }
     return { action: "renew", conversationId, minutes: minutes || undefined };
   }
+  if (action === "retry-callback" || action === "retry") {
+    const { token: conversationId } = takeRequiredToken(rest, "Usage: /akk retry-callback <conversation-id>");
+    return { action: "retry-callback", conversationId };
+  }
   if (action === "recover") {
     const { token: conversationId } = takeRequiredToken(rest, "Usage: /akk recover <conversation-id>");
     return { action: "recover", conversationId };
@@ -877,6 +915,7 @@ function akkUsageText() {
     "/akk send <conversation-id> <message>",
     "/akk cancel <conversation-id>",
     "/akk renew <conversation-id> [minutes]",
+    "/akk retry-callback <conversation-id>",
     "/akk recover <conversation-id>",
     "/akk close <conversation-id> [reason]"
   ].join("\n");
@@ -932,6 +971,14 @@ function formatRenewCommandResult(result) {
     `inactivity timeout: ${result.agent_timeout_minutes ?? "unknown"} minutes`,
     `hard lifetime: ${result.agent_hard_timeout_minutes ?? "unknown"} minutes`,
     "No message or key was sent to the coding agent."
+  ].join("\n");
+}
+
+function formatRetryCallbackCommandResult(result) {
+  return [
+    `AKK callback delivered: ${result.conversation?.conversation_id ?? "unknown"}`,
+    `status: ${result.conversation?.status ?? "unknown"}`,
+    `attempts: ${result.conversation?.callback_delivery?.attempts ?? "unknown"}`
   ].join("\n");
 }
 

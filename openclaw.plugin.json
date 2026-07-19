@@ -16,6 +16,7 @@
       "agent_knock_knock_describe",
       "agent_knock_knock_send",
       "agent_knock_knock_renew",
+      "agent_knock_knock_retry_callback",
       "agent_knock_knock_cancel",
       "agent_knock_knock_recover",
       "agent_knock_knock_close",
@@ -41,6 +42,9 @@
       "optional": true
     },
     "agent_knock_knock_renew": {
+      "optional": true
+    },
+    "agent_knock_knock_retry_callback": {
       "optional": true
     },
     "agent_knock_knock_cancel": {

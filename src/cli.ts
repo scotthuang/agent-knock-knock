@@ -61,6 +61,7 @@ const DEFAULT_IDLE_TIMEOUT_MINUTES = 10080;
 const DEFAULT_AGENT_TIMEOUT_MINUTES = 60;
 const DEFAULT_AGENT_HARD_TIMEOUT_MINUTES = 720;
 const DEFAULT_MONITOR_POLL_INTERVAL_MS = 5000;
+const CALLBACK_RETRY_DELAYS_MS = [5000, 15000, 60000, 60000];
 const DEFAULT_CODEX_ACPX_AGENT_COMMAND = "npx -y @agentclientprotocol/codex-acp@^1.1.0";
 
 class InlineCodexSessionAdapter implements CodexLocalSessionAdapter {
@@ -169,6 +170,8 @@ async function runCommand(commandName, options) {
     runDoctor(options);
   } else if (commandName === "callback") {
     runCallback(options);
+  } else if (commandName === "retry-callback") {
+    runRetryCallback(options);
   } else if (commandName === "monitor") {
     await runMonitor(options);
   } else if (commandName === "agent") {
@@ -4196,6 +4199,9 @@ function runClose(options) {
 }
 
 async function runMonitor(options) {
+  if (options.callbackRetry) {
+    return runCallbackRetryMonitor(options);
+  }
   if (options.terminalBridge) {
     return await runTerminalBridgeMonitor(options);
   }
@@ -4331,6 +4337,73 @@ async function runMonitor(options) {
     }
 
     sleepSync(pollIntervalMs);
+  }
+}
+
+function startCallbackRetryMonitor({ statePath }) {
+  const child = spawn(process.execPath, [
+    new URL(import.meta.url).pathname,
+    "monitor",
+    "--callback-retry",
+    "--state",
+    statePath
+  ], {
+    detached: true,
+    stdio: "ignore",
+    cwd: process.cwd(),
+    env: process.env
+  });
+  child.unref();
+  return child;
+}
+
+function runCallbackRetryMonitor(options) {
+  const statePath = expandHome(required(options.state, "--state is required"));
+  while (true) {
+    const conversation = loadState(statePath);
+    const callbackDelivery = isRecord(conversation.callback_delivery)
+      ? conversation.callback_delivery
+      : undefined;
+    const attempts = Number(callbackDelivery?.attempts ?? 0);
+    if (conversation.status !== "callback_failed" || !isRecord(callbackDelivery?.message)) {
+      return;
+    }
+    if (attempts > CALLBACK_RETRY_DELAYS_MS.length) {
+      return;
+    }
+    const delayMs = CALLBACK_RETRY_DELAYS_MS[Math.max(0, attempts - 1)];
+    sleepSync(delayMs);
+
+    const releaseLock = acquireFileLock(`${statePath}.lock`);
+    try {
+      const current = loadState(statePath);
+      const currentDelivery = isRecord(current.callback_delivery)
+        ? current.callback_delivery
+        : undefined;
+      if (current.status !== "callback_failed" || !isRecord(currentDelivery?.message)) {
+        return;
+      }
+      try {
+        runLockedCallback({
+          statePath,
+          messageJson: JSON.stringify(currentDelivery.message),
+          gatewayMethod: stringValue(currentDelivery.gateway_method) ?? current.gateway_method,
+          gatewaySession: stringValue(currentDelivery.gateway_session) ?? current.gateway_session,
+          openclawSession: current.openclaw_session,
+          openclawBin: stringValue(currentDelivery.openclaw_bin) ?? current.openclaw_bin,
+          gatewayUrl: stringValue(currentDelivery.gateway_url) ?? current.gateway_url,
+          token: current.gateway_token,
+          closeTerminalBridgeOnDone: currentDelivery.close_terminal_bridge_on_done === true,
+          retryPending: true,
+          disableCallbackRetry: true
+        });
+        return;
+      } catch {
+        // The failed attempt is persisted by runLockedCallback; continue with bounded backoff.
+      }
+    } finally {
+      releaseLock();
+    }
   }
 }
 
@@ -4565,13 +4638,10 @@ async function runTerminalBridgeMonitor(options) {
           startedAt
         })
       : undefined;
-    const assistantMessage = contextMatch?.context
-      ? latestAssistantAfter(contextMatch.context, startedAt)
-      : undefined;
-    const rolloutFingerprint = rolloutCompletion || assistantMessage
+    const rolloutFingerprint = rolloutCompletion
       ? terminalBridgeActivityFingerprint(JSON.stringify({
-          text: rolloutCompletion?.text ?? assistantMessage?.text,
-          timestamp: rolloutCompletion?.timestamp ?? assistantMessage?.timestamp,
+          text: rolloutCompletion.text,
+          timestamp: rolloutCompletion.timestamp,
           turn_id: rolloutCompletion?.turnId
         }))
       : undefined;
@@ -4610,7 +4680,7 @@ async function runTerminalBridgeMonitor(options) {
     }
 
     const terminalIdle = terminalStatus.activity_state === "idle";
-    const screenMessage = !rolloutCompletion && !assistantMessage && terminalIdle
+    const screenMessage = !rolloutCompletion && terminalIdle
       ? terminalBridgeScreenMessage({
           conversation,
           nativeTakeover,
@@ -4618,12 +4688,10 @@ async function runTerminalBridgeMonitor(options) {
           screenChangedSinceSend
         })
       : undefined;
-    const completion = rolloutCompletion ?? (terminalIdle ? assistantMessage ?? screenMessage : undefined);
+    const completion = rolloutCompletion ?? (terminalIdle ? screenMessage : undefined);
     const completionMatch = rolloutCompletion
       ? "rollout_task_complete"
-      : assistantMessage
-        ? contextMatch?.match
-        : "terminal_screen";
+      : "terminal_screen";
     const completionFingerprint = completion
       ? createHash("sha256")
         .update(JSON.stringify({
@@ -4660,7 +4728,7 @@ async function runTerminalBridgeMonitor(options) {
           source: "terminal_bridge",
           terminal_control: terminalControl,
           codex_session: contextMatch?.context.source,
-          confidence: rolloutCompletion || assistantMessage ? contextMatch?.confidence : "screen_only",
+          confidence: rolloutCompletion ? contextMatch?.confidence : "screen_only",
           match: completionMatch,
           assistant_timestamp: completion?.timestamp,
           rollout_turn_id: rolloutCompletion?.turnId,
@@ -4951,22 +5019,6 @@ async function terminalBridgeCodexContext({ conversation, nativeTakeover, option
     match: sessions.length === 1 ? "cwd" : "cwd_latest",
     confidence: sessions.length === 1 ? "medium" : "low"
   };
-}
-
-function latestAssistantAfter(context: ForkContextPackage, startedAt: string | undefined) {
-  const threshold = startedAt ? Date.parse(startedAt) : undefined;
-  return [...visibleRolloutMessages(context)]
-    .reverse()
-    .find((message) => {
-      if (message.role !== "assistant") {
-        return false;
-      }
-      if (!Number.isFinite(threshold)) {
-        return true;
-      }
-      const messageTime = message.timestamp ? Date.parse(message.timestamp) : NaN;
-      return Number.isFinite(messageTime) && messageTime >= Number(threshold);
-    });
 }
 
 function latestCompletedRolloutTurn({ context, conversation, nativeTakeover, startedAt }) {
@@ -5264,20 +5316,68 @@ function runCallback(options) {
   }
 }
 
+function runRetryCallback(options) {
+  const { conversation, statePath } = loadConversationFromOptions(options);
+  const callbackDelivery = isRecord(conversation.callback_delivery)
+    ? conversation.callback_delivery
+    : undefined;
+  if (!["callback_pending", "callback_failed"].includes(conversation.status)) {
+    throw new Error(
+      `cannot retry callback for ${conversation.conversation_id}; conversation is ${conversation.status}`
+    );
+  }
+  if (!callbackDelivery || !isRecord(callbackDelivery.message)) {
+    throw new Error(`cannot retry callback for ${conversation.conversation_id}; pending callback is missing`);
+  }
+
+  const releaseLock = acquireFileLock(`${statePath}.lock`);
+  try {
+    runLockedCallback({
+      ...options,
+      statePath,
+      messageJson: JSON.stringify(callbackDelivery.message),
+      gatewayMethod: stringValue(callbackDelivery.gateway_method) ?? conversation.gateway_method,
+      gatewaySession: stringValue(callbackDelivery.gateway_session) ?? conversation.gateway_session,
+      openclawSession: conversation.openclaw_session,
+      openclawBin: stringValue(callbackDelivery.openclaw_bin) ?? conversation.openclaw_bin,
+      gatewayUrl: stringValue(callbackDelivery.gateway_url) ?? conversation.gateway_url,
+      token: stringValue(callbackDelivery.gateway_token) ?? conversation.gateway_token,
+      closeTerminalBridgeOnDone: callbackDelivery.close_terminal_bridge_on_done === true,
+      retryPending: true
+    });
+  } finally {
+    releaseLock();
+  }
+}
+
 function runLockedCallback(options) {
   const messageInput = required(options.messageJson, "--message-json is required");
   const logPath = expandHome(options.log ?? logPathForStatePath(options.statePath));
   const conversation = loadState(options.statePath);
   const executor = executorForConversation(conversation);
-  const message = extractStructuredMessage({
-    conversation,
-    input: messageInput,
-    defaultFrom: executor.actor,
-    defaultTo: "openclaw"
-  });
+  const message = options.retryPending === true
+    ? parseMessageJson(messageInput)
+    : extractStructuredMessage({
+        conversation,
+        input: messageInput,
+        defaultFrom: executor.actor,
+        defaultTo: "openclaw"
+      });
+  if (message.conversation_id !== conversation.conversation_id) {
+    throw new Error(
+      `message.conversation_id ${message.conversation_id} does not match conversation ${conversation.conversation_id}`
+    );
+  }
 
   const existingEvents = readExistingEvents(logPath);
-  if (isDuplicateMessage(existingEvents, message)) {
+  const callbackDelivery = isRecord(conversation.callback_delivery)
+    ? conversation.callback_delivery
+    : undefined;
+  const retryingPending = options.retryPending === true &&
+    isRecord(callbackDelivery?.message) &&
+    callbackDelivery.message.id === message.id &&
+    ["pending", "failed"].includes(String(callbackDelivery.status ?? ""));
+  if (isDuplicateMessage(existingEvents, message) && !retryingPending) {
     runtimeLog("info", "callback_duplicate", {
       conversation_id: conversation.conversation_id,
       agent: executor.kind,
@@ -5298,20 +5398,46 @@ function runLockedCallback(options) {
     return;
   }
 
-  let nextConversation = applyMessageToConversation(conversation, message);
-  if (message.type === "done" && options.closeTerminalBridgeOnDone === true) {
+  const closeTerminalBridgeOnDone = message.type === "done" &&
+    options.closeTerminalBridgeOnDone === true;
+  const requiresDelivery = Boolean(options.gatewayMethod) || options.recordOnly !== true;
+  const deliveryAttempt = Number(callbackDelivery?.attempts ?? 0) + 1;
+  let nextConversation = retryingPending
+    ? conversation
+    : applyMessageToConversation(conversation, message);
+  if (!retryingPending) {
+    appendEvent(logPath, messageEvent(message));
+  }
+  if (closeTerminalBridgeOnDone && requiresDelivery) {
     const now = new Date().toISOString();
     nextConversation = {
       ...nextConversation,
-      status: "closed" as const,
-      closed_at: now,
-      close_reason: "terminal bridge task completed",
+      status: "callback_pending" as const,
+      callback_delivery: {
+        status: "pending",
+        message,
+        attempts: deliveryAttempt,
+        created_at: stringValue(callbackDelivery?.created_at) ?? now,
+        last_attempt_at: now,
+        gateway_method: options.gatewayMethod,
+        gateway_session: options.gatewaySession ?? options.openclawSession ?? conversation.openclaw_session,
+        gateway_url: options.gatewayUrl ?? conversation.gateway_url,
+        openclaw_bin: options.openclawBin ?? conversation.openclaw_bin,
+        close_terminal_bridge_on_done: true
+      },
       updated_at: now
     };
     delete nextConversation.idle_since;
+    delete nextConversation.closed_at;
+    delete nextConversation.close_reason;
+    appendEvent(logPath, {
+      ts: now,
+      conversation_id: conversation.conversation_id,
+      event: retryingPending ? "callback_delivery_retry_started" : "callback_delivery_pending",
+      message_id: message.id,
+      attempt: deliveryAttempt
+    });
   }
-
-  appendEvent(logPath, messageEvent(message));
   saveState(options.statePath, nextConversation);
   runtimeLog("info", "callback_received", {
     conversation_id: conversation.conversation_id,
@@ -5327,14 +5453,117 @@ function runLockedCallback(options) {
     message: textSummary(message.body)
   });
 
-  const result = {
-    conversation: nextConversation,
-    message,
-    budget: budgetAction(nextConversation),
-    delivered: false,
-    duplicate: false
-  };
+  if (options.recordOnly) {
+    runtimeLog("info", "callback_recorded_only", {
+      conversation_id: conversation.conversation_id,
+      status: nextConversation.status
+    });
+    printJson({
+      conversation: nextConversation,
+      message,
+      budget: budgetAction(nextConversation),
+      delivered: false,
+      duplicate: false
+    });
+    return;
+  }
+  try {
+    const deliveryKind = deliverCallbackToOpenClaw({
+      options,
+      statePath: options.statePath,
+      logPath,
+      conversation: nextConversation,
+      message
+    });
+    const deliveredAt = new Date().toISOString();
+    let deliveredConversation = nextConversation;
+    if (closeTerminalBridgeOnDone) {
+      deliveredConversation = {
+        ...nextConversation,
+        status: "closed" as const,
+        closed_at: deliveredAt,
+        close_reason: "terminal bridge task completed",
+        callback_delivery: {
+          ...(isRecord(nextConversation.callback_delivery) ? nextConversation.callback_delivery : {}),
+          status: "delivered",
+          delivered_at: deliveredAt,
+          last_error: undefined
+        },
+        updated_at: deliveredAt
+      };
+      delete deliveredConversation.idle_since;
+      saveState(options.statePath, deliveredConversation);
+      appendEvent(logPath, {
+        ts: deliveredAt,
+        conversation_id: conversation.conversation_id,
+        event: "callback_delivery_succeeded",
+        message_id: message.id,
+        attempt: deliveryAttempt,
+        status: "closed"
+      });
+    }
+    printJson({
+      conversation: deliveredConversation,
+      message,
+      budget: budgetAction(deliveredConversation),
+      delivered: true,
+      duplicate: false,
+      delivery: deliveryKind
+    });
+  } catch (error) {
+    if (closeTerminalBridgeOnDone) {
+      const failedAt = new Date().toISOString();
+      const failedConversation = {
+        ...nextConversation,
+        status: "callback_failed" as const,
+        callback_delivery: {
+          ...(isRecord(nextConversation.callback_delivery) ? nextConversation.callback_delivery : {}),
+          status: "failed",
+          failed_at: failedAt,
+          last_error: error instanceof Error ? error.message : String(error)
+        },
+        updated_at: failedAt
+      };
+      saveState(options.statePath, failedConversation);
+      appendEvent(logPath, {
+        ts: failedAt,
+        conversation_id: conversation.conversation_id,
+        event: "callback_delivery_failed",
+        message_id: message.id,
+        attempt: deliveryAttempt,
+        error: failedConversation.callback_delivery.last_error
+      });
+      if (
+        options.retryPending !== true &&
+        options.disableCallbackRetry !== true &&
+        deliveryAttempt <= CALLBACK_RETRY_DELAYS_MS.length
+      ) {
+        const retryMonitor = startCallbackRetryMonitor({ statePath: options.statePath });
+        const retryDelayMs = CALLBACK_RETRY_DELAYS_MS[Math.max(0, deliveryAttempt - 1)];
+        const retryState = {
+          ...failedConversation,
+          callback_delivery: {
+            ...failedConversation.callback_delivery,
+            retry_monitor_pid: retryMonitor.pid ?? null,
+            next_attempt_at: new Date(Date.now() + retryDelayMs).toISOString()
+          }
+        };
+        saveState(options.statePath, retryState);
+        appendEvent(logPath, {
+          ts: new Date().toISOString(),
+          conversation_id: conversation.conversation_id,
+          event: "callback_retry_monitor_launched",
+          message_id: message.id,
+          pid: retryMonitor.pid ?? null,
+          next_attempt_at: retryState.callback_delivery.next_attempt_at
+        });
+      }
+    }
+    throw error;
+  }
+}
 
+function deliverCallbackToOpenClaw({ options, statePath, logPath, conversation, message }): string {
   if (options.gatewayMethod) {
     const delivery = deliverToGatewayMethod({
       method: options.gatewayMethod,
@@ -5342,32 +5571,20 @@ function runLockedCallback(options) {
       gatewayUrl: options.gatewayUrl,
       token: options.token,
       sessionKey: options.gatewaySession ?? options.openclawSession ?? conversation.openclaw_session,
-      statePath: options.statePath,
+      statePath,
       logPath,
-      conversation: nextConversation,
+      conversation,
       message
     });
-    appendEvent(logPath, {
-      ts: new Date().toISOString(),
-      conversation_id: conversation.conversation_id,
+    recordCallbackProcessDelivery({
+      logPath,
+      conversation,
+      message,
       event: "callback_gateway_method_delivery",
-      from: message.from,
-      to: "openclaw",
-      round: message.round,
-      method: options.gatewayMethod,
-      status: delivery.status,
-      stdout: delivery.stdout,
-      stderr: delivery.stderr
+      runtimeEvent: "callback_gateway_method_delivery",
+      delivery,
+      detail: { method: options.gatewayMethod }
     });
-    runtimeLog("info", "callback_gateway_method_delivery", {
-      conversation_id: conversation.conversation_id,
-      method: options.gatewayMethod,
-      status: delivery.status,
-      failure_kind: classifyProcessFailure(delivery),
-      stdout: textSummary(delivery.stdout),
-      stderr: textSummary(delivery.stderr)
-    });
-
     if (delivery.status !== 0) {
       throw new Error(delivery.stderr || delivery.stdout || `gateway method delivery failed with status ${delivery.status}`);
     }
@@ -5375,93 +5592,52 @@ function runLockedCallback(options) {
     const gatewayPayload = parseOptionalJson(delivery.stdout);
     const chatSendParams = isRecord(gatewayPayload?.chat_send) ? gatewayPayload.chat_send : undefined;
     const sessionSendParams = isRecord(gatewayPayload?.session_send) ? gatewayPayload.session_send : undefined;
-    let chatSendDelivery;
-    let sessionSendDelivery;
     if (chatSendParams) {
-      chatSendDelivery = deliverToChatSend({
+      const chatSendDelivery = deliverToChatSend({
         openclawBin: options.openclawBin,
         gatewayUrl: options.gatewayUrl,
         token: options.token,
         params: chatSendParams
       });
-      appendEvent(logPath, {
-        ts: new Date().toISOString(),
-        conversation_id: conversation.conversation_id,
+      recordCallbackProcessDelivery({
+        logPath,
+        conversation,
+        message,
         event: "callback_chat_send_delivery",
-        from: message.from,
-        to: "openclaw",
-        round: message.round,
-        status: chatSendDelivery.status,
-        stdout: chatSendDelivery.stdout,
-        stderr: chatSendDelivery.stderr
+        runtimeEvent: "callback_chat_send_delivery",
+        delivery: chatSendDelivery
       });
-      runtimeLog("info", "callback_chat_send_delivery", {
-        conversation_id: conversation.conversation_id,
-        status: chatSendDelivery.status,
-        failure_kind: classifyProcessFailure(chatSendDelivery),
-        stdout: textSummary(chatSendDelivery.stdout),
-        stderr: textSummary(chatSendDelivery.stderr)
-      });
-
       if (chatSendDelivery.status !== 0) {
         throw new Error(chatSendDelivery.stderr || chatSendDelivery.stdout || `chat callback delivery failed with status ${chatSendDelivery.status}`);
       }
-    } else if (sessionSendParams) {
-      sessionSendDelivery = deliverToSessionSend({
+      return "gateway_method+chat_send";
+    }
+    if (sessionSendParams) {
+      const sessionSendDelivery = deliverToSessionSend({
         openclawBin: options.openclawBin,
         gatewayUrl: options.gatewayUrl,
         token: options.token,
         params: sessionSendParams
       });
-      appendEvent(logPath, {
-        ts: new Date().toISOString(),
-        conversation_id: conversation.conversation_id,
+      recordCallbackProcessDelivery({
+        logPath,
+        conversation,
+        message,
         event: "callback_session_send_delivery",
-        from: message.from,
-        to: "openclaw",
-        round: message.round,
-        status: sessionSendDelivery.status,
-        stdout: sessionSendDelivery.stdout,
-        stderr: sessionSendDelivery.stderr
+        runtimeEvent: "callback_session_send_delivery",
+        delivery: sessionSendDelivery
       });
-      runtimeLog("info", "callback_session_send_delivery", {
-        conversation_id: conversation.conversation_id,
-        status: sessionSendDelivery.status,
-        failure_kind: classifyProcessFailure(sessionSendDelivery),
-        stdout: textSummary(sessionSendDelivery.stdout),
-        stderr: textSummary(sessionSendDelivery.stderr)
-      });
-
       if (sessionSendDelivery.status !== 0) {
         throw new Error(sessionSendDelivery.stderr || sessionSendDelivery.stdout || `session callback delivery failed with status ${sessionSendDelivery.status}`);
       }
+      return "gateway_method+sessions_send";
     }
-
-    printJson({
-      ...result,
-      delivered: true,
-      delivery: chatSendDelivery
-        ? "gateway_method+chat_send"
-        : sessionSendDelivery
-          ? "gateway_method+sessions_send"
-          : "gateway_method"
-    });
-    return;
-  }
-
-  if (options.recordOnly) {
-    runtimeLog("info", "callback_recorded_only", {
-      conversation_id: conversation.conversation_id,
-      status: nextConversation.status
-    });
-    printJson(result);
-    return;
+    return "gateway_method";
   }
 
   const gatewayUrl = options.gatewayUrl ?? conversation.gateway_url;
   const token = options.token ?? conversation.gateway_token;
   const openclawSession = options.openclawSession ?? conversation.openclaw_session;
-
   if (!gatewayUrl) {
     throw new Error("--gateway-url is required unless state has gateway_url");
   }
@@ -5471,34 +5647,41 @@ function runLockedCallback(options) {
   if (!openclawSession) {
     throw new Error("--openclaw-session is required unless state has openclaw_session");
   }
-
   const delivery = deliverToOpenClaw({ gatewayUrl, token, openclawSession, message });
+  recordCallbackProcessDelivery({
+    logPath,
+    conversation,
+    message,
+    event: "callback_delivery",
+    runtimeEvent: "callback_delivery",
+    delivery
+  });
+  if (delivery.status !== 0) {
+    throw new Error(delivery.stderr || delivery.stdout || `callback delivery failed with status ${delivery.status}`);
+  }
+  return "acpx";
+}
+
+function recordCallbackProcessDelivery({ logPath, conversation, message, event, runtimeEvent, delivery, detail = {} }) {
   appendEvent(logPath, {
     ts: new Date().toISOString(),
     conversation_id: conversation.conversation_id,
-    event: "callback_delivery",
+    event,
     from: message.from,
     to: "openclaw",
     round: message.round,
+    ...detail,
     status: delivery.status,
     stdout: delivery.stdout,
     stderr: delivery.stderr
   });
-  runtimeLog("info", "callback_delivery", {
+  runtimeLog("info", runtimeEvent, {
     conversation_id: conversation.conversation_id,
+    ...detail,
     status: delivery.status,
     failure_kind: classifyProcessFailure(delivery),
     stdout: textSummary(delivery.stdout),
     stderr: textSummary(delivery.stderr)
-  });
-
-  if (delivery.status !== 0) {
-    throw new Error(delivery.stderr || delivery.stdout || `callback delivery failed with status ${delivery.status}`);
-  }
-
-  printJson({
-    ...result,
-    delivered: true
   });
 }
 
@@ -6964,6 +7147,7 @@ function usage() {
   agent-knock-knock approve --conversation <id>
   agent-knock-knock cancel --conversation <id> [--all-proxy <url>]
   agent-knock-knock renew --conversation <id> [--minutes <inactivity-minutes>]
+  agent-knock-knock retry-callback --conversation <id> [--store-dir <dir>]
   agent-knock-knock recover --conversation <id> [--session <name>] [--all-proxy <url>]
   agent-knock-knock close --conversation <id> [--reason <text>]
   agent-knock-knock install-openclaw [--openclaw-bin <path>] [--skill-path <path>] [--skill-only] [--no-restart]

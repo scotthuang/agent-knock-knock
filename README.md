@@ -140,6 +140,7 @@ akk describe <conversation-id>
 akk send <conversation-id>: continue with the smaller implementation
 akk cancel <conversation-id>
 akk renew <conversation-id> --minutes 180
+akk retry-callback <conversation-id>
 akk recover <conversation-id>
 akk close <conversation-id>
 AKK terminal takeover Codex <native-session-id>
@@ -158,6 +159,7 @@ Surfaces that support OpenClaw native commands can use the same workflow through
 /akk send <conversation-id> <message>
 /akk cancel <conversation-id>
 /akk renew <conversation-id> [minutes]
+/akk retry-callback <conversation-id>
 /akk close <conversation-id> [reason]
 ```
 
@@ -230,6 +232,7 @@ AKK list
 - Background sends to terminal-controlled Codex sessions use terminal bridge mode: AKK types only the user-facing task text into the tmux pane, monitors Codex rollout/terminal state, and delivers the OpenClaw callback itself when it observes completion.
 - Terminal bridge timeout is activity-aware. Visible Codex work, active background terminals, rollout updates, and meaningful terminal changes extend the inactivity deadline. A separate hard lifetime still stops permanently running monitors.
 - If a live terminal task is marked `stalled`, `AKK renew <conversation-id> --minutes <minutes>` restarts monitoring without sending text or keys to Codex. Renewal preserves the original callback destination and task hard deadline.
+- Terminal callbacks close their AKK task only after OpenClaw delivery succeeds. Transient failures retry with bounded backoff; persistent failures remain visible as `callback_failed` and can be retried idempotently with `AKK retry-callback <conversation-id>`.
 - `AKK status <terminal-controlled-id>` is the unified way to inspect current terminal output. AKK captures the terminal pane internally and returns `terminal_screen`; there is no separate public screen-capture command.
 - `AKK describe <id>` summarizes what a listed session is about. AKK-managed sessions use saved conversation history; native and terminal-controlled Codex sessions use exact Codex rollout history when a session id is available, fall back to cwd-matched rollout history when needed, and otherwise report only visible terminal/process context with lower confidence.
 

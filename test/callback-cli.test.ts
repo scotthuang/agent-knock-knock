@@ -270,6 +270,171 @@ console.log(JSON.stringify({ ok: true }));
   }
 });
 
+test("terminal bridge callback stays retryable until gateway delivery succeeds", () => {
+  const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-retry-"));
+  const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-openclaw-retry-"));
+  const allowDeliveryPath = path.join(fakeBinDir, "allow-delivery");
+  const callsPath = path.join(fakeBinDir, "calls.ndjson");
+
+  try {
+    const fakeOpenClaw = path.join(fakeBinDir, "openclaw");
+    fs.writeFileSync(
+      fakeOpenClaw,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(args) + "\\n", "utf8");
+if (!fs.existsSync(${JSON.stringify(allowDeliveryPath)})) {
+  console.error("gateway temporarily unavailable");
+  process.exit(1);
+}
+console.log(JSON.stringify({ ok: true }));
+`,
+      "utf8"
+    );
+    fs.chmodSync(fakeOpenClaw, 0o755);
+
+    const created = runCli([
+      "new",
+      "--agent",
+      "codex",
+      "--request",
+      "Retry terminal callback",
+      "--store-dir",
+      storeDir,
+      "--openclaw-session",
+      "agent:main:main"
+    ]);
+    const message = {
+      id: "msg-stable-retry-id",
+      ts: "2026-07-20T00:00:00.000Z",
+      conversation_id: created.conversation.conversation_id,
+      from: "codex",
+      to: "openclaw",
+      type: "done",
+      requires_response: false,
+      round: 1,
+      max_rounds: 50,
+      body: "Finished exactly once.",
+      metadata: {}
+    };
+    const failed = spawnSync(process.execPath, [
+      binPath,
+      "callback",
+      "--state",
+      created.paths.statePath,
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      "agent:main:main",
+      "--openclaw-bin",
+      fakeOpenClaw,
+      "--disable-callback-retry",
+      "--close-terminal-bridge-on-done",
+      "--message-json",
+      JSON.stringify(message)
+    ], { encoding: "utf8" });
+    assert.notEqual(failed.status, 0);
+    assert.match(failed.stderr, /gateway temporarily unavailable/);
+
+    const failedState = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
+    assert.equal(failedState.status, "callback_failed");
+    assert.equal(failedState.closed_at, undefined);
+    assert.equal(failedState.callback_delivery.status, "failed");
+    assert.equal(failedState.callback_delivery.attempts, 1);
+    const persistedMessageId = failedState.callback_delivery.message.id;
+    assert.match(persistedMessageId, /^msg-/);
+
+    fs.writeFileSync(allowDeliveryPath, "yes", "utf8");
+    const retried = runCli([
+      "retry-callback",
+      "--state",
+      created.paths.statePath
+    ]);
+    assert.equal(retried.delivered, true);
+    assert.equal(retried.conversation.status, "closed");
+    assert.equal(retried.conversation.close_reason, "terminal bridge task completed");
+    assert.equal(retried.conversation.callback_delivery.status, "delivered");
+    assert.equal(retried.conversation.callback_delivery.attempts, 2);
+    assert.equal(retried.message.id, persistedMessageId);
+
+    const events = fs.readFileSync(created.paths.logPath, "utf8")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line));
+    assert.equal(events.filter((event) =>
+      event.event === "message" && (event.message?.id ?? event.id) === persistedMessageId
+    ).length, 1);
+    assert.equal(events.some((event) => event.event === "callback_delivery_failed"), true);
+    assert.equal(events.some((event) => event.event === "callback_delivery_retry_started"), true);
+    assert.equal(events.some((event) => event.event === "callback_delivery_succeeded"), true);
+    assert.equal(fs.readFileSync(callsPath, "utf8").trim().split(/\r?\n/).length, 2);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(fakeBinDir, { recursive: true, force: true });
+  }
+});
+
+test("terminal bridge callback retries transient gateway failure automatically", async () => {
+  const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-auto-retry-"));
+  const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-openclaw-auto-retry-"));
+  const callsPath = path.join(fakeBinDir, "calls.ndjson");
+  try {
+    const fakeOpenClaw = path.join(fakeBinDir, "openclaw");
+    fs.writeFileSync(
+      fakeOpenClaw,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = ${JSON.stringify(callsPath)};
+const calls = fs.existsSync(path) ? fs.readFileSync(path, "utf8").trim().split(/\\r?\\n/).filter(Boolean) : [];
+fs.appendFileSync(path, JSON.stringify(process.argv.slice(2)) + "\\n", "utf8");
+if (calls.length === 0) {
+  console.error("temporary gateway failure");
+  process.exit(1);
+}
+console.log(JSON.stringify({ ok: true }));
+`,
+      "utf8"
+    );
+    fs.chmodSync(fakeOpenClaw, 0o755);
+    const created = runCli([
+      "new",
+      "--agent",
+      "codex",
+      "--request",
+      "Automatic retry",
+      "--store-dir",
+      storeDir,
+      "--openclaw-session",
+      "agent:main:main"
+    ]);
+    const failed = spawnSync(process.execPath, [
+      binPath,
+      "callback",
+      "--state",
+      created.paths.statePath,
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      "agent:main:main",
+      "--openclaw-bin",
+      fakeOpenClaw,
+      "--close-terminal-bridge-on-done",
+      "--message-json",
+      JSON.stringify({ from: "codex", to: "openclaw", type: "done", body: "Auto retry result." })
+    ], { encoding: "utf8" });
+    assert.notEqual(failed.status, 0);
+
+    const closed = await waitForConversationState(created.paths.statePath, "closed", 10000);
+    assert.equal(closed.callback_delivery.status, "delivered");
+    assert.equal(closed.callback_delivery.attempts, 2);
+    assert.equal(fs.readFileSync(callsPath, "utf8").trim().split(/\r?\n/).length, 2);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(fakeBinDir, { recursive: true, force: true });
+  }
+});
+
 test("callback delivers chat_send requested by plugin gateway method", () => {
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-chat-send-"));
   const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-fake-openclaw-"));
@@ -389,6 +554,18 @@ function runCli(args, env = {}) {
 
   assert.equal(result.status, 0, result.stderr || result.stdout);
   return JSON.parse(result.stdout);
+}
+
+async function waitForConversationState(statePath: string, status: string, timeoutMs: number) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    if (state.status === status) {
+      return state;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`timed out waiting for ${status}`);
 }
 
 interface CliAsyncResult {
