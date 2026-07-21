@@ -44,6 +44,7 @@ test("parseTmuxListPanes falls back to underscore-delimited output", () => {
 
 test("enrichActiveProcessesWithTerminalControl attaches tmux metadata by pid ancestry", async () => {
   const processes: ActiveCodexProcess[] = [{
+    agent: "codex",
     pid: 101,
     ppid: 100,
     command: "codex resume 019ee559-7bb8-7fd1-970c-0f7b6978c44e",
@@ -68,11 +69,47 @@ test("enrichActiveProcessesWithTerminalControl attaches tmux metadata by pid anc
 
   const enriched = await enrichActiveProcessesWithTerminalControl(processes, provider);
   assert.equal(enriched[0].terminalControl?.target, "codex-work:0.0");
-  assert.deepEqual(enriched[0].terminalControl?.capabilities, ["screen_status", "send_keys", "terminal_approval"]);
+  assert.deepEqual(enriched[0].terminalControl?.capabilities, ["screen_status", "send_keys"]);
+});
+
+test("terminal enrichment only adds agent capabilities supplied by the caller", async () => {
+  const processes: ActiveCodexProcess[] = [{
+    agent: "codex",
+    pid: 101,
+    ppid: 100,
+    command: "codex",
+    cwd: "/repo",
+    kind: "codex_cli",
+    confidence: "medium",
+    reason: "test"
+  }];
+  const provider = new StaticTerminalControlProvider({
+    panes: [{
+      kind: "tmux",
+      target: "codex-work:0.0",
+      session: "codex-work",
+      window: 0,
+      pane: 0,
+      panePid: 100,
+      currentPath: "/repo"
+    }]
+  });
+
+  const enriched = await enrichActiveProcessesWithTerminalControl(processes, provider, {
+    capabilities: ["screen_status", "send_keys", "terminal_approval", "durable_completion"]
+  });
+
+  assert.deepEqual(enriched[0].terminalControl?.capabilities, [
+    "screen_status",
+    "send_keys",
+    "terminal_approval",
+    "durable_completion"
+  ]);
 });
 
 test("enrichActiveProcessesWithTerminalControl falls back to unique pane cwd for wrapper-launched Codex", async () => {
   const processes: ActiveCodexProcess[] = [{
+    agent: "codex",
     pid: 34663,
     ppid: 34654,
     command: "node /Users/me/.npm-global/bin/codex --",
@@ -115,6 +152,7 @@ test("enrichActiveProcessesWithTerminalControl falls back to unique pane cwd for
 
 test("enrichActiveProcessesWithTerminalControl does not use ambiguous cwd fallback", async () => {
   const processes: ActiveCodexProcess[] = [{
+    agent: "codex",
     pid: 500,
     ppid: 400,
     command: "node /Users/me/.npm-global/bin/codex",

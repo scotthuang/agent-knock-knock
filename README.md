@@ -153,6 +153,8 @@ Experimental: AKK can discover Codex CLI sessions started outside AKK. `AKK list
 
 A terminal-controlled ID works directly with `send`, `status`, `describe`, `cancel`, and `approve`. Monitoring is activity-aware and has a separate hard lifetime. Use `renew` for a stalled monitor and `retry-callback` if callback delivery remains failed.
 
+New terminal-controlled IDs use `terminal:v2:tmux:<agent>:<target>:<pid>`, for example `terminal:v2:tmux:codex:codex-work:0.1:33389`. Legacy `terminal:tmux:<target>:<pid>` IDs remain valid and are treated as Codex. The production terminal adapter registry currently includes Codex; other agents require their own adapter.
+
 Start sessions you may want to control remotely inside tmux:
 
 ```bash

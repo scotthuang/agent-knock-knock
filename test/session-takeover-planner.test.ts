@@ -78,6 +78,7 @@ test("matching active processes ignores Codex ACP adapters for takeover targets"
       sessionId: session.id
     }),
     {
+      agent: "codex",
       pid: 2,
       command: "codex-acp",
       cwd: session.cwd,
@@ -125,6 +126,7 @@ test("fork plan uses OpenClaw summary confirmation instead of direct raw rollout
 
 function activeCodex(overrides: Partial<ActiveCodexProcess>): ActiveCodexProcess {
   return {
+    agent: "codex",
     pid: 1,
     command: "codex",
     cwd: "/repo/acpx",

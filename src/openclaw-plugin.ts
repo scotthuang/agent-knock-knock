@@ -180,7 +180,7 @@ const statusParameters = {
     conversation_id: {
       type: "string",
       description:
-        "AKK-managed conversation id, or a terminal-controlled id from AKK list such as terminal:tmux:codex-work:0.1:33389."
+        "AKK-managed conversation id, or a terminal-controlled id from AKK list such as terminal:v2:tmux:codex:codex-work:0.1:33389."
     },
     storeDir: {
       type: "string"
@@ -234,7 +234,7 @@ const sendParameters = {
     conversation_id: {
       type: "string",
       description:
-        "AKK-managed conversation id, or a terminal-controlled id from AKK list such as terminal:tmux:codex-work:0.1:33389. When the user refers to a listed tmux target like my-work:0.1, resolve it to the terminal-controlled id from AKK list before sending."
+        "AKK-managed conversation id, or a terminal-controlled id from AKK list such as terminal:v2:tmux:codex:codex-work:0.1:33389. When the user refers to a listed tmux target like my-work:0.1, resolve it to the terminal-controlled id from AKK list before sending."
     },
     message: {
       type: "string"
@@ -275,7 +275,7 @@ const cancelParameters = {
     conversation_id: {
       type: "string",
       description:
-        "AKK-managed conversation id, or a terminal-controlled id from AKK list such as terminal:tmux:codex-work:0.1:33389."
+        "AKK-managed conversation id, or a terminal-controlled id from AKK list such as terminal:v2:tmux:codex:codex-work:0.1:33389."
     },
     allProxy: {
       type: "string"
@@ -421,12 +421,17 @@ const agentTakeoverParameters = {
 const approveParameters = {
   type: "object",
   additionalProperties: false,
-  required: ["conversation_id"],
+  required: ["conversation_id", "expected_approval_fingerprint"],
   properties: {
     conversation_id: {
       type: "string",
       description:
-        "AKK-managed conversation id, or a terminal-controlled id from AKK list such as terminal:tmux:codex-work:0.1:33389."
+        "AKK-managed conversation id, or a terminal-controlled id from AKK list such as terminal:v2:tmux:codex:codex-work:0.1:33389."
+    },
+    expected_approval_fingerprint: {
+      type: "string",
+      description:
+        "Exact approval fingerprint returned by the latest status or approval-required callback. The prompt is captured again and must still match before keys are sent."
     },
     storeDir: {
       type: "string"
@@ -594,6 +599,11 @@ export default definePluginEntry({
       parameters: approveParameters,
       buildArgs: (params) => {
         const args = ["approve", "--conversation", requiredString(params.conversation_id, "conversation_id")];
+        pushOptional(
+          args,
+          "--expected-approval-fingerprint",
+          requiredString(params.expected_approval_fingerprint, "expected_approval_fingerprint")
+        );
         pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
         return args;
       }

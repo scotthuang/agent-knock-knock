@@ -1,31 +1,34 @@
-import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { discoverCodexProcesses, type CodexProcessSnapshot, type CodexThreadRow } from "./codex-session-provider.js";
 import type { CodexLocalSessionAdapter } from "./codex-local-session-provider.js";
+import {
+  SystemTerminalProcessSource,
+  runProcessCommand,
+  type ProcessCommandResult
+} from "./terminal-process-source.js";
 
-export interface CommandResult {
-  status: number | null;
-  stdout: string;
-  stderr: string;
-  error?: Error;
-}
+export {
+  parseLsofCwdMap,
+  parsePsProcessSnapshots,
+  type ProcessCommandResult as CommandResult
+} from "./terminal-process-source.js";
 
 export interface CodexStoreAdapterOptions {
   codexHome?: string;
-  runCommand?: (command: string, args: string[]) => CommandResult;
+  runCommand?: (command: string, args: string[]) => ProcessCommandResult;
   maxSessions?: number;
 }
 
 export class CodexStoreAdapter implements CodexLocalSessionAdapter {
   private readonly codexHome: string;
-  private readonly runCommand: (command: string, args: string[]) => CommandResult;
+  private readonly runCommand: (command: string, args: string[]) => ProcessCommandResult;
   private readonly maxSessions: number;
 
   constructor(options: CodexStoreAdapterOptions = {}) {
     this.codexHome = options.codexHome ?? path.join(os.homedir(), ".codex");
-    this.runCommand = options.runCommand ?? runCommand;
+    this.runCommand = options.runCommand ?? runProcessCommand;
     this.maxSessions = options.maxSessions ?? 100;
   }
 
@@ -53,27 +56,8 @@ export class CodexStoreAdapter implements CodexLocalSessionAdapter {
   }
 
   async listProcessSnapshots(): Promise<CodexProcessSnapshot[]> {
-    const ps = this.runCommand("ps", ["-axo", "pid,ppid,etime,command"]);
-    if (ps.status !== 0) {
-      throw new Error(ps.stderr || ps.error?.message || "ps failed");
-    }
-
-    const snapshots = parsePsProcessSnapshots(ps.stdout);
-    const codexSnapshots = snapshots.filter((snapshot) => discoverCodexProcesses([snapshot]).length > 0);
-    if (codexSnapshots.length === 0) {
-      return [];
-    }
-
-    const lsof = this.runCommand("lsof", ["-a", "-d", "cwd", "-p", codexSnapshots.map((snapshot) => String(snapshot.pid)).join(",")]);
-    if (lsof.status !== 0) {
-      return codexSnapshots;
-    }
-
-    const cwdByPid = parseLsofCwdMap(lsof.stdout);
-    return codexSnapshots.map((snapshot) => ({
-      ...snapshot,
-      cwd: snapshot.cwd ?? cwdByPid.get(snapshot.pid)
-    }));
+    return new SystemTerminalProcessSource({ runCommand: this.runCommand })
+      .listProcessSnapshots((snapshot) => discoverCodexProcesses([snapshot]).length > 0);
   }
 
   private queryJson<T>(dbPath: string, sql: string): T[] {
@@ -97,31 +81,6 @@ export function latestStateDbPath(codexHome: string): string | undefined {
     .sort((left, right) => fs.statSync(right).mtimeMs - fs.statSync(left).mtimeMs)[0];
 }
 
-export function parsePsProcessSnapshots(output: string): CodexProcessSnapshot[] {
-  return output
-    .split(/\r?\n/)
-    .slice(1)
-    .map((line) => /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/u.exec(line))
-    .filter((match): match is RegExpExecArray => Boolean(match))
-    .map((match) => ({
-      pid: Number(match[1]),
-      ppid: Number(match[2]),
-      elapsed: match[3],
-      command: match[4]
-    }));
-}
-
-export function parseLsofCwdMap(output: string): Map<number, string> {
-  const cwdByPid = new Map<number, string>();
-  for (const line of output.split(/\r?\n/).slice(1)) {
-    const match = /^\S+\s+(\d+)\s+\S+\s+cwd\s+\S+\s+\S+\s+\S+\s+\S+\s+(.+?)\s*$/u.exec(line);
-    if (match) {
-      cwdByPid.set(Number(match[1]), match[2]);
-    }
-  }
-  return cwdByPid;
-}
-
 export function buildThreadSelect(columns: string[], limit: number): string {
   const columnSet = new Set(columns);
   const updatedAtExpression = columnSet.has("updated_at_ms")
@@ -141,17 +100,4 @@ export function buildThreadSelect(columns: string[], limit: number): string {
   ].join(", ");
 
   return `select ${select} from threads order by ${updatedAtExpression} desc limit ${Math.max(1, Math.floor(limit))}`;
-}
-
-function runCommand(command: string, args: string[]): CommandResult {
-  const result = spawnSync(command, args, {
-    encoding: "utf8",
-    maxBuffer: 1024 * 1024 * 10
-  });
-  return {
-    status: result.status,
-    stdout: result.stdout,
-    stderr: result.stderr,
-    error: result.error
-  };
 }

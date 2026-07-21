@@ -242,7 +242,7 @@ test("list groups delegated native and terminal-controlled sessions", () => {
     assert.equal(listed.native[0].commands.send, false);
     assert.equal(listed.native[0].commands.terminate_then_resume, true);
     assert.equal(listed.terminal_controlled.length, 1);
-    assert.equal(listed.terminal_controlled[0].id, "terminal:tmux:codex-work:0.0:2222");
+    assert.equal(listed.terminal_controlled[0].id, "terminal:v2:tmux:codex:codex-work:0.0:2222");
     assert.equal(listed.terminal_controlled[0].terminal_control.target, "codex-work:0.0");
     assert.equal(listed.terminal_controlled[0].activity_state, "awaiting_approval");
     assert.match(listed.terminal_controlled[0].activity_reason, /approval prompt/);

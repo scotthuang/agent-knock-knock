@@ -271,7 +271,7 @@ test("approval scan ignores stale Codex prompts left in terminal scrollback", ()
       `codex-work\t0\t1\t33389\tnode\t${workspace}\n`
     );
 
-    const conversationId = "terminal:tmux:codex-work:0.1:33389";
+    const conversationId = "terminal:v2:tmux:codex:codex-work:0.1:33389";
     const status = runAgentCli([
       "status",
       "--conversation",
@@ -1672,9 +1672,33 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
     assert.notEqual(paramsIndex, -1);
     const gatewayParams = JSON.parse(openclawCalls[0].args[paramsIndex + 1]);
     assert.equal(gatewayParams.message.type, "question");
-    assert.equal(gatewayParams.message.metadata.approve_command, `AKK approve ${conversationId}`);
+    assert.equal(
+      gatewayParams.message.metadata.approve_command,
+      `AKK approve ${conversationId} --expected-approval-fingerprint ${monitoredParsed.message.metadata.approval_fingerprint}`
+    );
     assert.equal(gatewayParams.message.metadata.deny_command, `AKK cancel ${conversationId}`);
     assert.equal(gatewayParams.message.metadata.approval_candidate.command, "npm install");
+
+    fs.writeFileSync(screenPath, approvalScreen.replace("$ npm install", "$ npm install left-pad"));
+    const persistedFingerprintMismatch = runAgentCli([
+      "approve",
+      "--state",
+      statePath,
+      "--disable-terminal-bridge-monitor"
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(
+      persistedFingerprintMismatch.status,
+      0,
+      persistedFingerprintMismatch.stderr || persistedFingerprintMismatch.stdout
+    );
+    assert.match(JSON.parse(persistedFingerprintMismatch.stdout).reason, /fingerprint changed/);
+    assert.equal(
+      readJsonLines(tmuxCallsPath).some((call) => call.args[0] === "send-keys" && call.args.at(-1) === "y"),
+      false
+    );
+    fs.writeFileSync(screenPath, approvalScreen);
 
     const fingerprintMismatch = runAgentCli([
       "approve",

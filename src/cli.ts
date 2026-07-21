@@ -9,9 +9,12 @@ import type {
   ActiveCodexProcess,
   CodexProcessSnapshot,
   CodexThreadRow,
-  ForkContextPackage,
-  TerminalControlRef
+  ForkContextPackage
 } from "./codex-session-provider.js";
+import {
+  createCodexTerminalAgentAdapter,
+  detectCodexDurableCompletion
+} from "./codex-terminal-agent-adapter.js";
 import { CodexLocalSessionProvider, type CodexLocalSessionAdapter } from "./codex-local-session-provider.js";
 import { CodexStoreAdapter } from "./codex-store-adapter.js";
 import {
@@ -30,10 +33,11 @@ import {
   executorDefinitionForKind,
   modelEnvForExecutor,
   normalizeModelForExecutor,
-  proxyEnvForExecutor
+  proxyEnvForExecutor,
+  type ExecutorKind
 } from "./executors.js";
 import { executorBootstrapPrompt } from "./bootstrap.js";
-import { redactString, writeRuntimeLog } from "./runtime-log.js";
+import { writeRuntimeLog } from "./runtime-log.js";
 import { formatTranscript, readNdjsonLog } from "./transcript.js";
 import {
   appendEvent,
@@ -52,10 +56,26 @@ import { planFork, planTakeover } from "./session-takeover-planner.js";
 import {
   StaticTerminalControlProvider,
   TmuxTerminalControlProvider,
-  enrichActiveProcessesWithTerminalControl,
-  terminalRefFromPane,
   type TerminalControlProvider
 } from "./terminal-control-provider.js";
+import {
+  parseTerminalConversationId,
+  terminalControlCapabilitiesForAdapter,
+  type ActiveTerminalProcess,
+  type TerminalControlCapability,
+  type TerminalControlRef,
+  type TerminalDurableCompletionRequest
+} from "./terminal-agent-adapter.js";
+import { createProductionTerminalAgentRegistry } from "./terminal-agent-registry.js";
+import {
+  StaticTerminalProcessSource,
+  SystemTerminalProcessSource,
+  type TerminalProcessSource
+} from "./terminal-process-source.js";
+import {
+  TerminalAgentBridge,
+  type ResolvedTerminalConversation
+} from "./terminal-agent-bridge.js";
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 10080;
 const DEFAULT_AGENT_TIMEOUT_MINUTES = 60;
@@ -630,7 +650,10 @@ async function listActiveSessionsWithTerminalControl(
   terminalProvider: TerminalControlProvider = createTerminalControlProvider(options)
 ): Promise<ActiveCodexProcess[]> {
   const activeSessions = await provider.listActiveSessions();
-  return enrichActiveProcessesWithTerminalControl(activeSessions, terminalProvider);
+  return createTerminalAgentBridge(options, terminalProvider).attachProcesses(
+    provider.agent,
+    activeSessions
+  );
 }
 
 function createTerminalControlProvider(options): TerminalControlProvider {
@@ -642,6 +665,65 @@ function createTerminalControlProvider(options): TerminalControlProvider {
   }
 
   return new TmuxTerminalControlProvider();
+}
+
+function createTerminalProcessSource(options): TerminalProcessSource {
+  if (options.processesJson) {
+    return new StaticTerminalProcessSource(
+      parseJsonOption(options.processesJson, "--processes-json")
+    );
+  }
+  return new SystemTerminalProcessSource();
+}
+
+function createRuntimeTerminalAgentRegistry(options) {
+  return createProductionTerminalAgentRegistry({
+    overrides: [createCodexTerminalAgentAdapter({
+      async detectDurableCompletion(request: TerminalDurableCompletionRequest) {
+        const runtime = isRecord(request.context) ? request.context : undefined;
+        const conversation = runtime?.conversation;
+        const nativeTakeover = isRecord(runtime?.nativeTakeover)
+          ? runtime?.nativeTakeover
+          : undefined;
+        if (!isRecord(conversation)) {
+          return undefined;
+        }
+        const contextMatch = await loadCodexTerminalContext({
+          conversation,
+          nativeTakeover,
+          options
+        });
+        if (!contextMatch?.context) {
+          return undefined;
+        }
+        const evidence = detectCodexDurableCompletion({
+          ...request,
+          context: contextMatch.context
+        });
+        return evidence
+          ? {
+              ...evidence,
+              confidence: contextMatch.confidence as "high" | "medium" | "low",
+              metadata: {
+                ...evidence.metadata,
+                context_match: contextMatch.match,
+                session: contextMatch.context.source
+              }
+            }
+          : undefined;
+      }
+    })]
+  });
+}
+
+function createTerminalAgentBridge(
+  options,
+  terminalProvider: TerminalControlProvider = createTerminalControlProvider(options)
+): TerminalAgentBridge {
+  return new TerminalAgentBridge({
+    registry: createRuntimeTerminalAgentRegistry(options),
+    terminalProvider
+  });
 }
 
 function planTerminalControlTakeover(session, activeSessions: ActiveCodexProcess[]) {
@@ -700,6 +782,9 @@ function terminalControlFromTakeover(nativeTakeover): TerminalControlRef | undef
   if (!target || !session || !Number.isInteger(window) || !Number.isInteger(pane) || !Number.isInteger(panePid)) {
     return undefined;
   }
+  const storedCapabilities = Array.isArray(terminalControl.capabilities)
+    ? terminalControl.capabilities.filter(isTerminalControlCapability)
+    : [];
   return {
     kind: "tmux",
     target,
@@ -710,205 +795,29 @@ function terminalControlFromTakeover(nativeTakeover): TerminalControlRef | undef
     currentCommand: stringValue(terminalControl.currentCommand),
     currentPath: stringValue(terminalControl.currentPath),
     socketPath: stringValue(terminalControl.socketPath),
-    capabilities: ["screen_status", "send_keys", "terminal_approval"]
+    // State written before adapter capabilities were persisted always represented Codex.
+    capabilities: storedCapabilities.length > 0
+      ? storedCapabilities
+      : [
+          "screen_status",
+          "send_keys",
+          "terminal_approval",
+          "screen_completion",
+          "durable_completion",
+          "terminal_cancel"
+        ]
   };
 }
 
-function detectCodexApprovalPrompt(screen: string):
-  | { approvable: true; key: string; label: string; promptKind: string; command?: string }
-  | { approvable: false; reason: string; promptKind?: string; command?: string } {
-  const prompt = codexApprovalPromptRegion(screen);
-  if (!prompt.visible) {
-    return {
-      approvable: false,
-      reason: prompt.reason
-    };
-  }
-
-  for (const line of prompt.region.split(/\r?\n/)) {
-    const match = /^[\s›]*1\.\s+(Yes,[^(]+)\(([^)]+)\)/u.exec(line.trim());
-    if (!match) {
-      continue;
-    }
-    const key = match[2].trim();
-    if (key !== "y") {
-      return {
-        approvable: false,
-        reason: `primary approval shortcut is ${key}, not y`,
-        ...approvalCandidateFromPrompt(prompt.marker, prompt.region)
-      };
-    }
-    return {
-      approvable: true,
-      key,
-      label: match[1].trim(),
-      ...approvalCandidateFromPrompt(prompt.marker, prompt.region)
-    };
-  }
-
-  return {
-    approvable: false,
-    reason: "no primary approve option with a shortcut was detected",
-    ...approvalCandidateFromPrompt(prompt.marker, prompt.region)
-  };
-}
-
-function isCodexApprovalPromptVisible(screen: string): boolean {
-  return codexApprovalPromptRegion(screen).visible;
-}
-
-function codexApprovalPromptRegion(screen: string): { visible: true; region: string; marker: string } | { visible: false; reason: string } {
-  const approvalMarkers = [
-    "Would you like to run the following command?",
-    "Would you like to make the following edits?",
-    "Would you like to grant these permissions?",
-    "needs your approval."
-  ];
-  const lines = screen.split(/\r?\n/);
-  let markerIndex = -1;
-  let matchedMarker = "";
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const marker = approvalMarkers.find((candidate) => lines[index].includes(candidate));
-    if (marker) {
-      markerIndex = index;
-      matchedMarker = marker;
-      break;
-    }
-  }
-
-  if (markerIndex < 0) {
-    return {
-      visible: false,
-      reason: "no Codex approval prompt was detected in the terminal screen"
-    };
-  }
-
-  const regionLines = lines.slice(markerIndex);
-  const staleLine = regionLines.slice(1).find((line) => isPostApprovalActivityLine(line));
-  if (staleLine) {
-    return {
-      visible: false,
-      reason: `Codex approval prompt appears stale after later terminal activity: ${staleLine.trim()}`
-    };
-  }
-
-  return {
-    visible: true,
-    region: regionLines.join("\n"),
-    marker: matchedMarker
-  };
-}
-
-function approvalCandidateFromPrompt(marker: string, region: string): { promptKind: string; command?: string } {
-  const promptKind = marker === "Would you like to run the following command?"
-    ? "run_command"
-    : marker === "Would you like to make the following edits?"
-      ? "file_edit"
-      : marker === "Would you like to grant these permissions?"
-        ? "grant_permissions"
-        : "unknown";
-  return {
-    promptKind,
-    command: promptKind === "run_command" ? commandFromApprovalRegion(region) : undefined
-  };
-}
-
-function commandFromApprovalRegion(region: string): string | undefined {
-  const lines = region.split(/\r?\n/);
-  const commandStart = lines.findIndex((line) => /^\s*\$\s+/u.test(line));
-  if (commandStart < 0) {
-    return undefined;
-  }
-
-  const parts: string[] = [];
-  for (let index = commandStart; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (index > commandStart && (!line.trim() || /^[\s›]*\d+\.\s+/u.test(line) || /Press enter to confirm/u.test(line))) {
-      break;
-    }
-    parts.push(index === commandStart ? line.replace(/^\s*\$\s+/u, "").trim() : line.trim());
-  }
-  const command = parts.filter(Boolean).join(" ").trim();
-  return command ? redactString(command) : undefined;
-}
-
-function isPostApprovalActivityLine(line: string): boolean {
-  const trimmed = line.trim();
-  if (!trimmed) {
-    return false;
-  }
-  if (/^✔\s+You approved\b/u.test(trimmed)) {
-    return true;
-  }
-  if (/^›\s+(?!1\.)\S/u.test(trimmed)) {
-    return true;
-  }
-  if (/^•\s+(Working|Ran|Explored|Edited|Read|Called|Searching|Planning|Updated|Added|Deleted|Modified|Running|Thinking)\b/u.test(trimmed)) {
-    return true;
-  }
-  return /^─\s*Worked for\b/u.test(trimmed);
-}
-
-function detectCodexActivityState(
-  screen: string,
-  approval = detectCodexApprovalPrompt(screen)
-): { state: "awaiting_approval" | "working" | "idle" | "unknown"; reason: string } {
-  if (approval.approvable || isCodexApprovalPromptVisible(screen)) {
-    return {
-      state: "awaiting_approval",
-      reason: "current Codex approval prompt is visible"
-    };
-  }
-
-  const tailLines = screen.trimEnd().split(/\r?\n/).slice(-30);
-  const workingLine = tailLines.find((line) => isCodexWorkingLine(line));
-  if (workingLine) {
-    return {
-      state: "working",
-      reason: `Codex working marker detected: ${workingLine.trim()}`
-    };
-  }
-
-  const idleLine = tailLines
-    .slice(-6)
-    .map((line) => line.trim())
-    .find((line) => isCodexIdlePromptLine(line));
-  if (idleLine) {
-    return {
-      state: "idle",
-      reason: `Codex input prompt detected: ${idleLine}`
-    };
-  }
-
-  return {
-    state: "unknown",
-    reason: "no current Codex working, idle, or approval marker was detected in the terminal screen"
-  };
-}
-
-function isCodexWorkingLine(line: string): boolean {
-  const trimmed = line.trim();
-  if (!trimmed) {
-    return false;
-  }
-  if (/^•\s+Working\b/u.test(trimmed) && (/\besc to interrupt\b/u.test(trimmed) || trimmed === "• Working")) {
-    return true;
-  }
-  if (/^•\s+Waiting for background terminals?\b(?:\s*·|$)/u.test(trimmed)) {
-    return true;
-  }
-  return /^\d+\s+background terminals? running\b/u.test(trimmed) && /\/(?:ps|stop)\b/u.test(trimmed);
-}
-
-function isCodexIdlePromptLine(line: string): boolean {
-  const trimmed = line.trim();
-  return /^›(?:\s|$)/u.test(trimmed) && !/^›\s*1\./u.test(trimmed);
-}
-
-function screenExcerpt(screen: string, maxLength = 4000): string {
-  const lines = screen.trimEnd().split(/\r?\n/);
-  const excerpt = lines.slice(Math.max(0, lines.length - 80)).join("\n");
-  return redactString(excerpt).slice(-maxLength);
+function isTerminalControlCapability(value: unknown): value is TerminalControlCapability {
+  return typeof value === "string" && [
+    "screen_status",
+    "send_keys",
+    "terminal_approval",
+    "screen_completion",
+    "durable_completion",
+    "terminal_cancel"
+  ].includes(value);
 }
 
 function createForkConversation({ agent, strategy, session, contextPackage, forkSummary, modelInfo, options }) {
@@ -1740,57 +1649,71 @@ async function buildNativeListGroups({ options, agentFilter, statusFilter }) {
       }
     };
   }
-  if (agentFilter && agentFilter !== "codex") {
+  const registry = createRuntimeTerminalAgentRegistry(options);
+  const adapters = agentFilter
+    ? [registry.get(agentFilter)].filter((adapter) => adapter !== undefined)
+    : registry.list();
+  if (agentFilter && adapters.length === 0) {
     return {
       ...empty,
       summary: {
         enabled: true,
         agents: [],
-        skipped: `native active discovery is not implemented for ${agentFilter}`
+        skipped: `terminal agent adapter is not registered for ${agentFilter}`
       }
     };
   }
 
+  const terminalProvider = createTerminalControlProvider(options);
+  const bridge = new TerminalAgentBridge({ registry, terminalProvider });
+  const terminalScan = options.terminalDebug ? await terminalControlDiagnostics(terminalProvider) : undefined;
+  const terminalControlled: Record<string, any>[] = [];
+  const native: Record<string, any>[] = [];
+  let activeCount = 0;
+  const errors: string[] = [];
   try {
-    const provider = createAgentSessionProvider("codex", options);
-    const terminalProvider = createTerminalControlProvider(options);
-    const terminalScan = options.terminalDebug ? await terminalControlDiagnostics(terminalProvider) : undefined;
-    const activeSessions = await listActiveSessionsWithTerminalControl(provider, options, terminalProvider);
+    const processSource = createTerminalProcessSource(options);
+    const snapshots = await processSource.listProcessSnapshots((snapshot) =>
+      adapters.some((adapter) =>
+        adapter.capabilities.processDiscovery && adapter.classifyProcess(snapshot) !== undefined
+      )
+    );
+    const activeSessions = await bridge.listProcesses(
+      snapshots,
+      adapters.map((adapter) => adapter.agent)
+    );
+    activeCount = activeSessions.length;
     const rootSessions = rootActiveProcesses(activeSessions);
-    const terminalControlled: Record<string, any>[] = [];
-    const native: Record<string, any>[] = [];
     for (const session of rootSessions) {
       if (session.terminalControl) {
-        terminalControlled.push(await terminalControlledListEntry(session, activeSessions, options));
+        terminalControlled.push(await terminalControlledListEntry(
+          session,
+          activeSessions,
+          options,
+          bridge
+        ));
       } else {
         native.push(nativeListEntry(session, activeSessions));
       }
     }
-
-    return {
-      native,
-      terminalControlled,
-      summary: {
-        enabled: true,
-        agents: ["codex"],
-        active_count: activeSessions.length,
-        native_count: native.length,
-        terminal_controlled_count: terminalControlled.length,
-        approval_scan: options.noApprovalScan ? "disabled" : "enabled",
-        terminal_scan: terminalScan
-      }
-    };
   } catch (error) {
-    return {
-      native: [],
-      terminalControlled: [],
-      summary: {
-        enabled: true,
-        agents: ["codex"],
-        error: error instanceof Error ? error.message : String(error)
-      }
-    };
+    errors.push(error instanceof Error ? error.message : String(error));
   }
+
+  return {
+    native,
+    terminalControlled,
+    summary: {
+      enabled: true,
+      agents: adapters.map((adapter) => adapter.agent),
+      active_count: activeCount,
+      native_count: native.length,
+      terminal_controlled_count: terminalControlled.length,
+      approval_scan: options.noApprovalScan ? "disabled" : "enabled",
+      terminal_scan: terminalScan,
+      error: errors.length > 0 ? errors.join("; ") : undefined
+    }
+  };
 }
 
 async function terminalControlDiagnostics(provider: TerminalControlProvider) {
@@ -1818,11 +1741,11 @@ function delegatedListEntry(task) {
   };
 }
 
-function nativeListEntry(session: ActiveCodexProcess, activeSessions: ActiveCodexProcess[]) {
+function nativeListEntry(session: ActiveTerminalProcess, activeSessions: ActiveTerminalProcess[]) {
   return {
-    id: `native:codex:${session.pid}`,
+    id: `native:${session.agent}:${session.pid}`,
     source: "native_active",
-    agent: "codex",
+    agent: session.agent,
     status: "active",
     pid: session.pid,
     child_pids: childPidsForRoot(session, activeSessions),
@@ -1846,16 +1769,21 @@ function nativeListEntry(session: ActiveCodexProcess, activeSessions: ActiveCode
   };
 }
 
-async function terminalControlledListEntry(session: ActiveCodexProcess, activeSessions: ActiveCodexProcess[], options) {
+async function terminalControlledListEntry(
+  session: ActiveTerminalProcess,
+  activeSessions: ActiveTerminalProcess[],
+  options,
+  bridge: TerminalAgentBridge = createTerminalAgentBridge(options)
+) {
   const terminalControl = session.terminalControl;
   if (!terminalControl) {
     throw new Error(`process ${session.pid} is not terminal-controlled`);
   }
-  const terminalState = await listStateForTerminal(terminalControl, options);
+  const terminalState = await listStateForTerminal(session.agent, terminalControl, options, bridge);
   return {
-    id: `terminal:${terminalControl.kind}:${terminalControl.target}:${session.pid}`,
+    id: bridge.terminalConversationId(session),
     source: "terminal_control",
-    agent: "codex",
+    agent: session.agent,
     status: "active",
     pid: session.pid,
     child_pids: childPidsForRoot(session, activeSessions),
@@ -1872,15 +1800,21 @@ async function terminalControlledListEntry(session: ActiveCodexProcess, activeSe
     activity_reason: terminalState.activity_reason,
     commands: {
       send: true,
-      approve: terminalState.approval_state.approvable === true,
+      approve: terminalControl.capabilities.includes("terminal_approval") &&
+        terminalState.approval_state.approvable === true,
       status: true,
-      cancel: true,
+      cancel: terminalControl.capabilities.includes("terminal_cancel"),
       close: false
     }
   };
 }
 
-async function listStateForTerminal(terminalControl: TerminalControlRef, options) {
+async function listStateForTerminal(
+  agent: ExecutorKind,
+  terminalControl: TerminalControlRef,
+  options,
+  bridge: TerminalAgentBridge = createTerminalAgentBridge(options)
+) {
   if (options.noApprovalScan) {
     return {
       approval_state: {
@@ -1894,27 +1828,17 @@ async function listStateForTerminal(terminalControl: TerminalControlRef, options
     };
   }
   try {
-    const screen = await createTerminalControlProvider(options).capture(terminalControl.target, {
-      scrollbackLines: Number(options.scrollbackLines ?? 120),
-      socketPath: terminalControl.socketPath
+    const status = await bridge.status(agent, terminalControl, {
+      scrollbackLines: Number(options.scrollbackLines ?? 120)
     });
-    const approval = detectCodexApprovalPrompt(screen);
-    const blocked = isCodexApprovalPromptVisible(screen);
-    const activity = detectCodexActivityState(screen, approval);
     return {
       approval_state: {
-        scanned: true,
-        blocked,
-        approvable: approval.approvable,
-        key: approval.approvable ? approval.key : undefined,
-        label: approval.approvable ? approval.label : undefined,
-        prompt_kind: approval.promptKind,
-        command: approval.command,
-        reason: approval.approvable ? undefined : approval.reason,
-        screen_excerpt: blocked ? screenExcerpt(screen, 1000) : undefined
+        ...status.approval_state,
+        screen_excerpt: status.approval_state.blocked ? status.screen.excerpt?.slice(-1000) : undefined
       },
-      activity_state: activity.state,
-      activity_reason: activity.reason
+      activity_state: status.activity_state,
+      activity_reason: status.activity_reason,
+      capability_limitation: status.capability_limitation
     };
   } catch (error) {
     return {
@@ -1930,12 +1854,16 @@ async function listStateForTerminal(terminalControl: TerminalControlRef, options
   }
 }
 
-function rootActiveProcesses(processes: ActiveCodexProcess[]): ActiveCodexProcess[] {
-  const pids = new Set(processes.map((process) => process.pid));
-  const roots = processes.filter((process) => !process.ppid || !pids.has(process.ppid));
+function rootActiveProcesses(processes: ActiveTerminalProcess[]): ActiveTerminalProcess[] {
+  const pids = new Set(processes.map((process) => `${process.agent}:${process.pid}`));
+  const roots = processes.filter((process) =>
+    !process.ppid || !pids.has(`${process.agent}:${process.ppid}`)
+  );
   const seenTerminalTargets = new Set<string>();
   return roots.filter((process) => {
-    const terminalTarget = process.terminalControl?.target;
+    const terminalTarget = process.terminalControl?.target
+      ? `${process.agent}:${process.terminalControl.target}`
+      : undefined;
     if (!terminalTarget) {
       return true;
     }
@@ -1947,9 +1875,9 @@ function rootActiveProcesses(processes: ActiveCodexProcess[]): ActiveCodexProces
   });
 }
 
-function childPidsForRoot(root: ActiveCodexProcess, processes: ActiveCodexProcess[]): number[] {
+function childPidsForRoot(root: ActiveTerminalProcess, processes: ActiveTerminalProcess[]): number[] {
   return processes
-    .filter((process) => process.ppid === root.pid)
+    .filter((process) => process.agent === root.agent && process.ppid === root.pid)
     .map((process) => process.pid);
 }
 
@@ -1957,49 +1885,12 @@ function canSendDelegated(status) {
   return !["failed", "closed", "cancelled"].includes(status);
 }
 
-async function resolveTerminalConversationFromOptions(options): Promise<{ conversationId: string; terminalControl: TerminalControlRef } | undefined> {
-  const parsed = parseTerminalConversationId(stringValue(options.conversation));
-  if (!parsed) {
-    return undefined;
-  }
-
-  const provider = createTerminalControlProvider(options);
-  const panes = await provider.listPanes();
-  const pane = panes.find((candidate) =>
-    candidate.kind === parsed.kind &&
-    candidate.target === parsed.target
+async function resolveTerminalConversationFromOptions(
+  options
+): Promise<ResolvedTerminalConversation | undefined> {
+  return createTerminalAgentBridge(options).resolveConversationId(
+    stringValue(options.conversation ?? options.conversationId)
   );
-  if (!pane) {
-    throw new Error(`terminal-controlled session ${parsed.conversationId} is no longer available`);
-  }
-
-  return {
-    conversationId: parsed.conversationId,
-    terminalControl: terminalRefFromPane(pane)
-  };
-}
-
-function parseTerminalConversationId(conversationId: string | undefined): { conversationId: string; kind: "tmux"; target: string; pid: number } | undefined {
-  const prefix = "terminal:tmux:";
-  if (!conversationId?.startsWith(prefix)) {
-    return undefined;
-  }
-  const rest = conversationId.slice(prefix.length);
-  const pidSeparator = rest.lastIndexOf(":");
-  if (pidSeparator <= 0 || pidSeparator === rest.length - 1) {
-    throw new Error(`invalid terminal-controlled conversation id: ${conversationId}`);
-  }
-  const target = rest.slice(0, pidSeparator);
-  const pid = Number(rest.slice(pidSeparator + 1));
-  if (!target || !Number.isInteger(pid)) {
-    throw new Error(`invalid terminal-controlled conversation id: ${conversationId}`);
-  }
-  return {
-    conversationId,
-    kind: "tmux",
-    target,
-    pid
-  };
 }
 
 function parseNativeConversationId(conversationId: string | undefined): { conversationId: string; agent: "codex"; pid: number } | undefined {
@@ -2022,7 +1913,11 @@ async function runStatus(options) {
   cleanupIdleConversations(storeDirFromOptions(options), options);
   const terminalConversation = await resolveTerminalConversationFromOptions(options);
   if (terminalConversation) {
-    const terminalStatus = await terminalStatusForControl(terminalConversation.terminalControl, options);
+    const terminalStatus = await terminalStatusForControl(
+      terminalConversation.agent,
+      terminalConversation.terminalControl,
+      options
+    );
     printJson({
       conversation_id: terminalConversation.conversationId,
       source: "terminal_control",
@@ -2055,8 +1950,9 @@ async function runStatus(options) {
     isRecord(conversation.native_session_takeover) ? conversation.native_session_takeover : undefined
   );
   if (terminalControl) {
+    const executor = executorForConversation(conversation);
     result.terminal_control = terminalControl;
-    result.terminal_status = await terminalStatusForControl(terminalControl, options);
+    result.terminal_status = await terminalStatusForControl(executor.kind, terminalControl, options);
     result.terminal_screen = result.terminal_status.screen;
   }
   printJson(result);
@@ -2075,8 +1971,31 @@ async function runDescribe(options) {
   const conversationId = required(options.conversation ?? options.conversationId, "--conversation is required");
   const terminalConversation = await resolveTerminalConversationFromOptions(options);
   if (terminalConversation) {
-    const terminalStatus = await terminalStatusForControl(terminalConversation.terminalControl, options);
-    const process = await activeCodexProcessForPid(options, parseTerminalConversationId(conversationId)?.pid);
+    const terminalStatus = await terminalStatusForControl(
+      terminalConversation.agent,
+      terminalConversation.terminalControl,
+      options
+    );
+    if (terminalConversation.agent !== "codex") {
+      const adapter = createRuntimeTerminalAgentRegistry(options).require(terminalConversation.agent);
+      printJson({
+        conversation_id: conversationId,
+        source: "terminal_control",
+        agent: terminalConversation.agent,
+        confidence: terminalStatus.reachable ? "medium" : "low",
+        about: terminalStatus.reachable
+          ? `${adapter.displayName} is attached through ${terminalConversation.terminalControl.kind}:${terminalConversation.terminalControl.target}.`
+          : `${adapter.displayName} terminal status is unavailable.`,
+        evidence: {
+          terminal_status: terminalStatus,
+          terminal_screen: terminalStatus.screen
+        },
+        limitations: ["Historical session context is not available for this terminal adapter."],
+        terminal_control: terminalConversation.terminalControl
+      });
+      return;
+    }
+    const process = await activeCodexProcessForPid(options, terminalConversation.pid);
     printJson(await describeNativeCodexSession({
       id: conversationId,
       source: "terminal_control",
@@ -2105,7 +2024,9 @@ async function runDescribe(options) {
   const terminalControl = terminalControlFromTakeover(
     isRecord(conversation.native_session_takeover) ? conversation.native_session_takeover : undefined
   );
-  const terminalStatus = terminalControl ? await terminalStatusForControl(terminalControl, options) : undefined;
+  const terminalStatus = terminalControl
+    ? await terminalStatusForControl(executorForConversation(conversation).kind, terminalControl, options)
+    : undefined;
   printJson({
     conversation_id: conversation.conversation_id,
     source: "akk_managed",
@@ -2124,112 +2045,69 @@ async function runDescribe(options) {
   });
 }
 
-async function terminalStatusForControl(terminalControl, options) {
-  try {
-    const screen = await createTerminalControlProvider(options).capture(terminalControl.target, {
-      scrollbackLines: Number(options.scrollbackLines ?? 120),
-      socketPath: terminalControl.socketPath
-    });
-    const approval = detectCodexApprovalPrompt(screen);
-    const blocked = isCodexApprovalPromptVisible(screen);
-    const activity = detectCodexActivityState(screen, approval);
-    return {
-      provider: terminalControl.kind,
-      target: terminalControl.target,
-      reachable: true,
-      activity_state: activity.state,
-      activity_reason: activity.reason,
-      approval_state: {
-        scanned: true,
-        blocked,
-        approvable: approval.approvable,
-        key: approval.approvable ? approval.key : undefined,
-        label: approval.approvable ? approval.label : undefined,
-        prompt_kind: approval.promptKind,
-        command: approval.command,
-        reason: approval.approvable ? undefined : approval.reason
-      },
-      screen: {
-        excerpt: screenExcerpt(screen),
-        approval
-      }
-    };
-  } catch (error) {
-    return {
-      provider: terminalControl.kind,
-      target: terminalControl.target,
-      reachable: false,
-      activity_state: "unknown",
-      activity_reason: error instanceof Error ? error.message : String(error),
-      approval_state: {
-        scanned: false,
-        blocked: false,
-        approvable: false
-      },
-      screen: {
-        error: error instanceof Error ? error.message : String(error)
-      }
-    };
-  }
+async function terminalStatusForControl(
+  agent: ExecutorKind,
+  terminalControl: TerminalControlRef,
+  options
+) {
+  return createTerminalAgentBridge(options).status(agent, terminalControl, {
+    scrollbackLines: Number(options.scrollbackLines ?? 120)
+  });
 }
 
 function terminalBridgeApprovalFingerprint({ terminalControl, terminalStatus }) {
   const approval = isRecord(terminalStatus?.approval_state) ? terminalStatus.approval_state : {};
+  const adapterFingerprint = stringValue(approval.fingerprint);
+  if (adapterFingerprint) {
+    return adapterFingerprint;
+  }
   const screen = isRecord(terminalStatus?.screen) ? terminalStatus.screen : {};
   return createHash("sha256")
     .update(JSON.stringify({
       target: terminalControl.target,
-      key: approval.key,
+      keys: approval.keys ?? (approval.key ? [approval.key] : undefined),
       label: approval.label,
       prompt_kind: approval.prompt_kind,
       command: approval.command,
       excerpt: screen.excerpt
     }))
-    .digest("hex")
-    .slice(0, 16);
-}
-
-function terminalBridgeApprovalFingerprintForScreen({ terminalControl, screen, approval }) {
-  return terminalBridgeApprovalFingerprint({
-    terminalControl,
-    terminalStatus: {
-      approval_state: {
-        key: approval.key,
-        label: approval.label,
-        prompt_kind: approval.promptKind,
-        command: approval.command
-      },
-      screen: {
-        excerpt: screenExcerpt(screen)
-      }
-    }
-  });
+    .digest("hex");
 }
 
 function terminalBridgeApprovalInstructions({ conversation, terminalControl, terminalStatus }) {
   const approval = isRecord(terminalStatus?.approval_state) ? terminalStatus.approval_state : {};
   const screen = isRecord(terminalStatus?.screen) ? terminalStatus.screen : {};
-  const label = stringValue(approval.label) || "the current Codex approval prompt";
-  const key = stringValue(approval.key) || "the detected approve key";
+  const executor = executorForConversation(conversation);
+  const agentName = executorDefinitionForKind(executor.kind).displayName;
+  const label = stringValue(approval.label) || `the current ${agentName} approval prompt`;
+  const keys = Array.isArray(approval.keys)
+    ? approval.keys.filter((value): value is string => typeof value === "string")
+    : [];
+  const keyDescription = keys.length > 0
+    ? keys.join(" then ")
+    : stringValue(approval.key) || "the detected approve key sequence";
+  const fingerprint = stringValue(approval.fingerprint);
   const excerpt = stringValue(screen.excerpt) || "(No terminal excerpt was available.)";
   return [
-    "Codex is waiting for approval in a terminal-controlled AKK session.",
+    `${agentName} is waiting for approval in a terminal-controlled AKK session.`,
     "",
     `Conversation: ${conversation.conversation_id}`,
     `Terminal: ${terminalControl.kind}:${terminalControl.target}`,
-    `Approval option: ${label} (${key})`,
+    `Approval option: ${label} (${keyDescription})`,
     "",
     "Safe terminal excerpt:",
     "```text",
     excerpt,
     "```",
     "",
-    "Ask the user whether to approve or deny this Codex request.",
+    `Ask the user whether to approve or deny this ${agentName} request.`,
     "",
     "If the user approves, call `agent_knock_knock_approve` with:",
     `- conversation_id: ${conversation.conversation_id}`,
+    `- expected_approval_fingerprint: ${fingerprint ?? "(missing; refresh status before approval)"}`,
     "",
-    "Equivalent user command: `AKK approve " + conversation.conversation_id + "`",
+    "Equivalent user command: `AKK approve " + conversation.conversation_id +
+      (fingerprint ? ` --expected-approval-fingerprint ${fingerprint}` : "") + "`",
     "",
     "If the user denies or wants to stop this request, call `agent_knock_knock_cancel` with:",
     `- conversation_id: ${conversation.conversation_id}`,
@@ -2301,6 +2179,7 @@ async function runSend(options) {
       const managed = createManagedTerminalConversationFromRawId({
         options,
         conversationId: terminalConversation.conversationId,
+        agent: terminalConversation.agent,
         messageBody,
         terminalControl: terminalConversation.terminalControl
       });
@@ -2320,6 +2199,7 @@ async function runSend(options) {
     await runTerminalConversationSend({
       options,
       conversationId: terminalConversation.conversationId,
+      agent: terminalConversation.agent,
       messageBody,
       terminalControl: terminalConversation.terminalControl
     });
@@ -2696,6 +2576,7 @@ async function runApprove(options) {
     await runTerminalConversationApprove({
       options,
       conversationId: terminalConversation.conversationId,
+      agent: terminalConversation.agent,
       terminalControl: terminalConversation.terminalControl
     });
     return;
@@ -2710,37 +2591,32 @@ async function runApprove(options) {
     throw new Error(`conversation ${conversation.conversation_id} is not controlled through a terminal`);
   }
 
-  const provider = createTerminalControlProvider(options);
-  const screen = await provider.capture(terminalControl.target, {
-    scrollbackLines: Number(options.scrollbackLines ?? 120),
-    socketPath: terminalControl.socketPath
-  });
-  const approval = detectCodexApprovalPrompt(screen);
-  if (!approval.approvable) {
-    printJson({
-      conversation,
-      approved: false,
-      blocked: true,
-      reason: approval.reason,
-      terminal_control: terminalControl,
-      screen_excerpt: screenExcerpt(screen)
-    });
-    return;
-  }
-
-  const expectedFingerprint = stringValue(options.expectedApprovalFingerprint);
-  const actualFingerprint = terminalBridgeApprovalFingerprintForScreen({ terminalControl, screen, approval });
+  const executor = executorForConversation(conversation);
+  const monitoredApproval = isRecord(nativeTakeover?.["terminal_bridge_approval"])
+    ? nativeTakeover.terminal_bridge_approval
+    : undefined;
+  const expectedFingerprint = stringValue(options.expectedApprovalFingerprint) ??
+    stringValue(monitoredApproval?.fingerprint);
   const autoApproved = options.autoApproved === true;
   const policyRuleId = stringValue(options.policyRuleId);
   const policyFingerprint = stringValue(options.policyFingerprint);
-  if (expectedFingerprint && actualFingerprint !== expectedFingerprint) {
+  const approval = await createTerminalAgentBridge(options).approve(
+    executor.kind,
+    terminalControl,
+    {
+      expectedFingerprint,
+      scrollbackLines: Number(options.scrollbackLines ?? 120)
+    }
+  );
+  const actualFingerprint = approval.fingerprint;
+  if (!approval.approved) {
     if (autoApproved) {
       appendEvent(logPath, {
         ts: new Date().toISOString(),
         conversation_id: conversation.conversation_id,
         event: "terminal_auto_approval_decision",
         action: "rejected",
-        reason: "approval fingerprint changed before execution",
+        reason: approval.reason,
         terminal_control: terminalControl,
         expected_fingerprint: expectedFingerprint,
         actual_fingerprint: actualFingerprint,
@@ -2751,25 +2627,23 @@ async function runApprove(options) {
     printJson({
       conversation,
       approved: false,
-      blocked: true,
-      reason: "approval fingerprint changed before execution",
+      blocked: approval.blocked,
+      reason: approval.reason,
       terminal_control: terminalControl,
       expected_approval_fingerprint: expectedFingerprint,
       actual_approval_fingerprint: actualFingerprint,
-      screen_excerpt: screenExcerpt(screen)
+      screen_excerpt: approval.screenExcerpt
     });
     return;
   }
 
-  await provider.sendKeys(terminalControl.target, [approval.key], {
-    socketPath: terminalControl.socketPath
-  });
   appendEvent(logPath, {
     ts: new Date().toISOString(),
     conversation_id: conversation.conversation_id,
     event: "terminal_approval_send",
     terminal_control: terminalControl,
     key: approval.key,
+    keys: approval.keys,
     label: approval.label,
     approval_fingerprint: actualFingerprint,
     auto_approved: autoApproved,
@@ -2792,6 +2666,7 @@ async function runApprove(options) {
     conversation_id: conversation.conversation_id,
     terminal_target: terminalControl.target,
     key: approval.key,
+    keys: approval.keys,
     label: approval.label,
     approval_fingerprint: actualFingerprint,
     auto_approved: autoApproved,
@@ -2867,6 +2742,7 @@ async function runApprove(options) {
     approved: true,
     terminal_control: terminalControl,
     key: approval.key,
+    keys: approval.keys,
     label: approval.label,
     approval_fingerprint: actualFingerprint,
     auto_approved: autoApproved,
@@ -2875,33 +2751,30 @@ async function runApprove(options) {
   });
 }
 
-async function runTerminalConversationApprove({ options, conversationId, terminalControl }) {
-  const provider = createTerminalControlProvider(options);
-  const screen = await provider.capture(terminalControl.target, {
-    scrollbackLines: Number(options.scrollbackLines ?? 120),
-    socketPath: terminalControl.socketPath
+async function runTerminalConversationApprove({ options, conversationId, agent, terminalControl }) {
+  const approval = await createTerminalAgentBridge(options).approve(agent, terminalControl, {
+    expectedFingerprint: stringValue(options.expectedApprovalFingerprint),
+    scrollbackLines: Number(options.scrollbackLines ?? 120)
   });
-  const approval = detectCodexApprovalPrompt(screen);
-  if (!approval.approvable) {
+  if (!approval.approved) {
     printJson({
       conversation_id: conversationId,
       source: "terminal_control",
       approved: false,
-      blocked: true,
+      blocked: approval.blocked,
       reason: approval.reason,
       terminal_control: terminalControl,
-      screen_excerpt: screenExcerpt(screen)
+      screen_excerpt: approval.screenExcerpt
     });
     return;
   }
 
-  await provider.sendKeys(terminalControl.target, [approval.key], {
-    socketPath: terminalControl.socketPath
-  });
   runtimeLog("info", "terminal_approval_send", {
     conversation_id: conversationId,
+    agent,
     terminal_target: terminalControl.target,
     key: approval.key,
+    keys: approval.keys,
     label: approval.label
   });
 
@@ -2911,21 +2784,18 @@ async function runTerminalConversationApprove({ options, conversationId, termina
     approved: true,
     terminal_control: terminalControl,
     key: approval.key,
-    label: approval.label
+    keys: approval.keys,
+    label: approval.label,
+    approval_fingerprint: approval.fingerprint
   });
 }
 
-async function runTerminalConversationSend({ options, conversationId, messageBody, terminalControl }) {
-  const provider = createTerminalControlProvider(options);
+async function runTerminalConversationSend({ options, conversationId, agent, messageBody, terminalControl }) {
   const terminalPayload = terminalSubmissionPayload(String(messageBody));
-  await provider.sendText(terminalControl.target, terminalPayload, {
-    socketPath: terminalControl.socketPath
-  });
-  await provider.sendKeys(terminalControl.target, ["C-m"], {
-    socketPath: terminalControl.socketPath
-  });
+  await createTerminalAgentBridge(options).send(agent, terminalControl, terminalPayload);
   runtimeLog("info", "terminal_message_send", {
     conversation_id: conversationId,
+    agent,
     terminal_target: terminalControl.target,
     message: textSummary(messageBody)
   });
@@ -2985,7 +2855,7 @@ async function runTerminalControlSend({
     }
   }
 
-  const provider = createTerminalControlProvider(options);
+  const terminalBridge = createTerminalAgentBridge(options);
   const bridgeStartedAt = new Date().toISOString();
   const agentTimeoutMinutes = Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES);
   const agentHardTimeoutMinutes = positiveMinutes(
@@ -3005,21 +2875,15 @@ async function runTerminalControlSend({
   let preSendScreenFingerprint: string | undefined;
   if (bridge) {
     try {
-      const screen = await provider.capture(terminalControl.target, {
-        scrollbackLines: Number(options.scrollbackLines ?? 120),
-        socketPath: terminalControl.socketPath
+      const status = await terminalBridge.status(executor.kind, terminalControl, {
+        scrollbackLines: Number(options.scrollbackLines ?? 120)
       });
-      preSendScreenFingerprint = terminalBridgeScreenFingerprint(screenExcerpt(screen));
+      preSendScreenFingerprint = terminalBridgeScreenFingerprint(status.screen.excerpt);
     } catch {
       // Delivery can still succeed when capture is unavailable; prompt matching remains the fallback boundary.
     }
   }
-  await provider.sendText(terminalControl.target, terminalPayload, {
-    socketPath: terminalControl.socketPath
-  });
-  await provider.sendKeys(terminalControl.target, ["C-m"], {
-    socketPath: terminalControl.socketPath
-  });
+  await terminalBridge.send(executor.kind, terminalControl, terminalPayload);
   const supersededConversationIds = bridge
     ? supersedeTerminalBridgeConversations({
         storeDir: storeDirFromOptions(options),
@@ -3111,12 +2975,18 @@ function terminalSubmissionPayload(payload: string): string {
   return payload.replace(/[\r\n]+$/u, "");
 }
 
-function createManagedTerminalConversationFromRawId({ options, conversationId, messageBody, terminalControl }) {
+function createManagedTerminalConversationFromRawId({
+  options,
+  conversationId,
+  agent,
+  messageBody,
+  terminalControl
+}) {
   const workspace = terminalControl.currentPath ?? process.cwd();
   const storeDir = expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(workspace));
   cleanupIdleConversations(storeDir, options);
   const executor = resolveExecutor({
-    kind: "codex",
+    kind: agent,
     session: conversationId
   });
   const now = new Date();
@@ -3154,12 +3024,12 @@ function createManagedTerminalConversationFromRawId({ options, conversationId, m
     gateway_session: options.gatewaySession ?? options.openclawSession ?? "agent:main:main",
     openclaw_bin: options.openclawBin ?? resolveOptionalExecutable("openclaw"),
     executor_all_proxy: proxyForExecutor(executor, options),
-    executor_model: options.model ?? options.codexModel,
+    executor_model: options.model ?? (agent === "codex" ? options.codexModel : undefined),
     native_session_takeover: {
-      agent: "codex",
+      agent,
       native_session_id: conversationId,
       source_cwd: workspace,
-      source_title: `Terminal-controlled Codex ${terminalControl.target}`,
+      source_title: `Terminal-controlled ${executor.display_name} ${terminalControl.target}`,
       strategy: "terminal_control",
       attached_at: now.toISOString(),
       takeover_match_kind: "raw_terminal_send",
@@ -3174,7 +3044,7 @@ function createManagedTerminalConversationFromRawId({ options, conversationId, m
     conversation_id: attachedConversation.conversation_id,
     event: "raw_terminal_session_attached",
     source_conversation_id: conversationId,
-    agent: "codex",
+    agent,
     terminal_control: terminalControl,
     executor
   });
@@ -3849,6 +3719,7 @@ async function runCancel(options) {
     await runTerminalConversationCancel({
       options,
       conversationId: terminalConversation.conversationId,
+      agent: terminalConversation.agent,
       terminalControl: terminalConversation.terminalControl
     });
     return;
@@ -3869,6 +3740,7 @@ async function runCancel(options) {
       conversation,
       statePath,
       logPath,
+      agent: executorForConversation(conversation).kind,
       terminalControl
     });
     return;
@@ -3935,31 +3807,41 @@ async function runCancel(options) {
   });
 }
 
-async function runTerminalConversationCancel({ options, conversationId, terminalControl }) {
-  const provider = createTerminalControlProvider(options);
-  await provider.sendKeys(terminalControl.target, ["C-c"], {
-    socketPath: terminalControl.socketPath
-  });
+async function runTerminalConversationCancel({ options, conversationId, agent, terminalControl }) {
+  const cancellation = await createTerminalAgentBridge(options).cancel(agent, terminalControl);
   runtimeLog("info", "terminal_cancel_requested", {
     conversation_id: conversationId,
+    agent,
     terminal_target: terminalControl.target,
-    key: "C-c"
+    key: cancellation.key,
+    keys: cancellation.keys,
+    cancel_requested: cancellation.cancelRequested,
+    reason: cancellation.reason
   });
 
   printJson({
     conversation_id: conversationId,
     source: "terminal_control",
-    cancel_requested: true,
+    cancel_requested: cancellation.cancelRequested,
+    reason: cancellation.reason,
     terminal_control: terminalControl,
-    key: "C-c"
+    key: cancellation.key,
+    keys: cancellation.keys
   });
 }
 
-async function runTerminalControlCancel({ options, conversation, statePath, logPath, terminalControl }) {
-  const provider = createTerminalControlProvider(options);
-  await provider.sendKeys(terminalControl.target, ["C-c"], {
-    socketPath: terminalControl.socketPath
-  });
+async function runTerminalControlCancel({ options, conversation, statePath, logPath, agent, terminalControl }) {
+  const cancellation = await createTerminalAgentBridge(options).cancel(agent, terminalControl);
+  if (!cancellation.cancelRequested) {
+    printJson({
+      conversation,
+      cancel_requested: false,
+      reason: cancellation.reason,
+      terminal_control: terminalControl,
+      budget: budgetAction(conversation)
+    });
+    return;
+  }
 
   const now = new Date().toISOString();
   appendEvent(logPath, {
@@ -3967,12 +3849,15 @@ async function runTerminalControlCancel({ options, conversation, statePath, logP
     conversation_id: conversation.conversation_id,
     event: "terminal_cancel_requested",
     terminal_control: terminalControl,
-    key: "C-c"
+    key: cancellation.key,
+    keys: cancellation.keys
   });
   runtimeLog("info", "terminal_cancel_requested", {
     conversation_id: conversation.conversation_id,
+    agent,
     terminal_target: terminalControl.target,
-    key: "C-c"
+    key: cancellation.key,
+    keys: cancellation.keys
   });
 
   const nextConversation = {
@@ -3986,7 +3871,8 @@ async function runTerminalControlCancel({ options, conversation, statePath, logP
     conversation: nextConversation,
     cancel_requested: true,
     terminal_control: terminalControl,
-    key: "C-c",
+    key: cancellation.key,
+    keys: cancellation.keys,
     budget: budgetAction(nextConversation)
   });
 }
@@ -4437,9 +4323,10 @@ async function runTerminalBridgeMonitor(options) {
     initialNativeTakeover?.["terminal_bridge_pre_send_screen_fingerprint"]
   );
   let previousScreenFingerprint: string | undefined = preSendScreenFingerprint;
-  let previousRolloutFingerprint: string | undefined;
+  let previousDurableFingerprint: string | undefined;
   let persistedActivityReason = stringValue(initialNativeTakeover?.["terminal_bridge_last_activity_reason"]);
   const executor = executorForConversation(conversation);
+  const terminalBridge = createTerminalAgentBridge(options);
   appendEvent(logPath, {
     ts: new Date().toISOString(),
     conversation_id: conversation.conversation_id,
@@ -4525,7 +4412,31 @@ async function runTerminalBridgeMonitor(options) {
       return;
     }
 
-    const terminalStatus = await terminalStatusForControl(terminalControl, options);
+    const requestText = String(
+      nativeTakeover?.["terminal_bridge_request_text"] ?? conversation.user_request ?? ""
+    );
+    const startedAt = stringValue(nativeTakeover?.["terminal_bridge_started_at"]);
+    const screenChangedSinceSend = preSendScreenFingerprint !== undefined &&
+      previousScreenFingerprint !== undefined &&
+      previousScreenFingerprint !== preSendScreenFingerprint;
+    const poll = await terminalBridge.monitorPoll({
+      agent: executor.kind,
+      terminalControl,
+      screenOptions: {
+        scrollbackLines: Number(options.scrollbackLines ?? 120),
+        requestText,
+        screenChangedSinceSend
+      },
+      durableRequest: {
+        sessionId: stringValue(nativeTakeover?.["native_session_id"]),
+        cwd: stringValue(nativeTakeover?.["source_cwd"]),
+        requestText,
+        requestHash: stringValue(nativeTakeover?.["terminal_bridge_request_hash"]),
+        startedAt,
+        context: { conversation, nativeTakeover }
+      }
+    });
+    const terminalStatus = poll.status;
     const approval = terminalStatus.approval_state;
     if (isRecord(approval) && approval.blocked === true) {
       const fingerprint = terminalBridgeApprovalFingerprint({ terminalControl, terminalStatus });
@@ -4580,7 +4491,7 @@ async function runTerminalBridgeMonitor(options) {
             terminalStatus,
             fingerprint
           }),
-          approve_command: `AKK approve ${notification.conversation.conversation_id}`,
+          approve_command: `AKK approve ${notification.conversation.conversation_id} --expected-approval-fingerprint ${fingerprint}`,
           deny_command: `AKK cancel ${notification.conversation.conversation_id}`,
           approve_tool: "agent_knock_knock_approve",
           deny_tool: "agent_knock_knock_cancel"
@@ -4619,39 +4530,24 @@ async function runTerminalBridgeMonitor(options) {
     const screenChanged = previousScreenFingerprint !== undefined &&
       screenFingerprint !== undefined &&
       screenFingerprint !== previousScreenFingerprint;
-    const screenChangedSinceSend = preSendScreenFingerprint !== undefined &&
-      screenFingerprint !== undefined &&
-      screenFingerprint !== preSendScreenFingerprint;
     previousScreenFingerprint = screenFingerprint;
 
-    const contextMatch = await terminalBridgeCodexContext({
-      conversation,
-      nativeTakeover,
-      options
-    });
-    const startedAt = stringValue(nativeTakeover?.["terminal_bridge_started_at"]);
-    const rolloutCompletion = contextMatch?.context
-      ? latestCompletedRolloutTurn({
-          context: contextMatch.context,
-          conversation,
-          nativeTakeover,
-          startedAt
-        })
-      : undefined;
-    const rolloutFingerprint = rolloutCompletion
+    const durableCompletion = poll.durableCompletion;
+    const durableFingerprint = durableCompletion
       ? terminalBridgeActivityFingerprint(JSON.stringify({
-          text: rolloutCompletion.text,
-          timestamp: rolloutCompletion.timestamp,
-          turn_id: rolloutCompletion?.turnId
+          text: durableCompletion.text,
+          timestamp: durableCompletion.timestamp,
+          id: durableCompletion.id,
+          metadata: durableCompletion.metadata
         }))
       : undefined;
-    const rolloutChanged = rolloutFingerprint !== undefined && rolloutFingerprint !== previousRolloutFingerprint;
-    previousRolloutFingerprint = rolloutFingerprint;
+    const durableChanged = durableFingerprint !== undefined && durableFingerprint !== previousDurableFingerprint;
+    previousDurableFingerprint = durableFingerprint;
 
     const activityReasons = [
       terminalStatus.activity_state === "working" ? terminalStatus.activity_reason : undefined,
       screenChanged ? "terminal screen changed" : undefined,
-      rolloutChanged ? "Codex rollout assistant output changed" : undefined
+      durableChanged ? "durable completion evidence changed" : undefined
     ].filter((value): value is string => Boolean(value));
     if (activityReasons.length > 0) {
       const observedAtMs = Date.now();
@@ -4679,26 +4575,20 @@ async function runTerminalBridgeMonitor(options) {
       }
     }
 
-    const terminalIdle = terminalStatus.activity_state === "idle";
-    const screenMessage = !rolloutCompletion && terminalIdle
-      ? terminalBridgeScreenMessage({
-          conversation,
-          nativeTakeover,
-          terminalStatus,
-          screenChangedSinceSend
-        })
+    const completion = poll.completion;
+    const completionMetadata = isRecord(completion?.metadata) ? completion.metadata : {};
+    const completionMatch = completion
+      ? stringValue(completionMetadata.match) ??
+        (completion.source === "screen" ? "terminal_screen" : "durable_completion")
       : undefined;
-    const completion = rolloutCompletion ?? (terminalIdle ? screenMessage : undefined);
-    const completionMatch = rolloutCompletion
-      ? "rollout_task_complete"
-      : "terminal_screen";
     const completionFingerprint = completion
       ? createHash("sha256")
         .update(JSON.stringify({
           text: completion.text,
           timestamp: completion.timestamp,
           match: completionMatch,
-          turn_id: rolloutCompletion?.turnId,
+          source: completion.source,
+          id: completion.id,
           message_id: currentMessageId
         }))
         .digest("hex")
@@ -4712,9 +4602,12 @@ async function runTerminalBridgeMonitor(options) {
         event: "terminal_bridge_completion_detected",
         terminal_control: terminalControl,
         match: completionMatch,
-        codex_session: contextMatch?.context.source,
+        completion_source: completion.source,
+        completion_id: completion.id,
+        terminal_session: completionMetadata.session,
+        context_match: completionMetadata.context_match,
         assistant_timestamp: completion?.timestamp,
-        rollout_turn_id: rolloutCompletion?.turnId,
+        rollout_turn_id: completion.source === "durable" ? completion.id : undefined,
         terminal_bridge_message_id: currentMessageId
       });
       const callbackMessage = createMessage({
@@ -4727,11 +4620,14 @@ async function runTerminalBridgeMonitor(options) {
         metadata: {
           source: "terminal_bridge",
           terminal_control: terminalControl,
-          codex_session: contextMatch?.context.source,
-          confidence: rolloutCompletion ? contextMatch?.confidence : "screen_only",
+          ...completionMetadata,
+          completion_source: completion.source,
+          completion_id: completion.id,
+          terminal_session: completionMetadata.session,
+          confidence: completion.confidence,
           match: completionMatch,
           assistant_timestamp: completion?.timestamp,
-          rollout_turn_id: rolloutCompletion?.turnId,
+          rollout_turn_id: completion.source === "durable" ? completion.id : undefined,
           terminal_bridge_message_id: currentMessageId
         }
       });
@@ -4802,7 +4698,7 @@ async function runTerminalBridgeMonitor(options) {
           detail: {
             terminal_bridge: true,
             terminal_control: terminalControl,
-            match: contextMatch?.match,
+            match: completionMetadata.context_match,
             terminal_activity_state: terminalStatus.activity_state,
             last_activity_at: new Date(lastActivityAtMs).toISOString(),
             inactivity_deadline_at: new Date(lastActivityAtMs + timeoutMinutes * 60 * 1000).toISOString(),
@@ -4960,7 +4856,7 @@ function terminalBridgeApprovalCandidate({ executor, terminalControl, terminalSt
   };
 }
 
-async function terminalBridgeCodexContext({ conversation, nativeTakeover, options }) {
+async function loadCodexTerminalContext({ conversation, nativeTakeover, options }) {
   const provider = createAgentSessionProvider("codex", options);
   const nativeSessionId = stringValue(nativeTakeover?.["native_session_id"]);
   const startedAtMs = Date.parse(String(nativeTakeover?.["terminal_bridge_started_at"] ?? ""));
@@ -5019,152 +4915,6 @@ async function terminalBridgeCodexContext({ conversation, nativeTakeover, option
     match: sessions.length === 1 ? "cwd" : "cwd_latest",
     confidence: sessions.length === 1 ? "medium" : "low"
   };
-}
-
-function latestCompletedRolloutTurn({ context, conversation, nativeTakeover, startedAt }) {
-  const threshold = validTimestampMs(startedAt);
-  const expectedRequestHash = stringValue(nativeTakeover?.["terminal_bridge_request_hash"]) ??
-    terminalBridgeRequestFingerprint(
-      nativeTakeover?.["terminal_bridge_request_text"] ?? conversation.user_request
-    );
-  if (threshold === undefined || !expectedRequestHash) {
-    return undefined;
-  }
-
-  const turn = [...(context.turns ?? [])]
-    .reverse()
-    .find((candidate) => {
-      const userTimestamp = validTimestampMs(candidate.userTimestamp);
-      const completedAt = validTimestampMs(candidate.completedAt);
-      return candidate.userTextHash === expectedRequestHash &&
-        userTimestamp !== undefined &&
-        completedAt !== undefined &&
-        userTimestamp >= threshold &&
-        completedAt >= userTimestamp &&
-        Boolean(candidate.lastAssistantMessage);
-    });
-  if (!turn?.lastAssistantMessage) {
-    return undefined;
-  }
-  return {
-    role: "assistant" as const,
-    text: turn.lastAssistantMessage,
-    timestamp: turn.completedAt,
-    turnId: turn.turnId,
-    userTimestamp: turn.userTimestamp
-  };
-}
-
-function terminalBridgeScreenMessage({
-  conversation,
-  nativeTakeover,
-  terminalStatus,
-  screenChangedSinceSend
-}) {
-  const excerpt = stringValue(terminalStatus?.screen?.excerpt);
-  if (!excerpt) {
-    return undefined;
-  }
-
-  const request = String(
-    nativeTakeover?.["terminal_bridge_request_text"] ?? conversation.user_request ?? ""
-  ).trim();
-  const promptEnd = request ? whitespaceInsensitiveMatchEnd(excerpt, request) : undefined;
-  const afterPrompt = promptEnd === undefined ? undefined : excerpt.slice(promptEnd);
-  const completionBoundary = afterPrompt === undefined
-    ? undefined
-    : terminalBridgeCompletionBoundary(afterPrompt);
-  const completionText = afterPrompt === undefined
-    ? screenChangedSinceSend
-      ? terminalBridgeLatestCompletedSegment(excerpt)
-      : undefined
-    : completionBoundary === undefined
-      ? afterPrompt
-      : afterPrompt.slice(0, completionBoundary);
-  if (completionText === undefined) {
-    return undefined;
-  }
-  const cleaned = cleanTerminalBridgeScreenText(completionText);
-  const hasCompletionEvidence = promptEnd === undefined || completionBoundary !== undefined || /[•└]/u.test(cleaned ?? "");
-  if (!cleaned || cleaned.length < 40 || !hasCompletionEvidence) {
-    return undefined;
-  }
-
-  return {
-    role: "assistant" as const,
-    text: truncateText(cleaned, 4000),
-    timestamp: undefined
-  };
-}
-
-function whitespaceInsensitiveMatchEnd(text: string, expected: string): number | undefined {
-  const normalizedExpected = expected.replace(/\s/gu, "");
-  if (!normalizedExpected) {
-    return undefined;
-  }
-
-  let normalizedText = "";
-  const sourceEnds: number[] = [];
-  for (let index = 0; index < text.length;) {
-    const codePoint = text.codePointAt(index);
-    if (codePoint === undefined) {
-      break;
-    }
-    const character = String.fromCodePoint(codePoint);
-    if (!/\s/u.test(character)) {
-      normalizedText += character;
-      for (let codeUnit = 0; codeUnit < character.length; codeUnit += 1) {
-        sourceEnds.push(index + character.length);
-      }
-    }
-    index += character.length;
-  }
-
-  const matchIndex = normalizedText.lastIndexOf(normalizedExpected);
-  if (matchIndex < 0) {
-    return undefined;
-  }
-  return sourceEnds[matchIndex + normalizedExpected.length - 1];
-}
-
-function terminalBridgeLatestCompletedSegment(text: string): string | undefined {
-  const matches = [...text.matchAll(/^[ \t]*[─━-]+\s+Worked for\b.*$/gmu)];
-  const completion = matches.at(-1);
-  if (completion?.index === undefined) {
-    return undefined;
-  }
-
-  const previousCompletion = matches.at(-2);
-  let start = previousCompletion?.index === undefined
-    ? 0
-    : previousCompletion.index + previousCompletion[0].length;
-  const beforeCompletion = text.slice(0, completion.index);
-  const prompts = [...beforeCompletion.matchAll(/^[ \t]*›(?:\s|$).*$/gmu)];
-  const latestPrompt = prompts.at(-1);
-  if (latestPrompt?.index !== undefined && latestPrompt.index >= start) {
-    start = latestPrompt.index + latestPrompt[0].length;
-  }
-  return text.slice(start, completion.index);
-}
-
-function terminalBridgeCompletionBoundary(text: string): number | undefined {
-  const matches = [...text.matchAll(/^[ \t]*[─━-]+\s+Worked for\b.*$/gmu)];
-  return matches.at(-1)?.index;
-}
-
-function cleanTerminalBridgeScreenText(text: string): string | undefined {
-  const lines = text
-    .split(/\r?\n/)
-    .map((line) => line.replace(/\s+$/u, ""))
-    .filter((line) => {
-      const trimmed = line.trim();
-      return trimmed &&
-        !trimmed.startsWith("› Use /skills") &&
-        !/^gpt-[\w.-]+/u.test(trimmed) &&
-        !/^[-\w.]+ default ·/u.test(trimmed);
-    });
-  const cleaned = lines.join("\n").trim();
-  return cleaned || undefined;
 }
 
 function resolveExecutable(command) {

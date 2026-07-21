@@ -1,7 +1,11 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import type { ActiveCodexProcess, TerminalControlRef } from "./codex-session-provider.js";
+import type {
+  ActiveTerminalProcess,
+  TerminalControlCapability,
+  TerminalControlRef
+} from "./terminal-agent-adapter.js";
 
 export interface TerminalPane {
   kind: "tmux";
@@ -19,7 +23,7 @@ export interface TerminalControlProvider {
   listPanes(): Promise<TerminalPane[]>;
   capture(target: string, options?: { scrollbackLines?: number; socketPath?: string }): Promise<string>;
   sendText(target: string, text: string, options?: { socketPath?: string }): Promise<void>;
-  sendKeys(target: string, keys: string[], options?: { socketPath?: string }): Promise<void>;
+  sendKeys(target: string, keys: readonly string[], options?: { socketPath?: string }): Promise<void>;
 }
 
 export interface CommandResult {
@@ -131,7 +135,7 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
     throw new Error(lastResult?.stderr || lastResult?.error?.message || `tmux capture-pane failed for ${target}`);
   }
 
-  async sendKeys(target: string, keys: string[], options: { socketPath?: string } = {}): Promise<void> {
+  async sendKeys(target: string, keys: readonly string[], options: { socketPath?: string } = {}): Promise<void> {
     let lastResult: CommandResult | undefined;
     for (const command of this.commands) {
       const result = this.runCommand(command, tmuxArgs(options.socketPath, ["send-keys", "-t", target, ...keys]));
@@ -178,8 +182,8 @@ export class StaticTerminalControlProvider implements TerminalControlProvider {
     this.sentKeys.push({ target, keys: ["-l", text] });
   }
 
-  async sendKeys(target: string, keys: string[]): Promise<void> {
-    this.sentKeys.push({ target, keys });
+  async sendKeys(target: string, keys: readonly string[]): Promise<void> {
+    this.sentKeys.push({ target, keys: [...keys] });
   }
 }
 
@@ -246,10 +250,11 @@ function parseUnderscoreTmuxPaneLine(line: string): string[] | undefined {
   return match ? match.slice(1) : undefined;
 }
 
-export async function enrichActiveProcessesWithTerminalControl(
-  processes: ActiveCodexProcess[],
-  provider: TerminalControlProvider
-): Promise<ActiveCodexProcess[]> {
+export async function enrichActiveProcessesWithTerminalControl<T extends ActiveTerminalProcess>(
+  processes: T[],
+  provider: TerminalControlProvider,
+  options: { capabilities?: readonly TerminalControlCapability[] } = {}
+): Promise<T[]> {
   const panes = await provider.listPanes();
   if (panes.length === 0) {
     return processes;
@@ -281,12 +286,15 @@ export async function enrichActiveProcessesWithTerminalControl(
     }
     return {
       ...process,
-      terminalControl: terminalRefFromPane(pane)
-    };
+      terminalControl: terminalRefFromPane(pane, options.capabilities)
+    } as T;
   });
 }
 
-export function terminalRefFromPane(pane: TerminalPane): TerminalControlRef {
+export function terminalRefFromPane(
+  pane: TerminalPane,
+  capabilities: readonly TerminalControlCapability[] = ["screen_status", "send_keys"]
+): TerminalControlRef {
   return {
     kind: "tmux",
     target: pane.target,
@@ -297,11 +305,15 @@ export function terminalRefFromPane(pane: TerminalPane): TerminalControlRef {
     panePid: pane.panePid,
     currentCommand: pane.currentCommand,
     currentPath: pane.currentPath,
-    capabilities: ["screen_status", "send_keys", "terminal_approval"]
+    capabilities: [...capabilities]
   };
 }
 
-function processBelongsToPane(process: ActiveCodexProcess, pane: TerminalPane, processes: ActiveCodexProcess[]): boolean {
+function processBelongsToPane<T extends ActiveTerminalProcess>(
+  process: T,
+  pane: TerminalPane,
+  processes: T[]
+): boolean {
   if (process.pid === pane.panePid || process.ppid === pane.panePid) {
     return true;
   }
@@ -322,7 +334,7 @@ function processBelongsToPane(process: ActiveCodexProcess, pane: TerminalPane, p
   return false;
 }
 
-function uniquePaneByCwd(process: ActiveCodexProcess, panes: TerminalPane[]): TerminalPane | undefined {
+function uniquePaneByCwd(process: ActiveTerminalProcess, panes: TerminalPane[]): TerminalPane | undefined {
   const processCwd = normalizedPath(process.cwd);
   if (!processCwd) {
     return undefined;

@@ -1,6 +1,12 @@
+import { createHash } from "node:crypto";
+import type {
+  ActiveTerminalProcess,
+  TerminalProcessSnapshot
+} from "./terminal-agent-adapter.js";
+
 export type CodexSessionCapability = "full" | "metadata_only" | "unavailable";
 export type CodexProcessKind = "codex_cli" | "codex_acp";
-export type DiscoveryConfidence = "high" | "medium" | "low";
+export type { DiscoveryConfidence, TerminalControlRef } from "./terminal-agent-adapter.js";
 
 export interface CodexThreadRow {
   id?: string;
@@ -35,39 +41,11 @@ export interface CodexSessionModelInfo {
   source: "turn_context" | "session_meta";
 }
 
-export interface CodexProcessSnapshot {
-  pid: number;
-  ppid?: number;
-  command: string;
-  cwd?: string;
-  elapsed?: string;
-}
+/** @deprecated Import TerminalProcessSnapshot from terminal-agent-adapter instead. */
+export type CodexProcessSnapshot = TerminalProcessSnapshot;
 
-export interface ActiveCodexProcess {
-  pid: number;
-  ppid?: number;
-  command: string;
-  cwd?: string;
-  elapsed?: string;
-  kind: CodexProcessKind;
-  sessionId?: string;
-  confidence: DiscoveryConfidence;
-  reason: string;
-  terminalControl?: TerminalControlRef;
-}
-
-export interface TerminalControlRef {
-  kind: "tmux";
-  target: string;
-  socketPath?: string;
-  session: string;
-  window: number;
-  pane: number;
-  panePid: number;
-  currentCommand?: string;
-  currentPath?: string;
-  capabilities: ("screen_status" | "send_keys" | "terminal_approval")[];
-}
+/** @deprecated Import ActiveTerminalProcess from terminal-agent-adapter for generic terminal code. */
+export type ActiveCodexProcess = ActiveTerminalProcess<CodexProcessKind>;
 
 export interface RolloutMessageExcerpt {
   role: "user" | "assistant" | "tool";
@@ -349,6 +327,7 @@ export function buildForkContextPackage(session: CodexSessionSummary, rollout: R
 
 function baseProcess(process: CodexProcessSnapshot): Omit<ActiveCodexProcess, "kind" | "confidence" | "reason"> {
   return {
+    agent: "codex",
     pid: process.pid,
     ppid: process.ppid,
     command: process.command,
@@ -541,4 +520,3 @@ function stringValue(value: unknown): string | undefined {
 function numberValue(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
-import { createHash } from "node:crypto";

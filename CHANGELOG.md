@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.46 - 2026-07-22
+
+### Added
+
+- Add a registry-driven terminal-agent adapter layer, neutral process discovery, agent-aware terminal IDs, and a documented extension path while keeping legacy Codex IDs compatible.
+
+### Security
+
+- Fail closed on missing capabilities and revalidate the full ordered approval-key action against a freshly captured prompt before sending terminal input.
+
 ## 0.2.45 - 2026-07-20
 
 ### Added

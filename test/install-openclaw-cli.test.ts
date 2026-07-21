@@ -19,6 +19,8 @@ test("OpenClaw contract exposes terminal timeout configuration and renewal", () 
 
   const pluginSource = fs.readFileSync(path.join(packageRoot, "src", "openclaw-plugin.ts"), "utf8");
   assert.match(pluginSource, /const sendParameters =[\s\S]*?agentTimeoutMinutes:[\s\S]*?agentHardTimeoutMinutes:/u);
+  assert.match(pluginSource, /const approveParameters =[\s\S]*?required: \["conversation_id", "expected_approval_fingerprint"\]/u);
+  assert.match(pluginSource, /--expected-approval-fingerprint/u);
   assert.match(pluginSource, /name: "agent_knock_knock_renew"/u);
   assert.match(fs.readFileSync(skillSource, "utf8"), /agent_knock_knock_renew/u);
 });
