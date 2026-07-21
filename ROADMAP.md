@@ -8,21 +8,22 @@ The priority order is intentional: reliability comes first. New orchestration fe
 
 ## Priority 1: Reliability And Operations
 
-- Improve stuck detection for delegated tasks that stop producing callbacks or remain in an ambiguous running state.
-- Classify ACPX and agent failures into actionable categories, such as reconnect failure, sandbox denial, permission denial, callback delivery failure, and timeout.
+- Done for terminal control: make bridge timeouts activity-aware, retain a hard lifetime, and allow stalled monitors to be renewed without sending terminal input.
+- Partial: delegated ACPX monitors detect dead executors and callback timeouts; improve handling of ambiguous live states.
+- Partial: classify reconnect, permission, sandbox, timeout, and process failures; make every category consistently actionable.
 - Make `cancelling` converge to a terminal or reusable state after successful cancel, agent callback, or timeout.
-- Add stronger diagnostics for Codex reconnect/internal-error cases.
-- Keep callback delivery observable without requiring OpenClaw to inspect raw stdout, stderr, process state, or event logs.
-- Add safer log redaction for tokens, local-only paths, and raw command payloads before sharing diagnostics.
-- Add health checks that validate the OpenClaw plugin, skill install, Gateway status, ACPX availability, and default Codex/Claude sessions.
-- Add regression smoke tests for Codex and Claude delegation, follow-up send, cancel, close, and callback delivery.
+- Partial: expose sanitized task traces and terminal diagnostics; add stronger diagnosis for Codex reconnect/internal-error cases.
+- Done for terminal bridge: expose callback delivery state, bounded retries, and idempotent manual retry without requiring OpenClaw to inspect raw process output.
+- Partial: runtime logs avoid full CLI argv and redact common secrets, but retain bounded payload previews and local paths for diagnostics.
+- Partial: `doctor` validates required commands, available agents, and packaged files. Add installed-plugin, skill, Gateway, and live-session checks.
+- Partial: fake-agent regression tests cover delegation, follow-up, cancel, close, and callback routes. Add live Codex and Claude smoke tests.
 
 ## Priority 2: Simpler Session Control
 
 - Let users send follow-ups without typing a full conversation id when there is only one obvious open session.
 - Support agent-targeted shortcuts such as `AKK send codex: ...` or `AKK send claude: ...`.
 - Add short task aliases or titles so sessions are easier to identify from WeChat and other text-first channels.
-- Improve `AKK list` output with last activity, last callback summary, status, agent, and session name.
+- Partial: `AKK list` includes update time, status, agent, and session; add last activity and callback summaries.
 - Make idle session reuse rules more explicit and easier to override when the user wants a new independent task.
 
 ## Priority 3: Agent Session Discovery And Adoption
@@ -30,9 +31,8 @@ The priority order is intentional: reliability comes first. New orchestration fe
 - Done for Codex: discover active local Codex CLIs by scanning same-user processes, cwd, argv, and child process trees.
 - Done for Codex: discover inactive or historical Codex sessions from `threads` metadata and rollout JSONL files.
 - Done for Codex: separate process discovery from resumable-session discovery. Active processes identify likely workspaces; stable session ids are the real anchor for resume, takeover, and fork.
-- Done for Codex: expose `agent_knock_knock_agent_discover` flows for capabilities, active processes, and historical sessions, including pid, cwd, visible session id when available, title, confidence, and risk-relevant metadata.
+- Done for Codex: expose active, historical, and terminal-controlled sessions through `AKK list` and takeover planning, including risk-relevant process and session metadata.
 - Done for Codex: register an existing native Codex session as an AKK-managed conversation without immediately sending a message.
-- Done for Codex: support safe resume when the original CLI is no longer active.
 - Done for Codex: support explicit takeover for active CLI sessions by asking for confirmation, terminating the selected same-user process tree, verifying exit, and then resuming the selected session.
 - Done for Codex: support a higher-risk `allowCwdOnly` fallback for Codex TUI processes that do not expose a session id in argv; this requires a user-confirmed pid and cwd re-scan before termination.
 - Done for Codex: support OpenClaw-mediated fork as a safer alternative. AKK extracts bounded source context from the original session, OpenClaw summarizes it for user review, the user confirms, and only then AKK creates a new managed session in the same workspace using the approved summary.
@@ -42,12 +42,11 @@ The priority order is intentional: reliability comes first. New orchestration fe
 
 ## Priority 4: Agent Compatibility Layer
 
-- Isolate agent-specific local store access behind compatibility adapters instead of reading Codex, Cursor, or Claude Code files directly from plugin handlers.
-- Start with a `CodexSessionProvider` that can list recent sessions, read session metadata, extract rollout excerpts, detect active processes, and degrade when Codex storage changes.
-- Detect Codex local store capabilities at runtime instead of hardcoding a single database filename or schema version.
-- Treat Codex rollout JSONL as best-effort input: parse known event shapes, skip unknown events, redact sensitive values, and avoid encrypted reasoning content.
-- Keep fork context extraction bounded before it reaches OpenClaw, using source metadata, first/last relevant turns, command summaries, changed-file hints when available, and known blockers instead of sending full raw rollout history.
-- Add fixture tests for missing fields, renamed sqlite files, missing rollout files, unknown event types, long output, and partial capability degradation.
+- Done for Codex: isolate process, store, rollout, and terminal discovery behind compatibility providers.
+- Done for Codex: list recent sessions, read metadata, extract bounded rollout context, detect active processes, and degrade when local data is incomplete.
+- Partial: treat rollout JSONL as best-effort input, skip unknown events, and avoid encrypted reasoning content; add sensitive-value redaction before exposing parsed context.
+- Partial: inline unit tests cover missing data, store variation, bounded long context, and partial degradation; add explicit unknown-shape and encrypted-reasoning cases.
+- Remaining: detect a wider range of future Codex local-store layouts without hardcoding schema assumptions.
 - Define equivalent adapters for Cursor and Claude Code only after their resume and local-store behavior is verified.
 - Document that local session discovery depends on best-effort compatibility with agent-local storage, not stable public APIs from the coding-agent vendors.
 
@@ -68,11 +67,12 @@ The priority order is intentional: reliability comes first. New orchestration fe
 
 ## Priority 7: Permission And Approval Broker
 
-- Document and encode the observed difference between Claude Code and Codex approval behavior under ACPX.
-- Prefer Claude Code for tasks that need ACPX-approved filesystem access outside the workspace until Codex exposes equivalent approvable permission requests.
-- Add policy hooks so OpenClaw can decide whether a sensitive relay or permission request should be auto-approved, denied, or escalated to the user.
-- Track permission-related events as first-class task state instead of burying them in raw agent output.
-- Avoid blind global approval flows; use one-shot, auditable decisions where possible.
+- Done: document the observed difference between Claude Code and Codex approval behavior under ACPX.
+- Done for terminal-controlled Codex: support audited, deterministic auto-approval rules for exact command vectors inside configured workspaces.
+- Continue to prefer Claude Code for tasks that need ACPX-approved filesystem access outside the workspace until Codex exposes equivalent approvable permission requests.
+- Partial for terminal-controlled Codex: configuration policy hooks can approve exact commands; extend them to explicit deny and user escalation decisions.
+- Partial for terminal-controlled Codex: persist approval state and events; generalize this to ACPX and tool-relay permissions.
+- Done for terminal-controlled Codex: approval decisions are one-shot, fingerprinted, and auditable rather than blind global grants.
 
 ## Priority 8: Artifact Delivery
 
