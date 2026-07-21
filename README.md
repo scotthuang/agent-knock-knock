@@ -2,43 +2,68 @@
 
 ![Agent Knock Knock cover: OpenClaw knocking on coding agents' door](docs/assets/agent-knock-knock-cover.jpg)
 
-Agent Knock Knock lets OpenClaw delegate work to local coding agents such as Codex, Claude Code, and Cursor, keep those delegations alive as reusable tasks, and route follow-up messages or results back through OpenClaw.
+Agent Knock Knock (AKK) lets OpenClaw delegate work to local Codex, Claude Code, and Cursor agents, preserve each task for follow-ups, and route results back to chat—even on channels without threads. It can also discover and safely take over native Codex sessions.
 
-The name is literal: OpenClaw knocks on the door of another coding agent, hands it a task, waits for the callback, and can knock again later with follow-up instructions. AKK provides the persistent task layer that makes that workflow practical across chat channels.
+## Install
 
-## Why This Exists
+Requirements:
 
-OpenClaw already has built-in session spawning, but persistent ACP sessions can depend on thread-bound channels such as Discord or Telegram. That model works well when the external channel can attach replies to a stable thread.
+- Node.js 20+
+- OpenClaw installed and running
+- [ACPX](https://github.com/openclaw/acpx) installed globally
+- At least one authenticated coding agent: Codex, Claude Code, or Cursor
 
-Channels such as WeChat and many direct-message surfaces do not provide that same thread primitive. Without an external thread, OpenClaw needs another durable place to remember which coding agents are working, which task each agent owns, and where follow-up messages should go.
+```bash
+npm install -g acpx
+npm install -g @scotthuang/agent-knock-knock
+agent-knock-knock install-openclaw
+agent-knock-knock doctor
+```
 
-Agent Knock Knock fills that gap. It keeps local task state outside the chat channel, uses ACPX / ACP to talk to coding agents, and gives OpenClaw tools to delegate, list, inspect, continue, cancel, and close work without relying on any external channel feature.
+`install-openclaw` installs or updates the plugin, enables it, installs the AKK skill template, and restarts the OpenClaw Gateway. It is safe to rerun. Use `--skill-only` to skip plugin installation; add `--no-restart` to skip the automatic Gateway restart.
 
-BTW, it can also [take over a Codex task](#native-codex-takeover) you started in a terminal, so when you are away from your computer, OpenClaw can still pick it up and keep going.
+If OpenClaw runs from a local checkout or another nonstandard location, pass its CLI explicitly:
 
-## What It Provides
+```bash
+agent-knock-knock install-openclaw --openclaw-bin /path/to/openclaw/openclaw.mjs
+```
 
-- ACPX-backed delegation to Codex, Claude Code, and Cursor
-- Reusable task sessions for follow-up messages after the first result
-- Task listing, status inspection, follow-up send, cooperative cancellation, and local close
-- Structured callbacks back into OpenClaw through the plugin Gateway method
-- Conversation state stored in the user's home directory for recovery across OpenClaw turns
-- Runtime diagnostics logs with local timestamps, redaction, and retention cleanup
-- A short `AKK` routing convention for chat and `/akk` command surfaces
+For local AKK development:
 
-See [ROADMAP.md](ROADMAP.md) for planned reliability work and future orchestration features.
+```bash
+npm install
+npm run build
+node dist/src/cli.js install-openclaw
+```
 
-## Architecture
+Rerun the build and installer after pulling or editing plugin sources. OpenClaw loads the compiled files from `dist/`.
 
-OpenClaw is the top-level orchestrator. Agent Knock Knock runs as the OpenClaw plugin bridge, uses ACPX / ACP to communicate with local coding agents, and keeps enough local task state for OpenClaw to manage many concurrent coding-agent sessions.
+## Quick Start
+
+Start a task from an OpenClaw chat, then use its conversation ID for follow-ups:
+
+```text
+AKK Codex: inspect this repository and summarize it
+AKK status <conversation-id>
+AKK send <conversation-id>: run the tests and fix any failures
+AKK list
+```
+
+If no agent is named, AKK uses the configured `defaultAgent`, falling back to Codex.
+
+## Why AKK
+
+OpenClaw can spawn agents directly, but persistent sessions may depend on channel threads. WeChat and many direct-message surfaces do not provide that primitive. AKK keeps task state outside the chat channel so OpenClaw can recover, inspect, and continue coding-agent work from any supported surface.
+
+OpenClaw remains the orchestrator. AKK provides the plugin bridge, ACPX/ACP transport, durable task state, tmux terminal control, and structured callbacks.
 
 ```mermaid
 flowchart LR
   user["User / chat surface"] --> openclaw["OpenClaw"]
-  openclaw --> plugin["Agent Knock Knock<br/>OpenClaw plugin"]
-  plugin --> state["Local task state<br/>~/.agent-knock-knock"]
-  plugin --> acpx["ACPX / ACP"]
-  plugin --> terminal["Terminal bridge<br/>tmux Codex"]
+  openclaw --> plugin["AKK plugin"]
+  plugin --> state["Task state<br/>~/.agent-knock-knock"]
+  plugin --> acpx["ACPX/ACP"]
+  plugin --> terminal["tmux terminal bridge"]
   acpx --> codex["Codex"]
   acpx --> claude["Claude Code"]
   acpx --> cursor["Cursor"]
@@ -50,104 +75,20 @@ flowchart LR
   callback --> openclaw
 ```
 
-## Prerequisites
+See [ROADMAP.md](ROADMAP.md) for planned reliability and orchestration work.
 
-- Node.js 20+
-- OpenClaw installed and running
-- ACPX installed globally:
+## Usage
 
-  ```bash
-  npm install -g acpx
-  acpx --version
-  ```
-
-- At least one local coding agent:
-  - Codex, if you want Codex delegation
-  - Claude Code, if you want Claude delegation
-  - Cursor, if you want Cursor delegation
-
-Agent Knock Knock does not manage Codex, Claude Code, or Cursor authentication. Make sure the agent you want to use is already installed and logged in before delegating tasks.
-
-## Install
-
-Install Agent Knock Knock globally:
-
-```bash
-npm install -g @scotthuang/agent-knock-knock
-agent-knock-knock install-openclaw
-agent-knock-knock doctor
-```
-
-`install-openclaw` installs or updates and enables the OpenClaw plugin from the npm package, installs the Agent Knock Knock skill template, and restarts the OpenClaw Gateway by default. The command is safe to rerun when the plugin is already installed. Use `--skill-only` to update only the skill template, or `--no-restart` if you want to restart the Gateway yourself.
-
-If you are developing from a local checkout, you can ask OpenClaw to install it for you:
+Use conversational `AKK` prompts on any chat surface. Explicit agent names override the configured default:
 
 ```text
-Install this Agent Knock Knock project into my local OpenClaw:
-1. Make sure Node.js 20+, OpenClaw, and at least one local coding agent such as Codex, Claude Code, or Cursor are installed.
-2. Install ACPX globally if it is missing: npm install -g acpx.
-3. Run npm install.
-4. Run npm run build.
-5. Link and enable the OpenClaw plugin from this repository.
-6. Install the Agent Knock Knock skill template into ~/.openclaw/skills/agent-knock-knock/SKILL.md.
-7. Restart the OpenClaw Gateway.
-```
-
-Local development installation:
-
-Install the plugin into OpenClaw during local development:
-
-```bash
-npm install
-npm run build
-openclaw plugins install --link .
-openclaw plugins enable agent-knock-knock
-```
-
-Install the OpenClaw skill template so OpenClaw learns when to route chat requests to AKK:
-
-```bash
-mkdir -p ~/.openclaw/skills/agent-knock-knock
-cp templates/openclaw-skills/agent-knock-knock/SKILL.md ~/.openclaw/skills/agent-knock-knock/SKILL.md
-```
-
-Apply local project updates to OpenClaw:
-
-```bash
-npm install
-npm run build
-openclaw plugins install --link .
-openclaw plugins enable agent-knock-knock
-openclaw gateway restart
-```
-
-Run this after pulling new code or editing TypeScript/plugin files. The OpenClaw plugin loads compiled files from `dist/`, so source changes do not take effect until `npm run build` has run and the Gateway has reloaded the linked plugin. If the skill template changes, copy `templates/openclaw-skills/agent-knock-knock/SKILL.md` to `~/.openclaw/skills/agent-knock-knock/SKILL.md` again.
-
-## OpenClaw Plugin
-
-Use `AKK` or `akk` in OpenClaw chat to delegate coding work. If no agent is named, AKK uses the plugin `defaultAgent`; if that is unset, it falls back to Codex. Explicit agent names override the default.
-
-Useful chat-style prompts:
-
-```text
-akk: fix the failing tests in this project
-AKK Codex: review the current branch and propose a small fix
 AKK Claude: review the latest commit
 AKK Cursor: fix the flaky UI test
-akk list
-akk status <conversation-id>
-akk describe <conversation-id>
-akk send <conversation-id>: continue with the smaller implementation
-akk cancel <conversation-id>
-akk renew <conversation-id> --minutes 180
-akk retry-callback <conversation-id>
-akk recover <conversation-id>
-akk close <conversation-id>
-AKK terminal takeover Codex <native-session-id>
-AKK approve <conversation-id>
+AKK describe <conversation-id>
+AKK recover <conversation-id>
 ```
 
-Surfaces that support OpenClaw native commands can use the same workflow through `/akk`:
+Surfaces with native commands also support:
 
 ```text
 /akk <task>
@@ -156,14 +97,18 @@ Surfaces that support OpenClaw native commands can use the same workflow through
 /akk cursor <task>
 /akk list
 /akk status <conversation-id>
+/akk describe <conversation-id>
 /akk send <conversation-id> <message>
 /akk cancel <conversation-id>
 /akk renew <conversation-id> [minutes]
 /akk retry-callback <conversation-id>
+/akk recover <conversation-id>
 /akk close <conversation-id> [reason]
 ```
 
-Optional default-agent config:
+## Configuration
+
+Configure AKK under `plugins.entries.agent-knock-knock.config` in `~/.openclaw/openclaw.json`:
 
 ```json5
 {
@@ -171,9 +116,8 @@ Optional default-agent config:
     entries: {
       "agent-knock-knock": {
         config: {
-          defaultAgent: "codex", // "codex", "claude", or "cursor"
-          agentTimeoutMinutes: 60, // terminal inactivity timeout
-          agentHardTimeoutMinutes: 720 // terminal task lifetime ceiling
+          defaultAgent: "codex",
+          workspace: "/Users/scott/project"
         }
       }
     }
@@ -181,149 +125,113 @@ Optional default-agent config:
 }
 ```
 
-Optional deterministic auto-approval policy for terminal-controlled Codex sessions:
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `defaultAgent` | `codex` | Agent used when a request does not name one. |
+| `workspace` | OpenClaw process directory | Working directory for delegated tasks. |
+| `storeDir` | `~/.agent-knock-knock/conversations` | Conversation state location. |
+| `openclawBin` | Auto-detected | OpenClaw CLI used for callback delivery. |
+| `codexAllProxy`, `cursorAllProxy`, `allProxy` | Unset | Per-agent or shared `ALL_PROXY` for ACPX launches. |
+| `codexModel`, `cursorModel`, `model` | Unset | Per-agent or shared ACPX model override. |
+| `defaultCodexSession`, `defaultClaudeSession`, `defaultCursorSession` | Generated per task | Named ACPX session to reuse. |
+| `idleTimeoutMinutes` | `10080` | Time before an idle task is lazily closed. |
+| `agentTimeoutMinutes` | `60` | Callback timeout; terminal bridges treat it as an inactivity timeout. |
+| `agentHardTimeoutMinutes` | `720` | Maximum terminal bridge monitor lifetime. |
+| `softLimit`, `hardLimit` | `50`, `100` | Response-requiring round limits. |
 
-```json5
-{
-  plugins: {
-    entries: {
-      "agent-knock-knock": {
-        config: {
-          autoApprove: {
-            enabled: true,
-            rules: [
-              {
-                id: "project-read-status",
-                agents: ["codex"],
-                workspaces: ["/Users/scott/project"],
-                commands: [
-                  ["pwd"],
-                  ["git", "status"],
-                  ["git", "diff", "--stat"]
-                ]
-              }
-            ]
-          }
-        }
-      }
-    }
-  }
-}
-```
-
-Auto-approval is disabled by default. Rules use exact argument-vector matching and apply only to Codex `run command` prompts in the configured workspace. Shell composition, command substitution, glob expansion, environment assignments, unparseable commands, and paths outside the workspace always fall back to user approval. The OpenClaw plugin reads this trusted configuration inside the Gateway; it is not exposed as model-controlled tool input. AKK rechecks the visible prompt fingerprint immediately before sending the approval key and records the matched rule and policy fingerprint in the conversation event log.
+See [`openclaw.plugin.json`](openclaw.plugin.json) for the complete schema and compatibility aliases.
 
 ## Native Codex Takeover
 
-Experimental: AKK can list and take over Codex CLI sessions that were started outside AKK. This is useful when you started Codex in a terminal, left the machine, and want OpenClaw to continue managing that work from chat.
+Experimental: AKK can discover Codex CLI sessions started outside AKK. `AKK list` separates managed `delegated` tasks, discovered `native` sessions, and tmux-backed `terminal_controlled` sessions.
 
-List current AKK-managed and local agent work:
+| Strategy | Behavior |
+| --- | --- |
+| `AKK takeover Codex <session-id>` | After confirmation, stop and attach the matching CLI; the next send resumes it. |
+| `AKK terminal takeover Codex <session-id>` | After confirmation, control the existing tmux session without stopping it. |
+| `AKK fork takeover Codex <session-id>` | Keep the original running and create a new task from an OpenClaw-approved summary. |
 
-```text
-AKK list
-```
+A terminal-controlled ID works directly with `send`, `status`, `describe`, `cancel`, and `approve`. Monitoring is activity-aware and has a separate hard lifetime. Use `renew` for a stalled monitor and `retry-callback` if callback delivery remains failed.
 
-`AKK list` returns separate groups for:
-
-- `delegated`: AKK-managed background tasks.
-- `native`: local native sessions that AKK can discover but cannot directly control.
-- `terminal_controlled`: local sessions running in a controllable terminal provider. The current provider is tmux. These entries include terminal metadata, command capabilities, and concise approval state when a visible approval prompt is detected.
-- `terminal_controlled` entries can be addressed directly by their `id` from `AKK list` for `AKK send <id>`, `AKK status <id>`, `AKK cancel <id>`, and `AKK approve <id>`. They do not need an AKK state file before terminal control.
-- Background sends to terminal-controlled Codex sessions use terminal bridge mode: AKK types only the user-facing task text into the tmux pane, monitors Codex rollout/terminal state, and delivers the OpenClaw callback itself when it observes completion.
-- Terminal bridge timeout is activity-aware. Visible Codex work, active background terminals, rollout updates, and meaningful terminal changes extend the inactivity deadline. A separate hard lifetime still stops permanently running monitors.
-- If a live terminal task is marked `stalled`, `AKK renew <conversation-id> --minutes <minutes>` restarts monitoring without sending text or keys to Codex. Renewal preserves the original callback destination and task hard deadline.
-- Terminal callbacks close their AKK task only after OpenClaw delivery succeeds. Transient failures retry with bounded backoff; persistent failures remain visible as `callback_failed` and can be retried idempotently with `AKK retry-callback <conversation-id>`.
-- `AKK status <terminal-controlled-id>` is the unified way to inspect current terminal output. AKK captures the terminal pane internally and returns `terminal_screen`; there is no separate public screen-capture command.
-- `AKK describe <id>` summarizes what a listed session is about. AKK-managed sessions use saved conversation history; native and terminal-controlled Codex sessions use exact Codex rollout history when a session id is available, fall back to cwd-matched rollout history when needed, and otherwise report only visible terminal/process context with lower confidence.
-
-Takeover prompts:
-
-```text
-AKK takeover Codex <native-session-id>
-AKK terminal takeover Codex <native-session-id>
-AKK fork takeover Codex <native-session-id>
-AKK approve <conversation-id>
-```
-
-Strategies:
-
-- `takeover`: stop an active matching Codex CLI after explicit confirmation, then resume it under AKK.
-- `terminal takeover`: attach an active Codex CLI running inside a controllable terminal provider after explicit confirmation. AKK sends follow-ups directly to the terminal pane, can send Control-C for cancel, and can approve the currently visible Codex approval prompt.
-- `fork takeover`: keep the original Codex CLI running, ask OpenClaw to summarize bounded source context, then create a new AKK-managed fork from that summary.
-
-For long-running local Codex sessions that you may want OpenClaw to operate from WeChat, run Codex inside tmux. AKK does not require tmux, but tmux enables terminal-control takeover without stopping the original process:
+Start sessions you may want to control remotely inside tmux:
 
 ```bash
 tmux new -s codex-work
 codex
 ```
 
-Avoid starting a second live client on the same active Codex session. It can mix session history in ways that neither live client sees until a later resume.
+Avoid opening a second live client on the same Codex session; concurrent clients can produce inconsistent visible history.
 
-## Approval Behavior
+## Approvals
 
-AKK sends ACPX-backed coding-agent prompts with `--approve-all` so ACPX permission requests can proceed without an additional OpenClaw turn.
+AKK runs ACPX-backed agents with `--approve-all`. Claude Code surfaces permission requests through ACPX, but some Codex sandbox-sensitive operations fail directly. Keep Codex background work inside its workspace, or prefer Claude Code when a task requires ACPX-approved access elsewhere.
 
-Claude Code permission requests work with this model. For example, a Claude Code write outside the repository workspace triggers ACPX `session/request_permission`; with `--approve-all`, ACPX approves the request and the write can complete.
+For tmux-backed Codex, AKK reports visible approval prompts through OpenClaw. Use `AKK approve <conversation-id>` to continue or `AKK cancel <conversation-id>` to deny and stop.
 
-Codex does not currently behave the same way for every sensitive operation under AKK. Some Codex sandbox-sensitive actions, such as writing outside the workspace in non-interactive execution, may fail directly with sandbox or permission errors instead of surfacing an ACPX permission request that AKK can approve. In those cases the action is currently unavailable through AKK's background Codex path; prefer Claude Code for tasks that require ACPX-approved filesystem access outside the workspace, or redesign the task to stay inside the configured workspace.
+Trusted terminal commands can be auto-approved with a deterministic policy:
 
-For terminal bridge sends to tmux-backed Codex sessions, AKK watches the terminal pane. If Codex shows an approval prompt, AKK sends OpenClaw a `question` callback with a safe terminal excerpt and explicit routing instructions: approve with `AKK approve <conversation-id>` / `agent_knock_knock_approve`, or deny/stop with `AKK cancel <conversation-id>` / `agent_knock_knock_cancel`. After an approval is sent, AKK resumes terminal bridge monitoring and waits for the final Codex result callback.
+```json5
+autoApprove: {
+  enabled: true,
+  rules: [{
+    id: "project-read-status",
+    agents: ["codex"],
+    workspaces: ["/Users/scott/project"],
+    commands: [
+      ["pwd"],
+      ["git", "status"],
+      ["git", "diff", "--stat"]
+    ]
+  }]
+}
+```
+
+Place `autoApprove` inside the plugin `config` object. It is disabled by default and applies only to exact Codex `run command` argument vectors inside configured workspaces. Shell composition, substitutions, globs, environment assignments, unparseable commands, and out-of-workspace paths always require user approval. AKK rechecks the visible prompt immediately before approval and records the matched rule and policy fingerprint.
+
+## Troubleshooting
+
+Start with `agent-knock-knock doctor`. It checks Node.js, OpenClaw, ACPX, at least one supported coding-agent command, and the packaged plugin files. The OpenClaw CLI must be on `PATH` or in a common user install directory for this check.
+
+| Symptom | Action |
+| --- | --- |
+| Installer or callbacks cannot find a local OpenClaw CLI | Set `openclawBin` and pass `--openclaw-bin` to `install-openclaw`. |
+| Source changes do not appear | Build, reinstall from the checkout, and restart the Gateway. |
+| Terminal bridge task is `stalled` | Run `AKK renew <conversation-id> --minutes <minutes>`. |
+| ACPX task is `stalled` | Inspect `status --trace`; close and redelegate if the executor cannot continue. |
+| Task is `callback_failed` | Run `AKK retry-callback <conversation-id>`. |
+| Codex delegation rejects the deprecated adapter | Remove the old override or select a supported adapter as described below. |
+| Terminal takeover is unavailable | Run Codex inside tmux and check `AKK list` for a `terminal_controlled` entry. |
+
+For local diagnostics, use:
+
+```bash
+agent-knock-knock status --conversation <conversation-id> --trace
+agent-knock-knock list --terminal-debug
+agent-knock-knock list --managed-only # skip native and terminal discovery
+```
+
+### Codex ACP Adapter
+
+Codex delegation uses `npx -y @agentclientprotocol/codex-acp@^1.1.0` by default and rejects the deprecated `@zed-industries/codex-acp`. The first run may take longer while `npx` downloads the adapter. To select another compatible adapter, set this in the environment that runs OpenClaw/AKK:
+
+```bash
+export AKK_CODEX_ACPX_AGENT_COMMAND='your-compatible-adapter-command'
+```
 
 ## Development
 
-Build TypeScript sources:
-
 ```bash
-npm run build
-```
-
-Run type checking without writing `dist/`:
-
-```bash
-npm run typecheck
-```
-
-Run the full test suite. This builds first, then runs the compiled TypeScript tests from `dist/test` against the compiled `dist/src` output:
-
-```bash
-npm test
-```
-
-Run a two-Claude simulation:
-
-```bash
-node scripts/two-claude-weather-test.js --location 广州
-```
-
-Run named simulations:
-
-```bash
-npm run simulate:architecture
+npm run build                 # compile TypeScript into dist/
+npm run typecheck             # check types without writing output
+npm test                      # build and run the full test suite
+npm run simulate:architecture # run a named two-agent simulation
 npm run simulate:weather
+npm run transcript -- --conversation ~/.agent-knock-knock/conversations/<conversation-id>
 ```
 
-Print a readable transcript from an NDJSON log:
+Pass `--include-raw` to the transcript command only when debugging model exchange events. See [CONTRIBUTING.md](CONTRIBUTING.md) for the development and pull request workflow.
 
-```bash
-npm run transcript -- --conversation .agent-knock-knock/conversations/<conversation-id>
-```
-
-You can also read a specific event log file:
-
-```bash
-npm run transcript -- --log .agent-knock-knock/conversations/<conversation-id>/events.ndjson
-```
-
-Include raw model exchange events when debugging prompt/response payloads:
-
-```bash
-npm run transcript -- --conversation .agent-knock-knock/conversations/<conversation-id> --include-raw
-```
-
-## Storage
-
-Conversation state is stored under the user's home directory so a new OpenClaw session can recover the shared context independently from OpenClaw's own app state:
+## Storage and Logs
 
 ```text
 ~/.agent-knock-knock/
@@ -336,47 +244,25 @@ Conversation state is stored under the user's home directory so a new OpenClaw s
     runtime-YYYY-MM-DD.ndjson
 ```
 
-Use `--store-dir <dir>` to override the conversation store location. `--log-dir <dir>` is still accepted as a compatibility alias. `<agent>-output.log` is diagnostic-only; OpenClaw should not read it as part of agent communication.
+Use `--store-dir <dir>` to override the conversation store; `--log-dir` remains a compatibility alias. Agent output and runtime logs are diagnostic-only and are not part of OpenClaw-agent communication.
 
-Runtime logs are diagnostic-only and are safe to use for local troubleshooting. They keep local timestamps, preserve useful absolute paths, redact common secrets, and are cleaned up by retention policy. Use `AKK_LOG_DIR`, `AKK_LOG_LEVEL`, and `AKK_LOG_RETENTION_DAYS` to override the defaults.
-
-## Defaults
-
-- Default agent: configured with `defaultAgent`; fallback is `codex`
-- OpenClaw session: inherited from the current OpenClaw session; fallback is `agent:main:main`
-- Delegated ACPX session: generated per new task, unless `session`, `codexSession`, `claudeSession`, or `cursorSession` is configured
-- Agent callback/terminal inactivity timeout: `60` minutes before an inactive waiting task is marked `stalled`
-- Terminal bridge hard lifetime: `720` minutes for a still-running monitor with no approval or completion result, even if other activity continues
-- Idle timeout: `10080` minutes before an idle task is lazily closed
-- Soft response limit: `50` rounds
-- Hard response limit: `100` rounds
-- Store directory: `~/.agent-knock-knock/conversations`
-- Runtime log directory: `~/.agent-knock-knock/logs`
-- Runtime log retention: `14` days
-- Codex model: unset by default; configure `codexModel` only when your ACPX Codex setup requires one
-- Cursor model: unset by default; configure `cursorModel` only when your ACPX Cursor setup requires one
+Runtime logs use local timestamps, redact common secrets, and are cleaned by retention policy. Configure them with `AKK_LOG_DIR`, `AKK_LOG_LEVEL`, and `AKK_LOG_RETENTION_DAYS`. Defaults are `~/.agent-knock-knock/logs` and 14 days.
 
 ## Release
 
-`package.json` is the version source. Create releases with npm's version command so the version commit and git tag stay aligned:
+`package.json` is the version source. Create a release with npm's version command, then push the commit and tag:
 
 ```bash
-npm version patch
+npm version patch # or minor / major
 git push
 git push --tags
 ```
 
-Use `minor` for feature releases and `major` for breaking changes. Tags matching `v*` trigger the GitHub Actions release workflow, which runs the test suite, publishes `@scotthuang/agent-knock-knock` to npm with public access, and creates a GitHub Release from the tag notes.
-
-The release workflow requires an `NPM_TOKEN` repository secret with permission to publish the npm package. GitHub's built-in `GITHUB_TOKEN` is used for creating the GitHub Release.
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for local development, test, and pull request guidance.
+Tags matching `v*` run the release workflow, which tests the package, publishes it to npm, and creates a GitHub Release. Publishing requires an `NPM_TOKEN` repository secret.
 
 ## Security
 
-Please do not open public issues for sensitive security reports. See [SECURITY.md](SECURITY.md).
+Do not open public issues for sensitive security reports. See [SECURITY.md](SECURITY.md).
 
 ## License
 
