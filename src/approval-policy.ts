@@ -6,6 +6,7 @@ import path from "node:path";
 export interface ApprovalCandidate {
   agent: string;
   kind: string;
+  decisionMode?: "keys" | "structured";
   command?: string;
   cwd?: string;
   fingerprint: string;
@@ -60,6 +61,9 @@ export function approvalCandidateFromMessage(message: unknown): ApprovalCandidat
     agent,
     kind,
     fingerprint,
+    ...(candidate?.decision_mode === "structured" || candidate?.decision_mode === "keys"
+      ? { decisionMode: candidate.decision_mode }
+      : {}),
     command: stringValue(candidate?.command),
     cwd: stringValue(candidate?.cwd),
     terminalTarget: stringValue(candidate?.terminal_target)
@@ -79,6 +83,9 @@ export function evaluateApprovalPolicy({
   }
   if (candidate.kind !== "run_command") {
     return ask(`approval kind is not supported: ${candidate.kind}`, policyFingerprint);
+  }
+  if (candidate.agent === "claude" && candidate.decisionMode !== "structured") {
+    return ask("Claude auto approval requires a structured hook request", policyFingerprint);
   }
   if (!candidate.command) {
     return ask("approval command is unavailable", policyFingerprint);

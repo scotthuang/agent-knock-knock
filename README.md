@@ -2,7 +2,7 @@
 
 ![Agent Knock Knock cover: OpenClaw knocking on coding agents' door](docs/assets/agent-knock-knock-cover.jpg)
 
-Agent Knock Knock (AKK) lets OpenClaw delegate work to local Codex, Claude Code, and Cursor agents, preserve each task for follow-ups, and route results back to chat—even on channels without threads. It can also discover and safely take over native Codex sessions.
+Agent Knock Knock (AKK) lets OpenClaw delegate work to local Codex, Claude Code, and Cursor agents, preserve each task for follow-ups, and route results back to chat—even on channels without threads. It can also discover native Codex sessions and control Codex or Claude Code already running in tmux.
 
 ## Install
 
@@ -21,6 +21,14 @@ agent-knock-knock doctor
 ```
 
 `install-openclaw` installs or updates the plugin, enables it, installs the AKK skill template, and restarts the OpenClaw Gateway. It is safe to rerun. Use `--skill-only` to skip plugin installation; add `--no-restart` to skip the automatic Gateway restart.
+
+To control Claude Code sessions in tmux, install AKK's structured hooks once:
+
+```bash
+agent-knock-knock install-claude-hooks
+```
+
+The installer merges AKK hooks into `~/.claude/settings.json` and preserves existing settings and hooks. Rerun it if the AKK executable path changes.
 
 If OpenClaw runs from a local checkout or another nonstandard location, pass its CLI explicitly:
 
@@ -68,6 +76,7 @@ flowchart LR
   acpx --> claude["Claude Code"]
   acpx --> cursor["Cursor"]
   terminal --> codex
+  terminal --> claude
   codex --> plugin
   claude --> plugin
   cursor --> plugin
@@ -141,9 +150,9 @@ Configure AKK under `plugins.entries.agent-knock-knock.config` in `~/.openclaw/o
 
 See [`openclaw.plugin.json`](openclaw.plugin.json) for the complete schema and compatibility aliases.
 
-## Native Codex Takeover
+## Native Sessions and tmux Control
 
-Experimental: AKK can discover Codex CLI sessions started outside AKK. `AKK list` separates managed `delegated` tasks, discovered `native` sessions, and tmux-backed `terminal_controlled` sessions.
+Experimental: AKK can discover Codex CLI sessions started outside AKK and control Codex or Claude Code sessions in tmux. `AKK list` separates managed `delegated` tasks, discovered `native` sessions, and tmux-backed `terminal_controlled` sessions. Native stop/resume and fork takeover remain Codex-only.
 
 | Strategy | Behavior |
 | --- | --- |
@@ -151,24 +160,29 @@ Experimental: AKK can discover Codex CLI sessions started outside AKK. `AKK list
 | `AKK terminal takeover Codex <session-id>` | After confirmation, control the existing tmux session without stopping it. |
 | `AKK fork takeover Codex <session-id>` | Keep the original running and create a new task from an OpenClaw-approved summary. |
 
-A terminal-controlled ID works directly with `send`, `status`, `describe`, `cancel`, and `approve`. Monitoring is activity-aware and has a separate hard lifetime. Use `renew` for a stalled monitor and `retry-callback` if callback delivery remains failed.
+A terminal-controlled ID works directly with `send`, `status`, `describe`, and `cancel`. Claude accepts new messages only at a verified idle prompt. Codex visible prompts can also be approved directly. Claude structured approval and durable monitoring require a managed lease: use `send --background` first (the OpenClaw send tool already does this), then use the returned managed conversation ID with `approve`, `cancel`, or `status`. Monitoring is activity-aware and has a separate hard lifetime. Use `renew` for a stalled monitor and `retry-callback` if callback delivery remains failed.
 
-New terminal-controlled IDs use `terminal:v2:tmux:<agent>:<target>:<pid>`, for example `terminal:v2:tmux:codex:codex-work:0.1:33389`. Legacy `terminal:tmux:<target>:<pid>` IDs remain valid and are treated as Codex. The production terminal adapter registry currently includes Codex; other agents require their own adapter.
+New terminal-controlled IDs use `terminal:v2:tmux:<agent>:<target>:<pid>`, for example `terminal:v2:tmux:claude:claude-work:0.1:33389`. Legacy `terminal:tmux:<target>:<pid>` IDs remain valid and are treated as Codex. Cursor tmux sessions are not yet supported.
 
 Start sessions you may want to control remotely inside tmux:
 
 ```bash
 tmux new -s codex-work
 codex
+
+tmux new -s claude-work
+claude
 ```
 
-Avoid opening a second live client on the same Codex session; concurrent clients can produce inconsistent visible history.
+For Claude Code, `send --background` creates the managed lease that binds hook events to the exact session, terminal, conversation, and message. A `Stop` event produces one callback from `last_assistant_message` only after background tasks and scheduled jobs have finished; `StopFailure` produces an actionable error. If hooks are unavailable or identity is stale or ambiguous, AKK can still discover, send, and inspect through tmux, but it will not approve or claim durable completion. `cancel` uses Escape only when no unverified permission dialog is visible; unsafe dialogs must be resolved manually in the terminal.
+
+Avoid opening a second live client on the same agent session; concurrent clients can produce inconsistent visible history.
 
 ## Approvals
 
 AKK runs ACPX-backed agents with `--approve-all`. Claude Code surfaces permission requests through ACPX, but some Codex sandbox-sensitive operations fail directly. Keep Codex background work inside its workspace, or prefer Claude Code when a task requires ACPX-approved access elsewhere.
 
-For tmux-backed Codex, AKK reports visible approval prompts through OpenClaw. Use `AKK approve <conversation-id>` to continue or `AKK cancel <conversation-id>` to deny and stop.
+For tmux-backed Codex, AKK reports visible approval prompts. For Claude Code, the installed hook reports structured `PermissionRequest` events and AKK shows the tool name plus a redacted, bounded target summary without copying the full tool input. Inspect the current request through OpenClaw, then use `AKK approve <conversation-id>` to allow it or `AKK cancel <conversation-id>` to deny and stop. Unknown, stale, or ambiguous requests are never approved or interrupted by synthetic keys; resolve those dialogs manually in the terminal.
 
 Trusted terminal commands can be auto-approved with a deterministic policy:
 
@@ -177,7 +191,7 @@ autoApprove: {
   enabled: true,
   rules: [{
     id: "project-read-status",
-    agents: ["codex"],
+    agents: ["codex", "claude"],
     workspaces: ["/Users/scott/project"],
     commands: [
       ["pwd"],
@@ -188,7 +202,7 @@ autoApprove: {
 }
 ```
 
-Place `autoApprove` inside the plugin `config` object. It is disabled by default and applies only to exact Codex `run command` argument vectors inside configured workspaces. Shell composition, substitutions, globs, environment assignments, unparseable commands, and out-of-workspace paths always require user approval. AKK rechecks the visible prompt immediately before approval and records the matched rule and policy fingerprint.
+Place `autoApprove` inside the plugin `config` object. It is disabled by default and applies only to exact Codex run-command or Claude Code `Bash` argument vectors inside configured workspaces. Shell composition, substitutions, globs, environment assignments, unparseable commands, and out-of-workspace paths always require user approval. AKK revalidates the current request immediately before approval and records the matched rule and policy fingerprint.
 
 ## Troubleshooting
 
@@ -202,7 +216,8 @@ Start with `agent-knock-knock doctor`. It checks Node.js, OpenClaw, ACPX, at lea
 | ACPX task is `stalled` | Inspect `status --trace`; close and redelegate if the executor cannot continue. |
 | Task is `callback_failed` | Run `AKK retry-callback <conversation-id>`. |
 | Codex delegation rejects the deprecated adapter | Remove the old override or select a supported adapter as described below. |
-| Terminal takeover is unavailable | Run Codex inside tmux and check `AKK list` for a `terminal_controlled` entry. |
+| Terminal takeover is unavailable | Run Codex or Claude Code inside tmux and check `AKK list` for a `terminal_controlled` entry. |
+| Claude permission or completion is not detected | Run `agent-knock-knock install-claude-hooks`, then retry in the managed tmux session. |
 
 For local diagnostics, use:
 

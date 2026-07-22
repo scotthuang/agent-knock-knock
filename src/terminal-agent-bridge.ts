@@ -12,6 +12,7 @@ import {
   type TerminalControlRef,
   type TerminalDurableCompletionRequest,
   type TerminalProcessSnapshot,
+  type TerminalRuntimeIdentity,
   type TerminalScreenInspection
 } from "./terminal-agent-adapter.js";
 import {
@@ -37,8 +38,12 @@ export interface TerminalBridgeStatus {
     label?: string;
     prompt_kind?: string;
     command?: string;
+    tool_name?: string;
+    request_detail?: string;
     reason?: string;
     fingerprint?: string;
+    decision_mode?: "keys" | "structured";
+    request_id?: string;
   };
   screen: {
     excerpt?: string;
@@ -66,8 +71,12 @@ export interface TerminalApprovalExecution {
   label?: string;
   promptKind?: string;
   command?: string;
+  toolName?: string;
+  requestDetail?: string;
   fingerprint?: string;
   screenExcerpt?: string;
+  decisionMode?: "keys" | "structured";
+  requestId?: string;
 }
 
 export interface TerminalMonitorPoll {
@@ -170,10 +179,13 @@ export class TerminalAgentBridge {
   async status(
     agent: ExecutorKind,
     terminalControl: TerminalControlRef,
-    options: { scrollbackLines?: number } = {}
+    options: { scrollbackLines?: number; runtime?: TerminalRuntimeIdentity } = {}
   ): Promise<TerminalBridgeStatus> {
     const adapter = this.registry.require(agent);
-    if (!adapter.capabilities.screenStatus) {
+    if (
+      !adapter.capabilities.screenStatus ||
+      !terminalControl.capabilities.includes("screen_status")
+    ) {
       return unsupportedScreenStatus(adapter, terminalControl);
     }
     try {
@@ -221,14 +233,62 @@ export class TerminalAgentBridge {
     });
   }
 
-  async cancel(agent: ExecutorKind, terminalControl: TerminalControlRef): Promise<{
+  async cancel(
+    agent: ExecutorKind,
+    terminalControl: TerminalControlRef,
+    options: { runtime?: TerminalRuntimeIdentity; scrollbackLines?: number } = {}
+  ): Promise<{
     cancelRequested: boolean;
     key?: string;
     keys?: readonly string[];
     reason?: string;
+    deniedApproval?: boolean;
+    requestId?: string;
   }> {
     const adapter = this.registry.require(agent);
-    if (!adapter.capabilities.cancellation || adapter.cancelKeys.length === 0) {
+    if (
+      adapter.capabilities.terminalApproval &&
+      adapter.resolveApproval &&
+      terminalControl.capabilities.includes("terminal_approval") &&
+      adapter.capabilities.screenStatus &&
+      terminalControl.capabilities.includes("screen_status")
+    ) {
+      const { inspection } = await this.captureInspection(adapter, terminalControl, options);
+      if (inspection.approval.approvable && inspection.approval.action.mode === "structured") {
+        const fingerprint = terminalApprovalFingerprint(adapter.agent, terminalControl, inspection);
+        if (!fingerprint) {
+          return {
+            cancelRequested: false,
+            reason: `${adapter.displayName} structured approval has no fingerprint`
+          };
+        }
+        const decision = await adapter.resolveApproval({
+          decision: "deny",
+          expectedFingerprint: fingerprint,
+          actualFingerprint: fingerprint,
+          inspection,
+          runtime: options.runtime,
+          interrupt: true
+        });
+        return {
+          cancelRequested: decision.resolved,
+          deniedApproval: decision.resolved,
+          requestId: decision.requestId,
+          reason: decision.reason
+        };
+      }
+      if (inspection.approval.blocked && !inspection.approval.approvable) {
+        return {
+          cancelRequested: false,
+          reason: inspection.approval.reason
+        };
+      }
+    }
+    if (
+      !adapter.capabilities.cancellation ||
+      adapter.cancelKeys.length === 0 ||
+      !terminalControl.capabilities.includes("terminal_cancel")
+    ) {
       return {
         cancelRequested: false,
         reason: `${adapter.displayName} terminal cancellation is not supported`
@@ -247,10 +307,18 @@ export class TerminalAgentBridge {
   async approve(
     agent: ExecutorKind,
     terminalControl: TerminalControlRef,
-    options: { expectedFingerprint?: string; scrollbackLines?: number } = {}
+    options: {
+      expectedFingerprint?: string;
+      scrollbackLines?: number;
+      runtime?: TerminalRuntimeIdentity;
+      requiredDecisionMode?: "keys" | "structured";
+    } = {}
   ): Promise<TerminalApprovalExecution> {
     const adapter = this.registry.require(agent);
-    if (!adapter.capabilities.terminalApproval) {
+    if (
+      !adapter.capabilities.terminalApproval ||
+      !terminalControl.capabilities.includes("terminal_approval")
+    ) {
       return {
         approved: false,
         blocked: true,
@@ -268,7 +336,22 @@ export class TerminalAgentBridge {
         screenExcerpt: inspection.screenExcerpt
       };
     }
-    if (inspection.approval.action.keys.length === 0) {
+    const decisionMode = inspection.approval.action.mode ?? "keys";
+    if (options.requiredDecisionMode && decisionMode !== options.requiredDecisionMode) {
+      return {
+        approved: false,
+        blocked: true,
+        reason: `${adapter.displayName} approval mode ${decisionMode} is not eligible for this decision`,
+        label: inspection.approval.action.label,
+        promptKind: inspection.approval.promptKind,
+        command: inspection.approval.command,
+        fingerprint: terminalApprovalFingerprint(adapter.agent, terminalControl, inspection),
+        screenExcerpt: inspection.screenExcerpt,
+        decisionMode,
+        requestId: inspection.approval.action.requestId
+      };
+    }
+    if (decisionMode === "keys" && inspection.approval.action.keys.length === 0) {
       return {
         approved: false,
         blocked: true,
@@ -293,7 +376,55 @@ export class TerminalAgentBridge {
         promptKind: inspection.approval.promptKind,
         command: inspection.approval.command,
         fingerprint,
-        screenExcerpt: inspection.screenExcerpt
+        screenExcerpt: inspection.screenExcerpt,
+        decisionMode,
+        requestId: inspection.approval.action.requestId
+      };
+    }
+    if (decisionMode === "structured") {
+      if (!options.expectedFingerprint) {
+        return {
+          approved: false,
+          blocked: true,
+          reason: "structured approval requires the latest expected fingerprint",
+          label: inspection.approval.action.label,
+          promptKind: inspection.approval.promptKind,
+          command: inspection.approval.command,
+          fingerprint,
+          screenExcerpt: inspection.screenExcerpt,
+          decisionMode,
+          requestId: inspection.approval.action.requestId
+        };
+      }
+      if (!fingerprint || !adapter.resolveApproval) {
+        return {
+          approved: false,
+          blocked: true,
+          reason: `${adapter.displayName} structured approval resolver is unavailable`,
+          fingerprint,
+          screenExcerpt: inspection.screenExcerpt,
+          decisionMode,
+          requestId: inspection.approval.action.requestId
+        };
+      }
+      const resolved = await adapter.resolveApproval({
+        decision: "allow",
+        expectedFingerprint: options.expectedFingerprint,
+        actualFingerprint: fingerprint,
+        inspection,
+        runtime: options.runtime
+      });
+      return {
+        approved: resolved.resolved,
+        blocked: !resolved.resolved,
+        reason: resolved.reason,
+        label: inspection.approval.action.label,
+        promptKind: inspection.approval.promptKind,
+        command: inspection.approval.command,
+        fingerprint,
+        screenExcerpt: inspection.screenExcerpt,
+        decisionMode,
+        requestId: resolved.requestId ?? inspection.approval.action.requestId
       };
     }
     await this.terminalProvider.sendKeys(
@@ -312,7 +443,9 @@ export class TerminalAgentBridge {
       promptKind: inspection.approval.promptKind,
       command: inspection.approval.command,
       fingerprint,
-      screenExcerpt: inspection.screenExcerpt
+      screenExcerpt: inspection.screenExcerpt,
+      decisionMode,
+      requestId: inspection.approval.action.requestId
     };
   }
 
@@ -324,13 +457,17 @@ export class TerminalAgentBridge {
       requestText?: string;
       screenChangedSinceSend?: boolean;
       maxExcerptLength?: number;
+      runtime?: TerminalRuntimeIdentity;
     };
     durableRequest?: TerminalDurableCompletionRequest;
   }): Promise<TerminalMonitorPoll> {
     const adapter = this.registry.require(options.agent);
     let inspection: TerminalScreenInspection | undefined;
     let status = unsupportedScreenStatus(adapter, options.terminalControl);
-    if (adapter.capabilities.screenStatus) {
+    if (
+      adapter.capabilities.screenStatus &&
+      options.terminalControl.capabilities.includes("screen_status")
+    ) {
       try {
         const captured = await this.captureInspection(
           adapter,
@@ -347,14 +484,17 @@ export class TerminalAgentBridge {
     let durableCompletion: TerminalCompletionEvidence | undefined;
     let durableError: string | undefined;
     try {
-      durableCompletion = adapter.capabilities.durableCompletion && options.durableRequest
+      durableCompletion = adapter.capabilities.durableCompletion &&
+        options.terminalControl.capabilities.includes("durable_completion") &&
+        options.durableRequest
         ? await adapter.detectDurableCompletion?.(options.durableRequest)
         : undefined;
     } catch (error) {
       durableError = error instanceof Error ? error.message : String(error);
     }
 
-    const screenCompletion = adapter.capabilities.screenCompletion
+    const screenCompletion = adapter.capabilities.screenCompletion &&
+      options.terminalControl.capabilities.includes("screen_completion")
       ? inspection?.completion
       : undefined;
     const limitations = [
@@ -382,6 +522,7 @@ export class TerminalAgentBridge {
       requestText?: string;
       screenChangedSinceSend?: boolean;
       maxExcerptLength?: number;
+      runtime?: TerminalRuntimeIdentity;
     } = {}
   ): Promise<{ screen: string; inspection: TerminalScreenInspection }> {
     const screen = await this.terminalProvider.capture(terminalControl.target, {
@@ -394,7 +535,8 @@ export class TerminalAgentBridge {
         screen,
         requestText: options.requestText,
         screenChangedSinceSend: options.screenChangedSinceSend,
-        maxExcerptLength: options.maxExcerptLength
+        maxExcerptLength: options.maxExcerptLength,
+        runtime: options.runtime
       })
     };
   }
@@ -408,6 +550,7 @@ export function terminalApprovalFingerprint(
   if (!inspection.approval.approvable) {
     return undefined;
   }
+  const decisionMode = inspection.approval.action.mode ?? "keys";
   return createHash("sha256")
     .update(JSON.stringify({
       agent,
@@ -417,7 +560,11 @@ export function terminalApprovalFingerprint(
       label: inspection.approval.action.label,
       prompt_kind: inspection.approval.promptKind,
       command: inspection.approval.command,
-      screen_excerpt: inspection.screenExcerpt
+      tool_name: inspection.approval.toolName,
+      request_detail: inspection.approval.requestDetail,
+      screen_excerpt: decisionMode === "structured" ? undefined : inspection.screenExcerpt,
+      decision_mode: decisionMode,
+      request_id: inspection.approval.action.requestId
     }))
     .digest("hex");
 }
@@ -448,8 +595,12 @@ function statusFromInspection(
       label: approval.approvable ? approval.action.label : undefined,
       prompt_kind: approval.promptKind,
       command: approval.command,
+      tool_name: approval.toolName,
+      request_detail: approval.requestDetail,
       reason: approval.approvable ? undefined : approval.reason,
-      fingerprint
+      fingerprint,
+      decision_mode: approval.approvable ? approval.action.mode ?? "keys" : undefined,
+      request_id: approval.approvable ? approval.action.requestId : undefined
     },
     screen: {
       excerpt: inspection.screenExcerpt,
@@ -489,7 +640,9 @@ function approvalOutput(approval: TerminalScreenInspection["approval"]): Record<
       approvable: false,
       reason: approval.reason,
       promptKind: approval.promptKind,
-      command: approval.command
+      command: approval.command,
+      toolName: approval.toolName,
+      requestDetail: approval.requestDetail
     };
   }
   return {
@@ -499,7 +652,11 @@ function approvalOutput(approval: TerminalScreenInspection["approval"]): Record<
     keys: approval.action.keys,
     label: approval.action.label,
     promptKind: approval.promptKind,
-    command: approval.command
+    command: approval.command,
+    toolName: approval.toolName,
+    requestDetail: approval.requestDetail,
+    decisionMode: approval.action.mode ?? "keys",
+    requestId: approval.action.requestId
   };
 }
 

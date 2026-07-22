@@ -15,6 +15,22 @@ import {
   createCodexTerminalAgentAdapter,
   detectCodexDurableCompletion
 } from "./codex-terminal-agent-adapter.js";
+import {
+  createClaudeTerminalAgentAdapter,
+  type ClaudeAgentRow
+} from "./claude-terminal-agent-adapter.js";
+import {
+  ClaudeHookStore,
+  ClaudeHookStoreError,
+  defaultClaudeHookStoreDir,
+  type ClaudeManagedLease
+} from "./claude-hook-store.js";
+import { claudePermissionHookOutput } from "./claude-hook-protocol.js";
+import {
+  defaultClaudeSettingsPath,
+  installClaudeHooks,
+  loadTrustedClaudeTokenjuiceLaunchers
+} from "./claude-hook-installer.js";
 import { CodexLocalSessionProvider, type CodexLocalSessionAdapter } from "./codex-local-session-provider.js";
 import { CodexStoreAdapter } from "./codex-store-adapter.js";
 import {
@@ -25,7 +41,8 @@ import {
   executorForConversation,
   extractStructuredMessage,
   parseMessageJson,
-  resolveExecutor
+  resolveExecutor,
+  type ConversationStatus
 } from "./protocol.js";
 import {
   EXECUTOR_KINDS,
@@ -64,7 +81,8 @@ import {
   type ActiveTerminalProcess,
   type TerminalControlCapability,
   type TerminalControlRef,
-  type TerminalDurableCompletionRequest
+  type TerminalDurableCompletionRequest,
+  type TerminalRuntimeIdentity
 } from "./terminal-agent-adapter.js";
 import { createProductionTerminalAgentRegistry } from "./terminal-agent-registry.js";
 import {
@@ -83,6 +101,22 @@ const DEFAULT_AGENT_HARD_TIMEOUT_MINUTES = 720;
 const DEFAULT_MONITOR_POLL_INTERVAL_MS = 5000;
 const CALLBACK_RETRY_DELAYS_MS = [5000, 15000, 60000, 60000];
 const DEFAULT_CODEX_ACPX_AGENT_COMMAND = "npx -y @agentclientprotocol/codex-acp@^1.1.0";
+const CONVERSATION_STATUSES = new Set<ConversationStatus>([
+  "created",
+  "running",
+  "waiting_for_agent",
+  "waiting_for_openclaw",
+  "idle",
+  "stalled",
+  "needs_recovery",
+  "needs_model_selection",
+  "callback_pending",
+  "callback_failed",
+  "failed",
+  "closed",
+  "cancelled",
+  "cancelling"
+]);
 
 class InlineCodexSessionAdapter implements CodexLocalSessionAdapter {
   private readonly threads: CodexThreadRow[];
@@ -186,6 +220,10 @@ async function runCommand(commandName, options) {
     runTranscript(options);
   } else if (commandName === "install-openclaw") {
     runInstallOpenClaw(options);
+  } else if (commandName === "install-claude-hooks") {
+    runInstallClaudeHooks(options);
+  } else if (commandName === "claude-hook") {
+    await runClaudeHook(options);
   } else if (commandName === "doctor") {
     runDoctor(options);
   } else if (commandName === "callback") {
@@ -256,6 +294,92 @@ function runInstallOpenClaw(options) {
       ? "Restart the OpenClaw Gateway before using Agent Knock Knock."
       : "Agent Knock Knock is installed. Try: AKK list"
   });
+}
+
+function runInstallClaudeHooks(options) {
+  const configuredExecutable = stringValue(options.executablePath ?? options.binPath);
+  let executablePath: string;
+  if (configuredExecutable) {
+    executablePath = path.resolve(expandHome(configuredExecutable));
+  } else {
+    try {
+      executablePath = resolveExecutable("agent-knock-knock");
+    } catch {
+      executablePath = path.resolve(process.argv[1]);
+    }
+  }
+  const result = installClaudeHooks({
+    executablePath,
+    settingsPath: expandHome(options.settingsPath ?? options.settings),
+    dryRun: options.dryRun === true
+  });
+  printJson({
+    installed: result.written || !result.changed,
+    ...result,
+    executablePath,
+    next: result.dryRun
+      ? "Run again without --dry-run to install the Claude Code hooks."
+      : "Claude Code hooks are configured. Existing sessions pick them up through settings reload; start a new session if needed."
+  });
+}
+
+async function runClaudeHook(options) {
+  const rawInput = fs.readFileSync(0, "utf8");
+  let input: unknown;
+  try {
+    input = JSON.parse(rawInput);
+  } catch {
+    throw new Error("Claude hook input must be valid JSON");
+  }
+
+  const agentRows = loadClaudeAgentRows(options);
+  const claudePid = inferClaudeAncestorPid(agentRows);
+  const store = createClaudeHookStore(options);
+  const record = store.record(input, {
+    ...(claudePid === undefined ? {} : { claudePid })
+  });
+  if (record.event.input.hook_event_name !== "PermissionRequest" || !record.permission) {
+    return;
+  }
+
+  const permission = record.permission;
+  const requestedTimeout = options.permissionWaitTimeoutMs ?? options.timeoutMs;
+  const timeoutMs = requestedTimeout === undefined
+    ? undefined
+    : Math.max(0, Number(requestedTimeout));
+  try {
+    const decision = await store.waitForPermissionDecision({
+      sessionId: permission.sessionId,
+      requestId: permission.requestId,
+      fingerprint: permission.fingerprint,
+      conversationId: permission.conversationId,
+      messageId: permission.messageId,
+      ...(timeoutMs === undefined ? {} : { timeoutMs })
+    });
+    process.stdout.write(`${JSON.stringify(
+      decision?.hookOutput ?? claudePermissionHookOutput({
+        behavior: "deny",
+        interrupt: false,
+        message: "Agent Knock Knock approval timed out. Review the request and retry the task."
+      })
+    )}\n`);
+  } catch (error) {
+    if (error instanceof ClaudeHookStoreError && [
+      "PERMISSION_EXPIRED",
+      "PERMISSION_CONSUMED",
+      "PERMISSION_ALREADY_DECIDED"
+    ].includes(error.code)) {
+      process.stdout.write(`${JSON.stringify(
+        claudePermissionHookOutput({
+          behavior: "deny",
+          interrupt: false,
+          message: "Agent Knock Knock approval expired before a safe decision was received."
+        })
+      )}\n`);
+      return;
+    }
+    throw error;
+  }
 }
 
 function installOpenClawPlugin(openclawBin, root) {
@@ -676,43 +800,154 @@ function createTerminalProcessSource(options): TerminalProcessSource {
   return new SystemTerminalProcessSource();
 }
 
+function createClaudeHookStore(options: Record<string, any> = {}): ClaudeHookStore {
+  const configuredRoot = stringValue(options.claudeHookStoreDir);
+  return new ClaudeHookStore({
+    rootDir: expandHome(configuredRoot ?? defaultClaudeHookStoreDir())
+  });
+}
+
+function loadClaudeAgentRows(options: Record<string, any> = {}): ClaudeAgentRow[] {
+  let value: unknown;
+  if (options.claudeAgentsJson !== undefined) {
+    value = typeof options.claudeAgentsJson === "string"
+      ? parseJsonOption(options.claudeAgentsJson, "--claude-agents-json")
+      : options.claudeAgentsJson;
+  } else if (options.processesJson || options.terminalsJson || options.terminalScreensJson) {
+    return [];
+  } else {
+    const claudeExecutable = resolveOptionalExecutable("claude");
+    if (!claudeExecutable) {
+      return [];
+    }
+    const result = spawnSync(claudeExecutable, ["agents", "--json", "--all"], {
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024 * 10,
+      timeout: 10_000
+    });
+    if (result.error || result.status !== 0) {
+      runtimeLog("warn", "claude_agents_list_failed", {
+        status: result.status ?? null,
+        error: result.error?.message,
+        stderr: textSummary(cleanProcessText(result.stderr))
+      });
+      return [];
+    }
+    try {
+      value = JSON.parse(result.stdout);
+    } catch {
+      runtimeLog("warn", "claude_agents_list_invalid_json", {
+        stdout: textSummary(result.stdout)
+      });
+      return [];
+    }
+  }
+
+  const rows = Array.isArray(value)
+    ? value
+    : isRecord(value) && Array.isArray(value.agents)
+      ? value.agents
+      : [];
+  return rows.flatMap((row): ClaudeAgentRow[] => {
+    if (!isRecord(row) || !Number.isInteger(Number(row.pid))) {
+      return [];
+    }
+    return [{
+      pid: Number(row.pid),
+      ...(stringValue(row.cwd) ? { cwd: stringValue(row.cwd) } : {}),
+      ...(stringValue(row.kind) ? { kind: stringValue(row.kind) } : {}),
+      ...(stringValue(row.sessionId) ? { sessionId: stringValue(row.sessionId) } : {}),
+      ...(stringValue(row.status) ? { status: stringValue(row.status) } : {})
+    }];
+  });
+}
+
+function inferClaudeAncestorPid(
+  agentRows: readonly ClaudeAgentRow[],
+  startingPid = process.ppid
+): number | undefined {
+  const interactivePids = new Set(agentRows
+    .filter((row) => row.kind === undefined || row.kind === "interactive")
+    .map((row) => row.pid)
+    .filter((pid): pid is number => Number.isInteger(pid)));
+  let pid = startingPid;
+  const visited = new Set<number>();
+  for (let depth = 0; depth < 16 && Number.isInteger(pid) && pid > 1 && !visited.has(pid); depth += 1) {
+    visited.add(pid);
+    const processRow = spawnSync("ps", ["-p", String(pid), "-o", "pid=,ppid=,command="], {
+      encoding: "utf8",
+      timeout: 2_000
+    });
+    if (processRow.error || processRow.status !== 0) {
+      return undefined;
+    }
+    const match = /^\s*(\d+)\s+(\d+)\s+(.+)$/u.exec(String(processRow.stdout).trim());
+    if (!match) {
+      return undefined;
+    }
+    const currentPid = Number(match[1]);
+    const parentPid = Number(match[2]);
+    const commandText = match[3];
+    if (interactivePids.has(currentPid) || isClaudeProcessCommand(commandText)) {
+      return currentPid;
+    }
+    pid = parentPid;
+  }
+  return undefined;
+}
+
+function isClaudeProcessCommand(commandText: string): boolean {
+  const executable = commandText.trim().split(/\s+/u, 1)[0];
+  return path.basename(executable) === "claude" ||
+    /[\\/]\.local[\\/]share[\\/]claude[\\/]versions[\\/][^\\/\s]+$/u.test(executable);
+}
+
 function createRuntimeTerminalAgentRegistry(options) {
   return createProductionTerminalAgentRegistry({
-    overrides: [createCodexTerminalAgentAdapter({
-      async detectDurableCompletion(request: TerminalDurableCompletionRequest) {
-        const runtime = isRecord(request.context) ? request.context : undefined;
-        const conversation = runtime?.conversation;
-        const nativeTakeover = isRecord(runtime?.nativeTakeover)
-          ? runtime?.nativeTakeover
-          : undefined;
-        if (!isRecord(conversation)) {
-          return undefined;
-        }
-        const contextMatch = await loadCodexTerminalContext({
-          conversation,
-          nativeTakeover,
-          options
-        });
-        if (!contextMatch?.context) {
-          return undefined;
-        }
-        const evidence = detectCodexDurableCompletion({
-          ...request,
-          context: contextMatch.context
-        });
-        return evidence
-          ? {
-              ...evidence,
-              confidence: contextMatch.confidence as "high" | "medium" | "low",
-              metadata: {
-                ...evidence.metadata,
-                context_match: contextMatch.match,
-                session: contextMatch.context.source
+    overrides: [
+      createCodexTerminalAgentAdapter({
+        async detectDurableCompletion(request: TerminalDurableCompletionRequest) {
+          const runtime = isRecord(request.context) ? request.context : undefined;
+          const conversation = runtime?.conversation;
+          const nativeTakeover = isRecord(runtime?.nativeTakeover)
+            ? runtime?.nativeTakeover
+            : undefined;
+          if (!isRecord(conversation)) {
+            return undefined;
+          }
+          const contextMatch = await loadCodexTerminalContext({
+            conversation,
+            nativeTakeover,
+            options
+          });
+          if (!contextMatch?.context) {
+            return undefined;
+          }
+          const evidence = detectCodexDurableCompletion({
+            ...request,
+            context: contextMatch.context
+          });
+          return evidence
+            ? {
+                ...evidence,
+                confidence: contextMatch.confidence as "high" | "medium" | "low",
+                metadata: {
+                  ...evidence.metadata,
+                  context_match: contextMatch.match,
+                  session: contextMatch.context.source
+                }
               }
-            }
-          : undefined;
-      }
-    })]
+            : undefined;
+        }
+      }),
+      createClaudeTerminalAgentAdapter({
+        agentRows: loadClaudeAgentRows(options),
+        hookStore: createClaudeHookStore(options),
+        trustedTokenjuiceLaunchers: loadTrustedClaudeTokenjuiceLaunchers(
+          expandHome(options.claudeSettingsPath ?? defaultClaudeSettingsPath())
+        )
+      })
+    ]
   });
 }
 
@@ -806,6 +1041,29 @@ function terminalControlFromTakeover(nativeTakeover): TerminalControlRef | undef
           "durable_completion",
           "terminal_cancel"
         ]
+  };
+}
+
+function terminalRuntimeIdentityForConversation(
+  conversation,
+  terminalControl: TerminalControlRef
+): TerminalRuntimeIdentity {
+  const nativeTakeover = isRecord(conversation?.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const nativeSessionId = stringValue(nativeTakeover?.native_session_id);
+  const terminalIdentity = parseTerminalConversationId(nativeSessionId);
+  const explicitSessionId = stringValue(nativeTakeover?.terminal_agent_session_id) ??
+    (terminalIdentity ? undefined : nativeSessionId);
+  return {
+    pid: Number.isInteger(Number(nativeTakeover?.terminal_agent_pid))
+      ? Number(nativeTakeover?.terminal_agent_pid)
+      : terminalIdentity?.pid,
+    sessionId: explicitSessionId,
+    cwd: stringValue(nativeTakeover?.source_cwd) ?? terminalControl.currentPath,
+    conversationId: stringValue(conversation?.conversation_id),
+    messageId: stringValue(nativeTakeover?.terminal_bridge_message_id),
+    terminalTarget: terminalControl.target
   };
 }
 
@@ -1419,7 +1677,8 @@ function startTerminalBridgeMonitor({
   agentTimeoutMinutes,
   agentHardTimeoutMinutes,
   pollIntervalMs,
-  codexHome
+  codexHome,
+  claudeHookStoreDir
 }) {
   const args = [
     new URL(import.meta.url).pathname,
@@ -1438,6 +1697,9 @@ function startTerminalBridgeMonitor({
   ];
   if (codexHome) {
     args.push("--codex-home", codexHome);
+  }
+  if (claudeHookStoreDir) {
+    args.push("--claude-hook-store-dir", claudeHookStoreDir);
   }
 
   const child = spawn(process.execPath, args, {
@@ -1471,7 +1733,8 @@ function startTerminalBridgeMonitorForConversation({ conversation, statePath, lo
         DEFAULT_AGENT_HARD_TIMEOUT_MINUTES
     ),
     pollIntervalMs: Number(options.monitorPollIntervalMs ?? DEFAULT_MONITOR_POLL_INTERVAL_MS),
-    codexHome: options.codexHome
+    codexHome: options.codexHome,
+    claudeHookStoreDir: options.claudeHookStoreDir ?? nativeTakeover?.["claude_hook_store_dir"]
   });
 }
 
@@ -1503,6 +1766,7 @@ function withTerminalBridgeState({
       terminal_bridge_request_text: String(message.body ?? ""),
       terminal_bridge_request_hash: terminalBridgeRequestFingerprint(message.body),
       terminal_bridge_pre_send_screen_fingerprint: preSendScreenFingerprint,
+      terminal_bridge_completion_claim: undefined,
       terminal_bridge_monitor_started_at: startedAt,
       terminal_bridge_last_activity_at: startedAt,
       terminal_bridge_inactivity_timeout_minutes: agentTimeoutMinutes,
@@ -1512,6 +1776,189 @@ function withTerminalBridgeState({
     },
     updated_at: startedAt
   };
+}
+
+interface ClaudeHookLeaseState {
+  lease: ClaudeManagedLease;
+  storeDir: string;
+  pid?: number;
+  sessionId?: string;
+}
+
+function activateClaudeHookLease({
+  options,
+  conversation,
+  message,
+  terminalControl,
+  expiresAt
+}): ClaudeHookLeaseState | undefined {
+  const runtime = terminalRuntimeIdentityForConversation(conversation, terminalControl);
+  const pid = runtime.pid;
+  const agentRow = pid === undefined
+    ? undefined
+    : loadClaudeAgentRows(options).find((row) => row.pid === pid && (row.kind === undefined || row.kind === "interactive"));
+  const sessionId = agentRow?.sessionId ?? runtime.sessionId;
+  const cwd = agentRow?.cwd ?? runtime.cwd ?? terminalControl.currentPath;
+  if (!cwd || (pid === undefined && !sessionId)) {
+    runtimeLog("warn", "claude_hook_lease_unavailable", {
+      conversation_id: conversation.conversation_id,
+      terminal_target: terminalControl.target,
+      reason: "exact Claude pid/session identity is unavailable"
+    });
+    return undefined;
+  }
+
+  const store = createClaudeHookStore(options);
+  try {
+    const previous = store.resolveLease({
+      ...(sessionId === undefined ? {} : { sessionId }),
+      ...(pid === undefined ? {} : { pid }),
+      cwd,
+      requireUnique: true
+    });
+    if (previous && (
+      previous.lease.conversationId !== conversation.conversation_id ||
+      previous.lease.messageId !== message.id
+    )) {
+      store.releaseLease({ leaseId: previous.lease.id });
+    }
+    const lease = store.activateLease({
+      ...(sessionId === undefined ? {} : { sessionId }),
+      ...(pid === undefined ? {} : { pid }),
+      cwd,
+      conversationId: conversation.conversation_id,
+      messageId: message.id,
+      terminalTarget: terminalControl.target,
+      expiresAt
+    });
+    runtimeLog("info", "claude_hook_lease_activated", {
+      conversation_id: conversation.conversation_id,
+      message_id: message.id,
+      terminal_target: terminalControl.target,
+      lease_id: lease.id,
+      pid,
+      session_id: sessionId,
+      expires_at: lease.expiresAt
+    });
+    return {
+      lease,
+      storeDir: store.rootDir,
+      ...(pid === undefined ? {} : { pid }),
+      ...(sessionId === undefined ? {} : { sessionId })
+    };
+  } catch (error) {
+    runtimeLog("warn", "claude_hook_lease_unavailable", {
+      conversation_id: conversation.conversation_id,
+      terminal_target: terminalControl.target,
+      reason: error instanceof Error ? error.message : String(error)
+    });
+    return undefined;
+  }
+}
+
+function withClaudeHookLeaseState(conversation, state: ClaudeHookLeaseState) {
+  const nativeTakeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : {};
+  return {
+    ...conversation,
+    native_session_takeover: {
+      ...nativeTakeover,
+      claude_hook_mode: "enabled",
+      claude_hook_store_dir: state.storeDir,
+      claude_hook_lease_id: state.lease.id,
+      terminal_agent_pid: state.pid,
+      terminal_agent_session_id: state.sessionId
+    }
+  };
+}
+
+function releaseClaudeHookLease(conversation): void {
+  const nativeTakeover = isRecord(conversation?.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const leaseId = stringValue(nativeTakeover?.claude_hook_lease_id);
+  if (!leaseId || nativeTakeover?.agent !== "claude") {
+    return;
+  }
+  const storeDir = stringValue(nativeTakeover.claude_hook_store_dir) ?? defaultClaudeHookStoreDir();
+  try {
+    const released = new ClaudeHookStore({ rootDir: storeDir }).releaseLease({ leaseId });
+    runtimeLog("info", "claude_hook_lease_released", {
+      conversation_id: conversation.conversation_id,
+      message_id: released?.messageId,
+      lease_id: leaseId
+    });
+  } catch (error) {
+    runtimeLog("warn", "claude_hook_lease_release_failed", {
+      conversation_id: conversation.conversation_id,
+      lease_id: leaseId,
+      reason: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+
+function renewClaudeHookLease(conversation, expiresAt: string): ClaudeManagedLease | undefined {
+  const nativeTakeover = isRecord(conversation?.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  if (nativeTakeover?.agent !== "claude") {
+    return undefined;
+  }
+  const conversationId = stringValue(conversation.conversation_id);
+  const messageId = stringValue(nativeTakeover.terminal_bridge_message_id);
+  const terminalControl = terminalControlFromTakeover(nativeTakeover);
+  const cwd = stringValue(nativeTakeover.source_cwd) ?? terminalControl?.currentPath;
+  const pid = Number.isInteger(Number(nativeTakeover.terminal_agent_pid))
+    ? Number(nativeTakeover.terminal_agent_pid)
+    : undefined;
+  const sessionId = stringValue(nativeTakeover.terminal_agent_session_id);
+  if (!conversationId || !messageId || !terminalControl || !cwd || (pid === undefined && !sessionId)) {
+    return undefined;
+  }
+  const storeDir = stringValue(nativeTakeover.claude_hook_store_dir) ?? defaultClaudeHookStoreDir();
+  try {
+    return new ClaudeHookStore({ rootDir: storeDir }).activateLease({
+      ...(sessionId === undefined ? {} : { sessionId }),
+      ...(pid === undefined ? {} : { pid }),
+      cwd,
+      conversationId,
+      messageId,
+      terminalTarget: terminalControl.target,
+      expiresAt
+    });
+  } catch (error) {
+    runtimeLog("warn", "claude_hook_lease_renew_failed", {
+      conversation_id: conversationId,
+      message_id: messageId,
+      reason: error instanceof Error ? error.message : String(error)
+    });
+    return undefined;
+  }
+}
+
+function releaseClaudeHookLeasesForTerminal({
+  storeDir,
+  terminalControl,
+  replacementConversationId
+}): void {
+  for (const candidate of listConversations(storeDir)) {
+    if (candidate.conversation_id === replacementConversationId) {
+      continue;
+    }
+    const nativeTakeover = isRecord(candidate.native_session_takeover)
+      ? candidate.native_session_takeover
+      : undefined;
+    const candidateControl = terminalControlFromTakeover(nativeTakeover);
+    if (
+      nativeTakeover?.agent === "claude" &&
+      nativeTakeover?.terminal_bridge === true &&
+      candidateControl?.target === terminalControl.target &&
+      candidateControl?.socketPath === terminalControl.socketPath
+    ) {
+      releaseClaudeHookLease(candidate);
+    }
+  }
 }
 
 function uniqueDelegateSessionName(kind) {
@@ -1779,7 +2226,18 @@ async function terminalControlledListEntry(
   if (!terminalControl) {
     throw new Error(`process ${session.pid} is not terminal-controlled`);
   }
-  const terminalState = await listStateForTerminal(session.agent, terminalControl, options, bridge);
+  const terminalState = await listStateForTerminal(
+    session.agent,
+    terminalControl,
+    options,
+    bridge,
+    {
+      pid: session.pid,
+      sessionId: session.sessionId,
+      cwd: session.cwd,
+      terminalTarget: terminalControl.target
+    }
+  );
   return {
     id: bridge.terminalConversationId(session),
     source: "terminal_control",
@@ -1813,7 +2271,8 @@ async function listStateForTerminal(
   agent: ExecutorKind,
   terminalControl: TerminalControlRef,
   options,
-  bridge: TerminalAgentBridge = createTerminalAgentBridge(options)
+  bridge: TerminalAgentBridge = createTerminalAgentBridge(options),
+  runtime?: TerminalRuntimeIdentity
 ) {
   if (options.noApprovalScan) {
     return {
@@ -1829,7 +2288,8 @@ async function listStateForTerminal(
   }
   try {
     const status = await bridge.status(agent, terminalControl, {
-      scrollbackLines: Number(options.scrollbackLines ?? 120)
+      scrollbackLines: Number(options.scrollbackLines ?? 120),
+      runtime
     });
     return {
       approval_state: {
@@ -1916,7 +2376,12 @@ async function runStatus(options) {
     const terminalStatus = await terminalStatusForControl(
       terminalConversation.agent,
       terminalConversation.terminalControl,
-      options
+      options,
+      {
+        pid: terminalConversation.pid,
+        cwd: terminalConversation.terminalControl.currentPath,
+        terminalTarget: terminalConversation.terminalControl.target
+      }
     );
     printJson({
       conversation_id: terminalConversation.conversationId,
@@ -1952,7 +2417,12 @@ async function runStatus(options) {
   if (terminalControl) {
     const executor = executorForConversation(conversation);
     result.terminal_control = terminalControl;
-    result.terminal_status = await terminalStatusForControl(executor.kind, terminalControl, options);
+    result.terminal_status = await terminalStatusForControl(
+      executor.kind,
+      terminalControl,
+      options,
+      terminalRuntimeIdentityForConversation(conversation, terminalControl)
+    );
     result.terminal_screen = result.terminal_status.screen;
   }
   printJson(result);
@@ -1974,7 +2444,12 @@ async function runDescribe(options) {
     const terminalStatus = await terminalStatusForControl(
       terminalConversation.agent,
       terminalConversation.terminalControl,
-      options
+      options,
+      {
+        pid: terminalConversation.pid,
+        cwd: terminalConversation.terminalControl.currentPath,
+        terminalTarget: terminalConversation.terminalControl.target
+      }
     );
     if (terminalConversation.agent !== "codex") {
       const adapter = createRuntimeTerminalAgentRegistry(options).require(terminalConversation.agent);
@@ -2025,7 +2500,12 @@ async function runDescribe(options) {
     isRecord(conversation.native_session_takeover) ? conversation.native_session_takeover : undefined
   );
   const terminalStatus = terminalControl
-    ? await terminalStatusForControl(executorForConversation(conversation).kind, terminalControl, options)
+    ? await terminalStatusForControl(
+        executorForConversation(conversation).kind,
+        terminalControl,
+        options,
+        terminalRuntimeIdentityForConversation(conversation, terminalControl)
+      )
     : undefined;
   printJson({
     conversation_id: conversation.conversation_id,
@@ -2048,10 +2528,12 @@ async function runDescribe(options) {
 async function terminalStatusForControl(
   agent: ExecutorKind,
   terminalControl: TerminalControlRef,
-  options
+  options,
+  runtime?: TerminalRuntimeIdentity
 ) {
   return createTerminalAgentBridge(options).status(agent, terminalControl, {
-    scrollbackLines: Number(options.scrollbackLines ?? 120)
+    scrollbackLines: Number(options.scrollbackLines ?? 120),
+    runtime
   });
 }
 
@@ -2069,9 +2551,30 @@ function terminalBridgeApprovalFingerprint({ terminalControl, terminalStatus }) 
       label: approval.label,
       prompt_kind: approval.prompt_kind,
       command: approval.command,
+      tool_name: approval.tool_name,
+      request_detail: approval.request_detail,
       excerpt: screen.excerpt
     }))
     .digest("hex");
+}
+
+function assertSafeClaudeTerminalSend(terminalStatus): void {
+  const approval = isRecord(terminalStatus?.approval_state)
+    ? terminalStatus.approval_state
+    : undefined;
+  if (terminalStatus?.reachable !== true) {
+    throw new Error("Claude Code terminal status is unavailable");
+  }
+  if (approval?.blocked === true) {
+    throw new Error(
+      stringValue(approval.reason) ?? "Claude Code is waiting at a permission dialog"
+    );
+  }
+  if (terminalStatus.activity_state !== "idle") {
+    throw new Error(
+      `Claude Code terminal is ${stringValue(terminalStatus.activity_state) ?? "unknown"}, not idle`
+    );
+  }
 }
 
 function terminalBridgeApprovalInstructions({ conversation, terminalControl, terminalStatus }) {
@@ -2083,10 +2586,18 @@ function terminalBridgeApprovalInstructions({ conversation, terminalControl, ter
   const keys = Array.isArray(approval.keys)
     ? approval.keys.filter((value): value is string => typeof value === "string")
     : [];
-  const keyDescription = keys.length > 0
-    ? keys.join(" then ")
-    : stringValue(approval.key) || "the detected approve key sequence";
+  const decisionMode = stringValue(approval.decision_mode);
+  const keyDescription = decisionMode === "structured"
+    ? "structured one-time Hook decision"
+    : keys.length > 0
+      ? keys.join(" then ")
+      : stringValue(approval.key) || "the detected approve key sequence";
   const fingerprint = stringValue(approval.fingerprint);
+  const promptKind = stringValue(approval.prompt_kind);
+  const command = stringValue(approval.command);
+  const toolName = stringValue(approval.tool_name);
+  const requestDetail = stringValue(approval.request_detail);
+  const requestId = stringValue(approval.request_id);
   const excerpt = stringValue(screen.excerpt) || "(No terminal excerpt was available.)";
   return [
     `${agentName} is waiting for approval in a terminal-controlled AKK session.`,
@@ -2094,6 +2605,11 @@ function terminalBridgeApprovalInstructions({ conversation, terminalControl, ter
     `Conversation: ${conversation.conversation_id}`,
     `Terminal: ${terminalControl.kind}:${terminalControl.target}`,
     `Approval option: ${label} (${keyDescription})`,
+    promptKind ? `Request kind: ${promptKind}` : undefined,
+    toolName ? `Tool: ${toolName}` : undefined,
+    requestDetail ? `Request: ${requestDetail}` : undefined,
+    command ? `Command: ${command}` : undefined,
+    requestId ? `Structured request id: ${requestId}` : undefined,
     "",
     "Safe terminal excerpt:",
     "```text",
@@ -2115,7 +2631,7 @@ function terminalBridgeApprovalInstructions({ conversation, terminalControl, ter
     "Equivalent user command: `AKK cancel " + conversation.conversation_id + "`",
     "",
     "Do not use raw tmux, shell, or manual key presses for this approval. Do not approve without explicit user confirmation."
-  ].join("\n");
+  ].filter((line): line is string => line !== undefined).join("\n");
 }
 
 function recordTerminalBridgeApprovalNotification({ statePath, logPath, terminalControl, terminalStatus, fingerprint }) {
@@ -2180,6 +2696,7 @@ async function runSend(options) {
         options,
         conversationId: terminalConversation.conversationId,
         agent: terminalConversation.agent,
+        pid: terminalConversation.pid,
         messageBody,
         terminalControl: terminalConversation.terminalControl
       });
@@ -2200,6 +2717,7 @@ async function runSend(options) {
       options,
       conversationId: terminalConversation.conversationId,
       agent: terminalConversation.agent,
+      pid: terminalConversation.pid,
       messageBody,
       terminalControl: terminalConversation.terminalControl
     });
@@ -2577,7 +3095,8 @@ async function runApprove(options) {
       options,
       conversationId: terminalConversation.conversationId,
       agent: terminalConversation.agent,
-      terminalControl: terminalConversation.terminalControl
+      terminalControl: terminalConversation.terminalControl,
+      pid: terminalConversation.pid
     });
     return;
   }
@@ -2605,7 +3124,11 @@ async function runApprove(options) {
     terminalControl,
     {
       expectedFingerprint,
-      scrollbackLines: Number(options.scrollbackLines ?? 120)
+      scrollbackLines: Number(options.scrollbackLines ?? 120),
+      runtime: terminalRuntimeIdentityForConversation(conversation, terminalControl),
+      requiredDecisionMode: autoApproved && executor.kind === "claude"
+        ? "structured"
+        : undefined
     }
   );
   const actualFingerprint = approval.fingerprint;
@@ -2645,6 +3168,8 @@ async function runApprove(options) {
     key: approval.key,
     keys: approval.keys,
     label: approval.label,
+    decision_mode: approval.decisionMode,
+    request_id: approval.requestId,
     approval_fingerprint: actualFingerprint,
     auto_approved: autoApproved,
     policy_rule_id: policyRuleId,
@@ -2668,6 +3193,8 @@ async function runApprove(options) {
     key: approval.key,
     keys: approval.keys,
     label: approval.label,
+    decision_mode: approval.decisionMode,
+    request_id: approval.requestId,
     approval_fingerprint: actualFingerprint,
     auto_approved: autoApproved,
     policy_rule_id: policyRuleId,
@@ -2688,7 +3215,7 @@ async function runApprove(options) {
       DEFAULT_AGENT_HARD_TIMEOUT_MINUTES,
     "--agent-hard-timeout-minutes"
   );
-  const nextNativeTakeover = {
+  const nextNativeTakeover: Record<string, unknown> = {
     ...nativeTakeoverForUpdate,
     terminal_bridge_approval: undefined,
     terminal_bridge_approval_resolved_at: approvalResolvedAt,
@@ -2704,12 +3231,31 @@ async function runApprove(options) {
     )
   };
   delete nextNativeTakeover.terminal_bridge_approval;
-  const nextConversation = {
+  let nextConversation = {
     ...conversation,
     status: terminalBridgeEnabled(conversation) ? "waiting_for_agent" as const : conversation.status,
     native_session_takeover: nextNativeTakeover,
     updated_at: approvalResolvedAt
   };
+  const approvalLeaseDeadlines = [
+    stringValue(nextNativeTakeover.terminal_bridge_inactivity_deadline_at),
+    stringValue(nextNativeTakeover.terminal_bridge_hard_deadline_at)
+  ].filter((value): value is string => Boolean(value));
+  if (approvalLeaseDeadlines.length > 0) {
+    const renewedLease = renewClaudeHookLease(
+      nextConversation,
+      new Date(Math.min(...approvalLeaseDeadlines.map((value) => Date.parse(value)))).toISOString()
+    );
+    if (renewedLease) {
+      nextConversation = {
+        ...nextConversation,
+        native_session_takeover: {
+          ...nextNativeTakeover,
+          claude_hook_lease_id: renewedLease.id
+        }
+      };
+    }
+  }
   saveState(statePath, nextConversation);
 
   const bridgeMonitor = startTerminalBridgeMonitorForConversation({
@@ -2744,6 +3290,8 @@ async function runApprove(options) {
     key: approval.key,
     keys: approval.keys,
     label: approval.label,
+    decision_mode: approval.decisionMode,
+    request_id: approval.requestId,
     approval_fingerprint: actualFingerprint,
     auto_approved: autoApproved,
     policy_rule_id: policyRuleId,
@@ -2751,10 +3299,15 @@ async function runApprove(options) {
   });
 }
 
-async function runTerminalConversationApprove({ options, conversationId, agent, terminalControl }) {
+async function runTerminalConversationApprove({ options, conversationId, agent, terminalControl, pid }) {
   const approval = await createTerminalAgentBridge(options).approve(agent, terminalControl, {
     expectedFingerprint: stringValue(options.expectedApprovalFingerprint),
-    scrollbackLines: Number(options.scrollbackLines ?? 120)
+    scrollbackLines: Number(options.scrollbackLines ?? 120),
+    runtime: {
+      pid,
+      cwd: terminalControl.currentPath,
+      terminalTarget: terminalControl.target
+    }
   });
   if (!approval.approved) {
     printJson({
@@ -2775,7 +3328,9 @@ async function runTerminalConversationApprove({ options, conversationId, agent, 
     terminal_target: terminalControl.target,
     key: approval.key,
     keys: approval.keys,
-    label: approval.label
+    label: approval.label,
+    decision_mode: approval.decisionMode,
+    request_id: approval.requestId
   });
 
   printJson({
@@ -2786,13 +3341,27 @@ async function runTerminalConversationApprove({ options, conversationId, agent, 
     key: approval.key,
     keys: approval.keys,
     label: approval.label,
-    approval_fingerprint: approval.fingerprint
+    approval_fingerprint: approval.fingerprint,
+    decision_mode: approval.decisionMode,
+    request_id: approval.requestId
   });
 }
 
-async function runTerminalConversationSend({ options, conversationId, agent, messageBody, terminalControl }) {
+async function runTerminalConversationSend({ options, conversationId, agent, pid, messageBody, terminalControl }) {
   const terminalPayload = terminalSubmissionPayload(String(messageBody));
-  await createTerminalAgentBridge(options).send(agent, terminalControl, terminalPayload);
+  const terminalBridge = createTerminalAgentBridge(options);
+  if (agent === "claude") {
+    const status = await terminalBridge.status(agent, terminalControl, {
+      scrollbackLines: Number(options.scrollbackLines ?? 120),
+      runtime: {
+        pid,
+        cwd: terminalControl.currentPath,
+        terminalTarget: terminalControl.target
+      }
+    });
+    assertSafeClaudeTerminalSend(status);
+  }
+  await terminalBridge.send(agent, terminalControl, terminalPayload);
   runtimeLog("info", "terminal_message_send", {
     conversation_id: conversationId,
     agent,
@@ -2870,20 +3439,67 @@ async function runTerminalControlSend({
         includeNativeTakeoverBootstrap: true,
         includeForkTakeoverBootstrap: false,
         forkTakeover: undefined
-      }))
+    }))
     : terminalSubmissionPayload(String(message.body ?? ""));
+  const preSendRuntime: TerminalRuntimeIdentity = {
+    ...terminalRuntimeIdentityForConversation(nextConversation, terminalControl),
+    messageId: message.id
+  };
   let preSendScreenFingerprint: string | undefined;
   if (bridge) {
     try {
       const status = await terminalBridge.status(executor.kind, terminalControl, {
-        scrollbackLines: Number(options.scrollbackLines ?? 120)
+        scrollbackLines: Number(options.scrollbackLines ?? 120),
+        runtime: preSendRuntime
       });
+      if (executor.kind === "claude") {
+        assertSafeClaudeTerminalSend(status);
+      }
       preSendScreenFingerprint = terminalBridgeScreenFingerprint(status.screen.excerpt);
-    } catch {
-      // Delivery can still succeed when capture is unavailable; prompt matching remains the fallback boundary.
+    } catch (error) {
+      if (executor.kind === "claude") {
+        throw new Error(
+          `refusing to send to Claude Code without a verified idle terminal: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+      // Codex delivery can still use its established fallback when capture is unavailable.
     }
   }
-  await terminalBridge.send(executor.kind, terminalControl, terminalPayload);
+  if (bridge && executor.kind === "claude") {
+    releaseClaudeHookLeasesForTerminal({
+      storeDir: storeDirFromOptions(options),
+      terminalControl,
+      replacementConversationId: conversation.conversation_id
+    });
+    releaseClaudeHookLease(nextConversation);
+  }
+  const claudeHookLeaseState = bridge && executor.kind === "claude"
+    ? activateClaudeHookLease({
+        options,
+        conversation: nextConversation,
+        message,
+        terminalControl,
+        expiresAt: deadlineAt(
+          bridgeStartedAt,
+          agentTimeoutMinutes > 0
+            ? Math.min(agentTimeoutMinutes, agentHardTimeoutMinutes)
+            : agentHardTimeoutMinutes
+        )
+      })
+    : undefined;
+  const conversationWithHookLease = claudeHookLeaseState
+    ? withClaudeHookLeaseState(nextConversation, claudeHookLeaseState)
+    : nextConversation;
+  try {
+    await terminalBridge.send(executor.kind, terminalControl, terminalPayload);
+  } catch (error) {
+    if (claudeHookLeaseState) {
+      releaseClaudeHookLease(conversationWithHookLease);
+    }
+    throw error;
+  }
   const supersededConversationIds = bridge
     ? supersedeTerminalBridgeConversations({
         storeDir: storeDirFromOptions(options),
@@ -2911,7 +3527,7 @@ async function runTerminalControlSend({
   });
   const bridgeConversation = bridge
     ? withTerminalBridgeState({
-        conversation: nextConversation,
+        conversation: conversationWithHookLease,
         message,
         startedAt: bridgeStartedAt,
         agentTimeoutMinutes,
@@ -2979,6 +3595,7 @@ function createManagedTerminalConversationFromRawId({
   options,
   conversationId,
   agent,
+  pid,
   messageBody,
   terminalControl
 }) {
@@ -3012,6 +3629,9 @@ function createManagedTerminalConversationFromRawId({
         gatewaySession: options.gatewaySession,
         openclawBin: options.openclawBin ?? resolveOptionalExecutable("openclaw")
       });
+  const claudeAgent = agent === "claude"
+    ? loadClaudeAgentRows(options).find((row) => row.pid === pid)
+    : undefined;
   const attachedConversation = withStoragePaths({
     ...conversation,
     executor,
@@ -3028,6 +3648,8 @@ function createManagedTerminalConversationFromRawId({
     native_session_takeover: {
       agent,
       native_session_id: conversationId,
+      terminal_agent_pid: pid,
+      terminal_agent_session_id: claudeAgent?.sessionId,
       source_cwd: workspace,
       source_title: `Terminal-controlled ${executor.display_name} ${terminalControl.target}`,
       strategy: "terminal_control",
@@ -3143,14 +3765,16 @@ function supersedeTerminalBridgeConversations({
       }
 
       const now = new Date().toISOString();
-      saveState(candidateStatePath, {
+      const closedConversation = {
         ...current,
         status: "closed" as const,
         closed_at: now,
         close_reason: "terminal bridge superseded by a newer task on the same terminal",
         superseded_by_conversation_id: replacementConversationId,
         updated_at: now
-      });
+      };
+      saveState(candidateStatePath, closedConversation);
+      releaseClaudeHookLease(closedConversation);
       appendEvent(logPathForStatePath(candidateStatePath), {
         ts: now,
         conversation_id: current.conversation_id,
@@ -3634,17 +4258,40 @@ async function runRenew(options) {
   }
 
   const now = new Date().toISOString();
+  const currentMessageId = stringValue(nativeTakeover?.terminal_bridge_message_id);
+  const hardDeadline = deadlineAt(startedAt ?? now, hardTimeoutMinutes) ??
+    new Date(Date.now() + hardTimeoutMinutes * 60 * 1000).toISOString();
+  const inactivityDeadline = deadlineAt(now, inactivityTimeoutMinutes) ??
+    new Date(Date.now() + inactivityTimeoutMinutes * 60 * 1000).toISOString();
+  const renewedLease = executorForConversation(conversation).kind === "claude" && currentMessageId
+    ? activateClaudeHookLease({
+        options,
+        conversation,
+        message: { id: currentMessageId },
+        terminalControl,
+        expiresAt: new Date(Math.min(
+          Date.parse(hardDeadline),
+          Date.parse(inactivityDeadline)
+        )).toISOString()
+      })
+    : undefined;
+  const renewedBase = renewedLease
+    ? withClaudeHookLeaseState(conversation, renewedLease)
+    : conversation;
+  const renewedNativeTakeover = isRecord(renewedBase.native_session_takeover)
+    ? renewedBase.native_session_takeover
+    : nativeTakeover;
   const renewed = {
-    ...conversation,
+    ...renewedBase,
     status: "waiting_for_agent" as const,
     native_session_takeover: {
-      ...nativeTakeover,
+      ...renewedNativeTakeover,
       terminal_bridge_monitor_started_at: now,
       terminal_bridge_last_activity_at: now,
       terminal_bridge_inactivity_timeout_minutes: inactivityTimeoutMinutes,
       terminal_bridge_hard_timeout_minutes: hardTimeoutMinutes,
-      terminal_bridge_inactivity_deadline_at: deadlineAt(now, inactivityTimeoutMinutes),
-      terminal_bridge_hard_deadline_at: deadlineAt(startedAt ?? now, hardTimeoutMinutes),
+      terminal_bridge_inactivity_deadline_at: inactivityDeadline,
+      terminal_bridge_hard_deadline_at: hardDeadline,
       terminal_bridge_renewed_at: now
     },
     updated_at: now
@@ -3720,7 +4367,8 @@ async function runCancel(options) {
       options,
       conversationId: terminalConversation.conversationId,
       agent: terminalConversation.agent,
-      terminalControl: terminalConversation.terminalControl
+      terminalControl: terminalConversation.terminalControl,
+      pid: terminalConversation.pid
     });
     return;
   }
@@ -3807,14 +4455,23 @@ async function runCancel(options) {
   });
 }
 
-async function runTerminalConversationCancel({ options, conversationId, agent, terminalControl }) {
-  const cancellation = await createTerminalAgentBridge(options).cancel(agent, terminalControl);
+async function runTerminalConversationCancel({ options, conversationId, agent, terminalControl, pid }) {
+  const cancellation = await createTerminalAgentBridge(options).cancel(agent, terminalControl, {
+    runtime: {
+      pid,
+      cwd: terminalControl.currentPath,
+      terminalTarget: terminalControl.target
+    },
+    scrollbackLines: Number(options.scrollbackLines ?? 120)
+  });
   runtimeLog("info", "terminal_cancel_requested", {
     conversation_id: conversationId,
     agent,
     terminal_target: terminalControl.target,
     key: cancellation.key,
     keys: cancellation.keys,
+    denied_approval: cancellation.deniedApproval,
+    request_id: cancellation.requestId,
     cancel_requested: cancellation.cancelRequested,
     reason: cancellation.reason
   });
@@ -3826,12 +4483,17 @@ async function runTerminalConversationCancel({ options, conversationId, agent, t
     reason: cancellation.reason,
     terminal_control: terminalControl,
     key: cancellation.key,
-    keys: cancellation.keys
+    keys: cancellation.keys,
+    denied_approval: cancellation.deniedApproval,
+    request_id: cancellation.requestId
   });
 }
 
 async function runTerminalControlCancel({ options, conversation, statePath, logPath, agent, terminalControl }) {
-  const cancellation = await createTerminalAgentBridge(options).cancel(agent, terminalControl);
+  const cancellation = await createTerminalAgentBridge(options).cancel(agent, terminalControl, {
+    runtime: terminalRuntimeIdentityForConversation(conversation, terminalControl),
+    scrollbackLines: Number(options.scrollbackLines ?? 120)
+  });
   if (!cancellation.cancelRequested) {
     printJson({
       conversation,
@@ -3850,22 +4512,29 @@ async function runTerminalControlCancel({ options, conversation, statePath, logP
     event: "terminal_cancel_requested",
     terminal_control: terminalControl,
     key: cancellation.key,
-    keys: cancellation.keys
+    keys: cancellation.keys,
+    denied_approval: cancellation.deniedApproval,
+    request_id: cancellation.requestId
   });
   runtimeLog("info", "terminal_cancel_requested", {
     conversation_id: conversation.conversation_id,
     agent,
     terminal_target: terminalControl.target,
     key: cancellation.key,
-    keys: cancellation.keys
+    keys: cancellation.keys,
+    denied_approval: cancellation.deniedApproval,
+    request_id: cancellation.requestId
   });
 
   const nextConversation = {
     ...conversation,
+    status: "cancelled" as const,
+    cancelled_at: now,
     terminal_cancel_requested_at: now,
     updated_at: now
   };
   saveState(statePath, nextConversation);
+  releaseClaudeHookLease(nextConversation);
 
   printJson({
     conversation: nextConversation,
@@ -3873,6 +4542,8 @@ async function runTerminalControlCancel({ options, conversation, statePath, logP
     terminal_control: terminalControl,
     key: cancellation.key,
     keys: cancellation.keys,
+    denied_approval: cancellation.deniedApproval,
+    request_id: cancellation.requestId,
     budget: budgetAction(nextConversation)
   });
 }
@@ -4064,6 +4735,7 @@ function runClose(options) {
     updated_at: now
   };
   saveState(statePath, closed);
+  releaseClaudeHookLease(closed);
   appendEvent(logPath, {
     ts: now,
     conversation_id: conversation.conversation_id,
@@ -4416,6 +5088,7 @@ async function runTerminalBridgeMonitor(options) {
       nativeTakeover?.["terminal_bridge_request_text"] ?? conversation.user_request ?? ""
     );
     const startedAt = stringValue(nativeTakeover?.["terminal_bridge_started_at"]);
+    const terminalRuntime = terminalRuntimeIdentityForConversation(conversation, terminalControl);
     const screenChangedSinceSend = preSendScreenFingerprint !== undefined &&
       previousScreenFingerprint !== undefined &&
       previousScreenFingerprint !== preSendScreenFingerprint;
@@ -4425,19 +5098,115 @@ async function runTerminalBridgeMonitor(options) {
       screenOptions: {
         scrollbackLines: Number(options.scrollbackLines ?? 120),
         requestText,
-        screenChangedSinceSend
+        screenChangedSinceSend,
+        runtime: terminalRuntime
       },
       durableRequest: {
-        sessionId: stringValue(nativeTakeover?.["native_session_id"]),
+        sessionId: terminalRuntime.sessionId,
         cwd: stringValue(nativeTakeover?.["source_cwd"]),
         requestText,
         requestHash: stringValue(nativeTakeover?.["terminal_bridge_request_hash"]),
         startedAt,
-        context: { conversation, nativeTakeover }
+        context: {
+          conversation,
+          nativeTakeover,
+          ...terminalRuntime
+        }
       }
     });
     const terminalStatus = poll.status;
     const approval = terminalStatus.approval_state;
+    if (isRecord(approval) && approval.blocked === true && approval.approvable !== true) {
+      const approvalReason = stringValue(approval.reason) ??
+        "Claude Code permission state cannot be safely resolved through AKK";
+      appendEvent(logPath, {
+        ts: new Date().toISOString(),
+        conversation_id: conversation.conversation_id,
+        event: "terminal_bridge_approval_not_approvable",
+        terminal_control: terminalControl,
+        activity_state: terminalStatus.activity_state,
+        reason: approvalReason
+      });
+      if (/waiting for hook consumption/iu.test(approvalReason)) {
+        sleepSync(pollIntervalMs);
+        continue;
+      }
+
+      const fingerprint = terminalBridgeApprovalFingerprint({ terminalControl, terminalStatus });
+      const notification = recordTerminalBridgeApprovalNotification({
+        statePath,
+        logPath,
+        terminalControl,
+        terminalStatus,
+        fingerprint
+      });
+      if (notification.duplicate) {
+        printJson({
+          conversation: notification.conversation,
+          monitored: true,
+          terminal_bridge: true,
+          awaiting_approval: true,
+          approvable: false,
+          duplicate: true,
+          reason: approvalReason,
+          terminal_control: terminalControl,
+          terminal_status: terminalStatus
+        });
+        return;
+      }
+      const callbackMessage = createMessage({
+        conversation: notification.conversation,
+        from: executor.actor,
+        to: "openclaw",
+        type: "blocked",
+        requiresResponse: true,
+        body: [
+          `${executor.display_name} is waiting at a permission state that AKK cannot safely approve.`,
+          approvalReason,
+          "",
+          `Conversation: ${notification.conversation.conversation_id}`,
+          `Terminal: ${terminalControl.target}`,
+          "Review and resolve this dialog in the terminal manually. AKK intentionally sends no key when the request identity cannot be revalidated."
+        ].join("\n"),
+        metadata: {
+          source: "terminal_bridge",
+          reason: "approval_not_approvable",
+          terminal_control: terminalControl,
+          terminal_status: terminalStatus,
+          approval_fingerprint: fingerprint
+        }
+      });
+      if (notification.conversation.gateway_method) {
+        runLockedCallback({
+          ...options,
+          statePath,
+          log: logPath,
+          messageJson: JSON.stringify(callbackMessage),
+          gatewayMethod: notification.conversation.gateway_method,
+          gatewaySession: notification.conversation.gateway_session,
+          openclawSession: notification.conversation.openclaw_session,
+          openclawBin: notification.conversation.openclaw_bin,
+          gatewayUrl: stringValue(notification.conversation.gateway_token)
+            ? notification.conversation.gateway_url
+            : undefined,
+          token: stringValue(notification.conversation.gateway_token)
+        });
+        return;
+      }
+      printJson({
+        conversation: notification.conversation,
+        monitored: true,
+        terminal_bridge: true,
+        awaiting_approval: true,
+        approvable: false,
+        delivered: false,
+        message: callbackMessage,
+        reason: "gateway_method_missing",
+        terminal_control: terminalControl,
+        terminal_status: terminalStatus
+      });
+      return;
+    }
     if (isRecord(approval) && approval.blocked === true) {
       const fingerprint = terminalBridgeApprovalFingerprint({ terminalControl, terminalStatus });
       appendEvent(logPath, {
@@ -4595,55 +5364,97 @@ async function runTerminalBridgeMonitor(options) {
       : undefined;
     const completionStable = completionFingerprint !== undefined && completionFingerprint === idleCompletionFingerprint;
     idleCompletionFingerprint = completionFingerprint;
-    if (completion && completionStable) {
-      appendEvent(logPath, {
-        ts: new Date().toISOString(),
-        conversation_id: conversation.conversation_id,
-        event: "terminal_bridge_completion_detected",
-        terminal_control: terminalControl,
-        match: completionMatch,
-        completion_source: completion.source,
-        completion_id: completion.id,
-        terminal_session: completionMetadata.session,
-        context_match: completionMetadata.context_match,
-        assistant_timestamp: completion?.timestamp,
-        rollout_turn_id: completion.source === "durable" ? completion.id : undefined,
-        terminal_bridge_message_id: currentMessageId
+    if (completion && completionStable && completionFingerprint) {
+      const completionOutcome = completion.outcome === "failure" ? "failure" : "success";
+      const callbackMessageId = deterministicTerminalCallbackMessageId({
+        conversationId: conversation.conversation_id,
+        terminalMessageId: currentMessageId,
+        completionFingerprint,
+        outcome: completionOutcome
       });
-      const callbackMessage = createMessage({
-        conversation,
-        from: executor.actor,
-        to: "openclaw",
-        type: "done",
-        requiresResponse: false,
-        body: completion?.text ?? "",
-        metadata: {
-          source: "terminal_bridge",
+      const claim = claimTerminalBridgeCompletion({
+        statePath,
+        logPath,
+        terminalMessageId: currentMessageId,
+        completionFingerprint,
+        completionId: completion.id,
+        callbackMessageId,
+        outcome: completionOutcome
+      });
+      if (!claim.claimed) {
+        printJson({
+          conversation: claim.conversation,
+          monitored: true,
+          terminal_bridge: true,
+          completed: false,
+          duplicate: true,
+          reason: claim.reason
+        });
+        return;
+      }
+      try {
+        conversation = claim.conversation;
+        appendEvent(logPath, {
+          ts: new Date().toISOString(),
+          conversation_id: conversation.conversation_id,
+          event: "terminal_bridge_completion_detected",
           terminal_control: terminalControl,
-          ...completionMetadata,
+          match: completionMatch,
           completion_source: completion.source,
+          completion_outcome: completionOutcome,
           completion_id: completion.id,
           terminal_session: completionMetadata.session,
-          confidence: completion.confidence,
-          match: completionMatch,
+          context_match: completionMetadata.context_match,
           assistant_timestamp: completion?.timestamp,
           rollout_turn_id: completion.source === "durable" ? completion.id : undefined,
-          terminal_bridge_message_id: currentMessageId
-        }
-      });
-      runLockedCallback({
-        ...options,
-        statePath,
-        log: logPath,
-        closeTerminalBridgeOnDone: true,
-        messageJson: JSON.stringify(callbackMessage),
-        gatewayMethod: conversation.gateway_method,
-        gatewaySession: conversation.gateway_session,
-        openclawSession: conversation.openclaw_session,
-        openclawBin: conversation.openclaw_bin,
-        gatewayUrl: stringValue(conversation.gateway_token) ? conversation.gateway_url : undefined,
-        token: stringValue(conversation.gateway_token)
-      });
+          terminal_bridge_message_id: currentMessageId,
+          callback_message_id: callbackMessageId
+        });
+        const callbackMessage = {
+          ...createMessage({
+            conversation,
+            from: executor.actor,
+            to: "openclaw",
+            type: completionOutcome === "failure" ? "error" : "done",
+            requiresResponse: false,
+            body: completion.text,
+            metadata: {
+              source: "terminal_bridge",
+              terminal_control: terminalControl,
+              ...completionMetadata,
+              completion_source: completion.source,
+              completion_outcome: completionOutcome,
+              completion_id: completion.id,
+              terminal_session: completionMetadata.session,
+              confidence: completion.confidence,
+              match: completionMatch,
+              assistant_timestamp: completion?.timestamp,
+              rollout_turn_id: completion.source === "durable" ? completion.id : undefined,
+              terminal_bridge_message_id: currentMessageId
+            }
+          }),
+          id: callbackMessageId
+        };
+        runLockedCallback({
+          ...options,
+          statePath,
+          log: logPath,
+          closeTerminalBridgeOnDone: completionOutcome === "success",
+          trackCallbackDelivery: true,
+          recoverTerminalCompletion: claim.resumed === true,
+          preserveMessageId: true,
+          messageJson: JSON.stringify(callbackMessage),
+          gatewayMethod: conversation.gateway_method,
+          gatewaySession: conversation.gateway_session,
+          openclawSession: conversation.openclaw_session,
+          openclawBin: conversation.openclaw_bin,
+          gatewayUrl: stringValue(conversation.gateway_token) ? conversation.gateway_url : undefined,
+          token: stringValue(conversation.gateway_token)
+        });
+      } finally {
+        releaseClaudeHookLease(conversation);
+        claim.release();
+      }
       return;
     }
 
@@ -4759,6 +5570,128 @@ function terminalBridgeRequestFingerprint(value): string | undefined {
   return text ? createHash("sha256").update(text).digest("hex") : undefined;
 }
 
+function deterministicTerminalCallbackMessageId({
+  conversationId,
+  terminalMessageId,
+  completionFingerprint,
+  outcome
+}): string {
+  const digest = createHash("sha256")
+    .update(JSON.stringify({
+      conversation_id: conversationId,
+      terminal_message_id: terminalMessageId,
+      completion_fingerprint: completionFingerprint,
+      outcome
+    }))
+    .digest("hex")
+    .slice(0, 32);
+  return `msg-terminal-${digest}`;
+}
+
+function claimTerminalBridgeCompletion({
+  statePath,
+  logPath,
+  terminalMessageId,
+  completionFingerprint,
+  completionId,
+  callbackMessageId,
+  outcome
+}) {
+  const release = acquireFileLock(`${statePath}.lock`);
+  try {
+    const conversation = loadState(statePath);
+    const nativeTakeover = isRecord(conversation.native_session_takeover)
+      ? conversation.native_session_takeover
+      : {};
+    if (!isWaitingForAgent(conversation.status)) {
+      release();
+      return {
+        claimed: false as const,
+        conversation,
+        reason: "conversation_no_longer_waiting"
+      };
+    }
+    if (stringValue(nativeTakeover.terminal_bridge_message_id) !== terminalMessageId) {
+      release();
+      return {
+        claimed: false as const,
+        conversation,
+        reason: "terminal_bridge_task_replaced"
+      };
+    }
+    const existing = isRecord(nativeTakeover.terminal_bridge_completion_claim)
+      ? nativeTakeover.terminal_bridge_completion_claim
+      : undefined;
+    if (existing) {
+      if (
+        existing.callback_message_id === callbackMessageId &&
+        existing.terminal_bridge_message_id === terminalMessageId &&
+        existing.completion_fingerprint === completionFingerprint &&
+        existing.outcome === outcome
+      ) {
+        appendEvent(logPath, {
+          ts: new Date().toISOString(),
+          conversation_id: conversation.conversation_id,
+          event: "terminal_bridge_completion_claim_resumed",
+          terminal_bridge_message_id: terminalMessageId,
+          completion_fingerprint: completionFingerprint,
+          callback_message_id: callbackMessageId,
+          outcome
+        });
+        return {
+          claimed: true as const,
+          resumed: true as const,
+          conversation,
+          release
+        };
+      }
+      release();
+      return {
+        claimed: false as const,
+        conversation,
+        reason: "terminal_bridge_completion_claim_conflict"
+      };
+    }
+
+    const claimedAt = new Date().toISOString();
+    const claimedConversation = {
+      ...conversation,
+      native_session_takeover: {
+        ...nativeTakeover,
+        terminal_bridge_completion_claim: {
+          terminal_bridge_message_id: terminalMessageId,
+          completion_fingerprint: completionFingerprint,
+          completion_id: completionId,
+          callback_message_id: callbackMessageId,
+          outcome,
+          claimed_at: claimedAt
+        }
+      },
+      updated_at: claimedAt
+    };
+    saveState(statePath, claimedConversation);
+    appendEvent(logPath, {
+      ts: claimedAt,
+      conversation_id: conversation.conversation_id,
+      event: "terminal_bridge_completion_claimed",
+      terminal_bridge_message_id: terminalMessageId,
+      completion_fingerprint: completionFingerprint,
+      completion_id: completionId,
+      callback_message_id: callbackMessageId,
+      outcome
+    });
+    return {
+      claimed: true as const,
+      resumed: false as const,
+      conversation: claimedConversation,
+      release
+    };
+  } catch (error) {
+    release();
+    throw error;
+  }
+}
+
 function terminalBridgeActivityPersistIntervalMs(timeoutMinutes: number, pollIntervalMs: number): number {
   if (!Number.isFinite(timeoutMinutes) || timeoutMinutes <= 0) {
     return 5 * 60 * 1000;
@@ -4800,6 +5733,13 @@ function persistTerminalBridgeActivity({
     const inactivityDeadlineAt = Number.isFinite(timeoutMinutes) && timeoutMinutes > 0
       ? new Date(observedAtMs + timeoutMinutes * 60 * 1000).toISOString()
       : undefined;
+    const hardDeadlineAt = stringValue(nativeTakeover.terminal_bridge_hard_deadline_at);
+    const leaseDeadlineAt = inactivityDeadlineAt && hardDeadlineAt
+      ? new Date(Math.min(Date.parse(inactivityDeadlineAt), Date.parse(hardDeadlineAt))).toISOString()
+      : inactivityDeadlineAt ?? hardDeadlineAt;
+    const renewedLease = leaseDeadlineAt
+      ? renewClaudeHookLease(currentConversation, leaseDeadlineAt)
+      : undefined;
     const nextConversation = {
       ...currentConversation,
       native_session_takeover: {
@@ -4808,7 +5748,8 @@ function persistTerminalBridgeActivity({
         terminal_bridge_last_activity_reason: reason,
         terminal_bridge_inactivity_deadline_at: inactivityDeadlineAt,
         terminal_bridge_inactivity_timeout_minutes: timeoutMinutes,
-        terminal_bridge_hard_timeout_minutes: hardTimeoutMinutes
+        terminal_bridge_hard_timeout_minutes: hardTimeoutMinutes,
+        claude_hook_lease_id: renewedLease?.id ?? nativeTakeover.claude_hook_lease_id
       },
       updated_at: observedAt
     };
@@ -4850,9 +5791,12 @@ function terminalBridgeApprovalCandidate({ executor, terminalControl, terminalSt
     agent: executor.kind,
     kind: stringValue(approval.prompt_kind) ?? "unknown",
     command: stringValue(approval.command),
+    tool_name: stringValue(approval.tool_name),
+    request_detail: stringValue(approval.request_detail),
     cwd: terminalControl.currentPath,
     fingerprint,
-    terminal_target: terminalControl.target
+    terminal_target: terminalControl.target,
+    decision_mode: stringValue(approval.decision_mode)
   };
 }
 
@@ -5105,7 +6049,7 @@ function runLockedCallback(options) {
   const logPath = expandHome(options.log ?? logPathForStatePath(options.statePath));
   const conversation = loadState(options.statePath);
   const executor = executorForConversation(conversation);
-  const message = options.retryPending === true
+  const message = options.retryPending === true || options.preserveMessageId === true
     ? parseMessageJson(messageInput)
     : extractStructuredMessage({
         conversation,
@@ -5127,7 +6071,11 @@ function runLockedCallback(options) {
     isRecord(callbackDelivery?.message) &&
     callbackDelivery.message.id === message.id &&
     ["pending", "failed"].includes(String(callbackDelivery.status ?? ""));
-  if (isDuplicateMessage(existingEvents, message) && !retryingPending) {
+  const duplicateMessage = isDuplicateMessage(existingEvents, message);
+  const recoveringTerminalCompletion = options.recoverTerminalCompletion === true &&
+    duplicateMessage &&
+    isWaitingForAgent(conversation.status);
+  if (duplicateMessage && !retryingPending && !recoveringTerminalCompletion) {
     runtimeLog("info", "callback_duplicate", {
       conversation_id: conversation.conversation_id,
       agent: executor.kind,
@@ -5150,15 +6098,23 @@ function runLockedCallback(options) {
 
   const closeTerminalBridgeOnDone = message.type === "done" &&
     options.closeTerminalBridgeOnDone === true;
+  const trackCallbackDelivery = closeTerminalBridgeOnDone ||
+    options.trackCallbackDelivery === true ||
+    callbackDelivery?.track_delivery === true;
   const requiresDelivery = Boolean(options.gatewayMethod) || options.recordOnly !== true;
   const deliveryAttempt = Number(callbackDelivery?.attempts ?? 0) + 1;
   let nextConversation = retryingPending
     ? conversation
     : applyMessageToConversation(conversation, message);
-  if (!retryingPending) {
+  const storedFinalStatus = stringValue(callbackDelivery?.final_status);
+  const finalStatus: ConversationStatus = storedFinalStatus &&
+    CONVERSATION_STATUSES.has(storedFinalStatus as ConversationStatus)
+    ? storedFinalStatus as ConversationStatus
+    : nextConversation.status;
+  if (!retryingPending && !recoveringTerminalCompletion) {
     appendEvent(logPath, messageEvent(message));
   }
-  if (closeTerminalBridgeOnDone && requiresDelivery) {
+  if (trackCallbackDelivery && requiresDelivery) {
     const now = new Date().toISOString();
     nextConversation = {
       ...nextConversation,
@@ -5173,7 +6129,9 @@ function runLockedCallback(options) {
         gateway_session: options.gatewaySession ?? options.openclawSession ?? conversation.openclaw_session,
         gateway_url: options.gatewayUrl ?? conversation.gateway_url,
         openclaw_bin: options.openclawBin ?? conversation.openclaw_bin,
-        close_terminal_bridge_on_done: true
+        close_terminal_bridge_on_done: closeTerminalBridgeOnDone,
+        track_delivery: true,
+        final_status: finalStatus
       },
       updated_at: now
     };
@@ -5227,12 +6185,17 @@ function runLockedCallback(options) {
     });
     const deliveredAt = new Date().toISOString();
     let deliveredConversation = nextConversation;
-    if (closeTerminalBridgeOnDone) {
+    if (trackCallbackDelivery) {
+      const deliveredStatus: ConversationStatus = closeTerminalBridgeOnDone ? "closed" : finalStatus;
       deliveredConversation = {
         ...nextConversation,
-        status: "closed" as const,
-        closed_at: deliveredAt,
-        close_reason: "terminal bridge task completed",
+        status: deliveredStatus,
+        ...(closeTerminalBridgeOnDone
+          ? {
+              closed_at: deliveredAt,
+              close_reason: "terminal bridge task completed"
+            }
+          : {}),
         callback_delivery: {
           ...(isRecord(nextConversation.callback_delivery) ? nextConversation.callback_delivery : {}),
           status: "delivered",
@@ -5249,7 +6212,7 @@ function runLockedCallback(options) {
         event: "callback_delivery_succeeded",
         message_id: message.id,
         attempt: deliveryAttempt,
-        status: "closed"
+        status: deliveredStatus
       });
     }
     printJson({
@@ -5261,7 +6224,7 @@ function runLockedCallback(options) {
       delivery: deliveryKind
     });
   } catch (error) {
-    if (closeTerminalBridgeOnDone) {
+    if (trackCallbackDelivery) {
       const failedAt = new Date().toISOString();
       const failedConversation = {
         ...nextConversation,
@@ -5441,6 +6404,8 @@ function acquireFileLock(lockPath, { timeoutMs = 5000, retryMs = 50 } = {}) {
   while (true) {
     try {
       const fd = fs.openSync(lockPath, "wx");
+      fs.writeFileSync(fd, `${process.pid}\n`, "utf8");
+      fs.fsyncSync(fd);
       fs.closeSync(fd);
       return () => {
         fs.rmSync(lockPath, { force: true });
@@ -5449,11 +6414,34 @@ function acquireFileLock(lockPath, { timeoutMs = 5000, retryMs = 50 } = {}) {
       if (error.code !== "EEXIST") {
         throw error;
       }
+      if (staleFileLock(lockPath)) {
+        fs.rmSync(lockPath, { force: true });
+        continue;
+      }
       if (Date.now() - started >= timeoutMs) {
         throw new Error(`timed out waiting for file lock: ${lockPath}`);
       }
       sleepSync(retryMs);
     }
+  }
+}
+
+function staleFileLock(lockPath: string): boolean {
+  try {
+    const stat = fs.statSync(lockPath);
+    const ownerText = fs.readFileSync(lockPath, "utf8").trim();
+    const ownerPid = Number(ownerText);
+    if (Number.isSafeInteger(ownerPid) && ownerPid > 1) {
+      try {
+        process.kill(ownerPid, 0);
+        return false;
+      } catch (error) {
+        return isRecord(error) && error.code === "ESRCH";
+      }
+    }
+    return Date.now() - stat.mtimeMs > 30_000;
+  } catch (error) {
+    return isRecord(error) && error.code === "ENOENT";
   }
 }
 
@@ -6112,6 +7100,7 @@ function markConversationStalled({ statePath, logPath, reason, detail = {} }) {
       updated_at: now
     };
     saveState(statePath, stalledConversation);
+    releaseClaudeHookLease(stalledConversation);
     appendEvent(logPath, {
       ts: now,
       conversation_id: conversation.conversation_id,
@@ -6901,6 +7890,7 @@ function usage() {
   agent-knock-knock recover --conversation <id> [--session <name>] [--all-proxy <url>]
   agent-knock-knock close --conversation <id> [--reason <text>]
   agent-knock-knock install-openclaw [--openclaw-bin <path>] [--skill-path <path>] [--skill-only] [--no-restart]
+  agent-knock-knock install-claude-hooks [--settings-path <path>] [--executable-path <path>] [--dry-run]
   agent-knock-knock doctor
   agent-knock-knock agent takeover --agent codex --session-id <id> --strategy terminate_then_resume|terminal_control|fork [--create-conversation]
   agent-knock-knock callback --state <file> --message-json <json> [--record-only]
