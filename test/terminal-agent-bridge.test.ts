@@ -4,6 +4,7 @@ import {
   createTerminalAgentAdapterRegistry,
   type TerminalAgentAdapter,
   type TerminalAgentAdapterCapabilities,
+  type TerminalApprovalDecisionRequest,
   type TerminalCompletionEvidence,
   type TerminalDurableCompletionRequest,
   type TerminalScreenInspection
@@ -152,6 +153,56 @@ function inspectTestClaudeScreen(screen: string): TerminalScreenInspection {
     completion: screen.includes("screen-complete")
       ? { source: "screen", text: "screen result", confidence: "screen_only" }
       : undefined
+  };
+}
+
+function structuredApprovalInspection(
+  screen: string,
+  requestId = "permission-request-1"
+): TerminalScreenInspection {
+  return {
+    activity: { state: "awaiting_approval", reason: "structured permission request" },
+    approval: {
+      blocked: true,
+      approvable: true,
+      promptKind: "tool_permission",
+      command: "npm test",
+      toolName: "Bash",
+      requestDetail: "Workspace command",
+      action: {
+        mode: "structured",
+        keys: [],
+        label: "Allow once",
+        requestId
+      }
+    },
+    screenExcerpt: screen
+  };
+}
+
+function createStructuredClaudeAdapter(options: {
+  requestId?: () => string;
+  inspectScreen?: (screen: string) => TerminalScreenInspection;
+  resolveApproval?: (
+    request: TerminalApprovalDecisionRequest
+  ) => Promise<{ resolved: boolean; requestId?: string; reason?: string }>;
+} = {}): TerminalAgentAdapter<"test_claude_cli"> {
+  return {
+    ...createTestClaudeAdapter(),
+    inspectScreen({ screen }) {
+      return options.inspectScreen?.(screen) ?? structuredApprovalInspection(
+        screen,
+        options.requestId?.() ?? "permission-request-1"
+      );
+    },
+    async resolveApproval(request) {
+      return options.resolveApproval?.(request) ?? {
+        resolved: true,
+        requestId: request.inspection.approval.approvable
+          ? request.inspection.approval.action.requestId
+          : undefined
+      };
+    }
   };
 }
 
@@ -337,6 +388,89 @@ test("missing adapter and semantic capabilities fail closed without terminal inp
   assert.deepEqual(provider.operations, []);
 });
 
+test("bridge gates semantic actions on the capabilities stored with the terminal reference", async () => {
+  let inspectionCalls = 0;
+  let resolverCalls = 0;
+  let durableCalls = 0;
+  const baseAdapter = createStructuredClaudeAdapter({
+    async resolveApproval() {
+      resolverCalls += 1;
+      return { resolved: true, requestId: "permission-request-1" };
+    }
+  });
+  const adapter: TerminalAgentAdapter<"test_claude_cli"> = {
+    ...baseAdapter,
+    inspectScreen(options) {
+      inspectionCalls += 1;
+      return {
+        ...baseAdapter.inspectScreen(options),
+        completion: {
+          source: "screen",
+          text: "must be hidden without screen_completion"
+        }
+      };
+    },
+    async detectDurableCompletion() {
+      durableCalls += 1;
+      return {
+        source: "durable",
+        text: "must be hidden without durable_completion"
+      };
+    }
+  };
+  const provider = new RecordingTerminalProvider([PANE], {
+    [PANE.target]: "structured permission"
+  });
+  const bridge = createBridge(adapter, provider);
+  const inputOnlyControl = {
+    ...terminalControl(adapter),
+    capabilities: ["send_keys" as const]
+  };
+
+  const status = await bridge.status("claude", inputOnlyControl);
+  assert.equal(status.approval_state.scanned, false);
+  assert.match(status.capability_limitation ?? "", /screen status is not supported/);
+
+  const approval = await bridge.approve("claude", inputOnlyControl, {
+    expectedFingerprint: "untrusted-caller-fingerprint"
+  });
+  assert.equal(approval.approved, false);
+  assert.match(approval.reason ?? "", /approval is not supported/);
+
+  const cancellation = await bridge.cancel("claude", inputOnlyControl);
+  assert.equal(cancellation.cancelRequested, false);
+  assert.match(cancellation.reason ?? "", /cancellation is not supported/);
+
+  const noCapturePoll = await bridge.monitorPoll({
+    agent: "claude",
+    terminalControl: inputOnlyControl,
+    durableRequest: { sessionId: "claude-session-1" }
+  });
+  assert.equal(noCapturePoll.completion, undefined);
+  assert.equal(inspectionCalls, 0);
+  assert.equal(resolverCalls, 0);
+  assert.equal(durableCalls, 0);
+  assert.equal(provider.operations.length, 0);
+
+  const screenStatusOnlyControl = {
+    ...terminalControl(adapter),
+    capabilities: ["send_keys" as const, "screen_status" as const]
+  };
+  const screenStatusOnlyPoll = await bridge.monitorPoll({
+    agent: "claude",
+    terminalControl: screenStatusOnlyControl,
+    durableRequest: { sessionId: "claude-session-1" }
+  });
+  assert.equal(inspectionCalls, 1);
+  assert.equal(durableCalls, 0);
+  assert.equal(screenStatusOnlyPoll.inspection?.completion?.source, "screen");
+  assert.equal(screenStatusOnlyPoll.completion, undefined);
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind === "keys"),
+    []
+  );
+});
+
 test("approval revalidates fingerprint A to B and sends zero keys", async () => {
   const adapter = createTestClaudeAdapter();
   const provider = new RecordingTerminalProvider([PANE], {
@@ -358,6 +492,218 @@ test("approval revalidates fingerprint A to B and sends zero keys", async () => 
   assert.equal(result.blocked, true);
   assert.match(result.reason ?? "", /fingerprint changed/);
   assert.notEqual(result.fingerprint, fingerprintA);
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind === "keys"),
+    []
+  );
+});
+
+test("structured approval status exposes decision mode and request identity", async () => {
+  const adapter = createStructuredClaudeAdapter();
+  const provider = new RecordingTerminalProvider([PANE], {
+    [PANE.target]: "structured permission"
+  });
+
+  const status = await createBridge(adapter, provider).status(
+    "claude",
+    terminalControl(adapter)
+  );
+
+  assert.equal(status.activity_state, "awaiting_approval");
+  assert.equal(status.approval_state.approvable, true);
+  assert.equal(status.approval_state.decision_mode, "structured");
+  assert.equal(status.approval_state.request_id, "permission-request-1");
+  assert.equal(status.approval_state.tool_name, "Bash");
+  assert.equal(status.approval_state.request_detail, "Workspace command");
+  assert.equal(status.approval_state.keys?.length, 0);
+  assert.ok(status.approval_state.fingerprint);
+  assert.equal(status.screen.approval?.decisionMode, "structured");
+  assert.equal(status.screen.approval?.requestId, "permission-request-1");
+  assert.equal(status.screen.approval?.toolName, "Bash");
+  assert.equal(status.screen.approval?.requestDetail, "Workspace command");
+});
+
+test("structured approval requires an exact expected fingerprint before resolving", async () => {
+  const resolverCalls: TerminalApprovalDecisionRequest[] = [];
+  const adapter = createStructuredClaudeAdapter({
+    async resolveApproval(request) {
+      resolverCalls.push(request);
+      return { resolved: true, requestId: "permission-request-1" };
+    }
+  });
+  const provider = new RecordingTerminalProvider([PANE], {
+    [PANE.target]: "structured permission"
+  });
+
+  const result = await createBridge(adapter, provider).approve(
+    "claude",
+    terminalControl(adapter)
+  );
+
+  assert.equal(result.approved, false);
+  assert.equal(result.blocked, true);
+  assert.equal(result.decisionMode, "structured");
+  assert.equal(result.requestId, "permission-request-1");
+  assert.match(result.reason ?? "", /requires the latest expected fingerprint/);
+  assert.equal(resolverCalls.length, 0);
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind === "keys"),
+    []
+  );
+});
+
+test("structured approval with the exact fingerprint calls the resolver without sending keys", async () => {
+  const resolverCalls: TerminalApprovalDecisionRequest[] = [];
+  const adapter = createStructuredClaudeAdapter({
+    async resolveApproval(request) {
+      resolverCalls.push(request);
+      return { resolved: true, requestId: "permission-request-1" };
+    }
+  });
+  const provider = new RecordingTerminalProvider([PANE], {
+    [PANE.target]: "structured permission"
+  });
+  const bridge = createBridge(adapter, provider);
+  const control = terminalControl(adapter);
+  const runtime = {
+    pid: 110,
+    sessionId: "claude-session-1",
+    conversationId: "conversation-1",
+    messageId: "message-1",
+    terminalTarget: PANE.target
+  };
+  const fingerprint = (await bridge.status("claude", control, { runtime }))
+    .approval_state.fingerprint;
+  assert.ok(fingerprint);
+
+  const result = await bridge.approve("claude", control, {
+    expectedFingerprint: fingerprint,
+    requiredDecisionMode: "structured",
+    runtime
+  });
+
+  assert.equal(result.approved, true);
+  assert.equal(result.blocked, false);
+  assert.equal(result.decisionMode, "structured");
+  assert.equal(result.requestId, "permission-request-1");
+  assert.equal(resolverCalls.length, 1);
+  assert.equal(resolverCalls[0].decision, "allow");
+  assert.equal(resolverCalls[0].expectedFingerprint, fingerprint);
+  assert.equal(resolverCalls[0].actualFingerprint, fingerprint);
+  assert.deepEqual(resolverCalls[0].runtime, runtime);
+  assert.equal(resolverCalls[0].interrupt, undefined);
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind === "keys"),
+    []
+  );
+});
+
+test("structured approval rejects a changed request fingerprint without resolving or sending keys", async () => {
+  let requestId = "permission-request-A";
+  const resolverCalls: TerminalApprovalDecisionRequest[] = [];
+  const adapter = createStructuredClaudeAdapter({
+    requestId: () => requestId,
+    async resolveApproval(request) {
+      resolverCalls.push(request);
+      return { resolved: true, requestId };
+    }
+  });
+  const provider = new RecordingTerminalProvider([PANE], {
+    [PANE.target]: "unchanged terminal screen"
+  });
+  const bridge = createBridge(adapter, provider);
+  const control = terminalControl(adapter);
+  const fingerprintA = (await bridge.status("claude", control)).approval_state.fingerprint;
+  assert.ok(fingerprintA);
+
+  requestId = "permission-request-B";
+  const result = await bridge.approve("claude", control, {
+    expectedFingerprint: fingerprintA,
+    requiredDecisionMode: "structured"
+  });
+
+  assert.equal(result.approved, false);
+  assert.equal(result.blocked, true);
+  assert.equal(result.requestId, "permission-request-B");
+  assert.match(result.reason ?? "", /fingerprint changed/);
+  assert.notEqual(result.fingerprint, fingerprintA);
+  assert.equal(resolverCalls.length, 0);
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind === "keys"),
+    []
+  );
+});
+
+test("cancel denies a structured approval with interrupt and never sends Escape", async () => {
+  const resolverCalls: TerminalApprovalDecisionRequest[] = [];
+  const adapter = createStructuredClaudeAdapter({
+    async resolveApproval(request) {
+      resolverCalls.push(request);
+      return { resolved: true, requestId: "permission-request-1" };
+    }
+  });
+  const provider = new RecordingTerminalProvider([PANE], {
+    [PANE.target]: "structured permission"
+  });
+  const runtime = {
+    pid: 110,
+    sessionId: "claude-session-1",
+    conversationId: "conversation-1",
+    messageId: "message-1",
+    terminalTarget: PANE.target
+  };
+
+  const result = await createBridge(adapter, provider).cancel(
+    "claude",
+    terminalControl(adapter),
+    { runtime }
+  );
+
+  assert.equal(result.cancelRequested, true);
+  assert.equal(result.deniedApproval, true);
+  assert.equal(result.requestId, "permission-request-1");
+  assert.equal(resolverCalls.length, 1);
+  assert.equal(resolverCalls[0].decision, "deny");
+  assert.equal(resolverCalls[0].interrupt, true);
+  assert.equal(resolverCalls[0].expectedFingerprint, resolverCalls[0].actualFingerprint);
+  assert.deepEqual(resolverCalls[0].runtime, runtime);
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind === "keys"),
+    []
+  );
+});
+
+test("cancel fails closed for an ambiguous non-approvable prompt without sending keys", async () => {
+  let resolverCalls = 0;
+  const adapter = createStructuredClaudeAdapter({
+    inspectScreen(screen) {
+      return {
+        activity: { state: "awaiting_approval", reason: "ambiguous permission state" },
+        approval: {
+          blocked: true,
+          approvable: false,
+          reason: "multiple pending permission requests are ambiguous"
+        },
+        screenExcerpt: screen
+      };
+    },
+    async resolveApproval() {
+      resolverCalls += 1;
+      return { resolved: true };
+    }
+  });
+  const provider = new RecordingTerminalProvider([PANE], {
+    [PANE.target]: "ambiguous permission"
+  });
+
+  const result = await createBridge(adapter, provider).cancel(
+    "claude",
+    terminalControl(adapter)
+  );
+
+  assert.equal(result.cancelRequested, false);
+  assert.match(result.reason ?? "", /ambiguous/);
+  assert.equal(resolverCalls, 0);
   assert.deepEqual(
     provider.operations.filter((operation) => operation.kind === "keys"),
     []

@@ -48,9 +48,13 @@ export interface TerminalActivityInspection {
 }
 
 export interface TerminalApprovalAction {
+  /** Screen adapters use keys; hook-backed adapters use a structured one-time decision. */
+  mode?: "keys" | "structured";
   /** Exact ordered tmux key sequence to send after prompt revalidation. */
   keys: readonly string[];
   label: string;
+  /** Opaque adapter-owned request identity for a structured decision. */
+  requestId?: string;
 }
 
 export type TerminalApprovalInspection =
@@ -59,6 +63,10 @@ export type TerminalApprovalInspection =
       approvable: true;
       promptKind: string;
       command?: string;
+      /** Safe display name for the tool that requested permission. */
+      toolName?: string;
+      /** Redacted, bounded summary of the permission target; never the full tool input. */
+      requestDetail?: string;
       action: TerminalApprovalAction;
     }
   | {
@@ -67,11 +75,14 @@ export type TerminalApprovalInspection =
       reason: string;
       promptKind?: string;
       command?: string;
+      toolName?: string;
+      requestDetail?: string;
       action?: undefined;
     };
 
 export interface TerminalCompletionEvidence {
   source: "screen" | "durable";
+  outcome?: "success" | "failure";
   text: string;
   timestamp?: string;
   id?: string;
@@ -79,11 +90,21 @@ export interface TerminalCompletionEvidence {
   metadata?: Record<string, unknown>;
 }
 
+export interface TerminalRuntimeIdentity {
+  pid?: number;
+  sessionId?: string;
+  cwd?: string;
+  conversationId?: string;
+  messageId?: string;
+  terminalTarget?: string;
+}
+
 export interface TerminalScreenInspectionOptions {
   screen: string;
   requestText?: string;
   screenChangedSinceSend?: boolean;
   maxExcerptLength?: number;
+  runtime?: TerminalRuntimeIdentity;
 }
 
 export interface TerminalScreenInspection {
@@ -100,6 +121,21 @@ export interface TerminalDurableCompletionRequest {
   requestHash?: string;
   startedAt?: string;
   context?: unknown;
+}
+
+export interface TerminalApprovalDecisionRequest {
+  decision: "allow" | "deny";
+  expectedFingerprint: string;
+  actualFingerprint: string;
+  inspection: TerminalScreenInspection;
+  runtime?: TerminalRuntimeIdentity;
+  interrupt?: boolean;
+}
+
+export interface TerminalApprovalDecisionResult {
+  resolved: boolean;
+  requestId?: string;
+  reason?: string;
 }
 
 export interface TerminalAgentAdapterCapabilities {
@@ -120,6 +156,9 @@ export interface TerminalAgentAdapter<ProcessKind extends string = string> {
 
   classifyProcess(snapshot: TerminalProcessSnapshot): ActiveTerminalProcess<ProcessKind> | undefined;
   inspectScreen(options: TerminalScreenInspectionOptions): TerminalScreenInspection;
+  resolveApproval?(
+    request: TerminalApprovalDecisionRequest
+  ): Promise<TerminalApprovalDecisionResult>;
   detectDurableCompletion?(
     request: TerminalDurableCompletionRequest
   ): Promise<TerminalCompletionEvidence | undefined>;

@@ -1,4 +1,5 @@
 import { codexTerminalAgentAdapter } from "./codex-terminal-agent-adapter.js";
+import { claudeTerminalAgentAdapter } from "./claude-terminal-agent-adapter.js";
 import {
   createTerminalAgentAdapterRegistry,
   type TerminalAgentAdapter
@@ -7,7 +8,8 @@ import type { ExecutorKind } from "./executors.js";
 
 /** New production terminal agents opt in once here after providing a complete adapter. */
 const productionTerminalAgentAdapters: readonly TerminalAgentAdapter[] = [
-  codexTerminalAgentAdapter
+  codexTerminalAgentAdapter,
+  claudeTerminalAgentAdapter
 ];
 
 export function createProductionTerminalAgentRegistry(options: {

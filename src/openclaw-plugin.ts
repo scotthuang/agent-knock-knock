@@ -500,7 +500,7 @@ export default definePluginEntry({
 
     registerCliTool(api, {
       name: "agent_knock_knock_list",
-      description: "List Agent Knock Knock work and local active coding-agent sessions. Use this for AKK list, akk list, current AKK tasks, native Codex active work, terminal-controlled Codex work, or asking which Codex/Claude/Cursor sessions are open. The result separates delegated AKK tasks, native active processes, and terminal-controlled sessions; terminal-controlled entries include approval state when available.",
+      description: "List Agent Knock Knock work and local active coding-agent sessions. Use this for AKK list, current AKK tasks, native Codex work, terminal-controlled Codex or Claude Code work, or asking which coding-agent sessions are open. The result separates delegated tasks, native processes, and terminal-controlled sessions; terminal entries include approval state when available.",
       parameters: listParameters,
       buildArgs: (params) => {
         const args = ["list"];
@@ -541,7 +541,7 @@ export default definePluginEntry({
 
     registerCliTool(api, {
       name: "agent_knock_knock_describe",
-      description: "Describe what a listed Agent Knock Knock or local Codex session is about. Use this when the user asks what a session/task/drawing is doing, what the original work was, or wants a reminder of a session's content. It summarizes AKK history when available, otherwise Codex rollout history, cwd-based inferred history, or terminal screen fallback with confidence and limitations.",
+      description: "Describe what a listed Agent Knock Knock or local coding-agent session is about. It summarizes AKK history when available, otherwise uses supported durable agent context or a conservative terminal-screen fallback with confidence and limitations.",
       parameters: describeParameters,
       buildArgs: (params) => {
         const args = ["describe", "--conversation", requiredString(params.conversation_id, "conversation_id")];
@@ -556,7 +556,7 @@ export default definePluginEntry({
 
     registerCliTool(api, {
       name: "agent_knock_knock_send",
-      description: "Send a message, follow-up, or new task to an existing open Agent Knock Knock coding-agent session or terminal-controlled session from AKK list. Use this when the user says to send/tell/ask/forward/add/continue work in a listed session, a listed Codex terminal, a tmux target such as my-work:0.1, or the one from AKK list. Do not start a new delegate for those requests. This is an asynchronous handoff: after the message is accepted, end the OpenClaw turn and wait for an Agent Knock Knock callback or a later explicit status request. Do not poll terminal output or wait for the coding agent's final result in the same OpenClaw turn.",
+      description: "Send a message, follow-up, or new task to an existing open Agent Knock Knock or terminal-controlled coding-agent session from AKK list, including Codex or Claude Code in tmux. Do not start a new delegate for those requests. This is asynchronous: after acceptance, end the OpenClaw turn and wait for the AKK callback or a later explicit status request.",
       parameters: sendParameters,
       buildArgs: (params, toolContext) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
@@ -595,7 +595,7 @@ export default definePluginEntry({
     registerCliTool(api, {
       name: "agent_knock_knock_approve",
       description:
-        "Approve the current visible terminal approval prompt for an AKK terminal-controlled session. Use only after showing the user the detected prompt and receiving explicit approval. This sends the primary approve shortcut to the controlled terminal pane.",
+        "Approve the current AKK terminal permission request after showing it to the user and receiving explicit approval. Claude Code uses a revalidated structured one-time Hook decision; supported screen fallbacks use the detected primary shortcut and are never eligible for Claude auto-approval.",
       parameters: approveParameters,
       buildArgs: (params) => {
         const args = ["approve", "--conversation", requiredString(params.conversation_id, "conversation_id")];
@@ -611,7 +611,7 @@ export default definePluginEntry({
 
     registerCliTool(api, {
       name: "agent_knock_knock_renew",
-      description: "Renew monitoring for a stalled AKK-managed terminal bridge task without sending text or keys to Codex. Use this when the user wants a still-live long-running terminal task to keep monitoring after an inactivity stall.",
+      description: "Renew monitoring for a stalled AKK-managed terminal bridge task without sending text or keys to the coding agent. Use this when the user wants a still-live long-running terminal task to keep monitoring after an inactivity stall.",
       parameters: renewParameters,
       buildArgs: (params) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
@@ -636,7 +636,7 @@ export default definePluginEntry({
 
     registerCliTool(api, {
       name: "agent_knock_knock_cancel",
-      description: "Request cancellation for an existing Agent Knock Knock Codex, Claude, or Cursor session. Delegated sessions use cooperative ACPX cancellation. Terminal-controlled sessions send Control-C to the controlled terminal pane. This does not close the AKK session; use close when the session should no longer be reused.",
+      description: "Cancel an existing Agent Knock Knock Codex, Claude, or Cursor task. Delegated sessions use cooperative ACPX cancellation. Terminal-controlled Claude denies a pending structured permission or sends Escape; other adapters use their declared interrupt keys. The underlying tmux pane remains open.",
       parameters: cancelParameters,
       buildArgs: (params) => {
         const args = ["cancel", "--conversation", requiredString(params.conversation_id, "conversation_id")];

@@ -8,6 +8,7 @@ import {
   detectCodexDurableCompletion,
   inspectCodexScreen
 } from "../src/codex-terminal-agent-adapter.js";
+import { claudeTerminalAgentAdapter } from "../src/claude-terminal-agent-adapter.js";
 import { terminalAgentAdapterFor } from "../src/terminal-agent-registry.js";
 import {
   createTerminalAgentAdapterRegistry,
@@ -109,11 +110,12 @@ test("registry dispatches a test-only adapter and fails closed for missing adapt
   );
 });
 
-test("default registry exposes Codex and rejects unsupported terminal agents", () => {
+test("default registry exposes Codex and Claude and rejects unsupported terminal agents", () => {
   assert.equal(terminalAgentAdapterFor("codex"), codexTerminalAgentAdapter);
+  assert.equal(terminalAgentAdapterFor("claude"), claudeTerminalAgentAdapter);
   assert.throws(
-    () => terminalAgentAdapterFor("claude"),
-    /terminal agent adapter is not registered for claude/
+    () => terminalAgentAdapterFor("cursor"),
+    /terminal agent adapter is not registered for cursor/
   );
 });
 

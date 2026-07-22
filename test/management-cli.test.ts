@@ -358,6 +358,95 @@ test("list exposes terminal-controlled Codex working activity state", () => {
   }
 });
 
+test("list discovers Claude and Codex tmux sessions from static runtime snapshots", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-list-claude-tmux-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const claudeHookStoreDir = path.join(tempDir, "claude-hooks");
+  const codexWorkspace = path.join(tempDir, "codex-workspace");
+  const claudeWorkspace = path.join(tempDir, "claude-workspace");
+
+  try {
+    const listed = runCli([
+      "list",
+      "--store-dir",
+      storeDir,
+      "--claude-hook-store-dir",
+      claudeHookStoreDir,
+      "--processes-json",
+      JSON.stringify([{
+        pid: 5101,
+        ppid: 9001,
+        elapsed: "00:20",
+        command: "codex",
+        cwd: codexWorkspace
+      }, {
+        pid: 5201,
+        ppid: 9002,
+        elapsed: "00:30",
+        command: "claude",
+        cwd: claudeWorkspace
+      }]),
+      "--terminals-json",
+      JSON.stringify([{
+        kind: "tmux",
+        target: "codex-work:0.0",
+        session: "codex-work",
+        window: 0,
+        pane: 0,
+        panePid: 9001,
+        currentCommand: "node",
+        currentPath: codexWorkspace
+      }, {
+        kind: "tmux",
+        target: "claude-work:1.0",
+        session: "claude-work",
+        window: 1,
+        pane: 0,
+        panePid: 9002,
+        currentCommand: "node",
+        currentPath: claudeWorkspace
+      }]),
+      "--terminal-screens-json",
+      JSON.stringify({
+        "codex-work:0.0": "› ",
+        "claude-work:1.0": "❯ "
+      }),
+      "--claude-agents-json",
+      JSON.stringify([{
+        kind: "interactive",
+        pid: 5201,
+        sessionId: "claude-session-list",
+        cwd: claudeWorkspace,
+        status: "idle"
+      }])
+    ]);
+
+    assert.equal(listed.native_scan.active_count, 2);
+    assert.equal(listed.native_scan.terminal_controlled_count, 2);
+    assert.deepEqual(listed.native_scan.agents, ["codex", "claude"]);
+    assert.deepEqual(listed.terminal_controlled.map((entry) => entry.agent).sort(), ["claude", "codex"]);
+
+    const codex = listed.terminal_controlled.find((entry) => entry.agent === "codex");
+    assert.equal(codex.id, "terminal:v2:tmux:codex:codex-work:0.0:5101");
+    assert.equal(codex.commands.send, true);
+    assert.equal(codex.commands.cancel, true);
+    assert.equal(codex.terminal_control.capabilities.includes("screen_completion"), true);
+
+    const claude = listed.terminal_controlled.find((entry) => entry.agent === "claude");
+    assert.equal(claude.id, "terminal:v2:tmux:claude:claude-work:1.0:5201");
+    assert.equal(claude.session_id, "claude-session-list");
+    assert.equal(claude.confidence, "high");
+    assert.equal(claude.activity_state, "idle");
+    assert.equal(claude.commands.send, true);
+    assert.equal(claude.commands.cancel, true);
+    assert.equal(claude.commands.approve, false);
+    assert.equal(claude.terminal_control.capabilities.includes("durable_completion"), true);
+    assert.equal(claude.terminal_control.capabilities.includes("screen_completion"), false);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("cancel requests cooperative ACPX cancellation for Codex, Claude, and Cursor sessions", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-cancel-management-"));
   const storeDir = path.join(tempDir, "conversations");

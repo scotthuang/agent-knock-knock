@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.47 - 2026-07-23
+
+### Added
+
+- Add tmux control for Claude Code, including discovery, safe idle-only sends, Hook-backed monitoring, structured allow/deny, and exact-rule auto approval.
+- Add an idempotent `install-claude-hooks` command that preserves existing Claude settings and hooks.
+
+### Fixed
+
+- Bind Claude permission and Stop/StopFailure events to strong runtime identity, terminal, conversation, message, and active lease; keep background work from completing early and deliver each terminal result once.
+- Show a redacted permission target summary, preserve conservative manual fallback for unverifiable dialogs, and normalize only the exact source-tagged Tokenjuice Claude wrapper for policy matching.
+
 ## 0.2.46 - 2026-07-22
 
 ### Added

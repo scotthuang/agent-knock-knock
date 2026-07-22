@@ -4,12 +4,395 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { ClaudeHookStore } from "../src/claude-hook-store.js";
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 const CODEX_ACPX_SELECTOR = ["--agent", "npx -y @agentclientprotocol/codex-acp@^1.1.0"];
 const sessionId = "019ee559-7bb8-7fd1-970c-0f7b6978c44e";
 const cwd = "/repo/agent-knock-knock";
 const rolloutPath = "/tmp/codex-rollout.jsonl";
+
+test("managed Claude tmux send binds hook identity and structured approval/cancel never sends dialog keys", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-terminal-permission-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const hookStoreDir = path.join(tempDir, "claude-hooks");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const workspace = path.join(tempDir, "workspace");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const terminalTarget = "claude-work:0.0";
+  const claudePid = 42301;
+  const claudeSessionId = "claude-session-permission";
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "❯ ");
+    writeFakeOpenClaw(fakeBinDir, openclawCallsPath);
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `claude-work\t0\t0\t999\tnode\t${workspace}\n`
+    );
+
+    const task = startManagedClaudeTerminalTask({
+      fakeBinDir,
+      workspace,
+      storeDir,
+      hookStoreDir,
+      terminalTarget,
+      claudePid,
+      claudeSessionId,
+      message: "Run the focused tests"
+    });
+    const conversation = task.conversation;
+    const nativeTakeover = conversation.native_session_takeover;
+    const messageId = nativeTakeover.terminal_bridge_message_id;
+    assert.equal(nativeTakeover.claude_hook_mode, "enabled");
+    assert.equal(nativeTakeover.claude_hook_store_dir, hookStoreDir);
+    assert.equal(nativeTakeover.terminal_agent_pid, claudePid);
+    assert.equal(nativeTakeover.terminal_agent_session_id, claudeSessionId);
+    assert.equal(typeof nativeTakeover.claude_hook_lease_id, "string");
+    assert.equal(typeof messageId, "string");
+
+    const hookStore = new ClaudeHookStore({ rootDir: hookStoreDir });
+    const lease = hookStore.resolveLease({
+      sessionId: claudeSessionId,
+      pid: claudePid,
+      cwd: workspace
+    });
+    assert.equal(lease?.authorizationEligible, true);
+    assert.equal(lease?.lease.conversationId, conversation.conversation_id);
+    assert.equal(lease?.lease.messageId, messageId);
+    assert.equal(lease?.lease.terminalTarget, terminalTarget);
+
+    const promptId = "prompt-permission";
+    hookStore.record(claudePromptHookInput(claudeSessionId, workspace, promptId), {
+      claudePid
+    });
+    const pendingAllow = hookStore.record(
+      claudePermissionHookInput(claudeSessionId, workspace, promptId, "npm test -- --runInBand"),
+      { claudePid }
+    ).permission;
+    assert.ok(pendingAllow);
+
+    const staticArgs = claudeTerminalStaticArgs({
+      workspace,
+      terminalTarget,
+      claudePid,
+      claudeSessionId,
+      screen: "❯ "
+    });
+    const status = runAgentCli([
+      "status",
+      "--conversation",
+      conversation.conversation_id,
+      "--store-dir",
+      storeDir,
+      "--claude-hook-store-dir",
+      hookStoreDir,
+      ...staticArgs
+    ]);
+    assert.equal(status.status, 0, status.stderr || status.stdout);
+    const statusParsed = JSON.parse(status.stdout);
+    assert.equal(statusParsed.terminal_status.activity_state, "awaiting_approval");
+    assert.equal(statusParsed.terminal_status.approval_state.approvable, true);
+    assert.equal(statusParsed.terminal_status.approval_state.decision_mode, "structured");
+    assert.equal(statusParsed.terminal_status.approval_state.request_id, pendingAllow.requestId);
+    assert.equal(statusParsed.terminal_status.approval_state.command, "npm test -- --runInBand");
+    assert.equal(typeof statusParsed.terminal_status.approval_state.fingerprint, "string");
+
+    const monitored = runAgentCli(claudeMonitorArgs({
+      task,
+      hookStoreDir,
+      staticArgs
+    }));
+    assert.equal(monitored.status, 0, monitored.stderr || monitored.stdout);
+    const monitoredParsed = JSON.parse(monitored.stdout);
+    assert.equal(monitoredParsed.delivered, true);
+    assert.equal(monitoredParsed.message.type, "question");
+    assert.equal(monitoredParsed.message.metadata.reason, "approval_required");
+    assert.equal(monitoredParsed.message.metadata.approval_candidate.agent, "claude");
+    assert.equal(monitoredParsed.message.metadata.approval_candidate.decision_mode, "structured");
+    assert.equal(monitoredParsed.message.metadata.terminal_status.approval_state.request_id, pendingAllow.requestId);
+    assert.equal(monitoredParsed.conversation.status, "waiting_for_openclaw");
+
+    const approvalFingerprint = monitoredParsed.message.metadata.approval_fingerprint;
+    const sendKeysBeforeApproval = readJsonLines(tmuxCallsPath)
+      .filter((call) => call.args[0] === "send-keys").length;
+    const approved = runAgentCli([
+      "approve",
+      "--conversation",
+      conversation.conversation_id,
+      "--store-dir",
+      storeDir,
+      "--expected-approval-fingerprint",
+      approvalFingerprint,
+      "--claude-hook-store-dir",
+      hookStoreDir,
+      ...staticArgs
+    ]);
+    assert.equal(approved.status, 0, approved.stderr || approved.stdout);
+    const approvedParsed = JSON.parse(approved.stdout);
+    assert.equal(approvedParsed.approved, true);
+    assert.equal(approvedParsed.decision_mode, "structured");
+    assert.equal(approvedParsed.request_id, pendingAllow.requestId);
+    assert.equal(approvedParsed.key, undefined);
+    assert.deepEqual(approvedParsed.keys ?? [], []);
+    assert.equal(approvedParsed.conversation.status, "waiting_for_agent");
+    assert.equal(
+      readJsonLines(tmuxCallsPath).filter((call) => call.args[0] === "send-keys").length,
+      sendKeysBeforeApproval
+    );
+
+    const allowed = hookStore.consumePermissionDecision({
+      sessionId: pendingAllow.sessionId,
+      requestId: pendingAllow.requestId,
+      fingerprint: pendingAllow.fingerprint,
+      conversationId: pendingAllow.conversationId,
+      messageId: pendingAllow.messageId
+    });
+    assert.deepEqual(allowed?.hookOutput, {
+      hookSpecificOutput: {
+        hookEventName: "PermissionRequest",
+        decision: { behavior: "allow" }
+      }
+    });
+
+    const pendingDeny = hookStore.record(
+      claudePermissionHookInput(claudeSessionId, workspace, promptId, "git push origin main"),
+      { claudePid }
+    ).permission;
+    assert.ok(pendingDeny);
+    const sendKeysBeforeCancel = readJsonLines(tmuxCallsPath)
+      .filter((call) => call.args[0] === "send-keys").length;
+    const cancelled = runAgentCli([
+      "cancel",
+      "--conversation",
+      conversation.conversation_id,
+      "--store-dir",
+      storeDir,
+      "--claude-hook-store-dir",
+      hookStoreDir,
+      "--claude-agents-json",
+      JSON.stringify([claudeAgentRow(claudePid, claudeSessionId, workspace)])
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(cancelled.status, 0, cancelled.stderr || cancelled.stdout);
+    const cancelledParsed = JSON.parse(cancelled.stdout);
+    assert.equal(cancelledParsed.cancel_requested, true);
+    assert.equal(cancelledParsed.denied_approval, true);
+    assert.equal(cancelledParsed.request_id, pendingDeny.requestId);
+    assert.equal(cancelledParsed.key, undefined);
+    assert.equal(cancelledParsed.conversation.status, "cancelled");
+    assert.equal(
+      readJsonLines(tmuxCallsPath).filter((call) => call.args[0] === "send-keys").length,
+      sendKeysBeforeCancel,
+      "structured deny must not send Escape or any other tmux key"
+    );
+    const deniedPermission = hookStore.resolveSession({ sessionId: claudeSessionId })?.permissions
+      .find((permission) => permission.requestId === pendingDeny.requestId);
+    assert.equal(deniedPermission?.decision?.behavior, "deny");
+    assert.equal(deniedPermission?.decision?.interrupt, true);
+
+    fs.writeFileSync(screenPath, [
+      "Bash command",
+      "npm publish",
+      "Do you want to proceed?",
+      "❯ 1. Yes",
+      "  2. Yes, and don't ask again for npm publish commands",
+      "  3. No",
+      "Esc to cancel"
+    ].join("\n"));
+    const sendKeysBeforeBlockedSend = readJsonLines(tmuxCallsPath)
+      .filter((call) => call.args[0] === "send-keys").length;
+    const blockedSend = runAgentCli([
+      "send",
+      "--conversation",
+      `terminal:v2:tmux:claude:${terminalTarget}:${claudePid}`,
+      "--message",
+      "This must not be submitted over the permission dialog",
+      "--claude-hook-store-dir",
+      hookStoreDir,
+      "--claude-agents-json",
+      JSON.stringify([claudeAgentRow(claudePid, claudeSessionId, workspace)])
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.notEqual(blockedSend.status, 0);
+    assert.match(blockedSend.stderr, /permission|refusing to send/iu);
+    assert.equal(
+      readJsonLines(tmuxCallsPath).filter((call) => call.args[0] === "send-keys").length,
+      sendKeysBeforeBlockedSend,
+      "a new message must never be typed over a Claude permission dialog"
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("Claude Stop and StopFailure callbacks are exactly once and background work is not completion", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-terminal-completion-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const hookStoreDir = path.join(tempDir, "claude-hooks");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const workspace = path.join(tempDir, "workspace");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const terminalTarget = "claude-work:0.0";
+  const claudePid = 42302;
+  const claudeSessionId = "claude-session-completion";
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "❯ ");
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `claude-work\t0\t0\t999\tnode\t${workspace}\n`
+    );
+    const hookStore = new ClaudeHookStore({ rootDir: hookStoreDir });
+    const staticArgs = claudeTerminalStaticArgs({
+      workspace,
+      terminalTarget,
+      claudePid,
+      claudeSessionId,
+      screen: "❯ "
+    });
+
+    const successCallsPath = path.join(tempDir, "openclaw-success.ndjson");
+    writeFakeOpenClaw(fakeBinDir, successCallsPath);
+    const successTask = startManagedClaudeTerminalTask({
+      fakeBinDir,
+      workspace,
+      storeDir,
+      hookStoreDir,
+      terminalTarget,
+      claudePid,
+      claudeSessionId,
+      message: "Finish the implementation"
+    });
+    const successPromptId = "prompt-success";
+    hookStore.record(claudePromptHookInput(claudeSessionId, workspace, successPromptId), { claudePid });
+    hookStore.record(claudeStopHookInput(claudeSessionId, workspace, successPromptId, {
+      last_assistant_message: "Implementation complete; focused tests pass.",
+      background_tasks: [],
+      session_crons: []
+    }), { claudePid });
+
+    const successMonitorArgs = claudeMonitorArgs({
+      task: successTask,
+      hookStoreDir,
+      staticArgs
+    });
+    const [successFirst, successSecond] = await Promise.all([
+      runAgentCliAsync(successMonitorArgs),
+      runAgentCliAsync(successMonitorArgs)
+    ]);
+    assert.equal(successFirst.status, 0, successFirst.stderr || successFirst.stdout);
+    assert.equal(successSecond.status, 0, successSecond.stderr || successSecond.stdout);
+    const successResults = [successFirst, successSecond].map((result) => JSON.parse(result.stdout));
+    const deliveredSuccess = successResults.filter((result) => result.delivered === true);
+    assert.equal(deliveredSuccess.length, 1);
+    assert.equal(deliveredSuccess[0].message.type, "done");
+    assert.equal(deliveredSuccess[0].message.body, "Implementation complete; focused tests pass.");
+    assert.equal(deliveredSuccess[0].message.metadata.match, "claude_stop_hook");
+    assert.equal(deliveredSuccess[0].conversation.status, "closed");
+    assert.equal(readJsonLines(successCallsPath).length, 1);
+    const successEvents = fs.readFileSync(successTask.logPath, "utf8");
+    assert.equal((successEvents.match(/terminal_bridge_completion_detected/gu) ?? []).length, 1);
+    assert.equal((successEvents.match(/terminal_bridge_completion_claimed/gu) ?? []).length, 1);
+    const completionClaim = readJsonLines(successTask.logPath)
+      .find((event) => event.event === "terminal_bridge_completion_claimed");
+    assert.match(completionClaim.callback_message_id, /^msg-terminal-[a-f0-9]{32}$/u);
+
+    const failureCallsPath = path.join(tempDir, "openclaw-failure.ndjson");
+    writeFakeOpenClaw(fakeBinDir, failureCallsPath);
+    const failureTask = startManagedClaudeTerminalTask({
+      fakeBinDir,
+      workspace,
+      storeDir,
+      hookStoreDir,
+      terminalTarget,
+      claudePid,
+      claudeSessionId,
+      message: "Run the release command"
+    });
+    const failurePromptId = "prompt-failure";
+    hookStore.record(claudePromptHookInput(claudeSessionId, workspace, failurePromptId), { claudePid });
+    hookStore.record(claudeStopFailureHookInput(claudeSessionId, workspace, failurePromptId), { claudePid });
+
+    const failureMonitorArgs = claudeMonitorArgs({
+      task: failureTask,
+      hookStoreDir,
+      staticArgs
+    });
+    const failed = runAgentCli(failureMonitorArgs);
+    assert.equal(failed.status, 0, failed.stderr || failed.stdout);
+    const failedParsed = JSON.parse(failed.stdout);
+    assert.equal(failedParsed.delivered, true);
+    assert.equal(failedParsed.message.type, "error");
+    assert.match(failedParsed.message.body, /rate_limit/u);
+    assert.match(failedParsed.message.body, /429 Too Many Requests/u);
+    assert.equal(failedParsed.message.metadata.match, "claude_stop_failure_hook");
+    assert.equal(failedParsed.conversation.status, "failed");
+    const failedAgain = runAgentCli(failureMonitorArgs);
+    assert.equal(failedAgain.status, 0, failedAgain.stderr || failedAgain.stdout);
+    assert.equal(JSON.parse(failedAgain.stdout).reason, "conversation_no_longer_waiting");
+    assert.equal(readJsonLines(failureCallsPath).length, 1);
+
+    const backgroundCallsPath = path.join(tempDir, "openclaw-background.ndjson");
+    writeFakeOpenClaw(fakeBinDir, backgroundCallsPath);
+    const backgroundTask = startManagedClaudeTerminalTask({
+      fakeBinDir,
+      workspace,
+      storeDir,
+      hookStoreDir,
+      terminalTarget,
+      claudePid,
+      claudeSessionId,
+      message: "Wait for the background test run"
+    });
+    const backgroundPromptId = "prompt-background";
+    hookStore.record(claudePromptHookInput(claudeSessionId, workspace, backgroundPromptId), { claudePid });
+    hookStore.record(claudeStopHookInput(claudeSessionId, workspace, backgroundPromptId, {
+      last_assistant_message: "The foreground turn ended but tests are still running.",
+      background_tasks: [{
+        id: "task-1",
+        type: "bash",
+        status: "running",
+        description: "npm test"
+      }],
+      session_crons: []
+    }), { claudePid });
+    const backgroundMonitor = runAgentCli(claudeMonitorArgs({
+      task: backgroundTask,
+      hookStoreDir,
+      staticArgs,
+      timeoutMinutes: "0.001"
+    }));
+    assert.equal(backgroundMonitor.status, 0, backgroundMonitor.stderr || backgroundMonitor.stdout);
+    const backgroundParsed = JSON.parse(backgroundMonitor.stdout);
+    assert.equal(backgroundParsed.stalled, true);
+    assert.equal(backgroundParsed.completed, undefined);
+    assert.match(backgroundParsed.reason, /observed no activity/u);
+    assert.doesNotMatch(fs.readFileSync(backgroundTask.logPath, "utf8"), /terminal_bridge_completion_detected/u);
+    const backgroundCallbacks = fs.existsSync(backgroundCallsPath)
+      ? readJsonLines(backgroundCallsPath).flatMap((call) => {
+          const paramsIndex = call.args.indexOf("--params");
+          return paramsIndex >= 0 ? [JSON.parse(call.args[paramsIndex + 1])] : [];
+        })
+      : [];
+    assert.equal(backgroundCallbacks.some((params) => params.message?.type === "done"), false);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
 
 test("agent takeover terminal_control attaches tmux pane and send writes to the terminal", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-agent-terminal-"));
@@ -136,7 +519,7 @@ test("agent takeover terminal_control attaches tmux pane and send writes to the 
     assert.equal(cancelledParsed.cancel_requested, true);
     assert.equal(cancelledParsed.terminal_control.target, "codex-work:0.0");
     assert.equal(cancelledParsed.key, "C-c");
-    assert.equal(cancelledParsed.conversation.status, sentParsed.conversation.status);
+    assert.equal(cancelledParsed.conversation.status, "cancelled");
     calls = readJsonLines(tmuxCallsPath);
     assert.deepEqual(calls.at(-1).args, ["send-keys", "-t", "codex-work:0.0", "C-c"]);
   } finally {
@@ -1658,7 +2041,8 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
       command: "npm install",
       cwd: workspace,
       fingerprint: monitoredParsed.message.metadata.approval_fingerprint,
-      terminal_target: "codex-work:0.1"
+      terminal_target: "codex-work:0.1",
+      decision_mode: "keys"
     });
     assert.match(monitoredParsed.message.body, new RegExp(`AKK approve ${conversationId}`));
     assert.match(monitoredParsed.message.body, new RegExp(`AKK cancel ${conversationId}`));
@@ -2310,6 +2694,192 @@ test("describe prefers Codex title over injected environment context", () => {
   assert.doesNotMatch(parsed.about, /environment_context/);
   assert.equal(parsed.evidence.recent_messages.some((message) => message.text.includes("environment_context")), false);
 });
+
+interface ManagedClaudeTerminalTask {
+  conversation: any;
+  statePath: string;
+  logPath: string;
+}
+
+function startManagedClaudeTerminalTask(options: {
+  fakeBinDir: string;
+  workspace: string;
+  storeDir: string;
+  hookStoreDir: string;
+  terminalTarget: string;
+  claudePid: number;
+  claudeSessionId: string;
+  message: string;
+}): ManagedClaudeTerminalTask {
+  const openclawBin = path.join(options.fakeBinDir, "openclaw");
+  const rawConversationId = `terminal:v2:tmux:claude:${options.terminalTarget}:${options.claudePid}`;
+  const sent = runAgentCli([
+    "send",
+    "--conversation",
+    rawConversationId,
+    "--message",
+    options.message,
+    "--background",
+    "--store-dir",
+    options.storeDir,
+    "--gateway-method",
+    "agent-knock-knock.callback",
+    "--gateway-session",
+    "agent:channel:original",
+    "--openclaw-session",
+    "agent:channel:original",
+    "--openclaw-bin",
+    openclawBin,
+    "--claude-hook-store-dir",
+    options.hookStoreDir,
+    "--claude-agents-json",
+    JSON.stringify([claudeAgentRow(options.claudePid, options.claudeSessionId, options.workspace)]),
+    "--disable-terminal-bridge-monitor"
+  ], {
+    PATH: `${options.fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+  });
+  assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+  const parsed = JSON.parse(sent.stdout);
+  assert.equal(parsed.delivered, true);
+  assert.equal(parsed.status, "async_pending");
+  assert.equal(parsed.background, true);
+  assert.equal(parsed.executor.kind, "claude");
+  assert.equal(parsed.terminal_control.target, options.terminalTarget);
+  return {
+    conversation: parsed.conversation,
+    statePath: parsed.conversation.state_path,
+    logPath: parsed.conversation.event_log_path
+  };
+}
+
+function claudeMonitorArgs(options: {
+  task: ManagedClaudeTerminalTask;
+  hookStoreDir: string;
+  staticArgs: string[];
+  timeoutMinutes?: string;
+}): string[] {
+  return [
+    "monitor",
+    "--terminal-bridge",
+    "--state",
+    options.task.statePath,
+    "--log",
+    options.task.logPath,
+    "--poll-interval-ms",
+    "20",
+    "--agent-timeout-minutes",
+    options.timeoutMinutes ?? "60",
+    "--agent-hard-timeout-minutes",
+    "120",
+    "--claude-hook-store-dir",
+    options.hookStoreDir,
+    ...options.staticArgs
+  ];
+}
+
+function claudeTerminalStaticArgs(options: {
+  workspace: string;
+  terminalTarget: string;
+  claudePid: number;
+  claudeSessionId: string;
+  screen: string;
+}): string[] {
+  return [
+    "--processes-json",
+    JSON.stringify([{
+      pid: options.claudePid,
+      ppid: 999,
+      elapsed: "00:30",
+      command: "claude",
+      cwd: options.workspace
+    }]),
+    "--terminals-json",
+    JSON.stringify([{
+      kind: "tmux",
+      target: options.terminalTarget,
+      session: "claude-work",
+      window: 0,
+      pane: 0,
+      panePid: 999,
+      currentCommand: "node",
+      currentPath: options.workspace
+    }]),
+    "--terminal-screens-json",
+    JSON.stringify({ [options.terminalTarget]: options.screen }),
+    "--claude-agents-json",
+    JSON.stringify([claudeAgentRow(options.claudePid, options.claudeSessionId, options.workspace)])
+  ];
+}
+
+function claudeAgentRow(pid: number, sessionId: string, workspace: string) {
+  return {
+    kind: "interactive",
+    pid,
+    sessionId,
+    cwd: workspace,
+    status: "idle"
+  };
+}
+
+function claudeHookBase(sessionId: string, workspace: string) {
+  return {
+    session_id: sessionId,
+    transcript_path: path.join(workspace, ".claude", `${sessionId}.jsonl`),
+    cwd: workspace,
+    permission_mode: "default"
+  };
+}
+
+function claudePromptHookInput(sessionId: string, workspace: string, promptId: string) {
+  return {
+    ...claudeHookBase(sessionId, workspace),
+    hook_event_name: "UserPromptSubmit" as const,
+    prompt_id: promptId,
+    prompt: `prompt for ${promptId}`
+  };
+}
+
+function claudePermissionHookInput(
+  sessionId: string,
+  workspace: string,
+  promptId: string,
+  command: string
+) {
+  return {
+    ...claudeHookBase(sessionId, workspace),
+    hook_event_name: "PermissionRequest" as const,
+    prompt_id: promptId,
+    tool_name: "Bash",
+    tool_input: { command },
+    permission_suggestions: []
+  };
+}
+
+function claudeStopHookInput(
+  sessionId: string,
+  workspace: string,
+  promptId: string,
+  fields: Record<string, unknown>
+) {
+  return {
+    ...claudeHookBase(sessionId, workspace),
+    hook_event_name: "Stop" as const,
+    prompt_id: promptId,
+    stop_hook_active: false,
+    ...fields
+  };
+}
+
+function claudeStopFailureHookInput(sessionId: string, workspace: string, promptId: string) {
+  return {
+    ...claudeHookBase(sessionId, workspace),
+    hook_event_name: "StopFailure" as const,
+    prompt_id: promptId,
+    error: "rate_limit" as const,
+    error_details: "429 Too Many Requests",
+    last_assistant_message: "Release command failed before completion."
+  };
+}
 
 function runAgentCli(args: string[], env: NodeJS.ProcessEnv = {}) {
   return spawnSync(process.execPath, [binPath, ...args], {

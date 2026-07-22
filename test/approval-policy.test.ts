@@ -50,6 +50,31 @@ test("approval policy defaults to asking when disabled or unmatched", () => {
   }).action, "ask");
 });
 
+test("Claude auto approval requires a structured hook decision", () => {
+  const claudePolicy = {
+    enabled: true,
+    rules: [{
+      ...policy.rules[0],
+      agents: ["claude"]
+    }]
+  };
+  const claudeCandidate = {
+    ...candidate,
+    agent: "claude",
+    decisionMode: "structured" as const
+  };
+  assert.equal(evaluateApprovalPolicy({
+    policy: claudePolicy,
+    candidate: claudeCandidate
+  }).action, "approve");
+  const screenFallback = evaluateApprovalPolicy({
+    policy: claudePolicy,
+    candidate: { ...claudeCandidate, decisionMode: "keys" }
+  });
+  assert.equal(screenFallback.action, "ask");
+  assert.match(screenFallback.reason, /structured hook request/u);
+});
+
 test("approval policy rejects shell composition and paths outside workspace", () => {
   assert.match(
     evaluateApprovalPolicy({
