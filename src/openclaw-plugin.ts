@@ -606,7 +606,7 @@ export default definePluginEntry({
     registerCliTool(api, {
       name: "agent_knock_knock_approve",
       description:
-        "Approve the current AKK terminal permission request after showing it to the user and receiving explicit approval. Claude Code uses a revalidated structured one-time Hook decision; supported screen fallbacks use the detected primary shortcut and are never eligible for Claude auto-approval.",
+        "Approve the current AKK terminal permission request after showing it to the user and receiving explicit approval. Claude Code uses no Hooks: AKK only approves an exact Bash permission screen for the current managed turn, revalidates its short-lived fingerprint immediately before sending Enter, and never auto-approves it. Approval screen automation is best-effort; hook-free durable completion is independently verified from the local Claude transcript.",
       parameters: approveParameters,
       buildArgs: (params) => {
         const args = ["approve", "--conversation", requiredString(params.conversation_id, "conversation_id")];
@@ -651,7 +651,7 @@ export default definePluginEntry({
 
     registerCliTool(api, {
       name: "agent_knock_knock_cancel",
-      description: "Cancel an existing Agent Knock Knock Codex, Claude, or Cursor task. Delegated sessions use cooperative ACPX cancellation. Terminal-controlled Claude denies a pending structured permission or sends Escape; other adapters use their declared interrupt keys. The underlying tmux pane remains open.",
+      description: "Cancel an existing Agent Knock Knock Codex, Claude, or Cursor task. Delegated sessions use cooperative ACPX cancellation. Terminal-controlled Claude sends Escape to dismiss or interrupt the current screen flow; other adapters use their declared interrupt keys. The underlying tmux pane remains open.",
       parameters: cancelParameters,
       buildArgs: (params) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};

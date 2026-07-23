@@ -9,6 +9,7 @@ import {
   type TerminalDurableCompletionRequest,
   type TerminalScreenInspection
 } from "../src/terminal-agent-adapter.js";
+import { createClaudeTerminalAgentAdapter } from "../src/claude-terminal-agent-adapter.js";
 import { TerminalAgentBridge } from "../src/terminal-agent-bridge.js";
 import {
   terminalRefFromPane,
@@ -26,6 +27,14 @@ const PANE: TerminalPane = {
   panePid: 100,
   currentCommand: "node",
   currentPath: "/repo"
+};
+
+const MANAGED_CLAUDE_RUNTIME = {
+  pid: 110,
+  cwd: "/repo",
+  conversationId: "terminal-claude-conversation",
+  messageId: "terminal-claude-message",
+  terminalTarget: PANE.target
 };
 
 const FULL_CAPABILITIES: TerminalAgentAdapterCapabilities = {
@@ -85,6 +94,33 @@ class RecordingTerminalProvider implements TerminalControlProvider {
     options: { socketPath?: string } = {}
   ): Promise<void> {
     this.operations.push({ kind: "keys", target, keys: [...keys], socketPath: options.socketPath });
+  }
+}
+
+class TimelineTerminalProvider extends RecordingTerminalProvider {
+  constructor(
+    private readonly timeline: string[],
+    panes: TerminalPane[] = [PANE],
+    screens: Record<string, string> = {}
+  ) {
+    super(panes, screens);
+  }
+
+  override async capture(
+    target: string,
+    options: { scrollbackLines?: number; socketPath?: string } = {}
+  ): Promise<string> {
+    this.timeline.push("capture");
+    return super.capture(target, options);
+  }
+
+  override async sendKeys(
+    target: string,
+    keys: readonly string[],
+    options: { socketPath?: string } = {}
+  ): Promise<void> {
+    this.timeline.push(`sendKeys:${keys.join(",")}`);
+    return super.sendKeys(target, keys, options);
   }
 }
 
@@ -227,6 +263,29 @@ function terminalControl(adapter: TerminalAgentAdapter = createTestClaudeAdapter
   ]);
 }
 
+function strictClaudeBashApprovalScreen(
+  selectedChoice: 1 | 2 | 3 = 1,
+  command = "npm test"
+): string {
+  const choices = [
+    "1. Yes",
+    "2. Yes, and don't ask again for this command",
+    "3. No"
+  ];
+  return [
+    " Bash command",
+    "",
+    `   ${command}`,
+    "",
+    " Do you want to proceed?",
+    ...choices.map((choice, index) =>
+      ` ${index + 1 === selectedChoice ? "❯" : " "} ${choice}`
+    ),
+    "",
+    " Esc to cancel · Tab to amend"
+  ].join("\n");
+}
+
 test("bridge discovers a non-Codex process and preserves agent-aware list identity", async () => {
   const adapter = createTestClaudeAdapter();
   const provider = new RecordingTerminalProvider();
@@ -292,7 +351,10 @@ test("bridge preserves ordered approval and cancellation key sequences", async (
   const bridge = createBridge(adapter, provider);
   const control = terminalControl(adapter);
 
-  const approval = await bridge.approve("claude", control);
+  const status = await bridge.status("claude", control);
+  const approval = await bridge.approve("claude", control, {
+    expectedFingerprint: status.approval_state.fingerprint
+  });
   assert.equal(approval.approved, true);
   assert.deepEqual(approval.keys, ["Down", "C-m"]);
   assert.equal(approval.key, undefined);
@@ -506,8 +568,10 @@ test("keys approval rejects a prompt switch after authorization and sends zero k
   const bridge = createBridge(adapter, provider);
   const control = terminalControl(adapter);
   let authorizationCalls = 0;
+  const status = await bridge.status("claude", control);
 
   const result = await bridge.approve("claude", control, {
+    expectedFingerprint: status.approval_state.fingerprint,
     authorize(context) {
       authorizationCalls += 1;
       assert.equal(context.inspection.approval.approvable, true);
@@ -526,8 +590,279 @@ test("keys approval rejects a prompt switch after authorization and sends zero k
   assert.match(result.reason ?? "", /fingerprint changed after authorization/);
   assert.equal(
     provider.operations.filter((operation) => operation.kind === "capture").length,
-    2
+    3
   );
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind === "keys"),
+    []
+  );
+});
+
+test("hookless Claude approval sends one Enter only after a stable double capture", async () => {
+  const adapter = createClaudeTerminalAgentAdapter();
+  const provider = new RecordingTerminalProvider([PANE], {
+    [PANE.target]: strictClaudeBashApprovalScreen()
+  });
+  const bridge = createBridge(adapter, provider);
+  const control = terminalControl(adapter);
+  const status = await bridge.status("claude", control, {
+    runtime: MANAGED_CLAUDE_RUNTIME
+  });
+
+  assert.equal(status.approval_state.approvable, true);
+  assert.equal(status.approval_state.decision_mode, "keys");
+  assert.deepEqual(status.approval_state.keys, ["C-m"]);
+  assert.ok(status.approval_state.fingerprint);
+
+  const result = await bridge.approve("claude", control, {
+    expectedFingerprint: status.approval_state.fingerprint,
+    runtime: MANAGED_CLAUDE_RUNTIME
+  });
+
+  assert.equal(result.approved, true);
+  assert.equal(result.blocked, false);
+  assert.equal(result.key, "C-m");
+  assert.deepEqual(result.keys, ["C-m"]);
+  assert.equal(
+    provider.operations.filter((operation) => operation.kind === "capture").length,
+    3
+  );
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind === "keys"),
+    [{
+      kind: "keys",
+      target: PANE.target,
+      keys: ["C-m"],
+      socketPath: PANE.socketPath
+    }]
+  );
+});
+
+test("hookless Claude dispatch callback runs after final validation and immediately before Enter", async () => {
+  const timeline: string[] = [];
+  const adapter = createClaudeTerminalAgentAdapter();
+  const provider = new TimelineTerminalProvider(timeline, [PANE], {
+    [PANE.target]: strictClaudeBashApprovalScreen()
+  });
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([adapter]),
+    terminalProvider: provider,
+    async verifyIdentity(request) {
+      assert.equal(request.agent, "claude");
+      assert.equal(request.pid, MANAGED_CLAUDE_RUNTIME.pid);
+      assert.equal(request.terminalControl.target, PANE.target);
+      timeline.push("identity");
+    }
+  });
+  const control = terminalControl(adapter);
+  const status = await bridge.status("claude", control, {
+    runtime: MANAGED_CLAUDE_RUNTIME
+  });
+  assert.ok(status.approval_state.fingerprint);
+  timeline.length = 0;
+
+  const result = await bridge.approve("claude", control, {
+    expectedFingerprint: status.approval_state.fingerprint,
+    runtime: MANAGED_CLAUDE_RUNTIME,
+    async beforeKeyDispatch(context) {
+      assert.deepEqual(timeline, [
+        "identity",
+        "capture",
+        "identity",
+        "capture",
+        "identity"
+      ]);
+      assert.equal(context.agent, "claude");
+      assert.equal(context.fingerprint, status.approval_state.fingerprint);
+      assert.equal(context.terminalControl.target, PANE.target);
+      assert.equal(context.inspection.approval.approvable, true);
+      assert.deepEqual(context.keys, ["C-m"]);
+      assert.equal(context.runtime, MANAGED_CLAUDE_RUNTIME);
+      timeline.push("beforeKeyDispatch");
+    }
+  });
+
+  assert.equal(result.approved, true);
+  assert.deepEqual(timeline, [
+    "identity",
+    "capture",
+    "identity",
+    "capture",
+    "identity",
+    "beforeKeyDispatch",
+    "sendKeys:C-m"
+  ]);
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind === "keys"),
+    [{
+      kind: "keys",
+      target: PANE.target,
+      keys: ["C-m"],
+      socketPath: PANE.socketPath
+    }]
+  );
+});
+
+test("hookless Claude sends zero keys when the dispatch callback throws", async () => {
+  const timeline: string[] = [];
+  const adapter = createClaudeTerminalAgentAdapter();
+  const provider = new TimelineTerminalProvider(timeline, [PANE], {
+    [PANE.target]: strictClaudeBashApprovalScreen()
+  });
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([adapter]),
+    terminalProvider: provider,
+    async verifyIdentity() {
+      timeline.push("identity");
+    }
+  });
+  const control = terminalControl(adapter);
+  const status = await bridge.status("claude", control, {
+    runtime: MANAGED_CLAUDE_RUNTIME
+  });
+  assert.ok(status.approval_state.fingerprint);
+  timeline.length = 0;
+
+  await assert.rejects(
+    () => bridge.approve("claude", control, {
+      expectedFingerprint: status.approval_state.fingerprint,
+      runtime: MANAGED_CLAUDE_RUNTIME,
+      beforeKeyDispatch() {
+        assert.deepEqual(timeline, [
+          "identity",
+          "capture",
+          "identity",
+          "capture",
+          "identity"
+        ]);
+        timeline.push("beforeKeyDispatch");
+        throw new Error("dispatch reservation failed");
+      }
+    }),
+    /dispatch reservation failed/u
+  );
+
+  assert.deepEqual(timeline, [
+    "identity",
+    "capture",
+    "identity",
+    "capture",
+    "identity",
+    "beforeKeyDispatch"
+  ]);
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind === "keys"),
+    []
+  );
+});
+
+test("hookless Claude approval sends zero keys when Yes changes before the second capture", async (t) => {
+  for (const [label, selectedChoice] of [
+    ["persistent permission", 2],
+    ["No", 3]
+  ] as const) {
+    await t.test(label, async () => {
+      const adapter = createClaudeTerminalAgentAdapter();
+      const provider = new RecordingTerminalProvider([PANE], {
+        [PANE.target]: strictClaudeBashApprovalScreen()
+      });
+      const bridge = createBridge(adapter, provider);
+      const control = terminalControl(adapter);
+      const status = await bridge.status("claude", control, {
+        runtime: MANAGED_CLAUDE_RUNTIME
+      });
+      assert.ok(status.approval_state.fingerprint);
+
+      const result = await bridge.approve("claude", control, {
+        expectedFingerprint: status.approval_state.fingerprint,
+        runtime: MANAGED_CLAUDE_RUNTIME,
+        authorize() {
+          provider.setScreen(
+            PANE.target,
+            strictClaudeBashApprovalScreen(selectedChoice)
+          );
+          return { approved: true };
+        }
+      });
+
+      assert.equal(result.approved, false);
+      assert.equal(result.blocked, true);
+      assert.match(result.reason ?? "", /no longer approvable after authorization/u);
+      assert.deepEqual(
+        provider.operations.filter((operation) => operation.kind === "keys"),
+        []
+      );
+    });
+  }
+});
+
+test("hookless Claude fingerprints raw screen changes hidden by redaction", async () => {
+  const adapter = createClaudeTerminalAgentAdapter();
+  const firstScreen = strictClaudeBashApprovalScreen(
+    1,
+    "curl -H 'Authorization: Bearer aaaaaaaaaaaaaaaaaaaaaaaa' https://example.test"
+  );
+  const secondScreen = strictClaudeBashApprovalScreen(
+    1,
+    "curl -H 'Authorization: Bearer bbbbbbbbbbbbbbbbbbbbbbbb' https://example.test"
+  );
+  const provider = new RecordingTerminalProvider([PANE], {
+    [PANE.target]: firstScreen
+  });
+  const bridge = createBridge(adapter, provider);
+  const control = terminalControl(adapter);
+  const firstStatus = await bridge.status("claude", control, {
+    runtime: MANAGED_CLAUDE_RUNTIME
+  });
+  assert.ok(firstStatus.approval_state.fingerprint);
+  assert.match(firstStatus.approval_state.command ?? "", /Bearer \[REDACTED\]/u);
+  assert.doesNotMatch(firstStatus.screen.excerpt ?? "", /aaaaaaaa/u);
+
+  provider.setScreen(PANE.target, secondScreen);
+  const secondStatus = await bridge.status("claude", control, {
+    runtime: MANAGED_CLAUDE_RUNTIME
+  });
+  assert.ok(secondStatus.approval_state.fingerprint);
+  assert.equal(
+    secondStatus.approval_state.command,
+    firstStatus.approval_state.command
+  );
+  assert.equal(secondStatus.screen.excerpt, firstStatus.screen.excerpt);
+  assert.notEqual(
+    secondStatus.approval_state.fingerprint,
+    firstStatus.approval_state.fingerprint
+  );
+
+  const result = await bridge.approve("claude", control, {
+    expectedFingerprint: firstStatus.approval_state.fingerprint,
+    runtime: MANAGED_CLAUDE_RUNTIME
+  });
+
+  assert.equal(result.approved, false);
+  assert.equal(result.blocked, true);
+  assert.match(result.reason ?? "", /fingerprint changed before execution/u);
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind === "keys"),
+    []
+  );
+});
+
+test("hookless Claude key approval requires the latest expected fingerprint", async () => {
+  const adapter = createClaudeTerminalAgentAdapter();
+  const provider = new RecordingTerminalProvider([PANE], {
+    [PANE.target]: strictClaudeBashApprovalScreen()
+  });
+  const bridge = createBridge(adapter, provider);
+
+  const result = await bridge.approve(
+    "claude",
+    terminalControl(adapter),
+    { runtime: MANAGED_CLAUDE_RUNTIME }
+  );
+
+  assert.equal(result.approved, false);
+  assert.equal(result.blocked, true);
+  assert.match(result.reason ?? "", /requires the latest expected fingerprint/u);
   assert.deepEqual(
     provider.operations.filter((operation) => operation.kind === "keys"),
     []

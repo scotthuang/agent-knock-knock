@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.49 - 2026-07-24
+
+### Added
+
+- Detect hook-free Claude Code tmux completion from the owner-private local JSONL transcript by binding the exact process, session, prompt, file boundary, `end_turn`, and `turn_duration`, then reusing the existing deterministic, idempotent terminal callback flow.
+
+### Changed
+
+- Make tmux and ACPX/ACP independent installation choices, with tmux recommended for shared human/agent control.
+- Make Claude Code tmux control and durable completion hook-free by default.
+- Disable the legacy `install-claude-hooks` CLI so AKK no longer writes Claude Code settings.
+- Recover persisted callback outbox entries after process or Gateway restart, with bounded delivery timeouts and idempotent retries.
+
+### Security
+
+- Limit Claude screen approval to explicit user confirmation for a current managed turn and an exact one-time Bash prompt.
+- Bind approval fingerprints to the raw screen digest, terminal/process identity, conversation, and message; revalidate before input and reject expired, reused, stale, or automatic Claude approvals.
+- Read only the post-send Claude transcript range from a non-symlink, owner-private file; reject unknown schemas, partial writes, rotation, truncation, PID reuse, ambiguous prompts, unresolved tools, and background or sidechain work.
+
 ## 0.2.48 - 2026-07-23
 
 ### Added

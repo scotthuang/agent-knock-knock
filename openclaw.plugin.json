@@ -171,7 +171,7 @@
       "autoApprove": {
         "type": "object",
         "additionalProperties": false,
-        "description": "Deterministic Codex and Claude Code terminal approval policy. Disabled by default and never exposed as model-controlled tool parameters.",
+        "description": "Deterministic Codex terminal approval policy. Disabled by default and never exposed as model-controlled tool parameters.",
         "properties": {
           "enabled": {
             "type": "boolean",
@@ -193,7 +193,7 @@
                   "minItems": 1,
                   "items": {
                     "type": "string",
-                    "enum": ["codex", "claude"]
+                    "enum": ["codex"]
                   }
                 },
                 "workspaces": {

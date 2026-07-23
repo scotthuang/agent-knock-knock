@@ -76,7 +76,16 @@ test("CLI output redacts legacy Gateway credentials", () => {
       ...state,
       gateway_token: gatewayToken,
       callback_command:
-        `agent-knock-knock callback --token ${gatewayToken} --state ${statePath}`
+        `agent-knock-knock callback --token ${gatewayToken} --state ${statePath}`,
+      native_session_takeover: {
+        claude_home: "/private/.claude",
+        claude_transcript_anchor: {
+          relative_path: "-private-workspace/private-session.jsonl",
+          cwd: "/private/workspace",
+          pid: 4242,
+          inode: "private-inode"
+        }
+      }
     }, null, 2)}\n`);
 
     const status = runCliRaw([
@@ -91,6 +100,21 @@ test("CLI output redacts legacy Gateway credentials", () => {
     const output = JSON.parse(status.stdout);
     assert.equal(Object.hasOwn(output.conversation, "gateway_token"), false);
     assert.match(output.conversation.callback_command, /--token \[REDACTED\]/u);
+    assert.equal(
+      Object.hasOwn(
+        output.conversation.native_session_takeover,
+        "claude_transcript_anchor"
+      ),
+      false
+    );
+    assert.equal(
+      Object.hasOwn(output.conversation.native_session_takeover, "claude_home"),
+      false
+    );
+    assert.doesNotMatch(
+      status.stdout,
+      /private-session|private-inode|private\/\.claude/u
+    );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

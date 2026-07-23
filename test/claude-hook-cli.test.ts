@@ -14,10 +14,10 @@ function temporaryDirectory(t: test.TestContext): string {
   return directory;
 }
 
-test("install-claude-hooks exposes a safe idempotent CLI installer", (t) => {
+test("install-claude-hooks is disabled and never modifies Claude settings", (t) => {
   const directory = temporaryDirectory(t);
   const settingsPath = path.join(directory, "settings.json");
-  const first = spawnSync(process.execPath, [
+  const result = spawnSync(process.execPath, [
     cliPath,
     "install-claude-hooks",
     "--settings-path",
@@ -25,24 +25,10 @@ test("install-claude-hooks exposes a safe idempotent CLI installer", (t) => {
     "--executable-path",
     cliPath
   ], { encoding: "utf8" });
-  assert.equal(first.status, 0, first.stderr);
-  const firstOutput = JSON.parse(first.stdout);
-  assert.equal(firstOutput.written, true);
-  assert.equal(firstOutput.summary.addedCount, 6);
-  assert.equal(fs.statSync(settingsPath).mode & 0o777, 0o600);
-
-  const second = spawnSync(process.execPath, [
-    cliPath,
-    "install-claude-hooks",
-    "--settings-path",
-    settingsPath,
-    "--executable-path",
-    cliPath
-  ], { encoding: "utf8" });
-  assert.equal(second.status, 0, second.stderr);
-  const secondOutput = JSON.parse(second.stdout);
-  assert.equal(secondOutput.changed, false);
-  assert.equal(secondOutput.summary.existingCount, 6);
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, "");
+  assert.match(result.stderr, /no longer supported/u);
+  assert.equal(fs.existsSync(settingsPath), false);
 });
 
 test("claude-hook ignores unmanaged events without persistence or permission decisions", (t) => {
