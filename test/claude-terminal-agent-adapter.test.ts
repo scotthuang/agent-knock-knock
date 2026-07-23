@@ -38,6 +38,13 @@ test("classifies only direct interactive Claude CLI processes", () => {
     })?.kind,
     "claude_cli"
   );
+  assert.equal(
+    classifyClaudeProcess({
+      pid: 13,
+      command: "/Users/test/.local/share/claude/versions/2.1.198 --permission-mode default"
+    })?.kind,
+    "claude_cli"
+  );
 
   for (const command of [
     "claude -p 'summarize this'",
@@ -55,6 +62,10 @@ test("classifies only direct interactive Claude CLI processes", () => {
     "node /opt/acpx/dist/index.js claude",
     "claude-code-acp --stdio",
     "/opt/bin/claude-wrapper claude",
+    ".local/share/claude/versions/2.1.198",
+    "/Users/test/.local/share/claude/versions/current",
+    "/Users/test/.local/share/not-claude/versions/2.1.198",
+    "/opt/claude/versions/2.1.198",
     "sh -lc 'claude --resume session-1'",
     "uvx minimax-coding-plan-mcp -y"
   ]) {
@@ -493,7 +504,24 @@ test("structured approval fails closed for changed, stale, unknown, and ambiguou
   assert.equal(unknown.approval.approvable, false);
 
   const ambiguousStore = new ClaudeHookStore({ rootDir: temporaryHookStore(t) });
+  const firstLease = ambiguousStore.activateLease({
+    sessionId: "ambiguous-a",
+    pid: 7401,
+    cwd: "/workspace/shared",
+    conversationId: "conversation-ambiguous-a",
+    messageId: "message-ambiguous-a",
+    terminalTarget: "claude-work:0.0"
+  });
   ambiguousStore.record(claudeSessionStartInput("ambiguous-a", "/workspace/shared"), { claudePid: 7401 });
+  ambiguousStore.releaseLease({ leaseId: firstLease.id });
+  ambiguousStore.activateLease({
+    sessionId: "ambiguous-b",
+    pid: 7401,
+    cwd: "/workspace/shared",
+    conversationId: "conversation-ambiguous-b",
+    messageId: "message-ambiguous-b",
+    terminalTarget: "claude-work:0.0"
+  });
   ambiguousStore.record(claudeSessionStartInput("ambiguous-b", "/workspace/shared"), { claudePid: 7401 });
   const ambiguous = createClaudeTerminalAgentAdapter({ hookStore: ambiguousStore }).inspectScreen({
     screen: claudePermissionScreen("❯ 1. Yes"),

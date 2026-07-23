@@ -1,6 +1,6 @@
 # Bidirectional Agent Protocol
 
-This protocol supports managed bidirectional delegation:
+This protocol supports managed bidirectional delegation through ACPX. tmux-controlled tasks reuse AKK conversation state and callback message types, but AKK sends the user-facing task directly to the existing pane and owns terminal monitoring.
 
 - OpenClaw is the product manager, requirements owner, and final acceptance decision maker.
 - Claude Code, Codex, or Cursor is the engineering implementation agent and can directly edit code.
@@ -80,7 +80,7 @@ Allowed routes:
 ## Budget
 
 - `0-29`: normal collaboration
-- `30`: OpenClaw asks Claude Code to converge
-- `40`: OpenClaw warns Claude Code to finish, degrade, or fail within 10 response rounds
+- `30`: OpenClaw asks the selected coding agent to converge
+- `40`: OpenClaw warns the selected coding agent to finish, degrade, or fail within 10 response rounds
 - `50`: soft stop unless OpenClaw explicitly extends
 - `100`: hard stop

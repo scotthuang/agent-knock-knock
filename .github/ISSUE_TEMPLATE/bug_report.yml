@@ -1,0 +1,37 @@
+name: Bug report
+description: Report a reproducible problem with Agent Knock Knock
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the expected and actual behavior.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: How can we reproduce it?
+      description: Provide the smallest safe sequence of steps that reproduces the problem.
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Include AKK, OpenClaw, Node.js, OS, coding agent, and ACPX or tmux mode.
+      placeholder: "AKK 0.2.x; OpenClaw 2026.x; Node 24.x; macOS; Claude Code; tmux"
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics
+      description: Share only the relevant, redacted output from `agent-knock-knock doctor` or status commands. Never include tokens, credentials, private prompts, or raw task logs.
+      render: shell

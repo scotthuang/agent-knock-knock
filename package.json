@@ -1,7 +1,7 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.2.47",
-  "description": "OpenClaw plugin bridge for delegating work to local coding agents through ACPX.",
+  "version": "0.2.48",
+  "description": "OpenClaw orchestration for local coding agents through ACPX, with shared Codex and Claude Code tmux control.",
   "license": "MIT",
   "type": "module",
   "homepage": "https://github.com/scotthuang/agent-knock-knock#readme",
@@ -14,11 +14,16 @@
   },
   "keywords": [
     "openclaw",
+    "openclaw-plugin",
     "acpx",
+    "agent-client-protocol",
+    "agent-orchestration",
     "codex",
     "claude-code",
     "cursor",
-    "coding-agent"
+    "coding-agent",
+    "local-first",
+    "tmux"
   ],
   "openclaw": {
     "extensions": [
@@ -55,10 +60,10 @@
     "transcript": "node dist/src/cli.js transcript"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.14.0"
   },
   "devDependencies": {
-    "@types/node": "^26.0.0",
+    "@types/node": "^22.20.1",
     "typescript": "^6.0.3"
   }
 }

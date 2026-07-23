@@ -131,13 +131,21 @@ export function evaluateApprovalPolicy({
 export function autoApprovalCliArgs({
   statePath,
   candidate,
-  decision
+  decision,
+  policy
 }: {
   statePath: string;
   candidate: ApprovalCandidate;
   decision: ApprovalPolicyDecision;
+  policy: unknown;
 }): string[] | undefined {
-  if (decision.action !== "approve" || !decision.ruleId || !statePath) {
+  const serializedPolicy = JSON.stringify(policy);
+  if (
+    decision.action !== "approve" ||
+    !decision.ruleId ||
+    !statePath ||
+    typeof serializedPolicy !== "string"
+  ) {
     return undefined;
   }
   return [
@@ -150,7 +158,9 @@ export function autoApprovalCliArgs({
     "--policy-rule-id",
     decision.ruleId,
     "--policy-fingerprint",
-    decision.policyFingerprint
+    decision.policyFingerprint,
+    "--auto-approval-policy-json",
+    serializedPolicy
   ];
 }
 
@@ -170,7 +180,9 @@ export function attemptAutoApproval({
     return undefined;
   }
   const decision = evaluateApprovalPolicy({ policy, candidate });
-  const cliArgs = statePath ? autoApprovalCliArgs({ statePath, candidate, decision }) : undefined;
+  const cliArgs = statePath
+    ? autoApprovalCliArgs({ statePath, candidate, decision, policy })
+    : undefined;
   if (!cliArgs || !decision.ruleId) {
     return {
       approved: false,

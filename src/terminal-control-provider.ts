@@ -1,10 +1,12 @@
+import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import type {
   ActiveTerminalProcess,
   TerminalControlCapability,
-  TerminalControlRef
+  TerminalControlRef,
+  TerminalProcessSnapshot
 } from "./terminal-agent-adapter.js";
 
 export interface TerminalPane {
@@ -97,7 +99,9 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
           continue;
         }
         for (const pane of parsedPanes) {
-          const key = `${pane.socketPath ?? ""}\t${pane.target}\t${pane.panePid}`;
+          // A default-server query and its discovered socket path can describe the
+          // same pane. The pane PID is system-unique, so keep only the first route.
+          const key = `${pane.target}\t${pane.panePid}`;
           if (seenTargets.has(key)) {
             continue;
           }
@@ -150,13 +154,46 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
   async sendText(target: string, text: string, options: { socketPath?: string } = {}): Promise<void> {
     let lastResult: CommandResult | undefined;
     for (const command of this.commands) {
+      if (/[\r\n]/u.test(text)) {
+        const bufferName = `akk-${process.pid}-${randomUUID()}`;
+        const setBuffer = this.runCommand(command, tmuxArgs(options.socketPath, [
+          "set-buffer",
+          "-b",
+          bufferName,
+          "--",
+          text
+        ]));
+        if (setBuffer.status !== 0) {
+          lastResult = setBuffer;
+          continue;
+        }
+        const pasteBuffer = this.runCommand(command, tmuxArgs(options.socketPath, [
+          "paste-buffer",
+          "-p",
+          "-d",
+          "-b",
+          bufferName,
+          "-t",
+          target
+        ]));
+        if (pasteBuffer.status === 0) {
+          return;
+        }
+        this.runCommand(command, tmuxArgs(options.socketPath, [
+          "delete-buffer",
+          "-b",
+          bufferName
+        ]));
+        lastResult = pasteBuffer;
+        continue;
+      }
       const result = this.runCommand(command, tmuxArgs(options.socketPath, ["send-keys", "-t", target, "-l", text]));
       if (result.status === 0) {
         return;
       }
       lastResult = result;
     }
-    throw new Error(lastResult?.stderr || lastResult?.error?.message || `tmux send-keys failed for ${target}`);
+    throw new Error(lastResult?.stderr || lastResult?.error?.message || `tmux terminal paste failed for ${target}`);
   }
 }
 
@@ -253,7 +290,10 @@ function parseUnderscoreTmuxPaneLine(line: string): string[] | undefined {
 export async function enrichActiveProcessesWithTerminalControl<T extends ActiveTerminalProcess>(
   processes: T[],
   provider: TerminalControlProvider,
-  options: { capabilities?: readonly TerminalControlCapability[] } = {}
+  options: {
+    capabilities?: readonly TerminalControlCapability[];
+    processTree?: readonly TerminalProcessSnapshot[];
+  } = {}
 ): Promise<T[]> {
   const panes = await provider.listPanes();
   if (panes.length === 0) {
@@ -261,22 +301,15 @@ export async function enrichActiveProcessesWithTerminalControl<T extends ActiveT
   }
 
   const matches = new Map<number, TerminalPane>();
+  const processTree = options.processTree ?? processes;
   for (const process of processes) {
-    const pane = panes.find((candidate) => processBelongsToPane(process, candidate, processes));
+    const pane = panes.find((candidate) =>
+      terminalPaneContainsProcess(process, candidate, processTree)
+    );
     if (!pane) {
       continue;
     }
     matches.set(process.pid, pane);
-  }
-
-  for (const process of processes) {
-    if (matches.has(process.pid)) {
-      continue;
-    }
-    const pane = uniquePaneByCwd(process, panes);
-    if (pane) {
-      matches.set(process.pid, pane);
-    }
   }
 
   return processes.map((process) => {
@@ -309,16 +342,16 @@ export function terminalRefFromPane(
   };
 }
 
-function processBelongsToPane<T extends ActiveTerminalProcess>(
-  process: T,
+export function terminalPaneContainsProcess(
+  process: Pick<TerminalProcessSnapshot, "pid" | "ppid">,
   pane: TerminalPane,
-  processes: T[]
+  processes: readonly Pick<TerminalProcessSnapshot, "pid" | "ppid">[]
 ): boolean {
   if (process.pid === pane.panePid || process.ppid === pane.panePid) {
     return true;
   }
 
-  let current = process;
+  let current: Pick<TerminalProcessSnapshot, "pid" | "ppid"> = process;
   const seen = new Set<number>();
   while (current.ppid && !seen.has(current.pid)) {
     seen.add(current.pid);
@@ -332,34 +365,6 @@ function processBelongsToPane<T extends ActiveTerminalProcess>(
     current = parent;
   }
   return false;
-}
-
-function uniquePaneByCwd(process: ActiveTerminalProcess, panes: TerminalPane[]): TerminalPane | undefined {
-  const processCwd = normalizedPath(process.cwd);
-  if (!processCwd) {
-    return undefined;
-  }
-
-  const matchesByPane = new Map<string, TerminalPane>();
-  for (const pane of panes) {
-    const key = paneIdentityKey(pane);
-    if (normalizedPath(pane.currentPath) !== processCwd) {
-      continue;
-    }
-    if (!matchesByPane.has(key)) {
-      matchesByPane.set(key, pane);
-    }
-  }
-  const matches = [...matchesByPane.values()];
-  return matches.length === 1 ? matches[0] : undefined;
-}
-
-function paneIdentityKey(pane: TerminalPane): string {
-  return `${pane.target}\t${pane.panePid}`;
-}
-
-function normalizedPath(value: string | undefined): string | undefined {
-  return value ? path.resolve(value) : undefined;
 }
 
 function runCommand(command: string, args: string[]): CommandResult {

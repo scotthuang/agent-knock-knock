@@ -2,13 +2,17 @@
 
 ## Supported Versions
 
-Agent Knock Knock is currently an early public project. Security fixes target the `main` branch unless a release branch is explicitly announced.
+Agent Knock Knock is currently an early public project. Security fixes target the latest npm release and the `main` branch unless a release branch is explicitly announced. Older releases are not maintained separately.
 
 ## Reporting a Vulnerability
 
 Please do not open public GitHub issues for vulnerabilities or sensitive findings.
 
-Report privately by contacting the repository maintainers through GitHub. Include:
+Use GitHub's private vulnerability reporting form:
+
+[Open a private security advisory](https://github.com/scotthuang/agent-knock-knock/security/advisories/new)
+
+Include:
 
 - A concise description of the issue.
 - Steps to reproduce, if safe to share.

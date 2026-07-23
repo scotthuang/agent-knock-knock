@@ -8,7 +8,7 @@ The priority order is intentional: reliability comes first. New orchestration fe
 
 ## Priority 1: Reliability And Operations
 
-- Done for terminal control: make bridge timeouts activity-aware, retain a hard lifetime, and allow stalled monitors to be renewed without sending terminal input.
+- Done for terminal control: make bridge timeouts activity-aware, retain a hard lifetime, renew stalled monitors without terminal input, enforce a single monitor owner, and reconcile safe tasks after Gateway restarts.
 - Partial: delegated ACPX monitors detect dead executors and callback timeouts; improve handling of ambiguous live states.
 - Partial: classify reconnect, permission, sandbox, timeout, and process failures; make every category consistently actionable.
 - Make `cancelling` converge to a terminal or reusable state after successful cancel, agent callback, or timeout.
@@ -16,7 +16,7 @@ The priority order is intentional: reliability comes first. New orchestration fe
 - Done for terminal bridge: expose callback delivery state, bounded retries, and idempotent manual retry without requiring OpenClaw to inspect raw process output.
 - Partial: runtime logs avoid full CLI argv and redact common secrets, but retain bounded payload previews and local paths for diagnostics.
 - Partial: `doctor` validates required commands, available agents, and packaged files. Add installed-plugin, skill, Gateway, and live-session checks.
-- Partial: fake-agent regression tests cover delegation, follow-up, cancel, close, and callback routes. Add live Codex and Claude smoke tests.
+- Partial: fake-agent regression tests cover delegation, follow-up, cancel, close, and callback routes, and Claude tmux has been verified manually. Add repeatable live Codex and Claude smoke tests.
 
 ## Priority 2: Simpler Session Control
 
@@ -37,17 +37,19 @@ The priority order is intentional: reliability comes first. New orchestration fe
 - Done for Codex: support a higher-risk `allowCwdOnly` fallback for Codex TUI processes that do not expose a session id in argv; this requires a user-confirmed pid and cwd re-scan before termination.
 - Done for Codex: support OpenClaw-mediated fork as a safer alternative. AKK extracts bounded source context from the original session, OpenClaw summarizes it for user review, the user confirms, and only then AKK creates a new managed session in the same workspace using the approved summary.
 - Done for Codex: store adoption metadata in AKK state, including source agent, source session id, workspace, native model, strategy, and takeover match kind.
-- Remaining: validate the full takeover flow through installed OpenClaw plugin tools, not only the local CLI.
-- Remaining: define equivalent discovery and adoption adapters for Cursor and Claude Code after their local-store and native resume behavior is verified.
+- Done for Claude Code terminal control: discover exact live CLI processes in tmux, send only at a verified idle prompt, and bind monitoring to the exact session, process, pane, conversation, message, and lease.
+- Remaining: validate the full Codex native takeover flow through installed OpenClaw plugin tools, not only the local CLI.
+- Remaining: define native-store discovery and adoption for Cursor and Claude Code after their local resume behavior is verified. This is separate from the existing Claude tmux bridge.
 
 ## Priority 4: Agent Compatibility Layer
 
 - Done for Codex: isolate process, store, rollout, and terminal discovery behind compatibility providers.
 - Done for Codex: list recent sessions, read metadata, extract bounded rollout context, detect active processes, and degrade when local data is incomplete.
+- Done for terminal control: use registry-backed Codex and Claude Code adapters with agent-aware IDs and fail-closed capabilities.
 - Partial: treat rollout JSONL as best-effort input, skip unknown events, and avoid encrypted reasoning content; add sensitive-value redaction before exposing parsed context.
 - Partial: inline unit tests cover missing data, store variation, bounded long context, and partial degradation; add explicit unknown-shape and encrypted-reasoning cases.
 - Remaining: detect a wider range of future Codex local-store layouts without hardcoding schema assumptions.
-- Define equivalent adapters for Cursor and Claude Code only after their resume and local-store behavior is verified.
+- Define equivalent native-store discovery and adoption adapters for Cursor and Claude Code only after their resume and local-store behavior is verified.
 - Document that local session discovery depends on best-effort compatibility with agent-local storage, not stable public APIs from the coding-agent vendors.
 
 ## Priority 5: OpenClaw Tool Relay
@@ -68,11 +70,12 @@ The priority order is intentional: reliability comes first. New orchestration fe
 ## Priority 7: Permission And Approval Broker
 
 - Done: document the observed difference between Claude Code and Codex approval behavior under ACPX.
-- Done for terminal-controlled Codex: support audited, deterministic auto-approval rules for exact command vectors inside configured workspaces.
+- Done for terminal-controlled Codex and Claude Code: support audited, deterministic auto-approval rules for exact command vectors inside configured workspaces.
+- Done for Claude Code tmux: use structured `PermissionRequest` hooks for one-time allow or deny decisions, and fail closed when runtime identity is stale, unknown, or ambiguous.
 - Continue to prefer Claude Code for tasks that need ACPX-approved filesystem access outside the workspace until Codex exposes equivalent approvable permission requests.
-- Partial for terminal-controlled Codex: configuration policy hooks can approve exact commands; extend them to explicit deny and user escalation decisions.
-- Partial for terminal-controlled Codex: persist approval state and events; generalize this to ACPX and tool-relay permissions.
-- Done for terminal-controlled Codex: approval decisions are one-shot, fingerprinted, and auditable rather than blind global grants.
+- Partial for terminal control: configuration policies can approve exact commands; extend them to explicit deny and user-escalation rules.
+- Done for terminal control: approval decisions are one-shot, fingerprinted, revalidated, persisted, and auditable rather than blind global grants.
+- Remaining: generalize approval state and events to ACPX delegation and future OpenClaw tool-relay permissions.
 
 ## Priority 8: Artifact Delivery
 

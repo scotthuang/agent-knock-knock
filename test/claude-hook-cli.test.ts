@@ -45,7 +45,7 @@ test("install-claude-hooks exposes a safe idempotent CLI installer", (t) => {
   assert.equal(secondOutput.summary.existingCount, 6);
 });
 
-test("claude-hook records unmanaged events without blocking or deciding permissions", (t) => {
+test("claude-hook ignores unmanaged events without persistence or permission decisions", (t) => {
   const storeDir = temporaryDirectory(t);
   const input = {
     session_id: "unmanaged-session",
@@ -71,7 +71,7 @@ test("claude-hook records unmanaged events without blocking or deciding permissi
   });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, "");
-  assert.ok(fs.readdirSync(storeDir).some((entry) => entry.endsWith(".json")));
+  assert.deepEqual(fs.readdirSync(storeDir), []);
 });
 
 test("claude-hook rejects malformed input without writing a hook decision", () => {

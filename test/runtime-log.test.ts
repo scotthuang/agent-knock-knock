@@ -22,6 +22,7 @@ test("runtime logs use local timestamps and preserve absolute paths", () => {
   const absolutePath = path.join(tempDir, "workspace", "file.txt");
 
   try {
+    fs.chmodSync(tempDir, 0o755);
     const result = writeRuntimeLog({
       level: "info",
       event: "path_check",
@@ -36,6 +37,8 @@ test("runtime logs use local timestamps and preserve absolute paths", () => {
     assert.equal(result.path, runtimeLogPath({ now, logDir: tempDir }));
     assert.match(localTimestamp(now), /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$/);
     assert.equal(path.basename(result.path), `runtime-${localDateStamp(now)}.ndjson`);
+    assert.equal(fs.statSync(tempDir).mode & 0o777, 0o700);
+    assert.equal(fs.statSync(result.path).mode & 0o777, 0o600);
 
     const entry = JSON.parse(fs.readFileSync(result.path, "utf8").trim());
     assert.equal(entry.event, "path_check");
@@ -133,6 +136,49 @@ test("runtime log level can suppress lower-severity entries", () => {
     const lines = fs.readFileSync(warn.path, "utf8").trim().split(/\r?\n/);
     assert.equal(lines.length, 1);
     assert.equal(JSON.parse(lines[0]).event, "written");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("runtime logging refuses a non-dedicated existing directory without chmod", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-runtime-shared-"));
+
+  try {
+    fs.writeFileSync(path.join(tempDir, "shared-app.log"), "keep\n", "utf8");
+    fs.chmodSync(tempDir, 0o755);
+    assert.throws(
+      () => writeRuntimeLog(
+        { event: "must_not_write" },
+        { logDir: tempDir }
+      ),
+      /non-dedicated runtime log directory/
+    );
+    assert.equal(fs.statSync(tempDir).mode & 0o777, 0o755);
+    assert.equal(fs.readFileSync(path.join(tempDir, "shared-app.log"), "utf8"), "keep\n");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("runtime logging refuses a symlink log target", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-runtime-symlink-"));
+  const now = new Date(2026, 5, 19, 18, 30, 45, 123);
+  const outsidePath = path.join(tempDir, "outside.ndjson");
+  const logDir = path.join(tempDir, "logs");
+
+  try {
+    fs.mkdirSync(logDir, { mode: 0o700 });
+    fs.writeFileSync(outsidePath, "outside\n", "utf8");
+    fs.symlinkSync(outsidePath, runtimeLogPath({ now, logDir }));
+    assert.throws(
+      () => writeRuntimeLog(
+        { event: "must_not_follow" },
+        { logDir, now }
+      ),
+      /ELOOP|symbolic link|symlink|non-dedicated/i
+    );
+    assert.equal(fs.readFileSync(outsidePath, "utf8"), "outside\n");
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

@@ -59,6 +59,14 @@ test("official Claude hook inputs parse without reading the transcript", (t) => 
   ];
 
   const store = new ClaudeHookStore({ rootDir });
+  store.activateLease({
+    sessionId: "session-protocol",
+    pid: 1201,
+    cwd: "/workspace/protocol",
+    conversationId: "conversation-protocol",
+    messageId: "message-protocol",
+    terminalTarget: "claude-work:0.0"
+  });
   const results = inputs.map((input) => store.record(parseClaudeHookInput(input), { claudePid: 1201 }));
 
   assert.deepEqual(results.map((result) => result.event.input.hook_event_name), [
@@ -75,6 +83,32 @@ test("official Claude hook inputs parse without reading the transcript", (t) => 
   const sessionFiles = fs.readdirSync(rootDir).filter((entry) => /^[a-f0-9]{64}\.json$/u.test(entry));
   assert.equal(sessionFiles.length, 1);
   assert.equal(fs.statSync(path.join(rootDir, sessionFiles[0])).mode & 0o777, 0o600);
+});
+
+test("unmanaged hook payloads stay ephemeral and never persist raw contents", (t) => {
+  const rootDir = temporaryStore(t);
+  const store = new ClaudeHookStore({ rootDir });
+  const sentinel = "UNMANAGED-PRIVATE-PROMPT-DO-NOT-PERSIST";
+  const recorded = store.record({
+    session_id: "session-unmanaged-private",
+    transcript_path: "/workspace/private/transcript.jsonl",
+    cwd: "/workspace/private",
+    hook_event_name: "UserPromptSubmit",
+    prompt_id: "private-turn",
+    prompt: sentinel
+  }, { claudePid: 1901 });
+
+  assert.equal(recorded.managed, false);
+  assert.equal(recorded.event.input.hook_event_name, "UserPromptSubmit");
+  assert.equal(store.resolveSession({ sessionId: "session-unmanaged-private" }), undefined);
+  const persistedFiles = fs.readdirSync(rootDir)
+    .filter((entry) => !entry.endsWith(".lock"))
+    .map((entry) => fs.readFileSync(path.join(rootDir, entry), "utf8"));
+  assert.equal(persistedFiles.some((source) => source.includes(sentinel)), false);
+  assert.equal(
+    fs.readdirSync(rootDir).some((entry) => /^[a-f0-9]{64}\.json$/u.test(entry)),
+    false
+  );
 });
 
 test("permission fingerprint is canonical and a cwd-only lease cannot authorize", (t) => {
@@ -98,6 +132,7 @@ test("permission fingerprint is canonical and a cwd-only lease cannot authorize"
   assert.equal(unmanaged.lease?.matchedBy, "cwd");
   assert.equal(unmanaged.lease?.authorizationEligible, false);
   assert.equal(unmanaged.permission, undefined);
+  assert.equal(store.resolveSession({ sessionId: "session-safe" }), undefined);
 
   const bound = store.activateLease({
     pid: 2001,
@@ -357,6 +392,22 @@ test("stale or released managed permission requests fail closed", (t) => {
 
 test("session resolution accepts exact id and pid but rejects an ambiguous cwd", (t) => {
   const store = new ClaudeHookStore({ rootDir: temporaryStore(t) });
+  store.activateLease({
+    sessionId: "session-a",
+    pid: 4101,
+    cwd: "/workspace/shared",
+    conversationId: "conversation-a",
+    messageId: "message-a",
+    terminalTarget: "claude-a:0.0"
+  });
+  store.activateLease({
+    sessionId: "session-b",
+    pid: 4102,
+    cwd: "/workspace/shared",
+    conversationId: "conversation-b",
+    messageId: "message-b",
+    terminalTarget: "claude-b:0.0"
+  });
   store.record(sessionStartInput("session-a", "/workspace/shared"), { claudePid: 4101 });
   store.record(sessionStartInput("session-b", "/workspace/shared"), { claudePid: 4102 });
 
@@ -371,6 +422,13 @@ test("durable Stop completion requires turn correlation and explicit empty backg
   const store = new ClaudeHookStore({ rootDir, now: () => new Date(nowMs) });
   const sessionId = "session-completion";
   const cwd = "/workspace/completion";
+  store.activateLease({
+    sessionId,
+    cwd,
+    conversationId: "conversation-completion",
+    messageId: "message-completion",
+    terminalTarget: "claude-completion:0.0"
+  });
 
   store.record(promptInput(sessionId, cwd, "turn-missing"));
   nowMs += 10;
@@ -505,9 +563,10 @@ test("durable completion is bound to the current managed conversation message", 
     background_tasks: [],
     session_crons: []
   }), { claudePid: 9999 });
-  assertStoreError(
-    () => store.detectCompletion(currentIdentity),
-    "SESSION_IDENTITY_MISMATCH"
+  assert.equal(
+    store.detectCompletion(currentIdentity).status,
+    "pending",
+    "wrong-pid hook payloads must remain ephemeral and cannot affect managed completion"
   );
 
   nowMs += 10;
@@ -541,6 +600,13 @@ test("StopFailure is retained and reported as a structured turn failure", (t) =>
   const store = new ClaudeHookStore({ rootDir, now: () => new Date(nowMs) });
   const sessionId = "session-failure";
   const cwd = "/workspace/failure";
+  store.activateLease({
+    sessionId,
+    cwd,
+    conversationId: "conversation-failure",
+    messageId: "message-failure",
+    terminalTarget: "claude-failure:0.0"
+  });
   store.record(promptInput(sessionId, cwd, "turn-failure"));
   nowMs += 25;
   const failedEvent = store.record({

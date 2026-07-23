@@ -38,6 +38,7 @@ export interface TerminalBridgeStatus {
     label?: string;
     prompt_kind?: string;
     command?: string;
+    cwd?: string;
     tool_name?: string;
     request_detail?: string;
     reason?: string;
@@ -71,12 +72,40 @@ export interface TerminalApprovalExecution {
   label?: string;
   promptKind?: string;
   command?: string;
+  cwd?: string;
   toolName?: string;
   requestDetail?: string;
   fingerprint?: string;
   screenExcerpt?: string;
   decisionMode?: "keys" | "structured";
   requestId?: string;
+}
+
+export interface TerminalIdentityVerificationRequest {
+  agent: ExecutorKind;
+  pid: number;
+  terminalControl: TerminalControlRef;
+}
+
+export interface TerminalIdentityVerificationResult {
+  terminalControl?: TerminalControlRef;
+}
+
+export type TerminalIdentityVerifier = (
+  request: TerminalIdentityVerificationRequest
+) => Promise<TerminalIdentityVerificationResult | void>;
+
+export interface TerminalApprovalAuthorizationContext {
+  agent: ExecutorKind;
+  terminalControl: TerminalControlRef;
+  inspection: TerminalScreenInspection;
+  fingerprint?: string;
+  runtime?: TerminalRuntimeIdentity;
+}
+
+export interface TerminalApprovalAuthorizationDecision {
+  approved: boolean;
+  reason?: string;
 }
 
 export interface TerminalMonitorPoll {
@@ -89,13 +118,16 @@ export interface TerminalMonitorPoll {
 export class TerminalAgentBridge {
   readonly registry: TerminalAgentAdapterRegistry;
   readonly terminalProvider: TerminalControlProvider;
+  private readonly verifyIdentity?: TerminalIdentityVerifier;
 
   constructor(options: {
     registry: TerminalAgentAdapterRegistry;
     terminalProvider: TerminalControlProvider;
+    verifyIdentity?: TerminalIdentityVerifier;
   }) {
     this.registry = options.registry;
     this.terminalProvider = options.terminalProvider;
+    this.verifyIdentity = options.verifyIdentity;
   }
 
   adapterFor(agent: ExecutorKind | string): TerminalAgentAdapter {
@@ -118,7 +150,14 @@ export class TerminalAgentBridge {
         .map((snapshot) => adapter.classifyProcess(snapshot))
         .filter((process): process is ActiveTerminalProcess => process !== undefined)
         .map((process) => ({ ...process, agent: adapter.agent }));
-      discovered.push(...await this.attachProcesses(adapter.agent, classified));
+      discovered.push(...await enrichActiveProcessesWithTerminalControl(
+        classified,
+        this.terminalProvider,
+        {
+          capabilities: terminalControlCapabilitiesForAdapter(adapter),
+          processTree: snapshots
+        }
+      ));
     }
     return discovered;
   }
@@ -132,11 +171,13 @@ export class TerminalAgentBridge {
 
   async attachProcesses<T extends ActiveTerminalProcess>(
     agent: ExecutorKind,
-    processes: T[]
+    processes: T[],
+    options: { processTree?: readonly TerminalProcessSnapshot[] } = {}
   ): Promise<T[]> {
     const adapter = this.registry.require(agent);
     return enrichActiveProcessesWithTerminalControl(processes, this.terminalProvider, {
-      capabilities: terminalControlCapabilitiesForAdapter(adapter)
+      capabilities: terminalControlCapabilitiesForAdapter(adapter),
+      processTree: options.processTree
     });
   }
 
@@ -159,9 +200,41 @@ export class TerminalAgentBridge {
     }
     const adapter = this.registry.require(parsed.agent);
     const panes = await this.terminalProvider.listPanes();
-    const pane = panes.find((candidate) => candidate.kind === parsed.kind && candidate.target === parsed.target);
-    if (!pane) {
+    const candidates = panes.filter(
+      (candidate) => candidate.kind === parsed.kind && candidate.target === parsed.target
+    );
+    const verified = this.verifyIdentity
+      ? (await Promise.all(candidates.map(async (pane) => {
+          const terminalControl = terminalRefFromPane(
+            pane,
+            terminalControlCapabilitiesForAdapter(adapter)
+          );
+          try {
+            const verifiedTerminalControl = await this.verifyTerminalIdentity(
+              adapter.agent,
+              terminalControl,
+              { pid: parsed.pid }
+            );
+            return { pane, terminalControl: verifiedTerminalControl };
+          } catch {
+            return undefined;
+          }
+        }))).filter((candidate): candidate is {
+          pane: (typeof candidates)[number];
+          terminalControl: TerminalControlRef;
+        } => candidate !== undefined)
+      : candidates.slice(0, 1).map((pane) => ({
+          pane,
+          terminalControl: terminalRefFromPane(
+            pane,
+            terminalControlCapabilitiesForAdapter(adapter)
+          )
+        }));
+    if (verified.length === 0) {
       throw new Error(`terminal-controlled session ${parsed.conversationId} is no longer available`);
+    }
+    if (verified.length > 1) {
+      throw new Error(`terminal-controlled session ${parsed.conversationId} matches multiple active panes`);
     }
     return {
       conversationId: parsed.conversationId,
@@ -169,10 +242,7 @@ export class TerminalAgentBridge {
       pid: parsed.pid,
       legacy: parsed.legacy,
       adapter,
-      terminalControl: terminalRefFromPane(
-        pane,
-        terminalControlCapabilitiesForAdapter(adapter)
-      )
+      terminalControl: verified[0].terminalControl
     };
   }
 
@@ -189,8 +259,8 @@ export class TerminalAgentBridge {
       return unsupportedScreenStatus(adapter, terminalControl);
     }
     try {
-      const { inspection } = await this.captureInspection(adapter, terminalControl, options);
-      return statusFromInspection(adapter, terminalControl, inspection);
+      const captured = await this.captureInspection(adapter, terminalControl, options);
+      return statusFromInspection(adapter, captured.terminalControl, captured.inspection);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return {
@@ -215,7 +285,8 @@ export class TerminalAgentBridge {
   async send(
     agent: ExecutorKind,
     terminalControl: TerminalControlRef,
-    text: string
+    text: string,
+    options: { runtime?: TerminalRuntimeIdentity } = {}
   ): Promise<void> {
     const adapter = this.registry.require(agent);
     if (!terminalControl.capabilities.includes("send_keys")) {
@@ -225,11 +296,35 @@ export class TerminalAgentBridge {
     if (!normalized) {
       throw new Error("terminal message is empty");
     }
-    await this.terminalProvider.sendText(terminalControl.target, normalized, {
-      socketPath: terminalControl.socketPath
+    const verifiedForText = await this.verifyTerminalIdentity(
+      adapter.agent,
+      terminalControl,
+      options.runtime
+    );
+    await this.terminalProvider.sendText(verifiedForText.target, normalized, {
+      socketPath: verifiedForText.socketPath
     });
-    await this.terminalProvider.sendKeys(terminalControl.target, ["C-m"], {
-      socketPath: terminalControl.socketPath
+    // Text and Enter are separate tmux operations. Revalidate between them; if the
+    // identity changed, clear the line best-effort and never submit it.
+    let verifiedForEnter: TerminalControlRef;
+    try {
+      verifiedForEnter = await this.verifyTerminalIdentity(
+        adapter.agent,
+        terminalControl,
+        options.runtime
+      );
+    } catch (error) {
+      try {
+        await this.terminalProvider.sendKeys(verifiedForText.target, ["C-u"], {
+          socketPath: verifiedForText.socketPath
+        });
+      } catch {
+        // Best effort only: preserving the identity failure is more important than cleanup.
+      }
+      throw error;
+    }
+    await this.terminalProvider.sendKeys(verifiedForEnter.target, ["C-m"], {
+      socketPath: verifiedForEnter.socketPath
     });
   }
 
@@ -253,15 +348,21 @@ export class TerminalAgentBridge {
       adapter.capabilities.screenStatus &&
       terminalControl.capabilities.includes("screen_status")
     ) {
-      const { inspection } = await this.captureInspection(adapter, terminalControl, options);
+      const captured = await this.captureInspection(adapter, terminalControl, options);
+      const { inspection } = captured;
       if (inspection.approval.approvable && inspection.approval.action.mode === "structured") {
-        const fingerprint = terminalApprovalFingerprint(adapter.agent, terminalControl, inspection);
+        const fingerprint = terminalApprovalFingerprint(
+          adapter.agent,
+          captured.terminalControl,
+          inspection
+        );
         if (!fingerprint) {
           return {
             cancelRequested: false,
             reason: `${adapter.displayName} structured approval has no fingerprint`
           };
         }
+        await this.verifyTerminalIdentity(adapter.agent, captured.terminalControl, options.runtime);
         const decision = await adapter.resolveApproval({
           decision: "deny",
           expectedFingerprint: fingerprint,
@@ -294,8 +395,13 @@ export class TerminalAgentBridge {
         reason: `${adapter.displayName} terminal cancellation is not supported`
       };
     }
-    await this.terminalProvider.sendKeys(terminalControl.target, adapter.cancelKeys, {
-      socketPath: terminalControl.socketPath
+    const verifiedForCancel = await this.verifyTerminalIdentity(
+      adapter.agent,
+      terminalControl,
+      options.runtime
+    );
+    await this.terminalProvider.sendKeys(verifiedForCancel.target, adapter.cancelKeys, {
+      socketPath: verifiedForCancel.socketPath
     });
     return {
       cancelRequested: true,
@@ -312,6 +418,9 @@ export class TerminalAgentBridge {
       scrollbackLines?: number;
       runtime?: TerminalRuntimeIdentity;
       requiredDecisionMode?: "keys" | "structured";
+      authorize?: (
+        context: TerminalApprovalAuthorizationContext
+      ) => TerminalApprovalAuthorizationDecision | Promise<TerminalApprovalAuthorizationDecision>;
     } = {}
   ): Promise<TerminalApprovalExecution> {
     const adapter = this.registry.require(agent);
@@ -325,7 +434,9 @@ export class TerminalAgentBridge {
         reason: `${adapter.displayName} terminal approval is not supported`
       };
     }
-    const { inspection } = await this.captureInspection(adapter, terminalControl, options);
+    const captured = await this.captureInspection(adapter, terminalControl, options);
+    const { inspection } = captured;
+    const activeTerminalControl = captured.terminalControl;
     if (!inspection.approval.approvable) {
       return {
         approved: false,
@@ -345,7 +456,7 @@ export class TerminalAgentBridge {
         label: inspection.approval.action.label,
         promptKind: inspection.approval.promptKind,
         command: inspection.approval.command,
-        fingerprint: terminalApprovalFingerprint(adapter.agent, terminalControl, inspection),
+        fingerprint: terminalApprovalFingerprint(adapter.agent, activeTerminalControl, inspection),
         screenExcerpt: inspection.screenExcerpt,
         decisionMode,
         requestId: inspection.approval.action.requestId
@@ -362,7 +473,7 @@ export class TerminalAgentBridge {
         screenExcerpt: inspection.screenExcerpt
       };
     }
-    const fingerprint = terminalApprovalFingerprint(adapter.agent, terminalControl, inspection);
+    const fingerprint = terminalApprovalFingerprint(adapter.agent, activeTerminalControl, inspection);
     if (options.expectedFingerprint && options.expectedFingerprint !== fingerprint) {
       return {
         approved: false,
@@ -380,6 +491,35 @@ export class TerminalAgentBridge {
         decisionMode,
         requestId: inspection.approval.action.requestId
       };
+    }
+    if (options.authorize) {
+      const authorization = await options.authorize({
+        agent: adapter.agent,
+        terminalControl: activeTerminalControl,
+        inspection,
+        fingerprint,
+        runtime: options.runtime
+      });
+      if (!authorization.approved) {
+        return {
+          approved: false,
+          blocked: true,
+          reason: authorization.reason ?? "approval was not authorized",
+          key: inspection.approval.action.keys.length === 1
+            ? inspection.approval.action.keys[0]
+            : undefined,
+          keys: inspection.approval.action.keys,
+          label: inspection.approval.action.label,
+          promptKind: inspection.approval.promptKind,
+          command: inspection.approval.command,
+          toolName: inspection.approval.toolName,
+          requestDetail: inspection.approval.requestDetail,
+          fingerprint,
+          screenExcerpt: inspection.screenExcerpt,
+          decisionMode,
+          requestId: inspection.approval.action.requestId
+        };
+      }
     }
     if (decisionMode === "structured") {
       if (!options.expectedFingerprint) {
@@ -407,6 +547,7 @@ export class TerminalAgentBridge {
           requestId: inspection.approval.action.requestId
         };
       }
+      await this.verifyTerminalIdentity(adapter.agent, activeTerminalControl, options.runtime);
       const resolved = await adapter.resolveApproval({
         decision: "allow",
         expectedFingerprint: options.expectedFingerprint,
@@ -427,25 +568,98 @@ export class TerminalAgentBridge {
         requestId: resolved.requestId ?? inspection.approval.action.requestId
       };
     }
+    const recaptured = await this.captureInspection(
+      adapter,
+      activeTerminalControl,
+      options
+    );
+    const recapturedInspection = recaptured.inspection;
+    if (!recapturedInspection.approval.approvable) {
+      return {
+        approved: false,
+        blocked: true,
+        reason: "approval prompt is no longer approvable after authorization",
+        promptKind: recapturedInspection.approval.promptKind,
+        command: recapturedInspection.approval.command,
+        cwd: recapturedInspection.approval.cwd,
+        toolName: recapturedInspection.approval.toolName,
+        requestDetail: recapturedInspection.approval.requestDetail,
+        screenExcerpt: recapturedInspection.screenExcerpt
+      };
+    }
+    const recapturedDecisionMode = recapturedInspection.approval.action.mode ?? "keys";
+    const recapturedFingerprint = terminalApprovalFingerprint(
+      adapter.agent,
+      recaptured.terminalControl,
+      recapturedInspection
+    );
+    if (recapturedDecisionMode !== decisionMode) {
+      return {
+        approved: false,
+        blocked: true,
+        reason: "approval decision mode changed after authorization",
+        key: recapturedInspection.approval.action.keys.length === 1
+          ? recapturedInspection.approval.action.keys[0]
+          : undefined,
+        keys: recapturedInspection.approval.action.keys,
+        label: recapturedInspection.approval.action.label,
+        promptKind: recapturedInspection.approval.promptKind,
+        command: recapturedInspection.approval.command,
+        cwd: recapturedInspection.approval.cwd,
+        toolName: recapturedInspection.approval.toolName,
+        requestDetail: recapturedInspection.approval.requestDetail,
+        fingerprint: recapturedFingerprint,
+        screenExcerpt: recapturedInspection.screenExcerpt,
+        decisionMode: recapturedDecisionMode,
+        requestId: recapturedInspection.approval.action.requestId
+      };
+    }
+    if (recapturedFingerprint !== fingerprint) {
+      return {
+        approved: false,
+        blocked: true,
+        reason: "approval fingerprint changed after authorization",
+        key: recapturedInspection.approval.action.keys.length === 1
+          ? recapturedInspection.approval.action.keys[0]
+          : undefined,
+        keys: recapturedInspection.approval.action.keys,
+        label: recapturedInspection.approval.action.label,
+        promptKind: recapturedInspection.approval.promptKind,
+        command: recapturedInspection.approval.command,
+        cwd: recapturedInspection.approval.cwd,
+        toolName: recapturedInspection.approval.toolName,
+        requestDetail: recapturedInspection.approval.requestDetail,
+        fingerprint: recapturedFingerprint,
+        screenExcerpt: recapturedInspection.screenExcerpt,
+        decisionMode: recapturedDecisionMode,
+        requestId: recapturedInspection.approval.action.requestId
+      };
+    }
+    const verifiedForApproval = await this.verifyTerminalIdentity(
+      adapter.agent,
+      recaptured.terminalControl,
+      options.runtime
+    );
     await this.terminalProvider.sendKeys(
-      terminalControl.target,
-      inspection.approval.action.keys,
-      { socketPath: terminalControl.socketPath }
+      verifiedForApproval.target,
+      recapturedInspection.approval.action.keys,
+      { socketPath: verifiedForApproval.socketPath }
     );
     return {
       approved: true,
       blocked: false,
-      key: inspection.approval.action.keys.length === 1
-        ? inspection.approval.action.keys[0]
+      key: recapturedInspection.approval.action.keys.length === 1
+        ? recapturedInspection.approval.action.keys[0]
         : undefined,
-      keys: inspection.approval.action.keys,
-      label: inspection.approval.action.label,
-      promptKind: inspection.approval.promptKind,
-      command: inspection.approval.command,
-      fingerprint,
-      screenExcerpt: inspection.screenExcerpt,
-      decisionMode,
-      requestId: inspection.approval.action.requestId
+      keys: recapturedInspection.approval.action.keys,
+      label: recapturedInspection.approval.action.label,
+      promptKind: recapturedInspection.approval.promptKind,
+      command: recapturedInspection.approval.command,
+      cwd: recapturedInspection.approval.cwd,
+      fingerprint: recapturedFingerprint,
+      screenExcerpt: recapturedInspection.screenExcerpt,
+      decisionMode: recapturedDecisionMode,
+      requestId: recapturedInspection.approval.action.requestId
     };
   }
 
@@ -475,7 +689,7 @@ export class TerminalAgentBridge {
           options.screenOptions
         );
         inspection = captured.inspection;
-        status = statusFromInspection(adapter, options.terminalControl, inspection);
+        status = statusFromInspection(adapter, captured.terminalControl, inspection);
       } catch (error) {
         status = failedScreenStatus(adapter, options.terminalControl, error);
       }
@@ -524,12 +738,22 @@ export class TerminalAgentBridge {
       maxExcerptLength?: number;
       runtime?: TerminalRuntimeIdentity;
     } = {}
-  ): Promise<{ screen: string; inspection: TerminalScreenInspection }> {
-    const screen = await this.terminalProvider.capture(terminalControl.target, {
+  ): Promise<{
+    terminalControl: TerminalControlRef;
+    screen: string;
+    inspection: TerminalScreenInspection;
+  }> {
+    const verifiedTerminalControl = await this.verifyTerminalIdentity(
+      adapter.agent,
+      terminalControl,
+      options.runtime
+    );
+    const screen = await this.terminalProvider.capture(verifiedTerminalControl.target, {
       scrollbackLines: options.scrollbackLines ?? 120,
-      socketPath: terminalControl.socketPath
+      socketPath: verifiedTerminalControl.socketPath
     });
     return {
+      terminalControl: verifiedTerminalControl,
       screen,
       inspection: adapter.inspectScreen({
         screen,
@@ -539,6 +763,27 @@ export class TerminalAgentBridge {
         runtime: options.runtime
       })
     };
+  }
+
+  private async verifyTerminalIdentity(
+    agent: ExecutorKind,
+    terminalControl: TerminalControlRef,
+    runtime?: TerminalRuntimeIdentity
+  ): Promise<TerminalControlRef> {
+    if (!this.verifyIdentity) {
+      return terminalControl;
+    }
+    if (!Number.isInteger(runtime?.pid) || Number(runtime?.pid) <= 0) {
+      throw new Error(
+        `refusing terminal access for ${agent}:${terminalControl.target} without an exact agent pid; reattach this legacy tmux session before controlling it`
+      );
+    }
+    const result = await this.verifyIdentity({
+      agent,
+      pid: Number(runtime?.pid),
+      terminalControl
+    });
+    return result?.terminalControl ?? terminalControl;
   }
 }
 
@@ -560,6 +805,7 @@ export function terminalApprovalFingerprint(
       label: inspection.approval.action.label,
       prompt_kind: inspection.approval.promptKind,
       command: inspection.approval.command,
+      cwd: inspection.approval.cwd,
       tool_name: inspection.approval.toolName,
       request_detail: inspection.approval.requestDetail,
       screen_excerpt: decisionMode === "structured" ? undefined : inspection.screenExcerpt,
@@ -595,6 +841,7 @@ function statusFromInspection(
       label: approval.approvable ? approval.action.label : undefined,
       prompt_kind: approval.promptKind,
       command: approval.command,
+      cwd: approval.cwd,
       tool_name: approval.toolName,
       request_detail: approval.requestDetail,
       reason: approval.approvable ? undefined : approval.reason,
@@ -641,6 +888,7 @@ function approvalOutput(approval: TerminalScreenInspection["approval"]): Record<
       reason: approval.reason,
       promptKind: approval.promptKind,
       command: approval.command,
+      cwd: approval.cwd,
       toolName: approval.toolName,
       requestDetail: approval.requestDetail
     };
@@ -653,6 +901,7 @@ function approvalOutput(approval: TerminalScreenInspection["approval"]): Record<
     label: approval.action.label,
     promptKind: approval.promptKind,
     command: approval.command,
+    cwd: approval.cwd,
     toolName: approval.toolName,
     requestDetail: approval.requestDetail,
     decisionMode: approval.action.mode ?? "keys",

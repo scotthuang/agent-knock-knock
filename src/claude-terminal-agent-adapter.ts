@@ -123,6 +123,7 @@ const CLAUDE_SCREEN_TAIL_LINES = 48;
 const CLAUDE_EXCERPT_LINES = 80;
 const CLAUDE_PERMISSION_DETAIL_LENGTH = 600;
 const CLAUDE_AUTO_APPROVAL_COMMAND_LENGTH = 2000;
+const CLAUDE_NATIVE_VERSION_PATTERN = /^\d+\.\d+\.\d+$/u;
 const TRUSTED_CLAUDE_SHELL_PATHS = new Set([
   "/bin/bash",
   "/bin/dash",
@@ -191,7 +192,7 @@ export function classifyClaudeProcess(
   agentRows: readonly ClaudeAgentRow[] = []
 ): ActiveTerminalProcess<ClaudeProcessKind> | undefined {
   const tokens = tokenizeCommand(snapshot.command);
-  if (tokens.length === 0 || path.basename(tokens[0]) !== "claude") {
+  if (tokens.length === 0 || !isClaudeExecutable(tokens[0])) {
     return undefined;
   }
 
@@ -234,6 +235,21 @@ export function classifyClaudeProcess(
     confidence,
     reason
   };
+}
+
+function isClaudeExecutable(executable: string): boolean {
+  if (path.basename(executable) === "claude") {
+    return true;
+  }
+  if (!path.isAbsolute(executable)) {
+    return false;
+  }
+
+  const segments = executable.split(path.sep);
+  const version = segments.at(-1);
+  return version !== undefined &&
+    CLAUDE_NATIVE_VERSION_PATTERN.test(version) &&
+    segments.slice(-5, -1).join("/") === ".local/share/claude/versions";
 }
 
 export function extractClaudeSessionId(command: string): string | undefined {
@@ -348,6 +364,7 @@ function hookPermissionScreenInspection(
       blocked: true,
       approvable: true,
       promptKind: hookInspection.promptKind,
+      cwd: hookInspection.cwd,
       toolName: display.toolName,
       ...(requestDetail ? { requestDetail } : {}),
       ...(command?.command === undefined ? {} : { command: command.command }),

@@ -6,7 +6,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
-const CODEX_ACPX_SELECTOR = ["--agent", "npx -y @agentclientprotocol/codex-acp@^1.1.0"];
+const CODEX_ACPX_SELECTOR = ["--agent", "npx -y @agentclientprotocol/codex-acp@1.1.7"];
 
 test("delegate background launches acpx without returning raw Claude output", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-delegate-"));
@@ -14,6 +14,7 @@ test("delegate background launches acpx without returning raw Claude output", as
   const workspace = path.join(tempDir, "workspace");
   const launchedPath = path.join(tempDir, "acpx-args.json");
   const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
+  const gatewayToken = "gateway-token-must-not-reach-agent";
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
@@ -23,6 +24,10 @@ test("delegate background launches acpx without returning raw Claude output", as
       fakeAcpx,
       `#!/usr/bin/env node
 const fs = require("node:fs");
+if (process.env.AKK_GATEWAY_TOKEN || process.env.OPENCLAW_GATEWAY_TOKEN) {
+  process.stderr.write("gateway token leaked into coding-agent environment");
+  process.exit(97);
+}
 fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify(process.argv.slice(2)) + "\\n", "utf8");
 `,
       "utf8"
@@ -51,6 +56,8 @@ console.log(JSON.stringify({ ok: true }));
       path.join(tempDir, "conversations"),
       "--gateway-method",
       "agent-knock-knock.callback",
+      "--token",
+      gatewayToken,
       "--openclaw-bin",
       fakeOpenClaw,
       "--monitor-poll-interval-ms",
@@ -69,6 +76,10 @@ console.log(JSON.stringify({ ok: true }));
     assert.equal(parsed.launched, true);
     assert.equal(parsed.background, true);
     assert.equal(parsed.acpx_command, undefined);
+    assert.doesNotMatch(result.stdout, new RegExp(gatewayToken));
+    if (process.platform !== "win32") {
+      assert.equal(fs.statSync(parsed.output_path).mode & 0o777, 0o600);
+    }
 
     const acpxCalls = await waitForCalls(launchedPath, 2);
     const generatedSession = acpxCalls[0][4];
@@ -77,12 +88,16 @@ console.log(JSON.stringify({ ok: true }));
     const acpxArgs = acpxCalls.at(-1);
     assert.deepEqual(acpxArgs.slice(0, 4), ["--approve-all", "claude", "-s", generatedSession]);
     assert.match(acpxArgs[4], /Initial task message:/);
+    assert.doesNotMatch(JSON.stringify(acpxCalls), new RegExp(gatewayToken));
 
-    const state = JSON.parse(fs.readFileSync(parsed.paths.statePath, "utf8"));
+    const stateText = fs.readFileSync(parsed.paths.statePath, "utf8");
+    assert.doesNotMatch(stateText, new RegExp(gatewayToken));
+    const state = JSON.parse(stateText);
     assert.doesNotMatch(state.callback_command, /--record-only/);
     assert.match(state.callback_command, /--gateway-method/);
     assert.match(state.callback_command, /--openclaw-bin/);
-    assert.doesNotMatch(state.callback_command, /<token>/);
+    assert.doesNotMatch(state.callback_command, /--(?:gateway-)?token/u);
+    assert.doesNotMatch(state.callback_command, /--gateway-url/u);
 
     const events = fs.readFileSync(parsed.paths.logPath, "utf8")
       .trim()
@@ -97,6 +112,8 @@ console.log(JSON.stringify({ ok: true }));
       .filter(Boolean)
       .map((line) => JSON.parse(line));
     assert.deepEqual(openclawCalls[0].slice(0, 3), ["gateway", "call", "agent-knock-knock.callback"]);
+    assert.equal(openclawCalls[0].includes("--token"), false);
+    assert.doesNotMatch(JSON.stringify(openclawCalls), new RegExp(gatewayToken));
   } finally {
     removeTempDir(tempDir);
   }
