@@ -48,6 +48,8 @@ export interface TerminalBridgeStatus {
   };
   screen: {
     excerpt?: string;
+    /** SHA-256 of the raw capture. The raw terminal contents are never exposed here. */
+    digest?: string;
     approval?: Record<string, unknown>;
     error?: string;
   };
@@ -106,6 +108,15 @@ export interface TerminalApprovalAuthorizationContext {
 export interface TerminalApprovalAuthorizationDecision {
   approved: boolean;
   reason?: string;
+}
+
+export interface TerminalApprovalKeyDispatchContext {
+  agent: ExecutorKind;
+  terminalControl: TerminalControlRef;
+  inspection: TerminalScreenInspection;
+  fingerprint: string;
+  keys: readonly string[];
+  runtime?: TerminalRuntimeIdentity;
 }
 
 export interface TerminalMonitorPoll {
@@ -260,7 +271,10 @@ export class TerminalAgentBridge {
     }
     try {
       const captured = await this.captureInspection(adapter, terminalControl, options);
-      return statusFromInspection(adapter, captured.terminalControl, captured.inspection);
+      return statusFromInspection(adapter, captured.terminalControl, captured.inspection, {
+        screen: captured.screen,
+        runtime: options.runtime
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return {
@@ -354,7 +368,11 @@ export class TerminalAgentBridge {
         const fingerprint = terminalApprovalFingerprint(
           adapter.agent,
           captured.terminalControl,
-          inspection
+          inspection,
+          {
+            screen: captured.screen,
+            runtime: options.runtime
+          }
         );
         if (!fingerprint) {
           return {
@@ -421,6 +439,13 @@ export class TerminalAgentBridge {
       authorize?: (
         context: TerminalApprovalAuthorizationContext
       ) => TerminalApprovalAuthorizationDecision | Promise<TerminalApprovalAuthorizationDecision>;
+      /**
+       * Persist an at-most-once dispatch reservation after final prompt/identity validation
+       * and immediately before tmux receives the approval keys.
+       */
+      beforeKeyDispatch?: (
+        context: TerminalApprovalKeyDispatchContext
+      ) => void | Promise<void>;
     } = {}
   ): Promise<TerminalApprovalExecution> {
     const adapter = this.registry.require(agent);
@@ -456,7 +481,15 @@ export class TerminalAgentBridge {
         label: inspection.approval.action.label,
         promptKind: inspection.approval.promptKind,
         command: inspection.approval.command,
-        fingerprint: terminalApprovalFingerprint(adapter.agent, activeTerminalControl, inspection),
+        fingerprint: terminalApprovalFingerprint(
+          adapter.agent,
+          activeTerminalControl,
+          inspection,
+          {
+            screen: captured.screen,
+            runtime: options.runtime
+          }
+        ),
         screenExcerpt: inspection.screenExcerpt,
         decisionMode,
         requestId: inspection.approval.action.requestId
@@ -473,7 +506,40 @@ export class TerminalAgentBridge {
         screenExcerpt: inspection.screenExcerpt
       };
     }
-    const fingerprint = terminalApprovalFingerprint(adapter.agent, activeTerminalControl, inspection);
+    const fingerprint = terminalApprovalFingerprint(
+      adapter.agent,
+      activeTerminalControl,
+      inspection,
+      {
+        screen: captured.screen,
+        runtime: options.runtime
+      }
+    );
+    if (
+      adapter.agent === "claude" &&
+      decisionMode === "keys" &&
+      !options.expectedFingerprint
+    ) {
+      return {
+        approved: false,
+        blocked: true,
+        reason: "screen approval requires the latest expected fingerprint",
+        key: inspection.approval.action.keys.length === 1
+          ? inspection.approval.action.keys[0]
+          : undefined,
+        keys: inspection.approval.action.keys,
+        label: inspection.approval.action.label,
+        promptKind: inspection.approval.promptKind,
+        command: inspection.approval.command,
+        cwd: inspection.approval.cwd,
+        toolName: inspection.approval.toolName,
+        requestDetail: inspection.approval.requestDetail,
+        fingerprint,
+        screenExcerpt: inspection.screenExcerpt,
+        decisionMode,
+        requestId: inspection.approval.action.requestId
+      };
+    }
     if (options.expectedFingerprint && options.expectedFingerprint !== fingerprint) {
       return {
         approved: false,
@@ -591,7 +657,11 @@ export class TerminalAgentBridge {
     const recapturedFingerprint = terminalApprovalFingerprint(
       adapter.agent,
       recaptured.terminalControl,
-      recapturedInspection
+      recapturedInspection,
+      {
+        screen: recaptured.screen,
+        runtime: options.runtime
+      }
     );
     if (recapturedDecisionMode !== decisionMode) {
       return {
@@ -640,6 +710,23 @@ export class TerminalAgentBridge {
       recaptured.terminalControl,
       options.runtime
     );
+    if (!recapturedFingerprint) {
+      return {
+        approved: false,
+        blocked: true,
+        reason: "approval has no dispatch fingerprint",
+        screenExcerpt: recapturedInspection.screenExcerpt,
+        decisionMode: recapturedDecisionMode
+      };
+    }
+    await options.beforeKeyDispatch?.({
+      agent: adapter.agent,
+      terminalControl: verifiedForApproval,
+      inspection: recapturedInspection,
+      fingerprint: recapturedFingerprint,
+      keys: recapturedInspection.approval.action.keys,
+      runtime: options.runtime
+    });
     await this.terminalProvider.sendKeys(
       verifiedForApproval.target,
       recapturedInspection.approval.action.keys,
@@ -689,7 +776,10 @@ export class TerminalAgentBridge {
           options.screenOptions
         );
         inspection = captured.inspection;
-        status = statusFromInspection(adapter, captured.terminalControl, inspection);
+        status = statusFromInspection(adapter, captured.terminalControl, inspection, {
+          screen: captured.screen,
+          runtime: options.screenOptions?.runtime
+        });
       } catch (error) {
         status = failedScreenStatus(adapter, options.terminalControl, error);
       }
@@ -789,18 +879,40 @@ export class TerminalAgentBridge {
 
 export function terminalApprovalFingerprint(
   agent: ExecutorKind,
-  terminalControl: Pick<TerminalControlRef, "target">,
-  inspection: TerminalScreenInspection
+  terminalControl: TerminalControlRef,
+  inspection: TerminalScreenInspection,
+  options: {
+    screen?: string;
+    runtime?: TerminalRuntimeIdentity;
+  } = {}
 ): string | undefined {
   if (!inspection.approval.approvable) {
     return undefined;
   }
   const decisionMode = inspection.approval.action.mode ?? "keys";
+  const rawScreenDigest = decisionMode === "keys" && options.screen !== undefined
+    ? createHash("sha256").update(options.screen).digest("hex")
+    : undefined;
   return createHash("sha256")
     .update(JSON.stringify({
       agent,
       provider: "tmux",
-      target: terminalControl.target,
+      terminal: {
+        target: terminalControl.target,
+        socket_path: terminalControl.socketPath,
+        session: terminalControl.session,
+        window: terminalControl.window,
+        pane: terminalControl.pane,
+        pane_pid: terminalControl.panePid
+      },
+      runtime: {
+        pid: options.runtime?.pid,
+        session_id: options.runtime?.sessionId,
+        cwd: options.runtime?.cwd,
+        conversation_id: options.runtime?.conversationId,
+        message_id: options.runtime?.messageId,
+        terminal_target: options.runtime?.terminalTarget
+      },
       keys: inspection.approval.action.keys,
       label: inspection.approval.action.label,
       prompt_kind: inspection.approval.promptKind,
@@ -808,7 +920,7 @@ export function terminalApprovalFingerprint(
       cwd: inspection.approval.cwd,
       tool_name: inspection.approval.toolName,
       request_detail: inspection.approval.requestDetail,
-      screen_excerpt: decisionMode === "structured" ? undefined : inspection.screenExcerpt,
+      raw_screen_sha256: rawScreenDigest,
       decision_mode: decisionMode,
       request_id: inspection.approval.action.requestId
     }))
@@ -818,10 +930,19 @@ export function terminalApprovalFingerprint(
 function statusFromInspection(
   adapter: TerminalAgentAdapter,
   terminalControl: TerminalControlRef,
-  inspection: TerminalScreenInspection
+  inspection: TerminalScreenInspection,
+  options: {
+    screen?: string;
+    runtime?: TerminalRuntimeIdentity;
+  } = {}
 ): TerminalBridgeStatus {
   const approval = inspection.approval;
-  const fingerprint = terminalApprovalFingerprint(adapter.agent, terminalControl, inspection);
+  const fingerprint = terminalApprovalFingerprint(
+    adapter.agent,
+    terminalControl,
+    inspection,
+    options
+  );
   return {
     provider: terminalControl.kind,
     target: terminalControl.target,
@@ -851,6 +972,9 @@ function statusFromInspection(
     },
     screen: {
       excerpt: inspection.screenExcerpt,
+      digest: options.screen === undefined
+        ? undefined
+        : createHash("sha256").update(options.screen).digest("hex"),
       approval: approvalOutput(approval)
     }
   };

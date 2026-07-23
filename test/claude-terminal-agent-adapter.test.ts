@@ -231,7 +231,7 @@ test("detects the Claude 2.1.198 idle and working terminal tails", () => {
   assert.equal(codexOnly.activity.state, "unknown");
 });
 
-test("approves only the currently highlighted one-time Yes choice", () => {
+test("approves only a strict complete Bash fixture in an AKK-managed runtime", () => {
   const screen = [
     " Bash command",
     "",
@@ -244,7 +244,15 @@ test("approves only the currently highlighted one-time Yes choice", () => {
     "",
     " Esc to cancel · Tab to amend"
   ].join("\n");
-  const inspection = inspectClaudeScreen({ screen });
+  const inspection = inspectClaudeScreen({
+    screen,
+    runtime: {
+      pid: 7200,
+      conversationId: "conversation-screen-approval",
+      messageId: "message-screen-approval",
+      terminalTarget: "claude-work:0.0"
+    }
+  });
 
   assert.equal(inspection.activity.state, "awaiting_approval");
   assert.equal(inspection.approval.blocked, true);
@@ -256,6 +264,137 @@ test("approves only the currently highlighted one-time Yes choice", () => {
   assert.equal(inspection.approval.action.mode, "keys");
   assert.equal(inspection.approval.action.label, "Yes");
   assert.equal(inspection.approval.promptKind, "claude_permission");
+  assert.equal(inspection.approval.toolName, "Bash");
+  assert.match(inspection.approval.command ?? "", /printf/);
+});
+
+test("screen approval rejects prose lookalikes and incomplete or ambiguous Bash dialogs", () => {
+  const validLines = [
+    " Bash command",
+    "",
+    "   npm test",
+    "",
+    " Do you want to proceed?",
+    " ❯ 1. Yes",
+    "   2. Yes, and don't ask again for this command",
+    "   3. No",
+    "",
+    " Esc to cancel · Tab to amend"
+  ];
+  const markerIndex = validLines.indexOf(" Do you want to proceed?");
+  const yesIndex = validLines.indexOf(" ❯ 1. Yes");
+  const persistentIndex = validLines.indexOf(
+    "   2. Yes, and don't ask again for this command"
+  );
+  const noIndex = validLines.indexOf("   3. No");
+  const footerIndex = validLines.indexOf(" Esc to cancel · Tab to amend");
+
+  const cases: Array<[string, string]> = [
+    [
+      "minimal prose",
+      "The assistant asked “Do you want to proceed?” in ordinary explanatory prose."
+    ],
+    [
+      "complete dialog quoted as prose",
+      [
+        "The following is documentation, not a live permission dialog:",
+        "```text",
+        ...validLines,
+        "```"
+      ].join("\n")
+    ],
+    [
+      "missing Bash header",
+      validLines.filter((_, index) => index !== 0).join("\n")
+    ],
+    [
+      "missing footer",
+      validLines.filter((_, index) => index !== footerIndex).join("\n")
+    ],
+    [
+      "missing No choice",
+      validLines.filter((_, index) => index !== noIndex).join("\n")
+    ],
+    [
+      "duplicate permission marker",
+      [
+        ...validLines.slice(0, markerIndex + 1),
+        " Do you want to proceed?",
+        ...validLines.slice(markerIndex + 1)
+      ].join("\n")
+    ],
+    [
+      "duplicate highlighted choice",
+      validLines.map((line, index) =>
+        index === persistentIndex
+          ? " ❯ 2. Yes, and don't ask again for this command"
+          : line
+      ).join("\n")
+    ],
+    [
+      "unexpected text between marker and choices",
+      [
+        ...validLines.slice(0, yesIndex),
+        "This line is not part of the permission dialog.",
+        ...validLines.slice(yesIndex)
+      ].join("\n")
+    ],
+    [
+      "unexpected text between choices",
+      [
+        ...validLines.slice(0, persistentIndex),
+        "This line must not be accepted as option continuation.",
+        ...validLines.slice(persistentIndex)
+      ].join("\n")
+    ],
+    [
+      "choices in the wrong order",
+      [
+        ...validLines.slice(0, yesIndex),
+        " ❯ 1. Yes",
+        "   3. No",
+        "   2. Yes, and don't ask again for this command",
+        ...validLines.slice(yesIndex + 3)
+      ].join("\n")
+    ],
+    [
+      "extra choice",
+      [
+        ...validLines.slice(0, noIndex + 1),
+        "   4. Open settings",
+        ...validLines.slice(noIndex + 1)
+      ].join("\n")
+    ]
+  ];
+
+  for (const [label, screen] of cases) {
+    const approval = detectClaudeApprovalPrompt(screen);
+    assert.equal(approval.approvable, false, label);
+    assert.equal(approval.action, undefined, label);
+  }
+});
+
+test("a strict Bash dialog is non-approvable without an AKK-managed runtime", () => {
+  const inspection = inspectClaudeScreen({
+    screen: [
+      " Bash command",
+      "",
+      "   npm test",
+      "",
+      " Do you want to proceed?",
+      " ❯ 1. Yes",
+      "   2. Yes, and don't ask again for this command",
+      "   3. No",
+      "",
+      " Esc to cancel · Tab to amend"
+    ].join("\n")
+  });
+
+  assert.equal(inspection.activity.state, "awaiting_approval");
+  assert.equal(inspection.approval.blocked, true);
+  assert.equal(inspection.approval.approvable, false);
+  assert.equal(inspection.approval.action, undefined);
+  assert.match(inspection.approval.reason, /AKK-managed turn/u);
 });
 
 test("permission fallback fails closed for persistent, negative, unknown, and stale choices", () => {
@@ -296,9 +435,9 @@ test("permission fallback fails closed for persistent, negative, unknown, and st
     "  2. No",
     "Bash command completed after the old dialog"
   ].join("\n"));
-  assert.equal(staleWithoutIdle.blocked, false);
+  assert.equal(staleWithoutIdle.blocked, true);
   assert.equal(staleWithoutIdle.approvable, false);
-  assert.match(staleWithoutIdle.reason, /stale/);
+  assert.match(staleWithoutIdle.reason, /does not match/);
 
   const prose = detectClaudeApprovalPrompt([
     "The README asks: Do you want to proceed?",
@@ -688,7 +827,7 @@ test("StopFailure maps to actionable durable failure evidence", async (t) => {
   });
 });
 
-test("Claude terminal capabilities keep completion hook-only and cancel with Escape", () => {
+test("Claude terminal capabilities expose durable completion only with a configured provider", async () => {
   assert.deepEqual(terminalControlCapabilitiesForAdapter(claudeTerminalAgentAdapter), [
     "screen_status",
     "send_keys",
@@ -706,6 +845,43 @@ test("Claude terminal capabilities keep completion hook-only and cancel with Esc
   assert.equal(hookAdapter.capabilities.durableCompletion, true);
   assert.equal(typeof hookAdapter.detectDurableCompletion, "function");
   assert.equal(typeof hookAdapter.resolveApproval, "function");
+
+  const transcriptAdapter = createClaudeTerminalAgentAdapter({
+    async detectDurableCompletion() {
+      return {
+        source: "durable",
+        text: "Transcript-complete"
+      };
+    }
+  });
+  assert.equal(transcriptAdapter.capabilities.durableCompletion, true);
+  assert.equal(transcriptAdapter.resolveApproval, undefined);
+  assert.equal(
+    (await transcriptAdapter.detectDurableCompletion?.({}))?.text,
+    "Transcript-complete"
+  );
+
+  let transcriptFallbackCalled = false;
+  const authoritativeHookAdapter = createClaudeTerminalAgentAdapter({
+    hookStore: new ClaudeHookStore({
+      rootDir: path.join(os.tmpdir(), "unused-authoritative-claude-hook-store")
+    }),
+    async detectDurableCompletion() {
+      transcriptFallbackCalled = true;
+      return {
+        source: "durable",
+        text: "Must not bypass pending hook state"
+      };
+    }
+  });
+  assert.equal(
+    await authoritativeHookAdapter.detectDurableCompletion?.({
+      startedAt: new Date().toISOString(),
+      context: {}
+    }),
+    undefined
+  );
+  assert.equal(transcriptFallbackCalled, false);
 });
 
 function temporaryHookStore(t: test.TestContext): string {

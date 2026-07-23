@@ -29,6 +29,7 @@ export interface ClaudeAgentRow {
   cwd?: string;
   kind?: string;
   sessionId?: string;
+  startedAt?: number;
   status?: string;
 }
 
@@ -40,6 +41,10 @@ export interface CreateClaudeTerminalAgentAdapterOptions {
   agentRows?: readonly ClaudeAgentRow[];
   /** Structured Claude hook state used for one-time permission decisions and durable completion. */
   hookStore?: ClaudeHookStore;
+  /** Read-only local transcript detector used when Claude hooks are not installed. */
+  detectDurableCompletion?: NonNullable<
+    TerminalAgentAdapter<ClaudeProcessKind>["detectDurableCompletion"]
+  >;
   /** Canonical launchers explicitly configured by Claude's trusted Tokenjuice PreToolUse hook. */
   trustedTokenjuiceLaunchers?: readonly ClaudeTrustedTokenjuiceLauncher[];
 }
@@ -148,7 +153,10 @@ export function createClaudeTerminalAgentAdapter(
 ): TerminalAgentAdapter<ClaudeProcessKind> {
   const agentRows = options.agentRows ?? [];
   const hookStore = options.hookStore;
+  const transcriptCompletionDetector = options.detectDurableCompletion;
   const trustedTokenjuiceLaunchers = options.trustedTokenjuiceLaunchers ?? [];
+  const durableCompletion = hookStore !== undefined ||
+    transcriptCompletionDetector !== undefined;
   return {
     agent: "claude",
     displayName: "Claude Code",
@@ -158,7 +166,7 @@ export function createClaudeTerminalAgentAdapter(
       terminalApproval: true,
       // A visible idle prompt is not durable proof that the requested turn completed.
       screenCompletion: false,
-      durableCompletion: hookStore !== undefined,
+      durableCompletion,
       cancellation: true
     },
     cancelKeys: ["Escape"],
@@ -176,9 +184,18 @@ export function createClaudeTerminalAgentAdapter(
       ? {
           async resolveApproval(request: TerminalApprovalDecisionRequest) {
             return resolveClaudeHookApproval(hookStore, request);
-          },
+          }
+        }
+      : {}),
+    ...(durableCompletion
+      ? {
           async detectDurableCompletion(request: TerminalDurableCompletionRequest) {
-            return detectClaudeHookCompletion(hookStore, request);
+            // A configured legacy hook store is authoritative. Falling back when it
+            // reports pending could bypass its background-task and cron evidence.
+            if (hookStore) {
+              return detectClaudeHookCompletion(hookStore, request);
+            }
+            return transcriptCompletionDetector?.(request);
           }
         }
       : {})
@@ -262,13 +279,35 @@ export function extractClaudeSessionId(command: string): string | undefined {
 export function inspectClaudeScreen(
   options: TerminalScreenInspectionOptions
 ): TerminalScreenInspection {
-  const approval = detectClaudeApprovalPrompt(options.screen);
+  const detectedApproval = detectClaudeApprovalPrompt(options.screen);
+  const approval = detectedApproval.approvable && !hasManagedClaudeApprovalIdentity(options.runtime)
+    ? {
+        blocked: true as const,
+        approvable: false as const,
+        reason: "Claude screen approval requires an active AKK-managed turn with exact process and message identity",
+        promptKind: detectedApproval.promptKind,
+        command: detectedApproval.command,
+        cwd: detectedApproval.cwd,
+        toolName: detectedApproval.toolName,
+        requestDetail: detectedApproval.requestDetail
+      }
+    : detectedApproval;
   return {
     activity: detectClaudeActivityState(options.screen, approval),
     approval,
     screenExcerpt: claudeScreenExcerpt(options.screen, options.maxExcerptLength ?? 4000)
     // Deliberately no screen completion: idle alone can follow cancellation, errors, or old output.
   };
+}
+
+function hasManagedClaudeApprovalIdentity(
+  runtime: TerminalRuntimeIdentity | undefined
+): boolean {
+  return Number.isInteger(runtime?.pid) &&
+    Number(runtime?.pid) > 0 &&
+    Boolean(nonEmptyString(runtime?.conversationId)) &&
+    Boolean(nonEmptyString(runtime?.messageId)) &&
+    Boolean(nonEmptyString(runtime?.terminalTarget));
 }
 
 function inspectClaudeScreenWithHooks(
@@ -757,45 +796,131 @@ function errorMessage(error: unknown): string {
 
 export function detectClaudeApprovalPrompt(screen: string): TerminalApprovalInspection {
   const lines = claudeDetectionTail(screen);
-  const markerIndex = findLastIndex(lines, (line) => /\bDo you want to proceed\?\s*$/iu.test(line));
-  if (markerIndex < 0) {
+  const markerIndexes = lines
+    .map((line, index) => /^\s*Do you want to proceed\?\s*$/iu.test(line) ? index : -1)
+    .filter((index) => index >= 0);
+  if (markerIndexes.length === 0) {
     return {
       blocked: false,
       approvable: false,
       reason: "no current Claude Code permission dialog was detected in the terminal tail"
     };
   }
-
-  const region = lines.slice(markerIndex);
-  const highlighted = findHighlightedChoice(region);
-  const newerStateIndex = findLastIndex(region, (line, index) =>
-    index > (highlighted?.index ?? -1) && (isClaudeIdlePromptLine(line) || isClaudeWorkingLine(line))
-  );
-  const hasPermissionChoices = region.some((line) => isPermissionChoice(line));
-  const hasUnexpectedTrailingContent = highlighted
-    ? region.slice(highlighted.index + 1).some((line) => !isPermissionDialogTrailingLine(line))
-    : false;
-
-  if (newerStateIndex >= 0 || hasUnexpectedTrailingContent || !hasPermissionChoices) {
-    return {
-      blocked: false,
-      approvable: false,
-      reason: newerStateIndex >= 0 || hasUnexpectedTrailingContent
-        ? "the Claude Code permission dialog appears stale"
-        : "the matching text is not a recognized Claude Code permission dialog"
-    };
-  }
-
-  if (!highlighted) {
+  if (markerIndexes.length !== 1) {
     return {
       blocked: true,
       approvable: false,
-      reason: "the current Claude Code permission dialog has no recognized highlighted choice",
+      reason: "multiple Claude Code permission markers are visible; resolve the dialog manually",
       promptKind: "claude_permission"
     };
   }
 
-  if (!isOneTimeYesChoice(highlighted.label)) {
+  const markerIndex = markerIndexes[0];
+  const region = lines.slice(markerIndex);
+  const lastChoiceLikeIndex = findLastIndex(
+    region,
+    (line) => /^\s*(?:❯\s*)?[1-3]\.\s*.+?\s*$/u.test(line)
+  );
+  const newerStateIndex = findLastIndex(region, (line, index) =>
+    index > lastChoiceLikeIndex &&
+    (isClaudeIdlePromptLine(line) || isClaudeWorkingLine(line))
+  );
+  const unexpectedTrailingAfterChoices = lastChoiceLikeIndex >= 0 &&
+    region.slice(lastChoiceLikeIndex + 1).some((line) => {
+      const trimmed = line.trim();
+      return Boolean(trimmed) &&
+        !/^\s*Esc to cancel(?:\s*·\s*Tab to amend)?\s*$/iu.test(line) &&
+        !/^[─━═╌╍┄┅┈┉\s]+$/u.test(trimmed);
+    });
+  if (newerStateIndex >= 0) {
+    return {
+      blocked: false,
+      approvable: false,
+      reason: "the Claude Code permission dialog appears stale"
+    };
+  }
+  if (unexpectedTrailingAfterChoices) {
+    return {
+      blocked: true,
+      approvable: false,
+      reason: "the visible Claude Code permission text does not match the supported current Bash dialog exactly; resolve it manually",
+      promptKind: "claude_permission"
+    };
+  }
+  const headerIndex = findLastIndex(
+    lines.slice(Math.max(0, markerIndex - 16), markerIndex),
+    (line) => /^\s*Bash command\s*$/iu.test(line)
+  );
+  const absoluteHeaderIndex = headerIndex < 0
+    ? -1
+    : Math.max(0, markerIndex - 16) + headerIndex;
+  const choiceRows = region.flatMap((line, index) => {
+    const match = /^\s*(❯\s*)?([1-3])\.\s*(.+?)\s*$/u.exec(line);
+    return match
+      ? [{
+          index,
+          highlighted: Boolean(match[1]),
+          number: Number(match[2]),
+          label: match[3].trim()
+        }]
+      : [];
+  });
+  const highlightedRows = choiceRows.filter((choice) => choice.highlighted);
+  const footerIndexes = region
+    .map((line, index) =>
+      /^\s*Esc to cancel(?:\s*·\s*Tab to amend)?\s*$/iu.test(line) ? index : -1
+    )
+    .filter((index) => index >= 0);
+  const orderedChoices = choiceRows.length === 3 &&
+    choiceRows.every((choice, index) => choice.number === index + 1) &&
+    choiceRows.every((choice, index) =>
+      index === 0 || choice.index > choiceRows[index - 1].index
+    );
+  const exactLabels = orderedChoices &&
+    isOneTimeYesChoice(choiceRows[0].label) &&
+    isPersistentPermissionChoice(choiceRows[1].label) &&
+    /^No(?:\b|,)/iu.test(choiceRows[2].label);
+  const exactChoiceSpacing = orderedChoices && [
+    region.slice(1, choiceRows[0].index),
+    region.slice(choiceRows[0].index + 1, choiceRows[1].index),
+    region.slice(choiceRows[1].index + 1, choiceRows[2].index)
+  ].every((gap) => gap.every((line) => !line.trim()));
+  const footerIndex = footerIndexes[0] ?? -1;
+  const footerAfterChoices = footerIndexes.length === 1 &&
+    footerIndex > (choiceRows.at(-1)?.index ?? Number.MAX_SAFE_INTEGER);
+  const trailingIsDecorative = footerAfterChoices &&
+    region.slice(footerIndex + 1).every((line) => {
+      const trimmed = line.trim();
+      return !trimmed || /^[─━═╌╍┄┅┈┉\s]+$/u.test(trimmed);
+    });
+  const markerNearBottom = markerIndex >= Math.max(0, lines.length - 12);
+  const detailLines = absoluteHeaderIndex >= 0
+    ? lines.slice(absoluteHeaderIndex + 1, markerIndex)
+      .map((line) => line.trim())
+      .filter(Boolean)
+    : [];
+  const hasExactDialogShape =
+    absoluteHeaderIndex >= 0 &&
+    markerNearBottom &&
+    orderedChoices &&
+    exactLabels &&
+    exactChoiceSpacing &&
+    footerAfterChoices &&
+    trailingIsDecorative &&
+    highlightedRows.length === 1 &&
+    detailLines.length > 0;
+
+  if (!hasExactDialogShape) {
+    return {
+      blocked: true,
+      approvable: false,
+      reason: "the visible Claude Code permission text does not match the supported current Bash dialog exactly; resolve it manually",
+      promptKind: "claude_permission"
+    };
+  }
+
+  const highlighted = highlightedRows[0];
+  if (highlighted.number !== 1 || !isOneTimeYesChoice(highlighted.label)) {
     return {
       blocked: true,
       approvable: false,
@@ -806,10 +931,14 @@ export function detectClaudeApprovalPrompt(screen: string): TerminalApprovalInsp
     };
   }
 
+  const command = redactString(detailLines.join("\n"))
+    .slice(0, CLAUDE_PERMISSION_DETAIL_LENGTH);
   return {
     blocked: true,
     approvable: true,
     promptKind: "claude_permission",
+    command,
+    toolName: "Bash",
     action: {
       mode: "keys",
       keys: ["C-m"],
@@ -1064,39 +1193,6 @@ function isClaudeWorkingLine(line: string): boolean {
   // Codex also renders the words "esc to interrupt". Requiring Claude's spinner prevents
   // a recently reused tmux pane from inheriting a stale Codex working state.
   return /^\s*[✻✽✢✣✤✥✦✧]\s+.+(?:…|\.\.\.|\([^)]*(?:tokens?|\d+s|esc to interrupt)[^)]*\))\s*$/iu.test(line);
-}
-
-function isPermissionChoice(line: string): boolean {
-  const choice = choiceLabel(line);
-  return choice !== undefined && (
-    isOneTimeYesChoice(choice) ||
-    isPersistentPermissionChoice(choice) ||
-    /^No(?:\b|,)/iu.test(choice)
-  );
-}
-
-function isPermissionDialogTrailingLine(line: string): boolean {
-  const trimmed = line.trim();
-  return !trimmed ||
-    isPermissionChoice(line) ||
-    /^(?:Esc|Enter|Tab|Shift\+Tab)\b.*(?:cancel|confirm|amend|select|cycle)/iu.test(trimmed) ||
-    /^[─━═╌╍┄┅┈┉\s]+$/u.test(trimmed);
-}
-
-function findHighlightedChoice(lines: readonly string[]): { index: number; label: string } | undefined {
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const match = /^\s*❯\s*(?:\d+\.\s*)?(.+?)\s*$/u.exec(lines[index]);
-    const label = nonEmptyString(match?.[1]);
-    if (label) {
-      return { index, label };
-    }
-  }
-  return undefined;
-}
-
-function choiceLabel(line: string): string | undefined {
-  const match = /^\s*(?:❯\s*)?(?:\d+\.\s*)?(.+?)\s*$/u.exec(line);
-  return nonEmptyString(match?.[1]);
 }
 
 function isOneTimeYesChoice(label: string): boolean {

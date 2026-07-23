@@ -84,8 +84,8 @@ export function evaluateApprovalPolicy({
   if (candidate.kind !== "run_command") {
     return ask(`approval kind is not supported: ${candidate.kind}`, policyFingerprint);
   }
-  if (candidate.agent === "claude" && candidate.decisionMode !== "structured") {
-    return ask("Claude auto approval requires a structured hook request", policyFingerprint);
+  if (candidate.agent === "claude") {
+    return ask("Claude tmux approval always requires explicit user confirmation", policyFingerprint);
   }
   if (!candidate.command) {
     return ask("approval command is unavailable", policyFingerprint);

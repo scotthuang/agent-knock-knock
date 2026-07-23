@@ -50,7 +50,7 @@ test("approval policy defaults to asking when disabled or unmatched", () => {
   }).action, "ask");
 });
 
-test("Claude auto approval requires a structured hook decision", () => {
+test("Claude tmux approval never enters automatic approval", () => {
   const claudePolicy = {
     enabled: true,
     rules: [{
@@ -63,16 +63,18 @@ test("Claude auto approval requires a structured hook decision", () => {
     agent: "claude",
     decisionMode: "structured" as const
   };
-  assert.equal(evaluateApprovalPolicy({
+  const structured = evaluateApprovalPolicy({
     policy: claudePolicy,
     candidate: claudeCandidate
-  }).action, "approve");
+  });
+  assert.equal(structured.action, "ask");
+  assert.match(structured.reason, /explicit user confirmation/u);
   const screenFallback = evaluateApprovalPolicy({
     policy: claudePolicy,
     candidate: { ...claudeCandidate, decisionMode: "keys" }
   });
   assert.equal(screenFallback.action, "ask");
-  assert.match(screenFallback.reason, /structured hook request/u);
+  assert.match(screenFallback.reason, /explicit user confirmation/u);
 });
 
 test("approval policy rejects shell composition and paths outside workspace", () => {

@@ -384,6 +384,125 @@ console.log(JSON.stringify({ ok: true }));
   }
 });
 
+test("startup reconciliation recovers a persisted pending callback without duplicating it", async () => {
+  const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-pending-recovery-"));
+  const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-openclaw-pending-recovery-"));
+  const callsPath = path.join(fakeBinDir, "calls.ndjson");
+
+  try {
+    const fakeOpenClaw = path.join(fakeBinDir, "openclaw");
+    fs.writeFileSync(
+      fakeOpenClaw,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(process.argv.slice(2)) + "\\n", "utf8");
+console.log(JSON.stringify({ ok: true }));
+`,
+      "utf8"
+    );
+    fs.chmodSync(fakeOpenClaw, 0o755);
+
+    const created = runCli([
+      "new",
+      "--agent",
+      "codex",
+      "--request",
+      "Recover callback_pending after a crash",
+      "--store-dir",
+      storeDir,
+      "--openclaw-session",
+      "agent:main:main"
+    ]);
+    const message = {
+      id: "msg-pending-crash-recovery",
+      ts: "2026-07-24T00:00:00.000Z",
+      conversation_id: created.conversation.conversation_id,
+      from: "codex",
+      to: "openclaw",
+      type: "done",
+      requires_response: false,
+      round: 1,
+      max_rounds: 50,
+      body: "Recovered from persisted pending delivery.",
+      metadata: {}
+    };
+    fs.appendFileSync(created.paths.logPath, `${JSON.stringify({
+      ts: message.ts,
+      conversation_id: message.conversation_id,
+      event: "message",
+      from: message.from,
+      to: message.to,
+      type: message.type,
+      requires_response: message.requires_response,
+      round: message.round,
+      body: message.body,
+      message
+    })}\n`, "utf8");
+
+    const seededAt = new Date().toISOString();
+    const seededState = {
+      ...JSON.parse(fs.readFileSync(created.paths.statePath, "utf8")),
+      status: "callback_pending",
+      callback_delivery: {
+        status: "pending",
+        message,
+        attempts: 1,
+        created_at: seededAt,
+        last_attempt_at: seededAt,
+        gateway_method: "agent-knock-knock.callback",
+        gateway_session: "agent:main:main",
+        openclaw_bin: fakeOpenClaw,
+        close_terminal_bridge_on_done: true,
+        track_delivery: true,
+        final_status: "idle"
+      },
+      updated_at: seededAt
+    };
+    fs.writeFileSync(created.paths.statePath, `${JSON.stringify(seededState, null, 2)}\n`, "utf8");
+
+    const reconciliation = runCli([
+      "reconcile-monitors",
+      "--store-dir",
+      storeDir,
+      "--callback-retry-delay-ms",
+      "25"
+    ]);
+    assert.equal(reconciliation.launched, 1);
+    assert.equal(reconciliation.items[0].reason, "callback_delivery_reconciliation");
+    const recovered = await waitForConversationState(
+      created.paths.statePath,
+      "closed",
+      5_000
+    );
+    assert.equal(recovered.callback_delivery.message.id, message.id);
+    assert.equal(recovered.callback_delivery.status, "delivered");
+    assert.equal(recovered.callback_delivery.attempts, 2);
+
+    const redundantReconciliation = runCli([
+      "reconcile-monitors",
+      "--store-dir",
+      storeDir,
+      "--callback-retry-delay-ms",
+      "0"
+    ]);
+    assert.equal(redundantReconciliation.launched, 0);
+    assert.equal(fs.readFileSync(callsPath, "utf8").trim().split(/\r?\n/).length, 1);
+    const events = fs.readFileSync(created.paths.logPath, "utf8")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line));
+    assert.equal(events.filter((event) =>
+      event.event === "message" && (event.message?.id ?? event.id) === message.id
+    ).length, 1);
+    assert.equal(events.filter((event) =>
+      event.event === "callback_delivery_succeeded" && event.message_id === message.id
+    ).length, 1);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(fakeBinDir, { recursive: true, force: true });
+  }
+});
+
 test("terminal bridge callback retries transient gateway failure automatically", async () => {
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-auto-retry-"));
   const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-openclaw-auto-retry-"));

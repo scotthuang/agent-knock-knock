@@ -1,7 +1,7 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.2.48",
-  "description": "OpenClaw orchestration for local coding agents through ACPX, with shared Codex and Claude Code tmux control.",
+  "version": "0.2.49",
+  "description": "Local-first OpenClaw orchestration for coding agents through shared tmux sessions or ACPX/ACP.",
   "license": "MIT",
   "type": "module",
   "homepage": "https://github.com/scotthuang/agent-knock-knock#readme",
