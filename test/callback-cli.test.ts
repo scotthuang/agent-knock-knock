@@ -196,6 +196,7 @@ test("callback can deliver recorded messages through a plugin gateway method", (
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-"));
   const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-openclaw-"));
   const gatewayCallPath = path.join(fakeBinDir, "gateway-call.json");
+  const gatewayToken = "gateway-token-via-environment-only";
 
   try {
     const fakeOpenClaw = path.join(fakeBinDir, "openclaw");
@@ -203,6 +204,10 @@ test("callback can deliver recorded messages through a plugin gateway method", (
       fakeOpenClaw,
       `#!/usr/bin/env node
 const fs = require("node:fs");
+if (process.env.OPENCLAW_GATEWAY_TOKEN !== ${JSON.stringify(gatewayToken)}) {
+  process.stderr.write("gateway token was not delivered through the environment");
+  process.exit(98);
+}
 fs.writeFileSync(${JSON.stringify(gatewayCallPath)}, JSON.stringify(process.argv.slice(2)), "utf8");
 console.log(JSON.stringify({ ok: true }));
 `,
@@ -232,6 +237,8 @@ console.log(JSON.stringify({ ok: true }));
       "agent-knock-knock.callback",
       "--gateway-session",
       "agent:main:main",
+      "--token",
+      gatewayToken,
       "--message-json",
       JSON.stringify({
         from: "codex",
@@ -248,6 +255,8 @@ console.log(JSON.stringify({ ok: true }));
 
     const gatewayArgs = JSON.parse(fs.readFileSync(gatewayCallPath, "utf8"));
     assert.deepEqual(gatewayArgs.slice(0, 3), ["gateway", "call", "agent-knock-knock.callback"]);
+    assert.equal(gatewayArgs.includes("--token"), false);
+    assert.doesNotMatch(JSON.stringify(gatewayArgs), new RegExp(gatewayToken));
     const params = JSON.parse(gatewayArgs[gatewayArgs.indexOf("--params") + 1]);
     assert.equal(params.sessionKey, "agent:main:main");
     assert.equal(params.message.type, "question");

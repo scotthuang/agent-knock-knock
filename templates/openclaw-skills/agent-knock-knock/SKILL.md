@@ -93,29 +93,15 @@ akk approve task-20260618T010203Z-abcdef12
 
 ## Start A Conversation
 
-Prefer the OpenClaw plugin tool `agent_knock_knock_delegate`. It starts the selected coding agent in the background, creates durable conversation state, embeds the OpenClaw callback command, and returns protocol metadata.
+Use the OpenClaw plugin tool `agent_knock_knock_delegate`. It starts the selected coding agent in the background, creates durable conversation state, embeds a token-free OpenClaw callback command, and returns protocol metadata.
 
-If the plugin tool is unavailable, run these commands from the `agent-knock-knock` repository root, or from a workspace where `scripts/bidirectional-delegate.sh` is available.
-
-Start a managed Claude delegation through the legacy script:
-
-```bash
-scripts/bidirectional-delegate.sh --send \
-  --token '<gateway-token>' \
-  --request '<user task>'
-```
-
-If you only want to inspect the payload before sending:
-
-```bash
-scripts/bidirectional-delegate.sh --request '<user task>'
-```
+If the plugin tool is unavailable, stop and report that Agent Knock Knock must be installed or repaired. Never request, print, or place an OpenClaw Gateway token in a delegated prompt or custom callback command.
 
 ## Communication Contract
 
 Do not use OpenClaw's internal session tools, such as `sessions_send`, to send the task or follow-up messages directly to Codex, Claude, or Cursor.
 
-All OpenClaw-to-agent task delivery must go through the Agent Knock Knock plugin tools, `scripts/bidirectional-delegate.sh`, or an equivalent `agent-knock-knock delegate` command. Standard ACPX delegation builds the required bootstrap prompt, embeds the OpenClaw callback command, creates durable conversation state, and records the initial task message. Terminal-control bridge conversations are different: AKK types only the user-facing message into the tmux agent pane, monitors adapter and structured hook state, and sends the OpenClaw callback itself.
+All OpenClaw-to-agent task delivery must go through the Agent Knock Knock plugin tools. Standard ACPX delegation builds the required bootstrap prompt, embeds the OpenClaw callback command, creates durable conversation state, and records the initial task message. Terminal-control bridge conversations are different: AKK types only the user-facing message into the tmux agent pane, monitors adapter and structured hook state, and sends the OpenClaw callback itself.
 
 For standard ACPX delegation, the coding agent must communicate back to OpenClaw by executing the callback command included in its bootstrap prompt. For terminal-control bridge conversations, AKK owns callback delivery. The coding agent should not rely on OpenClaw's session tools, chat memory, or an out-of-band reply path.
 
@@ -126,7 +112,7 @@ The required routing is:
 3. The coding agent sends `question`, `progress`, `blocked`, `done`, or `error` messages back by running the provided callback command; for terminal-control bridge sessions, AKK observes completion and sends the callback.
 4. OpenClaw answers `question` or `blocked` messages with structured `answer` messages through the same protocol path.
 
-If the plugin tool and delegation script are unavailable, stop and report that Agent Knock Knock is not available. Do not fall back to direct `sessions_send` delivery.
+If the plugin tool is unavailable, stop and report that Agent Knock Knock is not available. Do not fall back to direct `sessions_send` delivery.
 
 ## Recovery Decisions
 

@@ -141,11 +141,11 @@
       },
       "gatewayUrl": {
         "type": "string",
-        "description": "Gateway URL used by the legacy CLI callback delivery path."
+        "description": "Deprecated compatibility field. Plugin callbacks use OpenClaw's configured Gateway target and do not forward this value."
       },
       "gatewayToken": {
         "type": "string",
-        "description": "Gateway token used by the legacy CLI callback delivery path."
+        "description": "Deprecated compatibility field. Plugin callbacks use OpenClaw's Gateway credentials and never forward this value to coding agents."
       },
       "openclawBin": {
         "type": "string",

@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.2.48 - 2026-07-23
+
+### Added
+
+- Add Node 22/24 CI, Dependabot coverage, contribution templates, and a social preview asset.
+
+### Changed
+
+- Refresh the README and project metadata around OpenClaw orchestration, ACPX delegation, and shared Codex/Claude tmux control.
+- Pin the default Codex ACP adapter to the tested `@agentclientprotocol/codex-acp@1.1.7` release and require Node.js 22.14+.
+- Keep the installed OpenClaw skill on token-free plugin callbacks instead of recommending the legacy direct-token script.
+
+### Fixed
+
+- Respect the configured default agent and custom store for `/akk` commands, preserve callback delivery for slash-command tmux sends, and keep agent-specific settings out of unrelated follow-ups.
+- Include native and terminal sessions in `/akk list`, resolve relative plugin stores from the configured workspace, and recognize Claude's native versioned executable path.
+- Reconcile eligible tmux monitors after Gateway restarts, prevent duplicate monitors, preserve wrapper process ancestry across list and takeover, and safely migrate exact legacy Codex terminal identities.
+- Make CLI help, version, doctor requirements, and failure exit status predictable.
+
+### Security
+
+- Require an exact live agent identity before tmux input, revalidate auto approvals inside the executor against the observed prompt, and avoid persisting unmanaged Claude hook payloads.
+- Recheck keys-mode approval fingerprints immediately before input and use tmux bracketed paste for multiline tasks.
+- Keep Gateway tokens out of normal plugin callbacks, coding-agent environments, CLI output, and child-process arguments.
+- Store local task data with private permissions, atomic state replacement, tokenized control locks, serialized stale-lock recovery and event writes, path-containment checks, and symlink rejection.
+- Refuse shared runtime-log directories without changing their permissions and append through no-follow file descriptors.
+
 ## 0.2.47 - 2026-07-23
 
 ### Added

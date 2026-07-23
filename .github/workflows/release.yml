@@ -6,20 +6,59 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  release:
+  publish:
+    name: Test and publish npm package
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: Validate tag and package version
+        id: release
+        shell: bash
+        run: |
+          package_name="$(node -p "require('./package.json').name")"
+          package_version="$(node -p "require('./package.json').version")"
+          expected_tag="v${package_version}"
+
+          if [[ "${GITHUB_REF_NAME}" != "${expected_tag}" ]]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match package version ${package_version}."
+            exit 1
+          fi
+
+          git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+          release_commit="$(git rev-parse "${GITHUB_REF_NAME}^{commit}")"
+          if ! git merge-base --is-ancestor "${release_commit}" origin/main; then
+            echo "::error::Release commit ${release_commit} is not on origin/main."
+            exit 1
+          fi
+
+          {
+            echo "package_name=${package_name}"
+            echo "package_version=${package_version}"
+            echo "release_commit=${release_commit}"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Install dependencies
         run: npm ci
@@ -27,12 +66,44 @@ jobs:
       - name: Run tests
         run: npm test
 
-      - name: Publish npm package
-        run: npm publish --access public
+      - name: Publish npm package with provenance
+        shell: bash
+        run: |
+          package_spec="${PACKAGE_NAME}@${PACKAGE_VERSION}"
+          if npm view "${package_spec}" version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
+            published_git_head="$(npm view "${package_spec}" gitHead --registry=https://registry.npmjs.org)"
+            if [[ "${published_git_head}" != "${RELEASE_COMMIT}" ]]; then
+              echo "::error::${package_spec} is already published from ${published_git_head:-an unknown commit}."
+              exit 1
+            fi
+            echo "${package_spec} is already published from this commit; skipping npm publish."
+          else
+            npm publish --access public --provenance --registry=https://registry.npmjs.org
+          fi
         env:
+          PACKAGE_NAME: ${{ steps.release.outputs.package_name }}
+          PACKAGE_VERSION: ${{ steps.release.outputs.package_version }}
+          RELEASE_COMMIT: ${{ steps.release.outputs.release_commit }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+  github-release:
+    name: Create GitHub Release
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
       - name: Create GitHub Release
-        run: gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag
+        shell: bash
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "GitHub Release ${GITHUB_REF_NAME} already exists; nothing to do."
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --generate-notes \
+              --verify-tag
+          fi
         env:
           GITHUB_TOKEN: ${{ github.token }}

@@ -4,8 +4,10 @@ Thanks for taking the time to improve Agent Knock Knock.
 
 ## Development Setup
 
+Use Node.js 22.14 or newer; Node.js 24 is recommended. CI currently verifies the latest Node.js 22 and 24 releases.
+
 ```bash
-npm install
+npm ci
 npm run build
 npm test
 ```
@@ -25,6 +27,7 @@ Before opening a pull request, run:
 ```bash
 npm run typecheck
 npm test
+npm pack --dry-run
 ```
 
 If your change touches logging, callbacks, or trace output, also review the output for secrets and local-only data. Trace output must not expose agent thinking text, raw callback payloads, gateway tokens, API keys, passwords, or proxy credentials.
@@ -42,6 +45,9 @@ If your change touches logging, callbacks, or trace output, also review the outp
 - Include tests for CLI behavior, protocol changes, callback delivery, or trace parsing.
 - Update `README.md` or `CHANGELOG.md` when user-visible behavior changes.
 - Do not commit `dist/`, `node_modules/`, runtime logs, local OpenClaw state, or `.env` files.
+- Complete the pull request checklist and wait for the Node.js 22 and 24 CI jobs to pass.
+
+For installation and usage help, see [SUPPORT.md](SUPPORT.md).
 
 ## Security Reports
 

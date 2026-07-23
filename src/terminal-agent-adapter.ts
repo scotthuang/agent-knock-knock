@@ -63,6 +63,8 @@ export type TerminalApprovalInspection =
       approvable: true;
       promptKind: string;
       command?: string;
+      /** Adapter-verified working directory for this exact approval request, when available. */
+      cwd?: string;
       /** Safe display name for the tool that requested permission. */
       toolName?: string;
       /** Redacted, bounded summary of the permission target; never the full tool input. */
@@ -75,6 +77,7 @@ export type TerminalApprovalInspection =
       reason: string;
       promptKind?: string;
       command?: string;
+      cwd?: string;
       toolName?: string;
       requestDetail?: string;
       action?: undefined;

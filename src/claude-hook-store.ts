@@ -401,13 +401,18 @@ export class ClaudeHookStore {
 
     return this.withSessionLock(input.session_id, () => this.withLeaseLock(() => {
       const receivedAt = this.nowIso();
-      const session = this.readSessionById(input.session_id) ?? newSession(input, receivedAt);
-      const eventId = this.uniqueEventId(session);
       const lease = this.resolveLeaseFrom(this.readLeases(), {
         sessionId: input.session_id,
         ...(claudePid === undefined ? {} : { pid: claudePid }),
         cwd: input.cwd
       }, { ambiguousCwdAsUnmanaged: true });
+      const persist = lease?.authorizationEligible === true;
+      // Global Claude hooks observe every local Claude session. Never load an unmanaged
+      // event into a persisted session or write its raw prompt/tool/output fields to disk.
+      const session = persist
+        ? this.readSessionById(input.session_id) ?? newSession(input, receivedAt)
+        : newSession(input, receivedAt);
+      const eventId = this.uniqueEventId(session);
 
       if (input.hook_event_name === "SessionStart" &&
           (input.source === "startup" || input.source === "clear" || input.source === "fork")) {
@@ -441,8 +446,17 @@ export class ClaudeHookStore {
       }
       session.events.push(event);
 
-      const permission = input.hook_event_name === "PermissionRequest" && lease?.authorizationEligible
-        ? this.createPendingPermission(session, event, input, leaseMs, lease)
+      if (!persist) {
+        return clone({
+          event,
+          session,
+          managed: false,
+          ...(lease ? { lease } : {})
+        });
+      }
+
+      const permission = input.hook_event_name === "PermissionRequest"
+        ? this.createPendingPermission(session, event, input, leaseMs, lease!)
         : undefined;
       if (permission) {
         session.permissions.push(permission);
@@ -452,9 +466,7 @@ export class ClaudeHookStore {
       return clone({
         event,
         session,
-        managed: input.hook_event_name === "PermissionRequest"
-          ? Boolean(permission)
-          : lease !== undefined,
+        managed: true,
         ...(permission ? { permission } : {}),
         ...(lease ? { lease } : {})
       });

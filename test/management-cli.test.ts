@@ -6,7 +6,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
-const CODEX_ACPX_SELECTOR = ["--agent", "npx -y @agentclientprotocol/codex-acp@^1.1.0"];
+const CODEX_ACPX_SELECTOR = ["--agent", "npx -y @agentclientprotocol/codex-acp@1.1.7"];
 
 test("list status send and close manage agent delegations", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-management-"));
@@ -204,9 +204,16 @@ test("list groups delegated native and terminal-controlled sessions", () => {
         },
         {
           pid: 2222,
-          ppid: 9999,
+          ppid: 3333,
           elapsed: "00:30",
           command: "codex",
+          cwd: "/repo/tmux"
+        },
+        {
+          pid: 3333,
+          ppid: 9999,
+          elapsed: "00:31",
+          command: "zsh -lc launch-agent",
           cwd: "/repo/tmux"
         }
       ]),
@@ -303,6 +310,69 @@ test("list groups delegated native and terminal-controlled sessions", () => {
     assert.deepEqual(managedOnly.native, []);
     assert.deepEqual(managedOnly.terminal_controlled, []);
     assert.equal(managedOnly.native_scan.enabled, false);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("list keeps same-named targets from distinct tmux servers", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-list-multi-tmux-"));
+  const storeDir = path.join(tempDir, "conversations");
+
+  try {
+    const listed = runCli([
+      "list",
+      "--store-dir",
+      storeDir,
+      "--processes-json",
+      JSON.stringify([
+        {
+          pid: 2201,
+          ppid: 9001,
+          elapsed: "00:20",
+          command: "codex",
+          cwd: "/repo/first"
+        },
+        {
+          pid: 2202,
+          ppid: 9002,
+          elapsed: "00:21",
+          command: "codex",
+          cwd: "/repo/second"
+        }
+      ]),
+      "--terminals-json",
+      JSON.stringify([
+        {
+          kind: "tmux",
+          target: "work:0.0",
+          socketPath: "/tmp/tmux-first",
+          session: "work",
+          window: 0,
+          pane: 0,
+          panePid: 9001,
+          currentCommand: "node",
+          currentPath: "/repo/first"
+        },
+        {
+          kind: "tmux",
+          target: "work:0.0",
+          socketPath: "/tmp/tmux-second",
+          session: "work",
+          window: 0,
+          pane: 0,
+          panePid: 9002,
+          currentCommand: "node",
+          currentPath: "/repo/second"
+        }
+      ])
+    ]);
+
+    assert.equal(listed.terminal_controlled.length, 2);
+    assert.deepEqual(
+      listed.terminal_controlled.map((entry) => entry.terminal_control.panePid).sort(),
+      [9001, 9002]
+    );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

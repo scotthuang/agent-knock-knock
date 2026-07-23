@@ -12,6 +12,11 @@ const LOG_LEVELS = {
 };
 const SENSITIVE_KEY_PATTERN = /(authorization|api[_-]?key|token|secret|password|passwd|gatewayToken|proxy|allProxy)/i;
 const cleanupPerformed = new Set();
+const PRIVATE_DIRECTORY_MODE = 0o700;
+const PRIVATE_FILE_MODE = 0o600;
+const NO_FOLLOW_FLAG = typeof fs.constants.O_NOFOLLOW === "number"
+  ? fs.constants.O_NOFOLLOW
+  : 0;
 
 export type RuntimeLogLevel = "debug" | "info" | "warn" | "error" | "silent";
 
@@ -70,9 +75,9 @@ export function writeRuntimeLog(record: RuntimeLogRecord, options: RuntimeLogOpt
   const now = options.now ?? new Date();
   const logDir = expandHome(options.logDir ?? process.env.AKK_LOG_DIR ?? defaultRuntimeLogDir());
   const retentionDays = retentionDaysFromOptions(options);
+  ensureRuntimeLogDir(logDir);
   maybeCleanupRuntimeLogs({ logDir, retentionDays, now });
 
-  fs.mkdirSync(logDir, { recursive: true });
   const logPath = runtimeLogPath({ now, logDir });
   const entry = redactRecord({
     ts: localTimestamp(now),
@@ -80,7 +85,25 @@ export function writeRuntimeLog(record: RuntimeLogRecord, options: RuntimeLogOpt
     level,
     ...record
   });
-  fs.appendFileSync(logPath, `${JSON.stringify(entry)}\n`, "utf8");
+  const fd = fs.openSync(
+    logPath,
+    fs.constants.O_CREAT |
+      fs.constants.O_WRONLY |
+      fs.constants.O_APPEND |
+      NO_FOLLOW_FLAG,
+    PRIVATE_FILE_MODE
+  );
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) {
+      throw new Error(`runtime log must be a regular file: ${logPath}`);
+    }
+    fs.fchmodSync(fd, PRIVATE_FILE_MODE);
+    fs.writeFileSync(fd, `${JSON.stringify(entry)}\n`, "utf8");
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
   return { written: true, path: logPath, entry };
 }
 
@@ -167,6 +190,40 @@ function maybeCleanupRuntimeLogs({ logDir, retentionDays, now }: { logDir: strin
   cleanupRuntimeLogs({ logDir, retentionDays, now });
 }
 
+function ensureRuntimeLogDir(logDir: string): void {
+  const resolvedLogDir = path.resolve(logDir);
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(resolvedLogDir);
+  } catch (error) {
+    if (!isNodeError(error, "ENOENT")) {
+      throw error;
+    }
+    fs.mkdirSync(resolvedLogDir, {
+      recursive: true,
+      mode: PRIVATE_DIRECTORY_MODE
+    });
+    stat = fs.lstatSync(resolvedLogDir);
+  }
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new Error(`runtime log directory must be a real directory: ${logDir}`);
+  }
+
+  const entries = fs.readdirSync(resolvedLogDir, { withFileTypes: true });
+  const looksDedicated =
+    resolvedLogDir === path.resolve(defaultRuntimeLogDir()) ||
+    entries.length === 0 ||
+    entries.every((entry) =>
+      entry.isFile() && /^runtime-\d{4}-\d{2}-\d{2}\.ndjson$/.test(entry.name)
+    );
+  if (!looksDedicated) {
+    throw new Error(
+      `refusing to use a non-dedicated runtime log directory; choose an empty or AKK-only directory: ${logDir}`
+    );
+  }
+  fs.chmodSync(resolvedLogDir, PRIVATE_DIRECTORY_MODE);
+}
+
 function retentionDaysFromOptions(options: RuntimeLogOptions): number {
   if (options.retentionDays !== undefined) {
     return Number(options.retentionDays);
@@ -210,4 +267,9 @@ function expandHome(filePath: string): string {
   }
 
   return filePath;
+}
+
+function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error &&
+    (error as NodeJS.ErrnoException).code === code;
 }

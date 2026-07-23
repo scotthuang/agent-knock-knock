@@ -4,15 +4,23 @@ import { fileURLToPath } from "node:url";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import {
   EXECUTOR_KINDS,
-  executorDefinitionForAlias,
   executorDefinitionForKind,
   parseLeadingExecutorAlias
 } from "./executors.js";
 import {
+  AKK_CALLBACK_METHOD,
+  akkUsageText,
+  buildAkkCommandCliArgs,
+  formatAkkListCommandResult,
+  parseAkkCommand,
+  resolvePluginStoreDir,
+  resolveConversationOverrides
+} from "./openclaw-plugin-helpers.js";
+import {
   attemptAutoApproval
 } from "./approval-policy.js";
 
-const CALLBACK_METHOD = "agent-knock-knock.callback";
+const CALLBACK_METHOD = AKK_CALLBACK_METHOD;
 const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const defaultBinPath = path.join(pluginRoot, "dist", "src", "cli.js");
 
@@ -33,11 +41,7 @@ const delegateParameters = {
     },
     workspace: {
       type: "string",
-      description: "Workspace path for Claude Code. Defaults to plugin config or the current process directory."
-    },
-    storeDir: {
-      type: "string",
-      description: "Conversation store directory. Defaults to <workspace>/.agent-knock-knock/conversations."
+      description: "Workspace path for the selected coding agent. Defaults to plugin config or the Gateway process directory."
     },
     claudeSession: {
       type: "string",
@@ -128,9 +132,6 @@ const listParameters = {
       type: "boolean",
       description: "When true, include tmux terminal discovery diagnostics for debugging Gateway environment issues."
     },
-    storeDir: {
-      type: "string"
-    },
     idleTimeoutMinutes: {
       type: "number"
     }
@@ -150,9 +151,6 @@ const renewParameters = {
       type: "number",
       exclusiveMinimum: 0,
       description: "New terminal inactivity timeout in minutes."
-    },
-    storeDir: {
-      type: "string"
     }
   }
 };
@@ -165,9 +163,6 @@ const retryCallbackParameters = {
     conversation_id: {
       type: "string",
       description: "AKK-managed conversation whose persisted callback delivery is pending or failed."
-    },
-    storeDir: {
-      type: "string"
     }
   }
 };
@@ -181,9 +176,6 @@ const statusParameters = {
       type: "string",
       description:
         "AKK-managed conversation id, or a terminal-controlled id from AKK list such as terminal:v2:tmux:codex:codex-work:0.1:33389."
-    },
-    storeDir: {
-      type: "string"
     },
     idleTimeoutMinutes: {
       type: "number"
@@ -207,9 +199,6 @@ const describeParameters = {
       type: "string",
       description:
         "AKK-managed conversation id, native Codex id, or terminal-controlled id from AKK list. Use this when the user asks what a listed AKK/Codex session is about."
-    },
-    storeDir: {
-      type: "string"
     },
     idleTimeoutMinutes: {
       type: "number"
@@ -249,9 +238,6 @@ const sendParameters = {
     model: {
       type: "string"
     },
-    storeDir: {
-      type: "string"
-    },
     idleTimeoutMinutes: {
       type: "number"
     },
@@ -280,9 +266,6 @@ const cancelParameters = {
     allProxy: {
       type: "string"
     },
-    storeDir: {
-      type: "string"
-    },
     idleTimeoutMinutes: {
       type: "number"
     }
@@ -306,9 +289,6 @@ const recoveryParameters = {
     model: {
       type: "string"
     },
-    storeDir: {
-      type: "string"
-    },
     idleTimeoutMinutes: {
       type: "number"
     }
@@ -324,9 +304,6 @@ const closeParameters = {
       type: "string"
     },
     reason: {
-      type: "string"
-    },
-    storeDir: {
       type: "string"
     }
   }
@@ -391,10 +368,6 @@ const agentTakeoverParameters = {
       description:
         "Required when strategy=fork and createConversation=true. OpenClaw-approved summary of the bounded source context to inject into the new forked AKK session."
     },
-    storeDir: {
-      type: "string",
-      description: "Conversation store directory. Defaults to plugin config or <workspace>/.agent-knock-knock/conversations."
-    },
     openclawSession: {
       type: "string",
       description: "OpenClaw session label recorded in the created AKK conversation."
@@ -432,9 +405,6 @@ const approveParameters = {
       type: "string",
       description:
         "Exact approval fingerprint returned by the latest status or approval-required callback. The prompt is captured again and must still match before keys are sent."
-    },
-    storeDir: {
-      type: "string"
     }
   }
 };
@@ -462,6 +432,36 @@ export default definePluginEntry({
       },
       { scope: "operator.write" }
     );
+
+    try {
+      api.registerService?.({
+        id: "agent-knock-knock-monitor-reconciliation",
+        start() {
+          try {
+            const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+            const args = ["reconcile-monitors"];
+            pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
+            const result = runCli(api, args);
+            api.logger.info?.(
+              "agent-knock-knock monitor reconciliation: " +
+              `checked=${result.checked ?? 0} launched=${result.launched ?? 0} ` +
+              `already_running=${result.already_running ?? 0} skipped=${result.skipped ?? 0} ` +
+              `errors=${result.errors ?? 0}`
+            );
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            api.logger.warn?.(
+              `agent-knock-knock monitor reconciliation skipped after startup error: ${message}`
+            );
+          }
+        }
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      api.logger.warn?.(
+        `agent-knock-knock monitor reconciliation service was not registered: ${message}`
+      );
+    }
 
     api.registerCommand?.({
       name: "akk",
@@ -504,7 +504,11 @@ export default definePluginEntry({
       parameters: listParameters,
       buildArgs: (params) => {
         const args = ["list"];
-        pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
+        pushOptional(
+          args,
+          "--store-dir",
+          resolvePluginStoreDir(isRecord(api.pluginConfig) ? api.pluginConfig : {})
+        );
         pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(api.pluginConfig?.idleTimeoutMinutes));
         pushOptional(args, "--agent", stringValue(params.agent));
         pushOptional(args, "--status", stringValue(params.status));
@@ -530,7 +534,11 @@ export default definePluginEntry({
       parameters: statusParameters,
       buildArgs: (params) => {
         const args = ["status", "--conversation", requiredString(params.conversation_id, "conversation_id")];
-        pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
+        pushOptional(
+          args,
+          "--store-dir",
+          resolvePluginStoreDir(isRecord(api.pluginConfig) ? api.pluginConfig : {})
+        );
         pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(api.pluginConfig?.idleTimeoutMinutes));
         if (params.trace === true) {
           args.push("--trace");
@@ -545,7 +553,11 @@ export default definePluginEntry({
       parameters: describeParameters,
       buildArgs: (params) => {
         const args = ["describe", "--conversation", requiredString(params.conversation_id, "conversation_id")];
-        pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
+        pushOptional(
+          args,
+          "--store-dir",
+          resolvePluginStoreDir(isRecord(api.pluginConfig) ? api.pluginConfig : {})
+        );
         pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(api.pluginConfig?.idleTimeoutMinutes));
         pushOptional(args, "--max-messages", numberString(params.maxMessages));
         pushOptional(args, "--max-commands", numberString(params.maxCommands));
@@ -573,15 +585,14 @@ export default definePluginEntry({
           "--background"
         ];
         pushOptional(args, "--type", stringValue(params.type));
-        pushOptional(args, "--all-proxy", stringValue(params.allProxy) ?? stringValue(config.codexAllProxy) ?? stringValue(config.allProxy));
-        pushOptional(args, "--model", stringValue(params.model) ?? stringValue(config.codexModel) ?? stringValue(config.model));
-        pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(config.storeDir));
+        const overrides = resolveConversationOverrides(params, config);
+        pushOptional(args, "--all-proxy", overrides.allProxy);
+        pushOptional(args, "--model", overrides.model);
+        pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
         pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(config.idleTimeoutMinutes));
         pushOptional(args, "--agent-timeout-minutes", numberString(params.agentTimeoutMinutes) ?? numberString(config.agentTimeoutMinutes));
         pushOptional(args, "--agent-hard-timeout-minutes", numberString(params.agentHardTimeoutMinutes) ?? numberString(config.agentHardTimeoutMinutes));
         pushOptional(args, "--openclaw-session", openclawSession);
-        pushOptional(args, "--gateway-url", stringValue(config.gatewayUrl));
-        pushOptional(args, "--token", stringValue(config.gatewayToken));
         pushOptional(args, "--gateway-method", CALLBACK_METHOD);
         pushOptional(args, "--gateway-session", openclawSession);
         pushOptional(args, "--openclaw-bin", stringValue(config.openclawBin));
@@ -604,7 +615,11 @@ export default definePluginEntry({
           "--expected-approval-fingerprint",
           requiredString(params.expected_approval_fingerprint, "expected_approval_fingerprint")
         );
-        pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
+        pushOptional(
+          args,
+          "--store-dir",
+          resolvePluginStoreDir(isRecord(api.pluginConfig) ? api.pluginConfig : {})
+        );
         return args;
       }
     });
@@ -617,7 +632,7 @@ export default definePluginEntry({
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
         const args = ["renew", "--conversation", requiredString(params.conversation_id, "conversation_id")];
         pushOptional(args, "--minutes", numberString(params.minutes) ?? numberString(config.agentTimeoutMinutes));
-        pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(config.storeDir));
+        pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
         return args;
       }
     });
@@ -629,7 +644,7 @@ export default definePluginEntry({
       buildArgs: (params) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
         const args = ["retry-callback", "--conversation", requiredString(params.conversation_id, "conversation_id")];
-        pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(config.storeDir));
+        pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
         return args;
       }
     });
@@ -639,10 +654,12 @@ export default definePluginEntry({
       description: "Cancel an existing Agent Knock Knock Codex, Claude, or Cursor task. Delegated sessions use cooperative ACPX cancellation. Terminal-controlled Claude denies a pending structured permission or sends Escape; other adapters use their declared interrupt keys. The underlying tmux pane remains open.",
       parameters: cancelParameters,
       buildArgs: (params) => {
+        const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+        const overrides = resolveConversationOverrides(params, config);
         const args = ["cancel", "--conversation", requiredString(params.conversation_id, "conversation_id")];
-        pushOptional(args, "--all-proxy", stringValue(params.allProxy) ?? stringValue(api.pluginConfig?.codexAllProxy) ?? stringValue(api.pluginConfig?.allProxy));
-        pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
-        pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(api.pluginConfig?.idleTimeoutMinutes));
+        pushOptional(args, "--all-proxy", overrides.allProxy);
+        pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
+        pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(config.idleTimeoutMinutes));
         return args;
       }
     });
@@ -661,7 +678,11 @@ export default definePluginEntry({
       buildArgs: (params) => {
         const args = ["close", "--conversation", requiredString(params.conversation_id, "conversation_id")];
         pushOptional(args, "--reason", stringValue(params.reason));
-        pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
+        pushOptional(
+          args,
+          "--store-dir",
+          resolvePluginStoreDir(isRecord(api.pluginConfig) ? api.pluginConfig : {})
+        );
         return args;
       }
     });
@@ -704,10 +725,8 @@ export default definePluginEntry({
         pushOptional(args, "--terminal-target", stringValue(params.terminalTarget));
         pushOptional(args, "--request", stringValue(params.request));
         pushOptional(args, "--fork-summary", stringValue(params.forkSummary));
-        pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(config.storeDir));
+        pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
         pushOptional(args, "--openclaw-session", openclawSession);
-        pushOptional(args, "--gateway-url", stringValue(config.gatewayUrl));
-        pushOptional(args, "--token", stringValue(config.gatewayToken));
         pushOptional(args, "--gateway-method", CALLBACK_METHOD);
         pushOptional(args, "--gateway-session", openclawSession);
         pushOptional(args, "--openclaw-bin", stringValue(config.openclawBin));
@@ -740,88 +759,34 @@ async function handleAkkCommand(api, ctx) {
       });
       return { text: formatDelegateCommandResult(result) };
     }
-    if (parsed.action === "list") {
-      const result = runCli(api, ["list"]);
-      return { text: formatListCommandResult(result) };
+    const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+    const args = buildAkkCommandCliArgs(parsed, config, {
+      sessionKey: ctx.sessionKey
+    });
+    if (!args) {
+      return { text: akkUsageText(), isError: true };
     }
-    if (parsed.action === "status") {
-      const result = runCli(api, ["status", "--conversation", parsed.conversationId]);
-      return { text: formatStatusCommandResult(result) };
+    const result = runCli(api, args);
+    switch (parsed.action) {
+      case "list":
+        return { text: formatAkkListCommandResult(result) };
+      case "status":
+        return { text: formatStatusCommandResult(result) };
+      case "describe":
+        return { text: formatDescribeCommandResult(result) };
+      case "send":
+        return { text: formatSendCommandResult(result) };
+      case "renew":
+        return { text: formatRenewCommandResult(result) };
+      case "retry-callback":
+        return { text: formatRetryCallbackCommandResult(result) };
+      case "cancel":
+        return { text: formatCancelCommandResult(result) };
+      case "recover":
+        return { text: formatRecoveryCommandResult(result) };
+      case "close":
+        return { text: formatCloseCommandResult(result) };
     }
-    if (parsed.action === "describe") {
-      const result = runCli(api, ["describe", "--conversation", parsed.conversationId]);
-      return { text: formatDescribeCommandResult(result) };
-    }
-    if (parsed.action === "send") {
-      const args = [
-        "send",
-        "--conversation",
-        parsed.conversationId,
-        "--message",
-        parsed.message,
-        "--background"
-      ];
-      const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
-      pushOptional(args, "--all-proxy", stringValue(config.codexAllProxy) ?? stringValue(config.allProxy));
-      pushOptional(args, "--model", stringValue(config.codexModel) ?? stringValue(config.model));
-      pushOptional(args, "--idle-timeout-minutes", numberString(config.idleTimeoutMinutes));
-      pushOptional(args, "--agent-timeout-minutes", numberString(config.agentTimeoutMinutes));
-      pushOptional(args, "--agent-hard-timeout-minutes", numberString(config.agentHardTimeoutMinutes));
-      const result = runCli(api, args);
-      return { text: formatSendCommandResult(result) };
-    }
-    if (parsed.action === "renew") {
-      const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
-      const args = ["renew", "--conversation", parsed.conversationId];
-      pushOptional(args, "--minutes", parsed.minutes ?? numberString(config.agentTimeoutMinutes));
-      pushOptional(args, "--store-dir", stringValue(config.storeDir));
-      const result = runCli(api, args);
-      return { text: formatRenewCommandResult(result) };
-    }
-    if (parsed.action === "retry-callback" || parsed.action === "retry") {
-      const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
-      const args = ["retry-callback", "--conversation", parsed.conversationId];
-      pushOptional(args, "--store-dir", stringValue(config.storeDir));
-      const result = runCli(api, args);
-      return { text: formatRetryCallbackCommandResult(result) };
-    }
-    if (parsed.action === "cancel") {
-      const args = [
-        "cancel",
-        "--conversation",
-        parsed.conversationId
-      ];
-      const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
-      pushOptional(args, "--all-proxy", stringValue(config.codexAllProxy) ?? stringValue(config.allProxy));
-      pushOptional(args, "--idle-timeout-minutes", numberString(config.idleTimeoutMinutes));
-      const result = runCli(api, args);
-      return { text: formatCancelCommandResult(result) };
-    }
-    if (parsed.action === "recover") {
-      const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
-      const args = [
-        "recover",
-        "--conversation",
-        parsed.conversationId,
-        "--background"
-      ];
-      pushOptional(args, "--all-proxy", stringValue(config.codexAllProxy) ?? stringValue(config.allProxy));
-      pushOptional(args, "--model", stringValue(config.codexModel) ?? stringValue(config.model));
-      pushOptional(args, "--idle-timeout-minutes", numberString(config.idleTimeoutMinutes));
-      const result = runCli(api, args);
-      return { text: formatRecoveryCommandResult(result) };
-    }
-    if (parsed.action === "close") {
-      const result = runCli(api, [
-        "close",
-        "--conversation",
-        parsed.conversationId,
-        "--reason",
-        parsed.reason
-      ]);
-      return { text: formatCloseCommandResult(result) };
-    }
-    return { text: akkUsageText(), isError: true };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return {
@@ -831,114 +796,14 @@ async function handleAkkCommand(api, ctx) {
   }
 }
 
-function parseAkkCommand(args) {
-  const input = String(args ?? "").trim();
-  if (!input || input === "help" || input === "-h" || input === "--help") {
-    return { action: "help" };
-  }
-
-  const { token, rest } = takeToken(input);
-  const action = String(token).toLowerCase();
-  if (action === "list" || action === "ls" || action === "tasks") {
-    return { action: "list" };
-  }
-  if (action === "status" || action === "show") {
-    const { token: conversationId } = takeRequiredToken(rest, "Usage: /akk status <conversation-id>");
-    return { action: "status", conversationId };
-  }
-  if (action === "describe" || action === "summary" || action === "about") {
-    const { token: conversationId } = takeRequiredToken(rest, "Usage: /akk describe <conversation-id>");
-    return { action: "describe", conversationId };
-  }
-  if (action === "send" || action === "reply") {
-    const { token: conversationId, rest: message } = takeRequiredToken(rest, "Usage: /akk send <conversation-id> <message>");
-    const body = message.trim();
-    if (!body) {
-      throw new Error("Usage: /akk send <conversation-id> <message>");
-    }
-    return { action: "send", conversationId, message: body };
-  }
-  if (action === "cancel" || action === "stop") {
-    const { token: conversationId } = takeRequiredToken(rest, "Usage: /akk cancel <conversation-id>");
-    return { action: "cancel", conversationId };
-  }
-  if (action === "renew") {
-    const { token: conversationId, rest: minutesInput } = takeRequiredToken(rest, "Usage: /akk renew <conversation-id> [minutes]");
-    const minutes = minutesInput.trim();
-    if (minutes && (!Number.isFinite(Number(minutes)) || Number(minutes) <= 0)) {
-      throw new Error("Usage: /akk renew <conversation-id> [positive-minutes]");
-    }
-    return { action: "renew", conversationId, minutes: minutes || undefined };
-  }
-  if (action === "retry-callback" || action === "retry") {
-    const { token: conversationId } = takeRequiredToken(rest, "Usage: /akk retry-callback <conversation-id>");
-    return { action: "retry-callback", conversationId };
-  }
-  if (action === "recover") {
-    const { token: conversationId } = takeRequiredToken(rest, "Usage: /akk recover <conversation-id>");
-    return { action: "recover", conversationId };
-  }
-  if (action === "close" || action === "done") {
-    const { token: conversationId, rest: reason } = takeRequiredToken(rest, "Usage: /akk close <conversation-id> [reason]");
-    return { action: "close", conversationId, reason: reason.trim() || "Closed from /akk command" };
-  }
-  const executorDefinition = executorDefinitionForAlias(action);
-  if (executorDefinition) {
-    const request = rest.trim();
-    if (!request) {
-      throw new Error(`Usage: /akk ${executorDefinition.kind} <task>`);
-    }
-    return { action: "delegate", agent: executorDefinition.kind, request };
-  }
-  return { action: "delegate", agent: "codex", request: input };
-}
-
-function takeRequiredToken(input, usage) {
-  const parsed = takeToken(input);
-  if (!parsed.token) {
-    throw new Error(usage);
-  }
-  return parsed;
-}
-
-function takeToken(input) {
-  const value = String(input ?? "").trimStart();
-  const match = value.match(/^(\S+)(?:\s+([\s\S]*))?$/);
-  if (!match) {
-    return { token: "", rest: "" };
-  }
-  return {
-    token: match[1],
-    rest: match[2] ?? ""
-  };
-}
-
-function akkUsageText() {
-  return [
-    "AKK usage:",
-    "/akk <task>",
-    "/akk codex <task>",
-    "/akk claude <task>",
-    "/akk list",
-    "/akk status <conversation-id>",
-    "/akk describe <conversation-id>",
-    "/akk send <conversation-id> <message>",
-    "/akk cancel <conversation-id>",
-    "/akk renew <conversation-id> [minutes]",
-    "/akk retry-callback <conversation-id>",
-    "/akk recover <conversation-id>",
-    "/akk close <conversation-id> [reason]"
-  ].join("\n");
-}
-
 function formatDelegateCommandResult(result) {
   const agent = executorDisplayName(result.agent);
   return [
-    `AKK 已交给 ${agent}。`,
+    `AKK delegated the task to ${agent}.`,
     `conversation: ${result.conversation_id ?? "unknown"}`,
     `session: ${result.session ?? "unknown"}`,
     `status: ${result.conversation_status ?? result.status ?? "unknown"}`,
-    "结果会通过 OpenClaw 回调返回当前会话。"
+    "The result will return to this OpenClaw session through the callback."
   ].join("\n");
 }
 
@@ -950,24 +815,15 @@ function executorDisplayName(kind) {
   }
 }
 
-function formatListCommandResult(result) {
-  const tasks = Array.isArray(result.tasks) ? result.tasks : [];
-  if (!tasks.length) {
-    return "AKK 当前没有打开的会话。";
-  }
-  return [
-    `AKK open sessions (${tasks.length}):`,
-    ...tasks.slice(0, 20).map(formatTaskLine)
-  ].join("\n");
-}
-
 function formatStatusCommandResult(result) {
-  const summary = result.summary ?? result.conversation ?? {};
+  const summary = result.summary ?? result.conversation ?? result ?? {};
+  const terminalStatus = isRecord(result.terminal_status) ? result.terminal_status : {};
+  const terminalControl = isRecord(result.terminal_control) ? result.terminal_control : {};
   const lines = [
-    `AKK status: ${summary.conversation_id ?? "unknown"}`,
-    `agent: ${summary.agent ?? summary.executor?.kind ?? "unknown"}`,
-    `status: ${summary.status ?? "unknown"}`,
-    `session: ${summary.session ?? summary.executor?.session ?? "unknown"}`
+    `AKK status: ${summary.conversation_id ?? result.conversation_id ?? "unknown"}`,
+    `agent: ${summary.agent ?? summary.executor?.kind ?? terminalStatus.agent ?? "unknown"}`,
+    `status: ${summary.status ?? terminalStatus.activity_state ?? "unknown"}`,
+    `session: ${summary.session ?? summary.executor?.session ?? terminalControl.target ?? "unknown"}`
   ];
   if (summary.request) {
     lines.push(`request: ${truncateText(summary.request, 180)}`);
@@ -1031,12 +887,13 @@ function formatSendCommandResult(result) {
 
 function formatCancelCommandResult(result) {
   const conversation = result.conversation ?? {};
+  const terminalControl = isRecord(result.terminal_control) ? result.terminal_control : {};
   return [
     "AKK cancel requested.",
-    `conversation: ${conversation.conversation_id ?? "unknown"}`,
+    `conversation: ${conversation.conversation_id ?? result.conversation_id ?? "unknown"}`,
     `agent: ${result.executor?.kind ?? conversation.executor?.kind ?? "unknown"}`,
-    `session: ${result.executor?.session ?? conversation.executor?.session ?? "unknown"}`,
-    `status: ${conversation.status ?? "unknown"}`
+    `session: ${result.executor?.session ?? conversation.executor?.session ?? terminalControl.target ?? "unknown"}`,
+    `status: ${conversation.status ?? (result.cancel_requested === true ? "cancel requested" : "not cancelled")}`
   ].join("\n");
 }
 
@@ -1058,15 +915,6 @@ function formatCloseCommandResult(result) {
     `conversation: ${conversation.conversation_id ?? "unknown"}`,
     `status: ${conversation.status ?? "unknown"}`
   ].join("\n");
-}
-
-function formatTaskLine(task) {
-  return [
-    task.conversation_id ?? "unknown",
-    task.agent ?? task.executor?.kind ?? "agent",
-    task.status ?? "unknown",
-    truncateText(task.request ?? "", 90)
-  ].filter(Boolean).join(" | ");
 }
 
 function runDelegate(api, params, toolContext) {
@@ -1111,13 +959,11 @@ function runDelegate(api, params, toolContext) {
     "--background"
   ];
 
-  pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(config.storeDir));
+  pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
   pushOptional(args, "--session", agentSession);
   pushOptional(args, "--all-proxy", allProxy);
   pushOptional(args, "--model", model);
   pushOptional(args, "--openclaw-session", openclawSession);
-  pushOptional(args, "--gateway-url", stringValue(config.gatewayUrl));
-  pushOptional(args, "--token", stringValue(config.gatewayToken));
   pushOptional(args, "--gateway-method", CALLBACK_METHOD);
   pushOptional(args, "--gateway-session", openclawSession);
   pushOptional(args, "--openclaw-bin", stringValue(config.openclawBin));
@@ -1197,12 +1043,14 @@ function registerCliTool(api, { name, description, parameters, buildArgs }) {
 }
 
 function buildRecoveryArgs(api, command, params) {
+  const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+  const overrides = resolveConversationOverrides(params, config);
   const args = [command, "--conversation", requiredString(params.conversation_id, "conversation_id"), "--background"];
   pushOptional(args, "--session", stringValue(params.session));
-  pushOptional(args, "--all-proxy", stringValue(params.allProxy) ?? stringValue(api.pluginConfig?.codexAllProxy) ?? stringValue(api.pluginConfig?.allProxy));
-  pushOptional(args, "--model", stringValue(params.model) ?? stringValue(api.pluginConfig?.codexModel) ?? stringValue(api.pluginConfig?.model));
-  pushOptional(args, "--store-dir", stringValue(params.storeDir) ?? stringValue(api.pluginConfig?.storeDir));
-  pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(api.pluginConfig?.idleTimeoutMinutes));
+  pushOptional(args, "--all-proxy", overrides.allProxy);
+  pushOptional(args, "--model", overrides.model);
+  pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
+  pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(config.idleTimeoutMinutes));
   return args;
 }
 

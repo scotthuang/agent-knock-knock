@@ -498,6 +498,42 @@ test("approval revalidates fingerprint A to B and sends zero keys", async () => 
   );
 });
 
+test("keys approval rejects a prompt switch after authorization and sends zero keys", async () => {
+  const adapter = createTestClaudeAdapter();
+  const provider = new RecordingTerminalProvider([PANE], {
+    [PANE.target]: "approval:command A"
+  });
+  const bridge = createBridge(adapter, provider);
+  const control = terminalControl(adapter);
+  let authorizationCalls = 0;
+
+  const result = await bridge.approve("claude", control, {
+    authorize(context) {
+      authorizationCalls += 1;
+      assert.equal(context.inspection.approval.approvable, true);
+      if (context.inspection.approval.approvable) {
+        assert.equal(context.inspection.approval.command, "command A");
+      }
+      provider.setScreen(PANE.target, "approval:command B");
+      return { approved: true };
+    }
+  });
+
+  assert.equal(authorizationCalls, 1);
+  assert.equal(result.approved, false);
+  assert.equal(result.blocked, true);
+  assert.equal(result.command, "command B");
+  assert.match(result.reason ?? "", /fingerprint changed after authorization/);
+  assert.equal(
+    provider.operations.filter((operation) => operation.kind === "capture").length,
+    2
+  );
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind === "keys"),
+    []
+  );
+});
+
 test("structured approval status exposes decision mode and request identity", async () => {
   const adapter = createStructuredClaudeAdapter();
   const provider = new RecordingTerminalProvider([PANE], {
@@ -874,4 +910,73 @@ test("send requires both a registered agent and send_keys capability", async () 
     /terminal input is not supported/
   );
   assert.deepEqual(provider.operations, []);
+});
+
+test("stale terminal identity is rejected before any tmux input", async () => {
+  const adapter = createTestClaudeAdapter();
+  const provider = new RecordingTerminalProvider([PANE]);
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([adapter]),
+    terminalProvider: provider,
+    async verifyIdentity() {
+      throw new Error("agent pid no longer belongs to the pane");
+    }
+  });
+
+  await assert.rejects(
+    () => bridge.resolveConversationId(
+      `terminal:v2:tmux:claude:${PANE.target}:110`
+    ),
+    /no longer available/
+  );
+  await assert.rejects(
+    () => bridge.send("claude", terminalControl(adapter), "do work", {
+      runtime: { pid: 110 }
+    }),
+    /no longer belongs/
+  );
+  assert.deepEqual(provider.operations, []);
+});
+
+test("send clears pasted text and never submits it when the second identity check fails", async () => {
+  const adapter = createTestClaudeAdapter();
+  const provider = new RecordingTerminalProvider([PANE]);
+  let checks = 0;
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([adapter]),
+    terminalProvider: provider,
+    async verifyIdentity() {
+      checks += 1;
+      if (checks === 2) {
+        throw new Error("agent exited after text injection");
+      }
+    }
+  });
+
+  await assert.rejects(
+    () => bridge.send("claude", terminalControl(adapter), "do work", {
+      runtime: { pid: 110 }
+    }),
+    /agent exited/
+  );
+  assert.deepEqual(provider.operations, [
+    {
+      kind: "text",
+      target: PANE.target,
+      text: "do work",
+      socketPath: PANE.socketPath
+    },
+    {
+      kind: "keys",
+      target: PANE.target,
+      keys: ["C-u"],
+      socketPath: PANE.socketPath
+    }
+  ]);
+  assert.equal(
+    provider.operations.some(
+      (operation) => operation.kind === "keys" && operation.keys.includes("C-m")
+    ),
+    false
+  );
 });

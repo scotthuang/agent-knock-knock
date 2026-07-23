@@ -134,12 +134,13 @@ test("approval candidate is read only from structured callback metadata", () => 
   }), undefined);
 });
 
-test("auto approval CLI arguments carry only the trusted decision and prompt fingerprint", () => {
+test("auto approval CLI arguments carry the trusted policy for executor-side revalidation", () => {
   const decision = evaluateApprovalPolicy({ policy, candidate });
   assert.deepEqual(autoApprovalCliArgs({
     statePath: "/tmp/task/state.json",
     candidate,
-    decision
+    decision,
+    policy
   }), [
     "approve",
     "--state",
@@ -150,7 +151,9 @@ test("auto approval CLI arguments carry only the trusted decision and prompt fin
     "--policy-rule-id",
     "safe-status",
     "--policy-fingerprint",
-    decision.policyFingerprint
+    decision.policyFingerprint,
+    "--auto-approval-policy-json",
+    JSON.stringify(policy)
   ]);
 });
 

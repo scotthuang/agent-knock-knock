@@ -107,7 +107,7 @@ test("terminal enrichment only adds agent capabilities supplied by the caller", 
   ]);
 });
 
-test("enrichActiveProcessesWithTerminalControl falls back to unique pane cwd for wrapper-launched Codex", async () => {
+test("enrichActiveProcessesWithTerminalControl never grants control from cwd alone", async () => {
   const processes: ActiveCodexProcess[] = [{
     agent: "codex",
     pid: 34663,
@@ -146,8 +146,41 @@ test("enrichActiveProcessesWithTerminalControl falls back to unique pane cwd for
 
   const enriched = await enrichActiveProcessesWithTerminalControl(processes, provider);
 
+  assert.equal(enriched[0].terminalControl, undefined);
+});
+
+test("terminal enrichment follows an explicit unclassified wrapper ancestry", async () => {
+  const processes: ActiveCodexProcess[] = [{
+    agent: "codex",
+    pid: 34663,
+    ppid: 34654,
+    command: "node /Users/me/.npm-global/bin/codex --",
+    cwd: "/Users/me/github/talk-to-shadow",
+    kind: "codex_cli",
+    confidence: "medium",
+    reason: "test"
+  }];
+  const provider = new StaticTerminalControlProvider({
+    panes: [{
+      kind: "tmux",
+      target: "codex-work:0.2",
+      session: "codex-work",
+      window: 0,
+      pane: 2,
+      panePid: 85361,
+      currentCommand: "node",
+      currentPath: "/Users/me/github/talk-to-shadow"
+    }]
+  });
+
+  const enriched = await enrichActiveProcessesWithTerminalControl(processes, provider, {
+    processTree: [
+      processes[0],
+      { pid: 34654, ppid: 85361, command: "npm exec codex" }
+    ]
+  });
+
   assert.equal(enriched[0].terminalControl?.target, "codex-work:0.2");
-  assert.equal(enriched[0].terminalControl?.panePid, 85361);
 });
 
 test("enrichActiveProcessesWithTerminalControl does not use ambiguous cwd fallback", async () => {
@@ -222,6 +255,27 @@ test("tmux provider falls back to explicit socket paths", async () => {
     ["list-panes", "-a", "-F"],
     ["-S", "/private/tmp/tmux-501/default", "list-panes"]
   ]);
+});
+
+test("tmux provider deduplicates a default server also found by socket path", async () => {
+  const provider = new TmuxTerminalControlProvider({
+    socketPaths: ["/private/tmp/tmux-501/default"],
+    commands: ["tmux"],
+    runCommand() {
+      return {
+        status: 0,
+        stdout: "codex-work\t0\t0\t36017\tnode\t/Users/me/github/codex\n",
+        stderr: ""
+      };
+    }
+  });
+
+  const panes = await provider.listPanes();
+
+  assert.equal(panes.length, 1);
+  assert.equal(panes[0].target, "codex-work:0.0");
+  assert.equal(panes[0].panePid, 36017);
+  assert.equal(panes[0].socketPath, undefined);
 });
 
 test("tmux provider falls back to absolute tmux command paths", async () => {
@@ -305,4 +359,47 @@ test("tmux provider uses socket path for capture and sends", async () => {
     ["-S", "/private/tmp/tmux-501/default", "send-keys", "-t"],
     ["-S", "/private/tmp/tmux-501/default", "send-keys", "-t"]
   ]);
+});
+
+test("tmux provider uses bracketed paste for multiline text", async () => {
+  const calls: string[][] = [];
+  const provider = new TmuxTerminalControlProvider({
+    socketPaths: [],
+    commands: ["tmux"],
+    runCommand(_command, args) {
+      calls.push(args);
+      return {
+        status: 0,
+        stdout: "",
+        stderr: ""
+      };
+    }
+  });
+
+  await provider.sendText("claude-work:0.0", "first line\nsecond line", {
+    socketPath: "/private/tmp/tmux-501/default"
+  });
+
+  assert.equal(calls.length, 2);
+  assert.match(calls[0][4], /^akk-\d+-[0-9a-f-]+$/u);
+  assert.deepEqual(calls[0].slice(0, 5), [
+    "-S",
+    "/private/tmp/tmux-501/default",
+    "set-buffer",
+    "-b",
+    calls[0][4]
+  ]);
+  assert.deepEqual(calls[0].slice(5), ["--", "first line\nsecond line"]);
+  assert.deepEqual(calls[1], [
+    "-S",
+    "/private/tmp/tmux-501/default",
+    "paste-buffer",
+    "-p",
+    "-d",
+    "-b",
+    calls[0][4],
+    "-t",
+    "claude-work:0.0"
+  ]);
+  assert.equal(calls.some((args) => args.includes("send-keys")), false);
 });

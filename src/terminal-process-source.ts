@@ -10,7 +10,8 @@ export interface ProcessCommandResult {
 
 export interface TerminalProcessSource {
   listProcessSnapshots(
-    isCandidate?: (snapshot: TerminalProcessSnapshot) => boolean
+    isCandidate?: (snapshot: TerminalProcessSnapshot) => boolean,
+    options?: { includeCwd?: boolean; includeAncestors?: boolean }
   ): Promise<TerminalProcessSnapshot[]>;
 }
 
@@ -18,9 +19,12 @@ export class StaticTerminalProcessSource implements TerminalProcessSource {
   constructor(private readonly snapshots: readonly TerminalProcessSnapshot[]) {}
 
   async listProcessSnapshots(
-    isCandidate: (snapshot: TerminalProcessSnapshot) => boolean = () => true
+    isCandidate: (snapshot: TerminalProcessSnapshot) => boolean = () => true,
+    options: { includeCwd?: boolean; includeAncestors?: boolean } = {}
   ): Promise<TerminalProcessSnapshot[]> {
-    return this.snapshots.filter(isCandidate).map((snapshot) => ({ ...snapshot }));
+    const candidates = this.snapshots.filter(isCandidate);
+    return selectedSnapshots(this.snapshots, candidates, options.includeAncestors === true)
+      .map((snapshot) => ({ ...snapshot }));
   }
 }
 
@@ -34,16 +38,26 @@ export class SystemTerminalProcessSource implements TerminalProcessSource {
   }
 
   async listProcessSnapshots(
-    isCandidate: (snapshot: TerminalProcessSnapshot) => boolean = () => true
+    isCandidate: (snapshot: TerminalProcessSnapshot) => boolean = () => true,
+    options: { includeCwd?: boolean; includeAncestors?: boolean } = {}
   ): Promise<TerminalProcessSnapshot[]> {
     const ps = this.runCommand("ps", ["-axo", "pid,ppid,etime,command"]);
     if (ps.status !== 0) {
       throw new Error(ps.stderr || ps.error?.message || "ps failed");
     }
 
-    const candidates = parsePsProcessSnapshots(ps.stdout).filter(isCandidate);
+    const snapshots = parsePsProcessSnapshots(ps.stdout);
+    const candidates = snapshots.filter(isCandidate);
     if (candidates.length === 0) {
       return [];
+    }
+    const selected = selectedSnapshots(
+      snapshots,
+      candidates,
+      options.includeAncestors === true
+    );
+    if (options.includeCwd === false) {
+      return selected;
     }
 
     const lsof = this.runCommand("lsof", [
@@ -54,15 +68,47 @@ export class SystemTerminalProcessSource implements TerminalProcessSource {
       candidates.map((snapshot) => String(snapshot.pid)).join(",")
     ]);
     if (lsof.status !== 0) {
-      return candidates;
+      return selected;
     }
 
     const cwdByPid = parseLsofCwdMap(lsof.stdout);
-    return candidates.map((snapshot) => ({
+    return selected.map((snapshot) => ({
       ...snapshot,
       cwd: snapshot.cwd ?? cwdByPid.get(snapshot.pid)
     }));
   }
+}
+
+function selectedSnapshots(
+  snapshots: readonly TerminalProcessSnapshot[],
+  candidates: readonly TerminalProcessSnapshot[],
+  includeAncestors: boolean
+): TerminalProcessSnapshot[] {
+  if (!includeAncestors) {
+    return [...candidates];
+  }
+
+  const byPid = new Map(snapshots.map((snapshot) => [snapshot.pid, snapshot]));
+  const selectedPids = new Set(candidates.map((snapshot) => snapshot.pid));
+  for (const candidate of candidates) {
+    let parentPid = candidate.ppid;
+    const visited = new Set<number>([candidate.pid]);
+    while (
+      typeof parentPid === "number" &&
+      Number.isInteger(parentPid) &&
+      parentPid > 1 &&
+      !visited.has(parentPid)
+    ) {
+      visited.add(parentPid);
+      const parent = byPid.get(parentPid);
+      if (!parent) {
+        break;
+      }
+      selectedPids.add(parent.pid);
+      parentPid = parent.ppid;
+    }
+  }
+  return snapshots.filter((snapshot) => selectedPids.has(snapshot.pid));
 }
 
 export function parsePsProcessSnapshots(output: string): TerminalProcessSnapshot[] {
