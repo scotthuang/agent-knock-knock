@@ -7,6 +7,7 @@ import path from "node:path";
 import {
   captureClaudeTranscriptAnchor,
   detectClaudeTranscriptCompletion,
+  detectClaudeTranscriptPendingApproval,
   type ClaudeTranscriptAnchor
 } from "../src/claude-local-transcript-provider.js";
 import type { ClaudeAgentRow } from "../src/claude-terminal-agent-adapter.js";
@@ -20,6 +21,404 @@ const STARTED_AT = "2026-07-24T02:00:00.000Z";
 const CAPTURED_AT = "2026-07-24T02:00:00.100Z";
 const PROMPT_AT = "2026-07-24T02:00:00.200Z";
 const COMPLETED_AT = "2026-07-24T02:00:00.400Z";
+
+test("detects one anchored foreground Bash tool use waiting for approval", (t) => {
+  const fixture = createFixture(t);
+  const anchor = fixture.capture();
+  assert.equal(anchor.file_existed, false);
+  fixture.agentRows[0] = { ...fixture.agentRows[0], status: "working" };
+
+  const request = "Run the exact approved command";
+  const command = "npm test -- --runInBand";
+  const ids = 700;
+  fixture.write(pendingBashRecords({ request, command, ids }));
+
+  const evidence = fixture.detectPending(anchor, request);
+  assert.ok(evidence);
+  const stat = fs.statSync(fixture.transcriptPath);
+  const commandSha256 = sha256(command);
+  const transcriptFileId = sha256(
+    `${fixture.sessionId}\0${stat.dev}:${stat.ino}`
+  ).slice(0, 24);
+  const evidenceFingerprint = sha256(JSON.stringify({
+    schema_version: 1,
+    source: "claude_transcript",
+    kind: "run_command",
+    session_id: fixture.sessionId,
+    cwd: fixture.workspace,
+    pid: PID,
+    agent_started_at_ms: AGENT_STARTED_AT_MS,
+    anchor_offset_bytes: 0,
+    observed_end_offset_bytes: stat.size,
+    prompt_uuid: uuid(ids),
+    assistant_uuid: uuid(ids + 2),
+    tool_use_id: `toolu_pending_${ids}`,
+    claude_version: VERSION,
+    transcript_file_id: transcriptFileId,
+    request_sha256: fingerprint(request),
+    command_sha256: commandSha256
+  }));
+  assert.deepEqual(evidence, {
+    source: "claude_transcript",
+    kind: "run_command",
+    command,
+    cwd: fixture.workspace,
+    toolName: "Bash",
+    toolUseId: `toolu_pending_${ids}`,
+    promptUuid: uuid(ids),
+    assistantUuid: uuid(ids + 2),
+    claudeVersion: VERSION,
+    transcriptFileId,
+    commandSha256,
+    evidenceFingerprint,
+    observedEndOffsetBytes: stat.size
+  });
+  assert.deepEqual(
+    fixture.detectPending(anchor, request),
+    evidence,
+    "an unchanged stable transcript snapshot must produce identical evidence"
+  );
+  assert.doesNotMatch(evidence.evidenceFingerprint, new RegExp(command, "u"));
+  assert.notEqual(evidence.evidenceFingerprint, evidence.commandSha256);
+  assert.equal(
+    fixture.detect(anchor, request),
+    undefined,
+    "an unresolved tool use is not durable completion"
+  );
+});
+
+test("pending approval evidence honors the existing transcript byte anchor", (t) => {
+  const fixture = createFixture(t);
+  fixture.write(turnRecords({
+    request: "Earlier completed request",
+    assistantText: "Earlier turn done",
+    ids: 100
+  }));
+  const anchor = fixture.capture();
+  assert.equal(anchor.file_existed, true);
+  assert.ok(anchor.offset_bytes > 0);
+  fixture.agentRows[0] = { ...fixture.agentRows[0], status: "working" };
+
+  fixture.append(pendingBashRecords({
+    request: "Approve the new command",
+    command: "git status --short",
+    ids: 800
+  }));
+  const evidence = fixture.detectPending(anchor, "Approve the new command");
+  assert.equal(evidence?.command, "git status --short");
+  assert.ok((evidence?.observedEndOffsetBytes ?? 0) > anchor.offset_bytes);
+  assert.equal(
+    fixture.detectPending(anchor, "Earlier completed request"),
+    undefined
+  );
+});
+
+test("pending approval permits earlier sequentially resolved tools in the managed turn", (t) => {
+  const fixture = createFixture(t);
+  const anchor = fixture.capture();
+  fixture.agentRows[0] = { ...fixture.agentRows[0], status: "working" };
+  const request = "Inspect first, then run the approved command";
+  const records = pendingBashRecords({
+    request,
+    command: "git status --short",
+    ids: 850
+  });
+  const prompt = records[0];
+  const pendingThinking = records[1];
+  const priorAssistantUuid = uuid(860);
+  const priorResultUuid = uuid(861);
+  const priorToolId = "toolu_resolved_first";
+  const priorAssistant = {
+    ...baseRecord(
+      priorAssistantUuid,
+      prompt.uuid as string,
+      PROMPT_AT,
+      SESSION_ID,
+      VERSION
+    ),
+    type: "assistant",
+    message: {
+      role: "assistant",
+      id: uuid(1860),
+      stop_reason: "tool_use",
+      content: [{
+        type: "tool_use",
+        id: priorToolId,
+        name: "Read",
+        input: { file_path: "README.md" }
+      }]
+    }
+  };
+  const priorResult = {
+    ...baseRecord(
+      priorResultUuid,
+      priorAssistantUuid,
+      PROMPT_AT,
+      SESSION_ID,
+      VERSION
+    ),
+    type: "user",
+    sourceToolAssistantUUID: priorAssistantUuid,
+    message: {
+      role: "user",
+      content: [{
+        type: "tool_result",
+        tool_use_id: priorToolId,
+        content: "README contents"
+      }]
+    }
+  };
+  pendingThinking.parentUuid = priorResultUuid;
+  fixture.write([
+    prompt,
+    priorAssistant,
+    priorResult,
+    ...records.slice(1)
+  ]);
+
+  const evidence = fixture.detectPending(anchor, request);
+  assert.equal(evidence?.command, "git status --short");
+  assert.equal(evidence?.toolUseId, "toolu_pending_850");
+});
+
+test("pending approval requires an unchanged process and a private transcript", (t) => {
+  const fixture = createFixture(t);
+  const anchor = fixture.capture();
+  const request = "Approve one private transcript command";
+  fixture.write(pendingBashRecords({
+    request,
+    command: "git status",
+    ids: 900
+  }));
+
+  fixture.agentRows[0] = { ...fixture.agentRows[0], status: "working" };
+  assert.equal(fixture.detectPending(anchor, request)?.command, "git status");
+
+  fixture.agentRows[0] = {
+    ...fixture.agentRows[0],
+    startedAt: AGENT_STARTED_AT_MS + 1
+  };
+  assert.throws(
+    () => fixture.detectPending(anchor, request),
+    /session identity changed/u
+  );
+
+  const broadPermissions = createFixture(t, 2);
+  const broadAnchor = broadPermissions.capture();
+  broadPermissions.agentRows[0] = {
+    ...broadPermissions.agentRows[0],
+    status: "working"
+  };
+  broadPermissions.write(pendingBashRecords({
+    request,
+    command: "git status",
+    ids: 910,
+    sessionId: broadPermissions.sessionId
+  }));
+  fs.chmodSync(broadPermissions.transcriptPath, 0o644);
+  assert.throws(
+    () => broadPermissions.detectPending(broadAnchor, request),
+    /permissions are broader than owner-only/u
+  );
+});
+
+test("pending approval rejects completed, background, ambiguous, and unsafe tool uses", (t) => {
+  const cases: Array<{
+    name: string;
+    mutate: (
+      records: Record<string, unknown>[],
+      fixture: ReturnType<typeof createFixture>
+    ) => void;
+  }> = [
+    {
+      name: "non-Bash tool",
+      mutate: (records) => {
+        pendingToolBlock(records).name = "Read";
+      }
+    },
+    {
+      name: "background Bash",
+      mutate: (records) => {
+        const input = pendingToolBlock(records).input as Record<string, unknown>;
+        input.run_in_background = true;
+      }
+    },
+    {
+      name: "empty command",
+      mutate: (records) => {
+        const input = pendingToolBlock(records).input as Record<string, unknown>;
+        input.command = "   ";
+      }
+    },
+    {
+      name: "multiline command",
+      mutate: (records) => {
+        const input = pendingToolBlock(records).input as Record<string, unknown>;
+        input.command = "git status\nrm -rf .";
+      }
+    },
+    {
+      name: "parallel tool blocks",
+      mutate: (records) => {
+        const owner = records[2];
+        const message = owner.message as Record<string, unknown>;
+        const content = message.content as Record<string, unknown>[];
+        content.push({
+          type: "tool_use",
+          id: "toolu_parallel",
+          name: "Bash",
+          input: { command: "pwd" }
+        });
+      }
+    },
+    {
+      name: "resolved tool use",
+      mutate: (records) => {
+        const ownerUuid = records[2].uuid as string;
+        records.push({
+          ...baseRecord(
+            uuid(9991),
+            ownerUuid,
+            COMPLETED_AT,
+            records[0].sessionId as string,
+            VERSION
+          ),
+          type: "user",
+          sourceToolAssistantUUID: ownerUuid,
+          message: {
+            role: "user",
+            content: [{
+              type: "tool_result",
+              tool_use_id: pendingToolBlock(records).id,
+              content: "done"
+            }]
+          }
+        });
+      }
+    },
+    {
+      name: "UUID-less tool result",
+      mutate: (records) => {
+        records.push({
+          type: "user",
+          isSidechain: false,
+          entrypoint: "cli",
+          timestamp: COMPLETED_AT,
+          sessionId: records[0].sessionId,
+          version: VERSION,
+          message: {
+            role: "user",
+            content: [{
+              type: "tool_result",
+              tool_use_id: pendingToolBlock(records).id,
+              content: "schema is insufficient"
+            }]
+          }
+        });
+      }
+    },
+    {
+      name: "completed turn",
+      mutate: (records) => {
+        records.push(durationRecord({
+          uuid: uuid(9992),
+          parentUuid: records[2].uuid as string,
+          timestamp: COMPLETED_AT,
+          sessionId: records[0].sessionId as string
+        }));
+      }
+    },
+    {
+      name: "later human prompt",
+      mutate: (records) => {
+        records.push(userRecord({
+          uuid: uuid(9993),
+          request: "A human superseded the managed prompt",
+          timestamp: COMPLETED_AT,
+          parentUuid: records[2].uuid as string,
+          sessionId: records[0].sessionId as string
+        }));
+      }
+    },
+    {
+      name: "parallel UUID branch",
+      mutate: (records) => {
+        records.push({
+          ...baseRecord(
+            uuid(9994),
+            records[0].uuid as string,
+            COMPLETED_AT,
+            records[0].sessionId as string,
+            VERSION
+          ),
+          type: "attachment",
+          attachment: { type: "ide_selection" }
+        });
+      }
+    },
+    {
+      name: "unverified future transcript schema",
+      mutate: (records) => {
+        for (const record of records) {
+          record.version = "3.0.0";
+        }
+      }
+    }
+  ];
+
+  cases.forEach(({ name, mutate }, index) => {
+    const fixture = createFixture(t, 20 + index);
+    const anchor = fixture.capture();
+    fixture.agentRows[0] = { ...fixture.agentRows[0], status: "working" };
+    const request = `Reject ${name}`;
+    const records = pendingBashRecords({
+      request,
+      command: "git status",
+      ids: 1000 + index * 10,
+      sessionId: fixture.sessionId
+    });
+    mutate(records, fixture);
+    fixture.write(records);
+    assert.equal(
+      fixture.detectPending(anchor, request),
+      undefined,
+      name
+    );
+  });
+});
+
+test("pending approval throws on sidechains and malformed tool identities", (t) => {
+  const sidechain = createFixture(t);
+  const sidechainAnchor = sidechain.capture();
+  sidechain.agentRows[0] = { ...sidechain.agentRows[0], status: "working" };
+  const sidechainRecords = pendingBashRecords({
+    request: "Reject sidechain",
+    command: "git status",
+    ids: 1200
+  });
+  sidechainRecords[2].isSidechain = true;
+  sidechain.write(sidechainRecords);
+  assert.throws(
+    () => sidechain.detectPending(sidechainAnchor, "Reject sidechain"),
+    /unsupported schema or identity/u
+  );
+
+  const malformed = createFixture(t, 2);
+  const malformedAnchor = malformed.capture();
+  malformed.agentRows[0] = { ...malformed.agentRows[0], status: "working" };
+  const malformedRecords = pendingBashRecords({
+    request: "Reject malformed tool",
+    command: "git status",
+    ids: 1300,
+    sessionId: malformed.sessionId
+  });
+  delete pendingToolBlock(malformedRecords).id;
+  malformed.write(malformedRecords);
+  assert.throws(
+    () => malformed.detectPending(malformedAnchor, "Reject malformed tool"),
+    /malformed tool_use/u
+  );
+});
 
 test("detects a hookless Claude turn when the transcript is created after send", (t) => {
   const fixture = createFixture(t);
@@ -780,6 +1179,24 @@ function createFixture(
       claudeHome,
       agentRows
     });
+  const detectPending = (anchor: ClaudeTranscriptAnchor, request: string) =>
+    detectClaudeTranscriptPendingApproval({
+      sessionId,
+      cwd: workspace,
+      requestText: request,
+      requestHash: fingerprint(request),
+      startedAt: STARTED_AT,
+      context: {
+        pid: PID,
+        sessionId,
+        nativeTakeover: {
+          claude_transcript_anchor: anchor
+        }
+      }
+    }, {
+      claudeHome,
+      agentRows
+    });
 
   return {
     root,
@@ -795,8 +1212,76 @@ function createFixture(
     writeRaw,
     appendRaw,
     normalizeRecords,
-    detect
+    detect,
+    detectPending
   };
+}
+
+function pendingBashRecords({
+  request,
+  command,
+  ids = 700,
+  sessionId = SESSION_ID,
+  version = VERSION
+}: {
+  request: string;
+  command: string;
+  ids?: number;
+  sessionId?: string;
+  version?: string;
+}): Record<string, unknown>[] {
+  const promptUuid = uuid(ids);
+  const thinkingUuid = uuid(ids + 1);
+  const toolUuid = uuid(ids + 2);
+  const messageId = uuid(ids + 1000);
+  return [
+    userRecord({
+      uuid: promptUuid,
+      request,
+      timestamp: PROMPT_AT,
+      parentUuid: null,
+      sessionId,
+      version
+    }),
+    {
+      ...baseRecord(thinkingUuid, promptUuid, PROMPT_AT, sessionId, version),
+      type: "assistant",
+      message: {
+        role: "assistant",
+        id: messageId,
+        stop_reason: "tool_use",
+        content: [{ type: "thinking", thinking: "not returned" }]
+      }
+    },
+    {
+      ...baseRecord(toolUuid, thinkingUuid, PROMPT_AT, sessionId, version),
+      type: "assistant",
+      message: {
+        role: "assistant",
+        id: messageId,
+        stop_reason: "tool_use",
+        content: [{
+          type: "tool_use",
+          id: `toolu_pending_${ids}`,
+          name: "Bash",
+          input: { command }
+        }]
+      }
+    }
+  ];
+}
+
+function pendingToolBlock(
+  records: readonly Record<string, unknown>[]
+): Record<string, unknown> {
+  const owner = records[2];
+  const message = isTestRecord(owner.message) ? owner.message : undefined;
+  const content = Array.isArray(message?.content) ? message.content : [];
+  const block = content.find((value) =>
+    isTestRecord(value) && value.type === "tool_use"
+  );
+  assert.ok(isTestRecord(block));
+  return block;
 }
 
 function turnRecords({
@@ -1014,4 +1499,12 @@ function fingerprint(value: string): string {
   return createHash("sha256")
     .update(value.replace(/\s+/gu, " ").trim())
     .digest("hex");
+}
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function isTestRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

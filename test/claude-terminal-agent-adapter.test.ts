@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -251,6 +252,7 @@ test("approves the strict Claude 2.1.218 Bash dialog in an AKK-managed runtime",
     screen,
     runtime: {
       pid: 7200,
+      cwd: "/workspace",
       conversationId: "conversation-screen-approval",
       messageId: "message-screen-approval",
       terminalTarget: "claude-work:0.0"
@@ -268,7 +270,297 @@ test("approves the strict Claude 2.1.218 Bash dialog in an AKK-managed runtime",
   assert.equal(inspection.approval.action.label, "Yes");
   assert.equal(inspection.approval.promptKind, "claude_permission");
   assert.equal(inspection.approval.toolName, "Bash");
-  assert.match(inspection.approval.command ?? "", /shasum/);
+  assert.equal(inspection.approval.command, undefined);
+  assert.match(inspection.approval.requestDetail ?? "", /shasum/u);
+
+  const managedStatusInspection =
+    createClaudeTerminalAgentAdapter().inspectScreen({
+      screen,
+      runtime: {
+        pid: 7200,
+        cwd: "/workspace",
+        conversationId: "conversation-screen-approval",
+        messageId: "message-screen-approval",
+        terminalTarget: "claude-work:0.0"
+      }
+    });
+  assert.equal(
+    managedStatusInspection.approval.requestDetail,
+    "Bash request details omitted; inspect the live terminal pane directly"
+  );
+  assert.doesNotMatch(
+    managedStatusInspection.approval.requestDetail ?? "",
+    /shasum/u
+  );
+  assert.doesNotMatch(managedStatusInspection.screenExcerpt, /shasum/u);
+  assert.match(
+    managedStatusInspection.screenExcerpt,
+    /Bash request details omitted/u
+  );
+});
+
+test("hookless Claude policy evidence requires an exact screen and transcript intersection", () => {
+  const command = "rm /workspace/.akk-safe-fixture";
+  const managedRequest = {
+    sessionId: "claude-session-approval",
+    cwd: "/workspace",
+    requestText: "Remove the exact fixture",
+    requestHash: "request-hash",
+    startedAt: "2026-07-25T02:00:00.000Z",
+    context: { managed: true }
+  };
+  const evidence = {
+    source: "claude_transcript" as const,
+    kind: "run_command" as const,
+    command,
+    cwd: "/workspace",
+    toolName: "Bash" as const,
+    toolUseId: "toolu_exact_approval",
+    promptUuid: "prompt-exact-approval",
+    assistantUuid: "assistant-exact-approval",
+    claudeVersion: "2.1.218",
+    transcriptFileId: "transcript-exact-approval",
+    commandSha256: createHash("sha256").update(command).digest("hex"),
+    evidenceFingerprint: "a".repeat(64),
+    observedEndOffsetBytes: 4096
+  };
+  let receivedRequest;
+  const inspection = createClaudeTerminalAgentAdapter({
+    detectPendingApproval(request) {
+      receivedRequest = request;
+      return evidence;
+    }
+  }).inspectScreen({
+    screen: [
+      "Earlier visible shell echo: rm /workspace/",
+      ".akk-safe-fixture",
+      currentClaudePermissionScreen(command, "Remove the test fixture")
+    ].join("\n"),
+    runtime: {
+      pid: 7200,
+      cwd: "/workspace",
+      conversationId: "conversation-screen-approval",
+      messageId: "message-screen-approval",
+      terminalTarget: "claude-work:0.0"
+    },
+    managedRequest
+  });
+
+  assert.deepEqual(receivedRequest, managedRequest);
+  assert.equal(inspection.approval.approvable, true);
+  if (!inspection.approval.approvable) {
+    assert.fail("expected correlated transcript evidence");
+  }
+  assert.equal(inspection.approval.command, undefined);
+  assert.equal(inspection.approval.cwd, "/workspace");
+  assert.equal(inspection.approval.action.requestId, evidence.toolUseId);
+  assert.deepEqual(inspection.approval.policyEvidence, {
+    source: "claude_transcript",
+    kind: "run_command",
+    command,
+    cwd: "/workspace",
+    toolName: "Bash",
+    requestId: evidence.toolUseId,
+    commandSha256: evidence.commandSha256,
+    evidenceFingerprint: evidence.evidenceFingerprint,
+    metadata: {
+      prompt_uuid: evidence.promptUuid,
+      assistant_uuid: evidence.assistantUuid,
+      claude_version: evidence.claudeVersion,
+      transcript_file_id: evidence.transcriptFileId,
+      observed_end_offset_bytes: evidence.observedEndOffsetBytes
+    }
+  });
+  assert.doesNotMatch(inspection.screenExcerpt, new RegExp(command, "u"));
+  assert.doesNotMatch(inspection.screenExcerpt, /Earlier visible shell echo/u);
+  assert.doesNotMatch(inspection.screenExcerpt, /rm \/workspace\//u);
+  assert.doesNotMatch(inspection.screenExcerpt, /\.akk-safe-fixture/u);
+  assert.doesNotMatch(inspection.approval.requestDetail ?? "", new RegExp(command, "u"));
+  assert.match(inspection.screenExcerpt, /verified Bash request omitted/u);
+});
+
+test("hookless Claude excerpt removes a command before the 4000-character boundary slice", () => {
+  const command = `rm /workspace/${Array.from(
+    { length: 90 },
+    (_, index) => `crossboundary${String(index).padStart(3, "0")}`
+  ).join("-")}`;
+  const commandSha256 = createHash("sha256").update(command).digest("hex");
+  const dialog = currentClaudePermissionScreen(
+    command,
+    "permission-detail-cross-boundary-private"
+  );
+  const echoPrefix = "Earlier visible shell echo: ";
+  const boundaryWithinCommand = Math.floor(command.length / 2);
+  const paddingLength =
+    4000 - 2 - dialog.length - (command.length - boundaryWithinCommand);
+  assert.ok(paddingLength > 0);
+  const screen = [
+    `${echoPrefix}${command}`,
+    "x".repeat(paddingLength),
+    dialog
+  ].join("\n");
+  const sliceStart = screen.length - 4000;
+  const commandStart = echoPrefix.length;
+  assert.equal(sliceStart, commandStart + boundaryWithinCommand);
+  assert.match(screen.slice(sliceStart), /crossboundary\d{3}/u);
+
+  const inspection = createClaudeTerminalAgentAdapter({
+    detectPendingApproval() {
+      return {
+        source: "claude_transcript",
+        kind: "run_command",
+        command,
+        cwd: "/workspace",
+        toolName: "Bash",
+        toolUseId: "toolu_boundary_approval",
+        promptUuid: "prompt-boundary-approval",
+        assistantUuid: "assistant-boundary-approval",
+        claudeVersion: "2.1.218",
+        transcriptFileId: "transcript-boundary-approval",
+        commandSha256,
+        evidenceFingerprint: "c".repeat(64),
+        observedEndOffsetBytes: 8192
+      };
+    }
+  }).inspectScreen({
+    screen,
+    runtime: {
+      pid: 7200,
+      cwd: "/workspace",
+      conversationId: "conversation-boundary-approval",
+      messageId: "message-boundary-approval",
+      terminalTarget: "claude-work:0.0"
+    },
+    managedRequest: {
+      cwd: "/workspace",
+      requestText: "Remove the exact boundary fixture"
+    }
+  });
+
+  assert.equal(inspection.screenExcerpt.length <= 4000, true);
+  assert.match(inspection.screenExcerpt, /verified Bash request omitted/u);
+  assert.doesNotMatch(inspection.screenExcerpt, /crossboundary\d{3}/u);
+  assert.doesNotMatch(
+    inspection.screenExcerpt,
+    /permission-detail-cross-boundary-private/u
+  );
+});
+
+test("hookless Claude transcript uncertainty preserves manual approval but grants no policy authority", () => {
+  const command = "rm /workspace/.akk-safe-fixture";
+  const baseEvidence = {
+    source: "claude_transcript" as const,
+    kind: "run_command" as const,
+    command,
+    cwd: "/workspace",
+    toolName: "Bash" as const,
+    toolUseId: "toolu_uncertain",
+    promptUuid: "prompt-uncertain",
+    assistantUuid: "assistant-uncertain",
+    claudeVersion: "2.1.218",
+    transcriptFileId: "transcript-uncertain",
+    commandSha256: createHash("sha256").update(command).digest("hex"),
+    evidenceFingerprint: "b".repeat(64),
+    observedEndOffsetBytes: 4096
+  };
+  const managedRequest = {
+    cwd: "/workspace",
+    requestText: "Remove the exact fixture"
+  };
+  const runtime = {
+    pid: 7200,
+    cwd: "/workspace",
+    conversationId: "conversation-screen-approval",
+    messageId: "message-screen-approval",
+    terminalTarget: "claude-work:0.0"
+  };
+  const cases = [
+    {
+      label: "screen command mismatch",
+      screen: currentClaudePermissionScreen("pwd"),
+      detect: () => baseEvidence
+    },
+    {
+      label: "visually wrapped screen command",
+      screen: currentClaudePermissionScreen(
+        command,
+        undefined,
+        ["rm /workspace/", ".akk-safe-fixture"]
+      ),
+      detect: () => baseEvidence
+    },
+    {
+      label: "redacted transcript command",
+      screen: currentClaudePermissionScreen("echo ARK_API_KEY=ark-test-secret-value"),
+      detect: () => {
+        const secretCommand = "echo ARK_API_KEY=ark-test-secret-value";
+        return {
+          ...baseEvidence,
+          command: secretCommand,
+          commandSha256: createHash("sha256").update(secretCommand).digest("hex")
+        };
+      }
+    },
+    {
+      label: "transcript workspace mismatch",
+      screen: currentClaudePermissionScreen(command),
+      detect: () => ({
+        ...baseEvidence,
+        cwd: "/different-workspace"
+      })
+    },
+    {
+      label: "detector failure",
+      screen: currentClaudePermissionScreen(command),
+      detect: () => {
+        throw new Error("unstable transcript");
+      }
+    }
+  ];
+
+  for (const candidate of cases) {
+    const inspection = createClaudeTerminalAgentAdapter({
+      detectPendingApproval: candidate.detect
+    }).inspectScreen({
+      screen: candidate.screen,
+      runtime,
+      managedRequest
+    });
+    assert.equal(inspection.approval.approvable, true, candidate.label);
+    if (!inspection.approval.approvable) {
+      assert.fail(candidate.label);
+    }
+    assert.equal(inspection.approval.policyEvidence, undefined, candidate.label);
+    assert.equal(inspection.approval.action.requestId, undefined, candidate.label);
+    assert.equal(
+      inspection.approval.requestDetail,
+      "Bash request details omitted; inspect the live terminal pane directly",
+      candidate.label
+    );
+    for (const rawFragment of [
+      "rm /workspace/",
+      ".akk-safe-fixture",
+      "pwd",
+      "ARK_API_KEY",
+      "ark-test-secret-value"
+    ]) {
+      assert.doesNotMatch(
+        inspection.screenExcerpt,
+        new RegExp(rawFragment.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"),
+        `${candidate.label}: ${rawFragment}`
+      );
+      assert.doesNotMatch(
+        inspection.approval.requestDetail ?? "",
+        new RegExp(rawFragment.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"),
+        `${candidate.label}: ${rawFragment}`
+      );
+    }
+    assert.match(
+      inspection.screenExcerpt,
+      /Bash request details omitted/u,
+      candidate.label
+    );
+  }
 });
 
 test("screen approval rejects prose lookalikes and incomplete or ambiguous Bash dialogs", () => {
@@ -978,5 +1270,27 @@ function claudePermissionScreen(selected: string): string {
     selected,
     "  3. No",
     "Esc to cancel"
+  ].join("\n");
+}
+
+function currentClaudePermissionScreen(
+  command: string,
+  description?: string,
+  visibleCommandLines: readonly string[] = [command]
+): string {
+  return [
+    "Bash command",
+    "",
+    ...visibleCommandLines.map((line) => `  ${line}`),
+    ...(description ? [`  ${description}`] : []),
+    "",
+    "This command requires approval",
+    "",
+    "Do you want to proceed?",
+    "❯ 1. Yes",
+    "  2. Yes, and don't ask again for this command",
+    "  3. No",
+    "",
+    "Esc to cancel · Tab to amend · ctrl+e to explain"
   ].join("\n");
 }

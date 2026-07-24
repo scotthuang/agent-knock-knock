@@ -606,7 +606,7 @@ export default definePluginEntry({
     registerCliTool(api, {
       name: "agent_knock_knock_approve",
       description:
-        "Approve the current AKK terminal permission request after showing it to the user and receiving explicit approval. Claude Code uses no Hooks: AKK only approves an exact Bash permission screen for the current managed turn, revalidates its short-lived fingerprint immediately before sending Enter, and never auto-approves it. Approval screen automation is best-effort; hook-free durable completion is independently verified from the local Claude transcript.",
+        "Manually approve the current AKK terminal permission request only after the user reviews and explicitly confirms it. Claude Code uses no Hooks: this manual path accepts only an exact one-time Bash permission screen for the current managed turn, then recaptures its short-lived evidence and process identity before sending Enter. Separately, trusted default-disabled plugin configuration can auto-approve an exact Claude command/workspace match without exposing policy control to the model. Hook-free durable completion is independently verified from the local Claude transcript.",
       parameters: approveParameters,
       buildArgs: (params) => {
         const args = ["approve", "--conversation", requiredString(params.conversation_id, "conversation_id")];
@@ -1100,7 +1100,7 @@ async function handleCallback(api, params) {
     conversationId,
     statePath: stringValue(params.statePath)
   });
-  if (autoApproval?.approved === true) {
+  if (autoApproval?.handled === true) {
     return {
       ok: true,
       enqueued: false,
@@ -1110,7 +1110,9 @@ async function handleCallback(api, params) {
       conversation_id: conversationId,
       message_id: messageId,
       message_type: stringValue(message.type) ?? "unknown",
-      auto_approved: true,
+      auto_approved: autoApproval.approved === true,
+      approval_already_handled:
+        autoApproval.action === "already_approved",
       approval: autoApproval
     };
   }

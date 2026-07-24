@@ -11,6 +11,8 @@ export interface ApprovalCandidate {
   cwd?: string;
   fingerprint: string;
   terminalTarget?: string;
+  evidenceSource?: "claude_transcript";
+  evidenceFingerprint?: string;
 }
 
 export interface ApprovalPolicyDecision {
@@ -29,7 +31,8 @@ export interface SimpleCommandParseResult {
 
 export interface AutoApprovalAttempt {
   approved: boolean;
-  action: "approved" | "ask";
+  handled: boolean;
+  action: "approved" | "already_approved" | "ask";
   reason: string;
   rule_id?: string;
   policy_fingerprint: string;
@@ -53,6 +56,9 @@ export function approvalCandidateFromMessage(message: unknown): ApprovalCandidat
   const agent = stringValue(candidate?.agent);
   const kind = stringValue(candidate?.kind);
   const fingerprint = stringValue(candidate?.fingerprint);
+  const policyEvidence = isRecord(candidate?.policy_evidence)
+    ? candidate.policy_evidence
+    : undefined;
   if (!agent || !kind || !fingerprint) {
     return undefined;
   }
@@ -66,7 +72,13 @@ export function approvalCandidateFromMessage(message: unknown): ApprovalCandidat
       : {}),
     command: stringValue(candidate?.command),
     cwd: stringValue(candidate?.cwd),
-    terminalTarget: stringValue(candidate?.terminal_target)
+    terminalTarget: stringValue(candidate?.terminal_target),
+    ...(policyEvidence?.source === "claude_transcript"
+      ? { evidenceSource: "claude_transcript" as const }
+      : {}),
+    ...(stringValue(policyEvidence?.evidence_fingerprint)
+      ? { evidenceFingerprint: stringValue(policyEvidence?.evidence_fingerprint) }
+      : {})
   };
 }
 
@@ -84,8 +96,18 @@ export function evaluateApprovalPolicy({
   if (candidate.kind !== "run_command") {
     return ask(`approval kind is not supported: ${candidate.kind}`, policyFingerprint);
   }
-  if (candidate.agent === "claude") {
-    return ask("Claude tmux approval always requires explicit user confirmation", policyFingerprint);
+  if (
+    candidate.agent === "claude" &&
+    (
+      candidate.decisionMode !== "keys" ||
+      candidate.evidenceSource !== "claude_transcript" ||
+      !isSha256Hex(candidate.evidenceFingerprint)
+    )
+  ) {
+    return ask(
+      "Claude auto approval requires verified local transcript evidence for a keys-mode request",
+      policyFingerprint
+    );
   }
   if (!candidate.command) {
     return ask("approval command is unavailable", policyFingerprint);
@@ -180,32 +202,132 @@ export function attemptAutoApproval({
     return undefined;
   }
   const decision = evaluateApprovalPolicy({ policy, candidate });
+  const deferredDecision = deferredClaudeAutoApprovalDecision({
+    policy,
+    candidate,
+    decision
+  });
   const cliArgs = statePath
-    ? autoApprovalCliArgs({ statePath, candidate, decision, policy })
+    ? decision.action === "approve"
+      ? autoApprovalCliArgs({ statePath, candidate, decision, policy })
+      : deferredDecision
+        ? deferredAutoApprovalCliArgs({
+            statePath,
+            candidate,
+            policy,
+            policyFingerprint: deferredDecision.policyFingerprint
+          })
+        : undefined
     : undefined;
-  if (!cliArgs || !decision.ruleId) {
+  if (!cliArgs) {
     return {
       approved: false,
+      handled: false,
       action: "ask",
-      reason: decision.reason,
+      reason: deferredDecision?.reason ?? decision.reason,
       rule_id: decision.ruleId,
-      policy_fingerprint: decision.policyFingerprint,
+      policy_fingerprint:
+        deferredDecision?.policyFingerprint ?? decision.policyFingerprint,
       approval_fingerprint: candidate.fingerprint
     };
   }
 
   const result = execute(cliArgs);
+  const effectiveRuleId = stringValue(result.policy_rule_id) ?? decision.ruleId;
+  const effectivePolicyFingerprint =
+    stringValue(result.policy_fingerprint) ??
+    deferredDecision?.policyFingerprint ??
+    decision.policyFingerprint;
+  const approved = result.approved === true;
+  const alreadyApproved = result.already_approved === true;
   return {
-    approved: result.approved === true,
-    action: result.approved === true ? "approved" : "ask",
-    reason: result.approved === true
-      ? decision.reason
+    approved,
+    handled: approved || alreadyApproved,
+    action: approved
+      ? "approved"
+      : alreadyApproved
+        ? "already_approved"
+        : "ask",
+    reason: approved
+      ? stringValue(result.reason) ??
+        (effectiveRuleId
+          ? `matched auto-approval rule ${effectiveRuleId}`
+          : "executor approved the verified local Claude request")
       : stringValue(result.reason) ?? "automatic approval was not executed",
-    rule_id: decision.ruleId,
-    policy_fingerprint: decision.policyFingerprint,
+    rule_id: effectiveRuleId,
+    policy_fingerprint: effectivePolicyFingerprint,
     approval_fingerprint: candidate.fingerprint,
     monitor_pid: typeof result.monitor_pid === "number" ? result.monitor_pid : null
   };
+}
+
+function deferredClaudeAutoApprovalDecision({
+  policy,
+  candidate,
+  decision
+}: {
+  policy: unknown;
+  candidate: ApprovalCandidate;
+  decision: ApprovalPolicyDecision;
+}): ApprovalPolicyDecision | undefined {
+  if (
+    decision.action === "approve" ||
+    candidate.agent !== "claude" ||
+    candidate.kind !== "run_command" ||
+    candidate.decisionMode !== "keys" ||
+    candidate.evidenceSource !== "claude_transcript" ||
+    !isSha256Hex(candidate.evidenceFingerprint) ||
+    !candidate.cwd
+  ) {
+    return undefined;
+  }
+  const policyFingerprint = fingerprintValue(policy);
+  if (!isRecord(policy) || policy.enabled !== true) {
+    return undefined;
+  }
+  const hasEligibleRule = (Array.isArray(policy.rules) ? policy.rules : [])
+    .map(normalizeRule)
+    .filter((rule): rule is NonNullable<ReturnType<typeof normalizeRule>> => Boolean(rule))
+    .some((rule) =>
+      rule.agents.includes("claude") &&
+      rule.workspaces.some((workspace) => isPathWithin(candidate.cwd!, workspace))
+    );
+  if (!hasEligibleRule) {
+    return undefined;
+  }
+  return ask(
+    "Claude command policy will be evaluated from fresh local transcript evidence by the executor",
+    policyFingerprint
+  );
+}
+
+function deferredAutoApprovalCliArgs({
+  statePath,
+  candidate,
+  policy,
+  policyFingerprint
+}: {
+  statePath: string;
+  candidate: ApprovalCandidate;
+  policy: unknown;
+  policyFingerprint: string;
+}): string[] | undefined {
+  const serializedPolicy = JSON.stringify(policy);
+  if (!statePath || typeof serializedPolicy !== "string") {
+    return undefined;
+  }
+  return [
+    "approve",
+    "--state",
+    statePath,
+    "--expected-approval-fingerprint",
+    candidate.fingerprint,
+    "--auto-approved",
+    "--policy-fingerprint",
+    policyFingerprint,
+    "--auto-approval-policy-json",
+    serializedPolicy
+  ];
 }
 
 export function parseSimpleShellCommand(command: string): SimpleCommandParseResult {
@@ -426,6 +548,10 @@ function stringArray(value: unknown): string[] {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function isSha256Hex(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{64}$/u.test(value);
 }
 
 function isRecord(value: unknown): value is Record<string, any> {

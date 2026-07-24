@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import {
   ClaudeHookStore,
@@ -13,6 +14,7 @@ import type {
   TerminalApprovalDecisionRequest,
   TerminalApprovalDecisionResult,
   TerminalApprovalInspection,
+  TerminalApprovalPolicyEvidence,
   TerminalCompletionEvidence,
   TerminalDurableCompletionRequest,
   TerminalProcessSnapshot,
@@ -45,8 +47,32 @@ export interface CreateClaudeTerminalAgentAdapterOptions {
   detectDurableCompletion?: NonNullable<
     TerminalAgentAdapter<ClaudeProcessKind>["detectDurableCompletion"]
   >;
+  /**
+   * Local transcript evidence for the one pending Bash tool use in the current
+   * managed turn. The adapter intersects it with the current strict permission
+   * screen before exposing any executor-local policy authority.
+   */
+  detectPendingApproval?: (
+    request: TerminalDurableCompletionRequest
+  ) => ClaudePendingApprovalEvidence | undefined;
   /** Canonical launchers explicitly configured by Claude's trusted Tokenjuice PreToolUse hook. */
   trustedTokenjuiceLaunchers?: readonly ClaudeTrustedTokenjuiceLauncher[];
+}
+
+export interface ClaudePendingApprovalEvidence {
+  source: "claude_transcript";
+  kind: "run_command";
+  command: string;
+  cwd: string;
+  toolName: "Bash";
+  toolUseId: string;
+  promptUuid: string;
+  assistantUuid: string;
+  claudeVersion: string;
+  transcriptFileId: string;
+  commandSha256: string;
+  evidenceFingerprint: string;
+  observedEndOffsetBytes: number;
 }
 
 export interface ClaudeTrustedTokenjuiceLauncher {
@@ -154,6 +180,7 @@ export function createClaudeTerminalAgentAdapter(
   const agentRows = options.agentRows ?? [];
   const hookStore = options.hookStore;
   const transcriptCompletionDetector = options.detectDurableCompletion;
+  const transcriptApprovalDetector = options.detectPendingApproval;
   const trustedTokenjuiceLaunchers = options.trustedTokenjuiceLaunchers ?? [];
   const durableCompletion = hookStore !== undefined ||
     transcriptCompletionDetector !== undefined;
@@ -177,6 +204,7 @@ export function createClaudeTerminalAgentAdapter(
       return inspectClaudeScreenWithHooks(
         screenOptions,
         hookStore,
+        transcriptApprovalDetector,
         trustedTokenjuiceLaunchers
       );
     },
@@ -313,11 +341,18 @@ function hasManagedClaudeApprovalIdentity(
 function inspectClaudeScreenWithHooks(
   options: TerminalScreenInspectionOptions,
   hookStore: ClaudeHookStore | undefined,
+  transcriptApprovalDetector:
+    | CreateClaudeTerminalAgentAdapterOptions["detectPendingApproval"]
+    | undefined,
   trustedTokenjuiceLaunchers: readonly ClaudeTrustedTokenjuiceLauncher[]
 ): TerminalScreenInspection {
   const screenInspection = inspectClaudeScreen(options);
   if (!hookStore) {
-    return screenInspection;
+    return transcriptApprovalScreenInspection(
+      screenInspection,
+      options,
+      transcriptApprovalDetector
+    );
   }
 
   const identity = exactClaudeHookIdentity(options.runtime);
@@ -356,6 +391,143 @@ function inspectClaudeScreenWithHooks(
     );
   }
   return screenInspection;
+}
+
+function transcriptApprovalScreenInspection(
+  screenInspection: TerminalScreenInspection,
+  options: TerminalScreenInspectionOptions,
+  detector: CreateClaudeTerminalAgentAdapterOptions["detectPendingApproval"]
+): TerminalScreenInspection {
+  const managedPermissionInspection =
+    (options.managedRequest || hasManagedClaudeApprovalIdentity(options.runtime)) &&
+    screenInspection.approval.blocked &&
+    screenInspection.approval.promptKind === "claude_permission"
+      ? privacySafeManagedClaudePermissionInspection(
+          screenInspection,
+          options.screen,
+          options.maxExcerptLength ?? 4000
+        )
+      : screenInspection;
+  if (
+    !detector ||
+    !options.managedRequest ||
+    !hasManagedClaudeApprovalIdentity(options.runtime) ||
+    !screenInspection.approval.approvable ||
+    screenInspection.approval.action.mode !== "keys"
+  ) {
+    return managedPermissionInspection;
+  }
+
+  let evidence: ClaudePendingApprovalEvidence | undefined;
+  try {
+    evidence = detector(options.managedRequest);
+  } catch {
+    // Transcript uncertainty must never remove the user's ability to make the
+    // already-validated one-time decision manually.
+    return managedPermissionInspection;
+  }
+  const visibleCommand = claudePermissionVisibleCommandLine(options.screen);
+  const policyCommand = evidence
+    ? claudePermissionCommandForApproval(evidence.command)
+    : undefined;
+  const evidenceCwd = evidence && path.isAbsolute(evidence.cwd)
+    ? path.resolve(evidence.cwd)
+    : undefined;
+  const managedRequestCwd =
+    nonEmptyString(options.managedRequest.cwd) &&
+    path.isAbsolute(options.managedRequest.cwd ?? "")
+      ? path.resolve(options.managedRequest.cwd as string)
+      : undefined;
+  const runtimeCwd =
+    nonEmptyString(options.runtime?.cwd) &&
+    path.isAbsolute(options.runtime?.cwd ?? "")
+      ? path.resolve(options.runtime?.cwd as string)
+      : undefined;
+  if (
+    !evidence ||
+    evidence.source !== "claude_transcript" ||
+    evidence.kind !== "run_command" ||
+    evidence.toolName !== "Bash" ||
+    !evidenceCwd ||
+    !managedRequestCwd ||
+    !runtimeCwd ||
+    evidenceCwd !== managedRequestCwd ||
+    evidenceCwd !== runtimeCwd ||
+    evidence.command.trim() !== evidence.command ||
+    policyCommand?.command !== evidence.command ||
+    visibleCommand !== evidence.command ||
+    sha256Hex(evidence.command) !== evidence.commandSha256 ||
+    !isSha256Hex(evidence.evidenceFingerprint) ||
+    !nonEmptyString(evidence.toolUseId) ||
+    !nonEmptyString(evidence.promptUuid) ||
+    !nonEmptyString(evidence.assistantUuid) ||
+    !nonEmptyString(evidence.claudeVersion) ||
+    !nonEmptyString(evidence.transcriptFileId) ||
+    !Number.isSafeInteger(evidence.observedEndOffsetBytes) ||
+    evidence.observedEndOffsetBytes <= 0
+  ) {
+    return managedPermissionInspection;
+  }
+
+  const policyEvidence: TerminalApprovalPolicyEvidence = {
+    source: "claude_transcript",
+    kind: "run_command",
+    command: evidence.command,
+    cwd: evidenceCwd,
+    toolName: "Bash",
+    requestId: evidence.toolUseId,
+    commandSha256: evidence.commandSha256,
+    evidenceFingerprint: evidence.evidenceFingerprint,
+    metadata: {
+      prompt_uuid: evidence.promptUuid,
+      assistant_uuid: evidence.assistantUuid,
+      claude_version: evidence.claudeVersion,
+      transcript_file_id: evidence.transcriptFileId,
+      observed_end_offset_bytes: evidence.observedEndOffsetBytes
+    }
+  };
+  return {
+    ...managedPermissionInspection,
+    approval: {
+      ...screenInspection.approval,
+      command: undefined,
+      cwd: policyEvidence.cwd,
+      toolName: "Bash",
+      requestDetail:
+        `Verified local Bash request (sha256:${policyEvidence.commandSha256.slice(0, 12)})`,
+      policyEvidence,
+      action: {
+        ...screenInspection.approval.action,
+        requestId: policyEvidence.requestId
+      }
+    },
+    screenExcerpt: omitClaudePermissionDetails(
+      options.screen,
+      policyEvidence.commandSha256,
+      options.maxExcerptLength ?? 4000
+    )
+  };
+}
+
+function privacySafeManagedClaudePermissionInspection(
+  screenInspection: TerminalScreenInspection,
+  screen: string,
+  maxExcerptLength: number
+): TerminalScreenInspection {
+  return {
+    ...screenInspection,
+    approval: {
+      ...screenInspection.approval,
+      command: undefined,
+      requestDetail:
+        "Bash request details omitted; inspect the live terminal pane directly"
+    },
+    screenExcerpt: omitClaudePermissionDetails(
+      screen,
+      undefined,
+      maxExcerptLength
+    )
+  };
 }
 
 function hookPermissionScreenInspection(
@@ -931,13 +1103,13 @@ export function detectClaudeApprovalPrompt(screen: string): TerminalApprovalInsp
     };
   }
 
-  const command = redactString(detailLines.join("\n"))
+  const requestDetail = redactString(detailLines.join("\n"))
     .slice(0, CLAUDE_PERMISSION_DETAIL_LENGTH);
   return {
     blocked: true,
     approvable: true,
     promptKind: "claude_permission",
-    command,
+    requestDetail,
     toolName: "Bash",
     action: {
       mode: "keys",
@@ -945,6 +1117,81 @@ export function detectClaudeApprovalPrompt(screen: string): TerminalApprovalInsp
       label: "Yes"
     }
   };
+}
+
+function claudePermissionVisibleCommandLine(screen: string): string | undefined {
+  const lines = claudeDetectionTail(screen);
+  const markerIndex = findLastIndex(
+    lines,
+    (line) => /^\s*Do you want to proceed\?\s*$/iu.test(line)
+  );
+  if (markerIndex < 0) {
+    return undefined;
+  }
+  const searchStart = Math.max(0, markerIndex - 16);
+  const relativeHeaderIndex = findLastIndex(
+    lines.slice(searchStart, markerIndex),
+    (line) => /^\s*Bash command\s*$/iu.test(line)
+  );
+  if (relativeHeaderIndex < 0) {
+    return undefined;
+  }
+  return lines
+    .slice(searchStart + relativeHeaderIndex + 1, markerIndex)
+    .map((line) => line.trim())
+    .find(Boolean);
+}
+
+function omitClaudePermissionDetails(
+  screen: string,
+  commandSha256: string | undefined,
+  maxLength: number
+): string {
+  const placeholder = commandSha256
+    ? `<verified Bash request omitted; sha256:${commandSha256.slice(0, 12)}>`
+    : "<Bash request details omitted; inspect live pane>";
+  const lines = normalizedScreenLines(screen);
+  const markerIndex = findLastIndex(
+    lines,
+    (line) => /^\s*Do you want to proceed\?\s*$/iu.test(line)
+  );
+  let sanitizedScreen: string;
+  if (markerIndex < 0) {
+    sanitizedScreen = placeholder;
+  } else {
+    const searchStart = Math.max(0, markerIndex - 16);
+    const relativeHeaderIndex = findLastIndex(
+      lines.slice(searchStart, markerIndex),
+      (line) => /^\s*Bash command\s*$/iu.test(line)
+    );
+    if (relativeHeaderIndex < 0) {
+      sanitizedScreen = placeholder;
+    } else {
+      const headerIndex = searchStart + relativeHeaderIndex;
+      // Start at the live dialog header instead of retaining scrollback. The
+      // same raw command may have been echoed earlier and terminal wrapping can
+      // split it across physical lines, making exact-string replacement unsafe.
+      sanitizedScreen = [
+        lines[headerIndex],
+        `  ${placeholder}`,
+        lines[markerIndex],
+        "  <permission options omitted; inspect live pane>"
+      ].join("\n");
+    }
+  }
+  const sanitizedLines = normalizedScreenLines(sanitizedScreen);
+  const excerpt = sanitizedLines
+    .slice(Math.max(0, sanitizedLines.length - CLAUDE_EXCERPT_LINES))
+    .join("\n");
+  return redactString(excerpt).slice(-Math.max(0, maxLength));
+}
+
+function sha256Hex(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function isSha256Hex(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{64}$/u.test(value);
 }
 
 export function detectClaudeActivityState(

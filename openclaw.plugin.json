@@ -171,7 +171,7 @@
       "autoApprove": {
         "type": "object",
         "additionalProperties": false,
-        "description": "Deterministic Codex terminal approval policy. Disabled by default and never exposed as model-controlled tool parameters.",
+        "description": "Deterministic, default-disabled exact command-vector and workspace policy for terminal-controlled Codex and hookless Claude. Claude auto-approval also requires a current managed one-time Bash prompt with matching local transcript evidence. Policy configuration is trusted and never exposed as model-controlled tool parameters.",
         "properties": {
           "enabled": {
             "type": "boolean",
@@ -193,7 +193,7 @@
                   "minItems": 1,
                   "items": {
                     "type": "string",
-                    "enum": ["codex"]
+                    "enum": ["codex", "claude"]
                   }
                 },
                 "workspaces": {

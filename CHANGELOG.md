@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.51 - 2026-07-25
+
+### Added
+
+- Add disabled-by-default exact command and workspace auto-approval for hookless Claude Code tmux turns by intersecting the current one-time Bash dialog with owner-private local transcript evidence.
+
+### Changed
+
+- Allow trusted `autoApprove` rules to target Claude as well as Codex, while leaving unmatched, unsupported, or ambiguous requests on the manual approval path.
+
+### Fixed
+
+- Deliver Gateway callback attempts outside conversation locks and recover interrupted approval-notification outboxes with stable message identities without duplicating message events.
+- Preserve terminal monitor ownership across inline auto-approval, callback retries, and post-delivery crashes, and track consumed Claude dialogs by transcript request identity plus an observed prompt-generation boundary so redraws cannot replay Enter while later identical requests remain approvable.
+
+### Security
+
+- Keep raw Claude commands executor-local and expose only bounded hashes and opaque identities through callbacks, state, events, logs, and screen summaries.
+- Re-evaluate the exact policy and recapture the prompt, selected one-time action, transcript evidence, and process identity after the one-shot dispatch reservation before sending one Enter; stale, changed, replayed, or uncertain requests fail closed.
+- Restrict pending-approval transcript evidence to compatible Claude Code `2.1.x` releases at `2.1.198` or later while retaining forward-compatible durable completion detection.
+
 ## 0.2.50 - 2026-07-24
 
 ### Changed

@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   createTerminalAgentAdapterRegistry,
   type TerminalAgentAdapter,
@@ -638,7 +639,217 @@ test("hookless Claude approval sends one Enter only after a stable double captur
   );
 });
 
-test("hookless Claude dispatch callback runs after final validation and immediately before Enter", async () => {
+test("hookless Claude exposes only transcript hashes publicly and keeps raw policy evidence local", async () => {
+  const command = "rm /repo/.akk-safe-fixture";
+  const commandSha256 = createHash("sha256").update(command).digest("hex");
+  const evidenceFingerprint = "d".repeat(64);
+  const durableRequest: TerminalDurableCompletionRequest = {
+    sessionId: "claude-session-approval",
+    cwd: "/repo",
+    requestText: "Remove the exact test fixture",
+    requestHash: "request-hash",
+    startedAt: "2026-07-25T02:00:00.000Z",
+    context: { managed: true }
+  };
+  let detectorCalls = 0;
+  const adapter = createClaudeTerminalAgentAdapter({
+    detectPendingApproval(request) {
+      detectorCalls += 1;
+      assert.equal(request, durableRequest);
+      return {
+        source: "claude_transcript",
+        kind: "run_command",
+        command,
+        cwd: "/repo",
+        toolName: "Bash",
+        toolUseId: "toolu_bridge_approval",
+        promptUuid: "prompt-bridge-approval",
+        assistantUuid: "assistant-bridge-approval",
+        claudeVersion: "2.1.218",
+        transcriptFileId: "transcript-bridge-approval",
+        commandSha256,
+        evidenceFingerprint,
+        observedEndOffsetBytes: 8192
+      };
+    }
+  });
+  const provider = new RecordingTerminalProvider([PANE], {
+    [PANE.target]: strictClaudeBashApprovalScreen(1, command)
+  });
+  const bridge = createBridge(adapter, provider);
+  const control = terminalControl(adapter);
+  const poll = await bridge.monitorPoll({
+    agent: "claude",
+    terminalControl: control,
+    screenOptions: { runtime: MANAGED_CLAUDE_RUNTIME },
+    durableRequest
+  });
+  const fingerprint = poll.status.approval_state.fingerprint;
+  assert.ok(fingerprint);
+  assert.deepEqual(poll.status.approval_state.policy_evidence, {
+    source: "claude_transcript",
+    kind: "run_command",
+    command_sha256: commandSha256,
+    evidence_fingerprint: evidenceFingerprint,
+    request_id: "toolu_bridge_approval"
+  });
+  assert.equal(poll.status.approval_state.command, undefined);
+  assert.equal(JSON.stringify(poll.status).includes(command), false);
+
+  let authorizeSawRawEvidence = false;
+  let dispatchSawFreshEvidence = false;
+  const result = await bridge.approve("claude", control, {
+    expectedFingerprint: fingerprint,
+    runtime: MANAGED_CLAUDE_RUNTIME,
+    managedRequest: durableRequest,
+    requiredDecisionMode: "keys",
+    authorize({ inspection }) {
+      assert.equal(
+        inspection.approval.approvable
+          ? inspection.approval.policyEvidence?.command
+          : undefined,
+        command
+      );
+      authorizeSawRawEvidence = true;
+      return { approved: true };
+    },
+    beforeKeyDispatch({ inspection }) {
+      assert.equal(
+        inspection.approval.approvable
+          ? inspection.approval.policyEvidence?.evidenceFingerprint
+          : undefined,
+        evidenceFingerprint
+      );
+      dispatchSawFreshEvidence = true;
+    }
+  });
+
+  assert.equal(result.approved, true);
+  assert.equal(authorizeSawRawEvidence, true);
+  assert.equal(dispatchSawFreshEvidence, true);
+  assert.equal(detectorCalls, 4);
+  assert.equal(JSON.stringify(result).includes(command), false);
+  assert.equal(
+    provider.operations.filter((operation) => operation.kind === "keys").length,
+    1
+  );
+});
+
+test("hookless Claude sends zero keys when transcript evidence changes after authorization", async () => {
+  const command = "rm /repo/.akk-safe-fixture";
+  const durableRequest: TerminalDurableCompletionRequest = {
+    sessionId: "claude-session-approval",
+    cwd: "/repo",
+    requestText: "Remove the exact test fixture"
+  };
+  let detectorCalls = 0;
+  const adapter = createClaudeTerminalAgentAdapter({
+    detectPendingApproval() {
+      detectorCalls += 1;
+      return {
+        source: "claude_transcript",
+        kind: "run_command",
+        command,
+        cwd: "/repo",
+        toolName: "Bash",
+        toolUseId: "toolu_bridge_approval",
+        promptUuid: "prompt-bridge-approval",
+        assistantUuid: "assistant-bridge-approval",
+        claudeVersion: "2.1.218",
+        transcriptFileId: "transcript-bridge-approval",
+        commandSha256: createHash("sha256").update(command).digest("hex"),
+        evidenceFingerprint: (detectorCalls >= 3 ? "e" : "d").repeat(64),
+        observedEndOffsetBytes: detectorCalls >= 3 ? 8193 : 8192
+      };
+    }
+  });
+  const provider = new RecordingTerminalProvider([PANE], {
+    [PANE.target]: strictClaudeBashApprovalScreen(1, command)
+  });
+  const bridge = createBridge(adapter, provider);
+  const control = terminalControl(adapter);
+  const status = (await bridge.monitorPoll({
+    agent: "claude",
+    terminalControl: control,
+    screenOptions: { runtime: MANAGED_CLAUDE_RUNTIME },
+    durableRequest
+  })).status;
+  assert.ok(status.approval_state.fingerprint);
+
+  const result = await bridge.approve("claude", control, {
+    expectedFingerprint: status.approval_state.fingerprint,
+    runtime: MANAGED_CLAUDE_RUNTIME,
+    managedRequest: durableRequest,
+    authorize: () => ({ approved: true })
+  });
+
+  assert.equal(result.approved, false);
+  assert.match(result.reason ?? "", /fingerprint changed after authorization/u);
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind === "keys"),
+    []
+  );
+});
+
+test("hookless Claude sends zero keys when transcript evidence changes after reservation", async () => {
+  const command = "rm /repo/.akk-safe-fixture";
+  const durableRequest: TerminalDurableCompletionRequest = {
+    sessionId: "claude-session-approval",
+    cwd: "/repo",
+    requestText: "Remove the exact test fixture"
+  };
+  let detectorCalls = 0;
+  const adapter = createClaudeTerminalAgentAdapter({
+    detectPendingApproval() {
+      detectorCalls += 1;
+      return {
+        source: "claude_transcript",
+        kind: "run_command",
+        command,
+        cwd: "/repo",
+        toolName: "Bash",
+        toolUseId: "toolu_bridge_approval",
+        promptUuid: "prompt-bridge-approval",
+        assistantUuid: "assistant-bridge-approval",
+        claudeVersion: "2.1.218",
+        transcriptFileId: "transcript-bridge-approval",
+        commandSha256: createHash("sha256").update(command).digest("hex"),
+        evidenceFingerprint: (detectorCalls >= 4 ? "e" : "d").repeat(64),
+        observedEndOffsetBytes: detectorCalls >= 4 ? 8193 : 8192
+      };
+    }
+  });
+  const provider = new RecordingTerminalProvider([PANE], {
+    [PANE.target]: strictClaudeBashApprovalScreen(1, command)
+  });
+  const bridge = createBridge(adapter, provider);
+  const control = terminalControl(adapter);
+  const status = (await bridge.monitorPoll({
+    agent: "claude",
+    terminalControl: control,
+    screenOptions: { runtime: MANAGED_CLAUDE_RUNTIME },
+    durableRequest
+  })).status;
+  assert.ok(status.approval_state.fingerprint);
+
+  const result = await bridge.approve("claude", control, {
+    expectedFingerprint: status.approval_state.fingerprint,
+    runtime: MANAGED_CLAUDE_RUNTIME,
+    managedRequest: durableRequest,
+    authorize: () => ({ approved: true }),
+    beforeKeyDispatch: () => undefined
+  });
+
+  assert.equal(detectorCalls, 4);
+  assert.equal(result.approved, false);
+  assert.match(result.reason ?? "", /fingerprint changed after dispatch reservation/u);
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind === "keys"),
+    []
+  );
+});
+
+test("hookless Claude dispatch reservation is followed by recapture and identity validation", async () => {
   const timeline: string[] = [];
   const adapter = createClaudeTerminalAgentAdapter();
   const provider = new TimelineTerminalProvider(timeline, [PANE], {
@@ -690,6 +901,9 @@ test("hookless Claude dispatch callback runs after final validation and immediat
     "capture",
     "identity",
     "beforeKeyDispatch",
+    "identity",
+    "capture",
+    "identity",
     "sendKeys:C-m"
   ]);
   assert.deepEqual(
@@ -700,6 +914,114 @@ test("hookless Claude dispatch callback runs after final validation and immediat
       keys: ["C-m"],
       socketPath: PANE.socketPath
     }]
+  );
+});
+
+test("hookless Claude revalidates terminal identity after reservation and sends zero keys on reuse", async () => {
+  let reservationPersisted = false;
+  const adapter = createClaudeTerminalAgentAdapter();
+  const provider = new RecordingTerminalProvider([PANE], {
+    [PANE.target]: strictClaudeBashApprovalScreen()
+  });
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([adapter]),
+    terminalProvider: provider,
+    async verifyIdentity() {
+      if (reservationPersisted) {
+        throw new Error("terminal pane was reused after approval reservation");
+      }
+    }
+  });
+  const control = terminalControl(adapter);
+  const fingerprint = (await bridge.status("claude", control, {
+    runtime: MANAGED_CLAUDE_RUNTIME
+  })).approval_state.fingerprint;
+  assert.ok(fingerprint);
+
+  await assert.rejects(
+    () => bridge.approve("claude", control, {
+      expectedFingerprint: fingerprint,
+      runtime: MANAGED_CLAUDE_RUNTIME,
+      beforeKeyDispatch() {
+        reservationPersisted = true;
+      }
+    }),
+    /pane was reused after approval reservation/u
+  );
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind === "keys"),
+    []
+  );
+});
+
+test("hookless Claude rejects a changed terminal ref from the final identity check", async () => {
+  let verificationCalls = 0;
+  const adapter = createClaudeTerminalAgentAdapter();
+  const provider = new RecordingTerminalProvider([PANE], {
+    [PANE.target]: strictClaudeBashApprovalScreen()
+  });
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([adapter]),
+    terminalProvider: provider,
+    async verifyIdentity({ terminalControl }) {
+      verificationCalls += 1;
+      if (verificationCalls === 6) {
+        return {
+          terminalControl: {
+            ...terminalControl,
+            socketPath: "/tmp/reused-tmux.sock"
+          }
+        };
+      }
+      return { terminalControl };
+    }
+  });
+  const control = terminalControl(adapter);
+  const fingerprint = (await bridge.status("claude", control, {
+    runtime: MANAGED_CLAUDE_RUNTIME
+  })).approval_state.fingerprint;
+  assert.ok(fingerprint);
+
+  await assert.rejects(
+    bridge.approve("claude", control, {
+      expectedFingerprint: fingerprint,
+      runtime: MANAGED_CLAUDE_RUNTIME,
+      beforeKeyDispatch: () => undefined
+    }),
+    /terminal control identity changed after the final approval capture/u
+  );
+  assert.equal(verificationCalls, 6);
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind === "keys"),
+    []
+  );
+});
+
+test("hookless Claude recaptures the one-time choice after reservation and sends zero keys on selection change", async () => {
+  const adapter = createClaudeTerminalAgentAdapter();
+  const provider = new RecordingTerminalProvider([PANE], {
+    [PANE.target]: strictClaudeBashApprovalScreen()
+  });
+  const bridge = createBridge(adapter, provider);
+  const control = terminalControl(adapter);
+  const fingerprint = (await bridge.status("claude", control, {
+    runtime: MANAGED_CLAUDE_RUNTIME
+  })).approval_state.fingerprint;
+  assert.ok(fingerprint);
+
+  const result = await bridge.approve("claude", control, {
+    expectedFingerprint: fingerprint,
+    runtime: MANAGED_CLAUDE_RUNTIME,
+    beforeKeyDispatch() {
+      provider.setScreen(PANE.target, strictClaudeBashApprovalScreen(2));
+    }
+  });
+
+  assert.equal(result.approved, false);
+  assert.match(result.reason ?? "", /no longer approvable after dispatch reservation/u);
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind === "keys"),
+    []
   );
 });
 
@@ -815,7 +1137,12 @@ test("hookless Claude fingerprints raw screen changes hidden by redaction", asyn
     runtime: MANAGED_CLAUDE_RUNTIME
   });
   assert.ok(firstStatus.approval_state.fingerprint);
-  assert.match(firstStatus.approval_state.command ?? "", /Bearer \[REDACTED\]/u);
+  assert.equal(firstStatus.approval_state.command, undefined);
+  assert.equal(
+    firstStatus.approval_state.request_detail,
+    "Bash request details omitted; inspect the live terminal pane directly"
+  );
+  assert.doesNotMatch(firstStatus.approval_state.request_detail, /Bearer/u);
   assert.doesNotMatch(firstStatus.screen.excerpt ?? "", /aaaaaaaa/u);
 
   provider.setScreen(PANE.target, secondScreen);
@@ -824,8 +1151,8 @@ test("hookless Claude fingerprints raw screen changes hidden by redaction", asyn
   });
   assert.ok(secondStatus.approval_state.fingerprint);
   assert.equal(
-    secondStatus.approval_state.command,
-    firstStatus.approval_state.command
+    secondStatus.approval_state.request_detail,
+    firstStatus.approval_state.request_detail
   );
   assert.equal(secondStatus.screen.excerpt, firstStatus.screen.excerpt);
   assert.notEqual(

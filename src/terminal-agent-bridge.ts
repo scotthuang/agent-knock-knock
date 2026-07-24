@@ -45,6 +45,13 @@ export interface TerminalBridgeStatus {
     fingerprint?: string;
     decision_mode?: "keys" | "structured";
     request_id?: string;
+    policy_evidence?: {
+      source: "claude_transcript";
+      kind: "run_command";
+      command_sha256: string;
+      evidence_fingerprint: string;
+      request_id: string;
+    };
   };
   screen: {
     excerpt?: string;
@@ -435,13 +442,15 @@ export class TerminalAgentBridge {
       expectedFingerprint?: string;
       scrollbackLines?: number;
       runtime?: TerminalRuntimeIdentity;
+      managedRequest?: TerminalDurableCompletionRequest;
       requiredDecisionMode?: "keys" | "structured";
       authorize?: (
         context: TerminalApprovalAuthorizationContext
       ) => TerminalApprovalAuthorizationDecision | Promise<TerminalApprovalAuthorizationDecision>;
       /**
-       * Persist an at-most-once dispatch reservation after final prompt/identity validation
-       * and immediately before tmux receives the approval keys.
+       * Persist an at-most-once dispatch reservation after authorization. The
+       * bridge then recaptures the prompt and revalidates terminal identity
+       * before tmux receives the approval keys.
        */
       beforeKeyDispatch?: (
         context: TerminalApprovalKeyDispatchContext
@@ -727,26 +736,110 @@ export class TerminalAgentBridge {
       keys: recapturedInspection.approval.action.keys,
       runtime: options.runtime
     });
+    let dispatchTerminalControl = verifiedForApproval;
+    let dispatchInspection = recapturedInspection;
+    if (options.beforeKeyDispatch) {
+      const afterReservation = await this.captureInspection(
+        adapter,
+        verifiedForApproval,
+        options
+      );
+      const afterReservationInspection = afterReservation.inspection;
+      if (!afterReservationInspection.approval.approvable) {
+        return {
+          approved: false,
+          blocked: true,
+          reason: "approval prompt is no longer approvable after dispatch reservation",
+          promptKind: afterReservationInspection.approval.promptKind,
+          command: afterReservationInspection.approval.command,
+          cwd: afterReservationInspection.approval.cwd,
+          toolName: afterReservationInspection.approval.toolName,
+          requestDetail: afterReservationInspection.approval.requestDetail,
+          screenExcerpt: afterReservationInspection.screenExcerpt
+        };
+      }
+      const afterReservationMode =
+        afterReservationInspection.approval.action.mode ?? "keys";
+      const afterReservationFingerprint = terminalApprovalFingerprint(
+        adapter.agent,
+        afterReservation.terminalControl,
+        afterReservationInspection,
+        {
+          screen: afterReservation.screen,
+          runtime: options.runtime
+        }
+      );
+      if (
+        afterReservationMode !== "keys" ||
+        afterReservationFingerprint !== recapturedFingerprint
+      ) {
+        return {
+          approved: false,
+          blocked: true,
+          reason: "approval fingerprint changed after dispatch reservation",
+          key: afterReservationInspection.approval.action.keys.length === 1
+            ? afterReservationInspection.approval.action.keys[0]
+            : undefined,
+          keys: afterReservationInspection.approval.action.keys,
+          label: afterReservationInspection.approval.action.label,
+          promptKind: afterReservationInspection.approval.promptKind,
+          command: afterReservationInspection.approval.command,
+          cwd: afterReservationInspection.approval.cwd,
+          toolName: afterReservationInspection.approval.toolName,
+          requestDetail: afterReservationInspection.approval.requestDetail,
+          fingerprint: afterReservationFingerprint,
+          screenExcerpt: afterReservationInspection.screenExcerpt,
+          decisionMode: afterReservationMode,
+          requestId: afterReservationInspection.approval.action.requestId
+        };
+      }
+      dispatchTerminalControl = afterReservation.terminalControl;
+      dispatchInspection = afterReservationInspection;
+    }
+    if (!dispatchInspection.approval.approvable) {
+      return {
+        approved: false,
+        blocked: true,
+        reason: "approval prompt lost its approvable state before terminal dispatch",
+        screenExcerpt: dispatchInspection.screenExcerpt
+      };
+    }
+    const dispatchApproval = dispatchInspection.approval;
+    const verifiedImmediatelyBeforeSend = await this.verifyTerminalIdentity(
+      adapter.agent,
+      dispatchTerminalControl,
+      options.runtime
+    );
+    if (
+      !sameTerminalControlIdentity(
+        dispatchTerminalControl,
+        verifiedImmediatelyBeforeSend
+      )
+    ) {
+      throw new Error(
+        "terminal control identity changed after the final approval capture"
+      );
+    }
     await this.terminalProvider.sendKeys(
-      verifiedForApproval.target,
-      recapturedInspection.approval.action.keys,
-      { socketPath: verifiedForApproval.socketPath }
+      verifiedImmediatelyBeforeSend.target,
+      dispatchApproval.action.keys,
+      { socketPath: verifiedImmediatelyBeforeSend.socketPath }
     );
     return {
       approved: true,
       blocked: false,
-      key: recapturedInspection.approval.action.keys.length === 1
-        ? recapturedInspection.approval.action.keys[0]
+      key: dispatchApproval.action.keys.length === 1
+        ? dispatchApproval.action.keys[0]
         : undefined,
-      keys: recapturedInspection.approval.action.keys,
-      label: recapturedInspection.approval.action.label,
-      promptKind: recapturedInspection.approval.promptKind,
-      command: recapturedInspection.approval.command,
-      cwd: recapturedInspection.approval.cwd,
+      keys: dispatchApproval.action.keys,
+      label: dispatchApproval.action.label,
+      promptKind: dispatchApproval.promptKind,
+      command: dispatchApproval.command,
+      cwd: dispatchApproval.cwd,
       fingerprint: recapturedFingerprint,
-      screenExcerpt: recapturedInspection.screenExcerpt,
+      screenExcerpt: dispatchInspection.screenExcerpt,
       decisionMode: recapturedDecisionMode,
-      requestId: recapturedInspection.approval.action.requestId
+      requestId: dispatchApproval.action.requestId
     };
   }
 
@@ -773,7 +866,10 @@ export class TerminalAgentBridge {
         const captured = await this.captureInspection(
           adapter,
           options.terminalControl,
-          options.screenOptions
+          {
+            ...options.screenOptions,
+            managedRequest: options.durableRequest
+          }
         );
         inspection = captured.inspection;
         status = statusFromInspection(adapter, captured.terminalControl, inspection, {
@@ -827,6 +923,7 @@ export class TerminalAgentBridge {
       screenChangedSinceSend?: boolean;
       maxExcerptLength?: number;
       runtime?: TerminalRuntimeIdentity;
+      managedRequest?: TerminalDurableCompletionRequest;
     } = {}
   ): Promise<{
     terminalControl: TerminalControlRef;
@@ -850,7 +947,8 @@ export class TerminalAgentBridge {
         requestText: options.requestText,
         screenChangedSinceSend: options.screenChangedSinceSend,
         maxExcerptLength: options.maxExcerptLength,
-        runtime: options.runtime
+        runtime: options.runtime,
+        managedRequest: options.managedRequest
       })
     };
   }
@@ -875,6 +973,19 @@ export class TerminalAgentBridge {
     });
     return result?.terminalControl ?? terminalControl;
   }
+}
+
+function sameTerminalControlIdentity(
+  left: TerminalControlRef,
+  right: TerminalControlRef
+): boolean {
+  return left.kind === right.kind &&
+    left.target === right.target &&
+    left.socketPath === right.socketPath &&
+    left.session === right.session &&
+    left.window === right.window &&
+    left.pane === right.pane &&
+    left.panePid === right.panePid;
 }
 
 export function terminalApprovalFingerprint(
@@ -920,6 +1031,17 @@ export function terminalApprovalFingerprint(
       cwd: inspection.approval.cwd,
       tool_name: inspection.approval.toolName,
       request_detail: inspection.approval.requestDetail,
+      policy_evidence: inspection.approval.policyEvidence
+        ? {
+            source: inspection.approval.policyEvidence.source,
+            kind: inspection.approval.policyEvidence.kind,
+            command_sha256: inspection.approval.policyEvidence.commandSha256,
+            evidence_fingerprint:
+              inspection.approval.policyEvidence.evidenceFingerprint,
+            request_id: inspection.approval.policyEvidence.requestId,
+            metadata: inspection.approval.policyEvidence.metadata
+          }
+        : undefined,
       raw_screen_sha256: rawScreenDigest,
       decision_mode: decisionMode,
       request_id: inspection.approval.action.requestId
@@ -968,7 +1090,16 @@ function statusFromInspection(
       reason: approval.approvable ? undefined : approval.reason,
       fingerprint,
       decision_mode: approval.approvable ? approval.action.mode ?? "keys" : undefined,
-      request_id: approval.approvable ? approval.action.requestId : undefined
+      request_id: approval.approvable ? approval.action.requestId : undefined,
+      policy_evidence: approval.approvable && approval.policyEvidence
+        ? {
+            source: approval.policyEvidence.source,
+            kind: approval.policyEvidence.kind,
+            command_sha256: approval.policyEvidence.commandSha256,
+            evidence_fingerprint: approval.policyEvidence.evidenceFingerprint,
+            request_id: approval.policyEvidence.requestId
+          }
+        : undefined
     },
     screen: {
       excerpt: inspection.screenExcerpt,
@@ -1028,6 +1159,15 @@ function approvalOutput(approval: TerminalScreenInspection["approval"]): Record<
     cwd: approval.cwd,
     toolName: approval.toolName,
     requestDetail: approval.requestDetail,
+    policyEvidence: approval.policyEvidence
+      ? {
+          source: approval.policyEvidence.source,
+          kind: approval.policyEvidence.kind,
+          commandSha256: approval.policyEvidence.commandSha256,
+          evidenceFingerprint: approval.policyEvidence.evidenceFingerprint,
+          requestId: approval.policyEvidence.requestId
+        }
+      : undefined,
     decisionMode: approval.action.mode ?? "keys",
     requestId: approval.action.requestId
   };

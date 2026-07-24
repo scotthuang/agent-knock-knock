@@ -81,6 +81,8 @@ interface CreateConversationOptions {
 
 interface CreateMessageOptions {
   conversation: Conversation;
+  /** Stable internal id used when a persisted callback outbox is reconstructed. */
+  id?: string;
   from: Actor;
   to: Actor;
   type: MessageType;
@@ -170,6 +172,7 @@ export function executorForConversation(conversation: Partial<Conversation> | nu
 
 export function createMessage({
   conversation,
+  id,
   from,
   to,
   type,
@@ -188,7 +191,7 @@ export function createMessage({
       : DEFAULT_REQUIRES_RESPONSE[type];
 
   const message = {
-    id: `msg-${randomUUID()}`,
+    id: id ?? `msg-${randomUUID()}`,
     ts: now.toISOString(),
     conversation_id: conversation.conversation_id,
     from,

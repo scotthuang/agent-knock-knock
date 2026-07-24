@@ -24,7 +24,7 @@ test("OpenClaw contract exposes terminal timeout configuration and renewal", () 
   assert.match(pluginSource, /name: "agent_knock_knock_renew"/u);
   assert.match(
     pluginSource,
-    /Claude Code uses no Hooks:[\s\S]*?exact Bash permission screen[\s\S]*?current managed turn[\s\S]*?never auto-approves[\s\S]*?durable completion[\s\S]*?local Claude transcript/u
+    /Claude Code uses no Hooks:[\s\S]*?exact one-time Bash permission screen[\s\S]*?current managed turn[\s\S]*?trusted default-disabled plugin configuration[\s\S]*?auto-approve[\s\S]*?durable completion[\s\S]*?local Claude transcript/u
   );
   assert.doesNotMatch(pluginSource, /structured one-time Hook|pending structured permission/u);
   assert.doesNotMatch(pluginSource, /install-claude-hooks/u);
