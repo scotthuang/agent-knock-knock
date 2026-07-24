@@ -9,6 +9,8 @@ Agent Knock Knock connects OpenClaw to local coding agents. Share a live termina
 
 **No hooks. No agent-side plugins. Just share a terminal and stay in control.**
 
+**No YOLO. Auto-approve only the exact Codex commands you trust—and keep everything else under human control.**
+
 ![Agent Knock Knock cover: OpenClaw knocking on coding agents' door](docs/assets/agent-knock-knock-cover.jpg)
 
 ## See It in Action
