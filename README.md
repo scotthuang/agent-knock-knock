@@ -7,13 +7,21 @@
 
 Agent Knock Knock connects OpenClaw to local coding agents. Share a live terminal through tmux, delegate managed work through ACP, and continue the same task from chat or the terminal.
 
+**No hooks. No agent-side plugins. Just share a terminal and stay in control.**
+
 ![Agent Knock Knock cover: OpenClaw knocking on coding agents' door](docs/assets/agent-knock-knock-cover.jpg)
+
+## See It in Action
+
+[![AKK orchestrating a Claude Code-to-Codex handoff through tmux](docs/assets/akk-tmux-handoff-demo.gif)](docs/assets/akk-tmux-handoff-demo.mp4)
+
+*OpenClaw asks Claude Code to write a file, waits for AKK to report completion, then hands the result to Codex. Click the preview to watch in full quality.*
 
 ## Choose an Execution Mode
 
 | Mode | Best for | Agents | Requires |
 | --- | --- | --- | --- |
-| **tmux bridge (recommended, experimental)** | Share one live CLI session. OpenClaw and a human can hand the task back and forth. | Codex, Claude Code | `tmux` |
+| **tmux bridge (recommended)** | Share one live CLI session. OpenClaw and a human can hand the task back and forth. | Codex, Claude Code | `tmux` |
 | **Managed ACP** | Start background tasks with durable ACP state and callbacks. | Codex, Claude Code, Cursor | [ACPX](https://github.com/openclaw/acpx) |
 
 Install either mode or both. tmux does not require ACPX. Cursor tmux control is [not yet supported](https://github.com/scotthuang/agent-knock-knock/issues/42). AKK can also discover, resume, or fork local Codex sessions; that is a Codex capability, not a third installation mode.
@@ -33,18 +41,47 @@ agent-knock-knock install-openclaw
 
 `install-openclaw` installs or updates the plugin, enables it, installs the AKK skill template, and restarts the OpenClaw Gateway. It is safe to rerun. Use `--skill-only` to skip plugin installation; add `--no-restart` to skip the automatic Gateway restart.
 
-Then enable at least one execution mode:
-
-- **tmux (recommended):** install `tmux` on a Unix-like host and run Codex or Claude Code in a pane owned by the same user as OpenClaw.
-- **Managed ACP:** install ACPX with `npm install -g acpx`.
-
-Claude tmux support requires no hooks and does not modify Claude Code settings. Hook-free completion monitoring is verified on Claude Code `2.1.198` and `2.1.218`; newer versions are accepted when their interactive transcripts preserve the required identity and completion structure.
-
 If OpenClaw runs from a local checkout or another nonstandard location, pass its CLI explicitly:
 
 ```bash
 agent-knock-knock install-openclaw --openclaw-bin /path/to/openclaw/openclaw.mjs
 ```
+
+Choose one execution mode, or install both.
+
+### Option A: tmux bridge (recommended)
+
+Install tmux on macOS:
+
+```bash
+brew install tmux
+```
+
+Or on Debian/Ubuntu:
+
+```bash
+sudo apt-get install tmux
+```
+
+Then start a shared terminal session:
+
+```bash
+tmux new -s coding
+```
+
+Run `codex` or `claude` inside the tmux session. AKK will discover it automatically when OpenClaw and the coding agent run as the same user.
+
+Claude tmux support requires no hooks and does not modify Claude Code settings. Hook-free completion monitoring is verified on Claude Code `2.1.198` and `2.1.218`; newer versions are accepted when their interactive transcripts preserve the required identity and completion structure.
+
+### Option B: Managed ACP
+
+Install ACPX:
+
+```bash
+npm install -g acpx
+```
+
+AKK uses ACPX to start managed Codex, Claude Code, or Cursor sessions from OpenClaw.
 
 Finally, check which modes are ready:
 
