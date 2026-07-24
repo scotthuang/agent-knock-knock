@@ -179,6 +179,14 @@ Surfaces with native commands use the same operations:
 /akk close <conversation-id> [reason]
 ```
 
+Codex CLI sessions started outside AKK can also be resumed, opened in a terminal, or forked:
+
+```text
+AKK takeover Codex <session-id>
+AKK terminal takeover Codex <session-id>
+AKK fork takeover Codex <session-id>
+```
+
 ## Configuration
 
 Configure AKK under `plugins.entries.agent-knock-knock.config` in `~/.openclaw/openclaw.json`, as shown in the Quick Start.
@@ -194,24 +202,6 @@ Configure AKK under `plugins.entries.agent-knock-knock.config` in `~/.openclaw/o
 | `agentHardTimeoutMinutes` | `720` | Maximum terminal bridge monitor lifetime. |
 
 See [`openclaw.plugin.json`](openclaw.plugin.json) for the complete schema and compatibility aliases.
-
-## Native Sessions and tmux Control
-
-AKK can discover Codex CLI sessions started outside AKK and control Codex or Claude Code sessions in tmux. `AKK list` separates managed `delegated` tasks, discovered `native` sessions, and tmux-backed `terminal_controlled` sessions. Native stop/resume and fork takeover remain Codex-only:
-
-```text
-AKK takeover Codex <session-id>
-AKK terminal takeover Codex <session-id>
-AKK fork takeover Codex <session-id>
-```
-
-A terminal-controlled ID works with `send`, `status`, `describe`, `approve`, and `cancel`. Claude accepts new messages only at a verified idle prompt. Use `send --background` (the OpenClaw send tool does this automatically) to bind a managed turn, then use the returned conversation ID with `approve`, `cancel`, or `status`.
-
-Claude tmux support is hook-free: AKK can discover the session, send at a verified idle prompt, report status, handle a narrowly verified approval, and detect completion for a verified local transcript schema. Before sending, AKK binds the Claude PID, process start time, session ID, cwd, and transcript file boundary. Completion requires the exact managed prompt, its UUID chain, an `end_turn` assistant response, a matching `turn_duration`, an idle unchanged process, and two stable monitor polls.
-
-This detector is deliberately conservative. An unknown Claude version or schema, partial or replaced transcript, ambiguous prompt, unresolved tool call, sidechain, or background work does not become `done`; the monitor remains pending and may eventually become `stalled`. `Agent`, `SendMessage`, and scheduled/background tool turns currently take this safe path because their child lifecycle is not fully visible in the main transcript. A visible idle prompt alone is never completion evidence.
-
-Avoid opening a second live client on the same agent session; concurrent clients can produce inconsistent visible history.
 
 ## Approvals
 
