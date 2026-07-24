@@ -7,9 +7,7 @@
 
 Agent Knock Knock connects OpenClaw to local coding agents. Share a live terminal through tmux, delegate managed work through ACP, and continue the same task from chat or the terminal.
 
-**No hooks. No agent-side plugins. Just share a terminal and stay in control.**
-
-**No YOLO. Auto-approve only the exact Codex commands you trust—and keep everything else under human control.**
+**No hooks. No agent-side plugins. Just share a terminal and stay in control. No YOLO. Automate the trusted. Review the rest.**
 
 ![Agent Knock Knock cover: OpenClaw knocking on coding agents' door](docs/assets/agent-knock-knock-cover.jpg)
 
