@@ -14,7 +14,8 @@ import type { ClaudeAgentRow } from "../src/claude-terminal-agent-adapter.js";
 const SESSION_ID = "11111111-1111-4111-8111-111111111111";
 const PID = 42421;
 const AGENT_STARTED_AT_MS = 1784870000000;
-const VERSION = "2.1.198";
+const VERSION = "2.1.218";
+const LEGACY_VERSION = "2.1.198";
 const STARTED_AT = "2026-07-24T02:00:00.000Z";
 const CAPTURED_AT = "2026-07-24T02:00:00.100Z";
 const PROMPT_AT = "2026-07-24T02:00:00.200Z";
@@ -43,6 +44,92 @@ test("detects a hookless Claude turn when the transcript is created after send",
     JSON.stringify(completion),
     /\/projects\/|\.jsonl|Implement the focused/u
   );
+});
+
+test("accepts verified and forward-compatible Claude transcript versions", (t) => {
+  const current = createFixture(t);
+  const currentAnchor = current.capture();
+  const [prompt, thinking, text, duration] = turnRecords({
+    request: "Validate the current transcript schema",
+    assistantText: "Current schema accepted"
+  });
+  const firstAttachmentUuid = uuid(10);
+  const secondAttachmentUuid = uuid(11);
+  const firstAttachment = {
+    ...baseRecord(
+      firstAttachmentUuid,
+      prompt.uuid as string,
+      PROMPT_AT,
+      SESSION_ID,
+      VERSION
+    ),
+    type: "attachment",
+    attachment: { type: "ide_selection" }
+  };
+  const secondAttachment = {
+    ...baseRecord(
+      secondAttachmentUuid,
+      firstAttachmentUuid,
+      PROMPT_AT,
+      SESSION_ID,
+      VERSION
+    ),
+    type: "attachment",
+    attachment: { type: "ide_opened_file" }
+  };
+  thinking.parentUuid = secondAttachmentUuid;
+  thinking.effort = "medium";
+  thinking.session_id = SESSION_ID;
+  text.effort = "medium";
+  text.session_id = SESSION_ID;
+  current.write([
+    { type: "mode", mode: "manual", sessionId: SESSION_ID },
+    { type: "permission-mode", permissionMode: "default", sessionId: SESSION_ID },
+    { type: "file-history-snapshot", isSnapshotUpdate: false, snapshot: {} },
+    prompt,
+    firstAttachment,
+    secondAttachment,
+    thinking,
+    text,
+    duration,
+    { type: "ai-title", aiTitle: "Schema validation", sessionId: SESSION_ID }
+  ]);
+  const currentCompletion = current.detect(
+    currentAnchor,
+    "Validate the current transcript schema"
+  );
+  assert.equal(currentCompletion?.text, "Current schema accepted");
+  assert.equal(currentCompletion?.metadata?.claude_version, VERSION);
+
+  const legacy = createFixture(t, 2);
+  const legacyAnchor = legacy.capture();
+  legacy.write(turnRecords({
+    request: "Validate the legacy transcript schema",
+    assistantText: "Legacy schema accepted",
+    sessionId: legacy.sessionId,
+    version: LEGACY_VERSION
+  }));
+  const legacyCompletion = legacy.detect(
+    legacyAnchor,
+    "Validate the legacy transcript schema"
+  );
+  assert.equal(legacyCompletion?.text, "Legacy schema accepted");
+  assert.equal(legacyCompletion?.metadata?.claude_version, LEGACY_VERSION);
+
+  const future = createFixture(t, 3);
+  const futureAnchor = future.capture();
+  future.write(turnRecords({
+    request: "Validate a future compatible transcript schema",
+    assistantText: "Future compatible schema accepted",
+    sessionId: future.sessionId,
+    version: "2.1.219"
+  }));
+  const futureCompletion = future.detect(
+    futureAnchor,
+    "Validate a future compatible transcript schema"
+  );
+  assert.equal(futureCompletion?.text, "Future compatible schema accepted");
+  assert.equal(futureCompletion?.metadata?.claude_version, "2.1.219");
 });
 
 test("anchors the first Claude turn before the projects directory exists", (t) => {
@@ -193,7 +280,7 @@ test("fails closed on duplicate prompts, unsupported schemas, and multiple durat
   unsupported.write(turnRecords({
     request: "Unsupported version",
     assistantText: "Must not complete",
-    version: "2.2.0"
+    version: "2.0.999"
   }));
   assert.throws(
     () => unsupported.detect(unsupportedAnchor, "Unsupported version"),
@@ -207,14 +294,31 @@ test("fails closed on duplicate prompts, unsupported schemas, and multiple durat
     assistantText: "Must not complete",
     sessionId: changedMidTurn.sessionId
   });
-  changedRecords[1].version = "2.1.199";
+  changedRecords[1].version = "2.1.197";
   changedMidTurn.write(changedRecords);
   assert.throws(
     () => changedMidTurn.detect(changedMidTurnAnchor, "Schema changed mid-turn"),
     /unsupported schema/u
   );
 
-  const multiple = createFixture(t, 5);
+  const mixedCompatible = createFixture(t, 5);
+  const mixedCompatibleAnchor = mixedCompatible.capture();
+  const mixedCompatibleRecords = turnRecords({
+    request: "Compatible schema changed mid-turn",
+    assistantText: "Must not complete",
+    sessionId: mixedCompatible.sessionId
+  });
+  mixedCompatibleRecords[1].version = "3.0.0";
+  mixedCompatible.write(mixedCompatibleRecords);
+  assert.throws(
+    () => mixedCompatible.detect(
+      mixedCompatibleAnchor,
+      "Compatible schema changed mid-turn"
+    ),
+    /changed schema versions/u
+  );
+
+  const multiple = createFixture(t, 6);
   const multipleAnchor = multiple.capture();
   const records = turnRecords({
     request: "Ambiguous duration",
@@ -346,6 +450,39 @@ test("requires an idle unchanged process and stalls on all known background work
     ]);
     assert.equal(native.detect(nativeAnchor, request), undefined);
   });
+});
+
+test("fails closed on nonzero or malformed Claude pending-work counts", (t) => {
+  let suffix = 50;
+  for (const key of ["pendingBackgroundAgentCount", "pendingWorkflowCount"]) {
+    for (const value of [1, -1, "1", null]) {
+      const blocked = createFixture(t, suffix);
+      suffix += 1;
+      const request = `${key} blocked ${String(value)}`;
+      const blockedAnchor = blocked.capture();
+      const blockedRecords = turnRecords({
+        request,
+        assistantText: "Must stay pending",
+        sessionId: blocked.sessionId
+      });
+      blockedRecords.at(-1)![key] = value;
+      blocked.write(blockedRecords);
+      assert.equal(blocked.detect(blockedAnchor, request), undefined);
+    }
+
+    const clear = createFixture(t, suffix);
+    suffix += 1;
+    const request = `${key} clear`;
+    const clearAnchor = clear.capture();
+    const clearRecords = turnRecords({
+      request,
+      assistantText: "No pending work",
+      sessionId: clear.sessionId
+    });
+    clearRecords.at(-1)![key] = 0;
+    clear.write(clearRecords);
+    assert.equal(clear.detect(clearAnchor, request)?.text, "No pending work");
+  }
 });
 
 test("accepts a resolved tool branch but not an unresolved tool or whitespace-only prompt collision", (t) => {

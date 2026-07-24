@@ -231,18 +231,21 @@ test("detects the Claude 2.1.198 idle and working terminal tails", () => {
   assert.equal(codexOnly.activity.state, "unknown");
 });
 
-test("approves only a strict complete Bash fixture in an AKK-managed runtime", () => {
+test("approves the strict Claude 2.1.218 Bash dialog in an AKK-managed runtime", () => {
   const screen = [
     " Bash command",
     "",
-    "   printf '%s' \"$ANTHROPIC_API_KEY\"",
+    "   shasum /etc/hosts",
+    "   Compute SHA checksum of /etc/hosts",
+    "",
+    " This command requires approval",
     "",
     " Do you want to proceed?",
     " ❯ 1. Yes",
-    "   2. Yes, and don't ask again for this command",
+    "   2. Yes, and don’t ask again for: shasum *",
     "   3. No",
     "",
-    " Esc to cancel · Tab to amend"
+    " Esc to cancel · Tab to amend · ctrl+e to explain"
   ].join("\n");
   const inspection = inspectClaudeScreen({
     screen,
@@ -265,7 +268,7 @@ test("approves only a strict complete Bash fixture in an AKK-managed runtime", (
   assert.equal(inspection.approval.action.label, "Yes");
   assert.equal(inspection.approval.promptKind, "claude_permission");
   assert.equal(inspection.approval.toolName, "Bash");
-  assert.match(inspection.approval.command ?? "", /printf/);
+  assert.match(inspection.approval.command ?? "", /shasum/);
 });
 
 test("screen approval rejects prose lookalikes and incomplete or ambiguous Bash dialogs", () => {
@@ -364,6 +367,30 @@ test("screen approval rejects prose lookalikes and incomplete or ambiguous Bash 
         "   4. Open settings",
         ...validLines.slice(noIndex + 1)
       ].join("\n")
+    ],
+    [
+      "unknown footer control",
+      validLines.map((line, index) =>
+        index === footerIndex
+          ? " Esc to cancel · Tab to amend · ctrl+x to trust"
+          : line
+      ).join("\n")
+    ],
+    [
+      "explain control without amend",
+      validLines.map((line, index) =>
+        index === footerIndex
+          ? " Esc to cancel · ctrl+e to explain"
+          : line
+      ).join("\n")
+    ],
+    [
+      "reordered footer controls",
+      validLines.map((line, index) =>
+        index === footerIndex
+          ? " Esc to cancel · ctrl+e to explain · Tab to amend"
+          : line
+      ).join("\n")
     ]
   ];
 
@@ -399,7 +426,7 @@ test("a strict Bash dialog is non-approvable without an AKK-managed runtime", ()
 
 test("permission fallback fails closed for persistent, negative, unknown, and stale choices", () => {
   for (const [label, selected] of [
-    ["persistent", "❯ 2. Yes, and don't ask again for this command"],
+    ["persistent", "❯ 2. Yes, and don’t ask again for: shasum *"],
     ["negative", "❯ 3. No"],
     ["unknown", "❯ 1. Allow once"]
   ]) {
