@@ -71,7 +71,7 @@ tmux new -s coding
 
 Run `codex` or `claude` inside the tmux session. AKK will discover it automatically when OpenClaw and the coding agent run as the same user.
 
-Claude tmux support requires no hooks and does not modify Claude Code settings. Hook-free completion monitoring is verified on Claude Code `2.1.198` and `2.1.218`; newer versions are accepted when their interactive transcripts preserve the required identity and completion structure.
+Claude tmux support requires no hooks and does not modify Claude Code settings. Hook-free completion monitoring is verified on Claude Code `2.1.198` and `2.1.218`; newer versions remain eligible when their interactive transcripts preserve the required identity and completion structure. Hookless auto-approval is deliberately narrower: approval evidence currently requires Claude Code `2.1.x` at `2.1.198` or later, and any other version falls back to manual handling.
 
 ### Option B: Managed ACP
 
@@ -93,7 +93,7 @@ agent-knock-knock doctor
 
 AKK is local-first: its state, logs, and terminal control stay on your machine. AKK has no hosted control plane or telemetry, and its tmux integration does not modify coding-agent settings.
 
-For a managed Claude tmux turn, AKK reads only the bytes appended to Claude Code's owner-private local JSONL transcript after the send boundary. It uses them locally to bind the exact prompt and extract a redacted final answer; it does not upload the transcript or persist a copy of its raw contents. The final answer still travels through your configured local OpenClaw callback.
+For a managed Claude tmux turn, AKK reads only the bytes appended to Claude Code's owner-private local JSONL transcript after the send boundary. It uses them locally to bind the exact prompt, extract a redacted final answer, and correlate a pending Bash tool request with the current permission screen. The raw pending command remains inside the local approval executor for exact policy matching; AKK does not copy it into callbacks, conversation state, events, runtime logs, or redacted screen summaries. AKK does not upload the transcript or persist a copy of its raw contents. The final answer still travels through your configured local OpenClaw callback.
 
 This does not mean task content can never leave the machine. OpenClaw and each coding agent or model provider still process content according to your configuration. Managed ACP tasks currently use ACPX `--approve-all`; treat them as trusted automation, set an explicit workspace, and review the agent's sandbox and credentials.
 
@@ -210,27 +210,28 @@ AKK runs ACPX-backed agents with `--approve-all`. Claude Code surfaces permissio
 For tmux-backed Codex, AKK reports visible approval prompts. Claude approval is deliberately narrower:
 
 - It is available only for the current AKK-managed turn.
-- AKK accepts only an exact, current Bash dialog with the one-time **Yes** choice already highlighted. Persistent permission choices are rejected.
-- A human must explicitly run `AKK approve <conversation-id>`. AKK never auto-approves Claude tmux requests.
-- The request is short-lived, fingerprinted to the terminal and managed-turn identity, and captured and validated again immediately before AKK sends Enter. Each dispatch is reserved first; an uncertain outcome fails closed and must be resolved in the terminal.
+- AKK accepts only an exact, current Bash dialog with the one-time **Yes** choice already highlighted, correlated to one unresolved foreground Bash tool request in the anchored owner-private transcript. Persistent permission choices are rejected.
+- When no trusted rule matches, the callback takes the manual path. The user must personally inspect the named tmux pane, explicitly confirm the exact request, and then run `AKK approve <conversation-id>`; the hash-only callback is not sufficient for review.
+- A disabled-by-default `autoApprove` rule may approve Claude only when its agent, canonical workspace, and exact argument vector all match the freshly re-read local evidence.
+- AKK re-evaluates the policy, reserves the one-shot dispatch, recaptures the one-time choice and transcript evidence, and revalidates the process and pane before sending one Enter. A stale, changed, replayed, or uncertain request fails closed and must be resolved in the terminal.
 
 Unknown, stale, changed, ambiguous, or unmanaged dialogs fail closed and must be resolved in the terminal.
 
-Trusted Codex terminal commands can optionally be auto-approved with a deterministic policy:
+Trusted Codex and hookless Claude terminal commands can optionally be auto-approved with a deterministic policy:
 
 ```json5
 autoApprove: {
   enabled: true,
   rules: [{
     id: "project-read-status",
-    agents: ["codex"],
+    agents: ["codex", "claude"],
     workspaces: ["/absolute/path/to/project"],
     commands: [["pwd"], ["git", "status"], ["git", "diff", "--stat"]]
   }]
 }
 ```
 
-Place `autoApprove` inside the plugin `config` object. It is disabled by default and matches only exact Codex argument vectors in configured workspaces. Shell composition, substitutions, globs, environment assignments, unparseable commands, and out-of-workspace paths require manual approval. Rules match arguments, not executable hashes.
+Place `autoApprove` inside the plugin `config` object. It is disabled by default and matches only exact argument vectors in configured workspaces. Shell composition, substitutions, globs, environment assignments, unparseable commands, and out-of-workspace paths require manual approval. Rules match arguments, not executable hashes. For Claude, the raw command never leaves the local executor; callbacks expose only bounded hashes and opaque request identities.
 
 ## Troubleshooting
 
@@ -245,6 +246,7 @@ Start with `agent-knock-knock doctor`. It checks the core installation and repor
 | Task is `callback_failed` | Run `/akk retry-callback <conversation-id>` in a native-command chat. |
 | Terminal takeover is unavailable | Run Codex or Claude Code inside tmux and check `AKK list` for a `terminal_controlled` entry. |
 | Claude permission is not offered through AKK | Use the managed conversation returned by a background send. If the dialog is not the exact supported one-time Bash prompt, resolve it in the terminal. |
+| Claude request was not auto-approved | Check `autoApprove.enabled`, `agents: ["claude"]`, the canonical workspace, and the exact command vector. The request must also be a current one-time Bash prompt with matching local transcript evidence from a supported Claude `2.1.x` version. |
 | Claude tmux monitor becomes `stalled` | Check the Claude version and `status`, then inspect the terminal. Unknown transcript schemas, background work, identity changes, and ambiguous turns intentionally fail closed. |
 
 For local diagnostics, use:

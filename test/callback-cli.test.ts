@@ -293,6 +293,11 @@ test("terminal bridge callback stays retryable until gateway delivery succeeds",
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(args) + "\\n", "utf8");
+const params = JSON.parse(args[args.indexOf("--params") + 1]);
+if (fs.existsSync(params.statePath + ".lock")) {
+  console.error("state lock held during gateway delivery");
+  process.exit(97);
+}
 if (!fs.existsSync(${JSON.stringify(allowDeliveryPath)})) {
   console.error("gateway temporarily unavailable");
   process.exit(1);

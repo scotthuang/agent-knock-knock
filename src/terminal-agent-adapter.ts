@@ -57,6 +57,25 @@ export interface TerminalApprovalAction {
   requestId?: string;
 }
 
+/**
+ * Executor-local authority for deterministic approval policy evaluation.
+ *
+ * `command` may contain raw terminal-agent input and must never be copied into
+ * callback metadata, persisted state, logs, or screen summaries. Callers may
+ * expose only the bounded hashes and opaque identities alongside it.
+ */
+export interface TerminalApprovalPolicyEvidence {
+  source: "claude_transcript";
+  kind: "run_command";
+  command: string;
+  cwd: string;
+  toolName: "Bash";
+  requestId: string;
+  commandSha256: string;
+  evidenceFingerprint: string;
+  metadata: Readonly<Record<string, string | number>>;
+}
+
 export type TerminalApprovalInspection =
   | {
       blocked: true;
@@ -69,6 +88,8 @@ export type TerminalApprovalInspection =
       toolName?: string;
       /** Redacted, bounded summary of the permission target; never the full tool input. */
       requestDetail?: string;
+      /** Raw executor-local policy authority. Never serialize this object. */
+      policyEvidence?: TerminalApprovalPolicyEvidence;
       action: TerminalApprovalAction;
     }
   | {
@@ -108,6 +129,8 @@ export interface TerminalScreenInspectionOptions {
   screenChangedSinceSend?: boolean;
   maxExcerptLength?: number;
   runtime?: TerminalRuntimeIdentity;
+  /** Managed-turn identity and transcript boundary used for local approval evidence. */
+  managedRequest?: TerminalDurableCompletionRequest;
 }
 
 export interface TerminalScreenInspection {

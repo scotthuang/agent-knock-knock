@@ -71,7 +71,7 @@ The priority order is intentional: reliability comes first. New orchestration fe
 
 - Done: document the observed difference between Claude Code and Codex approval behavior under ACPX.
 - Done for terminal-controlled Codex: support audited, deterministic auto-approval rules for exact command vectors inside configured workspaces.
-- Done for Claude Code tmux: detect a narrowly verified permission screen without hooks, require an explicit human `AKK approve`, and fail closed when the request or runtime identity is stale, unknown, or ambiguous.
+- Done for Claude Code tmux: intersect a narrowly verified one-time Bash screen with local transcript evidence without hooks, support disabled-by-default exact command/workspace auto-approval, retain explicit human review for unmatched requests, and fail closed when the request or runtime identity is stale, unknown, or ambiguous.
 - Continue to prefer Claude Code for tasks that need ACPX-approved filesystem access outside the workspace until Codex exposes equivalent approvable permission requests.
 - Partial for terminal control: configuration policies can approve exact commands; extend them to explicit deny and user-escalation rules.
 - Done for terminal control: approval decisions are one-shot, fingerprinted, revalidated, persisted, and auditable rather than blind global grants.

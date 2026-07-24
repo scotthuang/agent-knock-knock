@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -135,6 +136,69 @@ test("hookless Claude tmux approval is bound to a managed callback and sends exa
     // the assertions below count only keys emitted by the approval path.
     fs.writeFileSync(tmuxCallsPath, "");
 
+    const storedAfterSend = JSON.parse(fs.readFileSync(conversation.state_path, "utf8"));
+    const transcriptAnchor =
+      storedAfterSend.native_session_takeover.claude_transcript_anchor;
+    assert.equal(transcriptAnchor.session_id, claudeSessionId);
+    const projectDirectory = path.join(
+      claudeHome,
+      "projects",
+      workspace.replace(/[^A-Za-z0-9]/gu, "-")
+    );
+    fs.mkdirSync(projectDirectory, { recursive: true, mode: 0o700 });
+    const transcriptPath = path.join(projectDirectory, `${claudeSessionId}.jsonl`);
+    const promptAt = new Date(
+      Date.parse(transcriptAnchor.captured_at) + 100
+    ).toISOString();
+    const pendingCommand = "npm test -- --runInBand";
+    const promptUuid = "00000000-0000-4000-8000-000000000501";
+    const thinkingUuid = "00000000-0000-4000-8000-000000000502";
+    const toolUuid = "00000000-0000-4000-8000-000000000503";
+    const assistantMessageId = "00000000-0000-4000-8000-000000000504";
+    const transcriptBase = (uuid: string, parentUuid: string | null) => ({
+      uuid,
+      parentUuid,
+      isSidechain: false,
+      entrypoint: "cli",
+      timestamp: promptAt,
+      cwd: workspace,
+      sessionId: claudeSessionId,
+      version: "2.1.218"
+    });
+    fs.writeFileSync(transcriptPath, [
+      {
+        ...transcriptBase(promptUuid, null),
+        type: "user",
+        promptId: "00000000-0000-4000-8000-000000000505",
+        message: { role: "user", content: "Run the focused tests" }
+      },
+      {
+        ...transcriptBase(thinkingUuid, promptUuid),
+        type: "assistant",
+        message: {
+          role: "assistant",
+          id: assistantMessageId,
+          stop_reason: "tool_use",
+          content: [{ type: "thinking", thinking: "not returned" }]
+        }
+      },
+      {
+        ...transcriptBase(toolUuid, thinkingUuid),
+        type: "assistant",
+        message: {
+          role: "assistant",
+          id: assistantMessageId,
+          stop_reason: "tool_use",
+          content: [{
+            type: "tool_use",
+            id: "toolu_cli_hookless_approval",
+            name: "Bash",
+            input: { command: pendingCommand }
+          }]
+        }
+      }
+    ].map((record) => JSON.stringify(record)).join("\n") + "\n", { mode: 0o600 });
+
     fs.writeFileSync(screenPath, approvalScreen);
     const staticArgs = claudeTerminalStaticArgs({
       workspace,
@@ -156,6 +220,8 @@ test("hookless Claude tmux approval is bound to a managed callback and sends exa
       "60",
       "--agent-hard-timeout-minutes",
       "120",
+      "--claude-home",
+      claudeHome,
       ...staticArgs
     ], testEnv);
     assert.equal(monitored.status, 0, monitored.stderr || monitored.stdout);
@@ -174,19 +240,28 @@ test("hookless Claude tmux approval is bound to a managed callback and sends exa
     assert.deepEqual(approvalState.keys, ["C-m"]);
     assert.equal(typeof approvalFingerprint, "string");
     assert.ok(approvalFingerprint.length > 0);
+    const commandSha256 = createHash("sha256").update(pendingCommand).digest("hex");
+    assert.equal(approvalState.command, undefined);
+    assert.deepEqual(approvalState.policy_evidence, {
+      source: "claude_transcript",
+      kind: "run_command",
+      command_sha256: commandSha256,
+      evidence_fingerprint:
+        monitoredParsed.message.metadata.approval_candidate.policy_evidence
+          .evidence_fingerprint,
+      request_id: "toolu_cli_hookless_approval"
+    });
     assert.deepEqual(monitoredParsed.message.metadata.approval_candidate, {
       agent: "claude",
-      kind: "claude_permission",
-      command: [
-        "npm test -- --runInBand",
-        "Run the repository test suite",
-        "This command requires approval"
-      ].join("\n"),
+      kind: "run_command",
       tool_name: "Bash",
+      request_detail: `Verified local Bash request (sha256:${commandSha256.slice(0, 12)})`,
       cwd: workspace,
       fingerprint: approvalFingerprint,
       terminal_target: terminalTarget,
-      decision_mode: "keys"
+      decision_mode: "keys",
+      command_source: "executor_local",
+      policy_evidence: approvalState.policy_evidence
     });
     const callbackCall = readJsonLines(openclawCallsPath).at(-1);
     const callbackParamsIndex = callbackCall.args.indexOf("--params");
@@ -194,22 +269,42 @@ test("hookless Claude tmux approval is bound to a managed callback and sends exa
     const callbackParams = JSON.parse(callbackCall.args[callbackParamsIndex + 1]);
     assert.equal(callbackParams.message.metadata.approval_fingerprint, approvalFingerprint);
     assert.equal(callbackParams.message.metadata.approval_candidate.decision_mode, "keys");
+    assert.match(
+      callbackParams.message.body,
+      /personally inspect the live tmux pane claude-work:0\.0/u
+    );
+    assert.match(
+      callbackParams.message.body,
+      /do not approve from the hash or summary alone/u
+    );
     assert.deepEqual(
       callbackParams.message.metadata.terminal_status.approval_state.keys,
       ["C-m"]
     );
+    for (const serialized of [
+      JSON.stringify(monitoredParsed.message),
+      JSON.stringify(callbackParams),
+      fs.readFileSync(conversation.state_path, "utf8"),
+      fs.readFileSync(conversation.event_log_path, "utf8")
+    ]) {
+      assert.equal(
+        serialized.includes(pendingCommand),
+        false,
+        "raw transcript commands must not leave the local approval executor"
+      );
+    }
     assert.equal(controlMCount(), 0);
 
-    const safePolicy = {
+    const wrongPolicy = {
       enabled: true,
       rules: [{
-        id: "hookless-claude-test",
+        id: "hookless-claude-wrong-command",
         agents: ["claude"],
         workspaces: [workspace],
-        commands: [["npm", "test", "--", "--runInBand"]]
+        commands: [["npm", "test"]]
       }]
     };
-    const autoApproved = runAgentCli([
+    const rejected = runAgentCli([
       "approve",
       "--state",
       conversation.state_path,
@@ -218,18 +313,16 @@ test("hookless Claude tmux approval is bound to a managed callback and sends exa
       "--expected-approval-fingerprint",
       approvalFingerprint,
       "--auto-approved",
-      "--policy-rule-id",
-      "hookless-claude-test",
       "--auto-approval-policy-json",
-      JSON.stringify(safePolicy),
+      JSON.stringify(wrongPolicy),
       "--disable-terminal-bridge-monitor",
       ...claudeAgentArgs
     ], testEnv);
-    assert.equal(autoApproved.status, 0, autoApproved.stderr || autoApproved.stdout);
-    const autoApprovedParsed = JSON.parse(autoApproved.stdout);
-    assert.equal(autoApprovedParsed.approved, false);
-    assert.match(autoApprovedParsed.reason, /approval mode keys|structured|decision mode/u);
-    assert.equal(controlMCount(), 0, "hookless Claude approval must never be automatic");
+    assert.equal(rejected.status, 0, rejected.stderr || rejected.stdout);
+    const rejectedParsed = JSON.parse(rejected.stdout);
+    assert.equal(rejectedParsed.approved, false);
+    assert.match(rejectedParsed.reason, /executor-side auto-approval policy rejected/u);
+    assert.equal(controlMCount(), 0, "an unmatched Claude rule must send no key");
 
     const uncertainStatePath = writeConversationClone(
       storeDir,
@@ -272,7 +365,16 @@ test("hookless Claude tmux approval is bound to a managed callback and sends exa
       "an interrupted approval dispatch must fail closed instead of replaying C-m"
     );
 
-    const approved = runAgentCli([
+    const safePolicy = {
+      enabled: true,
+      rules: [{
+        id: "hookless-claude-test",
+        agents: ["claude"],
+        workspaces: [workspace],
+        commands: [["npm", "test", "--", "--runInBand"]]
+      }]
+    };
+    const autoApproved = runAgentCli([
       "approve",
       "--state",
       conversation.state_path,
@@ -280,17 +382,27 @@ test("hookless Claude tmux approval is bound to a managed callback and sends exa
       storeDir,
       "--expected-approval-fingerprint",
       approvalFingerprint,
+      "--auto-approved",
+      "--auto-approval-policy-json",
+      JSON.stringify(safePolicy),
       "--disable-terminal-bridge-monitor",
       ...claudeAgentArgs
     ], testEnv);
-    assert.equal(approved.status, 0, approved.stderr || approved.stdout);
-    const approvedParsed = JSON.parse(approved.stdout);
-    assert.equal(approvedParsed.approved, true);
-    assert.equal(approvedParsed.decision_mode, "keys");
-    assert.equal(approvedParsed.key, "C-m");
-    assert.deepEqual(approvedParsed.keys, ["C-m"]);
-    assert.equal(approvedParsed.approval_fingerprint, approvalFingerprint);
-    assert.equal(controlMCount(), 1, "manual approval must submit exactly one C-m");
+    assert.equal(autoApproved.status, 0, autoApproved.stderr || autoApproved.stdout);
+    const autoApprovedParsed = JSON.parse(autoApproved.stdout);
+    assert.equal(autoApprovedParsed.approved, true);
+    assert.equal(autoApprovedParsed.auto_approved, true);
+    assert.equal(autoApprovedParsed.decision_mode, "keys");
+    assert.equal(autoApprovedParsed.key, "C-m");
+    assert.deepEqual(autoApprovedParsed.keys, ["C-m"]);
+    assert.equal(autoApprovedParsed.approval_fingerprint, approvalFingerprint);
+    assert.equal(autoApprovedParsed.policy_rule_id, "hookless-claude-test");
+    assert.equal(typeof autoApprovedParsed.policy_fingerprint, "string");
+    assert.equal(
+      controlMCount(),
+      1,
+      "a matching verified Claude rule must submit exactly one C-m"
+    );
     const approvedState = JSON.parse(fs.readFileSync(conversation.state_path, "utf8"));
     assert.equal(
       approvedState.native_session_takeover.terminal_bridge_approval_dispatch,
@@ -299,6 +411,46 @@ test("hookless Claude tmux approval is bound to a managed callback and sends exa
     assert.equal(
       approvedState.native_session_takeover.terminal_bridge_last_approval_fingerprint,
       approvalFingerprint
+    );
+    assert.equal(
+      fs.readFileSync(conversation.state_path, "utf8").includes(pendingCommand),
+      false
+    );
+    assert.equal(
+      fs.readFileSync(conversation.event_log_path, "utf8").includes(pendingCommand),
+      false
+    );
+
+    const replay = runAgentCli([
+      "approve",
+      "--state",
+      conversation.state_path,
+      "--store-dir",
+      storeDir,
+      "--expected-approval-fingerprint",
+      approvalFingerprint,
+      "--auto-approved",
+      "--auto-approval-policy-json",
+      JSON.stringify(safePolicy),
+      "--disable-terminal-bridge-monitor",
+      ...claudeAgentArgs
+    ], testEnv);
+    assert.equal(replay.status, 0, replay.stderr || replay.stdout);
+    const replayParsed = JSON.parse(replay.stdout);
+    assert.equal(replayParsed.approved, false);
+    assert.equal(replayParsed.already_approved, true);
+    assert.equal(controlMCount(), 1, "a consumed fingerprint must never replay C-m");
+    assert.equal(
+      eventCount(conversation.event_log_path, "terminal_approval_send"),
+      1
+    );
+    assert.equal(
+      readJsonLines(conversation.event_log_path)
+        .filter((event) =>
+          event.event === "terminal_auto_approval_decision" &&
+          event.action === "approved"
+        ).length,
+      1
     );
 
     const closedStatePath = writeConversationClone(
@@ -321,6 +473,1015 @@ test("hookless Claude tmux approval is bound to a managed callback and sends exa
     assert.notEqual(closedReplay.status, 0);
     assert.match(closedReplay.stderr, /cannot approve .* conversation is closed/u);
     assert.equal(controlMCount(), 1, "a closed conversation must never replay approval keys");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("hookless Claude Gateway auto approval keeps the original monitor through completion", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-autoapprove-handoff-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const claudeHome = path.join(tempDir, ".claude");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const workspace = path.join(tempDir, "workspace");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const terminalTarget = "claude-autoapprove:0.0";
+  const claudePid = 42301;
+  const claudeSessionId = "55555555-5555-4555-8555-555555555555";
+  const request = "Remove the exact handoff fixture";
+  const command = `rm ${path.join(workspace, ".akk-autoapprove-handoff")}`;
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.mkdirSync(claudeHome, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(screenPath, "❯ ");
+    writeFakeOpenClaw(fakeBinDir, openclawCallsPath);
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `claude-autoapprove\t0\t0\t999\tnode\t${workspace}\n`
+    );
+    const task = startManagedClaudeTerminalTask({
+      fakeBinDir,
+      workspace,
+      storeDir,
+      claudeHome,
+      terminalTarget,
+      claudePid,
+      claudeSessionId,
+      message: request
+    });
+    fs.writeFileSync(tmuxCallsPath, "");
+
+    const storedConversation = JSON.parse(
+      fs.readFileSync(task.statePath, "utf8")
+    );
+    const anchor =
+      storedConversation.native_session_takeover.claude_transcript_anchor;
+    const promptAt = new Date(
+      Date.parse(anchor.captured_at) + 100
+    ).toISOString();
+    const completedAt = new Date(
+      Date.parse(promptAt) + 200
+    ).toISOString();
+    const projectDirectory = path.join(
+      claudeHome,
+      "projects",
+      workspace.replace(/[^A-Za-z0-9]/gu, "-")
+    );
+    fs.mkdirSync(projectDirectory, { recursive: true, mode: 0o700 });
+    const transcriptPath = path.join(
+      projectDirectory,
+      `${claudeSessionId}.jsonl`
+    );
+    const promptUuid = "00000000-0000-4000-8000-000000000601";
+    const thinkingUuid = "00000000-0000-4000-8000-000000000602";
+    const toolUuid = "00000000-0000-4000-8000-000000000603";
+    const resultUuid = "00000000-0000-4000-8000-000000000604";
+    const finalUuid = "00000000-0000-4000-8000-000000000605";
+    const durationUuid = "00000000-0000-4000-8000-000000000606";
+    const assistantMessageId =
+      "00000000-0000-4000-8000-000000000607";
+    const toolUseId = "toolu_autoapprove_handoff";
+    const transcriptBase = (
+      uuid: string,
+      parentUuid: string | null,
+      timestamp: string
+    ) => ({
+      uuid,
+      parentUuid,
+      isSidechain: false,
+      entrypoint: "cli",
+      timestamp,
+      cwd: workspace,
+      sessionId: claudeSessionId,
+      version: "2.1.218"
+    });
+    const pendingRecords = [
+      {
+        ...transcriptBase(promptUuid, null, promptAt),
+        type: "user",
+        promptId: "00000000-0000-4000-8000-000000000608",
+        message: { role: "user", content: request }
+      },
+      {
+        ...transcriptBase(thinkingUuid, promptUuid, promptAt),
+        type: "assistant",
+        message: {
+          role: "assistant",
+          id: assistantMessageId,
+          stop_reason: "tool_use",
+          content: [{ type: "thinking", thinking: "not returned" }]
+        }
+      },
+      {
+        ...transcriptBase(toolUuid, thinkingUuid, promptAt),
+        type: "assistant",
+        message: {
+          role: "assistant",
+          id: assistantMessageId,
+          stop_reason: "tool_use",
+          content: [{
+            type: "tool_use",
+            id: toolUseId,
+            name: "Bash",
+            input: { command }
+          }]
+        }
+      }
+    ];
+    const completionRecords = [
+      {
+        ...transcriptBase(resultUuid, toolUuid, completedAt),
+        type: "user",
+        sourceToolAssistantUUID: toolUuid,
+        message: {
+          role: "user",
+          content: [{
+            type: "tool_result",
+            tool_use_id: toolUseId,
+            content: ""
+          }]
+        }
+      },
+      {
+        ...transcriptBase(finalUuid, resultUuid, completedAt),
+        type: "assistant",
+        message: {
+          role: "assistant",
+          id: "00000000-0000-4000-8000-000000000609",
+          stop_reason: "end_turn",
+          content: [{
+            type: "text",
+            text: "AKK auto-approval handoff completed."
+          }]
+        }
+      },
+      {
+        ...transcriptBase(durationUuid, finalUuid, completedAt),
+        type: "system",
+        subtype: "turn_duration",
+        durationMs: 200
+      }
+    ];
+    fs.writeFileSync(
+      transcriptPath,
+      pendingRecords.map((record) => JSON.stringify(record)).join("\n") + "\n",
+      { mode: 0o600 }
+    );
+    const approvalScreen = currentClaudeApprovalScreenForTest(command);
+    fs.writeFileSync(screenPath, approvalScreen);
+    const autoApprovalPolicy = {
+      enabled: true,
+      rules: [{
+        id: "claude-handoff-exact",
+        agents: ["claude"],
+        workspaces: [workspace],
+        commands: [["rm", path.join(workspace, ".akk-autoapprove-handoff")]]
+      }]
+    };
+    writeAutoApprovingFakeOpenClaw({
+      fakeBinDir,
+      callsPath: openclawCallsPath,
+      statePath: task.statePath,
+      cliPath: binPath,
+      claudeHome,
+      claudeAgents: [
+        claudeAgentRow(claudePid, claudeSessionId, workspace)
+      ],
+      policy: autoApprovalPolicy,
+      screenPath,
+      transcriptPath,
+      toolResultAppend: `${JSON.stringify(completionRecords[0])}\n`,
+      completionAppend:
+        completionRecords
+          .slice(1)
+          .map((record) => JSON.stringify(record))
+          .join("\n") +
+        "\n"
+    });
+
+    const monitor = await runAgentCliAsync([
+      "monitor",
+      "--terminal-bridge",
+      "--state",
+      task.statePath,
+      "--log",
+      task.logPath,
+      "--poll-interval-ms",
+      "50",
+      "--agent-timeout-minutes",
+      "60",
+      "--agent-hard-timeout-minutes",
+      "120",
+      "--claude-home",
+      claudeHome,
+      "--claude-agents-json",
+      JSON.stringify([
+        claudeAgentRow(claudePid, claudeSessionId, workspace)
+      ])
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    }, 20_000);
+    assert.equal(monitor.status, 0, monitor.stderr || monitor.stdout);
+    const monitorResult = JSON.parse(monitor.stdout);
+    assert.equal(monitorResult.delivered, true);
+    assert.equal(monitorResult.message.type, "done");
+    assert.equal(
+      monitorResult.message.body,
+      "AKK auto-approval handoff completed."
+    );
+    assert.equal(monitorResult.conversation.status, "closed");
+
+    const tmuxCalls = readJsonLines(tmuxCallsPath);
+    assert.equal(
+      tmuxCalls.filter((call) =>
+        call.args[0] === "send-keys" &&
+        call.args[3] === "C-m"
+      ).length,
+      1
+    );
+    const events = readJsonLines(task.logPath);
+    const approvalScreenDigest = createHash("sha256")
+      .update(approvalScreen)
+      .digest("hex");
+    const approvalNotification = events.find((event) =>
+      event.event === "terminal_bridge_approval_notification_recorded"
+    );
+    assert.equal(
+      approvalNotification?.screen_digest,
+      approvalScreenDigest
+    );
+    assert.equal(
+      events.filter((event) =>
+        event.event === "terminal_bridge_approval_notification_recorded"
+      ).length,
+      1
+    );
+    assert.equal(
+      events.filter((event) =>
+        event.event === "terminal_bridge_monitor_continued_after_approval"
+      ).length,
+      1
+    );
+    assert.equal(
+      events.filter((event) =>
+        event.event === "terminal_bridge_monitor_reused" &&
+        event.reason === "approval_resolved"
+      ).length,
+      1,
+      "the nested approval must detect and reuse the callback-delivering monitor"
+    );
+    assert.equal(
+      events.filter((event) =>
+        event.event === "terminal_bridge_completion_detected"
+      ).length,
+      1
+    );
+    assert.equal(
+      events.filter((event) =>
+        event.event === "terminal_bridge_monitor_launch" &&
+        event.reason === "approval_resolved"
+      ).length,
+      0,
+      "Gateway auto-approval must reuse the callback-delivering monitor"
+    );
+    assert.equal(
+      events.filter((event) =>
+        event.event === "terminal_bridge_approval_detected"
+      ).length,
+      1,
+      "the consumed prompt must not create another approval callback before repaint"
+    );
+    const finalState = JSON.parse(fs.readFileSync(task.statePath, "utf8"));
+    assert.equal(
+      finalState.native_session_takeover
+        .terminal_bridge_last_approval_screen_digest,
+      approvalScreenDigest
+    );
+    assert.equal(
+      finalState.response_rounds_used,
+      storedConversation.response_rounds_used + 1,
+      "the unchanged consumed prompt must not spend another response round"
+    );
+    const gatewayMessages = readJsonLines(openclawCallsPath)
+      .filter((entry) => entry.kind === "gateway")
+      .map((entry) => {
+        const paramsIndex = entry.args.indexOf("--params");
+        return JSON.parse(entry.args[paramsIndex + 1]).message;
+      });
+    assert.deepEqual(
+      gatewayMessages.map((message) => message.type),
+      ["question", "done"]
+    );
+
+    const approvalCallbackMessage = gatewayMessages[0];
+    const claudeAgents = [
+      claudeAgentRow(claudePid, claudeSessionId, workspace)
+    ];
+    writeFakeClaudeAgents(fakeBinDir, claudeAgents);
+    const pendingTranscript = pendingRecords
+      .map((record) => JSON.stringify(record))
+      .join("\n") + "\n";
+    const secondToolUuid = "00000000-0000-4000-8000-000000000610";
+    const secondResultUuid = "00000000-0000-4000-8000-000000000611";
+    const sequentialFinalUuid = "00000000-0000-4000-8000-000000000612";
+    const sequentialDurationUuid =
+      "00000000-0000-4000-8000-000000000613";
+    const secondToolUseId = "toolu_autoapprove_handoff_second";
+    const secondToolAt = new Date(
+      Date.parse(completedAt) + 100
+    ).toISOString();
+    const secondResultAt = new Date(
+      Date.parse(secondToolAt) + 100
+    ).toISOString();
+    const sequentialCompletedAt = new Date(
+      Date.parse(secondResultAt) + 100
+    ).toISOString();
+    const secondToolRecord = {
+      ...transcriptBase(secondToolUuid, resultUuid, secondToolAt),
+      type: "assistant",
+      message: {
+        role: "assistant",
+        id: "00000000-0000-4000-8000-000000000614",
+        stop_reason: "tool_use",
+        content: [{
+          type: "tool_use",
+          id: secondToolUseId,
+          name: "Bash",
+          input: { command }
+        }]
+      }
+    };
+    const secondResultRecord = {
+      ...transcriptBase(
+        secondResultUuid,
+        secondToolUuid,
+        secondResultAt
+      ),
+      type: "user",
+      sourceToolAssistantUUID: secondToolUuid,
+      message: {
+        role: "user",
+        content: [{
+          type: "tool_result",
+          tool_use_id: secondToolUseId,
+          content: ""
+        }]
+      }
+    };
+    const sequentialCompletionRecords = [
+      {
+        ...transcriptBase(
+          sequentialFinalUuid,
+          secondResultUuid,
+          sequentialCompletedAt
+        ),
+        type: "assistant",
+        message: {
+          role: "assistant",
+          id: "00000000-0000-4000-8000-000000000615",
+          stop_reason: "end_turn",
+          content: [{
+            type: "text",
+            text: "AKK sequential auto-approvals completed."
+          }]
+        }
+      },
+      {
+        ...transcriptBase(
+          sequentialDurationUuid,
+          sequentialFinalUuid,
+          sequentialCompletedAt
+        ),
+        type: "system",
+        subtype: "turn_duration",
+        durationMs: 400
+      }
+    ];
+    const sequentialStatePath = writeConversationClone(
+      storeDir,
+      storedConversation,
+      "claude-autoapprove-sequential-identities",
+      (state) => {
+        const {
+          callback_delivery: _callbackDelivery,
+          ...withoutCallback
+        } = state;
+        return {
+          ...withoutCallback,
+          status: "waiting_for_agent"
+        };
+      }
+    );
+    const sequentialLogPath = path.join(
+      path.dirname(sequentialStatePath),
+      "events.ndjson"
+    );
+    const redrawnFirstScreen = `\n${approvalScreen}`;
+    const clearedScreen = "✻ Running approved command…\n";
+    fs.writeFileSync(transcriptPath, pendingTranscript, { mode: 0o600 });
+    fs.writeFileSync(screenPath, approvalScreen);
+    const sequentialCallsStart = readJsonLines(openclawCallsPath).length;
+    const sequentialEnterStart = readJsonLines(tmuxCallsPath)
+      .filter((call) =>
+        call.args[0] === "send-keys" &&
+        call.args[3] === "C-m"
+      ).length;
+    writeSequentialAutoApprovingFakeOpenClaw({
+      fakeBinDir,
+      callsPath: openclawCallsPath,
+      statePath: sequentialStatePath,
+      cliPath: binPath,
+      claudeHome,
+      claudeAgents,
+      policy: autoApprovalPolicy,
+      screenPath,
+      transcriptPath,
+      firstRequestId: toolUseId,
+      secondRequestId: secondToolUseId,
+      firstSchedulePath: path.join(tempDir, "sequential-first-scheduled"),
+      secondSchedulePath: path.join(tempDir, "sequential-second-scheduled"),
+      redrawnFirstScreen,
+      clearedScreen,
+      repeatedApprovalScreen: approvalScreen,
+      firstResultAppend: `${JSON.stringify(completionRecords[0])}\n`,
+      secondRequestAppend: `${JSON.stringify(secondToolRecord)}\n`,
+      secondResultAppend: `${JSON.stringify(secondResultRecord)}\n`,
+      completionAppend:
+        sequentialCompletionRecords
+          .map((record) => JSON.stringify(record))
+          .join("\n") +
+        "\n"
+    });
+    const sequentialMonitor = await runAgentCliAsync([
+      "monitor",
+      "--terminal-bridge",
+      "--state",
+      sequentialStatePath,
+      "--log",
+      sequentialLogPath,
+      "--poll-interval-ms",
+      "50",
+      "--agent-timeout-minutes",
+      "60",
+      "--agent-hard-timeout-minutes",
+      "120",
+      "--claude-home",
+      claudeHome,
+      "--claude-agents-json",
+      JSON.stringify(claudeAgents)
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    }, 20_000);
+    assert.equal(
+      sequentialMonitor.status,
+      0,
+      sequentialMonitor.stderr || sequentialMonitor.stdout
+    );
+    const sequentialResult = JSON.parse(sequentialMonitor.stdout);
+    assert.equal(sequentialResult.message.type, "done");
+    assert.equal(
+      sequentialResult.message.body,
+      "AKK sequential auto-approvals completed."
+    );
+    assert.equal(
+      readJsonLines(tmuxCallsPath)
+        .filter((call) =>
+          call.args[0] === "send-keys" &&
+          call.args[3] === "C-m"
+        ).length,
+      sequentialEnterStart + 2,
+      "a redraw of the first request must not replay Enter, while the second request must approve once"
+    );
+    const sequentialCalls = readJsonLines(openclawCallsPath)
+      .slice(sequentialCallsStart);
+    const sequentialQuestions = sequentialCalls
+      .filter((entry) => entry.kind === "gateway")
+      .map((entry) => {
+        const paramsIndex = entry.args.indexOf("--params");
+        return JSON.parse(entry.args[paramsIndex + 1]).message;
+      })
+      .filter((message) =>
+        message.metadata?.reason === "approval_required"
+      );
+    assert.deepEqual(
+      sequentialQuestions.map((message) =>
+        message.metadata.approval_candidate.policy_evidence.request_id
+      ),
+      [toolUseId, secondToolUseId],
+      "a changed render of one transcript request must stay consumed, while a new transcript request may reuse the original screen"
+    );
+    const sequentialEvents = readJsonLines(sequentialLogPath);
+    const sequentialApprovalIndexes = sequentialEvents
+      .map((event, index) =>
+        event.event === "terminal_bridge_approval_detected" ? index : -1
+      )
+      .filter((index) => index >= 0);
+    const promptClearedIndex = sequentialEvents.findIndex((event) =>
+      event.event === "terminal_bridge_approval_prompt_cleared"
+    );
+    assert.equal(sequentialApprovalIndexes.length, 2);
+    assert.ok(
+      promptClearedIndex > sequentialApprovalIndexes[0] &&
+      promptClearedIndex < sequentialApprovalIndexes[1],
+      "the monitor must observe a cleared prompt generation before the repeated screen becomes a new request"
+    );
+    const sequentialState = JSON.parse(
+      fs.readFileSync(sequentialStatePath, "utf8")
+    );
+    assert.equal(
+      sequentialState.native_session_takeover
+        .terminal_bridge_last_approval_request_id,
+      secondToolUseId
+    );
+    assert.equal(
+      typeof sequentialState.native_session_takeover
+        .terminal_bridge_last_approval_evidence_fingerprint,
+      "string"
+    );
+    for (const nestedApproval of sequentialCalls.filter((entry) =>
+      entry.kind === "nested_approve"
+    )) {
+      await waitForPidExit(
+        JSON.parse(nestedApproval.stdout).monitor_handoff_pid
+      );
+    }
+
+    const callbackDeliveryForRetry = (state: any) => ({
+      status: "failed",
+      message: approvalCallbackMessage,
+      attempts: 1,
+      attempt_id: "dead-approval-callback-attempt",
+      attempt_pid: 2_147_483_000,
+      created_at: approvalCallbackMessage.ts,
+      last_attempt_at: approvalCallbackMessage.ts,
+      gateway_method: state.gateway_method,
+      gateway_session: state.gateway_session,
+      gateway_url: state.gateway_url,
+      openclaw_bin: state.openclaw_bin,
+      close_terminal_bridge_on_done: false,
+      track_delivery: true,
+      final_status: "waiting_for_openclaw",
+      preserve_conversation_status: true,
+      kind: "approval_notification",
+      last_error: "simulated monitor crash before Gateway settlement"
+    });
+    const writeApprovalMessageEvent = (logPath: string) => {
+      fs.writeFileSync(logPath, `${JSON.stringify({
+        ts: approvalCallbackMessage.ts,
+        conversation_id: approvalCallbackMessage.conversation_id,
+        event: "message",
+        from: approvalCallbackMessage.from,
+        to: approvalCallbackMessage.to,
+        type: approvalCallbackMessage.type,
+        requires_response: approvalCallbackMessage.requires_response,
+        round: approvalCallbackMessage.round,
+        body: approvalCallbackMessage.body,
+        message: approvalCallbackMessage
+      })}\n`, { mode: 0o600 });
+    };
+    const configureRetryGateway = (statePath: string) => {
+      writeAutoApprovingFakeOpenClaw({
+        fakeBinDir,
+        callsPath: openclawCallsPath,
+        statePath,
+        cliPath: binPath,
+        claudeHome,
+        claudeAgents,
+        policy: autoApprovalPolicy,
+        screenPath,
+        transcriptPath,
+        toolResultAppend: `${JSON.stringify(completionRecords[0])}\n`,
+        completionAppend:
+          completionRecords
+            .slice(1)
+            .map((record) => JSON.stringify(record))
+            .join("\n") +
+          "\n"
+      });
+    };
+
+    const crashAfterDeliveryStatePath = writeConversationClone(
+      storeDir,
+      storedConversation,
+      "claude-autoapprove-crash-after-delivery",
+      (state) => {
+        const {
+          callback_delivery: _callbackDelivery,
+          ...withoutCallback
+        } = state;
+        return {
+          ...withoutCallback,
+          status: "waiting_for_agent"
+        };
+      }
+    );
+    const crashAfterDeliveryLogPath = path.join(
+      path.dirname(crashAfterDeliveryStatePath),
+      "events.ndjson"
+    );
+    fs.writeFileSync(transcriptPath, pendingTranscript, { mode: 0o600 });
+    fs.writeFileSync(screenPath, approvalScreen);
+    configureRetryGateway(crashAfterDeliveryStatePath);
+    const callsBeforeCrashAfterDelivery =
+      readJsonLines(openclawCallsPath).length;
+    const enterCountBeforeCrashAfterDelivery = readJsonLines(tmuxCallsPath)
+      .filter((call) =>
+        call.args[0] === "send-keys" &&
+        call.args[3] === "C-m"
+      ).length;
+    const crashedAfterDelivery = await runAgentCliAsync([
+      "monitor",
+      "--terminal-bridge",
+      "--state",
+      crashAfterDeliveryStatePath,
+      "--log",
+      crashAfterDeliveryLogPath,
+      "--poll-interval-ms",
+      "50",
+      "--agent-timeout-minutes",
+      "60",
+      "--agent-hard-timeout-minutes",
+      "120",
+      "--claude-home",
+      claudeHome,
+      "--claude-agents-json",
+      JSON.stringify(claudeAgents)
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      AKK_TEST_EXIT_AFTER_APPROVAL_CALLBACK_DELIVERED: "1"
+    }, 20_000);
+    assert.equal(
+      crashedAfterDelivery.status,
+      86,
+      crashedAfterDelivery.stderr || crashedAfterDelivery.stdout
+    );
+    await waitForCondition(
+      () => {
+        try {
+          return JSON.parse(
+            fs.readFileSync(crashAfterDeliveryStatePath, "utf8")
+          ).status === "closed";
+        } catch {
+          return false;
+        }
+      },
+      "handoff watchdog to replace a monitor that exited after callback delivery",
+      15_000
+    );
+    assert.equal(
+      readJsonLines(tmuxCallsPath)
+        .filter((call) =>
+          call.args[0] === "send-keys" &&
+          call.args[3] === "C-m"
+        ).length,
+      enterCountBeforeCrashAfterDelivery + 1,
+      "handoff recovery must never replay the approval key"
+    );
+    const crashAfterDeliveryEvents = readJsonLines(
+      crashAfterDeliveryLogPath
+    );
+    const approvalDeliverySettledIndex =
+      crashAfterDeliveryEvents.findIndex((event) =>
+        event.event === "callback_delivery_succeeded" &&
+        event.message_id !== undefined &&
+        event.status === "waiting_for_agent"
+      );
+    const forcedExitIndex = crashAfterDeliveryEvents.findIndex((event) =>
+      event.event ===
+        "terminal_bridge_test_exit_after_approval_callback_delivered"
+    );
+    const handoffLaunchIndex = crashAfterDeliveryEvents.findIndex((event) =>
+      event.event === "terminal_bridge_monitor_launch" &&
+      event.reason === "approval_handoff_reconciliation"
+    );
+    assert.ok(
+      approvalDeliverySettledIndex >= 0 &&
+      forcedExitIndex > approvalDeliverySettledIndex,
+      "the failpoint must exit only after the approval callback is durable"
+    );
+    assert.ok(
+      handoffLaunchIndex > forcedExitIndex,
+      "the detached handoff watchdog must launch the replacement after owner loss"
+    );
+    assert.equal(
+      crashAfterDeliveryEvents.filter((event) =>
+        event.event === "terminal_bridge_monitor_continued_after_approval"
+      ).length,
+      0,
+      "the forced exit must happen before the original monitor continues"
+    );
+    assert.equal(
+      crashAfterDeliveryEvents.filter((event) =>
+        event.event === "terminal_bridge_monitor_reused" &&
+        event.reason === "approval_resolved"
+      ).length,
+      1
+    );
+    assert.equal(
+      crashAfterDeliveryEvents.filter((event) =>
+        event.event ===
+          "terminal_bridge_monitor_handoff_watchdog_started"
+      ).length,
+      1,
+      "one state/message handoff watchdog must own recovery"
+    );
+    const crashAfterDeliveryCalls = readJsonLines(openclawCallsPath)
+      .slice(callsBeforeCrashAfterDelivery);
+    assert.deepEqual(
+      crashAfterDeliveryCalls
+        .filter((entry) => entry.kind === "gateway")
+        .map((entry) => {
+          const paramsIndex = entry.args.indexOf("--params");
+          return JSON.parse(entry.args[paramsIndex + 1]).message.type;
+        }),
+      ["question", "done"]
+    );
+    const crashNestedApproval = crashAfterDeliveryCalls.find(
+      (entry) => entry.kind === "nested_approve"
+    );
+    assert.ok(crashNestedApproval);
+    const crashApproval = JSON.parse(crashNestedApproval.stdout);
+    assert.equal(crashApproval.approved, true);
+    assert.ok(Number(crashApproval.monitor_handoff_pid) > 1);
+    const replacementLaunch = crashAfterDeliveryEvents.find((event) =>
+      event.event === "terminal_bridge_monitor_launch" &&
+      event.reason === "approval_handoff_reconciliation"
+    );
+    await waitForPidExit(crashApproval.monitor_handoff_pid);
+    await waitForPidExit(Number(replacementLaunch?.pid));
+
+    const retryBeforeApprovalStatePath = writeConversationClone(
+      storeDir,
+      storedConversation,
+      "claude-autoapprove-retry-before-approval",
+      (state) => ({
+        ...state,
+        conversation_id: storedConversation.conversation_id,
+        status: "waiting_for_openclaw",
+        response_rounds_used: approvalCallbackMessage.round,
+        native_session_takeover: {
+          ...state.native_session_takeover,
+          terminal_bridge_approval: {
+            fingerprint:
+              approvalCallbackMessage.metadata.approval_fingerprint,
+            notified_at: approvalCallbackMessage.ts,
+            terminal_control:
+              approvalCallbackMessage.metadata.terminal_control,
+            approval_state:
+              approvalCallbackMessage.metadata.terminal_status.approval_state,
+            screen_digest:
+              approvalCallbackMessage.metadata.terminal_status.screen.digest,
+            callback_message_id: approvalCallbackMessage.id,
+            callback_message_ts: approvalCallbackMessage.ts
+          }
+        },
+        callback_delivery: callbackDeliveryForRetry(state),
+        updated_at: approvalCallbackMessage.ts
+      })
+    );
+    const retryBeforeApprovalLogPath = path.join(
+      path.dirname(retryBeforeApprovalStatePath),
+      "events.ndjson"
+    );
+    writeApprovalMessageEvent(retryBeforeApprovalLogPath);
+    fs.writeFileSync(transcriptPath, pendingTranscript, { mode: 0o600 });
+    fs.writeFileSync(screenPath, approvalScreen);
+    configureRetryGateway(retryBeforeApprovalStatePath);
+    const callsBeforeFirstRetry = readJsonLines(openclawCallsPath).length;
+    const enterCountBeforeFirstRetry = readJsonLines(tmuxCallsPath)
+      .filter((call) =>
+        call.args[0] === "send-keys" &&
+        call.args[3] === "C-m"
+      ).length;
+    const retriedBeforeApproval = runAgentCli([
+      "retry-callback",
+      "--state",
+      retryBeforeApprovalStatePath
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(
+      retriedBeforeApproval.status,
+      0,
+      retriedBeforeApproval.stderr || retriedBeforeApproval.stdout
+    );
+    await waitForCondition(
+      () => {
+        try {
+          return JSON.parse(
+            fs.readFileSync(retryBeforeApprovalStatePath, "utf8")
+          ).status === "closed";
+        } catch {
+          return false;
+        }
+      },
+      "replacement monitor to complete after a pre-approval callback retry"
+    );
+    const firstRetryCalls = readJsonLines(openclawCallsPath)
+      .slice(callsBeforeFirstRetry);
+    const firstRetryNested = firstRetryCalls.find(
+      (entry) => entry.kind === "nested_approve"
+    );
+    assert.ok(firstRetryNested);
+    const firstRetryApproval = JSON.parse(firstRetryNested.stdout);
+    assert.equal(firstRetryApproval.approved, true);
+    assert.equal(
+      readJsonLines(tmuxCallsPath)
+        .filter((call) =>
+          call.args[0] === "send-keys" &&
+          call.args[3] === "C-m"
+        ).length,
+      enterCountBeforeFirstRetry + 1
+    );
+    const firstRetryEvents = readJsonLines(retryBeforeApprovalLogPath);
+    assert.equal(
+      firstRetryEvents.filter((event) =>
+        event.event === "terminal_bridge_monitor_launch" &&
+        event.reason === "approval_resolved"
+      ).length,
+      1,
+      "a dead callback owner must be replaced after sending approval"
+    );
+    assert.deepEqual(
+      firstRetryCalls
+        .filter((entry) => entry.kind === "gateway")
+        .map((entry) => {
+          const paramsIndex = entry.args.indexOf("--params");
+          return JSON.parse(entry.args[paramsIndex + 1]).message.type;
+        }),
+      ["question", "done"]
+    );
+    await waitForPidExit(firstRetryApproval.monitor_pid);
+
+    const approvedBeforeSettlement = {
+      ...firstRetryApproval.conversation,
+      native_session_takeover: {
+        ...firstRetryApproval.conversation.native_session_takeover,
+        claude_transcript_anchor:
+          storedConversation.native_session_takeover
+            .claude_transcript_anchor,
+        claude_home: claudeHome
+      }
+    };
+    const retryAfterApprovalStatePath = writeConversationClone(
+      storeDir,
+      approvedBeforeSettlement,
+      "claude-autoapprove-retry-after-approval",
+      (state) => {
+        const nativeTakeover = {
+          ...state.native_session_takeover
+        };
+        delete nativeTakeover.terminal_bridge_approval;
+        delete nativeTakeover.terminal_bridge_approval_dispatch;
+        return {
+          ...state,
+          conversation_id: storedConversation.conversation_id,
+          status: "waiting_for_agent",
+          response_rounds_used: approvalCallbackMessage.round,
+          native_session_takeover: nativeTakeover,
+          callback_delivery: callbackDeliveryForRetry(state),
+          updated_at:
+            nativeTakeover.terminal_bridge_approval_resolved_at
+        };
+      }
+    );
+    const retryAfterApprovalLogPath = path.join(
+      path.dirname(retryAfterApprovalStatePath),
+      "events.ndjson"
+    );
+    writeApprovalMessageEvent(retryAfterApprovalLogPath);
+    fs.writeFileSync(transcriptPath, pendingTranscript, { mode: 0o600 });
+    fs.writeFileSync(screenPath, approvalScreen);
+    configureRetryGateway(retryAfterApprovalStatePath);
+    const callsBeforeSecondRetry = readJsonLines(openclawCallsPath).length;
+    const enterCountBeforeSecondRetry = readJsonLines(tmuxCallsPath)
+      .filter((call) =>
+        call.args[0] === "send-keys" &&
+        call.args[3] === "C-m"
+      ).length;
+    const retriedAfterApproval = runAgentCli([
+      "retry-callback",
+      "--state",
+      retryAfterApprovalStatePath
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(
+      retriedAfterApproval.status,
+      0,
+      retriedAfterApproval.stderr || retriedAfterApproval.stdout
+    );
+    await waitForCondition(
+      () => {
+        try {
+          return JSON.parse(
+            fs.readFileSync(retryAfterApprovalStatePath, "utf8")
+          ).status === "closed";
+        } catch {
+          return false;
+        }
+      },
+      "replacement monitor to complete after an already-consumed callback retry"
+    );
+    const secondRetryCalls = readJsonLines(openclawCallsPath)
+      .slice(callsBeforeSecondRetry);
+    const secondRetryNested = secondRetryCalls.find(
+      (entry) => entry.kind === "nested_approve"
+    );
+    assert.ok(secondRetryNested);
+    const secondRetryApproval = JSON.parse(secondRetryNested.stdout);
+    assert.equal(secondRetryApproval.already_approved, true);
+    assert.equal(
+      readJsonLines(tmuxCallsPath)
+        .filter((call) =>
+          call.args[0] === "send-keys" &&
+          call.args[3] === "C-m"
+        ).length,
+      enterCountBeforeSecondRetry,
+      "a callback replay after approval commit must not send Enter again"
+    );
+    const secondRetryEvents = readJsonLines(retryAfterApprovalLogPath);
+    assert.equal(
+      secondRetryEvents.filter((event) =>
+        event.event === "terminal_bridge_monitor_launch" &&
+        event.reason === "approval_already_resolved"
+      ).length,
+      1,
+      "an already-consumed approval with no live owner must launch a monitor"
+    );
+    assert.deepEqual(
+      secondRetryCalls
+        .filter((entry) => entry.kind === "gateway")
+        .map((entry) => {
+          const paramsIndex = entry.args.indexOf("--params");
+          return JSON.parse(entry.args[paramsIndex + 1]).message.type;
+        }),
+      ["question", "done"]
+    );
+    await waitForPidExit(secondRetryApproval.monitor_pid);
+
+    const consumedTimeoutStatePath = writeConversationClone(
+      storeDir,
+      approvedBeforeSettlement,
+      "claude-consumed-screen-hard-timeout",
+      (state) => {
+        const nativeTakeover = {
+          ...state.native_session_takeover,
+          terminal_bridge_started_at:
+            new Date(Date.now() - 60_000).toISOString()
+        };
+        delete nativeTakeover.terminal_bridge_approval;
+        delete nativeTakeover.terminal_bridge_approval_dispatch;
+        const {
+          callback_delivery: _callbackDelivery,
+          ...withoutCallback
+        } = state;
+        return {
+          ...withoutCallback,
+          conversation_id: storedConversation.conversation_id,
+          status: "waiting_for_agent",
+          native_session_takeover: nativeTakeover,
+          updated_at:
+            nativeTakeover.terminal_bridge_approval_resolved_at
+        };
+      }
+    );
+    fs.writeFileSync(transcriptPath, pendingTranscript, { mode: 0o600 });
+    fs.writeFileSync(screenPath, approvalScreen);
+    const consumedTimeout = runAgentCli([
+      "monitor",
+      "--terminal-bridge",
+      "--state",
+      consumedTimeoutStatePath,
+      "--log",
+      path.join(path.dirname(consumedTimeoutStatePath), "events.ndjson"),
+      "--poll-interval-ms",
+      "20",
+      "--agent-timeout-minutes",
+      "60",
+      "--agent-hard-timeout-minutes",
+      "0.001",
+      "--claude-home",
+      claudeHome,
+      "--claude-agents-json",
+      JSON.stringify(claudeAgents)
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(
+      consumedTimeout.status,
+      0,
+      consumedTimeout.stderr || consumedTimeout.stdout
+    );
+    const consumedTimeoutParsed = JSON.parse(consumedTimeout.stdout);
+    assert.equal(consumedTimeoutParsed.stalled, true);
+    assert.equal(consumedTimeoutParsed.hard_timeout, true);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -3390,6 +4551,147 @@ test("terminal bridge monitor singleton rejects a live owner and reclaims a dead
       readJsonLines(tmuxCallsPath).filter((call) => call.args[0] === "send-keys").length,
       sendKeysBefore
     );
+
+    const handoffStatePath = writeConversationClone(
+      storeDir,
+      sentParsed.conversation,
+      "terminal-handoff-transient-callback",
+      (state) => ({
+        ...state,
+        status: "waiting_for_openclaw",
+        updated_at: new Date().toISOString()
+      })
+    );
+    const handoffLogPath = path.join(
+      path.dirname(handoffStatePath),
+      "events.ndjson"
+    );
+    const handoffMessageId =
+      sentParsed.conversation.native_session_takeover
+        .terminal_bridge_message_id;
+    const handoffArgs = [
+      "monitor",
+      "--terminal-bridge-handoff",
+      "--state",
+      handoffStatePath,
+      "--log",
+      handoffLogPath,
+      "--expected-terminal-message-id",
+      handoffMessageId,
+      "--monitor-handoff-poll-interval-ms",
+      "20",
+      "--monitor-poll-interval-ms",
+      "20"
+    ];
+    const handoff = spawnAgentCliCaptured(handoffArgs, testEnv);
+    childProcesses.push(handoff.child);
+    await waitForCondition(
+      () =>
+        eventCount(
+          handoffLogPath,
+          "terminal_bridge_monitor_handoff_watchdog_started"
+        ) === 1,
+      "handoff watchdog to stay alive across the callback state"
+    );
+    const duplicateHandoff = runAgentCli(handoffArgs, testEnv);
+    assert.equal(
+      duplicateHandoff.status,
+      0,
+      duplicateHandoff.stderr || duplicateHandoff.stdout
+    );
+    assert.equal(
+      JSON.parse(duplicateHandoff.stdout).reason,
+      "terminal_bridge_monitor_handoff_watchdog_already_running"
+    );
+    const transientState = JSON.parse(
+      fs.readFileSync(handoffStatePath, "utf8")
+    );
+    fs.writeFileSync(
+      handoffStatePath,
+      `${JSON.stringify({
+        ...transientState,
+        status: "waiting_for_agent",
+        updated_at: new Date().toISOString()
+      }, null, 2)}\n`
+    );
+    const handoffResult = await handoff.result;
+    assert.equal(
+      handoffResult.status,
+      0,
+      handoffResult.stderr || handoffResult.stdout
+    );
+    const handoffParsed = JSON.parse(handoffResult.stdout);
+    assert.equal(handoffParsed.launched, true);
+    assert.equal(
+      handoffParsed.reason,
+      "approval_handoff_reconciliation"
+    );
+    assert.equal(
+      eventCount(handoffLogPath, "terminal_bridge_monitor_launch"),
+      1,
+      "the original watchdog must survive the transient callback state and take over"
+    );
+    const handoffClosed = runAgentCli([
+      "close",
+      "--state",
+      handoffStatePath,
+      "--reason",
+      "handoff transient test cleanup"
+    ], testEnv);
+    assert.equal(
+      handoffClosed.status,
+      0,
+      handoffClosed.stderr || handoffClosed.stdout
+    );
+    await waitForPidExit(handoffParsed.monitor_pid);
+
+    for (const finalCallbackStatus of ["callback_pending", "callback_failed"]) {
+      const completedCallbackStatePath = writeConversationClone(
+        storeDir,
+        sentParsed.conversation,
+        `terminal-handoff-${finalCallbackStatus}`,
+        (state) => ({
+          ...state,
+          status: finalCallbackStatus,
+          updated_at: new Date().toISOString()
+        })
+      );
+      const completedCallbackLogPath = path.join(
+        path.dirname(completedCallbackStatePath),
+        "events.ndjson"
+      );
+      const completedCallbackHandoff = runAgentCli([
+        "monitor",
+        "--terminal-bridge-handoff",
+        "--state",
+        completedCallbackStatePath,
+        "--log",
+        completedCallbackLogPath,
+        "--expected-terminal-message-id",
+        handoffMessageId,
+        "--monitor-handoff-poll-interval-ms",
+        "20",
+        "--monitor-poll-interval-ms",
+        "20"
+      ], testEnv);
+      assert.equal(
+        completedCallbackHandoff.status,
+        0,
+        completedCallbackHandoff.stderr || completedCallbackHandoff.stdout
+      );
+      assert.equal(
+        eventCount(
+          completedCallbackLogPath,
+          "terminal_bridge_monitor_handoff_watchdog_finished"
+        ),
+        1
+      );
+      assert.equal(
+        eventCount(completedCallbackLogPath, "terminal_bridge_monitor_launch"),
+        0,
+        `${finalCallbackStatus} is a terminal callback state, not an approval handoff`
+      );
+    }
   } finally {
     for (const child of childProcesses) {
       if (child.exitCode === null && child.signalCode === null) {
@@ -3853,7 +5155,7 @@ test("terminal bridge monitor callbacks when the completed prompt has scrolled o
   }
 });
 
-test("terminal approval notification keeps the state lock through callback delivery before close", async () => {
+test("terminal approval notification releases the state lock during callback delivery and preserves concurrent close", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-approval-callback-close-race-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -3954,17 +5256,18 @@ test("terminal approval notification keeps the state lock through callback deliv
       "approval callback delivery to enter the OpenClaw gate"
     );
 
-    assert.equal(fs.existsSync(stateLockPath), true);
-    const callbackLockOwner = JSON.parse(fs.readFileSync(stateLockPath, "utf8"));
     assert.equal(
-      callbackLockOwner.pid,
-      monitoring.child.pid,
-      "the monitor must retain the notification state lock while OpenClaw delivery is blocked"
+      fs.existsSync(stateLockPath),
+      false,
+      "the monitor must release the notification state lock before calling OpenClaw"
     );
-    assert.equal(
-      JSON.parse(fs.readFileSync(statePath, "utf8")).status,
-      "waiting_for_openclaw"
-    );
+    const pendingState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    assert.equal(pendingState.status, "waiting_for_openclaw");
+    assert.equal(pendingState.callback_delivery.status, "pending");
+    assert.equal(pendingState.callback_delivery.kind, "approval_notification");
+    assert.equal(pendingState.callback_delivery.preserve_conversation_status, true);
+    assert.equal(pendingState.callback_delivery.attempt_pid, monitoring.child.pid);
+    assert.equal(typeof pendingState.callback_delivery.attempt_id, "string");
 
     closing = spawnAgentCliCaptured([
       "close",
@@ -3975,45 +5278,38 @@ test("terminal approval notification keeps the state lock through callback deliv
       "--reason",
       "closed while approval callback was in flight"
     ], testEnv);
-    await waitForCondition(() => {
-      const terminalLocks = fs.readdirSync(storeDir)
-        .filter((name) =>
-          name.startsWith(".terminal-bridge-send-") &&
-          name.endsWith(".lock")
-        );
-      return terminalLocks.some((name) => {
-        const owner = JSON.parse(fs.readFileSync(path.join(storeDir, name), "utf8"));
-        return owner.pid === closing?.child.pid;
-      });
-    }, "close to acquire the terminal lock while waiting for callback delivery");
-    assert.equal(
-      closing.child.exitCode,
-      null,
-      "close must wait until the notification callback releases the state lock"
-    );
-    assert.equal(
-      JSON.parse(fs.readFileSync(stateLockPath, "utf8")).pid,
-      monitoring.child.pid
-    );
-
-    fs.writeFileSync(`${openclawGatePath}.release`, "");
-    const monitored = await monitoring.result;
-    assert.equal(monitored.status, 0, monitored.stderr || monitored.stdout);
-    assert.equal(JSON.parse(monitored.stdout).delivered, true);
-
+    await waitForChildExit(closing.child);
     const closed = await closing.result;
     assert.equal(closed.status, 0, closed.stderr || closed.stdout);
     const closedParsed = JSON.parse(closed.stdout);
     assert.equal(closedParsed.conversation.status, "closed");
+    assert.equal(
+      monitoring.child.exitCode,
+      null,
+      "the callback should remain blocked while close completes independently"
+    );
+    const closedWhilePending = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    assert.equal(closedWhilePending.status, "closed");
+    assert.equal(closedWhilePending.callback_delivery.status, "pending");
+
+    fs.writeFileSync(`${openclawGatePath}.release`, "");
+    const monitored = await monitoring.result;
+    assert.equal(monitored.status, 0, monitored.stderr || monitored.stdout);
+    const monitoredParsed = JSON.parse(monitored.stdout);
+    assert.equal(monitoredParsed.delivered, true);
+    assert.equal(monitoredParsed.conversation.status, "closed");
+    assert.equal(monitoredParsed.conversation.callback_delivery.status, "delivered");
 
     const finalState = JSON.parse(fs.readFileSync(statePath, "utf8"));
     assert.equal(finalState.status, "closed");
+    assert.equal(finalState.callback_delivery.status, "delivered");
     assert.equal(finalState.closed_at, closedParsed.conversation.closed_at);
     assert.equal(finalState.updated_at, closedParsed.conversation.updated_at);
     assert.equal(finalState.close_reason, "closed while approval callback was in flight");
     const events = fs.readFileSync(logPath, "utf8");
     assert.match(events, /terminal_bridge_approval_notification_recorded/u);
     assert.match(events, /callback_gateway_method_delivery/u);
+    assert.match(events, /"state_preserved":true/u);
     assert.match(events, /conversation_closed/u);
   } finally {
     fs.writeFileSync(`${openclawGatePath}.release`, "");
@@ -4149,6 +5445,540 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
     );
     assert.equal(gatewayParams.message.metadata.deny_command, `AKK cancel ${conversationId}`);
     assert.equal(gatewayParams.message.metadata.approval_candidate.command, "npm install");
+
+    const recoveryConversationId = "codex-approval-outbox-recovery";
+    const recoveryStatePath = writeConversationClone(
+      storeDir,
+      monitoredParsed.conversation,
+      recoveryConversationId,
+      (state) => {
+        const { callback_delivery: _missingOutbox, ...withoutOutbox } = state;
+        return {
+          ...withoutOutbox,
+          conversation_id: monitoredParsed.conversation.conversation_id,
+          status: "waiting_for_agent",
+          response_rounds_used: Math.max(
+            0,
+            monitoredParsed.message.round - 1
+          ),
+          updated_at:
+            state.native_session_takeover.terminal_bridge_approval.notified_at
+        };
+      }
+    );
+    const recoveryLogPath = path.join(
+      path.dirname(recoveryStatePath),
+      "events.ndjson"
+    );
+    const recoveryMessage = {
+      ...monitoredParsed.message,
+      conversation_id: monitoredParsed.conversation.conversation_id
+    };
+    fs.writeFileSync(recoveryLogPath, `${JSON.stringify({
+      ts: recoveryMessage.ts,
+      conversation_id: monitoredParsed.conversation.conversation_id,
+      event: "message",
+      from: recoveryMessage.from,
+      to: recoveryMessage.to,
+      type: recoveryMessage.type,
+      requires_response: recoveryMessage.requires_response,
+      round: recoveryMessage.round,
+      body: recoveryMessage.body,
+      message: recoveryMessage
+    })}\n`, { mode: 0o600 });
+    const recoveredNotification = runAgentCli([
+      "monitor",
+      "--terminal-bridge",
+      "--state",
+      recoveryStatePath,
+      "--log",
+      recoveryLogPath,
+      "--poll-interval-ms",
+      "50",
+      "--agent-timeout-minutes",
+      "60",
+      "--processes-json",
+      JSON.stringify([{
+        pid: 33389,
+        ppid: 999,
+        command: "codex",
+        cwd: workspace
+      }]),
+      "--terminals-json",
+      JSON.stringify([tmuxPane({
+        target: "codex-work:0.1",
+        session: "codex-work",
+        window: 0,
+        pane: 1,
+        panePid: 33389,
+        currentPath: workspace
+      })]),
+      "--terminal-screens-json",
+      JSON.stringify({ "codex-work:0.1": approvalScreen })
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(
+      recoveredNotification.status,
+      0,
+      recoveredNotification.stderr || recoveredNotification.stdout
+    );
+    const recoveredParsed = JSON.parse(recoveredNotification.stdout);
+    assert.equal(recoveredParsed.delivered, true);
+    assert.equal(recoveredParsed.message.id, monitoredParsed.message.id);
+    assert.equal(recoveredParsed.conversation.callback_delivery.status, "delivered");
+    const recoveryEvents = readJsonLines(recoveryLogPath);
+    assert.equal(
+      recoveryEvents.filter((event) => event.event === "message").length,
+      1,
+      "outbox recovery must not duplicate the fixed callback message"
+    );
+    assert.equal(
+      recoveryEvents.some((event) =>
+        event.event === "terminal_bridge_approval_notification_outbox_recovered"
+      ),
+      true
+    );
+
+    const markerOnlyRecoveryMessageId =
+      "msg-approval-marker-before-message-event";
+    const markerOnlyRecoveryStatePath = writeConversationClone(
+      storeDir,
+      monitoredParsed.conversation,
+      "codex-approval-marker-only-recovery",
+      (state) => {
+        const {
+          callback_delivery: _missingOutbox,
+          ...withoutOutbox
+        } = state;
+        return {
+          ...withoutOutbox,
+          conversation_id: monitoredParsed.conversation.conversation_id,
+          status: "waiting_for_agent",
+          response_rounds_used: Math.max(
+            0,
+            monitoredParsed.message.round - 1
+          ),
+          native_session_takeover: {
+            ...state.native_session_takeover,
+            terminal_bridge_approval: {
+              ...state.native_session_takeover.terminal_bridge_approval,
+              callback_message_id: markerOnlyRecoveryMessageId
+            }
+          },
+          updated_at:
+            state.native_session_takeover.terminal_bridge_approval.notified_at
+        };
+      }
+    );
+    const markerOnlyRecoveryLogPath = path.join(
+      path.dirname(markerOnlyRecoveryStatePath),
+      "events.ndjson"
+    );
+    const markerOnlyRecovered = runAgentCli([
+      "monitor",
+      "--terminal-bridge",
+      "--state",
+      markerOnlyRecoveryStatePath,
+      "--log",
+      markerOnlyRecoveryLogPath,
+      "--poll-interval-ms",
+      "50",
+      "--agent-timeout-minutes",
+      "60",
+      "--processes-json",
+      JSON.stringify([{
+        pid: 33389,
+        ppid: 999,
+        command: "codex",
+        cwd: workspace
+      }]),
+      "--terminals-json",
+      JSON.stringify([tmuxPane({
+        target: "codex-work:0.1",
+        session: "codex-work",
+        window: 0,
+        pane: 1,
+        panePid: 33389,
+        currentPath: workspace
+      })]),
+      "--terminal-screens-json",
+      JSON.stringify({ "codex-work:0.1": approvalScreen })
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(
+      markerOnlyRecovered.status,
+      0,
+      markerOnlyRecovered.stderr || markerOnlyRecovered.stdout
+    );
+    const markerOnlyRecoveredParsed = JSON.parse(
+      markerOnlyRecovered.stdout
+    );
+    assert.equal(markerOnlyRecoveredParsed.delivered, true);
+    assert.equal(
+      markerOnlyRecoveredParsed.message.id,
+      markerOnlyRecoveryMessageId
+    );
+    const markerOnlyRecoveryEvents = readJsonLines(
+      markerOnlyRecoveryLogPath
+    );
+    assert.equal(
+      markerOnlyRecoveryEvents.filter((event) =>
+        event.event === "message"
+      ).length,
+      1,
+      "recovery after the stable marker save must create one message event"
+    );
+    assert.equal(
+      markerOnlyRecoveryEvents.some((event) =>
+        event.event ===
+          "terminal_bridge_approval_notification_outbox_recovered"
+      ),
+      true
+    );
+
+    const staleOutboxRecoveryConversationId =
+      "codex-approval-stale-outbox-recovery";
+    const recoveredCallbackMessageId = "msg-new-approval-after-crash";
+    const staleOutboxRecoveryStatePath = writeConversationClone(
+      storeDir,
+      monitoredParsed.conversation,
+      staleOutboxRecoveryConversationId,
+      (state) => {
+        const approval = {
+          ...state.native_session_takeover.terminal_bridge_approval,
+          callback_message_id: recoveredCallbackMessageId
+        };
+        return {
+          ...state,
+          conversation_id: monitoredParsed.conversation.conversation_id,
+          status: "waiting_for_agent",
+          updated_at: approval.notified_at,
+          native_session_takeover: {
+            ...state.native_session_takeover,
+            terminal_bridge_approval: approval
+          },
+          callback_delivery: {
+            ...state.callback_delivery,
+            status: "delivered",
+            attempts: 3,
+            final_status: "closed",
+            kind: "completion",
+            message: {
+              ...state.callback_delivery.message,
+              id: "msg-old-delivered-callback"
+            }
+          }
+        };
+      }
+    );
+    const staleOutboxRecoveryLogPath = path.join(
+      path.dirname(staleOutboxRecoveryStatePath),
+      "events.ndjson"
+    );
+    const staleOutboxRecovered = runAgentCli([
+      "monitor",
+      "--terminal-bridge",
+      "--state",
+      staleOutboxRecoveryStatePath,
+      "--log",
+      staleOutboxRecoveryLogPath,
+      "--poll-interval-ms",
+      "50",
+      "--agent-timeout-minutes",
+      "60",
+      "--processes-json",
+      JSON.stringify([{
+        pid: 33389,
+        ppid: 999,
+        command: "codex",
+        cwd: workspace
+      }]),
+      "--terminals-json",
+      JSON.stringify([tmuxPane({
+        target: "codex-work:0.1",
+        session: "codex-work",
+        window: 0,
+        pane: 1,
+        panePid: 33389,
+        currentPath: workspace
+      })]),
+      "--terminal-screens-json",
+      JSON.stringify({ "codex-work:0.1": approvalScreen })
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(
+      staleOutboxRecovered.status,
+      0,
+      staleOutboxRecovered.stderr || staleOutboxRecovered.stdout
+    );
+    const staleOutboxRecoveredParsed = JSON.parse(staleOutboxRecovered.stdout);
+    assert.equal(staleOutboxRecoveredParsed.delivered, true);
+    assert.equal(
+      staleOutboxRecoveredParsed.message.id,
+      recoveredCallbackMessageId
+    );
+    assert.equal(
+      staleOutboxRecoveredParsed.conversation.callback_delivery.attempts,
+      1,
+      "a new approval notification must not inherit stale callback attempts"
+    );
+    assert.equal(
+      staleOutboxRecoveredParsed.conversation.callback_delivery.kind,
+      "approval_notification"
+    );
+    assert.equal(
+      staleOutboxRecoveredParsed.conversation.callback_delivery.final_status,
+      "waiting_for_openclaw"
+    );
+    const staleOutboxRecoveryEvents = readJsonLines(
+      staleOutboxRecoveryLogPath
+    );
+    assert.equal(
+      staleOutboxRecoveryEvents.filter((event) => event.event === "message").length,
+      1
+    );
+    assert.equal(
+      staleOutboxRecoveryEvents.some((event) =>
+        event.event === "terminal_bridge_approval_notification_outbox_recovered"
+      ),
+      true
+    );
+    assert.equal(
+      staleOutboxRecoveryEvents.some((event) =>
+        event.event === "callback_retry_monitor_launched"
+      ),
+      true,
+      "the fresh first attempt must retain callback retry coverage"
+    );
+
+    const exhaustedOutboxRecoveryConversationId =
+      "codex-approval-exhausted-outbox-recovery";
+    const exhaustedCallbackMessageId =
+      "msg-new-approval-after-exhausted-callback";
+    const exhaustedOutboxRecoveryStatePath = writeConversationClone(
+      storeDir,
+      monitoredParsed.conversation,
+      exhaustedOutboxRecoveryConversationId,
+      (state) => {
+        const approval = {
+          ...state.native_session_takeover.terminal_bridge_approval,
+          callback_message_id: exhaustedCallbackMessageId
+        };
+        return {
+          ...state,
+          conversation_id: monitoredParsed.conversation.conversation_id,
+          status: "waiting_for_agent",
+          updated_at: approval.notified_at,
+          native_session_takeover: {
+            ...state.native_session_takeover,
+            terminal_bridge_approval: approval
+          },
+          callback_delivery: {
+            ...state.callback_delivery,
+            status: "failed",
+            attempts: 5,
+            final_status: "closed",
+            kind: "completion",
+            message: {
+              ...state.callback_delivery.message,
+              id: "msg-exhausted-failed-callback"
+            }
+          }
+        };
+      }
+    );
+    const exhaustedOutboxRecoveryLogPath = path.join(
+      path.dirname(exhaustedOutboxRecoveryStatePath),
+      "events.ndjson"
+    );
+    const olderSameBodyMessage = {
+      ...monitoredParsed.message,
+      id: "msg-older-same-body-callback"
+    };
+    fs.writeFileSync(exhaustedOutboxRecoveryLogPath, `${JSON.stringify({
+      ts: olderSameBodyMessage.ts,
+      conversation_id: monitoredParsed.conversation.conversation_id,
+      event: "message",
+      from: olderSameBodyMessage.from,
+      to: olderSameBodyMessage.to,
+      type: olderSameBodyMessage.type,
+      requires_response: olderSameBodyMessage.requires_response,
+      round: olderSameBodyMessage.round,
+      body: olderSameBodyMessage.body,
+      message: olderSameBodyMessage
+    })}\n`, { mode: 0o600 });
+    const exhaustedOutboxRecovered = runAgentCli([
+      "monitor",
+      "--terminal-bridge",
+      "--state",
+      exhaustedOutboxRecoveryStatePath,
+      "--log",
+      exhaustedOutboxRecoveryLogPath,
+      "--poll-interval-ms",
+      "50",
+      "--agent-timeout-minutes",
+      "60",
+      "--processes-json",
+      JSON.stringify([{
+        pid: 33389,
+        ppid: 999,
+        command: "codex",
+        cwd: workspace
+      }]),
+      "--terminals-json",
+      JSON.stringify([tmuxPane({
+        target: "codex-work:0.1",
+        session: "codex-work",
+        window: 0,
+        pane: 1,
+        panePid: 33389,
+        currentPath: workspace
+      })]),
+      "--terminal-screens-json",
+      JSON.stringify({ "codex-work:0.1": approvalScreen })
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(
+      exhaustedOutboxRecovered.status,
+      0,
+      exhaustedOutboxRecovered.stderr || exhaustedOutboxRecovered.stdout
+    );
+    const exhaustedOutboxRecoveredParsed = JSON.parse(
+      exhaustedOutboxRecovered.stdout
+    );
+    assert.equal(exhaustedOutboxRecoveredParsed.delivered, true);
+    assert.equal(
+      exhaustedOutboxRecoveredParsed.message.id,
+      exhaustedCallbackMessageId
+    );
+    assert.equal(
+      exhaustedOutboxRecoveredParsed.conversation.callback_delivery.attempts,
+      1
+    );
+    const exhaustedRecoveryEvents = readJsonLines(
+      exhaustedOutboxRecoveryLogPath
+    );
+    assert.equal(
+      exhaustedRecoveryEvents.some((event) =>
+        event.event === "terminal_bridge_approval_notification_outbox_recovered"
+      ),
+      true
+    );
+    assert.equal(
+      exhaustedRecoveryEvents.filter((event) => event.event === "message").length,
+      2,
+      "a same-body event with another id must not suppress the fixed recovery message"
+    );
+    assert.equal(
+      exhaustedRecoveryEvents.some((event) =>
+        event.event === "message" &&
+        event.message?.id === exhaustedCallbackMessageId
+      ),
+      true
+    );
+
+    const conflictingRecoveryConversationId =
+      "codex-approval-conflicting-log-recovery";
+    const conflictingCallbackMessageId =
+      "msg-conflicting-approval-recovery";
+    const conflictingRecoveryStatePath = writeConversationClone(
+      storeDir,
+      monitoredParsed.conversation,
+      conflictingRecoveryConversationId,
+      (state) => {
+        const approval = {
+          ...state.native_session_takeover.terminal_bridge_approval,
+          callback_message_id: conflictingCallbackMessageId
+        };
+        return {
+          ...state,
+          conversation_id: monitoredParsed.conversation.conversation_id,
+          status: "waiting_for_agent",
+          updated_at: approval.notified_at,
+          native_session_takeover: {
+            ...state.native_session_takeover,
+            terminal_bridge_approval: approval
+          },
+          callback_delivery: {
+            ...state.callback_delivery,
+            status: "delivered",
+            message: {
+              ...state.callback_delivery.message,
+              id: "msg-old-before-conflicting-recovery"
+            }
+          }
+        };
+      }
+    );
+    const conflictingRecoveryLogPath = path.join(
+      path.dirname(conflictingRecoveryStatePath),
+      "events.ndjson"
+    );
+    const conflictingLoggedMessage = {
+      ...monitoredParsed.message,
+      id: conflictingCallbackMessageId,
+      body: "A different payload was already logged under this stable id."
+    };
+    fs.writeFileSync(conflictingRecoveryLogPath, `${JSON.stringify({
+      ts: conflictingLoggedMessage.ts,
+      conversation_id: monitoredParsed.conversation.conversation_id,
+      event: "message",
+      from: conflictingLoggedMessage.from,
+      to: conflictingLoggedMessage.to,
+      type: conflictingLoggedMessage.type,
+      requires_response: conflictingLoggedMessage.requires_response,
+      round: conflictingLoggedMessage.round,
+      body: conflictingLoggedMessage.body,
+      message: conflictingLoggedMessage
+    })}\n`, { mode: 0o600 });
+    const openclawCallCountBeforeConflict =
+      readJsonLines(openclawCallsPath).length;
+    const conflictingRecovery = runAgentCli([
+      "monitor",
+      "--terminal-bridge",
+      "--state",
+      conflictingRecoveryStatePath,
+      "--log",
+      conflictingRecoveryLogPath,
+      "--poll-interval-ms",
+      "50",
+      "--agent-timeout-minutes",
+      "60",
+      "--processes-json",
+      JSON.stringify([{
+        pid: 33389,
+        ppid: 999,
+        command: "codex",
+        cwd: workspace
+      }]),
+      "--terminals-json",
+      JSON.stringify([tmuxPane({
+        target: "codex-work:0.1",
+        session: "codex-work",
+        window: 0,
+        pane: 1,
+        panePid: 33389,
+        currentPath: workspace
+      })]),
+      "--terminal-screens-json",
+      JSON.stringify({ "codex-work:0.1": approvalScreen })
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.notEqual(conflictingRecovery.status, 0);
+    assert.match(
+      conflictingRecovery.stderr,
+      /conflicts with its logged payload/u
+    );
+    assert.equal(
+      readJsonLines(openclawCallsPath).length,
+      openclawCallCountBeforeConflict,
+      "a conflicting stable message id must fail before Gateway delivery"
+    );
 
     fs.writeFileSync(screenPath, approvalScreen.replace("$ npm install", "$ npm install left-pad"));
     const persistedFingerprintMismatch = runAgentCli([
@@ -5368,6 +7198,325 @@ if (gatePath) {
   while (!fs.existsSync(gatePath + ".release")) {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
   }
+}
+process.stdout.write(JSON.stringify({ ok: true }) + "\\n");
+`,
+    "utf8"
+  );
+  fs.chmodSync(fakeOpenClaw, 0o755);
+  return fakeOpenClaw;
+}
+
+function writeFakeClaudeAgents(fakeBinDir: string, agents: unknown[]) {
+  const fakeClaude = path.join(fakeBinDir, "claude");
+  fs.writeFileSync(
+    fakeClaude,
+    `#!/usr/bin/env node
+process.stdout.write(${JSON.stringify(JSON.stringify(agents))});
+`,
+    "utf8"
+  );
+  fs.chmodSync(fakeClaude, 0o755);
+  return fakeClaude;
+}
+
+function currentClaudeApprovalScreenForTest(command: string): string {
+  return [
+    " Bash command",
+    "",
+    `   ${command}`,
+    "   Remove the exact handoff fixture",
+    "",
+    " This command requires approval",
+    "",
+    " Do you want to proceed?",
+    " ❯ 1. Yes",
+    "   2. Yes, and don’t ask again for this command",
+    "   3. No",
+    "",
+    " Esc to cancel · Tab to amend · ctrl+e to explain"
+  ].join("\n");
+}
+
+function writeAutoApprovingFakeOpenClaw(options: {
+  fakeBinDir: string;
+  callsPath: string;
+  statePath: string;
+  cliPath: string;
+  claudeHome: string;
+  claudeAgents: unknown[];
+  policy: unknown;
+  screenPath: string;
+  transcriptPath: string;
+  toolResultAppend: string;
+  completionAppend: string;
+}): string {
+  const fakeOpenClaw = path.join(options.fakeBinDir, "openclaw");
+  const updaterSource = `
+const fs = require("node:fs");
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 150);
+fs.appendFileSync(
+  ${JSON.stringify(options.transcriptPath)},
+  ${JSON.stringify(options.toolResultAppend)},
+  { mode: 0o600 }
+);
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 350);
+fs.writeFileSync(${JSON.stringify(options.screenPath)}, "Claude is working after approval.\\n");
+fs.appendFileSync(
+  ${JSON.stringify(options.transcriptPath)},
+  ${JSON.stringify(options.completionAppend)},
+  { mode: 0o600 }
+);
+`;
+  fs.writeFileSync(
+    fakeOpenClaw,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+const { spawn, spawnSync } = require("node:child_process");
+const args = process.argv.slice(2);
+fs.appendFileSync(
+  ${JSON.stringify(options.callsPath)},
+  JSON.stringify({ kind: "gateway", args }) + "\\n",
+  "utf8"
+);
+const paramsIndex = args.indexOf("--params");
+const params = paramsIndex >= 0 ? JSON.parse(args[paramsIndex + 1]) : {};
+const message = params.message || {};
+if (
+  message.metadata &&
+  message.metadata.reason === "approval_required"
+) {
+  if (params.statePath !== ${JSON.stringify(options.statePath)}) {
+    process.stderr.write("unexpected callback state path\\n");
+    process.exit(2);
+  }
+  const fingerprint = message.metadata.approval_fingerprint;
+  const approved = spawnSync(process.execPath, [
+    ${JSON.stringify(options.cliPath)},
+    "approve",
+    "--state",
+    params.statePath,
+    "--expected-approval-fingerprint",
+    fingerprint,
+    "--auto-approved",
+    "--monitor-poll-interval-ms",
+    "50",
+    "--auto-approval-policy-json",
+    ${JSON.stringify(JSON.stringify(options.policy))},
+    "--claude-home",
+    ${JSON.stringify(options.claudeHome)},
+    "--claude-agents-json",
+    ${JSON.stringify(JSON.stringify(options.claudeAgents))}
+  ], {
+    encoding: "utf8",
+    env: process.env
+  });
+  fs.appendFileSync(
+    ${JSON.stringify(options.callsPath)},
+    JSON.stringify({
+      kind: "nested_approve",
+      status: approved.status,
+      stdout: approved.stdout,
+      stderr: approved.stderr
+    }) + "\\n",
+    "utf8"
+  );
+  if (approved.status !== 0) {
+    process.stderr.write(approved.stderr || approved.stdout);
+    process.exit(approved.status || 2);
+  }
+  const approval = JSON.parse(approved.stdout);
+  if (approval.approved !== true && approval.already_approved !== true) {
+    process.stderr.write("nested auto approval was rejected: " + approved.stdout);
+    process.exit(2);
+  }
+  const updater = spawn(
+    process.execPath,
+    ["-e", ${JSON.stringify(updaterSource)}],
+    { detached: true, stdio: "ignore", env: process.env }
+  );
+  updater.unref();
+  process.stdout.write(JSON.stringify({ ok: true, auto_approved: true }) + "\\n");
+  process.exit(0);
+}
+process.stdout.write(JSON.stringify({ ok: true }) + "\\n");
+`,
+    "utf8"
+  );
+  fs.chmodSync(fakeOpenClaw, 0o755);
+  return fakeOpenClaw;
+}
+
+function writeSequentialAutoApprovingFakeOpenClaw(options: {
+  fakeBinDir: string;
+  callsPath: string;
+  statePath: string;
+  cliPath: string;
+  claudeHome: string;
+  claudeAgents: unknown[];
+  policy: unknown;
+  screenPath: string;
+  transcriptPath: string;
+  firstRequestId: string;
+  secondRequestId: string;
+  firstSchedulePath: string;
+  secondSchedulePath: string;
+  redrawnFirstScreen: string;
+  clearedScreen: string;
+  repeatedApprovalScreen: string;
+  firstResultAppend: string;
+  secondRequestAppend: string;
+  secondResultAppend: string;
+  completionAppend: string;
+}): string {
+  const fakeOpenClaw = path.join(options.fakeBinDir, "openclaw");
+  const firstUpdaterSource = `
+const fs = require("node:fs");
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 120);
+fs.writeFileSync(
+  ${JSON.stringify(options.screenPath)},
+  ${JSON.stringify(options.redrawnFirstScreen)}
+);
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+fs.appendFileSync(
+  ${JSON.stringify(options.transcriptPath)},
+  ${JSON.stringify(options.firstResultAppend)},
+  { mode: 0o600 }
+);
+fs.writeFileSync(
+  ${JSON.stringify(options.screenPath)},
+  ${JSON.stringify(options.clearedScreen)}
+);
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+fs.appendFileSync(
+  ${JSON.stringify(options.transcriptPath)},
+  ${JSON.stringify(options.secondRequestAppend)},
+  { mode: 0o600 }
+);
+fs.writeFileSync(
+  ${JSON.stringify(options.screenPath)},
+  ${JSON.stringify(options.repeatedApprovalScreen)}
+);
+`;
+  const secondUpdaterSource = `
+const fs = require("node:fs");
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 150);
+fs.appendFileSync(
+  ${JSON.stringify(options.transcriptPath)},
+  ${JSON.stringify(options.secondResultAppend)},
+  { mode: 0o600 }
+);
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
+fs.writeFileSync(
+  ${JSON.stringify(options.screenPath)},
+  ${JSON.stringify(options.clearedScreen)}
+);
+fs.appendFileSync(
+  ${JSON.stringify(options.transcriptPath)},
+  ${JSON.stringify(options.completionAppend)},
+  { mode: 0o600 }
+);
+`;
+  fs.writeFileSync(
+    fakeOpenClaw,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+const { spawn, spawnSync } = require("node:child_process");
+const args = process.argv.slice(2);
+fs.appendFileSync(
+  ${JSON.stringify(options.callsPath)},
+  JSON.stringify({ kind: "gateway", args }) + "\\n",
+  "utf8"
+);
+const paramsIndex = args.indexOf("--params");
+const params = paramsIndex >= 0 ? JSON.parse(args[paramsIndex + 1]) : {};
+const message = params.message || {};
+if (
+  message.metadata &&
+  message.metadata.reason === "approval_required"
+) {
+  if (params.statePath !== ${JSON.stringify(options.statePath)}) {
+    process.stderr.write("unexpected callback state path\\n");
+    process.exit(2);
+  }
+  const fingerprint = message.metadata.approval_fingerprint;
+  const requestId =
+    message.metadata.approval_candidate &&
+    message.metadata.approval_candidate.policy_evidence &&
+    message.metadata.approval_candidate.policy_evidence.request_id;
+  const approved = spawnSync(process.execPath, [
+    ${JSON.stringify(options.cliPath)},
+    "approve",
+    "--state",
+    params.statePath,
+    "--expected-approval-fingerprint",
+    fingerprint,
+    "--auto-approved",
+    "--monitor-poll-interval-ms",
+    "50",
+    "--auto-approval-policy-json",
+    ${JSON.stringify(JSON.stringify(options.policy))},
+    "--claude-home",
+    ${JSON.stringify(options.claudeHome)},
+    "--claude-agents-json",
+    ${JSON.stringify(JSON.stringify(options.claudeAgents))}
+  ], {
+    encoding: "utf8",
+    env: process.env
+  });
+  fs.appendFileSync(
+    ${JSON.stringify(options.callsPath)},
+    JSON.stringify({
+      kind: "nested_approve",
+      request_id: requestId,
+      status: approved.status,
+      stdout: approved.stdout,
+      stderr: approved.stderr
+    }) + "\\n",
+    "utf8"
+  );
+  if (approved.status !== 0) {
+    process.stderr.write(approved.stderr || approved.stdout);
+    process.exit(approved.status || 2);
+  }
+  const approval = JSON.parse(approved.stdout);
+  if (approval.approved !== true && approval.already_approved !== true) {
+    process.stderr.write("nested auto approval was rejected: " + approved.stdout);
+    process.exit(2);
+  }
+  const scheduleOnce = (markerPath, source) => {
+    try {
+      const fd = fs.openSync(markerPath, "wx", 0o600);
+      fs.closeSync(fd);
+    } catch (error) {
+      if (!error || error.code !== "EEXIST") {
+        throw error;
+      }
+      return;
+    }
+    const updater = spawn(
+      process.execPath,
+      ["-e", source],
+      { detached: true, stdio: "ignore", env: process.env }
+    );
+    updater.unref();
+  };
+  if (requestId === ${JSON.stringify(options.firstRequestId)}) {
+    scheduleOnce(
+      ${JSON.stringify(options.firstSchedulePath)},
+      ${JSON.stringify(firstUpdaterSource)}
+    );
+  } else if (requestId === ${JSON.stringify(options.secondRequestId)}) {
+    scheduleOnce(
+      ${JSON.stringify(options.secondSchedulePath)},
+      ${JSON.stringify(secondUpdaterSource)}
+    );
+  } else {
+    process.stderr.write("unexpected approval request id: " + String(requestId) + "\\n");
+    process.exit(2);
+  }
+  process.stdout.write(JSON.stringify({ ok: true, auto_approved: true }) + "\\n");
+  process.exit(0);
 }
 process.stdout.write(JSON.stringify({ ok: true }) + "\\n");
 `,

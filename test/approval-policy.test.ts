@@ -50,7 +50,7 @@ test("approval policy defaults to asking when disabled or unmatched", () => {
   }).action, "ask");
 });
 
-test("Claude tmux approval never enters automatic approval", () => {
+test("Claude auto approval requires keys-mode local transcript evidence", () => {
   const claudePolicy = {
     enabled: true,
     rules: [{
@@ -68,13 +68,36 @@ test("Claude tmux approval never enters automatic approval", () => {
     candidate: claudeCandidate
   });
   assert.equal(structured.action, "ask");
-  assert.match(structured.reason, /explicit user confirmation/u);
-  const screenFallback = evaluateApprovalPolicy({
+  assert.match(structured.reason, /verified local transcript evidence/u);
+  const screenWithoutEvidence = evaluateApprovalPolicy({
     policy: claudePolicy,
     candidate: { ...claudeCandidate, decisionMode: "keys" }
   });
-  assert.equal(screenFallback.action, "ask");
-  assert.match(screenFallback.reason, /explicit user confirmation/u);
+  assert.equal(screenWithoutEvidence.action, "ask");
+  assert.match(screenWithoutEvidence.reason, /verified local transcript evidence/u);
+
+  const verified = evaluateApprovalPolicy({
+    policy: claudePolicy,
+    candidate: {
+      ...claudeCandidate,
+      decisionMode: "keys",
+      evidenceSource: "claude_transcript",
+      evidenceFingerprint: "a".repeat(64)
+    }
+  });
+  assert.equal(verified.action, "approve");
+  assert.equal(verified.ruleId, "safe-status");
+
+  const malformedFingerprint = evaluateApprovalPolicy({
+    policy: claudePolicy,
+    candidate: {
+      ...claudeCandidate,
+      decisionMode: "keys",
+      evidenceSource: "claude_transcript",
+      evidenceFingerprint: "not-a-sha256"
+    }
+  });
+  assert.equal(malformedFingerprint.action, "ask");
 });
 
 test("approval policy rejects shell composition and paths outside workspace", () => {
@@ -134,6 +157,39 @@ test("approval candidate is read only from structured callback metadata", () => 
       approval_candidate: candidate
     }
   }), undefined);
+
+  assert.deepEqual(approvalCandidateFromMessage({
+    type: "question",
+    metadata: {
+      source: "terminal_bridge",
+      reason: "approval_required",
+      approval_candidate: {
+        agent: "claude",
+        kind: "run_command",
+        cwd: "/repo/project",
+        fingerprint: "claude-approval-123",
+        terminal_target: "claude-work:0.1",
+        decision_mode: "keys",
+        policy_evidence: {
+          source: "claude_transcript",
+          kind: "run_command",
+          command_sha256: "b".repeat(64),
+          evidence_fingerprint: "c".repeat(64),
+          request_id: "toolu_callback"
+        }
+      }
+    }
+  }), {
+    agent: "claude",
+    kind: "run_command",
+    fingerprint: "claude-approval-123",
+    decisionMode: "keys",
+    command: undefined,
+    cwd: "/repo/project",
+    terminalTarget: "claude-work:0.1",
+    evidenceSource: "claude_transcript",
+    evidenceFingerprint: "c".repeat(64)
+  });
 });
 
 test("auto approval CLI arguments carry the trusted policy for executor-side revalidation", () => {
@@ -182,6 +238,7 @@ test("auto approval callback executes only a matching trusted policy", () => {
     }
   });
   assert.equal(approved?.approved, true);
+  assert.equal(approved?.handled, true);
   assert.equal(approved?.action, "approved");
   assert.equal(approved?.rule_id, "safe-status");
   assert.equal(approved?.monitor_pid, 42);
@@ -197,6 +254,7 @@ test("auto approval callback executes only a matching trusted policy", () => {
     }
   });
   assert.equal(disabled?.approved, false);
+  assert.equal(disabled?.handled, false);
   assert.equal(disabled?.action, "ask");
   assert.equal(calls.length, 1);
 });
@@ -219,8 +277,131 @@ test("auto approval callback falls back to asking when fingerprint execution is 
     execute: () => ({ approved: false, reason: "approval fingerprint changed before execution" })
   });
   assert.equal(result?.approved, false);
+  assert.equal(result?.handled, false);
   assert.equal(result?.action, "ask");
   assert.match(result?.reason ?? "", /fingerprint changed/);
+});
+
+test("auto approval retries treat only a locally consumed fingerprint as handled", () => {
+  const message = {
+    type: "question",
+    metadata: {
+      source: "terminal_bridge",
+      reason: "approval_required",
+      approval_candidate: {
+        ...candidate,
+        terminal_target: candidate.terminalTarget
+      }
+    }
+  };
+  const consumed = attemptAutoApproval({
+    message,
+    policy,
+    statePath: "/tmp/task/state.json",
+    execute: () => ({
+      approved: false,
+      already_approved: true,
+      reason: "approval fingerprint was already consumed"
+    })
+  });
+  assert.equal(consumed?.approved, false);
+  assert.equal(consumed?.handled, true);
+  assert.equal(consumed?.action, "already_approved");
+
+  const missingNotification = attemptAutoApproval({
+    message,
+    policy,
+    statePath: "/tmp/task/state.json",
+    execute: () => ({
+      approved: false,
+      reason: "approval requires a current managed-turn notification"
+    })
+  });
+  assert.equal(missingNotification?.handled, false);
+  assert.equal(missingNotification?.action, "ask");
+});
+
+test("Claude callback defers raw command matching to the local executor", () => {
+  const claudePolicy = {
+    enabled: true,
+    rules: [{
+      id: "claude-safe-status",
+      agents: ["claude"],
+      workspaces: ["/repo/project"],
+      commands: [["git", "status"]]
+    }]
+  };
+  const message = {
+    type: "question",
+    metadata: {
+      source: "terminal_bridge",
+      reason: "approval_required",
+      approval_candidate: {
+        agent: "claude",
+        kind: "run_command",
+        cwd: "/repo/project",
+        fingerprint: "claude-approval-123",
+        terminal_target: "claude-work:0.1",
+        decision_mode: "keys",
+        policy_evidence: {
+          source: "claude_transcript",
+          kind: "run_command",
+          command_sha256: "b".repeat(64),
+          evidence_fingerprint: "c".repeat(64),
+          request_id: "toolu_callback"
+        }
+      }
+    }
+  };
+  const calls: string[][] = [];
+  const result = attemptAutoApproval({
+    message,
+    policy: claudePolicy,
+    statePath: "/tmp/task/state.json",
+    execute(args) {
+      calls.push(args);
+      return {
+        approved: true,
+        policy_rule_id: "claude-safe-status",
+        policy_fingerprint: evaluateApprovalPolicy({
+          policy: claudePolicy,
+          candidate: {
+            agent: "claude",
+            kind: "run_command",
+            decisionMode: "keys",
+            command: "git status",
+            cwd: "/repo/project",
+            fingerprint: "claude-approval-123",
+            evidenceSource: "claude_transcript",
+            evidenceFingerprint: "c".repeat(64)
+          }
+        }).policyFingerprint,
+        monitor_pid: 73
+      };
+    }
+  });
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0], [
+    "approve",
+    "--state",
+    "/tmp/task/state.json",
+    "--expected-approval-fingerprint",
+    "claude-approval-123",
+    "--auto-approved",
+    "--policy-fingerprint",
+    result?.policy_fingerprint,
+    "--auto-approval-policy-json",
+    JSON.stringify(claudePolicy)
+  ]);
+  assert.equal(result?.approved, true);
+  assert.equal(result?.rule_id, "claude-safe-status");
+  assert.equal(result?.monitor_pid, 73);
+  assert.equal(
+    JSON.stringify(message).includes("git status"),
+    false,
+    "the callback carries no raw transcript command"
+  );
 });
 
 test("approval policy rejects a workspace symlink that resolves outside the workspace", () => {

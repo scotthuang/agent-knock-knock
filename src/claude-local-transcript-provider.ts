@@ -49,6 +49,27 @@ export interface DetectClaudeTranscriptCompletionOptions {
   maxTurnBytes?: number;
 }
 
+/**
+ * Process-local evidence for one pending, foreground Claude Bash permission.
+ * `command` is intentionally raw so the caller can apply the exact command
+ * policy, but callers must not persist this object or add it to callbacks.
+ */
+export interface ClaudeTranscriptPendingApprovalEvidence {
+  source: "claude_transcript";
+  kind: "run_command";
+  command: string;
+  cwd: string;
+  toolName: "Bash";
+  toolUseId: string;
+  promptUuid: string;
+  assistantUuid: string;
+  claudeVersion: string;
+  transcriptFileId: string;
+  commandSha256: string;
+  evidenceFingerprint: string;
+  observedEndOffsetBytes: number;
+}
+
 interface TranscriptRecord {
   [key: string]: unknown;
 }
@@ -57,6 +78,17 @@ interface OpenTranscript {
   fd: number;
   stat: fs.Stats;
   relativePath: string;
+}
+
+interface ClaudeTranscriptTurnSnapshot {
+  anchor: ClaudeTranscriptAnchor;
+  sessionId: string;
+  cwd: string;
+  expectedRequestHash: string;
+  expectedPromptText: string;
+  records: readonly TranscriptRecord[];
+  transcriptFileId: string;
+  observedEndOffsetBytes: number;
 }
 
 export function defaultClaudeHome(): string {
@@ -159,6 +191,42 @@ export function detectClaudeTranscriptCompletion(
   request: TerminalDurableCompletionRequest,
   options: DetectClaudeTranscriptCompletionOptions
 ): TerminalCompletionEvidence | undefined {
+  const snapshot = readClaudeTranscriptTurnSnapshot(request, options, "idle");
+  if (!snapshot) {
+    return undefined;
+  }
+  return completionFromRecords({
+    records: snapshot.records,
+    sessionId: snapshot.sessionId,
+    cwd: snapshot.cwd,
+    expectedRequestHash: snapshot.expectedRequestHash,
+    expectedPromptText: snapshot.expectedPromptText,
+    transcriptFileId: snapshot.transcriptFileId
+  });
+}
+
+/**
+ * Detects exactly one unresolved foreground Bash tool use for the current
+ * AKK-managed Claude turn. It uses the same anchored, owner-private,
+ * no-follow, bounded, stable transcript read as durable completion and fails
+ * closed on identity changes, completed turns, background work, or ambiguity.
+ */
+export function detectClaudeTranscriptPendingApproval(
+  request: TerminalDurableCompletionRequest,
+  options: DetectClaudeTranscriptCompletionOptions
+): ClaudeTranscriptPendingApprovalEvidence | undefined {
+  const snapshot = readClaudeTranscriptTurnSnapshot(request, options);
+  if (!snapshot) {
+    return undefined;
+  }
+  return pendingApprovalFromRecords(snapshot);
+}
+
+function readClaudeTranscriptTurnSnapshot(
+  request: TerminalDurableCompletionRequest,
+  options: DetectClaudeTranscriptCompletionOptions,
+  requiredAgentStatus?: "idle"
+): ClaudeTranscriptTurnSnapshot | undefined {
   const anchor = transcriptAnchorFromContext(request.context);
   if (!anchor) {
     return undefined;
@@ -207,7 +275,7 @@ export function detectClaudeTranscriptCompletion(
   ) {
     throw new Error("the Claude process session identity changed after the managed send");
   }
-  if (agent.status !== "idle") {
+  if (requiredAgentStatus && agent.status !== requiredAgentStatus) {
     return undefined;
   }
 
@@ -260,14 +328,17 @@ export function detectClaudeTranscriptCompletion(
     if (records.length === 0) {
       return undefined;
     }
-    return completionFromRecords({
+    const fileIdentity = `${opened.stat.dev}:${opened.stat.ino}`;
+    return {
+      anchor,
       records,
       sessionId,
       cwd,
       expectedRequestHash,
       expectedPromptText,
-      fileIdentity: `${opened.stat.dev}:${opened.stat.ino}`
-    });
+      transcriptFileId: transcriptFileId(sessionId, fileIdentity),
+      observedEndOffsetBytes: opened.stat.size
+    };
   } finally {
     fs.closeSync(opened.fd);
   }
@@ -279,14 +350,14 @@ function completionFromRecords({
   cwd,
   expectedRequestHash,
   expectedPromptText,
-  fileIdentity
+  transcriptFileId: fileId
 }: {
   records: readonly TranscriptRecord[];
   sessionId: string;
   cwd: string;
   expectedRequestHash: string;
   expectedPromptText: string;
-  fileIdentity: string;
+  transcriptFileId: string;
 }): TerminalCompletionEvidence | undefined {
   const promptCandidates = records.filter((record) => {
     const promptText = userPromptText(record);
@@ -420,7 +491,7 @@ function completionFromRecords({
         prompt_uuid: promptUuid,
         error,
         transcript_schema: "claude_code_jsonl_v2",
-        transcript_file_id: transcriptFileId(sessionId, fileIdentity)
+        transcript_file_id: fileId
       }
     };
   }
@@ -477,8 +548,265 @@ function completionFromRecords({
       assistant_message_id: messageId,
       claude_version: nonEmptyString(finalAssistant.version),
       transcript_schema: "claude_code_jsonl_v2",
-      transcript_file_id: transcriptFileId(sessionId, fileIdentity)
+      transcript_file_id: fileId
     }
+  };
+}
+
+function pendingApprovalFromRecords(
+  snapshot: ClaudeTranscriptTurnSnapshot
+): ClaudeTranscriptPendingApprovalEvidence | undefined {
+  const promptCandidates = snapshot.records.filter((record) => {
+    const promptText = userPromptText(record);
+    return record.type === "user" &&
+      isRecord(record.message) &&
+      record.message.role === "user" &&
+      record.isSidechain !== true &&
+      nonEmptyString(record.agentId) === undefined &&
+      record.sessionId === snapshot.sessionId &&
+      normalizePath(record.cwd) === normalizePath(snapshot.cwd) &&
+      validTimestampMs(record.timestamp) !== undefined &&
+      promptText !== undefined &&
+      exactPromptText(promptText) === snapshot.expectedPromptText &&
+      requestFingerprint(promptText) === snapshot.expectedRequestHash;
+  });
+  if (promptCandidates.length === 0) {
+    return undefined;
+  }
+  if (promptCandidates.length !== 1) {
+    throw new Error("multiple Claude transcript prompts matched the managed request");
+  }
+
+  const prompt = promptCandidates[0];
+  const promptUuid = uuidValue(prompt.uuid);
+  if (!promptUuid) {
+    throw new Error("matched Claude transcript prompt has no stable UUID");
+  }
+  assertSupportedRecord(prompt, snapshot.sessionId, snapshot.cwd);
+
+  const promptIndex = snapshot.records.indexOf(prompt);
+  const nextHumanPrompt = snapshot.records.find((record, index) =>
+    index > promptIndex &&
+    record.type === "user" &&
+    isRecord(record.message) &&
+    record.message.role === "user" &&
+    record.isSidechain !== true &&
+    nonEmptyString(record.agentId) === undefined &&
+    userPromptText(record) !== undefined
+  );
+  if (nextHumanPrompt) {
+    return undefined;
+  }
+
+  const turnRecords = snapshot.records.slice(promptIndex);
+  if (
+    turnRecords.some(hasUnresolvedBackgroundWork) ||
+    turnRecords.some((record) =>
+      uuidValue(record.uuid) === undefined &&
+      (record.type === "assistant" || record.type === "user" || record.type === "system")
+    )
+  ) {
+    return undefined;
+  }
+  const recordsByUuid = new Map<string, TranscriptRecord>();
+  for (const record of turnRecords) {
+    const recordUuid = uuidValue(record.uuid);
+    if (!recordUuid) {
+      continue;
+    }
+    if (recordsByUuid.has(recordUuid)) {
+      throw new Error("Claude transcript contains a duplicate record UUID");
+    }
+    recordsByUuid.set(recordUuid, record);
+  }
+  assertParentsPrecedeChildren(turnRecords, recordsByUuid);
+
+  const descendants = turnRecords.filter((record) =>
+    uuidValue(record.uuid) !== undefined &&
+    descendantChain(recordsByUuid, promptUuid, record) !== undefined
+  );
+  if (descendants.length !== recordsByUuid.size) {
+    throw new Error("Claude transcript turn contains an unlinked UUID branch");
+  }
+  for (const record of descendants) {
+    assertSupportedRecord(record, snapshot.sessionId);
+  }
+  assertSameClaudeVersion(...descendants);
+  if (descendants.some((record) =>
+    record.type !== "user" &&
+    record.type !== "assistant" &&
+    record.type !== "attachment"
+  )) {
+    return undefined;
+  }
+  if (descendants.some((record) =>
+    record.isSidechain === true ||
+    nonEmptyString(record.agentId) !== undefined ||
+    hasUnresolvedBackgroundWork(record)
+  )) {
+    return undefined;
+  }
+  if (descendants.some((record) =>
+    hasTurnCompletionSignal(record) ||
+    record.subtype === "stop_hook_summary"
+  )) {
+    return undefined;
+  }
+
+  const lastDescendant = descendants.at(-1);
+  if (!lastDescendant) {
+    return undefined;
+  }
+  const linearChain = descendantChain(recordsByUuid, promptUuid, lastDescendant);
+  if (!linearChain || linearChain.length !== descendants.length) {
+    return undefined;
+  }
+
+  interface ToolUseState {
+    id: string;
+    name: string;
+    input: Record<string, unknown>;
+    owner: TranscriptRecord;
+    ownerUuid: string;
+    ownerToolUseCount: number;
+  }
+  interface ToolResultState {
+    parentUuid?: string;
+    sourceAssistantUuid?: string;
+  }
+  const toolUses = new Map<string, ToolUseState>();
+  const toolResults = new Map<string, ToolResultState>();
+  for (const record of descendants) {
+    const message = isRecord(record.message) ? record.message : undefined;
+    const content = Array.isArray(message?.content) ? message.content : [];
+    const ownerToolUseCount = content.filter((block) =>
+      isRecord(block) && block.type === "tool_use"
+    ).length;
+    for (const block of content) {
+      if (!isRecord(block)) {
+        continue;
+      }
+      if (block.type === "tool_use") {
+        const id = nonEmptyString(block.id);
+        const name = nonEmptyString(block.name);
+        const input = isRecord(block.input) ? block.input : undefined;
+        const ownerUuid = uuidValue(record.uuid);
+        if (!id || !name || !input || !ownerUuid) {
+          throw new Error("Claude transcript contains a malformed tool_use record");
+        }
+        if (toolUses.has(id)) {
+          throw new Error("Claude transcript contains a duplicate tool_use id");
+        }
+        toolUses.set(id, {
+          id,
+          name,
+          input,
+          owner: record,
+          ownerUuid,
+          ownerToolUseCount
+        });
+      } else if (block.type === "tool_result") {
+        const id = nonEmptyString(block.tool_use_id);
+        if (!id) {
+          throw new Error("Claude transcript contains a malformed tool_result record");
+        }
+        if (toolResults.has(id)) {
+          throw new Error("Claude transcript contains a duplicate tool_result id");
+        }
+        toolResults.set(id, {
+          parentUuid: uuidValue(record.parentUuid),
+          sourceAssistantUuid: uuidValue(record.sourceToolAssistantUUID)
+        });
+      }
+    }
+  }
+
+  for (const [id, result] of toolResults) {
+    const toolUse = toolUses.get(id);
+    if (
+      !toolUse ||
+      result.parentUuid !== toolUse.ownerUuid ||
+      result.sourceAssistantUuid !== toolUse.ownerUuid
+    ) {
+      throw new Error("Claude transcript contains an ambiguously linked tool_result");
+    }
+  }
+  if ([...toolUses.values()].some((toolUse) => toolUse.ownerToolUseCount !== 1)) {
+    return undefined;
+  }
+  const unresolved = [...toolUses.values()].filter((toolUse) =>
+    !toolResults.has(toolUse.id)
+  );
+  if (unresolved.length !== 1) {
+    return undefined;
+  }
+
+  const pending = unresolved[0];
+  const pendingMessage = isRecord(pending.owner.message)
+    ? pending.owner.message
+    : undefined;
+  if (
+    pending.name !== "Bash" ||
+    pending.owner !== lastDescendant ||
+    pendingMessage?.role !== "assistant" ||
+    pendingMessage.stop_reason !== "tool_use"
+  ) {
+    return undefined;
+  }
+
+  const command = pending.input.command;
+  if (
+    typeof command !== "string" ||
+    command.trim().length === 0 ||
+    /[\u0000-\u001f\u007f\u2028\u2029]/u.test(command)
+  ) {
+    return undefined;
+  }
+  const commandCwd = normalizePath(pending.owner.cwd);
+  if (!commandCwd || commandCwd !== normalizePath(snapshot.cwd)) {
+    return undefined;
+  }
+  const claudeVersion = nonEmptyString(pending.owner.version);
+  if (!claudeVersion) {
+    throw new Error("Claude pending Bash tool use has no compatible version");
+  }
+  if (!isCompatiblePendingApprovalClaudeVersion(claudeVersion)) {
+    return undefined;
+  }
+
+  const commandSha256 = sha256Hex(command);
+  const evidenceFingerprint = sha256Hex(JSON.stringify({
+    schema_version: 1,
+    source: "claude_transcript",
+    kind: "run_command",
+    session_id: snapshot.sessionId,
+    cwd: commandCwd,
+    pid: snapshot.anchor.pid,
+    agent_started_at_ms: snapshot.anchor.agent_started_at_ms,
+    anchor_offset_bytes: snapshot.anchor.offset_bytes,
+    observed_end_offset_bytes: snapshot.observedEndOffsetBytes,
+    prompt_uuid: promptUuid,
+    assistant_uuid: pending.ownerUuid,
+    tool_use_id: pending.id,
+    claude_version: claudeVersion,
+    transcript_file_id: snapshot.transcriptFileId,
+    request_sha256: snapshot.expectedRequestHash,
+    command_sha256: commandSha256
+  }));
+  return {
+    source: "claude_transcript",
+    kind: "run_command",
+    command,
+    cwd: commandCwd,
+    toolName: "Bash",
+    toolUseId: pending.id,
+    promptUuid,
+    assistantUuid: pending.ownerUuid,
+    claudeVersion,
+    transcriptFileId: snapshot.transcriptFileId,
+    commandSha256,
+    evidenceFingerprint,
+    observedEndOffsetBytes: snapshot.observedEndOffsetBytes
   };
 }
 
@@ -905,6 +1233,23 @@ function hasBlockingStopSummary(record: TranscriptRecord): boolean {
     );
 }
 
+function hasTurnCompletionSignal(record: TranscriptRecord): boolean {
+  if (
+    record.type === "system" &&
+    record.subtype === "turn_duration"
+  ) {
+    return true;
+  }
+  if (record.type !== "assistant" || !isRecord(record.message)) {
+    return false;
+  }
+  return record.isApiErrorMessage === true ||
+    (
+      nonEmptyString(record.message.stop_reason) !== undefined &&
+      record.message.stop_reason !== "tool_use"
+    );
+}
+
 function structuredBoolean(value: unknown, keys: readonly string[]): boolean | undefined {
   if (!isRecord(value)) {
     return undefined;
@@ -952,6 +1297,21 @@ function isCompatibleClaudeVersion(value: unknown): boolean {
     }
   }
   return true;
+}
+
+function isCompatiblePendingApprovalClaudeVersion(value: unknown): boolean {
+  const version = nonEmptyString(value);
+  const match = version === undefined
+    ? undefined
+    : CLAUDE_TRANSCRIPT_VERSION_PATTERN.exec(version);
+  if (!match) {
+    return false;
+  }
+  const [major, minor, patch] = match.slice(1).map(Number);
+  return major === MINIMUM_CLAUDE_TRANSCRIPT_VERSION[0] &&
+    minor === MINIMUM_CLAUDE_TRANSCRIPT_VERSION[1] &&
+    Number.isSafeInteger(patch) &&
+    patch >= MINIMUM_CLAUDE_TRANSCRIPT_VERSION[2];
 }
 
 function assertSameClaudeVersion(...records: readonly TranscriptRecord[]): void {
@@ -1043,10 +1403,11 @@ function exactPromptText(value: unknown): string | undefined {
 }
 
 function transcriptFileId(sessionId: string, fileIdentity: string): string {
-  return createHash("sha256")
-    .update(`${sessionId}\0${fileIdentity}`)
-    .digest("hex")
-    .slice(0, 24);
+  return sha256Hex(`${sessionId}\0${fileIdentity}`).slice(0, 24);
+}
+
+function sha256Hex(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 function boundedRedactedText(value: string): string {
