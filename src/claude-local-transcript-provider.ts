@@ -13,7 +13,9 @@ const CLAUDE_TRANSCRIPT_ANCHOR_VERSION = 1;
 const CLAUDE_TRANSCRIPT_MAX_TURN_BYTES = 64 * 1024 * 1024;
 const CLAUDE_SESSION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
-const SUPPORTED_CLAUDE_TRANSCRIPT_VERSION = "2.1.198";
+const MINIMUM_CLAUDE_TRANSCRIPT_VERSION = [2, 1, 198] as const;
+const CLAUDE_TRANSCRIPT_VERSION_PATTERN =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
 const NO_FOLLOW_FLAG = typeof fs.constants.O_NOFOLLOW === "number"
   ? fs.constants.O_NOFOLLOW
   : 0;
@@ -350,6 +352,7 @@ function completionFromRecords({
   for (const record of descendants) {
     assertSupportedRecord(record, sessionId);
   }
+  assertSameClaudeVersion(...descendants);
   if (descendants.some((record) =>
     record.isSidechain === true ||
     nonEmptyString(record.agentId) !== undefined ||
@@ -788,6 +791,15 @@ function userPromptText(record: TranscriptRecord): string | undefined {
 }
 
 function hasUnresolvedBackgroundWork(record: TranscriptRecord): boolean {
+  if ([
+    record.pendingBackgroundAgentCount,
+    record.pendingWorkflowCount
+  ].some((value) =>
+    value !== undefined &&
+    (!Number.isSafeInteger(value) || Number(value) !== 0)
+  )) {
+    return true;
+  }
   if (
     record.type === "assistant" &&
     isRecord(record.message) &&
@@ -916,10 +928,30 @@ function assertSupportedRecord(
     (cwd !== undefined && normalizePath(record.cwd) !== normalizePath(cwd)) ||
     record.isSidechain !== false ||
     record.entrypoint !== "cli" ||
-    record.version !== SUPPORTED_CLAUDE_TRANSCRIPT_VERSION
+    !isCompatibleClaudeVersion(record.version)
   ) {
     throw new Error("Claude transcript completion record uses an unsupported schema or identity");
   }
+}
+
+function isCompatibleClaudeVersion(value: unknown): boolean {
+  const version = nonEmptyString(value);
+  const match = version === undefined
+    ? undefined
+    : CLAUDE_TRANSCRIPT_VERSION_PATTERN.exec(version);
+  if (!match) {
+    return false;
+  }
+  const parsed = match.slice(1).map(Number);
+  if (!parsed.every(Number.isSafeInteger)) {
+    return false;
+  }
+  for (let index = 0; index < parsed.length; index += 1) {
+    if (parsed[index] !== MINIMUM_CLAUDE_TRANSCRIPT_VERSION[index]) {
+      return parsed[index] > MINIMUM_CLAUDE_TRANSCRIPT_VERSION[index];
+    }
+  }
+  return true;
 }
 
 function assertSameClaudeVersion(...records: readonly TranscriptRecord[]): void {

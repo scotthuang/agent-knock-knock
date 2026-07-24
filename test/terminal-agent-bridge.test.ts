@@ -269,7 +269,7 @@ function strictClaudeBashApprovalScreen(
 ): string {
   const choices = [
     "1. Yes",
-    "2. Yes, and don't ask again for this command",
+    `2. Yes, and don’t ask again for: ${command.split(/\s+/u)[0]} *`,
     "3. No"
   ];
   return [
@@ -282,7 +282,7 @@ function strictClaudeBashApprovalScreen(
       ` ${index + 1 === selectedChoice ? "❯" : " "} ${choice}`
     ),
     "",
-    " Esc to cancel · Tab to amend"
+    " Esc to cancel · Tab to amend · ctrl+e to explain"
   ].join("\n");
 }
 

@@ -29,13 +29,16 @@ test("hookless Claude tmux approval is bound to a managed callback and sends exa
     " Bash command",
     "",
     "   npm test -- --runInBand",
+    "   Run the repository test suite",
+    "",
+    " This command requires approval",
     "",
     " Do you want to proceed?",
     " ❯ 1. Yes",
-    "   2. Yes, and don't ask again for this command",
+    "   2. Yes, and don’t ask again for: npm test *",
     "   3. No",
     "",
-    " Esc to cancel · Tab to amend"
+    " Esc to cancel · Tab to amend · ctrl+e to explain"
   ].join("\n");
 
   try {
@@ -174,7 +177,11 @@ test("hookless Claude tmux approval is bound to a managed callback and sends exa
     assert.deepEqual(monitoredParsed.message.metadata.approval_candidate, {
       agent: "claude",
       kind: "claude_permission",
-      command: "npm test -- --runInBand",
+      command: [
+        "npm test -- --runInBand",
+        "Run the repository test suite",
+        "This command requires approval"
+      ].join("\n"),
       tool_name: "Bash",
       cwd: workspace,
       fingerprint: approvalFingerprint,
@@ -845,7 +852,7 @@ test("hookless Claude transcript completion closes a managed tmux task exactly o
       timestamp,
       cwd: workspace,
       sessionId: claudeSessionId,
-      version: "2.1.198"
+      version: "2.1.218"
     });
     const transcriptPath = path.join(projectDirectory, `${claudeSessionId}.jsonl`);
     fs.writeFileSync(transcriptPath, [

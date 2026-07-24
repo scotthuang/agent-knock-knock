@@ -829,7 +829,7 @@ export function detectClaudeApprovalPrompt(screen: string): TerminalApprovalInsp
     region.slice(lastChoiceLikeIndex + 1).some((line) => {
       const trimmed = line.trim();
       return Boolean(trimmed) &&
-        !/^\s*Esc to cancel(?:\s*·\s*Tab to amend)?\s*$/iu.test(line) &&
+        !isClaudePermissionFooterLine(line) &&
         !/^[─━═╌╍┄┅┈┉\s]+$/u.test(trimmed);
     });
   if (newerStateIndex >= 0) {
@@ -868,7 +868,7 @@ export function detectClaudeApprovalPrompt(screen: string): TerminalApprovalInsp
   const highlightedRows = choiceRows.filter((choice) => choice.highlighted);
   const footerIndexes = region
     .map((line, index) =>
-      /^\s*Esc to cancel(?:\s*·\s*Tab to amend)?\s*$/iu.test(line) ? index : -1
+      isClaudePermissionFooterLine(line) ? index : -1
     )
     .filter((index) => index >= 0);
   const orderedChoices = choiceRows.length === 3 &&
@@ -1201,6 +1201,11 @@ function isOneTimeYesChoice(label: string): boolean {
 
 function isPersistentPermissionChoice(label: string): boolean {
   return /(?:don['’]t ask again|always allow|allow (?:this|the).*(?:session|project|directory)|yes,\s*and)/iu.test(label);
+}
+
+function isClaudePermissionFooterLine(line: string): boolean {
+  return /^\s*Esc to cancel(?:\s*·\s*Tab to amend(?:\s*·\s*ctrl\+e to explain)?)?\s*$/iu
+    .test(line);
 }
 
 function findLastIndex<T>(

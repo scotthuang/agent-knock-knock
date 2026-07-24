@@ -38,7 +38,7 @@ Then enable at least one execution mode:
 - **tmux (recommended):** install `tmux` on a Unix-like host and run Codex or Claude Code in a pane owned by the same user as OpenClaw.
 - **Managed ACP:** install ACPX with `npm install -g acpx`.
 
-Claude tmux support requires no hooks and does not modify Claude Code settings. Hook-free completion monitoring currently accepts the verified Claude Code `2.1.198` interactive transcript schema and fails closed on unknown schemas.
+Claude tmux support requires no hooks and does not modify Claude Code settings. Hook-free completion monitoring is verified on Claude Code `2.1.198` and `2.1.218`; newer versions are accepted when their interactive transcripts preserve the required identity and completion structure.
 
 If OpenClaw runs from a local checkout or another nonstandard location, pass its CLI explicitly:
 
