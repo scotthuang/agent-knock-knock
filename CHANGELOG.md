@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.50 - 2026-07-24
+
+### Changed
+
+- Verify hook-free Claude tmux completion and approval on Claude Code `2.1.218`, and accept newer versions when their transcripts preserve the required identity and completion structure instead of requiring an exact release allowlist.
+
+### Fixed
+
+- Recognize Claude Code `2.1.218`'s `ctrl+e to explain` Bash approval footer while continuing to approve only the highlighted one-time `Yes` choice.
+
+### Security
+
+- Reject mixed transcript versions within one turn and keep nonzero or malformed Claude pending-agent and pending-workflow counts from completing early.
+
 ## 0.2.49 - 2026-07-24
 
 ### Added
