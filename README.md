@@ -21,7 +21,7 @@ Agent Knock Knock connects OpenClaw to local coding agents. Share a live termina
 
 **Delegate from anywhere.** Use any configured OpenClaw channel to hand work to a local coding agent wherever you are. AKK keeps the task running outside the chat, reports when the agent needs input or finishes, and lets you continue from chat or the shared terminal.
 
-**Orchestrate specialist agents.** Let OpenClaw coordinate multi-agent workflows: ask Claude Code to produce a technical plan, hand it to Codex for implementation, then send the result back to Claude Code for review. OpenClaw tracks the handoffs and routes feedback so each agent can focus on what it does best.
+**Orchestrate specialist agents.** OpenClaw does more than report progress: it can coordinate agent handoffs and automatically approve trusted permission requests under rules you define. Claude Code can plan, Codex can implement, and Claude Code can review. At any point, you can take over the shared terminal, keep working yourself, then hand the same task back to OpenClaw—with context intact.
 
 ## Choose an Execution Mode
 
