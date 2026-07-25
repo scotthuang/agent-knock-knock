@@ -17,6 +17,12 @@ Agent Knock Knock connects OpenClaw to local coding agents. Share a live termina
 
 *OpenClaw asks Claude Code to write a file, waits for AKK to report completion, then hands the result to Codex. Click the preview to watch in full quality.*
 
+## Use Cases
+
+**Delegate from anywhere.** Use any configured OpenClaw channel to hand work to a local coding agent wherever you are. AKK keeps the task running outside the chat, reports when the agent needs input or finishes, and lets you continue from chat or the shared terminal.
+
+**Orchestrate specialist agents.** Let OpenClaw coordinate multi-agent workflows: ask Claude Code to produce a technical plan, hand it to Codex for implementation, then send the result back to Claude Code for review. OpenClaw tracks the handoffs and routes feedback so each agent can focus on what it does best.
+
 ## Choose an Execution Mode
 
 | Mode | Best for | Agents | Requires |
@@ -91,13 +97,9 @@ agent-knock-knock doctor
 
 ### Trust and Privacy
 
-AKK is local-first: its state, logs, and terminal control stay on your machine. AKK has no hosted control plane or telemetry, and its tmux integration does not modify coding-agent settings.
+AKK is local-first. It has no hosted control plane or telemetry, does not modify coding-agent settings, and keeps its state, logs, terminal control, and approval decisions on your machine. Sensitive approval commands are never included in callbacks or AKK logs.
 
-For a managed Claude tmux turn, AKK reads only the bytes appended to Claude Code's owner-private local JSONL transcript after the send boundary. It uses them locally to bind the exact prompt, extract a redacted final answer, and correlate a pending Bash tool request with the current permission screen. The raw pending command remains inside the local approval executor for exact policy matching; AKK does not copy it into callbacks, conversation state, events, runtime logs, or redacted screen summaries. AKK does not upload the transcript or persist a copy of its raw contents. The final answer still travels through your configured local OpenClaw callback.
-
-This does not mean task content can never leave the machine. OpenClaw and each coding agent or model provider still process content according to your configuration. Managed ACP tasks currently use ACPX `--approve-all`; treat them as trusted automation, set an explicit workspace, and review the agent's sandbox and credentials.
-
-AKK's normal callback uses the OpenClaw Gateway configuration without putting its token in the agent prompt or child-process arguments. Keep credentials out of a custom `callbackCommand`. The legacy direct CLI `--token` callback embeds that credential in its callback command and should not be used for untrusted delegations.
+Your task content is still processed by OpenClaw and the coding-agent or model providers you configure. Use explicit workspaces, review agent permissions, and keep secrets out of custom callback commands.
 
 ## Quick Start
 
