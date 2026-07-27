@@ -1,7 +1,9 @@
 import { spawnSync } from "node:child_process";
-import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+import {
+  definePluginEntry,
+  type OpenClawPluginDefinition
+} from "openclaw/plugin-sdk/plugin-entry";
 import {
   EXECUTOR_KINDS,
   executorDefinitionForKind,
@@ -21,8 +23,7 @@ import {
 } from "./approval-policy.js";
 
 const CALLBACK_METHOD = AKK_CALLBACK_METHOD;
-const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const defaultBinPath = path.join(pluginRoot, "dist", "src", "cli.js");
+const defaultBinPath = fileURLToPath(new URL("./cli.js", import.meta.url));
 
 const delegateParameters = {
   type: "object",
@@ -178,9 +179,6 @@ const statusParameters = {
         "AKK-managed conversation id, or a terminal-controlled id from AKK list such as terminal:v2:tmux:codex:codex-work:0.1:33389."
     },
     idleTimeoutMinutes: {
-      type: "number"
-    },
-    agentTimeoutMinutes: {
       type: "number"
     },
     trace: {
@@ -409,7 +407,7 @@ const approveParameters = {
   }
 };
 
-export default definePluginEntry({
+const plugin: OpenClawPluginDefinition = definePluginEntry({
   id: "agent-knock-knock",
   name: "Agent Knock Knock",
   description:
@@ -479,6 +477,7 @@ export default definePluginEntry({
 
     api.registerTool(
       (toolContext) => ({
+        label: "AKK Delegate",
         name: "agent_knock_knock_delegate",
         description:
           "Delegate an implementation task to a local coding agent. Use this when the user says AKK, akk, Agent Knock Knock, asks to hand work to Codex, Claude, or Cursor, or asks OpenClaw to start a background coding-agent task. If the user says AKK without an explicit agent, omit the agent parameter so the plugin-configured defaultAgent is used, falling back to Codex when unset. The tool starts the coding agent in the background and returns only protocol metadata, not raw terminal output.",
@@ -491,7 +490,8 @@ export default definePluginEntry({
                 type: "text",
                 text: JSON.stringify(result, null, 2)
               }
-            ]
+            ],
+            details: result
           };
         }
       }),
@@ -743,6 +743,8 @@ export default definePluginEntry({
     });
   }
 });
+
+export default plugin;
 
 async function handleAkkCommand(api, ctx) {
   try {
@@ -1023,6 +1025,7 @@ function runDelegate(api, params, toolContext) {
 function registerCliTool(api, { name, description, parameters, buildArgs }) {
   api.registerTool(
     (toolContext) => ({
+      label: toolLabel(name),
       name,
       description,
       parameters,
@@ -1034,12 +1037,23 @@ function registerCliTool(api, { name, description, parameters, buildArgs }) {
               type: "text",
               text: JSON.stringify(result, null, 2)
             }
-          ]
+          ],
+          details: result
         };
       }
     }),
     { name, optional: true }
   );
+}
+
+function toolLabel(name) {
+  const action = String(name)
+    .replace(/^agent_knock_knock_/, "")
+    .split("_")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+  return `AKK ${action || "Tool"}`;
 }
 
 function buildRecoveryArgs(api, command, params) {
@@ -1080,10 +1094,11 @@ async function handleCallback(api, params) {
 
   const message = isRecord(params.message) ? params.message : undefined;
   const conversation = isRecord(params.conversation) ? params.conversation : undefined;
+  const messageMetadata = isRecord(message?.metadata) ? message.metadata : undefined;
   const sessionKey =
     stringValue(params.sessionKey) ??
     stringValue(conversation?.openclaw_session) ??
-    stringValue(message?.metadata?.openclaw_session);
+    stringValue(messageMetadata?.openclaw_session);
 
   if (!sessionKey) {
     throw new Error("callback params.sessionKey is required");
@@ -1247,7 +1262,7 @@ function pushOptional(args, flag, value) {
   }
 }
 
-function isRecord(value) {
+function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 

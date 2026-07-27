@@ -1,0 +1,181 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import plugin from "../src/openclaw-plugin.js";
+
+type Manifest = {
+  activation?: {
+    onCommands?: string[];
+  };
+  commandAliases?: Array<{
+    name?: string;
+  }>;
+  contracts?: {
+    tools?: string[];
+  };
+  skills?: string[];
+  toolMetadata?: Record<string, unknown>;
+};
+
+type ToolDefinition = {
+  name?: string;
+};
+
+type ToolFactory = (context: Record<string, never>) => ToolDefinition;
+
+type ContractTestApi = {
+  pluginConfig: Record<string, never>;
+  logger: {
+    info(): void;
+    warn(): void;
+  };
+  registerGatewayMethod(...args: unknown[]): void;
+  registerService(service: unknown): void;
+  registerCommand(command: { name?: string }): void;
+  registerTool(
+    tool: ToolDefinition | ToolFactory,
+    options?: {
+      name?: string;
+      optional?: boolean;
+    }
+  ): void;
+};
+
+const packageRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../.."
+);
+const manifestPath = path.join(packageRoot, "openclaw.plugin.json");
+
+test("OpenClaw runtime registrations match the published manifest", () => {
+  const manifest = readManifest();
+  const registeredCommands: string[] = [];
+  const registeredTools: string[] = [];
+
+  const api: ContractTestApi = {
+    pluginConfig: {},
+    logger: {
+      info() {},
+      warn() {}
+    },
+    registerGatewayMethod() {},
+    registerService() {},
+    registerCommand(command) {
+      registeredCommands.push(requiredName(command.name, "runtime command"));
+    },
+    registerTool(tool, options) {
+      const definition = typeof tool === "function" ? tool({}) : tool;
+      const runtimeName = requiredName(definition.name, "runtime tool");
+      const metadataName = requiredName(options?.name, "tool registration metadata");
+      assert.equal(metadataName, runtimeName);
+      registeredTools.push(runtimeName);
+    }
+  };
+
+  (
+    plugin as unknown as {
+      register(api: ContractTestApi): void;
+    }
+  ).register(api);
+
+  const contractedTools = requiredStringArray(
+    manifest.contracts?.tools,
+    "contracts.tools"
+  );
+  const activatedCommands = requiredStringArray(
+    manifest.activation?.onCommands,
+    "activation.onCommands"
+  );
+  const commandAliases = (manifest.commandAliases ?? []).map((alias) =>
+    requiredName(alias.name, "command alias")
+  );
+  const metadataTools = Object.keys(manifest.toolMetadata ?? {});
+
+  assert.deepEqual(sorted(registeredTools), sorted(contractedTools));
+  assert.deepEqual(sorted(metadataTools), sorted(contractedTools));
+  assert.deepEqual(
+    sorted(registeredCommands),
+    sorted(activatedCommands)
+  );
+  assert.deepEqual(
+    sorted(commandAliases),
+    sorted(registeredCommands)
+  );
+});
+
+test("bundled OpenClaw skills exist and are included in the npm artifact", () => {
+  const manifest = readManifest();
+  const skillPaths = requiredStringArray(manifest.skills, "skills");
+
+  for (const skillPath of skillPaths) {
+    assert.equal(path.isAbsolute(skillPath), false, `${skillPath} must be relative`);
+    const skillRoot = path.resolve(packageRoot, skillPath);
+    assert.equal(
+      path.relative(packageRoot, skillRoot).startsWith(".."),
+      false,
+      `${skillPath} must stay inside the package`
+    );
+    assert.equal(
+      fs.existsSync(path.join(skillRoot, "SKILL.md")),
+      true,
+      `${skillPath} must contain SKILL.md`
+    );
+  }
+
+  const packed = spawnSync(
+    "npm",
+    ["pack", "--dry-run", "--json", "--ignore-scripts"],
+    {
+      cwd: packageRoot,
+      encoding: "utf8",
+      maxBuffer: 10 * 1024 * 1024
+    }
+  );
+  assert.equal(packed.status, 0, packed.stderr || packed.stdout);
+
+  const result = JSON.parse(packed.stdout) as Array<{
+    files?: Array<{
+      path?: string;
+    }>;
+  }>;
+  const packedFiles = new Set(
+    (result[0]?.files ?? [])
+      .map((file) => file.path)
+      .filter((file): file is string => typeof file === "string")
+  );
+
+  for (const skillPath of skillPaths) {
+    assert.equal(
+      packedFiles.has(path.posix.join(skillPath, "SKILL.md")),
+      true,
+      `${skillPath}/SKILL.md must be included by npm pack`
+    );
+  }
+});
+
+function readManifest(): Manifest {
+  return JSON.parse(fs.readFileSync(manifestPath, "utf8")) as Manifest;
+}
+
+function requiredName(value: unknown, label: string): string {
+  assert.equal(typeof value, "string", `${label} must have a name`);
+  assert.notEqual(value, "", `${label} name must not be empty`);
+  return value as string;
+}
+
+function requiredStringArray(value: unknown, label: string): string[] {
+  assert.equal(Array.isArray(value), true, `${label} must be an array`);
+  assert.notEqual((value as unknown[]).length, 0, `${label} must not be empty`);
+  for (const item of value as unknown[]) {
+    assert.equal(typeof item, "string", `${label} entries must be strings`);
+    assert.notEqual(item, "", `${label} entries must not be empty`);
+  }
+  return value as string[];
+}
+
+function sorted(values: string[]): string[] {
+  return [...values].sort();
+}

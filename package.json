@@ -1,6 +1,6 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.2.51",
+  "version": "0.3.0-beta.1",
   "description": "Control local Codex and Claude Code from OpenClaw, take over the same live tmux session, and run managed ACP tasks through ACPX with Cursor support.",
   "license": "MIT",
   "type": "module",
@@ -29,9 +29,26 @@
     "extensions": [
       "./dist/src/openclaw-plugin.js"
     ],
+    "runtimeExtensions": [
+      "./dist/src/openclaw-plugin.js"
+    ],
+    "install": {
+      "clawhubSpec": "clawhub:@scotthuang/agent-knock-knock",
+      "npmSpec": "@scotthuang/agent-knock-knock",
+      "defaultChoice": "clawhub",
+      "minHostVersion": ">=2026.7.1-2"
+    },
     "compat": {
-      "pluginApi": ">=2026.3.24-beta.2",
-      "minGatewayVersion": "2026.3.24-beta.2"
+      "pluginApi": ">=2026.7.1-2",
+      "minGatewayVersion": "2026.7.1-2"
+    },
+    "build": {
+      "openclawVersion": "2026.7.1-2",
+      "pluginSdkVersion": "2026.7.1-2"
+    },
+    "release": {
+      "publishToClawHub": true,
+      "publishToNpm": true
     }
   },
   "bin": {
@@ -41,6 +58,7 @@
     "dist/src",
     "templates",
     "docs/assets/agent-knock-knock-cover.jpg",
+    "docs/assets/agent-knock-knock-icon.png",
     "openclaw.plugin.json",
     "README.md",
     "LICENSE",
@@ -55,6 +73,8 @@
     "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test dist/test/*.test.js",
+    "clawhub:validate": "npm run build && clawhub package validate . --out .clawhub-validation --openclaw node_modules/openclaw --runtime --allow-execute --no-mock-sdk",
+    "clawhub:dry-run": "npm run build && clawhub package publish . --family code-plugin --owner scotthuang --tags beta --dry-run",
     "simulate:architecture": "node scripts/two-claude-weather-test.js --scenario architecture-questions",
     "simulate:weather": "node scripts/two-claude-weather-test.js --scenario weather",
     "transcript": "node dist/src/cli.js transcript"
@@ -62,8 +82,18 @@
   "engines": {
     "node": ">=22.14.0"
   },
+  "peerDependencies": {
+    "openclaw": ">=2026.7.1-2"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@types/node": "^22.20.1",
+    "clawhub": "0.23.1",
+    "openclaw": "2026.7.1-2",
     "typescript": "^7.0.2"
   }
 }
