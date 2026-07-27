@@ -5,23 +5,23 @@
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.14-339933)](https://nodejs.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/scotthuang/agent-knock-knock/blob/main/LICENSE)
 
-Agent Knock Knock connects OpenClaw to local coding agents. Share a live terminal through tmux, delegate managed work through ACP, and continue the same task from chat or the terminal.
+Agent Knock Knock lets you control local Codex and Claude Code from any configured OpenClaw channel, then take over the same live tmux session without losing context. For managed background work, Managed ACP (via ACPX) also supports Cursor.
 
-**No hooks. No agent-side plugins. Just share a terminal and stay in control. No YOLO. Automate the trusted. Review the rest.**
-
-![Agent Knock Knock cover: OpenClaw knocking on coding agents' door](docs/assets/agent-knock-knock-cover.jpg)
+**Local-first, with no hosted control plane or telemetry. tmux mode keeps the coding agent's existing permission settings; Managed ACP uses a separate background permission model.**
 
 ## See It in Action
 
 [![AKK orchestrating a Claude Code-to-Codex handoff through tmux](docs/assets/akk-tmux-handoff-demo.gif)](docs/assets/akk-tmux-handoff-demo.mp4)
 
-*OpenClaw asks Claude Code to write a file, waits for AKK to report completion, then hands the result to Codex. Click the preview to watch in full quality.*
+*OpenClaw asks Claude Code to write a file, waits for AKK to report completion, then hands the result to Codex. Both terminals remain available for direct human takeover. The demo uses the agents' existing permission settings; AKK does not switch them. Click the preview to watch in full quality.*
 
 ## Use Cases
 
 **Delegate from anywhere.** Use any configured OpenClaw channel to hand work to a local coding agent wherever you are. AKK keeps the task running outside the chat, reports when the agent needs input or finishes, and lets you continue from chat or the shared terminal.
 
-**Orchestrate specialist agents.** OpenClaw does more than report progress: it can coordinate agent handoffs and automatically approve trusted permission requests under rules you define. Claude Code can plan, Codex can implement, and Claude Code can review. At any point, you can take over the shared terminal, keep working yourself, then hand the same task back to OpenClaw—with context intact.
+**Orchestrate specialist agents.** OpenClaw can coordinate agent handoffs: Claude Code can plan, Codex can implement, and Claude Code can review. In tmux mode, AKK can also automatically approve trusted permission requests under rules you define. At any point, you can take over the shared terminal, keep working yourself, then hand the same task back to OpenClaw—with context intact.
+
+![Agent Knock Knock cover: OpenClaw knocking on coding agents' door](docs/assets/agent-knock-knock-cover.jpg)
 
 ## Choose an Execution Mode
 
@@ -31,6 +31,13 @@ Agent Knock Knock connects OpenClaw to local coding agents. Share a live termina
 | **Managed ACP** | Start background tasks with durable ACP state and callbacks. | Codex, Claude Code, Cursor | [ACPX](https://github.com/openclaw/acpx) |
 
 Install either mode or both. tmux does not require ACPX. Cursor tmux control is [not yet supported](https://github.com/scotthuang/agent-knock-knock/issues/42). AKK can also discover, resume, or fork local Codex sessions; that is a Codex capability, not a third installation mode.
+
+### Permission Boundaries
+
+The two modes intentionally use different permission models:
+
+- **tmux bridge:** AKK does not change the coding agent's configured permission mode. For supported prompts in an AKK-managed turn, disabled-by-default exact-command rules may auto-approve a trusted request; unmatched or uncertain requests stay manual.
+- **Managed ACP:** AKK starts ACPX-backed agents with `--approve-all`; the tmux prompt inspection and exact-command `autoApprove` policy do not apply to this mode. Claude Code may still surface permission requests through ACPX, while some Codex sandbox-sensitive operations fail directly. Keep managed work inside an explicit workspace.
 
 ## Install
 
