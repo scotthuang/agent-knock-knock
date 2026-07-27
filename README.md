@@ -44,13 +44,34 @@ The two modes intentionally use different permission models:
 Core requirements:
 
 - Node.js 22.14+ (Node.js 24 recommended; use a version supported by your OpenClaw release)
-- [OpenClaw](https://docs.openclaw.ai/) Gateway and plugin API `2026.3.24-beta.2` or newer
+- [OpenClaw](https://docs.openclaw.ai/) Gateway and plugin API `2026.7.1-2` or newer
 - At least one authenticated coding agent: Codex, Claude Code, or Cursor
 
+### Install from ClawHub (recommended)
+
 ```bash
-npm install -g @scotthuang/agent-knock-knock
+openclaw plugins install clawhub:@scotthuang/agent-knock-knock@beta
+openclaw gateway restart
+```
+
+The explicit `@beta` selector follows the `0.3.0` prerelease channel. Remove it after the stable ClawHub release is available.
+
+ClawHub installs the OpenClaw plugin, bundled AKK skill, and package-local relay CLI together. OpenClaw invokes that bundled CLI directly, but ClawHub does not add the `agent-knock-knock` command to your shell `PATH`. Do not run `install-openclaw` after a ClawHub install; that command belongs to the npm installation path below and would repeat the plugin setup.
+
+If you also want standalone shell commands such as `agent-knock-knock doctor`, install the npm package globally without running `install-openclaw`:
+
+```bash
+npm install -g @scotthuang/agent-knock-knock@next
+```
+
+### Install from npm (beta)
+
+```bash
+npm install -g @scotthuang/agent-knock-knock@next
 agent-knock-knock install-openclaw
 ```
+
+The npm `next` dist-tag follows the same prerelease line. Remove `@next` after `0.3.0` becomes stable.
 
 `install-openclaw` installs or updates the plugin, enables it, installs the AKK skill template, and restarts the OpenClaw Gateway. It is safe to rerun. Use `--skill-only` to skip plugin installation; add `--no-restart` to skip the automatic Gateway restart.
 
@@ -59,6 +80,19 @@ If OpenClaw runs from a local checkout or another nonstandard location, pass its
 ```bash
 agent-knock-knock install-openclaw --openclaw-bin /path/to/openclaw/openclaw.mjs
 ```
+
+AKK's agent tools are optional and require an explicit OpenClaw tool-policy opt-in. If you use the default `coding` profile and do not already have `tools.allow`, add AKK without replacing the profile:
+
+```json5
+{
+  tools: {
+    profile: "coding",
+    alsoAllow: ["agent-knock-knock"]
+  }
+}
+```
+
+If your configuration already has a restrictive `tools.allow` list, add `"agent-knock-knock"` to that existing list instead. Do not set `allow` and `alsoAllow` at the same scope.
 
 Choose one execution mode, or install both.
 
@@ -96,10 +130,16 @@ npm install -g acpx
 
 AKK uses ACPX to start managed Codex, Claude Code, or Cursor sessions from OpenClaw.
 
-Finally, check which modes are ready:
+Finally, check which modes are ready if the global CLI is installed:
 
 ```bash
 agent-knock-knock doctor
+```
+
+For a ClawHub-only installation, verify that OpenClaw loaded the packaged runtime:
+
+```bash
+openclaw plugins inspect agent-knock-knock --runtime
 ```
 
 ### Trust and Privacy
@@ -115,6 +155,10 @@ First merge this configuration into `~/.openclaw/openclaw.json`, setting `worksp
 ```json5
 // ~/.openclaw/openclaw.json
 {
+  tools: {
+    profile: "coding",
+    alsoAllow: ["agent-knock-knock"]
+  },
   plugins: {
     entries: {
       "agent-knock-knock": {
@@ -244,11 +288,11 @@ Place `autoApprove` inside the plugin `config` object. It is disabled by default
 
 ## Troubleshooting
 
-Start with `agent-knock-knock doctor`. It checks the core installation and reports ACPX and tmux readiness separately; either execution mode is enough. It does not authenticate an agent, verify live Gateway/plugin connectivity, or run a real task.
+With the global npm CLI installed, start with `agent-knock-knock doctor`. It checks the core installation and reports ACPX and tmux readiness separately; either execution mode is enough. It does not authenticate an agent, verify live Gateway/plugin connectivity, or run a real task. For a ClawHub-only installation, start with `openclaw plugins inspect agent-knock-knock --runtime`.
 
 | Symptom | Action |
 | --- | --- |
-| Installer or callbacks cannot find a local OpenClaw CLI | Set `openclawBin` and pass `--openclaw-bin` to `install-openclaw`. |
+| The npm installer or callbacks cannot find a local OpenClaw CLI | Set `openclawBin` and pass `--openclaw-bin` to `install-openclaw`. |
 | Source changes do not appear | Build, reinstall from the checkout, and restart the Gateway. |
 | Terminal bridge task is `stalled` | Inspect `status` and the terminal; use `/akk renew <conversation-id> <minutes>` only when more monitoring time is useful. |
 | ACPX task is `stalled` | Inspect `status --trace`; close and redelegate if the executor cannot continue. |
@@ -277,6 +321,20 @@ npm test                      # build and run the full test suite
 ```
 
 See [CONTRIBUTING.md](https://github.com/scotthuang/agent-knock-knock/blob/main/CONTRIBUTING.md) for the development and pull request workflow. For local OpenClaw testing, rebuild, run `node dist/src/cli.js install-openclaw`, and restart the Gateway.
+
+### ClawHub Maintainer Release
+
+The first `0.3.0` beta publish is intentionally manual and must stay on ClawHub's `beta` tag:
+
+```bash
+npm ci
+npm run build
+npm exec clawhub -- login
+npm exec clawhub -- package publish . --family code-plugin --owner scotthuang --tags beta --dry-run --json
+npm exec clawhub -- package publish . --family code-plugin --owner scotthuang --tags beta
+```
+
+After that first release creates the package, configure this repository as its trusted publisher. Future publishes use the manually dispatched `ClawHub Publish` workflow, which defaults to a dry run and derives `beta` versus `latest` from the package version.
 
 ## Storage and Logs
 

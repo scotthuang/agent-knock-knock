@@ -1,14 +1,19 @@
 {
   "id": "agent-knock-knock",
   "name": "Agent Knock Knock",
-  "description": "Agent Knock Knock (AKK/akk) delegates OpenClaw coding work to local Codex, Claude, or Cursor agents. Use this plugin when the user says AKK, akk, Agent Knock Knock, asks to hand work to Codex, Claude, or Cursor, asks what agent tasks are running, asks what an AKK, Codex, or Claude session is about, sends a follow-up to an agent task, renews monitoring for a stalled terminal task, recovers an unavailable agent session, cancels a running agent task, or closes an agent task. Default delegation target comes from plugin config defaultAgent and falls back to Codex when unset; explicit user agent requests override it.",
+  "description": "Delegate OpenClaw coding tasks to local Codex, Claude Code, or Cursor agents, then take over the same live terminal session.",
+  "icon": "https://raw.githubusercontent.com/scotthuang/agent-knock-knock/main/docs/assets/agent-knock-knock-icon.png",
   "activation": {
-    "onStartup": true
+    "onStartup": true,
+    "onCommands": ["akk"]
   },
+  "commandAliases": [
+    {
+      "name": "akk",
+      "kind": "runtime-slash"
+    }
+  ],
   "contracts": {
-    "commands": [
-      "akk"
-    ],
     "tools": [
       "agent_knock_knock_delegate",
       "agent_knock_knock_list",
@@ -21,7 +26,6 @@
       "agent_knock_knock_recover",
       "agent_knock_knock_close",
       "agent_knock_knock_approve",
-      "agent_knock_knock_agent_discover",
       "agent_knock_knock_agent_takeover"
     ]
   },
@@ -59,13 +63,13 @@
     "agent_knock_knock_approve": {
       "optional": true
     },
-    "agent_knock_knock_agent_discover": {
-      "optional": true
-    },
     "agent_knock_knock_agent_takeover": {
       "optional": true
     }
   },
+  "skills": [
+    "templates/openclaw-skills/agent-knock-knock"
+  ],
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -150,6 +154,10 @@
       "openclawBin": {
         "type": "string",
         "description": "Path to the OpenClaw CLI used by callback delivery. Defaults to PATH plus common user install locations."
+      },
+      "codexHome": {
+        "type": "string",
+        "description": "Optional CODEX_HOME path used when resolving native Codex sessions for agent takeover."
       },
       "callbackCommand": {
         "type": "string",

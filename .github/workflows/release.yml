@@ -17,6 +17,8 @@ jobs:
     name: Test and publish npm package
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    outputs:
+      is_prerelease: ${{ steps.release.outputs.is_prerelease }}
     permissions:
       contents: read
       id-token: write
@@ -54,10 +56,20 @@ jobs:
             exit 1
           fi
 
+          if [[ "${package_version}" == *-* ]]; then
+            npm_tag="next"
+            is_prerelease="true"
+          else
+            npm_tag="latest"
+            is_prerelease="false"
+          fi
+
           {
             echo "package_name=${package_name}"
             echo "package_version=${package_version}"
             echo "release_commit=${release_commit}"
+            echo "npm_tag=${npm_tag}"
+            echo "is_prerelease=${is_prerelease}"
           } >> "${GITHUB_OUTPUT}"
 
       - name: Install dependencies
@@ -78,12 +90,17 @@ jobs:
             fi
             echo "${package_spec} is already published from this commit; skipping npm publish."
           else
-            npm publish --access public --provenance --registry=https://registry.npmjs.org
+            npm publish \
+              --access public \
+              --provenance \
+              --tag "${NPM_TAG}" \
+              --registry=https://registry.npmjs.org
           fi
         env:
           PACKAGE_NAME: ${{ steps.release.outputs.package_name }}
           PACKAGE_VERSION: ${{ steps.release.outputs.package_version }}
           RELEASE_COMMIT: ${{ steps.release.outputs.release_commit }}
+          NPM_TAG: ${{ steps.release.outputs.npm_tag }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   github-release:
@@ -100,10 +117,17 @@ jobs:
           if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             echo "GitHub Release ${GITHUB_REF_NAME} already exists; nothing to do."
           else
-            gh release create "${GITHUB_REF_NAME}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --generate-notes \
+            release_args=(
+              "${GITHUB_REF_NAME}"
+              --repo "${GITHUB_REPOSITORY}"
+              --generate-notes
               --verify-tag
+            )
+            if [[ "${IS_PRERELEASE}" == "true" ]]; then
+              release_args+=(--prerelease)
+            fi
+            gh release create "${release_args[@]}"
           fi
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          IS_PRERELEASE: ${{ needs.publish.outputs.is_prerelease }}

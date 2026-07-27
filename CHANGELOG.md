@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.0-beta.1 - 2026-07-28
+
+### Added
+
+- Add ClawHub package metadata, bundled skill discovery, a square catalog icon, and a package-local OpenClaw runtime entry.
+- Add manifest/runtime contract tests and a ClawHub validation and dry-run release path.
+
+### Changed
+
+- Compile against the tested OpenClaw `2026.7.1-2` SDK instead of a handwritten type shim.
+- Separate ClawHub and npm installation guidance, including the explicit optional-tool grant required by a clean OpenClaw profile.
+- Publish prerelease builds to npm's `next` dist-tag and mark their GitHub releases as prereleases.
+
+### Fixed
+
+- Align the declared `/akk` command, bundled skill, and tool inventory with the capabilities registered at runtime.
+- Resolve the bundled CLI relative to the loaded plugin entry so ClawHub installs do not depend on a global executable.
+
 ## 0.2.51 - 2026-07-25
 
 ### Added

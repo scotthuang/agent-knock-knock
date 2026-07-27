@@ -5,3 +5,4 @@ dist/
 .env
 .akk/
 .agent-knock-knock/
+.clawhub-validation/
