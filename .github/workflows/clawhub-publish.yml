@@ -110,7 +110,7 @@ jobs:
           fi
 
           publish_args=(
-            package publish "${packages[0]}"
+            package publish "${GITHUB_WORKSPACE}/${packages[0]}"
             --family code-plugin
             --owner scotthuang
             --tags "${RELEASE_CHANNEL}"
