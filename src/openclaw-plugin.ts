@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
   definePluginEntry,
@@ -768,8 +768,17 @@ async function handleAkkCommand(api, ctx) {
     if (!args) {
       return { text: akkUsageText(), isError: true };
     }
-    const result = runCli(api, args);
+    // Doctor calls back into the running Gateway for its independent health
+    // check. Keep the Gateway event loop free while that child CLI runs.
+    const result = parsed.action === "doctor"
+      ? await runCliAsync(api, args, { allowNonzeroJson: true })
+      : runCli(api, args);
     switch (parsed.action) {
+      case "doctor":
+        return {
+          text: formatDoctorCommandResult(result),
+          isError: result.ok !== true
+        };
       case "list":
         return { text: formatAkkListCommandResult(result) };
       case "status":
@@ -831,6 +840,37 @@ function formatStatusCommandResult(result) {
     lines.push(`request: ${truncateText(summary.request, 180)}`);
   }
   return lines.join("\n");
+}
+
+function formatDoctorCommandResult(result) {
+  const capabilities = isRecord(result.capabilities) ? result.capabilities : {};
+  const tmux = isRecord(capabilities.tmux) ? capabilities.tmux : {};
+  const acpx = isRecord(capabilities.acpx) ? capabilities.acpx : {};
+  const openclaw = isRecord(result.openclaw) ? result.openclaw : {};
+  const checks = Array.isArray(openclaw.checks) ? openclaw.checks : [];
+  const failures = checks
+    .filter((check) => isRecord(check) && check.ok !== true)
+    .map((check) => String(check.name ?? "unknown"));
+  const remediation = [...new Set(
+    checks.flatMap((check) =>
+      isRecord(check) && Array.isArray(check.remediation)
+        ? check.remediation.filter(
+            (command): command is string =>
+              typeof command === "string" && command.trim().length > 0
+          )
+        : []
+    )
+  )].slice(0, 3);
+  return [
+    `AKK doctor: ${result.ok === true ? "ready" : "needs attention"}`,
+    `mode: ${result.selected_mode ?? "all"}`,
+    `tmux: ${tmux.checked === false ? "not checked" : tmux.status ?? "unknown"}`,
+    `acpx: ${acpx.checked === false ? "not checked" : acpx.status ?? "unknown"}`,
+    `OpenClaw package: ${openclaw.package_ready === true ? "ready" : "not ready"}`,
+    `Gateway: ${openclaw.gateway_ready === true ? "healthy" : "unavailable"}`,
+    ...(failures.length > 0 ? [`check: ${failures.join(", ")}`] : []),
+    ...remediation.map((command) => `next: ${command}`)
+  ].join("\n");
 }
 
 function formatRenewCommandResult(result) {
@@ -1068,7 +1108,17 @@ function buildRecoveryArgs(api, command, params) {
   return args;
 }
 
-function runCli(api, cliArgs, { cwd = process.cwd() } = {}) {
+function runCli(
+  api,
+  cliArgs,
+  {
+    cwd = process.cwd(),
+    allowNonzeroJson = false
+  }: {
+    cwd?: string;
+    allowNonzeroJson?: boolean;
+  } = {}
+) {
   const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
   const binPath = stringValue(config.binPath) ?? defaultBinPath;
   const spawned = spawnSync(process.execPath, [binPath, ...cliArgs], {
@@ -1081,10 +1131,115 @@ function runCli(api, cliArgs, { cwd = process.cwd() } = {}) {
     throw new Error(`agent-knock-knock ${cliArgs[0]} failed to start: ${spawned.error.message}`);
   }
   if (spawned.status !== 0) {
+    if (allowNonzeroJson && spawned.stdout.trim()) {
+      return parseJson(spawned.stdout);
+    }
     throw new Error(cleanError(spawned.stderr || spawned.stdout || `agent-knock-knock ${cliArgs[0]} exited with status ${spawned.status}`));
   }
 
   return parseJson(spawned.stdout);
+}
+
+function runCliAsync(
+  api,
+  cliArgs,
+  {
+    cwd = process.cwd(),
+    allowNonzeroJson = false,
+    timeoutMs = 90_000
+  }: {
+    cwd?: string;
+    allowNonzeroJson?: boolean;
+    timeoutMs?: number;
+  } = {}
+): Promise<Record<string, any>> {
+  const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+  const binPath = stringValue(config.binPath) ?? defaultBinPath;
+  const maxBuffer = 10 * 1024 * 1024;
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [binPath, ...cliArgs], {
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true
+    });
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+
+    let stdout = "";
+    let stderr = "";
+    let overflow = false;
+    let timedOut = false;
+    const append = (current: string, chunk: string): string => {
+      const next = current + chunk;
+      if (Buffer.byteLength(next, "utf8") > maxBuffer) {
+        overflow = true;
+        child.kill("SIGKILL");
+      }
+      return next;
+    };
+    child.stdout.on("data", (chunk: string) => {
+      stdout = append(stdout, chunk);
+    });
+    child.stderr.on("data", (chunk: string) => {
+      stderr = append(stderr, chunk);
+    });
+
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, timeoutMs);
+    timeout.unref();
+
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(
+        new Error(
+          `agent-knock-knock ${cliArgs[0]} failed to start: ${error.message}`
+        )
+      );
+    });
+    child.once("close", (status) => {
+      clearTimeout(timeout);
+      if (timedOut) {
+        reject(
+          new Error(`agent-knock-knock ${cliArgs[0]} timed out`)
+        );
+        return;
+      }
+      if (overflow) {
+        reject(
+          new Error(`agent-knock-knock ${cliArgs[0]} output exceeded 10 MiB`)
+        );
+        return;
+      }
+      if (status !== 0) {
+        if (allowNonzeroJson && stdout.trim()) {
+          try {
+            resolve(parseJson(stdout));
+          } catch (error) {
+            reject(error);
+          }
+          return;
+        }
+        reject(
+          new Error(
+            cleanError(
+              stderr ||
+                stdout ||
+                `agent-knock-knock ${cliArgs[0]} exited with status ${status}`
+            )
+          )
+        );
+        return;
+      }
+      try {
+        resolve(parseJson(stdout));
+      } catch (error) {
+        reject(error);
+      }
+    });
+  });
 }
 
 async function handleCallback(api, params) {

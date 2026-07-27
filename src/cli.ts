@@ -54,6 +54,7 @@ import {
   EXECUTOR_KINDS,
   acpxCommandForExecutor,
   executorDefinitionForKind,
+  isExecutorKind,
   modelEnvForExecutor,
   normalizeModelForExecutor,
   proxyEnvForExecutor,
@@ -94,6 +95,7 @@ import {
 } from "./terminal-agent-adapter.js";
 import { createProductionTerminalAgentRegistry } from "./terminal-agent-registry.js";
 import {
+  parseProcessElapsedSeconds,
   StaticTerminalProcessSource,
   SystemTerminalProcessSource,
   type TerminalProcessSource
@@ -106,7 +108,17 @@ import {
   evaluateApprovalPolicy,
   type ApprovalCandidate
 } from "./approval-policy.js";
-import { evaluateDoctorCapabilities } from "./doctor-capabilities.js";
+import {
+  evaluateDoctorCapabilities,
+  runDoctorCapabilityProbes,
+  type DoctorMode
+} from "./doctor-capabilities.js";
+import { runOpenClawChainDiagnostics } from "./openclaw-doctor.js";
+import {
+  resolveSessionSelector,
+  sessionShortRef,
+  type SessionSelectorCandidate
+} from "./session-selector.js";
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 10080;
 const DEFAULT_AGENT_TIMEOUT_MINUTES = 60;
@@ -137,6 +149,18 @@ const CONVERSATION_STATUSES = new Set<ConversationStatus>([
   "closed",
   "cancelled",
   "cancelling"
+]);
+const SESSION_SELECTOR_COMMANDS = new Set([
+  "status",
+  "describe",
+  "summary",
+  "send",
+  "approve",
+  "cancel",
+  "renew",
+  "retry-callback",
+  "recover",
+  "close"
 ]);
 
 class InlineCodexSessionAdapter implements CodexLocalSessionAdapter {
@@ -211,6 +235,7 @@ try {
 }
 
 async function runCommand(commandName, options) {
+  await resolveConversationSelectorOption(commandName, options);
   if (commandName === "help" || commandName === "--help" || commandName === "-h") {
     usage();
   } else if (commandName === "version" || commandName === "--version" || commandName === "-v") {
@@ -272,7 +297,29 @@ async function runCommand(commandName, options) {
 function runInstallOpenClaw(options) {
   const root = packageRootDir();
   const skillOnly = options.skillOnly === true;
-  const needsOpenClaw = !skillOnly || options.noRestart !== true;
+  const workspace = options.workspace === undefined
+    ? undefined
+    : canonicalWorkspace(options.workspace);
+  const defaultAgent = optionalExecutorKind(options.defaultAgent);
+  const selectedMode = options.mode === undefined
+    ? undefined
+    : parseDoctorMode(options.mode);
+  if (selectedMode === "tmux" && defaultAgent === "cursor") {
+    throw new Error("--default-agent cursor requires --mode acpx or --mode all");
+  }
+  if (
+    skillOnly &&
+    (workspace !== undefined ||
+      defaultAgent !== undefined ||
+      selectedMode !== undefined ||
+      options.verify === true)
+  ) {
+    throw new Error(
+      "--skill-only cannot be combined with --workspace, --default-agent, --mode, or --verify"
+    );
+  }
+
+  const needsOpenClaw = !skillOnly || options.noRestart !== true || options.verify === true;
   const openclawBin = needsOpenClaw
     ? options.openclawBin ?? resolveExecutable("openclaw")
     : options.openclawBin;
@@ -288,12 +335,39 @@ function runInstallOpenClaw(options) {
       mode: pluginInstall.mode
     });
 
-    runCheckedCommand(openclawBin, ["plugins", "enable", "agent-knock-knock"], {
-      label: "openclaw plugins enable"
-    });
+    const configOperations: Array<{ path: string; value: unknown }> = [
+      {
+        path: "plugins.entries.agent-knock-knock.enabled",
+        value: true
+      },
+      ...(workspace === undefined
+        ? []
+        : [{
+            path: "plugins.entries.agent-knock-knock.config.workspace",
+            value: workspace
+          }]),
+      ...(defaultAgent === undefined
+        ? []
+        : [{
+            path: "plugins.entries.agent-knock-knock.config.defaultAgent",
+            value: defaultAgent
+          }]),
+      ...(selectedMode === undefined
+        ? []
+        : [{
+            path: "plugins.entries.agent-knock-knock.config.mode",
+            value: selectedMode
+          }])
+    ];
+    runCheckedCommand(
+      openclawBin,
+      ["config", "set", "--batch-json", JSON.stringify(configOperations)],
+      { label: "openclaw config set" }
+    );
     steps.push({
-      name: "plugin_enabled",
-      plugin: "agent-knock-knock"
+      name: "plugin_configured",
+      plugin: "agent-knock-knock",
+      updated: configOperations.map((operation) => operation.path)
     });
   }
 
@@ -313,16 +387,122 @@ function runInstallOpenClaw(options) {
     });
   }
 
+  const pendingRestart = !skillOnly && options.noRestart === true;
+  const verification = options.verify === true
+    ? buildDoctorReport({
+        ...options,
+        openclawBin,
+        ...(workspace ? { workspace } : {}),
+        mode: selectedMode ?? "all"
+      })
+    : undefined;
+  const ready = verification
+    ? verification.ok === true && !pendingRestart
+    : false;
+  const nextActions = installNextActions({
+    pendingRestart,
+    verification,
+    mode: selectedMode ?? "all",
+    agent: defaultAgent ?? "codex"
+  });
+
   printJson({
     installed: true,
+    ready,
+    pending_restart: pendingRestart,
     mode: skillOnly ? "skill_only" : "full",
+    execution_mode: selectedMode ?? null,
+    default_agent: defaultAgent ?? null,
+    workspace: workspace ?? null,
     package_root: root,
     openclaw_bin: openclawBin ?? null,
     steps,
-    next: options.noRestart === true
-      ? "Restart the OpenClaw Gateway before using Agent Knock Knock."
-      : "Agent Knock Knock is installed. Try: AKK list"
+    ...(verification ? { verification } : {}),
+    next_actions: nextActions
   });
+}
+
+function canonicalWorkspace(value: unknown): string {
+  const requested = path.resolve(String(required(value, "--workspace is required")));
+  let canonical: string;
+  let stat: fs.Stats;
+  try {
+    canonical = fs.realpathSync(requested);
+    stat = fs.statSync(canonical);
+  } catch {
+    throw new Error(`--workspace does not exist: ${requested}`);
+  }
+  if (!stat.isDirectory()) {
+    throw new Error(`--workspace must be a directory: ${requested}`);
+  }
+  return canonical;
+}
+
+function optionalExecutorKind(value: unknown): ExecutorKind | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const normalized = String(value).trim().toLowerCase();
+  if (!isExecutorKind(normalized)) {
+    throw new Error(`--default-agent must be one of: ${EXECUTOR_KINDS.join(", ")}`);
+  }
+  return normalized;
+}
+
+function installNextActions({
+  pendingRestart,
+  verification,
+  mode,
+  agent
+}: {
+  pendingRestart: boolean;
+  verification?: Record<string, any>;
+  mode: DoctorMode;
+  agent: ExecutorKind;
+}): Array<{ action: string; command: string }> {
+  if (pendingRestart) {
+    return [
+      {
+        action: "apply_plugin_changes",
+        command: "openclaw gateway restart"
+      },
+      {
+        action: "verify",
+        command: `agent-knock-knock doctor --mode ${mode}`
+      }
+    ];
+  }
+
+  if (verification && verification.ok !== true) {
+    const chain = isRecord(verification.openclaw) ? verification.openclaw : {};
+    const checks = Array.isArray(chain.checks) ? chain.checks : [];
+    const remediation = checks.flatMap((check) =>
+      isRecord(check) && Array.isArray(check.remediation)
+        ? check.remediation.filter((command): command is string => typeof command === "string")
+        : []
+    );
+    return [...new Set(remediation)].map((command) => ({
+      action: "repair",
+      command
+    }));
+  }
+
+  if (!verification) {
+    return [{
+      action: "verify",
+      command: `agent-knock-knock doctor --mode ${mode}`
+    }];
+  }
+
+  return mode === "tmux"
+    ? [{
+        action: "start_agent",
+        command: `tmux new -s akk-${agent} ${agent}`
+      }]
+    : [{
+        action: "delegate",
+        command: `/akk ${agent} <task>`
+      }];
 }
 
 async function runClaudeHook(options) {
@@ -411,18 +591,45 @@ function installOpenClawPlugin(openclawBin, root) {
 }
 
 function runDoctor(options) {
-  const commands = ["node", "openclaw", "tmux", "acpx", "codex", "claude", "cursor"];
-  const checks = commands.map((commandName) => {
-    const check = executableCheck(commandName);
-    return commandName === "node"
-      ? {
-          ...check,
-          version: process.versions.node,
-          version_supported: versionAtLeast(process.versions.node, MINIMUM_NODE_VERSION),
-          minimum_version: MINIMUM_NODE_VERSION
-        }
-      : check;
-  });
+  const report = buildDoctorReport(options);
+  printJson(report);
+  if (!report.ok) {
+    process.exitCode = 1;
+  }
+}
+
+function buildDoctorReport(options): Record<string, any> {
+  const mode = parseDoctorMode(options.mode ?? "all");
+  const timeoutMs = options.timeoutMs === undefined
+    ? undefined
+    : positiveMilliseconds(options.timeoutMs, "--timeout-ms");
+  const openclawBin = String(options.openclawBin ?? resolveOptionalExecutable("openclaw"));
+  const executables = {
+    openclaw: openclawBin,
+    ...(options.tmuxBin ? { tmux: String(options.tmuxBin) } : {}),
+    ...(options.acpxBin ? { acpx: String(options.acpxBin) } : {}),
+    ...(options.codexBin ? { codex: String(options.codexBin) } : {}),
+    ...(options.claudeBin ? { claude: String(options.claudeBin) } : {}),
+    ...(options.cursorBin ? { cursor: String(options.cursorBin) } : {})
+  };
+  const checks = [
+    {
+      command: "node",
+      status: "ok" as const,
+      available: true,
+      executable: process.execPath,
+      version: process.versions.node,
+      version_supported: versionAtLeast(process.versions.node, MINIMUM_NODE_VERSION),
+      minimum_version: MINIMUM_NODE_VERSION
+    },
+    ...runDoctorCapabilityProbes(
+      {
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
+        executables
+      },
+      mode
+    )
+  ];
   const root = packageRootDir();
   const packageFiles = [
     "dist/src/cli.js",
@@ -436,30 +643,86 @@ function runDoctor(options) {
       exists: fs.existsSync(filePath)
     };
   });
-  const capabilities = evaluateDoctorCapabilities(checks);
+  const capabilities = evaluateDoctorCapabilities(checks, mode);
   const filesOk = packageFiles.every((check) => check.exists);
-
-  const ok = capabilities.coreOk && filesOk && capabilities.transportOk;
-  printJson({
+  const openclaw = runOpenClawChainDiagnostics({
+    openclawBin,
+    ...(options.workspace ? { workspace: String(options.workspace) } : {}),
+    ...(timeoutMs === undefined ? {} : { timeoutMs })
+  });
+  const selectedAgent =
+    optionalExecutorKind(options.defaultAgent) ??
+    openclaw.default_agent ??
+    "codex";
+  const selectedAgentReady = mode === "tmux"
+    ? capabilities.tmux.status === "ready" &&
+      capabilities.tmux.agents.includes(selectedAgent)
+    : mode === "acpx"
+      ? capabilities.acpx.status === "ready" &&
+        capabilities.acpx.agents.includes(selectedAgent)
+      : (
+          capabilities.tmux.status === "ready" &&
+          capabilities.tmux.agents.includes(selectedAgent)
+        ) || (
+          capabilities.acpx.status === "ready" &&
+          capabilities.acpx.agents.includes(selectedAgent)
+        );
+  const ok =
+    capabilities.readiness === "ready" &&
+    selectedAgentReady &&
+    filesOk &&
+    openclaw.ready;
+  return {
     ok,
+    readiness: ok
+      ? "ready"
+      : capabilities.readiness === "not_ready"
+        ? "not_ready"
+        : "partially_ready",
+    selected_mode: mode,
+    selected_agent: selectedAgent
+      ? {
+          agent: selectedAgent,
+          ready: selectedAgentReady
+        }
+      : null,
     package_root: root,
     checks,
     package_files: packageFiles,
     capabilities: {
-      tmux: capabilities.tmux,
-      acp: capabilities.acp
+      tmux: {
+        ...capabilities.tmux,
+        checked: mode !== "acpx"
+      },
+      acpx: {
+        ...capabilities.acpx,
+        checked: mode !== "tmux"
+      }
     },
+    openclaw,
     notes: [
       `Node.js ${MINIMUM_NODE_VERSION}+ and OpenClaw are required.`,
       "Choose tmux (recommended), ACPX/ACP, or install both.",
       "tmux supports Codex and Claude Code; ACPX supports Codex, Claude Code, and Cursor.",
       "Claude tmux completion is hook-free and fails closed unless the local transcript schema is verified."
-    ],
-    options
-  });
-  if (!ok) {
-    process.exitCode = 1;
+    ]
+  };
+}
+
+function parseDoctorMode(value: unknown): DoctorMode {
+  const normalized = String(value).trim().toLowerCase();
+  if (normalized === "tmux" || normalized === "acpx" || normalized === "all") {
+    return normalized;
   }
+  throw new Error("--mode must be one of: tmux, acpx, all");
+}
+
+function positiveMilliseconds(value: unknown, optionName: string): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${optionName} must be a positive number`);
+  }
+  return Math.ceil(parsed);
 }
 
 function versionAtLeast(version: string, minimum: string): boolean {
@@ -2509,12 +2772,21 @@ async function runList(options) {
   const includeAll = Boolean(options.all);
   const agentFilter = options.agent ? resolveExecutor({ kind: options.agent }).kind : undefined;
   const statusFilter = options.status;
-  const conversations = listConversations(storeDir)
-    .map((conversation) => summarizeConversation(conversation))
+  const storedConversations = listConversations(storeDir)
     .filter((conversation) => includeAll || isActiveStatus(conversation.status))
-    .filter((conversation) => !agentFilter || conversation.agent === agentFilter)
+    .filter((conversation) =>
+      !agentFilter || executorForConversation(conversation).kind === agentFilter
+    )
     .filter((conversation) => !statusFilter || conversation.status === statusFilter);
-  const delegated = conversations.map(delegatedListEntry);
+  const conversations = storedConversations.map((conversation) =>
+    summarizeConversation(conversation)
+  );
+  const delegated = storedConversations.map((conversation) =>
+    delegatedListEntry(
+      summarizeConversation(conversation),
+      { terminalBridge: terminalBridgeEnabled(conversation) }
+    )
+  );
   const nativeScan = await buildNativeListGroups({ options, agentFilter, statusFilter });
 
   printJson({
@@ -2640,24 +2912,30 @@ async function terminalControlDiagnostics(provider: TerminalControlProvider) {
   };
 }
 
-function delegatedListEntry(task) {
+function delegatedListEntry(
+  task,
+  { terminalBridge = false }: { terminalBridge?: boolean } = {}
+) {
   return {
     ...task,
     id: task.conversation_id,
+    short_ref: sessionShortRef(task.conversation_id),
     source: "akk_delegate",
     commands: {
       send: canSendDelegated(task.status),
       cancel: isWaitingForAgent(task.status),
       close: task.status !== "closed",
       status: true,
-      approve: false
+      approve: terminalBridge && isActiveStatus(task.status)
     }
   };
 }
 
 function nativeListEntry(session: ActiveTerminalProcess, activeSessions: ActiveTerminalProcess[]) {
+  const id = `native:${session.agent}:${session.pid}`;
   return {
-    id: `native:${session.agent}:${session.pid}`,
+    id,
+    short_ref: sessionShortRef(id),
     source: "native_active",
     agent: session.agent,
     status: "active",
@@ -2707,6 +2985,7 @@ async function terminalControlledListEntry(
   );
   return {
     id: bridge.terminalConversationId(session),
+    short_ref: sessionShortRef(bridge.terminalConversationId(session)),
     source: "terminal_control",
     agent: session.agent,
     status: "active",
@@ -2810,6 +3089,146 @@ function childPidsForRoot(root: ActiveTerminalProcess, processes: ActiveTerminal
 
 function canSendDelegated(status) {
   return !["failed", "closed", "cancelled"].includes(status);
+}
+
+async function resolveConversationSelectorOption(commandName, options): Promise<void> {
+  if (
+    !SESSION_SELECTOR_COMMANDS.has(String(commandName ?? "")) ||
+    options.state
+  ) {
+    return;
+  }
+  const supplied = stringValue(options.conversation ?? options.conversationId)?.trim();
+  if (supplied && !isSessionSelectorSyntax(supplied)) {
+    // Full authoritative IDs keep their existing command-specific validation
+    // path. This avoids a discovery scan before option validation and preserves
+    // precise downstream errors for closed or currently non-actionable state.
+    return;
+  }
+  const candidates = await sessionSelectorCandidates(commandName, options);
+  const resolution = resolveSessionSelector(supplied, candidates, {
+    operation: commandName
+  });
+  options.conversation = resolution.id;
+  delete options.conversationId;
+}
+
+function isSessionSelectorSyntax(value: string): boolean {
+  return (
+    /^(?:only|latest|codex|claude|cursor|(?:codex|claude|cursor):latest)$/iu.test(value) ||
+    /^@[0-9a-f]+$/iu.test(value)
+  );
+}
+
+async function sessionSelectorCandidates(
+  commandName,
+  options
+): Promise<SessionSelectorCandidate[]> {
+  const storeDir = storeDirFromOptions(options);
+  cleanupIdleConversations(storeDir, options);
+  const storedConversations = listConversations(storeDir);
+  const managed = storedConversations.map((conversation) =>
+    delegatedListEntry(
+      summarizeConversation(conversation),
+      { terminalBridge: terminalBridgeEnabled(conversation) }
+    )
+  );
+  const managedTerminalKeys = new Set(
+    storedConversations
+      .filter((conversation) => isActiveStatus(conversation.status))
+      .map((conversation) =>
+        terminalControlSelectorKey(
+          terminalControlFromTakeover(
+            isRecord(conversation.native_session_takeover)
+              ? conversation.native_session_takeover
+              : undefined
+          )
+        )
+      )
+      .filter((key): key is string => key !== undefined)
+  );
+  const nativeScan = await buildNativeListGroups({
+    options: {
+      ...options,
+      noApprovalScan: commandName === "approve"
+        ? options.noApprovalScan
+        : true
+    },
+    agentFilter: undefined,
+    statusFilter: undefined
+  });
+  const observedAtMs = Date.now();
+  return [
+    ...managed,
+    ...nativeScan.terminalControlled.filter((entry) => {
+      const key = terminalControlSelectorKey(entry.terminal_control);
+      return key === undefined || !managedTerminalKeys.has(key);
+    }),
+    ...nativeScan.native
+  ].map((entry) => ({
+    id: String(entry.id),
+    agent: resolveExecutor({ kind: entry.agent }).kind,
+    actionable: sessionEntrySupportsCommand(entry, commandName),
+    ...sessionEntryRecency(entry, observedAtMs),
+    source: stringValue(entry.source),
+    status: stringValue(entry.status),
+    workspace: stringValue(entry.workspace ?? entry.cwd),
+    label: stringValue(entry.request ?? entry.command)
+  }));
+}
+
+function terminalControlSelectorKey(value: unknown): string | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const target = stringValue(value.target);
+  const panePid = Number(value.panePid);
+  if (!target || !Number.isSafeInteger(panePid) || panePid <= 1) {
+    return undefined;
+  }
+  return JSON.stringify({
+    target,
+    pane_pid: panePid,
+    socket_path: stringValue(value.socketPath) ?? null
+  });
+}
+
+function sessionEntrySupportsCommand(entry, commandName): boolean {
+  if (commandName === "summary") {
+    commandName = "describe";
+  }
+  const commands = isRecord(entry.commands) ? entry.commands : {};
+  if (typeof commands[commandName] === "boolean") {
+    return commands[commandName] === true;
+  }
+  if (commandName === "describe") {
+    return commands.status === true || entry.source === "native_active";
+  }
+  if (entry.source !== "akk_delegate") {
+    return false;
+  }
+  if (commandName === "renew") {
+    return entry.status === "stalled";
+  }
+  if (commandName === "retry-callback") {
+    return ["callback_pending", "callback_failed"].includes(entry.status);
+  }
+  if (commandName === "recover") {
+    return entry.status === "needs_recovery";
+  }
+  return false;
+}
+
+function sessionEntryRecency(entry, observedAtMs: number): { updatedAtMs?: number } {
+  const timestamp = Date.parse(String(entry.updated_at ?? entry.created_at ?? ""));
+  if (Number.isFinite(timestamp)) {
+    return { updatedAtMs: timestamp };
+  }
+  const elapsedSeconds = parseProcessElapsedSeconds(entry.elapsed);
+  if (elapsedSeconds !== undefined) {
+    return { updatedAtMs: observedAtMs - elapsedSeconds * 1000 };
+  }
+  return {};
 }
 
 async function resolveTerminalConversationFromOptions(
@@ -11008,18 +11427,18 @@ function usage() {
   agent-knock-knock bootstrap-prompt --callback-command <command> [--agent ${agentList}]
   agent-knock-knock delegate --request <text> [--agent ${agentList}] [--store-dir <dir>] [--all-proxy <url>] [--agent-timeout-minutes <minutes>] [--token <gateway-token>] [--send|--background]
   agent-knock-knock list [--store-dir <dir>] [--agent ${agentList}] [--status <status>] [--all] [--managed-only] [--no-approval-scan] [--terminal-debug]
-  agent-knock-knock status --conversation <id> [--store-dir <dir>] [--trace]
-  agent-knock-knock describe --conversation <id> [--store-dir <dir>]
-  agent-knock-knock send --conversation <id> --message <text> [--type answer|task|control] [--all-proxy <url>] [--agent-timeout-minutes <minutes>] [--agent-hard-timeout-minutes <minutes>]
-  agent-knock-knock approve --conversation <id>
-  agent-knock-knock cancel --conversation <id> [--all-proxy <url>]
-  agent-knock-knock renew --conversation <id> [--minutes <inactivity-minutes>]
+  agent-knock-knock status [--conversation <id|selector>] [--store-dir <dir>] [--trace]
+  agent-knock-knock describe [--conversation <id|selector>] [--store-dir <dir>]
+  agent-knock-knock send [--conversation <id|selector>] --message <text> [--type answer|task|control] [--all-proxy <url>] [--agent-timeout-minutes <minutes>] [--agent-hard-timeout-minutes <minutes>]
+  agent-knock-knock approve [--conversation <id|selector>]
+  agent-knock-knock cancel [--conversation <id|selector>] [--all-proxy <url>]
+  agent-knock-knock renew [--conversation <id|selector>] [--minutes <inactivity-minutes>]
   agent-knock-knock reconcile-monitors [--store-dir <dir>]
   agent-knock-knock retry-callback --conversation <id> [--store-dir <dir>]
   agent-knock-knock recover --conversation <id> [--session <name>] [--all-proxy <url>]
   agent-knock-knock close --conversation <id> [--reason <text>]
-  agent-knock-knock install-openclaw [--openclaw-bin <path>] [--skill-path <path>] [--skill-only] [--no-restart]
-  agent-knock-knock doctor
+  agent-knock-knock install-openclaw [--workspace <path>] [--default-agent ${agentList}] [--mode tmux|acpx|all] [--verify] [--openclaw-bin <path>] [--skill-path <path>] [--skill-only] [--no-restart]
+  agent-knock-knock doctor [--mode tmux|acpx|all] [--workspace <path>] [--openclaw-bin <path>]
   agent-knock-knock agent takeover --agent codex --session-id <id> --strategy terminate_then_resume|terminal_control|fork [--create-conversation]
   agent-knock-knock callback --state <file> --message-json <json> [--record-only]
   agent-knock-knock transcript --log <file> [--include-raw]

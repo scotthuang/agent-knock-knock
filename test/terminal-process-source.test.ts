@@ -1,9 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  parseProcessElapsedSeconds,
   SystemTerminalProcessSource,
   type ProcessCommandResult
 } from "../src/terminal-process-source.js";
+
+test("ps elapsed values parse for selector recency", () => {
+  assert.equal(parseProcessElapsedSeconds("00:12"), 12);
+  assert.equal(parseProcessElapsedSeconds("01:02:03"), 3723);
+  assert.equal(parseProcessElapsedSeconds("2-01:02:03"), 176523);
+  assert.equal(parseProcessElapsedSeconds("not-a-duration"), undefined);
+  assert.equal(parseProcessElapsedSeconds("00:99"), undefined);
+});
 
 test("system process source returns neutral filtered snapshots with cwd metadata", async () => {
   const calls: Array<{ command: string; args: string[] }> = [];

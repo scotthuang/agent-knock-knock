@@ -38,7 +38,14 @@ test("doctor exits non-zero when required package files are missing", () => {
     fs.cpSync(path.dirname(binPath), copiedDistDir, { recursive: true });
     const result = spawnSync(
       process.execPath,
-      [path.join(copiedDistDir, "cli.js"), "doctor"],
+      [
+        path.join(copiedDistDir, "cli.js"),
+        "doctor",
+        "--openclaw-bin",
+        path.join(tempDir, "missing-openclaw"),
+        "--timeout-ms",
+        "100"
+      ],
       { encoding: "utf8" }
     );
 
@@ -50,6 +57,41 @@ test("doctor exits non-zero when required package files are missing", () => {
     assert.equal(nodeCheck.version, process.versions.node);
     assert.equal(nodeCheck.minimum_version, "22.14.0");
     assert.equal(nodeCheck.version_supported, true);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("doctor rejects an OpenClaw binary that exists but cannot run", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-doctor-runtime-"));
+  const fakeOpenClaw = path.join(tempDir, "openclaw");
+
+  try {
+    fs.writeFileSync(
+      fakeOpenClaw,
+      `#!/bin/sh
+printf '%s' 'unsupported Node runtime' >&2
+exit 9
+`,
+      "utf8"
+    );
+    fs.chmodSync(fakeOpenClaw, 0o755);
+    const result = runCliRaw([
+      "doctor",
+      "--mode",
+      "tmux",
+      "--openclaw-bin",
+      fakeOpenClaw,
+      "--timeout-ms",
+      "2000"
+    ]);
+    const output = JSON.parse(result.stdout);
+    const openclaw = output.checks.find((entry) => entry.command === "openclaw");
+
+    assert.equal(result.status, 1);
+    assert.equal(output.ok, false);
+    assert.equal(openclaw.status, "version_failed");
+    assert.equal(openclaw.available, false);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
