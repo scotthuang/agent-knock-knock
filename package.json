@@ -1,6 +1,6 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Control local Codex and Claude Code from OpenClaw, take over the same live tmux session, and run managed ACP tasks through ACPX with Cursor support.",
   "license": "MIT",
   "type": "module",
