@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.0-beta.2 - 2026-07-28
+
+### Added
+
+- Add bounded real probes and OpenClaw config, plugin runtime, skill, workspace, and Gateway diagnostics to `doctor`.
+- Add fail-closed session selectors, stable short references, and independent five-minute tmux and Managed ACPX quickstarts.
+- Add deterministic onboarding coverage and explicitly opt-in live ACPX and tmux smoke scripts.
+
+### Changed
+
+- Make `install-openclaw` configure workspace, default agent, and mode atomically, preserve approval policy, restart the Gateway at most once, and optionally verify readiness.
+- Verify the packaged README after every ClawHub publish and the default README after stable releases.
+
 ## 0.3.0-beta.1 - 2026-07-28
 
 ### Added
