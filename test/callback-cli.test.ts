@@ -585,6 +585,8 @@ if (method === "agent-knock-knock.callback") {
   const params = JSON.parse(args[args.indexOf("--params") + 1]);
   console.log(JSON.stringify({
     ok: true,
+    delivery_required: true,
+    delivery_mode: "chat.send",
     chat_send: {
       sessionKey: params.sessionKey,
       message: [
@@ -607,6 +609,12 @@ if (method === "agent-knock-knock.callback") {
   }));
 } else if (method === "chat.send") {
   console.log(JSON.stringify({ runId: "akk-test-chat-send", status: "started", messageSeq: 2 }));
+} else if (method === "agent.wait") {
+  console.log(JSON.stringify({
+    runId: "akk-test-chat-send",
+    status: "ok",
+    endedAt: Date.now()
+  }));
 } else {
   console.log(JSON.stringify({ ok: true }));
 }
@@ -651,9 +659,10 @@ if (method === "agent-knock-knock.callback") {
       .trim()
       .split(/\r?\n/)
       .map((line) => JSON.parse(line));
-    assert.equal(calls.length, 2);
+    assert.equal(calls.length, 3);
     assert.deepEqual(calls[0].slice(0, 3), ["gateway", "call", "agent-knock-knock.callback"]);
     assert.deepEqual(calls[1].slice(0, 3), ["gateway", "call", "chat.send"]);
+    assert.deepEqual(calls[2].slice(0, 3), ["gateway", "call", "agent.wait"]);
     const chatSendParams = JSON.parse(calls[1][calls[1].indexOf("--params") + 1]);
     assert.equal(chatSendParams.sessionKey, "agent:main:main");
     assert.equal(chatSendParams.idempotencyKey, "akk-test-chat-send");
@@ -661,6 +670,10 @@ if (method === "agent-knock-knock.callback") {
     assert.match(chatSendParams.message, /AKK list/);
     assert.match(chatSendParams.message, new RegExp(`AKK send ${created.conversation.conversation_id}: <message>`));
     assert.equal(chatSendParams.deliver, true);
+    const agentWaitParams = JSON.parse(calls[2][calls[2].indexOf("--params") + 1]);
+    assert.equal(agentWaitParams.runId, "akk-test-chat-send");
+    assert.equal(agentWaitParams.timeoutMs, 20_000);
+    assert.equal(calls[2][calls[2].indexOf("--timeout") + 1], "25000");
 
     const events = fs.readFileSync(created.paths.logPath, "utf8")
       .trim()
@@ -670,11 +683,494 @@ if (method === "agent-knock-knock.callback") {
       event.event === "callback_chat_send_delivery" &&
       event.status === 0
     ), true);
+    assert.equal(events.some((event) =>
+      event.event === "callback_agent_wait_delivery" &&
+      event.run_id === "akk-test-chat-send" &&
+      event.run_status === "ok" &&
+      event.status === 0
+    ), true);
   } finally {
     fs.rmSync(storeDir, { recursive: true, force: true });
     fs.rmSync(fakeBinDir, { recursive: true, force: true });
   }
 });
+
+test("callback keeps chat_send retryable until agent.wait reports success", () => {
+  const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-chat-wait-retry-"));
+  const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-fake-openclaw-"));
+  const allowWaitPath = path.join(fakeBinDir, "allow-wait");
+  const callsPath = path.join(fakeBinDir, "calls.ndjson");
+  try {
+    const fakeOpenClaw = path.join(fakeBinDir, "openclaw");
+    fs.writeFileSync(
+      fakeOpenClaw,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(args) + "\\n", "utf8");
+const method = args[2];
+if (method === "agent-knock-knock.callback") {
+  const params = JSON.parse(args[args.indexOf("--params") + 1]);
+  console.log(JSON.stringify({
+    ok: true,
+    delivery_required: true,
+    chat_send: {
+      sessionKey: params.sessionKey,
+      message: "Retry this callback safely.",
+      idempotencyKey: "akk-wait-retry",
+      deliver: true
+    }
+  }));
+} else if (method === "chat.send") {
+  console.log(JSON.stringify({ runId: "akk-wait-retry", status: "in_flight" }));
+} else if (method === "agent.wait") {
+  console.log(JSON.stringify(fs.existsSync(${JSON.stringify(allowWaitPath)})
+    ? { runId: "akk-wait-retry", status: "ok", endedAt: Date.now() }
+    : { runId: "akk-wait-retry", status: "timeout" }));
+}
+`,
+      "utf8"
+    );
+    fs.chmodSync(fakeOpenClaw, 0o755);
+
+    const created = runCli([
+      "new",
+      "--agent",
+      "codex",
+      "--request",
+      "Wait for callback run completion",
+      "--store-dir",
+      storeDir,
+      "--openclaw-session",
+      "agent:main:main"
+    ]);
+    const failed = spawnSync(process.execPath, [
+      binPath,
+      "callback",
+      "--state",
+      created.paths.statePath,
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      "agent:main:main",
+      "--openclaw-bin",
+      fakeOpenClaw,
+      "--disable-callback-retry",
+      "--close-terminal-bridge-on-done",
+      "--message-json",
+      JSON.stringify({ from: "codex", to: "openclaw", type: "done", body: "Finished." })
+    ], { encoding: "utf8" });
+    assert.notEqual(failed.status, 0);
+    assert.match(failed.stderr, /agent\.wait returned timeout/);
+
+    const failedState = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
+    assert.equal(failedState.status, "callback_failed");
+    assert.equal(failedState.callback_delivery.status, "failed");
+    assert.equal(failedState.closed_at, undefined);
+
+    fs.writeFileSync(allowWaitPath, "yes", "utf8");
+    const retried = runCli([
+      "retry-callback",
+      "--state",
+      created.paths.statePath
+    ]);
+    assert.equal(retried.delivered, true);
+    assert.equal(retried.delivery, "gateway_method+chat_send");
+    assert.equal(retried.conversation.status, "closed");
+    assert.equal(retried.conversation.callback_delivery.status, "delivered");
+
+    const calls = readJsonLines(callsPath);
+    const chatSendCalls = calls.filter((args) => args[2] === "chat.send");
+    assert.equal(chatSendCalls.length, 2);
+    const idempotencyKeys = chatSendCalls.map((args) => {
+      const params = JSON.parse(args[args.indexOf("--params") + 1]);
+      return params.idempotencyKey;
+    });
+    assert.deepEqual(idempotencyKeys, ["akk-wait-retry", "akk-wait-retry"]);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(fakeBinDir, { recursive: true, force: true });
+  }
+});
+
+test("callback treats agent.wait timeout as a retryable delivery failure", () => {
+  const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-chat-wait-timeout-"));
+  const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-fake-openclaw-"));
+  try {
+    const fakeOpenClaw = writeCallbackPlanOpenClaw(fakeBinDir, {
+      gatewayPayload: {
+        ok: true,
+        delivery_required: true,
+        chat_send: {
+          sessionKey: "agent:main:main",
+          message: "Wait for this run.",
+          idempotencyKey: "akk-wait-timeout",
+          deliver: true
+        }
+      },
+      chatSendPayload: { runId: "akk-wait-timeout", status: "started" },
+      agentWaitPayload: { runId: "akk-wait-timeout", status: "timeout" }
+    });
+    const created = runCli([
+      "new",
+      "--request",
+      "Timeout callback run",
+      "--store-dir",
+      storeDir,
+      "--openclaw-session",
+      "agent:main:main"
+    ]);
+    const result = runCallbackExpectFailure(created.paths.statePath, fakeOpenClaw);
+    assert.match(result.stderr, /agent\.wait returned timeout/);
+    const state = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
+    assert.equal(state.callback_delivery.status, "failed");
+    assert.equal(state.status, "callback_failed");
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(fakeBinDir, { recursive: true, force: true });
+  }
+});
+
+test("callback does not mark an agent.wait error as delivered", () => {
+  const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-chat-wait-error-"));
+  const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-fake-openclaw-"));
+  try {
+    const fakeOpenClaw = writeCallbackPlanOpenClaw(fakeBinDir, {
+      gatewayPayload: {
+        ok: true,
+        delivery_required: true,
+        delivery_mode: "chat.send",
+        chat_send: {
+          sessionKey: "agent:main:main",
+          message: "This delivery will fail.",
+          idempotencyKey: "akk-wait-error",
+          deliver: true
+        }
+      },
+      chatSendPayload: { runId: "akk-wait-error", status: "started" },
+      agentWaitPayload: {
+        runId: "akk-wait-error",
+        status: "error",
+        error: "channel delivery failed"
+      }
+    });
+    const created = runCli([
+      "new",
+      "--request",
+      "Failed callback run",
+      "--store-dir",
+      storeDir,
+      "--openclaw-session",
+      "agent:main:main"
+    ]);
+    const result = runCallbackExpectFailure(created.paths.statePath, fakeOpenClaw);
+    assert.match(result.stderr, /channel delivery failed/);
+    const state = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
+    assert.equal(state.callback_delivery.status, "failed");
+    assert.equal(state.status, "callback_failed");
+    assert.equal(state.closed_at, undefined);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(fakeBinDir, { recursive: true, force: true });
+  }
+});
+
+test("callback rejects mismatched Gateway run identities", () => {
+  const cases = [
+    {
+      name: "chat.send runId",
+      chatSendPayload: { runId: "different-run", status: "started" },
+      agentWaitPayload: { runId: "akk-expected-run", status: "ok" },
+      error: /runId does not match its idempotencyKey/
+    },
+    {
+      name: "agent.wait runId",
+      chatSendPayload: { runId: "akk-expected-run", status: "started" },
+      agentWaitPayload: { runId: "different-run", status: "ok" },
+      error: /result for a different runId/
+    }
+  ];
+
+  for (const testCase of cases) {
+    const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-run-id-"));
+    const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-fake-openclaw-"));
+    try {
+      const fakeOpenClaw = writeCallbackPlanOpenClaw(fakeBinDir, {
+        gatewayPayload: {
+          ok: true,
+          delivery_required: true,
+          delivery_mode: "chat.send",
+          chat_send: {
+            sessionKey: "agent:main:main",
+            message: "Verify the Gateway run identity.",
+            idempotencyKey: "akk-expected-run",
+            deliver: true
+          }
+        },
+        chatSendPayload: testCase.chatSendPayload,
+        agentWaitPayload: testCase.agentWaitPayload
+      });
+      const created = runCli([
+        "new",
+        "--request",
+        `Reject mismatched ${testCase.name}`,
+        "--store-dir",
+        storeDir,
+        "--openclaw-session",
+        "agent:main:main"
+      ]);
+      const result = runCallbackExpectFailure(created.paths.statePath, fakeOpenClaw);
+      assert.match(result.stderr, testCase.error);
+      const state = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
+      assert.equal(state.callback_delivery.status, "failed");
+      assert.equal(state.status, "callback_failed");
+    } finally {
+      fs.rmSync(storeDir, { recursive: true, force: true });
+      fs.rmSync(fakeBinDir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("callback keeps legacy delivery plans compatible while confirming sessions.send", () => {
+  const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-legacy-plan-"));
+  const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-fake-openclaw-"));
+  try {
+    const legacyOpenClaw = writeCallbackPlanOpenClaw(fakeBinDir, {
+      gatewayPayload: {
+        ok: true,
+        chat_send: {
+          sessionKey: "agent:main:main",
+          message: "Legacy plan without delivery_required.",
+          idempotencyKey: "akk-legacy-run",
+          deliver: true
+        }
+      },
+      chatSendPayload: { runId: "akk-legacy-run", status: "ok" }
+    });
+    const legacy = runCli([
+      "new",
+      "--request",
+      "Accept legacy callback plan",
+      "--store-dir",
+      storeDir,
+      "--openclaw-session",
+      "agent:main:main"
+    ]);
+    const legacyResult = runCli([
+      "callback",
+      "--state",
+      legacy.paths.statePath,
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      "agent:main:main",
+      "--openclaw-bin",
+      legacyOpenClaw,
+      "--message-json",
+      JSON.stringify({
+        from: "claude-code",
+        to: "openclaw",
+        type: "done",
+        body: "Legacy delivery finished."
+      })
+    ]);
+    assert.equal(legacyResult.delivered, true);
+    assert.equal(legacyResult.delivery, "gateway_method+chat_send");
+
+    const sessionOpenClaw = writeCallbackPlanOpenClaw(fakeBinDir, {
+      gatewayPayload: {
+        ok: true,
+        delivery_required: true,
+        delivery_mode: "sessions.send",
+        session_send: {
+          key: "agent:main:main",
+          message: "Confirm this session delivery.",
+          idempotencyKey: "akk-session-run"
+        }
+      },
+      sessionSendPayload: { runId: "akk-session-run", status: "started" },
+      agentWaitPayload: { runId: "akk-session-run", status: "ok" }
+    });
+    const session = runCli([
+      "new",
+      "--request",
+      "Confirm sessions.send callback",
+      "--store-dir",
+      storeDir,
+      "--openclaw-session",
+      "agent:main:main"
+    ]);
+    const sessionResult = runCli([
+      "callback",
+      "--state",
+      session.paths.statePath,
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      "agent:main:main",
+      "--openclaw-bin",
+      sessionOpenClaw,
+      "--message-json",
+      JSON.stringify({
+        from: "codex",
+        to: "openclaw",
+        type: "done",
+        body: "Session delivery finished."
+      })
+    ]);
+    assert.equal(sessionResult.delivered, true);
+    assert.equal(sessionResult.delivery, "gateway_method+sessions_send");
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(fakeBinDir, { recursive: true, force: true });
+  }
+});
+
+test("callback fails closed for malformed or incomplete gateway delivery plans", () => {
+  const cases = [
+    {
+      name: "malformed JSON",
+      stdout: "not-json",
+      error: /malformed JSON/
+    },
+    {
+      name: "explicit rejection",
+      gatewayPayload: { ok: false, error: "callback rejected" },
+      error: /callback rejected/
+    },
+    {
+      name: "missing required plan",
+      gatewayPayload: { ok: true, delivery_required: true },
+      error: /requires delivery but returned no supported/
+    },
+    {
+      name: "invalid chat plan",
+      gatewayPayload: {
+        ok: true,
+        delivery_required: true,
+        delivery_mode: "chat.send",
+        chat_send: {}
+      },
+      error: /invalid chat_send delivery plan/
+    },
+    {
+      name: "invalid session plan",
+      gatewayPayload: {
+        ok: true,
+        delivery_required: true,
+        delivery_mode: "sessions.send",
+        session_send: {}
+      },
+      error: /invalid session_send delivery plan/
+    },
+    {
+      name: "mismatched mode",
+      gatewayPayload: {
+        ok: true,
+        delivery_required: true,
+        delivery_mode: "sessions.send",
+        chat_send: {
+          sessionKey: "agent:main:main",
+          message: "Mismatch",
+          idempotencyKey: "akk-mismatch",
+          deliver: true
+        }
+      },
+      error: /delivery_mode does not match/
+    }
+  ];
+
+  for (const testCase of cases) {
+    const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-plan-invalid-"));
+    const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-fake-openclaw-"));
+    try {
+      const fakeOpenClaw = writeCallbackPlanOpenClaw(fakeBinDir, {
+        gatewayPayload: testCase.gatewayPayload,
+        gatewayStdout: testCase.stdout
+      });
+      const created = runCli([
+        "new",
+        "--request",
+        `Reject ${testCase.name}`,
+        "--store-dir",
+        storeDir,
+        "--openclaw-session",
+        "agent:main:main"
+      ]);
+      const result = runCallbackExpectFailure(created.paths.statePath, fakeOpenClaw);
+      assert.match(result.stderr, testCase.error);
+      const state = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
+      assert.equal(state.callback_delivery.status, "failed");
+      assert.equal(state.status, "callback_failed");
+    } finally {
+      fs.rmSync(storeDir, { recursive: true, force: true });
+      fs.rmSync(fakeBinDir, { recursive: true, force: true });
+    }
+  }
+});
+
+function writeCallbackPlanOpenClaw(fakeBinDir, options) {
+  const fakeOpenClaw = path.join(fakeBinDir, "openclaw");
+  fs.writeFileSync(
+    fakeOpenClaw,
+    `#!/usr/bin/env node
+const args = process.argv.slice(2);
+const method = args[2];
+if (method === "agent-knock-knock.callback") {
+  process.stdout.write(${JSON.stringify(
+    options.gatewayStdout ?? JSON.stringify(options.gatewayPayload ?? { ok: true })
+  )});
+} else if (method === "chat.send") {
+  console.log(JSON.stringify(${JSON.stringify(options.chatSendPayload ?? {
+    runId: "akk-test-run",
+    status: "started"
+  })}));
+} else if (method === "sessions.send") {
+  console.log(JSON.stringify(${JSON.stringify(options.sessionSendPayload ?? {
+    runId: "akk-test-run",
+    status: "started"
+  })}));
+} else if (method === "agent.wait") {
+  console.log(JSON.stringify(${JSON.stringify(options.agentWaitPayload ?? {
+    runId: "akk-test-run",
+    status: "ok"
+  })}));
+}
+`,
+    "utf8"
+  );
+  fs.chmodSync(fakeOpenClaw, 0o755);
+  return fakeOpenClaw;
+}
+
+function runCallbackExpectFailure(statePath, fakeOpenClaw) {
+  const result = spawnSync(process.execPath, [
+    binPath,
+    "callback",
+    "--state",
+    statePath,
+    "--gateway-method",
+    "agent-knock-knock.callback",
+    "--gateway-session",
+    "agent:main:main",
+    "--openclaw-bin",
+    fakeOpenClaw,
+    "--disable-callback-retry",
+    "--close-terminal-bridge-on-done",
+    "--message-json",
+    JSON.stringify({ from: "codex", to: "openclaw", type: "done", body: "Finished." })
+  ], { encoding: "utf8" });
+  assert.notEqual(result.status, 0);
+  return result;
+}
+
+function readJsonLines(filePath) {
+  return fs.readFileSync(filePath, "utf8")
+    .trim()
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
 
 function runCli(args, env = {}) {
   const result = spawnSync(process.execPath, [binPath, ...args], {

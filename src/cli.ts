@@ -88,6 +88,7 @@ import {
   parseTerminalConversationId,
   terminalControlCapabilitiesForAdapter,
   type ActiveTerminalProcess,
+  type TerminalCompletionEvidence,
   type TerminalControlCapability,
   type TerminalControlRef,
   type TerminalDurableCompletionRequest,
@@ -126,7 +127,18 @@ const DEFAULT_AGENT_HARD_TIMEOUT_MINUTES = 720;
 const DEFAULT_MONITOR_POLL_INTERVAL_MS = 5000;
 const CLAUDE_SCREEN_APPROVAL_TTL_MS = 10 * 60 * 1000;
 const CALLBACK_DELIVERY_TIMEOUT_MS = 30_000;
+const CALLBACK_AGENT_WAIT_TIMEOUT_MS = 20_000;
+const CALLBACK_AGENT_WAIT_CLI_TIMEOUT_MS = 25_000;
+const CALLBACK_AGENT_WAIT_PROCESS_TIMEOUT_MS = 30_000;
 const CALLBACK_RETRY_DELAYS_MS = [5000, 15000, 60000, 60000];
+const TERMINAL_BRIDGE_SUPERSEDE_STATUSES = new Set<ConversationStatus>([
+  "created",
+  "running",
+  "waiting_for_agent",
+  "waiting_for_openclaw",
+  "stalled",
+  "cancelling"
+]);
 const TERMINAL_BRIDGE_MONITOR_LOCK_VERSION = 1;
 const MINIMUM_NODE_VERSION = "22.14.0";
 const PRIVATE_LOCK_FILE_MODE = 0o600;
@@ -1234,29 +1246,47 @@ function createRuntimeTerminalAgentRegistry(options) {
           if (!isRecord(conversation)) {
             return undefined;
           }
-          const contextMatch = await loadCodexTerminalContext({
+          const contextMatches = await loadCodexTerminalContexts({
             conversation,
             nativeTakeover,
             options
           });
-          if (!contextMatch?.context) {
-            return undefined;
-          }
-          const evidence = detectCodexDurableCompletion({
-            ...request,
-            context: contextMatch.context
-          });
-          return evidence
-            ? {
-                ...evidence,
-                confidence: contextMatch.confidence as "high" | "medium" | "low",
-                metadata: {
-                  ...evidence.metadata,
-                  context_match: contextMatch.match,
-                  session: contextMatch.context.source
-                }
+          const matches: TerminalCompletionEvidence[] = [];
+          const detectionErrors: string[] = [];
+          for (const contextMatch of contextMatches) {
+            try {
+              const evidence = detectCodexDurableCompletion({
+                ...request,
+                context: contextMatch.context
+              });
+              if (evidence) {
+                matches.push({
+                  ...evidence,
+                  confidence: contextMatch.confidence as "high" | "medium" | "low",
+                  metadata: {
+                    ...evidence.metadata,
+                    context_match: contextMatch.match,
+                    session: contextMatch.context.source
+                  }
+                });
               }
-            : undefined;
+            } catch (error) {
+              detectionErrors.push(
+                error instanceof Error ? error.message : String(error)
+              );
+            }
+          }
+          if (detectionErrors.length > 0) {
+            throw new Error(
+              `could not inspect every plausible Codex completion: ${detectionErrors.join("; ")}`
+            );
+          }
+          if (matches.length > 1) {
+            throw new Error(
+              "multiple same-cwd Codex sessions match the managed terminal request"
+            );
+          }
+          return matches[0];
         }
       }),
       createClaudeTerminalAgentAdapter({
@@ -5323,6 +5353,44 @@ async function runTerminalControlSend({
     }
     throw error;
   }
+  let terminalCompletionReconciliation = {
+    prepared: [] as Array<{
+      conversationId: string;
+      statePath: string;
+      logPath: string;
+      terminalControl: TerminalControlRef;
+      prepared: ReturnType<typeof prepareLockedCallback>;
+    }>,
+    reconciledConversationIds: [] as string[],
+    protectedConversationIds: [] as string[],
+    skipSupersede: false
+  };
+  if (bridge) {
+    try {
+      terminalCompletionReconciliation =
+        await reconcileTerminalBridgeCompletionsBeforeSupersede({
+          options,
+          storeDir: storeDirFromOptions(options),
+          terminalControl,
+          replacementConversationId: conversation.conversation_id
+        });
+    } catch (error) {
+      terminalCompletionReconciliation.skipSupersede = true;
+      terminalCompletionReconciliation.protectedConversationIds =
+        fenceTerminalBridgeConversationsForReconciliation({
+          storeDir: storeDirFromOptions(options),
+          terminalControl,
+          replacementConversationId: conversation.conversation_id
+        });
+      appendEvent(logPath, {
+        ts: new Date().toISOString(),
+        conversation_id: conversation.conversation_id,
+        event: "terminal_bridge_pre_supersede_reconciliation_failed",
+        terminal_control: terminalControl,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
   const bridgeConversation = bridge
     ? withTerminalBridgeState({
         conversation: conversationWithHookLease,
@@ -5346,11 +5414,16 @@ async function runTerminalControlSend({
     stateLockHeld: terminalStateLockHeld
   });
   saveState(statePath, deliveredConversation);
-  const supersededConversationIds = bridge
+  const supersededConversationIds = bridge &&
+    !terminalCompletionReconciliation.skipSupersede
     ? supersedeTerminalBridgeConversations({
         storeDir: storeDirFromOptions(options),
         terminalControl,
-        replacementConversationId: conversation.conversation_id
+        replacementConversationId: conversation.conversation_id,
+        excludedConversationIds: [
+          ...terminalCompletionReconciliation.reconciledConversationIds,
+          ...terminalCompletionReconciliation.protectedConversationIds
+        ]
       })
     : [];
   if (recordRawAttachmentAfterSend) {
@@ -5396,6 +5469,10 @@ async function runTerminalControlSend({
     terminal_control: terminalControl,
     message: textSummary(message.body),
     payload: textSummary(terminalPayload),
+    reconciled_conversation_ids:
+      terminalCompletionReconciliation.reconciledConversationIds,
+    reconciliation_protected_conversation_ids:
+      terminalCompletionReconciliation.protectedConversationIds,
     superseded_conversation_ids: supersededConversationIds
   });
   runtimeLog("info", "terminal_message_send", {
@@ -5404,6 +5481,10 @@ async function runTerminalControlSend({
     terminal_target: terminalControl.target,
     message: textSummary(message.body),
     payload: textSummary(terminalPayload),
+    reconciled_conversation_ids:
+      terminalCompletionReconciliation.reconciledConversationIds,
+    reconciliation_protected_conversation_ids:
+      terminalCompletionReconciliation.protectedConversationIds,
     superseded_conversation_ids: supersededConversationIds
   });
   const bridgeMonitor = bridge
@@ -5447,6 +5528,13 @@ async function runTerminalControlSend({
       callbackExpected: Boolean(deliveredConversation.callback_command || deliveredConversation.gateway_method)
     })
   });
+  if (terminalCompletionReconciliation.prepared.length > 0) {
+    setImmediate(() => {
+      deliverReconciledTerminalBridgeCallbacks(
+        terminalCompletionReconciliation.prepared
+      );
+    });
+  }
 }
 
 function terminalSubmissionPayload(payload: string): string {
@@ -5545,22 +5633,340 @@ function createManagedTerminalConversationFromRawId({
   };
 }
 
-function supersedeTerminalBridgeConversations({
+async function reconcileTerminalBridgeCompletionsBeforeSupersede({
+  options,
+  storeDir,
+  terminalControl,
+  replacementConversationId
+}) {
+  const prepared: Array<{
+    conversationId: string;
+    statePath: string;
+    logPath: string;
+    terminalControl: TerminalControlRef;
+    prepared: ReturnType<typeof prepareLockedCallback>;
+  }> = [];
+  const reconciledConversationIds: string[] = [];
+  const protectedConversationIds: string[] = [];
+  const registry = createRuntimeTerminalAgentRegistry(options);
+
+  for (const listedConversation of listConversations(storeDir)) {
+    if (
+      listedConversation.conversation_id === replacementConversationId ||
+      !TERMINAL_BRIDGE_SUPERSEDE_STATUSES.has(listedConversation.status)
+    ) {
+      continue;
+    }
+    const listedTakeover = isRecord(listedConversation.native_session_takeover)
+      ? listedConversation.native_session_takeover
+      : undefined;
+    const listedControl = terminalControlFromTakeover(listedTakeover);
+    if (
+      listedTakeover?.terminal_bridge !== true ||
+      !listedControl ||
+      listedControl.target !== terminalControl.target ||
+      listedControl.socketPath !== terminalControl.socketPath ||
+      !listedControl.capabilities.includes("durable_completion")
+    ) {
+      continue;
+    }
+
+    const candidateStatePath = stringValue(listedConversation.state_path);
+    if (!candidateStatePath) {
+      continue;
+    }
+    const candidateLogPath = logPathForStatePath(candidateStatePath);
+    let candidate = loadState(candidateStatePath);
+    const candidateTakeover = isRecord(candidate.native_session_takeover)
+      ? candidate.native_session_takeover
+      : undefined;
+    const candidateControl = terminalControlFromTakeover(candidateTakeover);
+    const terminalMessageId = stringValue(
+      candidateTakeover?.terminal_bridge_message_id
+    );
+    if (
+      !TERMINAL_BRIDGE_SUPERSEDE_STATUSES.has(candidate.status) ||
+      candidateTakeover?.terminal_bridge !== true ||
+      !candidateControl ||
+      candidateControl.target !== terminalControl.target ||
+      candidateControl.socketPath !== terminalControl.socketPath ||
+      !candidateControl.capabilities.includes("durable_completion") ||
+      !terminalMessageId
+    ) {
+      continue;
+    }
+    const fenced = fenceTerminalBridgeConversationForReconciliation({
+      statePath: candidateStatePath,
+      logPath: candidateLogPath,
+      terminalControl: candidateControl,
+      terminalMessageId,
+      replacementConversationId
+    });
+    if (!fenced.fenced) {
+      continue;
+    }
+    candidate = fenced.conversation;
+
+    const executor = executorForConversation(candidate);
+    const adapter = registry.require(executor.kind);
+    if (
+      adapter.capabilities.durableCompletion !== true ||
+      typeof adapter.detectDurableCompletion !== "function"
+    ) {
+      continue;
+    }
+
+    let completion: TerminalCompletionEvidence | undefined;
+    try {
+      completion = await adapter.detectDurableCompletion(
+        terminalDurableRequestForConversation(candidate, candidateControl)
+      );
+    } catch (error) {
+      protectedConversationIds.push(candidate.conversation_id);
+      appendEvent(candidateLogPath, {
+        ts: new Date().toISOString(),
+        conversation_id: candidate.conversation_id,
+        event: "terminal_bridge_pre_supersede_reconciliation_failed",
+        terminal_control: candidateControl,
+        terminal_bridge_message_id: terminalMessageId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      continue;
+    }
+    if (!completion || completion.source !== "durable") {
+      continue;
+    }
+
+    let preparedCompletion;
+    try {
+      preparedCompletion = prepareTerminalBridgeCompletionCallback({
+        options,
+        statePath: candidateStatePath,
+        logPath: candidateLogPath,
+        conversation: candidate,
+        executor,
+        terminalControl: candidateControl,
+        terminalMessageId,
+        completion,
+        allowSupersedeRecovery: true
+      });
+    } catch (error) {
+      protectedConversationIds.push(candidate.conversation_id);
+      appendEvent(candidateLogPath, {
+        ts: new Date().toISOString(),
+        conversation_id: candidate.conversation_id,
+        event: "terminal_bridge_pre_supersede_reconciliation_failed",
+        terminal_control: candidateControl,
+        terminal_bridge_message_id: terminalMessageId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      continue;
+    }
+    if (!preparedCompletion.claimed) {
+      const latest = preparedCompletion.conversation;
+      if (TERMINAL_BRIDGE_SUPERSEDE_STATUSES.has(latest.status)) {
+        protectedConversationIds.push(candidate.conversation_id);
+      } else {
+        reconciledConversationIds.push(candidate.conversation_id);
+      }
+      continue;
+    }
+
+    const reconciledAt = new Date().toISOString();
+    appendEvent(candidateLogPath, {
+      ts: reconciledAt,
+      conversation_id: candidate.conversation_id,
+      event: "terminal_bridge_completion_reconciled_before_supersede",
+      terminal_control: candidateControl,
+      terminal_bridge_message_id: terminalMessageId,
+      callback_message_id: preparedCompletion.callbackMessageId,
+      replacement_conversation_id: replacementConversationId
+    });
+    reconciledConversationIds.push(candidate.conversation_id);
+    prepared.push({
+      conversationId: candidate.conversation_id,
+      statePath: candidateStatePath,
+      logPath: candidateLogPath,
+      terminalControl: candidateControl,
+      prepared: preparedCompletion.prepared
+    });
+  }
+
+  return {
+    prepared,
+    reconciledConversationIds,
+    protectedConversationIds,
+    skipSupersede: false
+  };
+}
+
+function fenceTerminalBridgeConversationsForReconciliation({
   storeDir,
   terminalControl,
   replacementConversationId
 }): string[] {
-  const activeStatuses = new Set([
-    "created",
-    "running",
-    "waiting_for_agent",
-    "waiting_for_openclaw",
-    "stalled",
-    "cancelling"
-  ]);
+  const fencedConversationIds: string[] = [];
+  for (const listedConversation of listConversations(storeDir)) {
+    if (
+      listedConversation.conversation_id === replacementConversationId ||
+      !TERMINAL_BRIDGE_SUPERSEDE_STATUSES.has(listedConversation.status)
+    ) {
+      continue;
+    }
+    const statePath = stringValue(listedConversation.state_path);
+    const listedTakeover = isRecord(listedConversation.native_session_takeover)
+      ? listedConversation.native_session_takeover
+      : undefined;
+    const listedControl = terminalControlFromTakeover(listedTakeover);
+    const terminalMessageId = stringValue(
+      listedTakeover?.terminal_bridge_message_id
+    );
+    if (
+      !statePath ||
+      listedTakeover?.terminal_bridge !== true ||
+      !listedControl ||
+      listedControl.target !== terminalControl.target ||
+      listedControl.socketPath !== terminalControl.socketPath ||
+      !terminalMessageId
+    ) {
+      continue;
+    }
+    const result = fenceTerminalBridgeConversationForReconciliation({
+      statePath,
+      logPath: logPathForStatePath(statePath),
+      terminalControl: listedControl,
+      terminalMessageId,
+      replacementConversationId
+    });
+    if (result.fenced) {
+      fencedConversationIds.push(listedConversation.conversation_id);
+    }
+  }
+  return fencedConversationIds;
+}
+
+function fenceTerminalBridgeConversationForReconciliation({
+  statePath,
+  logPath,
+  terminalControl,
+  terminalMessageId,
+  replacementConversationId
+}) {
+  const releaseLock = acquireFileLock(`${statePath}.lock`);
+  try {
+    const conversation = loadState(statePath);
+    const nativeTakeover = isRecord(conversation.native_session_takeover)
+      ? conversation.native_session_takeover
+      : undefined;
+    const currentControl = terminalControlFromTakeover(nativeTakeover);
+    if (
+      !TERMINAL_BRIDGE_SUPERSEDE_STATUSES.has(conversation.status) ||
+      nativeTakeover?.terminal_bridge !== true ||
+      currentControl?.target !== terminalControl.target ||
+      currentControl?.socketPath !== terminalControl.socketPath ||
+      stringValue(nativeTakeover?.terminal_bridge_message_id) !==
+        terminalMessageId
+    ) {
+      return {
+        fenced: false as const,
+        conversation
+      };
+    }
+    const existingFence = isRecord(
+      nativeTakeover.terminal_bridge_reconciliation_fence
+    )
+      ? nativeTakeover.terminal_bridge_reconciliation_fence
+      : undefined;
+    if (
+      conversation.status === "stalled" &&
+      existingFence?.replacement_conversation_id === replacementConversationId
+    ) {
+      return {
+        fenced: true as const,
+        conversation
+      };
+    }
+
+    const fencedAt = new Date().toISOString();
+    const fencedConversation = {
+      ...conversation,
+      status: "stalled" as const,
+      stalled_reason:
+        "terminal bridge paused because a newer task reused the same terminal before durable completion was resolved",
+      native_session_takeover: {
+        ...nativeTakeover,
+        terminal_bridge_reconciliation_fence: {
+          replacement_conversation_id: replacementConversationId,
+          terminal_bridge_message_id: terminalMessageId,
+          previous_status: conversation.status,
+          fenced_at: fencedAt
+        }
+      },
+      updated_at: fencedAt
+    };
+    saveState(statePath, fencedConversation);
+    appendEvent(logPath, {
+      ts: fencedAt,
+      conversation_id: conversation.conversation_id,
+      event: "terminal_bridge_reconciliation_fenced",
+      terminal_control: terminalControl,
+      terminal_bridge_message_id: terminalMessageId,
+      previous_status: conversation.status,
+      replacement_conversation_id: replacementConversationId
+    });
+    return {
+      fenced: true as const,
+      conversation: fencedConversation
+    };
+  } finally {
+    releaseLock();
+  }
+}
+
+function deliverReconciledTerminalBridgeCallbacks(
+  reconciledCallbacks: Array<{
+    conversationId: string;
+    statePath: string;
+    logPath: string;
+    terminalControl: TerminalControlRef;
+    prepared: ReturnType<typeof prepareLockedCallback>;
+  }>
+): void {
+  for (const callback of reconciledCallbacks) {
+    try {
+      runPreparedCallback(callback.prepared, { emit: false });
+    } catch (error) {
+      appendEvent(callback.logPath, {
+        ts: new Date().toISOString(),
+        conversation_id: callback.conversationId,
+        event: "terminal_bridge_reconciled_callback_delivery_failed",
+        terminal_control: callback.terminalControl,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      runtimeLog("warn", "terminal_bridge_reconciled_callback_delivery_failed", {
+        conversation_id: callback.conversationId,
+        terminal_target: callback.terminalControl.target,
+        state_path: callback.statePath,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+}
+
+function supersedeTerminalBridgeConversations({
+  storeDir,
+  terminalControl,
+  replacementConversationId,
+  excludedConversationIds = [] as string[]
+}): string[] {
+  const excluded = new Set(excludedConversationIds);
   const superseded: string[] = [];
   for (const candidate of listConversations(storeDir)) {
-    if (candidate.conversation_id === replacementConversationId || !activeStatuses.has(candidate.status)) {
+    if (
+      candidate.conversation_id === replacementConversationId ||
+      excluded.has(candidate.conversation_id) ||
+      !TERMINAL_BRIDGE_SUPERSEDE_STATUSES.has(candidate.status)
+    ) {
       continue;
     }
     const candidateTakeover = isRecord(candidate.native_session_takeover)
@@ -5582,7 +5988,7 @@ function supersedeTerminalBridgeConversations({
     const releaseLock = acquireFileLock(`${candidateStatePath}.lock`);
     try {
       const current = loadState(candidateStatePath);
-      if (!activeStatuses.has(current.status)) {
+      if (!TERMINAL_BRIDGE_SUPERSEDE_STATUSES.has(current.status)) {
         continue;
       }
       const currentTakeover = isRecord(current.native_session_takeover)
@@ -8381,98 +8787,29 @@ async function runTerminalBridgeMonitorWithLock(options) {
     const completionStable = completionFingerprint !== undefined && completionFingerprint === idleCompletionFingerprint;
     idleCompletionFingerprint = completionFingerprint;
     if (completion && completionStable && completionFingerprint) {
-      const completionOutcome = completion.outcome === "failure" ? "failure" : "success";
-      const callbackMessageId = deterministicTerminalCallbackMessageId({
-        conversationId: conversation.conversation_id,
-        terminalMessageId: currentMessageId,
-        completionFingerprint,
-        outcome: completionOutcome
-      });
-      const claim = claimTerminalBridgeCompletion({
+      const preparedCompletion = prepareTerminalBridgeCompletionCallback({
+        options,
         statePath,
         logPath,
+        conversation,
+        executor,
+        terminalControl,
         terminalMessageId: currentMessageId,
-        completionFingerprint,
-        completionId: completion.id,
-        callbackMessageId,
-        outcome: completionOutcome
+        completion,
+        completionFingerprint
       });
-      if (!claim.claimed) {
+      if (!preparedCompletion.claimed) {
         printJson({
-          conversation: claim.conversation,
+          conversation: preparedCompletion.conversation,
           monitored: true,
           terminal_bridge: true,
           completed: false,
           duplicate: true,
-          reason: claim.reason
+          reason: preparedCompletion.reason
         });
         return;
       }
-      let preparedCallback;
-      try {
-        conversation = claim.conversation;
-        appendEvent(logPath, {
-          ts: new Date().toISOString(),
-          conversation_id: conversation.conversation_id,
-          event: "terminal_bridge_completion_detected",
-          terminal_control: terminalControl,
-          match: completionMatch,
-          completion_source: completion.source,
-          completion_outcome: completionOutcome,
-          completion_id: completion.id,
-          terminal_session: completionMetadata.session,
-          context_match: completionMetadata.context_match,
-          assistant_timestamp: completion?.timestamp,
-          rollout_turn_id: completion.source === "durable" ? completion.id : undefined,
-          terminal_bridge_message_id: currentMessageId,
-          callback_message_id: callbackMessageId
-        });
-        const callbackMessage = {
-          ...createMessage({
-            conversation,
-            from: executor.actor,
-            to: "openclaw",
-            type: completionOutcome === "failure" ? "error" : "done",
-            requiresResponse: false,
-            body: completion.text,
-            metadata: {
-              source: "terminal_bridge",
-              terminal_control: terminalControl,
-              ...completionMetadata,
-              completion_source: completion.source,
-              completion_outcome: completionOutcome,
-              completion_id: completion.id,
-              terminal_session: completionMetadata.session,
-              confidence: completion.confidence,
-              match: completionMatch,
-              assistant_timestamp: completion?.timestamp,
-              rollout_turn_id: completion.source === "durable" ? completion.id : undefined,
-              terminal_bridge_message_id: currentMessageId
-            }
-          }),
-          id: callbackMessageId
-        };
-        preparedCallback = prepareLockedCallback({
-          ...options,
-          statePath,
-          log: logPath,
-          closeTerminalBridgeOnDone: completionOutcome === "success",
-          trackCallbackDelivery: true,
-          recoverTerminalCompletion: claim.resumed === true,
-          preserveMessageId: true,
-          messageJson: JSON.stringify(callbackMessage),
-          gatewayMethod: conversation.gateway_method,
-          gatewaySession: conversation.gateway_session,
-          openclawSession: conversation.openclaw_session,
-          openclawBin: conversation.openclaw_bin,
-          gatewayUrl: stringValue(conversation.gateway_token) ? conversation.gateway_url : undefined,
-          token: stringValue(conversation.gateway_token)
-        });
-      } finally {
-        releaseClaudeHookLease(conversation);
-        claim.release();
-      }
-      runPreparedCallback(preparedCallback);
+      runPreparedCallback(preparedCompletion.prepared);
       return;
     }
 
@@ -8664,6 +9001,141 @@ function deterministicTerminalCallbackMessageId({
   return `msg-terminal-${digest}`;
 }
 
+function terminalBridgeCompletionFingerprint({
+  completion,
+  terminalMessageId
+}: {
+  completion: TerminalCompletionEvidence;
+  terminalMessageId?: string;
+}): string {
+  const metadata = isRecord(completion.metadata) ? completion.metadata : {};
+  const match = stringValue(metadata.match) ??
+    (completion.source === "screen" ? "terminal_screen" : "durable_completion");
+  return createHash("sha256")
+    .update(JSON.stringify({
+      text: completion.text,
+      timestamp: completion.timestamp,
+      match,
+      source: completion.source,
+      id: completion.id,
+      message_id: terminalMessageId
+    }))
+    .digest("hex");
+}
+
+function prepareTerminalBridgeCompletionCallback({
+  options,
+  statePath,
+  logPath,
+  conversation,
+  executor,
+  terminalControl,
+  terminalMessageId,
+  completion,
+  allowSupersedeRecovery = false,
+  completionFingerprint = terminalBridgeCompletionFingerprint({
+    completion,
+    terminalMessageId
+  })
+}) {
+  const completionMetadata = isRecord(completion.metadata) ? completion.metadata : {};
+  const completionMatch = stringValue(completionMetadata.match) ??
+    (completion.source === "screen" ? "terminal_screen" : "durable_completion");
+  const completionOutcome = completion.outcome === "failure" ? "failure" : "success";
+  const callbackMessageId = deterministicTerminalCallbackMessageId({
+    conversationId: conversation.conversation_id,
+    terminalMessageId,
+    completionFingerprint,
+    outcome: completionOutcome
+  });
+  const claim = claimTerminalBridgeCompletion({
+    statePath,
+    logPath,
+    terminalMessageId,
+    completionFingerprint,
+    completionId: completion.id,
+    callbackMessageId,
+    outcome: completionOutcome,
+    allowSupersedeRecovery
+  });
+  if (!claim.claimed) {
+    return claim;
+  }
+
+  let claimedConversation = claim.conversation;
+  try {
+    appendEvent(logPath, {
+      ts: new Date().toISOString(),
+      conversation_id: claimedConversation.conversation_id,
+      event: "terminal_bridge_completion_detected",
+      terminal_control: terminalControl,
+      match: completionMatch,
+      completion_source: completion.source,
+      completion_outcome: completionOutcome,
+      completion_id: completion.id,
+      terminal_session: completionMetadata.session,
+      context_match: completionMetadata.context_match,
+      assistant_timestamp: completion.timestamp,
+      rollout_turn_id: completion.source === "durable" ? completion.id : undefined,
+      terminal_bridge_message_id: terminalMessageId,
+      callback_message_id: callbackMessageId
+    });
+    const callbackMessage = {
+      ...createMessage({
+        conversation: claimedConversation,
+        from: executor.actor,
+        to: "openclaw",
+        type: completionOutcome === "failure" ? "error" : "done",
+        requiresResponse: false,
+        body: completion.text,
+        metadata: {
+          source: "terminal_bridge",
+          terminal_control: terminalControl,
+          ...completionMetadata,
+          completion_source: completion.source,
+          completion_outcome: completionOutcome,
+          completion_id: completion.id,
+          terminal_session: completionMetadata.session,
+          confidence: completion.confidence,
+          match: completionMatch,
+          assistant_timestamp: completion.timestamp,
+          rollout_turn_id: completion.source === "durable" ? completion.id : undefined,
+          terminal_bridge_message_id: terminalMessageId
+        }
+      }),
+      id: callbackMessageId
+    };
+    const prepared = prepareLockedCallback({
+      ...options,
+      statePath,
+      log: logPath,
+      closeTerminalBridgeOnDone: completionOutcome === "success",
+      trackCallbackDelivery: true,
+      recoverTerminalCompletion: claim.resumed === true,
+      allowTerminalCompletionRecoveryStatus: allowSupersedeRecovery,
+      preserveMessageId: true,
+      messageJson: JSON.stringify(callbackMessage),
+      gatewayMethod: claimedConversation.gateway_method,
+      gatewaySession: claimedConversation.gateway_session,
+      openclawSession: claimedConversation.openclaw_session,
+      openclawBin: claimedConversation.openclaw_bin,
+      gatewayUrl: stringValue(claimedConversation.gateway_token)
+        ? claimedConversation.gateway_url
+        : undefined,
+      token: stringValue(claimedConversation.gateway_token)
+    });
+    return {
+      claimed: true as const,
+      conversation: claimedConversation,
+      prepared,
+      callbackMessageId
+    };
+  } finally {
+    releaseClaudeHookLease(claimedConversation);
+    claim.release();
+  }
+}
+
 function claimTerminalBridgeCompletion({
   statePath,
   logPath,
@@ -8671,7 +9143,8 @@ function claimTerminalBridgeCompletion({
   completionFingerprint,
   completionId,
   callbackMessageId,
-  outcome
+  outcome,
+  allowSupersedeRecovery = false
 }) {
   const release = acquireFileLock(`${statePath}.lock`);
   try {
@@ -8679,7 +9152,13 @@ function claimTerminalBridgeCompletion({
     const nativeTakeover = isRecord(conversation.native_session_takeover)
       ? conversation.native_session_takeover
       : {};
-    if (!isWaitingForAgent(conversation.status)) {
+    if (
+      !isWaitingForAgent(conversation.status) &&
+      !(
+        allowSupersedeRecovery &&
+        TERMINAL_BRIDGE_SUPERSEDE_STATUSES.has(conversation.status)
+      )
+    ) {
       release();
       return {
         claimed: false as const,
@@ -8898,7 +9377,7 @@ function terminalBridgeApprovalCandidate({ executor, terminalControl, terminalSt
   };
 }
 
-async function loadCodexTerminalContext({ conversation, nativeTakeover, options }) {
+async function loadCodexTerminalContexts({ conversation, nativeTakeover, options }) {
   const provider = createAgentSessionProvider("codex", options);
   const nativeSessionId = stringValue(nativeTakeover?.["native_session_id"]);
   const startedAtMs = Date.parse(String(nativeTakeover?.["terminal_bridge_started_at"] ?? ""));
@@ -8913,18 +9392,18 @@ async function loadCodexTerminalContext({ conversation, nativeTakeover, options 
       maxTextLength: Number(options.maxTextLength ?? 4000)
     });
     if (context) {
-      return {
+      return [{
         context,
         process: activeProcess,
         match: activeProcess?.sessionId ? "process_session_id" : "native_session_id",
         confidence: "high"
-      };
+      }];
     }
   }
 
   const cwd = activeProcess?.cwd ?? stringValue(nativeTakeover?.["source_cwd"]);
   if (!cwd) {
-    return undefined;
+    return [];
   }
 
   const sessions = (await provider.listHistoricalSessions())
@@ -8933,30 +9412,48 @@ async function loadCodexTerminalContext({ conversation, nativeTakeover, options 
       if (!Number.isFinite(startedAtMs)) {
         return true;
       }
-      return Number(session.updatedAtMs ?? 0) >= startedAtMs;
+      if (session.updatedAtMs === undefined || session.updatedAtMs === null) {
+        return true;
+      }
+      const updatedAtMs = Number(session.updatedAtMs);
+      return !Number.isFinite(updatedAtMs) || updatedAtMs >= startedAtMs;
     })
     .sort((left, right) => Number(right.updatedAtMs ?? 0) - Number(left.updatedAtMs ?? 0));
-  const selected = sessions[0];
-  if (!selected) {
-    return undefined;
+  const matches: Array<{
+    context: ForkContextPackage;
+    process: ActiveCodexProcess | undefined;
+    match: string;
+    confidence: string;
+  }> = [];
+  const candidateErrors: string[] = [];
+  for (const session of sessions) {
+    try {
+      const context = await provider.getForkContext({
+        sessionId: session.id,
+        maxMessages: Number(options.maxMessages ?? 16),
+        maxCommands: Number(options.maxCommands ?? 10),
+        maxTextLength: Number(options.maxTextLength ?? 4000)
+      });
+      if (context) {
+        matches.push({
+          context,
+          process: activeProcess,
+          match: sessions.length === 1 ? "cwd" : "cwd_request_hash",
+          confidence: sessions.length === 1 ? "medium" : "low"
+        });
+      }
+    } catch (error) {
+      candidateErrors.push(
+        `${session.id}: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
   }
-
-  const context = await provider.getForkContext({
-    sessionId: selected.id,
-    maxMessages: Number(options.maxMessages ?? 16),
-    maxCommands: Number(options.maxCommands ?? 10),
-    maxTextLength: Number(options.maxTextLength ?? 4000)
-  });
-  if (!context) {
-    return undefined;
+  if (candidateErrors.length > 0) {
+    throw new Error(
+      `could not inspect every plausible same-cwd Codex session: ${candidateErrors.join("; ")}`
+    );
   }
-
-  return {
-    context,
-    process: activeProcess,
-    match: sessions.length === 1 ? "cwd" : "cwd_latest",
-    confidence: sessions.length === 1 ? "medium" : "low"
-  };
+  return matches;
 }
 
 function resolveExecutable(command) {
@@ -9193,7 +9690,13 @@ function prepareLockedCallback(options) {
     );
   const recoveringTerminalCompletion = options.recoverTerminalCompletion === true &&
     duplicateMessage &&
-    isWaitingForAgent(conversation.status);
+    (
+      isWaitingForAgent(conversation.status) ||
+      (
+        options.allowTerminalCompletionRecoveryStatus === true &&
+        TERMINAL_BRIDGE_SUPERSEDE_STATUSES.has(conversation.status)
+      )
+    );
   if (
     duplicateMessage &&
     !retryingPending &&
@@ -9611,9 +10114,9 @@ function deliverCallbackToOpenClaw({ options, statePath, logPath, conversation, 
       throw new Error(delivery.stderr || delivery.stdout || `gateway method delivery failed with status ${delivery.status}`);
     }
 
-    const gatewayPayload = parseOptionalJson(delivery.stdout);
-    const chatSendParams = isRecord(gatewayPayload?.chat_send) ? gatewayPayload.chat_send : undefined;
-    const sessionSendParams = isRecord(gatewayPayload?.session_send) ? gatewayPayload.session_send : undefined;
+    const gatewayPayload = parseRequiredGatewayDeliveryPayload(delivery.stdout);
+    const { chatSendParams, sessionSendParams } =
+      parseGatewayCallbackDeliveryPlan(gatewayPayload);
     if (chatSendParams) {
       const chatSendDelivery = deliverToChatSend({
         openclawBin: options.openclawBin,
@@ -9621,16 +10124,76 @@ function deliverCallbackToOpenClaw({ options, statePath, logPath, conversation, 
         token: options.token,
         params: chatSendParams
       });
+      if (chatSendDelivery.status !== 0) {
+        recordCallbackProcessDelivery({
+          logPath,
+          conversation,
+          message,
+          event: "callback_chat_send_delivery",
+          runtimeEvent: "callback_chat_send_delivery",
+          delivery: chatSendDelivery
+        });
+        throw new Error(chatSendDelivery.stderr || chatSendDelivery.stdout || `chat callback delivery failed with status ${chatSendDelivery.status}`);
+      }
+      const chatSendAck = parseChatSendAcknowledgement(
+        chatSendDelivery.stdout,
+        String(chatSendParams.idempotencyKey)
+      );
       recordCallbackProcessDelivery({
         logPath,
         conversation,
         message,
         event: "callback_chat_send_delivery",
         runtimeEvent: "callback_chat_send_delivery",
-        delivery: chatSendDelivery
+        delivery: chatSendDelivery,
+        detail: {
+          run_id: chatSendAck.runId,
+          run_status: chatSendAck.status
+        }
       });
-      if (chatSendDelivery.status !== 0) {
-        throw new Error(chatSendDelivery.stderr || chatSendDelivery.stdout || `chat callback delivery failed with status ${chatSendDelivery.status}`);
+      if (chatSendAck.status === "ok") {
+        return "gateway_method+chat_send";
+      }
+      const agentWaitDelivery = deliverToAgentWait({
+        openclawBin: options.openclawBin,
+        gatewayUrl: options.gatewayUrl,
+        token: options.token,
+        runId: chatSendAck.runId
+      });
+      if (agentWaitDelivery.status !== 0) {
+        recordCallbackProcessDelivery({
+          logPath,
+          conversation,
+          message,
+          event: "callback_agent_wait_delivery",
+          runtimeEvent: "callback_agent_wait_delivery",
+          delivery: agentWaitDelivery,
+          detail: { run_id: chatSendAck.runId }
+        });
+        throw new Error(
+          agentWaitDelivery.stderr ||
+          agentWaitDelivery.stdout ||
+          `callback agent wait failed with status ${agentWaitDelivery.status}`
+        );
+      }
+      const waitResult = parseAgentWaitResult(agentWaitDelivery.stdout, chatSendAck.runId);
+      recordCallbackProcessDelivery({
+        logPath,
+        conversation,
+        message,
+        event: "callback_agent_wait_delivery",
+        runtimeEvent: "callback_agent_wait_delivery",
+        delivery: agentWaitDelivery,
+        detail: {
+          run_id: chatSendAck.runId,
+          run_status: waitResult.status
+        }
+      });
+      if (waitResult.status !== "ok") {
+        const detail = stringValue(waitResult.error) ??
+          stringValue(waitResult.stopReason) ??
+          `agent.wait returned ${String(waitResult.status)}`;
+        throw new Error(`callback Gateway run did not complete successfully: ${detail}`);
       }
       return "gateway_method+chat_send";
     }
@@ -9641,16 +10204,80 @@ function deliverCallbackToOpenClaw({ options, statePath, logPath, conversation, 
         token: options.token,
         params: sessionSendParams
       });
+      if (sessionSendDelivery.status !== 0) {
+        recordCallbackProcessDelivery({
+          logPath,
+          conversation,
+          message,
+          event: "callback_session_send_delivery",
+          runtimeEvent: "callback_session_send_delivery",
+          delivery: sessionSendDelivery
+        });
+        throw new Error(sessionSendDelivery.stderr || sessionSendDelivery.stdout || `session callback delivery failed with status ${sessionSendDelivery.status}`);
+      }
+      const sessionSendAck = parseChatSendAcknowledgement(
+        sessionSendDelivery.stdout,
+        String(sessionSendParams.idempotencyKey)
+      );
       recordCallbackProcessDelivery({
         logPath,
         conversation,
         message,
         event: "callback_session_send_delivery",
         runtimeEvent: "callback_session_send_delivery",
-        delivery: sessionSendDelivery
+        delivery: sessionSendDelivery,
+        detail: {
+          run_id: sessionSendAck.runId,
+          run_status: sessionSendAck.status
+        }
       });
-      if (sessionSendDelivery.status !== 0) {
-        throw new Error(sessionSendDelivery.stderr || sessionSendDelivery.stdout || `session callback delivery failed with status ${sessionSendDelivery.status}`);
+      if (sessionSendAck.status !== "ok") {
+        const agentWaitDelivery = deliverToAgentWait({
+          openclawBin: options.openclawBin,
+          gatewayUrl: options.gatewayUrl,
+          token: options.token,
+          runId: sessionSendAck.runId
+        });
+        if (agentWaitDelivery.status !== 0) {
+          recordCallbackProcessDelivery({
+            logPath,
+            conversation,
+            message,
+            event: "callback_agent_wait_delivery",
+            runtimeEvent: "callback_agent_wait_delivery",
+            delivery: agentWaitDelivery,
+            detail: { run_id: sessionSendAck.runId }
+          });
+          throw new Error(
+            agentWaitDelivery.stderr ||
+            agentWaitDelivery.stdout ||
+            `callback agent wait failed with status ${agentWaitDelivery.status}`
+          );
+        }
+        const waitResult = parseAgentWaitResult(
+          agentWaitDelivery.stdout,
+          sessionSendAck.runId
+        );
+        recordCallbackProcessDelivery({
+          logPath,
+          conversation,
+          message,
+          event: "callback_agent_wait_delivery",
+          runtimeEvent: "callback_agent_wait_delivery",
+          delivery: agentWaitDelivery,
+          detail: {
+            run_id: sessionSendAck.runId,
+            run_status: waitResult.status
+          }
+        });
+        if (waitResult.status !== "ok") {
+          const detail = stringValue(waitResult.error) ??
+            stringValue(waitResult.stopReason) ??
+            `agent.wait returned ${String(waitResult.status)}`;
+          throw new Error(
+            `callback Gateway run did not complete successfully: ${detail}`
+          );
+        }
       }
       return "gateway_method+sessions_send";
     }
@@ -11099,6 +11726,48 @@ function deliverToChatSend({ openclawBin, gatewayUrl, token, params }) {
   };
 }
 
+function deliverToAgentWait({ openclawBin, gatewayUrl, token, runId }) {
+  const args = [
+    "gateway",
+    "call",
+    "agent.wait",
+    "--params",
+    JSON.stringify({
+      runId,
+      timeoutMs: CALLBACK_AGENT_WAIT_TIMEOUT_MS
+    }),
+    "--json",
+    "--timeout",
+    String(CALLBACK_AGENT_WAIT_CLI_TIMEOUT_MS)
+  ];
+
+  if (gatewayUrl) {
+    args.push("--url", gatewayUrl);
+  }
+
+  const result = spawnSync(openclawBin ?? "openclaw", args, {
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024 * 10,
+    timeout: CALLBACK_AGENT_WAIT_PROCESS_TIMEOUT_MS,
+    killSignal: "SIGKILL",
+    env: openClawGatewayEnvironment(token)
+  });
+
+  if (result.error) {
+    return {
+      status: 1,
+      stdout: result.stdout ?? "",
+      stderr: result.error.message
+    };
+  }
+
+  return {
+    status: result.status ?? 1,
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? ""
+  };
+}
+
 function openClawGatewayEnvironment(token): NodeJS.ProcessEnv {
   if (!token || token === "<token>") {
     return process.env;
@@ -11168,6 +11837,120 @@ function parseOptionalJson(text) {
   } catch {
     return undefined;
   }
+}
+
+function parseRequiredGatewayDeliveryPayload(text): Record<string, unknown> {
+  const payload = parseOptionalJson(text);
+  if (!isRecord(payload)) {
+    throw new Error("gateway callback returned malformed JSON");
+  }
+  if (payload.ok !== true) {
+    throw new Error(
+      `gateway callback was not accepted: ${
+        stringValue(payload.error) ?? stringValue(payload.message) ?? "ok was not true"
+      }`
+    );
+  }
+  if (
+    payload.delivery_required !== undefined &&
+    typeof payload.delivery_required !== "boolean"
+  ) {
+    throw new Error("gateway callback returned an invalid delivery_required value");
+  }
+  return payload;
+}
+
+function parseGatewayCallbackDeliveryPlan(payload: Record<string, unknown>): {
+  chatSendParams?: Record<string, unknown>;
+  sessionSendParams?: Record<string, unknown>;
+} {
+  const chatSendParams = isRecord(payload.chat_send) ? payload.chat_send : undefined;
+  const sessionSendParams = isRecord(payload.session_send) ? payload.session_send : undefined;
+  if (chatSendParams && sessionSendParams) {
+    throw new Error("gateway callback returned multiple delivery plans");
+  }
+
+  const deliveryRequired = payload.delivery_required === true;
+  const deliveryExplicitlyNotRequired = payload.delivery_required === false;
+  const deliveryMode = stringValue(payload.delivery_mode);
+  if (deliveryRequired && !chatSendParams && !sessionSendParams) {
+    throw new Error(
+      "gateway callback requires delivery but returned no supported chat_send or session_send plan"
+    );
+  }
+  if (deliveryExplicitlyNotRequired && (chatSendParams || sessionSendParams)) {
+    throw new Error("gateway callback returned a delivery plan without delivery_required");
+  }
+  if (deliveryMode && deliveryMode !== "none") {
+    const expectedMode = chatSendParams ? "chat.send" : sessionSendParams ? "sessions.send" : undefined;
+    if (deliveryMode !== expectedMode) {
+      throw new Error("gateway callback delivery_mode does not match its delivery plan");
+    }
+  }
+  if (deliveryMode === "none" && deliveryRequired) {
+    throw new Error("gateway callback delivery_mode none cannot require delivery");
+  }
+
+  if (chatSendParams) {
+    if (
+      !stringValue(chatSendParams.sessionKey) ||
+      !stringValue(chatSendParams.message) ||
+      !stringValue(chatSendParams.idempotencyKey) ||
+      chatSendParams.deliver !== true
+    ) {
+      throw new Error("gateway callback returned an invalid chat_send delivery plan");
+    }
+  }
+  if (sessionSendParams) {
+    if (
+      !stringValue(sessionSendParams.key) ||
+      !stringValue(sessionSendParams.message) ||
+      !stringValue(sessionSendParams.idempotencyKey)
+    ) {
+      throw new Error("gateway callback returned an invalid session_send delivery plan");
+    }
+  }
+  return { chatSendParams, sessionSendParams };
+}
+
+function parseChatSendAcknowledgement(
+  text,
+  expectedRunId: string
+): { runId: string; status: "started" | "in_flight" | "ok" } {
+  const payload = parseOptionalJson(text);
+  if (!isRecord(payload)) {
+    throw new Error("chat.send returned malformed JSON");
+  }
+  const runId = stringValue(payload.runId);
+  const status = stringValue(payload.status);
+  if (!runId) {
+    throw new Error("chat.send acknowledgement is missing runId");
+  }
+  if (runId !== expectedRunId) {
+    throw new Error("chat.send acknowledgement runId does not match its idempotencyKey");
+  }
+  if (!status || !["started", "in_flight", "ok"].includes(status)) {
+    throw new Error(`chat.send returned unexpected status ${JSON.stringify(status ?? null)}`);
+  }
+  return {
+    runId,
+    status: status as "started" | "in_flight" | "ok"
+  };
+}
+
+function parseAgentWaitResult(text, expectedRunId: string): Record<string, unknown> {
+  const payload = parseOptionalJson(text);
+  if (!isRecord(payload)) {
+    throw new Error("agent.wait returned malformed JSON");
+  }
+  if (stringValue(payload.runId) !== expectedRunId) {
+    throw new Error("agent.wait returned a result for a different runId");
+  }
+  const status = stringValue(payload.status);
+  if (!status || !["ok", "error", "timeout", "pending"].includes(status)) {
+    throw new Error(`agent.wait returned unexpected status ${JSON.stringify(status ?? null)}`);
+  }
+  return payload;
 }
 
 function createAgentSessionProvider(agent, options) {
