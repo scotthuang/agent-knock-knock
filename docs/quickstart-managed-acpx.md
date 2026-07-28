@@ -1,6 +1,6 @@
 # Managed ACPX in 5 Minutes
 
-Use this path for managed background Codex, Claude Code, or Cursor tasks with durable AKK state and callbacks. You need Node.js 24.15+ on the 24.x line, OpenClaw `2026.7.1-2`+, and an authenticated coding-agent CLI.
+Use this path for managed background Codex, Claude Code, or Cursor tasks with durable AKK state and callbacks. You need a Node.js version supported by your OpenClaw release (Node.js 24 LTS recommended), OpenClaw `2026.6.5`+, and an authenticated coding-agent CLI.
 
 ## 1. Install and configure
 
