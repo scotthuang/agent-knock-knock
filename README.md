@@ -53,9 +53,9 @@ Core requirements:
 | --- | --- | --- |
 | Normal OpenClaw installation | `2026.6.5`+ | The packed plugin installs, loads, registers its full runtime, and passes isolated Gateway workflows. Earlier hosts block AKK's expected local process control in their legacy install-time scanner unless an unsafe override is used. |
 | Plugin API and Gateway | `2026.5.12`+ | This is the first stable release with `api.session.workflow.enqueueNextTurnInjection`. The adjacent tested boundary, `2026.5.10-beta.2`, lacks that API. |
-| Build SDK | `2026.7.1-2` | Build metadata stays pinned to the SDK actually used; it is not the runtime floor. |
+| Build SDK | `2026.6.5` | The plugin is built against the oldest host supported for normal installation. |
 
-The compatibility suite tests the minimum and build-time hosts with isolated state and the real packed artifact.
+The compatibility suite tests the normal installation floor and the Plugin API boundary with isolated state and the real packed artifact.
 
 ### Install from ClawHub (recommended)
 
