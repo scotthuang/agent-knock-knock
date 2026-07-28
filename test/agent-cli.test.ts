@@ -3675,6 +3675,319 @@ test("a newer raw terminal task supersedes the prior screen-only callback bounda
   }
 });
 
+test("a newer raw terminal task reconciles durable completion before superseding", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-task-reconcile-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+  const rawConversationId = "terminal:tmux:codex-work:0.1:33389";
+  const completedSessionId = "019ee559-7bb8-7fd1-970c-0f7b6978c452";
+  const completedRolloutPath = path.join(tempDir, "completed.jsonl");
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "› \n");
+    const openclawBin = writeFakeOpenClaw(fakeBinDir, openclawCallsPath);
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `codex-work\t0\t1\t33389\tnode\t${workspace}\n`
+    );
+
+    const baseSendArgs = [
+      "send",
+      "--conversation",
+      rawConversationId,
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      "agent:channel:original",
+      "--openclaw-session",
+      "agent:channel:original",
+      "--openclaw-bin",
+      openclawBin,
+      "--disable-terminal-bridge-monitor"
+    ];
+    const env = {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    };
+
+    const first = runAgentCli([
+      ...baseSendArgs,
+      "--message",
+      "First durable task"
+    ], env);
+    assert.equal(first.status, 0, first.stderr || first.stdout);
+    const firstParsed = JSON.parse(first.stdout);
+    const firstStatePath = path.join(
+      storeDir,
+      firstParsed.conversation.conversation_id,
+      "state.json"
+    );
+    const firstLogPath = path.join(
+      storeDir,
+      firstParsed.conversation.conversation_id,
+      "events.ndjson"
+    );
+    const stalledStatePath = writeConversationClone(
+      storeDir,
+      firstParsed.conversation,
+      "terminal-stalled-before-durable-reconcile",
+      (state) => ({
+        ...state,
+        status: "stalled",
+        stalled_reason: "monitor timed out just before task_complete was persisted",
+        updated_at: new Date().toISOString()
+      })
+    );
+    const stalledLogPath = path.join(
+      path.dirname(stalledStatePath),
+      "events.ndjson"
+    );
+
+    const completedRollout = [
+      JSON.stringify({
+        timestamp: "2099-07-04T00:00:00.000Z",
+        type: "event_msg",
+        payload: {
+          type: "user_message",
+          message: "First durable task"
+        }
+      }),
+      JSON.stringify({
+        timestamp: "2099-07-04T00:01:00.000Z",
+        type: "event_msg",
+        payload: {
+          type: "agent_message",
+          message: "The first durable task completed."
+        }
+      }),
+      JSON.stringify({
+        timestamp: "2099-07-04T00:01:01.000Z",
+        type: "event_msg",
+        payload: {
+          type: "task_complete",
+          turn_id: "turn-before-replacement",
+          last_agent_message: "The first durable task completed."
+        }
+      })
+    ].join("\n");
+    const second = runAgentCli([
+      ...baseSendArgs,
+      "--message",
+      "Second task",
+      "--threads-json",
+      JSON.stringify([{
+        id: completedSessionId,
+        cwd: workspace,
+        rollout_path: completedRolloutPath,
+        updated_at_ms: Date.parse("2099-07-04T00:01:01.000Z"),
+        archived: false
+      }]),
+      "--processes-json",
+      JSON.stringify([{
+        pid: 33389,
+        ppid: 999,
+        command: "codex",
+        cwd: workspace
+      }]),
+      "--terminals-json",
+      JSON.stringify([tmuxPane({
+        target: "codex-work:0.1",
+        pane: 1,
+        panePid: 33389,
+        currentPath: workspace
+      })]),
+      "--rollouts-json",
+      JSON.stringify({ [completedRolloutPath]: completedRollout })
+    ], env);
+    assert.equal(second.status, 0, second.stderr || second.stdout);
+    const secondParsed = JSON.parse(second.stdout);
+    const secondStatePath = path.join(
+      storeDir,
+      secondParsed.conversation.conversation_id,
+      "state.json"
+    );
+
+    const reconciledState = JSON.parse(fs.readFileSync(firstStatePath, "utf8"));
+    assert.equal(reconciledState.status, "closed");
+    assert.equal(reconciledState.callback_delivery.status, "delivered");
+    assert.equal(reconciledState.callback_delivery.attempts, 1);
+    assert.equal(reconciledState.superseded_by_conversation_id, undefined);
+    const firstEvents = fs.readFileSync(firstLogPath, "utf8");
+    assert.match(firstEvents, /terminal_bridge_completion_reconciled_before_supersede/);
+    assert.doesNotMatch(firstEvents, /terminal_bridge_superseded/);
+    assert.equal(
+      JSON.parse(fs.readFileSync(secondStatePath, "utf8")).status,
+      "waiting_for_agent"
+    );
+    const stalledState = JSON.parse(fs.readFileSync(stalledStatePath, "utf8"));
+    assert.equal(stalledState.status, "closed");
+    assert.equal(stalledState.callback_delivery.status, "delivered");
+    assert.equal(stalledState.callback_delivery.attempts, 1);
+    assert.equal(stalledState.superseded_by_conversation_id, undefined);
+    assert.match(
+      fs.readFileSync(stalledLogPath, "utf8"),
+      /terminal_bridge_completion_reconciled_before_supersede/
+    );
+    assert.doesNotMatch(
+      fs.readFileSync(stalledLogPath, "utf8"),
+      /terminal_bridge_superseded/
+    );
+
+    await waitForCondition(
+      () => JSON.parse(fs.readFileSync(firstStatePath, "utf8")).status === "closed",
+      "reconciled callback delivery",
+      12_000
+    );
+    const firstState = JSON.parse(fs.readFileSync(firstStatePath, "utf8"));
+    assert.equal(firstState.close_reason, "terminal bridge task completed");
+    assert.equal(firstState.callback_delivery.status, "delivered");
+    assert.equal(firstState.superseded_by_conversation_id, undefined);
+    assert.equal(readJsonLines(openclawCallsPath).length, 2);
+
+    const ambiguousRollout = (turnId: string) => [
+      JSON.stringify({
+        timestamp: "2099-07-04T00:02:00.000Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: "Second task" }
+      }),
+      JSON.stringify({
+        timestamp: "2099-07-04T00:03:00.000Z",
+        type: "event_msg",
+        payload: {
+          type: "agent_message",
+          message: `Ambiguous completion ${turnId}`
+        }
+      }),
+      JSON.stringify({
+        timestamp: "2099-07-04T00:03:01.000Z",
+        type: "event_msg",
+        payload: {
+          type: "task_complete",
+          turn_id: turnId,
+          last_agent_message: `Ambiguous completion ${turnId}`
+        }
+      })
+    ].join("\n");
+    const ambiguousRolloutA = path.join(tempDir, "ambiguous-a.jsonl");
+    const ambiguousRolloutB = path.join(tempDir, "ambiguous-b.jsonl");
+    const third = runAgentCli([
+      ...baseSendArgs,
+      "--message",
+      "Third task",
+      "--threads-json",
+      JSON.stringify([
+        {
+          id: "019ee559-7bb8-7fd1-970c-0f7b6978c453",
+          cwd: workspace,
+          rollout_path: ambiguousRolloutA,
+          updated_at_ms: Date.parse("2099-07-04T00:03:01.000Z"),
+          archived: false
+        },
+        {
+          id: "019ee559-7bb8-7fd1-970c-0f7b6978c454",
+          cwd: workspace,
+          rollout_path: ambiguousRolloutB,
+          updated_at_ms: Date.parse("2099-07-04T00:03:02.000Z"),
+          archived: false
+        }
+      ]),
+      "--processes-json",
+      JSON.stringify([{
+        pid: 33389,
+        ppid: 999,
+        command: "codex",
+        cwd: workspace
+      }]),
+      "--terminals-json",
+      JSON.stringify([tmuxPane({
+        target: "codex-work:0.1",
+        pane: 1,
+        panePid: 33389,
+        currentPath: workspace
+      })]),
+      "--rollouts-json",
+      JSON.stringify({
+        [ambiguousRolloutA]: ambiguousRollout("turn-ambiguous-a"),
+        [ambiguousRolloutB]: ambiguousRollout("turn-ambiguous-b")
+      })
+    ], env);
+    assert.equal(third.status, 0, third.stderr || third.stdout);
+    const protectedSecondState = JSON.parse(
+      fs.readFileSync(secondStatePath, "utf8")
+    );
+    assert.equal(protectedSecondState.status, "stalled");
+    assert.match(
+      protectedSecondState.stalled_reason,
+      /newer task reused the same terminal/
+    );
+    assert.equal(protectedSecondState.superseded_by_conversation_id, undefined);
+    const secondEvents = fs.readFileSync(
+      path.join(path.dirname(secondStatePath), "events.ndjson"),
+      "utf8"
+    );
+    assert.match(secondEvents, /terminal_bridge_pre_supersede_reconciliation_failed/);
+    assert.match(secondEvents, /multiple same-cwd Codex sessions match/);
+    assert.match(secondEvents, /terminal_bridge_reconciliation_fenced/);
+    assert.doesNotMatch(secondEvents, /terminal_bridge_superseded/);
+
+    const protectedMonitor = runAgentCli([
+      "monitor",
+      "--terminal-bridge",
+      "--state",
+      secondStatePath,
+      "--log",
+      path.join(path.dirname(secondStatePath), "events.ndjson"),
+      "--poll-interval-ms",
+      "50",
+      "--processes-json",
+      JSON.stringify([{
+        pid: 33389,
+        ppid: 999,
+        command: "codex",
+        cwd: workspace
+      }]),
+      "--terminals-json",
+      JSON.stringify([tmuxPane({
+        target: "codex-work:0.1",
+        pane: 1,
+        panePid: 33389,
+        currentPath: workspace
+      })]),
+      "--terminal-screens-json",
+      JSON.stringify({
+        "codex-work:0.1": [
+          "› Third task",
+          "The third task is complete.",
+          "─ Worked for 1m ─────────────────────────────",
+          "› "
+        ].join("\n")
+      })
+    ]);
+    assert.equal(
+      protectedMonitor.status,
+      0,
+      protectedMonitor.stderr || protectedMonitor.stdout
+    );
+    assert.equal(
+      JSON.parse(protectedMonitor.stdout).reason,
+      "conversation_no_longer_waiting"
+    );
+    assert.equal(readJsonLines(openclawCallsPath).length, 2);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("a failed replacement send keeps the prior terminal bridge active", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-task-send-failure-"));
   const storeDir = path.join(tempDir, "conversations");
@@ -3927,6 +4240,187 @@ test("terminal bridge monitor trusts matching task_complete despite stale workin
     const openclawCalls = readJsonLines(openclawCallsPath);
     assert.deepEqual(openclawCalls[0].args.slice(0, 3), ["gateway", "call", "agent-knock-knock.callback"]);
     assert.equal(openclawCalls[0].args.includes("--url"), false);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("terminal bridge searches all same-cwd rollouts for the matching task_complete", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-cwd-rollouts-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+  const correctSessionId = "019ee559-7bb8-7fd1-970c-0f7b6978c44f";
+  const newerSessionId = "019ee559-7bb8-7fd1-970c-0f7b6978c450";
+  const newestSessionId = "019ee559-7bb8-7fd1-970c-0f7b6978c451";
+  const correctRolloutPath = path.join(tempDir, "correct.jsonl");
+  const newerRolloutPath = path.join(tempDir, "newer.jsonl");
+  const newestRolloutPath = path.join(tempDir, "newest.jsonl");
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "• Working (12s • esc to interrupt)\n");
+    const openclawBin = writeFakeOpenClaw(fakeBinDir, openclawCallsPath);
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `codex-work\t0\t1\t33389\tnode\t${workspace}\n`
+    );
+
+    const request = "Summarize the release gate";
+    const sent = runAgentCli([
+      "send",
+      "--conversation",
+      "terminal:tmux:codex-work:0.1:33389",
+      "--message",
+      request,
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      "agent:channel:original",
+      "--openclaw-session",
+      "agent:channel:original",
+      "--openclaw-bin",
+      openclawBin,
+      "--disable-terminal-bridge-monitor"
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    const sentParsed = JSON.parse(sent.stdout);
+    const statePath = path.join(
+      storeDir,
+      sentParsed.conversation.conversation_id,
+      "state.json"
+    );
+    const logPath = path.join(
+      storeDir,
+      sentParsed.conversation.conversation_id,
+      "events.ndjson"
+    );
+
+    const completedRollout = [
+      JSON.stringify({
+        timestamp: "2099-07-04T00:00:00.000Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: request }
+      }),
+      JSON.stringify({
+        timestamp: "2099-07-04T00:01:00.000Z",
+        type: "event_msg",
+        payload: {
+          type: "agent_message",
+          message: "The release gate is ready."
+        }
+      }),
+      JSON.stringify({
+        timestamp: "2099-07-04T00:01:01.000Z",
+        type: "event_msg",
+        payload: {
+          type: "task_complete",
+          turn_id: "turn-correct-cwd-session",
+          last_agent_message: "The release gate is ready."
+        }
+      })
+    ].join("\n");
+    const unrelatedRollout = (message: string, turnId: string) => [
+      JSON.stringify({
+        timestamp: "2099-07-04T00:02:00.000Z",
+        type: "event_msg",
+        payload: { type: "user_message", message }
+      }),
+      JSON.stringify({
+        timestamp: "2099-07-04T00:03:00.000Z",
+        type: "event_msg",
+        payload: { type: "agent_message", message: `${message} finished.` }
+      }),
+      JSON.stringify({
+        timestamp: "2099-07-04T00:03:01.000Z",
+        type: "event_msg",
+        payload: {
+          type: "task_complete",
+          turn_id: turnId,
+          last_agent_message: `${message} finished.`
+        }
+      })
+    ].join("\n");
+
+    const monitored = runAgentCli([
+      "monitor",
+      "--terminal-bridge",
+      "--state",
+      statePath,
+      "--log",
+      logPath,
+      "--poll-interval-ms",
+      "50",
+      "--agent-timeout-minutes",
+      "60",
+      "--threads-json",
+      JSON.stringify([
+        {
+          id: newestSessionId,
+          cwd: workspace,
+          rollout_path: newestRolloutPath,
+          updated_at_ms: Date.parse("2099-07-04T00:06:00.000Z"),
+          archived: false
+        },
+        {
+          id: newerSessionId,
+          cwd: workspace,
+          rollout_path: newerRolloutPath,
+          updated_at_ms: Date.parse("2099-07-04T00:05:00.000Z"),
+          archived: false
+        },
+        {
+          id: correctSessionId,
+          cwd: workspace,
+          rollout_path: correctRolloutPath,
+          updated_at_ms: Date.parse("2099-07-04T00:01:01.000Z"),
+          archived: false
+        }
+      ]),
+      "--processes-json",
+      JSON.stringify([{
+        pid: 33389,
+        ppid: 999,
+        command: "codex",
+        cwd: workspace
+      }]),
+      "--terminals-json",
+      JSON.stringify([tmuxPane({
+        target: "codex-work:0.1",
+        pane: 1,
+        panePid: 999,
+        currentPath: workspace
+      })]),
+      "--terminal-screens-json",
+      JSON.stringify({ "codex-work:0.1": fs.readFileSync(screenPath, "utf8") }),
+      "--rollouts-json",
+      JSON.stringify({
+        [newestRolloutPath]: unrelatedRollout("Newest unrelated task", "turn-newest"),
+        [newerRolloutPath]: unrelatedRollout("Newer unrelated task", "turn-newer"),
+        [correctRolloutPath]: completedRollout
+      })
+    ]);
+
+    assert.equal(monitored.status, 0, monitored.stderr || monitored.stdout);
+    const parsed = JSON.parse(monitored.stdout);
+    assert.equal(parsed.delivered, true);
+    assert.equal(parsed.message.body, "The release gate is ready.");
+    assert.equal(parsed.message.metadata.match, "rollout_task_complete");
+    assert.equal(parsed.message.metadata.context_match, "cwd_request_hash");
+    assert.equal(parsed.message.metadata.session.sessionId, correctSessionId);
+    assert.equal(parsed.message.metadata.rollout_turn_id, "turn-correct-cwd-session");
+    assert.equal(readJsonLines(openclawCallsPath).length, 1);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
