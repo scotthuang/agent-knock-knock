@@ -52,31 +52,27 @@ Core requirements:
 ### Install from ClawHub (recommended)
 
 ```bash
-openclaw plugins install clawhub:@scotthuang/agent-knock-knock@beta
+openclaw plugins install clawhub:@scotthuang/agent-knock-knock
 openclaw config set plugins.entries.agent-knock-knock.config.workspace "$PWD"
 openclaw config set plugins.entries.agent-knock-knock.config.defaultAgent codex
 openclaw config set plugins.entries.agent-knock-knock.config.mode tmux
 openclaw gateway restart
 ```
 
-The explicit `@beta` selector follows the `0.3.0` prerelease channel. Remove it after the stable ClawHub release is available.
-
 ClawHub installs the OpenClaw plugin, bundled AKK skill, and package-local relay CLI together. OpenClaw invokes that bundled CLI directly, but ClawHub does not add the `agent-knock-knock` command to your shell `PATH`. Do not run `install-openclaw` after a ClawHub install; that command belongs to the npm installation path below and would repeat the plugin setup.
 
 If you also want standalone shell commands such as `agent-knock-knock doctor`, install the npm package globally without running `install-openclaw`:
 
 ```bash
-npm install -g @scotthuang/agent-knock-knock@next
+npm install -g @scotthuang/agent-knock-knock
 ```
 
-### Install from npm (beta)
+### Install from npm
 
 ```bash
-npm install -g @scotthuang/agent-knock-knock@next
+npm install -g @scotthuang/agent-knock-knock
 agent-knock-knock install-openclaw --workspace "$PWD" --default-agent codex --mode tmux --verify
 ```
-
-The npm `next` dist-tag follows the same prerelease line. Remove `@next` after `0.3.0` becomes stable.
 
 `install-openclaw` installs or updates the plugin, atomically configures the selected workspace, agent, and mode without replacing unrelated settings, installs the AKK skill template, restarts the Gateway at most once, and optionally verifies the full runtime chain. It is safe to rerun. Without `--verify`, the result remains unverified rather than claiming readiness. Use `--skill-only` to skip plugin installation; add `--no-restart` to leave an explicit pending-restart state.
 
@@ -298,17 +294,12 @@ See [CONTRIBUTING.md](https://github.com/scotthuang/agent-knock-knock/blob/main/
 
 ### ClawHub Maintainer Release
 
-The first `0.3.0` beta publish is intentionally manual and must stay on ClawHub's `beta` tag:
+The package is configured for ClawHub trusted publishing. Dispatch the `ClawHub Publish` workflow for a release; it derives `beta` versus `latest` from the package version and defaults to a dry run:
 
 ```bash
-npm ci
-npm run build
-npm exec clawhub -- login
-npm exec clawhub -- package publish . --family code-plugin --owner scotthuang --tags beta --dry-run --json
-npm exec clawhub -- package publish . --family code-plugin --owner scotthuang --tags beta
+gh workflow run clawhub-publish.yml --ref main -f dry_run=true
+gh workflow run clawhub-publish.yml --ref main -f dry_run=false
 ```
-
-After that first release creates the package, configure this repository as its trusted publisher. Future publishes use the manually dispatched `ClawHub Publish` workflow, which defaults to a dry run and derives `beta` versus `latest` from the package version.
 
 ## Storage and Logs
 

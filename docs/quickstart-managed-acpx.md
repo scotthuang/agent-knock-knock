@@ -7,7 +7,7 @@ Use this path for managed background Codex, Claude Code, or Cursor tasks with du
 From the project the agent may edit:
 
 ```bash
-npm install -g acpx@latest @scotthuang/agent-knock-knock@next && agent-knock-knock install-openclaw --workspace "$PWD" --default-agent codex --mode acpx --verify
+npm install -g acpx@latest @scotthuang/agent-knock-knock && agent-knock-knock install-openclaw --workspace "$PWD" --default-agent codex --mode acpx --verify
 ```
 
 Use `--default-agent claude` or `cursor` when preferred. Existing AKK approval policy remains intact, and the Gateway restarts at most once.

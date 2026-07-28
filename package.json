@@ -1,6 +1,6 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.3.0-beta.2",
+  "version": "0.3.0",
   "description": "Control local Codex and Claude Code from OpenClaw, take over the same live tmux session, and run managed ACP tasks through ACPX with Cursor support.",
   "license": "MIT",
   "type": "module",
@@ -78,7 +78,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test dist/test/*.test.js",
     "clawhub:validate": "npm run build && clawhub package validate . --out .clawhub-validation --openclaw node_modules/openclaw --runtime --allow-execute --no-mock-sdk",
-    "clawhub:dry-run": "npm run build && clawhub package publish . --family code-plugin --owner scotthuang --tags beta --dry-run",
+    "clawhub:dry-run": "npm run build && clawhub package publish . --family code-plugin --owner scotthuang --tags latest --dry-run",
     "smoke:acpx": "npm run build && node scripts/smoke-acpx.js",
     "smoke:tmux": "npm run build && node scripts/smoke-tmux.js",
     "simulate:architecture": "node scripts/two-claude-weather-test.js --scenario architecture-questions",

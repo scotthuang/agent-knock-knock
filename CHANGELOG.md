@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.0 - 2026-07-28
+
+### Added
+
+- Publish the complete OpenClaw plugin, bundled AKK skill, and package-local relay through ClawHub, with stable npm and ClawHub installation paths.
+- Add bounded runtime diagnostics, fail-closed session selectors, stable short references, five-minute tmux and Managed ACPX quickstarts, and opt-in live smoke scripts.
+
+### Changed
+
+- Make installation configure and verify the OpenClaw runtime while preserving unrelated plugin settings.
+- Confirm asynchronous Gateway callback runs before settling delivery, instead of treating a `started` acknowledgement as delivered.
+
+### Fixed
+
+- Find the matching Codex completion across plausible same-workspace rollouts and reconcile durable completion before a newer same-pane task can supersede it.
+- Keep uncertain terminal completion and callback delivery states retryable without duplicating callbacks or attributing a newer task's screen output to an older monitor.
+
 ## 0.3.0-beta.2 - 2026-07-28
 
 ### Added

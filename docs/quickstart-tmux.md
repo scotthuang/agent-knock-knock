@@ -7,7 +7,7 @@ Use this path when you want OpenClaw and a human to share the same live Codex or
 From the project the agent may edit:
 
 ```bash
-npm install -g @scotthuang/agent-knock-knock@next && agent-knock-knock install-openclaw --workspace "$PWD" --default-agent codex --mode tmux --verify
+npm install -g @scotthuang/agent-knock-knock && agent-knock-knock install-openclaw --workspace "$PWD" --default-agent codex --mode tmux --verify
 ```
 
 The installer updates only AKK's enabled flag, workspace, default agent, and mode. Existing plugin settings—including `autoApprove` rules—remain intact, and the Gateway restarts at most once.
