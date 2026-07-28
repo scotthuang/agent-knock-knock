@@ -46,6 +46,18 @@ type ContractTestApi = {
   ): void;
 };
 
+type GatewayMethodHandler = (context: {
+  params: unknown;
+  respond(
+    ok: boolean,
+    result?: unknown,
+    error?: {
+      code?: string;
+      message?: string;
+    }
+  ): void;
+}) => Promise<void>;
+
 const packageRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../.."
@@ -171,6 +183,112 @@ test("bundled OpenClaw skills exist and are included in the npm artifact", () =>
   }
 });
 
+test("callback delivery uses the grouped OpenClaw session workflow API", async () => {
+  let callbackHandler: GatewayMethodHandler | undefined;
+  let capturedInjection: Record<string, unknown> | undefined;
+  let response:
+    | {
+        ok: boolean;
+        result?: Record<string, unknown>;
+        error?: {
+          code?: string;
+          message?: string;
+        };
+      }
+    | undefined;
+
+  (
+    plugin as unknown as {
+      register(api: Record<string, any>): void;
+    }
+  ).register({
+    pluginConfig: {},
+    logger: {
+      info() {},
+      warn() {}
+    },
+    session: {
+      workflow: {
+        async enqueueNextTurnInjection(
+          injection: Record<string, unknown>
+        ) {
+          capturedInjection = injection;
+          return {
+            enqueued: true,
+            id: "injection-1",
+            sessionKey: injection.sessionKey
+          };
+        }
+      }
+    },
+    registerGatewayMethod(
+      method: string,
+      handler: GatewayMethodHandler
+    ) {
+      if (method === "agent-knock-knock.callback") {
+        callbackHandler = handler;
+      }
+    },
+    registerService() {},
+    registerCommand() {},
+    registerTool() {}
+  });
+
+  assert.equal(typeof callbackHandler, "function");
+  await callbackHandler?.({
+    params: {
+      sessionKey: "agent:main:compat",
+      conversation: {
+        conversation_id: "compat-1",
+        openclaw_session: "agent:main:compat"
+      },
+      message: {
+        id: "message-1",
+        conversation_id: "compat-1",
+        type: "progress",
+        requires_response: false,
+        round: 1,
+        body: "Compatibility callback"
+      }
+    },
+    respond(ok, result, error) {
+      response = {
+        ok,
+        ...(isRecord(result) ? { result } : {}),
+        ...(error ? { error } : {})
+      };
+    }
+  });
+
+  assert.equal(response?.ok, true);
+  assert.equal(response?.error, undefined);
+  assert.equal(response?.result?.enqueued, true);
+  assert.equal(response?.result?.delivery_required, false);
+  assert.equal(response?.result?.session_key, "agent:main:compat");
+  assert.deepEqual(capturedInjection, {
+    sessionKey: "agent:main:compat",
+    text: [
+      "[Agent Knock Knock callback]",
+      "Conversation: compat-1",
+      "Message type: progress",
+      "Requires OpenClaw response: no",
+      "Round: 1",
+      "Compatibility callback"
+    ].join("\n"),
+    idempotencyKey: "agent-knock-knock:compat-1:message-1",
+    placement: "append_context",
+    ttlMs: 24 * 60 * 60 * 1000,
+    metadata: {
+      kind: "agent-knock-knock-callback",
+      conversation_id: "compat-1",
+      message_id: "message-1",
+      message_type: "progress",
+      state_path: undefined,
+      log_path: undefined
+    }
+  });
+});
+
 test("/akk doctor leaves the Gateway event loop free for its health check", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-plugin-doctor-"));
   const fakeCli = path.join(tempDir, "doctor.cjs");
@@ -282,4 +400,8 @@ function requiredStringArray(value: unknown, label: string): string[] {
 
 function sorted(values: string[]): string[] {
   return [...values].sort();
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

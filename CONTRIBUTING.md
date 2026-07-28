@@ -30,6 +30,14 @@ npm test
 npm pack --dry-run
 ```
 
+OpenClaw compatibility changes must also pass the isolated host matrix:
+
+```bash
+npm run compat:openclaw
+```
+
+The matrix derives the supported Host, Plugin API, and build versions from `package.json`, then verifies the adjacent failing API boundary. It uses only temporary OpenClaw state and does not make credentialed coding-agent turns.
+
 If your change touches logging, callbacks, or trace output, also review the output for secrets and local-only data. Trace output must not expose agent thinking text, raw callback payloads, gateway tokens, API keys, passwords, or proxy credentials.
 
 ## Adding a Terminal Agent Adapter

@@ -45,9 +45,17 @@ The two modes intentionally use different permission models:
 
 Core requirements:
 
-- A Node.js version supported by OpenClaw (Node.js 24.15+ on the 24.x line is recommended for the compatibility floor below)
-- [OpenClaw](https://docs.openclaw.ai/) Gateway and plugin API `2026.7.1-2` or newer
+- A Node.js version supported by your OpenClaw release (Node.js 24 LTS is recommended)
+- [OpenClaw](https://docs.openclaw.ai/) `2026.6.5` or newer
 - At least one authenticated coding agent: Codex, Claude Code, or Cursor
+
+| Compatibility layer | Version | Evidence |
+| --- | --- | --- |
+| Normal OpenClaw installation | `2026.6.5`+ | The packed plugin installs, loads, registers its full runtime, and passes isolated Gateway workflows. Earlier hosts block AKK's expected local process control in their legacy install-time scanner unless an unsafe override is used. |
+| Plugin API and Gateway | `2026.5.12`+ | This is the first stable release with `api.session.workflow.enqueueNextTurnInjection`. The adjacent tested boundary, `2026.5.10-beta.2`, lacks that API. |
+| Build SDK | `2026.7.1-2` | Build metadata stays pinned to the SDK actually used; it is not the runtime floor. |
+
+The compatibility suite tests the minimum and build-time hosts with isolated state and the real packed artifact.
 
 ### Install from ClawHub (recommended)
 

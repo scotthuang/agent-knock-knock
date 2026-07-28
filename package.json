@@ -36,11 +36,11 @@
       "clawhubSpec": "clawhub:@scotthuang/agent-knock-knock",
       "npmSpec": "@scotthuang/agent-knock-knock",
       "defaultChoice": "clawhub",
-      "minHostVersion": ">=2026.7.1-2"
+      "minHostVersion": ">=2026.6.5"
     },
     "compat": {
-      "pluginApi": ">=2026.7.1-2",
-      "minGatewayVersion": "2026.7.1-2"
+      "pluginApi": ">=2026.5.12",
+      "minGatewayVersion": "2026.5.12"
     },
     "build": {
       "openclawVersion": "2026.7.1-2",
@@ -77,8 +77,9 @@
     "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test dist/test/*.test.js",
-    "clawhub:validate": "npm run build && clawhub package validate . --out .clawhub-validation --openclaw node_modules/openclaw --runtime --allow-execute --no-mock-sdk",
+    "clawhub:validate": "npm run build && clawhub --workdir . package validate . --out .clawhub-validation --openclaw node_modules/openclaw --runtime --allow-execute --no-mock-sdk",
     "clawhub:dry-run": "npm run build && clawhub package publish . --family code-plugin --owner scotthuang --tags latest --dry-run",
+    "compat:openclaw": "npm run build && node scripts/verify-openclaw-compatibility.js",
     "smoke:acpx": "npm run build && node scripts/smoke-acpx.js",
     "smoke:tmux": "npm run build && node scripts/smoke-tmux.js",
     "simulate:architecture": "node scripts/two-claude-weather-test.js --scenario architecture-questions",
@@ -89,7 +90,7 @@
     "node": ">=22.14.0"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.7.1-2"
+    "openclaw": ">=2026.5.12"
   },
   "peerDependenciesMeta": {
     "openclaw": {

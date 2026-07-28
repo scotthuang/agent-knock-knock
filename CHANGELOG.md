@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Lower the OpenClaw plugin API, Gateway, and npm peer floor to the first verified stable API release, `2026.5.12`, and the normal installation host floor to `2026.6.5`, while continuing to build against `2026.7.1-2`.
+- Add isolated compatibility coverage for the minimum and build-time OpenClaw hosts, plus an explicit failing boundary at `2026.5.10-beta.2`.
+
 ## 0.3.0 - 2026-07-28
 
 ### Added

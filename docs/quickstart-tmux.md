@@ -1,6 +1,6 @@
 # tmux Bridge in 5 Minutes
 
-Use this path when you want OpenClaw and a human to share the same live Codex or Claude Code terminal. You need Node.js 24.15+ on the 24.x line, OpenClaw `2026.7.1-2`+, tmux, and an authenticated `codex` or `claude` CLI, all running as the same OS user.
+Use this path when you want OpenClaw and a human to share the same live Codex or Claude Code terminal. You need a Node.js version supported by your OpenClaw release (Node.js 24 LTS recommended), OpenClaw `2026.6.5`+, tmux, and an authenticated `codex` or `claude` CLI, all running as the same OS user.
 
 ## 1. Install and configure
 
