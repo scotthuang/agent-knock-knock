@@ -3612,6 +3612,8 @@ test("a newer raw terminal task supersedes the prior screen-only callback bounda
       "agent:channel:original",
       "--openclaw-bin",
       openclawBin,
+      "--threads-json",
+      JSON.stringify([]),
       "--disable-terminal-bridge-monitor"
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
@@ -4014,6 +4016,8 @@ test("a failed replacement send keeps the prior terminal bridge active", () => {
       storeDir,
       "--openclaw-bin",
       "/usr/bin/true",
+      "--threads-json",
+      JSON.stringify([]),
       "--disable-terminal-bridge-monitor"
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
@@ -4067,6 +4071,8 @@ test("concurrent raw terminal sends serialize replacement state and terminal sub
       storeDir,
       "--openclaw-bin",
       "/usr/bin/true",
+      "--threads-json",
+      JSON.stringify([]),
       "--disable-terminal-bridge-monitor"
     ];
     const env = {
