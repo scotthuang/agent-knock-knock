@@ -45,10 +45,11 @@ test("OpenClaw compatibility metadata distinguishes the API and install floors",
   );
 });
 
-test("OpenClaw build metadata describes the installed SDK instead of the runtime floor", () => {
+test("OpenClaw build metadata matches the installed SDK and verified host floor", () => {
   const buildVersion = packageJson.devDependencies?.openclaw;
   assert.equal(typeof buildVersion, "string");
   assert.notEqual(buildVersion, minimumApiVersion);
+  assert.equal(buildVersion, minimumHostVersion);
   assert.equal(packageJson.openclaw?.build?.openclawVersion, buildVersion);
   assert.equal(packageJson.openclaw?.build?.pluginSdkVersion, buildVersion);
 });

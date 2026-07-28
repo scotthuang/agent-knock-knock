@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Build against the verified OpenClaw `2026.6.5` installation floor so ClawHub reports the package without a minimum-host-version drift warning.
+
 ## 0.3.1 - 2026-07-28
 
 ### Changed
