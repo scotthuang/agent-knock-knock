@@ -4,6 +4,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { createConversation } from "../src/protocol.js";
+import {
+  appendEvent,
+  pathsForConversation,
+  saveState
+} from "../src/store.js";
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 const packageRoot = path.resolve(path.dirname(binPath), "../..");
@@ -55,7 +61,7 @@ test("doctor exits non-zero when required package files are missing", () => {
     assert.equal(output.package_files.some((entry) => entry.exists === false), true);
     const nodeCheck = output.checks.find((entry) => entry.command === "node");
     assert.equal(nodeCheck.version, process.versions.node);
-    assert.equal(nodeCheck.minimum_version, "22.14.0");
+    assert.equal(nodeCheck.minimum_version, "22.19.0");
     assert.equal(nodeCheck.version_supported, true);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -78,8 +84,6 @@ exit 9
     fs.chmodSync(fakeOpenClaw, 0o755);
     const result = runCliRaw([
       "doctor",
-      "--mode",
-      "tmux",
       "--openclaw-bin",
       fakeOpenClaw,
       "--timeout-ms",
@@ -103,19 +107,10 @@ test("CLI output redacts legacy Gateway credentials", () => {
   const gatewayToken = "gateway-token-that-must-not-reach-stdout";
 
   try {
-    const created = runCliRaw([
-      "new",
-      "--request",
-      "redaction test",
-      "--store-dir",
-      storeDir
-    ]);
-    assert.equal(created.status, 0, created.stderr);
-    const createdOutput = JSON.parse(created.stdout);
-    const statePath = createdOutput.paths.statePath;
-    const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
-    fs.writeFileSync(statePath, `${JSON.stringify({
-      ...state,
+    const stored = storeConversationFixture(storeDir, "redaction test");
+    const statePath = stored.paths.statePath;
+    const state = {
+      ...stored.conversation,
       gateway_token: gatewayToken,
       callback_command:
         `agent-knock-knock callback --token ${gatewayToken} --state ${statePath}`,
@@ -128,7 +123,8 @@ test("CLI output redacts legacy Gateway credentials", () => {
           inode: "private-inode"
         }
       }
-    }, null, 2)}\n`);
+    };
+    saveState(statePath, state);
 
     const status = runCliRaw([
       "status",
@@ -161,6 +157,31 @@ test("CLI output redacts legacy Gateway credentials", () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+function storeConversationFixture(storeDir: string, request: string) {
+  const conversation = createConversation({
+    userRequest: request,
+    executorKind: "claude",
+    executorSession: "claude-redaction",
+    now: new Date("2026-07-28T00:00:00.000Z")
+  });
+  const paths = pathsForConversation(conversation.conversation_id, storeDir);
+  const storedConversation = {
+    ...conversation,
+    store_dir: paths.storeDir,
+    conversation_dir: paths.conversationDir,
+    event_log_path: paths.logPath,
+    state_path: paths.statePath
+  };
+  saveState(paths.statePath, storedConversation);
+  appendEvent(paths.logPath, {
+    ts: storedConversation.created_at,
+    conversation_id: storedConversation.conversation_id,
+    event: "conversation_created",
+    conversation: storedConversation
+  });
+  return { conversation: storedConversation, paths };
+}
 
 function runCliRaw(args: string[]) {
   return spawnSync(process.execPath, [binPath, ...args], {

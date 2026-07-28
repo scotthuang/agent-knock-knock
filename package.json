@@ -1,7 +1,7 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.3.2",
-  "description": "Control local Codex and Claude Code from OpenClaw, take over the same live tmux session, and run managed ACP tasks through ACPX with Cursor support.",
+  "version": "0.4.0",
+  "description": "Control local Codex and Claude Code from OpenClaw through shared tmux terminals, with seamless human-agent handoff.",
   "license": "MIT",
   "type": "module",
   "homepage": "https://github.com/scotthuang/agent-knock-knock#readme",
@@ -15,14 +15,13 @@
   "keywords": [
     "openclaw",
     "openclaw-plugin",
-    "acpx",
-    "agent-client-protocol",
     "agent-orchestration",
     "codex",
     "claude-code",
-    "cursor",
     "coding-agent",
     "local-first",
+    "terminal-control",
+    "terminal-handoff",
     "tmux"
   ],
   "openclaw": {
@@ -59,10 +58,7 @@
     "templates",
     "docs/assets/agent-knock-knock-cover.jpg",
     "docs/assets/agent-knock-knock-icon.png",
-    "docs/quickstart-managed-acpx.md",
     "docs/quickstart-tmux.md",
-    "scripts/smoke-acpx.js",
-    "scripts/smoke-tmux.js",
     "openclaw.plugin.json",
     "README.md",
     "LICENSE",
@@ -77,17 +73,13 @@
     "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test dist/test/*.test.js",
-    "clawhub:validate": "npm run build && clawhub --workdir . package validate . --out .clawhub-validation --openclaw node_modules/openclaw --runtime --allow-execute --no-mock-sdk",
-    "clawhub:dry-run": "npm run build && clawhub package publish . --family code-plugin --owner scotthuang --tags latest --dry-run",
+    "clawhub:validate": "npm run build && clawhub --workdir . package validate . --out .clawhub-validation --runtime --allow-execute --no-mock-sdk",
+    "clawhub:dry-run": "npm run build && clawhub package publish . --family code-plugin --owner scotthuang --tags latest --topics tmux,codex,claude-code,agent-orchestration,terminal-handoff --dry-run",
     "compat:openclaw": "npm run build && node scripts/verify-openclaw-compatibility.js",
-    "smoke:acpx": "npm run build && node scripts/smoke-acpx.js",
-    "smoke:tmux": "npm run build && node scripts/smoke-tmux.js",
-    "simulate:architecture": "node scripts/two-claude-weather-test.js --scenario architecture-questions",
-    "simulate:weather": "node scripts/two-claude-weather-test.js --scenario weather",
     "transcript": "node dist/src/cli.js transcript"
   },
   "engines": {
-    "node": ">=22.14.0"
+    "node": ">=22.19.0"
   },
   "peerDependencies": {
     "openclaw": ">=2026.5.12"

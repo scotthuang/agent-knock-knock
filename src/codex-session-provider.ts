@@ -5,7 +5,7 @@ import type {
 } from "./terminal-agent-adapter.js";
 
 export type CodexSessionCapability = "full" | "metadata_only" | "unavailable";
-export type CodexProcessKind = "codex_cli" | "codex_acp";
+export type CodexProcessKind = "codex_cli";
 export type { DiscoveryConfidence, TerminalControlRef } from "./terminal-agent-adapter.js";
 
 export interface CodexThreadRow {
@@ -33,12 +33,6 @@ export interface CodexSessionSummary {
   archived: boolean;
   capability: CodexSessionCapability;
   capabilityReason?: string;
-}
-
-export interface CodexSessionModelInfo {
-  model: string;
-  acpxModel: string;
-  source: "turn_context" | "session_meta";
 }
 
 /** @deprecated Import TerminalProcessSnapshot from terminal-agent-adapter instead. */
@@ -152,16 +146,6 @@ export function classifyCodexProcess(process: CodexProcessSnapshot): ActiveCodex
     return undefined;
   }
 
-  if (/\bcodex-acp(?:\s|$)/i.test(command) || /@agentclientprotocol\/codex-acp|@zed-industries\/codex-acp/i.test(command)) {
-    return {
-      ...baseProcess(process),
-      kind: "codex_acp",
-      sessionId: extractResumeSessionId(command),
-      confidence: "medium",
-      reason: "codex ACP adapter process"
-    };
-  }
-
   if (!commandInvokesCodexCli(command)) {
     return undefined;
   }
@@ -253,60 +237,6 @@ export function parseCodexRolloutJsonl(text: string, options: RolloutExcerptOpti
     skippedLines,
     truncated
   };
-}
-
-export function parseCodexRolloutModel(text: string): CodexSessionModelInfo | undefined {
-  for (const line of text.split(/\r?\n/)) {
-    if (!line.trim()) {
-      continue;
-    }
-
-    let event: unknown;
-    try {
-      event = JSON.parse(line);
-    } catch {
-      continue;
-    }
-
-    const record = asRecord(event);
-    const payload = asRecord(record?.payload);
-    if (!record || !payload) {
-      continue;
-    }
-
-    const directModel = stringValue(payload.model);
-    if (directModel && (record.type === "turn_context" || record.type === "session_meta")) {
-      return {
-        model: directModel,
-        acpxModel: normalizeCodexAcpxModel(directModel),
-        source: record.type
-      };
-    }
-
-    if (record.type === "turn_context") {
-      const collaborationMode = asRecord(payload.collaboration_mode);
-      const settings = asRecord(collaborationMode?.settings);
-      const settingsModel = stringValue(settings?.model);
-      if (settingsModel) {
-        return {
-          model: settingsModel,
-          acpxModel: normalizeCodexAcpxModel(settingsModel),
-          source: "turn_context"
-        };
-      }
-    }
-  }
-
-  return undefined;
-}
-
-export function normalizeCodexAcpxModel(model: string): string {
-  const cleaned = model.trim();
-  if (!cleaned || cleaned.includes("[")) {
-    return cleaned;
-  }
-
-  return /^gpt-/i.test(cleaned) ? `${cleaned}[medium]` : cleaned;
 }
 
 export function buildForkContextPackage(session: CodexSessionSummary, rollout: RolloutExcerpt): ForkContextPackage {

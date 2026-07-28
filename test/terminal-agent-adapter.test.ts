@@ -18,6 +18,8 @@ import {
   type TerminalAgentAdapter
 } from "../src/terminal-agent-adapter.js";
 
+const UNKNOWN_AGENT = "unknown-agent" as never;
+
 test("agent-aware terminal conversation ids round-trip and legacy ids remain Codex", () => {
   const id = formatTerminalConversationId({
     agent: "claude",
@@ -60,7 +62,7 @@ test("malformed and unsupported agent-aware ids fail closed", () => {
     /unsupported terminal agent.*other/
   );
   assert.throws(
-    () => parseTerminalConversationId("terminal:v2:tmux:cursor:work:0.1:not-a-pid"),
+    () => parseTerminalConversationId("terminal:v2:tmux:codex:work:0.1:not-a-pid"),
     /invalid terminal-controlled conversation id/
   );
 });
@@ -105,8 +107,8 @@ test("registry dispatches a test-only adapter and fails closed for missing adapt
   assert.equal(registry.require("claude").inspectScreen({ screen: "ready" }).activity.state, "idle");
   assert.deepEqual(calls, ["process:7", "screen:ready"]);
   assert.throws(
-    () => registry.require("cursor"),
-    /terminal agent adapter is not registered for cursor/
+    () => registry.require(UNKNOWN_AGENT),
+    /terminal agent adapter is not registered for unknown-agent/
   );
 });
 
@@ -114,8 +116,8 @@ test("default registry exposes Codex and Claude and rejects unsupported terminal
   assert.equal(terminalAgentAdapterFor("codex"), codexTerminalAgentAdapter);
   assert.equal(terminalAgentAdapterFor("claude"), claudeTerminalAgentAdapter);
   assert.throws(
-    () => terminalAgentAdapterFor("cursor"),
-    /terminal agent adapter is not registered for cursor/
+    () => terminalAgentAdapterFor(UNKNOWN_AGENT),
+    /terminal agent adapter is not registered for unknown-agent/
   );
 });
 
@@ -234,9 +236,5 @@ test("adapter capabilities advertise semantic terminal behavior explicitly", () 
   assert.equal(
     codexTerminalAgentAdapter.classifyProcess({ pid: 42, command: "codex", cwd: "/repo" })?.kind,
     "codex_cli"
-  );
-  assert.equal(
-    codexTerminalAgentAdapter.classifyProcess({ pid: 43, command: "codex-acp", cwd: "/repo" }),
-    undefined
   );
 });

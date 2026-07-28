@@ -60,10 +60,6 @@ test("user-facing installation docs state the supported floor and failing bounda
     path.join(packageRoot, "docs", "quickstart-tmux.md"),
     "utf8"
   );
-  const acpxQuickstart = fs.readFileSync(
-    path.join(packageRoot, "docs", "quickstart-managed-acpx.md"),
-    "utf8"
-  );
 
   assert.match(
     readme,
@@ -72,7 +68,6 @@ test("user-facing installation docs state the supported floor and failing bounda
   assert.match(readme, new RegExp(escapeRegex(minimumApiVersion)));
   assert.match(readme, new RegExp(escapeRegex(boundaryVersion)));
   assert.match(tmuxQuickstart, new RegExp(escapeRegex(minimumHostVersion)));
-  assert.match(acpxQuickstart, new RegExp(escapeRegex(minimumHostVersion)));
 });
 
 function escapeRegex(value: string): string {

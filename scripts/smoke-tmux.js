@@ -70,7 +70,8 @@ const result = runCli(cliPath, [
   "--conversation",
   String(selected.id),
   "--message",
-  message
+  message,
+  "--background"
 ]);
 process.stdout.write(`${JSON.stringify({
   ok: true,

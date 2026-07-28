@@ -139,7 +139,7 @@ test("install-openclaw atomically preserves approval policy and verifies first-r
         enabled: false,
         config: {
           autoApprove: approvalPolicy,
-          softLimit: 8
+          idleTimeoutMinutes: 8
         }
       }),
       "utf8"
@@ -162,19 +162,13 @@ test("install-openclaw atomically preserves approval policy and verifies first-r
       workspace,
       "--default-agent",
       "codex",
-      "--mode",
-      "tmux",
       "--verify",
       "--tmux-bin",
       fakeTmux,
       "--codex-bin",
       fakeCodex,
-      "--acpx-bin",
-      path.join(tempDir, "missing-acpx"),
       "--claude-bin",
-      path.join(tempDir, "missing-claude"),
-      "--cursor-bin",
-      path.join(tempDir, "missing-cursor")
+      path.join(tempDir, "missing-claude")
     ]);
 
     assert.equal(result.installed, true);
@@ -186,10 +180,9 @@ test("install-openclaw atomically preserves approval policy and verifies first-r
     assert.equal(result.verification.openclaw.gateway_ready, true);
     const saved = JSON.parse(fs.readFileSync(configPath, "utf8"));
     assert.deepEqual(saved.config.autoApprove, approvalPolicy);
-    assert.equal(saved.config.softLimit, 8);
+    assert.equal(saved.config.idleTimeoutMinutes, 8);
     assert.equal(saved.config.workspace, workspace);
     assert.equal(saved.config.defaultAgent, "codex");
-    assert.equal(saved.config.mode, "tmux");
     assert.equal(saved.enabled, true);
     assert.equal(
       readCalls(callsPath)

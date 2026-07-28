@@ -8,7 +8,7 @@ Check the README troubleshooting section and run:
 agent-knock-knock doctor
 ```
 
-Search the existing GitHub issues before opening a new one. AKK supports Codex, Claude Code, and Cursor through ACPX. Native tmux control currently supports Codex and Claude Code; Cursor tmux support is tracked in issue #42.
+Search the existing GitHub issues before opening a new one. AKK supports Codex and Claude Code running inside tmux as the same OS user as OpenClaw.
 
 ## Ask for Help
 

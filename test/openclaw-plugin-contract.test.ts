@@ -24,6 +24,12 @@ type Manifest = {
 
 type ToolDefinition = {
   name?: string;
+  execute?: (
+    toolCallId: string,
+    params: Record<string, unknown>
+  ) => Promise<{
+    details?: Record<string, unknown>;
+  }>;
 };
 
 type ToolFactory = (context: Record<string, never>) => ToolDefinition;
@@ -120,6 +126,80 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
 });
 
+test("OpenClaw delegate returns tmux conversation storage paths", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-plugin-delegate-paths-"));
+  const fakeCli = path.join(tempDir, "delegate.cjs");
+  const statePath = path.join(tempDir, "state.json");
+  const eventLogPath = path.join(tempDir, "events.ndjson");
+  let delegateTool: ToolDefinition | undefined;
+
+  try {
+    fs.writeFileSync(
+      fakeCli,
+      [
+        `const result = ${JSON.stringify({
+          conversation: {
+            conversation_id: "managed-terminal-1",
+            status: "waiting_for_agent",
+            state_path: statePath,
+            event_log_path: eventLogPath,
+            executor: {
+              kind: "codex",
+              session: "terminal:v2:tmux:codex:work:0.0:123"
+            }
+          },
+          terminal_control: {
+            target: "work:0.0",
+            panePid: 123
+          },
+          delivered: true,
+          background: true
+        })};`,
+        "process.stdout.write(JSON.stringify(result));"
+      ].join("\n")
+    );
+
+    (
+      plugin as unknown as {
+        register(api: Record<string, any>): void;
+      }
+    ).register({
+      pluginConfig: {
+        binPath: fakeCli,
+        workspace: tempDir
+      },
+      logger: {
+        info() {},
+        warn() {}
+      },
+      registerGatewayMethod() {},
+      registerService() {},
+      registerCommand() {},
+      registerTool(
+        tool: ToolDefinition | ToolFactory,
+        options?: { name?: string }
+      ) {
+        const definition = typeof tool === "function"
+          ? tool({ sessionKey: "agent:test:main" } as never)
+          : tool;
+        if (options?.name === "agent_knock_knock_delegate") {
+          delegateTool = definition;
+        }
+      }
+    });
+
+    assert.equal(typeof delegateTool?.execute, "function");
+    const result = await delegateTool?.execute?.("tool-call-1", {
+      request: "Verify the delegate output contract",
+      agent: "codex"
+    });
+    assert.equal(result?.details?.state_path, statePath);
+    assert.equal(result?.details?.event_log_path, eventLogPath);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("bundled OpenClaw skills exist and are included in the npm artifact", () => {
   const manifest = readManifest();
   const skillPaths = requiredStringArray(manifest.skills, "skills");
@@ -170,10 +250,7 @@ test("bundled OpenClaw skills exist and are included in the npm artifact", () =>
   }
   for (const documentationPath of [
     "README.md",
-    "docs/quickstart-tmux.md",
-    "docs/quickstart-managed-acpx.md",
-    "scripts/smoke-acpx.js",
-    "scripts/smoke-tmux.js"
+    "docs/quickstart-tmux.md"
   ]) {
     assert.equal(
       packedFiles.has(documentationPath),
@@ -298,10 +375,8 @@ test("/akk doctor leaves the Gateway event loop free for its health check", asyn
   const server = http.createServer((_request, response) => {
     response.end(JSON.stringify({
       ok: true,
-      selected_mode: "tmux",
       capabilities: {
-        tmux: { checked: true, status: "ready" },
-        acpx: { checked: false, status: "partially_ready" }
+        tmux: { checked: true, status: "ready" }
       },
       openclaw: {
         package_ready: true,
@@ -358,7 +433,7 @@ request.on("error", () => process.exit(4));
 
       assert.equal(typeof command?.handler, "function");
       const result = await command?.handler?.({
-        args: "doctor tmux",
+        args: "doctor",
         sessionKey: "agent:main:main"
       });
       assert.match(result?.text ?? "", /AKK doctor: ready/u);

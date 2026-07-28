@@ -14,13 +14,12 @@ const packageRoot = path.resolve(
 
 test("five-minute guides use implemented installer, doctor, and selector contracts", () => {
   const tmux = read("docs/quickstart-tmux.md");
-  const acpx = read("docs/quickstart-managed-acpx.md");
 
   assert.match(
     tmux,
-    /agent-knock-knock install-openclaw --workspace "\$PWD" --default-agent codex --mode tmux --verify/u
+    /agent-knock-knock install-openclaw --workspace "\$PWD" --default-agent codex --verify/u
   );
-  assert.match(tmux, /agent-knock-knock doctor --mode tmux/u);
+  assert.match(tmux, /agent-knock-knock doctor/u);
   assert.match(tmux, /tmux new-session -s akk-work -c "\$PWD" codex/u);
   assert.deepEqual(
     parseAkkCommand("send codex: inspect this repository and summarize it"),
@@ -31,11 +30,6 @@ test("five-minute guides use implemented installer, doctor, and selector contrac
     }
   );
 
-  assert.match(
-    acpx,
-    /agent-knock-knock install-openclaw --workspace "\$PWD" --default-agent codex --mode acpx --verify/u
-  );
-  assert.match(acpx, /agent-knock-knock doctor --mode acpx/u);
   assert.deepEqual(parseAkkCommand("codex inspect this repository and summarize it"), {
     action: "delegate",
     agent: "codex",
@@ -65,17 +59,14 @@ test("five-minute guides use implemented installer, doctor, and selector contrac
     ]
   );
 
-  for (const guide of [tmux, acpx]) {
-    assert.doesNotMatch(guide, /<conversation-id>|<terminal-controlled-id>/u);
-  }
+  assert.doesNotMatch(tmux, /<conversation-id>|<terminal-controlled-id>/u);
 });
 
-test("root README links both packaged guides and exposes chat-side doctor", () => {
+test("root README links the canonical tmux guide and exposes chat-side doctor", () => {
   const readme = read("README.md");
 
   assert.match(readme, /docs\/quickstart-tmux\.md/u);
-  assert.match(readme, /docs\/quickstart-managed-acpx\.md/u);
-  assert.match(readme, /\/akk doctor \[tmux\|acpx\|all\]/u);
+  assert.match(readme, /\/akk doctor/u);
 });
 
 function read(relativePath: string): string {

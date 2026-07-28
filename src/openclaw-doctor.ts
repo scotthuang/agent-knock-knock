@@ -29,7 +29,7 @@ export interface OpenClawChainDiagnostics {
   ready: boolean;
   package_ready: boolean;
   gateway_ready: boolean;
-  default_agent?: "codex" | "claude" | "cursor";
+  default_agent?: "codex" | "claude";
   workspace?: string;
   checks: OpenClawDiagnosticCheck[];
 }
@@ -424,8 +424,8 @@ function stringValue(value: unknown): string | undefined {
     : undefined;
 }
 
-function executorValue(value: unknown): "codex" | "claude" | "cursor" | undefined {
-  return value === "codex" || value === "claude" || value === "cursor"
+function executorValue(value: unknown): "codex" | "claude" | undefined {
+  return value === "codex" || value === "claude"
     ? value
     : undefined;
 }

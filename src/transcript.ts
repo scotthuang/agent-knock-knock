@@ -45,7 +45,7 @@ export function formatTranscript(events: TranscriptEvent[], { includeRaw = false
   for (const event of events) {
     if (event.event === "conversation_created") {
       lines.push(formatConversationCreated(event));
-    } else if (event.event === "message" && event.source !== "normalized_acpx") {
+    } else if (event.event === "message") {
       lines.push(formatMessage(event));
     } else if (event.event === "conversation_closed") {
       lines.push(formatConversationClosed(event));
@@ -103,8 +103,7 @@ function isDebugEvent(event: TranscriptEvent): boolean {
   return event.event === "raw_exchange" ||
     event.event?.startsWith("developer_step_") ||
     event.event?.startsWith("manager_step_") ||
-    event.event === "manager_final" ||
-    event.source === "normalized_acpx";
+    event.event === "manager_final";
 }
 
 function indent(value: unknown): string {

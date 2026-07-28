@@ -1,7 +1,7 @@
 {
   "id": "agent-knock-knock",
   "name": "Agent Knock Knock",
-  "description": "Delegate OpenClaw coding tasks to local Codex, Claude Code, or Cursor agents, then take over the same live terminal session.",
+  "description": "Control local Codex and Claude Code through shared tmux terminals, with live monitoring, approvals, and human takeover.",
   "icon": "https://raw.githubusercontent.com/scotthuang/agent-knock-knock/main/docs/assets/agent-knock-knock-icon.png",
   "activation": {
     "onStartup": true,
@@ -23,7 +23,6 @@
       "agent_knock_knock_renew",
       "agent_knock_knock_retry_callback",
       "agent_knock_knock_cancel",
-      "agent_knock_knock_recover",
       "agent_knock_knock_close",
       "agent_knock_knock_approve",
       "agent_knock_knock_agent_takeover"
@@ -54,9 +53,6 @@
     "agent_knock_knock_cancel": {
       "optional": true
     },
-    "agent_knock_knock_recover": {
-      "optional": true
-    },
     "agent_knock_knock_close": {
       "optional": true
     },
@@ -80,81 +76,16 @@
       },
       "workspace": {
         "type": "string",
-        "description": "Default workspace for delegated coding-agent tasks."
+        "description": "Workspace matched against eligible coding-agent tmux panes."
       },
       "storeDir": {
         "type": "string",
         "description": "Default conversation store directory."
       },
-      "claudeSession": {
-        "type": "string",
-        "description": "Default Claude Code session name."
-      },
-      "codexSession": {
-        "type": "string",
-        "description": "Default Codex session name."
-      },
-      "cursorSession": {
-        "type": "string",
-        "description": "Default Cursor session name."
-      },
       "defaultAgent": {
         "type": "string",
-        "enum": ["claude", "codex", "cursor"],
+        "enum": ["claude", "codex"],
         "description": "Default coding agent for unspecified AKK delegations. If unset, Agent Knock Knock falls back to codex."
-      },
-      "mode": {
-        "type": "string",
-        "enum": ["tmux", "acpx", "all"],
-        "description": "Execution mode checked by /akk doctor. tmux shares live Codex or Claude terminals; acpx runs managed Codex, Claude, or Cursor tasks."
-      },
-      "defaultClaudeSession": {
-        "type": "string",
-        "description": "Default Claude Code session name. claudeSession remains supported as a compatibility alias."
-      },
-      "defaultCodexSession": {
-        "type": "string",
-        "description": "Default Codex session name."
-      },
-      "defaultCursorSession": {
-        "type": "string",
-        "description": "Default Cursor session name."
-      },
-      "codexAllProxy": {
-        "type": "string",
-        "description": "ALL_PROXY value used when launching Codex through ACPX."
-      },
-      "cursorAllProxy": {
-        "type": "string",
-        "description": "ALL_PROXY value used when launching Cursor through ACPX."
-      },
-      "codexModel": {
-        "type": "string",
-        "description": "ACPX model id used when launching Codex."
-      },
-      "cursorModel": {
-        "type": "string",
-        "description": "ACPX model id used when launching Cursor."
-      },
-      "model": {
-        "type": "string",
-        "description": "ACPX model id used when launching coding agents."
-      },
-      "allProxy": {
-        "type": "string",
-        "description": "ALL_PROXY value used when launching coding agents through ACPX."
-      },
-      "openclawSession": {
-        "type": "string",
-        "description": "Default OpenClaw session label stored in the protocol state."
-      },
-      "gatewayUrl": {
-        "type": "string",
-        "description": "Deprecated compatibility field. Plugin callbacks use OpenClaw's configured Gateway target and do not forward this value."
-      },
-      "gatewayToken": {
-        "type": "string",
-        "description": "Deprecated compatibility field. Plugin callbacks use OpenClaw's Gateway credentials and never forward this value to coding agents."
       },
       "openclawBin": {
         "type": "string",
@@ -162,11 +93,7 @@
       },
       "codexHome": {
         "type": "string",
-        "description": "Optional CODEX_HOME path used when resolving native Codex sessions for agent takeover."
-      },
-      "callbackCommand": {
-        "type": "string",
-        "description": "Optional callback command template. {statePath} and {state_path} are replaced with the shell-quoted state path."
+        "description": "Optional CODEX_HOME path used to correlate Codex session metadata with eligible tmux takeover targets."
       },
       "idleTimeoutMinutes": {
         "type": "number",
@@ -232,12 +159,6 @@
             }
           }
         }
-      },
-      "softLimit": {
-        "type": "number"
-      },
-      "hardLimit": {
-        "type": "number"
       }
     }
   }

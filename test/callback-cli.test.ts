@@ -4,6 +4,18 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import {
+  applyMessageToConversation,
+  createConversation,
+  createMessage,
+  type ExecutorKind
+} from "../src/protocol.js";
+import {
+  appendEvent,
+  messageEvent,
+  pathsForConversation,
+  saveState
+} from "../src/store.js";
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 
@@ -11,13 +23,7 @@ test("callback records a structured Claude message before delivery", () => {
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-"));
 
   try {
-    const created = runCli([
-      "new",
-      "--request",
-      "Callback test",
-      "--store-dir",
-      storeDir
-    ]);
+    const created = createCallbackConversation(storeDir, "Callback test");
     const statePath = created.paths.statePath;
 
     const callback = runCli([
@@ -53,13 +59,10 @@ test("callback does not record duplicate structured messages", () => {
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-"));
 
   try {
-    const created = runCli([
-      "new",
-      "--request",
-      "Callback duplicate test",
-      "--store-dir",
-      storeDir
-    ]);
+    const created = createCallbackConversation(
+      storeDir,
+      "Callback duplicate test"
+    );
     const statePath = created.paths.statePath;
     const messageJson = JSON.stringify({
       from: "claude-code",
@@ -107,13 +110,10 @@ test("callback refuses to write to a corrupted event log", () => {
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-"));
 
   try {
-    const created = runCli([
-      "new",
-      "--request",
-      "Callback corrupted log test",
-      "--store-dir",
-      storeDir
-    ]);
+    const created = createCallbackConversation(
+      storeDir,
+      "Callback corrupted log test"
+    );
     fs.writeFileSync(created.paths.logPath, JSON.stringify({ event: "conversation_created" }, null, 2), "utf8");
 
     const result = spawnSync(process.execPath, [
@@ -144,13 +144,10 @@ test("callback serializes concurrent duplicate messages", async () => {
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-"));
 
   try {
-    const created = runCli([
-      "new",
-      "--request",
-      "Callback concurrent duplicate test",
-      "--store-dir",
-      storeDir
-    ]);
+    const created = createCallbackConversation(
+      storeDir,
+      "Callback concurrent duplicate test"
+    );
     const messageJson = JSON.stringify({
       from: "claude-code",
       to: "openclaw",
@@ -215,19 +212,15 @@ console.log(JSON.stringify({ ok: true }));
     );
     fs.chmodSync(fakeOpenClaw, 0o755);
 
-    const created = runCli([
-      "new",
-      "--agent",
-      "codex",
-      "--session",
-      "codex-callback",
-      "--request",
-      "Callback gateway method test",
-      "--store-dir",
+    const created = createCallbackConversation(
       storeDir,
-      "--openclaw-session",
-      "agent:main:main"
-    ]);
+      "Callback gateway method test",
+      {
+        agent: "codex",
+        session: "codex-callback",
+        openclawSession: "agent:main:main"
+      }
+    );
 
     const callback = runCli([
       "callback",
@@ -308,17 +301,14 @@ console.log(JSON.stringify({ ok: true }));
     );
     fs.chmodSync(fakeOpenClaw, 0o755);
 
-    const created = runCli([
-      "new",
-      "--agent",
-      "codex",
-      "--request",
-      "Retry terminal callback",
-      "--store-dir",
+    const created = createCallbackConversation(
       storeDir,
-      "--openclaw-session",
-      "agent:main:main"
-    ]);
+      "Retry terminal callback",
+      {
+        agent: "codex",
+        openclawSession: "agent:main:main"
+      }
+    );
     const message = {
       id: "msg-stable-retry-id",
       ts: "2026-07-20T00:00:00.000Z",
@@ -407,17 +397,14 @@ console.log(JSON.stringify({ ok: true }));
     );
     fs.chmodSync(fakeOpenClaw, 0o755);
 
-    const created = runCli([
-      "new",
-      "--agent",
-      "codex",
-      "--request",
-      "Recover callback_pending after a crash",
-      "--store-dir",
+    const created = createCallbackConversation(
       storeDir,
-      "--openclaw-session",
-      "agent:main:main"
-    ]);
+      "Recover callback_pending after a crash",
+      {
+        agent: "codex",
+        openclawSession: "agent:main:main"
+      }
+    );
     const message = {
       id: "msg-pending-crash-recovery",
       ts: "2026-07-24T00:00:00.000Z",
@@ -530,17 +517,10 @@ console.log(JSON.stringify({ ok: true }));
       "utf8"
     );
     fs.chmodSync(fakeOpenClaw, 0o755);
-    const created = runCli([
-      "new",
-      "--agent",
-      "codex",
-      "--request",
-      "Automatic retry",
-      "--store-dir",
-      storeDir,
-      "--openclaw-session",
-      "agent:main:main"
-    ]);
+    const created = createCallbackConversation(storeDir, "Automatic retry", {
+      agent: "codex",
+      openclawSession: "agent:main:main"
+    });
     const failed = spawnSync(process.execPath, [
       binPath,
       "callback",
@@ -623,15 +603,11 @@ if (method === "agent-knock-knock.callback") {
     );
     fs.chmodSync(fakeOpenClaw, 0o755);
 
-    const created = runCli([
-      "new",
-      "--request",
-      "Callback session send test",
-      "--store-dir",
+    const created = createCallbackConversation(
       storeDir,
-      "--openclaw-session",
-      "agent:main:main"
-    ]);
+      "Callback session send test",
+      { openclawSession: "agent:main:main" }
+    );
 
     const callback = runCli([
       "callback",
@@ -733,17 +709,14 @@ if (method === "agent-knock-knock.callback") {
     );
     fs.chmodSync(fakeOpenClaw, 0o755);
 
-    const created = runCli([
-      "new",
-      "--agent",
-      "codex",
-      "--request",
-      "Wait for callback run completion",
-      "--store-dir",
+    const created = createCallbackConversation(
       storeDir,
-      "--openclaw-session",
-      "agent:main:main"
-    ]);
+      "Wait for callback run completion",
+      {
+        agent: "codex",
+        openclawSession: "agent:main:main"
+      }
+    );
     const failed = spawnSync(process.execPath, [
       binPath,
       "callback",
@@ -811,15 +784,11 @@ test("callback treats agent.wait timeout as a retryable delivery failure", () =>
       chatSendPayload: { runId: "akk-wait-timeout", status: "started" },
       agentWaitPayload: { runId: "akk-wait-timeout", status: "timeout" }
     });
-    const created = runCli([
-      "new",
-      "--request",
-      "Timeout callback run",
-      "--store-dir",
+    const created = createCallbackConversation(
       storeDir,
-      "--openclaw-session",
-      "agent:main:main"
-    ]);
+      "Timeout callback run",
+      { openclawSession: "agent:main:main" }
+    );
     const result = runCallbackExpectFailure(created.paths.statePath, fakeOpenClaw);
     assert.match(result.stderr, /agent\.wait returned timeout/);
     const state = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
@@ -854,15 +823,11 @@ test("callback does not mark an agent.wait error as delivered", () => {
         error: "channel delivery failed"
       }
     });
-    const created = runCli([
-      "new",
-      "--request",
-      "Failed callback run",
-      "--store-dir",
+    const created = createCallbackConversation(
       storeDir,
-      "--openclaw-session",
-      "agent:main:main"
-    ]);
+      "Failed callback run",
+      { openclawSession: "agent:main:main" }
+    );
     const result = runCallbackExpectFailure(created.paths.statePath, fakeOpenClaw);
     assert.match(result.stderr, /channel delivery failed/);
     const state = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
@@ -910,15 +875,11 @@ test("callback rejects mismatched Gateway run identities", () => {
         chatSendPayload: testCase.chatSendPayload,
         agentWaitPayload: testCase.agentWaitPayload
       });
-      const created = runCli([
-        "new",
-        "--request",
-        `Reject mismatched ${testCase.name}`,
-        "--store-dir",
+      const created = createCallbackConversation(
         storeDir,
-        "--openclaw-session",
-        "agent:main:main"
-      ]);
+        `Reject mismatched ${testCase.name}`,
+        { openclawSession: "agent:main:main" }
+      );
       const result = runCallbackExpectFailure(created.paths.statePath, fakeOpenClaw);
       assert.match(result.stderr, testCase.error);
       const state = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
@@ -947,15 +908,11 @@ test("callback keeps legacy delivery plans compatible while confirming sessions.
       },
       chatSendPayload: { runId: "akk-legacy-run", status: "ok" }
     });
-    const legacy = runCli([
-      "new",
-      "--request",
-      "Accept legacy callback plan",
-      "--store-dir",
+    const legacy = createCallbackConversation(
       storeDir,
-      "--openclaw-session",
-      "agent:main:main"
-    ]);
+      "Accept legacy callback plan",
+      { openclawSession: "agent:main:main" }
+    );
     const legacyResult = runCli([
       "callback",
       "--state",
@@ -991,15 +948,11 @@ test("callback keeps legacy delivery plans compatible while confirming sessions.
       sessionSendPayload: { runId: "akk-session-run", status: "started" },
       agentWaitPayload: { runId: "akk-session-run", status: "ok" }
     });
-    const session = runCli([
-      "new",
-      "--request",
-      "Confirm sessions.send callback",
-      "--store-dir",
+    const session = createCallbackConversation(
       storeDir,
-      "--openclaw-session",
-      "agent:main:main"
-    ]);
+      "Confirm sessions.send callback",
+      { openclawSession: "agent:main:main" }
+    );
     const sessionResult = runCli([
       "callback",
       "--state",
@@ -1088,15 +1041,11 @@ test("callback fails closed for malformed or incomplete gateway delivery plans",
         gatewayPayload: testCase.gatewayPayload,
         gatewayStdout: testCase.stdout
       });
-      const created = runCli([
-        "new",
-        "--request",
-        `Reject ${testCase.name}`,
-        "--store-dir",
+      const created = createCallbackConversation(
         storeDir,
-        "--openclaw-session",
-        "agent:main:main"
-      ]);
+        `Reject ${testCase.name}`,
+        { openclawSession: "agent:main:main" }
+      );
       const result = runCallbackExpectFailure(created.paths.statePath, fakeOpenClaw);
       assert.match(result.stderr, testCase.error);
       const state = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
@@ -1108,6 +1057,62 @@ test("callback fails closed for malformed or incomplete gateway delivery plans",
     }
   }
 });
+
+function createCallbackConversation(
+  storeDir: string,
+  request: string,
+  {
+    agent = "claude",
+    session,
+    openclawSession = "agent:main:main"
+  }: {
+    agent?: ExecutorKind;
+    session?: string;
+    openclawSession?: string;
+  } = {}
+) {
+  const conversation = createConversation({
+    userRequest: request,
+    workspace: process.cwd(),
+    openclawSession,
+    executorKind: agent,
+    executorSession: session
+  });
+  const taskMessage = createMessage({
+    conversation,
+    from: "openclaw",
+    to: conversation.executor.actor,
+    type: "task",
+    body: request,
+    metadata: {
+      executor_kind: conversation.executor.kind,
+      executor_session: conversation.executor.session
+    }
+  });
+  const paths = pathsForConversation(conversation.conversation_id, storeDir);
+  const storedConversation = {
+    ...applyMessageToConversation(conversation, taskMessage),
+    store_dir: paths.storeDir,
+    conversation_dir: paths.conversationDir,
+    event_log_path: paths.logPath,
+    state_path: paths.statePath
+  };
+
+  saveState(paths.statePath, storedConversation);
+  appendEvent(paths.logPath, {
+    ts: conversation.created_at,
+    conversation_id: conversation.conversation_id,
+    event: "conversation_created",
+    conversation: storedConversation
+  });
+  appendEvent(paths.logPath, messageEvent(taskMessage));
+
+  return {
+    conversation: storedConversation,
+    paths,
+    task_message: taskMessage
+  };
+}
 
 function writeCallbackPlanOpenClaw(fakeBinDir, options) {
   const fakeOpenClaw = path.join(fakeBinDir, "openclaw");

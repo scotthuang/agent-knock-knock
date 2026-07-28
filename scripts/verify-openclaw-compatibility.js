@@ -568,22 +568,16 @@ async function verifyFullHost({
       run(process.execPath, [
         relayPath,
         "doctor",
-        "--mode",
-        "all",
         "--workspace",
         workspace,
         "--openclaw-bin",
         host.openclawBin,
         "--tmux-bin",
         fakeExecutables.tmux,
-        "--acpx-bin",
-        fakeExecutables.acpx,
         "--codex-bin",
         fakeExecutables.codex,
         "--claude-bin",
         fakeExecutables.claude,
-        "--cursor-bin",
-        fakeExecutables.cursor,
         "--timeout-ms",
         "20000"
       ], {
@@ -597,7 +591,6 @@ async function verifyFullHost({
     assert.equal(doctor.openclaw?.package_ready, true);
     assert.equal(doctor.openclaw?.gateway_ready, true);
     assert.equal(doctor.capabilities?.tmux?.status, "ready");
-    assert.equal(doctor.capabilities?.acpx?.status, "ready");
   } finally {
     await stopGateway(gateway);
   }
@@ -639,7 +632,7 @@ async function verifyFullHost({
     akk_doctor_command: "passed",
     bundled_skill: "eligible",
     tmux_read_only_fixture: "passed",
-    managed_acpx_diagnostics: "passed",
+    tmux_diagnostics: "passed",
     update_reinstall: "passed",
     update_dry_run: lifecycle.update,
     uninstall: "passed"
@@ -1069,10 +1062,8 @@ function createFakeExecutables(caseRoot) {
   fs.mkdirSync(binDir, { recursive: true });
   const values = {
     tmux: { filename: "tmux", version: "tmux 3.5a" },
-    acpx: { filename: "acpx", version: "acpx 0.1.15" },
     codex: { filename: "codex", version: "codex-cli 0.107.0" },
-    claude: { filename: "claude", version: "2.1.218" },
-    cursor: { filename: "cursor-agent", version: "2.4.0" }
+    claude: { filename: "claude", version: "2.1.218" }
   };
   return Object.fromEntries(
     Object.entries(values).map(([name, value]) => {

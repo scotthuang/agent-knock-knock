@@ -11,7 +11,7 @@ import {
 } from "../src/doctor-capabilities.js";
 
 function checks(available: string[]) {
-  return ["node", "openclaw", "tmux", "acpx", "codex", "claude", "cursor"]
+  return ["node", "openclaw", "tmux", "codex", "claude"]
     .map((command) => ({
       command,
       available: available.includes(command),
@@ -19,7 +19,7 @@ function checks(available: string[]) {
     }));
 }
 
-test("doctor accepts a tmux-only installation without ACPX", () => {
+test("doctor accepts a tmux installation with either supported coding agent", () => {
   const result = evaluateDoctorCapabilities(
     checks(["node", "openclaw", "tmux", "claude"])
   );
@@ -29,44 +29,37 @@ test("doctor accepts a tmux-only installation without ACPX", () => {
   assert.equal(result.tmux.available, true);
   assert.equal(result.tmux.status, "ready");
   assert.deepEqual(result.tmux.agents, ["claude"]);
-  assert.equal(result.acp.available, false);
-  assert.equal(result.acpx, result.acp);
+  assert.equal(result.mode, "tmux");
   assert.equal(result.readiness, "ready");
 });
 
-test("doctor accepts ACPX without tmux and rejects an unusable transport", () => {
-  const acpOnly = evaluateDoctorCapabilities(
-    checks(["node", "openclaw", "acpx", "cursor"])
+test("doctor rejects missing tmux or a missing supported coding agent", () => {
+  const withoutTmux = evaluateDoctorCapabilities(
+    checks(["node", "openclaw", "codex"])
   );
-  assert.equal(acpOnly.transportOk, true);
-  assert.equal(acpOnly.tmux.available, false);
-  assert.equal(acpOnly.acp.available, true);
-  assert.deepEqual(acpOnly.acp.agents, ["cursor"]);
+  assert.equal(withoutTmux.transportOk, false);
+  assert.equal(withoutTmux.tmux.available, false);
+  assert.deepEqual(withoutTmux.tmux.missing, ["tmux"]);
 
-  const unusable = evaluateDoctorCapabilities(
-    checks(["node", "openclaw", "tmux", "cursor"])
+  const withoutAgent = evaluateDoctorCapabilities(
+    checks(["node", "openclaw", "tmux"])
   );
-  assert.equal(unusable.transportOk, false);
-  assert.equal(unusable.tmux.available, false);
-  assert.equal(unusable.acp.available, false);
+  assert.equal(withoutAgent.transportOk, false);
+  assert.equal(withoutAgent.tmux.available, false);
+  assert.deepEqual(withoutAgent.tmux.missing, ["codex or claude"]);
 });
 
-test("doctor reports readiness for the selected execution mode", () => {
+test("doctor reports tmux readiness", () => {
   const installed = checks(["node", "openclaw", "tmux", "codex"]);
 
-  const tmux = evaluateDoctorCapabilities(installed, "tmux");
+  const tmux = evaluateDoctorCapabilities(installed);
   assert.equal(tmux.mode, "tmux");
   assert.equal(tmux.readiness, "ready");
   assert.deepEqual(tmux.tmux.missing, []);
 
-  const acpx = evaluateDoctorCapabilities(installed, "acpx");
-  assert.equal(acpx.readiness, "partially_ready");
-  assert.deepEqual(acpx.acpx.missing, ["acpx"]);
-
-  const nothing = evaluateDoctorCapabilities(checks(["node"]), "all");
+  const nothing = evaluateDoctorCapabilities(checks(["node"]));
   assert.equal(nothing.readiness, "not_ready");
   assert.equal(nothing.tmux.status, "not_ready");
-  assert.equal(nothing.acpx.status, "not_ready");
 });
 
 test("failed OpenClaw execution cannot produce a ready result", () => {
@@ -75,7 +68,7 @@ test("failed OpenClaw execution cannot produce a ready result", () => {
     { command: "openclaw", available: false, status: "version_failed" },
     { command: "tmux", available: true, status: "ok" },
     { command: "codex", available: true, status: "ok" }
-  ], "tmux");
+  ]);
 
   assert.equal(result.coreOk, false);
   assert.equal(result.readiness, "partially_ready");
@@ -87,7 +80,7 @@ test("doctor capability evaluation fails closed without an explicit supported No
     { command: "openclaw", available: true, status: "ok" },
     { command: "tmux", available: true, status: "ok" },
     { command: "codex", available: true, status: "ok" }
-  ], "tmux");
+  ]);
 
   assert.equal(result.coreOk, false);
   assert.notEqual(result.readiness, "ready");
@@ -101,10 +94,8 @@ test("real probes accept supported version output without invoking a shell", () 
     const versions = {
       openclaw: "OpenClaw 2026.7.1-2",
       tmux: "tmux 3.5a",
-      acpx: "acpx 0.1.15",
       codex: "codex-cli 0.107.0",
-      claude: "2.1.15 (Claude Code)",
-      cursor: "Cursor 2.4.0"
+      claude: "2.1.15 (Claude Code)"
     };
     const executables = Object.fromEntries(
       DOCTOR_PROBE_COMMANDS.map((command) => {
@@ -129,7 +120,7 @@ process.stdout.write(${JSON.stringify(versions[command])});
     assert.equal(probes.every((probe) => probe.status === "ok"), true);
     assert.deepEqual(
       probes.map((probe) => probe.version),
-      ["2026.7.1-2", "3.5a", "0.1.15", "0.107.0", "2.1.15", "2.4.0"]
+      ["2026.7.1-2", "3.5a", "0.107.0", "2.1.15"]
     );
     assert.equal(probes.every((probe) => probe.available), true);
   } finally {
@@ -137,42 +128,17 @@ process.stdout.write(${JSON.stringify(versions[command])});
   }
 });
 
-test("Cursor probes the ACP-capable cursor-agent binary by default", () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-doctor-cursor-agent-"));
-  const cursorAgent = writeFakeExecutable(
-    tempDir,
-    "cursor-agent",
-    `process.stdout.write("2026.06.19-20-24-33-653a7fb");`
-  );
-
-  try {
-    const probe = probeDoctorCommand("cursor", {
-      env: {
-        PATH: tempDir
-      }
-    });
-    assert.equal(probe.executable, "cursor-agent");
-    assert.equal(probe.status, "ok");
-    assert.equal(probe.version, "2026.06.19-20-24-33-653a7fb");
-    assert.equal(cursorAgent, path.join(tempDir, "cursor-agent"));
-  } finally {
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  }
-});
-
-test("mode-specific probe runs skip unrelated transports and agents", () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-doctor-mode-probes-"));
+test("doctor probes only tmux and its supported coding agents", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-doctor-tmux-probes-"));
   const executables = {
     openclaw: writeFakeExecutable(tempDir, "openclaw", `process.stdout.write("2026.7.1-2");`),
     tmux: writeFakeExecutable(tempDir, "tmux", `process.stdout.write("tmux 3.5a");`),
     codex: writeFakeExecutable(tempDir, "codex", `process.stdout.write("0.107.0");`),
-    claude: writeFakeExecutable(tempDir, "claude", `process.stdout.write("2.1.218");`),
-    acpx: path.join(tempDir, "must-not-run-acpx"),
-    cursor: path.join(tempDir, "must-not-run-cursor")
+    claude: writeFakeExecutable(tempDir, "claude", `process.stdout.write("2.1.218");`)
   };
 
   try {
-    const probes = runDoctorCapabilityProbes({ executables }, "tmux");
+    const probes = runDoctorCapabilityProbes({ executables });
     assert.deepEqual(
       probes.map((probe) => probe.command),
       ["openclaw", "tmux", "codex", "claude"]
@@ -212,34 +178,34 @@ exit 9`
     const working = writeShellExecutable(
       tempDir,
       "working",
-      `printf '%s' 'Cursor 2.4.0'`
+      `printf '%s' 'Codex 0.107.0'`
     );
     const probes = runDoctorCapabilityProbes({
       timeoutMs: 5_000,
       executables: {
         openclaw: path.join(tempDir, "missing-openclaw"),
         tmux: notExecutable,
-        acpx: versionFailed,
         codex: working,
-        claude: malformed,
-        cursor: working
+        claude: malformed
       }
     });
     const timeoutProbe = probeDoctorCommand("codex", {
       timeoutMs: 1_000,
       executables: { codex: timeout }
     });
+    const versionFailedProbe = probeDoctorCommand("codex", {
+      executables: { codex: versionFailed }
+    });
     const byCommand = new Map(probes.map((probe) => [probe.command, probe]));
 
     assert.equal(byCommand.get("openclaw")?.status, "not_found");
     assert.equal(byCommand.get("tmux")?.status, "not_executable");
-    assert.equal(byCommand.get("acpx")?.status, "version_failed");
     assert.equal(byCommand.get("codex")?.status, "ok");
     assert.equal(timeoutProbe.status, "timeout");
+    assert.equal(versionFailedProbe.status, "version_failed");
     assert.equal(byCommand.get("claude")?.status, "malformed_output");
-    assert.equal(byCommand.get("cursor")?.status, "ok");
-    assert.equal(probes.filter((probe) => probe.available).length, 2);
-    assert.match(byCommand.get("acpx")?.error ?? "", /cannot load runtime/);
+    assert.equal(probes.filter((probe) => probe.available).length, 1);
+    assert.match(versionFailedProbe.error ?? "", /cannot load runtime/);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

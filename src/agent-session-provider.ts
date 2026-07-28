@@ -1,6 +1,5 @@
 import type {
   ActiveCodexProcess,
-  CodexSessionModelInfo,
   CodexSessionSummary,
   ForkContextPackage,
   RolloutExcerptOptions
@@ -31,6 +30,5 @@ export interface CodingAgentSessionProvider {
   listHistoricalSessions(): Promise<CodexSessionSummary[]>;
   listActiveSessions(): Promise<ActiveCodexProcess[]>;
   getSession(sessionId: string): Promise<CodexSessionSummary | undefined>;
-  getSessionModel(sessionId: string): Promise<CodexSessionModelInfo | undefined>;
   getForkContext(options: ForkContextOptions): Promise<ForkContextPackage | undefined>;
 }

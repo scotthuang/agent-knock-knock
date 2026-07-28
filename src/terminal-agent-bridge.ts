@@ -43,7 +43,7 @@ export interface TerminalBridgeStatus {
     request_detail?: string;
     reason?: string;
     fingerprint?: string;
-    decision_mode?: "keys" | "structured";
+    decision_mode?: "keys";
     request_id?: string;
     policy_evidence?: {
       source: "claude_transcript";
@@ -86,7 +86,7 @@ export interface TerminalApprovalExecution {
   requestDetail?: string;
   fingerprint?: string;
   screenExcerpt?: string;
-  decisionMode?: "keys" | "structured";
+  decisionMode?: "keys";
   requestId?: string;
 }
 
@@ -364,45 +364,12 @@ export class TerminalAgentBridge {
     const adapter = this.registry.require(agent);
     if (
       adapter.capabilities.terminalApproval &&
-      adapter.resolveApproval &&
       terminalControl.capabilities.includes("terminal_approval") &&
       adapter.capabilities.screenStatus &&
       terminalControl.capabilities.includes("screen_status")
     ) {
       const captured = await this.captureInspection(adapter, terminalControl, options);
       const { inspection } = captured;
-      if (inspection.approval.approvable && inspection.approval.action.mode === "structured") {
-        const fingerprint = terminalApprovalFingerprint(
-          adapter.agent,
-          captured.terminalControl,
-          inspection,
-          {
-            screen: captured.screen,
-            runtime: options.runtime
-          }
-        );
-        if (!fingerprint) {
-          return {
-            cancelRequested: false,
-            reason: `${adapter.displayName} structured approval has no fingerprint`
-          };
-        }
-        await this.verifyTerminalIdentity(adapter.agent, captured.terminalControl, options.runtime);
-        const decision = await adapter.resolveApproval({
-          decision: "deny",
-          expectedFingerprint: fingerprint,
-          actualFingerprint: fingerprint,
-          inspection,
-          runtime: options.runtime,
-          interrupt: true
-        });
-        return {
-          cancelRequested: decision.resolved,
-          deniedApproval: decision.resolved,
-          requestId: decision.requestId,
-          reason: decision.reason
-        };
-      }
       if (inspection.approval.blocked && !inspection.approval.approvable) {
         return {
           cancelRequested: false,
@@ -443,7 +410,7 @@ export class TerminalAgentBridge {
       scrollbackLines?: number;
       runtime?: TerminalRuntimeIdentity;
       managedRequest?: TerminalDurableCompletionRequest;
-      requiredDecisionMode?: "keys" | "structured";
+      requiredDecisionMode?: "keys";
       authorize?: (
         context: TerminalApprovalAuthorizationContext
       ) => TerminalApprovalAuthorizationDecision | Promise<TerminalApprovalAuthorizationDecision>;
@@ -595,53 +562,6 @@ export class TerminalAgentBridge {
           requestId: inspection.approval.action.requestId
         };
       }
-    }
-    if (decisionMode === "structured") {
-      if (!options.expectedFingerprint) {
-        return {
-          approved: false,
-          blocked: true,
-          reason: "structured approval requires the latest expected fingerprint",
-          label: inspection.approval.action.label,
-          promptKind: inspection.approval.promptKind,
-          command: inspection.approval.command,
-          fingerprint,
-          screenExcerpt: inspection.screenExcerpt,
-          decisionMode,
-          requestId: inspection.approval.action.requestId
-        };
-      }
-      if (!fingerprint || !adapter.resolveApproval) {
-        return {
-          approved: false,
-          blocked: true,
-          reason: `${adapter.displayName} structured approval resolver is unavailable`,
-          fingerprint,
-          screenExcerpt: inspection.screenExcerpt,
-          decisionMode,
-          requestId: inspection.approval.action.requestId
-        };
-      }
-      await this.verifyTerminalIdentity(adapter.agent, activeTerminalControl, options.runtime);
-      const resolved = await adapter.resolveApproval({
-        decision: "allow",
-        expectedFingerprint: options.expectedFingerprint,
-        actualFingerprint: fingerprint,
-        inspection,
-        runtime: options.runtime
-      });
-      return {
-        approved: resolved.resolved,
-        blocked: !resolved.resolved,
-        reason: resolved.reason,
-        label: inspection.approval.action.label,
-        promptKind: inspection.approval.promptKind,
-        command: inspection.approval.command,
-        fingerprint,
-        screenExcerpt: inspection.screenExcerpt,
-        decisionMode,
-        requestId: resolved.requestId ?? inspection.approval.action.requestId
-      };
     }
     const recaptured = await this.captureInspection(
       adapter,

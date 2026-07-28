@@ -5,10 +5,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
-import { ClaudeHookStore } from "../src/claude-hook-store.js";
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
-const CODEX_ACPX_SELECTOR = ["--agent", "npx -y @agentclientprotocol/codex-acp@1.1.7"];
+const testRuntimeDir = fs.mkdtempSync(
+  path.join(os.tmpdir(), "akk-agent-cli-runtime-")
+);
+process.env.AKK_RUNTIME_DIR = testRuntimeDir;
+process.on("exit", () => {
+  fs.rmSync(testRuntimeDir, { recursive: true, force: true });
+});
 const sessionId = "019ee559-7bb8-7fd1-970c-0f7b6978c44e";
 const cwd = "/repo/agent-knock-knock";
 const rolloutPath = "/tmp/codex-rollout.jsonl";
@@ -695,7 +700,8 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
       monitorResult.message.body,
       "AKK auto-approval handoff completed."
     );
-    assert.equal(monitorResult.conversation.status, "closed");
+    assert.equal(monitorResult.conversation.status, "idle");
+    assert.equal(typeof monitorResult.conversation.idle_since, "string");
 
     const tmuxCalls = readJsonLines(tmuxCallsPath);
     assert.equal(
@@ -878,6 +884,31 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
         };
       }
     );
+    const terminalDispatchLedgerPath = findTerminalDispatchLedgerPath(
+      task.conversation.conversation_id,
+      path.join(tempDir, ".akk-cli-test-runtime")
+    );
+    const assignTerminalDispatchOwner = (statePath: string) => {
+      const ownerState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+      const ledger = JSON.parse(
+        fs.readFileSync(terminalDispatchLedgerPath, "utf8")
+      );
+      delete ledger.resolved_at;
+      delete ledger.reason;
+      fs.writeFileSync(
+        terminalDispatchLedgerPath,
+        `${JSON.stringify({
+          ...ledger,
+          status: "submitted",
+          conversation_id: ownerState.conversation_id,
+          state_path: statePath,
+          message_id:
+            ownerState.native_session_takeover.terminal_bridge_message_id,
+          submitted_at: new Date().toISOString()
+        }, null, 2)}\n`
+      );
+    };
+    assignTerminalDispatchOwner(sequentialStatePath);
     const sequentialLogPath = path.join(
       path.dirname(sequentialStatePath),
       "events.ndjson"
@@ -1085,6 +1116,7 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
       path.dirname(crashAfterDeliveryStatePath),
       "events.ndjson"
     );
+    assignTerminalDispatchOwner(crashAfterDeliveryStatePath);
     fs.writeFileSync(transcriptPath, pendingTranscript, { mode: 0o600 });
     fs.writeFileSync(screenPath, approvalScreen);
     configureRetryGateway(crashAfterDeliveryStatePath);
@@ -1126,7 +1158,7 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
         try {
           return JSON.parse(
             fs.readFileSync(crashAfterDeliveryStatePath, "utf8")
-          ).status === "closed";
+          ).status === "idle";
         } catch {
           return false;
         }
@@ -1249,6 +1281,7 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
       path.dirname(retryBeforeApprovalStatePath),
       "events.ndjson"
     );
+    assignTerminalDispatchOwner(retryBeforeApprovalStatePath);
     writeApprovalMessageEvent(retryBeforeApprovalLogPath);
     fs.writeFileSync(transcriptPath, pendingTranscript, { mode: 0o600 });
     fs.writeFileSync(screenPath, approvalScreen);
@@ -1276,7 +1309,7 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
         try {
           return JSON.parse(
             fs.readFileSync(retryBeforeApprovalStatePath, "utf8")
-          ).status === "closed";
+          ).status === "idle";
         } catch {
           return false;
         }
@@ -1355,6 +1388,7 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
       path.dirname(retryAfterApprovalStatePath),
       "events.ndjson"
     );
+    assignTerminalDispatchOwner(retryAfterApprovalStatePath);
     writeApprovalMessageEvent(retryAfterApprovalLogPath);
     fs.writeFileSync(transcriptPath, pendingTranscript, { mode: 0o600 });
     fs.writeFileSync(screenPath, approvalScreen);
@@ -1382,7 +1416,7 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
         try {
           return JSON.parse(
             fs.readFileSync(retryAfterApprovalStatePath, "utf8")
-          ).status === "closed";
+          ).status === "idle";
         } catch {
           return false;
         }
@@ -1452,6 +1486,7 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
         };
       }
     );
+    assignTerminalDispatchOwner(consumedTimeoutStatePath);
     fs.writeFileSync(transcriptPath, pendingTranscript, { mode: 0o600 });
     fs.writeFileSync(screenPath, approvalScreen);
     const consumedTimeout = runAgentCli([
@@ -1482,388 +1517,6 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
     const consumedTimeoutParsed = JSON.parse(consumedTimeout.stdout);
     assert.equal(consumedTimeoutParsed.stalled, true);
     assert.equal(consumedTimeoutParsed.hard_timeout, true);
-  } finally {
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  }
-});
-
-test("managed Claude tmux send binds hook identity and structured approval/cancel never sends dialog keys", () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-terminal-permission-"));
-  const storeDir = path.join(tempDir, "conversations");
-  const hookStoreDir = path.join(tempDir, "claude-hooks");
-  const fakeBinDir = path.join(tempDir, "bin");
-  const workspace = path.join(tempDir, "workspace");
-  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
-  const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
-  const screenPath = path.join(tempDir, "screen.txt");
-  const terminalTarget = "claude-work:0.0";
-  const claudePid = 42301;
-  const claudeSessionId = "claude-session-permission";
-
-  try {
-    fs.mkdirSync(fakeBinDir, { recursive: true });
-    fs.mkdirSync(workspace, { recursive: true });
-    fs.writeFileSync(screenPath, "❯ ");
-    writeFakeOpenClaw(fakeBinDir, openclawCallsPath);
-    writeFakeTmux(
-      fakeBinDir,
-      tmuxCallsPath,
-      screenPath,
-      `claude-work\t0\t0\t999\tnode\t${workspace}\n`
-    );
-
-    const task = startManagedClaudeTerminalTask({
-      fakeBinDir,
-      workspace,
-      storeDir,
-      hookStoreDir,
-      terminalTarget,
-      claudePid,
-      claudeSessionId,
-      message: "Run the focused tests"
-    });
-    const conversation = task.conversation;
-    const nativeTakeover = conversation.native_session_takeover;
-    const messageId = nativeTakeover.terminal_bridge_message_id;
-    assert.equal(nativeTakeover.claude_hook_mode, "enabled");
-    assert.equal(nativeTakeover.claude_hook_store_dir, hookStoreDir);
-    assert.equal(nativeTakeover.terminal_agent_pid, claudePid);
-    assert.equal(nativeTakeover.terminal_agent_session_id, claudeSessionId);
-    assert.equal(typeof nativeTakeover.claude_hook_lease_id, "string");
-    assert.equal(typeof messageId, "string");
-
-    const hookStore = new ClaudeHookStore({ rootDir: hookStoreDir });
-    const lease = hookStore.resolveLease({
-      sessionId: claudeSessionId,
-      pid: claudePid,
-      cwd: workspace
-    });
-    assert.equal(lease?.authorizationEligible, true);
-    assert.equal(lease?.lease.conversationId, conversation.conversation_id);
-    assert.equal(lease?.lease.messageId, messageId);
-    assert.equal(lease?.lease.terminalTarget, terminalTarget);
-
-    const promptId = "prompt-permission";
-    hookStore.record(claudePromptHookInput(claudeSessionId, workspace, promptId), {
-      claudePid
-    });
-    const pendingAllow = hookStore.record(
-      claudePermissionHookInput(claudeSessionId, workspace, promptId, "npm test -- --runInBand"),
-      { claudePid }
-    ).permission;
-    assert.ok(pendingAllow);
-
-    const staticArgs = claudeTerminalStaticArgs({
-      workspace,
-      terminalTarget,
-      claudePid,
-      claudeSessionId,
-      screen: "❯ "
-    });
-    const status = runAgentCli([
-      "status",
-      "--conversation",
-      conversation.conversation_id,
-      "--store-dir",
-      storeDir,
-      "--claude-hook-store-dir",
-      hookStoreDir,
-      ...staticArgs
-    ]);
-    assert.equal(status.status, 0, status.stderr || status.stdout);
-    const statusParsed = JSON.parse(status.stdout);
-    assert.equal(statusParsed.terminal_status.activity_state, "awaiting_approval");
-    assert.equal(statusParsed.terminal_status.approval_state.approvable, true);
-    assert.equal(statusParsed.terminal_status.approval_state.decision_mode, "structured");
-    assert.equal(statusParsed.terminal_status.approval_state.request_id, pendingAllow.requestId);
-    assert.equal(statusParsed.terminal_status.approval_state.command, "npm test -- --runInBand");
-    assert.equal(typeof statusParsed.terminal_status.approval_state.fingerprint, "string");
-
-    const monitored = runAgentCli(claudeMonitorArgs({
-      task,
-      hookStoreDir,
-      staticArgs
-    }));
-    assert.equal(monitored.status, 0, monitored.stderr || monitored.stdout);
-    const monitoredParsed = JSON.parse(monitored.stdout);
-    assert.equal(monitoredParsed.delivered, true);
-    assert.equal(monitoredParsed.message.type, "question");
-    assert.equal(monitoredParsed.message.metadata.reason, "approval_required");
-    assert.equal(monitoredParsed.message.metadata.approval_candidate.agent, "claude");
-    assert.equal(monitoredParsed.message.metadata.approval_candidate.decision_mode, "structured");
-    assert.equal(monitoredParsed.message.metadata.terminal_status.approval_state.request_id, pendingAllow.requestId);
-    assert.equal(monitoredParsed.conversation.status, "waiting_for_openclaw");
-
-    const approvalFingerprint = monitoredParsed.message.metadata.approval_fingerprint;
-    const sendKeysBeforeApproval = readJsonLines(tmuxCallsPath)
-      .filter((call) => call.args[0] === "send-keys").length;
-    const approved = runAgentCli([
-      "approve",
-      "--conversation",
-      conversation.conversation_id,
-      "--store-dir",
-      storeDir,
-      "--expected-approval-fingerprint",
-      approvalFingerprint,
-      "--claude-hook-store-dir",
-      hookStoreDir,
-      ...staticArgs
-    ]);
-    assert.equal(approved.status, 0, approved.stderr || approved.stdout);
-    const approvedParsed = JSON.parse(approved.stdout);
-    assert.equal(approvedParsed.approved, true);
-    assert.equal(approvedParsed.decision_mode, "structured");
-    assert.equal(approvedParsed.request_id, pendingAllow.requestId);
-    assert.equal(approvedParsed.key, undefined);
-    assert.deepEqual(approvedParsed.keys ?? [], []);
-    assert.equal(approvedParsed.conversation.status, "waiting_for_agent");
-    assert.equal(
-      readJsonLines(tmuxCallsPath).filter((call) => call.args[0] === "send-keys").length,
-      sendKeysBeforeApproval
-    );
-
-    const allowed = hookStore.consumePermissionDecision({
-      sessionId: pendingAllow.sessionId,
-      requestId: pendingAllow.requestId,
-      fingerprint: pendingAllow.fingerprint,
-      conversationId: pendingAllow.conversationId,
-      messageId: pendingAllow.messageId
-    });
-    assert.deepEqual(allowed?.hookOutput, {
-      hookSpecificOutput: {
-        hookEventName: "PermissionRequest",
-        decision: { behavior: "allow" }
-      }
-    });
-
-    const pendingDeny = hookStore.record(
-      claudePermissionHookInput(claudeSessionId, workspace, promptId, "git push origin main"),
-      { claudePid }
-    ).permission;
-    assert.ok(pendingDeny);
-    const sendKeysBeforeCancel = readJsonLines(tmuxCallsPath)
-      .filter((call) => call.args[0] === "send-keys").length;
-    const cancelled = runAgentCli([
-      "cancel",
-      "--conversation",
-      conversation.conversation_id,
-      "--store-dir",
-      storeDir,
-      "--claude-hook-store-dir",
-      hookStoreDir,
-      "--claude-agents-json",
-      JSON.stringify([claudeAgentRow(claudePid, claudeSessionId, workspace)])
-    ], {
-      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
-    });
-    assert.equal(cancelled.status, 0, cancelled.stderr || cancelled.stdout);
-    const cancelledParsed = JSON.parse(cancelled.stdout);
-    assert.equal(cancelledParsed.cancel_requested, true);
-    assert.equal(cancelledParsed.denied_approval, true);
-    assert.equal(cancelledParsed.request_id, pendingDeny.requestId);
-    assert.equal(cancelledParsed.key, undefined);
-    assert.equal(cancelledParsed.conversation.status, "cancelled");
-    assert.equal(
-      readJsonLines(tmuxCallsPath).filter((call) => call.args[0] === "send-keys").length,
-      sendKeysBeforeCancel,
-      "structured deny must not send Escape or any other tmux key"
-    );
-    const deniedPermission = hookStore.resolveSession({ sessionId: claudeSessionId })?.permissions
-      .find((permission) => permission.requestId === pendingDeny.requestId);
-    assert.equal(deniedPermission?.decision?.behavior, "deny");
-    assert.equal(deniedPermission?.decision?.interrupt, true);
-
-    fs.writeFileSync(screenPath, [
-      "Bash command",
-      "npm publish",
-      "Do you want to proceed?",
-      "❯ 1. Yes",
-      "  2. Yes, and don't ask again for npm publish commands",
-      "  3. No",
-      "Esc to cancel"
-    ].join("\n"));
-    const sendKeysBeforeBlockedSend = readJsonLines(tmuxCallsPath)
-      .filter((call) => call.args[0] === "send-keys").length;
-    const blockedSend = runAgentCli([
-      "send",
-      "--conversation",
-      `terminal:v2:tmux:claude:${terminalTarget}:${claudePid}`,
-      "--message",
-      "This must not be submitted over the permission dialog",
-      "--claude-hook-store-dir",
-      hookStoreDir,
-      "--claude-agents-json",
-      JSON.stringify([claudeAgentRow(claudePid, claudeSessionId, workspace)])
-    ], {
-      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
-    });
-    assert.notEqual(blockedSend.status, 0);
-    assert.match(blockedSend.stderr, /permission|refusing to send/iu);
-    assert.equal(
-      readJsonLines(tmuxCallsPath).filter((call) => call.args[0] === "send-keys").length,
-      sendKeysBeforeBlockedSend,
-      "a new message must never be typed over a Claude permission dialog"
-    );
-  } finally {
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  }
-});
-
-test("Claude Stop and StopFailure callbacks are exactly once and background work is not completion", async () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-terminal-completion-"));
-  const storeDir = path.join(tempDir, "conversations");
-  const hookStoreDir = path.join(tempDir, "claude-hooks");
-  const fakeBinDir = path.join(tempDir, "bin");
-  const workspace = path.join(tempDir, "workspace");
-  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
-  const screenPath = path.join(tempDir, "screen.txt");
-  const terminalTarget = "claude-work:0.0";
-  const claudePid = 42302;
-  const claudeSessionId = "claude-session-completion";
-
-  try {
-    fs.mkdirSync(fakeBinDir, { recursive: true });
-    fs.mkdirSync(workspace, { recursive: true });
-    fs.writeFileSync(screenPath, "❯ ");
-    writeFakeTmux(
-      fakeBinDir,
-      tmuxCallsPath,
-      screenPath,
-      `claude-work\t0\t0\t999\tnode\t${workspace}\n`
-    );
-    const hookStore = new ClaudeHookStore({ rootDir: hookStoreDir });
-    const staticArgs = claudeTerminalStaticArgs({
-      workspace,
-      terminalTarget,
-      claudePid,
-      claudeSessionId,
-      screen: "❯ "
-    });
-
-    const successCallsPath = path.join(tempDir, "openclaw-success.ndjson");
-    writeFakeOpenClaw(fakeBinDir, successCallsPath);
-    const successTask = startManagedClaudeTerminalTask({
-      fakeBinDir,
-      workspace,
-      storeDir,
-      hookStoreDir,
-      terminalTarget,
-      claudePid,
-      claudeSessionId,
-      message: "Finish the implementation"
-    });
-    const successPromptId = "prompt-success";
-    hookStore.record(claudePromptHookInput(claudeSessionId, workspace, successPromptId), { claudePid });
-    hookStore.record(claudeStopHookInput(claudeSessionId, workspace, successPromptId, {
-      last_assistant_message: "Implementation complete; focused tests pass.",
-      background_tasks: [],
-      session_crons: []
-    }), { claudePid });
-
-    const successMonitorArgs = claudeMonitorArgs({
-      task: successTask,
-      hookStoreDir,
-      staticArgs
-    });
-    const [successFirst, successSecond] = await Promise.all([
-      runAgentCliAsync(successMonitorArgs),
-      runAgentCliAsync(successMonitorArgs)
-    ]);
-    assert.equal(successFirst.status, 0, successFirst.stderr || successFirst.stdout);
-    assert.equal(successSecond.status, 0, successSecond.stderr || successSecond.stdout);
-    const successResults = [successFirst, successSecond].map((result) => JSON.parse(result.stdout));
-    const deliveredSuccess = successResults.filter((result) => result.delivered === true);
-    assert.equal(deliveredSuccess.length, 1);
-    assert.equal(deliveredSuccess[0].message.type, "done");
-    assert.equal(deliveredSuccess[0].message.body, "Implementation complete; focused tests pass.");
-    assert.equal(deliveredSuccess[0].message.metadata.match, "claude_stop_hook");
-    assert.equal(deliveredSuccess[0].conversation.status, "closed");
-    assert.equal(readJsonLines(successCallsPath).length, 1);
-    const successEvents = fs.readFileSync(successTask.logPath, "utf8");
-    assert.equal((successEvents.match(/terminal_bridge_completion_detected/gu) ?? []).length, 1);
-    assert.equal((successEvents.match(/terminal_bridge_completion_claimed/gu) ?? []).length, 1);
-    const completionClaim = readJsonLines(successTask.logPath)
-      .find((event) => event.event === "terminal_bridge_completion_claimed");
-    assert.match(completionClaim.callback_message_id, /^msg-terminal-[a-f0-9]{32}$/u);
-
-    const failureCallsPath = path.join(tempDir, "openclaw-failure.ndjson");
-    writeFakeOpenClaw(fakeBinDir, failureCallsPath);
-    const failureTask = startManagedClaudeTerminalTask({
-      fakeBinDir,
-      workspace,
-      storeDir,
-      hookStoreDir,
-      terminalTarget,
-      claudePid,
-      claudeSessionId,
-      message: "Run the release command"
-    });
-    const failurePromptId = "prompt-failure";
-    hookStore.record(claudePromptHookInput(claudeSessionId, workspace, failurePromptId), { claudePid });
-    hookStore.record(claudeStopFailureHookInput(claudeSessionId, workspace, failurePromptId), { claudePid });
-
-    const failureMonitorArgs = claudeMonitorArgs({
-      task: failureTask,
-      hookStoreDir,
-      staticArgs
-    });
-    const failed = runAgentCli(failureMonitorArgs);
-    assert.equal(failed.status, 0, failed.stderr || failed.stdout);
-    const failedParsed = JSON.parse(failed.stdout);
-    assert.equal(failedParsed.delivered, true);
-    assert.equal(failedParsed.message.type, "error");
-    assert.match(failedParsed.message.body, /rate_limit/u);
-    assert.match(failedParsed.message.body, /429 Too Many Requests/u);
-    assert.equal(failedParsed.message.metadata.match, "claude_stop_failure_hook");
-    assert.equal(failedParsed.conversation.status, "failed");
-    const failedAgain = runAgentCli(failureMonitorArgs);
-    assert.equal(failedAgain.status, 0, failedAgain.stderr || failedAgain.stdout);
-    assert.equal(JSON.parse(failedAgain.stdout).reason, "conversation_no_longer_waiting");
-    assert.equal(readJsonLines(failureCallsPath).length, 1);
-
-    const backgroundCallsPath = path.join(tempDir, "openclaw-background.ndjson");
-    writeFakeOpenClaw(fakeBinDir, backgroundCallsPath);
-    const backgroundTask = startManagedClaudeTerminalTask({
-      fakeBinDir,
-      workspace,
-      storeDir,
-      hookStoreDir,
-      terminalTarget,
-      claudePid,
-      claudeSessionId,
-      message: "Wait for the background test run"
-    });
-    const backgroundPromptId = "prompt-background";
-    hookStore.record(claudePromptHookInput(claudeSessionId, workspace, backgroundPromptId), { claudePid });
-    hookStore.record(claudeStopHookInput(claudeSessionId, workspace, backgroundPromptId, {
-      last_assistant_message: "The foreground turn ended but tests are still running.",
-      background_tasks: [{
-        id: "task-1",
-        type: "bash",
-        status: "running",
-        description: "npm test"
-      }],
-      session_crons: []
-    }), { claudePid });
-    const backgroundMonitor = runAgentCli(claudeMonitorArgs({
-      task: backgroundTask,
-      hookStoreDir,
-      staticArgs,
-      timeoutMinutes: "0.001"
-    }));
-    assert.equal(backgroundMonitor.status, 0, backgroundMonitor.stderr || backgroundMonitor.stdout);
-    const backgroundParsed = JSON.parse(backgroundMonitor.stdout);
-    assert.equal(backgroundParsed.stalled, true);
-    assert.equal(backgroundParsed.completed, undefined);
-    assert.match(backgroundParsed.reason, /observed no activity/u);
-    assert.doesNotMatch(fs.readFileSync(backgroundTask.logPath, "utf8"), /terminal_bridge_completion_detected/u);
-    const backgroundCallbacks = fs.existsSync(backgroundCallsPath)
-      ? readJsonLines(backgroundCallsPath).flatMap((call) => {
-          const paramsIndex = call.args.indexOf("--params");
-          return paramsIndex >= 0 ? [JSON.parse(call.args[paramsIndex + 1])] : [];
-        })
-      : [];
-    assert.equal(backgroundCallbacks.some((params) => params.message?.type === "done"), false);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -2091,7 +1744,8 @@ test("hookless Claude transcript completion closes a managed tmux task exactly o
       delivered[0].message.metadata.match,
       "claude_transcript_turn_duration"
     );
-    assert.equal(delivered[0].conversation.status, "closed");
+    assert.equal(delivered[0].conversation.status, "idle");
+    assert.equal(typeof delivered[0].conversation.idle_since, "string");
     assert.equal(readJsonLines(openclawCallsPath).length, 1);
     assert.equal(
       eventCount(task.logPath, "terminal_bridge_completion_detected"),
@@ -2108,14 +1762,16 @@ test("agent takeover terminal_control attaches tmux pane and send writes to the 
   const fakeBinDir = path.join(tempDir, "bin");
   const workspace = path.join(tempDir, "workspace");
   const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "› \n");
     writeFakeTmux(
       fakeBinDir,
       tmuxCallsPath,
-      undefined,
+      screenPath,
       `codex-work\t0\t0\t999\tnode\t${workspace}\n`
     );
     writeFakeProcessTools(fakeBinDir, [{
@@ -2241,9 +1897,9 @@ test("agent takeover terminal_control attaches tmux pane and send writes to the 
     assert.equal(sentParsed.delivered, true);
     assert.equal(sentParsed.status, "async_pending");
     assert.equal(sentParsed.background, true);
-    assert.equal(sentParsed.callback_expected, true);
+    assert.equal(sentParsed.callback_expected, false);
     assert.equal(sentParsed.openclaw_next_action.action, "yield");
-    assert.equal(sentParsed.openclaw_next_action.callback_expected, true);
+    assert.equal(sentParsed.openclaw_next_action.callback_expected, false);
     assert.equal(sentParsed.terminal_control.target, "codex-work:0.0");
     let calls = readJsonLines(tmuxCallsPath)
       .filter((call) => call.args[0] === "send-keys");
@@ -2268,67 +1924,6 @@ test("agent takeover terminal_control attaches tmux pane and send writes to the 
     assert.equal(cancelledParsed.conversation.status, "cancelled");
     calls = readJsonLines(tmuxCallsPath);
     assert.deepEqual(calls.at(-1).args, ["send-keys", "-t", "codex-work:0.0", "C-c"]);
-  } finally {
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  }
-});
-
-test("managed send reloads state while holding the callback transaction lock", async () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-send-state-lock-"));
-  const storeDir = path.join(tempDir, "conversations");
-
-  try {
-    const created = runAgentCli([
-      "new",
-      "--agent",
-      "codex",
-      "--request",
-      "state lock test",
-      "--store-dir",
-      storeDir
-    ]);
-    assert.equal(created.status, 0, created.stderr || created.stdout);
-    const parsed = JSON.parse(created.stdout);
-    const statePath = parsed.paths.statePath;
-    const lockPath = `${statePath}.lock`;
-    fs.writeFileSync(
-      lockPath,
-      `${JSON.stringify({
-        pid: process.pid,
-        token: "test-owner",
-        created_at: new Date().toISOString()
-      })}\n`,
-      { mode: 0o600 }
-    );
-
-    let settled = false;
-    const sending = runAgentCliAsync([
-      "send",
-      "--conversation",
-      parsed.conversation.conversation_id,
-      "--message",
-      "must not overwrite the callback state",
-      "--store-dir",
-      storeDir
-    ]).finally(() => {
-      settled = true;
-    });
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    assert.equal(settled, false);
-
-    const callbackState = JSON.parse(fs.readFileSync(statePath, "utf8"));
-    callbackState.status = "closed";
-    callbackState.close_reason = "simulated concurrent callback";
-    callbackState.updated_at = new Date().toISOString();
-    fs.writeFileSync(statePath, `${JSON.stringify(callbackState, null, 2)}\n`);
-    fs.unlinkSync(lockPath);
-
-    const result = await sending;
-    assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /conversation is closed/);
-    const finalState = JSON.parse(fs.readFileSync(statePath, "utf8"));
-    assert.equal(finalState.status, "closed");
-    assert.equal(finalState.close_reason, "simulated concurrent callback");
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -2464,7 +2059,10 @@ test("rejected managed Claude send leaves callback state and event log unchanged
       ...staticArgs
     ], testEnv);
     assert.notEqual(rejected.status, 0);
-    assert.match(rejected.stderr, /verified idle terminal|permission dialog/u);
+    assert.match(
+      rejected.stderr,
+      /verified idle terminal|permission dialog|still owned by active AKK conversation/u
+    );
 
     const afterStateRaw = fs.readFileSync(conversation.state_path, "utf8");
     const afterState = JSON.parse(afterStateRaw);
@@ -2505,22 +2103,35 @@ test("managed terminal send cannot overwrite a concurrent terminal cancellation"
   const fakeBinDir = path.join(tempDir, "bin");
   const workspace = path.join(tempDir, "workspace");
   const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
-  const tmuxGatePath = path.join(tempDir, "tmux-send-gate");
+  const screenPath = path.join(tempDir, "screen.txt");
   const tmuxSession = `akk-send-cancel-${process.pid}`;
   const terminalTarget = `${tmuxSession}:0.1`;
   const rawConversationId = `terminal:tmux:${terminalTarget}:33389`;
+  const terminalKey = createHash("sha256")
+    .update(JSON.stringify({
+      target: terminalTarget,
+      socket_path: null
+    }))
+    .digest("hex")
+    .slice(0, 20);
+  const terminalLockPath = path.join(
+    tempDir,
+    ".akk-cli-test-runtime",
+    "terminal-locks",
+    `terminal-bridge-send-${terminalKey}.lock`
+  );
   const racedMessage = "This prepared message must never reach tmux";
-  let holder: ReturnType<typeof spawnAgentCliCaptured> | undefined;
   let sending: ReturnType<typeof spawnAgentCliCaptured> | undefined;
   let sendingStopped = false;
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "› \n");
     writeFakeTmux(
       fakeBinDir,
       tmuxCallsPath,
-      undefined,
+      screenPath,
       `${tmuxSession}\t0\t1\t33389\tnode\t${workspace}\n`
     );
     const testEnv = {
@@ -2547,21 +2158,15 @@ test("managed terminal send cannot overwrite a concurrent terminal cancellation"
     const initialStateRaw = fs.readFileSync(statePath, "utf8");
     fs.writeFileSync(tmuxCallsPath, "");
 
-    holder = spawnAgentCliCaptured([
-      "send",
-      "--conversation",
-      rawConversationId,
-      "--message",
-      "Hold the terminal lock",
-      "--store-dir",
-      storeDir
-    ], {
-      ...testEnv,
-      AKK_TEST_TMUX_SEND_GATE_PATH: tmuxGatePath
-    });
-    await waitForCondition(
-      () => fs.existsSync(`${tmuxGatePath}.entered`),
-      "raw terminal send to enter the fake tmux gate"
+    fs.mkdirSync(path.dirname(terminalLockPath), { recursive: true });
+    fs.writeFileSync(
+      terminalLockPath,
+      `${JSON.stringify({
+        pid: process.pid,
+        token: "send-cancel-race-owner",
+        created_at: new Date().toISOString()
+      })}\n`,
+      { mode: 0o600 }
     );
 
     let cancelSettled = false;
@@ -2601,10 +2206,7 @@ test("managed terminal send cannot overwrite a concurrent terminal cancellation"
     assert.ok(sending.child.pid);
     process.kill(sending.child.pid, "SIGSTOP");
     sendingStopped = true;
-    fs.writeFileSync(`${tmuxGatePath}.release`, "");
-
-    const holderResult = await holder.result;
-    assert.equal(holderResult.status, 0, holderResult.stderr || holderResult.stdout);
+    fs.rmSync(terminalLockPath, { force: true });
     const cancelled = await cancelling;
     assert.equal(cancelled.status, 0, cancelled.stderr || cancelled.stdout);
     const cancelledParsed = JSON.parse(cancelled.stdout);
@@ -2644,9 +2246,7 @@ test("managed terminal send cannot overwrite a concurrent terminal cancellation"
       "the concurrent cancellation should be the only control action after the gate"
     );
   } finally {
-    if (!fs.existsSync(`${tmuxGatePath}.release`)) {
-      fs.writeFileSync(`${tmuxGatePath}.release`, "");
-    }
+    fs.rmSync(terminalLockPath, { force: true });
     if (sendingStopped && sending?.child.pid) {
       try {
         process.kill(sending.child.pid, "SIGCONT");
@@ -2654,7 +2254,6 @@ test("managed terminal send cannot overwrite a concurrent terminal cancellation"
         // The send process already exited.
       }
     }
-    killPidBestEffort(holder?.child.pid);
     killPidBestEffort(sending?.child.pid);
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -2666,9 +2265,15 @@ test("managed terminal close locks terminal before state and prevents queued sen
   const fakeBinDir = path.join(tempDir, "bin");
   const workspace = path.join(tempDir, "workspace");
   const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
   const tmuxSession = `akk-close-race-${process.pid}`;
   const terminalTarget = `${tmuxSession}:0.1`;
   const rawConversationId = `terminal:tmux:${terminalTarget}:33389`;
+  const terminalLockDir = path.join(
+    tempDir,
+    ".akk-cli-test-runtime",
+    "terminal-locks"
+  );
   const racedMessage = "This message must never be sent after close";
   let closing: ReturnType<typeof spawnAgentCliCaptured> | undefined;
   let sending: ReturnType<typeof spawnAgentCliCaptured> | undefined;
@@ -2679,10 +2284,11 @@ test("managed terminal close locks terminal before state and prevents queued sen
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "› \n");
     writeFakeTmux(
       fakeBinDir,
       tmuxCallsPath,
-      undefined,
+      screenPath,
       `${tmuxSession}\t0\t1\t33389\tnode\t${workspace}\n`
     );
     const testEnv = {
@@ -2729,13 +2335,18 @@ test("managed terminal close locks terminal before state and prevents queued sen
       "closed during terminal mutation race"
     ], testEnv);
     await waitForCondition(() => {
-      const terminalLocks = fs.readdirSync(storeDir)
+      if (!fs.existsSync(terminalLockDir)) {
+        return false;
+      }
+      const terminalLocks = fs.readdirSync(terminalLockDir)
         .filter((name) =>
-          name.startsWith(".terminal-bridge-send-") &&
+          name.startsWith("terminal-bridge-send-") &&
           name.endsWith(".lock")
         );
       return terminalLocks.some((name) => {
-        const owner = JSON.parse(fs.readFileSync(path.join(storeDir, name), "utf8"));
+        const owner = JSON.parse(
+          fs.readFileSync(path.join(terminalLockDir, name), "utf8")
+        );
         return owner.pid === closing?.child.pid;
       });
     }, "close to acquire the terminal lock before waiting for state");
@@ -2832,6 +2443,7 @@ test("managed terminal close locks terminal before state and prevents queued sen
 test("idle cleanup locks and reloads a stale candidate before closing it", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-idle-cleanup-race-"));
   const storeDir = path.join(tempDir, "conversations");
+  const workspace = path.join(tempDir, "workspace");
   const preloadPath = path.join(tempDir, "state-read-gate.cjs");
   const snapshotReadPath = path.join(tempDir, "snapshot-read");
   const snapshotReleasePath = path.join(tempDir, "snapshot-release");
@@ -2841,19 +2453,45 @@ test("idle cleanup locks and reloads a stale candidate before closing it", async
   let stateLockPath = "";
 
   try {
+    fs.mkdirSync(workspace, { recursive: true });
     const created = runAgentCli([
-      "new",
-      "--agent",
-      "codex",
-      "--request",
+      "send",
+      "--conversation",
+      "terminal:v2:tmux:codex:codex-work:0.0:33389",
+      "--message",
       "idle cleanup race",
+      "--background",
       "--store-dir",
-      storeDir
+      storeDir,
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      "agent:test:main",
+      "--openclaw-session",
+      "agent:test:main",
+      "--disable-terminal-bridge-monitor",
+      "--processes-json",
+      JSON.stringify([{
+        pid: 33389,
+        ppid: 999,
+        command: "codex",
+        cwd: workspace
+      }]),
+      "--terminals-json",
+      JSON.stringify([tmuxPane({
+        target: "codex-work:0.0",
+        panePid: 999,
+        currentPath: workspace
+      })]),
+      "--terminal-screens-json",
+      JSON.stringify({
+        "codex-work:0.0": "› "
+      })
     ]);
     assert.equal(created.status, 0, created.stderr || created.stdout);
     const parsed = JSON.parse(created.stdout);
-    const statePath = parsed.paths.statePath;
-    const eventLogPath = parsed.paths.logPath;
+    const statePath = parsed.conversation.state_path;
+    const eventLogPath = parsed.conversation.event_log_path;
     stateLockPath = `${statePath}.lock`;
     const staleState = {
       ...JSON.parse(fs.readFileSync(statePath, "utf8")),
@@ -3081,10 +2719,23 @@ test("approve sends y only when the terminal screen shows a primary Codex approv
     assert.equal(statusParsed.terminal_status.approval_state.blocked, true);
     assert.equal(statusParsed.terminal_status.approval_state.approvable, true);
 
+    const rawConversationId =
+      "terminal:v2:tmux:codex:codex-work:0.0:1234";
+    const rawStatus = runAgentCli([
+      "status",
+      "--conversation",
+      rawConversationId
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(rawStatus.status, 0, rawStatus.stderr || rawStatus.stdout);
+    const rawStatusParsed = JSON.parse(rawStatus.stdout);
     const approved = runAgentCli([
       "approve",
       "--conversation",
-      parsed.conversation.conversation_id,
+      rawConversationId,
+      "--expected-approval-fingerprint",
+      rawStatusParsed.terminal_status.approval_state.fingerprint,
       "--store-dir",
       storeDir
     ], {
@@ -3094,6 +2745,7 @@ test("approve sends y only when the terminal screen shows a primary Codex approv
     assert.equal(approved.status, 0, approved.stderr || approved.stdout);
     const approvedParsed = JSON.parse(approved.stdout);
     assert.equal(approvedParsed.approved, true);
+    assert.equal(approvedParsed.conversation_id, rawConversationId);
     assert.equal(approvedParsed.key, "y");
     const calls = readJsonLines(tmuxCallsPath)
       .filter((call) => call.args[0] === "send-keys");
@@ -3132,7 +2784,6 @@ test("approval scan ignores stale Codex prompts left in terminal scrollback", ()
       screenPath,
       `codex-work\t0\t1\t33389\tnode\t${workspace}\n`
     );
-
     const conversationId = "terminal:v2:tmux:codex:codex-work:0.1:33389";
     const status = runAgentCli([
       "status",
@@ -3277,6 +2928,135 @@ test("status detects tmux Codex working idle and unknown activity states", () =>
   }
 });
 
+test("raw and managed Codex sends fail closed unless the locked pane is verifiably idle", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-send-idle-gate-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+  const tmuxSession = `akk-idle-gate-${process.pid}`;
+  const terminalTarget = `${tmuxSession}:0.1`;
+  const rawConversationId =
+    `terminal:v2:tmux:codex:${terminalTarget}:33389`;
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "› \n");
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `${tmuxSession}\t0\t1\t33389\tnode\t${workspace}\n`
+    );
+    const baseEnv = {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    };
+    const managed = runAgentCli([
+      "send",
+      "--conversation",
+      rawConversationId,
+      "--message",
+      "Create the managed turn",
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--disable-terminal-bridge-monitor"
+    ], baseEnv);
+    assert.equal(managed.status, 0, managed.stderr || managed.stdout);
+    const managedParsed = JSON.parse(managed.stdout);
+    const managedConversationId =
+      managedParsed.conversation.conversation_id;
+    const managedStatePath = managedParsed.conversation.state_path;
+    const completedAt = new Date().toISOString();
+    const managedState = JSON.parse(
+      fs.readFileSync(managedStatePath, "utf8")
+    );
+    fs.writeFileSync(
+      managedStatePath,
+      `${JSON.stringify({
+        ...managedState,
+        status: "idle",
+        idle_since: completedAt,
+        updated_at: completedAt
+      }, null, 2)}\n`
+    );
+    const managedLedgerPath = findTerminalDispatchLedgerPath(
+      managedConversationId,
+      path.join(tempDir, ".akk-cli-test-runtime")
+    );
+    const managedLedger = JSON.parse(
+      fs.readFileSync(managedLedgerPath, "utf8")
+    );
+    fs.writeFileSync(
+      managedLedgerPath,
+      `${JSON.stringify({
+        ...managedLedger,
+        status: "resolved",
+        resolved_at: completedAt,
+        reason: "simulated durable completion"
+      }, null, 2)}\n`
+    );
+
+    const scenarios = [
+      {
+        name: "working",
+        screen: "• Working (12s • esc to interrupt)\n\n› Steer the current task\n",
+        env: {},
+        expected: /Codex terminal is working, not idle/u
+      },
+      {
+        name: "unknown",
+        screen: "last command output\nno recognizable Codex TUI footer\n",
+        env: {},
+        expected: /Codex terminal is unknown, not idle/u
+      },
+      {
+        name: "capture failure",
+        screen: "› \n",
+        env: { AKK_TEST_TMUX_CAPTURE_FAIL: "1" },
+        expected: /Codex terminal status is unavailable/u
+      }
+    ];
+
+    for (const scenario of scenarios) {
+      fs.writeFileSync(screenPath, scenario.screen);
+      const scenarioEnv = { ...baseEnv, ...scenario.env };
+
+      for (const conversationId of [rawConversationId, managedConversationId]) {
+        fs.writeFileSync(tmuxCallsPath, "");
+        const sendArgs = [
+          "send",
+          "--conversation",
+          conversationId,
+          "--message",
+          `Must not send while terminal status is ${scenario.name}`,
+          "--background",
+          "--store-dir",
+          storeDir,
+          "--disable-terminal-bridge-monitor"
+        ];
+        const sent = runAgentCli(sendArgs, scenarioEnv);
+
+        assert.notEqual(
+          sent.status,
+          0,
+          `${scenario.name} ${conversationId}: ${sent.stderr || sent.stdout}`
+        );
+        assert.match(sent.stderr, scenario.expected);
+        assert.equal(
+          readJsonLines(tmuxCallsPath).some((call) => call.args[0] === "send-keys"),
+          false,
+          `${scenario.name} ${conversationId} must not write terminal keys`
+        );
+      }
+    }
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("raw terminal send rejects a stale agent pid without sending tmux keys", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-stale-pid-"));
   const fakeBinDir = path.join(tempDir, "bin");
@@ -3385,19 +3165,17 @@ test("approve supports terminal-controlled conversation ids without AKK state", 
   }
 });
 
-test("send and cancel support terminal-controlled conversation ids without AKK state", () => {
+test("raw terminal send requires managed background mode while cancel remains direct", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-send-"));
   const fakeBinDir = path.join(tempDir, "bin");
   const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
-  const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
   const screenPath = path.join(tempDir, "screen.txt");
   const workspace = path.join(tempDir, "workspace");
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
-    fs.writeFileSync(screenPath, "Codex is ready\n");
-    const openclawBin = writeFakeOpenClaw(fakeBinDir, openclawCallsPath);
+    fs.writeFileSync(screenPath, "› \n");
     writeFakeTmux(
       fakeBinDir,
       tmuxCallsPath,
@@ -3416,22 +3194,12 @@ test("send and cancel support terminal-controlled conversation ids without AKK s
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     });
 
-    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
-    const sentParsed = JSON.parse(sent.stdout);
-    assert.equal(sentParsed.conversation_id, conversationId);
-    assert.equal(sentParsed.source, "terminal_control");
-    assert.equal(sentParsed.delivered, true);
-    assert.equal(sentParsed.status, "async_pending");
-    assert.equal(sentParsed.background, true);
-    assert.equal(sentParsed.callback_expected, false);
-    assert.equal(sentParsed.openclaw_next_action.action, "yield");
-    assert.equal(sentParsed.openclaw_next_action.callback_expected, false);
-    assert.equal(sentParsed.terminal_control.target, "codex-work:0.1");
-
-    const calls = readJsonLines(tmuxCallsPath)
-      .filter((call) => call.args[0] === "send-keys");
-    assert.deepEqual(calls.at(-2).args, ["send-keys", "-t", "codex-work:0.1", "-l", "你好"]);
-    assert.deepEqual(calls.at(-1).args, ["send-keys", "-t", "codex-work:0.1", "C-m"]);
+    assert.notEqual(sent.status, 0);
+    assert.match(sent.stderr, /raw tmux terminal sends require --background/u);
+    assert.equal(
+      readJsonLines(tmuxCallsPath).some((call) => call.args[0] === "send-keys"),
+      false
+    );
 
     const cancelled = runAgentCli([
       "cancel",
@@ -3466,13 +3234,19 @@ test("background send to raw terminal id creates managed callback conversation",
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
-    fs.writeFileSync(screenPath, "Codex is ready\n");
+    fs.writeFileSync(screenPath, "› \n");
     writeFakeTmux(
       fakeBinDir,
       tmuxCallsPath,
       screenPath,
       `codex-work\t0\t1\t33389\tnode\t${workspace}\n`
     );
+    writeFakeProcessTools(fakeBinDir, [{
+      pid: 33389,
+      ppid: 999,
+      command: `codex resume ${sessionId}`,
+      cwd: workspace
+    }]);
 
     const rawConversationId = "terminal:tmux:codex-work:0.1:33389";
     const rejected = runAgentCli([
@@ -3536,6 +3310,32 @@ test("background send to raw terminal id creates managed callback conversation",
     assert.equal(state.conversation_id, sentParsed.conversation.conversation_id);
     assert.equal(typeof state.native_session_takeover.terminal_bridge_started_at, "string");
     assert.equal(state.native_session_takeover.terminal_bridge_message_id, sentParsed.message.id);
+    assert.equal(
+      state.native_session_takeover.terminal_bridge_submission.status,
+      "submitted"
+    );
+    assert.equal(
+      state.native_session_takeover.terminal_bridge_submission.message_id,
+      sentParsed.message.id
+    );
+    assert.equal(
+      typeof state.native_session_takeover.terminal_bridge_submission.prepared_at,
+      "string"
+    );
+    assert.equal(
+      typeof state.native_session_takeover.terminal_bridge_submission.submitted_at,
+      "string"
+    );
+
+    const events = readJsonLines(path.join(path.dirname(statePath), "events.ndjson"));
+    const messageIndex = events.findIndex((event) => event.event === "message");
+    const preparedIndex = events.findIndex(
+      (event) => event.event === "terminal_message_submit_prepared"
+    );
+    const sentIndex = events.findIndex((event) => event.event === "terminal_message_send");
+    assert.ok(messageIndex >= 0);
+    assert.ok(preparedIndex > messageIndex);
+    assert.ok(sentIndex > preparedIndex);
 
     const calls = readJsonLines(tmuxCallsPath)
       .filter((call) => call.args[0] === "send-keys");
@@ -3550,7 +3350,7 @@ test("background send to raw terminal id creates managed callback conversation",
     const idleState = {
       ...state,
       status: "idle",
-      idle_since: new Date().toISOString(),
+      idle_since: new Date(Date.now() - 2 * 60 * 1000).toISOString(),
       updated_at: new Date().toISOString()
     };
     fs.writeFileSync(statePath, `${JSON.stringify(idleState, null, 2)}\n`);
@@ -3559,6 +3359,8 @@ test("background send to raw terminal id creates managed callback conversation",
       "list",
       "--store-dir",
       storeDir,
+      "--idle-timeout-minutes",
+      "1",
       "--managed-only"
     ]);
     assert.equal(listed.status, 0, listed.stderr || listed.stdout);
@@ -3567,13 +3369,613 @@ test("background send to raw terminal id creates managed callback conversation",
     assert.deepEqual(listedParsed.delegated, []);
     const closedState = JSON.parse(fs.readFileSync(statePath, "utf8"));
     assert.equal(closedState.status, "closed");
-    assert.equal(closedState.close_reason, "terminal bridge task completed");
+    assert.equal(closedState.close_reason, "idle timeout after 1 minutes");
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
 
-test("a newer raw terminal task supersedes the prior screen-only callback boundary", () => {
+test("raw background send durably prepares its terminal submission before tmux accepts it", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-submit-prepare-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const tmuxGatePath = path.join(tempDir, "tmux-send-gate");
+  const workspace = path.join(tempDir, "workspace");
+  const tmuxSession = `akk-submit-prepare-${process.pid}`;
+  const rawConversationId = `terminal:tmux:${tmuxSession}:0.1:33389`;
+  let sending: ReturnType<typeof spawnAgentCliCaptured> | undefined;
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "› \n");
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `${tmuxSession}\t0\t1\t33389\tnode\t${workspace}\n`
+    );
+
+    sending = spawnAgentCliCaptured([
+      "send",
+      "--conversation",
+      rawConversationId,
+      "--message",
+      "Persist before sending",
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor"
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      AKK_TEST_TMUX_SEND_GATE_PATH: tmuxGatePath
+    });
+
+    await waitForCondition(
+      () => fs.existsSync(`${tmuxGatePath}.entered`),
+      "terminal submission to enter the fake tmux gate"
+    );
+
+    const conversationDirs = fs.readdirSync(storeDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory());
+    assert.equal(conversationDirs.length, 1);
+    const conversationDir = path.join(storeDir, conversationDirs[0].name);
+    const statePath = path.join(conversationDir, "state.json");
+    const logPath = path.join(conversationDir, "events.ndjson");
+    const preparedState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    assert.equal(
+      preparedState.native_session_takeover.terminal_bridge_submission.status,
+      "prepared"
+    );
+    assert.equal(
+      preparedState.native_session_takeover.terminal_bridge_submission.message_id,
+      preparedState.native_session_takeover.terminal_bridge_message_id
+    );
+    assert.equal(
+      typeof preparedState.native_session_takeover.terminal_bridge_submission.request_hash,
+      "string"
+    );
+    const preparedEvents = readJsonLines(logPath);
+    assert.equal(
+      preparedEvents.some((event) => event.event === "terminal_message_submit_prepared"),
+      true
+    );
+    assert.equal(
+      preparedEvents.some((event) => event.event === "terminal_message_send"),
+      false
+    );
+    assert.equal(
+      readJsonLines(tmuxCallsPath).some(
+        (call) => call.args[0] === "send-keys" && call.args.at(-1) === "C-m"
+      ),
+      false
+    );
+
+    fs.writeFileSync(`${tmuxGatePath}.release`, "");
+    const result = await sending.result;
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const submittedState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    assert.equal(
+      submittedState.native_session_takeover.terminal_bridge_submission.status,
+      "submitted"
+    );
+    assert.equal(
+      readJsonLines(logPath).some((event) => event.event === "terminal_message_send"),
+      true
+    );
+  } finally {
+    if (sending?.child.exitCode === null) {
+      fs.writeFileSync(`${tmuxGatePath}.release`, "");
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("an orphaned prepared submission becomes uncertain without terminal attribution", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-submit-orphan-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+  const terminalTarget = "codex-orphan:0.1";
+  let dispatchLedgerPath: string | undefined;
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "› \n");
+    const openclawBin = writeFakeOpenClaw(fakeBinDir, openclawCallsPath);
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `codex-orphan\t0\t1\t33389\tnode\t${workspace}\n`
+    );
+
+    const sent = runAgentCli([
+      "send",
+      "--conversation",
+      `terminal:tmux:${terminalTarget}:33389`,
+      "--message",
+      "Original AKK task",
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      "agent:channel:original",
+      "--openclaw-session",
+      "agent:channel:original",
+      "--openclaw-bin",
+      openclawBin,
+      "--disable-terminal-bridge-monitor"
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    const sentParsed = JSON.parse(sent.stdout);
+    const statePath = sentParsed.conversation.state_path;
+    const logPath = sentParsed.conversation.event_log_path;
+    const submittedState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    const submitted =
+      submittedState.native_session_takeover.terminal_bridge_submission;
+    const { submitted_at: _submittedAt, ...preparedSubmission } = submitted;
+    const preparedState = {
+      ...submittedState,
+      native_session_takeover: {
+        ...submittedState.native_session_takeover,
+        terminal_bridge_submission: {
+          ...preparedSubmission,
+          status: "prepared",
+          dispatcher_pid: 99999999
+        }
+      },
+      updated_at: submitted.prepared_at
+    };
+    fs.writeFileSync(statePath, `${JSON.stringify(preparedState, null, 2)}\n`);
+    dispatchLedgerPath = findTerminalDispatchLedgerPath(
+      sentParsed.conversation.conversation_id,
+      path.join(tempDir, ".akk-cli-test-runtime")
+    );
+    const submittedLedger = JSON.parse(
+      fs.readFileSync(dispatchLedgerPath, "utf8")
+    );
+    const { submitted_at: _ledgerSubmittedAt, ...preparedLedger } =
+      submittedLedger;
+    fs.writeFileSync(
+      dispatchLedgerPath,
+      `${JSON.stringify({
+        ...preparedLedger,
+        status: "prepared",
+        dispatcher_pid: 99999999
+      }, null, 2)}\n`,
+      { mode: 0o600 }
+    );
+    fs.writeFileSync(screenPath, [
+      "A human completed an unrelated task.",
+      "─ Worked for 1m ─────────────────────────────",
+      "› "
+    ].join("\n"));
+
+    const monitored = runAgentCli([
+      "monitor",
+      "--terminal-bridge",
+      "--state",
+      statePath,
+      "--log",
+      logPath,
+      "--poll-interval-ms",
+      "50",
+      "--processes-json",
+      JSON.stringify([{
+        pid: 33389,
+        ppid: 999,
+        command: "codex",
+        cwd: workspace
+      }]),
+      "--terminals-json",
+      JSON.stringify([tmuxPane({
+        target: terminalTarget,
+        session: "codex-orphan",
+        window: 0,
+        pane: 1,
+        panePid: 33389,
+        currentPath: workspace
+      })]),
+      "--terminal-screens-json",
+      JSON.stringify({ [terminalTarget]: fs.readFileSync(screenPath, "utf8") })
+    ]);
+    assert.equal(monitored.status, 0, monitored.stderr || monitored.stdout);
+    const monitoredParsed = JSON.parse(monitored.stdout);
+    assert.equal(monitoredParsed.completed, false);
+    assert.equal(monitoredParsed.submission_outcome, "uncertain");
+    assert.equal(monitoredParsed.do_not_retry, true);
+
+    const uncertainState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    const uncertain =
+      uncertainState.native_session_takeover.terminal_bridge_submission;
+    assert.equal(uncertain.status, "uncertain");
+    assert.equal(typeof uncertain.uncertain_at, "string");
+    assert.equal(uncertainState.updated_at, uncertain.uncertain_at);
+    assert.equal(fs.existsSync(openclawCallsPath), false);
+    const events = fs.readFileSync(logPath, "utf8");
+    assert.match(events, /dispatcher_exited_before_submitted_receipt/u);
+    assert.doesNotMatch(events, /terminal_bridge_completion_detected/u);
+    assert.doesNotMatch(events, /terminal_bridge_approval_detected/u);
+  } finally {
+    if (dispatchLedgerPath) {
+      fs.rmSync(dispatchLedgerPath, { force: true });
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("a released terminal owner permits the same task text in a new conversation", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-submit-receipt-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const retryStoreDir = path.join(tempDir, "retry-conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const tmuxGatePath = path.join(tempDir, "tmux-send-gate");
+  const workspace = path.join(tempDir, "workspace");
+  const tmuxSession = `akk-submit-receipt-${process.pid}`;
+  const terminalTarget = `${tmuxSession}:0.1`;
+  const rawConversationId = `terminal:tmux:${terminalTarget}:33389`;
+  const request = "Do this exactly once";
+  let sending: ReturnType<typeof spawnAgentCliCaptured> | undefined;
+  let dispatchLedgerPath: string | undefined;
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "› \n");
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `${tmuxSession}\t0\t1\t33389\tnode\t${workspace}\n`
+    );
+    const args = [
+      "send",
+      "--conversation",
+      rawConversationId,
+      "--message",
+      request,
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor"
+    ];
+    const testEnv = {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    };
+    sending = spawnAgentCliCaptured(args, {
+      ...testEnv,
+      AKK_TEST_TMUX_SEND_GATE_PATH: tmuxGatePath
+    });
+    await waitForCondition(
+      () => fs.existsSync(`${tmuxGatePath}.entered`),
+      "terminal submission to enter the post-submit receipt gate"
+    );
+
+    const conversationDir = path.join(
+      storeDir,
+      fs.readdirSync(storeDir, { withFileTypes: true })
+        .find((entry) => entry.isDirectory())!.name
+    );
+    const statePath = path.join(conversationDir, "state.json");
+    const logPath = path.join(conversationDir, "events.ndjson");
+    fs.appendFileSync(logPath, "{invalid-event\n");
+    fs.writeFileSync(`${tmuxGatePath}.release`, "");
+
+    const result = await sending.result;
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.delivered, true);
+    assert.equal(parsed.delivery_receipt, "submitted");
+    assert.ok(parsed.bookkeeping_warning);
+    fs.writeFileSync(
+      logPath,
+      fs.readFileSync(logPath, "utf8")
+        .split(/\r?\n/u)
+        .filter((line) => line !== "{invalid-event")
+        .filter(Boolean)
+        .map((line) => `${line}\n`)
+        .join("")
+    );
+    const submittedState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    assert.equal(
+      submittedState.native_session_takeover.terminal_bridge_submission.status,
+      "submitted"
+    );
+    dispatchLedgerPath = findTerminalDispatchLedgerPath(
+      parsed.conversation.conversation_id,
+      path.join(tempDir, ".akk-cli-test-runtime")
+    );
+    const preparedLedger = JSON.parse(
+      fs.readFileSync(dispatchLedgerPath, "utf8")
+    );
+    delete preparedLedger.submitted_at;
+    fs.writeFileSync(
+      dispatchLedgerPath,
+      `${JSON.stringify({
+        ...preparedLedger,
+        status: "prepared"
+      }, null, 2)}\n`
+    );
+    const workingScreen = [
+      "• Working on the task",
+      "",
+      "› Steer the current task"
+    ].join("\n");
+    const recovered = runAgentCli([
+      "monitor",
+      "--terminal-bridge",
+      "--state",
+      statePath,
+      "--log",
+      logPath,
+      "--poll-interval-ms",
+      "50",
+      "--agent-timeout-minutes",
+      "60",
+      "--agent-hard-timeout-minutes",
+      "0.001",
+      "--processes-json",
+      JSON.stringify([{
+        pid: 33389,
+        ppid: 999,
+        command: "codex",
+        cwd: workspace
+      }]),
+      "--terminals-json",
+      JSON.stringify([tmuxPane({
+        target: terminalTarget,
+        session: tmuxSession,
+        window: 0,
+        pane: 1,
+        panePid: 33389,
+        currentPath: workspace
+      })]),
+      "--terminal-screens-json",
+      JSON.stringify({ [terminalTarget]: workingScreen })
+    ], testEnv);
+    assert.equal(
+      recovered.status,
+      0,
+      recovered.stderr || recovered.stdout
+    );
+    assert.equal(JSON.parse(recovered.stdout).hard_timeout, true);
+    assert.equal(
+      JSON.parse(fs.readFileSync(dispatchLedgerPath, "utf8")).status,
+      "submitted",
+      "a durable submitted state must repair a prepared terminal ledger"
+    );
+    const entersBeforeRetry = readJsonLines(tmuxCallsPath)
+      .filter((call) => call.args[0] === "send-keys" && call.args.at(-1) === "C-m")
+      .length;
+    assert.equal(entersBeforeRetry, 1);
+
+    const closedAt = new Date().toISOString();
+    fs.writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        ...submittedState,
+        status: "closed",
+        closed_at: closedAt,
+        close_reason: "simulated callback completion",
+        updated_at: closedAt
+      }, null, 2)}\n`
+    );
+    const retryArgs = [...args];
+    retryArgs[retryArgs.indexOf("--store-dir") + 1] = retryStoreDir;
+    const retried = runAgentCli(retryArgs, testEnv);
+    assert.equal(retried.status, 0, retried.stderr || retried.stdout);
+    const retriedParsed = JSON.parse(retried.stdout);
+    assert.equal(retriedParsed.delivered, true);
+    assert.notEqual(retriedParsed.replayed, true);
+    assert.equal(retriedParsed.delivery_receipt, "submitted");
+    assert.notEqual(
+      retriedParsed.conversation.conversation_id,
+      parsed.conversation.conversation_id
+    );
+    assert.notEqual(retriedParsed.message.id, parsed.message.id);
+    const entersAfterRetry = readJsonLines(tmuxCallsPath)
+      .filter((call) => call.args[0] === "send-keys" && call.args.at(-1) === "C-m")
+      .length;
+    assert.equal(entersAfterRetry, 2);
+  } finally {
+    if (sending?.child.exitCode === null) {
+      fs.writeFileSync(`${tmuxGatePath}.release`, "");
+    }
+    if (dispatchLedgerPath) {
+      fs.rmSync(dispatchLedgerPath, { force: true });
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("an orphaned terminal dispatch requires its exact listed generation before recovery", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-orphan-recovery-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const retryStoreDir = path.join(tempDir, "retry-conversations");
+  const runtimeDir = path.join(tempDir, ".akk-cli-test-runtime");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+  const terminalSession = `akk-orphan-recovery-${process.pid}`;
+  const terminalTarget = `${terminalSession}:0.1`;
+  const panePid = 33389;
+  const rawConversationId =
+    `terminal:v2:tmux:codex:${terminalTarget}:${panePid}`;
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "› \n");
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `${terminalSession}\t0\t1\t${panePid}\tcodex\t${workspace}\n`
+    );
+    const testEnv = {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    };
+    const sent = runAgentCli([
+      "send",
+      "--conversation",
+      rawConversationId,
+      "--message",
+      "Recover this dispatch safely",
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor"
+    ], testEnv);
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    const sentParsed = JSON.parse(sent.stdout);
+    const messageId = sentParsed.message.id;
+    const statePath = sentParsed.conversation.state_path;
+    const stateBackupPath = `${statePath}.orphaned`;
+    const ledgerPath = findTerminalDispatchLedgerPath(
+      sentParsed.conversation.conversation_id,
+      runtimeDir
+    );
+    const staticTerminalArgs = [
+      "--processes-json",
+      JSON.stringify([{
+        pid: panePid,
+        ppid: 999,
+        command: "codex",
+        cwd: workspace
+      }]),
+      "--terminals-json",
+      JSON.stringify([tmuxPane({
+        target: terminalTarget,
+        session: terminalSession,
+        window: 0,
+        pane: 1,
+        panePid,
+        currentCommand: "codex",
+        currentPath: workspace
+      })]),
+      "--terminal-screens-json",
+      JSON.stringify({ [terminalTarget]: "› \n" })
+    ];
+    const closeArgs = [
+      "close",
+      "--conversation",
+      rawConversationId,
+      "--store-dir",
+      storeDir,
+      ...staticTerminalArgs
+    ];
+
+    const owned = runAgentCli([
+      ...closeArgs,
+      "--expected-message-id",
+      messageId
+    ], testEnv);
+    assert.notEqual(owned.status, 0);
+    assert.match(owned.stderr, /owned by AKK conversation/u);
+    assert.equal(
+      JSON.parse(fs.readFileSync(ledgerPath, "utf8")).status,
+      "submitted"
+    );
+
+    fs.renameSync(statePath, stateBackupPath);
+    const listed = runAgentCli([
+      "list",
+      "--store-dir",
+      storeDir,
+      ...staticTerminalArgs
+    ], testEnv);
+    assert.equal(listed.status, 0, listed.stderr || listed.stdout);
+    const listedParsed = JSON.parse(listed.stdout);
+    assert.equal(listedParsed.terminal_controlled.length, 1);
+    const orphaned =
+      listedParsed.terminal_controlled[0].orphaned_terminal_dispatch;
+    assert.equal(orphaned.message_id, messageId);
+    assert.equal(listedParsed.terminal_controlled[0].commands.close, true);
+    assert.equal(
+      orphaned.recovery,
+      `/akk close ${rawConversationId} --expected-message-id ${messageId}`
+    );
+
+    const missingIdentity = runAgentCli(closeArgs, testEnv);
+    assert.notEqual(missingIdentity.status, 0);
+    assert.match(missingIdentity.stderr, /expected-message-id is required/u);
+    const wrongIdentity = runAgentCli([
+      ...closeArgs,
+      "--expected-message-id",
+      "wrong-generation"
+    ], testEnv);
+    assert.notEqual(wrongIdentity.status, 0);
+    assert.match(wrongIdentity.stderr, /identity changed/u);
+    assert.equal(
+      JSON.parse(fs.readFileSync(ledgerPath, "utf8")).status,
+      "submitted"
+    );
+
+    const recovered = runAgentCli([
+      ...closeArgs,
+      "--expected-message-id",
+      messageId,
+      "--reason",
+      "operator inspected the pane"
+    ], testEnv);
+    assert.equal(recovered.status, 0, recovered.stderr || recovered.stdout);
+    const recoveredParsed = JSON.parse(recovered.stdout);
+    assert.equal(recoveredParsed.terminal_dispatch_resolved, true);
+    assert.equal(recoveredParsed.coding_agent_stopped, false);
+    assert.equal(recoveredParsed.tmux_pane_closed, false);
+    assert.equal(
+      JSON.parse(fs.readFileSync(ledgerPath, "utf8")).status,
+      "resolved"
+    );
+
+    const retried = runAgentCli([
+      "send",
+      "--conversation",
+      rawConversationId,
+      "--message",
+      "A new generation after recovery",
+      "--background",
+      "--store-dir",
+      retryStoreDir,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor"
+    ], testEnv);
+    assert.equal(retried.status, 0, retried.stderr || retried.stdout);
+    assert.equal(
+      readJsonLines(tmuxCallsPath)
+        .filter((call) =>
+          call.args[0] === "send-keys" &&
+          call.args.at(-1) === "C-m"
+        ).length,
+      2
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("a newer raw terminal task cannot replace an active callback boundary", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-task-supersede-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -3626,13 +4028,25 @@ test("a newer raw terminal task supersedes the prior screen-only callback bounda
     const firstLogPath = path.join(storeDir, firstParsed.conversation.conversation_id, "events.ndjson");
 
     const second = sendTask("Second task");
-    assert.equal(second.status, 0, second.stderr || second.stdout);
-    const secondParsed = JSON.parse(second.stdout);
+    assert.notEqual(second.status, 0);
+    assert.match(second.stderr, /still owned by active AKK conversation/u);
     const firstState = JSON.parse(fs.readFileSync(firstStatePath, "utf8"));
-    assert.equal(firstState.status, "closed");
-    assert.equal(firstState.superseded_by_conversation_id, secondParsed.conversation.conversation_id);
-    assert.match(firstState.close_reason, /superseded by a newer task/);
-    assert.match(fs.readFileSync(firstLogPath, "utf8"), /terminal_bridge_superseded/);
+    assert.equal(firstState.status, "waiting_for_agent");
+    assert.equal(firstState.superseded_by_conversation_id, undefined);
+    assert.doesNotMatch(
+      fs.readFileSync(firstLogPath, "utf8"),
+      /terminal_bridge_superseded/u
+    );
+    assert.equal(
+      readJsonLines(tmuxCallsPath)
+        .filter((call) =>
+          call.args[0] === "send-keys" &&
+          call.args.at(-1) === "C-m"
+        ).length,
+      1
+    );
+    assert.equal(fs.existsSync(openclawCallsPath), false);
+    return;
 
     fs.writeFileSync(screenPath, [
       "› First task",
@@ -3677,7 +4091,7 @@ test("a newer raw terminal task supersedes the prior screen-only callback bounda
   }
 });
 
-test("a newer raw terminal task reconciles durable completion before superseding", async () => {
+test("durable completion must settle before a newer raw task can send", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-task-reconcile-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -3808,9 +4222,19 @@ test("a newer raw terminal task reconciles durable completion before superseding
         panePid: 33389,
         currentPath: workspace
       })]),
+      "--terminal-screens-json",
+      JSON.stringify({ "codex-work:0.1": "› \n" }),
       "--rollouts-json",
       JSON.stringify({ [completedRolloutPath]: completedRollout })
     ], env);
+    assert.notEqual(second.status, 0);
+    assert.match(second.stderr, /still owned by active AKK conversation/u);
+    assert.equal(
+      JSON.parse(fs.readFileSync(firstStatePath, "utf8")).status,
+      "waiting_for_agent"
+    );
+    assert.equal(fs.existsSync(openclawCallsPath), false);
+    return;
     assert.equal(second.status, 0, second.stderr || second.stdout);
     const secondParsed = JSON.parse(second.stdout);
     const secondStatePath = path.join(
@@ -3917,6 +4341,8 @@ test("a newer raw terminal task reconciles durable completion before superseding
         panePid: 33389,
         currentPath: workspace
       })]),
+      "--terminal-screens-json",
+      JSON.stringify({ "codex-work:0.1": "› \n" }),
       "--rollouts-json",
       JSON.stringify({
         [ambiguousRolloutA]: ambiguousRollout("turn-ambiguous-a"),
@@ -3990,11 +4416,12 @@ test("a newer raw terminal task reconciles durable completion before superseding
   }
 });
 
-test("a failed replacement send keeps the prior terminal bridge active", () => {
+test("an active dispatch blocks a replacement before tmux input", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-task-send-failure-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
   const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
   const workspace = path.join(tempDir, "workspace");
   const tmuxSession = `akk-send-failure-${process.pid}`;
   const rawConversationId = `terminal:tmux:${tmuxSession}:0.1:33389`;
@@ -4002,8 +4429,9 @@ test("a failed replacement send keeps the prior terminal bridge active", () => {
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "› \n");
     const listPanesOutput = `${tmuxSession}\t0\t1\t33389\tnode\t${workspace}\n`;
-    writeFakeTmux(fakeBinDir, tmuxCallsPath, undefined, listPanesOutput);
+    writeFakeTmux(fakeBinDir, tmuxCallsPath, screenPath, listPanesOutput);
 
     const sendTask = (message: string) => runAgentCli([
       "send",
@@ -4029,24 +4457,233 @@ test("a failed replacement send keeps the prior terminal bridge active", () => {
     const firstStatePath = path.join(storeDir, firstParsed.conversation.conversation_id, "state.json");
     const firstLogPath = path.join(storeDir, firstParsed.conversation.conversation_id, "events.ndjson");
 
-    writeFakeTmux(fakeBinDir, tmuxCallsPath, undefined, listPanesOutput, "Second task");
+    writeFakeTmux(fakeBinDir, tmuxCallsPath, screenPath, listPanesOutput, "Second task");
     const second = sendTask("Second task");
     assert.notEqual(second.status, 0);
+    assert.match(second.stderr, /still owned by active AKK conversation/u);
 
     const firstState = JSON.parse(fs.readFileSync(firstStatePath, "utf8"));
     assert.equal(firstState.status, "waiting_for_agent");
     assert.equal(firstState.superseded_by_conversation_id, undefined);
-    assert.doesNotMatch(fs.readFileSync(firstLogPath, "utf8"), /terminal_bridge_superseded/);
+    const firstEvents = fs.readFileSync(firstLogPath, "utf8");
+    assert.doesNotMatch(
+      firstEvents,
+      /terminal_bridge_stalled_by_uncertain_dispatch/u
+    );
+    assert.doesNotMatch(firstEvents, /terminal_bridge_superseded/u);
+    assert.equal(
+      readJsonLines(tmuxCallsPath)
+        .filter((call) =>
+          call.args[0] === "send-keys" &&
+          call.args.at(-1) === "C-m"
+        ).length,
+      1
+    );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
 
-test("concurrent raw terminal sends serialize replacement state and terminal submission", async () => {
+test("an active managed task blocks a follow-up before tmux input", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-managed-send-failure-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+  const tmuxSession = `akk-managed-failure-${process.pid}`;
+  const rawConversationId = `terminal:tmux:${tmuxSession}:0.1:33389`;
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "› \n");
+    const listPanesOutput = `${tmuxSession}\t0\t1\t33389\tnode\t${workspace}\n`;
+    writeFakeTmux(fakeBinDir, tmuxCallsPath, screenPath, listPanesOutput);
+    const testEnv = {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    };
+    const first = runAgentCli([
+      "send",
+      "--conversation",
+      rawConversationId,
+      "--message",
+      "First managed task",
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor"
+    ], testEnv);
+    assert.equal(first.status, 0, first.stderr || first.stdout);
+    const firstParsed = JSON.parse(first.stdout);
+    const conversationId = firstParsed.conversation.conversation_id;
+    const statePath = firstParsed.conversation.state_path;
+    const firstMessageId =
+      firstParsed.conversation.native_session_takeover
+        .terminal_bridge_message_id;
+
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      listPanesOutput,
+      "Second managed task"
+    );
+    const second = runAgentCli([
+      "send",
+      "--conversation",
+      conversationId,
+      "--message",
+      "Second managed task",
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--disable-terminal-bridge-monitor"
+    ], testEnv);
+    assert.notEqual(second.status, 0);
+    assert.match(second.stderr, /still owned by active AKK conversation/u);
+
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    assert.equal(
+      state.native_session_takeover.terminal_bridge_message_id,
+      firstMessageId
+    );
+    assert.equal(
+      state.native_session_takeover.terminal_bridge_request_text,
+      "First managed task"
+    );
+    assert.equal(
+      state.native_session_takeover.terminal_bridge_submission.status,
+      "submitted"
+    );
+    assert.equal(
+      state.native_session_takeover.terminal_bridge_submission.message_id,
+      firstMessageId
+    );
+    assert.equal(state.status, "waiting_for_agent");
+    assert.equal(
+      readJsonLines(tmuxCallsPath)
+        .filter((call) =>
+          call.args[0] === "send-keys" &&
+          call.args.at(-1) === "C-m"
+        ).length,
+      1
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("managed pre-submit setup failure restores the previous boundary and is retryable", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-managed-send-abort-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+  const tmuxSession = `akk-managed-abort-${process.pid}`;
+  const rawConversationId = `terminal:tmux:${tmuxSession}:0.1:33389`;
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "› \n");
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `${tmuxSession}\t0\t1\t33389\tnode\t${workspace}\n`
+    );
+    const testEnv = {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    };
+    const first = runAgentCli([
+      "send",
+      "--conversation",
+      rawConversationId,
+      "--message",
+      "First managed task",
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor"
+    ], testEnv);
+    assert.equal(first.status, 0, first.stderr || first.stdout);
+    const firstParsed = JSON.parse(first.stdout);
+    const conversationId = firstParsed.conversation.conversation_id;
+    const statePath = firstParsed.conversation.state_path;
+    const firstMessageId =
+      firstParsed.conversation.native_session_takeover
+        .terminal_bridge_message_id;
+    const entersBefore = readJsonLines(tmuxCallsPath)
+      .filter((call) => call.args[0] === "send-keys" && call.args.at(-1) === "C-m")
+      .length;
+    const idleAt = new Date().toISOString();
+    const firstState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    fs.writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        ...firstState,
+        status: "idle",
+        idle_since: idleAt,
+        updated_at: idleAt
+      }, null, 2)}\n`
+    );
+    const second = runAgentCli([
+      "send",
+      "--conversation",
+      conversationId,
+      "--message",
+      "Second managed task",
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--idle-timeout-minutes",
+      "0",
+      "--disable-terminal-bridge-monitor"
+    ], {
+      ...testEnv,
+      AKK_TEST_TERMINAL_SETUP_FAILURE: "1"
+    });
+    assert.equal(second.status, 0, second.stderr || second.stdout);
+    const secondParsed = JSON.parse(second.stdout);
+    assert.equal(secondParsed.submission_outcome, "aborted");
+    assert.equal(secondParsed.safe_to_retry, true);
+    assert.equal(secondParsed.delivered, false);
+
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    assert.equal(
+      state.native_session_takeover.terminal_bridge_message_id,
+      firstMessageId
+    );
+    assert.equal(
+      state.native_session_takeover.terminal_bridge_request_text,
+      "First managed task"
+    );
+    assert.equal(
+      state.native_session_takeover.terminal_bridge_submission.status,
+      "aborted"
+    );
+    assert.equal(state.status, "idle");
+    const entersAfter = readJsonLines(tmuxCallsPath)
+      .filter((call) => call.args[0] === "send-keys" && call.args.at(-1) === "C-m")
+      .length;
+    assert.equal(entersAfter, entersBefore);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("concurrent raw terminal sends allow exactly one active generation", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-task-concurrent-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
   const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
   const workspace = path.join(tempDir, "workspace");
   const tmuxSession = `akk-concurrent-${process.pid}`;
   const rawConversationId = `terminal:tmux:${tmuxSession}:0.1:33389`;
@@ -4054,10 +4691,11 @@ test("concurrent raw terminal sends serialize replacement state and terminal sub
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "› \n");
     writeFakeTmux(
       fakeBinDir,
       tmuxCallsPath,
-      undefined,
+      screenPath,
       `${tmuxSession}\t0\t1\t33389\tnode\t${workspace}\n`
     );
     const sendArgs = (message: string) => [
@@ -4084,28 +4722,620 @@ test("concurrent raw terminal sends serialize replacement state and terminal sub
       runAgentCliAsync(sendArgs("Concurrent task A"), env),
       runAgentCliAsync(sendArgs("Concurrent task B"), env)
     ]);
-    assert.equal(first.status, 0, first.stderr || first.stdout);
-    assert.equal(second.status, 0, second.stderr || second.stdout);
+    assert.deepEqual(
+      [first.status, second.status].sort(),
+      [0, 1]
+    );
+    const rejected = first.status === 0 ? second : first;
+    assert.match(
+      rejected.stderr,
+      /still owned by active AKK conversation/u
+    );
 
     const states = fs.readdirSync(storeDir, { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
-      .map((entry) => JSON.parse(fs.readFileSync(path.join(storeDir, entry.name, "state.json"), "utf8")));
+      .map((entry) => path.join(storeDir, entry.name, "state.json"))
+      .filter((statePath) => fs.existsSync(statePath))
+      .map((statePath) =>
+        JSON.parse(fs.readFileSync(statePath, "utf8"))
+      );
     const active = states.filter((state) => state.status === "waiting_for_agent");
-    const closed = states.filter((state) => state.status === "closed");
     assert.equal(active.length, 1);
-    assert.equal(closed.length, 1);
-    assert.equal(closed[0].superseded_by_conversation_id, active[0].conversation_id);
 
     const calls = readJsonLines(tmuxCallsPath);
     const literalSendIndexes = calls
       .map((call, index) => call.args.includes("-l") ? index : -1)
       .filter((index) => index >= 0);
-    assert.equal(literalSendIndexes.length, 2);
-    const firstEnterIndex = calls.findIndex(
-      (call, index) => index > literalSendIndexes[0] && call.args.at(-1) === "C-m"
+    assert.equal(literalSendIndexes.length, 1);
+    assert.equal(
+      calls.filter((call) =>
+        call.args[0] === "send-keys" &&
+        call.args.at(-1) === "C-m"
+      ).length,
+      1
     );
-    assert.ok(firstEnterIndex > literalSendIndexes[0]);
-    assert.ok(firstEnterIndex < literalSendIndexes[1]);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("terminal generation ownership spans different stores", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-cross-store-"));
+  const firstStoreDir = path.join(tempDir, "first-conversations");
+  const secondStoreDir = path.join(tempDir, "second-conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+  const tmuxSession = `akk-cross-store-${process.pid}`;
+  const rawConversationId = `terminal:tmux:${tmuxSession}:0.1:33389`;
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "› \n");
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `${tmuxSession}\t0\t1\t33389\tnode\t${workspace}\n`
+    );
+    const sendArgs = (message: string, storeDir: string) => [
+      "send",
+      "--conversation",
+      rawConversationId,
+      "--message",
+      message,
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor"
+    ];
+    const env = {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      AKK_TEST_TMUX_SEND_DELAY_MS: "300"
+    };
+
+    const [first, second] = await Promise.all([
+      runAgentCliAsync(sendArgs("Cross-store task A", firstStoreDir), env),
+      runAgentCliAsync(sendArgs("Cross-store task B", secondStoreDir), env)
+    ]);
+    assert.deepEqual(
+      [first.status, second.status].sort(),
+      [0, 1]
+    );
+    const rejected = first.status === 0 ? second : first;
+    assert.match(
+      rejected.stderr,
+      /still owned by active AKK conversation/u
+    );
+
+    const calls = readJsonLines(tmuxCallsPath);
+    const literalSendIndexes = calls
+      .map((call, index) => call.args.includes("-l") ? index : -1)
+      .filter((index) => index >= 0);
+    assert.equal(literalSendIndexes.length, 1);
+    assert.equal(
+      calls.filter((call) =>
+        call.args[0] === "send-keys" &&
+        call.args.at(-1) === "C-m"
+      ).length,
+      1
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("only the uncertain cross-store owner can resolve its terminal fence", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-cross-store-fence-"));
+  const firstStoreDir = path.join(tempDir, "first-conversations");
+  const secondStoreDir = path.join(tempDir, "second-conversations");
+  const thirdStoreDir = path.join(tempDir, "third-conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+  const tmuxSession = `akk-cross-store-fence-${process.pid}`;
+  const terminalTarget = `${tmuxSession}:0.1`;
+  const rawConversationId = `terminal:tmux:${terminalTarget}:33389`;
+  const listPanesOutput =
+    `${tmuxSession}\t0\t1\t33389\tnode\t${workspace}\n`;
+  let dispatchLedgerPath: string | undefined;
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "› \n");
+    const openclawBin = writeFakeOpenClaw(
+      fakeBinDir,
+      openclawCallsPath
+    );
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      listPanesOutput
+    );
+    const testEnv = {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    };
+    const sendArgs = (
+      message: string,
+      storeDir: string,
+      withCallback = false
+    ) => [
+      "send",
+      "--conversation",
+      rawConversationId,
+      "--message",
+      message,
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--openclaw-bin",
+      withCallback ? openclawBin : "/usr/bin/true",
+      ...(withCallback
+        ? [
+            "--gateway-method",
+            "agent-knock-knock.callback",
+            "--gateway-session",
+            "agent:channel:original",
+            "--openclaw-session",
+            "agent:channel:original"
+          ]
+        : []),
+      "--disable-terminal-bridge-monitor"
+    ];
+
+    const first = runAgentCli(
+      sendArgs("First cross-store task", firstStoreDir, true),
+      testEnv
+    );
+    assert.equal(first.status, 0, first.stderr || first.stdout);
+    const firstParsed = JSON.parse(first.stdout);
+    const firstStatePath = firstParsed.conversation.state_path;
+    dispatchLedgerPath = findTerminalDispatchLedgerPath(
+      firstParsed.conversation.conversation_id,
+      path.join(tempDir, ".akk-cli-test-runtime")
+    );
+
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      listPanesOutput,
+      "Second cross-store task"
+    );
+    const second = runAgentCli(
+      sendArgs("Second cross-store task", secondStoreDir),
+      testEnv
+    );
+    assert.notEqual(second.status, 0);
+    assert.match(second.stderr, /still owned by active AKK conversation/u);
+    assert.equal(
+      JSON.parse(fs.readFileSync(firstStatePath, "utf8")).status,
+      "waiting_for_agent"
+    );
+
+    const oldClosed = runAgentCli([
+      "close",
+      "--conversation",
+      firstParsed.conversation.conversation_id,
+      "--store-dir",
+      firstStoreDir,
+      "--reason",
+      "closing the old cross-store generation"
+    ], testEnv);
+    assert.equal(oldClosed.status, 0, oldClosed.stderr || oldClosed.stdout);
+    assert.equal(
+      JSON.parse(oldClosed.stdout).terminal_dispatch_resolved,
+      true
+    );
+
+    const uncertain = runAgentCli(
+      sendArgs("Second cross-store task", secondStoreDir),
+      testEnv
+    );
+    assert.equal(
+      uncertain.status,
+      0,
+      uncertain.stderr || uncertain.stdout
+    );
+    const secondParsed = JSON.parse(uncertain.stdout);
+    assert.equal(secondParsed.submission_outcome, "uncertain");
+    assert.equal(secondParsed.do_not_retry, true);
+
+    const staleClose = runAgentCli([
+      "close",
+      "--conversation",
+      firstParsed.conversation.conversation_id,
+      "--store-dir",
+      firstStoreDir,
+      "--reason",
+      "stale owner cannot resolve the replacement generation"
+    ], testEnv);
+    assert.equal(
+      staleClose.status,
+      0,
+      staleClose.stderr || staleClose.stdout
+    );
+    assert.equal(
+      JSON.parse(staleClose.stdout).terminal_dispatch_resolved,
+      false
+    );
+
+    const blocked = runAgentCli(
+      sendArgs("Third cross-store task", thirdStoreDir),
+      testEnv
+    );
+    assert.notEqual(blocked.status, 0);
+    assert.match(blocked.stderr, /terminal-level uncertain dispatch/u);
+
+    const ownerClosed = runAgentCli([
+      "close",
+      "--conversation",
+      secondParsed.conversation.conversation_id,
+      "--store-dir",
+      secondStoreDir,
+      "--reason",
+      "operator inspected the uncertain terminal dispatch"
+    ], testEnv);
+    assert.equal(
+      ownerClosed.status,
+      0,
+      ownerClosed.stderr || ownerClosed.stdout
+    );
+    assert.equal(
+      JSON.parse(ownerClosed.stdout).terminal_dispatch_resolved,
+      true
+    );
+
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      listPanesOutput
+    );
+    const third = runAgentCli(
+      sendArgs("Third cross-store task", thirdStoreDir),
+      testEnv
+    );
+    assert.equal(third.status, 0, third.stderr || third.stdout);
+    assert.equal(JSON.parse(third.stdout).delivered, true);
+  } finally {
+    if (dispatchLedgerPath) {
+      fs.rmSync(dispatchLedgerPath, { force: true });
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("terminal receipt fingerprints preserve exact whitespace", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-exact-receipt-"));
+  const firstStoreDir = path.join(tempDir, "first-conversations");
+  const secondStoreDir = path.join(tempDir, "second-conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+  const tmuxSession = `akk-exact-receipt-${process.pid}`;
+  const rawConversationId =
+    `terminal:tmux:${tmuxSession}:0.1:33389`;
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "› \n");
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `${tmuxSession}\t0\t1\t33389\tnode\t${workspace}\n`
+    );
+    const testEnv = {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    };
+    const send = (message: string, storeDir: string) => runAgentCli([
+      "send",
+      "--conversation",
+      rawConversationId,
+      "--message",
+      message,
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor"
+    ], testEnv);
+
+    const first = send("Review:\n  alpha", firstStoreDir);
+    assert.equal(first.status, 0, first.stderr || first.stdout);
+    const firstParsed = JSON.parse(first.stdout);
+    const firstStatePath = firstParsed.conversation.state_path;
+    const firstState = JSON.parse(
+      fs.readFileSync(firstStatePath, "utf8")
+    );
+    const closedAt = new Date().toISOString();
+    fs.writeFileSync(
+      firstStatePath,
+      `${JSON.stringify({
+        ...firstState,
+        status: "closed",
+        closed_at: closedAt,
+        updated_at: closedAt
+      }, null, 2)}\n`
+    );
+
+    const second = send("Review: alpha", secondStoreDir);
+    assert.equal(second.status, 0, second.stderr || second.stdout);
+    assert.notEqual(JSON.parse(second.stdout).replayed, true);
+    assert.equal(
+      readJsonLines(tmuxCallsPath)
+        .filter((call) =>
+          call.args[0] === "send-keys" &&
+          call.args.at(-1) === "C-m"
+        ).length,
+      2
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("a recreated tmux pane does not replay the prior incarnation receipt", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-pane-incarnation-"));
+  const firstStoreDir = path.join(tempDir, "first-conversations");
+  const secondStoreDir = path.join(tempDir, "second-conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+  const tmuxSession = `akk-pane-incarnation-${process.pid}`;
+  const terminalTarget = `${tmuxSession}:0.1`;
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "› \n");
+    const testEnv = {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    };
+    const send = (
+      panePid: number,
+      storeDir: string
+    ) => runAgentCli([
+      "send",
+      "--conversation",
+      `terminal:tmux:${terminalTarget}:${panePid}`,
+      "--message",
+      "Run the same request",
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor"
+    ], testEnv);
+
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `${tmuxSession}\t0\t1\t33389\tnode\t${workspace}\n`
+    );
+    const first = send(33389, firstStoreDir);
+    assert.equal(first.status, 0, first.stderr || first.stdout);
+
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `${tmuxSession}\t0\t1\t44489\tnode\t${workspace}\n`
+    );
+    const second = send(44489, secondStoreDir);
+    assert.equal(second.status, 0, second.stderr || second.stdout);
+    assert.notEqual(JSON.parse(second.stdout).replayed, true);
+    assert.equal(
+      readJsonLines(tmuxCallsPath)
+        .filter((call) =>
+          call.args[0] === "send-keys" &&
+          call.args.at(-1) === "C-m"
+        ).length,
+      2
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("an orphaned prepared ledger without owner state is safely abandoned", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-orphan-ledger-"));
+  const firstStoreDir = path.join(tempDir, "first-conversations");
+  const secondStoreDir = path.join(tempDir, "second-conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+  const tmuxSession = `akk-orphan-ledger-${process.pid}`;
+  const rawConversationId =
+    `terminal:tmux:${tmuxSession}:0.1:33389`;
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "› \n");
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `${tmuxSession}\t0\t1\t33389\tnode\t${workspace}\n`
+    );
+    const testEnv = {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    };
+    const send = (message: string, storeDir: string) => runAgentCli([
+      "send",
+      "--conversation",
+      rawConversationId,
+      "--message",
+      message,
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor"
+    ], testEnv);
+
+    const first = send("First task", firstStoreDir);
+    assert.equal(first.status, 0, first.stderr || first.stdout);
+    const firstParsed = JSON.parse(first.stdout);
+    const ledgerPath = findTerminalDispatchLedgerPath(
+      firstParsed.conversation.conversation_id,
+      path.join(tempDir, ".akk-cli-test-runtime")
+    );
+    const ledger = JSON.parse(fs.readFileSync(ledgerPath, "utf8"));
+    delete ledger.submitted_at;
+    fs.writeFileSync(
+      ledgerPath,
+      `${JSON.stringify({
+        ...ledger,
+        status: "prepared",
+        dispatcher_pid: 99999999
+      }, null, 2)}\n`
+    );
+    fs.rmSync(firstParsed.conversation.state_path, { force: true });
+
+    const second = send("Second task", secondStoreDir);
+    assert.equal(second.status, 0, second.stderr || second.stdout);
+    assert.equal(JSON.parse(second.stdout).delivered, true);
+    assert.equal(
+      readJsonLines(tmuxCallsPath)
+        .filter((call) =>
+          call.args[0] === "send-keys" &&
+          call.args.at(-1) === "C-m"
+        ).length,
+      2
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("stale managed approve and cancel cannot control a newer cross-store generation", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-stale-control-"));
+  const firstStoreDir = path.join(tempDir, "first-conversations");
+  const secondStoreDir = path.join(tempDir, "second-conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+  const tmuxSession = `akk-stale-control-${process.pid}`;
+  const rawConversationId =
+    `terminal:tmux:${tmuxSession}:0.1:33389`;
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "› \n");
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `${tmuxSession}\t0\t1\t33389\tnode\t${workspace}\n`
+    );
+    const testEnv = {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    };
+    const send = (message: string, storeDir: string) => runAgentCli([
+      "send",
+      "--conversation",
+      rawConversationId,
+      "--message",
+      message,
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor"
+    ], testEnv);
+
+    const first = send("First task", firstStoreDir);
+    assert.equal(first.status, 0, first.stderr || first.stdout);
+    const firstParsed = JSON.parse(first.stdout);
+    const firstStatePath = firstParsed.conversation.state_path;
+    const firstState = JSON.parse(
+      fs.readFileSync(firstStatePath, "utf8")
+    );
+    const idleAt = new Date().toISOString();
+    fs.writeFileSync(
+      firstStatePath,
+      `${JSON.stringify({
+        ...firstState,
+        status: "idle",
+        idle_since: idleAt,
+        updated_at: idleAt
+      }, null, 2)}\n`
+    );
+
+    const second = send("Second task", secondStoreDir);
+    assert.equal(second.status, 0, second.stderr || second.stdout);
+    const staleAt = new Date().toISOString();
+    fs.writeFileSync(
+      firstStatePath,
+      `${JSON.stringify({
+        ...firstState,
+        status: "waiting_for_openclaw",
+        updated_at: staleAt
+      }, null, 2)}\n`
+    );
+    fs.writeFileSync(screenPath, [
+      "Would you like to run the following command?",
+      "",
+      "› 1. Yes, allow (y)",
+      "  2. No (n)"
+    ].join("\n"));
+    const keysBefore = readJsonLines(tmuxCallsPath)
+      .filter((call) => call.args[0] === "send-keys")
+      .length;
+
+    const approved = runAgentCli([
+      "approve",
+      "--conversation",
+      firstParsed.conversation.conversation_id,
+      "--store-dir",
+      firstStoreDir
+    ], testEnv);
+    assert.notEqual(approved.status, 0);
+    assert.match(
+      approved.stderr,
+      /does not own the current terminal dispatch generation/u
+    );
+
+    const cancelled = runAgentCli([
+      "cancel",
+      "--conversation",
+      firstParsed.conversation.conversation_id,
+      "--store-dir",
+      firstStoreDir
+    ], testEnv);
+    assert.notEqual(cancelled.status, 0);
+    assert.match(
+      cancelled.stderr,
+      /does not own the current terminal dispatch generation/u
+    );
+    assert.equal(
+      readJsonLines(tmuxCallsPath)
+        .filter((call) => call.args[0] === "send-keys")
+        .length,
+      keysBefore
+    );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -4123,7 +5353,7 @@ test("terminal bridge monitor trusts matching task_complete despite stale workin
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
-    fs.writeFileSync(screenPath, "Codex is ready\n");
+    fs.writeFileSync(screenPath, "› \n");
     const openclawBin = writeFakeOpenClaw(fakeBinDir, openclawCallsPath);
     writeFakeTmux(
       fakeBinDir,
@@ -4211,7 +5441,7 @@ test("terminal bridge monitor trusts matching task_complete despite stale workin
       JSON.stringify([tmuxPane({
         target: "codex-work:0.1",
         pane: 1,
-        panePid: 999,
+        panePid: 33389,
         currentPath: workspace
       })]),
       "--terminal-screens-json",
@@ -4237,8 +5467,71 @@ test("terminal bridge monitor trusts matching task_complete despite stale workin
     );
     assert.equal(parsed.message.metadata.match, "rollout_task_complete");
     assert.equal(parsed.message.metadata.rollout_turn_id, "turn-current-task");
-    assert.equal(parsed.conversation.status, "closed");
-    assert.equal(parsed.conversation.close_reason, "terminal bridge task completed");
+    assert.equal(parsed.conversation.status, "idle");
+    assert.equal(typeof parsed.conversation.idle_since, "string");
+    const completedLedgerPath = findTerminalDispatchLedgerPath(
+      parsed.conversation.conversation_id,
+      path.join(tempDir, ".akk-cli-test-runtime")
+    );
+    assert.equal(
+      JSON.parse(fs.readFileSync(completedLedgerPath, "utf8")).status,
+      "resolved"
+    );
+    const keysBeforeStaleActions = readJsonLines(tmuxCallsPath)
+      .filter((call) => call.args[0] === "send-keys")
+      .length;
+    const staleApprove = runAgentCli([
+      "approve",
+      "--conversation",
+      parsed.conversation.conversation_id,
+      "--expected-approval-fingerprint",
+      "stale-fingerprint",
+      "--store-dir",
+      storeDir
+    ]);
+    assert.notEqual(staleApprove.status, 0);
+    assert.match(staleApprove.stderr, /conversation is idle/u);
+    const staleCancel = runAgentCli([
+      "cancel",
+      "--conversation",
+      parsed.conversation.conversation_id,
+      "--store-dir",
+      storeDir
+    ]);
+    assert.notEqual(staleCancel.status, 0);
+    assert.match(staleCancel.stderr, /conversation is idle/u);
+    assert.equal(
+      readJsonLines(tmuxCallsPath)
+        .filter((call) => call.args[0] === "send-keys")
+        .length,
+      keysBeforeStaleActions
+    );
+
+    const followUp = runAgentCli([
+      "send",
+      "--conversation",
+      parsed.conversation.conversation_id,
+      "--message",
+      "Now summarize the release notes",
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--disable-terminal-bridge-monitor"
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(followUp.status, 0, followUp.stderr || followUp.stdout);
+    const followUpParsed = JSON.parse(followUp.stdout);
+    assert.equal(followUpParsed.delivered, true);
+    assert.equal(followUpParsed.conversation.status, "waiting_for_agent");
+    assert.equal(
+      readJsonLines(tmuxCallsPath)
+        .filter((call) =>
+          call.args[0] === "send-keys" &&
+          call.args.at(-1) === "C-m"
+        ).length,
+      2
+    );
 
     const events = fs.readFileSync(logPath, "utf8");
     assert.match(events, /terminal_bridge_completion_detected/);
@@ -4269,7 +5562,7 @@ test("terminal bridge searches all same-cwd rollouts for the matching task_compl
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
-    fs.writeFileSync(screenPath, "• Working (12s • esc to interrupt)\n");
+    fs.writeFileSync(screenPath, "› \n");
     const openclawBin = writeFakeOpenClaw(fakeBinDir, openclawCallsPath);
     writeFakeTmux(
       fakeBinDir,
@@ -4302,6 +5595,7 @@ test("terminal bridge searches all same-cwd rollouts for the matching task_compl
     });
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
     const sentParsed = JSON.parse(sent.stdout);
+    fs.writeFileSync(screenPath, "• Working (12s • esc to interrupt)\n");
     const statePath = path.join(
       storeDir,
       sentParsed.conversation.conversation_id,
@@ -4444,7 +5738,7 @@ test("terminal bridge monitor rejects low-confidence assistant and task_complete
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
-    fs.writeFileSync(screenPath, "• Waited for background terminal · git merge --ff-only origin/main\n");
+    fs.writeFileSync(screenPath, "› \n");
     const openclawBin = writeFakeOpenClaw(fakeBinDir, openclawCallsPath);
     writeFakeTmux(
       fakeBinDir,
@@ -4573,7 +5867,7 @@ test("terminal bridge working markers extend inactivity until the hard lifetime"
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
-    fs.writeFileSync(screenPath, workingScreen);
+    fs.writeFileSync(screenPath, "› \n");
     const openclawBin = writeFakeOpenClaw(fakeBinDir, openclawCallsPath);
     writeFakeTmux(
       fakeBinDir,
@@ -4609,6 +5903,7 @@ test("terminal bridge working markers extend inactivity until the hard lifetime"
     });
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
     const sentParsed = JSON.parse(sent.stdout);
+    fs.writeFileSync(screenPath, workingScreen);
     const statePath = path.join(storeDir, sentParsed.conversation.conversation_id, "state.json");
     const logPath = path.join(storeDir, sentParsed.conversation.conversation_id, "events.ndjson");
     const startedAt = JSON.parse(fs.readFileSync(statePath, "utf8"))
@@ -4828,7 +6123,8 @@ test("renew restarts a stalled terminal bridge without input and completion call
     const monitoredParsed = JSON.parse(monitored.stdout);
     assert.equal(monitoredParsed.delivered, true);
     assert.equal(monitoredParsed.message.body, "The long task is complete.");
-    assert.equal(monitoredParsed.conversation.status, "closed");
+    assert.equal(monitoredParsed.conversation.status, "idle");
+    assert.equal(typeof monitoredParsed.conversation.idle_since, "string");
 
     const monitoredAgain = runAgentCli(monitorArgs);
     assert.equal(monitoredAgain.status, 0, monitoredAgain.stderr || monitoredAgain.stdout);
@@ -4848,6 +6144,7 @@ test("renew reloads stalled state after pane discovery and cannot overwrite a co
   const fakeBinDir = path.join(tempDir, "bin");
   const workspace = path.join(tempDir, "workspace");
   const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
   const tmuxListGatePath = path.join(tempDir, "tmux-list-gate");
   const terminalTarget = "codex-renew-race:0.1";
   let renewing: ReturnType<typeof spawnAgentCliCaptured> | undefined;
@@ -4855,10 +6152,11 @@ test("renew reloads stalled state after pane discovery and cannot overwrite a co
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "› \n");
     writeFakeTmux(
       fakeBinDir,
       tmuxCallsPath,
-      undefined,
+      screenPath,
       `codex-renew-race\t0\t1\t33389\tnode\t${workspace}\n`
     );
     const testEnv = {
@@ -4954,10 +6252,9 @@ test("terminal bridge monitor singleton rejects a live owner and reclaims a dead
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
-    fs.writeFileSync(
-      screenPath,
-      "• Working (12s • esc to interrupt) · 1 background terminal running\n› Steer the current task\n"
-    );
+    const workingScreen =
+      "• Working (12s • esc to interrupt) · 1 background terminal running\n› Steer the current task\n";
+    fs.writeFileSync(screenPath, "› \n");
     const openclawBin = writeFakeOpenClaw(fakeBinDir, openclawCallsPath);
     writeFakeTmux(
       fakeBinDir,
@@ -4993,6 +6290,7 @@ test("terminal bridge monitor singleton rejects a live owner and reclaims a dead
     ], testEnv);
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
     const sentParsed = JSON.parse(sent.stdout);
+    fs.writeFileSync(screenPath, workingScreen);
     const statePath = sentParsed.conversation.state_path;
     const logPath = sentParsed.conversation.event_log_path;
     const monitorArgs = [
@@ -5069,6 +6367,29 @@ test("terminal bridge monitor singleton rejects a live owner and reclaims a dead
     const handoffMessageId =
       sentParsed.conversation.native_session_takeover
         .terminal_bridge_message_id;
+    const handoffLedgerPath = findTerminalDispatchLedgerPath(
+      sentParsed.conversation.conversation_id,
+      path.join(tempDir, ".akk-cli-test-runtime")
+    );
+    const handoffState = JSON.parse(
+      fs.readFileSync(handoffStatePath, "utf8")
+    );
+    const handoffLedger = JSON.parse(
+      fs.readFileSync(handoffLedgerPath, "utf8")
+    );
+    delete handoffLedger.resolved_at;
+    delete handoffLedger.reason;
+    fs.writeFileSync(
+      handoffLedgerPath,
+      `${JSON.stringify({
+        ...handoffLedger,
+        status: "submitted",
+        conversation_id: handoffState.conversation_id,
+        state_path: handoffStatePath,
+        message_id: handoffMessageId,
+        submitted_at: new Date().toISOString()
+      }, null, 2)}\n`
+    );
     const handoffArgs = [
       "monitor",
       "--terminal-bridge-handoff",
@@ -5348,109 +6669,8 @@ test("reconcile-monitors launches only recoverable waiting terminal bridges", as
   }
 });
 
-test("reconcile-monitors refreshes exact Claude leases and reports unsafe refresh failures", async () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-monitor-reconcile-"));
-  const storeDir = path.join(tempDir, "conversations");
-  const hookStoreDir = path.join(tempDir, "claude-hooks");
-  const invalidHookStorePath = path.join(tempDir, "invalid-hook-store");
-  const fakeBinDir = path.join(tempDir, "bin");
-  const workspace = path.join(tempDir, "workspace");
-  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
-  const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
-  const screenPath = path.join(tempDir, "screen.txt");
-  const terminalTarget = "claude-work:0.0";
-  const claudePid = 42301;
-  const claudeSessionId = "claude-session-reconcile";
-  let monitorPid: number | undefined;
-
-  try {
-    fs.mkdirSync(fakeBinDir, { recursive: true });
-    fs.mkdirSync(workspace, { recursive: true });
-    fs.writeFileSync(screenPath, "❯ ");
-    fs.writeFileSync(invalidHookStorePath, "not a directory\n");
-    writeFakeOpenClaw(fakeBinDir, openclawCallsPath);
-    writeFakeTmux(
-      fakeBinDir,
-      tmuxCallsPath,
-      screenPath,
-      `claude-work\t0\t0\t999\tnode\t${workspace}\n`
-    );
-    const task = startManagedClaudeTerminalTask({
-      fakeBinDir,
-      workspace,
-      storeDir,
-      hookStoreDir,
-      terminalTarget,
-      claudePid,
-      claudeSessionId,
-      message: "Continue after the Gateway restart"
-    });
-    const nativeTakeover = task.conversation.native_session_takeover;
-    const hookStore = new ClaudeHookStore({ rootDir: hookStoreDir });
-    hookStore.releaseLease({ leaseId: nativeTakeover.claude_hook_lease_id });
-
-    writeConversationClone(storeDir, task.conversation, "claude-unsafe-refresh", (state) => ({
-      ...state,
-      native_session_takeover: {
-        ...state.native_session_takeover,
-        terminal_bridge_message_id: "msg-claude-unsafe-refresh",
-        claude_hook_store_dir: invalidHookStorePath,
-        claude_hook_lease_id: "invalid-lease"
-      }
-    }));
-
-    const testEnv = {
-      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
-    };
-    const reconciled = runAgentCli([
-      "reconcile-monitors",
-      "--store-dir",
-      storeDir,
-      "--monitor-poll-interval-ms",
-      "20"
-    ], testEnv);
-    assert.equal(reconciled.status, 0, reconciled.stderr || reconciled.stdout);
-    const parsed = JSON.parse(reconciled.stdout);
-    assert.equal(parsed.checked, 2);
-    assert.equal(parsed.launched, 1);
-    assert.equal(parsed.skipped, 1);
-    assert.equal(parsed.errors, 0);
-    const failedItem = parsed.items.find((item) =>
-      item.conversation_id === "claude-unsafe-refresh"
-    );
-    assert.equal(failedItem.status, "skipped");
-    assert.equal(failedItem.reason, "claude_hook_lease_refresh_failed");
-    const launchedItem = parsed.items.find((item) => item.status === "launched");
-    monitorPid = launchedItem.monitor_pid;
-
-    const renewed = hookStore.resolveLease({
-      sessionId: claudeSessionId,
-      pid: claudePid,
-      cwd: workspace
-    });
-    assert.equal(renewed?.authorizationEligible, true);
-    assert.equal(renewed?.lease.conversationId, task.conversation.conversation_id);
-    assert.equal(renewed?.lease.messageId, nativeTakeover.terminal_bridge_message_id);
-    const renewedState = JSON.parse(fs.readFileSync(task.statePath, "utf8"));
-    assert.equal(renewedState.native_session_takeover.claude_hook_lease_id, renewed?.lease.id);
-
-    const closed = runAgentCli([
-      "close",
-      "--state",
-      task.statePath,
-      "--reason",
-      "Claude reconciliation test cleanup"
-    ]);
-    assert.equal(closed.status, 0, closed.stderr || closed.stdout);
-    await waitForPidExit(monitorPid);
-  } finally {
-    killPidBestEffort(monitorPid);
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  }
-});
-
-test("reconcile-monitors restarts hookless Claude bridges without a hook lease", async () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-hookless-claude-reconcile-"));
+test("reconcile-monitors restarts transcript-backed Claude bridges without sending terminal input", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-reconcile-"));
   const storeDir = path.join(tempDir, "conversations");
   const claudeHome = path.join(tempDir, ".claude");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -5483,10 +6703,15 @@ test("reconcile-monitors restarts hookless Claude bridges without a hook lease",
       terminalTarget,
       claudePid,
       claudeSessionId,
-      message: "Continue the hookless task after restart"
+      message: "Continue the transcript-backed task after restart"
     });
-    assert.equal(task.conversation.native_session_takeover.claude_hook_mode, undefined);
-    assert.equal(task.conversation.native_session_takeover.claude_hook_lease_id, undefined);
+    const storedAfterSend = JSON.parse(fs.readFileSync(task.statePath, "utf8"));
+    const nativeTakeover = storedAfterSend.native_session_takeover;
+    assert.equal(typeof nativeTakeover.claude_transcript_anchor, "object");
+    assert.deepEqual(
+      Object.keys(nativeTakeover).filter((key) => key.startsWith("claude_hook_")),
+      []
+    );
     const sendKeysBefore = readJsonLines(tmuxCallsPath)
       .filter((call) => call.args[0] === "send-keys").length;
     const testEnv = {
@@ -5506,26 +6731,29 @@ test("reconcile-monitors restarts hookless Claude bridges without a hook lease",
     assert.equal(parsed.launched, 1);
     assert.equal(parsed.skipped, 0);
     assert.equal(parsed.errors, 0);
-    assert.notEqual(
-      parsed.items[0]?.reason,
-      "claude_hook_lease_refresh_failed"
-    );
     monitorPid = parsed.items[0]?.monitor_pid;
     await waitForCondition(
       () => eventCount(task.logPath, "terminal_bridge_monitor_started") === 1,
-      "hookless Claude monitor to start after reconciliation"
+      "Claude transcript monitor to start after reconciliation"
     );
     assert.equal(
       readJsonLines(tmuxCallsPath).filter((call) => call.args[0] === "send-keys").length,
       sendKeysBefore
     );
+    const reconciledState = JSON.parse(fs.readFileSync(task.statePath, "utf8"));
+    assert.deepEqual(
+      Object.keys(reconciledState.native_session_takeover)
+        .filter((key) => key.startsWith("claude_hook_")),
+      []
+    );
+    assert.doesNotMatch(fs.readFileSync(task.logPath, "utf8"), /claude_hook_/u);
 
     const closed = runAgentCli([
       "close",
       "--state",
       task.statePath,
       "--reason",
-      "Hookless Claude reconciliation test cleanup"
+      "Claude transcript reconciliation test cleanup"
     ]);
     assert.equal(closed.status, 0, closed.stderr || closed.stdout);
     await waitForPidExit(monitorPid);
@@ -5548,7 +6776,7 @@ test("terminal bridge monitor callbacks when the completed prompt has scrolled o
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
     const request = "git pull 完后看一下最近的 commits，告诉我都更新了哪些特性";
-    fs.writeFileSync(screenPath, "Codex is ready\n");
+    fs.writeFileSync(screenPath, "› \n");
     const openclawBin = writeFakeOpenClaw(fakeBinDir, openclawCallsPath);
     writeFakeTmux(
       fakeBinDir,
@@ -5644,8 +6872,8 @@ test("terminal bridge monitor callbacks when the completed prompt has scrolled o
     assert.match(parsed.message.body, /这次 pull 实际只更新了 1 个 commit/);
     assert.doesNotMatch(parsed.message.body, /Worked for|Find and fix|gpt-5\.6/);
     assert.equal(parsed.message.metadata.confidence, "screen_only");
-    assert.equal(parsed.conversation.status, "closed");
-    assert.equal(parsed.conversation.close_reason, "terminal bridge task completed");
+    assert.equal(parsed.conversation.status, "idle");
+    assert.equal(typeof parsed.conversation.idle_since, "string");
 
     const events = fs.readFileSync(logPath, "utf8");
     assert.match(events, /terminal_bridge_completion_detected/);
@@ -5681,7 +6909,7 @@ test("terminal approval notification releases the state lock during callback del
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
-    fs.writeFileSync(screenPath, approvalScreen);
+    fs.writeFileSync(screenPath, "› \n");
     const openclawBin = writeFakeOpenClaw(fakeBinDir, openclawCallsPath);
     writeFakeTmux(
       fakeBinDir,
@@ -5713,6 +6941,7 @@ test("terminal approval notification releases the state lock during callback del
     ], testEnv);
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
     const sentParsed = JSON.parse(sent.stdout);
+    fs.writeFileSync(screenPath, approvalScreen);
     const conversationId = sentParsed.conversation.conversation_id;
     const statePath = sentParsed.conversation.state_path;
     const logPath = sentParsed.conversation.event_log_path;
@@ -5841,7 +7070,7 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
       "",
       "  Press enter to confirm or esc to cancel"
     ].join("\n");
-    fs.writeFileSync(screenPath, approvalScreen);
+    fs.writeFileSync(screenPath, "› \n");
     const openclawBin = writeFakeOpenClaw(fakeBinDir, openclawCallsPath);
     writeFakeTmux(
       fakeBinDir,
@@ -5874,6 +7103,7 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
     });
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
     const sentParsed = JSON.parse(sent.stdout);
+    fs.writeFileSync(screenPath, approvalScreen);
     const conversationId = sentParsed.conversation.conversation_id;
     const statePath = path.join(storeDir, conversationId, "state.json");
     const logPath = path.join(storeDir, conversationId, "events.ndjson");
@@ -6616,6 +7846,7 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
 
 test("terminal-controlled conversation ids use Codex pid, not tmux pane pid", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-pid-"));
+  const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
   const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
   const screenPath = path.join(tempDir, "screen.txt");
@@ -6624,7 +7855,7 @@ test("terminal-controlled conversation ids use Codex pid, not tmux pane pid", ()
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
-    fs.writeFileSync(screenPath, "Codex is ready\n");
+    fs.writeFileSync(screenPath, "› \n");
     writeFakeTmux(
       fakeBinDir,
       tmuxCallsPath,
@@ -6639,6 +7870,10 @@ test("terminal-controlled conversation ids use Codex pid, not tmux pane pid", ()
       conversationId,
       "--message",
       "继续",
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--disable-terminal-bridge-monitor",
       "--processes-json",
       JSON.stringify([{
         pid: 33389,
@@ -6651,22 +7886,30 @@ test("terminal-controlled conversation ids use Codex pid, not tmux pane pid", ()
         target: "codex-work:0.0",
         panePid: 999,
         currentPath: workspace
-      })])
+      })]),
+      "--terminal-screens-json",
+      JSON.stringify({ "codex-work:0.0": "› \n" })
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     });
 
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
     const sentParsed = JSON.parse(sent.stdout);
-    assert.equal(sentParsed.conversation_id, conversationId);
+    assert.equal(
+      sentParsed.conversation.native_session_takeover.native_session_id,
+      conversationId
+    );
+    assert.equal(
+      sentParsed.conversation.native_session_takeover.terminal_agent_pid,
+      33389
+    );
     assert.equal(sentParsed.terminal_control.panePid, 999);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
 
-
-test("agent takeover terminate_then_resume returns a confirmation plan for an exact active session", () => {
+test("agent takeover rejects an unsupported strategy", () => {
   const result = runAgentCli([
     "agent",
     "takeover",
@@ -6675,330 +7918,14 @@ test("agent takeover terminate_then_resume returns a confirmation plan for an ex
     "--session-id",
     sessionId,
     "--strategy",
-    "terminate_then_resume",
-    "--threads-json",
-    JSON.stringify([threadRow()]),
-    "--processes-json",
-    JSON.stringify([{
-      pid: 2000,
-      ppid: 1,
-      command: `codex resume ${sessionId}`,
-      cwd
-    }])
-  ]);
-
-  assert.equal(result.status, 0, result.stderr || result.stdout);
-  const parsed = JSON.parse(result.stdout);
-  assert.equal(parsed.status, "requires_confirmation");
-  assert.equal(parsed.sideEffectsExecuted, false);
-  assert.equal(parsed.plan.mode, "takeover");
-  assert.equal(parsed.plan.targets[0].pid, 2000);
-  assert.equal(parsed.plan.resumeAfterExit.sessionId, sessionId);
-});
-
-test("agent takeover terminate_then_resume requires explicit pid confirmation before terminating", () => {
-  const result = runAgentCli([
-    "agent",
-    "takeover",
-    "--agent",
-    "codex",
-    "--session-id",
-    sessionId,
-    "--strategy",
-    "terminate_then_resume",
-    "--create-conversation",
-    "--confirm-terminate",
-    "--threads-json",
-    JSON.stringify([threadRow()]),
-    "--processes-json",
-    JSON.stringify([{
-      pid: 2000,
-      ppid: 1,
-      command: `codex resume ${sessionId}`,
-      cwd
-    }])
+    "unsupported_strategy"
   ]);
 
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /--expected-pid is required/);
-});
-
-test("agent takeover terminate_then_resume can terminate a confirmed process and attach a conversation", () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-agent-terminate-"));
-  const storeDir = path.join(tempDir, "conversations");
-  const workspace = path.join(tempDir, "workspace");
-  fs.mkdirSync(workspace, { recursive: true });
-  const child = spawn("/bin/sleep", ["60"], {
-    stdio: "ignore",
-    detached: false
-  });
-
-  try {
-    assert.ok(child.pid);
-    const result = runAgentCli([
-      "agent",
-      "takeover",
-      "--agent",
-      "codex",
-      "--session-id",
-      sessionId,
-      "--strategy",
-      "terminate_then_resume",
-      "--create-conversation",
-      "--confirm-terminate",
-      "--expected-pid",
-      String(child.pid),
-      "--terminate-timeout-ms",
-      "50",
-      "--request",
-      "Take over active terminal Codex",
-      "--store-dir",
-      storeDir,
-      "--threads-json",
-      JSON.stringify([threadRow({ cwd: workspace })]),
-      "--rollouts-json",
-      JSON.stringify({ [rolloutPath]: nativeModelRollout() }),
-      "--processes-json",
-      JSON.stringify([[{
-        pid: child.pid,
-        ppid: 1,
-        command: `codex resume ${sessionId}`,
-        cwd: workspace
-      }], []])
-    ]);
-
-    assert.equal(result.status, 0, result.stderr || result.stdout);
-    const parsed = JSON.parse(result.stdout);
-    assert.equal(parsed.status, "attached", result.stdout);
-    assert.equal(parsed.sideEffectsExecuted, true);
-    assert.equal(parsed.termination.target.pid, child.pid);
-    assert.equal(parsed.termination.signals[0].status, "sent");
-    assert.equal(parsed.conversation.status, "idle");
-    assert.equal(parsed.conversation.executor.session, sessionId);
-    assert.equal(parsed.conversation.native_session_takeover.strategy, "terminate_then_resume");
-    assert.equal(parsed.conversation.native_session_takeover.needs_bootstrap, true);
-  } finally {
-    try {
-      if (child.pid) {
-        process.kill(child.pid, "SIGKILL");
-      }
-    } catch {
-      // Already terminated by the command under test.
-    }
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  }
-});
-
-test("agent takeover terminate_then_resume can explicitly accept a cwd-only confirmed pid", () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-agent-cwd-only-"));
-  const storeDir = path.join(tempDir, "conversations");
-  const workspace = path.join(tempDir, "workspace");
-  fs.mkdirSync(workspace, { recursive: true });
-  const child = spawn("/bin/sleep", ["60"], {
-    stdio: "ignore",
-    detached: false
-  });
-
-  try {
-    assert.ok(child.pid);
-    const result = runAgentCli([
-      "agent",
-      "takeover",
-      "--agent",
-      "codex",
-      "--session-id",
-      sessionId,
-      "--strategy",
-      "terminate_then_resume",
-      "--create-conversation",
-      "--confirm-terminate",
-      "--allow-cwd-only",
-      "--expected-pid",
-      String(child.pid),
-      "--terminate-timeout-ms",
-      "50",
-      "--request",
-      "Take over cwd-only terminal Codex",
-      "--store-dir",
-      storeDir,
-      "--threads-json",
-      JSON.stringify([threadRow({ cwd: workspace })]),
-      "--rollouts-json",
-      JSON.stringify({ [rolloutPath]: nativeModelRollout() }),
-      "--processes-json",
-      JSON.stringify([[{
-        pid: child.pid,
-        ppid: 1,
-        command: "codex",
-        cwd: workspace
-      }], []])
-    ]);
-
-    assert.equal(result.status, 0, result.stderr || result.stdout);
-    const parsed = JSON.parse(result.stdout);
-    assert.equal(parsed.status, "attached", result.stdout);
-    assert.equal(parsed.matchKind, "cwd_only_confirmed");
-    assert.equal(parsed.conversation.native_session_takeover.takeover_match_kind, "cwd_only_confirmed");
-    assert.equal(parsed.conversation.native_session_takeover.needs_bootstrap, true);
-  } finally {
-    try {
-      if (child.pid) {
-        process.kill(child.pid, "SIGKILL");
-      }
-    } catch {
-      // Already terminated by the command under test.
-    }
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  }
-});
-
-test("agent takeover fork returns bounded context for OpenClaw summary confirmation", () => {
-  const rollout = [
-    JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "review this branch" } }),
-    JSON.stringify({ type: "event_msg", payload: { type: "agent_message", message: "I found one issue." } }),
-    JSON.stringify({ type: "response_item", payload: { command: "git status", cwd, status: "0" } })
-  ].join("\n");
-  const result = runAgentCli([
-    "agent",
-    "takeover",
-    "--agent",
-    "codex",
-    "--session-id",
-    sessionId,
-    "--strategy",
-    "fork",
-    "--threads-json",
-    JSON.stringify([threadRow()]),
-    "--rollouts-json",
-    JSON.stringify({ [rolloutPath]: rollout })
-  ]);
-
-  assert.equal(result.status, 0, result.stderr || result.stdout);
-  const parsed = JSON.parse(result.stdout);
-  assert.equal(parsed.status, "awaiting_openclaw_summary");
-  assert.equal(parsed.sideEffectsExecuted, false);
-  assert.equal(parsed.plan.mode, "fork");
-  assert.equal(parsed.plan.requiresOpenClawSummary, true);
-  assert.equal(parsed.plan.contextPackage.source.sessionId, sessionId);
-  assert.equal(parsed.plan.contextPackage.messages.length, 2);
-  assert.match(parsed.summaryPrompt, /Produce a concise, user-reviewable summary/);
-  assert.match(parsed.summaryPrompt, /do not pass raw rollout history/);
-  assert.equal(parsed.nextAction.action, "summarize_and_confirm_fork");
-  assert.equal(parsed.nextAction.followUpTool, "agent_knock_knock_agent_takeover");
-  assert.deepEqual(parsed.nextAction.followUpParams, {
-    agent: "codex",
-    sessionId,
-    strategy: "fork",
-    createConversation: true,
-    forkSummary: "<confirmed OpenClaw summary>"
-  });
-});
-
-test("agent takeover fork can create a new AKK conversation from approved summary", () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-agent-fork-"));
-  const storeDir = path.join(tempDir, "conversations");
-  const fakeBinDir = path.join(tempDir, "bin");
-  const workspace = path.join(tempDir, "workspace");
-  const acpxCallsPath = path.join(tempDir, "acpx-calls.ndjson");
-  const rollout = [
-    JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "raw private source context" } }),
-    JSON.stringify({ type: "event_msg", payload: { type: "agent_message", message: "raw assistant context" } }),
-    nativeModelRollout()
-  ].join("\n");
-
-  try {
-    fs.mkdirSync(fakeBinDir, { recursive: true });
-    fs.mkdirSync(workspace, { recursive: true });
-    const fakeAcpx = path.join(fakeBinDir, "acpx");
-    fs.writeFileSync(
-      fakeAcpx,
-      `#!/usr/bin/env node
-const fs = require("node:fs");
-fs.appendFileSync(${JSON.stringify(acpxCallsPath)}, JSON.stringify({
-  args: process.argv.slice(2)
-}) + "\\n", "utf8");
-`,
-      "utf8"
-    );
-    fs.chmodSync(fakeAcpx, 0o755);
-
-    const forked = runAgentCli([
-      "agent",
-      "takeover",
-      "--agent",
-      "codex",
-      "--session-id",
-      sessionId,
-      "--strategy",
-      "fork",
-      "--create-conversation",
-      "--request",
-      "Fork my terminal Codex session",
-      "--fork-summary",
-      "Approved summary: inspect the ACPX branch and continue carefully.",
-      "--store-dir",
-      storeDir,
-      "--openclaw-session",
-      "agent:main:wechat",
-      "--threads-json",
-      JSON.stringify([threadRow({ cwd: workspace })]),
-      "--rollouts-json",
-      JSON.stringify({ [rolloutPath]: rollout }),
-      "--processes-json",
-      JSON.stringify([{
-        pid: 2000,
-        ppid: 1,
-        command: "codex",
-        cwd: workspace
-      }])
-    ]);
-
-    assert.equal(forked.status, 0, forked.stderr || forked.stdout);
-    const parsed = JSON.parse(forked.stdout);
-    assert.equal(parsed.status, "forked");
-    assert.equal(parsed.sideEffectsExecuted, true);
-    assert.equal(parsed.conversation.status, "idle");
-    assert.equal(parsed.conversation.executor.kind, "codex");
-    assert.notEqual(parsed.conversation.executor.session, sessionId);
-    assert.match(parsed.conversation.executor.session, /^akk-codex-/);
-    assert.equal(parsed.conversation.executor_model, "gpt-5.5[medium]");
-    assert.equal(parsed.conversation.fork_context_takeover.source_session_id, sessionId);
-    assert.equal(parsed.conversation.fork_context_takeover.summary, "Approved summary: inspect the ACPX branch and continue carefully.");
-    assert.equal(parsed.conversation.fork_context_takeover.needs_bootstrap, true);
-
-    const sent = runAgentCli([
-      "send",
-      "--conversation",
-      parsed.conversation.conversation_id,
-      "--store-dir",
-      storeDir,
-      "--message",
-      "Start from the approved fork summary.",
-      "--type",
-      "task"
-    ], {
-      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
-    });
-
-    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
-    const sentParsed = JSON.parse(sent.stdout);
-    assert.equal(sentParsed.delivered, true);
-    assert.equal(sentParsed.conversation.fork_context_takeover.needs_bootstrap, false);
-
-    const calls = fs.readFileSync(acpxCallsPath, "utf8")
-      .trim()
-      .split(/\r?\n/)
-      .map((line) => JSON.parse(line));
-    assert.deepEqual(calls[0].args, [...CODEX_ACPX_SELECTOR, "sessions", "ensure", "--name", parsed.conversation.executor.session]);
-    assert.deepEqual(calls[1].args.slice(0, 7), ["--approve-all", "--model", "gpt-5.5[medium]", ...CODEX_ACPX_SELECTOR, "prompt", "-s"]);
-    assert.equal(calls[1].args[7], parsed.conversation.executor.session);
-    assert.match(calls[1].args[8], /This AKK conversation is a fork/);
-    assert.match(calls[1].args[8], /Approved summary: inspect the ACPX branch/);
-    assert.doesNotMatch(calls[1].args[8], /raw private source context/);
-    assert.doesNotMatch(calls[1].args[8], /--resume-session/);
-  } finally {
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  }
+  assert.match(
+    `${result.stderr}\n${result.stdout}`,
+    /terminal_control.*only|only.*terminal_control/u
+  );
 });
 
 test("describe terminal-controlled Codex session from rollout history", () => {
@@ -7174,7 +8101,6 @@ function startManagedClaudeTerminalTask(options: {
   workspace: string;
   storeDir: string;
   claudeHome?: string;
-  hookStoreDir?: string;
   terminalTarget: string;
   claudePid: number;
   claudeSessionId: string;
@@ -7205,9 +8131,6 @@ function startManagedClaudeTerminalTask(options: {
     "agent:channel:original",
     "--openclaw-bin",
     openclawBin,
-    ...(options.hookStoreDir
-      ? ["--claude-hook-store-dir", options.hookStoreDir]
-      : []),
     ...(options.claudeHome
       ? ["--claude-home", options.claudeHome]
       : []),
@@ -7229,31 +8152,6 @@ function startManagedClaudeTerminalTask(options: {
     statePath: parsed.conversation.state_path,
     logPath: parsed.conversation.event_log_path
   };
-}
-
-function claudeMonitorArgs(options: {
-  task: ManagedClaudeTerminalTask;
-  hookStoreDir: string;
-  staticArgs: string[];
-  timeoutMinutes?: string;
-}): string[] {
-  return [
-    "monitor",
-    "--terminal-bridge",
-    "--state",
-    options.task.statePath,
-    "--log",
-    options.task.logPath,
-    "--poll-interval-ms",
-    "20",
-    "--agent-timeout-minutes",
-    options.timeoutMinutes ?? "60",
-    "--agent-hard-timeout-minutes",
-    "120",
-    "--claude-hook-store-dir",
-    options.hookStoreDir,
-    ...options.staticArgs
-  ];
 }
 
 function claudeTerminalStaticArgs(options: {
@@ -7301,73 +8199,41 @@ function claudeAgentRow(pid: number, sessionId: string, workspace: string) {
   };
 }
 
-function claudeHookBase(sessionId: string, workspace: string) {
+function agentCliTestEnv(
+  args: string[],
+  env: NodeJS.ProcessEnv
+): NodeJS.ProcessEnv {
+  let inferredRuntimeDir: string | undefined;
+  const storeIndex = args.indexOf("--store-dir");
+  if (storeIndex >= 0 && args[storeIndex + 1]) {
+    inferredRuntimeDir = path.join(
+      path.dirname(path.resolve(args[storeIndex + 1])),
+      ".akk-cli-test-runtime"
+    );
+  } else {
+    const stateIndex = args.indexOf("--state");
+    if (stateIndex >= 0 && args[stateIndex + 1]) {
+      const statePath = path.resolve(args[stateIndex + 1]);
+      const inferredStoreDir = path.dirname(path.dirname(statePath));
+      inferredRuntimeDir = path.join(
+        path.dirname(inferredStoreDir),
+        ".akk-cli-test-runtime"
+      );
+    }
+  }
   return {
-    session_id: sessionId,
-    transcript_path: path.join(workspace, ".claude", `${sessionId}.jsonl`),
-    cwd: workspace,
-    permission_mode: "default"
-  };
-}
-
-function claudePromptHookInput(sessionId: string, workspace: string, promptId: string) {
-  return {
-    ...claudeHookBase(sessionId, workspace),
-    hook_event_name: "UserPromptSubmit" as const,
-    prompt_id: promptId,
-    prompt: `prompt for ${promptId}`
-  };
-}
-
-function claudePermissionHookInput(
-  sessionId: string,
-  workspace: string,
-  promptId: string,
-  command: string
-) {
-  return {
-    ...claudeHookBase(sessionId, workspace),
-    hook_event_name: "PermissionRequest" as const,
-    prompt_id: promptId,
-    tool_name: "Bash",
-    tool_input: { command },
-    permission_suggestions: []
-  };
-}
-
-function claudeStopHookInput(
-  sessionId: string,
-  workspace: string,
-  promptId: string,
-  fields: Record<string, unknown>
-) {
-  return {
-    ...claudeHookBase(sessionId, workspace),
-    hook_event_name: "Stop" as const,
-    prompt_id: promptId,
-    stop_hook_active: false,
-    ...fields
-  };
-}
-
-function claudeStopFailureHookInput(sessionId: string, workspace: string, promptId: string) {
-  return {
-    ...claudeHookBase(sessionId, workspace),
-    hook_event_name: "StopFailure" as const,
-    prompt_id: promptId,
-    error: "rate_limit" as const,
-    error_details: "429 Too Many Requests",
-    last_assistant_message: "Release command failed before completion."
+    ...process.env,
+    ...(inferredRuntimeDir && env.AKK_RUNTIME_DIR === undefined
+      ? { AKK_RUNTIME_DIR: inferredRuntimeDir }
+      : {}),
+    ...env
   };
 }
 
 function runAgentCli(args: string[], env: NodeJS.ProcessEnv = {}) {
   return spawnSync(process.execPath, [binPath, ...args], {
     encoding: "utf8",
-    env: {
-      ...process.env,
-      ...env
-    }
+    env: agentCliTestEnv(args, env)
   });
 }
 
@@ -7378,10 +8244,7 @@ function runAgentCliAsync(
 ) {
   return new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
     const child = spawn(process.execPath, [binPath, ...args], {
-      env: {
-        ...process.env,
-        ...env
-      }
+      env: agentCliTestEnv(args, env)
     });
     let stdout = "";
     let stderr = "";
@@ -7423,10 +8286,7 @@ function runAgentCliAsync(
 
 function spawnAgentCliCaptured(args: string[], env: NodeJS.ProcessEnv = {}) {
   const child = spawn(process.execPath, [binPath, ...args], {
-    env: {
-      ...process.env,
-      ...env
-    }
+    env: agentCliTestEnv(args, env)
   });
   let stdout = "";
   let stderr = "";
@@ -7453,10 +8313,7 @@ function spawnAgentCliCaptured(args: string[], env: NodeJS.ProcessEnv = {}) {
 
 function spawnAgentCliProcess(args: string[], env: NodeJS.ProcessEnv = {}) {
   const child = spawn(process.execPath, [binPath, ...args], {
-    env: {
-      ...process.env,
-      ...env
-    }
+    env: agentCliTestEnv(args, env)
   });
   child.stdout.resume();
   child.stderr.resume();
@@ -7572,16 +8429,6 @@ function threadRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function nativeModelRollout() {
-  return JSON.stringify({
-    timestamp: "2026-06-20T14:05:25.758Z",
-    type: "turn_context",
-    payload: {
-      model: "gpt-5.5"
-    }
-  });
-}
-
 function tmuxPane(overrides: Record<string, unknown> = {}) {
   return {
     kind: "tmux",
@@ -7627,6 +8474,10 @@ if (args[0] === "send-keys" && args.includes("-l")) {
   }
 }
 if (args[0] === "capture-pane") {
+  if (process.env.AKK_TEST_TMUX_CAPTURE_FAIL === "1") {
+    process.stderr.write("capture failed\\n");
+    process.exit(1);
+  }
   process.stdout.write(fs.existsSync(${JSON.stringify(screenPath ?? "")}) ? fs.readFileSync(${JSON.stringify(screenPath ?? "")}, "utf8") : "");
 } else if (args[0] === "list-panes") {
   const gatePath = process.env.AKK_TEST_TMUX_LIST_GATE_PATH;
@@ -8024,6 +8875,30 @@ process.stdout.write(JSON.stringify({ ok: true }) + "\\n");
   );
   fs.chmodSync(fakeOpenClaw, 0o755);
   return fakeOpenClaw;
+}
+
+function findTerminalDispatchLedgerPath(
+  conversationId: string,
+  runtimeDir: string
+): string {
+  const ledgerDir = path.join(
+    runtimeDir,
+    "terminal-dispatch"
+  );
+  const match = fs.readdirSync(ledgerDir)
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => path.join(ledgerDir, name))
+    .find((ledgerPath) => {
+      try {
+        return JSON.parse(
+          fs.readFileSync(ledgerPath, "utf8")
+        ).conversation_id === conversationId;
+      } catch {
+        return false;
+      }
+    });
+  assert.ok(match, `terminal dispatch ledger for ${conversationId}`);
+  return match;
 }
 
 function readJsonLines(filePath: string) {

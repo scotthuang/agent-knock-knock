@@ -8,10 +8,8 @@ import {
   codexSessionsFromThreadRows,
   discoverCodexProcesses,
   parseCodexRolloutJsonl,
-  parseCodexRolloutModel,
   type ActiveCodexProcess,
   type CodexProcessSnapshot,
-  type CodexSessionModelInfo,
   type CodexSessionSummary,
   type CodexThreadRow,
   type ForkContextPackage
@@ -77,16 +75,6 @@ export class CodexLocalSessionProvider implements CodingAgentSessionProvider {
   async getSession(sessionId: string): Promise<CodexSessionSummary | undefined> {
     const sessions = await this.listHistoricalSessions();
     return sessions.find((session) => session.id === sessionId);
-  }
-
-  async getSessionModel(sessionId: string): Promise<CodexSessionModelInfo | undefined> {
-    const session = await this.getSession(sessionId);
-    if (!session?.rolloutPath) {
-      return undefined;
-    }
-
-    const rollout = await this.adapter.readRollout(session.rolloutPath);
-    return rollout ? parseCodexRolloutModel(rollout) : undefined;
   }
 
   async getForkContext(options: ForkContextOptions): Promise<ForkContextPackage | undefined> {

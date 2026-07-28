@@ -8,16 +8,25 @@ export const AKK_CALLBACK_METHOD = "agent-knock-knock.callback";
 
 export type AkkCommand =
   | { action: "help" }
-  | { action: "doctor"; mode?: "tmux" | "acpx" | "all" }
+  | { action: "doctor" }
   | { action: "list" }
   | { action: "status"; conversationId?: string }
   | { action: "describe"; conversationId?: string }
   | { action: "send"; conversationId: string; message: string }
+  | {
+      action: "approve";
+      conversationId: string;
+      expectedApprovalFingerprint: string;
+    }
   | { action: "cancel"; conversationId: string }
   | { action: "renew"; conversationId: string; minutes?: string }
   | { action: "retry-callback"; conversationId: string }
-  | { action: "recover"; conversationId: string }
-  | { action: "close"; conversationId: string; reason: string }
+  | {
+      action: "close";
+      conversationId: string;
+      reason: string;
+      expectedMessageId?: string;
+    }
   | { action: "delegate"; agent?: ExecutorKind; request: string };
 
 export function parseAkkCommand(args: unknown): AkkCommand {
@@ -32,20 +41,10 @@ export function parseAkkCommand(args: unknown): AkkCommand {
     return { action: "list" };
   }
   if (action === "doctor" || action === "check") {
-    const { token: mode, rest: extra } = takeToken(rest);
-    const normalizedMode = mode.toLowerCase();
-    if (
-      extra.trim() ||
-      (normalizedMode && !["tmux", "acpx", "all"].includes(normalizedMode))
-    ) {
-      throw new Error("Usage: /akk doctor [tmux|acpx|all]");
+    if (rest.trim()) {
+      throw new Error("Usage: /akk doctor");
     }
-    return {
-      action: "doctor",
-      mode: normalizedMode
-        ? normalizedMode as "tmux" | "acpx" | "all"
-        : undefined
-    };
+    return { action: "doctor" };
   }
   if (action === "status" || action === "show") {
     const { token: conversationId, rest: extra } = takeToken(rest);
@@ -76,6 +75,25 @@ export function parseAkkCommand(args: unknown): AkkCommand {
       message: body
     };
   }
+  if (action === "approve") {
+    const { token: conversationId, rest: approvalInput } = takeRequiredToken(
+      rest,
+      "Usage: /akk approve <session-selector> --expected-approval-fingerprint <fingerprint>"
+    );
+    const approval = /^--expected-approval-fingerprint\s+(\S+)$/u.exec(
+      approvalInput.trim()
+    );
+    if (!approval) {
+      throw new Error(
+        "Usage: /akk approve <session-selector> --expected-approval-fingerprint <fingerprint>"
+      );
+    }
+    return {
+      action: "approve",
+      conversationId,
+      expectedApprovalFingerprint: approval[1]
+    };
+  }
   if (action === "cancel" || action === "stop") {
     const { token: conversationId } = takeRequiredToken(rest, "Usage: /akk cancel <session-selector>");
     return { action: "cancel", conversationId };
@@ -98,19 +116,25 @@ export function parseAkkCommand(args: unknown): AkkCommand {
     );
     return { action: "retry-callback", conversationId };
   }
-  if (action === "recover") {
-    const { token: conversationId } = takeRequiredToken(rest, "Usage: /akk recover <session-selector>");
-    return { action: "recover", conversationId };
-  }
   if (action === "close" || action === "done") {
     const { token: conversationId, rest: reason } = takeRequiredToken(
       rest,
-      "Usage: /akk close <session-selector> [reason]"
+      "Usage: /akk close <session-selector> [--expected-message-id <id>] [reason]"
+    );
+    const recovery = /^--expected-message-id\s+(\S+)(?:\s+([\s\S]*))?$/u.exec(
+      reason.trim()
     );
     return {
       action: "close",
       conversationId,
-      reason: reason.trim() || "Closed from /akk command"
+      reason:
+        recovery?.[2]?.trim() ||
+        (recovery
+          ? "Orphaned terminal dispatch resolved from /akk command"
+          : reason.trim() || "Closed from /akk command"),
+      ...(recovery?.[1]
+        ? { expectedMessageId: recovery[1] }
+        : {})
     };
   }
 
@@ -138,17 +162,16 @@ export function akkUsageText(): string {
     "/akk <task>",
     "/akk codex <task>",
     "/akk claude <task>",
-    "/akk cursor <task>",
     "/akk list",
-    "/akk doctor [tmux|acpx|all]",
-    "/akk status [only|latest|codex|claude|cursor|@short-ref]",
+    "/akk doctor",
+    "/akk status [only|latest|codex|claude|@short-ref]",
     "/akk describe [session-selector]",
     "/akk send <session-selector>: <message>",
+    "/akk approve <session-selector> --expected-approval-fingerprint <fingerprint>",
     "/akk cancel <session-selector>",
     "/akk renew <session-selector> [minutes]",
     "/akk retry-callback <session-selector>",
-    "/akk recover <session-selector>",
-    "/akk close <session-selector> [reason]"
+    "/akk close <session-selector> [--expected-message-id <id>] [reason]"
   ].join("\n");
 }
 
@@ -171,19 +194,15 @@ export function formatAkkListCommandResult(result: Record<string, unknown>): str
     `AKK open sessions (${total}):`,
     ...groups.flatMap((group) => [
       `${group.label}:`,
-      ...group.tasks.slice(0, 20).map((task) => `- ${formatTaskLine(task)}`)
+      ...group.tasks.slice(0, 20).flatMap((task) => {
+        const recovery = orphanedTerminalDispatchRecovery(task);
+        return [
+          `- ${formatTaskLine(task)}`,
+          ...(recovery ? [`  recovery: ${recovery}`] : [])
+        ];
+      })
     ])
   ].join("\n");
-}
-
-export function resolveConversationOverrides(
-  params: Record<string, unknown>,
-  config: Record<string, unknown>
-): { allProxy?: string; model?: string } {
-  return {
-    allProxy: nonEmptyString(params.allProxy) ?? nonEmptyString(config.allProxy),
-    model: nonEmptyString(params.model) ?? nonEmptyString(config.model)
-  };
 }
 
 export function buildAkkCommandCliArgs(
@@ -201,7 +220,6 @@ export function buildAkkCommandCliArgs(
     case "doctor":
       return withOptionalArgs(
         ["doctor"],
-        ["--mode", command.mode ?? nonEmptyString(config.mode) ?? "all"],
         ["--workspace", nonEmptyString(config.workspace)],
         ["--openclaw-bin", nonEmptyString(config.openclawBin)]
       );
@@ -226,9 +244,7 @@ export function buildAkkCommandCliArgs(
     case "send": {
       const openclawSession =
         nonEmptyString(context.sessionKey) ??
-        nonEmptyString(config.openclawSession) ??
         "agent:main:main";
-      const overrides = resolveConversationOverrides({}, config);
       return withOptionalArgs(
         [
           "send",
@@ -238,8 +254,6 @@ export function buildAkkCommandCliArgs(
           command.message,
           "--background"
         ],
-        ["--all-proxy", overrides.allProxy],
-        ["--model", overrides.model],
         ["--store-dir", storeDir],
         ["--idle-timeout-minutes", idleTimeoutMinutes],
         ["--agent-timeout-minutes", finiteNumberString(config.agentTimeoutMinutes)],
@@ -247,12 +261,20 @@ export function buildAkkCommandCliArgs(
         ["--openclaw-session", openclawSession],
         ["--gateway-method", AKK_CALLBACK_METHOD],
         ["--gateway-session", openclawSession],
-        ["--openclaw-bin", nonEmptyString(config.openclawBin)],
-        ["--callback-command", nonEmptyString(config.callbackCommand)],
-        ["--soft-limit", finiteNumberString(config.softLimit)],
-        ["--hard-limit", finiteNumberString(config.hardLimit)]
+        ["--openclaw-bin", nonEmptyString(config.openclawBin)]
       );
     }
+    case "approve":
+      return withOptionalArgs(
+        [
+          "approve",
+          "--conversation",
+          command.conversationId,
+          "--expected-approval-fingerprint",
+          command.expectedApprovalFingerprint
+        ],
+        ["--store-dir", storeDir]
+      );
     case "renew":
       return withOptionalArgs(
         ["renew", "--conversation", command.conversationId],
@@ -268,20 +290,8 @@ export function buildAkkCommandCliArgs(
         ["--store-dir", storeDir]
       );
     case "cancel": {
-      const overrides = resolveConversationOverrides({}, config);
       return withOptionalArgs(
         ["cancel", "--conversation", command.conversationId],
-        ["--all-proxy", overrides.allProxy],
-        ["--store-dir", storeDir],
-        ["--idle-timeout-minutes", idleTimeoutMinutes]
-      );
-    }
-    case "recover": {
-      const overrides = resolveConversationOverrides({}, config);
-      return withOptionalArgs(
-        ["recover", "--conversation", command.conversationId, "--background"],
-        ["--all-proxy", overrides.allProxy],
-        ["--model", overrides.model],
         ["--store-dir", storeDir],
         ["--idle-timeout-minutes", idleTimeoutMinutes]
       );
@@ -295,6 +305,7 @@ export function buildAkkCommandCliArgs(
           "--reason",
           command.reason
         ],
+        ["--expected-message-id", command.expectedMessageId],
         ["--store-dir", storeDir]
       );
   }
@@ -398,6 +409,19 @@ function formatTaskLine(task: Record<string, unknown>): string {
     nonEmptyString(task.status) ?? "unknown",
     truncateText(context, 90)
   ].filter(Boolean).join(" | ");
+}
+
+function orphanedTerminalDispatchRecovery(
+  task: Record<string, unknown>
+): string | undefined {
+  const orphaned = task.orphaned_terminal_dispatch !== null &&
+    typeof task.orphaned_terminal_dispatch === "object" &&
+    !Array.isArray(task.orphaned_terminal_dispatch)
+    ? task.orphaned_terminal_dispatch as Record<string, unknown>
+    : undefined;
+  return orphaned
+    ? nonEmptyString(orphaned.recovery)
+    : undefined;
 }
 
 function truncateText(value: unknown, maxLength: number): string {
