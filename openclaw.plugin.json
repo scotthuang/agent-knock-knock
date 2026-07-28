@@ -103,6 +103,11 @@
         "enum": ["claude", "codex", "cursor"],
         "description": "Default coding agent for unspecified AKK delegations. If unset, Agent Knock Knock falls back to codex."
       },
+      "mode": {
+        "type": "string",
+        "enum": ["tmux", "acpx", "all"],
+        "description": "Execution mode checked by /akk doctor. tmux shares live Codex or Claude terminals; acpx runs managed Codex, Claude, or Cursor tasks."
+      },
       "defaultClaudeSession": {
         "type": "string",
         "description": "Default Claude Code session name. claudeSession remains supported as a compatibility alias."

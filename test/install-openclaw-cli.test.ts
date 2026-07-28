@@ -50,11 +50,23 @@ test("install-openclaw replaces an existing plugin and installs its skill", () =
     ]);
 
     assert.equal(result.mode, "full");
+    assert.equal(result.ready, false);
+    assert.equal(result.next_actions[0].action, "verify");
     assert.equal(result.steps[0].mode, "replaced");
     assert.deepEqual(readCalls(callsPath), [
       ["plugins", "install", "--link", packageRoot],
       ["plugins", "install", "--force", packageRoot],
-      ["plugins", "enable", "agent-knock-knock"],
+      [
+        "config",
+        "set",
+        "--batch-json",
+        JSON.stringify([
+          {
+            path: "plugins.entries.agent-knock-knock.enabled",
+            value: true
+          }
+        ])
+      ],
       ["gateway", "restart"]
     ]);
     assert.equal(fs.readFileSync(skillDest, "utf8"), fs.readFileSync(skillSource, "utf8"));
@@ -83,9 +95,145 @@ test("install-openclaw confirms the trusted local source when OpenClaw requires 
     assert.deepEqual(readCalls(callsPath), [
       ["plugins", "install", "--link", packageRoot],
       ["plugins", "install", "--force", packageRoot],
-      ["plugins", "enable", "agent-knock-knock"],
+      [
+        "config",
+        "set",
+        "--batch-json",
+        JSON.stringify([
+          {
+            path: "plugins.entries.agent-knock-knock.enabled",
+            value: true
+          }
+        ])
+      ],
       ["gateway", "restart"]
     ]);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("install-openclaw atomically preserves approval policy and verifies first-run readiness", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-install-openclaw-verify-"));
+  const callsPath = path.join(tempDir, "calls.ndjson");
+  const configPath = path.join(tempDir, "plugin-config.json");
+  const fakeOpenClaw = path.join(tempDir, "openclaw");
+  const fakeTmux = path.join(tempDir, "tmux");
+  const fakeCodex = path.join(tempDir, "codex");
+  const skillDest = path.join(tempDir, "skills", "agent-knock-knock", "SKILL.md");
+  const workspace = fs.realpathSync(tempDir);
+  const approvalPolicy = {
+    enabled: true,
+    rules: [{
+      id: "trusted-tests",
+      agents: ["codex"],
+      workspaces: [workspace],
+      commands: [["npm", "test"]]
+    }]
+  };
+
+  try {
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        enabled: false,
+        config: {
+          autoApprove: approvalPolicy,
+          softLimit: 8
+        }
+      }),
+      "utf8"
+    );
+    writeReadyFakeOpenClaw({
+      filePath: fakeOpenClaw,
+      callsPath,
+      configPath
+    });
+    writeVersionExecutable(fakeTmux, "tmux 3.5a");
+    writeVersionExecutable(fakeCodex, "codex-cli 0.107.0");
+
+    const result = runCli([
+      "install-openclaw",
+      "--openclaw-bin",
+      fakeOpenClaw,
+      "--skill-path",
+      skillDest,
+      "--workspace",
+      workspace,
+      "--default-agent",
+      "codex",
+      "--mode",
+      "tmux",
+      "--verify",
+      "--tmux-bin",
+      fakeTmux,
+      "--codex-bin",
+      fakeCodex,
+      "--acpx-bin",
+      path.join(tempDir, "missing-acpx"),
+      "--claude-bin",
+      path.join(tempDir, "missing-claude"),
+      "--cursor-bin",
+      path.join(tempDir, "missing-cursor")
+    ]);
+
+    assert.equal(result.installed, true);
+    assert.equal(result.ready, true);
+    assert.equal(result.pending_restart, false);
+    assert.equal(result.verification.ok, true);
+    assert.equal(result.verification.capabilities.tmux.status, "ready");
+    assert.equal(result.verification.openclaw.package_ready, true);
+    assert.equal(result.verification.openclaw.gateway_ready, true);
+    const saved = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    assert.deepEqual(saved.config.autoApprove, approvalPolicy);
+    assert.equal(saved.config.softLimit, 8);
+    assert.equal(saved.config.workspace, workspace);
+    assert.equal(saved.config.defaultAgent, "codex");
+    assert.equal(saved.config.mode, "tmux");
+    assert.equal(saved.enabled, true);
+    assert.equal(
+      readCalls(callsPath)
+        .filter((args) => args[0] === "gateway" && args[1] === "restart")
+        .length,
+      1
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("install-openclaw never claims readiness while a restart is pending", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-install-openclaw-pending-"));
+  const callsPath = path.join(tempDir, "calls.ndjson");
+  const configPath = path.join(tempDir, "plugin-config.json");
+  const fakeOpenClaw = path.join(tempDir, "openclaw");
+  const skillDest = path.join(tempDir, "skills", "agent-knock-knock", "SKILL.md");
+
+  try {
+    fs.writeFileSync(configPath, JSON.stringify({ config: {} }), "utf8");
+    writeReadyFakeOpenClaw({
+      filePath: fakeOpenClaw,
+      callsPath,
+      configPath
+    });
+    const result = runCli([
+      "install-openclaw",
+      "--openclaw-bin",
+      fakeOpenClaw,
+      "--skill-path",
+      skillDest,
+      "--no-restart"
+    ]);
+
+    assert.equal(result.installed, true);
+    assert.equal(result.ready, false);
+    assert.equal(result.pending_restart, true);
+    assert.equal(
+      readCalls(callsPath)
+        .some((args) => args[0] === "gateway" && args[1] === "restart"),
+      false
+    );
+    assert.equal(result.next_actions[0].command, "openclaw gateway restart");
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -137,6 +285,78 @@ if (args.includes("--link") && args.includes("--force")) {
   process.stderr.write("--force is not supported with --link\\n");
   process.exit(1);
 }
+`,
+    "utf8"
+  );
+  fs.chmodSync(filePath, 0o755);
+}
+
+function writeReadyFakeOpenClaw({
+  filePath,
+  callsPath,
+  configPath
+}: {
+  filePath: string;
+  callsPath: string;
+  configPath: string;
+}): void {
+  fs.writeFileSync(
+    filePath,
+    `#!${process.execPath}
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(args) + "\\n", "utf8");
+const readConfig = () => JSON.parse(fs.readFileSync(${JSON.stringify(configPath)}, "utf8"));
+const writeConfig = (value) => fs.writeFileSync(${JSON.stringify(configPath)}, JSON.stringify(value), "utf8");
+const emit = (value) => process.stdout.write(JSON.stringify(value));
+if (args[0] === "--version") {
+  process.stdout.write("OpenClaw 2026.7.1-2");
+} else if (args[0] === "config" && args[1] === "set") {
+  const config = readConfig();
+  const operations = JSON.parse(args[args.indexOf("--batch-json") + 1]);
+  for (const operation of operations) {
+    const parts = operation.path.replace(/^plugins\\.entries\\.agent-knock-knock\\./, "").split(".");
+    let target = config;
+    for (const part of parts.slice(0, -1)) target = target[part] ??= {};
+    target[parts.at(-1)] = operation.value;
+  }
+  writeConfig(config);
+} else if (args[0] === "config" && args[1] === "validate") {
+  emit({ valid: true, warnings: [] });
+} else if (args[0] === "config" && args[1] === "get") {
+  emit(readConfig());
+} else if (args[0] === "plugins" && args[1] === "inspect") {
+  emit({
+    plugin: {
+      id: "agent-knock-knock",
+      source: "/plugin/dist/src/openclaw-plugin.js",
+      enabled: true,
+      status: "loaded"
+    },
+    diagnostics: []
+  });
+} else if (args[0] === "skills" && args[1] === "info") {
+  emit({
+    name: "agent-knock-knock",
+    eligible: true,
+    disabled: false,
+    blockedByAllowlist: false,
+    blockedByAgentFilter: false
+  });
+} else if (args[0] === "health") {
+  emit({ ok: true });
+}
+`,
+    "utf8"
+  );
+  fs.chmodSync(filePath, 0o755);
+}
+
+function writeVersionExecutable(filePath: string, version: string): void {
+  fs.writeFileSync(
+    filePath,
+    `#!${process.execPath}
+process.stdout.write(${JSON.stringify(version)});
 `,
     "utf8"
   );

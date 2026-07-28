@@ -8,9 +8,10 @@ export const AKK_CALLBACK_METHOD = "agent-knock-knock.callback";
 
 export type AkkCommand =
   | { action: "help" }
+  | { action: "doctor"; mode?: "tmux" | "acpx" | "all" }
   | { action: "list" }
-  | { action: "status"; conversationId: string }
-  | { action: "describe"; conversationId: string }
+  | { action: "status"; conversationId?: string }
+  | { action: "describe"; conversationId?: string }
   | { action: "send"; conversationId: string; message: string }
   | { action: "cancel"; conversationId: string }
   | { action: "renew"; conversationId: string; minutes?: string }
@@ -30,55 +31,81 @@ export function parseAkkCommand(args: unknown): AkkCommand {
   if (action === "list" || action === "ls" || action === "tasks") {
     return { action: "list" };
   }
+  if (action === "doctor" || action === "check") {
+    const { token: mode, rest: extra } = takeToken(rest);
+    const normalizedMode = mode.toLowerCase();
+    if (
+      extra.trim() ||
+      (normalizedMode && !["tmux", "acpx", "all"].includes(normalizedMode))
+    ) {
+      throw new Error("Usage: /akk doctor [tmux|acpx|all]");
+    }
+    return {
+      action: "doctor",
+      mode: normalizedMode
+        ? normalizedMode as "tmux" | "acpx" | "all"
+        : undefined
+    };
+  }
   if (action === "status" || action === "show") {
-    const { token: conversationId } = takeRequiredToken(rest, "Usage: /akk status <conversation-id>");
-    return { action: "status", conversationId };
+    const { token: conversationId, rest: extra } = takeToken(rest);
+    if (extra.trim()) {
+      throw new Error("Usage: /akk status [session-selector]");
+    }
+    return { action: "status", conversationId: conversationId || undefined };
   }
   if (action === "describe" || action === "summary" || action === "about") {
-    const { token: conversationId } = takeRequiredToken(rest, "Usage: /akk describe <conversation-id>");
-    return { action: "describe", conversationId };
+    const { token: conversationId, rest: extra } = takeToken(rest);
+    if (extra.trim()) {
+      throw new Error("Usage: /akk describe [session-selector]");
+    }
+    return { action: "describe", conversationId: conversationId || undefined };
   }
   if (action === "send" || action === "reply") {
     const { token: conversationId, rest: message } = takeRequiredToken(
       rest,
-      "Usage: /akk send <conversation-id> <message>"
+      "Usage: /akk send <session-selector>: <message>"
     );
     const body = message.trim();
     if (!body) {
-      throw new Error("Usage: /akk send <conversation-id> <message>");
+      throw new Error("Usage: /akk send <session-selector>: <message>");
     }
-    return { action: "send", conversationId, message: body };
+    return {
+      action: "send",
+      conversationId: conversationId.replace(/:$/u, ""),
+      message: body
+    };
   }
   if (action === "cancel" || action === "stop") {
-    const { token: conversationId } = takeRequiredToken(rest, "Usage: /akk cancel <conversation-id>");
+    const { token: conversationId } = takeRequiredToken(rest, "Usage: /akk cancel <session-selector>");
     return { action: "cancel", conversationId };
   }
   if (action === "renew") {
     const { token: conversationId, rest: minutesInput } = takeRequiredToken(
       rest,
-      "Usage: /akk renew <conversation-id> [minutes]"
+      "Usage: /akk renew <session-selector> [minutes]"
     );
     const minutes = minutesInput.trim();
     if (minutes && (!Number.isFinite(Number(minutes)) || Number(minutes) <= 0)) {
-      throw new Error("Usage: /akk renew <conversation-id> [positive-minutes]");
+      throw new Error("Usage: /akk renew <session-selector> [positive-minutes]");
     }
     return { action: "renew", conversationId, minutes: minutes || undefined };
   }
   if (action === "retry-callback" || action === "retry") {
     const { token: conversationId } = takeRequiredToken(
       rest,
-      "Usage: /akk retry-callback <conversation-id>"
+      "Usage: /akk retry-callback <session-selector>"
     );
     return { action: "retry-callback", conversationId };
   }
   if (action === "recover") {
-    const { token: conversationId } = takeRequiredToken(rest, "Usage: /akk recover <conversation-id>");
+    const { token: conversationId } = takeRequiredToken(rest, "Usage: /akk recover <session-selector>");
     return { action: "recover", conversationId };
   }
   if (action === "close" || action === "done") {
     const { token: conversationId, rest: reason } = takeRequiredToken(
       rest,
-      "Usage: /akk close <conversation-id> [reason]"
+      "Usage: /akk close <session-selector> [reason]"
     );
     return {
       action: "close",
@@ -113,14 +140,15 @@ export function akkUsageText(): string {
     "/akk claude <task>",
     "/akk cursor <task>",
     "/akk list",
-    "/akk status <conversation-id>",
-    "/akk describe <conversation-id>",
-    "/akk send <conversation-id> <message>",
-    "/akk cancel <conversation-id>",
-    "/akk renew <conversation-id> [minutes]",
-    "/akk retry-callback <conversation-id>",
-    "/akk recover <conversation-id>",
-    "/akk close <conversation-id> [reason]"
+    "/akk doctor [tmux|acpx|all]",
+    "/akk status [only|latest|codex|claude|cursor|@short-ref]",
+    "/akk describe [session-selector]",
+    "/akk send <session-selector>: <message>",
+    "/akk cancel <session-selector>",
+    "/akk renew <session-selector> [minutes]",
+    "/akk retry-callback <session-selector>",
+    "/akk recover <session-selector>",
+    "/akk close <session-selector> [reason]"
   ].join("\n");
 }
 
@@ -170,6 +198,13 @@ export function buildAkkCommandCliArgs(
     case "help":
     case "delegate":
       return undefined;
+    case "doctor":
+      return withOptionalArgs(
+        ["doctor"],
+        ["--mode", command.mode ?? nonEmptyString(config.mode) ?? "all"],
+        ["--workspace", nonEmptyString(config.workspace)],
+        ["--openclaw-bin", nonEmptyString(config.openclawBin)]
+      );
     case "list":
       return withOptionalArgs(
         ["list"],
@@ -179,7 +214,12 @@ export function buildAkkCommandCliArgs(
     case "status":
     case "describe":
       return withOptionalArgs(
-        [command.action, "--conversation", command.conversationId],
+        [
+          command.action,
+          ...(command.conversationId
+            ? ["--conversation", command.conversationId]
+            : [])
+        ],
         ["--store-dir", storeDir],
         ["--idle-timeout-minutes", idleTimeoutMinutes]
       );
@@ -336,11 +376,27 @@ function formatTaskLine(task: Record<string, unknown>): string {
     !Array.isArray(task.executor)
     ? task.executor as Record<string, unknown>
     : {};
+  const terminalControl = task.terminal_control !== null &&
+    typeof task.terminal_control === "object" &&
+    !Array.isArray(task.terminal_control)
+    ? task.terminal_control as Record<string, unknown>
+    : {};
+  const context = nonEmptyString(task.request) ??
+    [
+      nonEmptyString(terminalControl.target)
+        ? `tmux ${nonEmptyString(terminalControl.target)}`
+        : undefined,
+      nonEmptyString(task.command),
+      nonEmptyString(task.workspace) ?? nonEmptyString(task.cwd)
+    ].filter((value): value is string => Boolean(value)).join(" · ");
   return [
-    nonEmptyString(task.conversation_id) ?? nonEmptyString(task.id) ?? "unknown",
+    nonEmptyString(task.short_ref) ??
+      nonEmptyString(task.conversation_id) ??
+      nonEmptyString(task.id) ??
+      "unknown",
     nonEmptyString(task.agent) ?? nonEmptyString(executor.kind) ?? "agent",
     nonEmptyString(task.status) ?? "unknown",
-    truncateText(task.request, 90)
+    truncateText(context, 90)
   ].filter(Boolean).join(" | ");
 }
 

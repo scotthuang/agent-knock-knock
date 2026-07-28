@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import http from "node:http";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import plugin from "../src/openclaw-plugin.js";
@@ -153,6 +155,108 @@ test("bundled OpenClaw skills exist and are included in the npm artifact", () =>
       true,
       `${skillPath}/SKILL.md must be included by npm pack`
     );
+  }
+  for (const documentationPath of [
+    "README.md",
+    "docs/quickstart-tmux.md",
+    "docs/quickstart-managed-acpx.md",
+    "scripts/smoke-acpx.js",
+    "scripts/smoke-tmux.js"
+  ]) {
+    assert.equal(
+      packedFiles.has(documentationPath),
+      true,
+      `${documentationPath} must be included for ClawHub rendering and first-run help`
+    );
+  }
+});
+
+test("/akk doctor leaves the Gateway event loop free for its health check", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-plugin-doctor-"));
+  const fakeCli = path.join(tempDir, "doctor.cjs");
+  let command:
+    | { handler?: (context: { args: string; sessionKey: string }) => Promise<any> }
+    | undefined;
+  const server = http.createServer((_request, response) => {
+    response.end(JSON.stringify({
+      ok: true,
+      selected_mode: "tmux",
+      capabilities: {
+        tmux: { checked: true, status: "ready" },
+        acpx: { checked: false, status: "partially_ready" }
+      },
+      openclaw: {
+        package_ready: true,
+        gateway_ready: true,
+        checks: []
+      }
+    }));
+  });
+
+  try {
+    fs.writeFileSync(
+      fakeCli,
+      `const http = require("node:http");
+const request = http.get(process.env.AKK_TEST_DOCTOR_URL, (response) => {
+  response.pipe(process.stdout);
+  response.on("end", () => process.exit(0));
+});
+request.setTimeout(1000, () => {
+  request.destroy();
+  process.exit(3);
+});
+request.on("error", () => process.exit(4));
+`,
+      "utf8"
+    );
+    await new Promise<void>((resolve) => {
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.address();
+    assert.notEqual(address, null);
+    assert.equal(typeof address, "object");
+    const previousUrl = process.env.AKK_TEST_DOCTOR_URL;
+    process.env.AKK_TEST_DOCTOR_URL =
+      `http://127.0.0.1:${(address as { port: number }).port}/health`;
+
+    try {
+      (
+        plugin as unknown as {
+          register(api: Record<string, any>): void;
+        }
+      ).register({
+        pluginConfig: { binPath: fakeCli },
+        logger: {
+          info() {},
+          warn() {}
+        },
+        registerGatewayMethod() {},
+        registerService() {},
+        registerCommand(value: typeof command) {
+          command = value;
+        },
+        registerTool() {}
+      });
+
+      assert.equal(typeof command?.handler, "function");
+      const result = await command?.handler?.({
+        args: "doctor tmux",
+        sessionKey: "agent:main:main"
+      });
+      assert.match(result?.text ?? "", /AKK doctor: ready/u);
+      assert.notEqual(result?.isError, true);
+    } finally {
+      if (previousUrl === undefined) {
+        delete process.env.AKK_TEST_DOCTOR_URL;
+      } else {
+        process.env.AKK_TEST_DOCTOR_URL = previousUrl;
+      }
+    }
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+    fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
 

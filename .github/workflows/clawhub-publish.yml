@@ -20,6 +20,7 @@ jobs:
       contents: read
     outputs:
       release_channel: ${{ steps.release.outputs.release_channel }}
+      package_version: ${{ steps.release.outputs.package_version }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -43,7 +44,10 @@ jobs:
             release_channel="latest"
           fi
           echo "Publishing ${package_version} on the ClawHub ${release_channel} channel."
-          echo "release_channel=${release_channel}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "release_channel=${release_channel}"
+            echo "package_version=${package_version}"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Install dependencies
         run: npm ci
@@ -100,6 +104,7 @@ jobs:
         env:
           DRY_RUN: ${{ inputs.dry_run }}
           RELEASE_CHANNEL: ${{ needs.prepare.outputs.release_channel }}
+          PACKAGE_VERSION: ${{ needs.prepare.outputs.package_version }}
         shell: bash
         run: |
           shopt -s nullglob
@@ -124,3 +129,19 @@ jobs:
           fi
 
           ./node_modules/.bin/clawhub "${publish_args[@]}"
+
+          if [[ "${DRY_RUN}" != "true" ]]; then
+            readme_url="https://clawhub.ai/api/v1/packages/%40scotthuang%2Fagent-knock-knock/file?path=README.md&preview=1&version=${PACKAGE_VERSION}"
+            curl --fail --silent --show-error --retry 10 --retry-all-errors \
+              --retry-delay 3 --retry-max-time 60 \
+              "${readme_url}" |
+              grep --fixed-strings "# Agent Knock Knock"
+
+            if [[ "${RELEASE_CHANNEL}" == "latest" ]]; then
+              default_readme_url="https://clawhub.ai/api/v1/packages/%40scotthuang%2Fagent-knock-knock/file?path=README.md&preview=1"
+              curl --fail --silent --show-error --retry 10 --retry-all-errors \
+                --retry-delay 3 --retry-max-time 60 \
+                "${default_readme_url}" |
+                grep --fixed-strings "# Agent Knock Knock"
+            fi
+          fi

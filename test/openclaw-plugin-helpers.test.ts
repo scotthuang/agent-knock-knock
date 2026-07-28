@@ -52,6 +52,64 @@ test("/akk help lists every supported ACPX executor", () => {
   assert.match(usage, /\/akk codex <task>/);
   assert.match(usage, /\/akk claude <task>/);
   assert.match(usage, /\/akk cursor <task>/);
+  assert.match(usage, /\/akk doctor \[tmux\|acpx\|all\]/);
+});
+
+test("/akk doctor uses trusted plugin mode, workspace, and OpenClaw binary", () => {
+  assert.deepEqual(
+    buildAkkCommandCliArgs(
+      parseAkkCommand("doctor"),
+      {
+        mode: "tmux",
+        workspace: "/work/project",
+        openclawBin: "/opt/openclaw/bin/openclaw"
+      }
+    ),
+    [
+      "doctor",
+      "--mode",
+      "tmux",
+      "--workspace",
+      "/work/project",
+      "--openclaw-bin",
+      "/opt/openclaw/bin/openclaw"
+    ]
+  );
+  assert.deepEqual(parseAkkCommand("doctor acpx"), {
+    action: "doctor",
+    mode: "acpx"
+  });
+  assert.throws(
+    () => parseAkkCommand("doctor unsafe"),
+    /tmux\|acpx\|all/u
+  );
+});
+
+test("/akk accepts selector-first follow-ups without long ids", () => {
+  assert.deepEqual(
+    parseAkkCommand("send latest: continue with the tests"),
+    {
+      action: "send",
+      conversationId: "latest",
+      message: "continue with the tests"
+    }
+  );
+  assert.deepEqual(
+    parseAkkCommand("send codex: review the diff"),
+    {
+      action: "send",
+      conversationId: "codex",
+      message: "review the diff"
+    }
+  );
+  assert.deepEqual(parseAkkCommand("status"), {
+    action: "status",
+    conversationId: undefined
+  });
+  assert.deepEqual(
+    buildAkkCommandCliArgs(parseAkkCommand("status"), {}),
+    ["status"]
+  );
 });
 
 test("follow-up overrides never leak Codex-only config to other conversations", () => {
@@ -171,6 +229,21 @@ test("/akk list includes terminal-controlled and native sessions", () => {
   assert.match(text, /managed-1/);
   assert.match(text, /terminal:v2:tmux:codex:work:0\.0:1234/);
   assert.match(text, /native:codex:5678/);
+});
+
+test("/akk list prefers stable short references while JSON retains full ids", () => {
+  const text = formatAkkListCommandResult({
+    delegated: [{
+      id: "managed-long-id",
+      conversation_id: "managed-long-id",
+      short_ref: "@0123456789",
+      agent: "codex",
+      status: "idle"
+    }]
+  });
+
+  assert.match(text, /@0123456789/u);
+  assert.doesNotMatch(text, /managed-long-id/u);
 });
 
 test("relative plugin storeDir resolves against the configured workspace", () => {

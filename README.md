@@ -32,6 +32,8 @@ Agent Knock Knock lets you control local Codex and Claude Code from any configur
 
 Install either mode or both. tmux does not require ACPX. Cursor tmux control is [not yet supported](https://github.com/scotthuang/agent-knock-knock/issues/42). AKK can also discover, resume, or fork local Codex sessions; that is a Codex capability, not a third installation mode.
 
+For a complete first run, choose [tmux bridge in 5 minutes](https://github.com/scotthuang/agent-knock-knock/blob/main/docs/quickstart-tmux.md) or [Managed ACPX in 5 minutes](https://github.com/scotthuang/agent-knock-knock/blob/main/docs/quickstart-managed-acpx.md). Both guides use the npm installer so configuration, restart, and verification fit in one copy-paste path.
+
 ### Permission Boundaries
 
 The two modes intentionally use different permission models:
@@ -43,7 +45,7 @@ The two modes intentionally use different permission models:
 
 Core requirements:
 
-- Node.js 22.14+ (Node.js 24 recommended; use a version supported by your OpenClaw release)
+- A Node.js version supported by OpenClaw (Node.js 24.15+ on the 24.x line is recommended for the compatibility floor below)
 - [OpenClaw](https://docs.openclaw.ai/) Gateway and plugin API `2026.7.1-2` or newer
 - At least one authenticated coding agent: Codex, Claude Code, or Cursor
 
@@ -51,6 +53,9 @@ Core requirements:
 
 ```bash
 openclaw plugins install clawhub:@scotthuang/agent-knock-knock@beta
+openclaw config set plugins.entries.agent-knock-knock.config.workspace "$PWD"
+openclaw config set plugins.entries.agent-knock-knock.config.defaultAgent codex
+openclaw config set plugins.entries.agent-knock-knock.config.mode tmux
 openclaw gateway restart
 ```
 
@@ -68,12 +73,12 @@ npm install -g @scotthuang/agent-knock-knock@next
 
 ```bash
 npm install -g @scotthuang/agent-knock-knock@next
-agent-knock-knock install-openclaw
+agent-knock-knock install-openclaw --workspace "$PWD" --default-agent codex --mode tmux --verify
 ```
 
 The npm `next` dist-tag follows the same prerelease line. Remove `@next` after `0.3.0` becomes stable.
 
-`install-openclaw` installs or updates the plugin, enables it, installs the AKK skill template, and restarts the OpenClaw Gateway. It is safe to rerun. Use `--skill-only` to skip plugin installation; add `--no-restart` to skip the automatic Gateway restart.
+`install-openclaw` installs or updates the plugin, atomically configures the selected workspace, agent, and mode without replacing unrelated settings, installs the AKK skill template, restarts the Gateway at most once, and optionally verifies the full runtime chain. It is safe to rerun. Without `--verify`, the result remains unverified rather than claiming readiness. Use `--skill-only` to skip plugin installation; add `--no-restart` to leave an explicit pending-restart state.
 
 If OpenClaw runs from a local checkout or another nonstandard location, pass its CLI explicitly:
 
@@ -133,13 +138,13 @@ AKK uses ACPX to start managed Codex, Claude Code, or Cursor sessions from OpenC
 Finally, check which modes are ready if the global CLI is installed:
 
 ```bash
-agent-knock-knock doctor
+agent-knock-knock doctor --mode tmux
 ```
 
-For a ClawHub-only installation, verify that OpenClaw loaded the packaged runtime:
+For a ClawHub-only installation, use the package-local chat diagnostic:
 
-```bash
-openclaw plugins inspect agent-knock-knock --runtime
+```text
+/akk doctor tmux
 ```
 
 ### Trust and Privacy
@@ -148,60 +153,16 @@ AKK is local-first. It has no hosted control plane or telemetry, does not modify
 
 Your task content is still processed by OpenClaw and the coding-agent or model providers you configure. Use explicit workspaces, review agent permissions, and keep secrets out of custom callback commands.
 
-## Quick Start
+## Five-Minute Quick Starts
 
-First merge this configuration into `~/.openclaw/openclaw.json`, setting `workspace` to the absolute path of the project agents may modify:
+Choose one complete, copy-paste path:
 
-```json5
-// ~/.openclaw/openclaw.json
-{
-  tools: {
-    profile: "coding",
-    alsoAllow: ["agent-knock-knock"]
-  },
-  plugins: {
-    entries: {
-      "agent-knock-knock": {
-        config: {
-          defaultAgent: "codex",
-          workspace: "/absolute/path/to/project"
-        }
-      }
-    }
-  }
-}
-```
+| Path | Result |
+| --- | --- |
+| [tmux bridge in 5 minutes](https://github.com/scotthuang/agent-knock-knock/blob/main/docs/quickstart-tmux.md) | Connect OpenClaw to an existing Codex or Claude Code terminal and keep direct human takeover. |
+| [Managed ACPX in 5 minutes](https://github.com/scotthuang/agent-knock-knock/blob/main/docs/quickstart-managed-acpx.md) | Start managed Codex, Claude Code, or Cursor background tasks with durable state and callbacks. |
 
-Restart the Gateway after changing the configuration:
-
-```bash
-openclaw gateway restart
-```
-
-For the recommended tmux mode, start an agent in tmux, then ask AKK to list and send to the discovered terminal:
-
-```bash
-tmux new -s claude-work
-claude
-```
-
-```text
-AKK list
-AKK send <terminal-controlled-id>: inspect this repository and summarize it
-AKK status <managed-conversation-id>
-```
-
-Attach to the same tmux session whenever you want to take over directly. Avoid typing while AKK is sending the same turn.
-
-For Managed ACP, start a new task and use its conversation ID for follow-ups:
-
-```text
-AKK Codex: inspect this repository and summarize it
-AKK status <conversation-id>
-AKK send <conversation-id>: run the tests and fix any failures
-```
-
-For new ACP tasks, omitting the agent uses `defaultAgent`, falling back to Codex.
+The five-minute paths use the npm installer so installation, configuration, restart, and verification fit in one command. The ClawHub path above remains the OpenClaw-native distribution option and exposes the same package-local `/akk doctor`.
 
 ## How It Works
 
@@ -214,8 +175,8 @@ Use conversational `AKK` prompts on any chat surface. Explicit agent names overr
 ```text
 AKK Claude: review the latest commit
 AKK Cursor: fix the flaky UI test
-AKK describe <conversation-id>
-AKK recover <conversation-id>
+AKK describe latest
+AKK recover only
 ```
 
 Surfaces with native commands use the same operations:
@@ -223,14 +184,17 @@ Surfaces with native commands use the same operations:
 ```text
 /akk <task>
 /akk list
-/akk status <conversation-id>
-/akk describe <conversation-id>
-/akk send <conversation-id> <message>
-/akk cancel <conversation-id>
-/akk renew <conversation-id> [minutes]
-/akk retry-callback <conversation-id>
-/akk close <conversation-id> [reason]
+/akk doctor [tmux|acpx|all]
+/akk status [only|latest|codex|claude|cursor|@short-ref]
+/akk describe [session-selector]
+/akk send <session-selector>: <message>
+/akk cancel <session-selector>
+/akk renew <session-selector> [minutes]
+/akk retry-callback <session-selector>
+/akk close <session-selector> [reason]
 ```
+
+Selectors fail closed: `only` works only with one actionable target, `latest` requires a unique newest target, and an agent name must identify exactly one actionable session. `AKK list` shows stable short references while JSON output retains the authoritative full IDs.
 
 Codex CLI sessions started outside AKK can also be resumed, opened in a terminal, or forked:
 
@@ -242,11 +206,12 @@ AKK fork takeover Codex <session-id>
 
 ## Configuration
 
-Configure AKK under `plugins.entries.agent-knock-knock.config` in `~/.openclaw/openclaw.json`, as shown in the Quick Start.
+AKK reads these options from `plugins.entries.agent-knock-knock.config`. The npm installer writes them for you; the ClawHub install section shows the equivalent `openclaw config set` commands.
 
 | Option | Default | Purpose |
 | --- | --- | --- |
 | `defaultAgent` | `codex` | Agent used when a request does not name one. |
+| `mode` | `all` | Mode checked by `/akk doctor`: `tmux`, `acpx`, or `all`. |
 | `workspace` | OpenClaw process directory | Working directory for delegated tasks. |
 | `storeDir` | `~/.agent-knock-knock/conversations` | Conversation state location; relative plugin paths resolve from `workspace`. |
 | `openclawBin` | Auto-detected | OpenClaw CLI used for callback delivery. |
@@ -264,7 +229,7 @@ For tmux-backed Codex, AKK reports visible approval prompts. Claude approval is 
 
 - It is available only for the current AKK-managed turn.
 - AKK accepts only an exact, current Bash dialog with the one-time **Yes** choice already highlighted, correlated to one unresolved foreground Bash tool request in the anchored owner-private transcript. Persistent permission choices are rejected.
-- When no trusted rule matches, the callback takes the manual path. The user must personally inspect the named tmux pane, explicitly confirm the exact request, and then run `AKK approve <conversation-id>`; the hash-only callback is not sufficient for review.
+- When no trusted rule matches, the callback takes the manual path. The user must personally inspect the named tmux pane, explicitly confirm the exact request, and then run `AKK approve <@short-ref>`; the hash-only callback is not sufficient for review.
 - A disabled-by-default `autoApprove` rule may approve Claude only when its agent, canonical workspace, and exact argument vector all match the freshly re-read local evidence.
 - AKK re-evaluates the policy, reserves the one-shot dispatch, recaptures the one-time choice and transcript evidence, and revalidates the process and pane before sending one Enter. A stale, changed, replayed, or uncertain request fails closed and must be resolved in the terminal.
 
@@ -288,15 +253,15 @@ Place `autoApprove` inside the plugin `config` object. It is disabled by default
 
 ## Troubleshooting
 
-With the global npm CLI installed, start with `agent-knock-knock doctor`. It checks the core installation and reports ACPX and tmux readiness separately; either execution mode is enough. It does not authenticate an agent, verify live Gateway/plugin connectivity, or run a real task. For a ClawHub-only installation, start with `openclaw plugins inspect agent-knock-knock --runtime`.
+With the global npm CLI installed, start with `agent-knock-knock doctor --mode tmux|acpx|all`. It runs bounded version probes, validates the OpenClaw config and AKK workspace, verifies the installed/enabled/loaded plugin and bundled skill, and checks Gateway health separately. For a ClawHub-only installation, use `/akk doctor`.
 
 | Symptom | Action |
 | --- | --- |
 | The npm installer or callbacks cannot find a local OpenClaw CLI | Set `openclawBin` and pass `--openclaw-bin` to `install-openclaw`. |
 | Source changes do not appear | Build, reinstall from the checkout, and restart the Gateway. |
-| Terminal bridge task is `stalled` | Inspect `status` and the terminal; use `/akk renew <conversation-id> <minutes>` only when more monitoring time is useful. |
+| Terminal bridge task is `stalled` | Inspect `status` and the terminal; use `/akk renew only <minutes>` only when exactly one stalled task needs more monitoring time. |
 | ACPX task is `stalled` | Inspect `status --trace`; close and redelegate if the executor cannot continue. |
-| Task is `callback_failed` | Run `/akk retry-callback <conversation-id>` in a native-command chat. |
+| Task is `callback_failed` | Run `/akk retry-callback only` when it is the only actionable failed callback, or use its `@short-ref`. |
 | Terminal takeover is unavailable | Run Codex or Claude Code inside tmux and check `AKK list` for a `terminal_controlled` entry. |
 | Claude permission is not offered through AKK | Use the managed conversation returned by a background send. If the dialog is not the exact supported one-time Bash prompt, resolve it in the terminal. |
 | Claude request was not auto-approved | Check `autoApprove.enabled`, `agents: ["claude"]`, the canonical workspace, and the exact command vector. The request must also be a current one-time Bash prompt with matching local transcript evidence from a supported Claude `2.1.x` version. |
@@ -305,12 +270,21 @@ With the global npm CLI installed, start with `agent-knock-knock doctor`. It che
 For local diagnostics, use:
 
 ```bash
-agent-knock-knock status --conversation <conversation-id> --trace
+agent-knock-knock status --conversation latest --trace
 agent-knock-knock list --terminal-debug
 agent-knock-knock list --managed-only
 ```
 
 Codex ACP uses the pinned `@agentclientprotocol/codex-acp` adapter. Override it only with a compatible command through `AKK_CODEX_ACPX_AGENT_COMMAND`.
+
+Credentialed smoke tests stay outside normal CI. From a repository checkout, the ACPX smoke creates a nonce-scoped session and closes it; the tmux smoke requires the exact pane PID and a freshly verified idle pane before sending one real turn:
+
+```bash
+AKK_RUN_LIVE_ACPX_SMOKE=1 npm run smoke:acpx -- --confirm-live --agent codex --workspace "$PWD"
+AKK_RUN_LIVE_TMUX_SMOKE=1 npm run smoke:tmux -- --confirm-live --agent codex --target akk-work:0.0 --expected-pane-pid <pid>
+```
+
+Both commands can use coding-agent credentials and may incur cost. Read the warning before opting in.
 
 ## Development
 
