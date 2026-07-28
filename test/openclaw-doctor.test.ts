@@ -28,9 +28,46 @@ test("OpenClaw diagnostics verify config, runtime, skill, workspace, and Gateway
     assert.equal(result.package_ready, true, JSON.stringify(result, null, 2));
     assert.equal(result.gateway_ready, true);
     assert.equal(result.workspace, canonicalWorkspace);
+    assert.equal(result.default_agent, "codex");
     assert.equal(result.checks.length, 8);
     assert.equal(result.checks.every((check) => check.ok), true);
     assert.doesNotMatch(JSON.stringify(result), /do-not-return-this-secret/u);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("OpenClaw diagnostics expose only supported tmux coding agents", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-openclaw-doctor-agent-"));
+  const fakeOpenClaw = path.join(tempDir, "openclaw");
+  const workspace = path.join(tempDir, "workspace");
+
+  try {
+    fs.mkdirSync(workspace);
+    const canonicalWorkspace = fs.realpathSync(workspace);
+    writeFakeOpenClaw(fakeOpenClaw);
+
+    const claude = runOpenClawChainDiagnostics({
+      openclawBin: fakeOpenClaw,
+      workspace: canonicalWorkspace,
+      env: {
+        AKK_FAKE_AGENT: "claude",
+        AKK_FAKE_WORKSPACE: canonicalWorkspace,
+        AKK_FAKE_SCENARIO: "ready"
+      }
+    });
+    assert.equal(claude.default_agent, "claude");
+
+    const unsupported = runOpenClawChainDiagnostics({
+      openclawBin: fakeOpenClaw,
+      workspace: canonicalWorkspace,
+      env: {
+        AKK_FAKE_AGENT: "unknown-agent",
+        AKK_FAKE_WORKSPACE: canonicalWorkspace,
+        AKK_FAKE_SCENARIO: "ready"
+      }
+    });
+    assert.equal(unsupported.default_agent, undefined);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -143,6 +180,7 @@ function writeFakeOpenClaw(filePath: string): void {
     filePath,
     `#!${process.execPath}
 const args = process.argv.slice(2);
+const agent = process.env.AKK_FAKE_AGENT || "codex";
 const scenario = process.env.AKK_FAKE_SCENARIO;
 const workspace = process.env.AKK_FAKE_WORKSPACE;
 const emit = (value, status = 0) => {
@@ -158,7 +196,7 @@ if (args[0] === "config" && args[1] === "get") {
     enabled: true,
     config: {
       workspace,
-      defaultAgent: "codex",
+      defaultAgent: agent,
       gatewayToken: "do-not-return-this-secret",
       autoApprove: { enabled: true, rules: [] }
     }

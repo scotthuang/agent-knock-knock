@@ -7,9 +7,7 @@ import {
   discoverCodexProcesses,
   extractResumeSessionId,
   listActiveCodexCli,
-  normalizeCodexAcpxModel,
-  parseCodexRolloutJsonl,
-  parseCodexRolloutModel
+  parseCodexRolloutJsonl
 } from "../src/codex-session-provider.js";
 
 const SESSION_ID = "019ee559-7bb8-7fd1-970c-0f7b6978c44e";
@@ -24,9 +22,9 @@ test("Codex session provider normalizes thread rows and degrades missing rollout
     },
     {
       id: SESSION_ID,
-      cwd: "/repo/acpx",
+      cwd: "/repo/project",
       rollout_path: "/Users/me/.codex/sessions/rollout.jsonl",
-      title: "  inspect ACPX changes  ",
+      title: "  inspect project changes  ",
       preview: "unused preview",
       first_user_message: "pull latest code",
       updated_at_ms: 20,
@@ -41,34 +39,29 @@ test("Codex session provider normalizes thread rows and degrades missing rollout
   assert.equal(sessions.length, 2);
   assert.equal(sessions[0].id, SESSION_ID);
   assert.equal(sessions[0].capability, "full");
-  assert.equal(sessions[0].title, "inspect ACPX changes");
+  assert.equal(sessions[0].title, "inspect project changes");
   assert.equal(sessions[1].capability, "metadata_only");
   assert.equal(sessions[1].capabilityReason, "missing rollout_path");
 });
 
-test("Codex process discovery separates native CLI from ACP adapter processes", () => {
+test("Codex process discovery finds native CLI processes", () => {
   const processes = discoverCodexProcesses([
     {
       pid: 100,
       ppid: 1,
-      cwd: "/repo/acpx",
+      cwd: "/repo/project",
       command: `node /Users/me/.npm-global/bin/codex resume ${SESSION_ID}`
     },
     {
       pid: 101,
       ppid: 100,
-      cwd: "/repo/acpx",
+      cwd: "/repo/project",
       command: `/vendor/bin/codex resume ${SESSION_ID}`
     },
     {
       pid: 200,
       cwd: "/repo/openclaw",
       command: "node /Users/me/.npm-global/bin/codex -- --full-auto"
-    },
-    {
-      pid: 300,
-      cwd: "/repo/openclaw",
-      command: "/Users/me/.npm/_npx/pkg/node_modules/@zed-industries/codex-acp-darwin-arm64/bin/codex-acp"
     },
     {
       pid: 350,
@@ -82,12 +75,11 @@ test("Codex process discovery separates native CLI from ACP adapter processes", 
     }
   ]);
 
-  assert.equal(processes.length, 4);
+  assert.equal(processes.length, 3);
   assert.deepEqual(processes.map((process) => process.kind), [
     "codex_cli",
     "codex_cli",
-    "codex_cli",
-    "codex_acp"
+    "codex_cli"
   ]);
   assert.equal(processes[0].sessionId, SESSION_ID);
   assert.equal(processes[0].confidence, "high");
@@ -142,7 +134,7 @@ test("Codex rollout parser extracts bounded user assistant and command context",
       payload: {
         type: "function_call",
         command: "git pull",
-        cwd: "/repo/acpx",
+        cwd: "/repo/project",
         status: "0"
       }
     }),
@@ -160,7 +152,7 @@ test("Codex rollout parser extracts bounded user assistant and command context",
   ]);
   assert.deepEqual(excerpt.commands, [{
     command: "git pull",
-    cwd: "/repo/acpx",
+    cwd: "/repo/project",
     status: "0",
     timestamp: "2026-06-20T14:05:40.000Z"
   }]);
@@ -201,38 +193,7 @@ test("Codex rollout parser retains the latest bounded task-completion turns", ()
   assert.equal(excerpt.truncated, true);
 });
 
-test("Codex rollout parser discovers the native model for ACPX resume", () => {
-  const rollout = [
-    JSON.stringify({
-      timestamp: "2026-06-20T14:05:25.750Z",
-      type: "session_meta",
-      payload: {
-        id: SESSION_ID
-      }
-    }),
-    JSON.stringify({
-      timestamp: "2026-06-20T14:05:25.758Z",
-      type: "turn_context",
-      payload: {
-        model: "gpt-5.5",
-        collaboration_mode: {
-          settings: {
-            model: "gpt-5.4"
-          }
-        }
-      }
-    })
-  ].join("\n");
-
-  assert.deepEqual(parseCodexRolloutModel(rollout), {
-    model: "gpt-5.5",
-    acpxModel: "gpt-5.5[medium]",
-    source: "turn_context"
-  });
-  assert.equal(normalizeCodexAcpxModel("gpt-5.5[high]"), "gpt-5.5[high]");
-});
-
-test("Codex rollout parser bounds long fork context before OpenClaw summarization", () => {
+test("Codex rollout parser bounds long session context before OpenClaw summarization", () => {
   const rollout = [
     JSON.stringify({
       timestamp: "2026-06-20T14:05:25.758Z",
@@ -261,9 +222,9 @@ test("Codex rollout parser bounds long fork context before OpenClaw summarizatio
   ].join("\n");
   const session = codexSessionsFromThreadRows([{
     id: SESSION_ID,
-    cwd: "/repo/acpx",
+    cwd: "/repo/project",
     rollout_path: "/rollout.jsonl",
-    title: "ACPX work",
+    title: "Project work",
     updated_at_ms: 100
   }])[0];
 
@@ -274,7 +235,7 @@ test("Codex rollout parser bounds long fork context before OpenClaw summarizatio
   const context = buildForkContextPackage(session, excerpt);
 
   assert.equal(context.source.sessionId, SESSION_ID);
-  assert.equal(context.source.cwd, "/repo/acpx");
+  assert.equal(context.source.cwd, "/repo/project");
   assert.equal(context.messages.length, 2);
   assert.match(context.messages[1].text, /\[truncated\]$/);
   assert.equal(context.truncated, true);

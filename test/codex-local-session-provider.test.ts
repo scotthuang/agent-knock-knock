@@ -9,9 +9,9 @@ test("Codex local session provider exposes a stable full-capability facade", asy
   const provider = new CodexLocalSessionProvider(new FakeCodexAdapter({
     rows: [{
       id: SESSION_ID,
-      cwd: "/repo/acpx",
+      cwd: "/repo/project",
       rollout_path: "/rollout.jsonl",
-      title: "inspect ACPX changes",
+      title: "inspect project changes",
       updated_at_ms: 20
     }],
     rollouts: new Map([
@@ -26,13 +26,13 @@ test("Codex local session provider exposes a stable full-capability facade", asy
         type: "event_msg",
         payload: {
           type: "user_message",
-          message: "review the latest ACPX changes"
+          message: "review the latest project changes"
         }
       })]
     ]),
     processes: [{
       pid: 100,
-      cwd: "/repo/acpx",
+      cwd: "/repo/project",
       command: `codex resume ${SESSION_ID}`
     }]
   }));
@@ -47,19 +47,13 @@ test("Codex local session provider exposes a stable full-capability facade", asy
 
   assert.equal((await provider.listHistoricalSessions())[0].id, SESSION_ID);
   assert.equal((await provider.listActiveSessions())[0].sessionId, SESSION_ID);
-  assert.deepEqual(await provider.getSessionModel(SESSION_ID), {
-    model: "gpt-5.5",
-    acpxModel: "gpt-5.5[medium]",
-    source: "turn_context"
-  });
-
   const forkContext = await provider.getForkContext({
     sessionId: SESSION_ID,
     maxMessages: 1
   });
   assert.equal(forkContext?.source.sessionId, SESSION_ID);
   assert.deepEqual(forkContext?.messages.map((message) => message.text), [
-    "review the latest ACPX changes"
+    "review the latest project changes"
   ]);
 });
 
@@ -67,7 +61,7 @@ test("Codex local session provider degrades when rollout content is unavailable"
   const provider = new CodexLocalSessionProvider(new FakeCodexAdapter({
     rows: [{
       id: SESSION_ID,
-      cwd: "/repo/acpx",
+      cwd: "/repo/project",
       title: "metadata only"
     }],
     rollouts: new Map(),
@@ -105,13 +99,13 @@ test("Codex local session provider finds sessions through the facade only", asyn
   const provider = new CodexLocalSessionProvider(new FakeCodexAdapter({
     rows: [{
       id: SESSION_ID,
-      cwd: "/repo/acpx"
+      cwd: "/repo/project"
     }],
     rollouts: new Map(),
     processes: []
   }));
 
-  assert.equal((await provider.getSession(SESSION_ID))?.cwd, "/repo/acpx");
+  assert.equal((await provider.getSession(SESSION_ID))?.cwd, "/repo/project");
   assert.equal(await provider.getSession("missing"), undefined);
   assert.equal(await provider.getForkContext({ sessionId: "missing" }), undefined);
 });

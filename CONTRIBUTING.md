@@ -4,7 +4,7 @@ Thanks for taking the time to improve Agent Knock Knock.
 
 ## Development Setup
 
-Use Node.js 22.14 or newer; Node.js 24 is recommended. CI currently verifies the latest Node.js 22 and 24 releases.
+Use Node.js 22.19 or newer; Node.js 24 is recommended. CI currently verifies the latest Node.js 22 and 24 releases.
 
 ```bash
 npm ci

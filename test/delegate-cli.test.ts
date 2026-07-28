@@ -6,413 +6,206 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
-const CODEX_ACPX_SELECTOR = ["--agent", "npx -y @agentclientprotocol/codex-acp@1.1.7"];
+const testRuntimeDir = fs.mkdtempSync(
+  path.join(os.tmpdir(), "akk-delegate-cli-runtime-")
+);
+process.env.AKK_RUNTIME_DIR = testRuntimeDir;
+process.on("exit", () => {
+  fs.rmSync(testRuntimeDir, { recursive: true, force: true });
+});
 
-test("delegate background launches acpx without returning raw Claude output", async () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-delegate-"));
-  const fakeBinDir = path.join(tempDir, "bin");
+test("delegate routes asynchronously to the only idle matching tmux pane", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-delegate-tmux-"));
   const workspace = path.join(tempDir, "workspace");
-  const launchedPath = path.join(tempDir, "acpx-args.json");
-  const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
-  const gatewayToken = "gateway-token-must-not-reach-agent";
+  const otherWorkspace = path.join(tempDir, "other-workspace");
+  const storeDir = path.join(tempDir, "conversations");
 
   try {
-    fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
-    const fakeAcpx = path.join(fakeBinDir, "acpx");
-    fs.writeFileSync(
-      fakeAcpx,
-      `#!/usr/bin/env node
-const fs = require("node:fs");
-if (process.env.AKK_GATEWAY_TOKEN || process.env.OPENCLAW_GATEWAY_TOKEN) {
-  process.stderr.write("gateway token leaked into coding-agent environment");
-  process.exit(97);
-}
-fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify(process.argv.slice(2)) + "\\n", "utf8");
-`,
-      "utf8"
-    );
-    fs.chmodSync(fakeAcpx, 0o755);
-    const fakeOpenClaw = path.join(fakeBinDir, "openclaw");
-    fs.writeFileSync(
-      fakeOpenClaw,
-      `#!/usr/bin/env node
-const fs = require("node:fs");
-fs.appendFileSync(${JSON.stringify(openclawCallsPath)}, JSON.stringify(process.argv.slice(2)) + "\\n", "utf8");
-console.log(JSON.stringify({ ok: true }));
-`,
-      "utf8"
-    );
-    fs.chmodSync(fakeOpenClaw, 0o755);
-
-    const result = spawnSync(process.execPath, [
-      binPath,
-      "delegate",
+    fs.mkdirSync(otherWorkspace, { recursive: true });
+    const result = runDelegate([
+      "--agent",
+      "codex",
       "--request",
-      "Implement a controlled plugin test",
+      "Implement the tmux-only delegate flow",
       "--workspace",
       workspace,
       "--store-dir",
-      path.join(tempDir, "conversations"),
+      storeDir,
+      "--openclaw-session",
+      "agent:test:main",
       "--gateway-method",
       "agent-knock-knock.callback",
-      "--token",
-      gatewayToken,
-      "--openclaw-bin",
-      fakeOpenClaw,
-      "--monitor-poll-interval-ms",
-      "50",
-      "--background"
-    ], {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
-      }
-    });
-
-    assert.equal(result.status, 0, result.stderr || result.stdout);
-    const parsed = JSON.parse(result.stdout);
-    assert.equal(parsed.launched, true);
-    assert.equal(parsed.background, true);
-    assert.equal(parsed.acpx_command, undefined);
-    assert.doesNotMatch(result.stdout, new RegExp(gatewayToken));
-    if (process.platform !== "win32") {
-      assert.equal(fs.statSync(parsed.output_path).mode & 0o777, 0o600);
-    }
-
-    const acpxCalls = await waitForCalls(launchedPath, 2);
-    const generatedSession = acpxCalls[0][4];
-    assert.match(generatedSession, /^akk-claude-\d{14}-[0-9a-f]{8}$/);
-    assert.deepEqual(acpxCalls[0], ["claude", "sessions", "ensure", "--name", generatedSession]);
-    const acpxArgs = acpxCalls.at(-1);
-    assert.deepEqual(acpxArgs.slice(0, 4), ["--approve-all", "claude", "-s", generatedSession]);
-    assert.match(acpxArgs[4], /Initial task message:/);
-    assert.doesNotMatch(JSON.stringify(acpxCalls), new RegExp(gatewayToken));
-
-    const stateText = fs.readFileSync(parsed.paths.statePath, "utf8");
-    assert.doesNotMatch(stateText, new RegExp(gatewayToken));
-    const state = JSON.parse(stateText);
-    assert.doesNotMatch(state.callback_command, /--record-only/);
-    assert.match(state.callback_command, /--gateway-method/);
-    assert.match(state.callback_command, /--openclaw-bin/);
-    assert.doesNotMatch(state.callback_command, /--(?:gateway-)?token/u);
-    assert.doesNotMatch(state.callback_command, /--gateway-url/u);
-
-    const events = fs.readFileSync(parsed.paths.logPath, "utf8")
-      .trim()
-      .split(/\r?\n/)
-      .map((line) => JSON.parse(line));
-    assert.equal(events.some((event) => event.event === "claude_session_ensure" && event.status === 0), true);
-    assert.equal(events.some((event) => event.event === "claude_launch" && event.mode === "background"), true);
-    await waitForEvent(parsed.paths.logPath, "stalled_gateway_method_delivery");
-    const openclawCalls = fs.readFileSync(openclawCallsPath, "utf8")
-      .trim()
-      .split(/\r?\n/)
-      .filter(Boolean)
-      .map((line) => JSON.parse(line));
-    assert.deepEqual(openclawCalls[0].slice(0, 3), ["gateway", "call", "agent-knock-knock.callback"]);
-    assert.equal(openclawCalls[0].includes("--token"), false);
-    assert.doesNotMatch(JSON.stringify(openclawCalls), new RegExp(gatewayToken));
-  } finally {
-    removeTempDir(tempDir);
-  }
-});
-
-test("delegate background generates a unique Codex session when no session is provided", async () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-unique-delegate-"));
-  const fakeBinDir = path.join(tempDir, "bin");
-  const workspace = path.join(tempDir, "workspace");
-  const launchedPath = path.join(tempDir, "acpx-args.json");
-
-  try {
-    fs.mkdirSync(fakeBinDir, { recursive: true });
-    fs.mkdirSync(workspace, { recursive: true });
-    const fakeAcpx = path.join(fakeBinDir, "acpx");
-    fs.writeFileSync(
-      fakeAcpx,
-      `#!/usr/bin/env node
-const fs = require("node:fs");
-fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify(process.argv.slice(2)) + "\\n", "utf8");
-`,
-      "utf8"
-    );
-    fs.chmodSync(fakeAcpx, 0o755);
-
-    const result = spawnSync(process.execPath, [
-      binPath,
-      "delegate",
-      "--agent",
-      "codex",
-      "--request",
-      "Run an isolated Codex task",
-      "--workspace",
-      workspace,
-      "--store-dir",
-      path.join(tempDir, "conversations"),
-      "--background"
-    ], {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
-      }
-    });
-
-    assert.equal(result.status, 0, result.stderr || result.stdout);
-    const parsed = JSON.parse(result.stdout);
-    assert.match(parsed.conversation.executor.session, /^akk-codex-\d{14}-[0-9a-f]{8}$/);
-
-    const acpxCalls = await waitForCalls(launchedPath, 2);
-    assert.deepEqual(acpxCalls[0], [...CODEX_ACPX_SELECTOR, "sessions", "ensure", "--name", parsed.conversation.executor.session]);
-    assert.deepEqual(acpxCalls.at(-1).slice(0, 5), ["--approve-all", ...CODEX_ACPX_SELECTOR, "prompt", "-s"]);
-    assert.equal(acpxCalls.at(-1)[5], parsed.conversation.executor.session);
-  } finally {
-    removeTempDir(tempDir);
-  }
-});
-
-test("delegate background can launch Codex through acpx", async () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-delegate-"));
-  const fakeBinDir = path.join(tempDir, "bin");
-  const workspace = path.join(tempDir, "workspace");
-  const launchedPath = path.join(tempDir, "acpx-args.json");
-
-  try {
-    fs.mkdirSync(fakeBinDir, { recursive: true });
-    fs.mkdirSync(workspace, { recursive: true });
-    const fakeAcpx = path.join(fakeBinDir, "acpx");
-    fs.writeFileSync(
-      fakeAcpx,
-      `#!/usr/bin/env node
-const fs = require("node:fs");
-fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify({
-  args: process.argv.slice(2),
-  allProxy: process.env.ALL_PROXY
-}) + "\\n", "utf8");
-`,
-      "utf8"
-    );
-    fs.chmodSync(fakeAcpx, 0o755);
-
-    const result = spawnSync(process.execPath, [
-      binPath,
-      "delegate",
-      "--agent",
-      "codex",
-      "--session",
-      "codex-task",
-      "--request",
-      "Implement a Codex-backed task",
-      "--workspace",
-      workspace,
-      "--store-dir",
-      path.join(tempDir, "conversations"),
-      "--all-proxy",
-      "socks5h://127.0.0.1:1082",
-      "--model",
-      "gpt-5.5/medium",
-      "--background"
-    ], {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
-      }
-    });
-
-    assert.equal(result.status, 0, result.stderr || result.stdout);
-    const parsed = JSON.parse(result.stdout);
-    assert.equal(parsed.conversation.executor.kind, "codex");
-    assert.equal(parsed.conversation.executor.session, "codex-task");
-    assert.equal(parsed.conversation.executor_all_proxy, "socks5h://127.0.0.1:1082");
-    assert.equal(parsed.conversation.executor_model, "gpt-5.5[medium]");
-
-    const acpxCalls = await waitForCalls(launchedPath, 2);
-    assert.deepEqual(acpxCalls[0].args, [...CODEX_ACPX_SELECTOR, "sessions", "ensure", "--name", "codex-task"]);
-    assert.equal(acpxCalls[0].allProxy, "socks5h://127.0.0.1:1082");
-    assert.deepEqual(acpxCalls.at(-1).args.slice(0, 7), ["--approve-all", "--model", "gpt-5.5[medium]", ...CODEX_ACPX_SELECTOR, "prompt", "-s"]);
-    assert.equal(acpxCalls.at(-1).args[7], "codex-task");
-    assert.equal(acpxCalls.at(-1).allProxy, "socks5h://127.0.0.1:1082");
-
-    const events = fs.readFileSync(parsed.paths.logPath, "utf8")
-      .trim()
-      .split(/\r?\n/)
-      .map((line) => JSON.parse(line));
-    assert.equal(events.some((event) =>
-      event.event === "executor_launch" &&
-      event.executor.kind === "codex"
-    ), true);
-  } finally {
-    removeTempDir(tempDir);
-  }
-});
-
-test("delegate uses supported Codex ACP adapter even when acpx install references deprecated zed codex-acp", async () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-legacy-acpx-"));
-  const fakeBinDir = path.join(tempDir, "bin");
-  const workspace = path.join(tempDir, "workspace");
-  const launchedPath = path.join(tempDir, "acpx-args.json");
-
-  try {
-    fs.mkdirSync(fakeBinDir, { recursive: true });
-    fs.mkdirSync(workspace, { recursive: true });
-    fs.writeFileSync(
-      path.join(tempDir, "package.json"),
+      "--gateway-session",
+      "agent:test:main",
+      "--background",
+      "--disable-terminal-bridge-monitor",
+      "--processes-json",
+      JSON.stringify([
+        {
+          pid: 5101,
+          ppid: 9001,
+          elapsed: "00:20",
+          command: "codex",
+          cwd: workspace
+        },
+        {
+          pid: 5102,
+          ppid: 9002,
+          elapsed: "00:20",
+          command: "codex",
+          cwd: otherWorkspace
+        }
+      ]),
+      "--terminals-json",
+      JSON.stringify([
+        tmuxPane({
+          target: "codex-work:0.0",
+          panePid: 9001,
+          currentPath: workspace
+        }),
+        tmuxPane({
+          target: "codex-other:0.0",
+          session: "codex-other",
+          panePid: 9002,
+          currentPath: otherWorkspace
+        })
+      ]),
+      "--terminal-screens-json",
       JSON.stringify({
-        name: "acpx",
-        dependencies: {
-          "@zed-industries/codex-acp": "0.15.0"
-        }
-      }),
-      "utf8"
-    );
-    const fakeAcpx = path.join(fakeBinDir, "acpx");
-    fs.writeFileSync(
-      fakeAcpx,
-      `#!/usr/bin/env node
-const fs = require("node:fs");
-fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify(process.argv.slice(2)) + "\\n", "utf8");
-`,
-      "utf8"
-    );
-    fs.chmodSync(fakeAcpx, 0o755);
-
-    const result = spawnSync(process.execPath, [
-      binPath,
-      "delegate",
-      "--agent",
-      "codex",
-      "--request",
-      "Run a Codex task",
-      "--workspace",
-      workspace,
-      "--store-dir",
-      path.join(tempDir, "conversations"),
-      "--background"
-    ], {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
-      }
-    });
+        "codex-work:0.0": "› ",
+        "codex-other:0.0": "› "
+      })
+    ]);
 
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const parsed = JSON.parse(result.stdout);
-    const acpxCalls = await waitForCalls(launchedPath, 2);
-    assert.deepEqual(acpxCalls[0], [...CODEX_ACPX_SELECTOR, "sessions", "ensure", "--name", parsed.conversation.executor.session]);
-    assert.deepEqual(acpxCalls.at(-1).slice(0, 5), ["--approve-all", ...CODEX_ACPX_SELECTOR, "prompt", "-s"]);
+    assert.equal(parsed.delivered, true);
+    assert.equal(parsed.status, "async_pending");
+    assert.equal(parsed.background, true);
+    assert.equal(parsed.callback_expected, true);
+    assert.equal(parsed.conversation.executor.kind, "codex");
+    assert.equal(parsed.terminal_control.target, "codex-work:0.0");
+    assert.equal(parsed.terminal_control.panePid, 9001);
+    assert.equal(fs.existsSync(parsed.conversation.state_path), true);
   } finally {
-    removeTempDir(tempDir);
+    fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
 
-test("delegate blocks explicit legacy zed Codex ACP adapter override", () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-legacy-agent-"));
-  const fakeBinDir = path.join(tempDir, "bin");
+test("delegate fails with setup guidance when no idle matching tmux pane exists", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-delegate-no-pane-"));
   const workspace = path.join(tempDir, "workspace");
-  const launchedPath = path.join(tempDir, "acpx-args.json");
 
   try {
-    fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
-    const fakeAcpx = path.join(fakeBinDir, "acpx");
-    fs.writeFileSync(
-      fakeAcpx,
-      `#!/usr/bin/env node
-const fs = require("node:fs");
-fs.appendFileSync(${JSON.stringify(launchedPath)}, JSON.stringify(process.argv.slice(2)) + "\\n", "utf8");
-`,
-      "utf8"
-    );
-    fs.chmodSync(fakeAcpx, 0o755);
-
-    const result = spawnSync(process.execPath, [
-      binPath,
-      "delegate",
+    const result = runDelegate([
       "--agent",
       "codex",
       "--request",
-      "Run a Codex task",
+      "Implement the requested change",
       "--workspace",
       workspace,
       "--store-dir",
       path.join(tempDir, "conversations"),
-      "--background"
-    ], {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
-        AKK_CODEX_ACPX_AGENT_COMMAND: "npx -y @zed-industries/codex-acp"
-      }
-    });
+      "--background",
+      "--processes-json",
+      "[]",
+      "--terminals-json",
+      "[]",
+      "--terminal-screens-json",
+      "{}"
+    ]);
 
-    assert.equal(result.status, 1);
-    assert.match(result.stderr, /Refusing to start Codex through deprecated @zed-industries\/codex-acp/);
-    assert.equal(fs.existsSync(launchedPath), false);
+    assert.equal(result.status, 1, result.stdout);
+    assert.match(result.stderr, /No idle Codex pane is available/);
+    assert.match(result.stderr, /Start codex inside tmux/);
   } finally {
-    removeTempDir(tempDir);
+    fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
 
-function waitForCalls(filePath, minCount, timeoutMs = 2000): Promise<any[]> {
-  const started = Date.now();
-  return new Promise((resolve, reject) => {
-    const check = () => {
-      if (fs.existsSync(filePath)) {
-        const calls = fs.readFileSync(filePath, "utf8")
-          .trim()
-          .split(/\r?\n/)
-          .filter(Boolean)
-          .map((line) => JSON.parse(line));
-        if (calls.length >= minCount) {
-          resolve(calls);
-          return;
+test("delegate fails closed when multiple idle matching tmux panes exist", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-delegate-ambiguous-"));
+  const workspace = path.join(tempDir, "workspace");
+
+  try {
+    fs.mkdirSync(workspace, { recursive: true });
+    const result = runDelegate([
+      "--agent",
+      "codex",
+      "--request",
+      "Implement the requested change",
+      "--workspace",
+      workspace,
+      "--store-dir",
+      path.join(tempDir, "conversations"),
+      "--background",
+      "--processes-json",
+      JSON.stringify([
+        {
+          pid: 5101,
+          ppid: 9001,
+          elapsed: "00:20",
+          command: "codex",
+          cwd: workspace
+        },
+        {
+          pid: 5102,
+          ppid: 9002,
+          elapsed: "00:21",
+          command: "codex",
+          cwd: workspace
         }
-      }
-      if (Date.now() - started >= timeoutMs) {
-        reject(new Error(`timed out waiting for ${filePath}`));
-        return;
-      }
-      setTimeout(check, 25);
-    };
-    check();
+      ]),
+      "--terminals-json",
+      JSON.stringify([
+        tmuxPane({
+          target: "codex-first:0.0",
+          session: "codex-first",
+          panePid: 9001,
+          currentPath: workspace
+        }),
+        tmuxPane({
+          target: "codex-second:0.0",
+          session: "codex-second",
+          panePid: 9002,
+          currentPath: workspace
+        })
+      ]),
+      "--terminal-screens-json",
+      JSON.stringify({
+        "codex-first:0.0": "› ",
+        "codex-second:0.0": "› "
+      })
+    ]);
+
+    assert.equal(result.status, 1, result.stdout);
+    assert.match(result.stderr, /Multiple idle Codex panes match/);
+    assert.match(result.stderr, /\/akk list/);
+    assert.match(result.stderr, /\/akk send/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+function runDelegate(args: string[]) {
+  return spawnSync(process.execPath, [binPath, "delegate", ...args], {
+    encoding: "utf8",
+    env: process.env
   });
 }
 
-function waitForEvent(logPath, eventName, timeoutMs = 2000): Promise<any> {
-  const started = Date.now();
-  return new Promise((resolve, reject) => {
-    const check = () => {
-      if (fs.existsSync(logPath)) {
-        const event = fs.readFileSync(logPath, "utf8")
-          .trim()
-          .split(/\r?\n/)
-          .filter(Boolean)
-          .map((line) => JSON.parse(line))
-          .find((entry) => entry.event === eventName);
-        if (event) {
-          resolve(event);
-          return;
-        }
-      }
-      if (Date.now() - started >= timeoutMs) {
-        reject(new Error(`timed out waiting for ${eventName} in ${logPath}`));
-        return;
-      }
-      setTimeout(check, 25);
-    };
-    check();
-  });
-}
-
-function removeTempDir(dirPath) {
-  fs.rmSync(dirPath, {
-    recursive: true,
-    force: true,
-    maxRetries: 3,
-    retryDelay: 50
-  });
+function tmuxPane(overrides: Record<string, unknown> = {}) {
+  return {
+    kind: "tmux",
+    target: "codex-work:0.0",
+    session: "codex-work",
+    window: 0,
+    pane: 0,
+    panePid: 9001,
+    currentCommand: "node",
+    currentPath: "/repo/workspace",
+    ...overrides
+  };
 }

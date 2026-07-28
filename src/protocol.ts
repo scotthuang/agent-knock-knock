@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import {
   ACTORS,
   CODING_AGENT_ACTORS,
-  EXECUTORS,
   type Actor,
   type Executor,
   type ExecutorKind,
@@ -10,7 +9,7 @@ import {
 } from "./executors.js";
 
 export type MessageType = "task" | "question" | "answer" | "progress" | "blocked" | "done" | "error" | "control";
-export type ConversationStatus = "created" | "running" | "waiting_for_agent" | "waiting_for_openclaw" | "idle" | "stalled" | "needs_recovery" | "needs_model_selection" | "callback_pending" | "callback_failed" | "failed" | "closed" | "cancelled" | "cancelling";
+export type ConversationStatus = "created" | "running" | "waiting_for_agent" | "waiting_for_openclaw" | "idle" | "stalled" | "callback_pending" | "callback_failed" | "failed" | "closed" | "cancelled" | "cancelling";
 export type BudgetLevel = "normal" | "converge" | "warning" | "soft_stop" | "hard_stop";
 export type { Actor, Executor, ExecutorKind } from "./executors.js";
 export { ACTORS, EXECUTORS, resolveExecutor } from "./executors.js";
@@ -32,15 +31,11 @@ export interface Conversation {
   closed_at?: string;
   close_reason?: string;
   cancel_requested_at?: string;
-  recovery?: Record<string, unknown>;
   gateway_url?: string;
   gateway_method?: string;
   gateway_session?: string;
-  callback_command?: string;
   openclaw_bin?: string;
   gateway_token?: string;
-  executor_all_proxy?: string;
-  executor_model?: string;
   store_dir?: string;
   conversation_dir?: string;
   event_log_path?: string;
@@ -133,7 +128,7 @@ export function createConversation({
   userRequest,
   workspace = process.cwd(),
   openclawSession = "agent:main:main",
-  claudeSession = "bidirectional",
+  claudeSession = "claude",
   executorKind = "claude",
   executorSession,
   softLimit = 50,

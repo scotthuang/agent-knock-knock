@@ -1,86 +1,60 @@
-# Bidirectional Agent Protocol
+# Terminal Handoff Protocol
 
-This protocol supports managed bidirectional delegation through ACPX. tmux-controlled tasks reuse AKK conversation state and callback message types, but AKK sends the user-facing task directly to the existing pane and owns terminal monitoring.
+Agent Knock Knock coordinates OpenClaw, a local coding agent, and a human through one visible tmux terminal.
 
-- OpenClaw is the product manager, requirements owner, and final acceptance decision maker.
-- Claude Code, Codex, or Cursor is the engineering implementation agent and can directly edit code.
-- OpenClaw decides product direction, requirements interpretation, acceptance criteria, delivery scope, UX behavior, and acceptable compromises.
-- The selected coding agent decides ordinary implementation details, but must ask OpenClaw before changing product behavior, narrowing scope, degrading quality, accepting a workaround, or changing delivery standards.
-- Only messages requiring a response consume the response budget.
-- Conversation storage is the durable source of truth for recovery, task listing, and future visualization.
-- NDJSON event logs live at `~/.agent-knock-knock/conversations/<conversation-id>/events.ndjson` by default.
+- OpenClaw is the orchestrator, requirements owner, and final acceptance decision maker.
+- Codex or Claude Code performs the engineering work inside tmux.
+- AKK owns terminal delivery, monitoring, lifecycle state, and callbacks.
+- A human can attach to the same tmux pane at any time, continue directly, and later hand control back to OpenClaw.
+- AKK sends input only after it verifies the selected agent, pane, process, workspace, and idle prompt.
+- AKK reports approval or completion only when the terminal adapter has reliable evidence. Uncertain states fail closed.
 
-## Message
+## Task Flow
 
-```json
-{
-  "id": "msg-...",
-  "conversation_id": "task-...",
-  "from": "openclaw",
-  "to": "claude-code",
-  "type": "task",
-  "requires_response": true,
-  "round": 1,
-  "max_rounds": 50,
-  "body": "Implement the requested change.",
-  "metadata": {
-    "workspace": "/path/to/project",
-    "task_id": "task-...",
-    "executor_kind": "claude",
-    "executor_session": "bidirectional"
-  }
-}
-```
+1. OpenClaw calls the AKK delegate or send tool with the user-facing task.
+2. AKK resolves exactly one eligible Codex or Claude Code pane in tmux.
+3. AKK records the managed turn, writes the task to the verified idle pane, and starts a monitor bound to that pane, process, and message.
+4. The coding agent works in the same terminal that the human can inspect or take over.
+5. AKK sends a structured callback to the originating OpenClaw session when it has reliable approval, completion, cancellation, stall, or failure evidence.
+6. OpenClaw may send a follow-up to the same managed terminal conversation.
 
-Conversation state records the selected executor:
+If no eligible terminal exists, AKK stops and returns an actionable setup message. It does not launch an invisible replacement agent.
 
-```json
-{
-  "conversation_id": "task-...",
-  "openclaw_session": "agent:main:main",
-  "executor": {
-    "kind": "claude",
-    "actor": "claude-code",
-    "session": "bidirectional",
-    "transport": "acpx"
-  },
-  "workspace": "/path/to/project",
-  "status": "waiting_for_agent"
-}
-```
+## Message Types
 
-## Types
-
-| Type | Requires response by default | Purpose |
-| --- | --- | --- |
-| `task` | yes | OpenClaw delegates work |
-| `question` | yes | Coding agent asks OpenClaw to decide |
-| `answer` | yes | OpenClaw answers or directs |
-| `progress` | no | Coding agent reports progress |
-| `blocked` | yes | Coding agent cannot continue |
-| `done` | no | Coding agent reports completion |
-| `error` | no | Tool, protocol, or runtime error |
-| `control` | no | Budget warnings and lifecycle control |
-
-## Routes
-
-Messages must match the active `conversation_id`.
-
-Allowed routes:
-
-| Route | Allowed types |
+| Type | Purpose |
 | --- | --- |
-| `openclaw -> claude-code` | `task`, `answer`, `control`, `error` |
-| `claude-code -> openclaw` | `question`, `progress`, `blocked`, `done`, `error` |
-| `openclaw -> codex` | `task`, `answer`, `control`, `error` |
-| `codex -> openclaw` | `question`, `progress`, `blocked`, `done`, `error` |
-| `openclaw -> cursor` | `task`, `answer`, `control`, `error` |
-| `cursor -> openclaw` | `question`, `progress`, `blocked`, `done`, `error` |
+| `task` | OpenClaw assigns work to the coding agent. |
+| `answer` | OpenClaw supplies a decision or follow-up. |
+| `progress` | AKK reports reliable non-final progress. |
+| `blocked` | AKK reports that the task needs attention. |
+| `done` | AKK reports that the current terminal turn completed. |
+| `error` | AKK reports a terminal, monitor, callback, or protocol failure. |
+| `control` | AKK records lifecycle control such as cancellation or timeout. |
 
-## Budget
+The coding agent does not run a callback command and does not need an AKK-specific hook or plugin. AKK's terminal monitor owns callback delivery.
 
-- `0-29`: normal collaboration
-- `30`: OpenClaw asks the selected coding agent to converge
-- `40`: OpenClaw warns the selected coding agent to finish, degrade, or fail within 10 response rounds
-- `50`: soft stop unless OpenClaw explicitly extends
-- `100`: hard stop
+## Terminal Identity
+
+Each managed turn is bound to a concrete terminal identity, including:
+
+- coding agent (`codex` or `claude`)
+- canonical workspace
+- tmux socket and pane target
+- pane and agent process identity
+- managed conversation and message identity
+- monitor owner and lease
+
+AKK revalidates that identity before sending tasks, interrupt keys, or approval input. Stale, changed, ambiguous, or replayed actions are rejected.
+
+## Human Handoff
+
+The tmux pane remains the source of visible truth:
+
+- Attach to tmux to inspect or continue the work yourself.
+- Use AKK status for a bounded remote view.
+- Send a follow-up only when AKK verifies the pane is idle.
+- Interrupt the current turn without closing the pane.
+- Renew monitoring only when the same live task remains in that pane.
+
+This makes handoff reversible: OpenClaw and the human operate the same coding-agent session instead of creating parallel, hidden conversations.

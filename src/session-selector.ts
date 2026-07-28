@@ -203,7 +203,7 @@ export function resolveSessionSelector<T extends SessionSelectorCandidate>(
     });
   }
 
-  const agentLatestMatch = /^(codex|claude|cursor):latest$/u.exec(normalizedSelector);
+  const agentLatestMatch = /^(codex|claude):latest$/u.exec(normalizedSelector);
   if (agentLatestMatch) {
     const agent = agentLatestMatch[1] as ExecutorKind;
     const allAgentMatches = normalizedCandidates.filter(

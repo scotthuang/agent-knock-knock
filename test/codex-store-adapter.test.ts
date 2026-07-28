@@ -52,14 +52,14 @@ test("Codex store adapter parses process and cwd command output", () => {
   ].join("\n"));
   const cwdByPid = parseLsofCwdMap([
     "COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME",
-    "node     1000 me    cwd    DIR   1,18       64  123 /repo/acpx",
-    "codex    1001 me    cwd    DIR   1,18       64  124 /repo/acpx"
+    "node     1000 me    cwd    DIR   1,18       64  123 /repo/project",
+    "codex    1001 me    cwd    DIR   1,18       64  124 /repo/project"
   ].join("\n"));
 
   assert.equal(snapshots.length, 2);
   assert.equal(snapshots[0].pid, 1000);
   assert.equal(snapshots[0].command, `node /Users/me/bin/codex resume ${SESSION_ID}`);
-  assert.equal(cwdByPid.get(1001), "/repo/acpx");
+  assert.equal(cwdByPid.get(1001), "/repo/project");
 });
 
 test("Codex store adapter wraps sqlite and process command output behind the adapter interface", async () => {
@@ -81,7 +81,7 @@ test("Codex store adapter wraps sqlite and process command output behind the ada
       if (command === "sqlite3" && args[0] === "-json" && args[2].startsWith("select id")) {
         return ok(JSON.stringify([{
           id: SESSION_ID,
-          cwd: "/repo/acpx",
+          cwd: "/repo/project",
           rollout_path: "/rollout.jsonl",
           updated_at_ms: 20,
           archived: 0
@@ -96,7 +96,7 @@ test("Codex store adapter wraps sqlite and process command output behind the ada
       if (command === "lsof") {
         return ok([
           "COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME",
-          "node     1000 me    cwd    DIR   1,18       64  123 /repo/acpx"
+          "node     1000 me    cwd    DIR   1,18       64  123 /repo/project"
         ].join("\n"));
       }
       return {
@@ -111,7 +111,7 @@ test("Codex store adapter wraps sqlite and process command output behind the ada
     fs.writeFileSync(dbPath, "", "utf8");
 
     assert.equal((await adapter.listThreadRows())[0].id, SESSION_ID);
-    assert.equal((await adapter.listProcessSnapshots())[0].cwd, "/repo/acpx");
+    assert.equal((await adapter.listProcessSnapshots())[0].cwd, "/repo/project");
     assert.equal(calls.some((call) => call.startsWith("sqlite3 -json")), true);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

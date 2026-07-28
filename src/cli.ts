@@ -26,17 +26,6 @@ import {
   detectClaudeTranscriptPendingApproval,
   type ClaudeTranscriptAnchor
 } from "./claude-local-transcript-provider.js";
-import {
-  ClaudeHookStore,
-  ClaudeHookStoreError,
-  defaultClaudeHookStoreDir,
-  type ClaudeManagedLease
-} from "./claude-hook-store.js";
-import { claudePermissionHookOutput } from "./claude-hook-protocol.js";
-import {
-  defaultClaudeSettingsPath,
-  loadTrustedClaudeTokenjuiceLaunchers
-} from "./claude-hook-installer.js";
 import { CodexLocalSessionProvider, type CodexLocalSessionAdapter } from "./codex-local-session-provider.js";
 import { CodexStoreAdapter } from "./codex-store-adapter.js";
 import {
@@ -48,19 +37,15 @@ import {
   extractStructuredMessage,
   parseMessageJson,
   resolveExecutor,
+  type Conversation,
   type ConversationStatus
 } from "./protocol.js";
 import {
   EXECUTOR_KINDS,
-  acpxCommandForExecutor,
   executorDefinitionForKind,
   isExecutorKind,
-  modelEnvForExecutor,
-  normalizeModelForExecutor,
-  proxyEnvForExecutor,
   type ExecutorKind
 } from "./executors.js";
-import { executorBootstrapPrompt } from "./bootstrap.js";
 import { redactString, writeRuntimeLog } from "./runtime-log.js";
 import { formatTranscript, readNdjsonLog } from "./transcript.js";
 import {
@@ -77,7 +62,6 @@ import {
   saveState,
   statePathForConversationId
 } from "./store.js";
-import { planFork, planTakeover } from "./session-takeover-planner.js";
 import {
   StaticTerminalControlProvider,
   TmuxTerminalControlProvider,
@@ -86,7 +70,6 @@ import {
 } from "./terminal-control-provider.js";
 import {
   parseTerminalConversationId,
-  terminalControlCapabilitiesForAdapter,
   type ActiveTerminalProcess,
   type TerminalCompletionEvidence,
   type TerminalControlCapability,
@@ -111,8 +94,7 @@ import {
 } from "./approval-policy.js";
 import {
   evaluateDoctorCapabilities,
-  runDoctorCapabilityProbes,
-  type DoctorMode
+  runDoctorCapabilityProbes
 } from "./doctor-capabilities.js";
 import { runOpenClawChainDiagnostics } from "./openclaw-doctor.js";
 import {
@@ -139,13 +121,18 @@ const TERMINAL_BRIDGE_SUPERSEDE_STATUSES = new Set<ConversationStatus>([
   "stalled",
   "cancelling"
 ]);
+const TERMINAL_DISPATCH_RELEASE_STATUSES = new Set<ConversationStatus>([
+  "idle",
+  "failed",
+  "closed",
+  "cancelled"
+]);
 const TERMINAL_BRIDGE_MONITOR_LOCK_VERSION = 1;
-const MINIMUM_NODE_VERSION = "22.14.0";
+const MINIMUM_NODE_VERSION = "22.19.0";
 const PRIVATE_LOCK_FILE_MODE = 0o600;
 const NO_FOLLOW_FLAG = typeof fs.constants.O_NOFOLLOW === "number"
   ? fs.constants.O_NOFOLLOW
   : 0;
-const DEFAULT_CODEX_ACPX_AGENT_COMMAND = "npx -y @agentclientprotocol/codex-acp@1.1.7";
 const CONVERSATION_STATUSES = new Set<ConversationStatus>([
   "created",
   "running",
@@ -153,8 +140,6 @@ const CONVERSATION_STATUSES = new Set<ConversationStatus>([
   "waiting_for_openclaw",
   "idle",
   "stalled",
-  "needs_recovery",
-  "needs_model_selection",
   "callback_pending",
   "callback_failed",
   "failed",
@@ -171,7 +156,6 @@ const SESSION_SELECTOR_COMMANDS = new Set([
   "cancel",
   "renew",
   "retry-callback",
-  "recover",
   "close"
 ]);
 
@@ -252,14 +236,8 @@ async function runCommand(commandName, options) {
     usage();
   } else if (commandName === "version" || commandName === "--version" || commandName === "-v") {
     printVersion();
-  } else if (commandName === "new") {
-    runNew(options);
-  } else if (commandName === "record") {
-    runRecord(options);
-  } else if (commandName === "bootstrap-prompt") {
-    runBootstrapPrompt(options);
   } else if (commandName === "delegate") {
-    runDelegate(options);
+    await runDelegate(options);
   } else if (commandName === "list") {
     await runList(options);
   } else if (commandName === "status") {
@@ -276,20 +254,12 @@ async function runCommand(commandName, options) {
     await runRenew(options);
   } else if (commandName === "reconcile-monitors") {
     await runReconcileMonitors(options);
-  } else if (commandName === "recover") {
-    runRecover(options);
   } else if (commandName === "close") {
     await runClose(options);
   } else if (commandName === "transcript") {
     runTranscript(options);
   } else if (commandName === "install-openclaw") {
     runInstallOpenClaw(options);
-  } else if (commandName === "install-claude-hooks") {
-    throw new Error(
-      "install-claude-hooks is no longer supported; Claude tmux control now works without modifying Claude Code settings"
-    );
-  } else if (commandName === "claude-hook") {
-    await runClaudeHook(options);
   } else if (commandName === "doctor") {
     runDoctor(options);
   } else if (commandName === "callback") {
@@ -313,17 +283,13 @@ function runInstallOpenClaw(options) {
     ? undefined
     : canonicalWorkspace(options.workspace);
   const defaultAgent = optionalExecutorKind(options.defaultAgent);
-  const selectedMode = options.mode === undefined
-    ? undefined
-    : parseDoctorMode(options.mode);
-  if (selectedMode === "tmux" && defaultAgent === "cursor") {
-    throw new Error("--default-agent cursor requires --mode acpx or --mode all");
+  if (options.mode !== undefined) {
+    throw new Error("--mode was removed; Agent Knock Knock now uses tmux only");
   }
   if (
     skillOnly &&
     (workspace !== undefined ||
       defaultAgent !== undefined ||
-      selectedMode !== undefined ||
       options.verify === true)
   ) {
     throw new Error(
@@ -364,12 +330,6 @@ function runInstallOpenClaw(options) {
             path: "plugins.entries.agent-knock-knock.config.defaultAgent",
             value: defaultAgent
           }]),
-      ...(selectedMode === undefined
-        ? []
-        : [{
-            path: "plugins.entries.agent-knock-knock.config.mode",
-            value: selectedMode
-          }])
     ];
     runCheckedCommand(
       openclawBin,
@@ -404,8 +364,7 @@ function runInstallOpenClaw(options) {
     ? buildDoctorReport({
         ...options,
         openclawBin,
-        ...(workspace ? { workspace } : {}),
-        mode: selectedMode ?? "all"
+        ...(workspace ? { workspace } : {})
       })
     : undefined;
   const ready = verification
@@ -414,7 +373,6 @@ function runInstallOpenClaw(options) {
   const nextActions = installNextActions({
     pendingRestart,
     verification,
-    mode: selectedMode ?? "all",
     agent: defaultAgent ?? "codex"
   });
 
@@ -423,7 +381,7 @@ function runInstallOpenClaw(options) {
     ready,
     pending_restart: pendingRestart,
     mode: skillOnly ? "skill_only" : "full",
-    execution_mode: selectedMode ?? null,
+    execution_mode: "tmux",
     default_agent: defaultAgent ?? null,
     workspace: workspace ?? null,
     package_root: root,
@@ -464,12 +422,10 @@ function optionalExecutorKind(value: unknown): ExecutorKind | undefined {
 function installNextActions({
   pendingRestart,
   verification,
-  mode,
   agent
 }: {
   pendingRestart: boolean;
   verification?: Record<string, any>;
-  mode: DoctorMode;
   agent: ExecutorKind;
 }): Array<{ action: string; command: string }> {
   if (pendingRestart) {
@@ -480,7 +436,7 @@ function installNextActions({
       },
       {
         action: "verify",
-        command: `agent-knock-knock doctor --mode ${mode}`
+        command: "agent-knock-knock doctor"
       }
     ];
   }
@@ -502,78 +458,14 @@ function installNextActions({
   if (!verification) {
     return [{
       action: "verify",
-      command: `agent-knock-knock doctor --mode ${mode}`
+      command: "agent-knock-knock doctor"
     }];
   }
 
-  return mode === "tmux"
-    ? [{
-        action: "start_agent",
-        command: `tmux new -s akk-${agent} ${agent}`
-      }]
-    : [{
-        action: "delegate",
-        command: `/akk ${agent} <task>`
-      }];
-}
-
-async function runClaudeHook(options) {
-  const rawInput = fs.readFileSync(0, "utf8");
-  let input: unknown;
-  try {
-    input = JSON.parse(rawInput);
-  } catch {
-    throw new Error("Claude hook input must be valid JSON");
-  }
-
-  const agentRows = loadClaudeAgentRows(options);
-  const claudePid = inferClaudeAncestorPid(agentRows);
-  const store = createClaudeHookStore(options);
-  const record = store.record(input, {
-    ...(claudePid === undefined ? {} : { claudePid })
-  });
-  if (record.event.input.hook_event_name !== "PermissionRequest" || !record.permission) {
-    return;
-  }
-
-  const permission = record.permission;
-  const requestedTimeout = options.permissionWaitTimeoutMs ?? options.timeoutMs;
-  const timeoutMs = requestedTimeout === undefined
-    ? undefined
-    : Math.max(0, Number(requestedTimeout));
-  try {
-    const decision = await store.waitForPermissionDecision({
-      sessionId: permission.sessionId,
-      requestId: permission.requestId,
-      fingerprint: permission.fingerprint,
-      conversationId: permission.conversationId,
-      messageId: permission.messageId,
-      ...(timeoutMs === undefined ? {} : { timeoutMs })
-    });
-    process.stdout.write(`${JSON.stringify(
-      decision?.hookOutput ?? claudePermissionHookOutput({
-        behavior: "deny",
-        interrupt: false,
-        message: "Agent Knock Knock approval timed out. Review the request and retry the task."
-      })
-    )}\n`);
-  } catch (error) {
-    if (error instanceof ClaudeHookStoreError && [
-      "PERMISSION_EXPIRED",
-      "PERMISSION_CONSUMED",
-      "PERMISSION_ALREADY_DECIDED"
-    ].includes(error.code)) {
-      process.stdout.write(`${JSON.stringify(
-        claudePermissionHookOutput({
-          behavior: "deny",
-          interrupt: false,
-          message: "Agent Knock Knock approval expired before a safe decision was received."
-        })
-      )}\n`);
-      return;
-    }
-    throw error;
-  }
+  return [{
+    action: "start_agent",
+    command: `tmux new -s akk-${agent} ${agent}`
+  }];
 }
 
 function installOpenClawPlugin(openclawBin, root) {
@@ -611,7 +503,9 @@ function runDoctor(options) {
 }
 
 function buildDoctorReport(options): Record<string, any> {
-  const mode = parseDoctorMode(options.mode ?? "all");
+  if (options.mode !== undefined) {
+    throw new Error("--mode was removed; Agent Knock Knock now checks tmux only");
+  }
   const timeoutMs = options.timeoutMs === undefined
     ? undefined
     : positiveMilliseconds(options.timeoutMs, "--timeout-ms");
@@ -619,10 +513,8 @@ function buildDoctorReport(options): Record<string, any> {
   const executables = {
     openclaw: openclawBin,
     ...(options.tmuxBin ? { tmux: String(options.tmuxBin) } : {}),
-    ...(options.acpxBin ? { acpx: String(options.acpxBin) } : {}),
     ...(options.codexBin ? { codex: String(options.codexBin) } : {}),
-    ...(options.claudeBin ? { claude: String(options.claudeBin) } : {}),
-    ...(options.cursorBin ? { cursor: String(options.cursorBin) } : {})
+    ...(options.claudeBin ? { claude: String(options.claudeBin) } : {})
   };
   const checks = [
     {
@@ -638,8 +530,7 @@ function buildDoctorReport(options): Record<string, any> {
       {
         ...(timeoutMs === undefined ? {} : { timeoutMs }),
         executables
-      },
-      mode
+      }
     )
   ];
   const root = packageRootDir();
@@ -655,7 +546,7 @@ function buildDoctorReport(options): Record<string, any> {
       exists: fs.existsSync(filePath)
     };
   });
-  const capabilities = evaluateDoctorCapabilities(checks, mode);
+  const capabilities = evaluateDoctorCapabilities(checks);
   const filesOk = packageFiles.every((check) => check.exists);
   const openclaw = runOpenClawChainDiagnostics({
     openclawBin,
@@ -666,19 +557,9 @@ function buildDoctorReport(options): Record<string, any> {
     optionalExecutorKind(options.defaultAgent) ??
     openclaw.default_agent ??
     "codex";
-  const selectedAgentReady = mode === "tmux"
-    ? capabilities.tmux.status === "ready" &&
-      capabilities.tmux.agents.includes(selectedAgent)
-    : mode === "acpx"
-      ? capabilities.acpx.status === "ready" &&
-        capabilities.acpx.agents.includes(selectedAgent)
-      : (
-          capabilities.tmux.status === "ready" &&
-          capabilities.tmux.agents.includes(selectedAgent)
-        ) || (
-          capabilities.acpx.status === "ready" &&
-          capabilities.acpx.agents.includes(selectedAgent)
-        );
+  const selectedAgentReady =
+    capabilities.tmux.status === "ready" &&
+    capabilities.tmux.agents.includes(selectedAgent);
   const ok =
     capabilities.readiness === "ready" &&
     selectedAgentReady &&
@@ -691,7 +572,7 @@ function buildDoctorReport(options): Record<string, any> {
       : capabilities.readiness === "not_ready"
         ? "not_ready"
         : "partially_ready",
-    selected_mode: mode,
+    selected_mode: "tmux",
     selected_agent: selectedAgent
       ? {
           agent: selectedAgent,
@@ -702,31 +583,15 @@ function buildDoctorReport(options): Record<string, any> {
     checks,
     package_files: packageFiles,
     capabilities: {
-      tmux: {
-        ...capabilities.tmux,
-        checked: mode !== "acpx"
-      },
-      acpx: {
-        ...capabilities.acpx,
-        checked: mode !== "tmux"
-      }
+      tmux: capabilities.tmux
     },
     openclaw,
     notes: [
       `Node.js ${MINIMUM_NODE_VERSION}+ and OpenClaw are required.`,
-      "Choose tmux (recommended), ACPX/ACP, or install both.",
-      "tmux supports Codex and Claude Code; ACPX supports Codex, Claude Code, and Cursor.",
+      "AKK supports Codex and Claude Code through shared tmux terminals.",
       "Claude tmux completion is hook-free and fails closed unless the local transcript schema is verified."
     ]
   };
-}
-
-function parseDoctorMode(value: unknown): DoctorMode {
-  const normalized = String(value).trim().toLowerCase();
-  if (normalized === "tmux" || normalized === "acpx" || normalized === "all") {
-    return normalized;
-  }
-  throw new Error("--mode must be one of: tmux, acpx, all");
 }
 
 function positiveMilliseconds(value: unknown, optionName: string): number {
@@ -767,7 +632,12 @@ async function runAgent(options) {
 async function runAgentTakeover(options) {
   const agent = required(options.agent, "--agent is required");
   const sessionId = required(options.sessionId, "--session-id is required");
-  const strategy = options.strategy ?? "terminate_then_resume";
+  const strategy = options.strategy ?? "terminal_control";
+  if (strategy !== "terminal_control") {
+    throw new Error(
+      "Agent Knock Knock only supports terminal_control takeover through tmux"
+    );
+  }
   const provider = createAgentSessionProvider(agent, options);
   const session = await provider.getSession(sessionId);
   if (!session) {
@@ -784,298 +654,57 @@ async function runAgentTakeover(options) {
     };
   }
 
-  if (strategy === "terminate_then_resume") {
-    const activeSessions = await listActiveSessionsWithTerminalControl(provider, options);
-    const plan = planTakeover(session, activeSessions);
-    if (options.confirmTerminate === true) {
-      const expectedPid = Number(required(options.expectedPid, "--expected-pid is required with --confirm-terminate"));
-      if (!Number.isInteger(expectedPid) || expectedPid <= 0) {
-        throw new Error("--expected-pid must be a positive integer");
-      }
-      if (!options.createConversation) {
-        throw new Error("--create-conversation is required with --confirm-terminate");
-      }
-      const targetSelection = selectTerminateTarget({
-        plan,
-        session,
-        activeSessions,
-        expectedPid,
-        allowCwdOnly: options.allowCwdOnly === true
-      });
-      if (!targetSelection.allowed) {
-        return {
-          agent,
-          sessionId,
-          strategy,
-          status: "blocked",
-          sideEffectsExecuted: false,
-          plan,
-          error: {
-            code: targetSelection.code,
-            message: targetSelection.message
-          }
-        };
-      }
-
-      const { target, matchKind } = targetSelection;
-
-      const termination = terminateProcessTarget(target, {
-        timeoutMs: Number(options.terminateTimeoutMs ?? 3000)
-      });
-      const activeAfterTermination = await listActiveSessionsWithTerminalControl(provider, options);
-      const afterTerminationPlan = planTakeover(session, activeAfterTermination);
-      if (afterTerminationPlan.targets.some((candidate) => candidate.sessionId === session.id || candidate.pid === expectedPid)) {
-        return {
-          agent,
-          sessionId,
-          strategy,
-          status: "blocked",
-          sideEffectsExecuted: true,
-          plan: afterTerminationPlan,
-          termination,
-          error: {
-            code: "target_still_active",
-            message: `Codex process ${expectedPid} still appears active after termination.`
-          }
-        };
-      }
-
-      const modelInfo = await provider.getSessionModel(session.id);
-      const attached = createNativeSessionConversation({
-        agent,
-        strategy,
-        session,
-        modelInfo,
-        options,
-        takeoverMatchKind: matchKind
-      });
-      return {
-        agent,
-        sessionId,
-        strategy,
-        status: "attached",
-        sideEffectsExecuted: true,
-        plan,
-        termination,
-        matchKind,
-        ...attached
-      };
+  const activeSessions = await listActiveSessionsWithTerminalControl(provider, options);
+  const plan = planTerminalControlTakeover(session, activeSessions);
+  if (options.confirmTerminal === true) {
+    const terminalTarget = String(required(options.terminalTarget, "--terminal-target is required with --confirm-terminal"));
+    if (!options.createConversation) {
+      throw new Error("--create-conversation is required with --confirm-terminal");
     }
-
-    return {
-      agent,
-      sessionId,
-      strategy,
-      status: plan.requiresConfirmation ? "requires_confirmation" : "blocked",
-      sideEffectsExecuted: false,
-      plan
-    };
-  }
-
-  if (strategy === "terminal_control") {
-    const activeSessions = await listActiveSessionsWithTerminalControl(provider, options);
-    const plan = planTerminalControlTakeover(session, activeSessions);
-    if (options.confirmTerminal === true) {
-      const terminalTarget = String(required(options.terminalTarget, "--terminal-target is required with --confirm-terminal"));
-      if (!options.createConversation) {
-        throw new Error("--create-conversation is required with --confirm-terminal");
-      }
-      const target = plan.targets.find((candidate) => candidate.terminalControl?.target === terminalTarget);
-      if (!plan.allowed || !target?.terminalControl) {
-        return {
-          agent,
-          sessionId,
-          strategy,
-          status: "blocked",
-          sideEffectsExecuted: false,
-          plan,
-          error: {
-            code: "terminal_target_unavailable",
-            message: `No matching terminal-controlled Codex process was found for ${terminalTarget}`
-          }
-        };
-      }
-      const modelInfo = await provider.getSessionModel(session.id);
-      const attached = createNativeSessionConversation({
-        agent,
-        strategy,
-        session,
-        modelInfo,
-        options,
-        takeoverMatchKind: "terminal_control",
-        terminalControl: target.terminalControl,
-        terminalAgentPid: target.pid,
-        needsBootstrap: false
-      });
-      return {
-        agent,
-        sessionId,
-        strategy,
-        status: "attached",
-        sideEffectsExecuted: true,
-        plan,
-        terminalControl: target.terminalControl,
-        ...attached
-      };
-    }
-
-    return {
-      agent,
-      sessionId,
-      strategy,
-      status: plan.allowed ? "requires_confirmation" : "blocked",
-      sideEffectsExecuted: false,
-      plan
-    };
-  }
-
-  if (strategy === "fork") {
-    const contextPackage = await provider.getForkContext({
-      sessionId,
-      maxMessages: Number(options.maxMessages ?? 12),
-      maxCommands: Number(options.maxCommands ?? 8),
-      maxTextLength: Number(options.maxTextLength ?? 1200)
-    });
-    if (!contextPackage) {
+    const target = plan.targets.find((candidate) => candidate.terminalControl?.target === terminalTarget);
+    if (!plan.allowed || !target?.terminalControl) {
       return {
         agent,
         sessionId,
         strategy,
         status: "blocked",
         sideEffectsExecuted: false,
+        plan,
         error: {
-          code: "fork_context_unavailable",
-          message: `No fork context could be built for ${sessionId}`
+          code: "terminal_target_unavailable",
+          message: `No matching terminal-controlled ${agent} process was found for ${terminalTarget}`
         }
       };
     }
-
-    if (options.createConversation) {
-      const forkSummary = String(required(options.forkSummary ?? options.summary, "--fork-summary is required when creating a fork conversation"));
-      const modelInfo = await provider.getSessionModel(session.id);
-      const attached = createForkConversation({
-        agent,
-        strategy,
-        session,
-        contextPackage,
-        forkSummary,
-        modelInfo,
-        options
-      });
-      return {
-        agent,
-        sessionId,
-        strategy,
-        status: "forked",
-        sideEffectsExecuted: true,
-        plan: planFork(session, contextPackage),
-        ...attached
-      };
-    }
-
+    const attached = createNativeSessionConversation({
+      agent,
+      strategy,
+      session,
+      options,
+      takeoverMatchKind: "terminal_control",
+      terminalControl: target.terminalControl,
+      terminalAgentPid: target.pid,
+      needsBootstrap: false
+    });
     return {
       agent,
       sessionId,
       strategy,
-      status: "awaiting_openclaw_summary",
-      sideEffectsExecuted: false,
-      plan: planFork(session, contextPackage),
-      summaryPrompt: buildForkSummaryPrompt({ agent, session, contextPackage }),
-      nextAction: {
-        actor: "openclaw",
-        action: "summarize_and_confirm_fork",
-        instructions: [
-          "Summarize plan.contextPackage for the user before creating a forked AKK-managed session.",
-          "Do not inject the raw rollout or full contextPackage into the new coding agent.",
-          "Ask the user to confirm the summary.",
-          "After confirmation, call this tool again with strategy=fork, createConversation=true, and forkSummary set to the confirmed summary."
-        ],
-        followUpTool: "agent_knock_knock_agent_takeover",
-        followUpParams: {
-          agent,
-          sessionId,
-          strategy: "fork",
-          createConversation: true,
-          forkSummary: "<confirmed OpenClaw summary>"
-        }
-      },
-      next: "Use summaryPrompt to summarize the bounded context package for the user, ask for confirmation, then create the forked AKK-managed session with forkSummary."
-    };
-  }
-
-  throw new Error(`unsupported takeover strategy: ${strategy}`);
-}
-
-function buildForkSummaryPrompt({ agent, session, contextPackage }) {
-  return [
-    "You are OpenClaw summarizing a bounded native coding-agent session context before Agent Knock Knock forks it into a new managed session.",
-    "",
-    "Goal:",
-    "- Produce a concise, user-reviewable summary that can be safely injected into a new AKK-managed coding-agent session after the user confirms it.",
-    "- The new session must use the summary only; do not pass raw rollout history or the full context package to the coding agent.",
-    "",
-    "Source:",
-    `- Agent: ${agent}`,
-    `- Session id: ${session.id}`,
-    `- Workspace: ${session.cwd}`,
-    `- Title: ${session.title ?? session.preview ?? session.firstUserMessage ?? "(unknown)"}`,
-    `- Context messages included: ${contextPackage.messages.length}`,
-    `- Commands included: ${contextPackage.commands.length}`,
-    `- Context truncated: ${contextPackage.truncated ? "yes" : "no"}`,
-    "",
-    "Summary format:",
-    "1. Original user goal",
-    "2. Work already completed",
-    "3. Current state and important findings",
-    "4. Constraints, risks, or files/workspace details the forked agent must preserve",
-    "5. Recommended next step for the forked agent",
-    "",
-    "After writing the summary, ask the user to confirm. If confirmed, call agent_knock_knock_agent_takeover with strategy=\"fork\", createConversation=true, and forkSummary equal to the confirmed summary."
-  ].join("\n");
-}
-
-function selectTerminateTarget({ plan, session, activeSessions, expectedPid, allowCwdOnly }) {
-  const exactTarget = plan.targets.find((candidate) => candidate.pid === expectedPid && candidate.sessionId === session.id);
-  if (exactTarget) {
-    return {
-      allowed: true,
-      target: exactTarget,
-      matchKind: "exact_session"
-    };
-  }
-
-  if (!allowCwdOnly) {
-    return {
-      allowed: false,
-      code: plan.allowed && plan.requiresConfirmation ? "expected_pid_mismatch" : "takeover_not_confirmable",
-      message: plan.allowed && plan.requiresConfirmation
-        ? `Expected pid ${expectedPid} is no longer the exact active Codex process for session ${session.id}.`
-        : "The current active Codex process no longer has an exact session match that can be safely terminated."
-    };
-  }
-
-  const cwdOnlyTarget = plan.targets.find((candidate) =>
-    candidate.pid === expectedPid &&
-    candidate.cwd === session.cwd &&
-    candidate.sessionId === undefined
-  );
-  const stillActive = activeSessions.some((candidate) =>
-    candidate.pid === expectedPid &&
-    candidate.cwd === session.cwd &&
-    candidate.sessionId === undefined
-  );
-  if (!cwdOnlyTarget || !stillActive) {
-    return {
-      allowed: false,
-      code: "expected_pid_mismatch",
-      message: `Expected pid ${expectedPid} is no longer an active Codex process in ${session.cwd}.`
+      status: "attached",
+      sideEffectsExecuted: true,
+      plan,
+      terminalControl: target.terminalControl,
+      ...attached
     };
   }
 
   return {
-    allowed: true,
-    target: cwdOnlyTarget,
-    matchKind: "cwd_only_confirmed"
+    agent,
+    sessionId,
+    strategy,
+    status: plan.allowed ? "requires_confirmation" : "blocked",
+    sideEffectsExecuted: false,
+    plan
   };
 }
 
@@ -1117,21 +746,6 @@ function createTerminalProcessSource(options): TerminalProcessSource {
     );
   }
   return new SystemTerminalProcessSource();
-}
-
-function createClaudeHookStore(options: Record<string, any> = {}): ClaudeHookStore {
-  const configuredRoot = stringValue(options.claudeHookStoreDir);
-  return new ClaudeHookStore({
-    rootDir: expandHome(configuredRoot ?? defaultClaudeHookStoreDir())
-  });
-}
-
-function createConfiguredClaudeHookStore(
-  options: Record<string, any> = {}
-): ClaudeHookStore | undefined {
-  return stringValue(options.claudeHookStoreDir)
-    ? createClaudeHookStore(options)
-    : undefined;
 }
 
 function loadClaudeAgentRows(options: Record<string, any> = {}): ClaudeAgentRow[] {
@@ -1192,48 +806,7 @@ function loadClaudeAgentRows(options: Record<string, any> = {}): ClaudeAgentRow[
   });
 }
 
-function inferClaudeAncestorPid(
-  agentRows: readonly ClaudeAgentRow[],
-  startingPid = process.ppid
-): number | undefined {
-  const interactivePids = new Set(agentRows
-    .filter((row) => row.kind === undefined || row.kind === "interactive")
-    .map((row) => row.pid)
-    .filter((pid): pid is number => Number.isInteger(pid)));
-  let pid = startingPid;
-  const visited = new Set<number>();
-  for (let depth = 0; depth < 16 && Number.isInteger(pid) && pid > 1 && !visited.has(pid); depth += 1) {
-    visited.add(pid);
-    const processRow = spawnSync("ps", ["-p", String(pid), "-o", "pid=,ppid=,command="], {
-      encoding: "utf8",
-      timeout: 2_000
-    });
-    if (processRow.error || processRow.status !== 0) {
-      return undefined;
-    }
-    const match = /^\s*(\d+)\s+(\d+)\s+(.+)$/u.exec(String(processRow.stdout).trim());
-    if (!match) {
-      return undefined;
-    }
-    const currentPid = Number(match[1]);
-    const parentPid = Number(match[2]);
-    const commandText = match[3];
-    if (interactivePids.has(currentPid) || isClaudeProcessCommand(commandText)) {
-      return currentPid;
-    }
-    pid = parentPid;
-  }
-  return undefined;
-}
-
-function isClaudeProcessCommand(commandText: string): boolean {
-  const executable = commandText.trim().split(/\s+/u, 1)[0];
-  return path.basename(executable) === "claude" ||
-    /[\\/]\.local[\\/]share[\\/]claude[\\/]versions[\\/][^\\/\s]+$/u.test(executable);
-}
-
 function createRuntimeTerminalAgentRegistry(options) {
-  const claudeHookStore = createConfiguredClaudeHookStore(options);
   return createProductionTerminalAgentRegistry({
     overrides: [
       createCodexTerminalAgentAdapter({
@@ -1247,7 +820,6 @@ function createRuntimeTerminalAgentRegistry(options) {
             return undefined;
           }
           const contextMatches = await loadCodexTerminalContexts({
-            conversation,
             nativeTakeover,
             options
           });
@@ -1302,15 +874,7 @@ function createRuntimeTerminalAgentRegistry(options) {
             claudeHome: expandHome(options.claudeHome),
             agentRows: loadClaudeAgentRows(options)
           });
-        },
-        ...(claudeHookStore
-          ? {
-              hookStore: claudeHookStore,
-              trustedTokenjuiceLaunchers: loadTrustedClaudeTokenjuiceLaunchers(
-                expandHome(options.claudeSettingsPath ?? defaultClaudeSettingsPath())
-              )
-            }
-          : {})
+        }
       })
     ]
   });
@@ -1630,112 +1194,15 @@ function isTerminalControlCapability(value: unknown): value is TerminalControlCa
   ].includes(value);
 }
 
-function createForkConversation({ agent, strategy, session, contextPackage, forkSummary, modelInfo, options }) {
-  const workspace = session.cwd;
-  const storeDir = expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(workspace));
-  cleanupIdleConversations(storeDir, options);
-  const executor = resolveExecutor({
-    kind: agent,
-    session: options.session ?? options.executorSession ?? uniqueDelegateSessionName(agent)
-  });
-  const now = new Date();
-  const conversation = createConversation({
-    userRequest: options.request ?? `Fork native ${agent} session ${session.id}`,
-    workspace,
-    openclawSession: options.openclawSession ?? "agent:main:main",
-    executorKind: executor.kind,
-    executorSession: executor.session,
-    softLimit: Number(options.softLimit ?? 50),
-    hardLimit: Number(options.hardLimit ?? 100),
-    now
-  });
-  const paths = pathsForConversation(conversation.conversation_id, storeDir);
-  const callbackCommand = options.callbackCommand
-    ? expandCallbackCommandTemplate(options.callbackCommand, { statePath: paths.statePath })
-    : buildCallbackCommand({
-        statePath: paths.statePath,
-        gatewayUrl: options.gatewayUrl ?? "ws://127.0.0.1:18789",
-        token: options.token,
-        openclawSession: options.openclawSession ?? "agent:main:main",
-        gatewayMethod: options.gatewayMethod,
-        gatewaySession: options.gatewaySession,
-        openclawBin: options.openclawBin ?? resolveOptionalExecutable("openclaw")
-      });
-  const explicitModel = options.model ?? options.codexModel;
-  const executorModel = explicitModel ?? modelInfo?.acpxModel ?? modelEnvForExecutor(executor, process.env);
-  const forkedConversation = withStoragePaths({
-    ...conversation,
-    executor,
-    status: "idle" as const,
-    idle_since: now.toISOString(),
-    updated_at: now.toISOString(),
-    callback_command: callbackCommand,
-    gateway_url: options.gatewayUrl ?? "ws://127.0.0.1:18789",
-    gateway_method: options.gatewayMethod,
-    gateway_session: options.gatewaySession ?? options.openclawSession ?? "agent:main:main",
-    openclaw_bin: options.openclawBin ?? resolveOptionalExecutable("openclaw"),
-    executor_all_proxy: proxyForExecutor(executor, options),
-    executor_model: executorModel,
-    fork_context_takeover: {
-      agent,
-      source_session_id: session.id,
-      source_cwd: session.cwd,
-      source_title: session.title,
-      source_updated_at_ms: session.updatedAtMs,
-      strategy,
-      forked_at: now.toISOString(),
-      summary: forkSummary,
-      context_message_count: contextPackage.messages.length,
-      context_command_count: contextPackage.commands.length,
-      context_truncated: contextPackage.truncated,
-      native_model: modelInfo?.model,
-      acpx_model: modelInfo?.acpxModel,
-      model_source: modelInfo?.source,
-      needs_bootstrap: true
-    }
-  }, paths);
-
-  saveState(paths.statePath, forkedConversation);
-  appendEvent(paths.logPath, {
-    ts: now.toISOString(),
-    conversation_id: forkedConversation.conversation_id,
-    event: "native_session_forked",
-    agent,
-    strategy,
-    source_session_id: session.id,
-    source_cwd: session.cwd,
-    executor,
-    context_message_count: contextPackage.messages.length,
-    context_command_count: contextPackage.commands.length,
-    context_truncated: contextPackage.truncated
-  });
-  runtimeLog("info", "native_session_forked", {
-    conversation_id: forkedConversation.conversation_id,
-    agent,
-    strategy,
-    source_session_id: session.id,
-    executor_session: executor.session,
-    state_path: paths.statePath,
-    event_log_path: paths.logPath
-  });
-
-  return {
-    conversation: forkedConversation,
-    paths,
-    next: `Use AKK send ${forkedConversation.conversation_id}: <message> to start the forked ${agent} session with the approved summary.`
-  };
-}
-
 function createNativeSessionConversation({
   agent,
   strategy,
   session,
-  modelInfo,
   options,
   takeoverMatchKind = strategy,
   terminalControl = undefined as TerminalControlRef | undefined,
   terminalAgentPid = undefined as number | undefined,
-  needsBootstrap = true
+  needsBootstrap = false
 }) {
   const workspace = session.cwd;
   const storeDir = expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(workspace));
@@ -1756,32 +1223,16 @@ function createNativeSessionConversation({
     now
   });
   const paths = pathsForConversation(conversation.conversation_id, storeDir);
-  const callbackCommand = options.callbackCommand
-    ? expandCallbackCommandTemplate(options.callbackCommand, { statePath: paths.statePath })
-    : buildCallbackCommand({
-        statePath: paths.statePath,
-        gatewayUrl: options.gatewayUrl ?? "ws://127.0.0.1:18789",
-        token: options.token,
-        openclawSession: options.openclawSession ?? "agent:main:main",
-        gatewayMethod: options.gatewayMethod,
-        gatewaySession: options.gatewaySession,
-        openclawBin: options.openclawBin ?? resolveOptionalExecutable("openclaw")
-      });
-  const explicitModel = options.model ?? options.codexModel;
-  const executorModel = explicitModel ?? modelInfo?.acpxModel ?? modelEnvForExecutor(executor, process.env);
   const attachedConversation = withStoragePaths({
     ...conversation,
     executor,
     status: "idle" as const,
     idle_since: now.toISOString(),
     updated_at: now.toISOString(),
-    callback_command: callbackCommand,
     gateway_url: options.gatewayUrl ?? "ws://127.0.0.1:18789",
     gateway_method: options.gatewayMethod,
     gateway_session: options.gatewaySession ?? options.openclawSession ?? "agent:main:main",
     openclaw_bin: options.openclawBin ?? resolveOptionalExecutable("openclaw"),
-    executor_all_proxy: proxyForExecutor(executor, options),
-    executor_model: executorModel,
     native_session_takeover: {
       agent,
       native_session_id: session.id,
@@ -1790,14 +1241,11 @@ function createNativeSessionConversation({
       source_title: session.title,
       strategy,
       attached_at: now.toISOString(),
-      native_model: modelInfo?.model,
-	      acpx_model: modelInfo?.acpxModel,
-	      model_source: modelInfo?.source,
-	      takeover_match_kind: takeoverMatchKind,
-	      terminal_control: terminalControl,
-	      needs_bootstrap: needsBootstrap,
-	      terminal_bridge: strategy === "terminal_control"
-	    }
+      takeover_match_kind: takeoverMatchKind,
+      terminal_control: terminalControl,
+      needs_bootstrap: needsBootstrap,
+      terminal_bridge: true
+    }
   }, paths);
 
   saveState(paths.statePath, attachedConversation);
@@ -1827,402 +1275,63 @@ function createNativeSessionConversation({
   };
 }
 
-function runNew(options) {
+async function runDelegate(options) {
   const request = required(options.request, "--request is required");
-  const workspace = options.workspace ?? process.cwd();
-  cleanupIdleConversations(expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(workspace)), options);
+  const workspace = canonicalWorkspace(options.workspace ?? process.cwd());
   const executor = resolveExecutor({
-    kind: options.agent ?? "claude",
-    session: options.session ?? options.executorSession ?? options.claudeSession
+    kind: options.agent ?? "codex"
   });
-  const conversation = createConversation({
-    userRequest: request,
-    workspace,
-    openclawSession: options.openclawSession ?? "agent:main:main",
-    claudeSession: options.claudeSession ?? "bidirectional",
-    executorKind: executor.kind,
-    executorSession: executor.session,
-    softLimit: Number(options.softLimit ?? 50),
-    hardLimit: Number(options.hardLimit ?? 100)
+  const scan = await buildNativeListGroups({
+    options: {
+      ...options,
+      workspace,
+      noApprovalScan: false
+    },
+    agentFilter: executor.kind,
+    statusFilter: undefined
   });
+  if (scan.summary.error) {
+    throw new Error(`tmux discovery failed: ${scan.summary.error}`);
+  }
 
-  const taskMessage = createMessage({
-    conversation,
-    from: "openclaw",
-    to: executor.actor,
-    type: "task",
-    body: request,
-    metadata: {
-      executor_kind: executor.kind,
-      executor_session: executor.session
+  const sameWorkspace = scan.terminalControlled.filter((candidate) => {
+    try {
+      return canonicalWorkspace(candidate.workspace) === workspace;
+    } catch {
+      return false;
     }
   });
-
-  const nextConversation = applyMessageToConversation(conversation, taskMessage);
-  const storeDir = expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(workspace));
-  const paths = pathsForConversation(conversation.conversation_id, storeDir);
-  const storedConversation = withStoragePaths(nextConversation, paths);
-
-  saveState(paths.statePath, storedConversation);
-  appendEvent(paths.logPath, {
-    ts: conversation.created_at,
-    conversation_id: conversation.conversation_id,
-    event: "conversation_created",
-    conversation: storedConversation
-  });
-  appendEvent(paths.logPath, messageEvent(taskMessage));
-  runtimeLog("info", "conversation_created", {
-    conversation_id: conversation.conversation_id,
-    agent: executor.kind,
-    executor_session: executor.session,
-    workspace,
-    store_dir: storeDir,
-    state_path: paths.statePath,
-    event_log_path: paths.logPath,
-    request: textSummary(request)
-  });
-
-  printJson({
-    conversation: storedConversation,
-    paths,
-    task_message: taskMessage,
-    budget: budgetAction(storedConversation)
-  });
-}
-
-function runRecord(options) {
-  const statePath = required(options.state, "--state is required");
-  const messageInput = required(options.messageJson, "--message-json is required");
-  const logPath = options.log ?? logPathForStatePath(statePath);
-
-  const conversation = loadState(expandHome(statePath));
-  const message = parseMessageJson(messageInput);
-  const nextConversation = applyMessageToConversation(conversation, message);
-
-  appendEvent(expandHome(logPath), messageEvent(message));
-  saveState(expandHome(statePath), nextConversation);
-
-  printJson({
-    conversation: nextConversation,
-    budget: budgetAction(nextConversation)
-  });
-}
-
-function runBootstrapPrompt(options) {
-  const callbackCommand = required(options.callbackCommand, "--callback-command is required");
-  const executor = resolveExecutor({
-    kind: options.agent ?? "claude",
-    session: options.session ?? options.claudeSession
-  });
-  process.stdout.write(
-    executorBootstrapPrompt({
-      callbackCommand,
-      executorName: executor.display_name,
-      softLimit: Number(options.softLimit ?? 50),
-      hardLimit: Number(options.hardLimit ?? 100)
-    })
+  const eligible = sameWorkspace.filter(
+    (candidate) => candidate.activity_state === "idle"
   );
-}
+  if (eligible.length === 0) {
+    const observed = sameWorkspace.length > 0
+      ? ` Found ${sameWorkspace.length} matching pane(s), but none is idle.`
+      : "";
+    throw new Error(
+      `No idle ${executor.display_name} pane is available in ${workspace}.${observed} ` +
+      `Start ${executor.kind} inside tmux in that workspace, wait until it is idle, then retry.`
+    );
+  }
+  if (eligible.length > 1) {
+    const candidates = eligible
+      .map((candidate) =>
+        `${candidate.short_ref} (${candidate.terminal_control?.target ?? candidate.id})`
+      )
+      .join(", ");
+    throw new Error(
+      `Multiple idle ${executor.display_name} panes match ${workspace}: ${candidates}. ` +
+      "Use /akk list and /akk send <session>: <message> to choose one explicitly."
+    );
+  }
 
-function runDelegate(options) {
-  const request = required(options.request, "--request is required");
-  const workspace = options.workspace ?? process.cwd();
-  const storeDir = expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(workspace));
-  cleanupIdleConversations(storeDir, options);
-  const explicitExecutorSession = options.session ?? options.executorSession ?? options.claudeSession;
-  const executor = resolveExecutor({
-    kind: options.agent ?? "claude",
-    session: explicitExecutorSession ?? uniqueDelegateSessionName(options.agent ?? "claude")
-  });
-  const newResult = captureJson([
-    "new",
-    "--request",
-    request,
-    "--workspace",
+  await runSend({
+    ...options,
+    conversation: eligible[0].id,
+    message: request,
     workspace,
-    "--openclaw-session",
-    options.openclawSession ?? "agent:main:main",
-    "--agent",
-    executor.kind,
-    "--session",
-    executor.session,
-    "--soft-limit",
-    String(options.softLimit ?? 50),
-    "--hard-limit",
-    String(options.hardLimit ?? 100),
-    "--store-dir",
-    storeDir
-  ]);
-
-  const gatewayUrl = options.gatewayUrl ?? "ws://127.0.0.1:18789";
-  if (options.send && !options.token) {
-    throw new Error("--token is required when using --send");
-  }
-
-  const openclawSession = options.openclawSession ?? "agent:main:main";
-  const openclawBin = options.openclawBin ?? resolveOptionalExecutable("openclaw");
-  const executorEnv = environmentForExecutor(executor, options);
-  const executorAllProxy = proxyForExecutor(executor, options);
-  const executorModel = modelForExecutor(executor, options);
-  const callbackCommand = options.callbackCommand
-    ? expandCallbackCommandTemplate(options.callbackCommand, { statePath: newResult.paths.statePath })
-    : buildCallbackCommand({
-        statePath: newResult.paths.statePath,
-        gatewayUrl,
-        token: options.token,
-        openclawSession,
-        gatewayMethod: options.gatewayMethod,
-        gatewaySession: options.gatewaySession,
-        openclawBin
-      });
-  const conversationWithCallback = {
-    ...newResult.conversation,
-    gateway_url: gatewayUrl,
-    callback_command: callbackCommand,
-    gateway_method: options.gatewayMethod,
-    gateway_session: options.gatewaySession ?? openclawSession,
-    openclaw_bin: openclawBin,
-    executor_all_proxy: executorAllProxy,
-    executor_model: executorModel
-  };
-  saveState(newResult.paths.statePath, conversationWithCallback);
-  newResult.conversation = conversationWithCallback;
-  runtimeLog("info", "delegate_created", {
-    conversation_id: newResult.conversation.conversation_id,
-    agent: executor.kind,
-    executor_session: executor.session,
-    workspace,
-    store_dir: storeDir,
-    state_path: newResult.paths.statePath,
-    gateway_method: options.gatewayMethod,
-    background: Boolean(options.background),
-    request: textSummary(request)
+    background: true
   });
-
-  const bootstrap = executorBootstrapPrompt({
-    callbackCommand,
-    executorName: executor.display_name,
-    softLimit: Number(options.softLimit ?? 50),
-    hardLimit: Number(options.hardLimit ?? 100)
-  });
-  const payload = `${bootstrap}\n\nInitial task message:\n${JSON.stringify(newResult.task_message)}`;
-
-  const acpxArgs = buildAcpxPromptArgs({ executor, payload, model: executorModel });
-
-  if (options.background) {
-    const acpxPath = resolveExecutable("acpx");
-    const ensureSession = ensureExecutorSession({
-      acpxPath,
-      executor,
-      cwd: workspace,
-      env: executorEnv
-    });
-    appendEvent(newResult.paths.logPath, {
-      ts: new Date().toISOString(),
-      conversation_id: newResult.conversation.conversation_id,
-      event: "executor_session_ensure",
-      status: ensureSession.status ?? null,
-      executor,
-      stdout: cleanProcessText(ensureSession.stdout),
-      stderr: cleanProcessText(ensureSession.stderr)
-    });
-    runtimeLog("info", "executor_session_ensure", {
-      conversation_id: newResult.conversation.conversation_id,
-      agent: executor.kind,
-      executor_session: executor.session,
-      status: ensureSession.status ?? null,
-      failure_kind: classifyProcessFailure(ensureSession),
-      stdout: textSummary(cleanProcessText(ensureSession.stdout)),
-      stderr: textSummary(cleanProcessText(ensureSession.stderr))
-    });
-    if (executor.kind === "claude") {
-      appendEvent(newResult.paths.logPath, {
-        ts: new Date().toISOString(),
-        conversation_id: newResult.conversation.conversation_id,
-        event: "claude_session_ensure",
-        status: ensureSession.status ?? null,
-        claude_session: executor.session,
-        stdout: cleanProcessText(ensureSession.stdout),
-        stderr: cleanProcessText(ensureSession.stderr)
-      });
-    }
-    if (ensureSession.error) {
-      throw new Error(`acpx ${executor.kind} session ensure failed to start: ${ensureSession.error.message}`);
-    }
-    if (ensureSession.status !== 0) {
-      throw new Error(cleanProcessText(ensureSession.stderr || ensureSession.stdout || `acpx ${executor.kind} sessions ensure exited with status ${ensureSession.status}`));
-    }
-
-    const outputPath = path.join(newResult.paths.conversationDir, `${executor.kind}-output.log`);
-    const outputFd = openPrivateAppendFile(outputPath);
-    const child = spawn(acpxPath, acpxArgs, {
-      detached: true,
-      stdio: ["ignore", outputFd, outputFd],
-      env: executorEnv,
-      cwd: workspace
-    });
-    child.unref();
-    fs.closeSync(outputFd);
-
-    appendEvent(newResult.paths.logPath, {
-      ts: new Date().toISOString(),
-      conversation_id: newResult.conversation.conversation_id,
-      event: "executor_launch",
-      mode: "background",
-      pid: child.pid ?? null,
-      executor,
-      output_path: outputPath
-    });
-    runtimeLog("info", "executor_launch", {
-      conversation_id: newResult.conversation.conversation_id,
-      agent: executor.kind,
-      executor_session: executor.session,
-      mode: "background",
-      pid: child.pid ?? null,
-      output_path: outputPath
-    });
-    if (executor.kind === "claude") {
-      appendEvent(newResult.paths.logPath, {
-        ts: new Date().toISOString(),
-        conversation_id: newResult.conversation.conversation_id,
-        event: "claude_launch",
-        mode: "background",
-        pid: child.pid ?? null,
-        claude_session: executor.session,
-        output_path: outputPath
-      });
-    }
-    const monitor = startExecutorMonitor({
-      statePath: newResult.paths.statePath,
-      logPath: newResult.paths.logPath,
-      pid: child.pid,
-      outputPath,
-      agentTimeoutMinutes: Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES),
-      pollIntervalMs: Number(options.monitorPollIntervalMs ?? DEFAULT_MONITOR_POLL_INTERVAL_MS)
-    });
-    appendEvent(newResult.paths.logPath, {
-      ts: new Date().toISOString(),
-      conversation_id: newResult.conversation.conversation_id,
-      event: "executor_monitor_launch",
-      pid: monitor.pid ?? null,
-      executor_pid: child.pid ?? null,
-      agent_timeout_minutes: Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES)
-    });
-    runtimeLog("info", "executor_monitor_launch", {
-      conversation_id: newResult.conversation.conversation_id,
-      monitor_pid: monitor.pid ?? null,
-      executor_pid: child.pid ?? null,
-      agent_timeout_minutes: Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES)
-    });
-
-    printJson({
-      ...newResult,
-      launched: true,
-      background: true,
-      pid: child.pid ?? null,
-      monitor_pid: monitor.pid ?? null,
-      output_path: outputPath
-    });
-    return;
-  }
-
-  if (options.send) {
-    const acpxPath = resolveExecutable("acpx");
-    const ensureSession = ensureExecutorSession({
-      acpxPath,
-      executor,
-      cwd: workspace,
-      env: executorEnv
-    });
-    if (ensureSession.error) {
-      throw new Error(`acpx ${executor.kind} session ensure failed to start: ${ensureSession.error.message}`);
-    }
-    if (ensureSession.status !== 0) {
-      throw new Error(cleanProcessText(ensureSession.stderr || ensureSession.stdout || `acpx ${executor.kind} sessions ensure exited with status ${ensureSession.status}`));
-    }
-    const result = spawnSync(acpxPath, acpxArgs, {
-      stdio: "inherit",
-      cwd: workspace,
-      env: executorEnv
-    });
-    runtimeLog("info", "executor_send", {
-      conversation_id: newResult.conversation.conversation_id,
-      agent: executor.kind,
-      executor_session: executor.session,
-      status: result.status ?? null,
-      failure_kind: classifyProcessFailure(result)
-    });
-    process.exitCode = result.status ?? 1;
-    return;
-  }
-
-  runtimeLog("info", "delegate_dry_run", {
-    conversation_id: newResult.conversation.conversation_id,
-    agent: executor.kind,
-    executor_session: executor.session
-  });
-  printJson({
-    ...newResult,
-    dry_run: true,
-    acpx_command: ["acpx", ...acpxArgs],
-    note: "Run again with --send to send this task through acpx."
-  });
-}
-
-function ensureExecutorSession({
-  acpxPath,
-  executor,
-  cwd,
-  env,
-  resumeSessionId
-}: {
-  acpxPath: string;
-  executor: any;
-  cwd: string;
-  env: NodeJS.ProcessEnv;
-  resumeSessionId?: string;
-}) {
-  const args = [...acpxAgentSelectorArgs(executor), "sessions", "ensure"];
-  if (resumeSessionId) {
-    args.push("--resume-session", resumeSessionId);
-  } else {
-    args.push("--name", executor.session);
-  }
-  return spawnSync(acpxPath, args, {
-    encoding: "utf8",
-    cwd,
-    env
-  });
-}
-
-function startExecutorMonitor({ statePath, logPath, pid, outputPath, agentTimeoutMinutes, pollIntervalMs }) {
-  const args = [
-    new URL(import.meta.url).pathname,
-    "monitor",
-    "--state",
-    statePath,
-    "--log",
-    logPath,
-    "--agent-timeout-minutes",
-    String(agentTimeoutMinutes),
-    "--poll-interval-ms",
-    String(pollIntervalMs)
-  ];
-  if (pid) {
-    args.push("--pid", String(pid));
-  }
-  if (outputPath) {
-    args.push("--output-path", outputPath);
-  }
-
-  const child = spawn(process.execPath, args, {
-    detached: true,
-    stdio: "ignore",
-    cwd: process.cwd(),
-    env: environmentWithoutGatewayTokens()
-  });
-  child.unref();
-  return child;
 }
 
 function startTerminalBridgeMonitor({
@@ -2232,8 +1341,7 @@ function startTerminalBridgeMonitor({
   agentHardTimeoutMinutes,
   pollIntervalMs,
   codexHome,
-  claudeHome,
-  claudeHookStoreDir
+  claudeHome
 }) {
   const args = [
     new URL(import.meta.url).pathname,
@@ -2256,10 +1364,6 @@ function startTerminalBridgeMonitor({
   if (claudeHome) {
     args.push("--claude-home", claudeHome);
   }
-  if (claudeHookStoreDir) {
-    args.push("--claude-hook-store-dir", claudeHookStoreDir);
-  }
-
   const child = spawn(process.execPath, args, {
     detached: true,
     stdio: "ignore",
@@ -2292,8 +1396,7 @@ function startTerminalBridgeMonitorForConversation({ conversation, statePath, lo
     ),
     pollIntervalMs: Number(options.monitorPollIntervalMs ?? DEFAULT_MONITOR_POLL_INTERVAL_MS),
     codexHome: options.codexHome,
-    claudeHome: options.claudeHome ?? nativeTakeover?.["claude_home"],
-    claudeHookStoreDir: options.claudeHookStoreDir ?? nativeTakeover?.["claude_hook_store_dir"]
+    claudeHome: options.claudeHome ?? nativeTakeover?.["claude_home"]
   });
 }
 
@@ -2346,17 +1449,11 @@ function startTerminalBridgeMonitorHandoffWatchdog({
   }
   const claudeHome =
     options.claudeHome ?? nativeTakeover?.["claude_home"];
-  const claudeHookStoreDir =
-    options.claudeHookStoreDir ??
-    nativeTakeover?.["claude_hook_store_dir"];
   if (options.codexHome) {
     args.push("--codex-home", options.codexHome);
   }
   if (claudeHome) {
     args.push("--claude-home", claudeHome);
-  }
-  if (claudeHookStoreDir) {
-    args.push("--claude-hook-store-dir", claudeHookStoreDir);
   }
 
   const child = spawn(process.execPath, args, {
@@ -2522,271 +1619,215 @@ function withTerminalBridgeState({
   };
 }
 
-interface ClaudeHookLeaseState {
-  lease: ClaudeManagedLease;
-  storeDir: string;
-  pid?: number;
-  sessionId?: string;
-}
+type TerminalBridgeSubmissionStatus =
+  | "prepared"
+  | "submitted"
+  | "uncertain"
+  | "aborted";
 
-function activateClaudeHookLease({
-  options,
+function withTerminalBridgeSubmission({
   conversation,
-  message,
-  terminalControl,
-  expiresAt
-}): ClaudeHookLeaseState | undefined {
-  if (!stringValue(options.claudeHookStoreDir)) {
-    return undefined;
-  }
-  const runtime = terminalRuntimeIdentityForConversation(conversation, terminalControl);
-  const pid = runtime.pid;
-  const agentRow = pid === undefined
-    ? undefined
-    : loadClaudeAgentRows(options).find((row) => row.pid === pid && (row.kind === undefined || row.kind === "interactive"));
-  const sessionId = agentRow?.sessionId ?? runtime.sessionId;
-  const cwd = agentRow?.cwd ?? runtime.cwd ?? terminalControl.currentPath;
-  if (!cwd || (pid === undefined && !sessionId)) {
-    runtimeLog("warn", "claude_hook_lease_unavailable", {
-      conversation_id: conversation.conversation_id,
-      terminal_target: terminalControl.target,
-      reason: "exact Claude pid/session identity is unavailable"
-    });
-    return undefined;
-  }
-
-  const store = createClaudeHookStore(options);
-  try {
-    const previous = store.resolveLease({
-      ...(sessionId === undefined ? {} : { sessionId }),
-      ...(pid === undefined ? {} : { pid }),
-      cwd,
-      requireUnique: true
-    });
-    if (previous && (
-      previous.lease.conversationId !== conversation.conversation_id ||
-      previous.lease.messageId !== message.id
-    )) {
-      store.releaseLease({ leaseId: previous.lease.id });
-    }
-    const lease = store.activateLease({
-      ...(sessionId === undefined ? {} : { sessionId }),
-      ...(pid === undefined ? {} : { pid }),
-      cwd,
-      conversationId: conversation.conversation_id,
-      messageId: message.id,
-      terminalTarget: terminalControl.target,
-      expiresAt
-    });
-    runtimeLog("info", "claude_hook_lease_activated", {
-      conversation_id: conversation.conversation_id,
-      message_id: message.id,
-      terminal_target: terminalControl.target,
-      lease_id: lease.id,
-      pid,
-      session_id: sessionId,
-      expires_at: lease.expiresAt
-    });
-    return {
-      lease,
-      storeDir: store.rootDir,
-      ...(pid === undefined ? {} : { pid }),
-      ...(sessionId === undefined ? {} : { sessionId })
-    };
-  } catch (error) {
-    runtimeLog("warn", "claude_hook_lease_unavailable", {
-      conversation_id: conversation.conversation_id,
-      terminal_target: terminalControl.target,
-      reason: error instanceof Error ? error.message : String(error)
-    });
-    return undefined;
-  }
-}
-
-function withClaudeHookLeaseState(conversation, state: ClaudeHookLeaseState) {
+  messageId,
+  requestText,
+  status,
+  preparedAt,
+  submittedAt,
+  uncertainAt,
+  abortedAt,
+  error
+}: {
+  conversation: Conversation;
+  messageId: string;
+  requestText: string;
+  status: TerminalBridgeSubmissionStatus;
+  preparedAt: string;
+  submittedAt?: string;
+  uncertainAt?: string;
+  abortedAt?: string;
+  error?: string;
+}): Conversation {
   const nativeTakeover = isRecord(conversation.native_session_takeover)
     ? conversation.native_session_takeover
     : {};
+  const previousSubmission = isRecord(nativeTakeover.terminal_bridge_submission)
+    ? nativeTakeover.terminal_bridge_submission
+    : undefined;
+  const previousDispatcherPid = Number(previousSubmission?.dispatcher_pid);
+  const dispatcherPid = status === "prepared" ||
+    !Number.isSafeInteger(previousDispatcherPid) ||
+    previousDispatcherPid <= 1
+    ? process.pid
+    : previousDispatcherPid;
   return {
     ...conversation,
     native_session_takeover: {
       ...nativeTakeover,
-      claude_hook_mode: "enabled",
-      claude_hook_store_dir: state.storeDir,
-      claude_hook_lease_id: state.lease.id,
-      terminal_agent_pid: state.pid,
-      terminal_agent_session_id: state.sessionId
-    }
+      terminal_bridge_submission: {
+        status,
+        message_id: messageId,
+        request_hash: terminalBridgeRequestFingerprint(requestText),
+        prepared_at: preparedAt,
+        dispatcher_pid: dispatcherPid,
+        ...(submittedAt ? { submitted_at: submittedAt } : {}),
+        ...(uncertainAt ? { uncertain_at: uncertainAt } : {}),
+        ...(abortedAt ? { aborted_at: abortedAt } : {}),
+        ...(error ? { error: textSummary(error) } : {})
+      }
+    },
+    updated_at: submittedAt ?? uncertainAt ?? abortedAt ?? preparedAt
   };
 }
 
-function releaseClaudeHookLease(conversation): void {
+function terminalBridgeSubmission(
+  conversation
+): Record<string, any> | undefined {
   const nativeTakeover = isRecord(conversation?.native_session_takeover)
     ? conversation.native_session_takeover
     : undefined;
-  const leaseId = stringValue(nativeTakeover?.claude_hook_lease_id);
-  if (!leaseId || nativeTakeover?.agent !== "claude") {
+  return isRecord(nativeTakeover?.terminal_bridge_submission)
+    ? nativeTakeover.terminal_bridge_submission
+    : undefined;
+}
+
+function unresolvedTerminalBridgeSubmission(conversation): Record<string, any> | undefined {
+  const submission = terminalBridgeSubmission(conversation);
+  return submission &&
+    (submission.status === "prepared" || submission.status === "uncertain")
+    ? submission
+    : undefined;
+}
+
+function assertNoUnresolvedTerminalBridgeSubmission(
+  storeDir: string,
+  terminalControl: TerminalControlRef,
+  currentConversationId: string,
+  requestText: string
+): void {
+  const targetKey = terminalControlSelectorKey(terminalControl);
+  const requestHash = terminalBridgeRequestFingerprint(requestText);
+  if (!targetKey) {
     return;
   }
-  const storeDir = stringValue(nativeTakeover.claude_hook_store_dir) ?? defaultClaudeHookStoreDir();
-  try {
-    const released = new ClaudeHookStore({ rootDir: storeDir }).releaseLease({ leaseId });
-    runtimeLog("info", "claude_hook_lease_released", {
-      conversation_id: conversation.conversation_id,
-      message_id: released?.messageId,
-      lease_id: leaseId
-    });
-  } catch (error) {
-    runtimeLog("warn", "claude_hook_lease_release_failed", {
-      conversation_id: conversation.conversation_id,
-      lease_id: leaseId,
-      reason: error instanceof Error ? error.message : String(error)
-    });
-  }
-}
-
-function renewClaudeHookLease(conversation, expiresAt: string): ClaudeManagedLease | undefined {
-  const nativeTakeover = isRecord(conversation?.native_session_takeover)
-    ? conversation.native_session_takeover
-    : undefined;
-  if (
-    nativeTakeover?.agent !== "claude" ||
-    nativeTakeover.claude_hook_mode !== "enabled" ||
-    !stringValue(nativeTakeover.claude_hook_store_dir)
-  ) {
-    return undefined;
-  }
-  const conversationId = stringValue(conversation.conversation_id);
-  const messageId = stringValue(nativeTakeover.terminal_bridge_message_id);
-  const terminalControl = terminalControlFromTakeover(nativeTakeover);
-  const cwd = stringValue(nativeTakeover.source_cwd) ?? terminalControl?.currentPath;
-  const pid = Number.isInteger(Number(nativeTakeover.terminal_agent_pid))
-    ? Number(nativeTakeover.terminal_agent_pid)
-    : undefined;
-  const sessionId = stringValue(nativeTakeover.terminal_agent_session_id);
-  if (!conversationId || !messageId || !terminalControl || !cwd || (pid === undefined && !sessionId)) {
-    return undefined;
-  }
-  const storeDir = stringValue(nativeTakeover.claude_hook_store_dir) ?? defaultClaudeHookStoreDir();
-  try {
-    return new ClaudeHookStore({ rootDir: storeDir }).activateLease({
-      ...(sessionId === undefined ? {} : { sessionId }),
-      ...(pid === undefined ? {} : { pid }),
-      cwd,
-      conversationId,
-      messageId,
-      terminalTarget: terminalControl.target,
-      expiresAt
-    });
-  } catch (error) {
-    runtimeLog("warn", "claude_hook_lease_renew_failed", {
-      conversation_id: conversationId,
-      message_id: messageId,
-      reason: error instanceof Error ? error.message : String(error)
-    });
-    return undefined;
-  }
-}
-
-function releaseClaudeHookLeasesForTerminal({
-  storeDir,
-  terminalControl,
-  replacementConversationId
-}): void {
   for (const candidate of listConversations(storeDir)) {
-    if (candidate.conversation_id === replacementConversationId) {
+    const submission = terminalBridgeSubmission(candidate);
+    if (
+      candidate.conversation_id === currentConversationId ||
+      !isActiveStatus(candidate.status) ||
+      !submission ||
+      !["prepared", "submitted", "uncertain"].includes(String(submission.status))
+    ) {
+      continue;
+    }
+    if (
+      submission.status === "submitted" &&
+      stringValue(submission.request_hash) !== requestHash
+    ) {
       continue;
     }
     const nativeTakeover = isRecord(candidate.native_session_takeover)
       ? candidate.native_session_takeover
       : undefined;
-    const candidateControl = terminalControlFromTakeover(nativeTakeover);
     if (
-      nativeTakeover?.agent === "claude" &&
-      nativeTakeover?.terminal_bridge === true &&
-      candidateControl?.target === terminalControl.target &&
-      candidateControl?.socketPath === terminalControl.socketPath
+      terminalControlSelectorKey(
+        terminalControlFromTakeover(nativeTakeover)
+      ) === targetKey
     ) {
-      releaseClaudeHookLease(candidate);
+      throw new Error(
+        `terminal ${terminalControl.target} has a conflicting ${String(submission.status)} ` +
+        `AKK submission in ${candidate.conversation_id}; inspect that conversation and pane, ` +
+        "then close it before retrying"
+      );
     }
   }
 }
 
-function uniqueDelegateSessionName(kind) {
-  const { sessionPrefix } = executorDefinitionForKind(kind || "claude");
-  const timestamp = new Date().toISOString().replace(/\D/g, "").slice(0, 14);
-  return `${sessionPrefix}-${timestamp}-${randomUUID().slice(0, 8)}`;
-}
-
-function buildAcpxPromptArgs({ executor, payload, model }) {
-  const args = ["--approve-all"];
-  if (model) {
-    args.push("--model", model);
+function stallOtherTerminalBridgeConversationsForUncertainDispatch({
+  storeDir,
+  terminalControl,
+  currentConversationId,
+  uncertainMessageId
+}: {
+  storeDir: string;
+  terminalControl: TerminalControlRef;
+  currentConversationId: string;
+  uncertainMessageId: string;
+}): string[] {
+  const targetKey = terminalControlSelectorKey(terminalControl);
+  if (!targetKey) {
+    return [];
   }
-  args.push(...acpxPromptArgs({ executor, payload }));
-  return args;
-}
-
-function acpxCancelArgs({ executor }: { executor: any }) {
-  return [...acpxAgentSelectorArgs(executor), "cancel", "-s", executor.session];
-}
-
-function acpxPromptArgs({ executor, payload }: { executor: any; payload: string }) {
-  if (executor.kind === "codex") {
-    return [...acpxAgentSelectorArgs(executor), "prompt", "-s", executor.session, payload];
+  const stalledConversationIds: string[] = [];
+  for (const listed of listConversations(storeDir)) {
+    if (
+      listed.conversation_id === currentConversationId ||
+      !isActiveStatus(listed.status)
+    ) {
+      continue;
+    }
+    const listedTakeover = isRecord(listed.native_session_takeover)
+      ? listed.native_session_takeover
+      : undefined;
+    if (
+      listedTakeover?.terminal_bridge !== true ||
+      terminalControlSelectorKey(
+        terminalControlFromTakeover(listedTakeover)
+      ) !== targetKey
+    ) {
+      continue;
+    }
+    const listedStatePath = stringValue(listed.state_path);
+    if (!listedStatePath) {
+      continue;
+    }
+    const releaseStateLock = acquireFileLock(`${listedStatePath}.lock`);
+    try {
+      const current = loadState(listedStatePath);
+      const currentTakeover = isRecord(current.native_session_takeover)
+        ? current.native_session_takeover
+        : undefined;
+      if (
+        !isActiveStatus(current.status) ||
+        currentTakeover?.terminal_bridge !== true ||
+        terminalControlSelectorKey(
+          terminalControlFromTakeover(currentTakeover)
+        ) !== targetKey
+      ) {
+        continue;
+      }
+      const stalledAt = new Date().toISOString();
+      const stalledConversation = {
+        ...current,
+        status: "stalled" as const,
+        stalled_at: stalledAt,
+        stalled_reason:
+          "a newer terminal submission has an uncertain outcome; inspect the shared tmux pane before continuing",
+        native_session_takeover: {
+          ...currentTakeover,
+          terminal_bridge_uncertain_dispatch_fence: {
+            message_id: uncertainMessageId,
+            observed_at: stalledAt
+          }
+        },
+        updated_at: stalledAt
+      };
+      saveState(listedStatePath, stalledConversation);
+      try {
+        appendEvent(logPathForStatePath(listedStatePath), {
+          ts: stalledAt,
+          conversation_id: current.conversation_id,
+          event: "terminal_bridge_stalled_by_uncertain_dispatch",
+          terminal_control: terminalControl,
+          uncertain_message_id: uncertainMessageId
+        });
+      } catch {
+        // The stalled state and terminal-level ledger are the authoritative fence.
+      }
+      stalledConversationIds.push(current.conversation_id);
+    } finally {
+      releaseStateLock();
+    }
   }
-  return [...acpxAgentSelectorArgs(executor), "-s", executor.session, payload];
-}
-
-function acpxAgentSelectorArgs(executor: any): string[] {
-  if (executor.kind !== "codex") {
-    return [acpxCommandForExecutor(executor)];
-  }
-
-  const command = codexAcpxAgentCommand();
-  if (/@zed-industries\/codex-acp\b/u.test(command)) {
-    throw new Error([
-      "Refusing to start Codex through deprecated @zed-industries/codex-acp.",
-      "Use @agentclientprotocol/codex-acp for AKK Codex ACPX delegation.",
-      "Set AKK_CODEX_ACPX_AGENT_COMMAND to a supported ACP adapter command if you need an override."
-    ].join(" "));
-  }
-
-  return ["--agent", command];
-}
-
-function codexAcpxAgentCommand(): string {
-  return process.env.AKK_CODEX_ACPX_AGENT_COMMAND?.trim() || DEFAULT_CODEX_ACPX_AGENT_COMMAND;
-}
-
-function proxyForExecutor(executor, options: Record<string, any> = {}) {
-  const explicit = options.allProxy ?? options.proxy;
-  if (explicit) {
-    return explicit;
-  }
-  return proxyEnvForExecutor(executor, process.env);
-}
-
-function modelForExecutor(executor, options: Record<string, any> = {}) {
-  const explicit = options.model ?? options.codexModel;
-  if (explicit) {
-    return normalizeModelForExecutor(executor, explicit);
-  }
-  return normalizeModelForExecutor(executor, modelEnvForExecutor(executor, process.env));
-}
-
-function environmentForExecutor(executor, options = {}) {
-  const environment = environmentWithoutGatewayTokens();
-  const proxy = proxyForExecutor(executor, options);
-  if (!proxy) {
-    return environment;
-  }
-
-  return {
-    ...environment,
-    ALL_PROXY: proxy,
-    all_proxy: proxy
-  };
+  return stalledConversationIds;
 }
 
 function environmentWithoutGatewayTokens(): NodeJS.ProcessEnv {
@@ -2979,8 +2020,6 @@ function nativeListEntry(session: ActiveTerminalProcess, activeSessions: ActiveT
     confidence: session.confidence,
     reason: session.reason,
     commands: {
-      terminate_then_resume: true,
-      fork: Boolean(session.sessionId),
       terminal_control_attach: false,
       send: false,
       cancel: false,
@@ -3013,6 +2052,8 @@ async function terminalControlledListEntry(
       terminalTarget: terminalControl.target
     }
   );
+  const orphanedDispatch =
+    orphanedTerminalDispatchForRecovery(terminalControl);
   return {
     id: bridge.terminalConversationId(session),
     short_ref: sessionShortRef(bridge.terminalConversationId(session)),
@@ -3032,13 +2073,28 @@ async function terminalControlledListEntry(
     approval_state: terminalState.approval_state,
     activity_state: terminalState.activity_state,
     activity_reason: terminalState.activity_reason,
+    ...(orphanedDispatch
+      ? {
+          orphaned_terminal_dispatch: {
+            status: orphanedDispatch.status,
+            owner_conversation_id:
+              stringValue(orphanedDispatch.conversation_id),
+            message_id: stringValue(orphanedDispatch.message_id),
+            recovery:
+              `/akk close ${bridge.terminalConversationId(session)} ` +
+              `--expected-message-id ${String(
+                orphanedDispatch.message_id
+              )}`
+          }
+        }
+      : {}),
     commands: {
       send: true,
       approve: terminalControl.capabilities.includes("terminal_approval") &&
         terminalState.approval_state.approvable === true,
       status: true,
       cancel: terminalControl.capabilities.includes("terminal_cancel"),
-      close: false
+      close: orphanedDispatch !== undefined
     }
   };
 }
@@ -3145,7 +2201,7 @@ async function resolveConversationSelectorOption(commandName, options): Promise<
 
 function isSessionSelectorSyntax(value: string): boolean {
   return (
-    /^(?:only|latest|codex|claude|cursor|(?:codex|claude|cursor):latest)$/iu.test(value) ||
+    /^(?:only|latest|codex|claude|(?:codex|claude):latest)$/iu.test(value) ||
     /^@[0-9a-f]+$/iu.test(value)
   );
 }
@@ -3242,9 +2298,6 @@ function sessionEntrySupportsCommand(entry, commandName): boolean {
   }
   if (commandName === "retry-callback") {
     return ["callback_pending", "callback_failed"].includes(entry.status);
-  }
-  if (commandName === "recover") {
-    return entry.status === "needs_recovery";
   }
   return false;
 }
@@ -3512,21 +2565,25 @@ function claudeTranscriptApprovalIdentity(approvalState): {
   };
 }
 
-function assertSafeClaudeTerminalSend(terminalStatus): void {
+function assertSafeTerminalSend(
+  agent: ExecutorKind,
+  terminalStatus
+): void {
+  const displayName = executorDefinitionForKind(agent).displayName;
   const approval = isRecord(terminalStatus?.approval_state)
     ? terminalStatus.approval_state
     : undefined;
   if (terminalStatus?.reachable !== true) {
-    throw new Error("Claude Code terminal status is unavailable");
+    throw new Error(`${displayName} terminal status is unavailable`);
   }
   if (approval?.blocked === true) {
     throw new Error(
-      stringValue(approval.reason) ?? "Claude Code is waiting at a permission dialog"
+      stringValue(approval.reason) ?? `${displayName} is waiting at a permission dialog`
     );
   }
   if (terminalStatus.activity_state !== "idle") {
     throw new Error(
-      `Claude Code terminal is ${stringValue(terminalStatus.activity_state) ?? "unknown"}, not idle`
+      `${displayName} terminal is ${stringValue(terminalStatus.activity_state) ?? "unknown"}, not idle`
     );
   }
 }
@@ -3541,11 +2598,9 @@ function terminalBridgeApprovalInstructions({ conversation, terminalControl, ter
     ? approval.keys.filter((value): value is string => typeof value === "string")
     : [];
   const decisionMode = stringValue(approval.decision_mode);
-  const keyDescription = decisionMode === "structured"
-    ? "structured one-time Hook decision"
-    : keys.length > 0
-      ? keys.join(" then ")
-      : stringValue(approval.key) || "the detected approve key sequence";
+  const keyDescription = keys.length > 0
+    ? keys.join(" then ")
+    : stringValue(approval.key) || "the detected approve key sequence";
   const fingerprint = stringValue(approval.fingerprint);
   const promptKind = stringValue(approval.prompt_kind);
   const command = stringValue(approval.command);
@@ -3566,7 +2621,7 @@ function terminalBridgeApprovalInstructions({ conversation, terminalControl, ter
     toolName ? `Tool: ${toolName}` : undefined,
     requestDetail ? `Request: ${requestDetail}` : undefined,
     command ? `Command: ${command}` : undefined,
-    requestId ? `Structured request id: ${requestId}` : undefined,
+    requestId ? `Request id: ${requestId}` : undefined,
     "",
     "Safe terminal excerpt:",
     "```text",
@@ -3891,14 +2946,8 @@ function prepareManagedSend({
   }
 
   const conversation = loadState(statePath);
-  if (["done", "failed", "closed", "cancelled"].includes(conversation.status)) {
+  if (!["waiting_for_agent", "waiting_for_openclaw", "idle"].includes(conversation.status)) {
     throw new Error(`cannot send to ${conversation.conversation_id}; conversation is ${conversation.status}`);
-  }
-  if (conversation.status === "needs_recovery") {
-    throw new Error(`cannot send to ${conversation.conversation_id}; choose recover, close, or delegate a new task first`);
-  }
-  if (conversation.status === "needs_model_selection" && !options.model) {
-    throw new Error(`cannot send to ${conversation.conversation_id}; choose a supported model with --model first`);
   }
 
   const executor = executorForConversation(conversation);
@@ -3907,6 +2956,14 @@ function prepareManagedSend({
   const nativeTakeoverForSend = isRecord(conversation.native_session_takeover)
     ? conversation.native_session_takeover
     : undefined;
+  const unresolvedSubmission = unresolvedTerminalBridgeSubmission(conversation);
+  if (unresolvedSubmission) {
+    throw new Error(
+      `cannot send to ${conversation.conversation_id}; its previous terminal submission is ` +
+      `${unresolvedSubmission.status}. Inspect the conversation and tmux pane, then close ` +
+      "the AKK conversation before creating a replacement task."
+    );
+  }
   if (
     rejectTerminalControl &&
     terminalControlFromTakeover(nativeTakeoverForSend)
@@ -3915,13 +2972,6 @@ function prepareManagedSend({
       "terminal control changed while waiting to send; refresh status and retry"
     );
   }
-  const forkTakeoverForSend = isRecord(conversation.fork_context_takeover)
-    ? conversation.fork_context_takeover
-    : undefined;
-  const needsNativeTakeoverBootstrap =
-    nativeTakeoverForSend?.["needs_bootstrap"] === true;
-  const needsForkTakeoverBootstrap =
-    forkTakeoverForSend?.["needs_bootstrap"] === true;
   const message = createMessage({
     conversation,
     from: "openclaw",
@@ -3933,23 +2983,12 @@ function prepareManagedSend({
       executor_session: executor.session
     }
   });
-  const previousModelSelection = isRecord(conversation.model_selection)
-    ? conversation.model_selection as Record<string, unknown>
-    : {};
   const nextConversation = {
     ...applyMessageToConversation(conversation, message),
     executor,
     claude_session: executor.kind === "claude"
       ? executor.session
-      : conversation.claude_session,
-    executor_model: options.model ?? conversation.executor_model,
-    model_selection: conversation.status === "needs_model_selection"
-      ? {
-          ...previousModelSelection,
-          resolved_at: new Date().toISOString(),
-          selected_model: options.model
-        }
-      : conversation.model_selection
+      : conversation.claude_session
   };
   if (persist) {
     saveState(statePath, nextConversation);
@@ -3968,9 +3007,6 @@ function prepareManagedSend({
     conversation,
     executor,
     nativeTakeoverForSend,
-    forkTakeoverForSend,
-    needsNativeTakeoverBootstrap,
-    needsForkTakeoverBootstrap,
     message,
     nextConversation
   };
@@ -3984,58 +3020,51 @@ async function runSend(options) {
   cleanupIdleConversations(storeDirFromOptions(options), options);
   const terminalConversation = await resolveTerminalConversationFromOptions(options);
   if (terminalConversation) {
-    if (options.background) {
-      const releaseTerminalLock = acquireFileLock(
-        terminalBridgeSendLockPath(
-          storeDirFromOptions(options),
-          terminalConversation.terminalControl
-        ),
-        { timeoutMs: 30000 }
+    if (!options.background) {
+      throw new Error(
+        "raw tmux terminal sends require --background so AKK can persist and monitor the submission safely"
       );
-      let releaseStateLock: (() => void) | undefined;
-      try {
-        const managed = createManagedTerminalConversationFromRawId({
-          options,
-          conversationId: terminalConversation.conversationId,
-          agent: terminalConversation.agent,
-          pid: terminalConversation.pid,
-          messageBody,
-          terminalControl: terminalConversation.terminalControl
-        });
-        ensureDir(path.dirname(managed.statePath));
-        releaseStateLock = acquireFileLock(`${managed.statePath}.lock`);
-        await runTerminalControlSend({
-          options,
-          conversation: managed.conversation,
-          nextConversation: managed.nextConversation,
-          statePath: managed.statePath,
-          logPath: managed.logPath,
-          executor: managed.executor,
-          message: managed.message,
-          terminalControl: terminalConversation.terminalControl,
-          needsNativeTakeoverBootstrap: true,
-          terminalSendLockHeld: true,
-          terminalStateLockHeld: true,
-          recordMessageAfterSend: true,
-          recordRawAttachmentAfterSend: true
-        });
-      } finally {
-        try {
-          releaseStateLock?.();
-        } finally {
-          releaseTerminalLock();
-        }
-      }
-      return;
     }
-    await runTerminalConversationSend({
-      options,
-      conversationId: terminalConversation.conversationId,
-      agent: terminalConversation.agent,
-      pid: terminalConversation.pid,
-      messageBody,
-      terminalControl: terminalConversation.terminalControl
-    });
+    const releaseTerminalLock = acquireFileLock(
+      terminalBridgeSendLockPath(
+        storeDirFromOptions(options),
+        terminalConversation.terminalControl
+      ),
+      { timeoutMs: 30000 }
+    );
+    let releaseStateLock: (() => void) | undefined;
+    try {
+      const managed = createManagedTerminalConversationFromRawId({
+        options,
+        conversationId: terminalConversation.conversationId,
+        agent: terminalConversation.agent,
+        pid: terminalConversation.pid,
+        messageBody,
+        terminalControl: terminalConversation.terminalControl
+      });
+      ensureDir(path.dirname(managed.statePath));
+      releaseStateLock = acquireFileLock(`${managed.statePath}.lock`);
+      await runTerminalControlSend({
+        options,
+        conversation: managed.conversation,
+        nextConversation: managed.nextConversation,
+        statePath: managed.statePath,
+        logPath: managed.logPath,
+        executor: managed.executor,
+        message: managed.message,
+        terminalControl: terminalConversation.terminalControl,
+        terminalSendLockHeld: true,
+        terminalStateLockHeld: true,
+        recordMessageAfterSend: true,
+        recordRawAttachmentAfterSend: true
+      });
+    } finally {
+      try {
+        releaseStateLock?.();
+      } finally {
+        releaseTerminalLock();
+      }
+    }
     return;
   }
 
@@ -4088,7 +3117,6 @@ async function runSend(options) {
         executor: prepared.executor,
         message: prepared.message,
         terminalControl: currentTerminalControl,
-        needsNativeTakeoverBootstrap: prepared.needsNativeTakeoverBootstrap,
         terminalSendLockHeld: true,
         terminalStateLockHeld: true,
         recordMessageAfterSend: true
@@ -4102,325 +3130,9 @@ async function runSend(options) {
     }
     return;
   }
-  const prepared = prepareManagedSend({
-    options,
-    statePath,
-    logPath,
-    messageBody,
-    rejectTerminalControl: true
-  });
-  const {
-    conversation,
-    executor,
-    nativeTakeoverForSend,
-    forkTakeoverForSend,
-    needsNativeTakeoverBootstrap,
-    needsForkTakeoverBootstrap,
-    message,
-    nextConversation
-  } = prepared;
-
-  const executorEnv = environmentForExecutor(executor, {
-    allProxy: options.allProxy ?? conversation.executor_all_proxy
-  });
-  const payload = buildAgentSendPayload({
-    conversation,
-    executor,
-    message,
-    includeNativeTakeoverBootstrap: needsNativeTakeoverBootstrap,
-    includeForkTakeoverBootstrap: needsForkTakeoverBootstrap,
-    forkTakeover: forkTakeoverForSend
-  });
-  const terminalControlForSend = terminalControlFromTakeover(nativeTakeoverForSend);
-  if (terminalControlForSend) {
-    await runTerminalControlSend({
-      options,
-      conversation,
-      nextConversation,
-      statePath,
-      logPath,
-      executor,
-      message,
-      terminalControl: terminalControlForSend,
-      needsNativeTakeoverBootstrap
-    });
-    return;
-  }
-  if (nativeTakeoverForSend?.["native_session_id"] && executor.kind === "codex") {
-    runNativeCodexResumeSend({
-      options,
-      conversation,
-      nextConversation,
-      statePath,
-      logPath,
-      executor,
-      executorEnv,
-      message,
-      payload,
-      nativeTakeover: nativeTakeoverForSend,
-      needsNativeTakeoverBootstrap
-    });
-    return;
-  }
-
-  const acpxPath = resolveExecutable("acpx");
-  const executorModel = modelForExecutor(executor, {
-    model: options.model ?? conversation.executor_model
-  });
-  const ensureSession = ensureExecutorSession({
-    acpxPath,
-    executor,
-    cwd: conversation.workspace ?? process.cwd(),
-    env: executorEnv,
-    resumeSessionId: stringValue(nativeTakeoverForSend?.["native_session_id"])
-  });
-  appendEvent(logPath, {
-    ts: new Date().toISOString(),
-    conversation_id: conversation.conversation_id,
-    event: "executor_session_ensure",
-    status: ensureSession.status ?? null,
-    executor,
-    stdout: cleanProcessText(ensureSession.stdout),
-    stderr: cleanProcessText(ensureSession.stderr)
-  });
-  runtimeLog("info", "executor_session_ensure", {
-    conversation_id: conversation.conversation_id,
-    agent: executor.kind,
-    executor_session: executor.session,
-    status: ensureSession.status ?? null,
-    failure_kind: classifyProcessFailure(ensureSession),
-    stdout: textSummary(cleanProcessText(ensureSession.stdout)),
-    stderr: textSummary(cleanProcessText(ensureSession.stderr))
-  });
-  if (ensureSession.error) {
-    if (requiresExplicitRecoveryDecision(options)) {
-      printJson(markConversationNeedsRecovery({
-        conversation: nextConversation,
-        statePath,
-        logPath,
-        executor,
-        message,
-        failedStage: "session_ensure",
-        result: ensureSession,
-        reason: `acpx ${executor.kind} session ensure failed to start: ${ensureSession.error.message}`
-      }));
-      return;
-    }
-    autoRecoverSendFailure({
-      options,
-      conversation: nextConversation,
-      statePath,
-      logPath,
-      executor,
-      message,
-      failedStage: "session_ensure",
-      result: ensureSession,
-      reason: `acpx ${executor.kind} session ensure failed to start: ${ensureSession.error.message}`
-    });
-    return;
-  }
-  if (ensureSession.status !== 0) {
-    const reason = cleanProcessText(ensureSession.stderr || ensureSession.stdout || `acpx ${executor.kind} sessions ensure exited with status ${ensureSession.status}`);
-    if (requiresExplicitRecoveryDecision(options)) {
-      printJson(markConversationNeedsRecovery({
-        conversation: nextConversation,
-        statePath,
-        logPath,
-        executor,
-        message,
-        failedStage: "session_ensure",
-        result: ensureSession,
-        reason
-      }));
-      return;
-    }
-    autoRecoverSendFailure({
-      options,
-      conversation: nextConversation,
-      statePath,
-      logPath,
-      executor,
-      message,
-      failedStage: "session_ensure",
-      result: ensureSession,
-      reason
-    });
-    return;
-  }
-
-  const acpxArgs = buildAcpxPromptArgs({ executor, payload, model: executorModel });
-
-  if (options.background) {
-    const outputPath = path.join(path.dirname(logPath), `${executor.kind}-followup-output.log`);
-    const outputFd = openPrivateAppendFile(outputPath);
-    const child = spawn(acpxPath, acpxArgs, {
-      detached: true,
-      stdio: ["ignore", outputFd, outputFd],
-      cwd: conversation.workspace ?? process.cwd(),
-      env: executorEnv
-    });
-    child.unref();
-    fs.closeSync(outputFd);
-
-    appendEvent(logPath, {
-      ts: new Date().toISOString(),
-      conversation_id: conversation.conversation_id,
-      event: "executor_message_launch",
-      mode: "background",
-      pid: child.pid ?? null,
-      executor,
-      output_path: outputPath
-    });
-    runtimeLog("info", "executor_message_launch", {
-      conversation_id: conversation.conversation_id,
-      agent: executor.kind,
-      executor_session: executor.session,
-      mode: "background",
-      pid: child.pid ?? null,
-      output_path: outputPath
-    });
-    const monitor = startExecutorMonitor({
-      statePath,
-      logPath,
-      pid: child.pid,
-      outputPath,
-      agentTimeoutMinutes: Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES),
-      pollIntervalMs: Number(options.monitorPollIntervalMs ?? DEFAULT_MONITOR_POLL_INTERVAL_MS)
-    });
-    appendEvent(logPath, {
-      ts: new Date().toISOString(),
-      conversation_id: conversation.conversation_id,
-      event: "executor_monitor_launch",
-      pid: monitor.pid ?? null,
-      executor_pid: child.pid ?? null,
-      agent_timeout_minutes: Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES)
-    });
-
-    const deliveredConversation = markTakeoverBootstrapped({
-      conversation: nextConversation,
-      statePath,
-      logPath,
-      executor,
-      native: needsNativeTakeoverBootstrap,
-      fork: needsForkTakeoverBootstrap
-    });
-
-    printJson({
-      conversation: deliveredConversation,
-      message,
-      delivered: true,
-      background: true,
-      status: "async_pending",
-      pid: child.pid ?? null,
-      monitor_pid: monitor.pid ?? null,
-      output_path: outputPath,
-      executor,
-      budget: budgetAction(nextConversation),
-      openclaw_next_action: openClawYieldNextAction({
-        conversationId: deliveredConversation.conversation_id,
-        source: "executor_background",
-        callbackExpected: Boolean(deliveredConversation.callback_command || deliveredConversation.gateway_method)
-      })
-    });
-    return;
-  }
-
-  const sendResult = spawnSync(acpxPath, acpxArgs, {
-    encoding: "utf8",
-    maxBuffer: 1024 * 1024 * 10,
-    cwd: conversation.workspace ?? process.cwd(),
-    env: executorEnv
-  });
-  appendEvent(logPath, {
-    ts: new Date().toISOString(),
-    conversation_id: conversation.conversation_id,
-    event: "executor_message_send",
-    status: sendResult.status ?? null,
-    executor,
-    stdout: cleanProcessText(sendResult.stdout),
-    stderr: cleanProcessText(sendResult.stderr)
-  });
-  runtimeLog("info", "executor_message_send", {
-    conversation_id: conversation.conversation_id,
-    agent: executor.kind,
-    executor_session: executor.session,
-    status: sendResult.status ?? null,
-    failure_kind: classifyProcessFailure(sendResult),
-    stdout: textSummary(cleanProcessText(sendResult.stdout)),
-    stderr: textSummary(cleanProcessText(sendResult.stderr))
-  });
-  if (sendResult.error) {
-    if (requiresExplicitRecoveryDecision(options)) {
-      printJson(markConversationNeedsRecovery({
-        conversation: nextConversation,
-        statePath,
-        logPath,
-        executor,
-        message,
-        failedStage: "message_send",
-        result: sendResult,
-        reason: `acpx ${executor.kind} send failed to start: ${sendResult.error.message}`
-      }));
-      return;
-    }
-    autoRecoverSendFailure({
-      options,
-      conversation: nextConversation,
-      statePath,
-      logPath,
-      executor,
-      message,
-      failedStage: "message_send",
-      result: sendResult,
-      reason: `acpx ${executor.kind} send failed to start: ${sendResult.error.message}`
-    });
-    return;
-  }
-  if (sendResult.status !== 0) {
-    const reason = cleanProcessText(sendResult.stderr || sendResult.stdout || `acpx ${executor.kind} send exited with status ${sendResult.status}`);
-    if (requiresExplicitRecoveryDecision(options)) {
-      printJson(markConversationNeedsRecovery({
-        conversation: nextConversation,
-        statePath,
-        logPath,
-        executor,
-        message,
-        failedStage: "message_send",
-        result: sendResult,
-        reason
-      }));
-      return;
-    }
-    autoRecoverSendFailure({
-      options,
-      conversation: nextConversation,
-      statePath,
-      logPath,
-      executor,
-      message,
-      failedStage: "message_send",
-      result: sendResult,
-      reason
-    });
-    return;
-  }
-
-  const deliveredConversation = markTakeoverBootstrapped({
-    conversation: nextConversation,
-    statePath,
-    logPath,
-    executor,
-    native: needsNativeTakeoverBootstrap,
-    fork: needsForkTakeoverBootstrap
-  });
-
-  printJson({
-    conversation: deliveredConversation,
-    message,
-    delivered: true,
-    executor,
-    budget: budgetAction(deliveredConversation)
-  });
+  throw new Error(
+    `conversation ${migratedConversation.conversation_id} is not attached to a live tmux terminal`
+  );
 }
 
 async function runApprove(options) {
@@ -4450,7 +3162,7 @@ async function runApprove(options) {
   if (!terminalControl) {
     throw new Error(`conversation ${conversation.conversation_id} is not controlled through a terminal`);
   }
-  if (["done", "failed", "closed", "cancelled"].includes(conversation.status)) {
+  if (!["waiting_for_agent", "waiting_for_openclaw"].includes(conversation.status)) {
     throw new Error(
       `cannot approve ${conversation.conversation_id}; conversation is ${conversation.status}`
     );
@@ -4464,10 +3176,8 @@ async function runApprove(options) {
   const expectedFingerprint = suppliedExpectedFingerprint ??
     stringValue(monitoredApproval?.fingerprint);
   const autoApproved = options.autoApproved === true;
-  const hooklessClaudeScreenApproval =
-    executor.kind === "claude" &&
-    nativeTakeover?.claude_hook_mode !== "enabled";
-  if (hooklessClaudeScreenApproval) {
+  const claudeScreenApproval = executor.kind === "claude";
+  if (claudeScreenApproval) {
     const monitoredState = isRecord(monitoredApproval?.approval_state)
       ? monitoredApproval.approval_state
       : undefined;
@@ -4658,12 +3368,17 @@ async function runApprove(options) {
       currentControl?.target !== terminalControl.target ||
       currentControl?.socketPath !== terminalControl.socketPath ||
       (
-        hooklessClaudeScreenApproval &&
+        claudeScreenApproval &&
         currentApproval?.fingerprint !== monitoredApproval?.fingerprint
       )
     ) {
       throw new Error("approval state changed while waiting for terminal control; refresh status and retry");
     }
+    assertManagedTerminalDispatchOwner({
+      conversation: currentConversation,
+      terminalControl: currentControl,
+      action: "approve"
+    });
     lockedConversation = currentConversation;
     approval = await createTerminalAgentBridge(options).approve(
       executor.kind,
@@ -4676,11 +3391,8 @@ async function runApprove(options) {
           currentConversation,
           terminalControl
         ),
-        requiredDecisionMode: autoApproved && executor.kind === "claude"
-          ? hooklessClaudeScreenApproval
-            ? "keys"
-            : "structured"
-          : undefined,
+        requiredDecisionMode:
+          autoApproved && executor.kind === "claude" ? "keys" : undefined,
         authorize: autoApproved
           ? ({ agent, terminalControl: currentTerminalControl, inspection, fingerprint }) => {
               if (!autoApprovalPolicy) {
@@ -4723,7 +3435,7 @@ async function runApprove(options) {
               return { approved: true };
             }
           : undefined,
-        beforeKeyDispatch: hooklessClaudeScreenApproval
+        beforeKeyDispatch: claudeScreenApproval
           ? ({ fingerprint, terminalControl: dispatchControl, inspection, keys }) => {
               if (autoApproved) {
                 if (!autoApprovalPolicy) {
@@ -4985,7 +3697,7 @@ async function runApprove(options) {
     delete nextNativeTakeover.terminal_bridge_approval;
     delete nextNativeTakeover.terminal_bridge_approval_dispatch;
     delete nextNativeTakeover.terminal_bridge_last_approval_prompt_cleared_at;
-    let nextConversation = {
+    const nextConversation = {
       ...lockedConversation,
       status: terminalBridgeEnabled(lockedConversation)
         ? "waiting_for_agent" as const
@@ -4993,25 +3705,6 @@ async function runApprove(options) {
       native_session_takeover: nextNativeTakeover,
       updated_at: approvalResolvedAt
     };
-    const approvalLeaseDeadlines = [
-      stringValue(nextNativeTakeover.terminal_bridge_inactivity_deadline_at),
-      stringValue(nextNativeTakeover.terminal_bridge_hard_deadline_at)
-    ].filter((value): value is string => Boolean(value));
-    if (approvalLeaseDeadlines.length > 0) {
-      const renewedLease = renewClaudeHookLease(
-        nextConversation,
-        new Date(Math.min(...approvalLeaseDeadlines.map((value) => Date.parse(value)))).toISOString()
-      );
-      if (renewedLease) {
-        nextConversation = {
-          ...nextConversation,
-          native_session_takeover: {
-            ...nextNativeTakeover,
-            claude_hook_lease_id: renewedLease.id
-          }
-        };
-      }
-    }
     saveState(statePath, nextConversation);
     releaseApprovalStateLock();
     releaseApprovalTerminalLock();
@@ -5117,61 +3810,6 @@ async function runTerminalConversationApprove({ options, conversationId, agent, 
   }
 }
 
-async function runTerminalConversationSend({ options, conversationId, agent, pid, messageBody, terminalControl }) {
-  const releaseTerminalLock = acquireFileLock(
-    terminalBridgeSendLockPath(storeDirFromOptions(options), terminalControl),
-    { timeoutMs: 30000 }
-  );
-  try {
-    const terminalPayload = terminalSubmissionPayload(String(messageBody));
-    const terminalBridge = createTerminalAgentBridge(options);
-    if (agent === "claude") {
-      const status = await terminalBridge.status(agent, terminalControl, {
-        scrollbackLines: Number(options.scrollbackLines ?? 120),
-        runtime: {
-          pid,
-          cwd: terminalControl.currentPath,
-          terminalTarget: terminalControl.target
-        }
-      });
-      assertSafeClaudeTerminalSend(status);
-    }
-    await terminalBridge.send(agent, terminalControl, terminalPayload, {
-      runtime: {
-        pid,
-        cwd: terminalControl.currentPath,
-        terminalTarget: terminalControl.target
-      }
-    });
-    runtimeLog("info", "terminal_message_send", {
-      conversation_id: conversationId,
-      agent,
-      terminal_target: terminalControl.target,
-      message: textSummary(messageBody)
-    });
-
-    printJson({
-      conversation_id: conversationId,
-      source: "terminal_control",
-      delivered: true,
-      status: "async_pending",
-      background: true,
-      callback_expected: false,
-      terminal_control: terminalControl,
-      message: {
-        body: messageBody
-      },
-      openclaw_next_action: openClawYieldNextAction({
-        conversationId,
-        source: "terminal_control",
-        callbackExpected: false
-      })
-    });
-  } finally {
-    releaseTerminalLock();
-  }
-}
-
 async function runTerminalControlSend({
   options,
   conversation,
@@ -5181,7 +3819,6 @@ async function runTerminalControlSend({
   executor,
   message,
   terminalControl,
-  needsNativeTakeoverBootstrap,
   terminalSendLockHeld = false,
   terminalStateLockHeld = false,
   recordMessageAfterSend = false,
@@ -5203,7 +3840,6 @@ async function runTerminalControlSend({
         executor,
         message,
         terminalControl,
-        needsNativeTakeoverBootstrap,
         terminalSendLockHeld: true,
         terminalStateLockHeld,
         recordMessageAfterSend,
@@ -5242,7 +3878,6 @@ async function runTerminalControlSend({
         executor,
         message,
         terminalControl,
-        needsNativeTakeoverBootstrap,
         terminalSendLockHeld: true,
         terminalStateLockHeld: true,
         recordMessageAfterSend,
@@ -5260,16 +3895,99 @@ async function runTerminalControlSend({
     options.agentHardTimeoutMinutes ?? DEFAULT_AGENT_HARD_TIMEOUT_MINUTES,
     "--agent-hard-timeout-minutes"
   );
-  const terminalPayload = needsNativeTakeoverBootstrap && !bridge
-    ? terminalSubmissionPayload(buildAgentSendPayload({
-        conversation,
-        executor,
-        message,
-        includeNativeTakeoverBootstrap: true,
-        includeForkTakeoverBootstrap: false,
-        forkTakeover: undefined
-    }))
-    : terminalSubmissionPayload(String(message.body ?? ""));
+  const terminalPayload = terminalSubmissionPayload(String(message.body ?? ""));
+  const terminalRequestHash =
+    terminalBridgeRequestFingerprint(terminalPayload);
+  let previousDispatchLedger =
+    resolveTerminalDispatchLedgerPaneIncarnation(
+      terminalControl,
+      loadTerminalBridgeDispatchLedger(terminalControl)
+    );
+  previousDispatchLedger =
+    reconcilePreparedTerminalDispatchLedger(
+      terminalControl,
+      previousDispatchLedger
+    );
+  if (
+    previousDispatchLedger?.status === "prepared" ||
+    previousDispatchLedger?.status === "uncertain"
+  ) {
+    throw new Error(
+      `terminal ${terminalControl.target} has a terminal-level ` +
+      `${String(previousDispatchLedger.status)} dispatch owned by ` +
+      `${stringValue(previousDispatchLedger.conversation_id) ?? "an unknown conversation"}; ` +
+      "inspect the shared tmux pane and explicitly close that AKK conversation before retrying"
+    );
+  }
+  if (previousDispatchLedger?.status === "submitted") {
+    const owner = loadTerminalDispatchLedgerOwner(
+      previousDispatchLedger
+    );
+    if (!owner) {
+      throw new Error(
+        `terminal ${terminalControl.target} has a submitted dispatch whose ` +
+        "owner state is unavailable; inspect the shared tmux pane and repair " +
+        "or explicitly resolve that conversation before sending another task"
+      );
+    }
+    if (!TERMINAL_DISPATCH_RELEASE_STATUSES.has(owner.status)) {
+      if (
+        stringValue(previousDispatchLedger.request_hash) ===
+        terminalRequestHash
+      ) {
+        const receiptConversationId =
+          stringValue(previousDispatchLedger.conversation_id) ??
+          owner.conversation_id;
+        const receiptMessageId =
+          stringValue(previousDispatchLedger.message_id) ??
+          message.id;
+        printJson({
+          conversation: owner,
+          message: {
+            ...message,
+            id: receiptMessageId,
+            conversation_id: receiptConversationId
+          },
+          delivered: true,
+          status: "async_pending",
+          background: true,
+          callback_expected: Boolean(
+            owner.gateway_method ??
+              previousDispatchLedger.callback_expected
+          ),
+          terminal_control: terminalControl,
+          executor,
+          replayed: true,
+          delivery_receipt: "submitted",
+          reason:
+            "AKK replayed the durable receipt for an identical active terminal request and did not send tmux input again.",
+          openclaw_next_action: openClawYieldNextAction({
+            conversationId: receiptConversationId,
+            source: "terminal_control",
+            callbackExpected: Boolean(
+              owner.gateway_method ??
+                previousDispatchLedger.callback_expected
+            )
+          })
+        });
+        return;
+      }
+      throw new Error(
+        `terminal ${terminalControl.target} is still owned by active AKK ` +
+        `conversation ${owner.conversation_id} (${owner.status}); wait for ` +
+        "its callback, cancel it, or explicitly close it before sending a " +
+        "different task"
+      );
+    }
+  }
+  if (bridge) {
+    assertNoUnresolvedTerminalBridgeSubmission(
+      storeDirFromOptions(options),
+      terminalControl,
+      conversation.conversation_id,
+      terminalPayload
+    );
+  }
   const preSendRuntime: TerminalRuntimeIdentity = {
     ...terminalRuntimeIdentityForConversation(nextConversation, terminalControl),
     messageId: message.id
@@ -5279,15 +3997,13 @@ async function runTerminalControlSend({
   const claudeHome = executor.kind === "claude"
     ? path.resolve(expandHome(options.claudeHome) ?? defaultClaudeHome())
     : undefined;
-  if (bridge) {
-    try {
-      const status = await terminalBridge.status(executor.kind, terminalControl, {
-        scrollbackLines: Number(options.scrollbackLines ?? 120),
-        runtime: preSendRuntime
-      });
-      if (executor.kind === "claude") {
-        assertSafeClaudeTerminalSend(status);
-      }
+  try {
+    const status = await terminalBridge.status(executor.kind, terminalControl, {
+      scrollbackLines: Number(options.scrollbackLines ?? 120),
+      runtime: preSendRuntime
+    });
+    assertSafeTerminalSend(executor.kind, status);
+    if (bridge) {
       preSendScreenFingerprint = stringValue(status.screen.digest) ??
         terminalBridgeScreenFingerprint(status.screen.excerpt);
       if (executor.kind === "claude") {
@@ -5298,102 +4014,23 @@ async function runTerminalControlSend({
           claudeHome,
           agentRows: loadClaudeAgentRows(options)
         });
-        if (
-          !claudeTranscriptAnchor &&
-          !stringValue(options.claudeHookStoreDir)
-        ) {
+        if (!claudeTranscriptAnchor) {
           throw new Error(
-            "the hook-free completion monitor could not bind an owner-private Claude transcript boundary"
+            "the completion monitor could not bind an owner-private Claude transcript boundary"
           );
         }
       }
-    } catch (error) {
-      if (executor.kind === "claude") {
-        throw new Error(
-          `refusing to send to Claude Code without a verified idle terminal: ${
-            error instanceof Error ? error.message : String(error)
-          }`
-        );
-      }
-      // Codex delivery can still use its established fallback when capture is unavailable.
     }
-  }
-  if (bridge && executor.kind === "claude") {
-    releaseClaudeHookLeasesForTerminal({
-      storeDir: storeDirFromOptions(options),
-      terminalControl,
-      replacementConversationId: conversation.conversation_id
-    });
-    releaseClaudeHookLease(nextConversation);
-  }
-  const claudeHookLeaseState = bridge && executor.kind === "claude"
-    ? activateClaudeHookLease({
-        options,
-        conversation: nextConversation,
-        message,
-        terminalControl,
-        expiresAt: deadlineAt(
-          bridgeStartedAt,
-          agentTimeoutMinutes > 0
-            ? Math.min(agentTimeoutMinutes, agentHardTimeoutMinutes)
-            : agentHardTimeoutMinutes
-        )
-      })
-    : undefined;
-  const conversationWithHookLease = claudeHookLeaseState
-    ? withClaudeHookLeaseState(nextConversation, claudeHookLeaseState)
-    : nextConversation;
-  try {
-    await terminalBridge.send(executor.kind, terminalControl, terminalPayload, {
-      runtime: preSendRuntime
-    });
   } catch (error) {
-    if (claudeHookLeaseState) {
-      releaseClaudeHookLease(conversationWithHookLease);
-    }
-    throw error;
-  }
-  let terminalCompletionReconciliation = {
-    prepared: [] as Array<{
-      conversationId: string;
-      statePath: string;
-      logPath: string;
-      terminalControl: TerminalControlRef;
-      prepared: ReturnType<typeof prepareLockedCallback>;
-    }>,
-    reconciledConversationIds: [] as string[],
-    protectedConversationIds: [] as string[],
-    skipSupersede: false
-  };
-  if (bridge) {
-    try {
-      terminalCompletionReconciliation =
-        await reconcileTerminalBridgeCompletionsBeforeSupersede({
-          options,
-          storeDir: storeDirFromOptions(options),
-          terminalControl,
-          replacementConversationId: conversation.conversation_id
-        });
-    } catch (error) {
-      terminalCompletionReconciliation.skipSupersede = true;
-      terminalCompletionReconciliation.protectedConversationIds =
-        fenceTerminalBridgeConversationsForReconciliation({
-          storeDir: storeDirFromOptions(options),
-          terminalControl,
-          replacementConversationId: conversation.conversation_id
-        });
-      appendEvent(logPath, {
-        ts: new Date().toISOString(),
-        conversation_id: conversation.conversation_id,
-        event: "terminal_bridge_pre_supersede_reconciliation_failed",
-        terminal_control: terminalControl,
-        error: error instanceof Error ? error.message : String(error)
-      });
-    }
+    throw new Error(
+      `refusing to send to ${executor.display_name} without a verified idle terminal: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
   }
   const bridgeConversation = bridge
     ? withTerminalBridgeState({
-        conversation: conversationWithHookLease,
+        conversation: nextConversation,
         message,
         requestText: terminalPayload,
         startedAt: bridgeStartedAt,
@@ -5404,112 +4041,389 @@ async function runTerminalControlSend({
         claudeHome
       })
     : nextConversation;
-  const deliveredConversation = markTakeoverBootstrapped({
+  const preparedConversation = withTerminalBridgeSubmission({
     conversation: bridgeConversation,
-    statePath,
-    logPath,
-    executor,
-    native: needsNativeTakeoverBootstrap && !bridge,
-    fork: false,
-    stateLockHeld: terminalStateLockHeld
+    messageId: message.id,
+    requestText: terminalPayload,
+    status: "prepared",
+    preparedAt: bridgeStartedAt
   });
-  saveState(statePath, deliveredConversation);
-  const supersededConversationIds = bridge &&
-    !terminalCompletionReconciliation.skipSupersede
-    ? supersedeTerminalBridgeConversations({
-        storeDir: storeDirFromOptions(options),
-        terminalControl,
-        replacementConversationId: conversation.conversation_id,
-        excludedConversationIds: [
-          ...terminalCompletionReconciliation.reconciledConversationIds,
-          ...terminalCompletionReconciliation.protectedConversationIds
-        ]
-      })
-    : [];
-  if (recordRawAttachmentAfterSend) {
-    const sourceConversationId = stringValue(
-      isRecord(conversation.native_session_takeover)
-        ? conversation.native_session_takeover.native_session_id
-        : undefined
-    );
-    appendEvent(logPath, {
-      ts: new Date().toISOString(),
-      conversation_id: conversation.conversation_id,
-      event: "raw_terminal_session_attached",
-      source_conversation_id: sourceConversationId,
-      agent: executor.kind,
-      terminal_control: terminalControl,
-      executor
+
+  saveTerminalBridgeDispatchLedger(terminalControl, {
+    status: "prepared",
+    generation_id: message.id,
+    conversation_id: preparedConversation.conversation_id,
+    message_id: message.id,
+    request_hash: terminalRequestHash,
+    prepared_at: bridgeStartedAt,
+    dispatcher_pid: process.pid,
+    state_path: statePath,
+    event_log_path: logPath,
+    callback_expected: Boolean(preparedConversation.gateway_method),
+    previous_generation_id:
+      stringValue(previousDispatchLedger?.generation_id) ??
+      stringValue(previousDispatchLedger?.message_id)
+  });
+  try {
+    saveState(statePath, preparedConversation);
+  } catch (error) {
+    restoreTerminalBridgeDispatchLedger({
+      terminalControl,
+      previousLedger: previousDispatchLedger,
+      reason: "prepared state persistence failed before tmux input"
     });
-    runtimeLog("info", "raw_terminal_session_attached", {
-      conversation_id: conversation.conversation_id,
-      source_conversation_id: sourceConversationId,
-      terminal_target: terminalControl.target,
-      state_path: statePath,
-      event_log_path: logPath
-    });
+    throw error;
   }
-  if (recordMessageAfterSend) {
-    appendEvent(logPath, messageEvent(message));
-    runtimeLog("info", "message_created", {
+  let bridgeMonitor:
+    | ReturnType<typeof startTerminalBridgeMonitorForConversation>
+    | undefined;
+  try {
+    if (
+      process.env.AKK_TEST_TERMINAL_SETUP_FAILURE === "1"
+    ) {
+      throw new Error(
+        "injected terminal setup failure before tmux input"
+      );
+    }
+    if (recordRawAttachmentAfterSend) {
+      const sourceConversationId = stringValue(
+        isRecord(conversation.native_session_takeover)
+          ? conversation.native_session_takeover.native_session_id
+          : undefined
+      );
+      appendEvent(logPath, {
+        ts: bridgeStartedAt,
+        conversation_id: conversation.conversation_id,
+        event: "raw_terminal_session_attached",
+        source_conversation_id: sourceConversationId,
+        agent: executor.kind,
+        terminal_control: terminalControl,
+        executor
+      });
+      runtimeLog("info", "raw_terminal_session_attached", {
+        conversation_id: conversation.conversation_id,
+        source_conversation_id: sourceConversationId,
+        terminal_target: terminalControl.target,
+        state_path: statePath,
+        event_log_path: logPath
+      });
+    }
+    if (recordMessageAfterSend) {
+      appendEvent(logPath, messageEvent(message));
+      runtimeLog("info", "message_created", {
+        conversation_id: conversation.conversation_id,
+        agent: executor.kind,
+        executor_session: executor.session,
+        message_type: message.type,
+        state_path: statePath,
+        event_log_path: logPath,
+        message: textSummary(message.body)
+      });
+    }
+    appendEvent(logPath, {
+      ts: bridgeStartedAt,
       conversation_id: conversation.conversation_id,
-      agent: executor.kind,
-      executor_session: executor.session,
-      message_type: message.type,
+      event: "terminal_message_submit_prepared",
+      message_id: message.id,
+      executor,
+      terminal_control: terminalControl,
+      request_hash: terminalBridgeRequestFingerprint(terminalPayload),
+      dispatcher_pid: process.pid
+    });
+
+    bridgeMonitor = bridge
+      ? startTerminalBridgeMonitorForConversation({
+          conversation: preparedConversation,
+          statePath,
+          logPath,
+          options
+        })
+      : undefined;
+    if (bridgeMonitor) {
+      appendEvent(logPath, {
+        ts: new Date().toISOString(),
+        conversation_id: preparedConversation.conversation_id,
+        event: "terminal_bridge_monitor_launch",
+        pid: bridgeMonitor.pid ?? null,
+        terminal_control: terminalControl,
+        phase: "before_terminal_submit",
+        agent_timeout_minutes: agentTimeoutMinutes,
+        agent_hard_timeout_minutes: agentHardTimeoutMinutes
+      });
+      runtimeLog("info", "terminal_bridge_monitor_launch", {
+        conversation_id: preparedConversation.conversation_id,
+        monitor_pid: bridgeMonitor.pid ?? null,
+        terminal_target: terminalControl.target,
+        phase: "before_terminal_submit"
+      });
+    }
+  } catch (error) {
+    const abortedAt = new Date().toISOString();
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    let dispatchLedgerRestored = true;
+    try {
+      restoreTerminalBridgeDispatchLedger({
+        terminalControl,
+        previousLedger: previousDispatchLedger,
+        reason: "terminal submission aborted before tmux input"
+      });
+    } catch (ledgerError) {
+      dispatchLedgerRestored = false;
+      runtimeLog("error", "terminal_dispatch_ledger_restore_failed", {
+        conversation_id: conversation.conversation_id,
+        terminal_target: terminalControl.target,
+        error: ledgerError instanceof Error
+          ? ledgerError.message
+          : String(ledgerError)
+      });
+    }
+    const failureBase = recordRawAttachmentAfterSend
+      ? {
+          ...preparedConversation,
+          status: "failed" as const,
+          failed_at: abortedAt,
+          failure_reason:
+            "terminal submission setup failed before tmux input"
+        }
+      : conversation;
+    const abortedConversation = withTerminalBridgeSubmission({
+      conversation: failureBase,
+      messageId: message.id,
+      requestText: terminalPayload,
+      status: "aborted",
+      preparedAt: bridgeStartedAt,
+      abortedAt,
+      error: errorMessage
+    });
+    try {
+      saveState(statePath, abortedConversation);
+      appendEvent(logPath, {
+        ts: abortedAt,
+        conversation_id: abortedConversation.conversation_id,
+        event: "terminal_message_submit_aborted",
+        message_id: message.id,
+        executor,
+        terminal_control: terminalControl,
+        error: textSummary(errorMessage),
+        safe_to_retry: dispatchLedgerRestored
+      });
+    } catch (persistenceError) {
+      runtimeLog("error", "terminal_message_submit_aborted_persist_failed", {
+        conversation_id: abortedConversation.conversation_id,
+        terminal_target: terminalControl.target,
+        error: persistenceError instanceof Error
+          ? persistenceError.message
+          : String(persistenceError)
+      });
+    }
+    runtimeLog("error", "terminal_message_submit_aborted", {
+      conversation_id: abortedConversation.conversation_id,
+      terminal_target: terminalControl.target,
+      error: errorMessage,
+      safe_to_retry: dispatchLedgerRestored
+    });
+    printJson({
+      conversation: abortedConversation,
+      message,
+      delivered: false,
+      status: "submission_aborted",
+      submission_outcome: "aborted",
+      background: true,
+      callback_expected: false,
+      terminal_control: terminalControl,
+      monitor_pid: bridgeMonitor?.pid ?? null,
+      executor,
+      safe_to_retry: dispatchLedgerRestored,
+      do_not_retry: !dispatchLedgerRestored,
+      reason: dispatchLedgerRestored
+        ? "AKK failed before touching tmux; this terminal submission was not sent and may be retried."
+        : "AKK failed before tmux input but could not restore the terminal dispatch ledger; inspect and close the conversation before retrying.",
+      openclaw_next_action: {
+        action: dispatchLedgerRestored ? "retry" : "inspect",
+        conversation_id: abortedConversation.conversation_id,
+        safe_to_retry: dispatchLedgerRestored,
+        do_not_retry: !dispatchLedgerRestored,
+        reason: dispatchLedgerRestored
+          ? "The failure occurred before any tmux input."
+          : "The terminal ledger could not be restored automatically."
+      }
+    });
+    return;
+  }
+
+  let deliveredConversation;
+  try {
+    await terminalBridge.send(executor.kind, terminalControl, terminalPayload, {
+      runtime: preSendRuntime
+    });
+    const submittedAt = new Date().toISOString();
+    deliveredConversation = withTerminalBridgeSubmission({
+      conversation: preparedConversation,
+      messageId: message.id,
+      requestText: terminalPayload,
+      status: "submitted",
+      preparedAt: bridgeStartedAt,
+      submittedAt
+    });
+    saveState(statePath, deliveredConversation);
+    saveTerminalBridgeDispatchLedger(terminalControl, {
+      status: "submitted",
+      generation_id: message.id,
+      conversation_id: deliveredConversation.conversation_id,
+      message_id: message.id,
+      request_hash: terminalRequestHash,
+      prepared_at: bridgeStartedAt,
+      submitted_at: submittedAt,
+      dispatcher_pid: process.pid,
       state_path: statePath,
       event_log_path: logPath,
-      message: textSummary(message.body)
+      callback_expected: Boolean(deliveredConversation.gateway_method),
+      previous_generation_id:
+        stringValue(previousDispatchLedger?.generation_id) ??
+        stringValue(previousDispatchLedger?.message_id)
     });
+  } catch (error) {
+    const uncertainAt = new Date().toISOString();
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const failureBase =
+      !recordRawAttachmentAfterSend && terminalBridgeEnabled(conversation)
+        ? conversation
+        : preparedConversation;
+    const stalledFailureBase = {
+      ...failureBase,
+      status: "stalled" as const,
+      stalled_at: uncertainAt,
+      stalled_reason:
+        "terminal submission outcome is uncertain; inspect the shared tmux pane before continuing",
+      updated_at: uncertainAt
+    };
+    const uncertainConversation = withTerminalBridgeSubmission({
+      conversation: stalledFailureBase,
+      messageId: message.id,
+      requestText: terminalPayload,
+      status: "uncertain",
+      preparedAt: bridgeStartedAt,
+      uncertainAt,
+      error: errorMessage
+    });
+    try {
+      saveTerminalBridgeDispatchLedger(terminalControl, {
+        status: "uncertain",
+        generation_id: message.id,
+        conversation_id: uncertainConversation.conversation_id,
+        message_id: message.id,
+        request_hash: terminalRequestHash,
+        prepared_at: bridgeStartedAt,
+        uncertain_at: uncertainAt,
+        dispatcher_pid: process.pid,
+        state_path: statePath,
+        event_log_path: logPath,
+        callback_expected: Boolean(uncertainConversation.gateway_method),
+        error: textSummary(errorMessage),
+        previous_generation_id:
+          stringValue(previousDispatchLedger?.generation_id) ??
+          stringValue(previousDispatchLedger?.message_id)
+      });
+      saveState(statePath, uncertainConversation);
+      appendEvent(logPath, {
+        ts: uncertainAt,
+        conversation_id: uncertainConversation.conversation_id,
+        event: "terminal_message_submit_uncertain",
+        message_id: message.id,
+        executor,
+        terminal_control: terminalControl,
+        error: textSummary(errorMessage),
+        do_not_retry: true
+      });
+    } catch (persistenceError) {
+      runtimeLog("error", "terminal_message_submit_uncertain_persist_failed", {
+        conversation_id: uncertainConversation.conversation_id,
+        terminal_target: terminalControl.target,
+        error: persistenceError instanceof Error
+          ? persistenceError.message
+          : String(persistenceError)
+      });
+    }
+    const stalledConversationIds =
+      stallOtherTerminalBridgeConversationsForUncertainDispatch({
+        storeDir: storeDirFromOptions(options),
+        terminalControl,
+        currentConversationId: uncertainConversation.conversation_id,
+        uncertainMessageId: message.id
+      });
+    runtimeLog("error", "terminal_message_submit_uncertain", {
+      conversation_id: uncertainConversation.conversation_id,
+      agent: executor.kind,
+      terminal_target: terminalControl.target,
+      error: errorMessage,
+      do_not_retry: true,
+      stalled_conversation_ids: stalledConversationIds
+    });
+    printJson({
+      conversation: uncertainConversation,
+      message,
+      delivered: false,
+      status: "submission_uncertain",
+      submission_outcome: "uncertain",
+      background: true,
+      callback_expected: Boolean(uncertainConversation.gateway_method),
+      terminal_control: terminalControl,
+      monitor_pid: bridgeMonitor?.pid ?? null,
+      executor,
+      do_not_retry: true,
+      stalled_conversation_ids: stalledConversationIds,
+      reason:
+        "AKK durably recorded the terminal submission, but could not prove whether tmux accepted Enter. Do not retry automatically; inspect this conversation and pane.",
+      openclaw_next_action: {
+        action: "inspect",
+        conversation_id: uncertainConversation.conversation_id,
+        do_not_retry: true,
+        reason:
+          "The terminal submission outcome is uncertain. Inspect AKK status and the shared tmux pane before deciding whether to close or continue."
+      }
+    });
+    return;
   }
-  appendEvent(logPath, {
-    ts: new Date().toISOString(),
-    conversation_id: conversation.conversation_id,
-    event: "terminal_message_send",
-    executor,
-    terminal_control: terminalControl,
-    message: textSummary(message.body),
-    payload: textSummary(terminalPayload),
-    reconciled_conversation_ids:
-      terminalCompletionReconciliation.reconciledConversationIds,
-    reconciliation_protected_conversation_ids:
-      terminalCompletionReconciliation.protectedConversationIds,
-    superseded_conversation_ids: supersededConversationIds
-  });
-  runtimeLog("info", "terminal_message_send", {
-    conversation_id: conversation.conversation_id,
-    agent: executor.kind,
-    terminal_target: terminalControl.target,
-    message: textSummary(message.body),
-    payload: textSummary(terminalPayload),
-    reconciled_conversation_ids:
-      terminalCompletionReconciliation.reconciledConversationIds,
-    reconciliation_protected_conversation_ids:
-      terminalCompletionReconciliation.protectedConversationIds,
-    superseded_conversation_ids: supersededConversationIds
-  });
-  const bridgeMonitor = bridge
-    ? startTerminalBridgeMonitorForConversation({
-        conversation: deliveredConversation,
-        statePath,
-        logPath,
-        options
-      })
-    : undefined;
-  if (bridgeMonitor) {
+
+  let bookkeepingWarning: string | undefined;
+  try {
     appendEvent(logPath, {
       ts: new Date().toISOString(),
-      conversation_id: deliveredConversation.conversation_id,
-      event: "terminal_bridge_monitor_launch",
-      pid: bridgeMonitor.pid ?? null,
+      conversation_id: conversation.conversation_id,
+      event: "terminal_message_send",
+      executor,
       terminal_control: terminalControl,
-      agent_timeout_minutes: agentTimeoutMinutes,
-      agent_hard_timeout_minutes: agentHardTimeoutMinutes
+      message: textSummary(message.body),
+      payload: textSummary(terminalPayload)
     });
-    runtimeLog("info", "terminal_bridge_monitor_launch", {
+    runtimeLog("info", "terminal_message_send", {
+      conversation_id: conversation.conversation_id,
+      agent: executor.kind,
+      terminal_target: terminalControl.target,
+      message: textSummary(message.body),
+      payload: textSummary(terminalPayload)
+    });
+  } catch (error) {
+    bookkeepingWarning =
+      error instanceof Error ? error.message : String(error);
+    runtimeLog("warn", "terminal_message_post_submit_bookkeeping_failed", {
       conversation_id: deliveredConversation.conversation_id,
-      monitor_pid: bridgeMonitor.pid ?? null,
-      terminal_target: terminalControl.target
+      terminal_target: terminalControl.target,
+      error: bookkeepingWarning,
+      delivered: true
     });
+    try {
+      appendEvent(logPath, {
+        ts: new Date().toISOString(),
+        conversation_id: deliveredConversation.conversation_id,
+        event: "terminal_message_post_submit_bookkeeping_failed",
+        terminal_control: terminalControl,
+        error: textSummary(bookkeepingWarning),
+        delivered: true
+      });
+    } catch {
+      // The durable submitted receipt remains authoritative even if the event log is unavailable.
+    }
   }
   printJson({
     conversation: deliveredConversation,
@@ -5517,24 +4431,23 @@ async function runTerminalControlSend({
     delivered: true,
     status: "async_pending",
     background: true,
-    callback_expected: Boolean(deliveredConversation.callback_command || deliveredConversation.gateway_method),
+    callback_expected: Boolean(deliveredConversation.gateway_method),
     terminal_control: terminalControl,
     monitor_pid: bridgeMonitor?.pid ?? null,
     executor,
     budget: budgetAction(deliveredConversation),
+    delivery_receipt: "submitted",
+    ...(bookkeepingWarning
+      ? {
+          bookkeeping_warning: textSummary(bookkeepingWarning)
+        }
+      : {}),
     openclaw_next_action: openClawYieldNextAction({
       conversationId: deliveredConversation.conversation_id,
       source: "terminal_control",
-      callbackExpected: Boolean(deliveredConversation.callback_command || deliveredConversation.gateway_method)
+      callbackExpected: Boolean(deliveredConversation.gateway_method)
     })
   });
-  if (terminalCompletionReconciliation.prepared.length > 0) {
-    setImmediate(() => {
-      deliverReconciledTerminalBridgeCallbacks(
-        terminalCompletionReconciliation.prepared
-      );
-    });
-  }
 }
 
 function terminalSubmissionPayload(payload: string): string {
@@ -5568,17 +4481,6 @@ function createManagedTerminalConversationFromRawId({
     now
   });
   const paths = pathsForConversation(conversation.conversation_id, storeDir);
-  const callbackCommand = options.callbackCommand
-    ? expandCallbackCommandTemplate(options.callbackCommand, { statePath: paths.statePath })
-    : buildCallbackCommand({
-        statePath: paths.statePath,
-        gatewayUrl: options.gatewayUrl ?? "ws://127.0.0.1:18789",
-        token: options.token,
-        openclawSession: options.openclawSession ?? "agent:main:main",
-        gatewayMethod: options.gatewayMethod,
-        gatewaySession: options.gatewaySession,
-        openclawBin: options.openclawBin ?? resolveOptionalExecutable("openclaw")
-      });
   const claudeAgent = agent === "claude"
     ? loadClaudeAgentRows(options).find((row) => row.pid === pid)
     : undefined;
@@ -5588,13 +4490,10 @@ function createManagedTerminalConversationFromRawId({
     status: "idle" as const,
     idle_since: now.toISOString(),
     updated_at: now.toISOString(),
-    callback_command: callbackCommand,
     gateway_url: options.gatewayUrl ?? "ws://127.0.0.1:18789",
     gateway_method: options.gatewayMethod,
     gateway_session: options.gatewaySession ?? options.openclawSession ?? "agent:main:main",
     openclaw_bin: options.openclawBin ?? resolveOptionalExecutable("openclaw"),
-    executor_all_proxy: proxyForExecutor(executor, options),
-    executor_model: options.model ?? (agent === "codex" ? options.codexModel : undefined),
     native_session_takeover: {
       agent,
       native_session_id: conversationId,
@@ -5633,579 +4532,6 @@ function createManagedTerminalConversationFromRawId({
   };
 }
 
-async function reconcileTerminalBridgeCompletionsBeforeSupersede({
-  options,
-  storeDir,
-  terminalControl,
-  replacementConversationId
-}) {
-  const prepared: Array<{
-    conversationId: string;
-    statePath: string;
-    logPath: string;
-    terminalControl: TerminalControlRef;
-    prepared: ReturnType<typeof prepareLockedCallback>;
-  }> = [];
-  const reconciledConversationIds: string[] = [];
-  const protectedConversationIds: string[] = [];
-  const registry = createRuntimeTerminalAgentRegistry(options);
-
-  for (const listedConversation of listConversations(storeDir)) {
-    if (
-      listedConversation.conversation_id === replacementConversationId ||
-      !TERMINAL_BRIDGE_SUPERSEDE_STATUSES.has(listedConversation.status)
-    ) {
-      continue;
-    }
-    const listedTakeover = isRecord(listedConversation.native_session_takeover)
-      ? listedConversation.native_session_takeover
-      : undefined;
-    const listedControl = terminalControlFromTakeover(listedTakeover);
-    if (
-      listedTakeover?.terminal_bridge !== true ||
-      !listedControl ||
-      listedControl.target !== terminalControl.target ||
-      listedControl.socketPath !== terminalControl.socketPath ||
-      !listedControl.capabilities.includes("durable_completion")
-    ) {
-      continue;
-    }
-
-    const candidateStatePath = stringValue(listedConversation.state_path);
-    if (!candidateStatePath) {
-      continue;
-    }
-    const candidateLogPath = logPathForStatePath(candidateStatePath);
-    let candidate = loadState(candidateStatePath);
-    const candidateTakeover = isRecord(candidate.native_session_takeover)
-      ? candidate.native_session_takeover
-      : undefined;
-    const candidateControl = terminalControlFromTakeover(candidateTakeover);
-    const terminalMessageId = stringValue(
-      candidateTakeover?.terminal_bridge_message_id
-    );
-    if (
-      !TERMINAL_BRIDGE_SUPERSEDE_STATUSES.has(candidate.status) ||
-      candidateTakeover?.terminal_bridge !== true ||
-      !candidateControl ||
-      candidateControl.target !== terminalControl.target ||
-      candidateControl.socketPath !== terminalControl.socketPath ||
-      !candidateControl.capabilities.includes("durable_completion") ||
-      !terminalMessageId
-    ) {
-      continue;
-    }
-    const fenced = fenceTerminalBridgeConversationForReconciliation({
-      statePath: candidateStatePath,
-      logPath: candidateLogPath,
-      terminalControl: candidateControl,
-      terminalMessageId,
-      replacementConversationId
-    });
-    if (!fenced.fenced) {
-      continue;
-    }
-    candidate = fenced.conversation;
-
-    const executor = executorForConversation(candidate);
-    const adapter = registry.require(executor.kind);
-    if (
-      adapter.capabilities.durableCompletion !== true ||
-      typeof adapter.detectDurableCompletion !== "function"
-    ) {
-      continue;
-    }
-
-    let completion: TerminalCompletionEvidence | undefined;
-    try {
-      completion = await adapter.detectDurableCompletion(
-        terminalDurableRequestForConversation(candidate, candidateControl)
-      );
-    } catch (error) {
-      protectedConversationIds.push(candidate.conversation_id);
-      appendEvent(candidateLogPath, {
-        ts: new Date().toISOString(),
-        conversation_id: candidate.conversation_id,
-        event: "terminal_bridge_pre_supersede_reconciliation_failed",
-        terminal_control: candidateControl,
-        terminal_bridge_message_id: terminalMessageId,
-        error: error instanceof Error ? error.message : String(error)
-      });
-      continue;
-    }
-    if (!completion || completion.source !== "durable") {
-      continue;
-    }
-
-    let preparedCompletion;
-    try {
-      preparedCompletion = prepareTerminalBridgeCompletionCallback({
-        options,
-        statePath: candidateStatePath,
-        logPath: candidateLogPath,
-        conversation: candidate,
-        executor,
-        terminalControl: candidateControl,
-        terminalMessageId,
-        completion,
-        allowSupersedeRecovery: true
-      });
-    } catch (error) {
-      protectedConversationIds.push(candidate.conversation_id);
-      appendEvent(candidateLogPath, {
-        ts: new Date().toISOString(),
-        conversation_id: candidate.conversation_id,
-        event: "terminal_bridge_pre_supersede_reconciliation_failed",
-        terminal_control: candidateControl,
-        terminal_bridge_message_id: terminalMessageId,
-        error: error instanceof Error ? error.message : String(error)
-      });
-      continue;
-    }
-    if (!preparedCompletion.claimed) {
-      const latest = preparedCompletion.conversation;
-      if (TERMINAL_BRIDGE_SUPERSEDE_STATUSES.has(latest.status)) {
-        protectedConversationIds.push(candidate.conversation_id);
-      } else {
-        reconciledConversationIds.push(candidate.conversation_id);
-      }
-      continue;
-    }
-
-    const reconciledAt = new Date().toISOString();
-    appendEvent(candidateLogPath, {
-      ts: reconciledAt,
-      conversation_id: candidate.conversation_id,
-      event: "terminal_bridge_completion_reconciled_before_supersede",
-      terminal_control: candidateControl,
-      terminal_bridge_message_id: terminalMessageId,
-      callback_message_id: preparedCompletion.callbackMessageId,
-      replacement_conversation_id: replacementConversationId
-    });
-    reconciledConversationIds.push(candidate.conversation_id);
-    prepared.push({
-      conversationId: candidate.conversation_id,
-      statePath: candidateStatePath,
-      logPath: candidateLogPath,
-      terminalControl: candidateControl,
-      prepared: preparedCompletion.prepared
-    });
-  }
-
-  return {
-    prepared,
-    reconciledConversationIds,
-    protectedConversationIds,
-    skipSupersede: false
-  };
-}
-
-function fenceTerminalBridgeConversationsForReconciliation({
-  storeDir,
-  terminalControl,
-  replacementConversationId
-}): string[] {
-  const fencedConversationIds: string[] = [];
-  for (const listedConversation of listConversations(storeDir)) {
-    if (
-      listedConversation.conversation_id === replacementConversationId ||
-      !TERMINAL_BRIDGE_SUPERSEDE_STATUSES.has(listedConversation.status)
-    ) {
-      continue;
-    }
-    const statePath = stringValue(listedConversation.state_path);
-    const listedTakeover = isRecord(listedConversation.native_session_takeover)
-      ? listedConversation.native_session_takeover
-      : undefined;
-    const listedControl = terminalControlFromTakeover(listedTakeover);
-    const terminalMessageId = stringValue(
-      listedTakeover?.terminal_bridge_message_id
-    );
-    if (
-      !statePath ||
-      listedTakeover?.terminal_bridge !== true ||
-      !listedControl ||
-      listedControl.target !== terminalControl.target ||
-      listedControl.socketPath !== terminalControl.socketPath ||
-      !terminalMessageId
-    ) {
-      continue;
-    }
-    const result = fenceTerminalBridgeConversationForReconciliation({
-      statePath,
-      logPath: logPathForStatePath(statePath),
-      terminalControl: listedControl,
-      terminalMessageId,
-      replacementConversationId
-    });
-    if (result.fenced) {
-      fencedConversationIds.push(listedConversation.conversation_id);
-    }
-  }
-  return fencedConversationIds;
-}
-
-function fenceTerminalBridgeConversationForReconciliation({
-  statePath,
-  logPath,
-  terminalControl,
-  terminalMessageId,
-  replacementConversationId
-}) {
-  const releaseLock = acquireFileLock(`${statePath}.lock`);
-  try {
-    const conversation = loadState(statePath);
-    const nativeTakeover = isRecord(conversation.native_session_takeover)
-      ? conversation.native_session_takeover
-      : undefined;
-    const currentControl = terminalControlFromTakeover(nativeTakeover);
-    if (
-      !TERMINAL_BRIDGE_SUPERSEDE_STATUSES.has(conversation.status) ||
-      nativeTakeover?.terminal_bridge !== true ||
-      currentControl?.target !== terminalControl.target ||
-      currentControl?.socketPath !== terminalControl.socketPath ||
-      stringValue(nativeTakeover?.terminal_bridge_message_id) !==
-        terminalMessageId
-    ) {
-      return {
-        fenced: false as const,
-        conversation
-      };
-    }
-    const existingFence = isRecord(
-      nativeTakeover.terminal_bridge_reconciliation_fence
-    )
-      ? nativeTakeover.terminal_bridge_reconciliation_fence
-      : undefined;
-    if (
-      conversation.status === "stalled" &&
-      existingFence?.replacement_conversation_id === replacementConversationId
-    ) {
-      return {
-        fenced: true as const,
-        conversation
-      };
-    }
-
-    const fencedAt = new Date().toISOString();
-    const fencedConversation = {
-      ...conversation,
-      status: "stalled" as const,
-      stalled_reason:
-        "terminal bridge paused because a newer task reused the same terminal before durable completion was resolved",
-      native_session_takeover: {
-        ...nativeTakeover,
-        terminal_bridge_reconciliation_fence: {
-          replacement_conversation_id: replacementConversationId,
-          terminal_bridge_message_id: terminalMessageId,
-          previous_status: conversation.status,
-          fenced_at: fencedAt
-        }
-      },
-      updated_at: fencedAt
-    };
-    saveState(statePath, fencedConversation);
-    appendEvent(logPath, {
-      ts: fencedAt,
-      conversation_id: conversation.conversation_id,
-      event: "terminal_bridge_reconciliation_fenced",
-      terminal_control: terminalControl,
-      terminal_bridge_message_id: terminalMessageId,
-      previous_status: conversation.status,
-      replacement_conversation_id: replacementConversationId
-    });
-    return {
-      fenced: true as const,
-      conversation: fencedConversation
-    };
-  } finally {
-    releaseLock();
-  }
-}
-
-function deliverReconciledTerminalBridgeCallbacks(
-  reconciledCallbacks: Array<{
-    conversationId: string;
-    statePath: string;
-    logPath: string;
-    terminalControl: TerminalControlRef;
-    prepared: ReturnType<typeof prepareLockedCallback>;
-  }>
-): void {
-  for (const callback of reconciledCallbacks) {
-    try {
-      runPreparedCallback(callback.prepared, { emit: false });
-    } catch (error) {
-      appendEvent(callback.logPath, {
-        ts: new Date().toISOString(),
-        conversation_id: callback.conversationId,
-        event: "terminal_bridge_reconciled_callback_delivery_failed",
-        terminal_control: callback.terminalControl,
-        error: error instanceof Error ? error.message : String(error)
-      });
-      runtimeLog("warn", "terminal_bridge_reconciled_callback_delivery_failed", {
-        conversation_id: callback.conversationId,
-        terminal_target: callback.terminalControl.target,
-        state_path: callback.statePath,
-        error: error instanceof Error ? error.message : String(error)
-      });
-    }
-  }
-}
-
-function supersedeTerminalBridgeConversations({
-  storeDir,
-  terminalControl,
-  replacementConversationId,
-  excludedConversationIds = [] as string[]
-}): string[] {
-  const excluded = new Set(excludedConversationIds);
-  const superseded: string[] = [];
-  for (const candidate of listConversations(storeDir)) {
-    if (
-      candidate.conversation_id === replacementConversationId ||
-      excluded.has(candidate.conversation_id) ||
-      !TERMINAL_BRIDGE_SUPERSEDE_STATUSES.has(candidate.status)
-    ) {
-      continue;
-    }
-    const candidateTakeover = isRecord(candidate.native_session_takeover)
-      ? candidate.native_session_takeover
-      : undefined;
-    const candidateControl = terminalControlFromTakeover(candidateTakeover);
-    if (
-      candidateTakeover?.["terminal_bridge"] !== true ||
-      candidateControl?.target !== terminalControl.target ||
-      candidateControl?.socketPath !== terminalControl.socketPath
-    ) {
-      continue;
-    }
-
-    const candidateStatePath = stringValue(candidate.state_path);
-    if (!candidateStatePath) {
-      continue;
-    }
-    const releaseLock = acquireFileLock(`${candidateStatePath}.lock`);
-    try {
-      const current = loadState(candidateStatePath);
-      if (!TERMINAL_BRIDGE_SUPERSEDE_STATUSES.has(current.status)) {
-        continue;
-      }
-      const currentTakeover = isRecord(current.native_session_takeover)
-        ? current.native_session_takeover
-        : undefined;
-      const currentControl = terminalControlFromTakeover(currentTakeover);
-      if (
-        currentTakeover?.["terminal_bridge"] !== true ||
-        currentControl?.target !== terminalControl.target ||
-        currentControl?.socketPath !== terminalControl.socketPath
-      ) {
-        continue;
-      }
-
-      const now = new Date().toISOString();
-      const closedConversation = {
-        ...current,
-        status: "closed" as const,
-        closed_at: now,
-        close_reason: "terminal bridge superseded by a newer task on the same terminal",
-        superseded_by_conversation_id: replacementConversationId,
-        updated_at: now
-      };
-      saveState(candidateStatePath, closedConversation);
-      releaseClaudeHookLease(closedConversation);
-      appendEvent(logPathForStatePath(candidateStatePath), {
-        ts: now,
-        conversation_id: current.conversation_id,
-        event: "terminal_bridge_superseded",
-        terminal_control: terminalControl,
-        replacement_conversation_id: replacementConversationId
-      });
-      superseded.push(current.conversation_id);
-    } finally {
-      releaseLock();
-    }
-  }
-  return superseded;
-}
-
-function runNativeCodexResumeSend({
-  options,
-  conversation,
-  nextConversation,
-  statePath,
-  logPath,
-  executor,
-  executorEnv,
-  message,
-  payload,
-  nativeTakeover,
-  needsNativeTakeoverBootstrap
-}) {
-  const codexPath = resolveExecutable("codex");
-  const nativeSessionId = String(nativeTakeover["native_session_id"]);
-  const nativeModel = nativeCodexModelForSend({ options, conversation, nativeTakeover });
-  const codexArgs = buildCodexExecResumeArgs({
-    nativeSessionId,
-    payload,
-    model: nativeModel
-  });
-
-  appendEvent(logPath, {
-    ts: new Date().toISOString(),
-    conversation_id: conversation.conversation_id,
-    event: "native_executor_resume_prepare",
-    executor,
-    native_session_id: nativeSessionId,
-    model: nativeModel ?? null
-  });
-  runtimeLog("info", "native_executor_resume_prepare", {
-    conversation_id: conversation.conversation_id,
-    agent: executor.kind,
-    executor_session: executor.session,
-    native_session_id: nativeSessionId,
-    model: nativeModel
-  });
-
-  if (options.background) {
-    const outputPath = path.join(path.dirname(logPath), `${executor.kind}-native-resume-output.log`);
-    const outputFd = openPrivateAppendFile(outputPath);
-    const child = spawn(codexPath, codexArgs, {
-      detached: true,
-      stdio: ["ignore", outputFd, outputFd],
-      cwd: conversation.workspace ?? process.cwd(),
-      env: executorEnv
-    });
-    child.unref();
-    fs.closeSync(outputFd);
-
-    appendEvent(logPath, {
-      ts: new Date().toISOString(),
-      conversation_id: conversation.conversation_id,
-      event: "native_executor_resume_launch",
-      mode: "background",
-      pid: child.pid ?? null,
-      executor,
-      native_session_id: nativeSessionId,
-      output_path: outputPath
-    });
-    runtimeLog("info", "native_executor_resume_launch", {
-      conversation_id: conversation.conversation_id,
-      agent: executor.kind,
-      executor_session: executor.session,
-      native_session_id: nativeSessionId,
-      mode: "background",
-      pid: child.pid ?? null,
-      output_path: outputPath
-    });
-    const monitor = startExecutorMonitor({
-      statePath,
-      logPath,
-      pid: child.pid,
-      outputPath,
-      agentTimeoutMinutes: Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES),
-      pollIntervalMs: Number(options.monitorPollIntervalMs ?? DEFAULT_MONITOR_POLL_INTERVAL_MS)
-    });
-    appendEvent(logPath, {
-      ts: new Date().toISOString(),
-      conversation_id: conversation.conversation_id,
-      event: "executor_monitor_launch",
-      pid: monitor.pid ?? null,
-      executor_pid: child.pid ?? null,
-      agent_timeout_minutes: Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES)
-    });
-
-    const deliveredConversation = markTakeoverBootstrapped({
-      conversation: nextConversation,
-      statePath,
-      logPath,
-      executor,
-      native: needsNativeTakeoverBootstrap,
-      fork: false
-    });
-
-    printJson({
-      conversation: deliveredConversation,
-      message,
-      delivered: true,
-      background: true,
-      status: "async_pending",
-      native_resume: true,
-      pid: child.pid ?? null,
-      monitor_pid: monitor.pid ?? null,
-      output_path: outputPath,
-      executor,
-      budget: budgetAction(deliveredConversation),
-      openclaw_next_action: openClawYieldNextAction({
-        conversationId: deliveredConversation.conversation_id,
-        source: "native_resume_background",
-        callbackExpected: Boolean(deliveredConversation.callback_command || deliveredConversation.gateway_method)
-      })
-    });
-    return;
-  }
-
-  const sendResult = spawnSync(codexPath, codexArgs, {
-    encoding: "utf8",
-    maxBuffer: 1024 * 1024 * 10,
-    cwd: conversation.workspace ?? process.cwd(),
-    env: executorEnv
-  });
-  appendEvent(logPath, {
-    ts: new Date().toISOString(),
-    conversation_id: conversation.conversation_id,
-    event: "native_executor_resume_send",
-    status: sendResult.status ?? null,
-    executor,
-    native_session_id: nativeSessionId,
-    stdout: cleanProcessText(sendResult.stdout),
-    stderr: cleanProcessText(sendResult.stderr)
-  });
-  runtimeLog("info", "native_executor_resume_send", {
-    conversation_id: conversation.conversation_id,
-    agent: executor.kind,
-    executor_session: executor.session,
-    native_session_id: nativeSessionId,
-    status: sendResult.status ?? null,
-    failure_kind: classifyProcessFailure(sendResult),
-    stdout: textSummary(cleanProcessText(sendResult.stdout)),
-    stderr: textSummary(cleanProcessText(sendResult.stderr))
-  });
-  if (sendResult.error) {
-    throw new Error(`codex exec resume failed to start: ${sendResult.error.message}`);
-  }
-  if (sendResult.status !== 0) {
-    throw new Error(cleanProcessText(sendResult.stderr || sendResult.stdout || `codex exec resume exited with status ${sendResult.status}`));
-  }
-
-  const deliveredConversation = markTakeoverBootstrapped({
-    conversation: nextConversation,
-    statePath,
-    logPath,
-    executor,
-    native: needsNativeTakeoverBootstrap,
-    fork: false
-  });
-
-  printJson({
-    conversation: deliveredConversation,
-    message,
-    delivered: true,
-    native_resume: true,
-    executor,
-    budget: budgetAction(deliveredConversation)
-  });
-}
-
-function buildCodexExecResumeArgs({ nativeSessionId, payload, model }) {
-  const args = ["exec", "resume"];
-  if (model) {
-    args.push("--model", model);
-  }
-  args.push("--skip-git-repo-check", nativeSessionId, payload);
-  return args;
-}
-
 function openClawYieldNextAction({ conversationId, source, callbackExpected }) {
   const callbackText = callbackExpected
     ? "The coding agent should report completion, questions, or errors through the existing Agent Knock Knock callback for this conversation."
@@ -6220,283 +4546,6 @@ function openClawYieldNextAction({ conversationId, source, callbackExpected }) {
     do_not:
       "Do not inspect event logs, process lists, terminal screens, files, stdout, or stderr while waiting unless the user explicitly asks for status.",
     expected_callback: callbackText
-  };
-}
-
-function nativeCodexModelForSend({ options, conversation, nativeTakeover }) {
-  const explicit = options.model ?? options.codexModel;
-  if (explicit) {
-    return normalizeNativeCodexModel(explicit);
-  }
-
-  const nativeModel = isRecord(nativeTakeover) ? nativeTakeover["native_model"] : undefined;
-  if (typeof nativeModel === "string" && nativeModel.trim()) {
-    return normalizeNativeCodexModel(nativeModel);
-  }
-
-  return normalizeNativeCodexModel(conversation.executor_model);
-}
-
-function normalizeNativeCodexModel(model) {
-  const value = typeof model === "string" ? model.trim() : "";
-  if (!value) {
-    return undefined;
-  }
-
-  return value.replace(/\[[^\]]+\]$/u, "").replace(/\/(?:low|medium|high|xhigh)$/u, "");
-}
-
-function buildAgentSendPayload({ conversation, executor, message, includeNativeTakeoverBootstrap, includeForkTakeoverBootstrap, forkTakeover }) {
-  const messageJson = JSON.stringify(message);
-  if (!includeNativeTakeoverBootstrap && !includeForkTakeoverBootstrap) {
-    return [
-      "Continue the existing Agent Knock Knock delegation using this structured OpenClaw message.",
-      "If this message answers a question or blocker, follow it as the product decision.",
-      "Continue to report back only through the callback command already provided for this conversation.",
-      "",
-      messageJson
-    ].join("\n");
-  }
-
-  if (includeForkTakeoverBootstrap) {
-    const summary = forkTakeoverSummaryText(forkTakeover);
-    return [
-      executorBootstrapPrompt({
-        callbackCommand: conversation.callback_command,
-        executorName: executor.display_name,
-        softLimit: Number(conversation.soft_limit ?? 50),
-        hardLimit: Number(conversation.hard_limit ?? 100)
-      }),
-      "",
-      "This AKK conversation is a fork of an existing native coding-agent session. Do not resume the original native session. Treat the approved summary below as the only imported context from the source session, then continue as a new AKK-managed session in this workspace.",
-      "",
-      "Approved source-session summary:",
-      summary || "(No approved summary was provided.)",
-      "",
-      "Initial AKK fork message:",
-      messageJson
-    ].join("\n");
-  }
-
-  return [
-    executorBootstrapPrompt({
-      callbackCommand: conversation.callback_command,
-      executorName: executor.display_name,
-      softLimit: Number(conversation.soft_limit ?? 50),
-      hardLimit: Number(conversation.hard_limit ?? 100)
-    }),
-    "",
-    "This AKK conversation is attaching to an existing native coding-agent session. Continue from the native session context if it is available, and use the callback command above for all replies to OpenClaw.",
-    "",
-    "Initial AKK takeover message:",
-    messageJson
-  ].join("\n");
-}
-
-function forkTakeoverSummaryText(forkTakeover) {
-  return String(isRecord(forkTakeover) ? forkTakeover.summary ?? "" : "").trim();
-}
-
-function markTakeoverBootstrapped({
-  conversation,
-  statePath,
-  logPath,
-  executor,
-  native,
-  fork,
-  stateLockHeld = false
-}) {
-  let nextConversation = conversation;
-  if (native) {
-    nextConversation = markNativeSessionBootstrapped({
-      conversation: nextConversation,
-      statePath,
-      logPath,
-      executor,
-      stateLockHeld
-    });
-  }
-  if (fork) {
-    nextConversation = markForkSessionBootstrapped({
-      conversation: nextConversation,
-      statePath,
-      logPath,
-      executor,
-      stateLockHeld
-    });
-  }
-  return nextConversation;
-}
-
-function markNativeSessionBootstrapped({
-  conversation,
-  statePath,
-  logPath,
-  executor,
-  stateLockHeld = false
-}) {
-  const now = new Date().toISOString();
-  const releaseLock = stateLockHeld
-    ? undefined
-    : acquireFileLock(`${statePath}.lock`);
-  let nextConversation = conversation;
-  try {
-    const current = stateLockHeld ? conversation : loadState(statePath);
-    const nativeTakeover = isRecord(current.native_session_takeover)
-      ? current.native_session_takeover
-      : {};
-    nextConversation = {
-      ...current,
-      native_session_takeover: {
-        ...nativeTakeover,
-        needs_bootstrap: false,
-        bootstrapped_at: now
-      },
-      updated_at: now
-    };
-    saveState(statePath, nextConversation);
-  } finally {
-    releaseLock?.();
-  }
-  appendEvent(logPath, {
-    ts: now,
-    conversation_id: nextConversation.conversation_id,
-    event: "native_session_bootstrapped",
-    executor
-  });
-  runtimeLog("info", "native_session_bootstrapped", {
-    conversation_id: nextConversation.conversation_id,
-    agent: executor.kind,
-    executor_session: executor.session,
-    state_path: statePath
-  });
-  return nextConversation;
-}
-
-function markForkSessionBootstrapped({
-  conversation,
-  statePath,
-  logPath,
-  executor,
-  stateLockHeld = false
-}) {
-  const now = new Date().toISOString();
-  const releaseLock = stateLockHeld
-    ? undefined
-    : acquireFileLock(`${statePath}.lock`);
-  let nextConversation = conversation;
-  try {
-    const current = stateLockHeld ? conversation : loadState(statePath);
-    const forkTakeover = isRecord(current.fork_context_takeover)
-      ? current.fork_context_takeover
-      : {};
-    nextConversation = {
-      ...current,
-      fork_context_takeover: {
-        ...forkTakeover,
-        needs_bootstrap: false,
-        bootstrapped_at: now
-      },
-      updated_at: now
-    };
-    saveState(statePath, nextConversation);
-  } finally {
-    releaseLock?.();
-  }
-  appendEvent(logPath, {
-    ts: now,
-    conversation_id: nextConversation.conversation_id,
-    event: "fork_session_bootstrapped",
-    executor
-  });
-  runtimeLog("info", "fork_session_bootstrapped", {
-    conversation_id: nextConversation.conversation_id,
-    agent: executor.kind,
-    executor_session: executor.session,
-    state_path: statePath
-  });
-  return nextConversation;
-}
-
-function requiresExplicitRecoveryDecision(options: Record<string, any> = {}) {
-  if (options.recoveryPolicy === "explicit" || options.recoveryPolicy === "explicit-decision") {
-    return true;
-  }
-  return false;
-}
-
-function autoRecoverSendFailure({ options, conversation, statePath, logPath, executor, message, failedStage, result, reason }) {
-  markConversationNeedsRecovery({
-    conversation,
-    statePath,
-    logPath,
-    executor,
-    message,
-    failedStage,
-    result,
-    reason
-  });
-  runtimeLog("info", "conversation_auto_recovery_start", {
-    conversation_id: conversation.conversation_id,
-    agent: executor.kind,
-    executor_session: executor.session,
-    failed_stage: failedStage,
-    reason: textSummary(reason)
-  });
-  runRecoveryDecision({
-    ...options,
-    mode: "recover",
-    autoRecovered: true
-  });
-}
-
-function markConversationNeedsRecovery({ conversation, statePath, logPath, executor, message, failedStage, result, reason }) {
-  const now = new Date().toISOString();
-  const failureKind = classifyProcessFailure(result);
-  const recovery = {
-    reason: "executor_session_unavailable",
-    detail: reason,
-    failed_at: now,
-    failed_stage: failedStage,
-    failure_kind: failureKind,
-    failed_message_id: message.id,
-    pending_message: message,
-    previous_executor: executor,
-    options: ["recover", "close", "delegate"]
-  };
-  const nextConversation = {
-    ...conversation,
-    status: "needs_recovery" as const,
-    recovery,
-    updated_at: now
-  };
-  saveState(statePath, nextConversation);
-  appendEvent(logPath, {
-    ts: now,
-    conversation_id: conversation.conversation_id,
-    event: "conversation_needs_recovery",
-    status: "needs_recovery",
-    executor,
-    failed_stage: failedStage,
-    failure_kind: failureKind,
-    reason
-  });
-  runtimeLog("warn", "conversation_needs_recovery", {
-    conversation_id: conversation.conversation_id,
-    agent: executor.kind,
-    executor_session: executor.session,
-    failed_stage: failedStage,
-    failure_kind: failureKind,
-    reason: textSummary(reason)
-  });
-  return {
-    conversation: nextConversation,
-    message,
-    delivered: false,
-    requires_recovery_decision: true,
-    recovery,
-    executor,
-    budget: budgetAction(nextConversation)
   };
 }
 
@@ -6592,34 +4641,15 @@ async function runRenew(options) {
     }
 
     const now = new Date().toISOString();
-    const currentMessageId = stringValue(currentTakeover.terminal_bridge_message_id);
     const hardDeadline = deadlineAt(startedAt ?? now, hardTimeoutMinutes) ??
       new Date(Date.now() + hardTimeoutMinutes * 60 * 1000).toISOString();
     const inactivityDeadline = deadlineAt(now, inactivityTimeoutMinutes) ??
       new Date(Date.now() + inactivityTimeoutMinutes * 60 * 1000).toISOString();
-    const renewedLease = executorForConversation(current).kind === "claude" && currentMessageId
-      ? activateClaudeHookLease({
-          options,
-          conversation: current,
-          message: { id: currentMessageId },
-          terminalControl: currentControl,
-          expiresAt: new Date(Math.min(
-            Date.parse(hardDeadline),
-            Date.parse(inactivityDeadline)
-          )).toISOString()
-        })
-      : undefined;
-    const renewedBase = renewedLease
-      ? withClaudeHookLeaseState(current, renewedLease)
-      : current;
-    const renewedNativeTakeover = isRecord(renewedBase.native_session_takeover)
-      ? renewedBase.native_session_takeover
-      : currentTakeover;
     renewed = {
-      ...renewedBase,
+      ...current,
       status: "waiting_for_agent" as const,
       native_session_takeover: {
-        ...renewedNativeTakeover,
+        ...currentTakeover,
         terminal_bridge_monitor_lock_version: TERMINAL_BRIDGE_MONITOR_LOCK_VERSION,
         terminal_bridge_monitor_started_at: now,
         terminal_bridge_last_activity_at: now,
@@ -7021,6 +5051,34 @@ function terminalBridgeReconciliationEligibility(conversation) {
   if (!terminalMessageId || !terminalControl) {
     return { eligible: false as const, reason: "terminal_bridge_identity_missing" };
   }
+  const dispatchLedger =
+    loadTerminalBridgeDispatchLedger(terminalControl);
+  if (
+    dispatchLedger &&
+    (
+      stringValue(dispatchLedger.message_id) !== terminalMessageId ||
+      !["prepared", "submitted"].includes(
+        String(dispatchLedger.status)
+      )
+    )
+  ) {
+    return {
+      eligible: false as const,
+      reason: `terminal_dispatch_${String(
+        dispatchLedger.status ?? "generation_replaced"
+      )}`
+    };
+  }
+  const submission = terminalBridgeSubmission(conversation);
+  if (
+    stringValue(submission?.message_id) === terminalMessageId &&
+    (submission?.status === "uncertain" || submission?.status === "aborted")
+  ) {
+    return {
+      eligible: false as const,
+      reason: `terminal_submission_${submission.status}`
+    };
+  }
   const runtime = terminalRuntimeIdentityForConversation(conversation, terminalControl);
   if (!Number.isInteger(runtime.pid) || Number(runtime.pid) <= 0 || !stringValue(runtime.cwd)) {
     return { eligible: false as const, reason: "terminal_agent_identity_missing" };
@@ -7129,45 +5187,13 @@ function prepareTerminalBridgeMonitorReconciliation({
       };
     }
 
-    let renewedLease: ClaudeManagedLease | undefined;
-    const usesClaudeHookLease =
-      executorForConversation(conversation).kind === "claude" &&
-      eligibility.nativeTakeover.claude_hook_mode === "enabled";
-    if (usesClaudeHookLease) {
-      const leaseDeadlineAtMs = Math.min(
-        eligibility.inactivityDeadlineAtMs,
-        eligibility.hardDeadlineAtMs
-      );
-      if (leaseDeadlineAtMs <= Date.now()) {
-        return {
-          prepared: false as const,
-          alreadyRunning: false,
-          reason: "claude_hook_lease_deadline_elapsed"
-        };
-      }
-      renewedLease = renewClaudeHookLease(
-        conversation,
-        new Date(leaseDeadlineAtMs).toISOString()
-      );
-      if (!renewedLease) {
-        return {
-          prepared: false as const,
-          alreadyRunning: false,
-          reason: "claude_hook_lease_refresh_failed"
-        };
-      }
-    }
-
     const nextNativeTakeover = {
       ...eligibility.nativeTakeover,
-      terminal_bridge_monitor_lock_version: TERMINAL_BRIDGE_MONITOR_LOCK_VERSION,
-      ...(renewedLease ? { claude_hook_lease_id: renewedLease.id } : {})
+      terminal_bridge_monitor_lock_version: TERMINAL_BRIDGE_MONITOR_LOCK_VERSION
     };
     const needsSave =
       eligibility.nativeTakeover.terminal_bridge_monitor_lock_version !==
-        TERMINAL_BRIDGE_MONITOR_LOCK_VERSION ||
-      (renewedLease !== undefined &&
-        eligibility.nativeTakeover.claude_hook_lease_id !== renewedLease.id);
+        TERMINAL_BRIDGE_MONITOR_LOCK_VERSION;
     const preparedConversation = needsSave
       ? {
           ...conversation,
@@ -7218,7 +5244,7 @@ async function runCancel(options) {
     ...loaded,
     options
   });
-  if (["closed", "cancelled"].includes(conversation.status)) {
+  if (!["waiting_for_agent", "waiting_for_openclaw"].includes(conversation.status)) {
     throw new Error(`cannot cancel ${conversation.conversation_id}; conversation is ${conversation.status}`);
   }
 
@@ -7229,7 +5255,6 @@ async function runCancel(options) {
   if (terminalControl) {
     await runTerminalControlCancel({
       options,
-      conversation,
       statePath,
       logPath,
       agent: executorForConversation(conversation).kind,
@@ -7238,65 +5263,9 @@ async function runCancel(options) {
     return;
   }
 
-  const executor = executorForConversation(conversation);
-  const acpxPath = resolveExecutable("acpx");
-  const executorEnv = environmentForExecutor(executor, {
-    allProxy: options.allProxy ?? conversation.executor_all_proxy
-  });
-  const cancelArgs = acpxCancelArgs({ executor });
-  const cancelResult = spawnSync(acpxPath, cancelArgs, {
-    encoding: "utf8",
-    maxBuffer: 1024 * 1024 * 10,
-    cwd: conversation.workspace ?? process.cwd(),
-    env: executorEnv
-  });
-  const now = new Date().toISOString();
-  appendEvent(logPath, {
-    ts: now,
-    conversation_id: conversation.conversation_id,
-    event: "executor_cancel_requested",
-    status: cancelResult.status ?? null,
-    executor,
-    stdout: cleanProcessText(cancelResult.stdout),
-    stderr: cleanProcessText(cancelResult.stderr)
-  });
-  runtimeLog("info", "executor_cancel_requested", {
-    conversation_id: conversation.conversation_id,
-    agent: executor.kind,
-    executor_session: executor.session,
-    status: cancelResult.status ?? null,
-    failure_kind: classifyProcessFailure(cancelResult),
-    stdout: textSummary(cleanProcessText(cancelResult.stdout)),
-    stderr: textSummary(cleanProcessText(cancelResult.stderr))
-  });
-  if (cancelResult.error) {
-    throw new Error(`acpx ${executor.kind} cancel failed to start: ${cancelResult.error.message}`);
-  }
-  if (cancelResult.status !== 0) {
-    throw new Error(cleanProcessText(cancelResult.stderr || cancelResult.stdout || `acpx ${executor.kind} cancel exited with status ${cancelResult.status}`));
-  }
-
-  const nextConversation = {
-    ...conversation,
-    status: "cancelling" as const,
-    cancel_requested_at: now,
-    updated_at: now
-  };
-  saveState(statePath, nextConversation);
-  runtimeLog("info", "conversation_cancelling", {
-    conversation_id: conversation.conversation_id,
-    agent: executor.kind,
-    executor_session: executor.session,
-    state_path: statePath
-  });
-
-  printJson({
-    conversation: nextConversation,
-    cancel_requested: true,
-    executor,
-    acpx_command: ["acpx", ...cancelArgs],
-    budget: budgetAction(nextConversation)
-  });
+  throw new Error(
+    `conversation ${conversation.conversation_id} is not attached to a live tmux terminal`
+  );
 }
 
 async function runTerminalConversationCancel({ options, conversationId, agent, terminalControl, pid }) {
@@ -7341,7 +5310,7 @@ async function runTerminalConversationCancel({ options, conversationId, agent, t
   }
 }
 
-async function runTerminalControlCancel({ options, conversation, statePath, logPath, agent, terminalControl }) {
+async function runTerminalControlCancel({ options, statePath, logPath, agent, terminalControl }) {
   const releaseTerminalLock = acquireFileLock(
     terminalBridgeSendLockPath(storeDirFromOptions(options), terminalControl),
     { timeoutMs: 30000 }
@@ -7350,7 +5319,7 @@ async function runTerminalControlCancel({ options, conversation, statePath, logP
   try {
     releaseStateLock = acquireFileLock(`${statePath}.lock`);
     const currentConversation = loadState(statePath);
-    if (["closed", "cancelled"].includes(currentConversation.status)) {
+    if (!["waiting_for_agent", "waiting_for_openclaw"].includes(currentConversation.status)) {
       throw new Error(
         `cannot cancel ${currentConversation.conversation_id}; conversation is ${currentConversation.status}`
       );
@@ -7368,6 +5337,11 @@ async function runTerminalControlCancel({ options, conversation, statePath, logP
         "terminal control changed while waiting to cancel; refresh status and retry"
       );
     }
+    assertManagedTerminalDispatchOwner({
+      conversation: currentConversation,
+      terminalControl: currentControl,
+      action: "cancel"
+    });
 
     const cancellation = await createTerminalAgentBridge(options).cancel(agent, currentControl, {
       runtime: terminalRuntimeIdentityForConversation(currentConversation, currentControl),
@@ -7413,7 +5387,6 @@ async function runTerminalControlCancel({ options, conversation, statePath, logP
       updated_at: now
     };
     saveState(statePath, nextConversation);
-    releaseClaudeHookLease(nextConversation);
 
     printJson({
       conversation: nextConversation,
@@ -7434,183 +5407,16 @@ async function runTerminalControlCancel({ options, conversation, statePath, logP
   }
 }
 
-function runRecover(options) {
-  runRecoveryDecision({ ...options, mode: "recover" });
-}
-
-function runRecoveryDecision(options) {
-  cleanupIdleConversations(storeDirFromOptions(options), options);
-  const { conversation, statePath, logPath } = loadConversationFromOptions(options);
-  if (conversation.status !== "needs_recovery") {
-    throw new Error(`cannot ${options.mode} ${conversation.conversation_id}; conversation is ${conversation.status}`);
-  }
-  const pendingMessage = conversation.recovery?.pending_message;
-  if (!isRecord(pendingMessage)) {
-    throw new Error(`cannot ${options.mode} ${conversation.conversation_id}; recovery pending message is missing`);
-  }
-
-  const previousExecutor = executorForConversation(conversation);
-  const executor = resolveExecutor({
-    kind: previousExecutor.kind,
-    session: options.session ?? uniqueDelegateSessionName(previousExecutor.kind)
-  });
-  const now = new Date().toISOString();
-  const recoveredConversation = {
-    ...conversation,
-    executor,
-    claude_session: executor.kind === "claude" ? executor.session : conversation.claude_session,
-    status: "waiting_for_agent" as const,
-    recovery: {
-      ...conversation.recovery,
-      resolved_at: now,
-      resolution: options.mode,
-      previous_session: previousExecutor.session,
-      new_session: executor.session
-    },
-    updated_at: now
-  };
-  saveState(statePath, recoveredConversation);
-
-  const payload = buildRecoverPayload({ conversation, pendingMessage, logPath });
-  const acpxPath = resolveExecutable("acpx");
-  const executorEnv = environmentForExecutor(executor, {
-    allProxy: options.allProxy ?? conversation.executor_all_proxy
-  });
-  const executorModel = modelForExecutor(executor, {
-    model: options.model ?? conversation.executor_model
-  });
-  const ensureSession = ensureExecutorSession({
-    acpxPath,
-    executor,
-    cwd: conversation.workspace ?? process.cwd(),
-    env: executorEnv
-  });
-  appendEvent(logPath, {
-    ts: new Date().toISOString(),
-    conversation_id: conversation.conversation_id,
-    event: "executor_recovery_session_ensure",
-    mode: options.mode,
-    status: ensureSession.status ?? null,
-    executor,
-    stdout: cleanProcessText(ensureSession.stdout),
-    stderr: cleanProcessText(ensureSession.stderr)
-  });
-  if (ensureSession.error) {
-    throw new Error(`acpx ${executor.kind} recovery session ensure failed to start: ${ensureSession.error.message}`);
-  }
-  if (ensureSession.status !== 0) {
-    throw new Error(cleanProcessText(ensureSession.stderr || ensureSession.stdout || `acpx ${executor.kind} recovery sessions ensure exited with status ${ensureSession.status}`));
-  }
-
-  const acpxArgs = buildAcpxPromptArgs({ executor, payload, model: executorModel });
-  if (options.background) {
-    const outputPath = path.join(path.dirname(logPath), `${executor.kind}-${options.mode}-output.log`);
-    const outputFd = openPrivateAppendFile(outputPath);
-    const child = spawn(acpxPath, acpxArgs, {
-      detached: true,
-      stdio: ["ignore", outputFd, outputFd],
-      cwd: conversation.workspace ?? process.cwd(),
-      env: executorEnv
-    });
-    child.unref();
-    fs.closeSync(outputFd);
-    appendEvent(logPath, {
-      ts: new Date().toISOString(),
-      conversation_id: conversation.conversation_id,
-      event: "executor_recovery_launch",
-      mode: options.mode,
-      run_mode: "background",
-      pid: child.pid ?? null,
-      executor,
-      output_path: outputPath
-    });
-    const monitor = startExecutorMonitor({
-      statePath,
-      logPath,
-      pid: child.pid,
-      outputPath,
-      agentTimeoutMinutes: Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES),
-      pollIntervalMs: Number(options.monitorPollIntervalMs ?? DEFAULT_MONITOR_POLL_INTERVAL_MS)
-    });
-    printJson({
-      conversation: recoveredConversation,
-      recovered: true,
-      auto_recovered: Boolean(options.autoRecovered),
-      background: true,
-      pid: child.pid ?? null,
-      monitor_pid: monitor.pid ?? null,
-      output_path: outputPath,
-      executor,
-      budget: budgetAction(recoveredConversation)
+async function runClose(options) {
+  const terminalConversation =
+    await resolveTerminalConversationFromOptions(options);
+  if (terminalConversation) {
+    runTerminalDispatchClose({
+      options,
+      terminalConversation
     });
     return;
   }
-
-  const sendResult = spawnSync(acpxPath, acpxArgs, {
-    encoding: "utf8",
-    maxBuffer: 1024 * 1024 * 10,
-    cwd: conversation.workspace ?? process.cwd(),
-    env: executorEnv
-  });
-  appendEvent(logPath, {
-    ts: new Date().toISOString(),
-    conversation_id: conversation.conversation_id,
-    event: "executor_recovery_send",
-    mode: options.mode,
-    status: sendResult.status ?? null,
-    executor,
-    stdout: cleanProcessText(sendResult.stdout),
-    stderr: cleanProcessText(sendResult.stderr)
-  });
-  if (sendResult.error) {
-    throw new Error(`acpx ${executor.kind} recovery send failed to start: ${sendResult.error.message}`);
-  }
-  if (sendResult.status !== 0) {
-    throw new Error(cleanProcessText(sendResult.stderr || sendResult.stdout || `acpx ${executor.kind} recovery send exited with status ${sendResult.status}`));
-  }
-
-  printJson({
-    conversation: recoveredConversation,
-    recovered: true,
-    auto_recovered: Boolean(options.autoRecovered),
-    delivered: true,
-    executor,
-    budget: budgetAction(recoveredConversation)
-  });
-}
-
-function buildRecoverPayload({ conversation, pendingMessage, logPath }) {
-  return [
-    "Recover this Agent Knock Knock task in a new ACPX session.",
-    "The previous coding-agent session was unavailable. This is AKK replay recovery, not native agent session resume.",
-    "Use the saved protocol history summary below as context, then continue with the pending OpenClaw message.",
-    "Continue to report back only through the callback command already provided for this conversation.",
-    "",
-    "Task:",
-    conversation.user_request,
-    "",
-    "Saved protocol history:",
-    formatProtocolHistoryForRecovery(readExistingEvents(logPath)),
-    "",
-    "Pending OpenClaw message:",
-    JSON.stringify(pendingMessage)
-  ].join("\n");
-}
-
-function formatProtocolHistoryForRecovery(events) {
-  const lines = events
-    .filter((event) => event.event === "message")
-    .map((event) => event.message ?? event)
-    .filter((message) => message?.from && message?.to && message?.type)
-    .slice(-40)
-    .map((message) => {
-      const body = String(message.body ?? "").replace(/\s+/g, " ").trim().slice(0, 700);
-      return `- round ${message.round ?? "?"}: ${message.from} -> ${message.to} ${message.type}: ${body}`;
-    });
-  return lines.length ? lines.join("\n") : "- No prior protocol messages were recorded.";
-}
-
-async function runClose(options) {
   const loaded = loadConversationFromOptions(options);
   const { statePath, logPath } = loaded;
   const nativeTakeover = isRecord(loaded.conversation.native_session_takeover)
@@ -7636,7 +5442,28 @@ async function runClose(options) {
       updated_at: now
     };
     saveState(statePath, closed);
-    releaseClaudeHookLease(closed);
+    let dispatchLedgerResolved = false;
+    let dispatchLedgerWarning: string | undefined;
+    if (terminalControl) {
+      try {
+        dispatchLedgerResolved = resolveTerminalBridgeDispatchLedger({
+          terminalControl,
+          conversation: closed,
+          expectedMessageId: stringValue(
+            nativeTakeover?.terminal_bridge_message_id
+          ),
+          reason: "conversation explicitly closed by request"
+        });
+      } catch (error) {
+        dispatchLedgerWarning =
+          error instanceof Error ? error.message : String(error);
+        runtimeLog("error", "terminal_dispatch_ledger_resolve_failed", {
+          conversation_id: closed.conversation_id,
+          terminal_target: terminalControl.target,
+          error: dispatchLedgerWarning
+        });
+      }
+    }
     appendEvent(logPath, {
       ts: now,
       conversation_id: conversation.conversation_id,
@@ -7653,7 +5480,15 @@ async function runClose(options) {
     });
     printJson({
       conversation: closed,
-      closed: true
+      closed: true,
+      terminal_dispatch_resolved: dispatchLedgerResolved,
+      ...(dispatchLedgerWarning
+        ? {
+            terminal_dispatch_warning:
+              textSummary(dispatchLedgerWarning),
+            do_not_retry: true
+          }
+        : {})
     });
   } finally {
     try {
@@ -7661,6 +5496,96 @@ async function runClose(options) {
     } finally {
       releaseTerminalLock();
     }
+  }
+}
+
+function runTerminalDispatchClose({
+  options,
+  terminalConversation
+}: {
+  options: Record<string, any>;
+  terminalConversation: ResolvedTerminalConversation;
+}): void {
+  const terminalControl = terminalConversation.terminalControl;
+  const releaseTerminalLock = acquireFileLock(
+    terminalBridgeSendLockPath(
+      storeDirFromOptions(options),
+      terminalControl
+    ),
+    { timeoutMs: 30000 }
+  );
+  try {
+    const ledger = resolveTerminalDispatchLedgerPaneIncarnation(
+      terminalControl,
+      loadTerminalBridgeDispatchLedger(terminalControl)
+    );
+    if (!ledger || ledger.status === "resolved") {
+      throw new Error(
+        `terminal ${terminalControl.target} has no unresolved AKK dispatch fence`
+      );
+    }
+    if (!["prepared", "submitted", "uncertain"].includes(ledger.status)) {
+      throw new Error(
+        `terminal ${terminalControl.target} has an invalid dispatch status: ` +
+        String(ledger.status)
+      );
+    }
+    const owner = loadTerminalDispatchLedgerOwner(ledger);
+    if (owner) {
+      throw new Error(
+        `terminal ${terminalControl.target} dispatch is owned by AKK ` +
+        `conversation ${owner.conversation_id} (${owner.status}); close that ` +
+        "managed conversation instead"
+      );
+    }
+    const expectedMessageId = required(
+      stringValue(options.expectedMessageId),
+      "--expected-message-id is required to resolve an orphaned terminal dispatch"
+    );
+    const ownerMessageId = stringValue(ledger.message_id);
+    if (!ownerMessageId || expectedMessageId !== ownerMessageId) {
+      throw new Error(
+        "terminal dispatch identity changed; run AKK list again and use the " +
+        "current orphaned dispatch message id"
+      );
+    }
+    const resolvedAt = new Date().toISOString();
+    const reason =
+      stringValue(options.reason) ??
+      "terminal dispatch explicitly resolved after operator inspection";
+    saveTerminalBridgeDispatchLedger(terminalControl, {
+      ...ledger,
+      status: "resolved",
+      resolved_at: resolvedAt,
+      reason,
+      resolved_by_terminal_conversation_id:
+        terminalConversation.conversationId
+    });
+    runtimeLog("info", "terminal_dispatch_explicitly_resolved", {
+      terminal_target: terminalControl.target,
+      terminal_conversation_id: terminalConversation.conversationId,
+      owner_conversation_id:
+        stringValue(ledger.conversation_id),
+      owner_message_id: stringValue(ledger.message_id),
+      previous_status: ledger.status,
+      reason
+    });
+    printJson({
+      source: "terminal_control",
+      conversation_id: terminalConversation.conversationId,
+      terminal_control: terminalControl,
+      closed: false,
+      terminal_dispatch_resolved: true,
+      previous_dispatch_status: ledger.status,
+      owner_conversation_id:
+        stringValue(ledger.conversation_id),
+      owner_message_id: stringValue(ledger.message_id),
+      reason,
+      coding_agent_stopped: false,
+      tmux_pane_closed: false
+    });
+  } finally {
+    releaseTerminalLock();
   }
 }
 
@@ -7674,139 +5599,9 @@ async function runMonitor(options) {
   if (options.terminalBridge) {
     return await runTerminalBridgeMonitor(options);
   }
-
-  const statePath = expandHome(required(options.state, "--state is required"));
-  const logPath = expandHome(options.log ?? logPathForStatePath(statePath));
-  const pid = options.pid ? Number(options.pid) : undefined;
-  const timeoutMinutes = Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES);
-  const pollIntervalMs = Math.max(50, Number(options.pollIntervalMs ?? DEFAULT_MONITOR_POLL_INTERVAL_MS));
-
-  let conversation = loadState(statePath);
-  const executor = executorForConversation(conversation);
-  appendEvent(logPath, {
-    ts: new Date().toISOString(),
-    conversation_id: conversation.conversation_id,
-    event: "executor_monitor_started",
-    executor,
-    executor_pid: Number.isFinite(pid) ? pid : null,
-    agent_timeout_minutes: timeoutMinutes,
-    poll_interval_ms: pollIntervalMs,
-    output_path: options.outputPath
-  });
-  runtimeLog("info", "executor_monitor_started", {
-    conversation_id: conversation.conversation_id,
-    agent: executor.kind,
-    executor_session: executor.session,
-    executor_pid: Number.isFinite(pid) ? pid : null,
-    agent_timeout_minutes: timeoutMinutes
-  });
-
-  while (true) {
-    conversation = loadState(statePath);
-    if (!isWaitingForAgent(conversation.status)) {
-      runtimeLog("info", "executor_monitor_finished", {
-        conversation_id: conversation.conversation_id,
-        status: conversation.status,
-        reason: "conversation_no_longer_waiting"
-      });
-      printJson({
-        conversation,
-        monitored: true,
-        stalled: false,
-        reason: "conversation_no_longer_waiting"
-      });
-      return;
-    }
-
-    if (Number.isFinite(pid) && !isProcessAlive(pid)) {
-      const outputTail = readOutputTail(options.outputPath);
-      const modelSelection = detectModelSelectionError(outputTail);
-      if (modelSelection) {
-        const modelSelectionConversation = markConversationNeedsModelSelection({
-          statePath,
-          logPath,
-          reason: modelSelection.message,
-          detail: {
-            executor_pid: pid,
-            output_path: options.outputPath,
-            model_selection: modelSelection
-          }
-        });
-        printJson({
-          conversation: modelSelectionConversation,
-          monitored: true,
-          stalled: false,
-          needs_model_selection: true,
-          reason: modelSelectionConversation?.model_selection?.message ?? modelSelection.message
-        });
-        return;
-      }
-      const transientFailure = detectTransientExecutorFailure(outputTail);
-      if (transientFailure) {
-        const recoveryResult = markMonitorFailureNeedsRecovery({
-          statePath,
-          logPath,
-          reason: transientFailure.message,
-          detail: {
-            executor_pid: pid,
-            output_path: options.outputPath,
-            transient_failure: transientFailure
-          },
-          outputTail
-        });
-        if (recoveryResult) {
-          printJson({
-            conversation: recoveryResult.conversation,
-            monitored: true,
-            stalled: false,
-            needs_recovery: true,
-            reason: transientFailure.message
-          });
-          return;
-        }
-      }
-      const stalledConversation = markConversationStalled({
-        statePath,
-        logPath,
-        reason: `executor process ${pid} exited before callback`,
-        detail: {
-          executor_pid: pid,
-          output_path: options.outputPath
-        }
-      });
-      printJson({
-        conversation: stalledConversation,
-        monitored: true,
-        stalled: true,
-        reason: stalledConversation?.stalled_reason
-      });
-      return;
-    }
-
-    if (Number.isFinite(timeoutMinutes) && timeoutMinutes > 0) {
-      const updatedAtMs = Date.parse(String(conversation.updated_at ?? conversation.created_at));
-      if (Number.isFinite(updatedAtMs) && Date.now() - updatedAtMs >= timeoutMinutes * 60 * 1000) {
-        const stalledConversation = markConversationStalled({
-          statePath,
-          logPath,
-          reason: `no callback after ${timeoutMinutes} minutes`,
-          detail: {
-            agent_timeout_minutes: timeoutMinutes,
-            output_path: options.outputPath
-          }
-        });
-        printJson({
-          conversation: stalledConversation,
-          monitored: true,
-          stalled: true,
-          reason: stalledConversation?.stalled_reason
-        });
-        return;
-      }
-    }
-
-    sleepSync(pollIntervalMs);
-  }
+  throw new Error(
+    "monitor requires --terminal-bridge, --terminal-bridge-handoff, or --callback-retry"
+  );
 }
 
 function startCallbackRetryMonitor({
@@ -8237,28 +6032,328 @@ async function runTerminalBridgeMonitorWithLock(options) {
       });
       return;
     }
+    const submission = terminalBridgeSubmission(conversation);
+    if (
+      currentMessageId &&
+      submission &&
+      stringValue(submission.message_id) === currentMessageId
+    ) {
+      const submissionStatus = stringValue(submission.status);
+      if (submissionStatus === "prepared") {
+        const dispatcherPid = Number(submission.dispatcher_pid);
+        if (
+          Number.isSafeInteger(dispatcherPid) &&
+          dispatcherPid > 1 &&
+          isProcessAlive(dispatcherPid)
+        ) {
+          sleepSync(pollIntervalMs);
+          continue;
+        }
 
-    const requestText = String(
-      nativeTakeover?.["terminal_bridge_request_text"] ?? conversation.user_request ?? ""
-    );
-    const terminalRuntime = terminalRuntimeIdentityForConversation(conversation, terminalControl);
+        const releaseTerminalLock = acquireFileLock(
+          terminalBridgeSendLockPath(
+            storeDirFromOptions(options),
+            terminalControl
+          ),
+          { timeoutMs: 30000 }
+        );
+        try {
+          const dispatchLedger =
+            loadTerminalBridgeDispatchLedger(terminalControl);
+          const releaseStateLock = acquireFileLock(`${statePath}.lock`);
+          try {
+            const current = loadState(statePath);
+            const currentSubmission = terminalBridgeSubmission(current);
+            const currentTakeover = isRecord(current.native_session_takeover)
+              ? current.native_session_takeover
+              : undefined;
+            const expectedMessageId = stringValue(
+              currentTakeover?.terminal_bridge_message_id
+            );
+            if (
+              expectedMessageId === currentMessageId &&
+              stringValue(currentSubmission?.message_id) === currentMessageId &&
+              currentSubmission?.status === "prepared"
+            ) {
+              const requestText = String(
+                currentTakeover?.terminal_bridge_request_text ??
+                  current.user_request ??
+                  ""
+              );
+              if (
+                dispatchLedger?.status === "submitted" &&
+                stringValue(dispatchLedger.message_id) === currentMessageId
+              ) {
+                const submittedAt =
+                  stringValue(dispatchLedger.submitted_at) ??
+                  new Date().toISOString();
+                const submittedConversation = withTerminalBridgeSubmission({
+                  conversation: current,
+                  messageId: currentMessageId,
+                  requestText,
+                  status: "submitted",
+                  preparedAt:
+                    stringValue(currentSubmission.prepared_at) ??
+                    submittedAt,
+                  submittedAt
+                });
+                saveState(statePath, submittedConversation);
+                conversation = submittedConversation;
+              } else {
+                const uncertainAt = new Date().toISOString();
+                const uncertainConversation = withTerminalBridgeSubmission({
+                  conversation: {
+                    ...current,
+                    status: "stalled" as const,
+                    stalled_at: uncertainAt,
+                    stalled_reason:
+                      "terminal dispatcher exited before AKK could prove the tmux submission",
+                    updated_at: uncertainAt
+                  },
+                  messageId: currentMessageId,
+                  requestText,
+                  status: "uncertain",
+                  preparedAt:
+                    stringValue(currentSubmission.prepared_at) ??
+                    uncertainAt,
+                  uncertainAt,
+                  error:
+                    "the terminal dispatcher exited before AKK could persist a submitted receipt"
+                });
+                if (
+                  !dispatchLedger ||
+                  stringValue(dispatchLedger.message_id) === currentMessageId
+                ) {
+                  saveTerminalBridgeDispatchLedger(terminalControl, {
+                    ...(dispatchLedger ?? {}),
+                    status: "uncertain",
+                    generation_id: currentMessageId,
+                    conversation_id:
+                      uncertainConversation.conversation_id,
+                    message_id: currentMessageId,
+                    request_hash:
+                      terminalBridgeRequestFingerprint(requestText),
+                    prepared_at:
+                      stringValue(currentSubmission.prepared_at) ??
+                      uncertainAt,
+                    uncertain_at: uncertainAt,
+                    dispatcher_pid:
+                      Number.isSafeInteger(dispatcherPid) &&
+                      dispatcherPid > 1
+                        ? dispatcherPid
+                        : null,
+                    state_path: statePath,
+                    event_log_path: logPath,
+                    callback_expected: Boolean(
+                      uncertainConversation.gateway_method
+                    ),
+                    reason:
+                      "dispatcher_exited_before_submitted_receipt"
+                  });
+                }
+                saveState(statePath, uncertainConversation);
+                appendEvent(logPath, {
+                  ts: uncertainAt,
+                  conversation_id:
+                    uncertainConversation.conversation_id,
+                  event: "terminal_message_submit_uncertain",
+                  message_id: currentMessageId,
+                  reason:
+                    "dispatcher_exited_before_submitted_receipt",
+                  dispatcher_pid:
+                    Number.isSafeInteger(dispatcherPid) &&
+                    dispatcherPid > 1
+                      ? dispatcherPid
+                      : null,
+                  do_not_retry: true
+                });
+                conversation = uncertainConversation;
+              }
+            } else {
+              conversation = current;
+            }
+          } finally {
+            releaseStateLock();
+          }
+          if (
+            terminalBridgeSubmission(conversation)?.status === "uncertain"
+          ) {
+            stallOtherTerminalBridgeConversationsForUncertainDispatch({
+              storeDir: storeDirFromOptions(options),
+              terminalControl,
+              currentConversationId: conversation.conversation_id,
+              uncertainMessageId: currentMessageId
+            });
+          }
+        } finally {
+          releaseTerminalLock();
+        }
+
+        const afterSubmission = terminalBridgeSubmission(conversation);
+        if (
+          stringValue(afterSubmission?.message_id) === currentMessageId &&
+          afterSubmission?.status === "submitted"
+        ) {
+          continue;
+        }
+        printJson({
+          conversation,
+          monitored: true,
+          terminal_bridge: true,
+          completed: false,
+          submission_outcome:
+            stringValue(afterSubmission?.status) ?? "uncertain",
+          do_not_retry: true,
+          reason:
+            "terminal submission outcome is not proven; inspect the shared tmux pane before deciding how to continue"
+        });
+        return;
+      }
+      if (submissionStatus === "uncertain" || submissionStatus === "aborted") {
+        printJson({
+          conversation,
+          monitored: true,
+          terminal_bridge: true,
+          completed: false,
+          submission_outcome: submissionStatus,
+          do_not_retry: submissionStatus === "uncertain",
+          safe_to_retry: submissionStatus === "aborted",
+          reason:
+            submissionStatus === "uncertain"
+              ? "terminal submission outcome is uncertain; automatic completion and approval attribution are disabled"
+              : "terminal submission was aborted before tmux input"
+        });
+        return;
+      }
+      if (submissionStatus !== "submitted") {
+        printJson({
+          conversation,
+          monitored: true,
+          terminal_bridge: true,
+          completed: false,
+          reason: "terminal_submission_status_invalid"
+        });
+        return;
+      }
+    }
     const screenChangedSinceSend = preSendScreenFingerprint !== undefined &&
       previousScreenFingerprint !== undefined &&
       previousScreenFingerprint !== preSendScreenFingerprint;
-    const poll = await terminalBridge.monitorPoll({
-      agent: executor.kind,
-      terminalControl,
-      screenOptions: {
-        scrollbackLines: Number(options.scrollbackLines ?? 120),
-        requestText,
-        screenChangedSinceSend,
-        runtime: terminalRuntime
-      },
-      durableRequest: terminalDurableRequestForConversation(
-        conversation,
+    let poll;
+    const expectedUpdatedAt = conversation.updated_at;
+    const expectedStatus = conversation.status;
+    const releaseTerminalPollLock = acquireFileLock(
+      terminalBridgeSendLockPath(
+        storeDirFromOptions(options),
         terminalControl
+      ),
+      { timeoutMs: 30000 }
+    );
+    try {
+      let dispatchLedger =
+        loadTerminalBridgeDispatchLedger(terminalControl);
+      const durableSubmission = terminalBridgeSubmission(conversation);
+      if (
+        dispatchLedger?.status === "prepared" &&
+        stringValue(dispatchLedger.message_id) === currentMessageId &&
+        durableSubmission?.status === "submitted" &&
+        stringValue(durableSubmission.message_id) === currentMessageId
+      ) {
+        const submittedAt =
+          stringValue(durableSubmission.submitted_at) ??
+          new Date().toISOString();
+        saveTerminalBridgeDispatchLedger(terminalControl, {
+          ...dispatchLedger,
+          status: "submitted",
+          submitted_at: submittedAt,
+          reason:
+            "recovered from the durable conversation submission receipt"
+        });
+        dispatchLedger =
+          loadTerminalBridgeDispatchLedger(terminalControl);
+      }
+      if (dispatchLedger) {
+        const ledgerStatus = stringValue(dispatchLedger.status);
+        const ledgerMessageId = stringValue(dispatchLedger.message_id);
+        if (
+          ledgerStatus !== "submitted" ||
+          ledgerMessageId !== currentMessageId
+        ) {
+          appendEvent(logPath, {
+            ts: new Date().toISOString(),
+            conversation_id: conversation.conversation_id,
+            event: "terminal_bridge_monitor_dispatch_fenced",
+            monitor_message_id: currentMessageId,
+            dispatch_message_id: ledgerMessageId,
+            dispatch_status: ledgerStatus
+          });
+          printJson({
+            conversation,
+            monitored: true,
+            terminal_bridge: true,
+            completed: false,
+            submission_outcome:
+              ledgerStatus === "uncertain"
+                ? "uncertain"
+                : undefined,
+            do_not_retry: ledgerStatus === "uncertain",
+            reason:
+              ledgerStatus === "prepared" ||
+              ledgerStatus === "uncertain"
+                ? "terminal_dispatch_not_proven"
+                : "terminal_bridge_generation_replaced"
+          });
+          return;
+        }
+      }
+
+      const lockedConversation = loadState(statePath);
+      const lockedTakeover = isRecord(
+        lockedConversation.native_session_takeover
       )
-    });
+        ? lockedConversation.native_session_takeover
+        : undefined;
+      const lockedControl =
+        terminalControlFromTakeover(lockedTakeover);
+      if (
+        lockedConversation.status !== expectedStatus ||
+        lockedConversation.updated_at !== expectedUpdatedAt ||
+        stringValue(lockedTakeover?.terminal_bridge_message_id) !==
+          currentMessageId ||
+        !lockedControl ||
+        terminalControlSelectorKey(lockedControl) !==
+          terminalControlSelectorKey(terminalControl)
+      ) {
+        conversation = lockedConversation;
+        continue;
+      }
+
+      const requestText = String(
+        lockedTakeover?.terminal_bridge_request_text ??
+          lockedConversation.user_request ??
+          ""
+      );
+      const terminalRuntime = terminalRuntimeIdentityForConversation(
+        lockedConversation,
+        terminalControl
+      );
+      poll = await terminalBridge.monitorPoll({
+        agent: executor.kind,
+        terminalControl,
+        screenOptions: {
+          scrollbackLines: Number(options.scrollbackLines ?? 120),
+          requestText,
+          screenChangedSinceSend,
+          runtime: terminalRuntime
+        },
+        durableRequest: terminalDurableRequestForConversation(
+          lockedConversation,
+          terminalControl
+        )
+      });
+    } finally {
+      releaseTerminalPollLock();
+    }
     const terminalStatus = poll.status;
     const approval = terminalStatus.approval_state;
     const currentScreenFingerprint = stringValue(terminalStatus?.screen?.digest) ??
@@ -8418,11 +6513,6 @@ async function runTerminalBridgeMonitorWithLock(options) {
         activity_state: terminalStatus.activity_state,
         reason: approvalReason
       });
-      if (/waiting for hook consumption/iu.test(approvalReason)) {
-        sleepSync(pollIntervalMs);
-        continue;
-      }
-
       const fingerprint = terminalBridgeApprovalFingerprint({ terminalControl, terminalStatus });
       const notification = recordTerminalBridgeApprovalNotification({
         statePath,
@@ -8966,20 +7056,447 @@ function tryAcquireTerminalBridgeMonitorLock(statePath: string, terminalMessageI
   }
 }
 
-function terminalBridgeSendLockPath(storeDir: string, terminalControl): string {
-  ensureDir(storeDir);
-  const terminalKey = createHash("sha256")
+function terminalBridgeSendLockPath(_storeDir: string, terminalControl): string {
+  const lockDir = terminalBridgeRuntimeLockDir();
+  ensureDir(lockDir);
+  const terminalKey = terminalBridgeRuntimeKey(terminalControl);
+  return path.join(lockDir, `terminal-bridge-send-${terminalKey}.lock`);
+}
+
+function terminalBridgeRuntimeLockDir(): string {
+  return path.join(
+    terminalBridgeRuntimeDir(),
+    "terminal-locks"
+  );
+}
+
+function terminalBridgeRuntimeDir(): string {
+  const configured = stringValue(process.env.AKK_RUNTIME_DIR);
+  return configured
+    ? path.resolve(expandHome(configured))
+    : path.join(path.dirname(defaultStoreDir()), "runtime");
+}
+
+function terminalBridgeRuntimeKey(terminalControl): string {
+  return createHash("sha256")
     .update(JSON.stringify({
       target: terminalControl.target,
-      socket_path: terminalControl.socketPath
+      socket_path: terminalControl.socketPath ?? null
     }))
     .digest("hex")
     .slice(0, 20);
-  return path.join(storeDir, `.terminal-bridge-send-${terminalKey}.lock`);
+}
+
+function terminalBridgeDispatchLedgerPath(terminalControl): string {
+  const ledgerDir = path.join(
+    terminalBridgeRuntimeDir(),
+    "terminal-dispatch"
+  );
+  ensureDir(ledgerDir);
+  return path.join(
+    ledgerDir,
+    `terminal-dispatch-${terminalBridgeRuntimeKey(terminalControl)}.json`
+  );
+}
+
+function loadTerminalBridgeDispatchLedger(
+  terminalControl
+): Record<string, any> | undefined {
+  const ledgerPath = terminalBridgeDispatchLedgerPath(terminalControl);
+  if (!fs.existsSync(ledgerPath)) {
+    return undefined;
+  }
+  const stat = fs.lstatSync(ledgerPath);
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    throw new Error(`terminal dispatch ledger is not a regular file: ${ledgerPath}`);
+  }
+  const parsed = JSON.parse(fs.readFileSync(ledgerPath, "utf8"));
+  if (
+    !isRecord(parsed) ||
+    parsed.version !== 1 ||
+    stringValue(parsed.terminal_key) !== terminalBridgeRuntimeKey(terminalControl)
+  ) {
+    throw new Error(`terminal dispatch ledger is invalid: ${ledgerPath}`);
+  }
+  return parsed;
+}
+
+function orphanedTerminalDispatchForRecovery(
+  terminalControl: TerminalControlRef
+): Record<string, any> | undefined {
+  try {
+    const ledger = loadTerminalBridgeDispatchLedger(terminalControl);
+    const ledgerControl = isRecord(ledger?.terminal_control)
+      ? ledger.terminal_control
+      : undefined;
+    const ledgerPanePid = Number(ledgerControl?.pane_pid);
+    const currentPanePid = Number(terminalControl.panePid);
+    if (
+      !ledger ||
+      !["prepared", "submitted", "uncertain"].includes(ledger.status) ||
+      !stringValue(ledger.message_id) ||
+      (
+        Number.isSafeInteger(ledgerPanePid) &&
+        ledgerPanePid > 0 &&
+        Number.isSafeInteger(currentPanePid) &&
+        currentPanePid > 0 &&
+        ledgerPanePid !== currentPanePid
+      ) ||
+      loadTerminalDispatchLedgerOwner(ledger)
+    ) {
+      return undefined;
+    }
+    return ledger;
+  } catch {
+    return undefined;
+  }
+}
+
+function saveTerminalBridgeDispatchLedger(
+  terminalControl,
+  ledger: Record<string, unknown>
+): void {
+  const ledgerPath = terminalBridgeDispatchLedgerPath(terminalControl);
+  if (fs.existsSync(ledgerPath) && fs.lstatSync(ledgerPath).isSymbolicLink()) {
+    throw new Error(`terminal dispatch ledger is a symlink: ${ledgerPath}`);
+  }
+  const nextLedger = {
+    ...ledger,
+    version: 1,
+    terminal_key: terminalBridgeRuntimeKey(terminalControl),
+    terminal_control: {
+      kind: "tmux",
+      target: terminalControl.target,
+      socket_path: terminalControl.socketPath ?? null,
+      pane_pid: terminalControl.panePid ?? null,
+      current_path: terminalControl.currentPath ?? null
+    }
+  };
+  const tempPath = `${ledgerPath}.${process.pid}.${randomUUID()}.tmp`;
+  let tempFd: number | undefined;
+  try {
+    tempFd = fs.openSync(
+      tempPath,
+      fs.constants.O_CREAT |
+        fs.constants.O_EXCL |
+        fs.constants.O_WRONLY |
+        NO_FOLLOW_FLAG,
+      0o600
+    );
+    fs.fchmodSync(tempFd, 0o600);
+    fs.writeFileSync(
+      tempFd,
+      `${JSON.stringify(nextLedger, null, 2)}\n`,
+      "utf8"
+    );
+    fs.fsyncSync(tempFd);
+    fs.closeSync(tempFd);
+    tempFd = undefined;
+    fs.renameSync(tempPath, ledgerPath);
+    fs.chmodSync(ledgerPath, 0o600);
+    fsyncTerminalBridgeDirectory(path.dirname(ledgerPath));
+  } finally {
+    if (tempFd !== undefined) {
+      fs.closeSync(tempFd);
+    }
+    fs.rmSync(tempPath, { force: true });
+  }
+}
+
+function fsyncTerminalBridgeDirectory(directory: string): void {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(
+      directory,
+      fs.constants.O_RDONLY | NO_FOLLOW_FLAG
+    );
+    fs.fsyncSync(fd);
+  } catch (error) {
+    const code = error instanceof Error
+      ? (error as NodeJS.ErrnoException).code
+      : undefined;
+    if (
+      !["EINVAL", "ENOTSUP", "EPERM", "EISDIR"].includes(
+        String(code)
+      )
+    ) {
+      throw error;
+    }
+  } finally {
+    if (fd !== undefined) {
+      fs.closeSync(fd);
+    }
+  }
+}
+
+function resolveTerminalDispatchLedgerPaneIncarnation(
+  terminalControl: TerminalControlRef,
+  ledger?: Record<string, any>
+): Record<string, any> | undefined {
+  if (!ledger || ledger.status === "resolved") {
+    return ledger;
+  }
+  const ledgerControl = isRecord(ledger.terminal_control)
+    ? ledger.terminal_control
+    : undefined;
+  const ledgerPanePid = Number(ledgerControl?.pane_pid);
+  const currentPanePid = Number(terminalControl.panePid);
+  if (
+    !Number.isSafeInteger(ledgerPanePid) ||
+    ledgerPanePid <= 0 ||
+    !Number.isSafeInteger(currentPanePid) ||
+    currentPanePid <= 0 ||
+    ledgerPanePid === currentPanePid
+  ) {
+    return ledger;
+  }
+  saveTerminalBridgeDispatchLedger(terminalControl, {
+    ...ledger,
+    status: "resolved",
+    resolved_at: new Date().toISOString(),
+    reason:
+      `tmux pane incarnation changed from pid ${ledgerPanePid} to ${currentPanePid}`
+  });
+  return loadTerminalBridgeDispatchLedger(terminalControl);
+}
+
+function loadTerminalDispatchLedgerOwner(
+  ledger: Record<string, any>
+): Conversation | undefined {
+  const statePath = stringValue(ledger.state_path);
+  if (!statePath) {
+    return undefined;
+  }
+  try {
+    const conversation = loadState(statePath);
+    if (
+      conversation.conversation_id !==
+        stringValue(ledger.conversation_id)
+    ) {
+      return undefined;
+    }
+    return conversation;
+  } catch {
+    return undefined;
+  }
+}
+
+function assertManagedTerminalDispatchOwner({
+  conversation,
+  terminalControl,
+  action
+}: {
+  conversation: Conversation;
+  terminalControl: TerminalControlRef;
+  action: "approve" | "cancel";
+}): void {
+  const nativeTakeover = isRecord(
+    conversation.native_session_takeover
+  )
+    ? conversation.native_session_takeover
+    : undefined;
+  const messageId = stringValue(
+    nativeTakeover?.terminal_bridge_message_id
+  );
+  const ledger = loadTerminalBridgeDispatchLedger(terminalControl);
+  if (
+    !messageId ||
+    ledger?.status !== "submitted" ||
+    stringValue(ledger.conversation_id) !==
+      conversation.conversation_id ||
+    stringValue(ledger.message_id) !== messageId
+  ) {
+    throw new Error(
+      `refusing to ${action}: this AKK conversation does not own the ` +
+      "current terminal dispatch generation; refresh status and operate on " +
+      "the current task"
+    );
+  }
+}
+
+function reconcilePreparedTerminalDispatchLedger(
+  terminalControl: TerminalControlRef,
+  ledger?: Record<string, any>
+): Record<string, any> | undefined {
+  if (ledger?.status !== "prepared") {
+    return ledger;
+  }
+  const statePath = stringValue(ledger.state_path);
+  const messageId = stringValue(ledger.message_id);
+  if (!statePath || !messageId) {
+    return ledger;
+  }
+  const dispatcherPid = Number(ledger.dispatcher_pid);
+  if (
+    Number.isSafeInteger(dispatcherPid) &&
+    dispatcherPid > 1 &&
+    isProcessAlive(dispatcherPid)
+  ) {
+    return ledger;
+  }
+  let conversation: Conversation | undefined;
+  try {
+    conversation = loadState(statePath);
+  } catch (error) {
+    const code = error instanceof Error
+      ? (error as NodeJS.ErrnoException).code
+      : undefined;
+    if (code !== "ENOENT") {
+      return ledger;
+    }
+    saveTerminalBridgeDispatchLedger(terminalControl, {
+      ...ledger,
+      status: "resolved",
+      resolved_at: new Date().toISOString(),
+      reason:
+        "dispatcher exited before the prepared owner state existed; no tmux input was possible"
+    });
+    return loadTerminalBridgeDispatchLedger(terminalControl);
+  }
+  const nativeTakeover = isRecord(
+    conversation.native_session_takeover
+  )
+    ? conversation.native_session_takeover
+    : undefined;
+  const storedControl = terminalControlFromTakeover(nativeTakeover);
+  const submission = terminalBridgeSubmission(conversation);
+  const storedMessageId = stringValue(
+    nativeTakeover?.terminal_bridge_message_id
+  );
+  if (
+    conversation.conversation_id !==
+      stringValue(ledger.conversation_id) ||
+    !storedControl ||
+    terminalBridgeRuntimeKey(storedControl) !==
+      terminalBridgeRuntimeKey(terminalControl)
+  ) {
+    return ledger;
+  }
+  if (
+    storedMessageId === messageId &&
+    stringValue(submission?.message_id) === messageId
+  ) {
+    if (submission?.status === "submitted") {
+      const submittedAt =
+        stringValue(submission.submitted_at) ??
+        stringValue(conversation.updated_at) ??
+        new Date().toISOString();
+      saveTerminalBridgeDispatchLedger(terminalControl, {
+        ...ledger,
+        status: "submitted",
+        submitted_at: submittedAt,
+        reason:
+          "recovered from the durable conversation submission receipt"
+      });
+    } else {
+      saveTerminalBridgeDispatchLedger(terminalControl, {
+        ...ledger,
+        status: "uncertain",
+        uncertain_at: new Date().toISOString(),
+        reason:
+          "dispatcher exited after the prepared state became durable; tmux submission cannot be proven"
+      });
+    }
+    return loadTerminalBridgeDispatchLedger(terminalControl);
+  }
+
+  if (
+    storedMessageId &&
+    submission?.status === "submitted" &&
+    stringValue(submission.message_id) === storedMessageId
+  ) {
+    const requestText = String(
+      nativeTakeover?.terminal_bridge_request_text ??
+        conversation.user_request ??
+        ""
+    );
+    saveTerminalBridgeDispatchLedger(terminalControl, {
+      status: "submitted",
+      generation_id: storedMessageId,
+      conversation_id: conversation.conversation_id,
+      message_id: storedMessageId,
+      request_hash:
+        terminalBridgeRequestFingerprint(requestText),
+      prepared_at:
+        stringValue(submission.prepared_at) ??
+        stringValue(conversation.updated_at),
+      submitted_at:
+        stringValue(submission.submitted_at) ??
+        stringValue(conversation.updated_at),
+      dispatcher_pid: null,
+      state_path: statePath,
+      event_log_path:
+        stringValue(ledger.event_log_path) ??
+        logPathForStatePath(statePath),
+      callback_expected: Boolean(conversation.gateway_method),
+      reason:
+        "restored the prior durable generation after a pre-submit dispatcher exit"
+    });
+  } else {
+    saveTerminalBridgeDispatchLedger(terminalControl, {
+      ...ledger,
+      status: "resolved",
+      resolved_at: new Date().toISOString(),
+      reason:
+        "dispatcher exited before the prepared generation reached durable state; no tmux input was possible"
+    });
+  }
+  return loadTerminalBridgeDispatchLedger(terminalControl);
+}
+
+function restoreTerminalBridgeDispatchLedger({
+  terminalControl,
+  previousLedger,
+  reason
+}: {
+  terminalControl: TerminalControlRef;
+  previousLedger?: Record<string, any>;
+  reason: string;
+}): void {
+  if (previousLedger) {
+    saveTerminalBridgeDispatchLedger(terminalControl, previousLedger);
+    return;
+  }
+  saveTerminalBridgeDispatchLedger(terminalControl, {
+    status: "resolved",
+    resolved_at: new Date().toISOString(),
+    reason
+  });
+}
+
+function resolveTerminalBridgeDispatchLedger({
+  terminalControl,
+  conversation,
+  expectedMessageId,
+  reason
+}: {
+  terminalControl: TerminalControlRef;
+  conversation: Conversation;
+  expectedMessageId?: string;
+  reason: string;
+}): boolean {
+  const ledger = loadTerminalBridgeDispatchLedger(terminalControl);
+  if (
+    !ledger ||
+    stringValue(ledger.conversation_id) !== conversation.conversation_id ||
+    (
+      expectedMessageId !== undefined &&
+      stringValue(ledger.message_id) !== expectedMessageId
+    )
+  ) {
+    return false;
+  }
+  saveTerminalBridgeDispatchLedger(terminalControl, {
+    ...ledger,
+    status: "resolved",
+    resolved_at: new Date().toISOString(),
+    reason
+  });
+  return true;
 }
 
 function terminalBridgeRequestFingerprint(value): string | undefined {
-  const text = String(value ?? "").replace(/\s+/gu, " ").trim();
+  const text = String(value ?? "");
   return text ? createHash("sha256").update(text).digest("hex") : undefined;
 }
 
@@ -9063,6 +7580,7 @@ function prepareTerminalBridgeCompletionCallback({
   }
 
   let claimedConversation = claim.conversation;
+  let claimReleased = false;
   try {
     appendEvent(logPath, {
       ts: new Date().toISOString(),
@@ -9109,7 +7627,7 @@ function prepareTerminalBridgeCompletionCallback({
       ...options,
       statePath,
       log: logPath,
-      closeTerminalBridgeOnDone: completionOutcome === "success",
+      closeTerminalBridgeOnDone: false,
       trackCallbackDelivery: true,
       recoverTerminalCompletion: claim.resumed === true,
       allowTerminalCompletionRecoveryStatus: allowSupersedeRecovery,
@@ -9124,6 +7642,25 @@ function prepareTerminalBridgeCompletionCallback({
         : undefined,
       token: stringValue(claimedConversation.gateway_token)
     });
+    claim.release();
+    claimReleased = true;
+    const releaseTerminalLock = acquireFileLock(
+      terminalBridgeSendLockPath(
+        storeDirFromOptions(options),
+        terminalControl
+      ),
+      { timeoutMs: 30000 }
+    );
+    try {
+      resolveTerminalBridgeDispatchLedger({
+        terminalControl,
+        conversation: claimedConversation,
+        expectedMessageId: terminalMessageId,
+        reason: "terminal bridge task reached durable completion"
+      });
+    } finally {
+      releaseTerminalLock();
+    }
     return {
       claimed: true as const,
       conversation: claimedConversation,
@@ -9131,8 +7668,9 @@ function prepareTerminalBridgeCompletionCallback({
       callbackMessageId
     };
   } finally {
-    releaseClaudeHookLease(claimedConversation);
-    claim.release();
+    if (!claimReleased) {
+      claim.release();
+    }
   }
 }
 
@@ -9288,13 +7826,6 @@ function persistTerminalBridgeActivity({
     const inactivityDeadlineAt = Number.isFinite(timeoutMinutes) && timeoutMinutes > 0
       ? new Date(observedAtMs + timeoutMinutes * 60 * 1000).toISOString()
       : undefined;
-    const hardDeadlineAt = stringValue(nativeTakeover.terminal_bridge_hard_deadline_at);
-    const leaseDeadlineAt = inactivityDeadlineAt && hardDeadlineAt
-      ? new Date(Math.min(Date.parse(inactivityDeadlineAt), Date.parse(hardDeadlineAt))).toISOString()
-      : inactivityDeadlineAt ?? hardDeadlineAt;
-    const renewedLease = leaseDeadlineAt
-      ? renewClaudeHookLease(currentConversation, leaseDeadlineAt)
-      : undefined;
     const nextConversation = {
       ...currentConversation,
       native_session_takeover: {
@@ -9303,8 +7834,7 @@ function persistTerminalBridgeActivity({
         terminal_bridge_last_activity_reason: reason,
         terminal_bridge_inactivity_deadline_at: inactivityDeadlineAt,
         terminal_bridge_inactivity_timeout_minutes: timeoutMinutes,
-        terminal_bridge_hard_timeout_minutes: hardTimeoutMinutes,
-        claude_hook_lease_id: renewedLease?.id ?? nativeTakeover.claude_hook_lease_id
+        terminal_bridge_hard_timeout_minutes: hardTimeoutMinutes
       },
       updated_at: observedAt
     };
@@ -9377,7 +7907,7 @@ function terminalBridgeApprovalCandidate({ executor, terminalControl, terminalSt
   };
 }
 
-async function loadCodexTerminalContexts({ conversation, nativeTakeover, options }) {
+async function loadCodexTerminalContexts({ nativeTakeover, options }) {
   const provider = createAgentSessionProvider("codex", options);
   const nativeSessionId = stringValue(nativeTakeover?.["native_session_id"]);
   const startedAtMs = Date.parse(String(nativeTakeover?.["terminal_bridge_started_at"] ?? ""));
@@ -9519,73 +8049,6 @@ function runCheckedCommand(command, args, { label }) {
   }
 
   return result;
-}
-
-function executableCheck(commandName) {
-  try {
-    const executable = resolveExecutable(commandName);
-    return {
-      command: commandName,
-      available: true,
-      path: executable
-    };
-  } catch (error) {
-    return {
-      command: commandName,
-      available: false,
-      error: error instanceof Error ? error.message : String(error)
-    };
-  }
-}
-
-function buildCallbackCommand({
-  statePath,
-  gatewayUrl,
-  token,
-  openclawSession,
-  gatewayMethod,
-  gatewaySession,
-  openclawBin
-}) {
-  const parts = [
-    shellQuote(process.execPath),
-    shellQuote(new URL(import.meta.url).pathname),
-    "callback",
-    "--state",
-    shellQuote(statePath)
-  ];
-
-  if (gatewayMethod) {
-    parts.push(
-      "--gateway-method",
-      shellQuote(gatewayMethod),
-      "--gateway-session",
-      shellQuote(gatewaySession ?? openclawSession)
-    );
-    if (openclawBin) {
-      parts.push("--openclaw-bin", shellQuote(openclawBin));
-    }
-  } else if (token) {
-    parts.push(
-      "--gateway-url",
-      shellQuote(gatewayUrl),
-      "--token",
-      shellQuote(token),
-      "--openclaw-session",
-      shellQuote(openclawSession)
-    );
-  } else {
-    parts.push("--record-only");
-  }
-
-  parts.push("--message-json", "'<structured-message-json>'");
-  return parts.join(" ");
-}
-
-function expandCallbackCommandTemplate(template, { statePath }) {
-  return template
-    .replaceAll("{statePath}", shellQuote(statePath))
-    .replaceAll("{state_path}", shellQuote(statePath));
 }
 
 function runTranscript(options) {
@@ -9986,7 +8449,11 @@ function settlePreparedCallbackDelivery(
         },
         updated_at: ownsConversationStatus ? deliveredAt : current.updated_at
       };
-      if (ownsConversationStatus) {
+      if (ownsConversationStatus && deliveredStatus === "idle") {
+        nextConversation.idle_since = deliveredAt;
+        delete nextConversation.closed_at;
+        delete nextConversation.close_reason;
+      } else if (ownsConversationStatus) {
         delete nextConversation.idle_since;
       }
       saveState(prepared.statePath, nextConversation);
@@ -10284,31 +8751,9 @@ function deliverCallbackToOpenClaw({ options, statePath, logPath, conversation, 
     return "gateway_method";
   }
 
-  const gatewayUrl = options.gatewayUrl ?? conversation.gateway_url;
-  const token = options.token ?? conversation.gateway_token;
-  const openclawSession = options.openclawSession ?? conversation.openclaw_session;
-  if (!gatewayUrl) {
-    throw new Error("--gateway-url is required unless state has gateway_url");
-  }
-  if (!token || token === "<token>") {
-    throw new Error("--token is required for callback delivery");
-  }
-  if (!openclawSession) {
-    throw new Error("--openclaw-session is required unless state has openclaw_session");
-  }
-  const delivery = deliverToOpenClaw({ gatewayUrl, token, openclawSession, message });
-  recordCallbackProcessDelivery({
-    logPath,
-    conversation,
-    message,
-    event: "callback_delivery",
-    runtimeEvent: "callback_delivery",
-    delivery
-  });
-  if (delivery.status !== 0) {
-    throw new Error(delivery.stderr || delivery.stdout || `callback delivery failed with status ${delivery.status}`);
-  }
-  return "acpx";
+  throw new Error(
+    "callback delivery requires a configured OpenClaw gateway method"
+  );
 }
 
 function recordCallbackProcessDelivery({ logPath, conversation, message, event, runtimeEvent, delivery, detail = {} }) {
@@ -10546,7 +8991,6 @@ function summarizeConversation(conversation) {
     updated_at: conversation.updated_at,
     idle_since: conversation.idle_since,
     closed_at: conversation.closed_at,
-    recovery: conversation.recovery,
     state_path: conversation.state_path,
     event_log_path: conversation.event_log_path
   };
@@ -10904,15 +9348,6 @@ function parseExecutorTraceOutput(output) {
       continue;
     }
 
-    const acpx = text.match(/^\[acpx\]\s+(.+)$/);
-    if (acpx) {
-      clientEvents.push({
-        name: "acpx",
-        status: sanitizeTraceText(acpx[1], 220)
-      });
-      continue;
-    }
-
     if (text.startsWith("[thinking]")) {
       thinkingRedactedCount += 1;
       agentMessages.push({
@@ -11052,53 +9487,6 @@ function isZombieProcess(pid) {
   return result.stdout.trim().toUpperCase().startsWith("Z");
 }
 
-function terminateProcessTarget(target, { timeoutMs = 3000 } = {}) {
-  const pids = [...target.childPids, target.pid]
-    .filter((pid, index, all) => Number.isInteger(pid) && pid > 0 && all.indexOf(pid) === index);
-  const signals: Array<Record<string, unknown>> = [];
-  for (const pid of pids) {
-    signals.push(sendSignalToPid(pid, "SIGTERM"));
-  }
-
-  const exited = waitForPidsToExit(pids, timeoutMs);
-  return {
-    target,
-    signal: "SIGTERM",
-    signals,
-    exited,
-    remainingPids: pids.filter((pid) => isProcessAlive(pid))
-  };
-}
-
-function sendSignalToPid(pid, signal) {
-  try {
-    process.kill(pid, signal);
-    return {
-      pid,
-      signal,
-      status: "sent"
-    };
-  } catch (error) {
-    return {
-      pid,
-      signal,
-      status: "failed",
-      error: error instanceof Error ? error.message : String(error)
-    };
-  }
-}
-
-function waitForPidsToExit(pids, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (pids.every((pid) => !isProcessAlive(pid))) {
-      return true;
-    }
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-  }
-  return pids.every((pid) => !isProcessAlive(pid));
-}
-
 function markConversationStalled({ statePath, logPath, reason, detail = {} }) {
   const releaseLock = acquireFileLock(`${statePath}.lock`);
   let stalledConversation;
@@ -11146,7 +9534,6 @@ function markConversationStalled({ statePath, logPath, reason, detail = {} }) {
       updated_at: now
     };
     saveState(statePath, stalledConversation);
-    releaseClaudeHookLease(stalledConversation);
     appendEvent(logPath, {
       ts: now,
       conversation_id: conversation.conversation_id,
@@ -11177,175 +9564,6 @@ function markConversationStalled({ statePath, logPath, reason, detail = {} }) {
     });
   }
   return stalledConversation;
-}
-
-function markMonitorFailureNeedsRecovery({ statePath, logPath, reason, detail = {}, outputTail = "" }) {
-  const releaseLock = acquireFileLock(`${statePath}.lock`);
-  let recoveryResult;
-  let recoveryMessage;
-  try {
-    const conversation = loadState(statePath);
-    if (!isWaitingForAgent(conversation.status)) {
-      runtimeLog("info", "executor_monitor_finished", {
-        conversation_id: conversation.conversation_id,
-        status: conversation.status,
-        reason: "conversation_changed_before_recovery"
-      });
-      return undefined;
-    }
-
-    const executor = executorForConversation(conversation);
-    const pendingMessage = latestPendingExecutorMessage({
-      events: readExistingEvents(logPath),
-      executor
-    });
-    if (!pendingMessage) {
-      runtimeLog("warn", "monitor_recovery_skipped", {
-        conversation_id: conversation.conversation_id,
-        agent: executor.kind,
-        executor_session: executor.session,
-        reason: "pending_message_missing"
-      });
-      return undefined;
-    }
-
-    recoveryResult = markConversationNeedsRecovery({
-      conversation,
-      statePath,
-      logPath,
-      executor,
-      message: pendingMessage,
-      failedStage: "executor_monitor",
-      result: {
-        status: 1,
-        stderr: outputTail
-      },
-      reason
-    });
-    const recoveredConversation = recoveryResult.conversation;
-    const shouldNotify = Boolean(recoveredConversation.gateway_method && !recoveredConversation.recovery_notification_sent_at);
-    if (shouldNotify) {
-      recoveryMessage = createMessage({
-        conversation: recoveredConversation,
-        from: executor.actor,
-        to: "openclaw",
-        type: "error",
-        requiresResponse: false,
-        body: [
-          `AKK marked this ${executor.display_name} task as needing recovery: ${reason}.`,
-          "",
-          `Conversation: ${recoveredConversation.conversation_id}`,
-          `Session: ${executor.session}`,
-          "Use `AKK recover` to replay saved AKK history in a new session, or `AKK close` to close it."
-        ].join("\n")
-      });
-      const now = new Date().toISOString();
-      recoveryResult.conversation = {
-        ...recoveredConversation,
-        recovery_notification_sent_at: now,
-        recovery_notification_message_id: recoveryMessage.id,
-        updated_at: now
-      };
-      saveState(statePath, recoveryResult.conversation);
-    }
-    appendEvent(logPath, {
-      ts: new Date().toISOString(),
-      conversation_id: conversation.conversation_id,
-      event: "monitor_recovery_classified",
-      status: "needs_recovery",
-      reason,
-      ...detail
-    });
-  } finally {
-    releaseLock();
-  }
-
-  if (recoveryResult?.conversation && recoveryMessage) {
-    deliverMonitorFailureNotification({
-      statePath,
-      logPath,
-      conversation: recoveryResult.conversation,
-      message: recoveryMessage,
-      eventPrefix: "recovery"
-    });
-  }
-  return recoveryResult;
-}
-
-function latestPendingExecutorMessage({ events, executor }) {
-  for (const event of [...events].reverse()) {
-    if (event.event !== "message") {
-      continue;
-    }
-
-    const message = event.message ?? event;
-    if (
-      message?.from === "openclaw" &&
-      message?.to === executor.actor &&
-      message?.requires_response !== false
-    ) {
-      return message;
-    }
-  }
-  return undefined;
-}
-
-function markConversationNeedsModelSelection({ statePath, logPath, reason, detail = {} }) {
-  const releaseLock = acquireFileLock(`${statePath}.lock`);
-  let modelSelectionConversation;
-  try {
-    const conversation = loadState(statePath);
-    if (!isWaitingForAgent(conversation.status)) {
-      runtimeLog("info", "executor_monitor_finished", {
-        conversation_id: conversation.conversation_id,
-        status: conversation.status,
-        reason: "conversation_changed_before_model_selection"
-      });
-      return conversation;
-    }
-
-    const now = new Date().toISOString();
-    const detailRecord = detail as Record<string, unknown>;
-    const modelSelection = isRecord(detailRecord.model_selection)
-      ? detailRecord.model_selection as Record<string, unknown>
-      : {};
-    modelSelectionConversation = {
-      ...conversation,
-      status: "needs_model_selection" as const,
-      model_selection: {
-        detected_at: now,
-        message: reason,
-        ...modelSelection
-      },
-      updated_at: now
-    };
-    saveState(statePath, modelSelectionConversation);
-    appendEvent(logPath, {
-      ts: now,
-      conversation_id: conversation.conversation_id,
-      event: "conversation_needs_model_selection",
-      status: "needs_model_selection",
-      reason,
-      ...detailRecord
-    });
-    runtimeLog("warn", "conversation_needs_model_selection", {
-      conversation_id: conversation.conversation_id,
-      agent: executorForConversation(conversation).kind,
-      executor_session: executorForConversation(conversation).session,
-      state_path: statePath,
-      event_log_path: logPath,
-      reason,
-      ...detailRecord
-    });
-  } finally {
-    releaseLock();
-  }
-
-  return modelSelectionConversation;
-}
-
-function deliverMonitorFailureNotification({ statePath, logPath, conversation, message, eventPrefix }) {
-  deliverStalledNotification({ statePath, logPath, conversation, message, eventPrefix });
 }
 
 function deliverStalledNotification({ statePath, logPath, conversation, message, eventPrefix = "stalled" }) {
@@ -11420,14 +9638,6 @@ function deliverStalledNotification({ statePath, logPath, conversation, message,
   });
 }
 
-function safeReadEvents(logPath) {
-  try {
-    return readNdjsonLog(logPath);
-  } catch {
-    return [];
-  }
-}
-
 function cleanupIdleConversations(storeDir, options: Record<string, any> = {}, now = new Date()) {
   const timeoutMinutes = Number(options.idleTimeoutMinutes ?? DEFAULT_IDLE_TIMEOUT_MINUTES);
   if (!Number.isFinite(timeoutMinutes) || timeoutMinutes <= 0) {
@@ -11445,10 +9655,7 @@ function cleanupIdleConversations(storeDir, options: Record<string, any> = {}, n
     if (!Number.isFinite(listedIdleSinceMs)) {
       continue;
     }
-    const listedTerminalBridge = terminalBridgeEnabled(listedConversation) &&
-      isRecord(listedConversation.native_session_takeover) &&
-      typeof listedConversation.native_session_takeover.terminal_bridge_message_id === "string";
-    if (!listedTerminalBridge && now.getTime() - listedIdleSinceMs < timeoutMinutes * 60 * 1000) {
+    if (now.getTime() - listedIdleSinceMs < timeoutMinutes * 60 * 1000) {
       continue;
     }
 
@@ -11477,14 +9684,12 @@ function cleanupIdleConversations(storeDir, options: Record<string, any> = {}, n
       const terminalBridge = terminalBridgeEnabled(conversation) &&
         isRecord(conversation.native_session_takeover) &&
         typeof conversation.native_session_takeover.terminal_bridge_message_id === "string";
-      if (!terminalBridge && now.getTime() - idleSinceMs < timeoutMinutes * 60 * 1000) {
+      if (now.getTime() - idleSinceMs < timeoutMinutes * 60 * 1000) {
         continue;
       }
 
       const logPath = conversation.event_log_path ?? logPathForStatePath(statePath);
-      const closeReason = terminalBridge
-        ? "terminal bridge task completed"
-        : `idle timeout after ${timeoutMinutes} minutes`;
+      const closeReason = `idle timeout after ${timeoutMinutes} minutes`;
       const closedConversation = {
         ...conversation,
         status: "closed" as const,
@@ -11582,31 +9787,6 @@ function messageFingerprint(message) {
     requires_response: message.requires_response,
     body: message.body
   });
-}
-
-function deliverToOpenClaw({ gatewayUrl, token, openclawSession, message }) {
-  const agent = `openclaw acp --url ${gatewayUrl} --session ${openclawSession}`;
-  const result = spawnSync("acpx", ["--agent", agent, JSON.stringify(message)], {
-    encoding: "utf8",
-    maxBuffer: 1024 * 1024 * 10,
-    timeout: CALLBACK_DELIVERY_TIMEOUT_MS,
-    killSignal: "SIGKILL",
-    env: openClawGatewayEnvironment(token)
-  });
-
-  if (result.error) {
-    return {
-      status: 1,
-      stdout: result.stdout ?? "",
-      stderr: result.error.message
-    };
-  }
-
-  return {
-    status: result.status ?? 1,
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? ""
-  };
 }
 
 function deliverToGatewayMethod({ method, openclawBin, gatewayUrl, token, sessionKey, statePath, logPath, conversation, message }) {
@@ -11776,18 +9956,6 @@ function openClawGatewayEnvironment(token): NodeJS.ProcessEnv {
     ...process.env,
     OPENCLAW_GATEWAY_TOKEN: token
   };
-}
-
-function captureJson(argv) {
-  const result = spawnSync(process.execPath, [new URL(import.meta.url).pathname, ...argv], {
-    encoding: "utf8"
-  });
-
-  if (result.status !== 0) {
-    throw new Error(result.stderr || result.stdout || `subcommand failed: ${argv[0]}`);
-  }
-
-  return JSON.parse(result.stdout);
 }
 
 function parseArgs(argv) {
@@ -12072,99 +10240,6 @@ function classifyProcessFailure(result) {
   return undefined;
 }
 
-function readOutputTail(outputPath, maxBytes = 65536) {
-  if (!outputPath) {
-    return "";
-  }
-
-  try {
-    const resolvedPath = expandHome(outputPath);
-    const stat = fs.statSync(resolvedPath);
-    const start = Math.max(0, stat.size - maxBytes);
-    const length = stat.size - start;
-    const fd = fs.openSync(resolvedPath, "r");
-    try {
-      const buffer = Buffer.alloc(length);
-      fs.readSync(fd, buffer, 0, length, start);
-      return buffer.toString("utf8");
-    } finally {
-      fs.closeSync(fd);
-    }
-  } catch {
-    return "";
-  }
-}
-
-function openPrivateAppendFile(filePath: string): number {
-  if (fs.existsSync(filePath) && fs.lstatSync(filePath).isSymbolicLink()) {
-    throw new Error(`refusing agent output symlink: ${filePath}`);
-  }
-  const noFollow = typeof fs.constants.O_NOFOLLOW === "number"
-    ? fs.constants.O_NOFOLLOW
-    : 0;
-  const descriptor = fs.openSync(
-    filePath,
-    fs.constants.O_CREAT |
-      fs.constants.O_APPEND |
-      fs.constants.O_WRONLY |
-      noFollow,
-    0o600
-  );
-  if (!fs.fstatSync(descriptor).isFile()) {
-    fs.closeSync(descriptor);
-    throw new Error(`agent output must be a regular file: ${filePath}`);
-  }
-  fs.fchmodSync(descriptor, 0o600);
-  return descriptor;
-}
-
-function detectModelSelectionError(text) {
-  const cleaned = cleanProcessText(text);
-  if (!cleaned) {
-    return undefined;
-  }
-
-  const unsupportedAccount = /The '([^']+)' model is not supported when using Codex with a ChatGPT account/i.exec(cleaned);
-  if (unsupportedAccount) {
-    return {
-      kind: "unsupported_chatgpt_account_model",
-      attempted_model: unsupportedAccount[1],
-      message: unsupportedAccount[0]
-    };
-  }
-
-  const unadvertised = /Cannot apply --model "([^"]+)": the ACP agent did not advertise that model\. Available models:\s*([^\n\r]+)/i.exec(cleaned);
-  if (unadvertised) {
-    return {
-      kind: "unadvertised_acpx_model",
-      attempted_model: unadvertised[1],
-      available_models: unadvertised[2]
-        .split(",")
-        .map((model) => model.trim())
-        .filter(Boolean),
-      message: unadvertised[0]
-    };
-  }
-
-  return undefined;
-}
-
-function detectTransientExecutorFailure(text) {
-  const cleaned = cleanProcessText(text);
-  if (!cleaned) {
-    return undefined;
-  }
-
-  if (isRemoteCompactStreamDisconnect(cleaned.toLowerCase())) {
-    return {
-      kind: "remote_compact_stream_disconnect",
-      message: "Codex remote compact stream disconnected before completion"
-    };
-  }
-
-  return undefined;
-}
-
 function isRemoteCompactStreamDisconnect(text) {
   const value = String(text ?? "").toLowerCase();
   return (
@@ -12186,10 +10261,6 @@ function runtimeLog(level, event, fields = {}) {
   }
 }
 
-function shellQuote(value) {
-  return `'${String(value).replace(/'/g, "'\\''")}'`;
-}
-
 function withStoragePaths(conversation, paths) {
   return {
     ...conversation,
@@ -12205,24 +10276,20 @@ function usage() {
   process.stdout.write(`Usage:
   agent-knock-knock --help
   agent-knock-knock --version
-  agent-knock-knock new --request <text> [--agent ${agentList}] [--workspace <path>] [--store-dir <dir>]
-  agent-knock-knock record --state <file> --message-json <json>
-  agent-knock-knock bootstrap-prompt --callback-command <command> [--agent ${agentList}]
-  agent-knock-knock delegate --request <text> [--agent ${agentList}] [--store-dir <dir>] [--all-proxy <url>] [--agent-timeout-minutes <minutes>] [--token <gateway-token>] [--send|--background]
+  agent-knock-knock delegate --request <text> [--agent ${agentList}] [--workspace <path>] [--store-dir <dir>]
   agent-knock-knock list [--store-dir <dir>] [--agent ${agentList}] [--status <status>] [--all] [--managed-only] [--no-approval-scan] [--terminal-debug]
   agent-knock-knock status [--conversation <id|selector>] [--store-dir <dir>] [--trace]
   agent-knock-knock describe [--conversation <id|selector>] [--store-dir <dir>]
-  agent-knock-knock send [--conversation <id|selector>] --message <text> [--type answer|task|control] [--all-proxy <url>] [--agent-timeout-minutes <minutes>] [--agent-hard-timeout-minutes <minutes>]
+  agent-knock-knock send [--conversation <id|selector>] --message <text> [--type answer|task|control] [--agent-timeout-minutes <minutes>] [--agent-hard-timeout-minutes <minutes>]
   agent-knock-knock approve [--conversation <id|selector>]
-  agent-knock-knock cancel [--conversation <id|selector>] [--all-proxy <url>]
+  agent-knock-knock cancel [--conversation <id|selector>]
   agent-knock-knock renew [--conversation <id|selector>] [--minutes <inactivity-minutes>]
   agent-knock-knock reconcile-monitors [--store-dir <dir>]
   agent-knock-knock retry-callback --conversation <id> [--store-dir <dir>]
-  agent-knock-knock recover --conversation <id> [--session <name>] [--all-proxy <url>]
-  agent-knock-knock close --conversation <id> [--reason <text>]
-  agent-knock-knock install-openclaw [--workspace <path>] [--default-agent ${agentList}] [--mode tmux|acpx|all] [--verify] [--openclaw-bin <path>] [--skill-path <path>] [--skill-only] [--no-restart]
-  agent-knock-knock doctor [--mode tmux|acpx|all] [--workspace <path>] [--openclaw-bin <path>]
-  agent-knock-knock agent takeover --agent codex --session-id <id> --strategy terminate_then_resume|terminal_control|fork [--create-conversation]
+  agent-knock-knock close --conversation <id> [--expected-message-id <id>] [--reason <text>]
+  agent-knock-knock install-openclaw [--workspace <path>] [--default-agent ${agentList}] [--verify] [--openclaw-bin <path>] [--skill-path <path>] [--skill-only] [--no-restart]
+  agent-knock-knock doctor [--workspace <path>] [--openclaw-bin <path>]
+  agent-knock-knock agent takeover --agent codex --session-id <id> --strategy terminal_control [--create-conversation]
   agent-knock-knock callback --state <file> --message-json <json> [--record-only]
   agent-knock-knock transcript --log <file> [--include-raw]
   agent-knock-knock transcript --conversation <dir> [--include-raw]

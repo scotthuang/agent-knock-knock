@@ -1,5 +1,5 @@
-# The first ClawHub release must be published manually. Use this workflow only
-# after configuring this repository as the package's trusted OIDC publisher.
+# Use this workflow after configuring this repository as the package's trusted
+# OIDC publisher in ClawHub.
 name: ClawHub Publish
 
 on:
@@ -25,6 +25,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Set up Node.js
@@ -33,11 +34,23 @@ jobs:
           node-version: "24"
           package-manager-cache: false
 
-      - name: Resolve release channel
+      - name: Validate release ref and resolve channel
         id: release
         shell: bash
         run: |
           package_version="$(node -p "require('./package.json').version")"
+          expected_ref="refs/tags/v${package_version}"
+          if [[ "${GITHUB_REF}" != "${expected_ref}" ]]; then
+            echo "::error::ClawHub releases must run from ${expected_ref}; received ${GITHUB_REF}."
+            exit 1
+          fi
+
+          git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+            echo "::error::Release commit ${GITHUB_SHA} is not on origin/main."
+            exit 1
+          fi
+
           if [[ "${package_version}" == *-* ]]; then
             release_channel="beta"
           else
@@ -54,6 +67,9 @@ jobs:
 
       - name: Run tests
         run: npm test
+
+      - name: Validate ClawHub package
+        run: npm run clawhub:validate
 
       - name: Pack prebuilt plugin
         shell: bash
@@ -119,6 +135,7 @@ jobs:
             --family code-plugin
             --owner scotthuang
             --tags "${RELEASE_CHANNEL}"
+            --topics "tmux,codex,claude-code,agent-orchestration,terminal-handoff"
             --source-repo "${GITHUB_REPOSITORY}"
             --source-commit "${GITHUB_SHA}"
             --source-ref "${GITHUB_REF}"

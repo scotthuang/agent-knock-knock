@@ -24,7 +24,7 @@ body:
     id: environment
     attributes:
       label: Environment
-      description: Include AKK, OpenClaw, Node.js, OS, coding agent, and ACPX or tmux mode.
+      description: Include AKK, OpenClaw, Node.js, OS, tmux, and coding-agent versions.
       placeholder: "AKK 0.2.x; OpenClaw 2026.x; Node 24.x; macOS; Claude Code; tmux"
     validations:
       required: true

@@ -13,6 +13,17 @@ import {
   runtimeLogPath,
   writeRuntimeLog
 } from "../src/runtime-log.js";
+import {
+  applyMessageToConversation,
+  createConversation,
+  createMessage
+} from "../src/protocol.js";
+import {
+  appendEvent,
+  messageEvent,
+  pathsForConversation,
+  saveState
+} from "../src/store.js";
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 
@@ -184,22 +195,27 @@ test("runtime logging refuses a symlink log target", () => {
   }
 });
 
-test("CLI writes runtime logs without leaking full request secrets", () => {
+test("CLI runtime logs do not leak secrets from stored task state", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-runtime-cli-"));
   const storeDir = path.join(tempDir, "conversations");
   const logDir = path.join(tempDir, "runtime");
   const request = "Investigate issue with token sk-abcdefghijklmnopqrstuvwxyz in a callback command.";
 
   try {
+    const stored = storeConversationFixture(storeDir, request);
+    writeRuntimeLog({
+      level: "info",
+      event: "conversation_created",
+      conversation_id: stored.conversation.conversation_id,
+      request: { preview: request }
+    }, {
+      logDir
+    });
     const result = spawnSync(process.execPath, [
       binPath,
-      "new",
-      "--agent",
-      "codex",
-      "--session",
-      "codex-runtime",
-      "--request",
-      request,
+      "status",
+      "--conversation",
+      stored.conversation.conversation_id,
       "--store-dir",
       storeDir
     ], {
@@ -212,16 +228,20 @@ test("CLI writes runtime logs without leaking full request secrets", () => {
 
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const parsed = JSON.parse(result.stdout);
+    assert.equal(
+      parsed.conversation.conversation_id,
+      stored.conversation.conversation_id
+    );
     const logFile = fs.readdirSync(logDir).find((file) => /^runtime-\d{4}-\d{2}-\d{2}\.ndjson$/.test(file));
     assert.ok(logFile);
 
     const text = fs.readFileSync(path.join(logDir, logFile), "utf8");
     assert.doesNotMatch(text, /sk-abcdefghijklmnopqrstuvwxyz/);
     const events = text.trim().split(/\r?\n/).map((line) => JSON.parse(line));
-    assert.equal(events.some((event) => event.event === "cli_start" && event.command === "new"), true);
+    assert.equal(events.some((event) => event.event === "cli_start" && event.command === "status"), true);
     assert.equal(events.some((event) =>
       event.event === "conversation_created" &&
-      event.conversation_id === parsed.conversation.conversation_id &&
+      event.conversation_id === stored.conversation.conversation_id &&
       event.request.preview.includes("sk-[REDACTED]")
     ), true);
     assert.equal(events.at(-1).event, "cli_finish");
@@ -229,3 +249,38 @@ test("CLI writes runtime logs without leaking full request secrets", () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+function storeConversationFixture(storeDir: string, request: string) {
+  const now = new Date("2026-07-28T00:00:00.000Z");
+  const base = createConversation({
+    userRequest: request,
+    executorKind: "codex",
+    executorSession: "codex-runtime",
+    now
+  });
+  const message = createMessage({
+    conversation: base,
+    from: "openclaw",
+    to: "codex",
+    type: "task",
+    body: request,
+    now
+  });
+  const paths = pathsForConversation(base.conversation_id, storeDir);
+  const conversation = {
+    ...applyMessageToConversation(base, message, now),
+    store_dir: paths.storeDir,
+    conversation_dir: paths.conversationDir,
+    event_log_path: paths.logPath,
+    state_path: paths.statePath
+  };
+  saveState(paths.statePath, conversation);
+  appendEvent(paths.logPath, {
+    ts: now.toISOString(),
+    conversation_id: conversation.conversation_id,
+    event: "conversation_created",
+    conversation
+  });
+  appendEvent(paths.logPath, messageEvent(message));
+  return { conversation, paths };
+}

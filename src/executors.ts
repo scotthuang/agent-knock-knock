@@ -1,31 +1,22 @@
 export type OpenClawActor = "openclaw";
-export type CodingAgentActor = "claude-code" | "codex" | "cursor";
+export type CodingAgentActor = "claude-code" | "codex";
 export type Actor = OpenClawActor | CodingAgentActor;
-export type ExecutorKind = "claude" | "codex" | "cursor";
+export type ExecutorKind = "claude" | "codex";
 
 export interface Executor {
   kind: ExecutorKind;
   actor: Actor;
   session: string;
   display_name: string;
-  transport: "acpx";
+  transport: "tmux";
 }
 
 export interface ExecutorDefinition {
   kind: ExecutorKind;
   actor: CodingAgentActor;
-  acpxCommand: string;
   defaultSession: string;
-  sessionPrefix: string;
   displayName: string;
   aliases: readonly string[];
-  sessionConfigKeys: readonly string[];
-  proxyConfigKeys: readonly string[];
-  modelConfigKeys: readonly string[];
-  proxyEnvKeys: readonly string[];
-  supportsSessionEnsure: boolean;
-  supportsCancel: boolean;
-  modelEnvKey?: string;
 }
 
 interface ResolveExecutorOptions {
@@ -37,49 +28,16 @@ export const EXECUTORS = {
   claude: {
     kind: "claude",
     actor: "claude-code",
-    acpxCommand: "claude",
-    defaultSession: "bidirectional",
-    sessionPrefix: "akk-claude",
+    defaultSession: "claude",
     displayName: "Claude Code",
-    aliases: ["claude", "claude-code", "claudecode"],
-    sessionConfigKeys: ["claudeSession", "defaultClaudeSession"],
-    proxyConfigKeys: [],
-    modelConfigKeys: [],
-    proxyEnvKeys: [],
-    supportsSessionEnsure: true,
-    supportsCancel: true
+    aliases: ["claude", "claude-code", "claudecode"]
   },
   codex: {
     kind: "codex",
     actor: "codex",
-    acpxCommand: "codex",
     defaultSession: "codex",
-    sessionPrefix: "akk-codex",
     displayName: "Codex",
-    aliases: ["codex", "c"],
-    sessionConfigKeys: ["codexSession", "defaultCodexSession"],
-    proxyConfigKeys: ["codexAllProxy"],
-    modelConfigKeys: ["codexModel"],
-    proxyEnvKeys: ["CODEX_ALL_PROXY", "ALL_PROXY", "all_proxy"],
-    supportsSessionEnsure: true,
-    supportsCancel: true,
-    modelEnvKey: "CODEX_ACPX_MODEL"
-  },
-  cursor: {
-    kind: "cursor",
-    actor: "cursor",
-    acpxCommand: "cursor",
-    defaultSession: "cursor",
-    sessionPrefix: "akk-cursor",
-    displayName: "Cursor",
-    aliases: ["cursor"],
-    sessionConfigKeys: ["cursorSession", "defaultCursorSession"],
-    proxyConfigKeys: ["cursorAllProxy"],
-    modelConfigKeys: ["cursorModel"],
-    proxyEnvKeys: ["CURSOR_ALL_PROXY", "ALL_PROXY", "all_proxy"],
-    supportsSessionEnsure: true,
-    supportsCancel: true,
-    modelEnvKey: "CURSOR_ACPX_MODEL"
+    aliases: ["codex", "c"]
   }
 } as const satisfies Record<ExecutorKind, ExecutorDefinition>;
 
@@ -132,44 +90,6 @@ export function resolveExecutor({ kind = "claude", session }: ResolveExecutorOpt
     actor: definition.actor,
     session: session || definition.defaultSession,
     display_name: definition.displayName,
-    transport: "acpx"
+    transport: "tmux"
   };
-}
-
-export function acpxCommandForExecutor(executor: Pick<Executor, "kind">): string {
-  return executorDefinitionForKind(executor.kind).acpxCommand;
-}
-
-export function proxyEnvForExecutor(executor: Pick<Executor, "kind">, env: NodeJS.ProcessEnv): string | undefined {
-  const definition = executorDefinitionForKind(executor.kind);
-  for (const key of definition.proxyEnvKeys) {
-    const value = env[key];
-    if (value) {
-      return value;
-    }
-  }
-  return undefined;
-}
-
-export function modelEnvForExecutor(executor: Pick<Executor, "kind">, env: NodeJS.ProcessEnv): string | undefined {
-  const key = executorDefinitionForKind(executor.kind).modelEnvKey;
-  return key ? env[key] : undefined;
-}
-
-export function normalizeModelForExecutor(executor: Pick<Executor, "kind">, model: string | undefined): string | undefined {
-  if (!model) {
-    return undefined;
-  }
-
-  const trimmed = model.trim();
-  if (executor.kind !== "codex") {
-    return trimmed;
-  }
-
-  const match = /^(.+)\/(low|medium|high|xhigh)$/i.exec(trimmed);
-  if (!match) {
-    return trimmed;
-  }
-
-  return `${match[1]}[${match[2].toLowerCase()}]`;
 }

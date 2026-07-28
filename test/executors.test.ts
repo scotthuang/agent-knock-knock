@@ -2,31 +2,24 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   EXECUTOR_KINDS,
-  acpxCommandForExecutor,
   executorDefinitionForAlias,
   executorDefinitionForKind,
-  normalizeModelForExecutor,
   parseLeadingExecutorAlias,
   resolveExecutor
 } from "../src/executors.js";
 
 test("executor registry exposes the supported coding agents", () => {
-  assert.deepEqual(EXECUTOR_KINDS, ["claude", "codex", "cursor"]);
+  assert.deepEqual(EXECUTOR_KINDS, ["claude", "codex"]);
 
   const claude = executorDefinitionForKind("claude");
   assert.equal(claude.actor, "claude-code");
-  assert.equal(claude.acpxCommand, "claude");
-  assert.equal(claude.sessionPrefix, "akk-claude");
+  assert.equal(claude.defaultSession, "claude");
+  assert.equal(claude.displayName, "Claude Code");
 
   const codex = executorDefinitionForKind("codex");
   assert.equal(codex.actor, "codex");
-  assert.equal(codex.acpxCommand, "codex");
-  assert.equal(codex.sessionPrefix, "akk-codex");
-
-  const cursor = executorDefinitionForKind("cursor");
-  assert.equal(cursor.actor, "cursor");
-  assert.equal(cursor.acpxCommand, "cursor");
-  assert.equal(cursor.sessionPrefix, "akk-cursor");
+  assert.equal(codex.defaultSession, "codex");
+  assert.equal(codex.displayName, "Codex");
 });
 
 test("executor registry resolves slash command aliases", () => {
@@ -34,44 +27,45 @@ test("executor registry resolves slash command aliases", () => {
   assert.equal(executorDefinitionForAlias("claude-code")?.kind, "claude");
   assert.equal(executorDefinitionForAlias("codex")?.kind, "codex");
   assert.equal(executorDefinitionForAlias("c")?.kind, "codex");
-  assert.equal(executorDefinitionForAlias("cursor")?.kind, "cursor");
+  assert.equal(executorDefinitionForAlias("unknown-agent"), undefined);
 });
 
 test("executor registry parses leading agent aliases from delegated request text", () => {
-  assert.deepEqual(parseLeadingExecutorAlias("cursor 帮我启动cursor做个测试"), {
-    kind: "cursor",
-    request: "帮我启动cursor做个测试"
+  assert.deepEqual(parseLeadingExecutorAlias("codex 帮我检查这个改动"), {
+    kind: "codex",
+    request: "帮我检查这个改动"
   });
-  assert.deepEqual(parseLeadingExecutorAlias("Cursor: say hello"), {
-    kind: "cursor",
-    request: "say hello"
+  assert.deepEqual(parseLeadingExecutorAlias("Claude: review this patch"), {
+    kind: "claude",
+    request: "review this patch"
   });
   assert.deepEqual(parseLeadingExecutorAlias("claude-code：review this patch"), {
     kind: "claude",
     request: "review this patch"
   });
-  assert.equal(parseLeadingExecutorAlias("please ask cursor to say hello"), undefined);
+  assert.equal(parseLeadingExecutorAlias("unknown-agent: say hello"), undefined);
+  assert.equal(parseLeadingExecutorAlias("please ask an unknown agent to say hello"), undefined);
 });
 
-test("resolved executors keep the stable protocol shape", () => {
+test("resolved executors use the tmux transport", () => {
   const codex = resolveExecutor({ kind: "codex", session: "codex-work" });
   assert.deepEqual(codex, {
     kind: "codex",
     actor: "codex",
     session: "codex-work",
     display_name: "Codex",
-    transport: "acpx"
+    transport: "tmux"
   });
-  assert.equal(acpxCommandForExecutor(codex), "codex");
-});
 
-test("normalizes Codex ACPX model aliases", () => {
-  const codex = resolveExecutor({ kind: "codex" });
-  const cursor = resolveExecutor({ kind: "cursor" });
-
-  assert.equal(normalizeModelForExecutor(codex, "gpt-5.5/medium"), "gpt-5.5[medium]");
-  assert.equal(normalizeModelForExecutor(codex, "gpt-5.3-codex/XHIGH"), "gpt-5.3-codex[xhigh]");
-  assert.equal(normalizeModelForExecutor(codex, "gpt-5.5[medium]"), "gpt-5.5[medium]");
-  assert.equal(normalizeModelForExecutor(cursor, "cursor-model/medium"), "cursor-model/medium");
-  assert.equal(normalizeModelForExecutor(codex, undefined), undefined);
+  assert.deepEqual(resolveExecutor({ kind: "claude" }), {
+    kind: "claude",
+    actor: "claude-code",
+    session: "claude",
+    display_name: "Claude Code",
+    transport: "tmux"
+  });
+  assert.throws(
+    () => executorDefinitionForKind("unknown-agent"),
+    /unsupported executor: unknown-agent/
+  );
 });

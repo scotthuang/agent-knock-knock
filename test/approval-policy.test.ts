@@ -60,15 +60,14 @@ test("Claude auto approval requires keys-mode local transcript evidence", () => 
   };
   const claudeCandidate = {
     ...candidate,
-    agent: "claude",
-    decisionMode: "structured" as const
+    agent: "claude"
   };
-  const structured = evaluateApprovalPolicy({
+  const missingMode = evaluateApprovalPolicy({
     policy: claudePolicy,
     candidate: claudeCandidate
   });
-  assert.equal(structured.action, "ask");
-  assert.match(structured.reason, /verified local transcript evidence/u);
+  assert.equal(missingMode.action, "ask");
+  assert.match(missingMode.reason, /verified local transcript evidence/u);
   const screenWithoutEvidence = evaluateApprovalPolicy({
     policy: claudePolicy,
     candidate: { ...claudeCandidate, decisionMode: "keys" }

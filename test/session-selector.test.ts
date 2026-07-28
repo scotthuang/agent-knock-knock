@@ -87,7 +87,7 @@ test("only reports empty and non-actionable candidate sets separately", () => {
 
   const inactive = candidate({
     id: "task-inactive",
-    agent: "cursor",
+    agent: "claude",
     actionable: false,
     status: "closed"
   });
@@ -112,7 +112,7 @@ test("latest selects the uniquely newest actionable target independent of input 
   });
   const closedButNewer = candidate({
     id: "task-closed",
-    agent: "cursor",
+    agent: "claude",
     actionable: false,
     updatedAtMs: 4
   });
@@ -142,7 +142,7 @@ test("latest fails closed when recency is missing or tied", () => {
     resolveSessionSelector("latest", [
       candidate({ id: "task-a", agent: "codex", updatedAtMs: 2 }),
       candidate({ id: "task-b", agent: "claude", updatedAtMs: 2 }),
-      candidate({ id: "task-old", agent: "cursor", updatedAtMs: 1 })
+      candidate({ id: "task-old", agent: "codex", updatedAtMs: 1 })
     ])
   );
   assert.equal(tiedError.code, "ambiguous");
@@ -156,11 +156,14 @@ test("latest fails closed when recency is missing or tied", () => {
 test("bare agent selectors require exactly one actionable target for that agent", () => {
   const codex = candidate({ id: "codex-open", agent: "codex" });
   const claude = candidate({ id: "claude-open", agent: "claude" });
-  const cursor = candidate({ id: "cursor-open", agent: "cursor" });
 
   assert.equal(resolveSessionSelector("codex", [claude, codex]).id, codex.id);
   assert.equal(resolveSessionSelector("CLAUDE", [codex, claude]).id, claude.id);
-  assert.equal(resolveSessionSelector("cursor", [cursor, codex]).id, cursor.id);
+
+  const unsupported = captureSelectorError(() =>
+    resolveSessionSelector("unknown-agent", [codex, claude])
+  );
+  assert.equal(unsupported.code, "not_found");
 
   const ambiguous = captureSelectorError(() =>
     resolveSessionSelector("codex", [
@@ -202,10 +205,10 @@ test("agent:latest selects within one agent and fails closed on an unavailable a
   assert.equal(result.matchedBy, "agent_latest");
 
   const unavailable = captureSelectorError(() =>
-    resolveSessionSelector("cursor:latest", [codexNew])
+    resolveSessionSelector("unknown-agent:latest", [codexNew])
   );
-  assert.equal(unavailable.code, "no_actionable_targets");
-  assert.deepEqual(unavailable.candidates, []);
+  assert.equal(unavailable.code, "not_found");
+  assert.deepEqual(unavailable.candidates.map((item) => item.id), [codexNew.id]);
 });
 
 test("stable short references resolve exactly and do not depend on visible candidates", () => {
@@ -296,7 +299,7 @@ test("a complete id or short ref cannot bypass operation actionability", () => {
 test("unknown selectors return actionable candidate details without guessing", () => {
   const actionable = candidate({
     id: "task-open",
-    agent: "cursor",
+    agent: "claude",
     status: "idle",
     source: "akk_delegate",
     workspace: "/work/repo",
@@ -329,7 +332,7 @@ test("candidate validation rejects unsafe or non-deterministic inputs", () => {
   assert.throws(
     () => resolveSessionSelector("only", [{
       id: "task",
-      agent: "unknown",
+      agent: "unknown-agent",
       actionable: true
     } as unknown as SessionSelectorCandidate]),
     /unsupported agent/

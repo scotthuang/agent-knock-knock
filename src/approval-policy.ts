@@ -6,7 +6,7 @@ import path from "node:path";
 export interface ApprovalCandidate {
   agent: string;
   kind: string;
-  decisionMode?: "keys" | "structured";
+  decisionMode?: "keys";
   command?: string;
   cwd?: string;
   fingerprint: string;
@@ -67,7 +67,7 @@ export function approvalCandidateFromMessage(message: unknown): ApprovalCandidat
     agent,
     kind,
     fingerprint,
-    ...(candidate?.decision_mode === "structured" || candidate?.decision_mode === "keys"
+    ...(candidate?.decision_mode === "keys"
       ? { decisionMode: candidate.decision_mode }
       : {}),
     command: stringValue(candidate?.command),

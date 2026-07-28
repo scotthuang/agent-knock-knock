@@ -1,16 +1,14 @@
 import { spawnSync } from "node:child_process";
 
-export type DoctorMode = "tmux" | "acpx" | "all";
+export type DoctorMode = "tmux";
 
 export type DoctorReadiness = "ready" | "partially_ready" | "not_ready";
 
 export type DoctorProbeCommand =
   | "openclaw"
   | "tmux"
-  | "acpx"
   | "codex"
-  | "claude"
-  | "cursor";
+  | "claude";
 
 export type DoctorProbeStatus =
   | "ok"
@@ -65,21 +63,12 @@ interface DoctorTmuxCapability extends DoctorModeCapability {
   recommended: true;
 }
 
-interface DoctorAcpxCapability extends DoctorModeCapability {
-  client: "acpx";
-}
-
 export interface DoctorCapabilitySummary {
   coreOk: boolean;
   transportOk: boolean;
   mode: DoctorMode;
   readiness: DoctorReadiness;
   tmux: DoctorTmuxCapability;
-  acpx: DoctorAcpxCapability;
-  /**
-   * Backwards-compatible alias retained for existing CLI consumers.
-   */
-  acp: DoctorAcpxCapability;
 }
 
 const DEFAULT_PROBE_TIMEOUT_MS = 3_000;
@@ -90,32 +79,20 @@ const MAX_REPORTED_OUTPUT_CHARS = 2_000;
 const PROBE_ARGUMENTS: Readonly<Record<DoctorProbeCommand, readonly string[]>> = {
   openclaw: ["--version"],
   tmux: ["-V"],
-  acpx: ["--version"],
   codex: ["--version"],
-  claude: ["--version"],
-  cursor: ["--version"]
+  claude: ["--version"]
 };
 
 const DEFAULT_PROBE_EXECUTABLES: Readonly<Record<DoctorProbeCommand, string>> = {
   openclaw: "openclaw",
   tmux: "tmux",
-  acpx: "acpx",
   codex: "codex",
-  claude: "claude",
-  // ACPX's built-in Cursor adapter launches `cursor-agent acp`. The desktop
-  // `cursor` shim may exist while no ACP-capable Cursor agent is available.
-  cursor: "cursor-agent"
+  claude: "claude"
 };
 
 export const DOCTOR_PROBE_COMMANDS = Object.freeze(
   Object.keys(PROBE_ARGUMENTS) as DoctorProbeCommand[]
 );
-
-const MODE_PROBE_COMMANDS: Readonly<Record<DoctorMode, readonly DoctorProbeCommand[]>> = {
-  tmux: ["openclaw", "tmux", "codex", "claude"],
-  acpx: ["openclaw", "acpx", "codex", "claude", "cursor"],
-  all: DOCTOR_PROBE_COMMANDS
-};
 
 /**
  * Run a bounded, non-interactive version probe for one doctor dependency.
@@ -213,20 +190,18 @@ export function probeDoctorCommand(
 }
 
 /**
- * Probe every external command used by the tmux and ACPX execution modes.
+ * Probe every external command used by the tmux execution mode.
  */
 export function runDoctorCapabilityProbes(
-  options: DoctorProbeOptions = {},
-  mode: DoctorMode = "all"
+  options: DoctorProbeOptions = {}
 ): DoctorCommandProbe[] {
-  return MODE_PROBE_COMMANDS[mode].map((command) =>
+  return DOCTOR_PROBE_COMMANDS.map((command) =>
     probeDoctorCommand(command, options)
   );
 }
 
 export function evaluateDoctorCapabilities(
-  checks: readonly DoctorCommandCheck[],
-  mode: DoctorMode = "all"
+  checks: readonly DoctorCommandCheck[]
 ): DoctorCapabilitySummary {
   const checkByCommand = new Map(checks.map((check) => [check.command, check]));
   const nodeCheck = checkByCommand.get("node");
@@ -239,45 +214,29 @@ export function evaluateDoctorCapabilities(
     ...(!nodeOk ? ["node"] : []),
     ...(!openclawOk ? ["openclaw"] : [])
   ];
-  const availableAgents = ["codex", "claude", "cursor"]
+  const availableAgents = ["codex", "claude"]
     .filter((agent) => isUsable(checkByCommand.get(agent)));
-  const tmuxAgents = availableAgents.filter((agent) => agent !== "cursor");
   const tmuxTransportOk = isUsable(checkByCommand.get("tmux"));
-  const acpxTransportOk = isUsable(checkByCommand.get("acpx"));
 
   const tmux = {
-    available: tmuxTransportOk && tmuxAgents.length > 0,
-    status: readinessFromParts([coreOk, tmuxTransportOk, tmuxAgents.length > 0]),
+    available: tmuxTransportOk && availableAgents.length > 0,
+    status: readinessFromParts([coreOk, tmuxTransportOk, availableAgents.length > 0]),
     recommended: true as const,
-    agents: tmuxAgents,
+    agents: availableAgents,
     requires: ["node", "openclaw", "tmux", "codex or claude"],
     missing: [
       ...missingCore,
       ...(!tmuxTransportOk ? ["tmux"] : []),
-      ...(tmuxAgents.length === 0 ? ["codex or claude"] : [])
-    ]
-  };
-  const acpx = {
-    available: acpxTransportOk && availableAgents.length > 0,
-    status: readinessFromParts([coreOk, acpxTransportOk, availableAgents.length > 0]),
-    client: "acpx" as const,
-    agents: availableAgents,
-    requires: ["node", "openclaw", "acpx", "codex, claude, or cursor"],
-    missing: [
-      ...missingCore,
-      ...(!acpxTransportOk ? ["acpx"] : []),
-      ...(availableAgents.length === 0 ? ["codex, claude, or cursor"] : [])
+      ...(availableAgents.length === 0 ? ["codex or claude"] : [])
     ]
   };
 
   return {
     coreOk,
-    transportOk: tmux.available || acpx.available,
-    mode,
-    readiness: selectedReadiness(mode, tmux.status, acpx.status),
-    tmux,
-    acpx,
-    acp: acpx
+    transportOk: tmux.available,
+    mode: "tmux",
+    readiness: tmux.status,
+    tmux
   };
 }
 
@@ -380,27 +339,4 @@ function readinessFromParts(parts: readonly boolean[]): DoctorReadiness {
     return "ready";
   }
   return readyParts === 0 ? "not_ready" : "partially_ready";
-}
-
-function selectedReadiness(
-  mode: DoctorMode,
-  tmux: DoctorReadiness,
-  acpx: DoctorReadiness
-): DoctorReadiness {
-  if (mode === "tmux") {
-    return tmux;
-  }
-  if (mode === "acpx") {
-    return acpx;
-  }
-  // "all" inspects both execution modes, but the product only requires one
-  // usable transport. Per-mode status still shows which optional mode needs
-  // attention.
-  if (tmux === "ready" || acpx === "ready") {
-    return "ready";
-  }
-  if (tmux === "not_ready" && acpx === "not_ready") {
-    return "not_ready";
-  }
-  return "partially_ready";
 }

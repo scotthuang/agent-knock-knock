@@ -6,8 +6,7 @@ import {
   buildAkkCommandCliArgs,
   formatAkkListCommandResult,
   parseAkkCommand,
-  resolvePluginStoreDir,
-  resolveConversationOverrides
+  resolvePluginStoreDir
 } from "../src/openclaw-plugin-helpers.js";
 
 test("bare /akk task leaves agent unset so plugin defaultAgent is used", () => {
@@ -30,14 +29,6 @@ test("explicit /akk agent aliases remain explicit", () => {
     }
   );
   assert.deepEqual(
-    parseAkkCommand("cursor fix the tests"),
-    {
-      action: "delegate",
-      agent: "cursor",
-      request: "fix the tests"
-    }
-  );
-  assert.deepEqual(
     parseAkkCommand("c check the diff"),
     {
       action: "delegate",
@@ -47,41 +38,33 @@ test("explicit /akk agent aliases remain explicit", () => {
   );
 });
 
-test("/akk help lists every supported ACPX executor", () => {
+test("/akk help lists the supported tmux executors", () => {
   const usage = akkUsageText();
   assert.match(usage, /\/akk codex <task>/);
   assert.match(usage, /\/akk claude <task>/);
-  assert.match(usage, /\/akk cursor <task>/);
-  assert.match(usage, /\/akk doctor \[tmux\|acpx\|all\]/);
+  assert.match(usage, /\/akk doctor/);
 });
 
-test("/akk doctor uses trusted plugin mode, workspace, and OpenClaw binary", () => {
+test("/akk doctor uses the trusted plugin workspace and OpenClaw binary", () => {
   assert.deepEqual(
     buildAkkCommandCliArgs(
       parseAkkCommand("doctor"),
       {
-        mode: "tmux",
         workspace: "/work/project",
         openclawBin: "/opt/openclaw/bin/openclaw"
       }
     ),
     [
       "doctor",
-      "--mode",
-      "tmux",
       "--workspace",
       "/work/project",
       "--openclaw-bin",
       "/opt/openclaw/bin/openclaw"
     ]
   );
-  assert.deepEqual(parseAkkCommand("doctor acpx"), {
-    action: "doctor",
-    mode: "acpx"
-  });
   assert.throws(
-    () => parseAkkCommand("doctor unsafe"),
-    /tmux\|acpx\|all/u
+    () => parseAkkCommand("doctor tmux"),
+    /Usage: \/akk doctor/u
   );
 });
 
@@ -112,40 +95,6 @@ test("/akk accepts selector-first follow-ups without long ids", () => {
   );
 });
 
-test("follow-up overrides never leak Codex-only config to other conversations", () => {
-  assert.deepEqual(
-    resolveConversationOverrides(
-      {},
-      {
-        codexAllProxy: "socks5://codex-only",
-        codexModel: "codex-only-model",
-        allProxy: "socks5://shared",
-        model: "shared-model"
-      }
-    ),
-    {
-      allProxy: "socks5://shared",
-      model: "shared-model"
-    }
-  );
-  assert.deepEqual(
-    resolveConversationOverrides(
-      {
-        allProxy: "socks5://explicit",
-        model: "explicit-model"
-      },
-      {
-        allProxy: "socks5://shared",
-        model: "shared-model"
-      }
-    ),
-    {
-      allProxy: "socks5://explicit",
-      model: "explicit-model"
-    }
-  );
-});
-
 test("/akk stateful commands consistently use the trusted plugin store", () => {
   const config = {
     storeDir: "/private/akk-store",
@@ -156,10 +105,10 @@ test("/akk stateful commands consistently use the trusted plugin store", () => {
     "status conversation-1",
     "describe conversation-1",
     "send conversation-1 continue",
+    "approve conversation-1 --expected-approval-fingerprint approval-1",
     "cancel conversation-1",
     "renew conversation-1 20",
     "retry-callback conversation-1",
-    "recover conversation-1",
     "close conversation-1 done"
   ];
 
@@ -180,11 +129,8 @@ test("/akk terminal send configures a real OpenClaw callback", () => {
     {
       storeDir: "/private/akk-store",
       openclawBin: "/opt/openclaw/bin/openclaw",
-      callbackCommand: "custom-callback {statePath}",
       agentTimeoutMinutes: 90,
-      agentHardTimeoutMinutes: 600,
-      softLimit: 20,
-      hardLimit: 40
+      agentHardTimeoutMinutes: 600
     },
     { sessionKey: "agent:chat:current" }
   );
@@ -194,10 +140,33 @@ test("/akk terminal send configures a real OpenClaw callback", () => {
   assert.deepEqual(optionValue(args, "--gateway-session"), "agent:chat:current");
   assert.deepEqual(optionValue(args, "--openclaw-session"), "agent:chat:current");
   assert.deepEqual(optionValue(args, "--openclaw-bin"), "/opt/openclaw/bin/openclaw");
-  assert.deepEqual(optionValue(args, "--callback-command"), "custom-callback {statePath}");
   assert.deepEqual(optionValue(args, "--agent-timeout-minutes"), "90");
   assert.deepEqual(optionValue(args, "--agent-hard-timeout-minutes"), "600");
   assert.equal(args.includes("--background"), true);
+});
+
+test("/akk approve requires and forwards an exact approval fingerprint", () => {
+  assert.throws(
+    () => parseAkkCommand("approve conversation-1"),
+    /expected-approval-fingerprint/u
+  );
+  assert.deepEqual(
+    buildAkkCommandCliArgs(
+      parseAkkCommand(
+        "approve conversation-1 --expected-approval-fingerprint approval-1"
+      ),
+      { storeDir: "/private/akk-store" }
+    ),
+    [
+      "approve",
+      "--conversation",
+      "conversation-1",
+      "--expected-approval-fingerprint",
+      "approval-1",
+      "--store-dir",
+      "/private/akk-store"
+    ]
+  );
 });
 
 function optionValue(args: string[], option: string): string | undefined {
@@ -229,6 +198,28 @@ test("/akk list includes terminal-controlled and native sessions", () => {
   assert.match(text, /managed-1/);
   assert.match(text, /terminal:v2:tmux:codex:work:0\.0:1234/);
   assert.match(text, /native:codex:5678/);
+});
+
+test("/akk list exposes the exact orphaned terminal dispatch recovery command", () => {
+  const text = formatAkkListCommandResult({
+    terminal_controlled: [{
+      id: "terminal:v2:tmux:codex:work:0.0:1234",
+      short_ref: "@terminal1",
+      agent: "codex",
+      status: "active",
+      orphaned_terminal_dispatch: {
+        message_id: "message-1",
+        recovery:
+          "/akk close terminal:v2:tmux:codex:work:0.0:1234 " +
+          "--expected-message-id message-1"
+      }
+    }]
+  });
+
+  assert.match(
+    text,
+    /recovery: \/akk close terminal:v2:tmux:codex:work:0\.0:1234 --expected-message-id message-1/u
+  );
 });
 
 test("/akk list prefers stable short references while JSON retains full ids", () => {

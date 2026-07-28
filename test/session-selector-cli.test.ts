@@ -4,22 +4,37 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import {
+  applyMessageToConversation,
+  createConversation,
+  createMessage,
+  type ExecutorKind
+} from "../src/protocol.js";
+import {
+  appendEvent,
+  messageEvent,
+  pathsForConversation,
+  saveState
+} from "../src/store.js";
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
+const testRuntimeDir = fs.mkdtempSync(
+  path.join(os.tmpdir(), "akk-selector-cli-runtime-")
+);
+process.env.AKK_RUNTIME_DIR = testRuntimeDir;
+process.on("exit", () => {
+  fs.rmSync(testRuntimeDir, { recursive: true, force: true });
+});
 
 test("CLI omission and short refs resolve one actionable managed session", () => {
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-selector-cli-only-"));
 
   try {
-    const created = runCli([
-      "new",
-      "--request",
-      "Review the selector",
-      "--agent",
-      "codex",
-      "--store-dir",
-      storeDir
-    ]);
+    const created = storeConversationFixture({
+      storeDir,
+      request: "Review the selector",
+      agent: "codex"
+    });
     const listed = runCli(["list", "--managed-only", "--store-dir", storeDir]);
     assert.equal(listed.delegated.length, 1);
     assert.match(listed.delegated[0].short_ref, /^@[0-9a-f]{10}$/u);
@@ -55,24 +70,16 @@ test("CLI latest is deterministic and omission fails closed on ambiguity", () =>
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-selector-cli-latest-"));
 
   try {
-    const older = runCli([
-      "new",
-      "--request",
-      "Older task",
-      "--agent",
-      "claude",
-      "--store-dir",
-      storeDir
-    ]);
-    const newer = runCli([
-      "new",
-      "--request",
-      "Newer task",
-      "--agent",
-      "codex",
-      "--store-dir",
-      storeDir
-    ]);
+    const older = storeConversationFixture({
+      storeDir,
+      request: "Older task",
+      agent: "claude"
+    });
+    const newer = storeConversationFixture({
+      storeDir,
+      request: "Newer task",
+      agent: "codex"
+    });
     updateTimestamp(older.conversation.state_path, "2026-07-28T01:00:00.000Z");
     updateTimestamp(newer.conversation.state_path, "2026-07-28T02:00:00.000Z");
 
@@ -263,6 +270,45 @@ function updateTimestamp(statePath: string, timestamp: string): void {
   const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
   state.updated_at = timestamp;
   fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+}
+
+function storeConversationFixture(options: {
+  storeDir: string;
+  request: string;
+  agent: ExecutorKind;
+}) {
+  const now = new Date("2026-07-28T00:00:00.000Z");
+  const base = createConversation({
+    userRequest: options.request,
+    executorKind: options.agent,
+    executorSession: `${options.agent}-selector`,
+    now
+  });
+  const message = createMessage({
+    conversation: base,
+    from: "openclaw",
+    to: base.executor.actor,
+    type: "task",
+    body: options.request,
+    now
+  });
+  const paths = pathsForConversation(base.conversation_id, options.storeDir);
+  const conversation = {
+    ...applyMessageToConversation(base, message, now),
+    store_dir: paths.storeDir,
+    conversation_dir: paths.conversationDir,
+    event_log_path: paths.logPath,
+    state_path: paths.statePath
+  };
+  saveState(paths.statePath, conversation);
+  appendEvent(paths.logPath, {
+    ts: now.toISOString(),
+    conversation_id: conversation.conversation_id,
+    event: "conversation_created",
+    conversation
+  });
+  appendEvent(paths.logPath, messageEvent(message));
+  return { conversation, paths };
 }
 
 function runCli(args: string[]): Record<string, any> {
