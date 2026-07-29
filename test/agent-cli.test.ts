@@ -2651,11 +2651,13 @@ test("status detects tmux Codex working idle and unknown activity states", () =>
   const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
   const screenPath = path.join(tempDir, "screen.txt");
   const workspace = path.join(tempDir, "workspace");
+  const codexHome = path.join(tempDir, "empty-codex-home");
   const conversationId = "terminal:tmux:codex-work:0.1:33389";
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
+    fs.mkdirSync(codexHome, { recursive: true });
     writeFakeTmux(
       fakeBinDir,
       tmuxCallsPath,
@@ -2671,7 +2673,9 @@ test("status detects tmux Codex working idle and unknown activity states", () =>
     let status = runAgentCli([
       "status",
       "--conversation",
-      conversationId
+      conversationId,
+      "--codex-home",
+      codexHome
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     });
@@ -2680,6 +2684,11 @@ test("status detects tmux Codex working idle and unknown activity states", () =>
     assert.equal(statusParsed.terminal_status.activity_state, "working");
     assert.match(statusParsed.terminal_status.activity_reason, /Working/);
     assert.equal(statusParsed.terminal_status.approval_state.blocked, false);
+    assert.equal(statusParsed.confidence, "low");
+    assert.match(
+      statusParsed.limitations[0],
+      /historical session context is unavailable/iu
+    );
 
     fs.writeFileSync(screenPath, [
       "• Waiting for background terminal · autoreview",

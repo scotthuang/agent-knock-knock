@@ -2247,22 +2247,34 @@ async function terminalStatusContext(
   limitations: string[];
 }> {
   if (terminalConversation.agent === "codex") {
-    const process = await activeCodexProcessForPid(
-      options,
-      terminalConversation.pid
-    );
-    const description = await codexTerminalStatusContext({
-      id: terminalConversation.conversationId,
-      process,
-      options,
-      terminalControl: terminalConversation.terminalControl,
-      terminalStatus
-    });
-    return {
-      confidence: description.confidence,
-      about: description.about,
-      limitations: description.limitations
-    };
+    try {
+      const process = await activeCodexProcessForPid(
+        options,
+        terminalConversation.pid
+      );
+      const description = await codexTerminalStatusContext({
+        id: terminalConversation.conversationId,
+        process,
+        options,
+        terminalControl: terminalConversation.terminalControl,
+        terminalStatus
+      });
+      return {
+        confidence: description.confidence,
+        about: description.about,
+        limitations: description.limitations
+      };
+    } catch {
+      return {
+        confidence: "low",
+        about: terminalStatus.reachable
+          ? `Codex is attached through ${terminalConversation.terminalControl.kind}:${terminalConversation.terminalControl.target}.`
+          : "Codex terminal status is unavailable.",
+        limitations: [
+          "Codex historical session context is unavailable; live terminal status remains authoritative."
+        ]
+      };
+    }
   }
   const adapter =
     createRuntimeTerminalAgentRegistry(options).require(terminalConversation.agent);
