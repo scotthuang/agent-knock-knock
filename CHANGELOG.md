@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.1 - 2026-07-29
+
+### Changed
+
+- Put one complete ClawHub-first path from installation through workspace setup, Gateway restart, tmux startup, diagnostics, and the first task at the top of the README.
+- Separate direct `/akk` usage from optional natural-language tool access and keep the npm installer as an alternative path.
+
+### Fixed
+
+- Fail closed with actionable setup guidance when the plugin workspace is missing or non-absolute instead of falling back to the Gateway working directory.
+- Keep `/akk doctor` available to diagnose invalid workspace configuration.
+
 ## 0.5.0 - 2026-07-29
 
 ### Changed
