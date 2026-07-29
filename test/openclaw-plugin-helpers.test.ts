@@ -2,10 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   AKK_CALLBACK_METHOD,
+  AKK_WORKSPACE_SETUP_COMMAND,
   akkUsageText,
   buildAkkCommandCliArgs,
   formatAkkListCommandResult,
   parseAkkCommand,
+  requirePluginWorkspace,
   resolvePluginStoreDir
 } from "../src/openclaw-plugin-helpers.js";
 
@@ -70,6 +72,31 @@ test("/akk doctor uses the trusted plugin workspace and OpenClaw binary", () => 
   assert.throws(
     () => parseAkkCommand("doctor tmux"),
     /Usage: \/akk doctor/u
+  );
+  assert.deepEqual(
+    buildAkkCommandCliArgs(parseAkkCommand("doctor"), {}),
+    ["doctor"]
+  );
+  assert.deepEqual(
+    buildAkkCommandCliArgs(parseAkkCommand("doctor"), {
+      workspace: "relative/project"
+    }),
+    ["doctor", "--workspace", "relative/project"]
+  );
+});
+
+test("runtime commands fail closed until an absolute workspace is configured", () => {
+  assert.throws(
+    () => requirePluginWorkspace({}),
+    new RegExp(escapeRegex(AKK_WORKSPACE_SETUP_COMMAND), "u")
+  );
+  assert.throws(
+    () => buildAkkCommandCliArgs(parseAkkCommand("list"), {}),
+    /workspace is not configured/u
+  );
+  assert.throws(
+    () => requirePluginWorkspace({ workspace: "relative/project" }),
+    /workspace must be an absolute path/u
   );
 });
 
@@ -200,6 +227,10 @@ test("/akk approve requires and forwards an exact approval fingerprint", () => {
 function optionValue(args: string[], option: string): string | undefined {
   const index = args.indexOf(option);
   return index >= 0 ? args[index + 1] : undefined;
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
 
 test("/akk list includes only managed and terminal-controlled sessions", () => {

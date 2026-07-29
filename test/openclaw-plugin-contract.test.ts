@@ -269,7 +269,7 @@ process.stdout.write(JSON.stringify(result));`,
         register(api: Record<string, any>): void;
       }
     ).register({
-      pluginConfig: { binPath: fakeCli },
+      pluginConfig: { binPath: fakeCli, workspace: tempDir },
       logger: {
         info() {},
         warn() {}

@@ -1,6 +1,8 @@
 import path from "node:path";
 
 export const AKK_CALLBACK_METHOD = "agent-knock-knock.callback";
+export const AKK_WORKSPACE_SETUP_COMMAND =
+  'openclaw config set plugins.entries.agent-knock-knock.config.workspace "$(pwd -P)"';
 
 export type AkkCommand =
   | { action: "help" }
@@ -182,20 +184,25 @@ export function buildAkkCommandCliArgs(
   config: Record<string, unknown>,
   context: { sessionKey?: unknown } = {}
 ): string[] | undefined {
-  const storeDir = resolvePluginStoreDir(config);
-  const idleTimeoutMinutes = finiteNumberString(config.idleTimeoutMinutes);
-  const workspace = pluginWorkspace(config);
-
   switch (command.action) {
     case "help":
     case "delegate":
       return undefined;
-    case "doctor":
+    case "doctor": {
+      const workspace = nonEmptyString(config.workspace);
       return withOptionalArgs(
         ["doctor"],
         ["--workspace", workspace],
         ["--openclaw-bin", nonEmptyString(config.openclawBin)]
       );
+    }
+  }
+
+  const workspace = requirePluginWorkspace(config);
+  const storeDir = resolvePluginStoreDir(config);
+  const idleTimeoutMinutes = finiteNumberString(config.idleTimeoutMinutes);
+
+  switch (command.action) {
     case "list":
       return withOptionalArgs(
         ["list"],
@@ -291,8 +298,33 @@ export function buildAkkCommandCliArgs(
   }
 }
 
-function pluginWorkspace(config: Record<string, unknown>): string {
-  return nonEmptyString(config.workspace) ?? process.cwd();
+export function requirePluginWorkspace(
+  config: Record<string, unknown>
+): string {
+  const workspace = configuredPluginWorkspace(config);
+  if (!workspace) {
+    throw new Error(
+      "AKK workspace is not configured. From the project AKK may edit, run: " +
+      `${AKK_WORKSPACE_SETUP_COMMAND}; then run: openclaw gateway restart`
+    );
+  }
+  return workspace;
+}
+
+function configuredPluginWorkspace(
+  config: Record<string, unknown>
+): string | undefined {
+  const workspace = nonEmptyString(config.workspace);
+  if (!workspace) {
+    return undefined;
+  }
+  if (!path.isAbsolute(workspace)) {
+    throw new Error(
+      "AKK workspace must be an absolute path. From the project AKK may edit, run: " +
+      `${AKK_WORKSPACE_SETUP_COMMAND}; then run: openclaw gateway restart`
+    );
+  }
+  return path.normalize(workspace);
 }
 
 function parseSelectorMessage(

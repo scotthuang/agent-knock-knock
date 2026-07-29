@@ -11,6 +11,11 @@ const skillSource = path.join(packageRoot, "templates", "openclaw-skills", "agen
 
 test("OpenClaw contract exposes terminal timeout configuration and renewal", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(packageRoot, "openclaw.plugin.json"), "utf8"));
+  assert.equal(manifest.configSchema.properties.workspace.minLength, 1);
+  assert.match(
+    manifest.configSchema.properties.workspace.description,
+    /Absolute project directory[\s\S]*fail closed/u
+  );
   assert.equal(manifest.configSchema.properties.agentTimeoutMinutes.type, "number");
   assert.equal(manifest.configSchema.properties.agentHardTimeoutMinutes.type, "number");
   assert.equal(manifest.configSchema.properties.agentHardTimeoutMinutes.exclusiveMinimum, 0);

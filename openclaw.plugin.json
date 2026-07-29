@@ -64,7 +64,8 @@
       },
       "workspace": {
         "type": "string",
-        "description": "Workspace matched against eligible coding-agent tmux panes."
+        "minLength": 1,
+        "description": "Absolute project directory matched against eligible coding-agent tmux panes. Configure this before using AKK; runtime operations fail closed when it is missing."
       },
       "storeDir": {
         "type": "string",

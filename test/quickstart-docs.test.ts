@@ -12,20 +12,38 @@ const packageRoot = path.resolve(
   "../.."
 );
 
-test("five-minute guide uses the unique-idle and explicit-selector contracts", () => {
+test("ClawHub quickstarts reach a first task before optional setup", () => {
   const tmux = read("docs/quickstart-tmux.md");
+  const readme = read("README.md");
+  const clawHubPreview = readme.split(/\r?\n/u).slice(0, 50).join("\n");
 
-  assert.match(
-    tmux,
-    /agent-knock-knock install-openclaw --workspace "\$PWD" --verify/u
-  );
-  assert.doesNotMatch(tmux, /defaultAgent|--default-agent/u);
-  assert.match(tmux, /agent-knock-knock doctor/u);
-  assert.match(tmux, /tmux new-session -s akk-work -c "\$PWD" codex/u);
-  assert.match(tmux, /AKK does not launch coding agents/u);
-  assert.match(tmux, /exactly one eligible idle pane/u);
+  for (const document of [tmux, clawHubPreview]) {
+    assert.match(
+      document,
+      /openclaw plugins install clawhub:@scotthuang\/agent-knock-knock/u
+    );
+    assert.match(
+      document,
+      /openclaw config set plugins\.entries\.agent-knock-knock\.config\.workspace "\$\(pwd -P\)"/u
+    );
+    assert.match(document, /openclaw gateway restart/u);
+    assert.match(document, /tmux new-session -s akk-work -c "\$\(pwd -P\)" codex/u);
+    assert.match(document, /\/akk doctor/u);
+    assert.match(document, /\/akk inspect this repository and summarize it/u);
+  }
+
+  assert.doesNotMatch(tmux, /defaultAgent|--default-agent|ACPX/u);
+  assert.match(tmux, /AKK reuses a coding agent that you start in tmux/u);
+  assert.match(tmux, /exactly one eligible idle coding-agent pane/u);
   assert.match(tmux, /\/akk <selector>: <message>/u);
+  assert.match(tmux, /Direct `\/akk \.\.\.` commands work without changing the OpenClaw tool policy/u);
+  assert.match(readme, /send a separate message/u);
   assert.doesNotMatch(tmux, /\/akk send\b/u);
+  assert.ok(
+    tmux.indexOf("openclaw plugins install clawhub:") <
+      tmux.indexOf("npm install -g"),
+    "the canonical ClawHub path must appear before the npm alternative"
+  );
 
   assert.deepEqual(
     parseAkkCommand("inspect this repository and summarize it"),

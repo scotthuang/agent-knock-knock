@@ -14,6 +14,7 @@ import {
   buildAkkCommandCliArgs,
   formatAkkListCommandResult,
   parseAkkCommand,
+  requirePluginWorkspace,
   resolvePluginStoreDir
 } from "./openclaw-plugin-helpers.js";
 import {
@@ -222,7 +223,7 @@ const plugin: OpenClawPluginDefinition = definePluginEntry({
           try {
             const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
             const args = ["reconcile-monitors"];
-            pushOptional(args, "--workspace", pluginWorkspace(config));
+            pushOptional(args, "--workspace", requirePluginWorkspace(config));
             pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
             const result = runCli(api, args);
             api.logger.info?.(
@@ -267,7 +268,7 @@ const plugin: OpenClawPluginDefinition = definePluginEntry({
       buildArgs: (params) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
         const args = ["list"];
-        pushOptional(args, "--workspace", pluginWorkspace(config));
+        pushOptional(args, "--workspace", requirePluginWorkspace(config));
         pushOptional(
           args,
           "--store-dir",
@@ -337,7 +338,7 @@ const plugin: OpenClawPluginDefinition = definePluginEntry({
       buildArgs: (params) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
         const args = ["approve", "--conversation", requiredString(params.conversation_id, "conversation_id")];
-        pushOptional(args, "--workspace", pluginWorkspace(config));
+        pushOptional(args, "--workspace", requirePluginWorkspace(config));
         pushOptional(
           args,
           "--expected-approval-fingerprint",
@@ -360,7 +361,7 @@ const plugin: OpenClawPluginDefinition = definePluginEntry({
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
         const args = ["renew", "--conversation", requiredString(params.conversation_id, "conversation_id")];
         pushOptional(args, "--minutes", numberString(params.minutes) ?? numberString(config.agentTimeoutMinutes));
-        pushOptional(args, "--workspace", pluginWorkspace(config));
+        pushOptional(args, "--workspace", requirePluginWorkspace(config));
         pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
         return args;
       }
@@ -373,7 +374,7 @@ const plugin: OpenClawPluginDefinition = definePluginEntry({
       buildArgs: (params) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
         const args = ["retry-callback", "--conversation", requiredString(params.conversation_id, "conversation_id")];
-        pushOptional(args, "--workspace", pluginWorkspace(config));
+        pushOptional(args, "--workspace", requirePluginWorkspace(config));
         pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
         return args;
       }
@@ -386,7 +387,7 @@ const plugin: OpenClawPluginDefinition = definePluginEntry({
       buildArgs: (params) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
         const args = ["cancel", "--conversation", requiredString(params.conversation_id, "conversation_id")];
-        pushOptional(args, "--workspace", pluginWorkspace(config));
+        pushOptional(args, "--workspace", requirePluginWorkspace(config));
         pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
         pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(config.idleTimeoutMinutes));
         return args;
@@ -402,7 +403,7 @@ const plugin: OpenClawPluginDefinition = definePluginEntry({
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
         const args = ["close", "--conversation", requiredString(params.conversation_id, "conversation_id")];
         pushOptional(args, "--reason", stringValue(params.reason));
-        pushOptional(args, "--workspace", pluginWorkspace(config));
+        pushOptional(args, "--workspace", requirePluginWorkspace(config));
         pushOptional(
           args,
           "--expected-message-id",
@@ -691,7 +692,7 @@ function buildStatusCliArgs(api, params) {
     "--conversation",
     requiredString(params.conversation_id, "conversation_id")
   ];
-  pushOptional(args, "--workspace", pluginWorkspace(config));
+  pushOptional(args, "--workspace", requirePluginWorkspace(config));
   pushOptional(
     args,
     "--store-dir",
@@ -745,7 +746,7 @@ async function runSendRequest(api, params, toolContext) {
     "--background"
   ];
   pushOptional(args, "--type", stringValue(params.type));
-  pushOptional(args, "--workspace", pluginWorkspace(config));
+  pushOptional(args, "--workspace", requirePluginWorkspace(config));
   pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
   pushOptional(
     args,
@@ -786,7 +787,7 @@ function toolResult(result) {
 
 async function runDelegate(api, params, toolContext) {
   const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
-  const workspace = pluginWorkspace(config);
+  const workspace = requirePluginWorkspace(config);
   const request = requiredString(params.request, "request");
   const openclawSession =
     stringValue(toolContext?.sessionKey) ??
@@ -1145,7 +1146,7 @@ function tryAutoApproveCallback({ api, message, conversationId, statePath }) {
       return runCli(api, [
         ...args,
         "--workspace",
-        pluginWorkspace(config)
+        requirePluginWorkspace(config)
       ]);
     }
   });
@@ -1224,10 +1225,6 @@ function formatDoneShortcuts(conversationId) {
     `- \`AKK status ${conversationId}\` shows this task record.`,
     "- AKK never starts or closes the coding agent or tmux pane."
   ].join("\n");
-}
-
-function pluginWorkspace(config: Record<string, unknown>): string {
-  return stringValue(config.workspace) ?? process.cwd();
 }
 
 function pushOptional(args, flag, value) {
