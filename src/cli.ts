@@ -270,9 +270,11 @@ async function runCommand(commandName, options) {
 function runInstallOpenClaw(options) {
   const root = packageRootDir();
   const skillOnly = options.skillOnly === true;
-  const workspace = options.workspace === undefined
-    ? undefined
-    : canonicalWorkspace(options.workspace);
+  if (options.workspace !== undefined) {
+    throw new Error(
+      "--workspace was removed from install-openclaw; AKK now discovers verified tmux panes across workspaces. Configure autoApprove.rules[].workspaces only for trusted automatic approvals."
+    );
+  }
   if (options.defaultAgent !== undefined) {
     throw new Error(
       "--default-agent was removed; AKK now selects the only eligible idle tmux pane"
@@ -281,13 +283,9 @@ function runInstallOpenClaw(options) {
   if (options.mode !== undefined) {
     throw new Error("--mode was removed; Agent Knock Knock now uses tmux only");
   }
-  if (
-    skillOnly &&
-    (workspace !== undefined ||
-      options.verify === true)
-  ) {
+  if (skillOnly && options.verify === true) {
     throw new Error(
-      "--skill-only cannot be combined with --workspace, --mode, or --verify"
+      "--skill-only cannot be combined with --verify"
     );
   }
 
@@ -312,12 +310,6 @@ function runInstallOpenClaw(options) {
         path: "plugins.entries.agent-knock-knock.enabled",
         value: true
       },
-      ...(workspace === undefined
-        ? []
-        : [{
-            path: "plugins.entries.agent-knock-knock.config.workspace",
-            value: workspace
-          }])
     ];
     runCheckedCommand(
       openclawBin,
@@ -351,8 +343,7 @@ function runInstallOpenClaw(options) {
   const verification = options.verify === true
     ? buildDoctorReport({
         ...options,
-        openclawBin,
-        ...(workspace ? { workspace } : {})
+        openclawBin
       })
     : undefined;
   const ready = verification
@@ -369,7 +360,6 @@ function runInstallOpenClaw(options) {
     pending_restart: pendingRestart,
     mode: skillOnly ? "skill_only" : "full",
     execution_mode: "tmux",
-    workspace: workspace ?? null,
     package_root: root,
     openclaw_bin: openclawBin ?? null,
     steps,
@@ -426,12 +416,12 @@ function assertConfiguredWorkspace(
     candidate = canonicalWorkspace(candidateWorkspace);
   } catch {
     throw new Error(
-      `refusing ${subject}; its workspace cannot be verified against configured workspace ${configured}`
+      `refusing ${subject}; its working directory cannot be verified against expected workspace ${configured}`
     );
   }
   if (candidate !== configured) {
     throw new Error(
-      `refusing ${subject}; workspace ${candidate} does not match configured workspace ${configured}`
+      `refusing ${subject}; workspace ${candidate} does not match expected workspace ${configured}`
     );
   }
 }
@@ -521,6 +511,11 @@ function buildDoctorReport(options): Record<string, any> {
   if (options.mode !== undefined) {
     throw new Error("--mode was removed; Agent Knock Knock now checks tmux only");
   }
+  if (options.workspace !== undefined) {
+    throw new Error(
+      "--workspace was removed from doctor; AKK now discovers verified tmux panes across workspaces"
+    );
+  }
   const timeoutMs = options.timeoutMs === undefined
     ? undefined
     : positiveMilliseconds(options.timeoutMs, "--timeout-ms");
@@ -565,7 +560,6 @@ function buildDoctorReport(options): Record<string, any> {
   const filesOk = packageFiles.every((check) => check.exists);
   const openclaw = runOpenClawChainDiagnostics({
     openclawBin,
-    ...(options.workspace ? { workspace: String(options.workspace) } : {}),
     ...(timeoutMs === undefined ? {} : { timeoutMs })
   });
   const ok =
@@ -812,10 +806,17 @@ function createTerminalAgentBridge(
     terminalProvider,
     async verifyIdentity({ agent, pid, terminalControl }) {
       const adapter = registry.require(agent);
+      const expectedWorkspace =
+        options.workspace ?? terminalControl.currentPath;
+      if (!expectedWorkspace) {
+        throw new Error(
+          `refusing terminal access to ${terminalControl.target}; its workspace is unavailable`
+        );
+      }
       const snapshots = await processSource.listProcessSnapshots(
         (candidate) => candidate.pid === pid,
         {
-          includeCwd: options.workspace !== undefined,
+          includeCwd: true,
           includeAncestors: true
         }
       );
@@ -837,12 +838,12 @@ function createTerminalAgentBridge(
         );
       }
       assertConfiguredWorkspace(
-        options.workspace,
+        expectedWorkspace,
         snapshot.cwd,
         `terminal access to ${terminalControl.target} by agent process ${pid}`
       );
       assertConfiguredWorkspace(
-        options.workspace,
+        expectedWorkspace,
         pane.currentPath,
         `terminal access to ${terminalControl.target} by tmux pane`
       );
@@ -1093,7 +1094,9 @@ function isTerminalControlCapability(value: unknown): value is TerminalControlCa
 
 async function runDelegate(options) {
   const request = required(options.request, "--request is required");
-  const workspace = canonicalWorkspace(options.workspace ?? process.cwd());
+  const workspace = options.workspace === undefined
+    ? undefined
+    : canonicalWorkspace(options.workspace);
   const requestedAgent = options.agent === undefined
     ? undefined
     : resolveExecutor({ kind: options.agent }).kind;
@@ -1110,48 +1113,61 @@ async function runDelegate(options) {
     throw new Error(`tmux discovery failed: ${scan.summary.error}`);
   }
 
-  const sameWorkspace = scan.terminalControlled.filter((candidate) => {
-    try {
-      return canonicalWorkspace(candidate.workspace) === workspace;
-    } catch {
-      return false;
-    }
-  });
-  const eligible = sameWorkspace.filter(
+  const scopedCandidates = workspace === undefined
+    ? scan.terminalControlled
+    : scan.terminalControlled.filter((candidate) => {
+        try {
+          return canonicalWorkspace(candidate.workspace) === workspace;
+        } catch {
+          return false;
+        }
+      });
+  const eligible = scopedCandidates.filter(
     (candidate) => candidate.activity_state === "idle"
   );
   if (eligible.length === 0) {
-    const observed = sameWorkspace.length > 0
-      ? ` Found ${sameWorkspace.length} matching pane(s), but none is idle.`
+    const observed = scopedCandidates.length > 0
+      ? ` Found ${scopedCandidates.length} matching pane(s), but none is idle.`
       : "";
     const requestedExecutor = requestedAgent
       ? executorDefinitionForKind(requestedAgent)
       : undefined;
+    const workspaceDetail = workspace
+      ? ` in ${workspace}`
+      : "";
     throw new Error(
-      `No idle ${requestedExecutor?.displayName ?? "Codex or Claude Code"} pane is available in ${workspace}.${observed} ` +
-      `Start ${requestedAgent ?? "codex or claude"} inside tmux in that workspace, wait until it is idle, then retry.`
+      `No idle ${requestedExecutor?.displayName ?? "Codex or Claude Code"} pane is available${workspaceDetail}.${observed} ` +
+      `Start ${requestedAgent ?? "codex or claude"} inside tmux${workspaceDetail}, wait until it is idle, then retry.`
     );
   }
   if (eligible.length > 1) {
     const candidates = eligible
-      .map((candidate) =>
-        `${candidate.short_ref} (${candidate.agent}, ${candidate.terminal_control?.target ?? candidate.id})`
-      )
+      .map((candidate) => {
+        const identity =
+          `${candidate.agent}, ${candidate.terminal_control?.target ?? candidate.id}`;
+        return workspace
+          ? `${candidate.short_ref} (${identity})`
+          : `${candidate.short_ref} (${identity}, ${candidate.workspace ?? "workspace unknown"})`;
+      })
       .join(", ");
     const scope = requestedAgent
       ? executorDefinitionForKind(requestedAgent).displayName
       : "coding-agent";
+    const ambiguity = workspace
+      ? `match ${workspace}`
+      : "are available across workspaces";
     throw new Error(
-      `Multiple idle ${scope} panes match ${workspace}: ${candidates}. ` +
+      `Multiple idle ${scope} panes ${ambiguity}: ${candidates}. ` +
       "Use /akk codex: <task>, /akk claude: <task>, or /akk @short-ref: <message> to choose one explicitly."
     );
   }
 
+  const selectedWorkspace = canonicalWorkspace(eligible[0].workspace);
   await runSend({
     ...options,
     conversation: eligible[0].id,
     message: request,
-    workspace,
+    workspace: selectedWorkspace,
     background: true
   });
 }
@@ -10077,8 +10093,8 @@ function usage() {
   agent-knock-knock send [--conversation <id|selector>] --message <text> [--type answer|task|control] [--agent-timeout-minutes <minutes>] [--agent-hard-timeout-minutes <minutes>]
   agent-knock-knock approve [--conversation <id|selector>] --expected-approval-fingerprint <fingerprint>
   agent-knock-knock cancel [--conversation <id|selector>]
-  agent-knock-knock install-openclaw [--workspace <path>] [--verify] [--openclaw-bin <path>] [--skill-path <path>] [--skill-only] [--no-restart]
-  agent-knock-knock doctor [--workspace <path>] [--openclaw-bin <path>]
+  agent-knock-knock install-openclaw [--verify] [--openclaw-bin <path>] [--skill-path <path>] [--skill-only] [--no-restart]
+  agent-knock-knock doctor [--openclaw-bin <path>]
   agent-knock-knock callback --state <file> --message-json <json> [--record-only]
   agent-knock-knock transcript --log <file> [--include-raw]
   agent-knock-knock transcript --conversation <dir> [--include-raw]

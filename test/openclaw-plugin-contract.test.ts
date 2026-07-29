@@ -138,15 +138,17 @@ test("OpenClaw runtime registrations match the published manifest", () => {
     }
   ).configSchema?.properties ?? {};
   assert.equal("defaultAgent" in configProperties, false);
+  assert.equal("workspace" in configProperties, false);
 });
 
-test("OpenClaw send without a selector returns tmux conversation storage paths", async () => {
+test("OpenClaw routing and reconciliation omit a global workspace argument", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-plugin-send-paths-"));
   const fakeCli = path.join(tempDir, "delegate.cjs");
   const callsPath = path.join(tempDir, "calls.ndjson");
   const statePath = path.join(tempDir, "state.json");
   const eventLogPath = path.join(tempDir, "events.ndjson");
   let sendTool: ToolDefinition | undefined;
+  let reconciliationService: { start?(): void } | undefined;
 
   try {
     fs.writeFileSync(
@@ -181,15 +183,16 @@ test("OpenClaw send without a selector returns tmux conversation storage paths",
       }
     ).register({
       pluginConfig: {
-        binPath: fakeCli,
-        workspace: tempDir
+        binPath: fakeCli
       },
       logger: {
         info() {},
         warn() {}
       },
       registerGatewayMethod() {},
-      registerService() {},
+      registerService(service: { start?(): void }) {
+        reconciliationService = service;
+      },
       registerCommand() {},
       registerTool(
         tool: ToolDefinition | ToolFactory,
@@ -214,13 +217,15 @@ test("OpenClaw send without a selector returns tmux conversation storage paths",
       selector: "@a1b2c3d4",
       request: "Continue with focused tests"
     });
+    assert.equal(typeof reconciliationService?.start, "function");
+    reconciliationService?.start?.();
     const calls = fs.readFileSync(callsPath, "utf8")
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as string[]);
     assert.equal(calls[0]?.[0], "delegate");
     assert.equal(calls[0]?.includes("--agent"), false);
-    assert.equal(calls[0]?.at(calls[0].indexOf("--workspace") + 1), tempDir);
+    assert.equal(calls[0]?.includes("--workspace"), false);
     assert.deepEqual(calls[1]?.slice(0, 5), [
       "send",
       "--conversation",
@@ -228,7 +233,9 @@ test("OpenClaw send without a selector returns tmux conversation storage paths",
       "--message",
       "Continue with focused tests"
     ]);
-    assert.equal(calls[1]?.at(calls[1].indexOf("--workspace") + 1), tempDir);
+    assert.equal(calls[1]?.includes("--workspace"), false);
+    assert.equal(calls[2]?.[0], "reconcile-monitors");
+    assert.equal(calls[2]?.includes("--workspace"), false);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -472,6 +479,174 @@ test("callback delivery uses the grouped OpenClaw session workflow API", async (
       log_path: undefined
     }
   });
+});
+
+test("callback auto approval keeps its rule workspace boundary without global workspace config", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-plugin-autoapprove-workspace-"));
+  const allowedWorkspace = path.join(tempDir, "allowed");
+  const outsideWorkspace = path.join(tempDir, "outside");
+  const fakeCli = path.join(tempDir, "approve.cjs");
+  const callsPath = path.join(tempDir, "calls.ndjson");
+  const statePath = path.join(tempDir, "state.json");
+  const policy = {
+    enabled: true,
+    rules: [{
+      id: "allowed-status",
+      agents: ["codex"],
+      workspaces: [allowedWorkspace],
+      commands: [["git", "status"]]
+    }]
+  };
+  let callbackHandler: GatewayMethodHandler | undefined;
+  const injections: Record<string, unknown>[] = [];
+
+  try {
+    fs.mkdirSync(allowedWorkspace, { recursive: true });
+    fs.mkdirSync(outsideWorkspace, { recursive: true });
+    fs.writeFileSync(
+      fakeCli,
+      [
+        `require("node:fs").appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(process.argv.slice(2)) + "\\n");`,
+        `process.stdout.write(${JSON.stringify(JSON.stringify({
+          approved: true,
+          policy_rule_id: "allowed-status",
+          monitor_pid: 71
+        }))});`
+      ].join("\n"),
+      "utf8"
+    );
+
+    (
+      plugin as unknown as {
+        register(api: Record<string, any>): void;
+      }
+    ).register({
+      pluginConfig: {
+        binPath: fakeCli,
+        autoApprove: policy
+      },
+      logger: {
+        info() {},
+        warn() {}
+      },
+      session: {
+        workflow: {
+          async enqueueNextTurnInjection(
+            injection: Record<string, unknown>
+          ) {
+            injections.push(injection);
+            return {
+              enqueued: true,
+              id: `injection-${injections.length}`,
+              sessionKey: injection.sessionKey
+            };
+          }
+        }
+      },
+      registerGatewayMethod(
+        method: string,
+        handler: GatewayMethodHandler
+      ) {
+        if (method === "agent-knock-knock.callback") {
+          callbackHandler = handler;
+        }
+      },
+      registerService() {},
+      registerCommand() {},
+      registerTool() {}
+    });
+
+    assert.equal(typeof callbackHandler, "function");
+    const invokeApprovalCallback = async (
+      messageId: string,
+      cwd: string
+    ) => {
+      let callbackResponse:
+        | {
+            ok: boolean;
+            result?: Record<string, any>;
+            error?: { code?: string; message?: string };
+          }
+        | undefined;
+      await callbackHandler?.({
+        params: {
+          sessionKey: "agent:test:autoapprove",
+          statePath,
+          conversation: {
+            conversation_id: "autoapprove-workspace",
+            openclaw_session: "agent:test:autoapprove"
+          },
+          message: {
+            id: messageId,
+            conversation_id: "autoapprove-workspace",
+            type: "question",
+            requires_response: true,
+            body: "Codex needs approval",
+            metadata: {
+              source: "terminal_bridge",
+              reason: "approval_required",
+              approval_candidate: {
+                agent: "codex",
+                kind: "run_command",
+                command: "git status",
+                cwd,
+                fingerprint: `fingerprint-${messageId}`,
+                terminal_target: "codex-work:0.0"
+              }
+            }
+          }
+        },
+        respond(ok, result, error) {
+          callbackResponse = {
+            ok,
+            ...(isRecord(result) ? { result } : {}),
+            ...(error ? { error } : {})
+          };
+        }
+      });
+      assert.notEqual(callbackResponse, undefined);
+      return callbackResponse!;
+    };
+
+    const approved = await invokeApprovalCallback(
+      "approval-allowed",
+      allowedWorkspace
+    );
+    assert.equal(approved.ok, true);
+    assert.equal(approved.result?.auto_approved, true);
+    assert.equal(approved.result?.enqueued, false);
+    assert.equal(injections.length, 0);
+
+    const calls = fs.readFileSync(callsPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as string[]);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]?.[0], "approve");
+    assert.equal(calls[0]?.includes("--workspace"), false);
+    const policyIndex = calls[0]?.indexOf("--auto-approval-policy-json") ?? -1;
+    assert.notEqual(policyIndex, -1);
+    assert.deepEqual(
+      JSON.parse(calls[0]?.[policyIndex + 1] ?? "{}"),
+      policy
+    );
+
+    const outside = await invokeApprovalCallback(
+      "approval-outside",
+      outsideWorkspace
+    );
+    assert.equal(outside.ok, true);
+    assert.equal(outside.result?.auto_approved, undefined);
+    assert.equal(outside.result?.enqueued, true);
+    assert.equal(injections.length, 1);
+    assert.equal(
+      fs.readFileSync(callsPath, "utf8").trim().split("\n").length,
+      1,
+      "an out-of-rule workspace must not execute the approval CLI"
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("/akk doctor leaves the Gateway event loop free for its health check", async () => {

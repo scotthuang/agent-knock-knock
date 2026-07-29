@@ -137,6 +137,52 @@ test("delegate without an agent selects the only idle supported pane", () => {
   }
 });
 
+test("delegate without --workspace routes to the only idle pane in its own cwd", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-delegate-any-workspace-"));
+  const paneWorkspace = path.join(tempDir, "pane-workspace");
+
+  try {
+    fs.mkdirSync(paneWorkspace, { recursive: true });
+    const result = runDelegate([
+      "--request",
+      "Review the pane workspace without a global workspace filter",
+      "--store-dir",
+      path.join(tempDir, "conversations"),
+      "--background",
+      "--disable-terminal-bridge-monitor",
+      ...terminalFixtureArgs({
+        processes: [{
+          pid: 5301,
+          ppid: 9301,
+          elapsed: "00:20",
+          command: "codex",
+          cwd: paneWorkspace
+        }],
+        panes: [tmuxPane({
+          target: "codex-any-workspace:0.0",
+          session: "codex-any-workspace",
+          panePid: 9301,
+          currentPath: paneWorkspace
+        })],
+        screens: {
+          "codex-any-workspace:0.0": "› "
+        }
+      })
+    ]);
+
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.conversation.executor.kind, "codex");
+    assert.equal(parsed.conversation.workspace, paneWorkspace);
+    assert.equal(
+      parsed.terminal_control.target,
+      "codex-any-workspace:0.0"
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("delegate without an agent gives setup guidance when no idle pane exists", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-delegate-no-pane-"));
   const workspace = path.join(tempDir, "workspace");
@@ -162,6 +208,73 @@ test("delegate without an agent gives setup guidance when no idle pane exists", 
     assert.equal(result.status, 1, result.stdout);
     assert.match(result.stderr, /No idle Codex or Claude Code pane is available/);
     assert.match(result.stderr, /Start codex or claude inside tmux/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("bare delegate without --workspace fails closed across idle pane workspaces", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-delegate-cross-workspace-"));
+  const firstWorkspace = path.join(tempDir, "first-workspace");
+  const secondWorkspace = path.join(tempDir, "second-workspace");
+
+  try {
+    fs.mkdirSync(firstWorkspace, { recursive: true });
+    fs.mkdirSync(secondWorkspace, { recursive: true });
+    const result = runDelegate([
+      "--request",
+      "Do not guess which project should receive this task",
+      "--store-dir",
+      path.join(tempDir, "conversations"),
+      "--background",
+      ...terminalFixtureArgs({
+        processes: [
+          {
+            pid: 5401,
+            ppid: 9401,
+            elapsed: "00:20",
+            command: "codex",
+            cwd: firstWorkspace
+          },
+          {
+            pid: 5402,
+            ppid: 9402,
+            elapsed: "00:21",
+            command: "codex",
+            cwd: secondWorkspace
+          }
+        ],
+        panes: [
+          tmuxPane({
+            target: "codex-first-workspace:0.0",
+            session: "codex-first-workspace",
+            panePid: 9401,
+            currentPath: firstWorkspace
+          }),
+          tmuxPane({
+            target: "codex-second-workspace:0.0",
+            session: "codex-second-workspace",
+            panePid: 9402,
+            currentPath: secondWorkspace
+          })
+        ],
+        screens: {
+          "codex-first-workspace:0.0": "› ",
+          "codex-second-workspace:0.0": "› "
+        }
+      })
+    ]);
+
+    assert.equal(result.status, 1, result.stdout);
+    assert.match(
+      result.stderr,
+      /Multiple idle coding-agent panes are available across workspaces/u
+    );
+    assert.match(result.stderr, /codex-first-workspace:0\.0/u);
+    assert.match(result.stderr, /codex-second-workspace:0\.0/u);
+    assert.equal(result.stderr.includes(firstWorkspace), true);
+    assert.equal(result.stderr.includes(secondWorkspace), true);
+    assert.match(result.stderr, /\/akk @short-ref: <message>/u);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -226,6 +339,84 @@ test("delegate fails closed when multiple idle matching tmux panes exist", () =>
     assert.match(result.stderr, /Multiple idle Codex panes match/);
     assert.match(result.stderr, /\/akk codex: <task>/);
     assert.match(result.stderr, /\/akk @short-ref: <message>/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("an exact short selector can send across cwd without --workspace", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-send-cross-workspace-"));
+  const firstWorkspace = path.join(tempDir, "first-workspace");
+  const selectedWorkspace = path.join(tempDir, "selected-workspace");
+  const storeDir = path.join(tempDir, "conversations");
+
+  try {
+    fs.mkdirSync(firstWorkspace, { recursive: true });
+    fs.mkdirSync(selectedWorkspace, { recursive: true });
+    const runtimeArgs = terminalFixtureArgs({
+      processes: [
+        {
+          pid: 5501,
+          ppid: 9501,
+          elapsed: "00:20",
+          command: "codex",
+          cwd: firstWorkspace
+        },
+        {
+          pid: 5502,
+          ppid: 9502,
+          elapsed: "00:21",
+          command: "codex",
+          cwd: selectedWorkspace
+        }
+      ],
+      panes: [
+        tmuxPane({
+          target: "codex-first-selector:0.0",
+          session: "codex-first-selector",
+          panePid: 9501,
+          currentPath: firstWorkspace
+        }),
+        tmuxPane({
+          target: "codex-selected:0.0",
+          session: "codex-selected",
+          panePid: 9502,
+          currentPath: selectedWorkspace
+        })
+      ],
+      screens: {
+        "codex-first-selector:0.0": "› ",
+        "codex-selected:0.0": "› "
+      }
+    });
+    const listed = runCli("list", [
+      "--store-dir",
+      storeDir,
+      ...runtimeArgs
+    ]);
+    assert.equal(listed.status, 0, listed.stderr || listed.stdout);
+    const selected = JSON.parse(listed.stdout).terminal_controlled.find(
+      (entry: Record<string, any>) =>
+        entry.terminal_control?.target === "codex-selected:0.0"
+    );
+    assert.match(selected?.short_ref ?? "", /^@[0-9a-f]{10}$/u);
+
+    const sent = runCli("send", [
+      "--conversation",
+      selected.short_ref,
+      "--message",
+      "Inspect only the explicitly selected project",
+      "--store-dir",
+      storeDir,
+      "--background",
+      "--disable-terminal-bridge-monitor",
+      ...runtimeArgs
+    ]);
+
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    const parsed = JSON.parse(sent.stdout);
+    assert.equal(parsed.conversation.workspace, selectedWorkspace);
+    assert.equal(parsed.terminal_control.target, "codex-selected:0.0");
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -399,6 +590,21 @@ function runCli(command: string, args: string[]) {
     encoding: "utf8",
     env: process.env
   });
+}
+
+function terminalFixtureArgs(options: {
+  processes: Array<Record<string, unknown>>;
+  panes: Array<Record<string, unknown>>;
+  screens: Record<string, string>;
+}): string[] {
+  return [
+    "--processes-json",
+    JSON.stringify(options.processes),
+    "--terminals-json",
+    JSON.stringify(options.panes),
+    "--terminal-screens-json",
+    JSON.stringify(options.screens)
+  ];
 }
 
 function tmuxPane(overrides: Record<string, unknown> = {}) {

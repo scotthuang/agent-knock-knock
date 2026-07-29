@@ -12,7 +12,7 @@ const packageRoot = path.resolve(
   "../.."
 );
 
-test("ClawHub quickstarts reach a first task before optional setup", () => {
+test("ClawHub quickstarts reach a first task without a top-level workspace", () => {
   const tmux = read("docs/quickstart-tmux.md");
   const readme = read("README.md");
   const clawHubPreview = readme.split(/\r?\n/u).slice(0, 50).join("\n");
@@ -22,7 +22,7 @@ test("ClawHub quickstarts reach a first task before optional setup", () => {
       document,
       /openclaw plugins install clawhub:@scotthuang\/agent-knock-knock/u
     );
-    assert.match(
+    assert.doesNotMatch(
       document,
       /openclaw config set plugins\.entries\.agent-knock-knock\.config\.workspace "\$\(pwd -P\)"/u
     );
@@ -31,11 +31,21 @@ test("ClawHub quickstarts reach a first task before optional setup", () => {
     assert.match(document, /\/akk doctor/u);
     assert.match(document, /\/akk inspect this repository and summarize it/u);
   }
+  for (const document of [tmux, readme]) {
+    assert.doesNotMatch(
+      document,
+      /plugins\.entries\.agent-knock-knock\.config\.workspace|install-openclaw --workspace|doctor --workspace/u
+    );
+  }
 
   assert.doesNotMatch(tmux, /defaultAgent|--default-agent|ACPX/u);
   assert.match(tmux, /AKK reuses a coding agent that you start in tmux/u);
   assert.match(tmux, /exactly one eligible idle coding-agent pane/u);
   assert.match(tmux, /\/akk <selector>: <message>/u);
+  assert.match(tmux, /multiple canonical roots/u);
+  assert.match(tmux, /autoApprove\.rules\[\]\.workspaces/u);
+  assert.match(readme, /multiple canonical workspace roots/u);
+  assert.match(readme, /autoApprove\.rules\[\]\.workspaces/u);
   assert.match(tmux, /Direct `\/akk \.\.\.` commands work without changing the OpenClaw tool policy/u);
   assert.match(readme, /send a separate message/u);
   assert.doesNotMatch(tmux, /\/akk send\b/u);
@@ -69,7 +79,7 @@ test("ClawHub quickstarts reach a first task before optional setup", () => {
   });
   assert.deepEqual(
     buildAkkCommandCliArgs(targeted, {
-      workspace: "/work/project"
+      workspace: "/legacy/project"
     }),
     [
       "send",
@@ -78,8 +88,6 @@ test("ClawHub quickstarts reach a first task before optional setup", () => {
       "--message",
       "run the tests and explain any failures",
       "--background",
-      "--workspace",
-      "/work/project",
       "--openclaw-session",
       "agent:main:main",
       "--gateway-method",

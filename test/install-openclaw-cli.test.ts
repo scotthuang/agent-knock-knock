@@ -9,13 +9,18 @@ const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 const packageRoot = path.resolve(path.dirname(binPath), "../..");
 const skillSource = path.join(packageRoot, "templates", "openclaw-skills", "agent-knock-knock", "SKILL.md");
 
-test("OpenClaw contract exposes terminal timeout configuration and renewal", () => {
+test("OpenClaw contract removes the top-level workspace and keeps rule-scoped approval workspaces", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(packageRoot, "openclaw.plugin.json"), "utf8"));
-  assert.equal(manifest.configSchema.properties.workspace.minLength, 1);
-  assert.match(
-    manifest.configSchema.properties.workspace.description,
-    /Absolute project directory[\s\S]*fail closed/u
-  );
+  const configProperties = manifest.configSchema.properties;
+  assert.equal("workspace" in configProperties, false);
+  const autoApproveRule =
+    configProperties.autoApprove.properties.rules.items;
+  assert.equal(autoApproveRule.required.includes("workspaces"), true);
+  assert.equal(autoApproveRule.properties.workspaces.type, "array");
+  assert.equal(autoApproveRule.properties.workspaces.minItems, 1);
+  assert.equal("maxItems" in autoApproveRule.properties.workspaces, false);
+  assert.equal(autoApproveRule.properties.workspaces.items.type, "string");
+  assert.equal(autoApproveRule.properties.workspaces.items.minLength, 1);
   assert.equal(manifest.configSchema.properties.agentTimeoutMinutes.type, "number");
   assert.equal(manifest.configSchema.properties.agentHardTimeoutMinutes.type, "number");
   assert.equal(manifest.configSchema.properties.agentHardTimeoutMinutes.exclusiveMinimum, 0);
@@ -118,7 +123,7 @@ test("install-openclaw confirms the trusted local source when OpenClaw requires 
   }
 });
 
-test("install-openclaw atomically preserves approval policy and verifies first-run readiness", () => {
+test("install-openclaw without a top-level workspace preserves approval rules and is ready", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-install-openclaw-verify-"));
   const callsPath = path.join(tempDir, "calls.ndjson");
   const configPath = path.join(tempDir, "plugin-config.json");
@@ -127,12 +132,13 @@ test("install-openclaw atomically preserves approval policy and verifies first-r
   const fakeClaude = path.join(tempDir, "claude");
   const skillDest = path.join(tempDir, "skills", "agent-knock-knock", "SKILL.md");
   const workspace = fs.realpathSync(tempDir);
+  const secondWorkspace = path.join(tempDir, "second-workspace");
   const approvalPolicy = {
     enabled: true,
     rules: [{
       id: "trusted-tests",
       agents: ["codex"],
-      workspaces: [workspace],
+      workspaces: [workspace, secondWorkspace],
       commands: [["npm", "test"]]
     }]
   };
@@ -163,8 +169,6 @@ test("install-openclaw atomically preserves approval policy and verifies first-r
       fakeOpenClaw,
       "--skill-path",
       skillDest,
-      "--workspace",
-      workspace,
       "--verify",
       "--tmux-bin",
       fakeTmux,
@@ -176,6 +180,7 @@ test("install-openclaw atomically preserves approval policy and verifies first-r
 
     assert.equal(result.installed, true);
     assert.equal(result.ready, true);
+    assert.equal("workspace" in result, false);
     assert.equal(result.pending_restart, false);
     assert.equal(result.verification.ok, true);
     assert.equal(result.verification.capabilities.tmux.status, "ready");
@@ -190,8 +195,12 @@ test("install-openclaw atomically preserves approval policy and verifies first-r
     assert.equal(result.verification.openclaw.gateway_ready, true);
     const saved = JSON.parse(fs.readFileSync(configPath, "utf8"));
     assert.deepEqual(saved.config.autoApprove, approvalPolicy);
+    assert.deepEqual(
+      saved.config.autoApprove.rules[0].workspaces,
+      [workspace, secondWorkspace]
+    );
     assert.equal(saved.config.idleTimeoutMinutes, 8);
-    assert.equal(saved.config.workspace, workspace);
+    assert.equal("workspace" in saved.config, false);
     assert.equal("defaultAgent" in saved.config, false);
     assert.equal(saved.enabled, true);
     assert.equal(

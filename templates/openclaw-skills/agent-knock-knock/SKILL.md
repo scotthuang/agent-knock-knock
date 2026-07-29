@@ -23,15 +23,15 @@ Use the `/akk` command for slash-command syntax. Use the Agent Knock Knock plugi
 
 Core slash-command forms:
 
-- `/akk <task>`: send a new task only when exactly one eligible idle coding-agent pane exists in the configured workspace.
+- `/akk <task>`: send a new task only when exactly one eligible idle coding-agent pane exists across all workspaces.
 - `/akk <selector>: <message>`: send a task or follow-up to one exact eligible idle pane.
 - `/akk list`: list eligible and managed coding-agent terminals.
 - `/akk status [session-selector]`: inspect one managed terminal turn.
 - `/akk cancel <session-selector>`: interrupt the current turn without closing its tmux pane.
 
-For the targeted slash form, a selector may be `codex`, `claude`, `only`, `latest`, or an `@short-ref` returned by `AKK list`. The `agent_knock_knock_send` tool additionally accepts an authoritative full ID in its `selector` field. Selectors fail closed when the target is missing or ambiguous. For every send, the selected pane must be in the configured workspace, owned by the expected coding-agent process, and at a verified idle prompt.
+For the targeted slash form, a selector may be `codex`, `claude`, `only`, `latest`, or an `@short-ref` returned by `AKK list`. The `agent_knock_knock_send` tool additionally accepts an authoritative full ID in its `selector` field. Selectors fail closed when the target is missing or ambiguous. For every send, AKK must revalidate the selected agent PID and tmux pane identity, confirm that the process and pane working directories match, and verify the idle prompt.
 
-Treat the configured workspace as a hard boundary for every AKK plugin tool. Do not try to list, inspect, send to, approve, cancel, or recover a terminal outside it, including through an authoritative full ID.
+AKK discovers eligible panes across workspaces. When more than one target matches, use a selector returned by `AKK list`; never guess based on a workspace name or path.
 
 Natural-language forms:
 
@@ -45,7 +45,7 @@ Natural-language forms:
 
 ## Starting and Reusing Work
 
-Use `agent_knock_knock_send` with `request` and no `selector` only for a new independent task whose target the user left unspecified. AKK must resolve exactly one eligible Codex or Claude Code pane and verify that it is idle immediately before writing the task. If no eligible pane exists, report AKK's setup guidance; do not substitute another execution path.
+Use `agent_knock_knock_send` with `request` and no `selector` only for a new independent task whose target the user left unspecified. AKK must resolve exactly one eligible Codex or Claude Code pane across all workspaces and verify that it is idle immediately before writing the task. If no eligible pane exists, report AKK's setup guidance; do not substitute another execution path.
 
 For a follow-up:
 
@@ -75,7 +75,7 @@ All OpenClaw-to-agent task delivery must go through Agent Knock Knock plugin too
 AKK:
 
 1. Resolves the selected Codex or Claude Code process and tmux pane.
-2. Verifies the pane, process identity, workspace, and idle prompt.
+2. Revalidates the expected agent PID and tmux pane identity, confirms that the process and pane working directories match, and verifies the idle prompt.
 3. Types only the user-facing task into the shared terminal.
 4. Creates a managed turn bound to that terminal and message.
 5. Monitors reliable local evidence and sends callbacks to the originating OpenClaw session.
@@ -119,13 +119,13 @@ For hookless Claude Code, the callback intentionally omits the raw command. Requ
 
 Unknown, stale, expired, ambiguous, persistent-permission, replayed, or changed requests must not be approved. Deny or interrupt them with `agent_knock_knock_cancel`, or tell the user to resolve them directly in the terminal.
 
-A trusted, default-disabled plugin `autoApprove` policy may independently approve only an exact configured agent, canonical workspace, and command vector backed by current terminal evidence. The model cannot create or modify that policy.
+A trusted, default-disabled plugin `autoApprove` policy may independently approve only an exact configured agent, command vector, and canonical root listed in `autoApprove.rules[].workspaces`, backed by current terminal evidence. A rule may list multiple workspace roots. These entries are the only workspace boundary for automatic approval; they do not limit pane discovery or manual control. The model cannot create or modify that policy.
 
 ## tmux Sessions
 
 `agent_knock_knock_list` reports eligible already-running Codex and Claude Code panes together with AKK-managed turns. Use an authoritative full ID or returned `@short-ref` whenever more than one candidate exists.
 
-AKK writes only to a pane that passes its current process, workspace, and idle checks. Humans can attach to the same tmux session and continue directly at any time.
+Before every terminal operation, AKK revalidates the expected agent PID and tmux pane identity, then confirms that the process and pane working directories match. Sending new work additionally requires a verified idle prompt. Humans can attach to the same tmux session and continue directly at any time.
 
 Claude Code completion depends on a strictly correlated local transcript turn and fails closed for unknown schemas, background work, or ambiguous identity. Never report completion merely because the pane looks idle.
 

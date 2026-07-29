@@ -10,12 +10,15 @@ const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 const testRuntimeDir = fs.mkdtempSync(
   path.join(os.tmpdir(), "akk-agent-cli-runtime-")
 );
+const cwd = fs.mkdtempSync(
+  path.join(os.tmpdir(), "akk-agent-cli-workspace-")
+);
 process.env.AKK_RUNTIME_DIR = testRuntimeDir;
 process.on("exit", () => {
   fs.rmSync(testRuntimeDir, { recursive: true, force: true });
+  fs.rmSync(cwd, { recursive: true, force: true });
 });
 const sessionId = "019ee559-7bb8-7fd1-970c-0f7b6978c44e";
-const cwd = "/repo/agent-knock-knock";
 const rolloutPath = "/tmp/codex-rollout.jsonl";
 
 test("hookless Claude tmux approval is bound to a managed callback and sends exactly one C-m", () => {
@@ -2996,8 +2999,6 @@ test("raw terminal send uses the target pid cwd from partial lsof output", () =>
       `terminal:v2:tmux:codex:${terminalTarget}:${targetPid}`,
       "--message",
       "Verify partial lsof handling",
-      "--workspace",
-      workspace,
       "--background",
       "--store-dir",
       storeDir,
@@ -3094,8 +3095,6 @@ test("raw terminal send fails closed when partial lsof output omits the target p
       `terminal:v2:tmux:codex:${terminalTarget}:${targetPid}`,
       "--message",
       "Must not reach tmux without a verified cwd",
-      "--workspace",
-      workspace,
       "--background",
       "--store-dir",
       storeDir,
@@ -8482,6 +8481,22 @@ process.stdout.write(${JSON.stringify(psOutput)});
     "utf8"
   );
   fs.chmodSync(fakePs, 0o755);
+
+  const fakeLsof = path.join(fakeBinDir, "lsof");
+  const lsofOutput = [
+    "COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME",
+    ...processes.map((entry) =>
+      `${path.basename(entry.command.split(/\s+/u)[0] || "agent")} ${entry.pid} me cwd DIR 1,18 64 123 ${entry.cwd}`
+    )
+  ].join("\n") + "\n";
+  fs.writeFileSync(
+    fakeLsof,
+    `#!/usr/bin/env node
+process.stdout.write(${JSON.stringify(lsofOutput)});
+`,
+    "utf8"
+  );
+  fs.chmodSync(fakeLsof, 0o755);
 }
 
 function writeTrackedFakeProcessTools(options: {

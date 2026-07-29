@@ -38,6 +38,30 @@ test("approval policy allows an exact command in an allowed workspace", () => {
   assert.equal(decision.policyFingerprint.length, 16);
 });
 
+test("approval policy allows one trusted rule to cover multiple workspaces", () => {
+  const multiWorkspacePolicy = {
+    ...policy,
+    rules: [{
+      ...policy.rules[0],
+      workspaces: ["/repo/project-a", "/repo/project-b"]
+    }]
+  };
+
+  for (const cwd of ["/repo/project-a", "/repo/project-b/nested"]) {
+    const decision = evaluateApprovalPolicy({
+      policy: multiWorkspacePolicy,
+      candidate: { ...candidate, cwd }
+    });
+    assert.equal(decision.action, "approve", cwd);
+    assert.equal(decision.ruleId, "safe-status", cwd);
+  }
+
+  assert.equal(evaluateApprovalPolicy({
+    policy: multiWorkspacePolicy,
+    candidate: { ...candidate, cwd: "/repo/project-c" }
+  }).action, "ask");
+});
+
 test("approval policy defaults to asking when disabled or unmatched", () => {
   assert.equal(evaluateApprovalPolicy({ policy: {}, candidate }).action, "ask");
   assert.equal(evaluateApprovalPolicy({
@@ -47,6 +71,23 @@ test("approval policy defaults to asking when disabled or unmatched", () => {
   assert.equal(evaluateApprovalPolicy({
     policy,
     candidate: { ...candidate, cwd: "/repo/other" }
+  }).action, "ask");
+});
+
+test("approval policy rejects relative workspace roots", () => {
+  const relativePolicy = {
+    ...policy,
+    rules: [{
+      ...policy.rules[0],
+      workspaces: ["."]
+    }]
+  };
+  assert.equal(evaluateApprovalPolicy({
+    policy: relativePolicy,
+    candidate: {
+      ...candidate,
+      cwd: process.cwd()
+    }
   }).action, "ask");
 });
 
