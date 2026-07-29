@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.2 - 2026-07-30
+
+### Fixed
+
+- Keep macOS tmux workspace revalidation reliable when `lsof` returns usable cwd rows with a partial-failure status.
+- Limit cwd lookups to the expected coding-agent PID while retaining ancestry checks and failing closed when target cwd evidence is absent.
+
 ## 0.5.1 - 2026-07-29
 
 ### Changed
