@@ -937,6 +937,7 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
       secondRequestId: secondToolUseId,
       firstSchedulePath: path.join(tempDir, "sequential-first-scheduled"),
       secondSchedulePath: path.join(tempDir, "sequential-second-scheduled"),
+      promptClearedLogPath: sequentialLogPath,
       redrawnFirstScreen,
       clearedScreen,
       repeatedApprovalScreen: approvalScreen,
@@ -8720,6 +8721,7 @@ function writeSequentialAutoApprovingFakeOpenClaw(options: {
   secondRequestId: string;
   firstSchedulePath: string;
   secondSchedulePath: string;
+  promptClearedLogPath: string;
   redrawnFirstScreen: string;
   clearedScreen: string;
   repeatedApprovalScreen: string;
@@ -8746,7 +8748,21 @@ fs.writeFileSync(
   ${JSON.stringify(options.screenPath)},
   ${JSON.stringify(options.clearedScreen)}
 );
-Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+const promptClearedDeadline = Date.now() + 5000;
+while (
+  !(
+    fs.existsSync(${JSON.stringify(options.promptClearedLogPath)}) &&
+    fs.readFileSync(
+      ${JSON.stringify(options.promptClearedLogPath)},
+      "utf8"
+    ).includes('"event":"terminal_bridge_approval_prompt_cleared"')
+  )
+) {
+  if (Date.now() >= promptClearedDeadline) {
+    process.exit(3);
+  }
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+}
 fs.appendFileSync(
   ${JSON.stringify(options.transcriptPath)},
   ${JSON.stringify(options.secondRequestAppend)},
