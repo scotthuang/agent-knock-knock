@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { runOpenClawChainDiagnostics } from "../src/openclaw-doctor.js";
+import { AKK_WORKSPACE_SETUP_COMMAND } from "../src/openclaw-plugin-helpers.js";
 
 test("OpenClaw diagnostics verify config, runtime, skill, workspace, and Gateway", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-openclaw-doctor-"));
@@ -170,6 +171,30 @@ test("OpenClaw diagnostics reject a non-canonical configured workspace", (t) => 
     assert.equal(check?.status, "invalid");
     assert.match(check?.detail ?? "", /not canonical/u);
     assert.match(check?.remediation?.[0] ?? "", new RegExp(escapeRegex(workspace), "u"));
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("OpenClaw diagnostics give copyable workspace setup guidance", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-openclaw-workspace-missing-"));
+  const fakeOpenClaw = path.join(tempDir, "openclaw");
+
+  try {
+    writeFakeOpenClaw(fakeOpenClaw);
+    const result = runOpenClawChainDiagnostics({
+      openclawBin: fakeOpenClaw,
+      env: {
+        AKK_FAKE_SCENARIO: "ready"
+      }
+    });
+    const check = result.checks.find((item) => item.name === "workspace");
+
+    assert.equal(check?.status, "missing");
+    assert.deepEqual(check?.remediation, [
+      AKK_WORKSPACE_SETUP_COMMAND,
+      "openclaw gateway restart"
+    ]);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

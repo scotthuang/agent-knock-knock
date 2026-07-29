@@ -9,6 +9,41 @@ Agent Knock Knock lets OpenClaw control local Codex and Claude Code through shar
 
 **No hooks. No agent-side plugins. Just share a terminal and stay in control. No YOLO. Automate the trusted. Review the rest.**
 
+## Quick Start with ClawHub
+
+AKK reuses Codex or Claude Code already running in tmux; it never launches a coding agent. You need OpenClaw `2026.6.5`+, tmux, and an authenticated `codex` or `claude` CLI, all running as the same OS user.
+
+From the project AKK may edit:
+
+```bash
+cd /absolute/path/to/project
+openclaw plugins install clawhub:@scotthuang/agent-knock-knock
+openclaw config set plugins.entries.agent-knock-knock.config.workspace "$(pwd -P)"
+openclaw gateway restart
+```
+
+Start the shared coding-agent terminal:
+
+```bash
+tmux new-session -s akk-work -c "$(pwd -P)" codex
+```
+
+Use `claude` instead of `codex` if preferred. Wait for the coding agent's idle prompt, then detach from tmux with `Ctrl-b`, followed by `d`.
+
+From any configured OpenClaw channel, first send:
+
+```text
+/akk doctor
+```
+
+After doctor reports `AKK doctor: ready`, send a separate message:
+
+```text
+/akk inspect this repository and summarize it
+```
+
+The second command proves that AKK can find the pane, send work in the configured workspace, and return the result. Direct `/akk ...` commands need no OpenClaw tool-policy changes.
+
 ## See It in Action
 
 [![AKK orchestrating a Claude Code-to-Codex handoff through tmux](https://raw.githubusercontent.com/scotthuang/agent-knock-knock/main/docs/assets/akk-tmux-handoff-demo.gif)](https://github.com/scotthuang/agent-knock-knock/blob/main/docs/assets/akk-tmux-handoff-demo.mp4)
@@ -35,7 +70,26 @@ AKK connects OpenClaw to Codex or Claude Code already running inside tmux:
 
 AKK is local-first. It has no hosted control plane or telemetry and does not change the coding agent's configured permission mode.
 
-## Install
+## Optional: Natural-Language Delegation
+
+The quick start uses direct `/akk ...` commands, which bypass the model and work without plugin tool access. To let OpenClaw decide to use AKK from a natural-language request, grant the optional `agent-knock-knock` tools in the applicable tool policy.
+
+If you use the default `coding` profile and do not already have `tools.allow`, add AKK without replacing the profile:
+
+```json5
+{
+  tools: {
+    profile: "coding",
+    alsoAllow: ["agent-knock-knock"]
+  }
+}
+```
+
+If your configuration already has a restrictive `tools.allow` list, add `"agent-knock-knock"` to that existing list instead. Do not set `allow` and `alsoAllow` at the same scope.
+
+Restart the Gateway after changing the tool policy.
+
+## Installation Details
 
 Requirements:
 
@@ -53,30 +107,7 @@ Requirements:
 
 The compatibility suite tests the normal installation floor and the Plugin API boundary with isolated state and the real packed artifact.
 
-### Install from ClawHub (recommended)
-
-From the project the agents may edit:
-
-```bash
-openclaw plugins install clawhub:@scotthuang/agent-knock-knock
-openclaw config set plugins.entries.agent-knock-knock.config.workspace "$PWD"
-openclaw gateway restart
-```
-
 ClawHub installs the OpenClaw plugin, bundled AKK skill, and package-local relay CLI together. It does not add the `agent-knock-knock` command to your shell `PATH`. Do not run `install-openclaw` after a ClawHub install; that command belongs to the npm path below.
-
-AKK's plugin tools are optional OpenClaw tools and require an explicit tool-policy grant. If you use the default `coding` profile and do not already have `tools.allow`, add AKK without replacing the profile:
-
-```json5
-{
-  tools: {
-    profile: "coding",
-    alsoAllow: ["agent-knock-knock"]
-  }
-}
-```
-
-If your configuration already has a restrictive `tools.allow` list, add `"agent-knock-knock"` to that existing list instead. Do not set `allow` and `alsoAllow` at the same scope.
 
 If you also want standalone shell commands such as `agent-knock-knock doctor`, install the npm package globally without running `install-openclaw`:
 
@@ -84,11 +115,11 @@ If you also want standalone shell commands such as `agent-knock-knock doctor`, i
 npm install -g @scotthuang/agent-knock-knock
 ```
 
-### Install from npm
+### Alternative: Install from npm
 
 ```bash
 npm install -g @scotthuang/agent-knock-knock
-agent-knock-knock install-openclaw --workspace "$PWD" --verify
+agent-knock-knock install-openclaw --workspace "$(pwd -P)" --verify
 ```
 
 `install-openclaw` installs or updates the plugin, configures the workspace without replacing unrelated settings, installs the bundled skill, restarts the Gateway at most once, and optionally verifies the runtime chain. It is safe to rerun. Without `--verify`, the result remains unverified rather than claiming readiness. Use `--skill-only` to skip plugin installation; add `--no-restart` to leave an explicit pending-restart state.
@@ -99,7 +130,7 @@ If OpenClaw runs from a local checkout or another nonstandard location, pass its
 agent-knock-knock install-openclaw --openclaw-bin /path/to/openclaw/openclaw.mjs
 ```
 
-## Start the Shared Terminal
+## Shared Terminal Details
 
 Install tmux on macOS:
 
@@ -116,7 +147,7 @@ sudo apt-get install tmux
 Then start Codex in a shared terminal:
 
 ```bash
-tmux new-session -s akk-work -c "$PWD" codex
+tmux new-session -s akk-work -c "$(pwd -P)" codex
 ```
 
 Use `claude` instead of `codex` for Claude Code. Detach with `Ctrl-b`, then `d`. AKK discovers the pane automatically.
@@ -173,11 +204,11 @@ If no eligible pane exists, AKK stops with setup guidance. If a send is ambiguou
 
 ## Configuration
 
-AKK reads these options from `plugins.entries.agent-knock-knock.config`. The npm installer writes the common options; the ClawHub section shows the equivalent setup.
+AKK reads these options from `plugins.entries.agent-knock-knock.config`. The npm installer writes the common options; the ClawHub quick start shows the equivalent manual setup.
 
 | Option | Default | Purpose |
 | --- | --- | --- |
-| `workspace` | OpenClaw process directory | Working directory matched against eligible terminal panes. |
+| `workspace` | Required before use | Absolute, canonical working directory matched against eligible terminal panes. Runtime operations fail closed when it is missing. |
 | `storeDir` | `~/.agent-knock-knock/conversations` | Conversation state location; relative plugin paths resolve from `workspace`. |
 | `openclawBin` | Auto-detected | OpenClaw CLI used for callback delivery. |
 | `codexHome` | Auto-detected | Optional Codex home used to identify Codex sessions running in tmux. |

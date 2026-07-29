@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { AKK_WORKSPACE_SETUP_COMMAND } from "./openclaw-plugin-helpers.js";
 
 export type OpenClawDiagnosticStatus =
   | "ok"
@@ -257,7 +258,8 @@ export function runOpenClawChainDiagnostics(
 
 function diagnoseWorkspace(workspace: string | undefined): OpenClawDiagnosticCheck {
   const remediation = [
-    "openclaw config set plugins.entries.agent-knock-knock.config.workspace /absolute/path/to/workspace"
+    AKK_WORKSPACE_SETUP_COMMAND,
+    "openclaw gateway restart"
   ];
   if (!workspace) {
     return {
