@@ -1,7 +1,4 @@
 import { spawnSync } from "node:child_process";
-import fs from "node:fs";
-import path from "node:path";
-import { AKK_WORKSPACE_SETUP_COMMAND } from "./openclaw-plugin-helpers.js";
 
 export type OpenClawDiagnosticStatus =
   | "ok"
@@ -18,7 +15,6 @@ export interface OpenClawDiagnosticCheck {
     | "plugin_enabled"
     | "plugin_runtime"
     | "skill"
-    | "workspace"
     | "gateway";
   ok: boolean;
   status: OpenClawDiagnosticStatus;
@@ -30,13 +26,11 @@ export interface OpenClawChainDiagnostics {
   ready: boolean;
   package_ready: boolean;
   gateway_ready: boolean;
-  workspace?: string;
   checks: OpenClawDiagnosticCheck[];
 }
 
 export interface OpenClawChainDiagnosticOptions {
   openclawBin: string;
-  workspace?: string;
   timeoutMs?: number;
   env?: NodeJS.ProcessEnv;
   cwd?: string;
@@ -54,8 +48,8 @@ const MAX_TIMEOUT_MS = 30_000;
 const MAX_BUFFER_BYTES = 1024 * 1024;
 
 /**
- * Verify the complete OpenClaw-side AKK chain without returning config values
- * other than the explicitly non-secret workspace path.
+ * Verify the complete OpenClaw-side AKK chain without returning plugin config
+ * values.
  */
 export function runOpenClawChainDiagnostics(
   options: OpenClawChainDiagnosticOptions
@@ -202,29 +196,6 @@ export function runOpenClawChainDiagnostics(
       : {})
   });
 
-  const configuredWorkspace = stringValue(recordValue(entry?.config)?.workspace);
-  const workspace = configuredWorkspace;
-  const workspaceCheck = diagnoseWorkspace(workspace);
-  if (workspaceCheck.ok && options.workspace && workspace) {
-    let expectedWorkspace: string | undefined;
-    try {
-      expectedWorkspace = fs.realpathSync(options.workspace);
-    } catch {
-      // The expected path is checked below without aborting the rest of doctor.
-    }
-    if (!expectedWorkspace || expectedWorkspace !== fs.realpathSync(workspace)) {
-      workspaceCheck.ok = false;
-      workspaceCheck.status = "invalid";
-      workspaceCheck.detail = expectedWorkspace
-        ? "Configured AKK workspace does not match the requested workspace."
-        : "Requested AKK workspace does not exist.";
-      workspaceCheck.remediation = [
-        `openclaw config set plugins.entries.agent-knock-knock.config.workspace ${expectedWorkspace ?? "/absolute/path/to/workspace"}`
-      ];
-    }
-  }
-  checks.push(workspaceCheck);
-
   const healthResult = run(["health", "--json", "--timeout", String(timeoutMs)]);
   const health = recordValue(healthResult.json);
   const gatewayOk = healthResult.ok && health?.ok === true;
@@ -251,74 +222,7 @@ export function runOpenClawChainDiagnostics(
     ready: packageReady && gatewayOk,
     package_ready: packageReady,
     gateway_ready: gatewayOk,
-    ...(workspace ? { workspace } : {}),
     checks
-  };
-}
-
-function diagnoseWorkspace(workspace: string | undefined): OpenClawDiagnosticCheck {
-  const remediation = [
-    AKK_WORKSPACE_SETUP_COMMAND,
-    "openclaw gateway restart"
-  ];
-  if (!workspace) {
-    return {
-      name: "workspace",
-      ok: false,
-      status: "missing",
-      detail: "AKK workspace is not configured.",
-      remediation
-    };
-  }
-  if (!path.isAbsolute(workspace)) {
-    return {
-      name: "workspace",
-      ok: false,
-      status: "invalid",
-      detail: "AKK workspace must be an absolute path.",
-      remediation
-    };
-  }
-
-  let stat: fs.Stats;
-  let canonical: string;
-  try {
-    stat = fs.statSync(workspace);
-    canonical = fs.realpathSync(workspace);
-  } catch {
-    return {
-      name: "workspace",
-      ok: false,
-      status: "missing",
-      detail: "Configured AKK workspace does not exist.",
-      remediation
-    };
-  }
-  if (!stat.isDirectory()) {
-    return {
-      name: "workspace",
-      ok: false,
-      status: "invalid",
-      detail: "Configured AKK workspace is not a directory.",
-      remediation
-    };
-  }
-  if (path.normalize(workspace) !== canonical) {
-    return {
-      name: "workspace",
-      ok: false,
-      status: "invalid",
-      detail: `AKK workspace is not canonical. Use: ${canonical}`,
-      remediation: [
-        `openclaw config set plugins.entries.agent-knock-knock.config.workspace ${canonical}`
-      ]
-    };
-  }
-  return {
-    name: "workspace",
-    ok: true,
-    status: "ok",
-    detail: "AKK workspace is absolute, canonical, and exists."
   };
 }
 
@@ -414,11 +318,5 @@ function boundedTimeout(value: number | undefined): number {
 function recordValue(value: unknown): Record<string, any> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, any>
-    : undefined;
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim().length > 0
-    ? value
     : undefined;
 }

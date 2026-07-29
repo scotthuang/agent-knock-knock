@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.6.0 - 2026-07-30
+
+### Changed
+
+- Discover and control verified Codex and Claude Code tmux panes across workspaces without project-specific plugin configuration.
+- Keep bare delegation fail-closed when multiple idle panes exist, while allowing exact selectors to route safely across projects.
+- Revalidate the coding-agent PID, tmux pane identity, and matching process/pane working directory before terminal operations.
+- Simplify ClawHub and npm installation, diagnostics, and first-run guidance by removing the top-level workspace setup step.
+
+### Security
+
+- Keep automatic approval disabled by default and scoped only by each trusted rule's exact commands, agents, and one or more `autoApprove.rules[].workspaces` roots.
+
+### Removed
+
+- Remove the top-level plugin `workspace` setting and the corresponding `install-openclaw` and `doctor` workspace options.
+
 ## 0.5.2 - 2026-07-30
 
 ### Fixed

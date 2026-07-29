@@ -1,9 +1,6 @@
 import path from "node:path";
 
 export const AKK_CALLBACK_METHOD = "agent-knock-knock.callback";
-export const AKK_WORKSPACE_SETUP_COMMAND =
-  'openclaw config set plugins.entries.agent-knock-knock.config.workspace "$(pwd -P)"';
-
 export type AkkCommand =
   | { action: "help" }
   | { action: "doctor" }
@@ -188,17 +185,13 @@ export function buildAkkCommandCliArgs(
     case "help":
     case "delegate":
       return undefined;
-    case "doctor": {
-      const workspace = nonEmptyString(config.workspace);
+    case "doctor":
       return withOptionalArgs(
         ["doctor"],
-        ["--workspace", workspace],
         ["--openclaw-bin", nonEmptyString(config.openclawBin)]
       );
-    }
   }
 
-  const workspace = requirePluginWorkspace(config);
   const storeDir = resolvePluginStoreDir(config);
   const idleTimeoutMinutes = finiteNumberString(config.idleTimeoutMinutes);
 
@@ -206,7 +199,6 @@ export function buildAkkCommandCliArgs(
     case "list":
       return withOptionalArgs(
         ["list"],
-        ["--workspace", workspace],
         ["--store-dir", storeDir],
         ["--idle-timeout-minutes", idleTimeoutMinutes]
       );
@@ -218,7 +210,6 @@ export function buildAkkCommandCliArgs(
             ? ["--conversation", command.conversationId]
             : [])
         ],
-        ["--workspace", workspace],
         ["--store-dir", storeDir],
         ["--idle-timeout-minutes", idleTimeoutMinutes]
       );
@@ -235,7 +226,6 @@ export function buildAkkCommandCliArgs(
           command.message,
           "--background"
         ],
-        ["--workspace", workspace],
         ["--store-dir", storeDir],
         ["--idle-timeout-minutes", idleTimeoutMinutes],
         ["--agent-timeout-minutes", finiteNumberString(config.agentTimeoutMinutes)],
@@ -255,7 +245,6 @@ export function buildAkkCommandCliArgs(
           "--expected-approval-fingerprint",
           command.expectedApprovalFingerprint
         ],
-        ["--workspace", workspace],
         ["--store-dir", storeDir]
       );
     case "renew":
@@ -265,19 +254,16 @@ export function buildAkkCommandCliArgs(
           "--minutes",
           command.minutes ?? finiteNumberString(config.agentTimeoutMinutes)
         ],
-        ["--workspace", workspace],
         ["--store-dir", storeDir]
       );
     case "retry-callback":
       return withOptionalArgs(
         ["retry-callback", "--conversation", command.conversationId],
-        ["--workspace", workspace],
         ["--store-dir", storeDir]
       );
     case "cancel": {
       return withOptionalArgs(
         ["cancel", "--conversation", command.conversationId],
-        ["--workspace", workspace],
         ["--store-dir", storeDir],
         ["--idle-timeout-minutes", idleTimeoutMinutes]
       );
@@ -292,39 +278,9 @@ export function buildAkkCommandCliArgs(
           command.reason
         ],
         ["--expected-message-id", command.expectedMessageId],
-        ["--workspace", workspace],
         ["--store-dir", storeDir]
       );
   }
-}
-
-export function requirePluginWorkspace(
-  config: Record<string, unknown>
-): string {
-  const workspace = configuredPluginWorkspace(config);
-  if (!workspace) {
-    throw new Error(
-      "AKK workspace is not configured. From the project AKK may edit, run: " +
-      `${AKK_WORKSPACE_SETUP_COMMAND}; then run: openclaw gateway restart`
-    );
-  }
-  return workspace;
-}
-
-function configuredPluginWorkspace(
-  config: Record<string, unknown>
-): string | undefined {
-  const workspace = nonEmptyString(config.workspace);
-  if (!workspace) {
-    return undefined;
-  }
-  if (!path.isAbsolute(workspace)) {
-    throw new Error(
-      "AKK workspace must be an absolute path. From the project AKK may edit, run: " +
-      `${AKK_WORKSPACE_SETUP_COMMAND}; then run: openclaw gateway restart`
-    );
-  }
-  return path.normalize(workspace);
 }
 
 function parseSelectorMessage(
@@ -358,11 +314,7 @@ export function resolvePluginStoreDir(
   if (path.isAbsolute(configured)) {
     return path.normalize(configured);
   }
-  const configuredWorkspace = nonEmptyString(config.workspace);
-  const workspace = configuredWorkspace
-    ? path.resolve(gatewayCwd, configuredWorkspace)
-    : path.resolve(gatewayCwd);
-  return path.resolve(workspace, configured);
+  return path.resolve(gatewayCwd, configured);
 }
 
 function takeRequiredToken(input: unknown, usage: string): { token: string; rest: string } {

@@ -6,7 +6,7 @@ Agent Knock Knock coordinates OpenClaw, a local coding agent, and a human throug
 - Codex or Claude Code performs the engineering work inside tmux.
 - AKK owns terminal delivery, monitoring, lifecycle state, and callbacks.
 - A human can attach to the same tmux pane at any time, continue directly, and later hand control back to OpenClaw.
-- AKK sends input only after it verifies the selected agent, pane, process, workspace, and idle prompt.
+- AKK sends input only after it verifies the selected agent, pane, process, pane/process working directory, and idle prompt.
 - AKK reports approval or completion only when the terminal adapter has reliable evidence. Uncertain states fail closed.
 
 ## Task Flow
@@ -39,7 +39,7 @@ The coding agent does not run a callback command and does not need an AKK-specif
 Each managed turn is bound to a concrete terminal identity, including:
 
 - coding agent (`codex` or `claude`)
-- canonical workspace
+- canonical working directory captured for this pane and managed turn
 - tmux socket and pane target
 - pane and agent process identity
 - managed conversation and message identity

@@ -406,11 +406,6 @@ async function verifyFullHost({
   setConfig(openclaw, "plugins.allow", ["agent-knock-knock"]);
   setConfig(
     openclaw,
-    "plugins.entries.agent-knock-knock.config.workspace",
-    workspace
-  );
-  setConfig(
-    openclaw,
     "plugins.entries.agent-knock-knock.config.storeDir",
     storeDir
   );
@@ -568,8 +563,6 @@ async function verifyFullHost({
       run(process.execPath, [
         relayPath,
         "doctor",
-        "--workspace",
-        workspace,
         "--openclaw-bin",
         host.openclawBin,
         "--tmux-bin",

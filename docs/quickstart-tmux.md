@@ -14,28 +14,27 @@ You need:
 
 AKK reuses a coding agent that you start in tmux. It never installs, authenticates, or launches Codex or Claude Code for you.
 
-## 1. Install AKK for one project
+## 1. Install AKK
 
-Run these commands from the project AKK may edit:
+Install the ClawHub package and restart the Gateway:
 
 ```bash
-cd /absolute/path/to/project
 openclaw plugins install clawhub:@scotthuang/agent-knock-knock
-openclaw config set plugins.entries.agent-knock-knock.config.workspace "$(pwd -P)"
 openclaw gateway restart
 ```
 
-The physical path from `pwd -P` gives AKK one canonical workspace boundary. The ClawHub package includes the OpenClaw plugin, bundled AKK skill, and its package-local relay CLI.
+The ClawHub package includes the OpenClaw plugin, bundled AKK skill, and its package-local relay CLI. Ordinary installation does not require a project workspace setting.
 
 ## 2. Start the shared terminal
 
 ```bash
+cd /absolute/path/to/project
 tmux new-session -s akk-work -c "$(pwd -P)" codex
 ```
 
 Use `claude` instead of `codex` to share a Claude Code terminal. Wait until the coding agent is authenticated and showing its idle prompt. Detach from tmux with `Ctrl-b`, followed by `d`.
 
-AKK sends work only to a matching Codex or Claude Code pane that is already running and idle inside the configured workspace.
+AKK discovers supported Codex and Claude Code panes across workspaces. Before acting, it revalidates the expected agent PID and tmux pane identity, then confirms that the process and pane working directories still match; sending new work also requires a verified idle prompt.
 
 ## 3. Run doctor
 
@@ -51,7 +50,7 @@ Success starts with:
 AKK doctor: ready
 ```
 
-Doctor verifies the installed plugin and skill, canonical workspace, Gateway health, tmux, and at least one supported coding-agent CLI. It does not make a credentialed model call or require a live pane.
+Doctor verifies the installed plugin and skill, Gateway health, tmux, and at least one supported coding-agent CLI. It does not make a credentialed model call or require a live pane.
 
 ## 4. Send the first task
 
@@ -59,7 +58,7 @@ Doctor verifies the installed plugin and skill, canonical workspace, Gateway hea
 /akk inspect this repository and summarize it
 ```
 
-The bare task works when exactly one eligible idle coding-agent pane exists in the configured workspace. If more than one pane is eligible, AKK stops instead of guessing: run `/akk list`, then use `/akk <selector>: <message>`, for example:
+The bare task works when exactly one eligible idle coding-agent pane exists across all workspaces. If more than one pane is eligible, AKK stops instead of guessing: run `/akk list`, then use `/akk <selector>: <message>`, for example:
 
 ```text
 /akk @a1b2c3d4: inspect this repository and summarize it
@@ -92,11 +91,11 @@ Use this route only when you also want the standalone `agent-knock-knock` shell 
 
 ```bash
 npm install -g @scotthuang/agent-knock-knock
-agent-knock-knock install-openclaw --workspace "$(pwd -P)" --verify
+agent-knock-knock install-openclaw --verify
 ```
 
 Do not run `install-openclaw` after a ClawHub install. The two commands are alternative installation paths.
 
 ## Permissions and monitoring
 
-AKK keeps the coding agent's own permission settings. Trusted, exact `autoApprove` rules may approve a supported prompt; everything else remains manual. If monitoring stalls while the same task is still live, inspect `/akk status only` and use `/akk renew only <minutes>` to resume monitoring without sending terminal input.
+AKK keeps the coding agent's own permission settings. Trusted, exact `autoApprove` rules may approve a supported prompt; each rule can authorize multiple canonical roots through `autoApprove.rules[].workspaces`. Those entries are the only workspace boundary for automatic approval and do not limit pane discovery or manual control. Everything else remains manual. If monitoring stalls while the same task is still live, inspect `/akk status only` and use `/akk renew only <minutes>` to resume monitoring without sending terminal input.

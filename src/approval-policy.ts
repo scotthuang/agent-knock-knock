@@ -448,7 +448,14 @@ function normalizeRule(value: unknown): {
   }
   const id = stringValue(value.id);
   const agents = stringArray(value.agents);
-  const workspaces = stringArray(value.workspaces).map((workspace) => path.resolve(expandHome(workspace)));
+  const configuredWorkspaces = stringArray(value.workspaces)
+    .map((workspace) => expandHome(workspace));
+  if (!configuredWorkspaces.every((workspace) => path.isAbsolute(workspace))) {
+    return undefined;
+  }
+  const workspaces = configuredWorkspaces.map((workspace) =>
+    path.resolve(workspace)
+  );
   const commands = Array.isArray(value.commands)
     ? value.commands.filter((command): command is string[] => (
       Array.isArray(command) && command.length > 0 && command.every((part) => typeof part === "string")

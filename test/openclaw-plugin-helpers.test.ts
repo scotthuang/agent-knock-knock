@@ -1,13 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import path from "node:path";
 import {
   AKK_CALLBACK_METHOD,
-  AKK_WORKSPACE_SETUP_COMMAND,
   akkUsageText,
   buildAkkCommandCliArgs,
   formatAkkListCommandResult,
   parseAkkCommand,
-  requirePluginWorkspace,
   resolvePluginStoreDir
 } from "../src/openclaw-plugin-helpers.js";
 
@@ -52,7 +51,7 @@ test("/akk help lists the supported tmux executors", () => {
   assert.doesNotMatch(usage, /\/akk (?:describe|send|renew|retry-callback|close)\b/u);
 });
 
-test("/akk doctor uses the trusted plugin workspace and OpenClaw binary", () => {
+test("/akk doctor ignores the removed top-level workspace and uses the OpenClaw binary", () => {
   assert.deepEqual(
     buildAkkCommandCliArgs(
       parseAkkCommand("doctor"),
@@ -63,8 +62,6 @@ test("/akk doctor uses the trusted plugin workspace and OpenClaw binary", () => 
     ),
     [
       "doctor",
-      "--workspace",
-      "/work/project",
       "--openclaw-bin",
       "/opt/openclaw/bin/openclaw"
     ]
@@ -81,23 +78,29 @@ test("/akk doctor uses the trusted plugin workspace and OpenClaw binary", () => 
     buildAkkCommandCliArgs(parseAkkCommand("doctor"), {
       workspace: "relative/project"
     }),
-    ["doctor", "--workspace", "relative/project"]
+    ["doctor"]
   );
 });
 
-test("runtime commands fail closed until an absolute workspace is configured", () => {
-  assert.throws(
-    () => requirePluginWorkspace({}),
-    new RegExp(escapeRegex(AKK_WORKSPACE_SETUP_COMMAND), "u")
-  );
-  assert.throws(
-    () => buildAkkCommandCliArgs(parseAkkCommand("list"), {}),
-    /workspace is not configured/u
-  );
-  assert.throws(
-    () => requirePluginWorkspace({ workspace: "relative/project" }),
-    /workspace must be an absolute path/u
-  );
+test("runtime command arguments never include the removed top-level workspace", () => {
+  const commands = [
+    "list",
+    "status conversation-1",
+    "@a1b2c3d4: continue",
+    "approve conversation-1 --expected-approval-fingerprint approval-1",
+    "cancel conversation-1",
+    "renew conversation-1 20",
+    "retry-callback conversation-1",
+    "close conversation-1 done"
+  ];
+
+  for (const input of commands) {
+    const args = buildAkkCommandCliArgs(parseAkkCommand(input), {
+      workspace: "/legacy/project"
+    });
+    assert.ok(args, input);
+    assert.equal(args.includes("--workspace"), false, input);
+  }
 });
 
 test("/akk accepts selector-first follow-ups without long ids", () => {
@@ -126,7 +129,7 @@ test("/akk accepts selector-first follow-ups without long ids", () => {
       parseAkkCommand("status"),
       { workspace: "/work/project" }
     ),
-    ["status", "--workspace", "/work/project"]
+    ["status"]
   );
   assert.throws(
     () => parseAkkCommand("send latest: continue"),
@@ -140,7 +143,7 @@ test("/akk accepts selector-first follow-ups without long ids", () => {
 
 test("/akk stateful commands consistently use the trusted plugin store", () => {
   const config = {
-    workspace: "/work/project",
+    workspace: "/legacy/project",
     storeDir: "/private/akk-store",
     idleTimeoutMinutes: 45
   };
@@ -163,11 +166,7 @@ test("/akk stateful commands consistently use the trusted plugin store", () => {
       ["--store-dir", "/private/akk-store"],
       input
     );
-    assert.deepEqual(
-      args.slice(args.indexOf("--workspace"), args.indexOf("--workspace") + 2),
-      ["--workspace", "/work/project"],
-      input
-    );
+    assert.equal(args.includes("--workspace"), false, input);
   }
 });
 
@@ -189,7 +188,7 @@ test("/akk terminal send configures a real OpenClaw callback", () => {
   assert.deepEqual(optionValue(args, "--gateway-session"), "agent:chat:current");
   assert.deepEqual(optionValue(args, "--openclaw-session"), "agent:chat:current");
   assert.deepEqual(optionValue(args, "--openclaw-bin"), "/opt/openclaw/bin/openclaw");
-  assert.deepEqual(optionValue(args, "--workspace"), "/work/project");
+  assert.equal(optionValue(args, "--workspace"), undefined);
   assert.deepEqual(optionValue(args, "--agent-timeout-minutes"), "90");
   assert.deepEqual(optionValue(args, "--agent-hard-timeout-minutes"), "600");
   assert.equal(args.includes("--background"), true);
@@ -216,8 +215,6 @@ test("/akk approve requires and forwards an exact approval fingerprint", () => {
       "conversation-1",
       "--expected-approval-fingerprint",
       "approval-1",
-      "--workspace",
-      "/work/project",
       "--store-dir",
       "/private/akk-store"
     ]
@@ -227,10 +224,6 @@ test("/akk approve requires and forwards an exact approval fingerprint", () => {
 function optionValue(args: string[], option: string): string | undefined {
   const index = args.indexOf(option);
   return index >= 0 ? args[index + 1] : undefined;
-}
-
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
 
 test("/akk list includes only managed and terminal-controlled sessions", () => {
@@ -296,28 +289,28 @@ test("/akk list prefers stable short references while JSON retains full ids", ()
   assert.doesNotMatch(text, /managed-long-id/u);
 });
 
-test("relative plugin storeDir resolves against the configured workspace", () => {
+test("relative plugin storeDir resolves against the Gateway cwd", () => {
   assert.equal(
     resolvePluginStoreDir(
       {
-        workspace: "/work/project",
+        workspace: "/legacy/project",
         storeDir: ".akk"
       },
       "/gateway"
     ),
-    "/work/project/.akk"
+    "/gateway/.akk"
   );
   assert.equal(
     optionValue(
       buildAkkCommandCliArgs(
         parseAkkCommand("list"),
         {
-          workspace: "/work/project",
+          workspace: "/legacy/project",
           storeDir: ".akk"
         }
       )!,
       "--store-dir"
     ),
-    "/work/project/.akk"
+    path.resolve(process.cwd(), ".akk")
   );
 });

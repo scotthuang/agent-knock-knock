@@ -62,11 +62,6 @@
         "type": "string",
         "description": "Path to agent-knock-knock CLI. Defaults to this package's dist/src/cli.js build output."
       },
-      "workspace": {
-        "type": "string",
-        "minLength": 1,
-        "description": "Absolute project directory matched against eligible coding-agent tmux panes. Configure this before using AKK; runtime operations fail closed when it is missing."
-      },
       "storeDir": {
         "type": "string",
         "description": "Default conversation store directory."
@@ -123,6 +118,7 @@
                 "workspaces": {
                   "type": "array",
                   "minItems": 1,
+                  "description": "One or more absolute workspace roots authorized by this automatic-approval rule.",
                   "items": {
                     "type": "string",
                     "minLength": 1

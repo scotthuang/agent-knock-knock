@@ -17,6 +17,8 @@ process.on("exit", () => {
 test("list exposes only tmux-controlled sessions", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-list-groups-"));
   const storeDir = path.join(tempDir, "conversations");
+  const nativeWorkspace = path.join(tempDir, "native");
+  const tmuxWorkspace = path.join(tempDir, "tmux");
   const approvalScreen = [
     "Would you like to run the following command?",
     "",
@@ -25,6 +27,8 @@ test("list exposes only tmux-controlled sessions", () => {
   ].join("\n");
 
   try {
+    fs.mkdirSync(nativeWorkspace, { recursive: true });
+    fs.mkdirSync(tmuxWorkspace, { recursive: true });
     const listed = runCli([
       "list",
       "--store-dir",
@@ -36,21 +40,21 @@ test("list exposes only tmux-controlled sessions", () => {
           ppid: 1,
           elapsed: "00:12",
           command: "codex",
-          cwd: "/repo/native"
+          cwd: nativeWorkspace
         },
         {
           pid: 2222,
           ppid: 3333,
           elapsed: "00:30",
           command: "codex",
-          cwd: "/repo/tmux"
+          cwd: tmuxWorkspace
         },
         {
           pid: 3333,
           ppid: 9999,
           elapsed: "00:31",
           command: "zsh -lc launch-agent",
-          cwd: "/repo/tmux"
+          cwd: tmuxWorkspace
         }
       ]),
       "--terminals-json",
@@ -62,7 +66,7 @@ test("list exposes only tmux-controlled sessions", () => {
         pane: 0,
         panePid: 9999,
         currentCommand: "node",
-        currentPath: "/repo/tmux"
+        currentPath: tmuxWorkspace
       }]),
       "--terminal-screens-json",
       JSON.stringify({
@@ -99,7 +103,7 @@ test("list exposes only tmux-controlled sessions", () => {
         ppid: 9999,
         elapsed: "00:30",
         command: "codex",
-        cwd: "/repo/tmux"
+        cwd: tmuxWorkspace
       }]),
       "--terminals-json",
       JSON.stringify([{
@@ -110,7 +114,7 @@ test("list exposes only tmux-controlled sessions", () => {
         pane: 0,
         panePid: 9999,
         currentCommand: "node",
-        currentPath: "/repo/tmux"
+        currentPath: tmuxWorkspace
       }])
     ]);
     assert.equal(debugListed.terminal_scan.diagnostics.provider, "static");
@@ -127,7 +131,7 @@ test("list exposes only tmux-controlled sessions", () => {
         ppid: 1,
         elapsed: "00:12",
         command: "codex",
-        cwd: "/repo/native"
+        cwd: nativeWorkspace
       }])
     ]);
     assert.deepEqual(managedOnly.delegated, []);
@@ -142,8 +146,12 @@ test("list exposes only tmux-controlled sessions", () => {
 test("list keeps same-named targets from distinct tmux servers", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-list-multi-tmux-"));
   const storeDir = path.join(tempDir, "conversations");
+  const firstWorkspace = path.join(tempDir, "first");
+  const secondWorkspace = path.join(tempDir, "second");
 
   try {
+    fs.mkdirSync(firstWorkspace, { recursive: true });
+    fs.mkdirSync(secondWorkspace, { recursive: true });
     const listed = runCli([
       "list",
       "--store-dir",
@@ -155,14 +163,14 @@ test("list keeps same-named targets from distinct tmux servers", () => {
           ppid: 9001,
           elapsed: "00:20",
           command: "codex",
-          cwd: "/repo/first"
+          cwd: firstWorkspace
         },
         {
           pid: 2202,
           ppid: 9002,
           elapsed: "00:21",
           command: "codex",
-          cwd: "/repo/second"
+          cwd: secondWorkspace
         }
       ]),
       "--terminals-json",
@@ -176,7 +184,7 @@ test("list keeps same-named targets from distinct tmux servers", () => {
           pane: 0,
           panePid: 9001,
           currentCommand: "node",
-          currentPath: "/repo/first"
+          currentPath: firstWorkspace
         },
         {
           kind: "tmux",
@@ -187,7 +195,7 @@ test("list keeps same-named targets from distinct tmux servers", () => {
           pane: 0,
           panePid: 9002,
           currentCommand: "node",
-          currentPath: "/repo/second"
+          currentPath: secondWorkspace
         }
       ])
     ]);
@@ -205,6 +213,7 @@ test("list keeps same-named targets from distinct tmux servers", () => {
 test("list exposes terminal-controlled Codex working activity state", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-list-activity-"));
   const storeDir = path.join(tempDir, "conversations");
+  const workspace = path.join(tempDir, "workspace");
   const workingScreen = [
     "• Working (8s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close",
     "",
@@ -212,6 +221,7 @@ test("list exposes terminal-controlled Codex working activity state", () => {
   ].join("\n");
 
   try {
+    fs.mkdirSync(workspace, { recursive: true });
     const listed = runCli([
       "list",
       "--store-dir",
@@ -222,7 +232,7 @@ test("list exposes terminal-controlled Codex working activity state", () => {
         ppid: 9999,
         elapsed: "00:30",
         command: "codex",
-        cwd: "/repo/tmux"
+        cwd: workspace
       }]),
       "--terminals-json",
       JSON.stringify([{
@@ -233,7 +243,7 @@ test("list exposes terminal-controlled Codex working activity state", () => {
         pane: 0,
         panePid: 9999,
         currentCommand: "node",
-        currentPath: "/repo/tmux"
+        currentPath: workspace
       }]),
       "--terminal-screens-json",
       JSON.stringify({
@@ -259,6 +269,8 @@ test("list discovers Claude and Codex tmux sessions from static runtime snapshot
   const claudeWorkspace = path.join(tempDir, "claude-workspace");
 
   try {
+    fs.mkdirSync(codexWorkspace, { recursive: true });
+    fs.mkdirSync(claudeWorkspace, { recursive: true });
     const listed = runCli([
       "list",
       "--store-dir",
