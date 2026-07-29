@@ -812,9 +812,13 @@ function createTerminalAgentBridge(
     terminalProvider,
     async verifyIdentity({ agent, pid, terminalControl }) {
       const adapter = registry.require(agent);
-      const snapshots = await processSource.listProcessSnapshots(undefined, {
-        includeCwd: options.workspace !== undefined
-      });
+      const snapshots = await processSource.listProcessSnapshots(
+        (candidate) => candidate.pid === pid,
+        {
+          includeCwd: options.workspace !== undefined,
+          includeAncestors: true
+        }
+      );
       const snapshot = snapshots.find((candidate) => candidate.pid === pid);
       if (!snapshot || !adapter.classifyProcess(snapshot)) {
         throw new Error(

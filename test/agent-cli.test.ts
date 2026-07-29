@@ -2937,6 +2937,191 @@ test("raw terminal send rejects a stale agent pid without sending tmux keys", ()
   }
 });
 
+test("raw terminal send uses the target pid cwd from partial lsof output", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-partial-lsof-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const processCallsPath = path.join(tempDir, "process-calls.ndjson");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+  const tmuxSession = `akk-partial-lsof-${process.pid}`;
+  const targetPid = 5101;
+  const panePid = 9001;
+  const unrelatedPid = 7777;
+  const terminalTarget = `${tmuxSession}:0.1`;
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "› \n");
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `${tmuxSession}\t0\t1\t${panePid}\tzsh\t${workspace}\n`
+    );
+    writeTrackedFakeProcessTools({
+      fakeBinDir,
+      callsPath: processCallsPath,
+      processes: [
+        { pid: panePid, ppid: 1, command: "zsh", cwd: workspace },
+        {
+          pid: targetPid,
+          ppid: panePid,
+          command: `codex resume ${sessionId}`,
+          cwd: workspace
+        },
+        {
+          pid: unrelatedPid,
+          ppid: 1,
+          command: "unrelated-worker",
+          cwd: path.join(tempDir, "unrelated")
+        }
+      ],
+      lsofStatus: 1,
+      lsofRows: [
+        {
+          command: "codex",
+          pid: targetPid,
+          cwd: workspace
+        }
+      ]
+    });
+
+    const sent = runAgentCli([
+      "send",
+      "--conversation",
+      `terminal:v2:tmux:codex:${terminalTarget}:${targetPid}`,
+      "--message",
+      "Verify partial lsof handling",
+      "--workspace",
+      workspace,
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor"
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    const processCalls = readJsonLines(processCallsPath);
+    const lsofCalls = processCalls.filter((call) => call.command === "lsof");
+    assert.ok(
+      lsofCalls.length >= 2,
+      "raw resolution and the pre-send identity gate must both verify cwd"
+    );
+    for (const call of lsofCalls) {
+      assert.deepEqual(call.args.slice(-2), ["-p", String(targetPid)]);
+      assert.equal(call.args.includes(String(unrelatedPid)), false);
+      assert.equal(call.args.includes(String(panePid)), false);
+    }
+
+    const tmuxSends = readJsonLines(tmuxCallsPath)
+      .filter((call) => call.args[0] === "send-keys");
+    assert.deepEqual(
+      tmuxSends.at(-2)?.args,
+      ["send-keys", "-t", terminalTarget, "-l", "Verify partial lsof handling"]
+    );
+    assert.deepEqual(
+      tmuxSends.at(-1)?.args,
+      ["send-keys", "-t", terminalTarget, "C-m"]
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("raw terminal send fails closed when partial lsof output omits the target pid", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-missing-lsof-cwd-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const processCallsPath = path.join(tempDir, "process-calls.ndjson");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+  const tmuxSession = `akk-missing-lsof-cwd-${process.pid}`;
+  const targetPid = 5201;
+  const panePid = 9002;
+  const unrelatedPid = 8888;
+  const terminalTarget = `${tmuxSession}:0.1`;
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "› \n");
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `${tmuxSession}\t0\t1\t${panePid}\tzsh\t${workspace}\n`
+    );
+    writeTrackedFakeProcessTools({
+      fakeBinDir,
+      callsPath: processCallsPath,
+      processes: [
+        { pid: panePid, ppid: 1, command: "zsh", cwd: workspace },
+        {
+          pid: targetPid,
+          ppid: panePid,
+          command: `codex resume ${sessionId}`,
+          cwd: workspace
+        },
+        {
+          pid: unrelatedPid,
+          ppid: 1,
+          command: "unrelated-worker",
+          cwd: workspace
+        }
+      ],
+      lsofStatus: 1,
+      lsofRows: [
+        {
+          command: "worker",
+          pid: unrelatedPid,
+          cwd: workspace
+        }
+      ]
+    });
+
+    const sent = runAgentCli([
+      "send",
+      "--conversation",
+      `terminal:v2:tmux:codex:${terminalTarget}:${targetPid}`,
+      "--message",
+      "Must not reach tmux without a verified cwd",
+      "--workspace",
+      workspace,
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor"
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+
+    assert.notEqual(sent.status, 0);
+    assert.match(sent.stderr, /no longer available/u);
+    const lsofCalls = readJsonLines(processCallsPath)
+      .filter((call) => call.command === "lsof");
+    assert.equal(lsofCalls.length, 1);
+    assert.deepEqual(lsofCalls[0].args.slice(-2), ["-p", String(targetPid)]);
+    assert.equal(
+      readJsonLines(tmuxCallsPath)
+        .some((call) => call.args[0] === "send-keys"),
+      false
+    );
+    assert.equal(fs.existsSync(storeDir), false);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("approve supports terminal-controlled conversation ids without AKK state", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-approve-"));
   const fakeBinDir = path.join(tempDir, "bin");
@@ -8296,6 +8481,66 @@ process.stdout.write(${JSON.stringify(psOutput)});
     "utf8"
   );
   fs.chmodSync(fakePs, 0o755);
+}
+
+function writeTrackedFakeProcessTools(options: {
+  fakeBinDir: string;
+  callsPath: string;
+  processes: Array<{
+    pid: number;
+    ppid: number;
+    command: string;
+    cwd: string;
+  }>;
+  lsofStatus: number;
+  lsofRows: Array<{ command: string; pid: number; cwd: string }>;
+}) {
+  const fakePs = path.join(options.fakeBinDir, "ps");
+  const psOutput = [
+    "  PID  PPID ELAPSED COMMAND",
+    ...options.processes.map((entry) =>
+      `${entry.pid} ${entry.ppid} 00:01 ${entry.command}`
+    )
+  ].join("\n") + "\n";
+  fs.writeFileSync(
+    fakePs,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(
+  ${JSON.stringify(options.callsPath)},
+  JSON.stringify({ command: "ps", args }) + "\\n",
+  "utf8"
+);
+process.stdout.write(${JSON.stringify(psOutput)});
+`,
+    "utf8"
+  );
+  fs.chmodSync(fakePs, 0o755);
+
+  const fakeLsof = path.join(options.fakeBinDir, "lsof");
+  const lsofOutput = [
+    "COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME",
+    ...options.lsofRows.map((entry) =>
+      `${entry.command} ${entry.pid} me cwd DIR 1,18 64 123 ${entry.cwd}`
+    )
+  ].join("\n") + "\n";
+  fs.writeFileSync(
+    fakeLsof,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(
+  ${JSON.stringify(options.callsPath)},
+  JSON.stringify({ command: "lsof", args }) + "\\n",
+  "utf8"
+);
+process.stdout.write(${JSON.stringify(lsofOutput)});
+process.exit(${options.lsofStatus});
+`,
+    "utf8"
+  );
+  fs.chmodSync(fakeLsof, 0o755);
 }
 
 function writeFakeOpenClaw(fakeBinDir: string, callsPath: string) {

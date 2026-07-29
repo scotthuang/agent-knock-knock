@@ -72,6 +72,43 @@ test("system process source returns neutral filtered snapshots with cwd metadata
   assert.equal("kind" in snapshots.at(-1)!, false);
 });
 
+test("system process source keeps valid cwd rows from a partial lsof failure", async () => {
+  const calls: Array<{ command: string; args: string[] }> = [];
+  const source = new SystemTerminalProcessSource({
+    runCommand(command, args): ProcessCommandResult {
+      calls.push({ command, args });
+      if (command === "ps") {
+        return ok([
+          "  PID  PPID     ELAPSED COMMAND",
+          "  100     1       01:00 tmux: server",
+          " 1100   100       00:12 codex",
+          " 1200   100       00:08 unrelated"
+        ].join("\n"));
+      }
+      if (command === "lsof") {
+        return {
+          status: 1,
+          stdout: [
+            "COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME",
+            "codex    1100 me    cwd    DIR   1,18       64  123 /repo/project"
+          ].join("\n"),
+          stderr: ""
+        };
+      }
+      return { status: 1, stdout: "", stderr: `unexpected command: ${command}` };
+    }
+  });
+
+  const snapshots = await source.listProcessSnapshots(
+    (snapshot) => snapshot.pid === 1100,
+    { includeAncestors: true }
+  );
+
+  assert.equal(snapshots.find((snapshot) => snapshot.pid === 1100)?.cwd, "/repo/project");
+  assert.deepEqual(calls.map(({ command }) => command), ["ps", "lsof"]);
+  assert.deepEqual(calls[1].args.slice(-1), ["1100"]);
+});
+
 function ok(stdout: string): ProcessCommandResult {
   return { status: 0, stdout, stderr: "" };
 }

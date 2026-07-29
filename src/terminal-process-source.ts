@@ -67,11 +67,12 @@ export class SystemTerminalProcessSource implements TerminalProcessSource {
       "-p",
       candidates.map((snapshot) => String(snapshot.pid)).join(",")
     ]);
-    if (lsof.status !== 0) {
+    const lsofOutput = typeof lsof.stdout === "string" ? lsof.stdout : "";
+    if (lsof.status !== 0 && lsofOutput.trim().length === 0) {
       return selected;
     }
 
-    const cwdByPid = parseLsofCwdMap(lsof.stdout);
+    const cwdByPid = parseLsofCwdMap(lsofOutput);
     return selected.map((snapshot) => ({
       ...snapshot,
       cwd: snapshot.cwd ?? cwdByPid.get(snapshot.pid)
