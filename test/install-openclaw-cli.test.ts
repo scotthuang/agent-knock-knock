@@ -119,7 +119,7 @@ test("install-openclaw atomically preserves approval policy and verifies first-r
   const configPath = path.join(tempDir, "plugin-config.json");
   const fakeOpenClaw = path.join(tempDir, "openclaw");
   const fakeTmux = path.join(tempDir, "tmux");
-  const fakeCodex = path.join(tempDir, "codex");
+  const fakeClaude = path.join(tempDir, "claude");
   const skillDest = path.join(tempDir, "skills", "agent-knock-knock", "SKILL.md");
   const workspace = fs.realpathSync(tempDir);
   const approvalPolicy = {
@@ -150,7 +150,7 @@ test("install-openclaw atomically preserves approval policy and verifies first-r
       configPath
     });
     writeVersionExecutable(fakeTmux, "tmux 3.5a");
-    writeVersionExecutable(fakeCodex, "codex-cli 0.107.0");
+    writeVersionExecutable(fakeClaude, "2.1.218 (Claude Code)");
 
     const result = runCli([
       "install-openclaw",
@@ -160,15 +160,13 @@ test("install-openclaw atomically preserves approval policy and verifies first-r
       skillDest,
       "--workspace",
       workspace,
-      "--default-agent",
-      "codex",
       "--verify",
       "--tmux-bin",
       fakeTmux,
       "--codex-bin",
-      fakeCodex,
+      path.join(tempDir, "missing-codex"),
       "--claude-bin",
-      path.join(tempDir, "missing-claude")
+      fakeClaude
     ]);
 
     assert.equal(result.installed, true);
@@ -176,13 +174,20 @@ test("install-openclaw atomically preserves approval policy and verifies first-r
     assert.equal(result.pending_restart, false);
     assert.equal(result.verification.ok, true);
     assert.equal(result.verification.capabilities.tmux.status, "ready");
+    assert.deepEqual(result.verification.capabilities.tmux.agents, ["claude"]);
+    assert.equal(result.verification.live_terminal.checked, false);
+    assert.equal(
+      result.verification.live_terminal.required_for_install_readiness,
+      false
+    );
+    assert.equal("selected_agent" in result.verification, false);
     assert.equal(result.verification.openclaw.package_ready, true);
     assert.equal(result.verification.openclaw.gateway_ready, true);
     const saved = JSON.parse(fs.readFileSync(configPath, "utf8"));
     assert.deepEqual(saved.config.autoApprove, approvalPolicy);
     assert.equal(saved.config.idleTimeoutMinutes, 8);
     assert.equal(saved.config.workspace, workspace);
-    assert.equal(saved.config.defaultAgent, "codex");
+    assert.equal("defaultAgent" in saved.config, false);
     assert.equal(saved.enabled, true);
     assert.equal(
       readCalls(callsPath)

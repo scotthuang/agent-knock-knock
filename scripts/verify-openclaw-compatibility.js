@@ -500,7 +500,7 @@ async function verifyFullHost({
     readOnlyList.terminal_controlled[0]?.terminal_control?.target,
     "akk-compat:0.0"
   );
-  assert.equal(readOnlyList.native_scan?.terminal_scan?.provider, "static");
+  assert.equal(readOnlyList.terminal_scan?.diagnostics?.provider, "static");
 
   const gateway = startGateway({
     env,

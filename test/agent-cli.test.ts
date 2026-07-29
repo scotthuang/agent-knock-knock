@@ -1756,179 +1756,6 @@ test("hookless Claude transcript completion closes a managed tmux task exactly o
   }
 });
 
-test("agent takeover terminal_control attaches tmux pane and send writes to the terminal", () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-agent-terminal-"));
-  const storeDir = path.join(tempDir, "conversations");
-  const fakeBinDir = path.join(tempDir, "bin");
-  const workspace = path.join(tempDir, "workspace");
-  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
-  const screenPath = path.join(tempDir, "screen.txt");
-
-  try {
-    fs.mkdirSync(fakeBinDir, { recursive: true });
-    fs.mkdirSync(workspace, { recursive: true });
-    fs.writeFileSync(screenPath, "› \n");
-    writeFakeTmux(
-      fakeBinDir,
-      tmuxCallsPath,
-      screenPath,
-      `codex-work\t0\t0\t999\tnode\t${workspace}\n`
-    );
-    writeFakeProcessTools(fakeBinDir, [{
-      pid: 1234,
-      ppid: 999,
-      command: `codex resume ${sessionId}`,
-      cwd: workspace
-    }]);
-
-    const plan = runAgentCli([
-      "agent",
-      "takeover",
-      "--agent",
-      "codex",
-      "--session-id",
-      sessionId,
-      "--strategy",
-      "terminal_control",
-      "--threads-json",
-      JSON.stringify([threadRow({ cwd: workspace })]),
-      "--processes-json",
-      JSON.stringify([{
-        pid: 1234,
-        ppid: 888,
-        command: `codex resume ${sessionId}`,
-        cwd: workspace
-      }, {
-        pid: 1235,
-        ppid: 1234,
-        command: `/vendor/bin/codex resume ${sessionId}`,
-        cwd: workspace
-      }, {
-        pid: 888,
-        ppid: 999,
-        command: "zsh -lc launch-codex",
-        cwd: workspace
-      }]),
-      "--terminals-json",
-      JSON.stringify([tmuxPane({ panePid: 999, currentPath: workspace })])
-    ]);
-
-    assert.equal(plan.status, 0, plan.stderr || plan.stdout);
-    const planned = JSON.parse(plan.stdout);
-    assert.equal(planned.status, "requires_confirmation");
-    assert.equal(planned.plan.mode, "terminal_control");
-    assert.equal(planned.plan.targets.length, 1);
-    assert.deepEqual(planned.plan.targets[0].childPids, [1235]);
-    assert.equal(planned.plan.targets[0].terminalControl.target, "codex-work:0.0");
-
-    const attached = runAgentCli([
-      "agent",
-      "takeover",
-      "--agent",
-      "codex",
-      "--session-id",
-      sessionId,
-      "--strategy",
-      "terminal_control",
-      "--create-conversation",
-      "--confirm-terminal",
-      "--terminal-target",
-      "codex-work:0.0",
-      "--request",
-      "Take over tmux Codex",
-      "--store-dir",
-      storeDir,
-      "--threads-json",
-      JSON.stringify([threadRow({ cwd: workspace })]),
-      "--processes-json",
-      JSON.stringify([{
-        pid: 1234,
-        ppid: 999,
-        command: `codex resume ${sessionId}`,
-        cwd: workspace
-      }]),
-      "--terminals-json",
-      JSON.stringify([tmuxPane({ panePid: 999, currentPath: workspace })])
-    ]);
-
-    assert.equal(attached.status, 0, attached.stderr || attached.stdout);
-    const parsed = JSON.parse(attached.stdout);
-    assert.equal(parsed.status, "attached");
-    assert.equal(parsed.conversation.native_session_takeover.strategy, "terminal_control");
-    assert.equal(parsed.conversation.native_session_takeover.needs_bootstrap, false);
-    assert.equal(parsed.conversation.native_session_takeover.terminal_bridge, true);
-    assert.equal(parsed.conversation.native_session_takeover.terminal_control.target, "codex-work:0.0");
-
-    const legacyState = JSON.parse(fs.readFileSync(parsed.paths.statePath, "utf8"));
-    delete legacyState.native_session_takeover.terminal_agent_pid;
-    fs.writeFileSync(parsed.paths.statePath, `${JSON.stringify(legacyState, null, 2)}\n`);
-    const upgradedStatus = runAgentCli([
-      "status",
-      "--conversation",
-      parsed.conversation.conversation_id,
-      "--store-dir",
-      storeDir
-    ], {
-      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
-    });
-    assert.equal(upgradedStatus.status, 0, upgradedStatus.stderr || upgradedStatus.stdout);
-    assert.equal(JSON.parse(upgradedStatus.stdout).terminal_status.reachable, true);
-    const migratedState = JSON.parse(fs.readFileSync(parsed.paths.statePath, "utf8"));
-    assert.equal(migratedState.native_session_takeover.terminal_agent_pid, 1234);
-    assert.equal(
-      typeof migratedState.native_session_takeover.terminal_agent_identity_migrated_at,
-      "string"
-    );
-
-    const sent = runAgentCli([
-      "send",
-      "--conversation",
-      parsed.conversation.conversation_id,
-      "--store-dir",
-      storeDir,
-      "--message",
-      "继续当前任务"
-    ], {
-      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
-    });
-
-    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
-    const sentParsed = JSON.parse(sent.stdout);
-    assert.equal(sentParsed.delivered, true);
-    assert.equal(sentParsed.status, "async_pending");
-    assert.equal(sentParsed.background, true);
-    assert.equal(sentParsed.callback_expected, false);
-    assert.equal(sentParsed.openclaw_next_action.action, "yield");
-    assert.equal(sentParsed.openclaw_next_action.callback_expected, false);
-    assert.equal(sentParsed.terminal_control.target, "codex-work:0.0");
-    let calls = readJsonLines(tmuxCallsPath)
-      .filter((call) => call.args[0] === "send-keys");
-    assert.deepEqual(calls.at(-2).args, ["send-keys", "-t", "codex-work:0.0", "-l", "继续当前任务"]);
-    assert.deepEqual(calls.at(-1).args, ["send-keys", "-t", "codex-work:0.0", "C-m"]);
-
-    const cancelled = runAgentCli([
-      "cancel",
-      "--conversation",
-      parsed.conversation.conversation_id,
-      "--store-dir",
-      storeDir
-    ], {
-      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
-    });
-
-    assert.equal(cancelled.status, 0, cancelled.stderr || cancelled.stdout);
-    const cancelledParsed = JSON.parse(cancelled.stdout);
-    assert.equal(cancelledParsed.cancel_requested, true);
-    assert.equal(cancelledParsed.terminal_control.target, "codex-work:0.0");
-    assert.equal(cancelledParsed.key, "C-c");
-    assert.equal(cancelledParsed.conversation.status, "cancelled");
-    calls = readJsonLines(tmuxCallsPath);
-    assert.deepEqual(calls.at(-1).args, ["send-keys", "-t", "codex-work:0.0", "C-c"]);
-  } finally {
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  }
-});
-
 test("rejected managed Claude send leaves callback state and event log unchanged", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-rejected-send-"));
   const storeDir = path.join(tempDir, "conversations");
@@ -2643,7 +2470,7 @@ test("approve sends y only when the terminal screen shows a primary Codex approv
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
-    fs.writeFileSync(screenPath, [
+    const approvalScreen = [
       "  ARK_API_KEY=ark-test-secret-value",
       "",
       "  Would you like to run the following command?",
@@ -2654,7 +2481,8 @@ test("approve sends y only when the terminal screen shows a primary Codex approv
       "  2. No, and tell Codex what to do differently (esc)",
       "",
       "  Press enter to confirm or esc to cancel"
-    ].join("\n"));
+    ].join("\n");
+    fs.writeFileSync(screenPath, "› \n");
     writeFakeTmux(
       fakeBinDir,
       tmuxCallsPath,
@@ -2668,19 +2496,16 @@ test("approve sends y only when the terminal screen shows a primary Codex approv
       cwd: workspace
     }]);
 
+    const rawConversationId =
+      "terminal:v2:tmux:codex:codex-work:0.0:1234";
     const attached = runAgentCli([
-      "agent",
-      "takeover",
-      "--agent",
-      "codex",
-      "--session-id",
-      sessionId,
-      "--strategy",
-      "terminal_control",
-      "--create-conversation",
-      "--confirm-terminal",
-      "--terminal-target",
-      "codex-work:0.0",
+      "send",
+      "--conversation",
+      rawConversationId,
+      "--message",
+      "Prepare the approval request",
+      "--background",
+      "--disable-terminal-bridge-monitor",
       "--store-dir",
       storeDir,
       "--threads-json",
@@ -2693,10 +2518,13 @@ test("approve sends y only when the terminal screen shows a primary Codex approv
         cwd: workspace
       }]),
       "--terminals-json",
-      JSON.stringify([tmuxPane({ panePid: 999, currentPath: workspace })])
+      JSON.stringify([tmuxPane({ panePid: 999, currentPath: workspace })]),
+      "--terminal-screens-json",
+      JSON.stringify({ "codex-work:0.0": "› \n" })
     ]);
     assert.equal(attached.status, 0, attached.stderr || attached.stdout);
     const parsed = JSON.parse(attached.stdout);
+    fs.writeFileSync(screenPath, approvalScreen);
 
     const status = runAgentCli([
       "status",
@@ -2719,8 +2547,6 @@ test("approve sends y only when the terminal screen shows a primary Codex approv
     assert.equal(statusParsed.terminal_status.approval_state.blocked, true);
     assert.equal(statusParsed.terminal_status.approval_state.approvable, true);
 
-    const rawConversationId =
-      "terminal:v2:tmux:codex:codex-work:0.0:1234";
     const rawStatus = runAgentCli([
       "status",
       "--conversation",
@@ -7909,33 +7735,14 @@ test("terminal-controlled conversation ids use Codex pid, not tmux pane pid", ()
   }
 });
 
-test("agent takeover rejects an unsupported strategy", () => {
-  const result = runAgentCli([
-    "agent",
-    "takeover",
-    "--agent",
-    "codex",
-    "--session-id",
-    sessionId,
-    "--strategy",
-    "unsupported_strategy"
-  ]);
-
-  assert.notEqual(result.status, 0);
-  assert.match(
-    `${result.stderr}\n${result.stdout}`,
-    /terminal_control.*only|only.*terminal_control/u
-  );
-});
-
-test("describe terminal-controlled Codex session from rollout history", () => {
+test("status includes terminal-controlled Codex context from rollout history", () => {
   const rollout = [
     JSON.stringify({
       timestamp: "2026-07-04T00:00:00.000Z",
       type: "event_msg",
       payload: {
         type: "user_message",
-        message: "Add AKK describe command"
+        message: "Add AKK status context"
       }
     }),
     JSON.stringify({
@@ -7956,8 +7763,8 @@ test("describe terminal-controlled Codex session from rollout history", () => {
     })
   ].join("\n");
 
-  const described = runAgentCli([
-    "describe",
+  const status = runAgentCli([
+    "status",
     "--conversation",
     "terminal:tmux:codex-work:0.0:33389",
     "--threads-json",
@@ -7979,67 +7786,16 @@ test("describe terminal-controlled Codex session from rollout history", () => {
     JSON.stringify({ [rolloutPath]: rollout })
   ]);
 
-  assert.equal(described.status, 0, described.stderr || described.stdout);
-  const parsed = JSON.parse(described.stdout);
+  assert.equal(status.status, 0, status.stderr || status.stdout);
+  const parsed = JSON.parse(status.stdout);
   assert.equal(parsed.source, "terminal_control");
   assert.equal(parsed.confidence, "high");
-  assert.equal(parsed.match, "session_id");
-  assert.match(parsed.about, /Add AKK describe command/);
+  assert.match(parsed.about, /Add AKK status context/);
   assert.match(parsed.about, /OpenClaw tool/);
-  assert.equal(parsed.evidence.initial_request, "Add AKK describe command");
-  assert.equal(parsed.evidence.recent_commands.at(-1).command, "npm test");
+  assert.deepEqual(parsed.limitations, []);
 });
 
-test("describe native Codex session falls back to cwd match", () => {
-  const otherSessionId = "019ee559-7bb8-7fd1-970c-0f7b6978c44f";
-  const otherRolloutPath = "/tmp/other-codex-rollout.jsonl";
-  const rollout = JSON.stringify({
-    timestamp: "2026-07-04T00:00:00.000Z",
-    type: "event_msg",
-    payload: {
-      type: "user_message",
-      message: "Most recent cwd task"
-    }
-  });
-
-  const described = runAgentCli([
-    "describe",
-    "--conversation",
-    "native:codex:4444",
-    "--threads-json",
-    JSON.stringify([
-      threadRow({ updated_at_ms: 1000, title: "older task" }),
-      {
-        id: otherSessionId,
-        cwd,
-        rollout_path: otherRolloutPath,
-        title: "newer task",
-        updated_at_ms: 2000,
-        archived: false
-      }
-    ]),
-    "--processes-json",
-    JSON.stringify([{
-      pid: 4444,
-      ppid: 1,
-      command: "codex",
-      cwd
-    }]),
-    "--rollouts-json",
-    JSON.stringify({ [otherRolloutPath]: rollout })
-  ]);
-
-  assert.equal(described.status, 0, described.stderr || described.stdout);
-  const parsed = JSON.parse(described.stdout);
-  assert.equal(parsed.source, "native_active");
-  assert.equal(parsed.confidence, "low");
-  assert.equal(parsed.match, "cwd_latest");
-  assert.match(parsed.about, /Most recent cwd task/);
-  assert.equal(parsed.evidence.candidates.length, 2);
-  assert.match(parsed.limitations[0], /most recent of 2 sessions/);
-});
-
-test("describe prefers Codex title over injected environment context", () => {
+test("status context prefers Codex title over injected environment context", () => {
   const rollout = [
     JSON.stringify({
       timestamp: "2026-07-04T00:00:00.000Z",
@@ -8059,8 +7815,8 @@ test("describe prefers Codex title over injected environment context", () => {
     })
   ].join("\n");
 
-  const described = runAgentCli([
-    "describe",
+  const status = runAgentCli([
+    "status",
     "--conversation",
     "terminal:tmux:codex-work:0.0:33389",
     "--threads-json",
@@ -8082,12 +7838,10 @@ test("describe prefers Codex title over injected environment context", () => {
     JSON.stringify({ [rolloutPath]: rollout })
   ]);
 
-  assert.equal(described.status, 0, described.stderr || described.stdout);
-  const parsed = JSON.parse(described.stdout);
-  assert.equal(parsed.evidence.initial_request, "Read the README and explain this project");
+  assert.equal(status.status, 0, status.stderr || status.stdout);
+  const parsed = JSON.parse(status.stdout);
   assert.match(parsed.about, /Read the README and explain this project/);
   assert.doesNotMatch(parsed.about, /environment_context/);
-  assert.equal(parsed.evidence.recent_messages.some((message) => message.text.includes("environment_context")), false);
 });
 
 interface ManagedClaudeTerminalTask {

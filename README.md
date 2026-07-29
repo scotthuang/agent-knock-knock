@@ -13,7 +13,7 @@ Agent Knock Knock lets OpenClaw control local Codex and Claude Code through shar
 
 [![AKK orchestrating a Claude Code-to-Codex handoff through tmux](https://raw.githubusercontent.com/scotthuang/agent-knock-knock/main/docs/assets/akk-tmux-handoff-demo.gif)](https://github.com/scotthuang/agent-knock-knock/blob/main/docs/assets/akk-tmux-handoff-demo.mp4)
 
-*OpenClaw asks Claude Code to write a file, waits for AKK to report completion, then hands the result to Codex. Both terminals remain available for direct human takeover. AKK keeps the agents' existing permission settings. Click the preview to watch in full quality.*
+*OpenClaw asks Claude Code to write a file, waits for AKK to report completion, then hands the result to Codex. Both terminals remain available for direct human control. AKK keeps the agents' existing permission settings. Click the preview to watch in full quality.*
 
 ## Use Cases
 
@@ -60,11 +60,8 @@ From the project the agents may edit:
 ```bash
 openclaw plugins install clawhub:@scotthuang/agent-knock-knock
 openclaw config set plugins.entries.agent-knock-knock.config.workspace "$PWD"
-openclaw config set plugins.entries.agent-knock-knock.config.defaultAgent codex
 openclaw gateway restart
 ```
-
-Use `claude` instead of `codex` when preferred.
 
 ClawHub installs the OpenClaw plugin, bundled AKK skill, and package-local relay CLI together. It does not add the `agent-knock-knock` command to your shell `PATH`. Do not run `install-openclaw` after a ClawHub install; that command belongs to the npm path below.
 
@@ -91,10 +88,10 @@ npm install -g @scotthuang/agent-knock-knock
 
 ```bash
 npm install -g @scotthuang/agent-knock-knock
-agent-knock-knock install-openclaw --workspace "$PWD" --default-agent codex --verify
+agent-knock-knock install-openclaw --workspace "$PWD" --verify
 ```
 
-`install-openclaw` installs or updates the plugin, configures the workspace and default agent without replacing unrelated settings, installs the bundled skill, restarts the Gateway at most once, and optionally verifies the runtime chain. It is safe to rerun. Without `--verify`, the result remains unverified rather than claiming readiness. Use `--skill-only` to skip plugin installation; add `--no-restart` to leave an explicit pending-restart state.
+`install-openclaw` installs or updates the plugin, configures the workspace without replacing unrelated settings, installs the bundled skill, restarts the Gateway at most once, and optionally verifies the runtime chain. It is safe to rerun. Without `--verify`, the result remains unverified rather than claiming readiness. Use `--skill-only` to skip plugin installation; add `--no-restart` to leave an explicit pending-restart state.
 
 If OpenClaw runs from a local checkout or another nonstandard location, pass its CLI explicitly:
 
@@ -142,42 +139,37 @@ For one complete first run, follow [Agent Knock Knock in 5 minutes](https://gith
 
 ## Usage
 
-Use conversational `AKK` prompts on any chat surface. Explicit agent names override the configured default:
+AKK sends work only to Codex or Claude Code panes that are already running in tmux, inside the configured workspace, and at a verified idle prompt. It never starts a coding agent for you.
+
+If exactly one idle coding-agent pane matches the workspace, send a task directly:
 
 ```text
-AKK Codex: inspect this repository and summarize it
-AKK Claude: review the latest commit
-AKK describe latest
+/akk inspect this repository and summarize it
 ```
 
-Surfaces with native commands use the same operations:
+If more than one pane is available, name the target before the colon:
+
+```text
+/akk codex: inspect this repository and summarize it
+/akk claude: review the latest commit
+/akk @a1b2c3d4: run the focused tests
+```
+
+The core command surface is intentionally small:
 
 ```text
 /akk <task>
+/akk <selector>: <message>
 /akk list
-/akk doctor
 /akk status [only|latest|codex|claude|@short-ref]
-/akk describe [session-selector]
-/akk send <session-selector>: <message>
-/akk approve <session-selector> --expected-approval-fingerprint <fingerprint>
 /akk cancel <session-selector>
-/akk renew <session-selector> [minutes]
-/akk retry-callback <session-selector>
-/akk close <session-selector> [--expected-message-id <id>] [reason]
 ```
 
-Selectors fail closed: `only` works only with one actionable target, `latest` requires a unique newest target, and an agent name must identify exactly one actionable session. `AKK list` shows stable short references while JSON output retains the authoritative full IDs.
+Selectors fail closed: `only` works only with one actionable target, `latest` requires a unique newest target, and `codex` or `claude` must identify exactly one eligible pane. `AKK list` shows stable short references while JSON output retains the authoritative full IDs. Every send revalidates the pane, process, workspace, and idle state immediately before typing.
 
-You can also send directly to a terminal entry returned by `AKK list`:
+The configured workspace is a hard boundary for OpenClaw tools and slash commands. Listing, inspection, sending, approval, cancellation, and recovery do not cross into another workspace even when given an explicit terminal ID.
 
-```text
-AKK send codex: continue with the smaller implementation
-AKK send @a1b2c3d4: run the focused tests
-```
-
-AKK submits only when the selected pane is at a verified idle prompt. If no eligible Codex or Claude Code tmux pane is available, it stops and tells you how to start one instead of launching an invisible replacement.
-
-If `AKK list` reports an orphaned terminal dispatch after its managed state was lost, inspect the named pane first. Clear only that stale dispatch fence with the exact `/akk close ... --expected-message-id ...` recovery command returned by the list; AKK leaves both the coding agent and tmux pane running.
+If no eligible pane exists, AKK stops with setup guidance. If a send is ambiguous, run `/akk list` and retry with the returned `@short-ref`.
 
 ## Configuration
 
@@ -185,7 +177,6 @@ AKK reads these options from `plugins.entries.agent-knock-knock.config`. The npm
 
 | Option | Default | Purpose |
 | --- | --- | --- |
-| `defaultAgent` | `codex` | Agent used when a request does not name one: `codex` or `claude`. |
 | `workspace` | OpenClaw process directory | Working directory matched against eligible terminal panes. |
 | `storeDir` | `~/.agent-knock-knock/conversations` | Conversation state location; relative plugin paths resolve from `workspace`. |
 | `openclawBin` | Auto-detected | OpenClaw CLI used for callback delivery. |
@@ -204,7 +195,7 @@ For Claude Code, manual approval is deliberately narrow:
 
 - It is available only for the current AKK-managed turn.
 - AKK accepts only an exact, current Bash dialog with the one-time **Yes** choice already highlighted, correlated to one unresolved foreground Bash tool request in the anchored owner-private transcript. Persistent permission choices are rejected.
-- When no trusted rule matches, the callback takes the manual path. The user must personally inspect the named tmux pane, explicitly confirm the exact request, and then run `AKK approve <@short-ref>`; the hash-only callback is not sufficient for review.
+- When no trusted rule matches, the callback takes the manual path. The user must personally inspect the named tmux pane, explicitly confirm the exact request, and then run `/akk approve @a1b2c3d4 --expected-approval-fingerprint <fresh-fingerprint>` using the fingerprint from that current notification; the hash-only callback is not sufficient for review.
 - AKK re-evaluates the evidence and revalidates the process and pane immediately before sending one Enter.
 
 Unknown, stale, changed, ambiguous, or unmanaged dialogs fail closed and must be resolved in the terminal.
@@ -244,6 +235,7 @@ With the global npm CLI installed, start with `agent-knock-knock doctor`. It run
 | Source changes do not appear | Build, reinstall from the checkout, and restart the Gateway. |
 | Terminal task is `stalled` | Inspect `status` and the terminal; use `/akk renew only <minutes>` only when exactly one live stalled task needs more monitoring time. |
 | Task is `callback_failed` | Run `/akk retry-callback only` when it is the only actionable failed callback, or use its `@short-ref`. |
+| `AKK list` reports an orphaned terminal dispatch | Inspect the named pane first, then run the exact `/akk close ... --expected-message-id ...` recovery command returned by `list`. AKK leaves the coding agent and tmux pane running. |
 | Claude permission is not offered through AKK | Resolve unsupported dialogs in the terminal. The AKK path requires the exact supported one-time Bash prompt for the current managed turn. |
 | Claude request was not auto-approved | Check `autoApprove.enabled`, the agent, canonical workspace, and exact command vector. The request must also have matching current screen and local transcript evidence. |
 | Claude monitor becomes `stalled` | Check the Claude version and `status`, then inspect the terminal. Unknown transcript schemas, background work, identity changes, and ambiguous turns intentionally fail closed. |

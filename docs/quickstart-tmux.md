@@ -7,10 +7,10 @@ This is the canonical Agent Knock Knock setup: OpenClaw and a human share the sa
 From the project the agent may edit:
 
 ```bash
-npm install -g @scotthuang/agent-knock-knock && agent-knock-knock install-openclaw --workspace "$PWD" --default-agent codex --verify
+npm install -g @scotthuang/agent-knock-knock && agent-knock-knock install-openclaw --workspace "$PWD" --verify
 ```
 
-The installer updates only AKK's enabled flag, workspace, and default agent. Existing plugin settings—including `autoApprove` rules—remain intact, and the Gateway restarts at most once.
+The installer updates only AKK's enabled flag and workspace. Existing plugin settings—including `autoApprove` rules—remain intact, and the Gateway restarts at most once.
 
 ## 2. Run doctor
 
@@ -18,7 +18,7 @@ The installer updates only AKK's enabled flag, workspace, and default agent. Exi
 agent-knock-knock doctor
 ```
 
-Success means `readiness` is `ready`, the selected CLI can return a version, the AKK runtime and skill are loaded, the workspace is canonical, and the Gateway is healthy. Doctor does not make a credentialed model call.
+Success means `readiness` is `ready`, at least one supported CLI can return a version, the AKK runtime and skill are loaded, the workspace is canonical, and the Gateway is healthy. Doctor does not make a credentialed model call.
 
 ## 3. Start the shared terminal
 
@@ -26,17 +26,21 @@ Success means `readiness` is `ready`, the selected CLI can return a version, the
 tmux new-session -s akk-work -c "$PWD" codex
 ```
 
-Use `claude` instead of `codex` if that is your configured agent. Detach with `Ctrl-b`, then `d`.
+Use `claude` instead of `codex` to share a Claude Code terminal. Detach with `Ctrl-b`, then `d`.
+
+AKK does not launch coding agents. It sends work only to a matching Codex or Claude Code pane that you already started and that is currently at a verified idle prompt.
 
 ## 4. Send one chat command
 
 From any configured OpenClaw channel:
 
 ```text
-/akk send codex: inspect this repository and summarize it
+/akk inspect this repository and summarize it
 ```
 
-AKK must find exactly one actionable Codex target; otherwise it stops and shows candidate short references instead of guessing. Success returns a managed conversation while the same tmux pane remains available for takeover.
+Because this quickstart starts one coding-agent pane in the configured workspace, the bare task resolves when exactly one eligible idle pane exists. If multiple panes are eligible, AKK stops instead of guessing: run `/akk list`, then target one explicitly with `/akk <selector>: <message>`, for example `/akk @a1b2c3d4: inspect this repository and summarize it`.
+
+Success returns a managed conversation while the same tmux pane remains available for direct human control.
 
 ## Permissions and monitoring
 

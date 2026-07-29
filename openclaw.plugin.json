@@ -15,30 +15,21 @@
   ],
   "contracts": {
     "tools": [
-      "agent_knock_knock_delegate",
       "agent_knock_knock_list",
       "agent_knock_knock_status",
-      "agent_knock_knock_describe",
       "agent_knock_knock_send",
       "agent_knock_knock_renew",
       "agent_knock_knock_retry_callback",
       "agent_knock_knock_cancel",
       "agent_knock_knock_close",
-      "agent_knock_knock_approve",
-      "agent_knock_knock_agent_takeover"
+      "agent_knock_knock_approve"
     ]
   },
   "toolMetadata": {
-    "agent_knock_knock_delegate": {
-      "optional": true
-    },
     "agent_knock_knock_list": {
       "optional": true
     },
     "agent_knock_knock_status": {
-      "optional": true
-    },
-    "agent_knock_knock_describe": {
       "optional": true
     },
     "agent_knock_knock_send": {
@@ -57,9 +48,6 @@
       "optional": true
     },
     "agent_knock_knock_approve": {
-      "optional": true
-    },
-    "agent_knock_knock_agent_takeover": {
       "optional": true
     }
   },
@@ -82,18 +70,13 @@
         "type": "string",
         "description": "Default conversation store directory."
       },
-      "defaultAgent": {
-        "type": "string",
-        "enum": ["claude", "codex"],
-        "description": "Default coding agent for unspecified AKK delegations. If unset, Agent Knock Knock falls back to codex."
-      },
       "openclawBin": {
         "type": "string",
         "description": "Path to the OpenClaw CLI used by callback delivery. Defaults to PATH plus common user install locations."
       },
       "codexHome": {
         "type": "string",
-        "description": "Optional CODEX_HOME path used to correlate Codex session metadata with eligible tmux takeover targets."
+        "description": "Optional CODEX_HOME path used to correlate Codex session metadata with eligible tmux terminals."
       },
       "idleTimeoutMinutes": {
         "type": "number",

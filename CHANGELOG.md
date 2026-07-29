@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.0 - 2026-07-29
+
+### Changed
+
+- Make already-running, verified-idle Codex and Claude Code tmux panes the only delegation targets.
+- Resolve bare `/akk <task>` only when exactly one eligible idle pane exists in the configured workspace, and use `/akk <selector>: <message>` for an explicit target.
+- Enforce the configured workspace as a hard boundary even for explicit terminal IDs and recovery operations.
+- Keep the main command surface focused on task routing, listing, status, and cancellation; keep diagnostics, approvals, and recovery operations in their relevant workflows.
+
+### Removed
+
+- Remove configuration-based default-agent routing and the `--default-agent` installer option.
+- Remove obsolete session inspection and attachment surfaces from the user-facing workflow.
+
 ## 0.4.0 - 2026-07-29
 
 ### Changed

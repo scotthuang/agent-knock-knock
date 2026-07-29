@@ -124,19 +124,35 @@ test("OpenClaw runtime registrations match the published manifest", () => {
     sorted(commandAliases),
     sorted(registeredCommands)
   );
+  assert.equal(contractedTools.includes("agent_knock_knock_send"), true);
+  for (const removedTool of [
+    "agent_knock_knock_delegate",
+    "agent_knock_knock_describe",
+    "agent_knock_knock_agent_takeover"
+  ]) {
+    assert.equal(contractedTools.includes(removedTool), false);
+  }
+  const configProperties = (
+    readManifest() as Manifest & {
+      configSchema?: { properties?: Record<string, unknown> };
+    }
+  ).configSchema?.properties ?? {};
+  assert.equal("defaultAgent" in configProperties, false);
 });
 
-test("OpenClaw delegate returns tmux conversation storage paths", async () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-plugin-delegate-paths-"));
+test("OpenClaw send without a selector returns tmux conversation storage paths", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-plugin-send-paths-"));
   const fakeCli = path.join(tempDir, "delegate.cjs");
+  const callsPath = path.join(tempDir, "calls.ndjson");
   const statePath = path.join(tempDir, "state.json");
   const eventLogPath = path.join(tempDir, "events.ndjson");
-  let delegateTool: ToolDefinition | undefined;
+  let sendTool: ToolDefinition | undefined;
 
   try {
     fs.writeFileSync(
       fakeCli,
       [
+        `require("node:fs").appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(process.argv.slice(2)) + "\\n");`,
         `const result = ${JSON.stringify({
           conversation: {
             conversation_id: "managed-terminal-1",
@@ -182,19 +198,111 @@ test("OpenClaw delegate returns tmux conversation storage paths", async () => {
         const definition = typeof tool === "function"
           ? tool({ sessionKey: "agent:test:main" } as never)
           : tool;
-        if (options?.name === "agent_knock_knock_delegate") {
-          delegateTool = definition;
+        if (options?.name === "agent_knock_knock_send") {
+          sendTool = definition;
         }
       }
     });
 
-    assert.equal(typeof delegateTool?.execute, "function");
-    const result = await delegateTool?.execute?.("tool-call-1", {
-      request: "Verify the delegate output contract",
-      agent: "codex"
+    assert.equal(typeof sendTool?.execute, "function");
+    const result = await sendTool?.execute?.("tool-call-1", {
+      request: "Verify the send output contract"
     });
     assert.equal(result?.details?.state_path, statePath);
     assert.equal(result?.details?.event_log_path, eventLogPath);
+    await sendTool?.execute?.("tool-call-2", {
+      selector: "@a1b2c3d4",
+      request: "Continue with focused tests"
+    });
+    const calls = fs.readFileSync(callsPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as string[]);
+    assert.equal(calls[0]?.[0], "delegate");
+    assert.equal(calls[0]?.includes("--agent"), false);
+    assert.equal(calls[0]?.at(calls[0].indexOf("--workspace") + 1), tempDir);
+    assert.deepEqual(calls[1]?.slice(0, 5), [
+      "send",
+      "--conversation",
+      "@a1b2c3d4",
+      "--message",
+      "Continue with focused tests"
+    ]);
+    assert.equal(calls[1]?.at(calls[1].indexOf("--workspace") + 1), tempDir);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("OpenClaw status includes purpose context and a bounded terminal screen", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-plugin-status-"));
+  const fakeCli = path.join(tempDir, "status.cjs");
+  let statusTool: ToolDefinition | undefined;
+  let command:
+    | { handler?: (context: { args: string; sessionKey: string }) => Promise<any> }
+    | undefined;
+
+  try {
+    fs.writeFileSync(
+      fakeCli,
+      `const result = {
+  conversation_id: "managed-terminal-1",
+  summary: {
+    conversation_id: "managed-terminal-1",
+    agent: "codex",
+    status: "waiting_for_agent",
+    session: "work:0.0"
+  },
+  about: "Review the current branch",
+  confidence: "high",
+  limitations: ["history is bounded"],
+  terminal_screen: {
+    excerpt: "Running focused tests"
+  }
+};
+process.stdout.write(JSON.stringify(result));`,
+      "utf8"
+    );
+
+    (
+      plugin as unknown as {
+        register(api: Record<string, any>): void;
+      }
+    ).register({
+      pluginConfig: { binPath: fakeCli },
+      logger: {
+        info() {},
+        warn() {}
+      },
+      registerGatewayMethod() {},
+      registerService() {},
+      registerCommand(value: typeof command) {
+        command = value;
+      },
+      registerTool(
+        tool: ToolDefinition | ToolFactory,
+        options?: { name?: string }
+      ) {
+        const definition = typeof tool === "function" ? tool({}) : tool;
+        if (options?.name === "agent_knock_knock_status") {
+          statusTool = definition;
+        }
+      }
+    });
+
+    const toolResult = await statusTool?.execute?.("tool-call-status", {
+      conversation_id: "only"
+    });
+    assert.equal(toolResult?.details?.about, "Review the current branch");
+    assert.equal(toolResult?.details?.confidence, "high");
+    assert.deepEqual(toolResult?.details?.limitations, ["history is bounded"]);
+
+    const slashResult = await command?.handler?.({
+      args: "status only",
+      sessionKey: "agent:test:main"
+    });
+    assert.match(slashResult?.text ?? "", /about: Review the current branch/u);
+    assert.match(slashResult?.text ?? "", /terminal screen:\nRunning focused tests/u);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
