@@ -14,7 +14,7 @@ process.on("exit", () => {
   fs.rmSync(testRuntimeDir, { recursive: true, force: true });
 });
 
-test("list groups native and terminal-controlled sessions", () => {
+test("list exposes only tmux-controlled sessions", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-list-groups-"));
   const storeDir = path.join(tempDir, "conversations");
   const approvalScreen = [
@@ -72,9 +72,7 @@ test("list groups native and terminal-controlled sessions", () => {
 
     assert.deepEqual(listed.tasks, []);
     assert.deepEqual(listed.delegated, []);
-    assert.equal(listed.native.length, 1);
-    assert.equal(listed.native[0].id, "native:codex:1234");
-    assert.equal(listed.native[0].commands.send, false);
+    assert.equal("native" in listed, false);
     assert.equal(listed.terminal_controlled.length, 1);
     assert.equal(listed.terminal_controlled[0].id, "terminal:v2:tmux:codex:codex-work:0.0:2222");
     assert.equal(listed.terminal_controlled[0].terminal_control.target, "codex-work:0.0");
@@ -88,8 +86,7 @@ test("list groups native and terminal-controlled sessions", () => {
     assert.equal(listed.terminal_controlled[0].commands.status, true);
     assert.equal("capture_screen" in listed.terminal_controlled[0].commands, false);
     assert.equal("detach" in listed.terminal_controlled[0].commands, false);
-    assert.equal(listed.native_scan.native_count, 1);
-    assert.equal(listed.native_scan.terminal_controlled_count, 1);
+    assert.equal(listed.terminal_scan.terminal_controlled_count, 1);
 
     const debugListed = runCli([
       "list",
@@ -116,8 +113,8 @@ test("list groups native and terminal-controlled sessions", () => {
         currentPath: "/repo/tmux"
       }])
     ]);
-    assert.equal(debugListed.native_scan.terminal_scan.provider, "static");
-    assert.equal(debugListed.native_scan.terminal_scan.paneCount, 1);
+    assert.equal(debugListed.terminal_scan.diagnostics.provider, "static");
+    assert.equal(debugListed.terminal_scan.diagnostics.paneCount, 1);
 
     const managedOnly = runCli([
       "list",
@@ -134,9 +131,9 @@ test("list groups native and terminal-controlled sessions", () => {
       }])
     ]);
     assert.deepEqual(managedOnly.delegated, []);
-    assert.deepEqual(managedOnly.native, []);
+    assert.equal("native" in managedOnly, false);
     assert.deepEqual(managedOnly.terminal_controlled, []);
-    assert.equal(managedOnly.native_scan.enabled, false);
+    assert.equal(managedOnly.terminal_scan.enabled, false);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -315,9 +312,9 @@ test("list discovers Claude and Codex tmux sessions from static runtime snapshot
       }])
     ]);
 
-    assert.equal(listed.native_scan.active_count, 2);
-    assert.equal(listed.native_scan.terminal_controlled_count, 2);
-    assert.deepEqual(listed.native_scan.agents, ["codex", "claude"]);
+    assert.equal(listed.terminal_scan.active_count, 2);
+    assert.equal(listed.terminal_scan.terminal_controlled_count, 2);
+    assert.deepEqual(listed.terminal_scan.agents, ["codex", "claude"]);
     assert.deepEqual(listed.terminal_controlled.map((entry: any) => entry.agent).sort(), ["claude", "codex"]);
 
     const codex = listed.terminal_controlled.find((entry: any) => entry.agent === "codex");

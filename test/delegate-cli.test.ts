@@ -93,15 +93,57 @@ test("delegate routes asynchronously to the only idle matching tmux pane", () =>
   }
 });
 
-test("delegate fails with setup guidance when no idle matching tmux pane exists", () => {
+test("delegate without an agent selects the only idle supported pane", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-delegate-any-agent-"));
+  const workspace = path.join(tempDir, "workspace");
+
+  try {
+    fs.mkdirSync(workspace, { recursive: true });
+    const result = runDelegate([
+      "--request",
+      "Review the tmux-only delegate flow",
+      "--workspace",
+      workspace,
+      "--store-dir",
+      path.join(tempDir, "conversations"),
+      "--background",
+      "--disable-terminal-bridge-monitor",
+      "--processes-json",
+      JSON.stringify([{
+        pid: 5101,
+        ppid: 9101,
+        elapsed: "00:20",
+        command: "codex",
+        cwd: workspace
+      }]),
+      "--terminals-json",
+      JSON.stringify([tmuxPane({
+        target: "codex-work:0.0",
+        panePid: 9101,
+        currentPath: workspace
+      })]),
+      "--terminal-screens-json",
+      JSON.stringify({
+        "codex-work:0.0": "› "
+      })
+    ]);
+
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.conversation.executor.kind, "codex");
+    assert.equal(parsed.terminal_control.target, "codex-work:0.0");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("delegate without an agent gives setup guidance when no idle pane exists", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-delegate-no-pane-"));
   const workspace = path.join(tempDir, "workspace");
 
   try {
     fs.mkdirSync(workspace, { recursive: true });
     const result = runDelegate([
-      "--agent",
-      "codex",
       "--request",
       "Implement the requested change",
       "--workspace",
@@ -118,8 +160,8 @@ test("delegate fails with setup guidance when no idle matching tmux pane exists"
     ]);
 
     assert.equal(result.status, 1, result.stdout);
-    assert.match(result.stderr, /No idle Codex pane is available/);
-    assert.match(result.stderr, /Start codex inside tmux/);
+    assert.match(result.stderr, /No idle Codex or Claude Code pane is available/);
+    assert.match(result.stderr, /Start codex or claude inside tmux/);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -182,15 +224,178 @@ test("delegate fails closed when multiple idle matching tmux panes exist", () =>
 
     assert.equal(result.status, 1, result.stdout);
     assert.match(result.stderr, /Multiple idle Codex panes match/);
-    assert.match(result.stderr, /\/akk list/);
-    assert.match(result.stderr, /\/akk send/);
+    assert.match(result.stderr, /\/akk codex: <task>/);
+    assert.match(result.stderr, /\/akk @short-ref: <message>/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("delegate without an agent fails closed across mixed idle panes", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-delegate-mixed-ambiguous-"));
+  const workspace = path.join(tempDir, "workspace");
+
+  try {
+    fs.mkdirSync(workspace, { recursive: true });
+    const result = runDelegate([
+      "--request",
+      "Implement the requested change",
+      "--workspace",
+      workspace,
+      "--store-dir",
+      path.join(tempDir, "conversations"),
+      "--background",
+      "--processes-json",
+      JSON.stringify([
+        {
+          pid: 5101,
+          ppid: 9001,
+          elapsed: "00:20",
+          command: "codex",
+          cwd: workspace
+        },
+        {
+          pid: 5201,
+          ppid: 9002,
+          elapsed: "00:21",
+          command: "claude",
+          cwd: workspace
+        }
+      ]),
+      "--terminals-json",
+      JSON.stringify([
+        tmuxPane({
+          target: "codex-work:0.0",
+          panePid: 9001,
+          currentPath: workspace
+        }),
+        tmuxPane({
+          target: "claude-work:0.0",
+          session: "claude-work",
+          panePid: 9002,
+          currentPath: workspace
+        })
+      ]),
+      "--terminal-screens-json",
+      JSON.stringify({
+        "codex-work:0.0": "› ",
+        "claude-work:0.0": "❯ "
+      })
+    ]);
+
+    assert.equal(result.status, 1, result.stdout);
+    assert.match(result.stderr, /Multiple idle coding-agent panes match/);
+    assert.match(result.stderr, /\(codex, codex-work:0\.0\)/);
+    assert.match(result.stderr, /\(claude, claude-work:0\.0\)/);
+    assert.match(result.stderr, /\/akk claude: <task>/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("explicit selectors cannot send outside the configured workspace", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-send-workspace-boundary-"));
+  const workspace = path.join(tempDir, "workspace");
+  const otherWorkspace = path.join(tempDir, "other-workspace");
+  const storeDir = path.join(tempDir, "conversations");
+  const processSnapshot = JSON.stringify([{
+    pid: 5102,
+    ppid: 9002,
+    elapsed: "00:20",
+    command: "codex",
+    cwd: otherWorkspace
+  }]);
+  const terminalSnapshot = JSON.stringify([tmuxPane({
+    target: "codex-other:0.0",
+    session: "codex-other",
+    panePid: 9002,
+    currentPath: otherWorkspace
+  })]);
+  const commonArgs = [
+    "--message",
+    "Do not send this outside the configured workspace",
+    "--workspace",
+    workspace,
+    "--store-dir",
+    storeDir,
+    "--background",
+    "--disable-terminal-bridge-monitor",
+    "--processes-json",
+    processSnapshot,
+    "--terminals-json",
+    terminalSnapshot,
+    "--terminal-screens-json",
+    JSON.stringify({ "codex-other:0.0": "› " })
+  ];
+
+  try {
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.mkdirSync(otherWorkspace, { recursive: true });
+
+    const agentSelector = runCli("send", [
+      "--conversation",
+      "codex",
+      ...commonArgs
+    ]);
+    assert.equal(agentSelector.status, 1, agentSelector.stdout);
+    assert.match(
+      agentSelector.stderr,
+      /no actionable sessions|does not match|unknown session selector/iu
+    );
+
+    const fullId = runCli("send", [
+      "--conversation",
+      "terminal:v2:tmux:codex:codex-other:0.0:5102",
+      ...commonArgs
+    ]);
+    assert.equal(fullId.status, 1, fullId.stdout);
+    assert.match(
+      fullId.stderr,
+      /workspace|no longer available/iu
+    );
+
+    const mismatchedIdentity = runCli("send", [
+      "--conversation",
+      "terminal:v2:tmux:codex:codex-other:0.0:5102",
+      "--message",
+      "Do not trust only the tmux pane path",
+      "--workspace",
+      workspace,
+      "--store-dir",
+      storeDir,
+      "--background",
+      "--disable-terminal-bridge-monitor",
+      "--processes-json",
+      processSnapshot,
+      "--terminals-json",
+      JSON.stringify([tmuxPane({
+        target: "codex-other:0.0",
+        session: "codex-other",
+        panePid: 9002,
+        currentPath: workspace
+      })]),
+      "--terminal-screens-json",
+      JSON.stringify({ "codex-other:0.0": "› " })
+    ]);
+    assert.equal(mismatchedIdentity.status, 1, mismatchedIdentity.stdout);
+    assert.match(
+      mismatchedIdentity.stderr,
+      /workspace|no longer available/iu
+    );
+    if (fs.existsSync(storeDir)) {
+      assert.deepEqual(fs.readdirSync(storeDir), []);
+    }
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
 
 function runDelegate(args: string[]) {
-  return spawnSync(process.execPath, [binPath, "delegate", ...args], {
+  return runCli("delegate", args);
+}
+
+function runCli(command: string, args: string[]) {
+  return spawnSync(process.execPath, [binPath, command, ...args], {
     encoding: "utf8",
     env: process.env
   });

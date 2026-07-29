@@ -9,7 +9,7 @@ import {
   resolvePluginStoreDir
 } from "../src/openclaw-plugin-helpers.js";
 
-test("bare /akk task leaves agent unset so plugin defaultAgent is used", () => {
+test("bare /akk task leaves routing unset for unique-pane selection", () => {
   assert.deepEqual(
     parseAkkCommand("inspect the configured workspace"),
     {
@@ -19,30 +19,35 @@ test("bare /akk task leaves agent unset so plugin defaultAgent is used", () => {
   );
 });
 
-test("explicit /akk agent aliases remain explicit", () => {
+test("selector-first /akk messages target an existing tmux session", () => {
   assert.deepEqual(
-    parseAkkCommand("claude review the API"),
+    parseAkkCommand("claude: review the API"),
     {
-      action: "delegate",
-      agent: "claude",
-      request: "review the API"
+      action: "send",
+      conversationId: "claude",
+      message: "review the API"
     }
   );
   assert.deepEqual(
-    parseAkkCommand("c check the diff"),
+    parseAkkCommand("@a1b2c3d4: check the diff"),
     {
-      action: "delegate",
-      agent: "codex",
-      request: "check the diff"
+      action: "send",
+      conversationId: "@a1b2c3d4",
+      message: "check the diff"
     }
   );
+  assert.deepEqual(parseAkkCommand("codex review the API"), {
+    action: "delegate",
+    request: "codex review the API"
+  });
 });
 
 test("/akk help lists the supported tmux executors", () => {
   const usage = akkUsageText();
-  assert.match(usage, /\/akk codex <task>/);
-  assert.match(usage, /\/akk claude <task>/);
+  assert.match(usage, /\/akk codex: <task>/);
+  assert.match(usage, /\/akk claude: <task>/);
   assert.match(usage, /\/akk doctor/);
+  assert.doesNotMatch(usage, /\/akk (?:describe|send|renew|retry-callback|close)\b/u);
 });
 
 test("/akk doctor uses the trusted plugin workspace and OpenClaw binary", () => {
@@ -70,7 +75,7 @@ test("/akk doctor uses the trusted plugin workspace and OpenClaw binary", () => 
 
 test("/akk accepts selector-first follow-ups without long ids", () => {
   assert.deepEqual(
-    parseAkkCommand("send latest: continue with the tests"),
+    parseAkkCommand("latest: continue with the tests"),
     {
       action: "send",
       conversationId: "latest",
@@ -78,7 +83,7 @@ test("/akk accepts selector-first follow-ups without long ids", () => {
     }
   );
   assert.deepEqual(
-    parseAkkCommand("send codex: review the diff"),
+    parseAkkCommand("codex: review the diff"),
     {
       action: "send",
       conversationId: "codex",
@@ -90,21 +95,32 @@ test("/akk accepts selector-first follow-ups without long ids", () => {
     conversationId: undefined
   });
   assert.deepEqual(
-    buildAkkCommandCliArgs(parseAkkCommand("status"), {}),
-    ["status"]
+    buildAkkCommandCliArgs(
+      parseAkkCommand("status"),
+      { workspace: "/work/project" }
+    ),
+    ["status", "--workspace", "/work/project"]
+  );
+  assert.throws(
+    () => parseAkkCommand("send latest: continue"),
+    /syntax changed/u
+  );
+  assert.throws(
+    () => parseAkkCommand("describe latest"),
+    /describe was removed/u
   );
 });
 
 test("/akk stateful commands consistently use the trusted plugin store", () => {
   const config = {
+    workspace: "/work/project",
     storeDir: "/private/akk-store",
     idleTimeoutMinutes: 45
   };
   const commands = [
     "list",
     "status conversation-1",
-    "describe conversation-1",
-    "send conversation-1 continue",
+    "@a1b2c3d4: continue",
     "approve conversation-1 --expected-approval-fingerprint approval-1",
     "cancel conversation-1",
     "renew conversation-1 20",
@@ -120,13 +136,19 @@ test("/akk stateful commands consistently use the trusted plugin store", () => {
       ["--store-dir", "/private/akk-store"],
       input
     );
+    assert.deepEqual(
+      args.slice(args.indexOf("--workspace"), args.indexOf("--workspace") + 2),
+      ["--workspace", "/work/project"],
+      input
+    );
   }
 });
 
 test("/akk terminal send configures a real OpenClaw callback", () => {
   const args = buildAkkCommandCliArgs(
-    parseAkkCommand("send terminal:v2:tmux:claude:work:0.1:1234 continue"),
+    parseAkkCommand("@a1b2c3d4: continue"),
     {
+      workspace: "/work/project",
       storeDir: "/private/akk-store",
       openclawBin: "/opt/openclaw/bin/openclaw",
       agentTimeoutMinutes: 90,
@@ -140,6 +162,7 @@ test("/akk terminal send configures a real OpenClaw callback", () => {
   assert.deepEqual(optionValue(args, "--gateway-session"), "agent:chat:current");
   assert.deepEqual(optionValue(args, "--openclaw-session"), "agent:chat:current");
   assert.deepEqual(optionValue(args, "--openclaw-bin"), "/opt/openclaw/bin/openclaw");
+  assert.deepEqual(optionValue(args, "--workspace"), "/work/project");
   assert.deepEqual(optionValue(args, "--agent-timeout-minutes"), "90");
   assert.deepEqual(optionValue(args, "--agent-hard-timeout-minutes"), "600");
   assert.equal(args.includes("--background"), true);
@@ -155,7 +178,10 @@ test("/akk approve requires and forwards an exact approval fingerprint", () => {
       parseAkkCommand(
         "approve conversation-1 --expected-approval-fingerprint approval-1"
       ),
-      { storeDir: "/private/akk-store" }
+      {
+        workspace: "/work/project",
+        storeDir: "/private/akk-store"
+      }
     ),
     [
       "approve",
@@ -163,6 +189,8 @@ test("/akk approve requires and forwards an exact approval fingerprint", () => {
       "conversation-1",
       "--expected-approval-fingerprint",
       "approval-1",
+      "--workspace",
+      "/work/project",
       "--store-dir",
       "/private/akk-store"
     ]
@@ -174,7 +202,7 @@ function optionValue(args: string[], option: string): string | undefined {
   return index >= 0 ? args[index + 1] : undefined;
 }
 
-test("/akk list includes terminal-controlled and native sessions", () => {
+test("/akk list includes only managed and terminal-controlled sessions", () => {
   const text = formatAkkListCommandResult({
     delegated: [{
       conversation_id: "managed-1",
@@ -194,10 +222,10 @@ test("/akk list includes terminal-controlled and native sessions", () => {
     }]
   });
 
-  assert.match(text, /AKK open sessions \(3\)/);
+  assert.match(text, /AKK open sessions \(2\)/);
   assert.match(text, /managed-1/);
   assert.match(text, /terminal:v2:tmux:codex:work:0\.0:1234/);
-  assert.match(text, /native:codex:5678/);
+  assert.doesNotMatch(text, /native:codex:5678/);
 });
 
 test("/akk list exposes the exact orphaned terminal dispatch recovery command", () => {

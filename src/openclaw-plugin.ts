@@ -6,8 +6,7 @@ import {
 } from "openclaw/plugin-sdk/plugin-entry";
 import {
   EXECUTOR_KINDS,
-  executorDefinitionForKind,
-  parseLeadingExecutorAlias
+  executorDefinitionForKind
 } from "./executors.js";
 import {
   AKK_CALLBACK_METHOD,
@@ -24,24 +23,23 @@ import {
 const CALLBACK_METHOD = AKK_CALLBACK_METHOD;
 const defaultBinPath = fileURLToPath(new URL("./cli.js", import.meta.url));
 
-const delegateParameters = {
+const sendParameters = {
   type: "object",
   additionalProperties: false,
   required: ["request"],
   properties: {
-    agent: {
+    selector: {
       type: "string",
-      enum: EXECUTOR_KINDS,
       description:
-        "Coding agent to delegate to. Defaults to plugin config defaultAgent, falling back to codex when unset. Explicit user agent requests override the default."
+        "Optional existing tmux target selector from AKK list: codex, claude, only, latest, an @short-ref, or an authoritative full id. Omit it to start a new managed turn through the unique eligible idle pane."
     },
     request: {
       type: "string",
-      description: "Implementation task for the coding agent."
+      description: "New task or follow-up message for the coding agent."
     },
-    workspace: {
+    type: {
       type: "string",
-      description: "Workspace path for the selected coding agent. Defaults to plugin config or the Gateway process directory."
+      enum: ["answer", "task", "control", "error"]
     },
     idleTimeoutMinutes: {
       type: "number",
@@ -75,7 +73,7 @@ const listParameters = {
     },
     managedOnly: {
       type: "boolean",
-      description: "When true, only list AKK-managed delegated tasks and skip native/terminal active discovery."
+      description: "When true, only list AKK-managed turns and skip live tmux terminal discovery."
     },
     noApprovalScan: {
       type: "boolean",
@@ -140,63 +138,6 @@ const statusParameters = {
   }
 };
 
-const describeParameters = {
-  type: "object",
-  additionalProperties: false,
-  required: ["conversation_id"],
-  properties: {
-    conversation_id: {
-      type: "string",
-      description:
-        "AKK-managed conversation id, native Codex id, or terminal-controlled id from AKK list. Use this when the user asks what a listed AKK/Codex session is about."
-    },
-    idleTimeoutMinutes: {
-      type: "number"
-    },
-    maxMessages: {
-      type: "number"
-    },
-    maxCommands: {
-      type: "number"
-    },
-    maxTextLength: {
-      type: "number"
-    }
-  }
-};
-
-const sendParameters = {
-  type: "object",
-  additionalProperties: false,
-  required: ["conversation_id", "message"],
-  properties: {
-    conversation_id: {
-      type: "string",
-      description:
-        "AKK-managed conversation id, or a terminal-controlled id from AKK list such as terminal:v2:tmux:codex:codex-work:0.1:33389. When the user refers to a listed tmux target like my-work:0.1, resolve it to the terminal-controlled id from AKK list before sending."
-    },
-    message: {
-      type: "string"
-    },
-    type: {
-      type: "string",
-      enum: ["answer", "task", "control", "error"]
-    },
-    idleTimeoutMinutes: {
-      type: "number"
-    },
-    agentTimeoutMinutes: {
-      type: "number",
-      description: "Terminal bridge inactivity timeout override in minutes."
-    },
-    agentHardTimeoutMinutes: {
-      type: "number",
-      exclusiveMinimum: 0,
-      description: "Terminal bridge fallback lifetime ceiling override in minutes."
-    }
-  }
-};
-
 const cancelParameters = {
   type: "object",
   additionalProperties: false,
@@ -228,52 +169,6 @@ const closeParameters = {
       type: "string",
       description:
         "Required only to clear an orphaned terminal dispatch shown by AKK list. Must exactly match that entry's current message_id."
-    }
-  }
-};
-
-const agentTakeoverParameters = {
-  type: "object",
-  additionalProperties: false,
-  required: ["agent", "sessionId", "strategy"],
-  properties: {
-    agent: {
-      type: "string",
-      enum: ["codex"],
-      description: "Local coding agent session provider to plan takeover for. Currently supports Codex."
-    },
-    sessionId: {
-      type: "string",
-      description: "Native Codex session id to inspect or take over."
-    },
-    strategy: {
-      type: "string",
-      enum: ["terminal_control"],
-      description:
-        "Attach to the existing Codex process through its shared tmux terminal."
-    },
-    createConversation: {
-      type: "boolean",
-      description:
-        "When true and the selected strategy is ready, create an AKK-managed conversation bound to the native session so later AKK send/status/close can use it."
-    },
-    confirmTerminal: {
-      type: "boolean",
-      description:
-        "Only for strategy=terminal_control. When true, AKK attaches to the exact terminalTarget after the user confirms that terminal pane."
-    },
-    terminalTarget: {
-      type: "string",
-      description:
-        "Required with confirmTerminal=true. The exact tmux target from the previous terminal_control plan, such as codex-work:0.0."
-    },
-    request: {
-      type: "string",
-      description: "Optional user-visible request label stored on the created AKK conversation."
-    },
-    codexHome: {
-      type: "string",
-      description: "Optional Codex home directory. Defaults to ~/.codex."
     }
   }
 };
@@ -327,6 +222,7 @@ const plugin: OpenClawPluginDefinition = definePluginEntry({
           try {
             const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
             const args = ["reconcile-monitors"];
+            pushOptional(args, "--workspace", pluginWorkspace(config));
             pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
             const result = runCli(api, args);
             api.logger.info?.(
@@ -352,51 +248,30 @@ const plugin: OpenClawPluginDefinition = definePluginEntry({
 
     api.registerCommand?.({
       name: "akk",
-      description: "Delegate coding work to Agent Knock Knock, list tasks, send follow-ups, cancel running work, and close tasks.",
+      description: "Send coding work through existing Codex or Claude Code tmux terminals, inspect tasks, approve exact prompts, and cancel running work.",
       acceptsArgs: true,
       requireAuth: true,
       nativeProgressMessages: {
         default: "AKK is handling the request..."
       },
       agentPromptGuidance: [
-        "Use /akk <task> to send work through a uniquely matching idle tmux terminal. /akk uses the plugin-configured defaultAgent and falls back to Codex; use /akk claude <task> or /akk codex <task> when the user explicitly requests that agent."
+        "Use /akk <task> when exactly one eligible idle coding-agent tmux pane should receive new work. Use /akk codex: <task>, /akk claude: <task>, or another selector returned by /akk list to target an existing pane. AKK never starts a coding agent."
       ],
       handler: async (ctx) => handleAkkCommand(api, ctx)
     });
 
-    api.registerTool(
-      (toolContext) => ({
-        label: "AKK Delegate",
-        name: "agent_knock_knock_delegate",
-        description:
-          "Send an implementation task to a uniquely matching idle Codex or Claude Code tmux terminal. AKK never starts a hidden coding-agent runtime; no match or an ambiguous match fails closed with setup guidance. Omit agent to use the configured default, falling back to Codex.",
-        parameters: delegateParameters,
-        async execute(_toolCallId, params) {
-          const result = await runDelegate(api, params, toolContext);
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify(result, null, 2)
-              }
-            ],
-            details: result
-          };
-        }
-      }),
-      { name: "agent_knock_knock_delegate", optional: true }
-    );
-
     registerCliTool(api, {
       name: "agent_knock_knock_list",
-      description: "List Agent Knock Knock work and local active coding-agent sessions. Use this for AKK list, current AKK tasks, native Codex work, terminal-controlled Codex or Claude Code work, or asking which coding-agent sessions are open. The result separates delegated tasks, native processes, and terminal-controlled sessions; terminal entries include approval state when available.",
+      description: "List AKK-managed work and existing Codex or Claude Code tmux terminals. Use this to choose an exact selector before sending, inspecting, approving, or cancelling. AKK reports terminal approval state when available and never starts a coding agent.",
       parameters: listParameters,
       buildArgs: (params) => {
+        const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
         const args = ["list"];
+        pushOptional(args, "--workspace", pluginWorkspace(config));
         pushOptional(
           args,
           "--store-dir",
-          resolvePluginStoreDir(isRecord(api.pluginConfig) ? api.pluginConfig : {})
+          resolvePluginStoreDir(config)
         );
         pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(api.pluginConfig?.idleTimeoutMinutes));
         pushOptional(args, "--agent", stringValue(params.agent));
@@ -417,73 +292,42 @@ const plugin: OpenClawPluginDefinition = definePluginEntry({
       }
     });
 
-    registerCliTool(api, {
-      name: "agent_knock_knock_status",
-      description: "Get detailed status for one Agent Knock Knock coding-agent task or terminal-controlled session. For terminal-controlled ids from AKK list, this is the only read-result/screen-inspection command: AKK captures the terminal pane internally and returns terminal_screen.",
-      parameters: statusParameters,
-      buildArgs: (params) => {
-        const args = ["status", "--conversation", requiredString(params.conversation_id, "conversation_id")];
-        pushOptional(
-          args,
-          "--store-dir",
-          resolvePluginStoreDir(isRecord(api.pluginConfig) ? api.pluginConfig : {})
-        );
-        pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(api.pluginConfig?.idleTimeoutMinutes));
-        if (params.trace === true) {
-          args.push("--trace");
+    api.registerTool(
+      (_toolContext) => ({
+        label: "AKK Status",
+        name: "agent_knock_knock_status",
+        description:
+          "Inspect one AKK-managed turn or existing coding-agent tmux terminal. Returns live state, a bounded terminal screen, and available purpose/context with confidence and limitations. AKK never starts a coding agent.",
+        parameters: statusParameters,
+        async execute(_toolCallId, params) {
+          const result = runCli(
+            api,
+            buildStatusCliArgs(api, isRecord(params) ? params : {})
+          );
+          return toolResult(result);
         }
-        return args;
-      }
-    });
+      }),
+      { name: "agent_knock_knock_status", optional: true }
+    );
 
-    registerCliTool(api, {
-      name: "agent_knock_knock_describe",
-      description: "Describe what a listed Agent Knock Knock or local coding-agent session is about. It summarizes AKK history when available, otherwise uses supported durable agent context or a conservative terminal-screen fallback with confidence and limitations.",
-      parameters: describeParameters,
-      buildArgs: (params) => {
-        const args = ["describe", "--conversation", requiredString(params.conversation_id, "conversation_id")];
-        pushOptional(
-          args,
-          "--store-dir",
-          resolvePluginStoreDir(isRecord(api.pluginConfig) ? api.pluginConfig : {})
-        );
-        pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(api.pluginConfig?.idleTimeoutMinutes));
-        pushOptional(args, "--max-messages", numberString(params.maxMessages));
-        pushOptional(args, "--max-commands", numberString(params.maxCommands));
-        pushOptional(args, "--max-text-length", numberString(params.maxTextLength));
-        return args;
-      }
-    });
-
-    registerCliTool(api, {
-      name: "agent_knock_knock_send",
-      description: "Send a message, follow-up, or new task to an existing open Agent Knock Knock or terminal-controlled coding-agent session from AKK list, including Codex or Claude Code in tmux. Do not start a new delegate for those requests. This is asynchronous: after acceptance, end the OpenClaw turn and wait for the AKK callback or a later explicit status request.",
-      parameters: sendParameters,
-      buildArgs: (params, toolContext) => {
-        const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
-        const openclawSession =
-          stringValue(toolContext?.sessionKey) ??
-          "agent:main:main";
-        const args = [
-          "send",
-          "--conversation",
-          requiredString(params.conversation_id, "conversation_id"),
-          "--message",
-          requiredString(params.message, "message"),
-          "--background"
-        ];
-        pushOptional(args, "--type", stringValue(params.type));
-        pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
-        pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(config.idleTimeoutMinutes));
-        pushOptional(args, "--agent-timeout-minutes", numberString(params.agentTimeoutMinutes) ?? numberString(config.agentTimeoutMinutes));
-        pushOptional(args, "--agent-hard-timeout-minutes", numberString(params.agentHardTimeoutMinutes) ?? numberString(config.agentHardTimeoutMinutes));
-        pushOptional(args, "--openclaw-session", openclawSession);
-        pushOptional(args, "--gateway-method", CALLBACK_METHOD);
-        pushOptional(args, "--gateway-session", openclawSession);
-        pushOptional(args, "--openclaw-bin", stringValue(config.openclawBin));
-        return args;
-      }
-    });
+    api.registerTool(
+      (toolContext) => ({
+        label: "AKK Send",
+        name: "agent_knock_knock_send",
+        description:
+          "Send a new task or follow-up through an existing Codex or Claude Code tmux terminal. Omit selector only when AKK should require one unique eligible idle pane; otherwise pass codex, claude, only, latest, an @short-ref from AKK list, or an authoritative full id. AKK never starts a coding agent. This is asynchronous: after acceptance, yield and wait for the callback or a later explicit status request.",
+        parameters: sendParameters,
+        async execute(_toolCallId, params) {
+          const result = await runSendRequest(
+            api,
+            isRecord(params) ? params : {},
+            toolContext
+          );
+          return toolResult(result);
+        }
+      }),
+      { name: "agent_knock_knock_send", optional: true }
+    );
 
     registerCliTool(api, {
       name: "agent_knock_knock_approve",
@@ -491,7 +335,9 @@ const plugin: OpenClawPluginDefinition = definePluginEntry({
         "Manually approve the current AKK terminal permission request only after the user reviews and explicitly confirms it. Claude Code uses no Hooks: this manual path accepts only an exact one-time Bash permission screen for the current managed turn, then recaptures its short-lived evidence and process identity before sending Enter. Separately, trusted default-disabled plugin configuration can auto-approve an exact Claude command/workspace match without exposing policy control to the model. Hook-free durable completion is independently verified from the local Claude transcript.",
       parameters: approveParameters,
       buildArgs: (params) => {
+        const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
         const args = ["approve", "--conversation", requiredString(params.conversation_id, "conversation_id")];
+        pushOptional(args, "--workspace", pluginWorkspace(config));
         pushOptional(
           args,
           "--expected-approval-fingerprint",
@@ -500,7 +346,7 @@ const plugin: OpenClawPluginDefinition = definePluginEntry({
         pushOptional(
           args,
           "--store-dir",
-          resolvePluginStoreDir(isRecord(api.pluginConfig) ? api.pluginConfig : {})
+          resolvePluginStoreDir(config)
         );
         return args;
       }
@@ -514,6 +360,7 @@ const plugin: OpenClawPluginDefinition = definePluginEntry({
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
         const args = ["renew", "--conversation", requiredString(params.conversation_id, "conversation_id")];
         pushOptional(args, "--minutes", numberString(params.minutes) ?? numberString(config.agentTimeoutMinutes));
+        pushOptional(args, "--workspace", pluginWorkspace(config));
         pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
         return args;
       }
@@ -526,6 +373,7 @@ const plugin: OpenClawPluginDefinition = definePluginEntry({
       buildArgs: (params) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
         const args = ["retry-callback", "--conversation", requiredString(params.conversation_id, "conversation_id")];
+        pushOptional(args, "--workspace", pluginWorkspace(config));
         pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
         return args;
       }
@@ -538,6 +386,7 @@ const plugin: OpenClawPluginDefinition = definePluginEntry({
       buildArgs: (params) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
         const args = ["cancel", "--conversation", requiredString(params.conversation_id, "conversation_id")];
+        pushOptional(args, "--workspace", pluginWorkspace(config));
         pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
         pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(config.idleTimeoutMinutes));
         return args;
@@ -550,8 +399,10 @@ const plugin: OpenClawPluginDefinition = definePluginEntry({
         "Close an AKK-managed task record without terminating the shared tmux pane. For an orphaned terminal dispatch only, the user must explicitly request recovery and provide the exact expected_message_id reported by AKK list.",
       parameters: closeParameters,
       buildArgs: (params) => {
+        const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
         const args = ["close", "--conversation", requiredString(params.conversation_id, "conversation_id")];
         pushOptional(args, "--reason", stringValue(params.reason));
+        pushOptional(args, "--workspace", pluginWorkspace(config));
         pushOptional(
           args,
           "--expected-message-id",
@@ -560,50 +411,12 @@ const plugin: OpenClawPluginDefinition = definePluginEntry({
         pushOptional(
           args,
           "--store-dir",
-          resolvePluginStoreDir(isRecord(api.pluginConfig) ? api.pluginConfig : {})
+          resolvePluginStoreDir(config)
         );
         return args;
       }
     });
 
-    registerCliTool(api, {
-      name: "agent_knock_knock_agent_takeover",
-      description:
-        "Build or execute a terminal-control attachment plan for an existing Codex session running inside tmux. The first call is side-effect-free; attach only after the user confirms the exact tmux target.",
-      parameters: agentTakeoverParameters,
-      buildArgs: (params, toolContext) => {
-        const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
-        const openclawSession =
-          stringValue(toolContext?.sessionKey) ??
-          "agent:main:main";
-        const args = [
-          "agent",
-          "takeover",
-          "--agent",
-          requiredString(params.agent, "agent"),
-          "--session-id",
-          requiredString(params.sessionId, "sessionId"),
-          "--strategy",
-          requiredString(params.strategy, "strategy")
-        ];
-        if (params.createConversation === true) {
-          args.push("--create-conversation");
-        }
-        if (params.confirmTerminal === true) {
-          args.push("--confirm-terminal");
-        }
-        pushOptional(args, "--terminal-target", stringValue(params.terminalTarget));
-        pushOptional(args, "--request", stringValue(params.request));
-        pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
-        pushOptional(args, "--openclaw-session", openclawSession);
-        pushOptional(args, "--gateway-method", CALLBACK_METHOD);
-        pushOptional(args, "--gateway-session", openclawSession);
-        pushOptional(args, "--openclaw-bin", stringValue(config.openclawBin));
-        pushOptional(args, "--idle-timeout-minutes", numberString(config.idleTimeoutMinutes));
-        pushOptional(args, "--codex-home", stringValue(params.codexHome) ?? stringValue(api.pluginConfig?.codexHome));
-        return args;
-      }
-    });
   }
 });
 
@@ -617,7 +430,6 @@ async function handleAkkCommand(api, ctx) {
     }
     if (parsed.action === "delegate") {
       const result = await runDelegate(api, {
-        agent: parsed.agent,
         request: parsed.request
       }, {
         sessionKey: ctx.sessionKey
@@ -649,8 +461,6 @@ async function handleAkkCommand(api, ctx) {
         return { text: formatAkkListCommandResult(result) };
       case "status":
         return { text: formatStatusCommandResult(result) };
-      case "describe":
-        return { text: formatDescribeCommandResult(result) };
       case "send":
         return {
           text: formatSendCommandResult(result),
@@ -726,6 +536,22 @@ function formatStatusCommandResult(result) {
   if (summary.request) {
     lines.push(`request: ${truncateText(summary.request, 180)}`);
   }
+  if (result.about) {
+    lines.push(`about: ${truncateText(result.about, 500)}`);
+  }
+  if (result.confidence) {
+    lines.push(`confidence: ${result.confidence}`);
+  }
+  const limitations = Array.isArray(result.limitations)
+    ? result.limitations.filter(Boolean)
+    : [];
+  if (limitations.length > 0) {
+    lines.push(`limitations: ${limitations.slice(0, 3).join("; ")}`);
+  }
+  const screen = terminalScreenExcerpt(result);
+  if (screen) {
+    lines.push(`terminal screen:\n${screen}`);
+  }
   return lines.join("\n");
 }
 
@@ -772,22 +598,6 @@ function formatRetryCallbackCommandResult(result) {
     `status: ${result.conversation?.status ?? "unknown"}`,
     `attempts: ${result.conversation?.callback_delivery?.attempts ?? "unknown"}`
   ].join("\n");
-}
-
-function formatDescribeCommandResult(result) {
-  const lines = [
-    `AKK description: ${result.conversation_id ?? "unknown"}`,
-    `source: ${result.source ?? "unknown"}`,
-    `confidence: ${result.confidence ?? "unknown"}`
-  ];
-  if (result.about) {
-    lines.push(`about: ${truncateText(result.about, 500)}`);
-  }
-  const limitations = Array.isArray(result.limitations) ? result.limitations.filter(Boolean) : [];
-  if (limitations.length > 0) {
-    lines.push(`limitations: ${limitations.slice(0, 3).join("; ")}`);
-  }
-  return lines.join("\n");
 }
 
 function formatSendCommandResult(result) {
@@ -874,24 +684,115 @@ function formatCloseCommandResult(result) {
   ].join("\n");
 }
 
-async function runDelegate(api, params, toolContext) {
+function buildStatusCliArgs(api, params) {
   const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
-  const binPath = stringValue(config.binPath) ?? defaultBinPath;
-  const workspace = stringValue(params.workspace) ?? stringValue(config.workspace) ?? process.cwd();
-  const rawRequest = requiredString(params.request, "request");
-  const prefixedRequest = stringValue(params.agent) ? undefined : parseLeadingExecutorAlias(rawRequest);
-  const request = prefixedRequest?.request ?? rawRequest;
-  const agent = executorDefinitionForKind(
-    stringValue(params.agent) ?? prefixedRequest?.kind ?? stringValue(config.defaultAgent) ?? "codex"
-  ).kind;
+  const args = [
+    "status",
+    "--conversation",
+    requiredString(params.conversation_id, "conversation_id")
+  ];
+  pushOptional(args, "--workspace", pluginWorkspace(config));
+  pushOptional(
+    args,
+    "--store-dir",
+    resolvePluginStoreDir(config)
+  );
+  pushOptional(
+    args,
+    "--idle-timeout-minutes",
+    numberString(params.idleTimeoutMinutes) ??
+      numberString(api.pluginConfig?.idleTimeoutMinutes)
+  );
+  if (params.trace === true) {
+    args.push("--trace");
+  }
+  return args;
+}
+
+function terminalScreenExcerpt(result): string | undefined {
+  const screen = result.terminal_screen;
+  const text = typeof screen === "string"
+    ? screen
+    : isRecord(screen)
+      ? stringValue(screen.excerpt) ??
+        stringValue(screen.text) ??
+        stringValue(screen.content)
+      : undefined;
+  if (!text) {
+    return undefined;
+  }
+  return text.length <= 1600
+    ? text
+    : `…${text.slice(-1599)}`;
+}
+
+async function runSendRequest(api, params, toolContext) {
+  const selector = stringValue(params.selector);
+  if (!selector) {
+    return runDelegate(api, params, toolContext);
+  }
+
+  const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
   const openclawSession =
     stringValue(toolContext?.sessionKey) ??
     "agent:main:main";
   const args = [
-    binPath,
+    "send",
+    "--conversation",
+    selector,
+    "--message",
+    requiredString(params.request, "request"),
+    "--background"
+  ];
+  pushOptional(args, "--type", stringValue(params.type));
+  pushOptional(args, "--workspace", pluginWorkspace(config));
+  pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
+  pushOptional(
+    args,
+    "--idle-timeout-minutes",
+    numberString(params.idleTimeoutMinutes) ??
+      numberString(config.idleTimeoutMinutes)
+  );
+  pushOptional(
+    args,
+    "--agent-timeout-minutes",
+    numberString(params.agentTimeoutMinutes) ??
+      numberString(config.agentTimeoutMinutes)
+  );
+  pushOptional(
+    args,
+    "--agent-hard-timeout-minutes",
+    numberString(params.agentHardTimeoutMinutes) ??
+      numberString(config.agentHardTimeoutMinutes)
+  );
+  pushOptional(args, "--openclaw-session", openclawSession);
+  pushOptional(args, "--gateway-method", CALLBACK_METHOD);
+  pushOptional(args, "--gateway-session", openclawSession);
+  pushOptional(args, "--openclaw-bin", stringValue(config.openclawBin));
+  return runCli(api, args);
+}
+
+function toolResult(result) {
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: JSON.stringify(result, null, 2)
+      }
+    ],
+    details: result
+  };
+}
+
+async function runDelegate(api, params, toolContext) {
+  const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+  const workspace = pluginWorkspace(config);
+  const request = requiredString(params.request, "request");
+  const openclawSession =
+    stringValue(toolContext?.sessionKey) ??
+    "agent:main:main";
+  const args = [
     "delegate",
-    "--agent",
-    agent,
     "--request",
     request,
     "--workspace",
@@ -908,7 +809,7 @@ async function runDelegate(api, params, toolContext) {
   pushOptional(args, "--agent-timeout-minutes", numberString(params.agentTimeoutMinutes) ?? numberString(config.agentTimeoutMinutes));
   pushOptional(args, "--agent-hard-timeout-minutes", numberString(params.agentHardTimeoutMinutes) ?? numberString(config.agentHardTimeoutMinutes));
 
-  const parsed = await runCliAsync(api, args.slice(1), { cwd: workspace });
+  const parsed = await runCliAsync(api, args, { cwd: workspace });
   const conversationId =
     parsed.conversation?.conversation_id ??
     parsed.conversation_id;
@@ -920,6 +821,9 @@ async function runDelegate(api, params, toolContext) {
     parsed.paths?.logPath;
   const submissionUncertain = parsed.submission_outcome === "uncertain";
   const submissionAborted = parsed.submission_outcome === "aborted";
+  const agent =
+    stringValue(parsed.conversation?.executor?.kind) ??
+    stringValue(parsed.agent);
   return {
     status: submissionUncertain
       ? "submission_uncertain"
@@ -1237,7 +1141,13 @@ function tryAutoApproveCallback({ api, message, conversationId, statePath }) {
     message,
     policy: config.autoApprove,
     statePath,
-    execute: (args) => runCli(api, args)
+    execute: (args) => {
+      return runCli(api, [
+        ...args,
+        "--workspace",
+        pluginWorkspace(config)
+      ]);
+    }
   });
   if (result) {
     api.logger.info?.(
@@ -1310,10 +1220,14 @@ function formatDoneShortcuts(conversationId) {
     "[AKK convenience commands]",
     "When summarizing this result to the user, include these short next-step commands:",
     "- `AKK list` lists live shared terminals and open AKK tasks.",
-    `- \`AKK send ${conversationId}: <message>\` continues in this same shared terminal.`,
+    "- Use the matching `@short-ref` from `AKK list`, then `AKK @short-ref: <message>` to continue in the same shared terminal.",
     `- \`AKK status ${conversationId}\` shows this task record.`,
-    `- \`AKK close ${conversationId}\` closes the AKK record without closing tmux.`
+    "- AKK never starts or closes the coding agent or tmux pane."
   ].join("\n");
+}
+
+function pluginWorkspace(config: Record<string, unknown>): string {
+  return stringValue(config.workspace) ?? process.cwd();
 }
 
 function pushOptional(args, flag, value) {
@@ -1353,7 +1267,7 @@ function parseJson(text) {
   try {
     return JSON.parse(text);
   } catch (error) {
-    throw new Error(`agent-knock-knock delegate returned invalid JSON: ${error.message}`);
+    throw new Error(`agent-knock-knock CLI returned invalid JSON: ${error.message}`);
   }
 }
 

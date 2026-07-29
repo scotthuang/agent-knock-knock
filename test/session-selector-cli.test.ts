@@ -150,6 +150,16 @@ test("CLI only prefers an active managed terminal bridge over its raw tmux pane"
     const managedId = sent.conversation.conversation_id;
     assert.notEqual(managedId, sent.conversation.native_session_takeover.native_session_id);
 
+    const listed = runCli([
+      "list",
+      "--store-dir",
+      storeDir,
+      ...runtimeArgs
+    ]);
+    assert.equal(listed.delegated.length, 1);
+    assert.equal(listed.delegated[0].id, managedId);
+    assert.deepEqual(listed.terminal_controlled, []);
+
     const status = runCli([
       "status",
       "--conversation",

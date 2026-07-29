@@ -28,7 +28,7 @@ test("OpenClaw diagnostics verify config, runtime, skill, workspace, and Gateway
     assert.equal(result.package_ready, true, JSON.stringify(result, null, 2));
     assert.equal(result.gateway_ready, true);
     assert.equal(result.workspace, canonicalWorkspace);
-    assert.equal(result.default_agent, "codex");
+    assert.equal("default_agent" in result, false);
     assert.equal(result.checks.length, 8);
     assert.equal(result.checks.every((check) => check.ok), true);
     assert.doesNotMatch(JSON.stringify(result), /do-not-return-this-secret/u);
@@ -37,7 +37,7 @@ test("OpenClaw diagnostics verify config, runtime, skill, workspace, and Gateway
   }
 });
 
-test("OpenClaw diagnostics expose only supported tmux coding agents", () => {
+test("OpenClaw diagnostics ignore the removed default-agent setting", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-openclaw-doctor-agent-"));
   const fakeOpenClaw = path.join(tempDir, "openclaw");
   const workspace = path.join(tempDir, "workspace");
@@ -56,7 +56,7 @@ test("OpenClaw diagnostics expose only supported tmux coding agents", () => {
         AKK_FAKE_SCENARIO: "ready"
       }
     });
-    assert.equal(claude.default_agent, "claude");
+    assert.equal("default_agent" in claude, false);
 
     const unsupported = runOpenClawChainDiagnostics({
       openclawBin: fakeOpenClaw,
@@ -67,7 +67,7 @@ test("OpenClaw diagnostics expose only supported tmux coding agents", () => {
         AKK_FAKE_SCENARIO: "ready"
       }
     });
-    assert.equal(unsupported.default_agent, undefined);
+    assert.equal("default_agent" in unsupported, false);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

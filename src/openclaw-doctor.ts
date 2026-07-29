@@ -29,7 +29,6 @@ export interface OpenClawChainDiagnostics {
   ready: boolean;
   package_ready: boolean;
   gateway_ready: boolean;
-  default_agent?: "codex" | "claude";
   workspace?: string;
   checks: OpenClawDiagnosticCheck[];
 }
@@ -203,7 +202,6 @@ export function runOpenClawChainDiagnostics(
   });
 
   const configuredWorkspace = stringValue(recordValue(entry?.config)?.workspace);
-  const configuredDefaultAgent = executorValue(recordValue(entry?.config)?.defaultAgent);
   const workspace = configuredWorkspace;
   const workspaceCheck = diagnoseWorkspace(workspace);
   if (workspaceCheck.ok && options.workspace && workspace) {
@@ -252,7 +250,6 @@ export function runOpenClawChainDiagnostics(
     ready: packageReady && gatewayOk,
     package_ready: packageReady,
     gateway_ready: gatewayOk,
-    ...(configuredDefaultAgent ? { default_agent: configuredDefaultAgent } : {}),
     ...(workspace ? { workspace } : {}),
     checks
   };
@@ -420,12 +417,6 @@ function recordValue(value: unknown): Record<string, any> | undefined {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0
-    ? value
-    : undefined;
-}
-
-function executorValue(value: unknown): "codex" | "claude" | undefined {
-  return value === "codex" || value === "claude"
     ? value
     : undefined;
 }

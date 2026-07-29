@@ -1,8 +1,4 @@
 import path from "node:path";
-import {
-  executorDefinitionForAlias,
-  type ExecutorKind
-} from "./executors.js";
 
 export const AKK_CALLBACK_METHOD = "agent-knock-knock.callback";
 
@@ -11,7 +7,6 @@ export type AkkCommand =
   | { action: "doctor" }
   | { action: "list" }
   | { action: "status"; conversationId?: string }
-  | { action: "describe"; conversationId?: string }
   | { action: "send"; conversationId: string; message: string }
   | {
       action: "approve";
@@ -27,12 +22,21 @@ export type AkkCommand =
       reason: string;
       expectedMessageId?: string;
     }
-  | { action: "delegate"; agent?: ExecutorKind; request: string };
+  | { action: "delegate"; request: string };
 
 export function parseAkkCommand(args: unknown): AkkCommand {
   const input = String(args ?? "").trim();
   if (!input || input === "help" || input === "-h" || input === "--help") {
     return { action: "help" };
+  }
+
+  const selectorMessage = parseSelectorMessage(input);
+  if (selectorMessage) {
+    return {
+      action: "send",
+      conversationId: selectorMessage.selector,
+      message: selectorMessage.message
+    };
   }
 
   const { token, rest } = takeToken(input);
@@ -54,26 +58,14 @@ export function parseAkkCommand(args: unknown): AkkCommand {
     return { action: "status", conversationId: conversationId || undefined };
   }
   if (action === "describe" || action === "summary" || action === "about") {
-    const { token: conversationId, rest: extra } = takeToken(rest);
-    if (extra.trim()) {
-      throw new Error("Usage: /akk describe [session-selector]");
-    }
-    return { action: "describe", conversationId: conversationId || undefined };
+    throw new Error(
+      "AKK describe was removed; use /akk status [session-selector]"
+    );
   }
   if (action === "send" || action === "reply") {
-    const { token: conversationId, rest: message } = takeRequiredToken(
-      rest,
-      "Usage: /akk send <session-selector>: <message>"
+    throw new Error(
+      "AKK send syntax changed; use /akk <session-selector>: <message>"
     );
-    const body = message.trim();
-    if (!body) {
-      throw new Error("Usage: /akk send <session-selector>: <message>");
-    }
-    return {
-      action: "send",
-      conversationId: conversationId.replace(/:$/u, ""),
-      message: body
-    };
   }
   if (action === "approve") {
     const { token: conversationId, rest: approvalInput } = takeRequiredToken(
@@ -138,21 +130,6 @@ export function parseAkkCommand(args: unknown): AkkCommand {
     };
   }
 
-  const executorDefinition = executorDefinitionForAlias(action);
-  if (executorDefinition) {
-    const request = rest.trim();
-    if (!request) {
-      throw new Error(`Usage: /akk ${executorDefinition.kind} <task>`);
-    }
-    return {
-      action: "delegate",
-      agent: executorDefinition.kind,
-      request
-    };
-  }
-
-  // Leaving agent unset is intentional: runDelegate applies the configured
-  // defaultAgent and falls back to Codex only when no default is configured.
   return { action: "delegate", request: input };
 }
 
@@ -160,18 +137,14 @@ export function akkUsageText(): string {
   return [
     "AKK usage:",
     "/akk <task>",
-    "/akk codex <task>",
-    "/akk claude <task>",
+    "/akk codex: <task>",
+    "/akk claude: <task>",
+    "/akk <only|latest|@short-ref>: <message>",
     "/akk list",
     "/akk doctor",
     "/akk status [only|latest|codex|claude|@short-ref]",
-    "/akk describe [session-selector]",
-    "/akk send <session-selector>: <message>",
     "/akk approve <session-selector> --expected-approval-fingerprint <fingerprint>",
-    "/akk cancel <session-selector>",
-    "/akk renew <session-selector> [minutes]",
-    "/akk retry-callback <session-selector>",
-    "/akk close <session-selector> [--expected-message-id <id>] [reason]"
+    "/akk cancel <session-selector>"
   ].join("\n");
 }
 
@@ -183,8 +156,7 @@ export function formatAkkListCommandResult(result: Record<string, unknown>): str
         ? arrayValue(result.delegated)
         : arrayValue(result.tasks)
     },
-    { label: "terminal-controlled", tasks: arrayValue(result.terminal_controlled) },
-    { label: "native", tasks: arrayValue(result.native) }
+    { label: "terminal-controlled", tasks: arrayValue(result.terminal_controlled) }
   ].filter((group) => group.tasks.length > 0);
   const total = groups.reduce((count, group) => count + group.tasks.length, 0);
   if (total === 0) {
@@ -212,6 +184,7 @@ export function buildAkkCommandCliArgs(
 ): string[] | undefined {
   const storeDir = resolvePluginStoreDir(config);
   const idleTimeoutMinutes = finiteNumberString(config.idleTimeoutMinutes);
+  const workspace = pluginWorkspace(config);
 
   switch (command.action) {
     case "help":
@@ -220,24 +193,25 @@ export function buildAkkCommandCliArgs(
     case "doctor":
       return withOptionalArgs(
         ["doctor"],
-        ["--workspace", nonEmptyString(config.workspace)],
+        ["--workspace", workspace],
         ["--openclaw-bin", nonEmptyString(config.openclawBin)]
       );
     case "list":
       return withOptionalArgs(
         ["list"],
+        ["--workspace", workspace],
         ["--store-dir", storeDir],
         ["--idle-timeout-minutes", idleTimeoutMinutes]
       );
     case "status":
-    case "describe":
       return withOptionalArgs(
         [
-          command.action,
+          "status",
           ...(command.conversationId
             ? ["--conversation", command.conversationId]
             : [])
         ],
+        ["--workspace", workspace],
         ["--store-dir", storeDir],
         ["--idle-timeout-minutes", idleTimeoutMinutes]
       );
@@ -254,6 +228,7 @@ export function buildAkkCommandCliArgs(
           command.message,
           "--background"
         ],
+        ["--workspace", workspace],
         ["--store-dir", storeDir],
         ["--idle-timeout-minutes", idleTimeoutMinutes],
         ["--agent-timeout-minutes", finiteNumberString(config.agentTimeoutMinutes)],
@@ -273,6 +248,7 @@ export function buildAkkCommandCliArgs(
           "--expected-approval-fingerprint",
           command.expectedApprovalFingerprint
         ],
+        ["--workspace", workspace],
         ["--store-dir", storeDir]
       );
     case "renew":
@@ -282,16 +258,19 @@ export function buildAkkCommandCliArgs(
           "--minutes",
           command.minutes ?? finiteNumberString(config.agentTimeoutMinutes)
         ],
+        ["--workspace", workspace],
         ["--store-dir", storeDir]
       );
     case "retry-callback":
       return withOptionalArgs(
         ["retry-callback", "--conversation", command.conversationId],
+        ["--workspace", workspace],
         ["--store-dir", storeDir]
       );
     case "cancel": {
       return withOptionalArgs(
         ["cancel", "--conversation", command.conversationId],
+        ["--workspace", workspace],
         ["--store-dir", storeDir],
         ["--idle-timeout-minutes", idleTimeoutMinutes]
       );
@@ -306,9 +285,34 @@ export function buildAkkCommandCliArgs(
           command.reason
         ],
         ["--expected-message-id", command.expectedMessageId],
+        ["--workspace", workspace],
         ["--store-dir", storeDir]
       );
   }
+}
+
+function pluginWorkspace(config: Record<string, unknown>): string {
+  return nonEmptyString(config.workspace) ?? process.cwd();
+}
+
+function parseSelectorMessage(
+  input: string
+): { selector: string; message: string } | undefined {
+  const match =
+    /^((?:(?:codex|claude):latest|only|latest|codex|claude|@[0-9a-f]+))\s*:\s*([\s\S]*)$/iu.exec(
+      input
+    );
+  const message = match?.[2]?.trim();
+  if (!match) {
+    return undefined;
+  }
+  if (!message) {
+    throw new Error("Usage: /akk <session-selector>: <message>");
+  }
+  return {
+    selector: match[1].toLowerCase(),
+    message
+  };
 }
 
 export function resolvePluginStoreDir(

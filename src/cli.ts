@@ -43,7 +43,6 @@ import {
 import {
   EXECUTOR_KINDS,
   executorDefinitionForKind,
-  isExecutorKind,
   type ExecutorKind
 } from "./executors.js";
 import { redactString, writeRuntimeLog } from "./runtime-log.js";
@@ -149,8 +148,6 @@ const CONVERSATION_STATUSES = new Set<ConversationStatus>([
 ]);
 const SESSION_SELECTOR_COMMANDS = new Set([
   "status",
-  "describe",
-  "summary",
   "send",
   "approve",
   "cancel",
@@ -204,9 +201,7 @@ class InlineCodexSessionAdapter implements CodexLocalSessionAdapter {
 
 const command = process.argv[2];
 const rawArgs = process.argv.slice(3);
-const args = command === "agent"
-  ? { agentCommand: rawArgs[0], ...parseArgs(rawArgs.slice(1)) }
-  : parseArgs(rawArgs);
+const args = parseArgs(rawArgs);
 
 runtimeLog("info", "cli_start", {
   command: command ?? "help",
@@ -242,8 +237,6 @@ async function runCommand(commandName, options) {
     await runList(options);
   } else if (commandName === "status") {
     await runStatus(options);
-  } else if (commandName === "describe" || commandName === "summary") {
-    await runDescribe(options);
   } else if (commandName === "send") {
     await runSend(options);
   } else if (commandName === "approve") {
@@ -268,8 +261,6 @@ async function runCommand(commandName, options) {
     runRetryCallback(options);
   } else if (commandName === "monitor") {
     await runMonitor(options);
-  } else if (commandName === "agent") {
-    await runAgent(options);
   } else {
     usage();
     process.exitCode = commandName ? 1 : 0;
@@ -282,18 +273,21 @@ function runInstallOpenClaw(options) {
   const workspace = options.workspace === undefined
     ? undefined
     : canonicalWorkspace(options.workspace);
-  const defaultAgent = optionalExecutorKind(options.defaultAgent);
+  if (options.defaultAgent !== undefined) {
+    throw new Error(
+      "--default-agent was removed; AKK now selects the only eligible idle tmux pane"
+    );
+  }
   if (options.mode !== undefined) {
     throw new Error("--mode was removed; Agent Knock Knock now uses tmux only");
   }
   if (
     skillOnly &&
     (workspace !== undefined ||
-      defaultAgent !== undefined ||
       options.verify === true)
   ) {
     throw new Error(
-      "--skill-only cannot be combined with --workspace, --default-agent, --mode, or --verify"
+      "--skill-only cannot be combined with --workspace, --mode, or --verify"
     );
   }
 
@@ -323,13 +317,7 @@ function runInstallOpenClaw(options) {
         : [{
             path: "plugins.entries.agent-knock-knock.config.workspace",
             value: workspace
-          }]),
-      ...(defaultAgent === undefined
-        ? []
-        : [{
-            path: "plugins.entries.agent-knock-knock.config.defaultAgent",
-            value: defaultAgent
-          }]),
+          }])
     ];
     runCheckedCommand(
       openclawBin,
@@ -372,8 +360,7 @@ function runInstallOpenClaw(options) {
     : false;
   const nextActions = installNextActions({
     pendingRestart,
-    verification,
-    agent: defaultAgent ?? "codex"
+    verification
   });
 
   printJson({
@@ -382,7 +369,6 @@ function runInstallOpenClaw(options) {
     pending_restart: pendingRestart,
     mode: skillOnly ? "skill_only" : "full",
     execution_mode: "tmux",
-    default_agent: defaultAgent ?? null,
     workspace: workspace ?? null,
     package_root: root,
     openclaw_bin: openclawBin ?? null,
@@ -408,25 +394,54 @@ function canonicalWorkspace(value: unknown): string {
   return canonical;
 }
 
-function optionalExecutorKind(value: unknown): ExecutorKind | undefined {
-  if (value === undefined) {
-    return undefined;
+function matchesConfiguredWorkspace(
+  configuredWorkspace: unknown,
+  candidateWorkspace: unknown
+): boolean {
+  if (configuredWorkspace === undefined) {
+    return true;
   }
-  const normalized = String(value).trim().toLowerCase();
-  if (!isExecutorKind(normalized)) {
-    throw new Error(`--default-agent must be one of: ${EXECUTOR_KINDS.join(", ")}`);
+  if (candidateWorkspace === undefined || candidateWorkspace === null) {
+    return false;
   }
-  return normalized;
+  try {
+    return canonicalWorkspace(configuredWorkspace) ===
+      canonicalWorkspace(candidateWorkspace);
+  } catch {
+    return false;
+  }
+}
+
+function assertConfiguredWorkspace(
+  configuredWorkspace: unknown,
+  candidateWorkspace: unknown,
+  subject: string
+): void {
+  if (configuredWorkspace === undefined) {
+    return;
+  }
+  const configured = canonicalWorkspace(configuredWorkspace);
+  let candidate: string;
+  try {
+    candidate = canonicalWorkspace(candidateWorkspace);
+  } catch {
+    throw new Error(
+      `refusing ${subject}; its workspace cannot be verified against configured workspace ${configured}`
+    );
+  }
+  if (candidate !== configured) {
+    throw new Error(
+      `refusing ${subject}; workspace ${candidate} does not match configured workspace ${configured}`
+    );
+  }
 }
 
 function installNextActions({
   pendingRestart,
-  verification,
-  agent
+  verification
 }: {
   pendingRestart: boolean;
   verification?: Record<string, any>;
-  agent: ExecutorKind;
 }): Array<{ action: string; command: string }> {
   if (pendingRestart) {
     return [
@@ -463,8 +478,8 @@ function installNextActions({
   }
 
   return [{
-    action: "start_agent",
-    command: `tmux new -s akk-${agent} ${agent}`
+    action: "start_shared_terminal",
+    command: "tmux new -s akk-work -c \"$PWD\" codex # use claude instead when preferred"
   }];
 }
 
@@ -553,16 +568,8 @@ function buildDoctorReport(options): Record<string, any> {
     ...(options.workspace ? { workspace: String(options.workspace) } : {}),
     ...(timeoutMs === undefined ? {} : { timeoutMs })
   });
-  const selectedAgent =
-    optionalExecutorKind(options.defaultAgent) ??
-    openclaw.default_agent ??
-    "codex";
-  const selectedAgentReady =
-    capabilities.tmux.status === "ready" &&
-    capabilities.tmux.agents.includes(selectedAgent);
   const ok =
     capabilities.readiness === "ready" &&
-    selectedAgentReady &&
     filesOk &&
     openclaw.ready;
   return {
@@ -573,12 +580,13 @@ function buildDoctorReport(options): Record<string, any> {
         ? "not_ready"
         : "partially_ready",
     selected_mode: "tmux",
-    selected_agent: selectedAgent
-      ? {
-          agent: selectedAgent,
-          ready: selectedAgentReady
-        }
-      : null,
+    live_terminal: {
+      checked: false,
+      required_for_install_readiness: false,
+      detail:
+        "Installation readiness checks tmux and at least one supported CLI. " +
+        "AKK verifies a live eligible pane when delegation begins."
+    },
     package_root: root,
     checks,
     package_files: packageFiles,
@@ -589,6 +597,7 @@ function buildDoctorReport(options): Record<string, any> {
     notes: [
       `Node.js ${MINIMUM_NODE_VERSION}+ and OpenClaw are required.`,
       "AKK supports Codex and Claude Code through shared tmux terminals.",
+      "Doctor does not require a live coding-agent pane; delegation discovers and verifies one at send time.",
       "Claude tmux completion is hook-free and fails closed unless the local transcript schema is verified."
     ]
   };
@@ -618,94 +627,6 @@ function versionAtLeast(version: string, minimum: string): boolean {
     }
   }
   return true;
-}
-
-async function runAgent(options) {
-  const agentCommand = required(options.agentCommand, "agent subcommand is required: takeover");
-  if (agentCommand === "takeover") {
-    printJson(await runAgentTakeover(options));
-    return;
-  }
-  throw new Error(`unsupported agent subcommand: ${agentCommand}`);
-}
-
-async function runAgentTakeover(options) {
-  const agent = required(options.agent, "--agent is required");
-  const sessionId = required(options.sessionId, "--session-id is required");
-  const strategy = options.strategy ?? "terminal_control";
-  if (strategy !== "terminal_control") {
-    throw new Error(
-      "Agent Knock Knock only supports terminal_control takeover through tmux"
-    );
-  }
-  const provider = createAgentSessionProvider(agent, options);
-  const session = await provider.getSession(sessionId);
-  if (!session) {
-    return {
-      agent,
-      sessionId,
-      strategy,
-      status: "blocked",
-      sideEffectsExecuted: false,
-      error: {
-        code: "session_not_found",
-        message: `No ${agent} session found for ${sessionId}`
-      }
-    };
-  }
-
-  const activeSessions = await listActiveSessionsWithTerminalControl(provider, options);
-  const plan = planTerminalControlTakeover(session, activeSessions);
-  if (options.confirmTerminal === true) {
-    const terminalTarget = String(required(options.terminalTarget, "--terminal-target is required with --confirm-terminal"));
-    if (!options.createConversation) {
-      throw new Error("--create-conversation is required with --confirm-terminal");
-    }
-    const target = plan.targets.find((candidate) => candidate.terminalControl?.target === terminalTarget);
-    if (!plan.allowed || !target?.terminalControl) {
-      return {
-        agent,
-        sessionId,
-        strategy,
-        status: "blocked",
-        sideEffectsExecuted: false,
-        plan,
-        error: {
-          code: "terminal_target_unavailable",
-          message: `No matching terminal-controlled ${agent} process was found for ${terminalTarget}`
-        }
-      };
-    }
-    const attached = createNativeSessionConversation({
-      agent,
-      strategy,
-      session,
-      options,
-      takeoverMatchKind: "terminal_control",
-      terminalControl: target.terminalControl,
-      terminalAgentPid: target.pid,
-      needsBootstrap: false
-    });
-    return {
-      agent,
-      sessionId,
-      strategy,
-      status: "attached",
-      sideEffectsExecuted: true,
-      plan,
-      terminalControl: target.terminalControl,
-      ...attached
-    };
-  }
-
-  return {
-    agent,
-    sessionId,
-    strategy,
-    status: plan.allowed ? "requires_confirmation" : "blocked",
-    sideEffectsExecuted: false,
-    plan
-  };
 }
 
 async function listActiveSessionsWithTerminalControl(
@@ -891,7 +812,9 @@ function createTerminalAgentBridge(
     terminalProvider,
     async verifyIdentity({ agent, pid, terminalControl }) {
       const adapter = registry.require(agent);
-      const snapshots = await processSource.listProcessSnapshots(undefined, { includeCwd: false });
+      const snapshots = await processSource.listProcessSnapshots(undefined, {
+        includeCwd: options.workspace !== undefined
+      });
       const snapshot = snapshots.find((candidate) => candidate.pid === pid);
       if (!snapshot || !adapter.classifyProcess(snapshot)) {
         throw new Error(
@@ -909,6 +832,16 @@ function createTerminalAgentBridge(
           `terminal conversation agent ${agent} with pid ${pid} no longer belongs to pane ${terminalControl.target}`
         );
       }
+      assertConfiguredWorkspace(
+        options.workspace,
+        snapshot.cwd,
+        `terminal access to ${terminalControl.target} by agent process ${pid}`
+      );
+      assertConfiguredWorkspace(
+        options.workspace,
+        pane.currentPath,
+        `terminal access to ${terminalControl.target} by tmux pane`
+      );
       return {
         terminalControl: {
           ...terminalControl,
@@ -920,46 +853,6 @@ function createTerminalAgentBridge(
       };
     }
   });
-}
-
-function planTerminalControlTakeover(session, activeSessions: ActiveCodexProcess[]) {
-  const matched = activeSessions
-    .filter((process) =>
-      process.kind === "codex_cli" &&
-      process.terminalControl &&
-      (
-        process.sessionId === session.id ||
-        (!process.sessionId && process.cwd === session.cwd)
-      )
-    );
-  const matchedPidSet = new Set(matched.map((process) => process.pid));
-  const targets = matched
-    .filter((process) => !process.ppid || !matchedPidSet.has(process.ppid))
-    .map((process) => ({
-      pid: process.pid,
-      childPids: matched
-        .filter((child) => child.ppid === process.pid)
-        .map((child) => child.pid),
-      cwd: process.cwd,
-      command: process.command,
-      sessionId: process.sessionId,
-      terminalControl: process.terminalControl
-    }));
-
-  const exactTargets = targets.filter((target) => target.sessionId === session.id);
-  const selectableTargets = exactTargets.length > 0 ? exactTargets : targets;
-
-  return {
-    mode: "terminal_control",
-    allowed: selectableTargets.length === 1,
-    requiresConfirmation: selectableTargets.length === 1,
-    reason: selectableTargets.length === 0
-      ? "no_terminal_control_target"
-      : selectableTargets.length === 1
-        ? "terminal_control_available"
-        : "ambiguous_terminal_control_target",
-    targets: selectableTargets
-  };
 }
 
 function terminalControlFromTakeover(nativeTakeover): TerminalControlRef | undefined {
@@ -1194,100 +1087,19 @@ function isTerminalControlCapability(value: unknown): value is TerminalControlCa
   ].includes(value);
 }
 
-function createNativeSessionConversation({
-  agent,
-  strategy,
-  session,
-  options,
-  takeoverMatchKind = strategy,
-  terminalControl = undefined as TerminalControlRef | undefined,
-  terminalAgentPid = undefined as number | undefined,
-  needsBootstrap = false
-}) {
-  const workspace = session.cwd;
-  const storeDir = expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(workspace));
-  cleanupIdleConversations(storeDir, options);
-  const executor = resolveExecutor({
-    kind: agent,
-    session: session.id
-  });
-  const now = new Date();
-  const conversation = createConversation({
-    userRequest: options.request ?? `Attach native ${agent} session ${session.id}`,
-    workspace,
-    openclawSession: options.openclawSession ?? "agent:main:main",
-    executorKind: executor.kind,
-    executorSession: executor.session,
-    softLimit: Number(options.softLimit ?? 50),
-    hardLimit: Number(options.hardLimit ?? 100),
-    now
-  });
-  const paths = pathsForConversation(conversation.conversation_id, storeDir);
-  const attachedConversation = withStoragePaths({
-    ...conversation,
-    executor,
-    status: "idle" as const,
-    idle_since: now.toISOString(),
-    updated_at: now.toISOString(),
-    gateway_url: options.gatewayUrl ?? "ws://127.0.0.1:18789",
-    gateway_method: options.gatewayMethod,
-    gateway_session: options.gatewaySession ?? options.openclawSession ?? "agent:main:main",
-    openclaw_bin: options.openclawBin ?? resolveOptionalExecutable("openclaw"),
-    native_session_takeover: {
-      agent,
-      native_session_id: session.id,
-      terminal_agent_pid: terminalAgentPid,
-      source_cwd: session.cwd,
-      source_title: session.title,
-      strategy,
-      attached_at: now.toISOString(),
-      takeover_match_kind: takeoverMatchKind,
-      terminal_control: terminalControl,
-      needs_bootstrap: needsBootstrap,
-      terminal_bridge: true
-    }
-  }, paths);
-
-  saveState(paths.statePath, attachedConversation);
-  appendEvent(paths.logPath, {
-    ts: now.toISOString(),
-    conversation_id: attachedConversation.conversation_id,
-    event: "native_session_attached",
-    agent,
-    strategy,
-    native_session_id: session.id,
-    source_cwd: session.cwd,
-    executor
-  });
-  runtimeLog("info", "native_session_attached", {
-    conversation_id: attachedConversation.conversation_id,
-    agent,
-    strategy,
-    native_session_id: session.id,
-    state_path: paths.statePath,
-    event_log_path: paths.logPath
-  });
-
-  return {
-    conversation: attachedConversation,
-    paths,
-    next: `Use AKK send ${attachedConversation.conversation_id}: <message> to continue this native ${agent} session through AKK.`
-  };
-}
-
 async function runDelegate(options) {
   const request = required(options.request, "--request is required");
   const workspace = canonicalWorkspace(options.workspace ?? process.cwd());
-  const executor = resolveExecutor({
-    kind: options.agent ?? "codex"
-  });
-  const scan = await buildNativeListGroups({
+  const requestedAgent = options.agent === undefined
+    ? undefined
+    : resolveExecutor({ kind: options.agent }).kind;
+  const scan = await buildTerminalListGroup({
     options: {
       ...options,
       workspace,
       noApprovalScan: false
     },
-    agentFilter: executor.kind,
+    agentFilter: requestedAgent,
     statusFilter: undefined
   });
   if (scan.summary.error) {
@@ -1308,20 +1120,26 @@ async function runDelegate(options) {
     const observed = sameWorkspace.length > 0
       ? ` Found ${sameWorkspace.length} matching pane(s), but none is idle.`
       : "";
+    const requestedExecutor = requestedAgent
+      ? executorDefinitionForKind(requestedAgent)
+      : undefined;
     throw new Error(
-      `No idle ${executor.display_name} pane is available in ${workspace}.${observed} ` +
-      `Start ${executor.kind} inside tmux in that workspace, wait until it is idle, then retry.`
+      `No idle ${requestedExecutor?.displayName ?? "Codex or Claude Code"} pane is available in ${workspace}.${observed} ` +
+      `Start ${requestedAgent ?? "codex or claude"} inside tmux in that workspace, wait until it is idle, then retry.`
     );
   }
   if (eligible.length > 1) {
     const candidates = eligible
       .map((candidate) =>
-        `${candidate.short_ref} (${candidate.terminal_control?.target ?? candidate.id})`
+        `${candidate.short_ref} (${candidate.agent}, ${candidate.terminal_control?.target ?? candidate.id})`
       )
       .join(", ");
+    const scope = requestedAgent
+      ? executorDefinitionForKind(requestedAgent).displayName
+      : "coding-agent";
     throw new Error(
-      `Multiple idle ${executor.display_name} panes match ${workspace}: ${candidates}. ` +
-      "Use /akk list and /akk send <session>: <message> to choose one explicitly."
+      `Multiple idle ${scope} panes match ${workspace}: ${candidates}. ` +
+      "Use /akk codex: <task>, /akk claude: <task>, or /akk @short-ref: <message> to choose one explicitly."
     );
   }
 
@@ -1846,6 +1664,9 @@ async function runList(options) {
   const storedConversations = listConversations(storeDir)
     .filter((conversation) => includeAll || isActiveStatus(conversation.status))
     .filter((conversation) =>
+      matchesConfiguredWorkspace(options.workspace, conversation.workspace)
+    )
+    .filter((conversation) =>
       !agentFilter || executorForConversation(conversation).kind === agentFilter
     )
     .filter((conversation) => !statusFilter || conversation.status === statusFilter);
@@ -1858,23 +1679,50 @@ async function runList(options) {
       { terminalBridge: terminalBridgeEnabled(conversation) }
     )
   );
-  const nativeScan = await buildNativeListGroups({ options, agentFilter, statusFilter });
+  const terminalScan = await buildTerminalListGroup({ options, agentFilter, statusFilter });
+  const managedTerminalKeys = new Set(
+    storedConversations
+      .filter((conversation) => isActiveStatus(conversation.status))
+      .map((conversation) =>
+        terminalControlSelectorKey(
+          terminalControlFromTakeover(
+            isRecord(conversation.native_session_takeover)
+              ? conversation.native_session_takeover
+              : undefined
+          )
+        )
+      )
+      .filter((key): key is string => key !== undefined)
+  );
+  const terminalControlled = terminalScan.terminalControlled.filter((entry) => {
+    if (
+      !matchesConfiguredWorkspace(
+        options.workspace,
+        entry.workspace ?? entry.cwd
+      )
+    ) {
+      return false;
+    }
+    const key = terminalControlSelectorKey(entry.terminal_control);
+    return key === undefined || !managedTerminalKeys.has(key);
+  });
 
   printJson({
     store_dir: storeDir,
     cleanup,
     delegated,
-    native: nativeScan.native,
-    terminal_controlled: nativeScan.terminalControlled,
-    native_scan: nativeScan.summary,
+    terminal_controlled: terminalControlled,
+    terminal_scan: {
+      ...terminalScan.summary,
+      terminal_controlled_count: terminalControlled.length
+    },
     tasks: conversations
   });
   runtimeLog("info", "tasks_listed", {
     store_dir: storeDir,
     returned_count: conversations.length,
-    native_count: nativeScan.native.length,
-    terminal_controlled_count: nativeScan.terminalControlled.length,
-    native_scan_error: nativeScan.summary.error,
+    terminal_controlled_count: terminalControlled.length,
+    terminal_scan_error: terminalScan.summary.error,
     include_all: includeAll,
     agent_filter: agentFilter,
     status_filter: statusFilter,
@@ -1882,9 +1730,8 @@ async function runList(options) {
   });
 }
 
-async function buildNativeListGroups({ options, agentFilter, statusFilter }) {
+async function buildTerminalListGroup({ options, agentFilter, statusFilter }) {
   const empty = {
-    native: [],
     terminalControlled: [],
     summary: {
       enabled: false,
@@ -1901,7 +1748,7 @@ async function buildNativeListGroups({ options, agentFilter, statusFilter }) {
       summary: {
         enabled: false,
         agents: [],
-        skipped: `native active discovery skipped for status filter ${statusFilter}`
+        skipped: `terminal discovery skipped for status filter ${statusFilter}`
       }
     };
   }
@@ -1922,9 +1769,10 @@ async function buildNativeListGroups({ options, agentFilter, statusFilter }) {
 
   const terminalProvider = createTerminalControlProvider(options);
   const bridge = createTerminalAgentBridge(options, terminalProvider, registry);
-  const terminalScan = options.terminalDebug ? await terminalControlDiagnostics(terminalProvider) : undefined;
+  const terminalDiagnostics = options.terminalDebug
+    ? await terminalControlDiagnostics(terminalProvider)
+    : undefined;
   const terminalControlled: Record<string, any>[] = [];
-  const native: Record<string, any>[] = [];
   let activeCount = 0;
   const errors: string[] = [];
   try {
@@ -1939,35 +1787,32 @@ async function buildNativeListGroups({ options, agentFilter, statusFilter }) {
       snapshots,
       adapters.map((adapter) => adapter.agent)
     );
-    activeCount = activeSessions.length;
     const rootSessions = rootActiveProcesses(activeSessions);
-    for (const session of rootSessions) {
-      if (session.terminalControl) {
-        terminalControlled.push(await terminalControlledListEntry(
-          session,
-          activeSessions,
-          options,
-          bridge
-        ));
-      } else {
-        native.push(nativeListEntry(session, activeSessions));
-      }
+    const controlledSessions = rootSessions.filter(
+      (session) => session.terminalControl !== undefined
+    );
+    activeCount = controlledSessions.length;
+    for (const session of controlledSessions) {
+      terminalControlled.push(await terminalControlledListEntry(
+        session,
+        activeSessions,
+        options,
+        bridge
+      ));
     }
   } catch (error) {
     errors.push(error instanceof Error ? error.message : String(error));
   }
 
   return {
-    native,
     terminalControlled,
     summary: {
       enabled: true,
       agents: adapters.map((adapter) => adapter.agent),
       active_count: activeCount,
-      native_count: native.length,
       terminal_controlled_count: terminalControlled.length,
       approval_scan: options.noApprovalScan ? "disabled" : "enabled",
-      terminal_scan: terminalScan,
+      diagnostics: terminalDiagnostics,
       error: errors.length > 0 ? errors.join("; ") : undefined
     }
   };
@@ -1998,34 +1843,6 @@ function delegatedListEntry(
       close: task.status !== "closed",
       status: true,
       approve: terminalBridge && isActiveStatus(task.status)
-    }
-  };
-}
-
-function nativeListEntry(session: ActiveTerminalProcess, activeSessions: ActiveTerminalProcess[]) {
-  const id = `native:${session.agent}:${session.pid}`;
-  return {
-    id,
-    short_ref: sessionShortRef(id),
-    source: "native_active",
-    agent: session.agent,
-    status: "active",
-    pid: session.pid,
-    child_pids: childPidsForRoot(session, activeSessions),
-    command: session.command,
-    cwd: session.cwd,
-    workspace: session.cwd,
-    elapsed: session.elapsed,
-    session_id: session.sessionId,
-    confidence: session.confidence,
-    reason: session.reason,
-    commands: {
-      terminal_control_attach: false,
-      send: false,
-      cancel: false,
-      approve: false,
-      close: false,
-      status: false
     }
   };
 }
@@ -2213,14 +2030,18 @@ async function sessionSelectorCandidates(
   const storeDir = storeDirFromOptions(options);
   cleanupIdleConversations(storeDir, options);
   const storedConversations = listConversations(storeDir);
-  const managed = storedConversations.map((conversation) =>
-    delegatedListEntry(
-      summarizeConversation(conversation),
-      { terminalBridge: terminalBridgeEnabled(conversation) }
-    )
+  const workspaceConversations = storedConversations
+    .filter((conversation) =>
+      matchesConfiguredWorkspace(options.workspace, conversation.workspace)
+    );
+  const managed = workspaceConversations.map((conversation) =>
+      delegatedListEntry(
+        summarizeConversation(conversation),
+        { terminalBridge: terminalBridgeEnabled(conversation) }
+      )
   );
   const managedTerminalKeys = new Set(
-    storedConversations
+    workspaceConversations
       .filter((conversation) => isActiveStatus(conversation.status))
       .map((conversation) =>
         terminalControlSelectorKey(
@@ -2233,7 +2054,7 @@ async function sessionSelectorCandidates(
       )
       .filter((key): key is string => key !== undefined)
   );
-  const nativeScan = await buildNativeListGroups({
+  const terminalScan = await buildTerminalListGroup({
     options: {
       ...options,
       noApprovalScan: commandName === "approve"
@@ -2246,11 +2067,18 @@ async function sessionSelectorCandidates(
   const observedAtMs = Date.now();
   return [
     ...managed,
-    ...nativeScan.terminalControlled.filter((entry) => {
+    ...terminalScan.terminalControlled.filter((entry) => {
+      if (
+        !matchesConfiguredWorkspace(
+          options.workspace,
+          entry.workspace ?? entry.cwd
+        )
+      ) {
+        return false;
+      }
       const key = terminalControlSelectorKey(entry.terminal_control);
       return key === undefined || !managedTerminalKeys.has(key);
-    }),
-    ...nativeScan.native
+    })
   ].map((entry) => ({
     id: String(entry.id),
     agent: resolveExecutor({ kind: entry.agent }).kind,
@@ -2280,15 +2108,9 @@ function terminalControlSelectorKey(value: unknown): string | undefined {
 }
 
 function sessionEntrySupportsCommand(entry, commandName): boolean {
-  if (commandName === "summary") {
-    commandName = "describe";
-  }
   const commands = isRecord(entry.commands) ? entry.commands : {};
   if (typeof commands[commandName] === "boolean") {
     return commands[commandName] === true;
-  }
-  if (commandName === "describe") {
-    return commands.status === true || entry.source === "native_active";
   }
   if (entry.source !== "akk_delegate") {
     return false;
@@ -2322,22 +2144,6 @@ async function resolveTerminalConversationFromOptions(
   );
 }
 
-function parseNativeConversationId(conversationId: string | undefined): { conversationId: string; agent: "codex"; pid: number } | undefined {
-  const prefix = "native:codex:";
-  if (!conversationId?.startsWith(prefix)) {
-    return undefined;
-  }
-  const pid = Number(conversationId.slice(prefix.length));
-  if (!Number.isInteger(pid)) {
-    throw new Error(`invalid native conversation id: ${conversationId}`);
-  }
-  return {
-    conversationId,
-    agent: "codex",
-    pid
-  };
-}
-
 async function runStatus(options) {
   cleanupIdleConversations(storeDirFromOptions(options), options);
   const terminalConversation = await resolveTerminalConversationFromOptions(options);
@@ -2353,9 +2159,16 @@ async function runStatus(options) {
         terminalTarget: terminalConversation.terminalControl.target
       }
     );
+    const context = await terminalStatusContext(
+      terminalConversation,
+      terminalStatus,
+      options
+    );
     printJson({
       conversation_id: terminalConversation.conversationId,
       source: "terminal_control",
+      agent: terminalConversation.agent,
+      ...context,
       terminal_control: terminalConversation.terminalControl,
       terminal_status: terminalStatus,
       terminal_screen: terminalStatus.screen
@@ -2378,6 +2191,9 @@ async function runStatus(options) {
   const result: Record<string, any> = {
     conversation,
     summary: summarizeConversation(conversation),
+    confidence: "high",
+    about: managedConversationAbout(conversation, events),
+    limitations: [],
     state_path: statePath,
     event_log_path: logPath,
     budget: budgetAction(conversation),
@@ -2399,6 +2215,16 @@ async function runStatus(options) {
       terminalRuntimeIdentityForConversation(conversation, terminalControl)
     );
     result.terminal_screen = result.terminal_status.screen;
+    result.about = managedConversationAbout(
+      conversation,
+      events,
+      result.terminal_status
+    );
+    result.limitations = result.terminal_status.reachable === false
+      ? ["terminal status unavailable"]
+      : [];
+  } else {
+    result.limitations = ["terminal control metadata is unavailable"];
   }
   printJson(result);
   runtimeLog("info", "task_status_read", {
@@ -2411,99 +2237,56 @@ async function runStatus(options) {
   });
 }
 
-async function runDescribe(options) {
-  cleanupIdleConversations(storeDirFromOptions(options), options);
-  const conversationId = required(options.conversation ?? options.conversationId, "--conversation is required");
-  const terminalConversation = await resolveTerminalConversationFromOptions(options);
-  if (terminalConversation) {
-    const terminalStatus = await terminalStatusForControl(
-      terminalConversation.agent,
-      terminalConversation.terminalControl,
-      options,
-      {
-        pid: terminalConversation.pid,
-        cwd: terminalConversation.terminalControl.currentPath,
-        conversationId: terminalConversation.conversationId,
-        terminalTarget: terminalConversation.terminalControl.target
-      }
-    );
-    if (terminalConversation.agent !== "codex") {
-      const adapter = createRuntimeTerminalAgentRegistry(options).require(terminalConversation.agent);
-      printJson({
-        conversation_id: conversationId,
-        source: "terminal_control",
-        agent: terminalConversation.agent,
-        confidence: terminalStatus.reachable ? "medium" : "low",
-        about: terminalStatus.reachable
-          ? `${adapter.displayName} is attached through ${terminalConversation.terminalControl.kind}:${terminalConversation.terminalControl.target}.`
-          : `${adapter.displayName} terminal status is unavailable.`,
-        evidence: {
-          terminal_status: terminalStatus,
-          terminal_screen: terminalStatus.screen
-        },
-        limitations: ["Historical session context is not available for this terminal adapter."],
-        terminal_control: terminalConversation.terminalControl
-      });
-      return;
-    }
-    const process = await activeCodexProcessForPid(options, terminalConversation.pid);
-    printJson(await describeNativeCodexSession({
-      id: conversationId,
-      source: "terminal_control",
-      process,
-      options,
-      terminalControl: terminalConversation.terminalControl,
-      terminalStatus
-    }));
-    return;
-  }
-
-  const nativeConversation = parseNativeConversationId(conversationId);
-  if (nativeConversation) {
-    const process = await activeCodexProcessForPid(options, nativeConversation.pid);
-    printJson(await describeNativeCodexSession({
-      id: conversationId,
-      source: "native_active",
-      process,
-      options
-    }));
-    return;
-  }
-
-  const loaded = loadConversationFromOptions(options);
-  const { statePath, logPath } = loaded;
-  const conversation = await migrateLegacyTerminalAgentIdentity({
-    ...loaded,
-    options
-  });
-  const events = readExistingEvents(logPath);
-  const terminalControl = terminalControlFromTakeover(
-    isRecord(conversation.native_session_takeover) ? conversation.native_session_takeover : undefined
-  );
-  const terminalStatus = terminalControl
-    ? await terminalStatusForControl(
-        executorForConversation(conversation).kind,
-        terminalControl,
+async function terminalStatusContext(
+  terminalConversation: ResolvedTerminalConversation,
+  terminalStatus: Record<string, any>,
+  options
+): Promise<{
+  confidence: string;
+  about: string;
+  limitations: string[];
+}> {
+  if (terminalConversation.agent === "codex") {
+    try {
+      const process = await activeCodexProcessForPid(
         options,
-        terminalRuntimeIdentityForConversation(conversation, terminalControl)
-      )
-    : undefined;
-  printJson({
-    conversation_id: conversation.conversation_id,
-    source: "akk_managed",
-    confidence: "high",
-    about: managedConversationAbout(conversation, events, terminalStatus),
-    summary: summarizeConversation(conversation),
-    evidence: {
-      initial_request: conversation.user_request,
-      recent_messages: recentMessageEvidence(events),
-      trace: buildConversationTrace({ conversation, events, logPath }),
-      terminal_screen: terminalStatus?.screen
-    },
-    limitations: terminalStatus?.reachable === false ? ["terminal status unavailable"] : [],
-    state_path: statePath,
-    event_log_path: logPath
-  });
+        terminalConversation.pid
+      );
+      const description = await codexTerminalStatusContext({
+        id: terminalConversation.conversationId,
+        process,
+        options,
+        terminalControl: terminalConversation.terminalControl,
+        terminalStatus
+      });
+      return {
+        confidence: description.confidence,
+        about: description.about,
+        limitations: description.limitations
+      };
+    } catch {
+      return {
+        confidence: "low",
+        about: terminalStatus.reachable
+          ? `Codex is attached through ${terminalConversation.terminalControl.kind}:${terminalConversation.terminalControl.target}.`
+          : "Codex terminal status is unavailable.",
+        limitations: [
+          "Codex historical session context is unavailable; live terminal status remains authoritative."
+        ]
+      };
+    }
+  }
+  const adapter =
+    createRuntimeTerminalAgentRegistry(options).require(terminalConversation.agent);
+  return {
+    confidence: terminalStatus.reachable ? "medium" : "low",
+    about: terminalStatus.reachable
+      ? `${adapter.displayName} is attached through ${terminalConversation.terminalControl.kind}:${terminalConversation.terminalControl.target}.`
+      : `${adapter.displayName} terminal status is unavailable.`,
+    limitations: [
+      "Historical session context is not available for this terminal adapter."
+    ]
+  };
 }
 
 async function terminalStatusForControl(
@@ -4730,6 +4513,15 @@ async function runReconcileMonitors(options) {
   let errors = 0;
 
   for (const listedConversation of conversations) {
+    if (
+      !matchesConfiguredWorkspace(
+        options.workspace,
+        listedConversation.workspace
+      )
+    ) {
+      ignored += 1;
+      continue;
+    }
     const statePath = expandHome(
       stringValue(listedConversation.state_path) ??
         statePathForConversationId(listedConversation.conversation_id, storeDir)
@@ -8962,6 +8754,11 @@ function loadConversationFromOptions(options) {
   const conversation = options.state
     ? loadState(statePath)
     : loadConversationById(conversationId, storeDir);
+  assertConfiguredWorkspace(
+    options.workspace,
+    conversation.workspace,
+    `access to AKK conversation ${conversation.conversation_id}`
+  );
   return {
     conversation,
     statePath,
@@ -9018,16 +8815,14 @@ async function activeCodexProcessForPid(options, pid: number | undefined): Promi
   return activeSessions.find((process) => process.pid === pid);
 }
 
-async function describeNativeCodexSession({
+async function codexTerminalStatusContext({
   id,
-  source,
   process,
   options,
   terminalControl,
   terminalStatus
 }: {
   id: string;
-  source: "native_active" | "terminal_control";
   process?: ActiveCodexProcess;
   options: Record<string, any>;
   terminalControl?: TerminalControlRef;
@@ -9043,9 +8838,8 @@ async function describeNativeCodexSession({
       maxTextLength: Number(options.maxTextLength ?? 1200)
     });
     if (context) {
-      return nativeDescriptionFromContext({
+      return codexTerminalContextFromHistory({
         id,
-        source,
         confidence: "high",
         match: "session_id",
         process,
@@ -9070,9 +8864,8 @@ async function describeNativeCodexSession({
       maxTextLength: Number(options.maxTextLength ?? 1200)
     });
     if (context) {
-      return nativeDescriptionFromContext({
+      return codexTerminalContextFromHistory({
         id,
-        source,
         confidence: sessions.length === 1 ? "medium" : "low",
         match: sessions.length === 1 ? "cwd" : "cwd_latest",
         process,
@@ -9095,7 +8888,7 @@ async function describeNativeCodexSession({
 
   return {
     conversation_id: id,
-    source,
+    source: "terminal_control",
     confidence: "screen_only",
     match: "terminal_screen",
     about: screenOnlyAbout({ process, terminalStatus }),
@@ -9112,9 +8905,8 @@ async function describeNativeCodexSession({
   };
 }
 
-function nativeDescriptionFromContext({
+function codexTerminalContextFromHistory({
   id,
-  source,
   confidence,
   match,
   process,
@@ -9125,7 +8917,6 @@ function nativeDescriptionFromContext({
   candidates
 }: {
   id: string;
-  source: "native_active" | "terminal_control";
   confidence: "high" | "medium" | "low";
   match: string;
   process?: ActiveCodexProcess;
@@ -9137,7 +8928,7 @@ function nativeDescriptionFromContext({
 }) {
   return {
     conversation_id: id,
-    source,
+    source: "terminal_control",
     confidence,
     match,
     about: rolloutAbout(context, terminalStatus),
@@ -10279,17 +10070,11 @@ function usage() {
   agent-knock-knock delegate --request <text> [--agent ${agentList}] [--workspace <path>] [--store-dir <dir>]
   agent-knock-knock list [--store-dir <dir>] [--agent ${agentList}] [--status <status>] [--all] [--managed-only] [--no-approval-scan] [--terminal-debug]
   agent-knock-knock status [--conversation <id|selector>] [--store-dir <dir>] [--trace]
-  agent-knock-knock describe [--conversation <id|selector>] [--store-dir <dir>]
   agent-knock-knock send [--conversation <id|selector>] --message <text> [--type answer|task|control] [--agent-timeout-minutes <minutes>] [--agent-hard-timeout-minutes <minutes>]
-  agent-knock-knock approve [--conversation <id|selector>]
+  agent-knock-knock approve [--conversation <id|selector>] --expected-approval-fingerprint <fingerprint>
   agent-knock-knock cancel [--conversation <id|selector>]
-  agent-knock-knock renew [--conversation <id|selector>] [--minutes <inactivity-minutes>]
-  agent-knock-knock reconcile-monitors [--store-dir <dir>]
-  agent-knock-knock retry-callback --conversation <id> [--store-dir <dir>]
-  agent-knock-knock close --conversation <id> [--expected-message-id <id>] [--reason <text>]
-  agent-knock-knock install-openclaw [--workspace <path>] [--default-agent ${agentList}] [--verify] [--openclaw-bin <path>] [--skill-path <path>] [--skill-only] [--no-restart]
+  agent-knock-knock install-openclaw [--workspace <path>] [--verify] [--openclaw-bin <path>] [--skill-path <path>] [--skill-only] [--no-restart]
   agent-knock-knock doctor [--workspace <path>] [--openclaw-bin <path>]
-  agent-knock-knock agent takeover --agent codex --session-id <id> --strategy terminal_control [--create-conversation]
   agent-knock-knock callback --state <file> --message-json <json> [--record-only]
   agent-knock-knock transcript --log <file> [--include-raw]
   agent-knock-knock transcript --conversation <dir> [--include-raw]
