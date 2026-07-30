@@ -36,6 +36,14 @@ export interface CreateCodexTerminalAgentAdapterOptions {
   >;
 }
 
+const CODEX_PRIMARY_APPROVAL_OPTION =
+  /^[\s›»]*1\.\s+(Yes,[^(]+)\(([^)]+)\)/u;
+const CODEX_NUMBERED_OPTION = /^[\s›»]*\d+\.\s+/u;
+const CODEX_PROMPT_ACTIVITY = /^[›»]\s+(?!\d+\.)\S/u;
+const CODEX_COMPOSER_LINE = /^[›»](?:\s|$)/u;
+const CODEX_TRANSCRIPT_PROMPT_LINE = /^[ \t]*[›»](?:\s|$).*$/gmu;
+const CODEX_SKILLS_HINT = /^[›»]\s+Use \/skills\b/u;
+
 export function createCodexTerminalAgentAdapter(
   options: CreateCodexTerminalAgentAdapterOptions = {}
 ): TerminalAgentAdapter<CodexProcessKind> {
@@ -112,7 +120,7 @@ export function detectCodexApprovalPrompt(screen: string): CodexApprovalPromptDe
   }
 
   for (const line of prompt.region.split(/\r?\n/)) {
-    const match = /^[\s›]*1\.\s+(Yes,[^(]+)\(([^)]+)\)/u.exec(line.trim());
+    const match = CODEX_PRIMARY_APPROVAL_OPTION.exec(line.trim());
     if (!match) {
       continue;
     }
@@ -332,7 +340,14 @@ function commandFromApprovalRegion(region: string): string | undefined {
   const parts: string[] = [];
   for (let index = commandStart; index < lines.length; index += 1) {
     const line = lines[index];
-    if (index > commandStart && (!line.trim() || /^[\s›]*\d+\.\s+/u.test(line) || /Press enter to confirm/u.test(line))) {
+    if (
+      index > commandStart &&
+      (
+        !line.trim() ||
+        CODEX_NUMBERED_OPTION.test(line) ||
+        /Press enter to confirm/u.test(line)
+      )
+    ) {
       break;
     }
     parts.push(index === commandStart ? line.replace(/^\s*\$\s+/u, "").trim() : line.trim());
@@ -349,7 +364,7 @@ function isPostApprovalActivityLine(line: string): boolean {
   if (/^✔\s+You approved\b/u.test(trimmed)) {
     return true;
   }
-  if (/^›\s+(?!1\.)\S/u.test(trimmed)) {
+  if (CODEX_PROMPT_ACTIVITY.test(trimmed)) {
     return true;
   }
   if (/^•\s+(Working|Ran|Explored|Edited|Read|Called|Searching|Planning|Updated|Added|Deleted|Modified|Running|Thinking)\b/u.test(trimmed)) {
@@ -374,7 +389,10 @@ function isCodexWorkingLine(line: string): boolean {
 
 function isCodexIdlePromptLine(line: string): boolean {
   const trimmed = line.trim();
-  return /^›(?:\s|$)/u.test(trimmed) && !/^›\s*1\./u.test(trimmed);
+  return (
+    CODEX_COMPOSER_LINE.test(trimmed) &&
+    !CODEX_NUMBERED_OPTION.test(trimmed)
+  );
 }
 
 function whitespaceInsensitiveMatchEnd(text: string, expected: string): number | undefined {
@@ -419,7 +437,7 @@ function latestCompletedCodexSegment(text: string): string | undefined {
     ? 0
     : previousCompletion.index + previousCompletion[0].length;
   const beforeCompletion = text.slice(0, completion.index);
-  const prompts = [...beforeCompletion.matchAll(/^[ \t]*›(?:\s|$).*$/gmu)];
+  const prompts = [...beforeCompletion.matchAll(CODEX_TRANSCRIPT_PROMPT_LINE)];
   const latestPrompt = prompts.at(-1);
   if (latestPrompt?.index !== undefined && latestPrompt.index >= start) {
     start = latestPrompt.index + latestPrompt[0].length;
@@ -439,7 +457,7 @@ function cleanCodexTerminalScreenText(text: string): string | undefined {
     .filter((line) => {
       const trimmed = line.trim();
       return trimmed &&
-        !trimmed.startsWith("› Use /skills") &&
+        !CODEX_SKILLS_HINT.test(trimmed) &&
         !/^gpt-[\w.-]+/u.test(trimmed) &&
         !/^[-\w.]+ default ·/u.test(trimmed);
     });

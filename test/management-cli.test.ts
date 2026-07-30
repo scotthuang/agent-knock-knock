@@ -90,7 +90,40 @@ test("list exposes only tmux-controlled sessions", () => {
     assert.equal(listed.terminal_controlled[0].commands.status, true);
     assert.equal("capture_screen" in listed.terminal_controlled[0].commands, false);
     assert.equal("detach" in listed.terminal_controlled[0].commands, false);
-    assert.equal(listed.action_contracts.version, 1);
+    assert.equal(listed.action_contracts.version, 2);
+    assert.match(
+      listed.action_contracts.instructions.join("\n"),
+      /Never use commands for routing or tool calls/u
+    );
+    assert.deepEqual(
+      listed.action_contracts.field_semantics.status,
+      {
+        delegated: "task_lifecycle",
+        terminal_controlled: "process_liveness",
+        authoritative_for_tool_calls: false
+      }
+    );
+    assert.equal(
+      listed.action_contracts.field_semantics.activity_state
+        .authoritative_for_tool_calls,
+      false
+    );
+    assert.equal(
+      listed.action_contracts.field_semantics.commands.deprecated,
+      true
+    );
+    assert.equal(
+      listed.action_contracts.field_semantics.commands
+        .authoritative_for_tool_calls,
+      false
+    );
+    assert.deepEqual(
+      listed.action_contracts.field_semantics.available_actions,
+      {
+        meaning: "currently_safe_actions",
+        authoritative_for_tool_calls: true
+      }
+    );
     assert.deepEqual(
       Object.keys(listed.action_contracts.actions),
       [
@@ -318,6 +351,92 @@ test("list exposes terminal-controlled Codex working activity state", () => {
     assert.deepEqual(
       listed.terminal_controlled[0].available_actions.cancel.arguments,
       { conversation_id: listed.terminal_controlled[0].id }
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("list recognizes the current Codex composer marker and keeps unknown screens fail closed", () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-list-current-codex-composer-")
+  );
+  const storeDir = path.join(tempDir, "conversations");
+  const workspace = path.join(tempDir, "workspace");
+  const terminalTarget = "codex-current:0.0";
+  const process = {
+    pid: 2222,
+    ppid: 9999,
+    elapsed: "00:30",
+    command: "codex",
+    cwd: workspace
+  };
+  const terminal = {
+    kind: "tmux",
+    target: terminalTarget,
+    session: "codex-current",
+    window: 0,
+    pane: 0,
+    panePid: 9999,
+    currentCommand: "node",
+    currentPath: workspace
+  };
+
+  try {
+    fs.mkdirSync(workspace, { recursive: true });
+    const idle = runCli([
+      "list",
+      "--store-dir",
+      storeDir,
+      "--processes-json",
+      JSON.stringify([process]),
+      "--terminals-json",
+      JSON.stringify([terminal]),
+      "--terminal-screens-json",
+      JSON.stringify({
+        [terminalTarget]: [
+          "The previous turn is complete.",
+          "",
+          "» Find and fix a bug in @filename",
+          "",
+          "gpt-5.6-sol high · /repo"
+        ].join("\n")
+      })
+    ]);
+    const idleEntry = idle.terminal_controlled[0];
+    assert.equal(idleEntry.status, "active");
+    assert.equal(idleEntry.activity_state, "idle");
+    assert.match(idleEntry.activity_reason, /input prompt/u);
+    assert.deepEqual(
+      idleEntry.available_actions.send.arguments,
+      { selector: idleEntry.id }
+    );
+    assert.equal(idleEntry.available_actions.cancel, undefined);
+
+    const unknown = runCli([
+      "list",
+      "--store-dir",
+      storeDir,
+      "--processes-json",
+      JSON.stringify([process]),
+      "--terminals-json",
+      JSON.stringify([terminal]),
+      "--terminal-screens-json",
+      JSON.stringify({
+        [terminalTarget]: [
+          "The result contains an inline » symbol.",
+          "No current Codex composer is visible."
+        ].join("\n")
+      })
+    ]);
+    const unknownEntry = unknown.terminal_controlled[0];
+    assert.equal(unknownEntry.status, "active");
+    assert.equal(unknownEntry.activity_state, "unknown");
+    assert.equal(unknownEntry.commands.send, true);
+    assert.equal(unknownEntry.commands.cancel, true);
+    assert.deepEqual(
+      Object.keys(unknownEntry.available_actions),
+      ["status"]
     );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });

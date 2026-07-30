@@ -148,6 +148,74 @@ test("Codex adapter preserves approval detection with an ordered key action", ()
   assert.doesNotMatch(inspection.screenExcerpt, /ark-test-secret-value/);
 });
 
+test("Codex adapter accepts current and legacy composer markers without weakening state precedence", () => {
+  for (const marker of ["›", "»"]) {
+    const idle = inspectCodexScreen({
+      screen: [
+        "The previous turn is complete.",
+        "",
+        `${marker} Find and fix a bug in @filename`
+      ].join("\n")
+    });
+    assert.equal(idle.activity.state, "idle", marker);
+
+    const emptyComposer = inspectCodexScreen({
+      screen: `Model: GPT-5\n\n${marker} `
+    });
+    assert.equal(emptyComposer.activity.state, "idle", `${marker}:empty`);
+
+    const working = inspectCodexScreen({
+      screen: [
+        "• Working (12s • esc to interrupt)",
+        "",
+        `${marker} Steer the current task`
+      ].join("\n")
+    });
+    assert.equal(working.activity.state, "working", `${marker}:working`);
+    assert.equal(working.completion, undefined);
+  }
+
+  const inlineMarker = inspectCodexScreen({
+    screen: "The final answer contains an inline » symbol.\nNo Codex composer is visible."
+  });
+  assert.equal(inlineMarker.activity.state, "unknown");
+
+  const numberedChoice = inspectCodexScreen({
+    screen: "A menu without a recognized approval marker\n» 1. First choice"
+  });
+  assert.equal(numberedChoice.activity.state, "unknown");
+});
+
+test("Codex adapter parses and invalidates approval prompts with the current composer marker", () => {
+  const currentApproval = inspectCodexScreen({
+    screen: [
+      "Would you like to run the following command?",
+      "",
+      "  $ git diff",
+      "    --stat",
+      "",
+      "» 1. Yes, proceed (y)",
+      "  2. No, and tell Codex what to do differently (esc)"
+    ].join("\n")
+  });
+  assert.equal(currentApproval.activity.state, "awaiting_approval");
+  assert.equal(currentApproval.approval.approvable, true);
+  if (!currentApproval.approval.approvable) {
+    assert.fail("expected current-marker approval to be approvable");
+  }
+  assert.deepEqual(currentApproval.approval.action.keys, ["y"]);
+  assert.equal(currentApproval.approval.command, "git diff --stat");
+
+  const stale = detectCodexApprovalPrompt([
+    "Would you like to run the following command?",
+    "» 1. Yes, proceed (y)",
+    "✔ You approved codex to run git status -sb",
+    "» Start another task"
+  ].join("\n"));
+  assert.equal(stale.approvable, false);
+  assert.match(stale.approvable ? "" : stale.reason, /appears stale/);
+});
+
 test("Codex adapter rejects stale approval prompts without returning keys", () => {
   const screen = [
     "Would you like to run the following command?",
@@ -221,6 +289,41 @@ test("Codex adapter detects screen and durable completion evidence", async () =>
   });
   assert.equal((await composed.detectDurableCompletion?.({ sessionId: "session-2" }))?.text, "from provider");
   assert.deepEqual(composedRequest, { sessionId: "session-2" });
+});
+
+test("Codex adapter extracts completion across mixed composer marker generations", () => {
+  const requestText = "Check the current changes";
+  const currentScreen = [
+    `» ${requestText}`,
+    "The implementation is complete and the focused tests pass.",
+    "» Use /skills to list available skills",
+    "─ Worked for 20s ─────────────────────────────",
+    "»",
+    "gpt-5.6-sol high · /repo"
+  ].join("\n");
+  const current = inspectCodexScreen({ screen: currentScreen, requestText });
+  assert.equal(current.activity.state, "idle");
+  assert.equal(current.completion?.source, "screen");
+  assert.match(current.completion?.text ?? "", /implementation is complete/);
+  assert.doesNotMatch(current.completion?.text ?? "", /Use \/skills/);
+
+  const mixedHistory = [
+    "› First request",
+    "The first response is old.",
+    "─ Worked for 10s ─────────────────────────────",
+    "» Second request",
+    "The second response is the only current completion.",
+    "─ Worked for 12s ─────────────────────────────",
+    "»",
+    "gpt-5.6-sol high · /repo"
+  ].join("\n");
+  const fallback = inspectCodexScreen({
+    screen: mixedHistory,
+    screenChangedSinceSend: true
+  });
+  assert.equal(fallback.activity.state, "idle");
+  assert.match(fallback.completion?.text ?? "", /second response/);
+  assert.doesNotMatch(fallback.completion?.text ?? "", /first response/);
 });
 
 test("adapter capabilities advertise semantic terminal behavior explicitly", () => {
