@@ -43,6 +43,7 @@ import {
 import {
   EXECUTOR_KINDS,
   executorDefinitionForKind,
+  isExecutorKind,
   type ExecutorKind
 } from "./executors.js";
 import { redactString, writeRuntimeLog } from "./runtime-log.js";
@@ -1681,7 +1682,9 @@ async function runList(options) {
   const includeAll = Boolean(options.all);
   const agentFilter = options.agent ? resolveExecutor({ kind: options.agent }).kind : undefined;
   const statusFilter = options.status;
-  const storedConversations = listConversations(storeDir)
+  const allStoredConversations = listConversations(storeDir);
+  const storedConversations = allStoredConversations
+    .filter(isDiscoverableTmuxConversation)
     .filter((conversation) => includeAll || isActiveStatus(conversation.status))
     .filter((conversation) =>
       matchesConfiguredWorkspace(options.workspace, conversation.workspace)
@@ -1696,13 +1699,20 @@ async function runList(options) {
   const delegated = storedConversations.map((conversation) =>
     delegatedListEntry(
       summarizeConversation(conversation),
-      { terminalBridge: terminalBridgeEnabled(conversation) }
+      {
+        terminalBridge: terminalBridgeEnabled(conversation),
+        approvalState: managedListApprovalState(conversation),
+        conversation
+      }
     )
   );
   const terminalScan = await buildTerminalListGroup({ options, agentFilter, statusFilter });
   const managedTerminalKeys = new Set(
-    storedConversations
+    allStoredConversations
       .filter((conversation) => isActiveStatus(conversation.status))
+      .filter((conversation) =>
+        matchesConfiguredWorkspace(options.workspace, conversation.workspace)
+      )
       .map((conversation) =>
         terminalControlSelectorKey(
           terminalControlFromTakeover(
@@ -1730,6 +1740,7 @@ async function runList(options) {
   printJson({
     store_dir: storeDir,
     cleanup,
+    action_contracts: listActionContracts(),
     delegated,
     terminal_controlled: terminalControlled,
     terminal_scan: {
@@ -1850,13 +1861,22 @@ async function terminalControlDiagnostics(provider: TerminalControlProvider) {
 
 function delegatedListEntry(
   task,
-  { terminalBridge = false }: { terminalBridge?: boolean } = {}
+  {
+    terminalBridge = false,
+    approvalState,
+    conversation
+  }: {
+    terminalBridge?: boolean;
+    approvalState?: Record<string, any>;
+    conversation?: Record<string, any>;
+  } = {}
 ) {
-  return {
+  const entry = {
     ...task,
     id: task.conversation_id,
     short_ref: sessionShortRef(task.conversation_id),
     source: "akk_delegate",
+    ...(approvalState ? { approval_state: approvalState } : {}),
     commands: {
       send: canSendDelegated(task.status),
       cancel: isWaitingForAgent(task.status),
@@ -1864,6 +1884,10 @@ function delegatedListEntry(
       status: true,
       approve: terminalBridge && isActiveStatus(task.status)
     }
+  };
+  return {
+    ...entry,
+    available_actions: availableListActions(entry, { conversation })
   };
 }
 
@@ -1891,7 +1915,7 @@ async function terminalControlledListEntry(
   );
   const orphanedDispatch =
     orphanedTerminalDispatchForRecovery(terminalControl);
-  return {
+  const entry = {
     id: bridge.terminalConversationId(session),
     short_ref: sessionShortRef(bridge.terminalConversationId(session)),
     source: "terminal_control",
@@ -1933,6 +1957,10 @@ async function terminalControlledListEntry(
       cancel: terminalControl.capabilities.includes("terminal_cancel"),
       close: orphanedDispatch !== undefined
     }
+  };
+  return {
+    ...entry,
+    available_actions: availableListActions(entry)
   };
 }
 
@@ -2011,7 +2039,271 @@ function childPidsForRoot(root: ActiveTerminalProcess, processes: ActiveTerminal
 }
 
 function canSendDelegated(status) {
-  return !["failed", "closed", "cancelled"].includes(status);
+  return !["done", "failed", "closed", "cancelled"].includes(status);
+}
+
+function managedListApprovalState(
+  conversation
+): Record<string, any> | undefined {
+  if (
+    !terminalBridgeEnabled(conversation) ||
+    !["waiting_for_agent", "waiting_for_openclaw"].includes(
+      String(conversation.status)
+    )
+  ) {
+    return undefined;
+  }
+  const nativeTakeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  if (
+    !terminalControlFromTakeover(nativeTakeover) ||
+    !stringValue(nativeTakeover?.terminal_bridge_message_id)
+  ) {
+    return undefined;
+  }
+  const approval = isRecord(nativeTakeover?.terminal_bridge_approval)
+    ? nativeTakeover.terminal_bridge_approval
+    : undefined;
+  const approvalState = isRecord(approval?.approval_state)
+    ? approval.approval_state
+    : undefined;
+  const fingerprint = stringValue(approval?.fingerprint);
+  const notifiedAt = stringValue(approval?.notified_at);
+  const notifiedAtMs = validTimestampMs(notifiedAt);
+  if (
+    !approvalState ||
+    !fingerprint ||
+    notifiedAtMs === undefined ||
+    Date.now() - notifiedAtMs > CLAUDE_SCREEN_APPROVAL_TTL_MS
+  ) {
+    return undefined;
+  }
+  return {
+    ...approvalState,
+    fingerprint,
+    notified_at: notifiedAt
+  };
+}
+
+function listActionContracts() {
+  return {
+    version: 1,
+    instructions: [
+      "Use only actions present in delegated[].available_actions or terminal_controlled[].available_actions.",
+      "Start with the action's prefilled arguments, supply every missing_required field, and consult the top-level action's optional fields only when needed.",
+      "Authoritative full IDs are prefilled; short_ref is for display and human input.",
+      "Availability is a snapshot. AKK revalidates process, tmux pane, workspace, activity, approval, and recovery state before side effects."
+    ],
+    actions: {
+      send: {
+        tool: "agent_knock_knock_send",
+        target_argument: "selector",
+        required: ["request"],
+        optional: [
+          "selector",
+          "type",
+          "idleTimeoutMinutes",
+          "agentTimeoutMinutes",
+          "agentHardTimeoutMinutes"
+        ],
+        unsupported: ["timeoutSeconds"],
+        ordinary_use:
+          "Add request only. Omit timeout fields unless the user explicitly asks to change monitoring limits."
+      },
+      status: {
+        tool: "agent_knock_knock_status",
+        target_argument: "conversation_id",
+        required: ["conversation_id"],
+        optional: ["idleTimeoutMinutes", "trace"]
+      },
+      approve: {
+        tool: "agent_knock_knock_approve",
+        target_argument: "conversation_id",
+        required: ["conversation_id", "expected_approval_fingerprint"],
+        requires_explicit_user_confirmation: true,
+        requires_fresh_status: true
+      },
+      cancel: {
+        tool: "agent_knock_knock_cancel",
+        target_argument: "conversation_id",
+        required: ["conversation_id"],
+        optional: ["idleTimeoutMinutes"],
+        requires_user_intent: true
+      },
+      renew: {
+        tool: "agent_knock_knock_renew",
+        target_argument: "conversation_id",
+        required: ["conversation_id"],
+        optional: ["minutes"]
+      },
+      retry_callback: {
+        tool: "agent_knock_knock_retry_callback",
+        target_argument: "conversation_id",
+        required: ["conversation_id"]
+      },
+      close: {
+        tool: "agent_knock_knock_close",
+        target_argument: "conversation_id",
+        required: ["conversation_id"],
+        optional: ["reason", "expected_message_id"],
+        requires_explicit_user_confirmation: true
+      }
+    }
+  };
+}
+
+function availableListActions(
+  entry,
+  { conversation }: { conversation?: Record<string, any> } = {}
+): Record<string, any> {
+  const id = stringValue(entry.id ?? entry.conversation_id);
+  if (!id) {
+    return {};
+  }
+  const commands = isRecord(entry.commands) ? entry.commands : {};
+  const actions: Record<string, any> = {
+    status: {
+      tool: "agent_knock_knock_status",
+      arguments: { conversation_id: id }
+    }
+  };
+  const terminalControlled = entry.source === "terminal_control";
+  const managed = entry.source === "akk_delegate";
+  const approvalState = isRecord(entry.approval_state)
+    ? entry.approval_state
+    : {};
+  const nativeTakeover = isRecord(conversation?.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const managedApprovalPending = isRecord(
+    nativeTakeover?.terminal_bridge_approval
+  );
+  const terminalBridgeReady =
+    managed &&
+    terminalBridgeEnabled(conversation) &&
+    terminalControlFromTakeover(nativeTakeover) !== undefined;
+
+  if (
+    commands.send === true &&
+    (
+      (
+        terminalBridgeReady &&
+        ["waiting_for_openclaw", "idle"].includes(String(entry.status)) &&
+        !managedApprovalPending &&
+        approvalState.blocked !== true
+      ) ||
+      (
+        terminalControlled &&
+        entry.activity_state === "idle" &&
+        approvalState.blocked !== true
+      )
+    )
+  ) {
+    actions.send = {
+      tool: "agent_knock_knock_send",
+      arguments: { selector: id },
+      missing_required: ["request"]
+    };
+  }
+
+  const approvalFingerprint = stringValue(approvalState.fingerprint);
+  const managedApprovalEligible =
+    terminalBridgeReady &&
+    entry.status === "waiting_for_openclaw" &&
+    (
+      entry.agent !== "claude" ||
+      approvalState.decision_mode === "keys"
+    );
+  if (
+    commands.approve === true &&
+    approvalState.approvable === true &&
+    approvalFingerprint &&
+    (
+      (
+        terminalControlled &&
+        entry.agent === "codex"
+      ) ||
+      managedApprovalEligible
+    )
+  ) {
+    actions.approve = {
+      tool: "agent_knock_knock_approve",
+      arguments: { conversation_id: id },
+      missing_required: ["expected_approval_fingerprint"],
+      before_call: {
+        tool: "agent_knock_knock_status",
+        arguments: { conversation_id: id },
+        use:
+          "After explicit user confirmation, copy the latest terminal_status.approval_state.fingerprint into expected_approval_fingerprint."
+      },
+      requires_explicit_user_confirmation: true,
+      requires_fresh_status: true
+    };
+  }
+
+  const rawCancellable =
+    terminalControlled &&
+    commands.cancel === true &&
+    (
+      entry.activity_state === "working" ||
+      (
+        approvalState.blocked === true &&
+        approvalState.approvable === true
+      )
+    );
+  const managedCancellable =
+    terminalBridgeReady &&
+    ["waiting_for_agent", "waiting_for_openclaw"].includes(
+      String(entry.status)
+    ) &&
+    !(
+      managedApprovalPending &&
+      approvalState.approvable !== true
+    );
+  if (rawCancellable || managedCancellable) {
+    actions.cancel = {
+      tool: "agent_knock_knock_cancel",
+      arguments: { conversation_id: id },
+      requires_user_intent: true
+    };
+  }
+  if (terminalBridgeReady && entry.status === "stalled") {
+    actions.renew = {
+      tool: "agent_knock_knock_renew",
+      arguments: { conversation_id: id }
+    };
+  }
+  const callbackDelivery = isRecord(conversation?.callback_delivery)
+    ? conversation.callback_delivery
+    : undefined;
+  if (
+    managed &&
+    isRecord(conversation) &&
+    isRetryableCallbackDelivery(conversation, callbackDelivery)
+  ) {
+    actions.retry_callback = {
+      tool: "agent_knock_knock_retry_callback",
+      arguments: { conversation_id: id }
+    };
+  }
+  if (commands.close === true) {
+    const orphanedDispatch = isRecord(entry.orphaned_terminal_dispatch)
+      ? entry.orphaned_terminal_dispatch
+      : undefined;
+    const expectedMessageId = stringValue(orphanedDispatch?.message_id);
+    actions.close = {
+      tool: "agent_knock_knock_close",
+      arguments: {
+        conversation_id: id,
+        ...(expectedMessageId
+          ? { expected_message_id: expectedMessageId }
+          : {})
+      },
+      requires_explicit_user_confirmation: true
+    };
+  }
+  return actions;
 }
 
 async function resolveConversationSelectorOption(commandName, options): Promise<void> {
@@ -2054,10 +2346,16 @@ async function sessionSelectorCandidates(
     .filter((conversation) =>
       matchesConfiguredWorkspace(options.workspace, conversation.workspace)
     );
-  const managed = workspaceConversations.map((conversation) =>
+  const discoverableWorkspaceConversations = workspaceConversations
+    .filter(isDiscoverableTmuxConversation);
+  const managed = discoverableWorkspaceConversations.map((conversation) =>
       delegatedListEntry(
         summarizeConversation(conversation),
-        { terminalBridge: terminalBridgeEnabled(conversation) }
+        {
+          terminalBridge: terminalBridgeEnabled(conversation),
+          approvalState: managedListApprovalState(conversation),
+          conversation
+        }
       )
   );
   const managedTerminalKeys = new Set(
@@ -8813,6 +9111,41 @@ function summarizeConversation(conversation) {
   };
 }
 
+function isDiscoverableTmuxConversation(conversation): boolean {
+  if (!isRecord(conversation)) {
+    return false;
+  }
+  if (!isRecord(conversation.executor)) {
+    return false;
+  }
+  const kind = stringValue(conversation.executor.kind)?.toLowerCase();
+  return (
+    kind !== undefined &&
+    isExecutorKind(kind) &&
+    conversation.executor.transport === "tmux"
+  );
+}
+
+function persistedExecutorLogFields(conversation): {
+  agent: string;
+  executor_session?: string;
+} {
+  if (isDiscoverableTmuxConversation(conversation)) {
+    const executor = executorForConversation(conversation);
+    return {
+      agent: executor.kind,
+      executor_session: executor.session
+    };
+  }
+  const rawExecutor = isRecord(conversation?.executor)
+    ? conversation.executor
+    : {};
+  return {
+    agent: stringValue(rawExecutor.kind) ?? "unsupported",
+    executor_session: stringValue(rawExecutor.session)
+  };
+}
+
 function summarizeEvent(event) {
   return {
     ts: event.ts,
@@ -9519,10 +9852,10 @@ function cleanupIdleConversations(storeDir, options: Record<string, any> = {}, n
         idle_timeout_minutes: timeoutMinutes,
         terminal_bridge: terminalBridge
       });
+      const executorLogFields = persistedExecutorLogFields(conversation);
       runtimeLog("info", "idle_conversation_closed", {
         conversation_id: conversation.conversation_id,
-        agent: executorForConversation(conversation).kind,
-        executor_session: executorForConversation(conversation).session,
+        ...executorLogFields,
         state_path: statePath,
         event_log_path: logPath,
         idle_since: conversation.idle_since,

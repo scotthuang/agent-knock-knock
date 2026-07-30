@@ -24,6 +24,12 @@ type Manifest = {
 
 type ToolDefinition = {
   name?: string;
+  description?: string;
+  parameters?: {
+    additionalProperties?: boolean;
+    required?: string[];
+    properties?: Record<string, unknown>;
+  };
   execute?: (
     toolCallId: string,
     params: Record<string, unknown>
@@ -208,6 +214,13 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
     });
 
     assert.equal(typeof sendTool?.execute, "function");
+    assert.equal(sendTool?.parameters?.additionalProperties, false);
+    assert.deepEqual(sendTool?.parameters?.required, ["request"]);
+    assert.equal(
+      "timeoutSeconds" in (sendTool?.parameters?.properties ?? {}),
+      false
+    );
+    assert.match(sendTool?.description ?? "", /timeoutSeconds is unsupported/u);
     const result = await sendTool?.execute?.("tool-call-1", {
       request: "Verify the send output contract"
     });

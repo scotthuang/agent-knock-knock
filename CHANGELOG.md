@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.1 - 2026-07-30
+
+### Added
+
+- Return per-session `available_actions` and a versioned action contract from `AKK list`, including exact tool names, authoritative target arguments, fresh-status approval prerequisites, and recovery message IDs when currently available.
+
+### Fixed
+
+- Exclude unsupported and retired ACPX executor records from session discovery so historical Cursor or pre-tmux state cannot break valid Codex and Claude Code routing, while active legacy ownership still fences its pane against double dispatch.
+- Keep idle cleanup logging safe when it closes an unsupported legacy executor record.
+
 ## 0.6.0 - 2026-07-30
 
 ### Changed

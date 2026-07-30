@@ -197,6 +197,8 @@ The core command surface is intentionally small:
 
 Selectors fail closed: `only` works only with one actionable target, `latest` requires a unique newest target, and `codex` or `claude` must identify exactly one eligible pane. `AKK list` shows stable short references while JSON output retains the authoritative full IDs. Before every terminal operation, AKK revalidates the expected agent PID and tmux pane identity, then confirms that the process and pane working directories still match; every send also revalidates the idle prompt immediately before typing.
 
+For natural-language tool use, `agent_knock_knock_list` returns an `available_actions` object on rows in `delegated[]` and `terminal_controlled[]`; `tasks[]` remains a compatibility summary. Use only an action shown there, start with its prefilled authoritative arguments, and supply every `missing_required` field. `send` uses `selector`; status, approval, cancellation, renewal, callback retry, and close use `conversation_id`. For an ordinary send, add only `request`—`timeoutSeconds` is not a supported argument, and monitoring limits should be omitted unless the user explicitly asks to change them.
+
 Workspace is not a routing boundary. AKK can list, inspect, and control verified panes across projects; when more than one target matches, use a selector to choose one explicitly.
 
 If no eligible pane exists, AKK stops with setup guidance. If a send is ambiguous, run `/akk list` and retry with the returned `@short-ref`.

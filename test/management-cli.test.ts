@@ -90,6 +90,63 @@ test("list exposes only tmux-controlled sessions", () => {
     assert.equal(listed.terminal_controlled[0].commands.status, true);
     assert.equal("capture_screen" in listed.terminal_controlled[0].commands, false);
     assert.equal("detach" in listed.terminal_controlled[0].commands, false);
+    assert.equal(listed.action_contracts.version, 1);
+    assert.deepEqual(
+      Object.keys(listed.action_contracts.actions),
+      [
+        "send",
+        "status",
+        "approve",
+        "cancel",
+        "renew",
+        "retry_callback",
+        "close"
+      ]
+    );
+    assert.equal(
+      listed.action_contracts.actions.send.target_argument,
+      "selector"
+    );
+    assert.deepEqual(
+      listed.action_contracts.actions.send.required,
+      ["request"]
+    );
+    assert.equal(
+      listed.action_contracts.actions.send.optional.includes("selector"),
+      true
+    );
+    assert.deepEqual(
+      listed.action_contracts.actions.send.unsupported,
+      ["timeoutSeconds"]
+    );
+    assert.equal(
+      listed.action_contracts.actions.approve.target_argument,
+      "conversation_id"
+    );
+    const approvalActions = listed.terminal_controlled[0].available_actions;
+    assert.deepEqual(
+      approvalActions.status.arguments,
+      { conversation_id: listed.terminal_controlled[0].id }
+    );
+    assert.equal(approvalActions.send, undefined);
+    assert.deepEqual(
+      approvalActions.approve.arguments,
+      { conversation_id: listed.terminal_controlled[0].id }
+    );
+    assert.deepEqual(
+      approvalActions.approve.missing_required,
+      ["expected_approval_fingerprint"]
+    );
+    assert.deepEqual(
+      approvalActions.approve.before_call.arguments,
+      { conversation_id: listed.terminal_controlled[0].id }
+    );
+    assert.equal(approvalActions.approve.requires_explicit_user_confirmation, true);
+    assert.deepEqual(
+      approvalActions.cancel.arguments,
+      { conversation_id: listed.terminal_controlled[0].id }
+    );
+    assert.equal(approvalActions.close, undefined);
     assert.equal(listed.terminal_scan.terminal_controlled_count, 1);
 
     const debugListed = runCli([
@@ -257,6 +314,81 @@ test("list exposes terminal-controlled Codex working activity state", () => {
     assert.equal(listed.terminal_controlled[0].approval_state.blocked, false);
     assert.equal(listed.terminal_controlled[0].approval_state.approvable, false);
     assert.equal(listed.terminal_controlled[0].commands.approve, false);
+    assert.equal(listed.terminal_controlled[0].available_actions.send, undefined);
+    assert.deepEqual(
+      listed.terminal_controlled[0].available_actions.cancel.arguments,
+      { conversation_id: listed.terminal_controlled[0].id }
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("list never advertises raw Claude approval or ambiguous cancellation", () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-list-raw-claude-approval-")
+  );
+  const storeDir = path.join(tempDir, "conversations");
+  const workspace = path.join(tempDir, "workspace");
+  const terminalTarget = "claude-raw:0.0";
+  const approvalScreen = [
+    " Bash command",
+    "",
+    "   npm test",
+    "",
+    " This command requires approval",
+    "",
+    " Do you want to proceed?",
+    " ❯ 1. Yes",
+    "   2. No"
+  ].join("\n");
+
+  try {
+    fs.mkdirSync(workspace, { recursive: true });
+    const listed = runCli([
+      "list",
+      "--store-dir",
+      storeDir,
+      "--processes-json",
+      JSON.stringify([{
+        pid: 5201,
+        ppid: 9002,
+        elapsed: "00:30",
+        command: "claude",
+        cwd: workspace
+      }]),
+      "--terminals-json",
+      JSON.stringify([{
+        kind: "tmux",
+        target: terminalTarget,
+        session: "claude-raw",
+        window: 0,
+        pane: 0,
+        panePid: 9002,
+        currentCommand: "node",
+        currentPath: workspace
+      }]),
+      "--terminal-screens-json",
+      JSON.stringify({ [terminalTarget]: approvalScreen }),
+      "--claude-agents-json",
+      JSON.stringify([{
+        kind: "interactive",
+        pid: 5201,
+        sessionId: "claude-session-raw-approval",
+        cwd: workspace,
+        status: "idle"
+      }])
+    ]);
+
+    assert.equal(listed.terminal_controlled.length, 1);
+    const entry = listed.terminal_controlled[0];
+    assert.equal(entry.agent, "claude");
+    assert.equal(entry.available_actions.approve, undefined);
+    assert.equal(entry.available_actions.cancel, undefined);
+    assert.deepEqual(
+      Object.keys(entry.available_actions),
+      ["status"]
+    );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -333,6 +465,15 @@ test("list discovers Claude and Codex tmux sessions from static runtime snapshot
     assert.equal(codex.id, "terminal:v2:tmux:codex:codex-work:0.0:5101");
     assert.equal(codex.commands.send, true);
     assert.equal(codex.commands.cancel, true);
+    assert.deepEqual(
+      codex.available_actions.send.arguments,
+      { selector: codex.id }
+    );
+    assert.deepEqual(
+      codex.available_actions.send.missing_required,
+      ["request"]
+    );
+    assert.equal(codex.available_actions.cancel, undefined);
     assert.equal(codex.terminal_control.capabilities.includes("screen_completion"), true);
 
     const claude = listed.terminal_controlled.find((entry: any) => entry.agent === "claude");
@@ -343,6 +484,11 @@ test("list discovers Claude and Codex tmux sessions from static runtime snapshot
     assert.equal(claude.commands.send, true);
     assert.equal(claude.commands.cancel, true);
     assert.equal(claude.commands.approve, false);
+    assert.deepEqual(
+      claude.available_actions.send.arguments,
+      { selector: claude.id }
+    );
+    assert.equal(claude.available_actions.cancel, undefined);
     assert.equal(claude.terminal_control.capabilities.includes("durable_completion"), true);
     assert.equal(claude.terminal_control.capabilities.includes("screen_completion"), false);
   } finally {
