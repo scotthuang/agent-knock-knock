@@ -51,9 +51,10 @@ For a follow-up:
 
 1. Reuse a terminal only when the user's reference uniquely identifies it.
 2. If no ID is supplied and more than one eligible pane may exist, call `agent_knock_knock_list`.
-3. If multiple rows match, show their `short_ref`, agent, and tmux target, then ask the user to choose.
-4. Call `agent_knock_knock_send` with the follow-up as `request` and the selected authoritative ID as `selector`.
-5. Never guess between multiple terminals or send to a pane that AKK has not verified as idle.
+3. Read the selected `delegated[]` or `terminal_controlled[]` row's `available_actions`. Use only an action present there, start with its prefilled authoritative arguments, supply every `missing_required` field, and consult the top-level contract for optional fields.
+4. If multiple rows match, show their `short_ref`, agent, and tmux target, then ask the user to choose.
+5. Call `agent_knock_knock_send` with the follow-up as `request` and the selected row's prefilled authoritative `selector`. For an ordinary send, do not add timeout fields; `timeoutSeconds` is unsupported.
+6. Never guess between multiple terminals or send to a pane that AKK has not verified as idle.
 
 An idle pane is at a verified ready prompt, with no current work or unresolved permission request. A previously completed managed turn alone is not proof that the pane is still idle.
 
@@ -107,7 +108,7 @@ Approval is a sensitive action.
 1. Call `agent_knock_knock_status`.
 2. Show the detected request details to the user.
 3. Require explicit approval of that exact current request.
-4. Call `agent_knock_knock_approve` with the returned `approval_state.fingerprint` as `expected_approval_fingerprint`.
+4. Call `agent_knock_knock_approve` with the returned `terminal_status.approval_state.fingerprint` as `expected_approval_fingerprint`.
 
 The equivalent slash command must also include that fresh fingerprint:
 
@@ -123,7 +124,7 @@ A trusted, default-disabled plugin `autoApprove` policy may independently approv
 
 ## tmux Sessions
 
-`agent_knock_knock_list` reports eligible already-running Codex and Claude Code panes together with AKK-managed turns. Use an authoritative full ID or returned `@short-ref` whenever more than one candidate exists.
+`agent_knock_knock_list` reports eligible already-running Codex and Claude Code panes together with AKK-managed turns. Its top-level `action_contracts` documents the exact schemas for send, status, approve, cancel, renew, retry-callback, and close; each `delegated[]` or `terminal_controlled[]` row's `available_actions` is the current model-facing snapshot. `tasks[]` is a compatibility summary and must not be used for action selection. `send` uses `selector`, while every other action uses `conversation_id`. Use an authoritative full ID or returned `@short-ref` whenever more than one candidate exists.
 
 Before every terminal operation, AKK revalidates the expected agent PID and tmux pane identity, then confirms that the process and pane working directories match. Sending new work additionally requires a verified idle prompt. Humans can attach to the same tmux session and continue directly at any time.
 

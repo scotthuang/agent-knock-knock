@@ -3931,6 +3931,18 @@ test("an orphaned terminal dispatch requires its exact listed generation before 
       listedParsed.terminal_controlled[0].orphaned_terminal_dispatch;
     assert.equal(orphaned.message_id, messageId);
     assert.equal(listedParsed.terminal_controlled[0].commands.close, true);
+    assert.deepEqual(
+      listedParsed.terminal_controlled[0].available_actions.close.arguments,
+      {
+        conversation_id: rawConversationId,
+        expected_message_id: messageId
+      }
+    );
+    assert.equal(
+      listedParsed.terminal_controlled[0]
+        .available_actions.close.requires_explicit_user_confirmation,
+      true
+    );
     assert.equal(
       orphaned.recovery,
       `/akk close ${rawConversationId} --expected-message-id ${messageId}`

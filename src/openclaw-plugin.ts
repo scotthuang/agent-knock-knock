@@ -35,7 +35,8 @@ const sendParameters = {
     },
     request: {
       type: "string",
-      description: "New task or follow-up message for the coding agent."
+      description:
+        "New task or follow-up message for the coding agent. For an ordinary send, omit monitoring timeout fields. timeoutSeconds is not a supported argument."
     },
     type: {
       type: "string",
@@ -261,7 +262,7 @@ const plugin: OpenClawPluginDefinition = definePluginEntry({
 
     registerCliTool(api, {
       name: "agent_knock_knock_list",
-      description: "List AKK-managed work and existing Codex or Claude Code tmux terminals. Use this to choose an exact selector before sending, inspecting, approving, or cancelling. AKK reports terminal approval state when available and never starts a coding agent.",
+      description: "List AKK-managed work and existing Codex or Claude Code tmux terminals. Rows in delegated and terminal_controlled include available_actions with the exact tool name and authoritative prefilled target arguments for safe sending, inspection, approval, cancellation, and recovery. Use only actions present in that snapshot; AKK revalidates them before side effects. AKK never starts a coding agent.",
       parameters: listParameters,
       buildArgs: (params) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
@@ -313,7 +314,7 @@ const plugin: OpenClawPluginDefinition = definePluginEntry({
         label: "AKK Send",
         name: "agent_knock_knock_send",
         description:
-          "Send a new task or follow-up through an existing Codex or Claude Code tmux terminal. Omit selector only when AKK should require one unique eligible idle pane; otherwise pass codex, claude, only, latest, an @short-ref from AKK list, or an authoritative full id. AKK never starts a coding agent. This is asynchronous: after acceptance, yield and wait for the callback or a later explicit status request.",
+          "Send a new task or follow-up through an existing Codex or Claude Code tmux terminal. Omit selector only when AKK should require one unique eligible idle pane; otherwise pass codex, claude, only, latest, an @short-ref from AKK list, or an authoritative full id. For ordinary use pass only request and, when targeting, selector; omit monitoring timeouts unless the user explicitly asks to change them. timeoutSeconds is unsupported. AKK never starts a coding agent. This is asynchronous: after acceptance, yield and wait for the callback or a later explicit status request.",
         parameters: sendParameters,
         async execute(_toolCallId, params) {
           const result = await runSendRequest(
