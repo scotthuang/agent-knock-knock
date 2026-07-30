@@ -2088,13 +2088,34 @@ function managedListApprovalState(
 
 function listActionContracts() {
   return {
-    version: 1,
+    version: 2,
     instructions: [
       "Use only actions present in delegated[].available_actions or terminal_controlled[].available_actions.",
+      "Never use commands for routing or tool calls. It is a deprecated, non-authoritative compatibility field with mixed legacy semantics.",
       "Start with the action's prefilled arguments, supply every missing_required field, and consult the top-level action's optional fields only when needed.",
       "Authoritative full IDs are prefilled; short_ref is for display and human input.",
       "Availability is a snapshot. AKK revalidates process, tmux pane, workspace, activity, approval, and recovery state before side effects."
     ],
+    field_semantics: {
+      status: {
+        delegated: "task_lifecycle",
+        terminal_controlled: "process_liveness",
+        authoritative_for_tool_calls: false
+      },
+      activity_state: {
+        terminal_controlled: "screen_activity_classification",
+        authoritative_for_tool_calls: false
+      },
+      commands: {
+        meaning: "legacy_compatibility_flags_with_mixed_semantics",
+        deprecated: true,
+        authoritative_for_tool_calls: false
+      },
+      available_actions: {
+        meaning: "currently_safe_actions",
+        authoritative_for_tool_calls: true
+      }
+    },
     actions: {
       send: {
         tool: "agent_knock_knock_send",

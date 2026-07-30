@@ -367,7 +367,7 @@ test("legacy unsupported executors do not break live terminal short refs", () =>
     workspace,
     terminalTarget,
     codexPid,
-    screen: "› Ready for the next task"
+    screen: "› Ready for the next task\n\ngpt-5.6-sol high · /repo"
   });
   const legacyPaths = pathsForConversation("task-legacy-cursor", storeDir);
   const idleLegacyPaths = pathsForConversation(
@@ -513,7 +513,7 @@ test("an active unsupported legacy owner still fences its tmux pane", () => {
     workspace,
     terminalTarget,
     codexPid,
-    screen: "› Ready for the next task"
+    screen: "› Ready for the next task\n\ngpt-5.6-sol high · /repo"
   });
   const legacyPaths = pathsForConversation(
     "task-active-legacy-cursor",
@@ -594,7 +594,7 @@ test("CLI only prefers an active managed terminal bridge over its raw tmux pane"
     workspace,
     terminalTarget,
     codexPid,
-    screen: "› Ready for the next task"
+    screen: "› Ready for the next task\n\ngpt-5.6-sol high · /repo"
   });
 
   try {

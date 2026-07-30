@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.2 - 2026-07-31
+
+### Changed
+
+- Publish `AKK list` action contract v2 with machine-readable field semantics that distinguish managed task lifecycle, terminal process liveness, parsed screen activity, deprecated compatibility flags, and the authoritative `available_actions` snapshot.
+
+### Fixed
+
+- Recognize both current `»` and legacy `›` Codex composer markers across idle detection, approval parsing, stale-prompt rejection, completion boundaries, and terminal artifact cleanup while preserving fail-closed working and approval precedence.
+
 ## 0.6.1 - 2026-07-30
 
 ### Added
