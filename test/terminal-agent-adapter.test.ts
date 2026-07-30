@@ -154,7 +154,9 @@ test("Codex adapter accepts current and legacy composer markers without weakenin
       screen: [
         "The previous turn is complete.",
         "",
-        `${marker} Find and fix a bug in @filename`
+        `${marker} Find and fix a bug in @filename`,
+        "",
+        "gpt-5.6-sol high · /repo"
       ].join("\n")
     });
     assert.equal(idle.activity.state, "idle", marker);
@@ -179,6 +181,23 @@ test("Codex adapter accepts current and legacy composer markers without weakenin
     screen: "The final answer contains an inline » symbol.\nNo Codex composer is visible."
   });
   assert.equal(inlineMarker.activity.state, "unknown");
+
+  const lineLeadingMarker = inspectCodexScreen({
+    screen: [
+      "Codex is explaining typography.",
+      "» This line is part of the response.",
+      "Still generating more output..."
+    ].join("\n")
+  });
+  assert.equal(lineLeadingMarker.activity.state, "unknown");
+
+  const indentedMarker = inspectCodexScreen({
+    screen: [
+      "Codex is still producing output.",
+      "  » This indented line is quoted output."
+    ].join("\n")
+  });
+  assert.equal(indentedMarker.activity.state, "unknown");
 
   const numberedChoice = inspectCodexScreen({
     screen: "A menu without a recognized approval marker\n» 1. First choice"
@@ -313,6 +332,8 @@ test("Codex adapter extracts completion across mixed composer marker generations
     "─ Worked for 10s ─────────────────────────────",
     "» Second request",
     "The second response is the only current completion.",
+    "» This marker is quoted output, not another composer.",
+    "The response continues after the quoted marker.",
     "─ Worked for 12s ─────────────────────────────",
     "»",
     "gpt-5.6-sol high · /repo"
@@ -323,6 +344,8 @@ test("Codex adapter extracts completion across mixed composer marker generations
   });
   assert.equal(fallback.activity.state, "idle");
   assert.match(fallback.completion?.text ?? "", /second response/);
+  assert.match(fallback.completion?.text ?? "", /quoted output/);
+  assert.match(fallback.completion?.text ?? "", /response continues/);
   assert.doesNotMatch(fallback.completion?.text ?? "", /first response/);
 });
 
