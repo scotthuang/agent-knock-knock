@@ -6,7 +6,9 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import plugin from "../src/openclaw-plugin.js";
+import plugin, {
+  createOpenClawPluginForTest
+} from "../src/openclaw-plugin.js";
 
 type Manifest = {
   activation?: {
@@ -184,13 +186,11 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
     );
 
     (
-      plugin as unknown as {
+      createOpenClawPluginForTest(fakeCli) as unknown as {
         register(api: Record<string, any>): void;
       }
     ).register({
-      pluginConfig: {
-        binPath: fakeCli
-      },
+      pluginConfig: {},
       logger: {
         info() {},
         warn() {}
@@ -285,11 +285,11 @@ process.stdout.write(JSON.stringify(result));`,
     );
 
     (
-      plugin as unknown as {
+      createOpenClawPluginForTest(fakeCli) as unknown as {
         register(api: Record<string, any>): void;
       }
     ).register({
-      pluginConfig: { binPath: fakeCli, workspace: tempDir },
+      pluginConfig: { workspace: tempDir },
       logger: {
         info() {},
         warn() {}
@@ -530,12 +530,11 @@ test("callback auto approval keeps its rule workspace boundary without global wo
     );
 
     (
-      plugin as unknown as {
+      createOpenClawPluginForTest(fakeCli) as unknown as {
         register(api: Record<string, any>): void;
       }
     ).register({
       pluginConfig: {
-        binPath: fakeCli,
         autoApprove: policy
       },
       logger: {
@@ -710,11 +709,11 @@ request.on("error", () => process.exit(4));
 
     try {
       (
-        plugin as unknown as {
+        createOpenClawPluginForTest(fakeCli) as unknown as {
           register(api: Record<string, any>): void;
         }
       ).register({
-        pluginConfig: { binPath: fakeCli },
+        pluginConfig: {},
         logger: {
           info() {},
           warn() {}

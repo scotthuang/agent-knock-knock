@@ -22,6 +22,7 @@ import {
 
 const CALLBACK_METHOD = AKK_CALLBACK_METHOD;
 const defaultBinPath = fileURLToPath(new URL("./cli.js", import.meta.url));
+const relayPathByApi = new WeakMap<object, string>();
 
 const sendParameters = {
   type: "object",
@@ -44,7 +45,8 @@ const sendParameters = {
     },
     idleTimeoutMinutes: {
       type: "number",
-      description: "Minutes an idle AKK session remains open before lazy cleanup closes it."
+      description:
+        "Minutes an idle AKK session remains open before controlled reconciliation closes its managed task record."
     },
     agentTimeoutMinutes: {
       type: "number",
@@ -192,12 +194,14 @@ const approveParameters = {
   }
 };
 
-const plugin: OpenClawPluginDefinition = definePluginEntry({
+function createPlugin(relayPath: string): OpenClawPluginDefinition {
+  return definePluginEntry({
   id: "agent-knock-knock",
   name: "Agent Knock Knock",
   description:
     "Agent Knock Knock (AKK/akk) lets OpenClaw operate local Codex and Claude Code through shared tmux terminals, with visible monitoring, approvals, callbacks, cancellation, and seamless human takeover.",
   register(api) {
+    relayPathByApi.set(api, relayPath);
     api.registerGatewayMethod(
       CALLBACK_METHOD,
       async ({ params, respond }) => {
@@ -266,7 +270,7 @@ const plugin: OpenClawPluginDefinition = definePluginEntry({
       parameters: listParameters,
       buildArgs: (params) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
-        const args = ["list"];
+        const args = ["list", "--reconcile"];
         pushOptional(
           args,
           "--store-dir",
@@ -365,7 +369,7 @@ const plugin: OpenClawPluginDefinition = definePluginEntry({
 
     registerCliTool(api, {
       name: "agent_knock_knock_retry_callback",
-      description: "Retry a persisted AKK callback that failed before reaching OpenClaw. The original callback message id is reused for idempotent delivery; a completed terminal task remains available for follow-up until idle cleanup.",
+      description: "Retry a persisted AKK callback that failed before reaching OpenClaw. The original callback message id is reused for idempotent delivery; a completed terminal task remains available for follow-up until its idle retention is reconciled.",
       parameters: retryCallbackParameters,
       buildArgs: (params) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
@@ -412,7 +416,16 @@ const plugin: OpenClawPluginDefinition = definePluginEntry({
     });
 
   }
-});
+  });
+}
+
+const plugin: OpenClawPluginDefinition = createPlugin(defaultBinPath);
+
+export function createOpenClawPluginForTest(
+  relayPath: string
+): OpenClawPluginDefinition {
+  return createPlugin(relayPath);
+}
 
 export default plugin;
 
@@ -682,6 +695,7 @@ function buildStatusCliArgs(api, params) {
   const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
   const args = [
     "status",
+    "--reconcile",
     "--conversation",
     requiredString(params.conversation_id, "conversation_id")
   ];
@@ -918,8 +932,7 @@ function runCli(
     allowNonzeroJson?: boolean;
   } = {}
 ) {
-  const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
-  const binPath = stringValue(config.binPath) ?? defaultBinPath;
+  const binPath = relayPathForApi(api);
   const spawned = spawnSync(process.execPath, [binPath, ...cliArgs], {
     encoding: "utf8",
     maxBuffer: 1024 * 1024 * 10,
@@ -952,8 +965,7 @@ function runCliAsync(
     timeoutMs?: number;
   } = {}
 ): Promise<Record<string, any>> {
-  const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
-  const binPath = stringValue(config.binPath) ?? defaultBinPath;
+  const binPath = relayPathForApi(api);
   const maxBuffer = 10 * 1024 * 1024;
 
   return new Promise((resolve, reject) => {
@@ -1039,6 +1051,10 @@ function runCliAsync(
       }
     });
   });
+}
+
+function relayPathForApi(api): string {
+  return relayPathByApi.get(api) ?? defaultBinPath;
 }
 
 async function handleCallback(api, params) {

@@ -198,7 +198,7 @@ export function buildAkkCommandCliArgs(
   switch (command.action) {
     case "list":
       return withOptionalArgs(
-        ["list"],
+        ["list", "--reconcile"],
         ["--store-dir", storeDir],
         ["--idle-timeout-minutes", idleTimeoutMinutes]
       );
@@ -206,6 +206,7 @@ export function buildAkkCommandCliArgs(
       return withOptionalArgs(
         [
           "status",
+          "--reconcile",
           ...(command.conversationId
             ? ["--conversation", command.conversationId]
             : [])
