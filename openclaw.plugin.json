@@ -58,13 +58,9 @@
     "type": "object",
     "additionalProperties": false,
     "properties": {
-      "binPath": {
-        "type": "string",
-        "description": "Path to agent-knock-knock CLI. Defaults to this package's dist/src/cli.js build output."
-      },
       "storeDir": {
         "type": "string",
-        "description": "Default conversation store directory."
+        "description": "Stable AKK Store root. Defaults to ~/.agent-knock-knock/store and contains the compatibility manifest and managed conversations."
       },
       "openclawBin": {
         "type": "string",
@@ -76,7 +72,7 @@
       },
       "idleTimeoutMinutes": {
         "type": "number",
-        "description": "Minutes an idle AKK session remains open before lazy cleanup closes it. Defaults to 10080."
+        "description": "Minutes an idle AKK session remains open before controlled reconciliation closes its managed task record. Defaults to 10080."
       },
       "agentTimeoutMinutes": {
         "type": "number",

@@ -50,8 +50,11 @@ import { redactString, writeRuntimeLog } from "./runtime-log.js";
 import { formatTranscript, readNdjsonLog } from "./transcript.js";
 import {
   appendEvent,
+  assertStoreWriterCompatible,
   defaultStoreDir,
   ensureDir,
+  ensureStoreWritable,
+  inspectStoreCompatibility,
   listConversations,
   logPathForStatePath,
   loadConversationById,
@@ -60,7 +63,8 @@ import {
   pathsForConversation,
   pathsForConversationDir,
   saveState,
-  statePathForConversationId
+  statePathForConversationId,
+  withStoreWriterLeaseAsync
 } from "./store.js";
 import {
   StaticTerminalControlProvider,
@@ -156,6 +160,18 @@ const SESSION_SELECTOR_COMMANDS = new Set([
   "retry-callback",
   "close"
 ]);
+const STORE_MUTATION_COMMANDS = new Set([
+  "delegate",
+  "send",
+  "approve",
+  "cancel",
+  "renew",
+  "reconcile-monitors",
+  "close",
+  "callback",
+  "retry-callback",
+  "monitor"
+]);
 
 class InlineCodexSessionAdapter implements CodexLocalSessionAdapter {
   private readonly threads: CodexThreadRow[];
@@ -228,6 +244,7 @@ try {
 
 async function runCommand(commandName, options) {
   await resolveConversationSelectorOption(commandName, options);
+  preflightStoreWriter(commandName, options);
   if (commandName === "help" || commandName === "--help" || commandName === "-h") {
     usage();
   } else if (commandName === "version" || commandName === "--version" || commandName === "-v") {
@@ -266,6 +283,17 @@ async function runCommand(commandName, options) {
     usage();
     process.exitCode = commandName ? 1 : 0;
   }
+}
+
+function preflightStoreWriter(commandName, options): void {
+  if (!STORE_MUTATION_COMMANDS.has(String(commandName ?? ""))) {
+    return;
+  }
+  const statePath = stringValue(options.state);
+  const storeDir = statePath
+    ? pathsForConversationDir(path.dirname(expandHome(statePath))).storeDir
+    : storeDirFromOptions(options);
+  assertStoreWriterCompatible(storeDir);
 }
 
 function runInstallOpenClaw(options) {
@@ -1678,7 +1706,12 @@ function environmentWithoutGatewayTokens(): NodeJS.ProcessEnv {
 
 async function runList(options) {
   const storeDir = expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(process.cwd()));
-  const cleanup = cleanupIdleConversations(storeDir, options);
+  const reconciliation = options.reconcile === true
+    ? await reconcileStoreForList(storeDir, options)
+    : {
+        status: "disabled",
+        reason: "standalone list is read-only unless --reconcile is supplied"
+      };
   const includeAll = Boolean(options.all);
   const agentFilter = options.agent ? resolveExecutor({ kind: options.agent }).kind : undefined;
   const statusFilter = options.status;
@@ -1739,7 +1772,8 @@ async function runList(options) {
 
   printJson({
     store_dir: storeDir,
-    cleanup,
+    store: inspectStoreCompatibility(storeDir),
+    reconciliation,
     action_contracts: listActionContracts(),
     delegated,
     terminal_controlled: terminalControlled,
@@ -1757,8 +1791,41 @@ async function runList(options) {
     include_all: includeAll,
     agent_filter: agentFilter,
     status_filter: statusFilter,
-    cleanup
+    reconciliation
   });
+}
+
+async function reconcileStoreForList(storeDir, options) {
+  try {
+    ensureStoreWritable(storeDir);
+  } catch (error) {
+    if (isRecord(error) && error.code === "AKK_STORE_INCOMPATIBLE") {
+      return {
+        status: "skipped",
+        reason: error instanceof Error ? error.message : String(error),
+        store: inspectStoreCompatibility(storeDir)
+      };
+    }
+    throw error;
+  }
+
+  const idle = reconcileIdleConversations(storeDir, options);
+  const monitors = await reconcileMonitors(options, {
+    includeCallbackRecovery: false,
+    reason: "list_reconciliation",
+    conversationId: undefined
+  });
+  return {
+    status: "completed",
+    checked: Math.max(idle.checked, monitors.checked),
+    changed: idle.closed + monitors.launched,
+    closed: idle.closed,
+    monitors_launched: monitors.launched,
+    monitors_already_running: monitors.already_running,
+    skipped: idle.skipped + monitors.skipped,
+    errors: monitors.errors,
+    idle_timeout_minutes: idle.idle_timeout_minutes
+  };
 }
 
 async function buildTerminalListGroup({ options, agentFilter, statusFilter }) {
@@ -2361,7 +2428,6 @@ async function sessionSelectorCandidates(
   options
 ): Promise<SessionSelectorCandidate[]> {
   const storeDir = storeDirFromOptions(options);
-  cleanupIdleConversations(storeDir, options);
   const storedConversations = listConversations(storeDir);
   const workspaceConversations = storedConversations
     .filter((conversation) =>
@@ -2484,7 +2550,30 @@ async function resolveTerminalConversationFromOptions(
 }
 
 async function runStatus(options) {
-  cleanupIdleConversations(storeDirFromOptions(options), options);
+  const explicitStatePath = options.state
+    ? expandHome(String(options.state))
+    : undefined;
+  const storeDir = explicitStatePath
+    ? pathsForConversationDir(path.dirname(explicitStatePath)).storeDir
+    : storeDirFromOptions(options);
+  const reconciliationConversationId =
+    stringValue(options.conversation ?? options.conversationId) ??
+    (explicitStatePath
+      ? path.basename(
+          pathsForConversationDir(path.dirname(explicitStatePath))
+            .conversationDir
+        )
+      : undefined);
+  const reconciliation = options.reconcile === true
+    ? await reconcileStoreForStatus(
+        storeDir,
+        options,
+        reconciliationConversationId
+      )
+    : {
+        status: "disabled",
+        reason: "standalone status is read-only unless --reconcile is supplied"
+      };
   const terminalConversation = await resolveTerminalConversationFromOptions(options);
   if (terminalConversation) {
     const terminalStatus = await terminalStatusForControl(
@@ -2507,6 +2596,8 @@ async function runStatus(options) {
       conversation_id: terminalConversation.conversationId,
       source: "terminal_control",
       agent: terminalConversation.agent,
+      store: inspectStoreCompatibility(storeDir),
+      reconciliation,
       ...context,
       terminal_control: terminalConversation.terminalControl,
       terminal_status: terminalStatus,
@@ -2522,13 +2613,12 @@ async function runStatus(options) {
 
   const loaded = loadConversationFromOptions(options);
   const { statePath, logPath } = loaded;
-  const conversation = await migrateLegacyTerminalAgentIdentity({
-    ...loaded,
-    options
-  });
+  const conversation = loaded.conversation;
   const events = readExistingEvents(logPath);
   const result: Record<string, any> = {
     conversation,
+    store: inspectStoreCompatibility(storeDir),
+    reconciliation,
     summary: summarizeConversation(conversation),
     confidence: "high",
     about: managedConversationAbout(conversation, events),
@@ -2574,6 +2664,43 @@ async function runStatus(options) {
     recent_event_count: Math.min(events.length, 10),
     trace: Boolean(options.trace)
   });
+}
+
+async function reconcileStoreForStatus(storeDir, options, conversationId) {
+  try {
+    ensureStoreWritable(storeDir);
+  } catch (error) {
+    if (isRecord(error) && error.code === "AKK_STORE_INCOMPATIBLE") {
+      return {
+        status: "skipped",
+        reason: error instanceof Error ? error.message : String(error),
+        store: inspectStoreCompatibility(storeDir)
+      };
+    }
+    throw error;
+  }
+  const idle = reconcileIdleConversations(
+    storeDir,
+    options,
+    new Date(),
+    conversationId
+  );
+  const monitors = await reconcileMonitors(options, {
+    includeCallbackRecovery: false,
+    reason: "status_reconciliation",
+    conversationId
+  });
+  return {
+    status: "completed",
+    checked: Math.max(idle.checked, monitors.checked),
+    changed: idle.closed + monitors.launched,
+    closed: idle.closed,
+    monitors_launched: monitors.launched,
+    monitors_already_running: monitors.already_running,
+    skipped: idle.skipped + monitors.skipped,
+    errors: monitors.errors,
+    idle_timeout_minutes: idle.idle_timeout_minutes
+  };
 }
 
 async function terminalStatusContext(
@@ -3139,7 +3266,6 @@ async function runSend(options) {
   if (options.agentHardTimeoutMinutes !== undefined) {
     positiveMinutes(options.agentHardTimeoutMinutes, "--agent-hard-timeout-minutes");
   }
-  cleanupIdleConversations(storeDirFromOptions(options), options);
   const terminalConversation = await resolveTerminalConversationFromOptions(options);
   if (terminalConversation) {
     if (!options.background) {
@@ -3164,6 +3290,7 @@ async function runSend(options) {
         messageBody,
         terminalControl: terminalConversation.terminalControl
       });
+      ensureStoreWritable(managed.conversation.store_dir);
       ensureDir(path.dirname(managed.statePath));
       releaseStateLock = acquireFileLock(`${managed.statePath}.lock`);
       await runTerminalControlSend({
@@ -3258,7 +3385,6 @@ async function runSend(options) {
 }
 
 async function runApprove(options) {
-  cleanupIdleConversations(storeDirFromOptions(options), options);
   const terminalConversation = await resolveTerminalConversationFromOptions(options);
   if (terminalConversation) {
     await runTerminalConversationApprove({
@@ -3466,6 +3592,7 @@ async function runApprove(options) {
     }
   };
   let releaseStateLock: (() => void) | undefined;
+  let approvalDispatchReserved = false;
   const releaseApprovalStateLock = () => {
     if (releaseStateLock) {
       const release = releaseStateLock;
@@ -3473,7 +3600,12 @@ async function runApprove(options) {
       release();
     }
   };
+  releaseStateLock = acquireFileLock(`${statePath}.lock`);
+  const writerStoreDir = pathsForConversationDir(
+    path.dirname(statePath)
+  ).storeDir;
   try {
+    return await withStoreWriterLeaseAsync(writerStoreDir, async () => {
     let approval;
     let lockedConversation = conversation;
     const currentConversation = loadState(statePath);
@@ -3602,10 +3734,15 @@ async function runApprove(options) {
                 }
                 executorPolicyDecision = freshPolicyDecision;
               }
-              if (releaseStateLock) {
+              if (approvalDispatchReserved) {
                 throw new Error("Claude approval dispatch was already reserved");
               }
-              releaseStateLock = acquireFileLock(`${statePath}.lock`);
+              approvalDispatchReserved = true;
+              if (!releaseStateLock) {
+                throw new Error(
+                  "approval state lock was released before terminal dispatch"
+                );
+              }
               const latestConversation = loadState(statePath);
               const latestTakeover = isRecord(latestConversation.native_session_takeover)
                 ? latestConversation.native_session_takeover
@@ -3855,6 +3992,7 @@ async function runApprove(options) {
       monitor_pid: bridgeMonitor.monitorPid ?? null,
       monitor_handoff_pid: bridgeMonitor.handoffWatchdog?.pid ?? null
     });
+    });
   } finally {
     try {
       releaseApprovalStateLock();
@@ -3943,6 +4081,7 @@ async function runTerminalControlSend({
   terminalControl,
   terminalSendLockHeld = false,
   terminalStateLockHeld = false,
+  storeWriterLeaseHeld = false,
   recordMessageAfterSend = false,
   recordRawAttachmentAfterSend = false
 }) {
@@ -3964,6 +4103,7 @@ async function runTerminalControlSend({
         terminalControl,
         terminalSendLockHeld: true,
         terminalStateLockHeld,
+        storeWriterLeaseHeld,
         recordMessageAfterSend,
         recordRawAttachmentAfterSend
       });
@@ -4002,12 +4142,36 @@ async function runTerminalControlSend({
         terminalControl,
         terminalSendLockHeld: true,
         terminalStateLockHeld: true,
+        storeWriterLeaseHeld,
         recordMessageAfterSend,
         recordRawAttachmentAfterSend
       });
     } finally {
       releaseStateLock();
     }
+  }
+
+  if (!storeWriterLeaseHeld) {
+    const writerStoreDir = pathsForConversationDir(
+      path.dirname(statePath)
+    ).storeDir;
+    return await withStoreWriterLeaseAsync(writerStoreDir, async () =>
+      runTerminalControlSend({
+        options,
+        conversation,
+        nextConversation,
+        statePath,
+        logPath,
+        executor,
+        message,
+        terminalControl,
+        terminalSendLockHeld: true,
+        terminalStateLockHeld,
+        storeWriterLeaseHeld: true,
+        recordMessageAfterSend,
+        recordRawAttachmentAfterSend
+      })
+    );
   }
 
   const terminalBridge = createTerminalAgentBridge(options);
@@ -4586,7 +4750,6 @@ function createManagedTerminalConversationFromRawId({
 }) {
   const workspace = terminalControl.currentPath ?? process.cwd();
   const storeDir = expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(workspace));
-  cleanupIdleConversations(storeDir, options);
   const executor = resolveExecutor({
     kind: agent,
     session: conversationId
@@ -4842,8 +5005,29 @@ async function runRenew(options) {
 }
 
 async function runReconcileMonitors(options) {
+  printJson(await reconcileMonitors(options, {
+    includeCallbackRecovery: true,
+    reason: "startup_reconciliation",
+    conversationId: undefined
+  }));
+}
+
+async function reconcileMonitors(
+  options,
+  {
+    includeCallbackRecovery,
+    reason,
+    conversationId
+  }: {
+    includeCallbackRecovery: boolean;
+    reason: string;
+    conversationId?: string;
+  }
+) {
   const storeDir = storeDirFromOptions(options);
-  const conversations = listConversations(storeDir);
+  const conversations = listConversations(storeDir).filter((conversation) =>
+    conversationId === undefined || conversation.conversation_id === conversationId
+  );
   const items: Record<string, unknown>[] = [];
   let ignored = 0;
   let launched = 0;
@@ -4871,28 +5055,30 @@ async function runReconcileMonitors(options) {
     );
 
     try {
-      const callbackRecovery = prepareCallbackDeliveryReconciliation({
-        statePath,
-        logPath,
-        delayMs: options.callbackRetryDelayMs
-      });
-      if (callbackRecovery.handled) {
-        if (callbackRecovery.status === "launched") {
-          launched += 1;
-        } else if (callbackRecovery.status === "already_running") {
-          alreadyRunning += 1;
-        } else {
-          skipped += 1;
-        }
-        items.push({
-          conversation_id: callbackRecovery.conversationId,
-          status: callbackRecovery.status,
-          reason: callbackRecovery.reason,
-          ...(callbackRecovery.monitorPid === undefined
-            ? {}
-            : { monitor_pid: callbackRecovery.monitorPid })
+      if (includeCallbackRecovery) {
+        const callbackRecovery = prepareCallbackDeliveryReconciliation({
+          statePath,
+          logPath,
+          delayMs: options.callbackRetryDelayMs
         });
-        continue;
+        if (callbackRecovery.handled) {
+          if (callbackRecovery.status === "launched") {
+            launched += 1;
+          } else if (callbackRecovery.status === "already_running") {
+            alreadyRunning += 1;
+          } else {
+            skipped += 1;
+          }
+          items.push({
+            conversation_id: callbackRecovery.conversationId,
+            status: callbackRecovery.status,
+            reason: callbackRecovery.reason,
+            ...(callbackRecovery.monitorPid === undefined
+              ? {}
+              : { monitor_pid: callbackRecovery.monitorPid })
+          });
+          continue;
+        }
       }
 
       const listedNativeTakeover = isRecord(listedConversation.native_session_takeover)
@@ -5019,7 +5205,7 @@ async function runReconcileMonitors(options) {
         event: "terminal_bridge_monitor_launch",
         pid: monitor.pid ?? null,
         terminal_control: prepared.terminalControl,
-        reason: "startup_reconciliation",
+        reason,
         agent_timeout_minutes: prepared.inactivityTimeoutMinutes,
         agent_hard_timeout_minutes: prepared.hardTimeoutMinutes
       });
@@ -5032,7 +5218,7 @@ async function runReconcileMonitors(options) {
       items.push({
         conversation_id: prepared.conversation.conversation_id,
         status: "launched",
-        reason: "startup_reconciliation",
+        reason,
         monitor_pid: monitor.pid ?? null
       });
     } catch (error) {
@@ -5045,7 +5231,7 @@ async function runReconcileMonitors(options) {
     }
   }
 
-  printJson({
+  return {
     reconciled: true,
     store_dir: storeDir,
     checked: conversations.length,
@@ -5055,7 +5241,7 @@ async function runReconcileMonitors(options) {
     skipped,
     errors,
     items
-  });
+  };
 }
 
 function prepareCallbackDeliveryReconciliation({
@@ -5356,7 +5542,6 @@ function positiveMinutes(value, optionName: string): number {
 }
 
 async function runCancel(options) {
-  cleanupIdleConversations(storeDirFromOptions(options), options);
   const terminalConversation = await resolveTerminalConversationFromOptions(options);
   if (terminalConversation) {
     await runTerminalConversationCancel({
@@ -5449,6 +5634,10 @@ async function runTerminalControlCancel({ options, statePath, logPath, agent, te
   let releaseStateLock: (() => void) | undefined;
   try {
     releaseStateLock = acquireFileLock(`${statePath}.lock`);
+    const writerStoreDir = pathsForConversationDir(
+      path.dirname(statePath)
+    ).storeDir;
+    return await withStoreWriterLeaseAsync(writerStoreDir, async () => {
     const currentConversation = loadState(statePath);
     if (!["waiting_for_agent", "waiting_for_openclaw"].includes(currentConversation.status)) {
       throw new Error(
@@ -5528,6 +5717,7 @@ async function runTerminalControlCancel({ options, statePath, logPath, agent, te
       denied_approval: cancellation.deniedApproval,
       request_id: cancellation.requestId,
       budget: budgetAction(nextConversation)
+    });
     });
   } finally {
     try {
@@ -7205,7 +7395,7 @@ function terminalBridgeRuntimeDir(): string {
   const configured = stringValue(process.env.AKK_RUNTIME_DIR);
   return configured
     ? path.resolve(expandHome(configured))
-    : path.join(path.dirname(defaultStoreDir()), "runtime");
+    : path.join(path.dirname(defaultStoreDir()), "runtime-v2");
 }
 
 function terminalBridgeRuntimeKey(terminalControl): string {
@@ -7223,7 +7413,6 @@ function terminalBridgeDispatchLedgerPath(terminalControl): string {
     terminalBridgeRuntimeDir(),
     "terminal-dispatch"
   );
-  ensureDir(ledgerDir);
   return path.join(
     ledgerDir,
     `terminal-dispatch-${terminalBridgeRuntimeKey(terminalControl)}.json`
@@ -7288,6 +7477,7 @@ function saveTerminalBridgeDispatchLedger(
   ledger: Record<string, unknown>
 ): void {
   const ledgerPath = terminalBridgeDispatchLedgerPath(terminalControl);
+  ensureDir(path.dirname(ledgerPath));
   if (fs.existsSync(ledgerPath) && fs.lstatSync(ledgerPath).isSymbolicLink()) {
     throw new Error(`terminal dispatch ledger is a symlink: ${ledgerPath}`);
   }
@@ -8494,6 +8684,9 @@ function runPreparedCallback(prepared, { emit = true } = {}) {
     return result;
   }
 
+  assertStoreWriterCompatible(
+    pathsForConversationDir(path.dirname(prepared.statePath)).storeDir
+  );
   try {
     const deliveryKind = deliverCallbackToOpenClaw({
       options: prepared.options,
@@ -9091,7 +9284,16 @@ function loadConversationFromOptions(options) {
   }
 
   const conversation = options.state
-    ? loadState(statePath)
+    ? (() => {
+        const paths = pathsForConversationDir(path.dirname(statePath));
+        if (path.resolve(paths.statePath) !== path.resolve(statePath)) {
+          throw new Error(`AKK state path is not canonical: ${statePath}`);
+        }
+        return loadConversationById(
+          path.basename(paths.conversationDir),
+          paths.storeDir
+        );
+      })()
     : loadConversationById(conversationId, storeDir);
   assertConfiguredWorkspace(
     options.workspace,
@@ -9803,14 +10005,29 @@ function deliverStalledNotification({ statePath, logPath, conversation, message,
   });
 }
 
-function cleanupIdleConversations(storeDir, options: Record<string, any> = {}, now = new Date()) {
+function reconcileIdleConversations(
+  storeDir,
+  options: Record<string, any> = {},
+  now = new Date(),
+  conversationId?: string
+) {
   const timeoutMinutes = Number(options.idleTimeoutMinutes ?? DEFAULT_IDLE_TIMEOUT_MINUTES);
   if (!Number.isFinite(timeoutMinutes) || timeoutMinutes <= 0) {
-    return { checked: 0, closed: 0, idle_timeout_minutes: timeoutMinutes };
+    return {
+      checked: 0,
+      closed: 0,
+      skipped: 0,
+      idle_timeout_minutes: timeoutMinutes
+    };
   }
 
-  const conversations = listConversations(storeDir);
+  ensureStoreWritable(storeDir);
+  const conversations = listConversations(storeDir).filter((conversation) =>
+    (conversationId === undefined || conversation.conversation_id === conversationId) &&
+    matchesConfiguredWorkspace(options.workspace, conversation.workspace)
+  );
   let closed = 0;
+  let skipped = 0;
   for (const listedConversation of conversations) {
     if (listedConversation.status !== "idle" || !listedConversation.idle_since) {
       continue;
@@ -9831,6 +10048,7 @@ function cleanupIdleConversations(storeDir, options: Record<string, any> = {}, n
       releaseStateLock = acquireFileLock(`${statePath}.lock`);
     } catch (error) {
       if (isRecord(error) && error.code === "LOCK_TIMEOUT") {
+        skipped += 1;
         continue;
       }
       throw error;
@@ -9892,6 +10110,7 @@ function cleanupIdleConversations(storeDir, options: Record<string, any> = {}, n
   return {
     checked: conversations.length,
     closed,
+    skipped,
     idle_timeout_minutes: timeoutMinutes
   };
 }
@@ -10442,8 +10661,8 @@ function usage() {
   agent-knock-knock --help
   agent-knock-knock --version
   agent-knock-knock delegate --request <text> [--agent ${agentList}] [--workspace <path>] [--store-dir <dir>]
-  agent-knock-knock list [--store-dir <dir>] [--agent ${agentList}] [--status <status>] [--all] [--managed-only] [--no-approval-scan] [--terminal-debug]
-  agent-knock-knock status [--conversation <id|selector>] [--store-dir <dir>] [--trace]
+  agent-knock-knock list [--store-dir <dir>] [--agent ${agentList}] [--status <status>] [--all] [--managed-only] [--reconcile] [--no-approval-scan] [--terminal-debug]
+  agent-knock-knock status [--conversation <id|selector>] [--store-dir <dir>] [--reconcile] [--trace]
   agent-knock-knock send [--conversation <id|selector>] --message <text> [--type answer|task|control] [--agent-timeout-minutes <minutes>] [--agent-hard-timeout-minutes <minutes>]
   agent-knock-knock approve [--conversation <id|selector>] --expected-approval-fingerprint <fingerprint>
   agent-knock-knock cancel [--conversation <id|selector>]

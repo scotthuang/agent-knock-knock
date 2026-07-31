@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.0 - 2026-08-01
+
+### Changed
+
+- Move managed task state to the permanent `~/.agent-knock-knock/store` root, with a compatibility manifest and conversation data under `conversations/`.
+- Let OpenClaw-triggered `list` reconcile all managed tasks and `status` reconcile only its selected task. Standalone shell `list` and `status` stay read-only by default, expose reconciliation only through explicit `--reconcile`, and never change state while resolving a selector.
+- Leave the former `~/.agent-knock-knock/conversations` store untouched and ignored. This release does not migrate old managed task records; existing tmux panes remain discoverable for new work.
+
+### Security
+
+- Refuse incompatible Store writers before changing managed state or performing terminal and Gateway side effects.
+- Always use the plugin package's bundled relay and remove the configurable external `binPath` override.
+
 ## 0.6.2 - 2026-07-31
 
 ### Changed

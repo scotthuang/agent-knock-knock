@@ -359,7 +359,7 @@ test("CLI latest is deterministic and omission fails closed on ambiguity", () =>
 
 test("legacy unsupported executors do not break live terminal short refs", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-selector-cli-legacy-"));
-  const storeDir = path.join(tempDir, "conversations");
+  const storeDir = path.join(tempDir, "store");
   const workspace = path.join(tempDir, "workspace");
   const terminalTarget = "codex-live:0.0";
   const codexPid = 2222;
@@ -400,6 +400,8 @@ test("legacy unsupported executors do not break live terminal short refs", () =>
       created_at: "2026-06-20T00:00:00.000Z",
       updated_at: "2026-06-20T00:01:00.000Z",
       closed_at: "2026-06-20T00:01:00.000Z",
+      store_dir: legacyPaths.storeDir,
+      conversation_dir: legacyPaths.conversationDir,
       state_path: legacyPaths.statePath,
       event_log_path: legacyPaths.logPath
     } as any);
@@ -422,6 +424,8 @@ test("legacy unsupported executors do not break live terminal short refs", () =>
       hard_limit: 100,
       created_at: "2026-06-20T00:00:00.000Z",
       updated_at: "2026-06-20T00:01:00.000Z",
+      store_dir: idleLegacyPaths.storeDir,
+      conversation_dir: idleLegacyPaths.conversationDir,
       state_path: idleLegacyPaths.statePath,
       event_log_path: idleLegacyPaths.logPath
     } as any);
@@ -443,12 +447,15 @@ test("legacy unsupported executors do not break live terminal short refs", () =>
       hard_limit: 100,
       created_at: "2026-06-20T00:00:00.000Z",
       updated_at: "2026-06-20T00:01:00.000Z",
+      store_dir: acpxCodexPaths.storeDir,
+      conversation_dir: acpxCodexPaths.conversationDir,
       state_path: acpxCodexPaths.statePath,
       event_log_path: acpxCodexPaths.logPath
     } as any);
 
     const managedOnly = runCli([
       "list",
+      "--reconcile",
       "--all",
       "--managed-only",
       "--idle-timeout-minutes",
@@ -456,7 +463,7 @@ test("legacy unsupported executors do not break live terminal short refs", () =>
       "--store-dir",
       storeDir
     ]);
-    assert.equal(managedOnly.cleanup.closed, 1);
+    assert.equal(managedOnly.reconciliation.closed, 1);
     assert.deepEqual(managedOnly.delegated, []);
     assert.deepEqual(managedOnly.tasks, []);
 
@@ -505,7 +512,7 @@ test("an active unsupported legacy owner still fences its tmux pane", () => {
   const tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-selector-cli-legacy-owner-")
   );
-  const storeDir = path.join(tempDir, "conversations");
+  const storeDir = path.join(tempDir, "store");
   const workspace = path.join(tempDir, "workspace");
   const terminalTarget = "legacy-owned:0.0";
   const codexPid = 2222;
@@ -552,6 +559,8 @@ test("an active unsupported legacy owner still fences its tmux pane", () => {
           ]
         }
       },
+      store_dir: legacyPaths.storeDir,
+      conversation_dir: legacyPaths.conversationDir,
       state_path: legacyPaths.statePath,
       event_log_path: legacyPaths.logPath
     } as any);

@@ -5,6 +5,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import {
+  ensureStoreWritable,
+  pathsForConversation,
+  storeConversationsDir
+} from "../src/store.js";
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 const testRuntimeDir = fs.mkdtempSync(
@@ -1049,7 +1054,10 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
 
     const callbackDeliveryForRetry = (state: any) => ({
       status: "failed",
-      message: approvalCallbackMessage,
+      message: {
+        ...approvalCallbackMessage,
+        conversation_id: state.conversation_id
+      },
       attempts: 1,
       attempt_id: "dead-approval-callback-attempt",
       attempt_pid: 2_147_483_000,
@@ -1066,18 +1074,18 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
       kind: "approval_notification",
       last_error: "simulated monitor crash before Gateway settlement"
     });
-    const writeApprovalMessageEvent = (logPath: string) => {
+    const writeApprovalMessageEvent = (logPath: string, message: any) => {
       fs.writeFileSync(logPath, `${JSON.stringify({
-        ts: approvalCallbackMessage.ts,
-        conversation_id: approvalCallbackMessage.conversation_id,
+        ts: message.ts,
+        conversation_id: message.conversation_id,
         event: "message",
-        from: approvalCallbackMessage.from,
-        to: approvalCallbackMessage.to,
-        type: approvalCallbackMessage.type,
-        requires_response: approvalCallbackMessage.requires_response,
-        round: approvalCallbackMessage.round,
-        body: approvalCallbackMessage.body,
-        message: approvalCallbackMessage
+        from: message.from,
+        to: message.to,
+        type: message.type,
+        requires_response: message.requires_response,
+        round: message.round,
+        body: message.body,
+        message
       })}\n`, { mode: 0o600 });
     };
     const configureRetryGateway = (statePath: string) => {
@@ -1100,7 +1108,10 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
           "\n"
       });
     };
-
+    const retryBeforeApprovalStoreDir = path.join(
+      tempDir,
+      "retry-before-approval-store"
+    );
     const crashAfterDeliveryStatePath = writeConversationClone(
       storeDir,
       storedConversation,
@@ -1253,12 +1264,11 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
     await waitForPidExit(Number(replacementLaunch?.pid));
 
     const retryBeforeApprovalStatePath = writeConversationClone(
-      storeDir,
+      retryBeforeApprovalStoreDir,
       storedConversation,
-      "claude-autoapprove-retry-before-approval",
+      storedConversation.conversation_id,
       (state) => ({
         ...state,
-        conversation_id: storedConversation.conversation_id,
         status: "waiting_for_openclaw",
         response_rounds_used: approvalCallbackMessage.round,
         native_session_takeover: {
@@ -1286,9 +1296,13 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
       "events.ndjson"
     );
     assignTerminalDispatchOwner(retryBeforeApprovalStatePath);
-    writeApprovalMessageEvent(retryBeforeApprovalLogPath);
     fs.writeFileSync(transcriptPath, pendingTranscript, { mode: 0o600 });
     fs.writeFileSync(screenPath, approvalScreen);
+    writeApprovalMessageEvent(
+      retryBeforeApprovalLogPath,
+      JSON.parse(fs.readFileSync(retryBeforeApprovalStatePath, "utf8"))
+        .callback_delivery.message
+    );
     configureRetryGateway(retryBeforeApprovalStatePath);
     const callsBeforeFirstRetry = readJsonLines(openclawCallsPath).length;
     const enterCountBeforeFirstRetry = readJsonLines(tmuxCallsPath)
@@ -1366,10 +1380,14 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
         claude_home: claudeHome
       }
     };
+    const retryAfterApprovalStoreDir = path.join(
+      tempDir,
+      "retry-after-approval-store"
+    );
     const retryAfterApprovalStatePath = writeConversationClone(
-      storeDir,
+      retryAfterApprovalStoreDir,
       approvedBeforeSettlement,
-      "claude-autoapprove-retry-after-approval",
+      storedConversation.conversation_id,
       (state) => {
         const nativeTakeover = {
           ...state.native_session_takeover
@@ -1378,7 +1396,6 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
         delete nativeTakeover.terminal_bridge_approval_dispatch;
         return {
           ...state,
-          conversation_id: storedConversation.conversation_id,
           status: "waiting_for_agent",
           response_rounds_used: approvalCallbackMessage.round,
           native_session_takeover: nativeTakeover,
@@ -1393,9 +1410,13 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
       "events.ndjson"
     );
     assignTerminalDispatchOwner(retryAfterApprovalStatePath);
-    writeApprovalMessageEvent(retryAfterApprovalLogPath);
     fs.writeFileSync(transcriptPath, pendingTranscript, { mode: 0o600 });
     fs.writeFileSync(screenPath, approvalScreen);
+    writeApprovalMessageEvent(
+      retryAfterApprovalLogPath,
+      JSON.parse(fs.readFileSync(retryAfterApprovalStatePath, "utf8"))
+        .callback_delivery.message
+    );
     configureRetryGateway(retryAfterApprovalStatePath);
     const callsBeforeSecondRetry = readJsonLines(openclawCallsPath).length;
     const enterCountBeforeSecondRetry = readJsonLines(tmuxCallsPath)
@@ -1482,7 +1503,6 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
         } = state;
         return {
           ...withoutCallback,
-          conversation_id: storedConversation.conversation_id,
           status: "waiting_for_agent",
           native_session_takeover: nativeTakeover,
           updated_at:
@@ -2390,6 +2410,7 @@ fs.closeSync = function(fd, ...args) {
     let settled = false;
     listing = spawnAgentCliCaptured([
       "list",
+      "--reconcile",
       "--store-dir",
       storeDir,
       "--idle-timeout-minutes",
@@ -2438,7 +2459,7 @@ fs.closeSync = function(fd, ...args) {
     const result = await listing.result;
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const listed = JSON.parse(result.stdout);
-    assert.equal(listed.cleanup.closed, 0);
+    assert.equal(listed.reconciliation.closed, 0);
     assert.equal(listed.tasks.length, 1);
     assert.equal(listed.tasks[0].status, "waiting_for_agent");
 
@@ -3325,7 +3346,10 @@ test("background send to raw terminal id creates managed callback conversation",
     assert.equal(sentParsed.conversation.native_session_takeover.terminal_bridge, true);
     assert.equal(sentParsed.monitor_pid, null);
 
-    const statePath = path.join(storeDir, sentParsed.conversation.conversation_id, "state.json");
+    const statePath = pathsForConversation(
+      sentParsed.conversation.conversation_id,
+      storeDir
+    ).statePath;
     const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
     assert.equal(state.conversation_id, sentParsed.conversation.conversation_id);
     assert.equal(typeof state.native_session_takeover.terminal_bridge_started_at, "string");
@@ -3377,6 +3401,7 @@ test("background send to raw terminal id creates managed callback conversation",
 
     const listed = runAgentCli([
       "list",
+      "--reconcile",
       "--store-dir",
       storeDir,
       "--idle-timeout-minutes",
@@ -3385,7 +3410,7 @@ test("background send to raw terminal id creates managed callback conversation",
     ]);
     assert.equal(listed.status, 0, listed.stderr || listed.stdout);
     const listedParsed = JSON.parse(listed.stdout);
-    assert.equal(listedParsed.cleanup.closed, 1);
+    assert.equal(listedParsed.reconciliation.closed, 1);
     assert.deepEqual(listedParsed.delegated, []);
     const closedState = JSON.parse(fs.readFileSync(statePath, "utf8"));
     assert.equal(closedState.status, "closed");
@@ -3440,10 +3465,13 @@ test("raw background send durably prepares its terminal submission before tmux a
       "terminal submission to enter the fake tmux gate"
     );
 
-    const conversationDirs = fs.readdirSync(storeDir, { withFileTypes: true })
+    const conversationDirs = fs.readdirSync(storeConversationsDir(storeDir), { withFileTypes: true })
       .filter((entry) => entry.isDirectory());
     assert.equal(conversationDirs.length, 1);
-    const conversationDir = path.join(storeDir, conversationDirs[0].name);
+    const conversationDir = path.join(
+      storeConversationsDir(storeDir),
+      conversationDirs[0].name
+    );
     const statePath = path.join(conversationDir, "state.json");
     const logPath = path.join(conversationDir, "events.ndjson");
     const preparedState = JSON.parse(fs.readFileSync(statePath, "utf8"));
@@ -3689,8 +3717,8 @@ test("a released terminal owner permits the same task text in a new conversation
     );
 
     const conversationDir = path.join(
-      storeDir,
-      fs.readdirSync(storeDir, { withFileTypes: true })
+      storeConversationsDir(storeDir),
+      fs.readdirSync(storeConversationsDir(storeDir), { withFileTypes: true })
         .find((entry) => entry.isDirectory())!.name
     );
     const statePath = path.join(conversationDir, "state.json");
@@ -4056,8 +4084,12 @@ test("a newer raw terminal task cannot replace an active callback boundary", () 
     const first = sendTask("First task");
     assert.equal(first.status, 0, first.stderr || first.stdout);
     const firstParsed = JSON.parse(first.stdout);
-    const firstStatePath = path.join(storeDir, firstParsed.conversation.conversation_id, "state.json");
-    const firstLogPath = path.join(storeDir, firstParsed.conversation.conversation_id, "events.ndjson");
+    const firstPaths = pathsForConversation(
+      firstParsed.conversation.conversation_id,
+      storeDir
+    );
+    const firstStatePath = firstPaths.statePath;
+    const firstLogPath = firstPaths.logPath;
 
     const second = sendTask("Second task");
     assert.notEqual(second.status, 0);
@@ -4175,16 +4207,12 @@ test("durable completion must settle before a newer raw task can send", async ()
     ], env);
     assert.equal(first.status, 0, first.stderr || first.stdout);
     const firstParsed = JSON.parse(first.stdout);
-    const firstStatePath = path.join(
-      storeDir,
+    const firstPaths = pathsForConversation(
       firstParsed.conversation.conversation_id,
-      "state.json"
+      storeDir
     );
-    const firstLogPath = path.join(
-      storeDir,
-      firstParsed.conversation.conversation_id,
-      "events.ndjson"
-    );
+    const firstStatePath = firstPaths.statePath;
+    const firstLogPath = firstPaths.logPath;
     const stalledStatePath = writeConversationClone(
       storeDir,
       firstParsed.conversation,
@@ -4269,11 +4297,10 @@ test("durable completion must settle before a newer raw task can send", async ()
     return;
     assert.equal(second.status, 0, second.stderr || second.stdout);
     const secondParsed = JSON.parse(second.stdout);
-    const secondStatePath = path.join(
-      storeDir,
+    const secondStatePath = pathsForConversation(
       secondParsed.conversation.conversation_id,
-      "state.json"
-    );
+      storeDir
+    ).statePath;
 
     const reconciledState = JSON.parse(fs.readFileSync(firstStatePath, "utf8"));
     assert.equal(reconciledState.status, "closed");
@@ -4486,8 +4513,12 @@ test("an active dispatch blocks a replacement before tmux input", () => {
     const first = sendTask("First task");
     assert.equal(first.status, 0, first.stderr || first.stdout);
     const firstParsed = JSON.parse(first.stdout);
-    const firstStatePath = path.join(storeDir, firstParsed.conversation.conversation_id, "state.json");
-    const firstLogPath = path.join(storeDir, firstParsed.conversation.conversation_id, "events.ndjson");
+    const firstPaths = pathsForConversation(
+      firstParsed.conversation.conversation_id,
+      storeDir
+    );
+    const firstStatePath = firstPaths.statePath;
+    const firstLogPath = firstPaths.logPath;
 
     writeFakeTmux(fakeBinDir, tmuxCallsPath, screenPath, listPanesOutput, "Second task");
     const second = sendTask("Second task");
@@ -4764,9 +4795,9 @@ test("concurrent raw terminal sends allow exactly one active generation", async 
       /still owned by active AKK conversation/u
     );
 
-    const states = fs.readdirSync(storeDir, { withFileTypes: true })
+    const states = fs.readdirSync(storeConversationsDir(storeDir), { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
-      .map((entry) => path.join(storeDir, entry.name, "state.json"))
+      .map((entry) => path.join(storeConversationsDir(storeDir), entry.name, "state.json"))
       .filter((statePath) => fs.existsSync(statePath))
       .map((statePath) =>
         JSON.parse(fs.readFileSync(statePath, "utf8"))
@@ -5418,8 +5449,12 @@ test("terminal bridge monitor trusts matching task_complete despite stale workin
     });
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
     const sentParsed = JSON.parse(sent.stdout);
-    const statePath = path.join(storeDir, sentParsed.conversation.conversation_id, "state.json");
-    const logPath = path.join(storeDir, sentParsed.conversation.conversation_id, "events.ndjson");
+    const storedPaths = pathsForConversation(
+      sentParsed.conversation.conversation_id,
+      storeDir
+    );
+    const statePath = storedPaths.statePath;
+    const logPath = storedPaths.logPath;
 
     const rollout = [
       JSON.stringify({
@@ -5628,16 +5663,12 @@ test("terminal bridge searches all same-cwd rollouts for the matching task_compl
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
     const sentParsed = JSON.parse(sent.stdout);
     fs.writeFileSync(screenPath, "• Working (12s • esc to interrupt)\n");
-    const statePath = path.join(
-      storeDir,
+    const storedPaths = pathsForConversation(
       sentParsed.conversation.conversation_id,
-      "state.json"
+      storeDir
     );
-    const logPath = path.join(
-      storeDir,
-      sentParsed.conversation.conversation_id,
-      "events.ndjson"
-    );
+    const statePath = storedPaths.statePath;
+    const logPath = storedPaths.logPath;
 
     const completedRollout = [
       JSON.stringify({
@@ -5802,8 +5833,12 @@ test("terminal bridge monitor rejects low-confidence assistant and task_complete
     });
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
     const sentParsed = JSON.parse(sent.stdout);
-    const statePath = path.join(storeDir, sentParsed.conversation.conversation_id, "state.json");
-    const logPath = path.join(storeDir, sentParsed.conversation.conversation_id, "events.ndjson");
+    const storedPaths = pathsForConversation(
+      sentParsed.conversation.conversation_id,
+      storeDir
+    );
+    const statePath = storedPaths.statePath;
+    const logPath = storedPaths.logPath;
     const rollout = [
       JSON.stringify({
         timestamp: "2099-07-04T00:00:00.000Z",
@@ -5936,8 +5971,12 @@ test("terminal bridge working markers extend inactivity until the hard lifetime"
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
     const sentParsed = JSON.parse(sent.stdout);
     fs.writeFileSync(screenPath, workingScreen);
-    const statePath = path.join(storeDir, sentParsed.conversation.conversation_id, "state.json");
-    const logPath = path.join(storeDir, sentParsed.conversation.conversation_id, "events.ndjson");
+    const storedPaths = pathsForConversation(
+      sentParsed.conversation.conversation_id,
+      storeDir
+    );
+    const statePath = storedPaths.statePath;
+    const logPath = storedPaths.logPath;
     const startedAt = JSON.parse(fs.readFileSync(statePath, "utf8"))
       .native_session_takeover.terminal_bridge_started_at;
 
@@ -6041,8 +6080,9 @@ test("renew restarts a stalled terminal bridge without input and completion call
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
     const sentParsed = JSON.parse(sent.stdout);
     const conversationId = sentParsed.conversation.conversation_id;
-    const statePath = path.join(storeDir, conversationId, "state.json");
-    const logPath = path.join(storeDir, conversationId, "events.ndjson");
+    const storedPaths = pathsForConversation(conversationId, storeDir);
+    const statePath = storedPaths.statePath;
+    const logPath = storedPaths.logPath;
     const waitingState = JSON.parse(fs.readFileSync(statePath, "utf8"));
     fs.writeFileSync(statePath, `${JSON.stringify({
       ...waitingState,
@@ -6688,11 +6728,11 @@ test("reconcile-monitors launches only recoverable waiting terminal bridges", as
       sendKeysBefore
     );
     assert.equal(
-      JSON.parse(fs.readFileSync(path.join(storeDir, "waiting-for-openclaw", "state.json"), "utf8")).status,
+      JSON.parse(fs.readFileSync(pathsForConversation("waiting-for-openclaw", storeDir).statePath, "utf8")).status,
       "waiting_for_openclaw"
     );
     assert.equal(
-      JSON.parse(fs.readFileSync(path.join(storeDir, "already-stalled", "state.json"), "utf8")).status,
+      JSON.parse(fs.readFileSync(pathsForConversation("already-stalled", storeDir).statePath, "utf8")).status,
       "stalled"
     );
   } finally {
@@ -6841,8 +6881,12 @@ test("terminal bridge monitor callbacks when the completed prompt has scrolled o
     });
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
     const sentParsed = JSON.parse(sent.stdout);
-    const statePath = path.join(storeDir, sentParsed.conversation.conversation_id, "state.json");
-    const logPath = path.join(storeDir, sentParsed.conversation.conversation_id, "events.ndjson");
+    const storedPaths = pathsForConversation(
+      sentParsed.conversation.conversation_id,
+      storeDir
+    );
+    const statePath = storedPaths.statePath;
+    const logPath = storedPaths.logPath;
     assert.equal(
       typeof sentParsed.conversation.native_session_takeover.terminal_bridge_pre_send_screen_fingerprint,
       "string"
@@ -7137,8 +7181,9 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
     const sentParsed = JSON.parse(sent.stdout);
     fs.writeFileSync(screenPath, approvalScreen);
     const conversationId = sentParsed.conversation.conversation_id;
-    const statePath = path.join(storeDir, conversationId, "state.json");
-    const logPath = path.join(storeDir, conversationId, "events.ndjson");
+    const storedPaths = pathsForConversation(conversationId, storeDir);
+    const statePath = storedPaths.statePath;
+    const logPath = storedPaths.logPath;
 
     const monitored = runAgentCli([
       "monitor",
@@ -7208,16 +7253,21 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
     assert.equal(gatewayParams.message.metadata.deny_command, `AKK cancel ${conversationId}`);
     assert.equal(gatewayParams.message.metadata.approval_candidate.command, "npm install");
 
-    const recoveryConversationId = "codex-approval-outbox-recovery";
-    const recoveryStatePath = writeConversationClone(
-      storeDir,
+    const writeApprovalRecoveryClone = (
+      name: string,
+      mutate: (state: any) => any
+    ) => writeConversationClone(
+      path.join(tempDir, `${name}-store`),
       monitoredParsed.conversation,
-      recoveryConversationId,
+      monitoredParsed.conversation.conversation_id,
+      mutate
+    );
+    const recoveryStatePath = writeApprovalRecoveryClone(
+      "codex-approval-outbox-recovery",
       (state) => {
         const { callback_delivery: _missingOutbox, ...withoutOutbox } = state;
         return {
           ...withoutOutbox,
-          conversation_id: monitoredParsed.conversation.conversation_id,
           status: "waiting_for_agent",
           response_rounds_used: Math.max(
             0,
@@ -7304,9 +7354,7 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
 
     const markerOnlyRecoveryMessageId =
       "msg-approval-marker-before-message-event";
-    const markerOnlyRecoveryStatePath = writeConversationClone(
-      storeDir,
-      monitoredParsed.conversation,
+    const markerOnlyRecoveryStatePath = writeApprovalRecoveryClone(
       "codex-approval-marker-only-recovery",
       (state) => {
         const {
@@ -7315,7 +7363,6 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
         } = state;
         return {
           ...withoutOutbox,
-          conversation_id: monitoredParsed.conversation.conversation_id,
           status: "waiting_for_agent",
           response_rounds_used: Math.max(
             0,
@@ -7400,13 +7447,9 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
       true
     );
 
-    const staleOutboxRecoveryConversationId =
-      "codex-approval-stale-outbox-recovery";
     const recoveredCallbackMessageId = "msg-new-approval-after-crash";
-    const staleOutboxRecoveryStatePath = writeConversationClone(
-      storeDir,
-      monitoredParsed.conversation,
-      staleOutboxRecoveryConversationId,
+    const staleOutboxRecoveryStatePath = writeApprovalRecoveryClone(
+      "codex-approval-stale-outbox-recovery",
       (state) => {
         const approval = {
           ...state.native_session_takeover.terminal_bridge_approval,
@@ -7414,7 +7457,6 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
         };
         return {
           ...state,
-          conversation_id: monitoredParsed.conversation.conversation_id,
           status: "waiting_for_agent",
           updated_at: approval.notified_at,
           native_session_takeover: {
@@ -7516,14 +7558,10 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
       "the fresh first attempt must retain callback retry coverage"
     );
 
-    const exhaustedOutboxRecoveryConversationId =
-      "codex-approval-exhausted-outbox-recovery";
     const exhaustedCallbackMessageId =
       "msg-new-approval-after-exhausted-callback";
-    const exhaustedOutboxRecoveryStatePath = writeConversationClone(
-      storeDir,
-      monitoredParsed.conversation,
-      exhaustedOutboxRecoveryConversationId,
+    const exhaustedOutboxRecoveryStatePath = writeApprovalRecoveryClone(
+      "codex-approval-exhausted-outbox-recovery",
       (state) => {
         const approval = {
           ...state.native_session_takeover.terminal_bridge_approval,
@@ -7531,7 +7569,6 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
         };
         return {
           ...state,
-          conversation_id: monitoredParsed.conversation.conversation_id,
           status: "waiting_for_agent",
           updated_at: approval.notified_at,
           native_session_takeover: {
@@ -7643,14 +7680,10 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
       true
     );
 
-    const conflictingRecoveryConversationId =
-      "codex-approval-conflicting-log-recovery";
     const conflictingCallbackMessageId =
       "msg-conflicting-approval-recovery";
-    const conflictingRecoveryStatePath = writeConversationClone(
-      storeDir,
-      monitoredParsed.conversation,
-      conflictingRecoveryConversationId,
+    const conflictingRecoveryStatePath = writeApprovalRecoveryClone(
+      "codex-approval-conflicting-log-recovery",
       (state) => {
         const approval = {
           ...state.native_session_takeover.terminal_bridge_approval,
@@ -7658,7 +7691,6 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
         };
         return {
           ...state,
-          conversation_id: monitoredParsed.conversation.conversation_id,
           status: "waiting_for_agent",
           updated_at: approval.notified_at,
           native_session_takeover: {
@@ -8174,7 +8206,9 @@ function agentCliTestEnv(
     const stateIndex = args.indexOf("--state");
     if (stateIndex >= 0 && args[stateIndex + 1]) {
       const statePath = path.resolve(args[stateIndex + 1]);
-      const inferredStoreDir = path.dirname(path.dirname(statePath));
+      const inferredStoreDir = path.dirname(
+        path.dirname(path.dirname(statePath))
+      );
       inferredRuntimeDir = path.join(
         path.dirname(inferredStoreDir),
         ".akk-cli-test-runtime"
@@ -8362,13 +8396,16 @@ function writeConversationClone(
   conversationId: string,
   mutate: (state: any) => any
 ): string {
-  const conversationDir = path.join(storeDir, conversationId);
-  const statePath = path.join(conversationDir, "state.json");
-  const eventLogPath = path.join(conversationDir, "events.ndjson");
+  ensureStoreWritable(storeDir);
+  const paths = pathsForConversation(conversationId, storeDir);
+  const conversationDir = paths.conversationDir;
+  const statePath = paths.statePath;
+  const eventLogPath = paths.logPath;
   fs.mkdirSync(conversationDir, { recursive: true });
   const cloned = mutate({
     ...sourceState,
     conversation_id: conversationId,
+    store_dir: storeDir,
     conversation_dir: conversationDir,
     state_path: statePath,
     event_log_path: eventLogPath

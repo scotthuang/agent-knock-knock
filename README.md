@@ -106,13 +106,15 @@ Requirements:
 
 The compatibility suite tests the normal installation floor and the Plugin API boundary with isolated state and the real packed artifact.
 
-ClawHub installs the OpenClaw plugin, bundled AKK skill, and package-local relay CLI together. It does not add the `agent-knock-knock` command to your shell `PATH`. Do not run `install-openclaw` after a ClawHub install; that command belongs to the npm path below.
+ClawHub installs the OpenClaw plugin, bundled AKK skill, and package-local relay CLI together. The plugin always uses that bundled relay, so a stale shell command cannot be selected through plugin configuration. ClawHub does not add the `agent-knock-knock` command to your shell `PATH`. Do not run `install-openclaw` after a ClawHub install; that command belongs to the npm path below.
 
 If you also want standalone shell commands such as `agent-knock-knock doctor`, install the npm package globally without running `install-openclaw`:
 
 ```bash
 npm install -g @scotthuang/agent-knock-knock
 ```
+
+Standalone `agent-knock-knock list` and `status` are read-only with respect to managed task state by default. Passing `--reconcile` explicitly enables controlled reconciliation; OpenClaw does this for `/akk list`, `/akk status`, and the corresponding plugin tools.
 
 ### Alternative: Install from npm
 
@@ -195,6 +197,8 @@ The core command surface is intentionally small:
 /akk cancel <session-selector>
 ```
 
+`/akk list` performs a controlled reconciliation across managed tasks, and `/akk status` limits reconciliation to the selected task. This can close task records whose idle retention has elapsed and restore eligible missing monitors, but it does not send terminal input or retry callback delivery. Standalone shell queries are read-only unless `--reconcile` is explicitly passed, and resolving a selector never changes task state.
+
 Selectors fail closed: `only` works only with one actionable target, `latest` requires a unique newest target, and `codex` or `claude` must identify exactly one eligible pane. `AKK list` shows stable short references while JSON output retains the authoritative full IDs. Before every terminal operation, AKK revalidates the expected agent PID and tmux pane identity, then confirms that the process and pane working directories still match; every send also revalidates the idle prompt immediately before typing.
 
 For natural-language tool use, `agent_knock_knock_list` returns an `available_actions` object on rows in `delegated[]` and `terminal_controlled[]`; `tasks[]` remains a compatibility summary. Use only an action shown there, start with its prefilled authoritative arguments, and supply every `missing_required` field. A delegated row's `status` is its task lifecycle, while a terminal-controlled row's `status` only says whether the coding-agent process is alive and its `activity_state` reports the parsed screen state. The legacy `commands` flags have mixed compatibility semantics, are deprecated, and must never drive tool calls; `available_actions` is the only authoritative current-action source. `send` uses `selector`; status, approval, cancellation, renewal, callback retry, and close use `conversation_id`. For an ordinary send, add only `request`—`timeoutSeconds` is not a supported argument, and monitoring limits should be omitted unless the user explicitly asks to change them.
@@ -209,12 +213,14 @@ AKK works without project-specific plugin configuration. It reads these optional
 
 | Option | Default | Purpose |
 | --- | --- | --- |
-| `storeDir` | `~/.agent-knock-knock/conversations` | Conversation state location. |
+| `storeDir` | `~/.agent-knock-knock/store` | Stable Store root for the compatibility manifest and managed conversations. |
 | `openclawBin` | Auto-detected | OpenClaw CLI used for callback delivery. |
 | `codexHome` | Auto-detected | Optional Codex home used to identify Codex sessions running in tmux. |
-| `idleTimeoutMinutes` | `10080` | Time before an idle task is lazily closed. |
+| `idleTimeoutMinutes` | `10080` | Idle retention checked during controlled reconciliation. |
 | `agentTimeoutMinutes` | `60` | Terminal inactivity timeout. |
 | `agentHardTimeoutMinutes` | `720` | Maximum terminal monitor lifetime. |
+
+Custom `storeDir` values use the same Store structure. AKK initializes a missing or empty directory and refuses a non-empty manifestless directory instead of guessing how to write it.
 
 See [`openclaw.plugin.json`](https://github.com/scotthuang/agent-knock-knock/blob/main/openclaw.plugin.json) for the complete schema.
 
@@ -311,7 +317,13 @@ gh workflow run clawhub-publish.yml --ref vX.Y.Z -f dry_run=false
 
 ## Storage and Logs
 
-State lives under `~/.agent-knock-knock/`. Directories use mode `0700`; state and log files use `0600`. Runtime logs redact common secrets and default to 14-day retention. Configure storage and logging with `--store-dir`, `AKK_LOG_DIR`, `AKK_LOG_LEVEL`, and `AKK_LOG_RETENTION_DAYS`; use a dedicated custom log directory.
+Managed state now lives in the stable `~/.agent-knock-knock/store` root. Its manifest prevents an incompatible AKK writer from changing task state. Directories use mode `0700`; state and log files use `0600`.
+
+The manifest checks storage format and writer behavior separately. An unknown `format_version` is not read. When the format is readable but `writer_protocol` differs, normal queries remain available, explicit reconciliation reports `skipped`, and every mutation fails closed before terminal or Gateway side effects.
+
+The former `~/.agent-knock-knock/conversations` directory is left untouched, but AKK `0.7.0` does not read or migrate it. Existing Codex and Claude Code tmux panes remain available through live discovery, while their old AKK task IDs, callback associations, and follow-up records are not carried into the new Store. Compatible future upgrades continue using the stable Store rather than creating a directory per package version.
+
+Runtime logs redact common secrets and default to 14-day retention. Configure storage and logging with `--store-dir`, `AKK_LOG_DIR`, `AKK_LOG_LEVEL`, and `AKK_LOG_RETENTION_DAYS`; use a dedicated custom log directory.
 
 ## Security
 

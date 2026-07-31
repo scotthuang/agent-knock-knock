@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -6,6 +7,13 @@ import type { AgentMessage, Conversation } from "./protocol.js";
 
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
+const STORE_SCHEMA = "agent-knock-knock/store";
+const STORE_MANIFEST_FILE = "manifest.json";
+const STORE_CONVERSATIONS_DIRECTORY = "conversations";
+const STORE_RUNTIME_DIRECTORY = "runtime";
+const STORE_WRITER_LOCK_FILE = ".akk-writer.lock";
+const STORE_MANIFEST_TEMP_PREFIX = `.${STORE_MANIFEST_FILE}.`;
+const STORE_MANIFEST_TEMP_SUFFIX = ".tmp";
 const STORE_LOCK_FILE = ".akk-store.lock";
 const STORE_LOCK_RECLAIM_SUFFIX = ".reclaim";
 const STORE_LOCK_TIMEOUT_MS = 10_000;
@@ -15,8 +23,54 @@ const NO_FOLLOW_FLAG = typeof fs.constants.O_NOFOLLOW === "number"
   ? fs.constants.O_NOFOLLOW
   : 0;
 
+export const STORE_FORMAT_VERSION = 1;
+export const STORE_WRITER_PROTOCOL = 1;
+
+export interface StoreManifest {
+  schema: typeof STORE_SCHEMA;
+  format_version: number;
+  writer_protocol: number;
+  created_at: string;
+}
+
+export interface StoreCompatibility {
+  status: "uninitialized" | "legacy" | "compatible" | "incompatible";
+  store_dir: string;
+  manifest_path: string;
+  readable: boolean;
+  writable: boolean;
+  format_version?: number;
+  writer_protocol?: number;
+  reason?: string;
+}
+
+const STORE_WRITER_LEASE_BRAND: unique symbol = Symbol("akk-store-writer-lease");
+
+export interface StoreWriterLease {
+  readonly storeDir: string;
+  readonly manifest: Readonly<StoreManifest>;
+  readonly [STORE_WRITER_LEASE_BRAND]: true;
+}
+
+interface ActiveStoreWriterLease extends StoreWriterLease {
+  released: boolean;
+}
+
+const activeStoreWriterLease = new AsyncLocalStorage<ActiveStoreWriterLease>();
+
+export class StoreCompatibilityError extends Error {
+  readonly code = "AKK_STORE_INCOMPATIBLE";
+  readonly compatibility: StoreCompatibility;
+
+  constructor(message: string, compatibility: StoreCompatibility) {
+    super(message);
+    this.name = "StoreCompatibilityError";
+    this.compatibility = compatibility;
+  }
+}
+
 export function defaultStoreDir(_workspace = process.cwd()): string {
-  return path.join(os.homedir(), ".agent-knock-knock", "conversations");
+  return path.join(os.homedir(), ".agent-knock-knock", "store");
 }
 
 export function defaultLogDir(workspace = process.cwd()): string {
@@ -42,6 +96,189 @@ export interface ConversationPaths {
   statePath: string;
 }
 
+export function storeManifestPath(storeDir = defaultStoreDir()): string {
+  return path.join(storeDir, STORE_MANIFEST_FILE);
+}
+
+export function storeConversationsDir(storeDir = defaultStoreDir()): string {
+  return path.join(storeDir, STORE_CONVERSATIONS_DIRECTORY);
+}
+
+export function inspectStoreCompatibility(
+  storeDir = defaultStoreDir()
+): StoreCompatibility {
+  const resolvedStoreDir = path.resolve(storeDir);
+  const manifestPath = storeManifestPath(resolvedStoreDir);
+  if (!fs.existsSync(resolvedStoreDir)) {
+    return {
+      status: "uninitialized",
+      store_dir: storeDir,
+      manifest_path: manifestPath,
+      readable: true,
+      writable: true
+    };
+  }
+
+  assertNotSymlink(resolvedStoreDir, "store directory");
+  const storeStat = fs.lstatSync(resolvedStoreDir);
+  if (!storeStat.isDirectory()) {
+    throw new Error(`store directory must be a real directory: ${storeDir}`);
+  }
+  if (!fs.existsSync(manifestPath)) {
+    if (storeHasConversationData(resolvedStoreDir)) {
+      return {
+        status: "legacy",
+        store_dir: storeDir,
+        manifest_path: manifestPath,
+        readable: false,
+        writable: false,
+        reason: "store contains conversation data but has no AKK manifest"
+      };
+    }
+    return {
+      status: "uninitialized",
+      store_dir: storeDir,
+      manifest_path: manifestPath,
+      readable: true,
+      writable: true
+    };
+  }
+
+  const manifest = readStoreManifest(manifestPath);
+  const readable = manifest.format_version === STORE_FORMAT_VERSION;
+  const writable = readable && manifest.writer_protocol === STORE_WRITER_PROTOCOL;
+  return {
+    status: readable && writable ? "compatible" : "incompatible",
+    store_dir: storeDir,
+    manifest_path: manifestPath,
+    readable,
+    writable,
+    format_version: manifest.format_version,
+    writer_protocol: manifest.writer_protocol,
+    ...(!readable
+      ? {
+          reason:
+            `store format ${manifest.format_version} is not readable by format ${STORE_FORMAT_VERSION}`
+        }
+      : !writable
+        ? {
+            reason:
+              `store writer protocol ${manifest.writer_protocol} is not writable by protocol ${STORE_WRITER_PROTOCOL}`
+          }
+        : {})
+  };
+}
+
+export function assertStoreReadable(storeDir = defaultStoreDir()): StoreCompatibility {
+  const compatibility = inspectStoreCompatibility(storeDir);
+  if (!compatibility.readable) {
+    throw new StoreCompatibilityError(
+      `${compatibility.reason}; use an empty AKK store created by the installed package`,
+      compatibility
+    );
+  }
+  return compatibility;
+}
+
+/**
+ * Validate whether this binary may write the selected store without creating or
+ * repairing anything. An absent or empty store is writable because its first
+ * real mutation may initialize the manifest.
+ */
+export function assertStoreWriterCompatible(
+  storeDir = defaultStoreDir()
+): StoreCompatibility {
+  const compatibility = inspectStoreCompatibility(storeDir);
+  assertWritableCompatibility(compatibility);
+  return compatibility;
+}
+
+export function ensureStoreWritable(storeDir = defaultStoreDir()): StoreManifest {
+  return withStoreWriterLease(storeDir, (lease) => ({ ...lease.manifest }));
+}
+
+/**
+ * Hold the store's writer lock for one synchronous mutation boundary. Nested
+ * calls for the same store reuse the active lease, so saveState/appendEvent can
+ * safely enforce the guard without deadlocking a command-level lease.
+ */
+export function withStoreWriterLease<T>(
+  storeDir: string,
+  action: (lease: StoreWriterLease) => T
+): T {
+  const resolvedStoreDir = path.resolve(storeDir);
+  const current = activeStoreWriterLease.getStore();
+  if (current && !current.released) {
+    assertSameStoreLease(current, resolvedStoreDir);
+    revalidateStoreWriterLease(current);
+    return action(current);
+  }
+
+  prepareStoreRootForWriterLock(resolvedStoreDir);
+  const lockPath = path.join(resolvedStoreDir, STORE_WRITER_LOCK_FILE);
+  const token = randomUUID();
+  acquireConversationLock(
+    lockPath,
+    token,
+    Date.now() + STORE_LOCK_TIMEOUT_MS
+  );
+  let lease: ActiveStoreWriterLease | undefined;
+  try {
+    const manifest = ensureStoreWritableWhileLocked(resolvedStoreDir);
+    lease = {
+      storeDir: resolvedStoreDir,
+      manifest: Object.freeze({ ...manifest }),
+      [STORE_WRITER_LEASE_BRAND]: true,
+      released: false
+    };
+    return activeStoreWriterLease.run(lease, () => action(lease!));
+  } finally {
+    if (lease) {
+      lease.released = true;
+    }
+    releaseConversationLock(lockPath, token);
+  }
+}
+
+/** Hold the store writer lease until an asynchronous side effect and commit finish. */
+export async function withStoreWriterLeaseAsync<T>(
+  storeDir: string,
+  action: (lease: StoreWriterLease) => Promise<T>
+): Promise<T> {
+  const resolvedStoreDir = path.resolve(storeDir);
+  const current = activeStoreWriterLease.getStore();
+  if (current && !current.released) {
+    assertSameStoreLease(current, resolvedStoreDir);
+    revalidateStoreWriterLease(current);
+    return action(current);
+  }
+
+  prepareStoreRootForWriterLock(resolvedStoreDir);
+  const lockPath = path.join(resolvedStoreDir, STORE_WRITER_LOCK_FILE);
+  const token = randomUUID();
+  acquireConversationLock(
+    lockPath,
+    token,
+    Date.now() + STORE_LOCK_TIMEOUT_MS
+  );
+  let lease: ActiveStoreWriterLease | undefined;
+  try {
+    const manifest = ensureStoreWritableWhileLocked(resolvedStoreDir);
+    lease = {
+      storeDir: resolvedStoreDir,
+      manifest: Object.freeze({ ...manifest }),
+      [STORE_WRITER_LEASE_BRAND]: true,
+      released: false
+    };
+    return await activeStoreWriterLease.run(lease, () => action(lease!));
+  } finally {
+    if (lease) {
+      lease.released = true;
+    }
+    releaseConversationLock(lockPath, token);
+  }
+}
+
 export interface EventRecord {
   event: string;
   [key: string]: unknown;
@@ -49,12 +286,14 @@ export interface EventRecord {
 
 export function pathsForConversation(conversationId: string, storeDir = defaultStoreDir()): ConversationPaths {
   const validated = validateConversationPath(conversationId, storeDir);
-  const conversationDir = path.join(storeDir, conversationId);
+  const conversationsDir = storeConversationsDir(storeDir);
+  const conversationDir = path.join(conversationsDir, conversationId);
   assertNotSymlink(validated.resolvedStoreDir, "store directory");
+  assertNotSymlink(validated.resolvedConversationsDir, "conversations directory");
   assertNotSymlink(validated.resolvedConversationDir, "conversation directory");
   return {
     storeDir,
-    logDir: storeDir,
+    logDir: conversationsDir,
     conversationDir,
     logPath: path.join(conversationDir, "events.ndjson"),
     statePath: path.join(conversationDir, "state.json")
@@ -63,14 +302,23 @@ export function pathsForConversation(conversationId: string, storeDir = defaultS
 
 export function pathsForConversationDir(conversationDir: string): ConversationPaths {
   const resolvedConversationDir = path.resolve(conversationDir);
-  const resolvedStoreDir = path.dirname(resolvedConversationDir);
-  if (resolvedConversationDir === resolvedStoreDir) {
-    throw new Error(`conversation directory must be contained by a store directory: ${conversationDir}`);
+  validateConversationId(path.basename(resolvedConversationDir));
+  const resolvedConversationsDir = path.dirname(resolvedConversationDir);
+  const resolvedStoreDir = path.dirname(resolvedConversationsDir);
+  if (
+    path.basename(resolvedConversationsDir) !== STORE_CONVERSATIONS_DIRECTORY ||
+    resolvedConversationDir === resolvedConversationsDir ||
+    resolvedConversationsDir === resolvedStoreDir
+  ) {
+    throw new Error(
+      `conversation directory must be contained by an AKK store conversations directory: ${conversationDir}`
+    );
   }
   assertNotSymlink(resolvedStoreDir, "store directory");
+  assertNotSymlink(resolvedConversationsDir, "conversations directory");
   assertNotSymlink(resolvedConversationDir, "conversation directory");
   return {
-    storeDir: path.dirname(conversationDir),
+    storeDir: path.dirname(path.dirname(conversationDir)),
     logDir: path.dirname(conversationDir),
     conversationDir,
     logPath: path.join(conversationDir, "events.ndjson"),
@@ -87,6 +335,16 @@ export function logPathForStatePath(statePath: string): string {
 }
 
 export function saveState(statePath: string, conversation: Conversation): void {
+  const paths = assertCanonicalConversationDataPath(statePath, "state.json");
+  withStoreWriterLease(paths.storeDir, () => {
+    saveStateWithWriterLease(statePath, conversation);
+  });
+}
+
+function saveStateWithWriterLease(
+  statePath: string,
+  conversation: Conversation
+): void {
   validateConversationId(conversation.conversation_id);
   secureConversationStorageMetadata(statePath, conversation);
   prepareDataDirectory(statePath);
@@ -136,7 +394,6 @@ export function loadState(statePath: string): Conversation {
   assertNotSymlink(path.dirname(statePath), "conversation directory");
   const fd = openRegularFileNoFollow(statePath, fs.constants.O_RDONLY, "state file");
   try {
-    fs.fchmodSync(fd, PRIVATE_FILE_MODE);
     return JSON.parse(fs.readFileSync(fd, "utf8")) as Conversation;
   } finally {
     fs.closeSync(fd);
@@ -148,32 +405,63 @@ export function statePathForConversationId(conversationId: string, storeDir = de
 }
 
 export function loadConversationById(conversationId: string, storeDir = defaultStoreDir()): Conversation {
-  return loadState(statePathForConversationId(conversationId, storeDir));
+  const resolvedStoreDir = path.resolve(storeDir);
+  assertStoreReadable(resolvedStoreDir);
+  const paths = pathsForConversation(conversationId, resolvedStoreDir);
+  return withCanonicalConversationStorage(loadState(paths.statePath), paths);
 }
 
 export function listConversations(storeDir = defaultStoreDir()): Conversation[] {
-  if (!fs.existsSync(storeDir)) {
+  const resolvedStoreDir = path.resolve(storeDir);
+  if (!fs.existsSync(resolvedStoreDir)) {
     return [];
   }
 
-  assertNotSymlink(path.resolve(storeDir), "store directory");
-  return fs.readdirSync(storeDir, { withFileTypes: true })
+  assertStoreReadable(resolvedStoreDir);
+  assertNotSymlink(resolvedStoreDir, "store directory");
+  const conversationsDir = storeConversationsDir(resolvedStoreDir);
+  if (!fs.existsSync(conversationsDir)) {
+    return [];
+  }
+  assertNotSymlink(path.resolve(conversationsDir), "conversations directory");
+  return fs.readdirSync(conversationsDir, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
-    .map((entry) => pathsForConversation(entry.name, storeDir).statePath)
-    .filter((statePath) => fs.existsSync(statePath))
-    .map((statePath) => {
-      const conversation = loadState(statePath);
-      return {
-        ...conversation,
-        state_path: conversation.state_path ?? statePath,
-        event_log_path: conversation.event_log_path ?? logPathForStatePath(statePath),
-        conversation_dir: conversation.conversation_dir ?? path.dirname(statePath)
-      };
-    })
+    .map((entry) => pathsForConversation(entry.name, resolvedStoreDir))
+    .filter((paths) => fs.existsSync(paths.statePath))
+    .map((paths) => withCanonicalConversationStorage(loadState(paths.statePath), paths))
     .sort((left: Conversation, right: Conversation) => String(right.updated_at ?? "").localeCompare(String(left.updated_at ?? "")));
 }
 
+function withCanonicalConversationStorage(
+  conversation: Conversation,
+  paths: ConversationPaths
+): Conversation {
+  const canonical = pathsForConversation(
+    conversation.conversation_id,
+    paths.storeDir
+  );
+  if (path.resolve(canonical.statePath) !== path.resolve(paths.statePath)) {
+    throw new Error(
+      `conversation id does not match its store directory: ${paths.statePath}`
+    );
+  }
+  return {
+    ...conversation,
+    store_dir: path.resolve(paths.storeDir),
+    conversation_dir: path.resolve(paths.conversationDir),
+    state_path: path.resolve(paths.statePath),
+    event_log_path: path.resolve(paths.logPath)
+  };
+}
+
 export function appendEvent(logPath: string, event: EventRecord): void {
+  const paths = assertCanonicalConversationDataPath(logPath, "events.ndjson");
+  withStoreWriterLease(paths.storeDir, () => {
+    appendEventWithWriterLease(logPath, event);
+  });
+}
+
+function appendEventWithWriterLease(logPath: string, event: EventRecord): void {
   const serialized = `${JSON.stringify(event)}\n`;
   secureEventStorageMetadata(logPath, event);
   prepareDataDirectory(logPath);
@@ -262,16 +550,25 @@ function validateConversationPath(
   storeDir: string
 ): {
   resolvedStoreDir: string;
+  resolvedConversationsDir: string;
   resolvedConversationDir: string;
 } {
   validateConversationId(conversationId);
   const resolvedStoreDir = path.resolve(storeDir);
-  const resolvedConversationDir = path.resolve(resolvedStoreDir, conversationId);
-  if (path.dirname(resolvedConversationDir) !== resolvedStoreDir) {
+  const resolvedConversationsDir = path.resolve(
+    resolvedStoreDir,
+    STORE_CONVERSATIONS_DIRECTORY
+  );
+  const resolvedConversationDir = path.resolve(
+    resolvedConversationsDir,
+    conversationId
+  );
+  if (path.dirname(resolvedConversationDir) !== resolvedConversationsDir) {
     throw new Error(`conversation id escapes the store directory: ${conversationId}`);
   }
   return {
     resolvedStoreDir,
+    resolvedConversationsDir,
     resolvedConversationDir
   };
 }
@@ -279,7 +576,8 @@ function validateConversationPath(
 function prepareDataDirectory(dataPath: string): void {
   const directory = path.dirname(dataPath);
   if (path.basename(dataPath) === "state.json" || path.basename(dataPath) === "events.ndjson") {
-    assertNotSymlink(path.resolve(path.dirname(directory)), "store directory");
+    const paths = pathsForConversationDir(directory);
+    ensureStoreWritable(paths.storeDir);
     ensureDir(directory);
     return;
   }
@@ -300,7 +598,9 @@ function secureConversationStorageMetadata(
     typeof conversation.conversation_dir !== "string" ||
     typeof conversation.state_path !== "string"
   ) {
-    return;
+    throw new Error(
+      `conversation storage metadata is required for state writes: ${statePath}`
+    );
   }
 
   const paths = pathsForConversation(conversation.conversation_id, conversation.store_dir);
@@ -309,38 +609,68 @@ function secureConversationStorageMetadata(
     path.resolve(paths.statePath) !== path.resolve(conversation.state_path) ||
     path.resolve(paths.statePath) !== path.resolve(statePath)
   ) {
-    return;
+    throw new Error(
+      `conversation storage metadata does not match state path: ${statePath}`
+    );
   }
 
+  ensureStoreWritable(paths.storeDir);
   ensureStoreDir(paths.storeDir, paths.conversationDir);
   ensureDir(paths.conversationDir);
 }
 
 function secureEventStorageMetadata(logPath: string, event: EventRecord): void {
   if (typeof event.conversation_id !== "string") {
-    return;
+    throw new Error(`conversation_id is required for event writes: ${logPath}`);
   }
   const conversationDir = path.dirname(logPath);
   validateConversationId(event.conversation_id);
   if (path.basename(conversationDir) !== event.conversation_id) {
-    return;
+    throw new Error(`event conversation_id does not match its directory: ${logPath}`);
   }
-  const storeDir = path.dirname(conversationDir);
+  const conversationsDir = path.dirname(conversationDir);
+  if (path.basename(conversationsDir) !== STORE_CONVERSATIONS_DIRECTORY) {
+    throw new Error(`event log is outside an AKK conversations directory: ${logPath}`);
+  }
+  const storeDir = path.dirname(conversationsDir);
   const paths = pathsForConversation(event.conversation_id, storeDir);
   if (path.resolve(paths.logPath) !== path.resolve(logPath)) {
-    return;
+    throw new Error(`event storage metadata does not match log path: ${logPath}`);
   }
 
+  ensureStoreWritable(paths.storeDir);
   ensureStoreDir(paths.storeDir, paths.conversationDir);
   ensureDir(paths.conversationDir);
+}
+
+function assertCanonicalConversationDataPath(
+  dataPath: string,
+  expectedBasename: "state.json" | "events.ndjson"
+): ConversationPaths {
+  if (path.basename(dataPath) !== expectedBasename) {
+    throw new Error(
+      `AKK ${expectedBasename} writes require <store>/conversations/<id>/${expectedBasename}: ${dataPath}`
+    );
+  }
+  const paths = pathsForConversationDir(path.dirname(dataPath));
+  const canonical = pathsForConversation(
+    path.basename(paths.conversationDir),
+    paths.storeDir
+  );
+  const expectedPath = expectedBasename === "state.json"
+    ? canonical.statePath
+    : canonical.logPath;
+  if (path.resolve(expectedPath) !== path.resolve(dataPath)) {
+    throw new Error(`AKK conversation data path is not canonical: ${dataPath}`);
+  }
+  return canonical;
 }
 
 function ensureStoreDir(storeDir: string, currentConversationDir: string): void {
   const resolvedStoreDir = path.resolve(storeDir);
   assertNotSymlink(resolvedStoreDir, "store directory");
   if (!fs.existsSync(resolvedStoreDir)) {
-    ensureDir(resolvedStoreDir);
-    return;
+    prepareStoreRootForWriterLock(resolvedStoreDir);
   }
 
   const stat = fs.lstatSync(resolvedStoreDir);
@@ -353,23 +683,217 @@ function ensureStoreDir(storeDir: string, currentConversationDir: string): void 
 
   const entries = fs.readdirSync(resolvedStoreDir, { withFileTypes: true });
   const resolvedCurrentConversationDir = path.resolve(currentConversationDir);
-  const looksDedicated = resolvedStoreDir === path.resolve(defaultStoreDir()) ||
-    entries.length === 0 ||
-    entries.every((entry) => {
-      if (!entry.isDirectory()) {
-        return false;
-      }
-      const entryPath = path.join(resolvedStoreDir, entry.name);
-      return entryPath === resolvedCurrentConversationDir ||
-        fs.existsSync(path.join(entryPath, "state.json")) ||
-        fs.existsSync(path.join(entryPath, "events.ndjson"));
-    });
+  const resolvedConversationsDir = path.resolve(storeConversationsDir(resolvedStoreDir));
+  const looksDedicated = entries.length === 0 || entries.every((entry) => {
+    const entryPath = path.join(resolvedStoreDir, entry.name);
+    if (entry.name === STORE_MANIFEST_FILE && entry.isFile()) {
+      return true;
+    }
+    if (entry.name === STORE_RUNTIME_DIRECTORY && entry.isDirectory()) {
+      return true;
+    }
+    if (entryPath !== resolvedConversationsDir || !entry.isDirectory()) {
+      return false;
+    }
+    return fs.readdirSync(resolvedConversationsDir, { withFileTypes: true })
+      .every((conversationEntry) => {
+        if (!conversationEntry.isDirectory()) {
+          return false;
+        }
+        const conversationEntryPath = path.join(
+          resolvedConversationsDir,
+          conversationEntry.name
+        );
+        return conversationEntryPath === resolvedCurrentConversationDir ||
+          fs.existsSync(path.join(conversationEntryPath, "state.json")) ||
+          fs.existsSync(path.join(conversationEntryPath, "events.ndjson"));
+      });
+  });
   if (!looksDedicated) {
     throw new Error(
       `refusing to change permissions on a non-dedicated store directory; use a private 0700 directory: ${storeDir}`
     );
   }
   fs.chmodSync(resolvedStoreDir, PRIVATE_DIRECTORY_MODE);
+}
+
+function prepareStoreRootForWriterLock(storeDir: string): void {
+  const resolvedStoreDir = path.resolve(storeDir);
+  if (!fs.existsSync(resolvedStoreDir)) {
+    fs.mkdirSync(resolvedStoreDir, {
+      recursive: true,
+      mode: PRIVATE_DIRECTORY_MODE
+    });
+  }
+  assertNotSymlink(resolvedStoreDir, "store directory");
+  const stat = fs.lstatSync(resolvedStoreDir);
+  if (!stat.isDirectory()) {
+    throw new Error(`store directory must be a real directory: ${storeDir}`);
+  }
+
+  // This preliminary, non-mutating check prevents a bad custom --store-dir
+  // from being chmodded or receiving a lock file before it fails closed.
+  assertWritableCompatibility(inspectStoreCompatibility(resolvedStoreDir));
+}
+
+function ensureStoreWritableWhileLocked(storeDir: string): StoreManifest {
+  let compatibility = inspectStoreCompatibility(storeDir);
+  if (compatibility.status === "uninitialized") {
+    createStoreManifest(storeDir);
+    compatibility = inspectStoreCompatibility(storeDir);
+  }
+  assertWritableCompatibility(compatibility);
+
+  // Permission repair is a write and therefore happens only after the
+  // manifest has been validated under the root writer lock.
+  fs.chmodSync(storeDir, PRIVATE_DIRECTORY_MODE);
+  ensureDir(storeConversationsDir(storeDir));
+  return readStoreManifest(storeManifestPath(storeDir));
+}
+
+function assertWritableCompatibility(
+  compatibility: StoreCompatibility
+): asserts compatibility is StoreCompatibility & { writable: true } {
+  if (!compatibility.writable) {
+    throw new StoreCompatibilityError(
+      `${compatibility.reason}; refusing to mutate the AKK store`,
+      compatibility
+    );
+  }
+}
+
+function assertSameStoreLease(
+  lease: ActiveStoreWriterLease,
+  requestedStoreDir: string
+): void {
+  if (path.resolve(lease.storeDir) !== path.resolve(requestedStoreDir)) {
+    throw new Error(
+      `cannot acquire AKK store writer lease for ${requestedStoreDir} while holding ${lease.storeDir}`
+    );
+  }
+}
+
+function revalidateStoreWriterLease(lease: ActiveStoreWriterLease): void {
+  const compatibility = inspectStoreCompatibility(lease.storeDir);
+  assertWritableCompatibility(compatibility);
+  if (
+    compatibility.format_version !== lease.manifest.format_version ||
+    compatibility.writer_protocol !== lease.manifest.writer_protocol
+  ) {
+    throw new StoreCompatibilityError(
+      "AKK store manifest changed while its writer lease was active",
+      compatibility
+    );
+  }
+}
+
+function storeHasConversationData(storeDir: string): boolean {
+  const conversationsDir = storeConversationsDir(storeDir);
+  if (!fs.existsSync(conversationsDir)) {
+    return fs.readdirSync(storeDir).some((entry) =>
+      !isStoreInitializationEntry(entry)
+    );
+  }
+  assertNotSymlink(conversationsDir, "conversations directory");
+  const conversationsStat = fs.lstatSync(conversationsDir);
+  if (!conversationsStat.isDirectory()) {
+    return true;
+  }
+  return fs.readdirSync(conversationsDir).length > 0 ||
+    fs.readdirSync(storeDir).some((entry) =>
+      entry !== STORE_CONVERSATIONS_DIRECTORY &&
+      !isStoreInitializationEntry(entry)
+    );
+}
+
+function isStoreInitializationEntry(entry: string): boolean {
+  return entry === STORE_MANIFEST_FILE ||
+    entry === STORE_RUNTIME_DIRECTORY ||
+    entry === STORE_WRITER_LOCK_FILE ||
+    entry === `${STORE_WRITER_LOCK_FILE}${STORE_LOCK_RECLAIM_SUFFIX}` ||
+    (
+      entry.startsWith(STORE_MANIFEST_TEMP_PREFIX) &&
+      entry.endsWith(STORE_MANIFEST_TEMP_SUFFIX)
+    );
+}
+
+function createStoreManifest(storeDir: string): void {
+  if (storeHasConversationData(storeDir)) {
+    const compatibility = inspectStoreCompatibility(storeDir);
+    throw new StoreCompatibilityError(
+      "refusing to adopt a non-empty manifestless AKK store; choose an empty store directory",
+      compatibility
+    );
+  }
+  const manifestPath = storeManifestPath(storeDir);
+  const manifest: StoreManifest = {
+    schema: STORE_SCHEMA,
+    format_version: STORE_FORMAT_VERSION,
+    writer_protocol: STORE_WRITER_PROTOCOL,
+    created_at: new Date().toISOString()
+  };
+  const tempPath = path.join(
+    storeDir,
+    `${STORE_MANIFEST_TEMP_PREFIX}${process.pid}.${randomUUID()}${STORE_MANIFEST_TEMP_SUFFIX}`
+  );
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(
+      tempPath,
+      fs.constants.O_CREAT |
+        fs.constants.O_EXCL |
+        fs.constants.O_WRONLY |
+        NO_FOLLOW_FLAG,
+      PRIVATE_FILE_MODE
+    );
+    fs.fchmodSync(fd, PRIVATE_FILE_MODE);
+    fs.writeFileSync(fd, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+    // linkSync publishes the already-fsynced inode without ever exposing a
+    // partially written manifest and, unlike rename, never replaces one.
+    fs.linkSync(tempPath, manifestPath);
+    fs.unlinkSync(tempPath);
+    fsyncDirectory(storeDir);
+  } catch (error) {
+    if (fd !== undefined) {
+      fs.closeSync(fd);
+    }
+    try {
+      fs.unlinkSync(tempPath);
+    } catch (cleanupError) {
+      if (!isNodeError(cleanupError, "ENOENT")) {
+        throw cleanupError;
+      }
+    }
+    if (isNodeError(error, "EEXIST")) {
+      return;
+    }
+    throw error;
+  }
+}
+
+function readStoreManifest(manifestPath: string): StoreManifest {
+  const fd = openRegularFileNoFollow(
+    manifestPath,
+    fs.constants.O_RDONLY,
+    "store manifest"
+  );
+  try {
+    const parsed = JSON.parse(fs.readFileSync(fd, "utf8")) as Partial<StoreManifest>;
+    if (
+      parsed.schema !== STORE_SCHEMA ||
+      !Number.isSafeInteger(parsed.format_version) ||
+      !Number.isSafeInteger(parsed.writer_protocol) ||
+      typeof parsed.created_at !== "string"
+    ) {
+      throw new Error(`invalid AKK store manifest: ${manifestPath}`);
+    }
+    return parsed as StoreManifest;
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 function assertNotSymlink(targetPath: string, label: string): void {

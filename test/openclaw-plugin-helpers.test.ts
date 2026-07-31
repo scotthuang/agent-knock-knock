@@ -129,7 +129,7 @@ test("/akk accepts selector-first follow-ups without long ids", () => {
       parseAkkCommand("status"),
       { workspace: "/work/project" }
     ),
-    ["status"]
+    ["status", "--reconcile"]
   );
   assert.throws(
     () => parseAkkCommand("send latest: continue"),
