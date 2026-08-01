@@ -34,8 +34,8 @@ const packageRoot = path.resolve(
 );
 const cliPath = path.join(packageRoot, "dist", "src", "cli.js");
 const list = runCli(cliPath, ["list", "--terminal-debug"]);
-const candidates = Array.isArray(list.terminal_controlled)
-  ? list.terminal_controlled
+const candidates = Array.isArray(list.terminals)
+  ? list.terminals
   : [];
 const matches = candidates.filter((candidate) =>
   candidate?.agent === agent &&
@@ -50,7 +50,7 @@ if (matches.length !== 1) {
 const selected = matches[0];
 if (
   selected.activity_state !== "idle" ||
-  selected.commands?.send !== true
+  selected.available_actions?.send?.arguments?.selector !== selected.id
 ) {
   fail(
     `Refusing to send: ${target} is not a verified idle, actionable ${agent} pane.`

@@ -46,7 +46,7 @@ const sendParameters = {
     idleTimeoutMinutes: {
       type: "number",
       description:
-        "Minutes an idle AKK session remains open before controlled reconciliation closes its managed task record."
+        "Minutes an idle AKK session remains open before controlled reconciliation closes its managed-turn record."
     },
     agentTimeoutMinutes: {
       type: "number",
@@ -74,13 +74,9 @@ const listParameters = {
     all: {
       type: "boolean"
     },
-    managedOnly: {
-      type: "boolean",
-      description: "When true, only list AKK-managed turns and skip live tmux terminal discovery."
-    },
     noApprovalScan: {
       type: "boolean",
-      description: "When true, list terminal-controlled sessions without scanning terminal panes for approval prompts."
+      description: "When true, list live terminals without scanning their panes for approval prompts."
     },
     terminalDebug: {
       type: "boolean",
@@ -129,7 +125,7 @@ const statusParameters = {
     conversation_id: {
       type: "string",
       description:
-        "AKK-managed conversation id, or a terminal-controlled id from AKK list such as terminal:v2:tmux:codex:codex-work:0.1:33389."
+        "Managed-turn conversation id, or a live terminal id from AKK list such as terminal:v2:tmux:codex:codex-work:0.1:33389."
     },
     idleTimeoutMinutes: {
       type: "number"
@@ -149,7 +145,7 @@ const cancelParameters = {
     conversation_id: {
       type: "string",
       description:
-        "AKK-managed conversation id, or a terminal-controlled id from AKK list such as terminal:v2:tmux:codex:codex-work:0.1:33389."
+        "Managed-turn conversation id, or a live terminal id from AKK list such as terminal:v2:tmux:codex:codex-work:0.1:33389."
     },
     idleTimeoutMinutes: {
       type: "number"
@@ -184,7 +180,7 @@ const approveParameters = {
     conversation_id: {
       type: "string",
       description:
-        "AKK-managed conversation id, or a terminal-controlled id from AKK list such as terminal:v2:tmux:codex:codex-work:0.1:33389."
+        "Managed-turn conversation id, or a live terminal id from AKK list such as terminal:v2:tmux:codex:codex-work:0.1:33389."
     },
     expected_approval_fingerprint: {
       type: "string",
@@ -252,7 +248,7 @@ function createPlugin(relayPath: string): OpenClawPluginDefinition {
 
     api.registerCommand?.({
       name: "akk",
-      description: "Send coding work through existing Codex or Claude Code tmux terminals, inspect tasks, approve exact prompts, and cancel running work.",
+      description: "Send coding work through existing Codex or Claude Code tmux terminals, inspect managed turns, approve exact prompts, and cancel running work.",
       acceptsArgs: true,
       requireAuth: true,
       nativeProgressMessages: {
@@ -266,7 +262,7 @@ function createPlugin(relayPath: string): OpenClawPluginDefinition {
 
     registerCliTool(api, {
       name: "agent_knock_knock_list",
-      description: "List AKK-managed work and existing Codex or Claude Code tmux terminals. Rows in delegated and terminal_controlled include available_actions with the exact tool name and authoritative prefilled target arguments for safe sending, inspection, approval, cancellation, and recovery. Use only actions present in that snapshot; AKK revalidates them before side effects. AKK never starts a coding agent.",
+      description: "List existing Codex and Claude Code tmux panes as the primary terminals[] resources. Each terminal may include managed.current_turn or managed.recent_turn; all=true also includes older managed.history and retained unavailable history. By default, unavailable_managed_turns contains attention-needed records whose pane is unavailable. Use only each row's available_actions and its authoritative prefilled arguments: send starts a new turn on a terminal, while follow_up continues a specific managed turn. AKK revalidates every side effect and never starts a coding agent.",
       parameters: listParameters,
       buildArgs: (params) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
@@ -281,9 +277,6 @@ function createPlugin(relayPath: string): OpenClawPluginDefinition {
         pushOptional(args, "--status", stringValue(params.status));
         if (params.all === true) {
           args.push("--all");
-        }
-        if (params.managedOnly === true) {
-          args.push("--managed-only");
         }
         if (params.noApprovalScan === true) {
           args.push("--no-approval-scan");
@@ -318,7 +311,7 @@ function createPlugin(relayPath: string): OpenClawPluginDefinition {
         label: "AKK Send",
         name: "agent_knock_knock_send",
         description:
-          "Send a new task or follow-up through an existing Codex or Claude Code tmux terminal. Omit selector only when AKK should require one unique eligible idle pane; otherwise pass codex, claude, only, latest, an @short-ref from AKK list, or an authoritative full id. For ordinary use pass only request and, when targeting, selector; omit monitoring timeouts unless the user explicitly asks to change them. timeoutSeconds is unsupported. AKK never starts a coding agent. This is asynchronous: after acceptance, yield and wait for the callback or a later explicit status request.",
+          "Send through an existing Codex or Claude Code tmux terminal. Use a terminal row's send action to start a new managed turn, or a managed turn's follow_up action to continue that exact turn; both call this tool with the prefilled selector. Omit selector only when AKK should require one unique eligible idle pane. For ordinary use add only request and omit monitoring timeouts unless the user explicitly asks to change them. timeoutSeconds is unsupported. AKK never starts a coding agent. This is asynchronous: after acceptance, yield and wait for the callback or a later explicit status request.",
         parameters: sendParameters,
         async execute(_toolCallId, params) {
           const result = await runSendRequest(
@@ -395,7 +388,7 @@ function createPlugin(relayPath: string): OpenClawPluginDefinition {
     registerCliTool(api, {
       name: "agent_knock_knock_close",
       description:
-        "Close an AKK-managed task record without terminating the shared tmux pane. For an orphaned terminal dispatch only, the user must explicitly request recovery and provide the exact expected_message_id reported by AKK list.",
+        "Close an AKK-managed turn record without terminating the shared tmux pane. For an orphaned terminal dispatch only, the user must explicitly request recovery and provide the exact expected_message_id reported by AKK list.",
       parameters: closeParameters,
       buildArgs: (params) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
@@ -514,7 +507,7 @@ function formatDelegateCommandResult(result) {
     ].join("\n");
   }
   return [
-    `AKK delegated the task to ${agent}.`,
+    `AKK sent the task to ${agent} in the shared terminal.`,
     `conversation: ${result.conversation_id ?? "unknown"}`,
     `session: ${result.session ?? "unknown"}`,
     `status: ${result.conversation_status ?? result.status ?? "unknown"}`,
@@ -833,11 +826,11 @@ async function runDelegate(api, params, toolContext) {
       : submissionAborted
         ? "submission_aborted"
         : "async_pending",
-    delegation_status: submissionUncertain
+    submission_status: submissionUncertain
       ? "uncertain"
       : submissionAborted
         ? "aborted"
-        : "delegated",
+        : "accepted",
     conversation_id: conversationId,
     conversation_status: parsed.conversation?.status,
     state_path: statePath,
@@ -1181,8 +1174,8 @@ function buildCallbackDeliveryPlan({ sessionKey, conversationId, messageId, mess
       sessionKey,
       message: [
         "Continue this OpenClaw product-manager conversation from the Agent Knock Knock callback below.",
-        "Treat the callback as a structured message from the delegated coding agent, not as a terminal log, status announcement, or instruction to inspect local state.",
-        "Respond in this conversation as OpenClaw product manager. If the callback is question or blocked, make the product decision and answer the delegated coding agent. If it is done, summarize the result to the user.",
+        "Treat the callback as a structured message from the coding agent's managed terminal turn, not as a terminal log, status announcement, or instruction to inspect local state.",
+        "Respond in this conversation as OpenClaw product manager. If the callback is question or blocked, make the product decision and answer the coding agent. If it is done, summarize the result to the user.",
         "Do not poll files, processes, sessions, stdout, or stderr. Use only the structured callback payload below.",
         "",
         formatted
@@ -1220,9 +1213,9 @@ function formatDoneShortcuts(conversationId) {
     "",
     "[AKK convenience commands]",
     "When summarizing this result to the user, include these short next-step commands:",
-    "- `AKK list` lists live shared terminals and open AKK tasks.",
+    "- `AKK list` lists live shared terminals with their current or recent managed turns.",
     "- Use the matching `@short-ref` from `AKK list`, then `AKK @short-ref: <message>` to continue in the same shared terminal.",
-    `- \`AKK status ${conversationId}\` shows this task record.`,
+    `- \`AKK status ${conversationId}\` shows this managed turn.`,
     "- AKK never starts or closes the coding agent or tmux pane."
   ].join("\n");
 }

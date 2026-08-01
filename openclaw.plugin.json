@@ -72,11 +72,11 @@
       },
       "idleTimeoutMinutes": {
         "type": "number",
-        "description": "Minutes an idle AKK session remains open before controlled reconciliation closes its managed task record. Defaults to 10080."
+        "description": "Minutes an idle AKK session remains open before controlled reconciliation closes its managed-turn record. Defaults to 10080."
       },
       "agentTimeoutMinutes": {
         "type": "number",
-        "description": "Minutes without terminal activity or a coding-agent callback before AKK marks a task stalled. Defaults to 60."
+        "description": "Minutes without terminal activity or a coding-agent callback before AKK marks a managed turn stalled. Defaults to 60."
       },
       "agentHardTimeoutMinutes": {
         "type": "number",

@@ -490,9 +490,9 @@ async function verifyFullHost({
     }).stdout,
     "agent-knock-knock list --terminal-debug"
   );
-  assert.equal(readOnlyList.terminal_controlled?.length, 1);
+  assert.equal(readOnlyList.terminals?.length, 1);
   assert.equal(
-    readOnlyList.terminal_controlled[0]?.terminal_control?.target,
+    readOnlyList.terminals[0]?.terminal_control?.target,
     "akk-compat:0.0"
   );
   assert.equal(readOnlyList.terminal_scan?.diagnostics?.provider, "static");

@@ -36,14 +36,17 @@ test("CLI omission and short refs resolve one actionable managed session", () =>
       agent: "codex"
     });
     const listed = runCli(["list", "--managed-only", "--store-dir", storeDir]);
-    assert.equal(listed.delegated.length, 1);
-    assert.match(listed.delegated[0].short_ref, /^@[0-9a-f]{10}$/u);
+    assert.deepEqual(listed.terminals, []);
+    assert.equal(listed.unavailable_managed_turns.length, 1);
+    const managedTurn = listed.unavailable_managed_turns[0];
+    assert.equal(managedTurn.source, "managed_turn");
+    assert.match(managedTurn.short_ref, /^@[0-9a-f]{10}$/u);
     assert.equal(
-      listed.delegated[0].conversation_id,
+      managedTurn.conversation_id,
       created.conversation.conversation_id
     );
     assert.deepEqual(
-      Object.keys(listed.delegated[0].available_actions),
+      Object.keys(managedTurn.available_actions),
       ["status", "close"]
     );
 
@@ -56,7 +59,7 @@ test("CLI omission and short refs resolve one actionable managed session", () =>
     const short = runCli([
       "status",
       "--conversation",
-      listed.delegated[0].short_ref,
+      managedTurn.short_ref,
       "--managed-only",
       "--store-dir",
       storeDir
@@ -70,19 +73,19 @@ test("CLI omission and short refs resolve one actionable managed session", () =>
   }
 });
 
-test("list action hints cover managed send, cancel, renew, retry, and close states", () => {
+test("unavailable managed turns expose only pane-independent actions", () => {
   const cases = [
     {
       status: "waiting_for_agent",
-      actions: ["status", "cancel", "close"]
+      actions: ["status", "close"]
     },
     {
       status: "idle",
-      actions: ["status", "send", "close"]
+      actions: ["status", "close"]
     },
     {
       status: "stalled",
-      actions: ["status", "renew", "close"]
+      actions: ["status", "close"]
     },
     {
       status: "callback_failed",
@@ -91,7 +94,7 @@ test("list action hints cover managed send, cancel, renew, retry, and close stat
     {
       status: "waiting_for_agent",
       callbackRetry: true,
-      actions: ["status", "cancel", "retry_callback", "close"]
+      actions: ["status", "retry_callback", "close"]
     },
     {
       status: "closed",
@@ -144,8 +147,13 @@ test("list action hints cover managed send, cancel, renew, retry, and close stat
         "--store-dir",
         storeDir
       ]);
-      assert.equal(listed.delegated.length, 1, testCase.status);
-      const entry = listed.delegated[0];
+      assert.equal(
+        listed.unavailable_managed_turns.length,
+        1,
+        testCase.status
+      );
+      const entry = listed.unavailable_managed_turns[0];
+      assert.equal(entry.source, "managed_turn", testCase.status);
       assert.deepEqual(
         Object.keys(entry.available_actions),
         testCase.actions,
@@ -153,7 +161,7 @@ test("list action hints cover managed send, cancel, renew, retry, and close stat
       );
       for (const action of testCase.actions) {
         const argumentsValue = entry.available_actions[action].arguments;
-        const targetKey = action === "send" ? "selector" : "conversation_id";
+        const targetKey = "conversation_id";
         assert.deepEqual(
           Object.keys(argumentsValue),
           [targetKey],
@@ -165,19 +173,17 @@ test("list action hints cover managed send, cancel, renew, retry, and close stat
           `${testCase.status}:${action}`
         );
       }
-      if (testCase.status === "idle") {
-        assert.deepEqual(
-          entry.available_actions.send.missing_required,
-          ["request"]
-        );
-      }
+      assert.equal(entry.available_actions.follow_up, undefined);
+      assert.equal(entry.available_actions.approve, undefined);
+      assert.equal(entry.available_actions.cancel, undefined);
+      assert.equal(entry.available_actions.renew, undefined);
     } finally {
       fs.rmSync(storeDir, { recursive: true, force: true });
     }
   }
 });
 
-test("managed Claude approval hints require the executable state", () => {
+test("unavailable managed Claude turns never advertise terminal approval", () => {
   const cases = [
     {
       name: "waiting for agent",
@@ -272,38 +278,11 @@ test("managed Claude approval hints require the executable state", () => {
         "--store-dir",
         storeDir
       ]);
-      const entry = listed.delegated[0];
-      assert.equal(entry.available_actions.send, undefined, testCase.name);
-      if ("hideCancel" in testCase && testCase.hideCancel) {
-        assert.equal(
-          entry.available_actions.cancel,
-          undefined,
-          testCase.name
-        );
-      }
-      if (!testCase.available) {
-        assert.equal(
-          entry.available_actions.approve,
-          undefined,
-          testCase.name
-        );
-        continue;
-      }
+      const entry = listed.unavailable_managed_turns[0];
       assert.deepEqual(
-        entry.available_actions.approve.arguments,
-        { conversation_id: entry.id }
-      );
-      assert.deepEqual(
-        entry.available_actions.approve.missing_required,
-        ["expected_approval_fingerprint"]
-      );
-      assert.deepEqual(
-        entry.available_actions.approve.before_call.arguments,
-        { conversation_id: entry.id }
-      );
-      assert.equal(
-        entry.available_actions.approve.requires_fresh_status,
-        true
+        Object.keys(entry.available_actions),
+        ["status", "close"],
+        testCase.name
       );
     } finally {
       fs.rmSync(storeDir, { recursive: true, force: true });
@@ -464,8 +443,10 @@ test("legacy unsupported executors do not break live terminal short refs", () =>
       storeDir
     ]);
     assert.equal(managedOnly.reconciliation.closed, 1);
-    assert.deepEqual(managedOnly.delegated, []);
-    assert.deepEqual(managedOnly.tasks, []);
+    assert.deepEqual(managedOnly.terminals, []);
+    assert.deepEqual(managedOnly.unavailable_managed_turns, []);
+    assert.equal("delegated" in managedOnly, false);
+    assert.equal("tasks" in managedOnly, false);
 
     const listed = runCli([
       "list",
@@ -474,14 +455,14 @@ test("legacy unsupported executors do not break live terminal short refs", () =>
       storeDir,
       ...runtimeArgs
     ]);
-    assert.deepEqual(listed.delegated, []);
-    assert.equal(listed.terminal_controlled.length, 1);
-    assert.match(listed.terminal_controlled[0].short_ref, /^@[0-9a-f]{10}$/u);
+    assert.deepEqual(listed.unavailable_managed_turns, []);
+    assert.equal(listed.terminals.length, 1);
+    assert.match(listed.terminals[0].short_ref, /^@[0-9a-f]{10}$/u);
 
     const sent = runCli([
       "send",
       "--conversation",
-      listed.terminal_controlled[0].short_ref,
+      listed.terminals[0].short_ref,
       "--message",
       "Inspect the current git status",
       "--background",
@@ -500,7 +481,7 @@ test("legacy unsupported executors do not break live terminal short refs", () =>
     ]);
     assert.equal(
       sent.conversation.native_session_takeover.native_session_id,
-      listed.terminal_controlled[0].id
+      listed.terminals[0].id
     );
     assert.equal(sent.conversation.executor.kind, "codex");
   } finally {
@@ -508,7 +489,7 @@ test("legacy unsupported executors do not break live terminal short refs", () =>
   }
 });
 
-test("an active unsupported legacy owner still fences its tmux pane", () => {
+test("an unsupported legacy record without a dispatch ledger does not hide its tmux pane", () => {
   const tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-selector-cli-legacy-owner-")
   );
@@ -572,10 +553,22 @@ test("an active unsupported legacy owner still fences its tmux pane", () => {
       storeDir,
       ...runtimeArgs
     ]);
-    assert.deepEqual(listed.delegated, []);
-    assert.deepEqual(listed.terminal_controlled, []);
+    assert.equal(listed.terminals.length, 1);
+    assert.equal(listed.terminals[0].management_state, "unmanaged");
+    assert.deepEqual(listed.terminals[0].managed, {
+      current_turn: null,
+      recent_turn: null,
+      turn_count: 0,
+      hidden_turn_count: 0,
+      history: []
+    });
+    assert.deepEqual(
+      listed.terminals[0].available_actions.send.arguments,
+      { selector: listed.terminals[0].id }
+    );
+    assert.deepEqual(listed.unavailable_managed_turns, []);
 
-    const send = spawnCli([
+    const sent = runCli([
       "send",
       "--conversation",
       "only",
@@ -584,16 +577,31 @@ test("an active unsupported legacy owner still fences its tmux pane", () => {
       "--background",
       "--store-dir",
       storeDir,
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      "agent:test:legacy-owner",
+      "--openclaw-session",
+      "agent:test:legacy-owner",
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor",
       ...runtimeArgs
     ]);
-    assert.equal(send.status, 1);
-    assert.match(send.stderr, /no actionable sessions for send/u);
+    assert.equal(
+      sent.conversation.native_session_takeover.native_session_id,
+      listed.terminals[0].id
+    );
+    assert.notEqual(
+      sent.conversation.conversation_id,
+      "task-active-legacy-cursor"
+    );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
 
-test("CLI only prefers an active managed terminal bridge over its raw tmux pane", () => {
+test("CLI keeps an owned terminal visible and routes its canonical actions to the ledger owner", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-selector-cli-managed-pane-"));
   const storeDir = path.join(tempDir, "conversations");
   const workspace = path.join(tempDir, "workspace");
@@ -637,9 +645,83 @@ test("CLI only prefers an active managed terminal bridge over its raw tmux pane"
       storeDir,
       ...runtimeArgs
     ]);
-    assert.equal(listed.delegated.length, 1);
-    assert.equal(listed.delegated[0].id, managedId);
-    assert.deepEqual(listed.terminal_controlled, []);
+    assert.equal(listed.terminals.length, 1);
+    const terminal = listed.terminals[0];
+    assert.equal(terminal.source, "terminal");
+    assert.equal(terminal.management_state, "managed");
+    assert.equal(terminal.managed.current_turn.id, managedId);
+    assert.equal(terminal.managed.current_turn.source, "managed_turn");
+    assert.equal(terminal.managed.recent_turn, null);
+    assert.equal(terminal.managed.turn_count, 1);
+    assert.equal(terminal.managed.hidden_turn_count, 0);
+    assert.equal(terminal.available_actions.send, undefined);
+    assert.deepEqual(
+      terminal.available_actions.status.arguments,
+      { conversation_id: managedId }
+    );
+    assert.deepEqual(
+      terminal.available_actions.cancel.arguments,
+      { conversation_id: managedId }
+    );
+    assert.deepEqual(listed.unavailable_managed_turns, []);
+
+    const approvalListed = runCli([
+      "list",
+      "--store-dir",
+      storeDir,
+      ...codexTerminalStaticArgs({
+        workspace,
+        terminalTarget,
+        codexPid,
+        screen: [
+          "Would you like to run the following command?",
+          "",
+          "› 1. Yes, allow (y)",
+          "  2. No (n)"
+        ].join("\n")
+      })
+    ]);
+    const approvalTerminal = approvalListed.terminals[0];
+    assert.equal(approvalTerminal.management_state, "managed");
+    assert.equal(
+      approvalTerminal.managed.current_turn.approval_state.approvable,
+      true
+    );
+    assert.deepEqual(
+      approvalTerminal.available_actions.approve.arguments,
+      { conversation_id: managedId }
+    );
+    assert.deepEqual(
+      approvalTerminal.available_actions.approve.before_call.arguments,
+      { conversation_id: managedId }
+    );
+    assert.deepEqual(
+      approvalTerminal.managed.current_turn.available_actions.approve.arguments,
+      { conversation_id: managedId }
+    );
+
+    const restartedListed = runCli([
+      "list",
+      "--store-dir",
+      storeDir,
+      ...codexTerminalStaticArgs({
+        workspace,
+        terminalTarget,
+        codexPid: codexPid + 1,
+        screen: "› Ready for the next task\n\ngpt-5.6-sol high · /repo"
+      })
+    ]);
+    const restartedTerminal = restartedListed.terminals[0];
+    assert.equal(restartedTerminal.management_state, "conflict");
+    assert.equal(
+      restartedTerminal.management_conflict.owner_conversation_id,
+      managedId
+    );
+    assert.equal(restartedTerminal.managed.current_turn, null);
+    assert.deepEqual(
+      Object.keys(restartedTerminal.available_actions),
+      ["status"]
+    );
 
     const status = runCli([
       "status",
@@ -653,6 +735,263 @@ test("CLI only prefers an active managed terminal bridge over its raw tmux pane"
     assert.equal(status.summary.conversation_id, managedId);
     assert.equal(status.conversation.conversation_id, managedId);
     assert.equal(status.terminal_status.target, terminalTarget);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("a cross-store terminal owner is visible but never advertised as locally actionable", () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-selector-cli-cross-store-owner-")
+  );
+  const ownerStoreDir = path.join(tempDir, "owner-store");
+  const observerStoreDir = path.join(tempDir, "observer-store");
+  const workspace = path.join(tempDir, "workspace");
+  const terminalTarget = `codex-cross-store-${process.pid}:0.0`;
+  const codexPid = 3222;
+  const runtimeArgs = codexTerminalStaticArgs({
+    workspace,
+    terminalTarget,
+    codexPid,
+    screen: "› Ready for the next task\n\ngpt-5.6-sol high · /repo"
+  });
+
+  try {
+    fs.mkdirSync(workspace, { recursive: true });
+    const sent = runCli([
+      "send",
+      "--conversation",
+      `terminal:v2:tmux:codex:${terminalTarget}:${codexPid}`,
+      "--message",
+      "Own this terminal from another store",
+      "--background",
+      "--store-dir",
+      ownerStoreDir,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor",
+      ...runtimeArgs
+    ]);
+    const ownerId = sent.conversation.conversation_id;
+
+    const listed = runCli([
+      "list",
+      "--store-dir",
+      observerStoreDir,
+      ...runtimeArgs
+    ]);
+    assert.equal(listed.terminals.length, 1);
+    const terminal = listed.terminals[0];
+    assert.equal(terminal.management_state, "conflict");
+    assert.equal(
+      terminal.management_conflict.owner_conversation_id,
+      ownerId
+    );
+    assert.equal(terminal.managed.current_turn, null);
+    assert.deepEqual(Object.keys(terminal.available_actions), ["status"]);
+    assert.deepEqual(
+      terminal.available_actions.status.arguments,
+      { conversation_id: terminal.id }
+    );
+
+    const status = runCli([
+      "status",
+      "--conversation",
+      "only",
+      "--store-dir",
+      observerStoreDir,
+      ...runtimeArgs
+    ]);
+    assert.equal(status.source, "terminal_control");
+    assert.equal(status.conversation_id, terminal.id);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("multiple idle turns stay terminal history while default send targets the physical pane", () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-selector-cli-terminal-history-")
+  );
+  const storeDir = path.join(tempDir, "store");
+  const workspace = path.join(tempDir, "workspace");
+  const terminalTarget = "codex-history:0.0";
+  const codexPid = 2222;
+  const runtimeArgs = codexTerminalStaticArgs({
+    workspace,
+    terminalTarget,
+    codexPid,
+    screen: "› Ready for the next task\n\ngpt-5.6-sol high · /repo"
+  });
+
+  try {
+    fs.mkdirSync(workspace, { recursive: true });
+    const older = storeConversationFixture({
+      storeDir,
+      request: "Older completed turn",
+      agent: "codex"
+    });
+    const newer = storeConversationFixture({
+      storeDir,
+      request: "Newer completed turn",
+      agent: "codex"
+    });
+    for (const [fixture, timestamp] of [
+      [older, "2026-07-28T01:00:00.000Z"],
+      [newer, "2026-07-28T02:00:00.000Z"]
+    ] as const) {
+      const state = JSON.parse(
+        fs.readFileSync(fixture.paths.statePath, "utf8")
+      );
+      const takeover = terminalBridgeTakeover(
+        fixture.conversation.conversation_id,
+        workspace
+      );
+      state.status = "idle";
+      state.workspace = workspace;
+      state.idle_since = timestamp;
+      state.updated_at = timestamp;
+      state.native_session_takeover = {
+        ...takeover,
+        terminal_agent_pid: codexPid,
+        native_session_id:
+          `terminal:v2:tmux:codex:${terminalTarget}:${codexPid}`,
+        terminal_control: {
+          ...takeover.terminal_control,
+          ...terminalPane(terminalTarget, workspace)
+        }
+      };
+      saveState(fixture.paths.statePath, state);
+    }
+
+    const listed = runCli([
+      "list",
+      "--store-dir",
+      storeDir,
+      ...runtimeArgs
+    ]);
+    assert.equal(listed.terminals.length, 1);
+    assert.deepEqual(listed.unavailable_managed_turns, []);
+    const terminal = listed.terminals[0];
+    assert.equal(terminal.management_state, "unmanaged");
+    assert.equal(terminal.managed.current_turn, null);
+    assert.equal(
+      terminal.managed.recent_turn.conversation_id,
+      newer.conversation.conversation_id
+    );
+    assert.equal(terminal.managed.recent_turn.source, "managed_turn");
+    assert.deepEqual(
+      terminal.managed.recent_turn.available_actions.follow_up.arguments,
+      { selector: newer.conversation.conversation_id }
+    );
+    assert.equal(terminal.managed.turn_count, 2);
+    assert.equal(terminal.managed.hidden_turn_count, 1);
+    assert.equal("history" in terminal.managed, false);
+    assert.deepEqual(
+      terminal.available_actions.send.arguments,
+      { selector: terminal.id }
+    );
+
+    const restarted = runCli([
+      "list",
+      "--store-dir",
+      storeDir,
+      ...codexTerminalStaticArgs({
+        workspace,
+        terminalTarget,
+        codexPid: codexPid + 1,
+        screen: "› Ready for the next task\n\ngpt-5.6-sol high · /repo"
+      })
+    ]);
+    assert.equal(
+      restarted.terminals[0].managed.recent_turn.conversation_id,
+      newer.conversation.conversation_id
+    );
+    assert.equal(
+      restarted.terminals[0].managed.recent_turn.available_actions.follow_up,
+      undefined
+    );
+    assert.notEqual(
+      restarted.terminals[0].available_actions.send,
+      undefined
+    );
+
+    const listedAll = runCli([
+      "list",
+      "--all",
+      "--store-dir",
+      storeDir,
+      ...runtimeArgs
+    ]);
+    const terminalAll = listedAll.terminals[0];
+    assert.equal(terminalAll.managed.hidden_turn_count, 0);
+    assert.deepEqual(
+      terminalAll.managed.history.map((turn: any) => turn.conversation_id),
+      [older.conversation.conversation_id]
+    );
+    assert.equal(
+      terminalAll.managed.history[0].available_actions.follow_up.arguments.selector,
+      older.conversation.conversation_id
+    );
+
+    const sent = runCli([
+      "send",
+      "--conversation",
+      "only",
+      "--message",
+      "Start a new independent turn",
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      "agent:test:history",
+      "--openclaw-session",
+      "agent:test:history",
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor",
+      ...runtimeArgs
+    ]);
+    assert.equal(
+      sent.conversation.native_session_takeover.native_session_id,
+      terminal.id
+    );
+    assert.notEqual(
+      sent.conversation.conversation_id,
+      older.conversation.conversation_id
+    );
+    assert.notEqual(
+      sent.conversation.conversation_id,
+      newer.conversation.conversation_id
+    );
+
+    const canonicalStatus = runCli([
+      "status",
+      "--conversation",
+      "only",
+      "--store-dir",
+      storeDir,
+      ...runtimeArgs
+    ]);
+    assert.equal(
+      canonicalStatus.summary.conversation_id,
+      sent.conversation.conversation_id
+    );
+
+    const historicalStatus = runCli([
+      "status",
+      "--conversation",
+      terminalAll.managed.history[0].short_ref,
+      "--managed-only",
+      "--store-dir",
+      storeDir
+    ]);
+    assert.equal(
+      historicalStatus.summary.conversation_id,
+      older.conversation.conversation_id
+    );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -724,10 +1063,11 @@ test("CLI approve only and short refs stay on the managed Claude approval path",
       "--store-dir",
       storeDir
     ]);
-    assert.equal(listed.delegated.length, 1);
-    assert.equal(listed.delegated[0].conversation_id, managedId);
+    assert.equal(listed.unavailable_managed_turns.length, 1);
+    const managedTurn = listed.unavailable_managed_turns[0];
+    assert.equal(managedTurn.conversation_id, managedId);
 
-    for (const selector of ["only", listed.delegated[0].short_ref]) {
+    for (const selector of ["only", managedTurn.short_ref]) {
       const approved = runCli([
         "approve",
         "--conversation",

@@ -14,7 +14,7 @@ process.on("exit", () => {
   fs.rmSync(testRuntimeDir, { recursive: true, force: true });
 });
 
-test("list exposes only tmux-controlled sessions", () => {
+test("list exposes physical tmux terminals with the terminal-first action contract", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-list-groups-"));
   const storeDir = path.join(tempDir, "conversations");
   const nativeWorkspace = path.join(tempDir, "native");
@@ -74,32 +74,46 @@ test("list exposes only tmux-controlled sessions", () => {
       })
     ]);
 
-    assert.deepEqual(listed.tasks, []);
-    assert.deepEqual(listed.delegated, []);
+    assert.equal("tasks" in listed, false);
+    assert.equal("delegated" in listed, false);
+    assert.equal("terminal_controlled" in listed, false);
     assert.equal("native" in listed, false);
-    assert.equal(listed.terminal_controlled.length, 1);
-    assert.equal(listed.terminal_controlled[0].id, "terminal:v2:tmux:codex:codex-work:0.0:2222");
-    assert.equal(listed.terminal_controlled[0].terminal_control.target, "codex-work:0.0");
-    assert.equal(listed.terminal_controlled[0].activity_state, "awaiting_approval");
-    assert.match(listed.terminal_controlled[0].activity_reason, /approval prompt/);
-    assert.equal(listed.terminal_controlled[0].approval_state.blocked, true);
-    assert.equal(listed.terminal_controlled[0].approval_state.approvable, true);
-    assert.equal(listed.terminal_controlled[0].commands.send, true);
-    assert.equal(listed.terminal_controlled[0].commands.approve, true);
-    assert.equal(listed.terminal_controlled[0].commands.cancel, true);
-    assert.equal(listed.terminal_controlled[0].commands.status, true);
-    assert.equal("capture_screen" in listed.terminal_controlled[0].commands, false);
-    assert.equal("detach" in listed.terminal_controlled[0].commands, false);
-    assert.equal(listed.action_contracts.version, 2);
+    assert.deepEqual(listed.unavailable_managed_turns, []);
+    assert.equal(listed.terminals.length, 1);
+    const terminal = listed.terminals[0];
+    assert.equal(terminal.id, "terminal:v2:tmux:codex:codex-work:0.0:2222");
+    assert.equal(terminal.source, "terminal");
+    assert.equal(terminal.process_state, "active");
+    assert.equal("status" in terminal, false);
+    assert.equal("commands" in terminal, false);
+    assert.equal(terminal.terminal_control.target, "codex-work:0.0");
+    assert.equal(terminal.activity_state, "awaiting_approval");
+    assert.match(terminal.activity_reason, /approval prompt/);
+    assert.equal(terminal.approval_state.blocked, true);
+    assert.equal(terminal.approval_state.approvable, true);
+    assert.equal(terminal.management_state, "unmanaged");
+    assert.deepEqual(terminal.managed, {
+      current_turn: null,
+      recent_turn: null,
+      turn_count: 0,
+      hidden_turn_count: 0
+    });
+    assert.equal(listed.action_contracts.version, 3);
     assert.match(
       listed.action_contracts.instructions.join("\n"),
-      /Never use commands for routing or tool calls/u
+      /Treat terminals\[\] as the primary resource/u
+    );
+    assert.deepEqual(
+      listed.action_contracts.field_semantics.process_state,
+      {
+        terminals: "physical_terminal_process_liveness",
+        authoritative_for_tool_calls: false
+      }
     );
     assert.deepEqual(
       listed.action_contracts.field_semantics.status,
       {
-        delegated: "task_lifecycle",
-        terminal_controlled: "process_liveness",
+        managed_turns: "managed_turn_lifecycle",
         authoritative_for_tool_calls: false
       }
     );
@@ -109,13 +123,8 @@ test("list exposes only tmux-controlled sessions", () => {
       false
     );
     assert.equal(
-      listed.action_contracts.field_semantics.commands.deprecated,
-      true
-    );
-    assert.equal(
-      listed.action_contracts.field_semantics.commands
-        .authoritative_for_tool_calls,
-      false
+      listed.action_contracts.field_semantics.managed.current_turn,
+      "the authoritative dispatch-ledger owner, never inferred from history"
     );
     assert.deepEqual(
       listed.action_contracts.field_semantics.available_actions,
@@ -128,6 +137,7 @@ test("list exposes only tmux-controlled sessions", () => {
       Object.keys(listed.action_contracts.actions),
       [
         "send",
+        "follow_up",
         "status",
         "approve",
         "cancel",
@@ -156,15 +166,19 @@ test("list exposes only tmux-controlled sessions", () => {
       listed.action_contracts.actions.approve.target_argument,
       "conversation_id"
     );
-    const approvalActions = listed.terminal_controlled[0].available_actions;
+    assert.equal(
+      listed.action_contracts.actions.follow_up.target_argument,
+      "selector"
+    );
+    const approvalActions = terminal.available_actions;
     assert.deepEqual(
       approvalActions.status.arguments,
-      { conversation_id: listed.terminal_controlled[0].id }
+      { conversation_id: terminal.id }
     );
     assert.equal(approvalActions.send, undefined);
     assert.deepEqual(
       approvalActions.approve.arguments,
-      { conversation_id: listed.terminal_controlled[0].id }
+      { conversation_id: terminal.id }
     );
     assert.deepEqual(
       approvalActions.approve.missing_required,
@@ -172,15 +186,15 @@ test("list exposes only tmux-controlled sessions", () => {
     );
     assert.deepEqual(
       approvalActions.approve.before_call.arguments,
-      { conversation_id: listed.terminal_controlled[0].id }
+      { conversation_id: terminal.id }
     );
     assert.equal(approvalActions.approve.requires_explicit_user_confirmation, true);
     assert.deepEqual(
       approvalActions.cancel.arguments,
-      { conversation_id: listed.terminal_controlled[0].id }
+      { conversation_id: terminal.id }
     );
     assert.equal(approvalActions.close, undefined);
-    assert.equal(listed.terminal_scan.terminal_controlled_count, 1);
+    assert.equal(listed.terminal_scan.terminal_count, 1);
 
     const debugListed = runCli([
       "list",
@@ -224,9 +238,9 @@ test("list exposes only tmux-controlled sessions", () => {
         cwd: nativeWorkspace
       }])
     ]);
-    assert.deepEqual(managedOnly.delegated, []);
+    assert.deepEqual(managedOnly.unavailable_managed_turns, []);
     assert.equal("native" in managedOnly, false);
-    assert.deepEqual(managedOnly.terminal_controlled, []);
+    assert.deepEqual(managedOnly.terminals, []);
     assert.equal(managedOnly.terminal_scan.enabled, false);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -290,9 +304,9 @@ test("list keeps same-named targets from distinct tmux servers", () => {
       ])
     ]);
 
-    assert.equal(listed.terminal_controlled.length, 2);
+    assert.equal(listed.terminals.length, 2);
     assert.deepEqual(
-      listed.terminal_controlled.map((entry: any) => entry.terminal_control.panePid).sort(),
+      listed.terminals.map((entry: any) => entry.terminal_control.panePid).sort(),
       [9001, 9002]
     );
   } finally {
@@ -341,16 +355,17 @@ test("list exposes terminal-controlled Codex working activity state", () => {
       })
     ]);
 
-    assert.equal(listed.terminal_controlled.length, 1);
-    assert.equal(listed.terminal_controlled[0].activity_state, "working");
-    assert.match(listed.terminal_controlled[0].activity_reason, /Working/);
-    assert.equal(listed.terminal_controlled[0].approval_state.blocked, false);
-    assert.equal(listed.terminal_controlled[0].approval_state.approvable, false);
-    assert.equal(listed.terminal_controlled[0].commands.approve, false);
-    assert.equal(listed.terminal_controlled[0].available_actions.send, undefined);
+    assert.equal(listed.terminals.length, 1);
+    assert.equal(listed.terminals[0].process_state, "active");
+    assert.equal(listed.terminals[0].activity_state, "working");
+    assert.match(listed.terminals[0].activity_reason, /Working/);
+    assert.equal(listed.terminals[0].approval_state.blocked, false);
+    assert.equal(listed.terminals[0].approval_state.approvable, false);
+    assert.equal("commands" in listed.terminals[0], false);
+    assert.equal(listed.terminals[0].available_actions.send, undefined);
     assert.deepEqual(
-      listed.terminal_controlled[0].available_actions.cancel.arguments,
-      { conversation_id: listed.terminal_controlled[0].id }
+      listed.terminals[0].available_actions.cancel.arguments,
+      { conversation_id: listed.terminals[0].id }
     );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -403,8 +418,8 @@ test("list recognizes the current Codex composer marker and keeps unknown screen
         ].join("\n")
       })
     ]);
-    const idleEntry = idle.terminal_controlled[0];
-    assert.equal(idleEntry.status, "active");
+    const idleEntry = idle.terminals[0];
+    assert.equal(idleEntry.process_state, "active");
     assert.equal(idleEntry.activity_state, "idle");
     assert.match(idleEntry.activity_reason, /input prompt/u);
     assert.deepEqual(
@@ -429,11 +444,10 @@ test("list recognizes the current Codex composer marker and keeps unknown screen
         ].join("\n")
       })
     ]);
-    const unknownEntry = unknown.terminal_controlled[0];
-    assert.equal(unknownEntry.status, "active");
+    const unknownEntry = unknown.terminals[0];
+    assert.equal(unknownEntry.process_state, "active");
     assert.equal(unknownEntry.activity_state, "unknown");
-    assert.equal(unknownEntry.commands.send, true);
-    assert.equal(unknownEntry.commands.cancel, true);
+    assert.equal("commands" in unknownEntry, false);
     assert.deepEqual(
       Object.keys(unknownEntry.available_actions),
       ["status"]
@@ -499,8 +513,8 @@ test("list never advertises raw Claude approval or ambiguous cancellation", () =
       }])
     ]);
 
-    assert.equal(listed.terminal_controlled.length, 1);
-    const entry = listed.terminal_controlled[0];
+    assert.equal(listed.terminals.length, 1);
+    const entry = listed.terminals[0];
     assert.equal(entry.agent, "claude");
     assert.equal(entry.available_actions.approve, undefined);
     assert.equal(entry.available_actions.cancel, undefined);
@@ -576,14 +590,15 @@ test("list discovers Claude and Codex tmux sessions from static runtime snapshot
     ]);
 
     assert.equal(listed.terminal_scan.active_count, 2);
-    assert.equal(listed.terminal_scan.terminal_controlled_count, 2);
+    assert.equal(listed.terminal_scan.terminal_count, 2);
     assert.deepEqual(listed.terminal_scan.agents, ["codex", "claude"]);
-    assert.deepEqual(listed.terminal_controlled.map((entry: any) => entry.agent).sort(), ["claude", "codex"]);
+    assert.deepEqual(listed.terminals.map((entry: any) => entry.agent).sort(), ["claude", "codex"]);
 
-    const codex = listed.terminal_controlled.find((entry: any) => entry.agent === "codex");
+    const codex = listed.terminals.find((entry: any) => entry.agent === "codex");
     assert.equal(codex.id, "terminal:v2:tmux:codex:codex-work:0.0:5101");
-    assert.equal(codex.commands.send, true);
-    assert.equal(codex.commands.cancel, true);
+    assert.equal(codex.source, "terminal");
+    assert.equal(codex.process_state, "active");
+    assert.equal("commands" in codex, false);
     assert.deepEqual(
       codex.available_actions.send.arguments,
       { selector: codex.id }
@@ -595,14 +610,14 @@ test("list discovers Claude and Codex tmux sessions from static runtime snapshot
     assert.equal(codex.available_actions.cancel, undefined);
     assert.equal(codex.terminal_control.capabilities.includes("screen_completion"), true);
 
-    const claude = listed.terminal_controlled.find((entry: any) => entry.agent === "claude");
+    const claude = listed.terminals.find((entry: any) => entry.agent === "claude");
     assert.equal(claude.id, "terminal:v2:tmux:claude:claude-work:1.0:5201");
     assert.equal(claude.session_id, "claude-session-list");
     assert.equal(claude.confidence, "high");
     assert.equal(claude.activity_state, "idle");
-    assert.equal(claude.commands.send, true);
-    assert.equal(claude.commands.cancel, true);
-    assert.equal(claude.commands.approve, false);
+    assert.equal(claude.source, "terminal");
+    assert.equal(claude.process_state, "active");
+    assert.equal("commands" in claude, false);
     assert.deepEqual(
       claude.available_actions.send.arguments,
       { selector: claude.id }

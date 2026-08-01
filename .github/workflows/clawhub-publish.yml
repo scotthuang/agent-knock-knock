@@ -133,7 +133,6 @@ jobs:
           publish_args=(
             package publish "${GITHUB_WORKSPACE}/${packages[0]}"
             --family code-plugin
-            --owner scotthuang
             --tags "${RELEASE_CHANNEL}"
             --topics "tmux,codex,claude-code,agent-orchestration,terminal-handoff"
             --source-repo "${GITHUB_REPOSITORY}"

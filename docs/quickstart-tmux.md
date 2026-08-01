@@ -64,9 +64,11 @@ The bare task works when exactly one eligible idle coding-agent pane exists acro
 /akk @a1b2c3d4: inspect this repository and summarize it
 ```
 
-Success returns a managed conversation and, when the task finishes, its result. The same tmux pane remains available for direct human control; reattach with `tmux attach -t akk-work`.
+Success returns a managed turn and, when the work finishes, its result. The same tmux pane remains available for direct human control; reattach with `tmux attach -t akk-work`.
 
-## Optional: Enable natural-language delegation
+`/akk list` keeps that physical pane as the primary resource: it appears once in `terminals[]` with live `process_state` and `activity_state`. AKK places the active turn under `managed.current_turn`, or the newest retained context under `managed.recent_turn`; retained turns do not occupy or hide the pane. Use a terminal's `send` action for new work and a managed turn's `follow_up` action to continue it.
+
+## Optional: Enable natural-language routing
 
 Direct `/akk ...` commands work without changing the OpenClaw tool policy. To let OpenClaw decide to use AKK from a natural-language request, grant the optional `agent-knock-knock` tools in the applicable policy.
 

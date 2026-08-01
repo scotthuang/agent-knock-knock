@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.8.0 - 2026-08-01
+
+### Changed
+
+- Make `AKK list` terminal-first: every discovered tmux pane is a single primary `terminals[]` resource with its authoritative current turn or latest retained turn nested below it.
+- Replace ambiguous managed-turn `send` hints with `follow_up`, keep historical turns explicitly addressable, and limit default selectors to physical terminal candidates.
+- Determine current terminal ownership from the dispatch ledger and suppress side effects when ownership is unresolved, while keeping the pane visible.
+
+### Removed
+
+- Remove the public `delegated[]`, `terminal_controlled[]`, `tasks[]`, legacy `commands`, and `source: "akk_delegate"` list compatibility model.
+
 ## 0.7.0 - 2026-08-01
 
 ### Changed

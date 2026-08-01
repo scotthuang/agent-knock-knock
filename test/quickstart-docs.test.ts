@@ -42,6 +42,11 @@ test("ClawHub quickstarts reach a first task without a top-level workspace", () 
   assert.match(tmux, /AKK reuses a coding agent that you start in tmux/u);
   assert.match(tmux, /exactly one eligible idle coding-agent pane/u);
   assert.match(tmux, /\/akk <selector>: <message>/u);
+  assert.match(tmux, /appears once in `terminals\[\]`/u);
+  assert.match(tmux, /`managed\.current_turn`/u);
+  assert.match(tmux, /`managed\.recent_turn`/u);
+  assert.match(tmux, /terminal's `send` action/u);
+  assert.match(tmux, /managed turn's `follow_up` action/u);
   assert.match(tmux, /multiple canonical roots/u);
   assert.match(tmux, /autoApprove\.rules\[\]\.workspaces/u);
   assert.match(readme, /multiple canonical workspace roots/u);
@@ -136,6 +141,15 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
   for (const document of [readme, skill]) {
     assert.doesNotMatch(document, /defaultAgent|--default-agent/u);
     assert.doesNotMatch(document, /\/akk send\b|\/akk describe\b/u);
+    assert.doesNotMatch(
+      document,
+      /`delegated\[\]`|`terminal_controlled\[\]`|`tasks\[\]`|akk_delegate/u
+    );
+    assert.match(document, /`terminals\[\]`/u);
+    assert.match(document, /`managed\.current_turn`/u);
+    assert.match(document, /`managed\.recent_turn`/u);
+    assert.match(document, /`unavailable_managed_turns\[\]`/u);
+    assert.match(document, /`follow_up`/u);
     assert.match(
       document,
       /\/akk approve @a1b2c3d4 --expected-approval-fingerprint <fresh-fingerprint>/u

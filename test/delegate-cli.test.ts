@@ -395,7 +395,7 @@ test("an exact short selector can send across cwd without --workspace", () => {
       ...runtimeArgs
     ]);
     assert.equal(listed.status, 0, listed.stderr || listed.stdout);
-    const selected = JSON.parse(listed.stdout).terminal_controlled.find(
+    const selected = JSON.parse(listed.stdout).terminals.find(
       (entry: Record<string, any>) =>
         entry.terminal_control?.target === "codex-selected:0.0"
     );

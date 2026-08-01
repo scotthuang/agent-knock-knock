@@ -2460,8 +2460,11 @@ fs.closeSync = function(fd, ...args) {
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const listed = JSON.parse(result.stdout);
     assert.equal(listed.reconciliation.closed, 0);
-    assert.equal(listed.tasks.length, 1);
-    assert.equal(listed.tasks[0].status, "waiting_for_agent");
+    assert.equal(listed.unavailable_managed_turns.length, 1);
+    assert.equal(
+      listed.unavailable_managed_turns[0].status,
+      "waiting_for_agent"
+    );
 
     const finalState = JSON.parse(fs.readFileSync(statePath, "utf8"));
     assert.equal(finalState.status, "waiting_for_agent");
@@ -3411,7 +3414,7 @@ test("background send to raw terminal id creates managed callback conversation",
     assert.equal(listed.status, 0, listed.stderr || listed.stdout);
     const listedParsed = JSON.parse(listed.stdout);
     assert.equal(listedParsed.reconciliation.closed, 1);
-    assert.deepEqual(listedParsed.delegated, []);
+    assert.deepEqual(listedParsed.unavailable_managed_turns, []);
     const closedState = JSON.parse(fs.readFileSync(statePath, "utf8"));
     assert.equal(closedState.status, "closed");
     assert.equal(closedState.close_reason, "idle timeout after 1 minutes");
@@ -3954,20 +3957,20 @@ test("an orphaned terminal dispatch requires its exact listed generation before 
     ], testEnv);
     assert.equal(listed.status, 0, listed.stderr || listed.stdout);
     const listedParsed = JSON.parse(listed.stdout);
-    assert.equal(listedParsed.terminal_controlled.length, 1);
+    assert.equal(listedParsed.terminals.length, 1);
     const orphaned =
-      listedParsed.terminal_controlled[0].orphaned_terminal_dispatch;
+      listedParsed.terminals[0].orphaned_terminal_dispatch;
     assert.equal(orphaned.message_id, messageId);
-    assert.equal(listedParsed.terminal_controlled[0].commands.close, true);
+    assert.equal("commands" in listedParsed.terminals[0], false);
     assert.deepEqual(
-      listedParsed.terminal_controlled[0].available_actions.close.arguments,
+      listedParsed.terminals[0].available_actions.close.arguments,
       {
         conversation_id: rawConversationId,
         expected_message_id: messageId
       }
     );
     assert.equal(
-      listedParsed.terminal_controlled[0]
+      listedParsed.terminals[0]
         .available_actions.close.requires_explicit_user_confirmation,
       true
     );

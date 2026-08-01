@@ -148,31 +148,59 @@ export function akkUsageText(): string {
 }
 
 export function formatAkkListCommandResult(result: Record<string, unknown>): string {
-  const groups = [
-    {
-      label: "delegated",
-      tasks: arrayValue(result.delegated).length > 0
-        ? arrayValue(result.delegated)
-        : arrayValue(result.tasks)
-    },
-    { label: "terminal-controlled", tasks: arrayValue(result.terminal_controlled) }
-  ].filter((group) => group.tasks.length > 0);
-  const total = groups.reduce((count, group) => count + group.tasks.length, 0);
-  if (total === 0) {
-    return "AKK has no open sessions.";
+  const terminals = arrayValue(result.terminals);
+  const unavailableManagedTurns = arrayValue(result.unavailable_managed_turns);
+  if (terminals.length === 0 && unavailableManagedTurns.length === 0) {
+    return "AKK found no live terminals or unavailable managed turns.";
   }
+
+  const terminalLines = terminals.slice(0, 20).flatMap((terminal) => {
+    const managed = recordValue(terminal.managed) ?? {};
+    const managementConflict = recordValue(terminal.management_conflict);
+    const currentTurn = recordValue(managed.current_turn);
+    const recentTurn = recordValue(managed.recent_turn);
+    const history = arrayValue(managed.history);
+    const hiddenTurnCount = finiteNumber(managed.hidden_turn_count) ?? 0;
+    const recovery = orphanedTerminalDispatchRecovery(terminal);
+    return [
+      `- ${formatTerminalLine(terminal)}`,
+      ...(currentTurn
+        ? [`  current turn: ${formatManagedTurnLine(currentTurn)}`]
+        : []),
+      ...(recentTurn
+        ? [`  recent turn: ${formatManagedTurnLine(recentTurn)}`]
+        : []),
+      ...history.slice(0, 20).map(
+        (turn) => `  history: ${formatManagedTurnLine(turn)}`
+      ),
+      ...(hiddenTurnCount > 0 && history.length === 0
+        ? [`  older managed turns: ${hiddenTurnCount} (use all=true to include)`]
+        : []),
+      ...(managementConflict
+        ? [
+            `  management conflict: ${nonEmptyString(managementConflict.reason) ?? "current terminal ownership is unresolved"}`,
+            ...(nonEmptyString(managementConflict.recovery)
+              ? [`  recovery: ${nonEmptyString(managementConflict.recovery)}`]
+              : [])
+          ]
+        : []),
+      ...(recovery ? [`  recovery: ${recovery}`] : [])
+    ];
+  });
+
   return [
-    `AKK open sessions (${total}):`,
-    ...groups.flatMap((group) => [
-      `${group.label}:`,
-      ...group.tasks.slice(0, 20).flatMap((task) => {
-        const recovery = orphanedTerminalDispatchRecovery(task);
-        return [
-          `- ${formatTaskLine(task)}`,
-          ...(recovery ? [`  recovery: ${recovery}`] : [])
-        ];
-      })
-    ])
+    `AKK terminals (${terminals.length} live, ${unavailableManagedTurns.length} unavailable managed turns):`,
+    ...(terminalLines.length > 0
+      ? ["live terminals:", ...terminalLines]
+      : []),
+    ...(unavailableManagedTurns.length > 0
+      ? [
+          "unavailable managed turns:",
+          ...unavailableManagedTurns.slice(0, 20).map(
+            (turn) => `- ${formatManagedTurnLine(turn)}`
+          )
+        ]
+      : [])
   ].join("\n");
 }
 
@@ -370,32 +398,52 @@ function arrayValue(value: unknown): Record<string, unknown>[] {
     : [];
 }
 
-function formatTaskLine(task: Record<string, unknown>): string {
-  const executor = task.executor !== null &&
-    typeof task.executor === "object" &&
-    !Array.isArray(task.executor)
-    ? task.executor as Record<string, unknown>
-    : {};
-  const terminalControl = task.terminal_control !== null &&
-    typeof task.terminal_control === "object" &&
-    !Array.isArray(task.terminal_control)
-    ? task.terminal_control as Record<string, unknown>
-    : {};
-  const context = nonEmptyString(task.request) ??
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
+}
+
+function formatTerminalLine(terminal: Record<string, unknown>): string {
+  const terminalControl = recordValue(terminal.terminal_control) ?? {};
+  const context = [
+    nonEmptyString(terminalControl.target)
+      ? `tmux ${nonEmptyString(terminalControl.target)}`
+      : undefined,
+    nonEmptyString(terminal.command),
+    nonEmptyString(terminal.workspace) ?? nonEmptyString(terminal.cwd)
+  ].filter((value): value is string => Boolean(value)).join(" · ");
+  return [
+    nonEmptyString(terminal.short_ref) ??
+      nonEmptyString(terminal.id) ??
+      "unknown",
+    nonEmptyString(terminal.agent) ?? "agent",
+    nonEmptyString(terminal.process_state) ?? "unknown",
+    nonEmptyString(terminal.activity_state),
+    truncateText(context, 90)
+  ].filter(Boolean).join(" | ");
+}
+
+function formatManagedTurnLine(turn: Record<string, unknown>): string {
+  const executor = recordValue(turn.executor) ?? {};
+  const context = nonEmptyString(turn.request) ??
     [
-      nonEmptyString(terminalControl.target)
-        ? `tmux ${nonEmptyString(terminalControl.target)}`
-        : undefined,
-      nonEmptyString(task.command),
-      nonEmptyString(task.workspace) ?? nonEmptyString(task.cwd)
+      nonEmptyString(turn.workspace),
+      nonEmptyString(turn.callback_state)
     ].filter((value): value is string => Boolean(value)).join(" · ");
   return [
-    nonEmptyString(task.short_ref) ??
-      nonEmptyString(task.conversation_id) ??
-      nonEmptyString(task.id) ??
+    nonEmptyString(turn.short_ref) ??
+      nonEmptyString(turn.conversation_id) ??
+      nonEmptyString(turn.id) ??
       "unknown",
-    nonEmptyString(task.agent) ?? nonEmptyString(executor.kind) ?? "agent",
-    nonEmptyString(task.status) ?? "unknown",
+    nonEmptyString(turn.agent) ?? nonEmptyString(executor.kind) ?? "agent",
+    nonEmptyString(turn.lifecycle_state) ?? nonEmptyString(turn.status) ?? "unknown",
     truncateText(context, 90)
   ].filter(Boolean).join(" | ");
 }

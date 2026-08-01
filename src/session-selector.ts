@@ -11,6 +11,13 @@ export const DEFAULT_SESSION_SHORT_REF_LENGTH = 10;
 export interface SessionSelectorCandidate {
   /** Complete, authoritative conversation/session id. */
   id: string;
+  /**
+   * Optional operation target returned after this candidate is selected.
+   * Matching, short references, and candidate details remain anchored to
+   * `id`, allowing a physical terminal to route an operation to its current
+   * managed turn without changing the terminal's public selector identity.
+   */
+  targetId?: string;
   agent: ExecutorKind;
   /**
    * Whether the caller can perform its current operation on this target.
@@ -20,6 +27,16 @@ export interface SessionSelectorCandidate {
    * cannot receive terminal input).
    */
   actionable: boolean;
+  /**
+   * Whether this candidate participates in omitted and semantic selector
+   * resolution (`only`, `latest`, an agent name, or `agent:latest`).
+   *
+   * Set this to false for explicitly addressable history, such as an older
+   * managed turn attached to a physical terminal. Complete ids and short refs
+   * still resolve the candidate when `actionable` is true. Omission preserves
+   * the previous behavior and allows the candidate into default selection.
+   */
+  defaultActionable?: boolean;
   /**
    * Caller-supplied recency. It must not be derived from the current clock in
    * this resolver. `latest` fails closed when recency is missing or tied.
@@ -36,6 +53,7 @@ export interface SessionSelectorCandidateDetail {
   shortRef: string;
   agent: ExecutorKind;
   actionable: boolean;
+  defaultActionable?: boolean;
   updatedAtMs?: number;
   source?: string;
   status?: string;
@@ -164,12 +182,17 @@ export function resolveSessionSelector<T extends SessionSelectorCandidate>(
     }
   }
 
-  const actionable = normalizedCandidates.filter((candidate) => candidate.actionable);
+  const defaultCandidates = normalizedCandidates.filter(
+    (candidate) => candidate.defaultActionable !== false
+  );
+  const defaultActionable = defaultCandidates.filter(
+    (candidate) => candidate.actionable
+  );
   if (!trimmedSelector || trimmedSelector.toLowerCase() === "only") {
     const matchedBy = trimmedSelector ? "only" : "implicit_only";
     return resolveOnly({
-      matches: actionable,
-      allCandidates: normalizedCandidates,
+      matches: defaultActionable,
+      allCandidates: defaultCandidates,
       selector: selectorForError,
       matchedBy,
       operation,
@@ -180,8 +203,8 @@ export function resolveSessionSelector<T extends SessionSelectorCandidate>(
   const normalizedSelector = trimmedSelector.toLowerCase();
   if (normalizedSelector === "latest") {
     return resolveLatest({
-      matches: actionable,
-      allCandidates: normalizedCandidates,
+      matches: defaultActionable,
+      allCandidates: defaultCandidates,
       selector: trimmedSelector,
       matchedBy: "latest",
       operation,
@@ -190,7 +213,7 @@ export function resolveSessionSelector<T extends SessionSelectorCandidate>(
   }
 
   if (isExecutorKind(normalizedSelector)) {
-    const allAgentMatches = normalizedCandidates.filter(
+    const allAgentMatches = defaultCandidates.filter(
       (candidate) => candidate.agent === normalizedSelector
     );
     return resolveOnly({
@@ -206,7 +229,7 @@ export function resolveSessionSelector<T extends SessionSelectorCandidate>(
   const agentLatestMatch = /^(codex|claude):latest$/u.exec(normalizedSelector);
   if (agentLatestMatch) {
     const agent = agentLatestMatch[1] as ExecutorKind;
-    const allAgentMatches = normalizedCandidates.filter(
+    const allAgentMatches = defaultCandidates.filter(
       (candidate) => candidate.agent === agent
     );
     return resolveLatest({
@@ -235,7 +258,10 @@ export function resolveSessionSelector<T extends SessionSelectorCandidate>(
     }
   }
 
-  const details = candidateDetails(actionable, shortRefLength);
+  const details = candidateDetails(
+    normalizedCandidates.filter((candidate) => candidate.actionable),
+    shortRefLength
+  );
   throw new SessionSelectorError({
     code: "not_found",
     selector: trimmedSelector,
@@ -390,7 +416,7 @@ function resolution<T extends SessionSelectorCandidate>(
 ): SessionSelectorResolution<T> {
   return {
     candidate,
-    id: candidate.id,
+    id: candidate.targetId ?? candidate.id,
     shortRef: sessionShortRef(candidate.id, shortRefLength),
     selector,
     matchedBy
@@ -408,6 +434,12 @@ function normalizeCandidates<T extends SessionSelectorCandidate>(
       throw new TypeError(`session selector candidate ${index} must be an object`);
     }
     requireNonEmptyString(candidate.id, `session selector candidate ${index} id`);
+    if (candidate.targetId !== undefined) {
+      requireNonEmptyString(
+        candidate.targetId,
+        `session selector candidate ${index} targetId`
+      );
+    }
     if (!isExecutorKind(candidate.agent)) {
       throw new TypeError(
         `session selector candidate ${index} has unsupported agent ${quote(String(candidate.agent))}`
@@ -416,6 +448,14 @@ function normalizeCandidates<T extends SessionSelectorCandidate>(
     if (typeof candidate.actionable !== "boolean") {
       throw new TypeError(
         `session selector candidate ${index} actionable must be a boolean`
+      );
+    }
+    if (
+      candidate.defaultActionable !== undefined &&
+      typeof candidate.defaultActionable !== "boolean"
+    ) {
+      throw new TypeError(
+        `session selector candidate ${index} defaultActionable must be a boolean when provided`
       );
     }
     if (
@@ -448,6 +488,7 @@ function detailFor(
     shortRef: sessionShortRef(candidate.id, shortRefLength),
     agent: candidate.agent,
     actionable: candidate.actionable,
+    defaultActionable: candidate.defaultActionable,
     updatedAtMs: candidate.updatedAtMs,
     source: candidate.source,
     status: candidate.status,
