@@ -49,6 +49,116 @@ test("omission is allowed only when exactly one actionable target exists", () =>
   );
 });
 
+test("default selectors ignore explicitly addressable managed-turn history", () => {
+  const terminal = candidate({
+    id: "terminal:v2:tmux:codex:work:0.0:4321",
+    agent: "codex",
+    source: "terminal",
+    updatedAtMs: 10
+  });
+  const olderTurn = candidate({
+    id: "task-older",
+    agent: "codex",
+    source: "managed_turn",
+    defaultActionable: false,
+    updatedAtMs: 20
+  });
+  const newestTurn = candidate({
+    id: "task-newest",
+    agent: "codex",
+    source: "managed_turn",
+    defaultActionable: false,
+    updatedAtMs: 30
+  });
+  const candidates = [newestTurn, terminal, olderTurn];
+
+  for (const selector of [undefined, "only", "latest", "codex", "codex:latest"] as const) {
+    assert.equal(resolveSessionSelector(selector, candidates).id, terminal.id);
+  }
+});
+
+test("complete ids and short refs can explicitly target managed-turn history", () => {
+  const terminal = candidate({
+    id: "terminal:v2:tmux:codex:work:0.0:4321",
+    agent: "codex",
+    source: "terminal"
+  });
+  const historicalTurn = candidate({
+    id: "task-historical",
+    agent: "codex",
+    source: "managed_turn",
+    defaultActionable: false
+  });
+
+  const byId = resolveSessionSelector(historicalTurn.id, [terminal, historicalTurn]);
+  assert.equal(byId.id, historicalTurn.id);
+  assert.equal(byId.matchedBy, "full_id");
+
+  const byShortRef = resolveSessionSelector(
+    sessionShortRef(historicalTurn.id),
+    [terminal, historicalTurn]
+  );
+  assert.equal(byShortRef.id, historicalTurn.id);
+  assert.equal(byShortRef.matchedBy, "short_ref");
+});
+
+test("a terminal selector can resolve to its operation-specific managed target", () => {
+  const terminal = candidate({
+    id: "terminal:v2:tmux:codex:work:0.0:4321",
+    targetId: "task-current",
+    agent: "codex",
+    source: "terminal"
+  });
+  const historicalTurn = candidate({
+    id: "task-historical",
+    agent: "codex",
+    source: "managed_turn",
+    defaultActionable: false
+  });
+  const candidates = [historicalTurn, terminal];
+
+  for (const selector of [undefined, "only", "codex", terminal.id] as const) {
+    const result = resolveSessionSelector(selector, candidates);
+    assert.equal(result.id, terminal.targetId);
+    assert.equal(result.candidate, terminal);
+    assert.equal(result.shortRef, sessionShortRef(terminal.id));
+  }
+
+  const terminalRef = resolveSessionSelector(sessionShortRef(terminal.id), candidates);
+  assert.equal(terminalRef.id, terminal.targetId);
+  assert.equal(terminalRef.shortRef, sessionShortRef(terminal.id));
+
+  const historicalRef = resolveSessionSelector(
+    sessionShortRef(historicalTurn.id),
+    candidates
+  );
+  assert.equal(historicalRef.id, historicalTurn.id);
+  assert.equal(historicalRef.candidate, historicalTurn);
+});
+
+test("agent selectors do not fall back to explicitly addressable history", () => {
+  const terminal = candidate({
+    id: "terminal:v2:tmux:codex:work:0.0:4321",
+    agent: "codex",
+    source: "terminal"
+  });
+  const historicalClaudeTurn = candidate({
+    id: "task-claude-history",
+    agent: "claude",
+    source: "managed_turn",
+    defaultActionable: false,
+    updatedAtMs: 20
+  });
+
+  for (const selector of ["claude", "claude:latest"]) {
+    const error = captureSelectorError(() =>
+      resolveSessionSelector(selector, [terminal, historicalClaudeTurn])
+    );
+    assert.equal(error.code, "no_actionable_targets");
+    assert.deepEqual(error.candidates, []);
+  }
+});
+
 test("omission rejects ambiguity with deterministic candidate details", () => {
   const error = captureSelectorError(() =>
     resolveSessionSelector(undefined, [
@@ -301,7 +411,7 @@ test("unknown selectors return actionable candidate details without guessing", (
     id: "task-open",
     agent: "claude",
     status: "idle",
-    source: "akk_delegate",
+    source: "managed_turn",
     workspace: "/work/repo",
     label: "Continue the integration tests"
   });
@@ -345,6 +455,24 @@ test("candidate validation rejects unsafe or non-deterministic inputs", () => {
       updatedAtMs: Number.NaN
     }]),
     /must be finite/
+  );
+  assert.throws(
+    () => resolveSessionSelector("only", [{
+      id: "task",
+      agent: "codex",
+      actionable: true,
+      defaultActionable: "false"
+    } as unknown as SessionSelectorCandidate]),
+    /defaultActionable must be a boolean/
+  );
+  assert.throws(
+    () => resolveSessionSelector("only", [{
+      id: "task",
+      targetId: " ",
+      agent: "codex",
+      actionable: true
+    }]),
+    /targetId must be a non-empty string/
   );
   assert.throws(
     () => sessionShortRef("task", 5),

@@ -38,7 +38,7 @@ test("standalone list and status leave persisted conversation files and runtime 
       storeDir
     ], { runtimeDir });
     assert.equal(listed.reconciliation.status, "disabled");
-    assert.equal(listed.delegated.length, 1);
+    assert.equal(listed.unavailable_managed_turns.length, 1);
 
     const status = runCli([
       "status",
@@ -100,7 +100,24 @@ test("list --reconcile remains readable and skips writes for a newer writer prot
     assert.equal(listed.store.writable, false);
     assert.equal(listed.reconciliation.status, "skipped");
     assert.match(listed.reconciliation.reason, /writer protocol/iu);
-    assert.equal(listed.delegated.length, 1);
+    assert.equal(listed.unavailable_managed_turns.length, 1);
+    const listedTurn = listed.unavailable_managed_turns[0];
+    assert.deepEqual(
+      Object.keys(listedTurn.available_actions),
+      ["status"]
+    );
+    const mutationSelector = spawnCli([
+      "send",
+      "--conversation",
+      listedTurn.short_ref,
+      "--message",
+      "must remain read-only",
+      "--managed-only",
+      "--store-dir",
+      storeDir
+    ], { runtimeDir });
+    assert.notEqual(mutationSelector.status, 0);
+    assert.match(mutationSelector.stderr, /not actionable for send/iu);
     assert.deepEqual({
       manifest: fileSnapshot(manifestPath),
       ...conversationFileSnapshots(fixture.paths),

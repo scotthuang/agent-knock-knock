@@ -1151,9 +1151,15 @@ async function runDelegate(options) {
           return false;
         }
       });
-  const eligible = scopedCandidates.filter(
-    (candidate) => candidate.activity_state === "idle"
-  );
+  const eligible = scopedCandidates.filter((candidate) => {
+    if (candidate.activity_state !== "idle") {
+      return false;
+    }
+    const terminalControl = isRecord(candidate.terminal_control)
+      ? candidate.terminal_control as unknown as TerminalControlRef
+      : undefined;
+    return !terminalControl || terminalDispatchOwnership(terminalControl).state === "none";
+  });
   if (eligible.length === 0) {
     const observed = scopedCandidates.length > 0
       ? ` Found ${scopedCandidates.length} matching pane(s), but none is idle.`
@@ -1706,6 +1712,7 @@ function environmentWithoutGatewayTokens(): NodeJS.ProcessEnv {
 
 async function runList(options) {
   const storeDir = expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(process.cwd()));
+  const store = inspectStoreCompatibility(storeDir);
   const reconciliation = options.reconcile === true
     ? await reconcileStoreForList(storeDir, options)
     : {
@@ -1716,8 +1723,9 @@ async function runList(options) {
   const agentFilter = options.agent ? resolveExecutor({ kind: options.agent }).kind : undefined;
   const statusFilter = options.status;
   const allStoredConversations = listConversations(storeDir);
-  const storedConversations = allStoredConversations
-    .filter(isDiscoverableTmuxConversation)
+  const allManagedConversations = allStoredConversations
+    .filter(isDiscoverableTmuxConversation);
+  const storedConversations = allManagedConversations
     .filter((conversation) => includeAll || isActiveStatus(conversation.status))
     .filter((conversation) =>
       matchesConfiguredWorkspace(options.workspace, conversation.workspace)
@@ -1726,67 +1734,41 @@ async function runList(options) {
       !agentFilter || executorForConversation(conversation).kind === agentFilter
     )
     .filter((conversation) => !statusFilter || conversation.status === statusFilter);
-  const conversations = storedConversations.map((conversation) =>
-    summarizeConversation(conversation)
-  );
-  const delegated = storedConversations.map((conversation) =>
-    delegatedListEntry(
-      summarizeConversation(conversation),
-      {
-        terminalBridge: terminalBridgeEnabled(conversation),
-        approvalState: managedListApprovalState(conversation),
-        conversation
-      }
+  const terminalScan = await buildTerminalListGroup({ options, agentFilter, statusFilter });
+  const physicalTerminals = terminalScan.terminalControlled.filter((entry) =>
+    matchesConfiguredWorkspace(
+      options.workspace,
+      entry.workspace ?? entry.cwd
     )
   );
-  const terminalScan = await buildTerminalListGroup({ options, agentFilter, statusFilter });
-  const managedTerminalKeys = new Set(
-    allStoredConversations
-      .filter((conversation) => isActiveStatus(conversation.status))
-      .filter((conversation) =>
-        matchesConfiguredWorkspace(options.workspace, conversation.workspace)
-      )
-      .map((conversation) =>
-        terminalControlSelectorKey(
-          terminalControlFromTakeover(
-            isRecord(conversation.native_session_takeover)
-              ? conversation.native_session_takeover
-              : undefined
-          )
-        )
-      )
-      .filter((key): key is string => key !== undefined)
-  );
-  const terminalControlled = terminalScan.terminalControlled.filter((entry) => {
-    if (
-      !matchesConfiguredWorkspace(
-        options.workspace,
-        entry.workspace ?? entry.cwd
-      )
-    ) {
-      return false;
-    }
-    const key = terminalControlSelectorKey(entry.terminal_control);
-    return key === undefined || !managedTerminalKeys.has(key);
+  const projection = terminalFirstListProjection({
+    terminals: physicalTerminals,
+    allConversations: allManagedConversations.filter((conversation) =>
+      matchesConfiguredWorkspace(options.workspace, conversation.workspace)
+    ),
+    displayedConversations: storedConversations,
+    includeAll,
+    managedOnly: options.managedOnly === true,
+    statusFilter,
+    mutationsAllowed: store.writable === true
   });
 
   printJson({
     store_dir: storeDir,
-    store: inspectStoreCompatibility(storeDir),
+    store,
     reconciliation,
     action_contracts: listActionContracts(),
-    delegated,
-    terminal_controlled: terminalControlled,
+    terminals: projection.terminals,
+    unavailable_managed_turns: projection.unavailableManagedTurns,
     terminal_scan: {
       ...terminalScan.summary,
-      terminal_controlled_count: terminalControlled.length
-    },
-    tasks: conversations
+      terminal_count: projection.terminals.length
+    }
   });
-  runtimeLog("info", "tasks_listed", {
+  runtimeLog("info", "terminals_listed", {
     store_dir: storeDir,
-    returned_count: conversations.length,
-    terminal_controlled_count: terminalControlled.length,
+    terminal_count: projection.terminals.length,
+    unavailable_managed_turn_count: projection.unavailableManagedTurns.length,
     terminal_scan_error: terminalScan.summary.error,
     include_all: includeAll,
     agent_filter: agentFilter,
@@ -1839,16 +1821,6 @@ async function buildTerminalListGroup({ options, agentFilter, statusFilter }) {
   };
   if (options.managedOnly) {
     return empty;
-  }
-  if (statusFilter && statusFilter !== "active") {
-    return {
-      ...empty,
-      summary: {
-        enabled: false,
-        agents: [],
-        skipped: `terminal discovery skipped for status filter ${statusFilter}`
-      }
-    };
   }
   const registry = createRuntimeTerminalAgentRegistry(options);
   const adapters = agentFilter
@@ -1908,7 +1880,7 @@ async function buildTerminalListGroup({ options, agentFilter, statusFilter }) {
       enabled: true,
       agents: adapters.map((adapter) => adapter.agent),
       active_count: activeCount,
-      terminal_controlled_count: terminalControlled.length,
+      terminal_count: terminalControlled.length,
       approval_scan: options.noApprovalScan ? "disabled" : "enabled",
       diagnostics: terminalDiagnostics,
       error: errors.length > 0 ? errors.join("; ") : undefined
@@ -1926,7 +1898,7 @@ async function terminalControlDiagnostics(provider: TerminalControlProvider) {
   };
 }
 
-function delegatedListEntry(
+function managedTurnListEntry(
   task,
   {
     terminalBridge = false,
@@ -1942,19 +1914,21 @@ function delegatedListEntry(
     ...task,
     id: task.conversation_id,
     short_ref: sessionShortRef(task.conversation_id),
-    source: "akk_delegate",
+    source: "managed_turn",
     ...(approvalState ? { approval_state: approvalState } : {}),
     commands: {
-      send: canSendDelegated(task.status),
+      send: canFollowUpManagedTurn(task.status),
       cancel: isWaitingForAgent(task.status),
       close: task.status !== "closed",
       status: true,
       approve: terminalBridge && isActiveStatus(task.status)
     }
   };
+  const availableActions = availableListActions(entry, { conversation });
+  const { commands: _commands, ...publicEntry } = entry;
   return {
-    ...entry,
-    available_actions: availableListActions(entry, { conversation })
+    ...publicEntry,
+    available_actions: availableActions
   };
 }
 
@@ -1985,9 +1959,9 @@ async function terminalControlledListEntry(
   const entry = {
     id: bridge.terminalConversationId(session),
     short_ref: sessionShortRef(bridge.terminalConversationId(session)),
-    source: "terminal_control",
+    source: "terminal",
     agent: session.agent,
-    status: "active",
+    process_state: "active",
     pid: session.pid,
     child_pids: childPidsForRoot(session, activeSessions),
     command: session.command,
@@ -2025,9 +1999,601 @@ async function terminalControlledListEntry(
       close: orphanedDispatch !== undefined
     }
   };
+  const availableActions = availableListActions(entry);
+  const { commands: _commands, ...publicEntry } = entry;
   return {
-    ...entry,
-    available_actions: availableListActions(entry)
+    ...publicEntry,
+    available_actions: availableActions
+  };
+}
+
+function terminalFirstListProjection({
+  terminals,
+  allConversations,
+  displayedConversations,
+  includeAll,
+  managedOnly,
+  statusFilter,
+  mutationsAllowed
+}: {
+  terminals: Record<string, any>[];
+  allConversations: Conversation[];
+  displayedConversations: Conversation[];
+  includeAll: boolean;
+  managedOnly: boolean;
+  statusFilter?: string;
+  mutationsAllowed: boolean;
+}): {
+  terminals: Record<string, any>[];
+  unavailableManagedTurns: Record<string, any>[];
+} {
+  const allByTerminal = managedConversationsByTerminal(allConversations);
+  const displayedByTerminal = managedConversationsByTerminal(
+    displayedConversations
+  );
+  const discoveredTerminalKeys = new Set<string>();
+
+  const projectedTerminals = terminals.map((terminal) => {
+    const terminalControl = isRecord(terminal.terminal_control)
+      ? terminal.terminal_control as unknown as TerminalControlRef
+      : undefined;
+    const terminalKey = terminalControlSelectorKey(terminalControl);
+    if (terminalKey) {
+      discoveredTerminalKeys.add(terminalKey);
+    }
+    const allRelated = terminalKey
+      ? [...(allByTerminal.get(terminalKey) ?? [])]
+      : [];
+    const displayedRelated = terminalKey
+      ? [...(displayedByTerminal.get(terminalKey) ?? [])]
+      : [];
+    const discoveredOwnership = terminalControl
+      ? terminalDispatchOwnership(terminalControl)
+      : { state: "none" as const };
+    const ownership = discoveredOwnership.state === "current"
+      ? localTerminalDispatchOwnership(
+          discoveredOwnership.conversation,
+          allRelated,
+          terminal
+        )
+      : discoveredOwnership;
+    const discoveredRawActions = isRecord(terminal.available_actions)
+      ? terminal.available_actions
+      : {};
+    const rawActions = mutationsAllowed
+      ? discoveredRawActions
+      : readOnlyListActions(discoveredRawActions);
+    const terminalCanAcceptSend =
+      ownership.state === "none" && isRecord(rawActions.send);
+    if (
+      ownership.state === "current" &&
+      !allRelated.some((conversation) =>
+        conversation.conversation_id === ownership.conversation.conversation_id
+      )
+    ) {
+      allRelated.push(ownership.conversation);
+    }
+
+    const currentTurnValue = ownership.state === "current"
+      ? currentManagedTurnForTerminal(
+          ownership.conversation,
+          terminal,
+          rawActions
+        )
+      : undefined;
+    const currentTurn = currentTurnValue && !mutationsAllowed
+      ? readOnlyManagedTurn(currentTurnValue)
+      : currentTurnValue;
+    const sortedDisplayed = [...displayedRelated]
+      .filter((conversation) =>
+        conversation.conversation_id !== currentTurn?.conversation_id
+      )
+      .sort(compareManagedConversationRecency);
+    const recentConversation = currentTurn ? undefined : sortedDisplayed[0];
+    const recentTurnValue = recentConversation
+      ? historicalManagedTurnForTerminal(
+          recentConversation,
+          terminalCanAcceptSend,
+          terminal
+        )
+      : undefined;
+    const recentTurn = recentTurnValue && !mutationsAllowed
+      ? readOnlyManagedTurn(recentTurnValue)
+      : recentTurnValue;
+    const historyConversations = includeAll
+      ? sortedDisplayed.filter((conversation) =>
+          conversation.conversation_id !== recentConversation?.conversation_id
+        )
+      : [];
+    const history = historyConversations.map((conversation) => {
+      const turn =
+      historicalManagedTurnForTerminal(
+        conversation,
+        terminalCanAcceptSend,
+        terminal
+      );
+      return mutationsAllowed ? turn : readOnlyManagedTurn(turn);
+    });
+    const visibleTurnIds = new Set(
+      [currentTurn, recentTurn, ...history]
+        .map((turn) => stringValue(turn?.conversation_id))
+        .filter((id): id is string => id !== undefined)
+    );
+    const management = {
+      current_turn: currentTurn ?? null,
+      recent_turn: recentTurn ?? null,
+      turn_count: allRelated.length,
+      hidden_turn_count: allRelated.filter((conversation) =>
+        !visibleTurnIds.has(conversation.conversation_id)
+      ).length,
+      ...(includeAll ? { history } : {})
+    };
+    const availableActions = ownership.state === "current"
+      ? currentTerminalActions(currentTurn)
+      : ownership.state === "conflict"
+        ? safeTerminalActionsDuringConflict(rawActions)
+        : rawActions;
+
+    return {
+      ...terminal,
+      management_state: ownership.state === "current"
+        ? "managed"
+        : ownership.state === "conflict"
+          ? "conflict"
+          : "unmanaged",
+      ...(ownership.state === "conflict"
+        ? { management_conflict: ownership.conflict }
+        : {}),
+      managed: management,
+      available_actions: availableActions
+    };
+  });
+
+  const unavailableManagedTurns = displayedConversations
+    .filter((conversation) => {
+      const terminalKey = terminalKeyForManagedConversation(conversation);
+      if (terminalKey && discoveredTerminalKeys.has(terminalKey)) {
+        return false;
+      }
+      return (
+        includeAll ||
+        managedOnly ||
+        statusFilter !== undefined ||
+        managedTurnNeedsAttention(conversation.status)
+      );
+    })
+    .sort(compareManagedConversationRecency)
+    .map((conversation) => {
+      const managedTurn = managedTurnListEntry(
+        summarizeConversation(conversation),
+        {
+          terminalBridge: terminalBridgeEnabled(conversation),
+          approvalState: managedListApprovalState(conversation),
+          conversation
+        }
+      );
+      return {
+        ...managedTurn,
+        available_actions: mutationsAllowed
+          ? safeUnavailableManagedTurnActions(
+              isRecord(managedTurn.available_actions)
+                ? managedTurn.available_actions
+                : {}
+            )
+          : readOnlyListActions(
+              isRecord(managedTurn.available_actions)
+                ? managedTurn.available_actions
+                : {}
+            ),
+        terminal_availability: {
+          available: false,
+          reason: managedOnly
+            ? "terminal discovery was disabled by --managed-only"
+            : "the referenced tmux pane is not currently available"
+        }
+      };
+    });
+
+  return {
+    terminals: projectedTerminals,
+    unavailableManagedTurns
+  };
+}
+
+function managedConversationsByTerminal(
+  conversations: Conversation[]
+): Map<string, Conversation[]> {
+  const groups = new Map<string, Conversation[]>();
+  for (const conversation of conversations) {
+    const key = terminalKeyForManagedConversation(conversation);
+    if (!key) {
+      continue;
+    }
+    const group = groups.get(key) ?? [];
+    group.push(conversation);
+    groups.set(key, group);
+  }
+  return groups;
+}
+
+function terminalKeyForManagedConversation(
+  conversation: Conversation
+): string | undefined {
+  return terminalControlSelectorKey(
+    terminalControlFromTakeover(
+      isRecord(conversation.native_session_takeover)
+        ? conversation.native_session_takeover
+        : undefined
+    )
+  );
+}
+
+function compareManagedConversationRecency(
+  left: Conversation,
+  right: Conversation
+): number {
+  const leftTime = Date.parse(String(left.updated_at ?? left.created_at ?? ""));
+  const rightTime = Date.parse(String(right.updated_at ?? right.created_at ?? ""));
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
+    return rightTime - leftTime;
+  }
+  if (Number.isFinite(leftTime) !== Number.isFinite(rightTime)) {
+    return Number.isFinite(leftTime) ? -1 : 1;
+  }
+  return left.conversation_id.localeCompare(right.conversation_id);
+}
+
+function managedTurnNeedsAttention(status: ConversationStatus): boolean {
+  return [
+    "created",
+    "running",
+    "waiting_for_agent",
+    "waiting_for_openclaw",
+    "stalled",
+    "callback_pending",
+    "callback_failed",
+    "cancelling"
+  ].includes(status);
+}
+
+function terminalDispatchOwnership(
+  terminalControl: TerminalControlRef
+):
+  | { state: "none" }
+  | { state: "current"; conversation: Conversation }
+  | { state: "conflict"; conflict: Record<string, any> } {
+  let ledger: Record<string, any> | undefined;
+  try {
+    ledger = loadTerminalBridgeDispatchLedger(terminalControl);
+  } catch (error) {
+    return {
+      state: "conflict",
+      conflict: {
+        reason: error instanceof Error ? error.message : String(error),
+        recovery: "inspect the shared tmux pane before performing a side effect"
+      }
+    };
+  }
+  if (!ledger || ledger.status === "resolved") {
+    return { state: "none" };
+  }
+  const ledgerControl = isRecord(ledger.terminal_control)
+    ? ledger.terminal_control
+    : undefined;
+  const ledgerPanePid = Number(ledgerControl?.pane_pid);
+  const currentPanePid = Number(terminalControl.panePid);
+  if (
+    Number.isSafeInteger(ledgerPanePid) &&
+    ledgerPanePid > 0 &&
+    Number.isSafeInteger(currentPanePid) &&
+    currentPanePid > 0 &&
+    ledgerPanePid !== currentPanePid
+  ) {
+    return { state: "none" };
+  }
+  if (!["prepared", "submitted", "uncertain"].includes(String(ledger.status))) {
+    return { state: "none" };
+  }
+  const owner = loadTerminalDispatchLedgerOwner(ledger);
+  if (!owner) {
+    return {
+      state: "conflict",
+      conflict: terminalDispatchConflict(ledger, "dispatch owner state is unavailable")
+    };
+  }
+  if (TERMINAL_DISPATCH_RELEASE_STATUSES.has(owner.status)) {
+    return { state: "none" };
+  }
+  const ownerTerminalKey = terminalKeyForManagedConversation(owner);
+  const currentTerminalKey = terminalControlSelectorKey(terminalControl);
+  if (!ownerTerminalKey || ownerTerminalKey !== currentTerminalKey) {
+    return {
+      state: "conflict",
+      conflict: terminalDispatchConflict(
+        ledger,
+        "dispatch owner does not reference this tmux pane incarnation"
+      )
+    };
+  }
+  const ownerTakeover = isRecord(owner.native_session_takeover)
+    ? owner.native_session_takeover
+    : undefined;
+  const ledgerMessageId = stringValue(ledger.message_id);
+  const ownerMessageId = stringValue(ownerTakeover?.terminal_bridge_message_id);
+  if (
+    ["prepared", "submitted", "uncertain"].includes(String(ledger.status)) &&
+    ledgerMessageId &&
+    ownerMessageId !== ledgerMessageId
+  ) {
+    return {
+      state: "conflict",
+      conflict: terminalDispatchConflict(
+        ledger,
+        "dispatch generation does not match the owner state"
+      )
+    };
+  }
+  return { state: "current", conversation: owner };
+}
+
+function terminalDispatchConflict(
+  ledger: Record<string, any>,
+  reason: string
+): Record<string, any> {
+  return {
+    reason,
+    dispatch_status: stringValue(ledger.status),
+    owner_conversation_id: stringValue(ledger.conversation_id),
+    message_id: stringValue(ledger.message_id),
+    recovery: "inspect the shared tmux pane and explicitly resolve the current dispatch before performing a side effect"
+  };
+}
+
+function localTerminalDispatchOwnership(
+  ledgerOwner: Conversation,
+  localConversations: Conversation[],
+  terminal: Record<string, any>
+):
+  | { state: "current"; conversation: Conversation }
+  | { state: "conflict"; conflict: Record<string, any> } {
+  const localOwner = localConversations.find((conversation) =>
+    conversation.conversation_id === ledgerOwner.conversation_id &&
+    sameCanonicalStatePath(conversation.state_path, ledgerOwner.state_path)
+  );
+  if (localOwner) {
+    if (!managedTurnMatchesLiveTerminal(localOwner, terminal)) {
+      return {
+        state: "conflict",
+        conflict: {
+          reason:
+            "the terminal dispatch owner no longer matches the live coding-agent process identity or workspace",
+          owner_conversation_id: ledgerOwner.conversation_id,
+          recovery:
+            "inspect the shared tmux pane and explicitly resolve the stale dispatch before performing a side effect"
+        }
+      };
+    }
+    return { state: "current", conversation: localOwner };
+  }
+  return {
+    state: "conflict",
+    conflict: {
+      reason:
+        "the terminal dispatch owner belongs to another AKK store or is not supported by this list view",
+      owner_conversation_id: ledgerOwner.conversation_id,
+      recovery:
+        "inspect the shared tmux pane and use the AKK store that owns the current dispatch"
+    }
+  };
+}
+
+function sameCanonicalStatePath(left: unknown, right: unknown): boolean {
+  const leftPath = stringValue(left);
+  const rightPath = stringValue(right);
+  return Boolean(
+    leftPath &&
+    rightPath &&
+    path.resolve(leftPath) === path.resolve(rightPath)
+  );
+}
+
+function currentTerminalActions(
+  currentTurn: Record<string, any> | undefined
+): Record<string, any> {
+  if (!currentTurn || !isRecord(currentTurn.available_actions)) {
+    return {};
+  }
+  const actions: Record<string, any> = {};
+  for (const action of ["status", "approve", "cancel", "renew", "retry_callback"]) {
+    if (isRecord(currentTurn.available_actions[action])) {
+      actions[action] = currentTurn.available_actions[action];
+    }
+  }
+  return actions;
+}
+
+function safeTerminalActionsDuringConflict(
+  rawActions: Record<string, any>
+): Record<string, any> {
+  const actions: Record<string, any> = {};
+  for (const action of ["status", "close"]) {
+    if (isRecord(rawActions[action])) {
+      actions[action] = rawActions[action];
+    }
+  }
+  return actions;
+}
+
+function safeUnavailableManagedTurnActions(
+  actionsValue: Record<string, any>
+): Record<string, any> {
+  const actions: Record<string, any> = {};
+  for (const action of ["status", "retry_callback", "close"]) {
+    if (isRecord(actionsValue[action])) {
+      actions[action] = actionsValue[action];
+    }
+  }
+  return actions;
+}
+
+function readOnlyListActions(
+  actionsValue: Record<string, any>
+): Record<string, any> {
+  return isRecord(actionsValue.status)
+    ? { status: actionsValue.status }
+    : {};
+}
+
+function readOnlyManagedTurn(
+  managedTurn: Record<string, any>
+): Record<string, any> {
+  return {
+    ...managedTurn,
+    available_actions: readOnlyListActions(
+      isRecord(managedTurn.available_actions)
+        ? managedTurn.available_actions
+        : {}
+    )
+  };
+}
+
+function historicalManagedTurnForTerminal(
+  conversation: Conversation,
+  terminalCanAcceptSend: boolean,
+  terminal: Record<string, any>
+): Record<string, any> {
+  const managedTurn = managedTurnListEntry(
+    summarizeConversation(conversation),
+    {
+      terminalBridge: terminalBridgeEnabled(conversation),
+      approvalState: managedListApprovalState(conversation),
+      conversation
+    }
+  );
+  const availableActions = isRecord(managedTurn.available_actions)
+    ? managedTurn.available_actions
+    : {};
+  const safeActions = safeUnavailableManagedTurnActions(availableActions);
+  if (
+    terminalCanAcceptSend &&
+    managedTurnMatchesLiveTerminal(conversation, terminal) &&
+    isRecord(availableActions.follow_up)
+  ) {
+    safeActions.follow_up = availableActions.follow_up;
+  }
+  return {
+    ...managedTurn,
+    available_actions: safeActions
+  };
+}
+
+function managedTurnMatchesLiveTerminal(
+  conversation: Conversation,
+  terminal: Record<string, any>
+): boolean {
+  const takeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const liveControl = isRecord(terminal.terminal_control)
+    ? terminal.terminal_control
+    : undefined;
+  const storedControl = terminalControlFromTakeover(takeover);
+  const livePid = Number(terminal.pid);
+  const storedPid = Number(takeover?.terminal_agent_pid);
+  if (
+    executorForConversation(conversation).kind !== terminal.agent ||
+    !Number.isSafeInteger(livePid) ||
+    livePid <= 1 ||
+    storedPid !== livePid ||
+    stringValue(takeover?.native_session_id) !== stringValue(terminal.id) ||
+    terminalControlSelectorKey(storedControl) !==
+      terminalControlSelectorKey(liveControl)
+  ) {
+    return false;
+  }
+  const storedSessionId = stringValue(takeover?.terminal_agent_session_id);
+  const liveSessionId = stringValue(terminal.session_id);
+  if (storedSessionId && storedSessionId !== liveSessionId) {
+    return false;
+  }
+  const liveWorkspace = terminal.workspace ?? terminal.cwd;
+  if (!matchesConfiguredWorkspace(conversation.workspace, liveWorkspace)) {
+    return false;
+  }
+  const livePanePath = liveControl?.currentPath;
+  if (
+    livePanePath !== undefined &&
+    !matchesConfiguredWorkspace(conversation.workspace, livePanePath)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function currentManagedTurnForTerminal(
+  conversation: Conversation,
+  terminal: Record<string, any>,
+  rawTerminalActions: Record<string, any>
+): Record<string, any> {
+  const managedTurn = managedTurnListEntry(
+    summarizeConversation(conversation),
+    {
+      terminalBridge: terminalBridgeEnabled(conversation),
+      approvalState: managedListApprovalState(conversation),
+      conversation
+    }
+  );
+  const rawApproval = isRecord(rawTerminalActions.approve)
+    ? rawTerminalActions.approve
+    : undefined;
+  if (!rawApproval || executorForConversation(conversation).kind !== "codex") {
+    return managedTurn;
+  }
+  const ownerId = conversation.conversation_id;
+  const approval = retargetConversationAction(rawApproval, ownerId);
+  const terminalApprovalState = isRecord(terminal.approval_state)
+    ? terminal.approval_state
+    : undefined;
+  return {
+    ...managedTurn,
+    ...(terminalApprovalState
+      ? { approval_state: terminalApprovalState }
+      : {}),
+    available_actions: {
+      ...(isRecord(managedTurn.available_actions)
+        ? managedTurn.available_actions
+        : {}),
+      approve: approval
+    }
+  };
+}
+
+function retargetConversationAction(
+  action: Record<string, any>,
+  conversationId: string
+): Record<string, any> {
+  const beforeCall = isRecord(action.before_call)
+    ? action.before_call
+    : undefined;
+  return {
+    ...action,
+    arguments: {
+      ...(isRecord(action.arguments) ? action.arguments : {}),
+      conversation_id: conversationId
+    },
+    ...(beforeCall
+      ? {
+          before_call: {
+            ...beforeCall,
+            arguments: {
+              ...(isRecord(beforeCall.arguments)
+                ? beforeCall.arguments
+                : {}),
+              conversation_id: conversationId
+            }
+          }
+        }
+      : {})
   };
 }
 
@@ -2105,7 +2671,7 @@ function childPidsForRoot(root: ActiveTerminalProcess, processes: ActiveTerminal
     .map((process) => process.pid);
 }
 
-function canSendDelegated(status) {
+function canFollowUpManagedTurn(status) {
   return !["done", "failed", "closed", "cancelled"].includes(status);
 }
 
@@ -2155,28 +2721,31 @@ function managedListApprovalState(
 
 function listActionContracts() {
   return {
-    version: 2,
+    version: 3,
     instructions: [
-      "Use only actions present in delegated[].available_actions or terminal_controlled[].available_actions.",
-      "Never use commands for routing or tool calls. It is a deprecated, non-authoritative compatibility field with mixed legacy semantics.",
+      "Treat terminals[] as the primary resource and use only actions present in available_actions.",
+      "Use a terminal send action to start a new managed turn. Use a managed turn follow_up action only when continuing that specific managed turn.",
       "Start with the action's prefilled arguments, supply every missing_required field, and consult the top-level action's optional fields only when needed.",
       "Authoritative full IDs are prefilled; short_ref is for display and human input.",
       "Availability is a snapshot. AKK revalidates process, tmux pane, workspace, activity, approval, and recovery state before side effects."
     ],
     field_semantics: {
+      process_state: {
+        terminals: "physical_terminal_process_liveness",
+        authoritative_for_tool_calls: false
+      },
       status: {
-        delegated: "task_lifecycle",
-        terminal_controlled: "process_liveness",
+        managed_turns: "managed_turn_lifecycle",
         authoritative_for_tool_calls: false
       },
       activity_state: {
-        terminal_controlled: "screen_activity_classification",
+        terminals: "terminal_screen_activity_classification",
         authoritative_for_tool_calls: false
       },
-      commands: {
-        meaning: "legacy_compatibility_flags_with_mixed_semantics",
-        deprecated: true,
-        authoritative_for_tool_calls: false
+      managed: {
+        current_turn: "the authoritative dispatch-ledger owner, never inferred from history",
+        recent_turn: "the latest visible non-owning turn for intentional follow-up",
+        history: "older turns, present only with --all"
       },
       available_actions: {
         meaning: "currently_safe_actions",
@@ -2197,7 +2766,20 @@ function listActionContracts() {
         ],
         unsupported: ["timeoutSeconds"],
         ordinary_use:
-          "Add request only. Omit timeout fields unless the user explicitly asks to change monitoring limits."
+          "Start a new managed turn on the selected physical terminal. Add request only and omit timeout fields unless the user explicitly asks to change monitoring limits."
+      },
+      follow_up: {
+        tool: "agent_knock_knock_send",
+        target_argument: "selector",
+        required: ["request"],
+        optional: [
+          "selector",
+          "idleTimeoutMinutes",
+          "agentTimeoutMinutes",
+          "agentHardTimeoutMinutes"
+        ],
+        ordinary_use:
+          "Continue the explicitly selected managed turn. Start from its prefilled selector and add request."
       },
       status: {
         tool: "agent_knock_knock_status",
@@ -2256,8 +2838,8 @@ function availableListActions(
       arguments: { conversation_id: id }
     }
   };
-  const terminalControlled = entry.source === "terminal_control";
-  const managed = entry.source === "akk_delegate";
+  const terminalControlled = entry.source === "terminal";
+  const managed = entry.source === "managed_turn";
   const approvalState = isRecord(entry.approval_state)
     ? entry.approval_state
     : {};
@@ -2288,7 +2870,7 @@ function availableListActions(
       )
     )
   ) {
-    actions.send = {
+    actions[managed ? "follow_up" : "send"] = {
       tool: "agent_knock_knock_send",
       arguments: { selector: id },
       missing_required: ["request"]
@@ -2428,6 +3010,7 @@ async function sessionSelectorCandidates(
   options
 ): Promise<SessionSelectorCandidate[]> {
   const storeDir = storeDirFromOptions(options);
+  const mutationsAllowed = inspectStoreCompatibility(storeDir).writable === true;
   const storedConversations = listConversations(storeDir);
   const workspaceConversations = storedConversations
     .filter((conversation) =>
@@ -2436,7 +3019,7 @@ async function sessionSelectorCandidates(
   const discoverableWorkspaceConversations = workspaceConversations
     .filter(isDiscoverableTmuxConversation);
   const managed = discoverableWorkspaceConversations.map((conversation) =>
-      delegatedListEntry(
+      managedTurnListEntry(
         summarizeConversation(conversation),
         {
           terminalBridge: terminalBridgeEnabled(conversation),
@@ -2445,55 +3028,134 @@ async function sessionSelectorCandidates(
         }
       )
   );
-  const managedTerminalKeys = new Set(
-    workspaceConversations
-      .filter((conversation) => isActiveStatus(conversation.status))
-      .map((conversation) =>
-        terminalControlSelectorKey(
-          terminalControlFromTakeover(
-            isRecord(conversation.native_session_takeover)
-              ? conversation.native_session_takeover
-              : undefined
-          )
-        )
-      )
-      .filter((key): key is string => key !== undefined)
-  );
   const terminalScan = await buildTerminalListGroup({
     options: {
       ...options,
-      noApprovalScan: commandName === "approve"
+      noApprovalScan: ["send", "approve", "cancel"].includes(commandName)
         ? options.noApprovalScan
         : true
     },
     agentFilter: undefined,
     statusFilter: undefined
   });
+  const terminalProjection = terminalFirstListProjection({
+    terminals: terminalScan.terminalControlled.filter((entry) =>
+      matchesConfiguredWorkspace(
+        options.workspace,
+        entry.workspace ?? entry.cwd
+      )
+    ),
+    allConversations: discoverableWorkspaceConversations,
+    displayedConversations: discoverableWorkspaceConversations,
+    includeAll: false,
+    managedOnly: options.managedOnly === true,
+    statusFilter: undefined,
+    mutationsAllowed
+  });
   const observedAtMs = Date.now();
   return [
-    ...managed,
-    ...terminalScan.terminalControlled.filter((entry) => {
-      if (
-        !matchesConfiguredWorkspace(
-          options.workspace,
-          entry.workspace ?? entry.cwd
-        )
-      ) {
-        return false;
-      }
-      const key = terminalControlSelectorKey(entry.terminal_control);
-      return key === undefined || !managedTerminalKeys.has(key);
-    })
-  ].map((entry) => ({
+    ...managed.map((entry) =>
+      sessionSelectorCandidateForEntry(entry, commandName, observedAtMs, {
+        defaultActionable: options.managedOnly === true,
+        mutationsAllowed
+      })
+    ),
+    ...terminalProjection.terminals.map((entry) =>
+      sessionSelectorCandidateForEntry(entry, commandName, observedAtMs, {
+        defaultActionable: true,
+        mutationsAllowed
+      })
+    )
+  ];
+}
+
+function sessionSelectorCandidateForEntry(
+  entry,
+  commandName: string,
+  observedAtMs: number,
+  {
+    defaultActionable,
+    mutationsAllowed
+  }: {
+    defaultActionable: boolean;
+    mutationsAllowed: boolean;
+  }
+): SessionSelectorCandidate {
+  const action = mutationsAllowed || commandName === "status"
+    ? listActionForCommand(entry, commandName)
+    : undefined;
+  const targetId = listActionTargetId(action);
+  return {
     id: String(entry.id),
+    ...(targetId && targetId !== entry.id ? { targetId } : {}),
     agent: resolveExecutor({ kind: entry.agent }).kind,
-    actionable: sessionEntrySupportsCommand(entry, commandName),
+    actionable: action !== undefined,
+    defaultActionable,
     ...sessionEntryRecency(entry, observedAtMs),
     source: stringValue(entry.source),
-    status: stringValue(entry.status),
+    status: stringValue(entry.status ?? entry.process_state),
     workspace: stringValue(entry.workspace ?? entry.cwd),
     label: stringValue(entry.request ?? entry.command)
-  }));
+  };
+}
+
+function listActionForCommand(
+  entry,
+  commandName: string
+): Record<string, any> | undefined {
+  const actions = isRecord(entry.available_actions)
+    ? entry.available_actions
+    : {};
+  const actionName = commandName === "retry-callback"
+    ? "retry_callback"
+    : commandName === "send" && entry.source === "managed_turn"
+      ? "follow_up"
+      : commandName;
+  if (isRecord(actions[actionName])) {
+    return actions[actionName];
+  }
+  if (commandName !== "approve") {
+    return undefined;
+  }
+  if (managedTurnCanEnterApprovalPath(entry)) {
+    return {
+      tool: "agent_knock_knock_approve",
+      arguments: { conversation_id: String(entry.id) }
+    };
+  }
+  const managed = isRecord(entry.managed) ? entry.managed : undefined;
+  const currentTurn = isRecord(managed?.current_turn)
+    ? managed.current_turn
+    : undefined;
+  if (currentTurn && managedTurnCanEnterApprovalPath(currentTurn)) {
+    return {
+      tool: "agent_knock_knock_approve",
+      arguments: {
+        conversation_id: String(
+          currentTurn.conversation_id ?? currentTurn.id
+        )
+      }
+    };
+  }
+  return undefined;
+}
+
+function managedTurnCanEnterApprovalPath(entry): boolean {
+  const executor = isRecord(entry.executor) ? entry.executor : undefined;
+  return (
+    entry.source === "managed_turn" &&
+    executor?.transport === "tmux" &&
+    isActiveStatus(String(entry.status))
+  );
+}
+
+function listActionTargetId(action: Record<string, any> | undefined): string | undefined {
+  const actionArguments = isRecord(action?.arguments)
+    ? action.arguments
+    : undefined;
+  return stringValue(
+    actionArguments?.selector ?? actionArguments?.conversation_id
+  );
 }
 
 function terminalControlSelectorKey(value: unknown): string | undefined {
@@ -2510,23 +3172,6 @@ function terminalControlSelectorKey(value: unknown): string | undefined {
     pane_pid: panePid,
     socket_path: stringValue(value.socketPath) ?? null
   });
-}
-
-function sessionEntrySupportsCommand(entry, commandName): boolean {
-  const commands = isRecord(entry.commands) ? entry.commands : {};
-  if (typeof commands[commandName] === "boolean") {
-    return commands[commandName] === true;
-  }
-  if (entry.source !== "akk_delegate") {
-    return false;
-  }
-  if (commandName === "renew") {
-    return entry.status === "stalled";
-  }
-  if (commandName === "retry-callback") {
-    return ["callback_pending", "callback_failed"].includes(entry.status);
-  }
-  return false;
 }
 
 function sessionEntryRecency(entry, observedAtMs: number): { updatedAtMs?: number } {
@@ -10661,7 +11306,7 @@ function usage() {
   agent-knock-knock --help
   agent-knock-knock --version
   agent-knock-knock delegate --request <text> [--agent ${agentList}] [--workspace <path>] [--store-dir <dir>]
-  agent-knock-knock list [--store-dir <dir>] [--agent ${agentList}] [--status <status>] [--all] [--managed-only] [--reconcile] [--no-approval-scan] [--terminal-debug]
+  agent-knock-knock list [--store-dir <dir>] [--agent ${agentList}] [--status <status>] [--all] [--reconcile] [--no-approval-scan] [--terminal-debug]
   agent-knock-knock status [--conversation <id|selector>] [--store-dir <dir>] [--reconcile] [--trace]
   agent-knock-knock send [--conversation <id|selector>] --message <text> [--type answer|task|control] [--agent-timeout-minutes <minutes>] [--agent-hard-timeout-minutes <minutes>]
   agent-knock-knock approve [--conversation <id|selector>] --expected-approval-fingerprint <fingerprint>

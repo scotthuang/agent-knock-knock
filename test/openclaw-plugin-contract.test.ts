@@ -82,6 +82,7 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   const manifest = readManifest();
   const registeredCommands: string[] = [];
   const registeredTools: string[] = [];
+  const toolDefinitions = new Map<string, ToolDefinition>();
 
   const api: ContractTestApi = {
     pluginConfig: {},
@@ -100,6 +101,7 @@ test("OpenClaw runtime registrations match the published manifest", () => {
       const metadataName = requiredName(options?.name, "tool registration metadata");
       assert.equal(metadataName, runtimeName);
       registeredTools.push(runtimeName);
+      toolDefinitions.set(runtimeName, definition);
     }
   };
 
@@ -127,6 +129,20 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   assert.deepEqual(
     sorted(registeredCommands),
     sorted(activatedCommands)
+  );
+
+  const listTool = toolDefinitions.get("agent_knock_knock_list");
+  assert.ok(listTool);
+  assert.match(listTool.description ?? "", /terminals\[\]/u);
+  assert.match(listTool.description ?? "", /managed\.current_turn/u);
+  assert.match(listTool.description ?? "", /follow_up/u);
+  assert.doesNotMatch(
+    listTool.description ?? "",
+    /delegated|terminal_controlled|tasks\[\]/u
+  );
+  assert.equal(
+    Object.hasOwn(listTool.parameters?.properties ?? {}, "managedOnly"),
+    false
   );
   assert.deepEqual(
     sorted(commandAliases),

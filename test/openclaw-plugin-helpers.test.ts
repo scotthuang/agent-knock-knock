@@ -226,39 +226,45 @@ function optionValue(args: string[], option: string): string | undefined {
   return index >= 0 ? args[index + 1] : undefined;
 }
 
-test("/akk list includes only managed and terminal-controlled sessions", () => {
+test("/akk list renders each live terminal once with its managed-turn context", () => {
   const text = formatAkkListCommandResult({
-    delegated: [{
-      conversation_id: "managed-1",
-      agent: "claude",
-      status: "idle",
-      request: "Review the repository"
-    }],
-    terminal_controlled: [{
+    terminals: [{
       id: "terminal:v2:tmux:codex:work:0.0:1234",
+      short_ref: "@terminal1",
       agent: "codex",
-      status: "active"
-    }],
-    native: [{
-      id: "native:codex:5678",
-      agent: "codex",
-      status: "active"
+      process_state: "active",
+      activity_state: "idle",
+      terminal_control: { target: "work:0.0" },
+      managed: {
+        current_turn: null,
+        recent_turn: {
+          conversation_id: "managed-1",
+          short_ref: "@managed1",
+          agent: "codex",
+          lifecycle_state: "idle",
+          request: "Review the repository"
+        },
+        turn_count: 3,
+        hidden_turn_count: 2
+      }
     }]
   });
 
-  assert.match(text, /AKK open sessions \(2\)/);
-  assert.match(text, /managed-1/);
-  assert.match(text, /terminal:v2:tmux:codex:work:0\.0:1234/);
-  assert.doesNotMatch(text, /native:codex:5678/);
+  assert.match(text, /AKK terminals \(1 live, 0 unavailable managed turns\)/u);
+  assert.match(text, /@terminal1 \| codex \| active \| idle \| tmux work:0\.0/u);
+  assert.match(text, /recent turn: @managed1 \| codex \| idle \| Review the repository/u);
+  assert.match(text, /older managed turns: 2/u);
+  assert.doesNotMatch(text, /managed-1/u);
+  assert.doesNotMatch(text, /delegated|terminal-controlled/u);
 });
 
 test("/akk list exposes the exact orphaned terminal dispatch recovery command", () => {
   const text = formatAkkListCommandResult({
-    terminal_controlled: [{
+    terminals: [{
       id: "terminal:v2:tmux:codex:work:0.0:1234",
       short_ref: "@terminal1",
       agent: "codex",
-      status: "active",
+      process_state: "active",
       orphaned_terminal_dispatch: {
         message_id: "message-1",
         recovery:
@@ -274,19 +280,81 @@ test("/akk list exposes the exact orphaned terminal dispatch recovery command", 
   );
 });
 
-test("/akk list prefers stable short references while JSON retains full ids", () => {
+test("/akk list explains a terminal management conflict and its recovery", () => {
   const text = formatAkkListCommandResult({
-    delegated: [{
-      id: "managed-long-id",
-      conversation_id: "managed-long-id",
-      short_ref: "@0123456789",
+    terminals: [{
+      id: "terminal:v2:tmux:codex:work:0.0:1234",
+      short_ref: "@terminal1",
       agent: "codex",
-      status: "idle"
+      process_state: "active",
+      activity_state: "idle",
+      management_state: "conflict",
+      management_conflict: {
+        reason: "dispatch owner belongs to another AKK store",
+        recovery: "use the AKK store that owns the current dispatch"
+      }
+    }],
+    unavailable_managed_turns: []
+  });
+
+  assert.match(
+    text,
+    /management conflict: dispatch owner belongs to another AKK store/u
+  );
+  assert.match(
+    text,
+    /recovery: use the AKK store that owns the current dispatch/u
+  );
+});
+
+test("/akk list renders current, expanded history, and unavailable managed turns", () => {
+  const text = formatAkkListCommandResult({
+    terminals: [{
+      id: "terminal:v2:tmux:claude:work:0.1:5678",
+      short_ref: "@terminal2",
+      agent: "claude",
+      process_state: "active",
+      managed: {
+        current_turn: {
+          conversation_id: "managed-current-long-id",
+          short_ref: "@current123",
+          agent: "claude",
+          lifecycle_state: "working",
+          request: "Implement the fix"
+        },
+        recent_turn: null,
+        history: [{
+          conversation_id: "managed-history-long-id",
+          short_ref: "@history123",
+          agent: "claude",
+          lifecycle_state: "idle",
+          request: "Plan the fix"
+        }],
+        turn_count: 2,
+        hidden_turn_count: 0
+      }
+    }],
+    unavailable_managed_turns: [{
+      conversation_id: "managed-unavailable-long-id",
+      short_ref: "@unavail123",
+      agent: "codex",
+      lifecycle_state: "callback_failed",
+      request: "Report the result"
     }]
   });
 
-  assert.match(text, /@0123456789/u);
-  assert.doesNotMatch(text, /managed-long-id/u);
+  assert.match(text, /AKK terminals \(1 live, 1 unavailable managed turns\)/u);
+  assert.match(text, /current turn: @current123/u);
+  assert.match(text, /history: @history123/u);
+  assert.match(text, /unavailable managed turns:\n- @unavail123/u);
+  assert.doesNotMatch(text, /managed-(?:current|history|unavailable)-long-id/u);
+});
+
+test("/akk list reports an empty terminal-first view", () => {
+  assert.equal(
+    formatAkkListCommandResult({ terminals: [], unavailable_managed_turns: [] }),
+    "AKK found no live terminals or unavailable managed turns."
+  );
 });
 
 test("relative plugin storeDir resolves against the Gateway cwd", () => {
