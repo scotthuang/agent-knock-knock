@@ -6636,6 +6636,16 @@ function runCallbackRetryMonitor(options) {
       return;
     }
 
+    const gatewayRoute = resolveCallbackGatewayRoute(
+      {
+        gatewayUrl: callbackDelivery.gateway_url,
+        token: callbackDelivery.gateway_token
+      },
+      {
+        gatewayUrl: conversation.gateway_url,
+        token: conversation.gateway_token
+      }
+    );
     try {
       runCallbackTransaction({
         statePath,
@@ -6644,8 +6654,8 @@ function runCallbackRetryMonitor(options) {
         gatewaySession: stringValue(callbackDelivery.gateway_session) ?? conversation.gateway_session,
         openclawSession: conversation.openclaw_session,
         openclawBin: stringValue(callbackDelivery.openclaw_bin) ?? conversation.openclaw_bin,
-        gatewayUrl: stringValue(callbackDelivery.gateway_url) ?? conversation.gateway_url,
-        token: conversation.gateway_token,
+        gatewayUrl: gatewayRoute.gatewayUrl,
+        token: gatewayRoute.token,
         closeTerminalBridgeOnDone: callbackDelivery.close_terminal_bridge_on_done === true,
         retryPending: true,
         disableCallbackRetry: true
@@ -9047,6 +9057,20 @@ function runRetryCallback(options) {
     throw new Error(`cannot retry callback for ${conversation.conversation_id}; pending callback is missing`);
   }
 
+  const gatewayRoute = resolveCallbackGatewayRoute(
+    {
+      gatewayUrl: options.gatewayUrl,
+      token: options.token
+    },
+    {
+      gatewayUrl: callbackDelivery.gateway_url,
+      token: callbackDelivery.gateway_token
+    },
+    {
+      gatewayUrl: conversation.gateway_url,
+      token: conversation.gateway_token
+    }
+  );
   runCallbackTransaction({
     ...options,
     statePath,
@@ -9055,11 +9079,28 @@ function runRetryCallback(options) {
     gatewaySession: stringValue(callbackDelivery.gateway_session) ?? conversation.gateway_session,
     openclawSession: conversation.openclaw_session,
     openclawBin: stringValue(callbackDelivery.openclaw_bin) ?? conversation.openclaw_bin,
-    gatewayUrl: stringValue(callbackDelivery.gateway_url) ?? conversation.gateway_url,
-    token: stringValue(callbackDelivery.gateway_token) ?? conversation.gateway_token,
+    gatewayUrl: gatewayRoute.gatewayUrl,
+    token: gatewayRoute.token,
     closeTerminalBridgeOnDone: callbackDelivery.close_terminal_bridge_on_done === true,
     retryPending: true
   });
+}
+
+function resolveCallbackGatewayRoute(...candidates) {
+  for (const candidate of candidates) {
+    const token = stringValue(candidate?.token);
+    if (!token || token === "<token>") {
+      continue;
+    }
+    return {
+      gatewayUrl: stringValue(candidate?.gatewayUrl),
+      token
+    };
+  }
+  return {
+    gatewayUrl: undefined,
+    token: undefined
+  };
 }
 
 function runCallbackTransaction(options) {
@@ -9080,6 +9121,10 @@ function prepareLockedCallback(options) {
     ? options.conversationOverride
     : loadState(options.statePath);
   const executor = executorForConversation(conversation);
+  const persistedGatewayRoute = resolveCallbackGatewayRoute({
+    gatewayUrl: options.gatewayUrl,
+    token: options.token
+  });
   const message = options.retryPending === true || options.preserveMessageId === true
     ? parseMessageJson(messageInput)
     : extractStructuredMessage({
@@ -9208,7 +9253,7 @@ function prepareLockedCallback(options) {
         last_attempt_at: now,
         gateway_method: options.gatewayMethod,
         gateway_session: options.gatewaySession ?? options.openclawSession ?? conversation.openclaw_session,
-        gateway_url: options.gatewayUrl ?? conversation.gateway_url,
+        gateway_url: persistedGatewayRoute.gatewayUrl,
         openclaw_bin: options.openclawBin ?? conversation.openclaw_bin,
         close_terminal_bridge_on_done: closeTerminalBridgeOnDone,
         track_delivery: true,
