@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.1 - 2026-08-03
+
+### Fixed
+
+- Keep automatic and manual callback retries config-routed when no durable Gateway token exists, instead of restoring a tokenless explicit URL that OpenClaw rejects.
+- Preserve persisted, explicitly authenticated Gateway URL and token pairs across retries without copying credentials into callback delivery state.
+
 ## 0.8.0 - 2026-08-01
 
 ### Changed
