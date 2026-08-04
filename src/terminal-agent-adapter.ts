@@ -117,6 +117,28 @@ export interface TerminalCompletionEvidence {
 export interface TerminalRuntimeIdentity {
   pid?: number;
   sessionId?: string;
+  nativeSessionId?: string;
+  nativeProcessUuid?: string;
+  nativeProcessBirth?: string;
+  /**
+   * Modern Claude turns require an exact process-incarnation token in addition
+   * to the native session id. A numeric PID can be reused and is not enough to
+   * authorize terminal side effects by itself.
+   */
+  requireNativeProcessUuid?: boolean;
+  /**
+   * Current Codex turns require the exact open root rollout descriptor and
+   * process-birth evidence. A session id by itself is not an incarnation
+   * fence and cannot authorize terminal side effects.
+   */
+  requireNativeRolloutIdentity?: boolean;
+  nativeRollout?: {
+    fd: string;
+    device: string;
+    inode: string;
+    path: string;
+  };
+  expectedEmptyNativeSession?: boolean;
   cwd?: string;
   conversationId?: string;
   messageId?: string;

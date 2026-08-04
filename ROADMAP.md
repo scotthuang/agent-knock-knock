@@ -2,13 +2,13 @@
 
 Agent Knock Knock is a local tmux terminal handoff bridge for OpenClaw, Codex, Claude Code, and humans.
 
-OpenClaw remains the remote control and orchestration surface. AKK keeps each task in a visible coding-agent terminal so a human can inspect it, take over directly, and hand it back without creating a second hidden session.
+OpenClaw remains the remote control and orchestration surface. AKK keeps each coding-agent context in a visible terminal and records each dispatch as a Turn, so a human can inspect it, take over directly, and hand it back without creating a second hidden session.
 
 The priority order is intentional: reliability and transparency come before adding more agents or orchestration features.
 
 ## Priority 1: Terminal Reliability
 
-- Keep terminal monitors bound to the exact tmux pane, process, workspace, conversation, message, and lease.
+- Keep terminal monitors bound to the exact tmux pane, process, workspace, AKK Session, Turn, message, and lease.
 - Reconcile safe monitors after Gateway restarts without duplicating callbacks.
 - Make completion, approval, cancellation, timeout, and callback failures consistently actionable.
 - Keep uncertain or unsupported terminal states visible and fail closed.
@@ -17,7 +17,7 @@ The priority order is intentional: reliability and transparency come before addi
 ## Priority 2: Handoff Experience
 
 - Make it obvious whether OpenClaw, the coding agent, or the human currently owns the next action.
-- Improve phone-friendly session summaries, short references, and follow-up selection.
+- Improve phone-friendly Session/Turn summaries, short references, and later-request selection.
 - Keep direct human takeover and hand-back seamless in the same tmux pane.
 - Make interrupt, status, renew, close, and callback retry behavior predictable.
 

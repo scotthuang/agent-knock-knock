@@ -94,6 +94,7 @@ export interface TerminalIdentityVerificationRequest {
   agent: ExecutorKind;
   pid: number;
   terminalControl: TerminalControlRef;
+  runtime?: TerminalRuntimeIdentity;
 }
 
 export interface TerminalIdentityVerificationResult {
@@ -889,7 +890,8 @@ export class TerminalAgentBridge {
     const result = await this.verifyIdentity({
       agent,
       pid: Number(runtime?.pid),
-      terminalControl
+      terminalControl,
+      runtime
     });
     return result?.terminalControl ?? terminalControl;
   }

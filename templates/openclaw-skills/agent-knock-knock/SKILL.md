@@ -24,12 +24,13 @@ Use the `/akk` command for slash-command syntax. Use the Agent Knock Knock plugi
 Core slash-command forms:
 
 - `/akk <task>`: send a new task only when exactly one eligible idle coding-agent pane exists across all workspaces.
-- `/akk <selector>: <message>`: send a task or follow-up to one exact eligible idle pane.
+- `/akk <selector>: <message>`: resolve one exact eligible AKK session and create a new Turn for the message.
 - `/akk list`: list live coding-agent terminals with their current or recent managed-turn context.
-- `/akk status [session-selector]`: inspect one live terminal or managed turn.
-- `/akk cancel <session-selector>`: interrupt the current turn without closing its tmux pane.
+- `/akk status [turn-selector]`: inspect one live terminal or exact managed Turn.
+- `/akk respond <turn-selector>: <answer>`: answer a coding-agent question inside a `waiting_for_openclaw` Turn.
+- `/akk cancel <turn-selector>`: interrupt the exact Turn without closing its tmux pane.
 
-For the targeted slash form, a selector may be `codex`, `claude`, `only`, `latest`, or an `@short-ref` returned by `AKK list`. The `agent_knock_knock_send` tool additionally accepts an authoritative full ID in its `selector` field. Selectors fail closed when the target is missing or ambiguous. For every send, AKK must revalidate the selected agent PID and tmux pane identity, confirm that the process and pane working directories match, and verify the idle prompt.
+For human-facing slash forms, a selector may be `codex`, `claude`, `only`, `latest`, or an `@short-ref` returned by `AKK list`. These selectors are only a resolution layer and fail closed when the target is missing or ambiguous. Once an AKK session exists, plugin actions prefill the authoritative full `session_id` for ordinary send or `turn_id` for respond and managed controls. On first attach only, an unmanaged raw-terminal row's send action instead pre-fills that row's exact `selector`. The same row may advertise a raw status, approval, cancellation, or orphan-close action with its own prefilled `conversation_id` compatibility selector. Use only the exact returned action; never construct, guess, copy, or reuse either compatibility selector. For every send, AKK must revalidate the selected agent PID and tmux pane identity, confirm that the process and pane working directories match, and verify the idle prompt.
 
 AKK discovers eligible panes across workspaces. When more than one target matches, use a selector returned by `AKK list`; never guess based on a workspace name or path.
 
@@ -40,23 +41,28 @@ Natural-language forms:
 - `AKK Claude: <task>`: call `agent_knock_knock_send` with `request=<task>` and `selector="claude"`.
 - Requests to list AKK or local coding-agent work: call `agent_knock_knock_list`.
 - Requests to inspect current output or ask what a task is doing: call `agent_knock_knock_status`.
-- Follow-ups for an existing listed terminal: call `agent_knock_knock_send` with `request=<message>` and the selected terminal reference as `selector`.
+- A later request for an existing listed AKK session: call `agent_knock_knock_send` with its authoritative `session_id` and `request=<message>`; this creates a new Turn in the same native context.
+- An answer to a coding-agent question in a `waiting_for_openclaw` Turn: call `agent_knock_knock_respond` with its authoritative `turn_id` and `request=<answer>`.
 - Requests to stop current work: call `agent_knock_knock_cancel`.
 
-## Starting and Reusing Work
+## Sessions and Turns
 
-Use `agent_knock_knock_send` with `request` and no `selector` only for a new independent task whose target the user left unspecified. AKK must resolve exactly one eligible Codex or Claude Code pane across all workspaces and verify that it is idle immediately before writing the task. If no eligible pane exists, report AKK's setup guidance; do not substitute another execution path.
+AKK's identity hierarchy is terminal → native Codex or Claude Code session → AKK session → Turns. Once the AKK session exists, its `session_id` is the ordinary-send target. Each accepted send creates a distinct `turn_id` without clearing the native agent context. A `turn_id` is only for history, callbacks, respond, status, approval, cancellation, renewal, callback retry, and close.
 
-For a new turn or follow-up:
+Use `agent_knock_knock_send` with `request` and neither `session_id` nor `selector` only when the target is unspecified. AKK must resolve exactly one eligible Codex or Claude Code pane across all workspaces, attach or discover its AKK session, and verify that it is idle immediately before writing the request. If no eligible pane exists, report AKK's setup guidance; do not substitute another execution path.
 
-1. Reuse a terminal or managed turn only when the user's reference uniquely identifies it.
+For ordinary send or an in-flight answer:
+
+1. Reuse an AKK session only when the user's reference uniquely identifies its verified native session and terminal incarnation.
 2. If no ID is supplied and more than one eligible pane may exist, call `agent_knock_knock_list`.
-3. Treat `terminals[]` as the primary resource list. A terminal's `managed.current_turn` is the only current AKK owner; `managed.recent_turn` and `managed.history` are retained context, not additional terminal owners. Records in `unavailable_managed_turns[]` have no live pane in this snapshot.
+3. Treat `terminals[]` as the primary resource list. Its managed context exposes `session_id`; `managed.current_turn` is the only current AKK owner, while `managed.recent_turn` and `managed.history` are retained Turn history. Records in `unavailable_managed_turns[]` have no live pane in this snapshot.
 4. Read the selected resource's `available_actions`. Use only an action present there, start with its prefilled authoritative arguments, supply every `missing_required` field, and consult the top-level contract for optional fields.
-5. Use a terminal row's `send` action for a new turn. Use a managed turn's `follow_up` action to continue that exact turn. Both invoke `agent_knock_knock_send`; add the message as `request` to the prefilled `selector`. Do not add timeout fields for ordinary use; `timeoutSeconds` is unsupported.
+5. For an existing managed Session, use `send` with its prefilled `session_id`; it creates a new Turn. For first attach only, use the selected unmanaged raw-terminal row's available `send` action with that row's prefilled `selector`. Never construct or reuse a selector. Use `respond` with its prefilled `turn_id` only when that Turn is explicitly `waiting_for_openclaw`; the answer stays in the same Turn. Add the text as `request`. Do not add timeout fields for ordinary use; `timeoutSeconds` is unsupported.
 6. If multiple terminals match, show their `short_ref`, agent, and tmux target, then ask the user to choose. Never guess or send to a pane that AKK has not verified as idle.
 
 An idle pane is at a verified ready prompt, with no current work or unresolved permission request. A previously completed managed turn alone is not proof that the pane is still idle.
+
+Do not treat ordinary send as native clear, new-session, or resume. Those native session-lifecycle operations are outside this skill's Turn-creation workflow.
 
 Useful examples:
 
@@ -66,6 +72,7 @@ Useful examples:
 /akk @a1b2c3d4: run the focused tests
 /akk list
 /akk status only
+/akk respond @a1b2c3d4: use the existing JSON format
 /akk cancel only
 ```
 
@@ -75,10 +82,10 @@ All OpenClaw-to-agent task delivery must go through Agent Knock Knock plugin too
 
 AKK:
 
-1. Resolves the selected Codex or Claude Code process and tmux pane.
+1. Resolves the authoritative AKK session to its selected Codex or Claude Code native session, process, and tmux pane.
 2. Revalidates the expected agent PID and tmux pane identity, confirms that the process and pane working directories match, and verifies the idle prompt.
 3. Types only the user-facing task into the shared terminal.
-4. Creates a managed turn bound to that terminal and message.
+4. Creates a unique managed `turn_id` bound to the AKK `session_id`, terminal incarnation, and message.
 5. Monitors reliable local evidence and sends callbacks to the originating OpenClaw session.
 
 The coding agent does not run an AKK callback command and does not require an AKK-specific hook or plugin.
@@ -93,7 +100,7 @@ For managed terminal entries, `agent_knock_knock_status` captures a bounded term
 
 `agent_knock_knock_cancel` uses the adapter's interrupt action—Control-C for Codex or Escape for Claude Code—and leaves the tmux pane open.
 
-Use `agent_knock_knock_renew` only when AKK marked the same live terminal turn `stalled`, the process and task remain in the same pane, and the user wants monitoring to continue without terminal input. The contextual slash form is `/akk renew @a1b2c3d4 30`.
+Use `agent_knock_knock_renew` only when AKK marked the same live terminal Turn `stalled`, the process and Turn remain in the same pane, and the user wants monitoring to continue without terminal input. The contextual slash form is `/akk renew @a1b2c3d4 30`.
 
 Use `agent_knock_knock_retry_callback` only for a `callback_failed` managed turn, for example `/akk retry-callback @a1b2c3d4`.
 
@@ -124,9 +131,9 @@ A trusted, default-disabled plugin `autoApprove` policy may independently approv
 
 ## tmux Sessions
 
-`agent_knock_knock_list` is terminal-first: every eligible already-running Codex or Claude Code pane appears once in `terminals[]`, even when retained managed turns reference it. `process_state` reports process liveness and `activity_state` reports the parsed screen state. `managed.current_turn` is the authoritative active turn for that terminal; otherwise `managed.recent_turn` shows the newest retained context. Request `all=true` only when older `managed.history` or retained unavailable history is needed. By default, `unavailable_managed_turns[]` contains attention-needed records whose terminal is unavailable.
+`agent_knock_knock_list` is terminal-first: every eligible already-running Codex or Claude Code pane appears once in `terminals[]`, even when retained managed Turns reference it. The resource chain is terminal → verified native session → managed AKK `session_id` → Turns. `process_state` reports process liveness and `activity_state` reports the parsed screen state. `managed.current_turn` is the authoritative active Turn for that terminal; otherwise `managed.recent_turn` shows the newest retained context. Request `all=true` only when older `managed.history` or retained unavailable history is needed. By default, `unavailable_managed_turns[]` contains attention-needed records whose terminal is unavailable.
 
-The top-level `action_contracts` documents the exact schemas for send, follow-up, status, approve, cancel, renew, retry-callback, and close. `available_actions` is the only authoritative current-action source. `send` on a terminal starts a new managed turn; `follow_up` on a managed turn continues it, using the same send tool with a managed-turn selector. Other actions use `conversation_id`. Start with the prefilled full ID, supply all `missing_required` fields, and use a returned `@short-ref` only for human-facing selection. Availability is a snapshot, so AKK revalidates it before side effects.
+The top-level `action_contracts` summarizes each tool's managed target and its narrow compatibility inputs; `available_actions` is the only authoritative current-action source. An existing managed Session's ordinary `send` targets `session_id` and starts a new managed Turn. On first attach only, an unmanaged raw-terminal row may advertise send with its exact prefilled `selector`. `respond` and every managed control target `turn_id`; `respond` is offered only for a Turn waiting on OpenClaw. A raw terminal may be controlled only through the status, approval, cancellation, or orphan-close action that its own row advertises with a prefilled `conversation_id`; this is not a Turn ID and must never be constructed, guessed, or reused from another row. Start with the prefilled full argument, supply all `missing_required` fields, and use a returned `@short-ref` only for human-facing selection. Availability is a snapshot, so AKK revalidates it before side effects.
 
 Before every terminal operation, AKK revalidates the expected agent PID and tmux pane identity, then confirms that the process and pane working directories match. Sending new work additionally requires a verified idle prompt. Humans can attach to the same tmux session and continue directly at any time.
 

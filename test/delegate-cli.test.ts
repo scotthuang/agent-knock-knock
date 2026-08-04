@@ -75,6 +75,13 @@ test("delegate routes asynchronously to the only idle matching tmux pane", () =>
       JSON.stringify({
         "codex-work:0.0": "› ",
         "codex-other:0.0": "› "
+      }),
+      "--codex-active-session-identities-json",
+      JSON.stringify({
+        5101: codexNativeIdentityFixture({
+          workspace,
+          codexPid: 5101
+        })
       })
     ]);
 
@@ -605,6 +612,30 @@ function terminalFixtureArgs(options: {
     "--terminal-screens-json",
     JSON.stringify(options.screens)
   ];
+}
+
+function codexNativeIdentityFixture(options: {
+  workspace: string;
+  codexPid: number;
+}): Record<string, unknown> {
+  const sessionId = `codex-native-session-${options.codexPid}`;
+  return {
+    sessionId,
+    processUuid: `codex-process-${options.codexPid}`,
+    processBirth: `fixture-process-birth-${options.codexPid}`,
+    rollout: {
+      fd: "17",
+      device: `fixture-device-${options.codexPid}`,
+      inode: String(100_000 + options.codexPid),
+      path: path.join(
+        options.workspace,
+        ".codex",
+        "sessions",
+        `${sessionId}.jsonl`
+      )
+    },
+    evidence: "static_exact_fixture"
+  };
 }
 
 function tmuxPane(overrides: Record<string, unknown> = {}) {

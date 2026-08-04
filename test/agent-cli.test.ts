@@ -1591,7 +1591,7 @@ test("hookless Claude send is refused when no transcript boundary can be bound",
       "--claude-agents-json",
       JSON.stringify([{
         ...claudeAgentRow(claudePid, claudeSessionId, workspace),
-        startedAt: undefined
+        status: "busy"
       }]),
       "--disable-terminal-bridge-monitor"
     ], {
@@ -1900,8 +1900,8 @@ test("rejected managed Claude send leaves callback state and event log unchanged
 
     const rejected = runAgentCli([
       "send",
-      "--conversation",
-      conversation.conversation_id,
+      "--session",
+      conversation.session_id,
       "--store-dir",
       storeDir,
       "--message",
@@ -1912,7 +1912,7 @@ test("rejected managed Claude send leaves callback state and event log unchanged
     assert.notEqual(rejected.status, 0);
     assert.match(
       rejected.stderr,
-      /verified idle terminal|permission dialog|still owned by active AKK conversation/u
+      /already has active turn|verified idle terminal|permission dialog|still owned by active AKK conversation/u
     );
 
     const afterStateRaw = fs.readFileSync(conversation.state_path, "utf8");
@@ -1972,6 +1972,12 @@ test("managed terminal send cannot overwrite a concurrent terminal cancellation"
     `terminal-bridge-send-${terminalKey}.lock`
   );
   const racedMessage = "This prepared message must never reach tmux";
+  const codexIdentityArgs = codexNativeIdentityArgs({
+    pid: 33389,
+    sessionId: "019ee559-7bb8-7fd1-970c-0f7b6978c450",
+    processUuid: "codex-send-cancel-process",
+    rolloutPath: path.join(tempDir, "codex-send-cancel-rollout.jsonl")
+  });
   let sending: ReturnType<typeof spawnAgentCliCaptured> | undefined;
   let sendingStopped = false;
 
@@ -1999,13 +2005,20 @@ test("managed terminal send cannot overwrite a concurrent terminal cancellation"
       storeDir,
       "--openclaw-bin",
       "/usr/bin/true",
+      ...codexIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], testEnv);
     assert.equal(managed.status, 0, managed.stderr || managed.stdout);
     const managedParsed = JSON.parse(managed.stdout);
-    const conversationId = managedParsed.conversation.conversation_id;
+    const turnId = managedParsed.conversation.turn_id;
     const statePath = managedParsed.conversation.state_path;
-    const initialRounds = managedParsed.conversation.response_rounds_used;
+    const waitingState = {
+      ...JSON.parse(fs.readFileSync(statePath, "utf8")),
+      status: "waiting_for_openclaw",
+      updated_at: new Date().toISOString()
+    };
+    fs.writeFileSync(statePath, `${JSON.stringify(waitingState, null, 2)}\n`);
+    const initialRounds = waitingState.response_rounds_used;
     const initialStateRaw = fs.readFileSync(statePath, "utf8");
     fs.writeFileSync(tmuxCallsPath, "");
 
@@ -2023,10 +2036,11 @@ test("managed terminal send cannot overwrite a concurrent terminal cancellation"
     let cancelSettled = false;
     const cancelling = runAgentCliAsync([
       "cancel",
-      "--conversation",
-      conversationId,
+      "--turn",
+      turnId,
       "--store-dir",
-      storeDir
+      storeDir,
+      ...codexIdentityArgs
     ], testEnv).finally(() => {
       cancelSettled = true;
     });
@@ -2034,13 +2048,14 @@ test("managed terminal send cannot overwrite a concurrent terminal cancellation"
     assert.equal(cancelSettled, false, "cancel must wait behind the gated terminal owner");
 
     sending = spawnAgentCliCaptured([
-      "send",
-      "--conversation",
-      conversationId,
+      "respond",
+      "--turn",
+      turnId,
       "--message",
       racedMessage,
       "--store-dir",
       storeDir,
+      ...codexIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], testEnv);
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -2069,7 +2084,7 @@ test("managed terminal send cannot overwrite a concurrent terminal cancellation"
     sendingStopped = false;
     const sendResult = await sending.result;
     assert.notEqual(sendResult.status, 0);
-    assert.match(sendResult.stderr, /conversation is cancelled/u);
+    assert.match(sendResult.stderr, /turn is cancelled|conversation is cancelled/u);
 
     const finalState = JSON.parse(fs.readFileSync(statePath, "utf8"));
     assert.equal(finalState.status, "cancelled");
@@ -2126,6 +2141,12 @@ test("managed terminal close locks terminal before state and prevents queued sen
     "terminal-locks"
   );
   const racedMessage = "This message must never be sent after close";
+  const codexIdentityArgs = codexNativeIdentityArgs({
+    pid: 33389,
+    sessionId: "019ee559-7bb8-7fd1-970c-0f7b6978c451",
+    processUuid: "codex-close-race-process",
+    rolloutPath: path.join(tempDir, "codex-close-race-rollout.jsonl")
+  });
   let closing: ReturnType<typeof spawnAgentCliCaptured> | undefined;
   let sending: ReturnType<typeof spawnAgentCliCaptured> | undefined;
   let sendingStopped = false;
@@ -2156,12 +2177,19 @@ test("managed terminal close locks terminal before state and prevents queued sen
       storeDir,
       "--openclaw-bin",
       "/usr/bin/true",
+      ...codexIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], testEnv);
     assert.equal(managed.status, 0, managed.stderr || managed.stdout);
     const managedParsed = JSON.parse(managed.stdout);
-    const conversationId = managedParsed.conversation.conversation_id;
+    const turnId = managedParsed.conversation.turn_id;
     const statePath = managedParsed.conversation.state_path;
+    const waitingState = {
+      ...JSON.parse(fs.readFileSync(statePath, "utf8")),
+      status: "waiting_for_openclaw",
+      updated_at: new Date().toISOString()
+    };
+    fs.writeFileSync(statePath, `${JSON.stringify(waitingState, null, 2)}\n`);
     stateLockPath = `${statePath}.lock`;
     fs.writeFileSync(tmuxCallsPath, "");
 
@@ -2178,10 +2206,11 @@ test("managed terminal close locks terminal before state and prevents queued sen
 
     closing = spawnAgentCliCaptured([
       "close",
-      "--conversation",
-      conversationId,
+      "--turn",
+      turnId,
       "--store-dir",
       storeDir,
+      ...codexIdentityArgs,
       "--reason",
       "closed during terminal mutation race"
     ], testEnv);
@@ -2204,13 +2233,14 @@ test("managed terminal close locks terminal before state and prevents queued sen
     assert.equal(closing.child.exitCode, null);
 
     sending = spawnAgentCliCaptured([
-      "send",
-      "--conversation",
-      conversationId,
+      "respond",
+      "--turn",
+      turnId,
       "--message",
       racedMessage,
       "--store-dir",
       storeDir,
+      ...codexIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], testEnv);
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -2241,7 +2271,7 @@ test("managed terminal close locks terminal before state and prevents queued sen
     sendingStopped = false;
     const sendResult = await sending.result;
     assert.notEqual(sendResult.status, 0);
-    assert.match(sendResult.stderr, /conversation is closed/u);
+    assert.match(sendResult.stderr, /turn is closed|conversation is closed/u);
 
     const finalState = JSON.parse(fs.readFileSync(statePath, "utf8"));
     assert.equal(finalState.status, "closed");
@@ -2260,10 +2290,11 @@ test("managed terminal close locks terminal before state and prevents queued sen
 
     const approval = runAgentCli([
       "approve",
-      "--conversation",
-      conversationId,
+      "--turn",
+      turnId,
       "--store-dir",
-      storeDir
+      storeDir,
+      ...codexIdentityArgs
     ], testEnv);
     assert.notEqual(approval.status, 0);
     assert.match(approval.stderr, /conversation is closed/u);
@@ -2802,6 +2833,12 @@ test("raw and managed Codex sends fail closed unless the locked pane is verifiab
   const terminalTarget = `${tmuxSession}:0.1`;
   const rawConversationId =
     `terminal:v2:tmux:codex:${terminalTarget}:33389`;
+  const nativeIdentityArgs = codexNativeIdentityArgs({
+    pid: 33389,
+    sessionId,
+    processUuid: "codex-idle-gate-process",
+    rolloutPath: path.join(tempDir, "codex-idle-gate-rollout.jsonl")
+  });
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
@@ -2825,12 +2862,13 @@ test("raw and managed Codex sends fail closed unless the locked pane is verifiab
       "--background",
       "--store-dir",
       storeDir,
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], baseEnv);
     assert.equal(managed.status, 0, managed.stderr || managed.stdout);
     const managedParsed = JSON.parse(managed.stdout);
-    const managedConversationId =
-      managedParsed.conversation.conversation_id;
+    const managedConversationId = managedParsed.conversation.conversation_id;
+    const managedSessionId = managedParsed.conversation.session_id;
     const managedStatePath = managedParsed.conversation.state_path;
     const completedAt = new Date().toISOString();
     const managedState = JSON.parse(
@@ -2887,17 +2925,21 @@ test("raw and managed Codex sends fail closed unless the locked pane is verifiab
       fs.writeFileSync(screenPath, scenario.screen);
       const scenarioEnv = { ...baseEnv, ...scenario.env };
 
-      for (const conversationId of [rawConversationId, managedConversationId]) {
+      for (const target of [
+        { option: "--conversation", id: rawConversationId },
+        { option: "--session", id: managedSessionId }
+      ]) {
         fs.writeFileSync(tmuxCallsPath, "");
         const sendArgs = [
           "send",
-          "--conversation",
-          conversationId,
+          target.option,
+          target.id,
           "--message",
           `Must not send while terminal status is ${scenario.name}`,
           "--background",
           "--store-dir",
           storeDir,
+          ...nativeIdentityArgs,
           "--disable-terminal-bridge-monitor"
         ];
         const sent = runAgentCli(sendArgs, scenarioEnv);
@@ -2905,13 +2947,13 @@ test("raw and managed Codex sends fail closed unless the locked pane is verifiab
         assert.notEqual(
           sent.status,
           0,
-          `${scenario.name} ${conversationId}: ${sent.stderr || sent.stdout}`
+          `${scenario.name} ${target.id}: ${sent.stderr || sent.stdout}`
         );
         assert.match(sent.stderr, scenario.expected);
         assert.equal(
           readJsonLines(tmuxCallsPath).some((call) => call.args[0] === "send-keys"),
           false,
-          `${scenario.name} ${conversationId} must not write terminal keys`
+          `${scenario.name} ${target.id} must not write terminal keys`
         );
       }
     }
@@ -2978,6 +3020,12 @@ test("raw terminal send uses the target pid cwd from partial lsof output", () =>
   const panePid = 9001;
   const unrelatedPid = 7777;
   const terminalTarget = `${tmuxSession}:0.1`;
+  const nativeIdentityArgs = codexNativeIdentityArgs({
+    pid: targetPid,
+    sessionId,
+    processUuid: "codex-partial-lsof-process",
+    rolloutPath: path.join(tempDir, "codex-partial-lsof-rollout.jsonl")
+  });
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
@@ -3028,6 +3076,7 @@ test("raw terminal send uses the target pid cwd from partial lsof output", () =>
       storeDir,
       "--openclaw-bin",
       "/usr/bin/true",
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
@@ -3274,6 +3323,12 @@ test("background send to raw terminal id creates managed callback conversation",
   const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
   const screenPath = path.join(tempDir, "screen.txt");
   const workspace = path.join(tempDir, "workspace");
+  const nativeIdentityArgs = codexNativeIdentityArgs({
+    pid: 33389,
+    sessionId,
+    processUuid: "codex-background-send-process",
+    rolloutPath: path.join(tempDir, "codex-background-send-rollout.jsonl")
+  });
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
@@ -3303,7 +3358,8 @@ test("background send to raw terminal id creates managed callback conversation",
       "--store-dir",
       storeDir,
       "--agent-hard-timeout-minutes",
-      "0"
+      "0",
+      ...nativeIdentityArgs
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     });
@@ -3328,6 +3384,7 @@ test("background send to raw terminal id creates managed callback conversation",
       "agent:channel:original",
       "--openclaw-bin",
       "/usr/bin/true",
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
@@ -3423,6 +3480,601 @@ test("background send to raw terminal id creates managed callback conversation",
   }
 });
 
+test("v0.8.1 terminal state without native identity metadata remains bound to its live pane", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-legacy-terminal-binding-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+  const terminalTarget = `akk-legacy-binding-${process.pid}:0.1`;
+  const rawConversationId =
+    `terminal:v2:tmux:codex:${terminalTarget}:33389`;
+  const nativeIdentityArgs = codexNativeIdentityArgs({
+    pid: 33389,
+    sessionId,
+    processUuid: "codex-legacy-binding-process",
+    rolloutPath: path.join(tempDir, "codex-legacy-binding-rollout.jsonl")
+  });
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "› \n");
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `${terminalTarget.split(":")[0]}\t0\t1\t33389\tnode\t${workspace}\n`
+    );
+    const testEnv = {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    };
+    const sent = runAgentCli([
+      "send",
+      "--conversation",
+      rawConversationId,
+      "--message",
+      "Legacy managed terminal binding",
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      ...nativeIdentityArgs,
+      "--disable-terminal-bridge-monitor"
+    ], testEnv);
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    const parsed = JSON.parse(sent.stdout);
+    const statePath = parsed.conversation.state_path;
+    const modernState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    const legacyTakeover = { ...modernState.native_session_takeover };
+    delete legacyTakeover.terminal_agent_identity_protocol;
+    delete legacyTakeover.terminal_agent_session_id;
+    delete legacyTakeover.terminal_agent_process_uuid;
+    delete legacyTakeover.terminal_agent_process_birth;
+    delete legacyTakeover.terminal_agent_rollout;
+    delete legacyTakeover.terminal_agent_identity_evidence;
+    const {
+      session_id: _sessionId,
+      turn_id: _turnId,
+      ...legacyIdentityState
+    } = modernState;
+    const idleAt = new Date().toISOString();
+    fs.writeFileSync(statePath, `${JSON.stringify({
+      ...legacyIdentityState,
+      status: "idle",
+      idle_since: idleAt,
+      updated_at: idleAt,
+      native_session_takeover: legacyTakeover
+    }, null, 2)}\n`);
+    const ledgerPath = findTerminalDispatchLedgerPath(
+      modernState.conversation_id,
+      path.join(tempDir, ".akk-cli-test-runtime")
+    );
+    const ledger = JSON.parse(fs.readFileSync(ledgerPath, "utf8"));
+    fs.writeFileSync(ledgerPath, `${JSON.stringify({
+      ...ledger,
+      status: "resolved",
+      resolved_at: idleAt,
+      reason: "legacy compatibility fixture"
+    }, null, 2)}\n`);
+
+    const listed = runAgentCli([
+      "list",
+      "--store-dir",
+      storeDir,
+      "--all",
+      "--processes-json",
+      JSON.stringify([{
+        pid: 33389,
+        ppid: 999,
+        command: `codex resume ${sessionId}`,
+        cwd: workspace
+      }]),
+      "--terminals-json",
+      JSON.stringify([tmuxPane({
+        target: terminalTarget,
+        session: terminalTarget.split(":")[0],
+        pane: 1,
+        panePid: 33389,
+        currentPath: workspace
+      })]),
+      "--terminal-screens-json",
+      JSON.stringify({ [terminalTarget]: "› \n" }),
+      ...nativeIdentityArgs
+    ], testEnv);
+    assert.equal(listed.status, 0, listed.stderr || listed.stdout);
+    const listedParsed = JSON.parse(listed.stdout);
+    assert.equal(listedParsed.terminals.length, 1);
+    const terminal = listedParsed.terminals[0];
+    assert.equal(terminal.managed.session_id, modernState.conversation_id);
+    assert.equal(
+      terminal.managed.recent_turn.conversation_id,
+      modernState.conversation_id
+    );
+    assert.equal(
+      terminal.available_actions.send.arguments.session_id,
+      modernState.conversation_id
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("raw Claude send fails closed when agent observation fails", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-observer-failure-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+  const terminalTarget = "claude-observer-failure:0.0";
+  const claudePid = 42377;
+  const claudeCallsPath = path.join(tempDir, "claude-agents-called");
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "❯ ");
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `claude-observer-failure\t0\t0\t999\tnode\t${workspace}\n`
+    );
+    writeFakeProcessTools(fakeBinDir, [{
+      pid: claudePid,
+      ppid: 999,
+      command: "claude",
+      cwd: workspace
+    }]);
+    const fakeClaude = path.join(fakeBinDir, "claude");
+    fs.writeFileSync(
+      fakeClaude,
+      `#!/usr/bin/env node
+require("node:fs").writeFileSync(${JSON.stringify(claudeCallsPath)}, "");
+process.stderr.write("simulated agents failure\\n");
+process.exit(7);
+`,
+      "utf8"
+    );
+    fs.chmodSync(fakeClaude, 0o755);
+    const sent = runAgentCli([
+      "send",
+      "--conversation",
+      `terminal:v2:tmux:claude:${terminalTarget}:${claudePid}`,
+      "--message",
+      "This must not reach Claude",
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor"
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.notEqual(sent.status, 0);
+    assert.equal(fs.existsSync(claudeCallsPath), true);
+    assert.match(sent.stderr, /observation failed|no longer available/u);
+    assert.equal(
+      readJsonLines(tmuxCallsPath).some((call) => call.args[0] === "send-keys"),
+      false
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("ordinary sends create distinct turns in one session and respond stays on its turn", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-session-turn-send-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+  const terminalTarget = `akk-session-turn-${process.pid}:0.1`;
+  const codexPid = 33389;
+  const rawTerminalId = `terminal:tmux:${terminalTarget}:${codexPid}`;
+  const nativeSessionId = "019ee559-7bb8-7fd1-970c-0f7b6978c44e";
+  const originalProcessUuid = `codex-pid:${codexPid}:birth:original`;
+  const replacementProcessUuid = `codex-pid:${codexPid}:birth:replacement`;
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "› \n");
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `${terminalTarget.replace(/:\d+$/u, "").replace(/:\d+\.\d+$/u, "")}\t0\t1\t${codexPid}\tnode\t${workspace}\n`
+    );
+    const testEnv = {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    };
+    const baseCommonArgs = [
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor"
+    ];
+    const identityArgs = (processUuid: string) => codexNativeIdentityArgs({
+      pid: codexPid,
+      sessionId: nativeSessionId,
+      processUuid,
+      rolloutPath: path.join(tempDir, `${processUuid}.jsonl`)
+    });
+    const commonArgs = [
+      ...baseCommonArgs,
+      ...identityArgs(originalProcessUuid)
+    ];
+
+    const first = runAgentCli([
+      "send",
+      "--conversation",
+      rawTerminalId,
+      "--message",
+      "First session turn",
+      ...commonArgs
+    ], testEnv);
+    assert.equal(first.status, 0, first.stderr || first.stdout);
+    const firstParsed = JSON.parse(first.stdout);
+    assert.equal(firstParsed.session_id, firstParsed.conversation.session_id);
+    assert.equal(firstParsed.turn_id, firstParsed.conversation.turn_id);
+    assert.equal(
+      firstParsed.conversation.native_session_takeover.terminal_agent_session_id,
+      nativeSessionId
+    );
+    assert.equal(
+      firstParsed.conversation.native_session_takeover
+        .terminal_agent_identity_protocol,
+      1
+    );
+    assert.equal(
+      firstParsed.conversation.native_session_takeover.terminal_agent_process_uuid,
+      originalProcessUuid
+    );
+    assert.equal(
+      firstParsed.conversation.native_session_takeover.terminal_agent_process_birth,
+      originalProcessUuid
+    );
+    assert.equal(
+      firstParsed.conversation.native_session_takeover.terminal_agent_rollout.fd,
+      "12r"
+    );
+
+    const firstStatePath = firstParsed.conversation.state_path;
+    const firstIdle = {
+      ...JSON.parse(fs.readFileSync(firstStatePath, "utf8")),
+      status: "idle",
+      idle_since: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    };
+    fs.writeFileSync(firstStatePath, `${JSON.stringify(firstIdle, null, 2)}\n`);
+
+    const keysBeforeWrongType = readJsonLines(tmuxCallsPath).filter(
+      (call) => call.args[0] === "send-keys"
+    ).length;
+    const wrongType = runAgentCli([
+      "send",
+      "--session",
+      firstParsed.session_id,
+      "--type",
+      "answer",
+      "--message",
+      "Ordinary send must not continue a Turn",
+      ...commonArgs
+    ], testEnv);
+    assert.notEqual(wrongType.status, 0);
+    assert.match(wrongType.stderr, /ordinary send only accepts message type task/u);
+    assert.equal(
+      readJsonLines(tmuxCallsPath).filter(
+        (call) => call.args[0] === "send-keys"
+      ).length,
+      keysBeforeWrongType
+    );
+
+    const second = runAgentCli([
+      "send",
+      "--session",
+      firstParsed.session_id,
+      "--message",
+      "Second session turn",
+      "--agent-timeout-minutes",
+      "7",
+      "--agent-hard-timeout-minutes",
+      "19",
+      ...commonArgs
+    ], testEnv);
+    assert.equal(second.status, 0, second.stderr || second.stdout);
+    const secondParsed = JSON.parse(second.stdout);
+    assert.equal(secondParsed.session_id, firstParsed.session_id);
+    assert.notEqual(secondParsed.turn_id, firstParsed.turn_id);
+    assert.notEqual(
+      secondParsed.conversation.state_path,
+      firstParsed.conversation.state_path
+    );
+    assert.equal(
+      JSON.parse(fs.readFileSync(firstStatePath, "utf8")).status,
+      "idle"
+    );
+    assert.equal(
+      fs.readdirSync(storeConversationsDir(storeDir), { withFileTypes: true })
+        .filter((entry) => entry.isDirectory()).length,
+      2
+    );
+
+    const entersBeforeRejectedTurn = readJsonLines(tmuxCallsPath).filter((call) =>
+      call.args[0] === "send-keys" && call.args.at(-1) === "C-m"
+    ).length;
+    const turnTargetRejected = runAgentCli([
+      "send",
+      "--session",
+      firstParsed.turn_id,
+      "--message",
+      "A turn id must not be a send target",
+      ...commonArgs
+    ], testEnv);
+    assert.notEqual(turnTargetRejected.status, 0);
+    assert.match(
+      turnTargetRejected.stderr,
+      /turn .* is an execution identity, not an ordinary send target/u
+    );
+    assert.equal(
+      readJsonLines(tmuxCallsPath).filter((call) =>
+        call.args[0] === "send-keys" && call.args.at(-1) === "C-m"
+      ).length,
+      entersBeforeRejectedTurn
+    );
+
+    const secondStatePath = secondParsed.conversation.state_path;
+    const waitingForOpenClaw = {
+      ...JSON.parse(fs.readFileSync(secondStatePath, "utf8")),
+      status: "waiting_for_openclaw",
+      updated_at: new Date().toISOString()
+    };
+    const secondLegStartedAt =
+      waitingForOpenClaw.native_session_takeover.terminal_bridge_started_at;
+    fs.writeFileSync(
+      secondStatePath,
+      `${JSON.stringify(waitingForOpenClaw, null, 2)}\n`
+    );
+    const keysBeforeIdentityChange = readJsonLines(tmuxCallsPath).filter(
+      (call) => call.args[0] === "send-keys"
+    ).length;
+    for (const action of ["approve", "cancel"]) {
+      const fenced = runAgentCli([
+        action,
+        "--turn",
+        secondParsed.turn_id,
+        ...baseCommonArgs,
+        ...identityArgs(replacementProcessUuid)
+      ], testEnv);
+      assert.notEqual(fenced.status, 0);
+      assert.match(
+        fenced.stderr,
+        /native codex session identity changed|native codex process incarnation cannot be verified/u
+      );
+      assert.equal(
+        readJsonLines(tmuxCallsPath).filter(
+          (call) => call.args[0] === "send-keys"
+        ).length,
+        keysBeforeIdentityChange,
+        `${action} must send zero terminal keys after native identity replacement`
+      );
+    }
+    const responded = runAgentCli([
+      "respond",
+      "--turn",
+      secondParsed.turn_id,
+      "--message",
+      "The requested clarification",
+      ...commonArgs
+    ], testEnv);
+    assert.equal(responded.status, 0, responded.stderr || responded.stdout);
+    const respondedParsed = JSON.parse(responded.stdout);
+    assert.equal(respondedParsed.session_id, secondParsed.session_id);
+    assert.equal(respondedParsed.turn_id, secondParsed.turn_id);
+    assert.equal(
+      respondedParsed.conversation.state_path,
+      secondParsed.conversation.state_path
+    );
+    assert.equal(respondedParsed.message.type, "answer");
+    assert.equal(
+      respondedParsed.conversation.native_session_takeover
+        .terminal_bridge_inactivity_timeout_minutes,
+      7
+    );
+    assert.equal(
+      respondedParsed.conversation.native_session_takeover
+        .terminal_bridge_hard_timeout_minutes,
+      19
+    );
+    assert.notEqual(
+      respondedParsed.conversation.native_session_takeover
+        .terminal_bridge_started_at,
+      secondLegStartedAt,
+      "respond starts a new response-leg clock while keeping the Turn identity"
+    );
+    assert.equal(
+      fs.readdirSync(storeConversationsDir(storeDir), { withFileTypes: true })
+        .filter((entry) => entry.isDirectory()).length,
+      2
+    );
+    assert.equal(
+      readJsonLines(tmuxCallsPath).filter((call) =>
+        call.args[0] === "send-keys" && call.args.at(-1) === "C-m"
+      ).length,
+      3
+    );
+
+    const incompleteIdentity = JSON.parse(
+      fs.readFileSync(secondStatePath, "utf8")
+    );
+    delete incompleteIdentity.native_session_takeover.terminal_agent_rollout;
+    fs.writeFileSync(
+      secondStatePath,
+      `${JSON.stringify(incompleteIdentity, null, 2)}\n`
+    );
+    const keysBeforeIncompleteIdentity = readJsonLines(tmuxCallsPath).filter(
+      (call) => call.args[0] === "send-keys"
+    ).length;
+    const incompleteCancel = runAgentCli([
+      "cancel",
+      "--turn",
+      secondParsed.turn_id,
+      ...commonArgs
+    ], testEnv);
+    assert.notEqual(incompleteCancel.status, 0);
+    assert.match(
+      incompleteCancel.stderr,
+      /native Codex session identity changed|rollout incarnation cannot be verified/iu
+    );
+    assert.equal(
+      readJsonLines(tmuxCallsPath).filter(
+        (call) => call.args[0] === "send-keys"
+      ).length,
+      keysBeforeIncompleteIdentity,
+      "an incomplete Codex rollout tuple must authorize zero terminal keys"
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("virgin terminal send stalls after delivery when no exact native session can be bound", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-native-bind-timeout-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const workspace = path.join(tempDir, "workspace");
+  const target = "codex-virgin:0.0";
+  const pid = 33401;
+  const rawTerminalId = `terminal:v2:tmux:codex:${target}:${pid}`;
+  try {
+    fs.mkdirSync(workspace, { recursive: true });
+    const startedAt = Date.now();
+    const sent = runAgentCli([
+      "send",
+      "--conversation",
+      rawTerminalId,
+      "--message",
+      "Start the first native session",
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor",
+      "--processes-json",
+      JSON.stringify([{ pid, ppid: 1, command: "codex", cwd: workspace }]),
+      "--terminals-json",
+      JSON.stringify([{
+        kind: "tmux",
+        target,
+        session: "codex-virgin",
+        window: 0,
+        pane: 0,
+        panePid: pid,
+        currentCommand: "codex",
+        currentPath: workspace
+      }]),
+      "--terminal-screens-json",
+      JSON.stringify({ [target]: "› \n" }),
+      "--codex-active-session-identities-json",
+      "{}"
+    ]);
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    const parsed = JSON.parse(sent.stdout);
+    assert.equal(parsed.delivered, true);
+    assert.equal(parsed.status, "delivered_unfenced");
+    assert.equal(parsed.do_not_retry, true);
+    assert.equal(parsed.conversation.status, "stalled");
+    assert.equal(
+      parsed.conversation.native_session_takeover.terminal_agent_identity_status,
+      "unresolved_after_submit"
+    );
+    assert.equal(
+      parsed.conversation.native_session_takeover.terminal_bridge_submission.status,
+      "submitted"
+    );
+    assert.ok(
+      elapsedMs >= 1_800,
+      `native identity binding window ended too early (${elapsedMs}ms)`
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("modern Claude send requires a session id and process-incarnation timestamp", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-incarnation-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const workspace = path.join(tempDir, "workspace");
+  const target = "claude-incarnation:0.0";
+  const pid = 33402;
+  const sessionId = "66666666-6666-4666-8666-666666666666";
+  const rawTerminalId = `terminal:v2:tmux:claude:${target}:${pid}`;
+  try {
+    fs.mkdirSync(workspace, { recursive: true });
+    const sent = runAgentCli([
+      "send",
+      "--conversation",
+      rawTerminalId,
+      "--message",
+      "Do not trust a reusable numeric PID",
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor",
+      "--processes-json",
+      JSON.stringify([{ pid, ppid: 1, command: "claude", cwd: workspace }]),
+      "--terminals-json",
+      JSON.stringify([{
+        kind: "tmux",
+        target,
+        session: "claude-incarnation",
+        window: 0,
+        pane: 0,
+        panePid: pid,
+        currentCommand: "claude",
+        currentPath: workspace
+      }]),
+      "--terminal-screens-json",
+      JSON.stringify({ [target]: "❯ " }),
+      "--claude-agents-json",
+      JSON.stringify([{ pid, cwd: workspace, sessionId }])
+    ]);
+    assert.notEqual(sent.status, 0);
+    assert.match(
+      sent.stderr,
+      /native Claude process incarnation cannot be verified|no longer available/u
+    );
+    const stateFiles = fs.existsSync(storeConversationsDir(storeDir))
+      ? fs.readdirSync(storeConversationsDir(storeDir), { withFileTypes: true })
+          .filter((entry) => entry.isDirectory())
+          .map((entry) => path.join(
+            storeConversationsDir(storeDir),
+            entry.name,
+            "state.json"
+          ))
+          .filter((statePath) => fs.existsSync(statePath))
+      : [];
+    assert.deepEqual(
+      stateFiles,
+      [],
+      "the incomplete Claude identity must fail before a managed Turn is persisted"
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("raw background send durably prepares its terminal submission before tmux accepts it", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-submit-prepare-"));
   const storeDir = path.join(tempDir, "conversations");
@@ -3433,6 +4085,12 @@ test("raw background send durably prepares its terminal submission before tmux a
   const workspace = path.join(tempDir, "workspace");
   const tmuxSession = `akk-submit-prepare-${process.pid}`;
   const rawConversationId = `terminal:tmux:${tmuxSession}:0.1:33389`;
+  const nativeIdentityArgs = codexNativeIdentityArgs({
+    pid: 33389,
+    sessionId,
+    processUuid: "codex-submit-prepare-process",
+    rolloutPath: path.join(tempDir, "codex-submit-prepare-rollout.jsonl")
+  });
   let sending: ReturnType<typeof spawnAgentCliCaptured> | undefined;
 
   try {
@@ -3457,6 +4115,7 @@ test("raw background send durably prepares its terminal submission before tmux a
       storeDir,
       "--openclaw-bin",
       "/usr/bin/true",
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
@@ -3535,6 +4194,12 @@ test("an orphaned prepared submission becomes uncertain without terminal attribu
   const screenPath = path.join(tempDir, "screen.txt");
   const workspace = path.join(tempDir, "workspace");
   const terminalTarget = "codex-orphan:0.1";
+  const nativeIdentityArgs = codexNativeIdentityArgs({
+    pid: 33389,
+    sessionId,
+    processUuid: "codex-orphan-submission-process",
+    rolloutPath: path.join(tempDir, "codex-orphan-submission-rollout.jsonl")
+  });
   let dispatchLedgerPath: string | undefined;
 
   try {
@@ -3566,6 +4231,7 @@ test("an orphaned prepared submission becomes uncertain without terminal attribu
       "agent:channel:original",
       "--openclaw-bin",
       openclawBin,
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
@@ -3641,7 +4307,8 @@ test("an orphaned prepared submission becomes uncertain without terminal attribu
         currentPath: workspace
       })]),
       "--terminal-screens-json",
-      JSON.stringify({ [terminalTarget]: fs.readFileSync(screenPath, "utf8") })
+      JSON.stringify({ [terminalTarget]: fs.readFileSync(screenPath, "utf8") }),
+      ...nativeIdentityArgs
     ]);
     assert.equal(monitored.status, 0, monitored.stderr || monitored.stdout);
     const monitoredParsed = JSON.parse(monitored.stdout);
@@ -3681,6 +4348,12 @@ test("a released terminal owner permits the same task text in a new conversation
   const terminalTarget = `${tmuxSession}:0.1`;
   const rawConversationId = `terminal:tmux:${terminalTarget}:33389`;
   const request = "Do this exactly once";
+  const nativeIdentityArgs = codexNativeIdentityArgs({
+    pid: 33389,
+    sessionId,
+    processUuid: "codex-submit-receipt-process",
+    rolloutPath: path.join(tempDir, "codex-submit-receipt-rollout.jsonl")
+  });
   let sending: ReturnType<typeof spawnAgentCliCaptured> | undefined;
   let dispatchLedgerPath: string | undefined;
 
@@ -3705,6 +4378,7 @@ test("a released terminal owner permits the same task text in a new conversation
       storeDir,
       "--openclaw-bin",
       "/usr/bin/true",
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ];
     const testEnv = {
@@ -3799,7 +4473,8 @@ test("a released terminal owner permits the same task text in a new conversation
         currentPath: workspace
       })]),
       "--terminal-screens-json",
-      JSON.stringify({ [terminalTarget]: workingScreen })
+      JSON.stringify({ [terminalTarget]: workingScreen }),
+      ...nativeIdentityArgs
     ], testEnv);
     assert.equal(
       recovered.status,
@@ -4047,6 +4722,12 @@ test("a newer raw terminal task cannot replace an active callback boundary", () 
   const screenPath = path.join(tempDir, "screen.txt");
   const workspace = path.join(tempDir, "workspace");
   const rawConversationId = "terminal:tmux:codex-work:0.1:33389";
+  const nativeIdentityArgs = codexNativeIdentityArgs({
+    pid: 33389,
+    sessionId,
+    processUuid: "codex-active-callback-process",
+    rolloutPath: path.join(tempDir, "codex-active-callback-rollout.jsonl")
+  });
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
@@ -4079,6 +4760,7 @@ test("a newer raw terminal task cannot replace an active callback boundary", () 
       openclawBin,
       "--threads-json",
       JSON.stringify([]),
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
@@ -4096,7 +4778,7 @@ test("a newer raw terminal task cannot replace an active callback boundary", () 
 
     const second = sendTask("Second task");
     assert.notEqual(second.status, 0);
-    assert.match(second.stderr, /still owned by active AKK conversation/u);
+    assert.match(second.stderr, /session .* already has active turn/u);
     const firstState = JSON.parse(fs.readFileSync(firstStatePath, "utf8"));
     assert.equal(firstState.status, "waiting_for_agent");
     assert.equal(firstState.superseded_by_conversation_id, undefined);
@@ -4169,6 +4851,12 @@ test("durable completion must settle before a newer raw task can send", async ()
   const rawConversationId = "terminal:tmux:codex-work:0.1:33389";
   const completedSessionId = "019ee559-7bb8-7fd1-970c-0f7b6978c452";
   const completedRolloutPath = path.join(tempDir, "completed.jsonl");
+  const nativeIdentityArgs = codexNativeIdentityArgs({
+    pid: 33389,
+    sessionId: completedSessionId,
+    processUuid: "codex-durable-reconcile-process",
+    rolloutPath: completedRolloutPath
+  });
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
@@ -4197,6 +4885,7 @@ test("durable completion must settle before a newer raw task can send", async ()
       "agent:channel:original",
       "--openclaw-bin",
       openclawBin,
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ];
     const env = {
@@ -4291,7 +4980,7 @@ test("durable completion must settle before a newer raw task can send", async ()
       JSON.stringify({ [completedRolloutPath]: completedRollout })
     ], env);
     assert.notEqual(second.status, 0);
-    assert.match(second.stderr, /still owned by active AKK conversation/u);
+    assert.match(second.stderr, /session .* already has active turn/u);
     assert.equal(
       JSON.parse(fs.readFileSync(firstStatePath, "utf8")).status,
       "waiting_for_agent"
@@ -4487,6 +5176,12 @@ test("an active dispatch blocks a replacement before tmux input", () => {
   const workspace = path.join(tempDir, "workspace");
   const tmuxSession = `akk-send-failure-${process.pid}`;
   const rawConversationId = `terminal:tmux:${tmuxSession}:0.1:33389`;
+  const nativeIdentityArgs = codexNativeIdentityArgs({
+    pid: 33389,
+    sessionId,
+    processUuid: "codex-active-dispatch-process",
+    rolloutPath: path.join(tempDir, "codex-active-dispatch-rollout.jsonl")
+  });
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
@@ -4508,6 +5203,7 @@ test("an active dispatch blocks a replacement before tmux input", () => {
       "/usr/bin/true",
       "--threads-json",
       JSON.stringify([]),
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
@@ -4526,7 +5222,7 @@ test("an active dispatch blocks a replacement before tmux input", () => {
     writeFakeTmux(fakeBinDir, tmuxCallsPath, screenPath, listPanesOutput, "Second task");
     const second = sendTask("Second task");
     assert.notEqual(second.status, 0);
-    assert.match(second.stderr, /still owned by active AKK conversation/u);
+    assert.match(second.stderr, /session .* already has active turn/u);
 
     const firstState = JSON.parse(fs.readFileSync(firstStatePath, "utf8"));
     assert.equal(firstState.status, "waiting_for_agent");
@@ -4559,6 +5255,12 @@ test("an active managed task blocks a follow-up before tmux input", () => {
   const workspace = path.join(tempDir, "workspace");
   const tmuxSession = `akk-managed-failure-${process.pid}`;
   const rawConversationId = `terminal:tmux:${tmuxSession}:0.1:33389`;
+  const nativeIdentityArgs = codexNativeIdentityArgs({
+    pid: 33389,
+    sessionId,
+    processUuid: "codex-active-managed-process",
+    rolloutPath: path.join(tempDir, "codex-active-managed-rollout.jsonl")
+  });
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
@@ -4580,11 +5282,12 @@ test("an active managed task blocks a follow-up before tmux input", () => {
       storeDir,
       "--openclaw-bin",
       "/usr/bin/true",
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], testEnv);
     assert.equal(first.status, 0, first.stderr || first.stdout);
     const firstParsed = JSON.parse(first.stdout);
-    const conversationId = firstParsed.conversation.conversation_id;
+    const managedSessionId = firstParsed.conversation.session_id;
     const statePath = firstParsed.conversation.state_path;
     const firstMessageId =
       firstParsed.conversation.native_session_takeover
@@ -4599,17 +5302,18 @@ test("an active managed task blocks a follow-up before tmux input", () => {
     );
     const second = runAgentCli([
       "send",
-      "--conversation",
-      conversationId,
+      "--session",
+      managedSessionId,
       "--message",
       "Second managed task",
       "--background",
       "--store-dir",
       storeDir,
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], testEnv);
     assert.notEqual(second.status, 0);
-    assert.match(second.stderr, /still owned by active AKK conversation/u);
+    assert.match(second.stderr, /session .* already has active turn/u);
 
     const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
     assert.equal(
@@ -4651,6 +5355,12 @@ test("managed pre-submit setup failure restores the previous boundary and is ret
   const workspace = path.join(tempDir, "workspace");
   const tmuxSession = `akk-managed-abort-${process.pid}`;
   const rawConversationId = `terminal:tmux:${tmuxSession}:0.1:33389`;
+  const nativeIdentityArgs = codexNativeIdentityArgs({
+    pid: 33389,
+    sessionId,
+    processUuid: "codex-managed-abort-process",
+    rolloutPath: path.join(tempDir, "codex-managed-abort-rollout.jsonl")
+  });
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
@@ -4676,11 +5386,12 @@ test("managed pre-submit setup failure restores the previous boundary and is ret
       storeDir,
       "--openclaw-bin",
       "/usr/bin/true",
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], testEnv);
     assert.equal(first.status, 0, first.stderr || first.stdout);
     const firstParsed = JSON.parse(first.stdout);
-    const conversationId = firstParsed.conversation.conversation_id;
+    const managedSessionId = firstParsed.conversation.session_id;
     const statePath = firstParsed.conversation.state_path;
     const firstMessageId =
       firstParsed.conversation.native_session_takeover
@@ -4701,8 +5412,8 @@ test("managed pre-submit setup failure restores the previous boundary and is ret
     );
     const second = runAgentCli([
       "send",
-      "--conversation",
-      conversationId,
+      "--session",
+      managedSessionId,
       "--message",
       "Second managed task",
       "--background",
@@ -4710,6 +5421,7 @@ test("managed pre-submit setup failure restores the previous boundary and is ret
       storeDir,
       "--idle-timeout-minutes",
       "0",
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], {
       ...testEnv,
@@ -4720,21 +5432,36 @@ test("managed pre-submit setup failure restores the previous boundary and is ret
     assert.equal(secondParsed.submission_outcome, "aborted");
     assert.equal(secondParsed.safe_to_retry, true);
     assert.equal(secondParsed.delivered, false);
+    assert.equal(secondParsed.session_id, managedSessionId);
+    assert.notEqual(secondParsed.turn_id, firstParsed.turn_id);
+    assert.notEqual(
+      secondParsed.conversation.state_path,
+      statePath
+    );
 
-    const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    const firstAfterFailure = JSON.parse(fs.readFileSync(statePath, "utf8"));
     assert.equal(
-      state.native_session_takeover.terminal_bridge_message_id,
+      firstAfterFailure.native_session_takeover.terminal_bridge_message_id,
       firstMessageId
     );
     assert.equal(
-      state.native_session_takeover.terminal_bridge_request_text,
+      firstAfterFailure.native_session_takeover.terminal_bridge_request_text,
       "First managed task"
     );
     assert.equal(
-      state.native_session_takeover.terminal_bridge_submission.status,
+      firstAfterFailure.native_session_takeover.terminal_bridge_submission.status,
+      "submitted"
+    );
+    assert.equal(firstAfterFailure.status, "idle");
+    const secondState = JSON.parse(
+      fs.readFileSync(secondParsed.conversation.state_path, "utf8")
+    );
+    assert.equal(secondState.user_request, "Second managed task");
+    assert.equal(
+      secondState.native_session_takeover.terminal_bridge_submission.status,
       "aborted"
     );
-    assert.equal(state.status, "idle");
+    assert.equal(secondState.status, "idle");
     const entersAfter = readJsonLines(tmuxCallsPath)
       .filter((call) => call.args[0] === "send-keys" && call.args.at(-1) === "C-m")
       .length;
@@ -4753,6 +5480,12 @@ test("concurrent raw terminal sends allow exactly one active generation", async 
   const workspace = path.join(tempDir, "workspace");
   const tmuxSession = `akk-concurrent-${process.pid}`;
   const rawConversationId = `terminal:tmux:${tmuxSession}:0.1:33389`;
+  const nativeIdentityArgs = codexNativeIdentityArgs({
+    pid: 33389,
+    sessionId,
+    processUuid: "codex-concurrent-send-process",
+    rolloutPath: path.join(tempDir, "codex-concurrent-send-rollout.jsonl")
+  });
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
@@ -4777,6 +5510,7 @@ test("concurrent raw terminal sends allow exactly one active generation", async 
       "/usr/bin/true",
       "--threads-json",
       JSON.stringify([]),
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ];
     const env = {
@@ -4795,7 +5529,7 @@ test("concurrent raw terminal sends allow exactly one active generation", async 
     const rejected = first.status === 0 ? second : first;
     assert.match(
       rejected.stderr,
-      /still owned by active AKK conversation/u
+      /session .* already has active turn/u
     );
 
     const states = fs.readdirSync(storeConversationsDir(storeDir), { withFileTypes: true })
@@ -4835,6 +5569,12 @@ test("terminal generation ownership spans different stores", async () => {
   const workspace = path.join(tempDir, "workspace");
   const tmuxSession = `akk-cross-store-${process.pid}`;
   const rawConversationId = `terminal:tmux:${tmuxSession}:0.1:33389`;
+  const nativeIdentityArgs = codexNativeIdentityArgs({
+    pid: 33389,
+    sessionId,
+    processUuid: "codex-cross-store-owner-process",
+    rolloutPath: path.join(tempDir, "codex-cross-store-owner-rollout.jsonl")
+  });
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
@@ -4857,6 +5597,7 @@ test("terminal generation ownership spans different stores", async () => {
       storeDir,
       "--openclaw-bin",
       "/usr/bin/true",
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ];
     const env = {
@@ -4865,17 +5606,32 @@ test("terminal generation ownership spans different stores", async () => {
     };
 
     const [first, second] = await Promise.all([
-      runAgentCliAsync(sendArgs("Cross-store task A", firstStoreDir), env),
-      runAgentCliAsync(sendArgs("Cross-store task B", secondStoreDir), env)
+      runAgentCliAsync(sendArgs("Cross-store identical task", firstStoreDir), env),
+      runAgentCliAsync(sendArgs("Cross-store identical task", secondStoreDir), env)
     ]);
     assert.deepEqual(
       [first.status, second.status].sort(),
       [0, 1]
     );
     const rejected = first.status === 0 ? second : first;
+    const accepted = first.status === 0 ? first : second;
     assert.match(
       rejected.stderr,
       /still owned by active AKK conversation/u
+    );
+    const acceptedParsed = JSON.parse(accepted.stdout);
+    assert.notEqual(acceptedParsed.replayed, true);
+    assert.equal(
+      acceptedParsed.message.conversation_id,
+      acceptedParsed.conversation.turn_id
+    );
+    assert.equal(
+      acceptedParsed.message.session_id,
+      acceptedParsed.conversation.session_id
+    );
+    assert.equal(
+      acceptedParsed.message.turn_id,
+      acceptedParsed.conversation.turn_id
     );
 
     const calls = readJsonLines(tmuxCallsPath);
@@ -4910,6 +5666,12 @@ test("only the uncertain cross-store owner can resolve its terminal fence", () =
   const rawConversationId = `terminal:tmux:${terminalTarget}:33389`;
   const listPanesOutput =
     `${tmuxSession}\t0\t1\t33389\tnode\t${workspace}\n`;
+  const nativeIdentityArgs = codexNativeIdentityArgs({
+    pid: 33389,
+    sessionId,
+    processUuid: "codex-cross-store-fence-process",
+    rolloutPath: path.join(tempDir, "codex-cross-store-fence-rollout.jsonl")
+  });
   let dispatchLedgerPath: string | undefined;
 
   try {
@@ -4954,6 +5716,7 @@ test("only the uncertain cross-store owner can resolve its terminal fence", () =
             "agent:channel:original"
           ]
         : []),
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ];
 
@@ -4993,6 +5756,7 @@ test("only the uncertain cross-store owner can resolve its terminal fence", () =
       firstParsed.conversation.conversation_id,
       "--store-dir",
       firstStoreDir,
+      ...nativeIdentityArgs,
       "--reason",
       "closing the old cross-store generation"
     ], testEnv);
@@ -5021,6 +5785,7 @@ test("only the uncertain cross-store owner can resolve its terminal fence", () =
       firstParsed.conversation.conversation_id,
       "--store-dir",
       firstStoreDir,
+      ...nativeIdentityArgs,
       "--reason",
       "stale owner cannot resolve the replacement generation"
     ], testEnv);
@@ -5047,6 +5812,7 @@ test("only the uncertain cross-store owner can resolve its terminal fence", () =
       secondParsed.conversation.conversation_id,
       "--store-dir",
       secondStoreDir,
+      ...nativeIdentityArgs,
       "--reason",
       "operator inspected the uncertain terminal dispatch"
     ], testEnv);
@@ -5415,6 +6181,12 @@ test("terminal bridge monitor trusts matching task_complete despite stale workin
   const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
   const screenPath = path.join(tempDir, "screen.txt");
   const workspace = path.join(tempDir, "workspace");
+  const nativeIdentityArgs = codexNativeIdentityArgs({
+    pid: 33389,
+    sessionId,
+    processUuid: "codex-monitor-task-complete-process",
+    rolloutPath
+  });
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
@@ -5446,6 +6218,7 @@ test("terminal bridge monitor trusts matching task_complete despite stale workin
       "agent:channel:original",
       "--openclaw-bin",
       openclawBin,
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
@@ -5524,7 +6297,8 @@ test("terminal bridge monitor trusts matching task_complete despite stale workin
         ].join("\n")
       }),
       "--rollouts-json",
-      JSON.stringify({ [rolloutPath]: rollout })
+      JSON.stringify({ [rolloutPath]: rollout }),
+      ...nativeIdentityArgs
     ]);
 
     assert.equal(monitored.status, 0, monitored.stderr || monitored.stdout);
@@ -5557,7 +6331,8 @@ test("terminal bridge monitor trusts matching task_complete despite stale workin
       "--expected-approval-fingerprint",
       "stale-fingerprint",
       "--store-dir",
-      storeDir
+      storeDir,
+      ...nativeIdentityArgs
     ]);
     assert.notEqual(staleApprove.status, 0);
     assert.match(staleApprove.stderr, /conversation is idle/u);
@@ -5566,7 +6341,8 @@ test("terminal bridge monitor trusts matching task_complete despite stale workin
       "--conversation",
       parsed.conversation.conversation_id,
       "--store-dir",
-      storeDir
+      storeDir,
+      ...nativeIdentityArgs
     ]);
     assert.notEqual(staleCancel.status, 0);
     assert.match(staleCancel.stderr, /conversation is idle/u);
@@ -5579,13 +6355,14 @@ test("terminal bridge monitor trusts matching task_complete despite stale workin
 
     const followUp = runAgentCli([
       "send",
-      "--conversation",
-      parsed.conversation.conversation_id,
+      "--session",
+      parsed.conversation.session_id,
       "--message",
       "Now summarize the release notes",
       "--background",
       "--store-dir",
       storeDir,
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
@@ -5594,6 +6371,12 @@ test("terminal bridge monitor trusts matching task_complete despite stale workin
     const followUpParsed = JSON.parse(followUp.stdout);
     assert.equal(followUpParsed.delivered, true);
     assert.equal(followUpParsed.conversation.status, "waiting_for_agent");
+    assert.equal(followUpParsed.session_id, parsed.conversation.session_id);
+    assert.notEqual(followUpParsed.turn_id, parsed.conversation.turn_id);
+    assert.notEqual(
+      followUpParsed.conversation.state_path,
+      parsed.conversation.state_path
+    );
     assert.equal(
       readJsonLines(tmuxCallsPath)
         .filter((call) =>
@@ -5628,6 +6411,12 @@ test("terminal bridge searches all same-cwd rollouts for the matching task_compl
   const correctRolloutPath = path.join(tempDir, "correct.jsonl");
   const newerRolloutPath = path.join(tempDir, "newer.jsonl");
   const newestRolloutPath = path.join(tempDir, "newest.jsonl");
+  const nativeIdentityArgs = codexNativeIdentityArgs({
+    pid: 33389,
+    sessionId: correctSessionId,
+    processUuid: "codex-cwd-rollout-process",
+    rolloutPath: correctRolloutPath
+  });
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
@@ -5659,6 +6448,7 @@ test("terminal bridge searches all same-cwd rollouts for the matching task_compl
       "agent:channel:original",
       "--openclaw-bin",
       openclawBin,
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
@@ -5775,7 +6565,8 @@ test("terminal bridge searches all same-cwd rollouts for the matching task_compl
         [newestRolloutPath]: unrelatedRollout("Newest unrelated task", "turn-newest"),
         [newerRolloutPath]: unrelatedRollout("Newer unrelated task", "turn-newer"),
         [correctRolloutPath]: completedRollout
-      })
+      }),
+      ...nativeIdentityArgs
     ]);
 
     assert.equal(monitored.status, 0, monitored.stderr || monitored.stdout);
@@ -5800,6 +6591,12 @@ test("terminal bridge monitor rejects low-confidence assistant and task_complete
   const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
   const screenPath = path.join(tempDir, "screen.txt");
   const workspace = path.join(tempDir, "workspace");
+  const nativeIdentityArgs = codexNativeIdentityArgs({
+    pid: 33389,
+    sessionId,
+    processUuid: "codex-low-confidence-process",
+    rolloutPath
+  });
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
@@ -5830,6 +6627,7 @@ test("terminal bridge monitor rejects low-confidence assistant and task_complete
       "agent:channel:original",
       "--openclaw-bin",
       openclawBin,
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
@@ -5899,7 +6697,8 @@ test("terminal bridge monitor rejects low-confidence assistant and task_complete
         "codex-work:0.1": "› \n"
       }),
       "--rollouts-json",
-      JSON.stringify({ [rolloutPath]: rollout })
+      JSON.stringify({ [rolloutPath]: rollout }),
+      ...nativeIdentityArgs
     ]);
 
     assert.equal(monitored.status, 0, monitored.stderr || monitored.stdout);
@@ -5933,6 +6732,12 @@ test("terminal bridge working markers extend inactivity until the hard lifetime"
     "",
     "› Steer the current task"
   ].join("\n");
+  const nativeIdentityArgs = codexNativeIdentityArgs({
+    pid: 33389,
+    sessionId,
+    processUuid: "codex-working-timeout-process",
+    rolloutPath: path.join(tempDir, "codex-working-timeout-rollout.jsonl")
+  });
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
@@ -5967,6 +6772,7 @@ test("terminal bridge working markers extend inactivity until the hard lifetime"
       "0.001",
       "--agent-hard-timeout-minutes",
       "0.004",
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
@@ -6013,7 +6819,8 @@ test("terminal bridge working markers extend inactivity until the hard lifetime"
         currentPath: workspace
       })]),
       "--terminal-screens-json",
-      JSON.stringify({ "codex-work:0.1": workingScreen })
+      JSON.stringify({ "codex-work:0.1": workingScreen }),
+      ...nativeIdentityArgs
     ]);
 
     assert.equal(monitored.status, 0, monitored.stderr || monitored.stdout);
@@ -6322,6 +7129,12 @@ test("terminal bridge monitor singleton rejects a live owner and reclaims a dead
   const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
   const screenPath = path.join(tempDir, "screen.txt");
   const workspace = path.join(tempDir, "workspace");
+  const nativeIdentityArgs = codexNativeIdentityArgs({
+    pid: 33389,
+    sessionId,
+    processUuid: "codex-monitor-singleton-process",
+    rolloutPath: path.join(tempDir, "codex-monitor-singleton-rollout.jsonl")
+  });
   const childProcesses: Array<ReturnType<typeof spawn>> = [];
 
   try {
@@ -6361,6 +7174,7 @@ test("terminal bridge monitor singleton rejects a live owner and reclaims a dead
       "60",
       "--agent-hard-timeout-minutes",
       "120",
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], testEnv);
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
@@ -6380,7 +7194,8 @@ test("terminal bridge monitor singleton rejects a live owner and reclaims a dead
       "--agent-timeout-minutes",
       "60",
       "--agent-hard-timeout-minutes",
-      "120"
+      "120",
+      ...nativeIdentityArgs
     ];
     const sendKeysBefore = readJsonLines(tmuxCallsPath)
       .filter((call) => call.args[0] === "send-keys").length;
@@ -6412,7 +7227,14 @@ test("terminal bridge monitor singleton rejects a live owner and reclaims a dead
       () => eventCount(logPath, "terminal_bridge_monitor_started") === 2,
       "replacement terminal bridge monitor to reclaim the stale lock"
     );
-    const closed = runAgentCli(["close", "--state", statePath, "--reason", "singleton test cleanup"]);
+    const closed = runAgentCli([
+      "close",
+      "--state",
+      statePath,
+      ...nativeIdentityArgs,
+      "--reason",
+      "singleton test cleanup"
+    ]);
     assert.equal(closed.status, 0, closed.stderr || closed.stdout);
     await waitForChildExit(replacement);
     assert.equal(
@@ -6477,7 +7299,8 @@ test("terminal bridge monitor singleton rejects a live owner and reclaims a dead
       "--monitor-handoff-poll-interval-ms",
       "20",
       "--monitor-poll-interval-ms",
-      "20"
+      "20",
+      ...nativeIdentityArgs
     ];
     const handoff = spawnAgentCliCaptured(handoffArgs, testEnv);
     childProcesses.push(handoff.child);
@@ -6531,6 +7354,7 @@ test("terminal bridge monitor singleton rejects a live owner and reclaims a dead
       "close",
       "--state",
       handoffStatePath,
+      ...nativeIdentityArgs,
       "--reason",
       "handoff transient test cleanup"
     ], testEnv);
@@ -6606,6 +7430,12 @@ test("reconcile-monitors launches only recoverable waiting terminal bridges", as
   const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
   const screenPath = path.join(tempDir, "screen.txt");
   const workspace = path.join(tempDir, "workspace");
+  const nativeIdentityArgs = codexNativeIdentityArgs({
+    pid: 33389,
+    sessionId,
+    processUuid: "codex-monitor-reconcile-process",
+    rolloutPath: path.join(tempDir, "codex-monitor-reconcile-rollout.jsonl")
+  });
   let monitorPid: number | undefined;
 
   try {
@@ -6643,6 +7473,7 @@ test("reconcile-monitors launches only recoverable waiting terminal bridges", as
       "1",
       "--agent-hard-timeout-minutes",
       "2",
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], testEnv);
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
@@ -6703,7 +7534,8 @@ test("reconcile-monitors launches only recoverable waiting terminal bridges", as
       "--store-dir",
       storeDir,
       "--monitor-poll-interval-ms",
-      "20"
+      "20",
+      ...nativeIdentityArgs
     ], testEnv);
     assert.equal(reconciled.status, 0, reconciled.stderr || reconciled.stdout);
     const parsed = JSON.parse(reconciled.stdout);
@@ -6846,6 +7678,12 @@ test("terminal bridge monitor callbacks when the completed prompt has scrolled o
   const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
   const screenPath = path.join(tempDir, "screen.txt");
   const workspace = path.join(tempDir, "workspace");
+  const nativeIdentityArgs = codexNativeIdentityArgs({
+    pid: 33389,
+    sessionId,
+    processUuid: "codex-screen-completion-process",
+    rolloutPath: path.join(tempDir, "codex-screen-completion-rollout.jsonl")
+  });
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
@@ -6878,6 +7716,7 @@ test("terminal bridge monitor callbacks when the completed prompt has scrolled o
       "agent:channel:original",
       "--openclaw-bin",
       openclawBin,
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
@@ -6941,7 +7780,8 @@ test("terminal bridge monitor callbacks when the completed prompt has scrolled o
       "--terminal-screens-json",
       JSON.stringify({
         "my-work:0.0": fs.readFileSync(screenPath, "utf8")
-      })
+      }),
+      ...nativeIdentityArgs
     ]);
 
     assert.equal(monitored.status, 0, monitored.stderr || monitored.stdout);
@@ -6972,6 +7812,12 @@ test("terminal approval notification releases the state lock during callback del
   const openclawGatePath = path.join(tempDir, "openclaw-gate");
   const screenPath = path.join(tempDir, "screen.txt");
   const terminalTarget = "codex-approval-lock:0.1";
+  const nativeIdentityArgs = codexNativeIdentityArgs({
+    pid: 33389,
+    sessionId,
+    processUuid: "codex-approval-close-race-process",
+    rolloutPath: path.join(tempDir, "codex-approval-close-race-rollout.jsonl")
+  });
   const approvalScreen = [
     "  Would you like to run the following command?",
     "",
@@ -7016,6 +7862,7 @@ test("terminal approval notification releases the state lock during callback del
       "agent:channel:original",
       "--openclaw-bin",
       openclawBin,
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], testEnv);
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
@@ -7054,7 +7901,8 @@ test("terminal approval notification releases the state lock during callback del
         currentPath: workspace
       })]),
       "--terminal-screens-json",
-      JSON.stringify({ [terminalTarget]: approvalScreen })
+      JSON.stringify({ [terminalTarget]: approvalScreen }),
+      ...nativeIdentityArgs
     ], {
       ...testEnv,
       AKK_TEST_OPENCLAW_GATE_PATH: openclawGatePath
@@ -7083,6 +7931,7 @@ test("terminal approval notification releases the state lock during callback del
       conversationId,
       "--store-dir",
       storeDir,
+      ...nativeIdentityArgs,
       "--reason",
       "closed while approval callback was in flight"
     ], testEnv);
@@ -7135,6 +7984,12 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
   const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
   const screenPath = path.join(tempDir, "screen.txt");
   const workspace = path.join(tempDir, "workspace");
+  const nativeIdentityArgs = codexNativeIdentityArgs({
+    pid: 33389,
+    sessionId,
+    processUuid: "codex-approval-monitor-process",
+    rolloutPath: path.join(tempDir, "codex-approval-monitor-rollout.jsonl")
+  });
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
@@ -7176,6 +8031,7 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
       "agent:channel:original",
       "--openclaw-bin",
       openclawBin,
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
@@ -7218,7 +8074,8 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
       "--terminal-screens-json",
       JSON.stringify({
         "codex-work:0.1": approvalScreen
-      })
+      }),
+      ...nativeIdentityArgs
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     });
@@ -7329,7 +8186,8 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
         currentPath: workspace
       })]),
       "--terminal-screens-json",
-      JSON.stringify({ "codex-work:0.1": approvalScreen })
+      JSON.stringify({ "codex-work:0.1": approvalScreen }),
+      ...nativeIdentityArgs
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     });
@@ -7415,7 +8273,8 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
         currentPath: workspace
       })]),
       "--terminal-screens-json",
-      JSON.stringify({ "codex-work:0.1": approvalScreen })
+      JSON.stringify({ "codex-work:0.1": approvalScreen }),
+      ...nativeIdentityArgs
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     });
@@ -7512,7 +8371,8 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
         currentPath: workspace
       })]),
       "--terminal-screens-json",
-      JSON.stringify({ "codex-work:0.1": approvalScreen })
+      JSON.stringify({ "codex-work:0.1": approvalScreen }),
+      ...nativeIdentityArgs
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     });
@@ -7640,7 +8500,8 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
         currentPath: workspace
       })]),
       "--terminal-screens-json",
-      JSON.stringify({ "codex-work:0.1": approvalScreen })
+      JSON.stringify({ "codex-work:0.1": approvalScreen }),
+      ...nativeIdentityArgs
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     });
@@ -7762,7 +8623,8 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
         currentPath: workspace
       })]),
       "--terminal-screens-json",
-      JSON.stringify({ "codex-work:0.1": approvalScreen })
+      JSON.stringify({ "codex-work:0.1": approvalScreen }),
+      ...nativeIdentityArgs
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     });
@@ -7782,6 +8644,7 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
       "approve",
       "--state",
       statePath,
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
@@ -7809,6 +8672,7 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
       "test-rule",
       "--policy-fingerprint",
       "policy-123",
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
@@ -7842,6 +8706,7 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
       "test-rule",
       "--auto-approval-policy-json",
       JSON.stringify(forgedCallbackPolicy),
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
@@ -7884,6 +8749,7 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
       "test-rule",
       "--auto-approval-policy-json",
       JSON.stringify(safePolicy),
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
@@ -8194,6 +9060,30 @@ function claudeAgentRow(pid: number, sessionId: string, workspace: string) {
   };
 }
 
+function codexNativeIdentityArgs(options: {
+  pid: number;
+  sessionId: string;
+  processUuid: string;
+  rolloutPath: string;
+}): string[] {
+  return [
+    "--codex-active-session-identities-json",
+    JSON.stringify({
+      [options.pid]: {
+        sessionId: options.sessionId,
+        processUuid: options.processUuid,
+        processBirth: options.processUuid,
+        rollout: {
+          fd: "12r",
+          device: "1",
+          inode: "2",
+          path: options.rolloutPath
+        }
+      }
+    })
+  ];
+}
+
 function agentCliTestEnv(
   args: string[],
   env: NodeJS.ProcessEnv
@@ -8408,6 +9298,9 @@ function writeConversationClone(
   const cloned = mutate({
     ...sourceState,
     conversation_id: conversationId,
+    ...(sourceState.session_id && sourceState.turn_id
+      ? { turn_id: conversationId }
+      : {}),
     store_dir: storeDir,
     conversation_dir: conversationDir,
     state_path: statePath,

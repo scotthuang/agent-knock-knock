@@ -66,7 +66,17 @@ The bare task works when exactly one eligible idle coding-agent pane exists acro
 
 Success returns a managed turn and, when the work finishes, its result. The same tmux pane remains available for direct human control; reattach with `tmux attach -t akk-work`.
 
-`/akk list` keeps that physical pane as the primary resource: it appears once in `terminals[]` with live `process_state` and `activity_state`. AKK places the active turn under `managed.current_turn`, or the newest retained context under `managed.recent_turn`; retained turns do not occupy or hide the pane. Use a terminal's `send` action for new work and a managed turn's `follow_up` action to continue it.
+`/akk list` keeps that physical pane as the primary resource: it appears once in `terminals[]` with live `process_state` and `activity_state`. Its managed context follows terminal → native coding-agent session → AKK `session_id` → Turns. AKK places the active Turn under `managed.current_turn`, or the newest retained Turn under `managed.recent_turn`; retained Turns do not occupy or hide the pane.
+
+For another request in the same coding-agent context, use the listed `send` action with its prefilled authoritative `session_id`. Every accepted ordinary send creates a new `turn_id`; a completed Turn is history, not the destination of the next send. Human-friendly selectors such as `codex`, `only`, or `@a1b2c3d4` only help `/akk list` resolve that authoritative session.
+
+If the coding agent asks a question and the active Turn becomes `waiting_for_openclaw`, use the listed `respond` action with its prefilled `turn_id`, or the equivalent form:
+
+```text
+/akk respond <turn-selector>: <answer>
+```
+
+This answer stays in the same Turn. Managed status, approval, cancellation, renewal, callback retry, and close also use the exact `turn_id`. Only an unmanaged raw-terminal row's own returned status or recovery action may use its prefilled compatibility selector; never construct one. Starting a new native context, clearing it, or resuming an older native session is outside ordinary send and Turn creation.
 
 ## Optional: Enable natural-language routing
 
@@ -100,4 +110,4 @@ Do not run `install-openclaw` after a ClawHub install. The two commands are alte
 
 ## Permissions and monitoring
 
-AKK keeps the coding agent's own permission settings. Trusted, exact `autoApprove` rules may approve a supported prompt; each rule can authorize multiple canonical roots through `autoApprove.rules[].workspaces`. Those entries are the only workspace boundary for automatic approval and do not limit pane discovery or manual control. Everything else remains manual. If monitoring stalls while the same task is still live, inspect `/akk status only` and use `/akk renew only <minutes>` to resume monitoring without sending terminal input.
+AKK keeps the coding agent's own permission settings. Trusted, exact `autoApprove` rules may approve a supported prompt; each rule can authorize multiple canonical roots through `autoApprove.rules[].workspaces`. Those entries are the only workspace boundary for automatic approval and do not limit pane discovery or manual control. Everything else remains manual. If monitoring stalls while the same Turn is still live, inspect `/akk status only` and use `/akk renew only <minutes>` to resume monitoring without sending terminal input.

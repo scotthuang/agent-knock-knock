@@ -6,6 +6,7 @@ import {
   akkUsageText,
   buildAkkCommandCliArgs,
   formatAkkListCommandResult,
+  formatAkkRespondCommandResult,
   parseAkkCommand,
   resolvePluginStoreDir
 } from "../src/openclaw-plugin-helpers.js";
@@ -25,7 +26,7 @@ test("selector-first /akk messages target an existing tmux session", () => {
     parseAkkCommand("claude: review the API"),
     {
       action: "send",
-      conversationId: "claude",
+      selector: "claude",
       message: "review the API"
     }
   );
@@ -33,7 +34,7 @@ test("selector-first /akk messages target an existing tmux session", () => {
     parseAkkCommand("@a1b2c3d4: check the diff"),
     {
       action: "send",
-      conversationId: "@a1b2c3d4",
+      selector: "@a1b2c3d4",
       message: "check the diff"
     }
   );
@@ -45,9 +46,17 @@ test("selector-first /akk messages target an existing tmux session", () => {
 
 test("/akk help lists the supported tmux executors", () => {
   const usage = akkUsageText();
-  assert.match(usage, /\/akk codex: <task>/);
-  assert.match(usage, /\/akk claude: <task>/);
+  assert.match(usage, /\/akk <request>/);
+  assert.match(usage, /\/akk codex: <request>/);
+  assert.match(usage, /\/akk claude: <request>/);
+  assert.match(usage, /\/akk <session-selector>: <message>/);
   assert.match(usage, /\/akk doctor/);
+  assert.match(usage, /\/akk respond <turn-selector>: <answer>/);
+  assert.match(usage, /\/akk approve <turn-selector>/);
+  assert.doesNotMatch(
+    usage,
+    /\/akk (?:status|respond|approve|cancel)[^\n]*session-selector/u
+  );
   assert.doesNotMatch(usage, /\/akk (?:describe|send|renew|retry-callback|close)\b/u);
 });
 
@@ -87,6 +96,7 @@ test("runtime command arguments never include the removed top-level workspace", 
     "list",
     "status conversation-1",
     "@a1b2c3d4: continue",
+    "respond conversation-1: use JSON",
     "approve conversation-1 --expected-approval-fingerprint approval-1",
     "cancel conversation-1",
     "renew conversation-1 20",
@@ -103,12 +113,12 @@ test("runtime command arguments never include the removed top-level workspace", 
   }
 });
 
-test("/akk accepts selector-first follow-ups without long ids", () => {
+test("/akk accepts selector-first sends without treating a Turn as the target", () => {
   assert.deepEqual(
     parseAkkCommand("latest: continue with the tests"),
     {
       action: "send",
-      conversationId: "latest",
+      selector: "latest",
       message: "continue with the tests"
     }
   );
@@ -116,13 +126,13 @@ test("/akk accepts selector-first follow-ups without long ids", () => {
     parseAkkCommand("codex: review the diff"),
     {
       action: "send",
-      conversationId: "codex",
+      selector: "codex",
       message: "review the diff"
     }
   );
   assert.deepEqual(parseAkkCommand("status"), {
     action: "status",
-    conversationId: undefined
+    turnId: undefined
   });
   assert.deepEqual(
     buildAkkCommandCliArgs(
@@ -141,6 +151,87 @@ test("/akk accepts selector-first follow-ups without long ids", () => {
   );
 });
 
+test("/akk respond keeps an answer inside one exact in-flight Turn", () => {
+  assert.deepEqual(
+    parseAkkCommand("respond @a1b2c3d4: use the existing JSON format"),
+    {
+      action: "respond",
+      turnId: "@a1b2c3d4",
+      message: "use the existing JSON format"
+    }
+  );
+  assert.deepEqual(
+    buildAkkCommandCliArgs(
+      parseAkkCommand("respond turn-123: use the existing JSON format"),
+      { storeDir: "/private/akk-store" }
+    ),
+    [
+      "respond",
+      "--turn",
+      "turn-123",
+      "--message",
+      "use the existing JSON format",
+      "--store-dir",
+      "/private/akk-store"
+    ]
+  );
+  assert.throws(
+    () => parseAkkCommand("respond @a1b2c3d4"),
+    /Usage: \/akk respond <turn-selector>: <answer>/u
+  );
+  assert.throws(
+    () => parseAkkCommand("respond @a1b2c3d4:"),
+    /Usage: \/akk respond <turn-selector>: <answer>/u
+  );
+  assert.throws(
+    () => parseAkkCommand("reply @a1b2c3d4: answer"),
+    /use \/akk respond/u
+  );
+
+  const submitted = formatAkkRespondCommandResult({
+    submission_outcome: "submitted",
+    session_id: "session-respond",
+    turn_id: "turn-respond",
+    status: "async_pending"
+  });
+  assert.equal(submitted.isError, false);
+  assert.match(submitted.text, /^AKK response sent\.$/mu);
+  assert.match(submitted.text, /^session: session-respond$/mu);
+  assert.match(submitted.text, /^turn: turn-respond$/mu);
+});
+
+test("/akk respond reports an uncertain submission and forbids automatic retry", () => {
+  const formatted = formatAkkRespondCommandResult({
+    submission_outcome: "uncertain",
+    session_id: "session-uncertain",
+    turn_id: "turn-uncertain",
+    status: "submission_uncertain"
+  });
+
+  assert.equal(formatted.isError, true);
+  assert.match(formatted.text, /may have delivered the response/u);
+  assert.match(formatted.text, /submission outcome is uncertain/u);
+  assert.match(formatted.text, /do not retry automatically/u);
+  assert.doesNotMatch(formatted.text, /^AKK response sent\.$/mu);
+});
+
+test("/akk respond reports an aborted submission as unsent and safe to retry", () => {
+  const formatted = formatAkkRespondCommandResult({
+    submission_outcome: "aborted",
+    conversation: {
+      conversation_id: "legacy-aborted-turn",
+      status: "waiting_for_openclaw"
+    }
+  });
+
+  assert.equal(formatted.isError, true);
+  assert.match(formatted.text, /^AKK response was not sent\.$/mu);
+  assert.match(formatted.text, /safe to retry this response/u);
+  assert.match(formatted.text, /^session: legacy-aborted-turn$/mu);
+  assert.match(formatted.text, /^turn: legacy-aborted-turn$/mu);
+  assert.doesNotMatch(formatted.text, /^AKK response sent\.$/mu);
+});
+
 test("/akk stateful commands consistently use the trusted plugin store", () => {
   const config = {
     workspace: "/legacy/project",
@@ -151,6 +242,7 @@ test("/akk stateful commands consistently use the trusted plugin store", () => {
     "list",
     "status conversation-1",
     "@a1b2c3d4: continue",
+    "respond conversation-1: use JSON",
     "approve conversation-1 --expected-approval-fingerprint approval-1",
     "cancel conversation-1",
     "renew conversation-1 20",
@@ -189,6 +281,8 @@ test("/akk terminal send configures a real OpenClaw callback", () => {
   assert.deepEqual(optionValue(args, "--openclaw-session"), "agent:chat:current");
   assert.deepEqual(optionValue(args, "--openclaw-bin"), "/opt/openclaw/bin/openclaw");
   assert.equal(optionValue(args, "--workspace"), undefined);
+  assert.deepEqual(optionValue(args, "--session"), "@a1b2c3d4");
+  assert.equal(optionValue(args, "--conversation"), undefined);
   assert.deepEqual(optionValue(args, "--agent-timeout-minutes"), "90");
   assert.deepEqual(optionValue(args, "--agent-hard-timeout-minutes"), "600");
   assert.equal(args.includes("--background"), true);
@@ -211,7 +305,7 @@ test("/akk approve requires and forwards an exact approval fingerprint", () => {
     ),
     [
       "approve",
-      "--conversation",
+      "--turn",
       "conversation-1",
       "--expected-approval-fingerprint",
       "approval-1",
@@ -236,13 +330,18 @@ test("/akk list renders each live terminal once with its managed-turn context", 
       activity_state: "idle",
       terminal_control: { target: "work:0.0" },
       managed: {
+        session_id: "session-managed-long-id",
+        session_short_ref: "@session1",
         current_turn: null,
         recent_turn: {
           conversation_id: "managed-1",
           short_ref: "@managed1",
           agent: "codex",
           lifecycle_state: "idle",
-          request: "Review the repository"
+          request: "Review the repository",
+          available_actions: {
+            status: { arguments: { turn_id: "managed-1" } }
+          }
         },
         turn_count: 3,
         hidden_turn_count: 2
@@ -252,7 +351,9 @@ test("/akk list renders each live terminal once with its managed-turn context", 
 
   assert.match(text, /AKK terminals \(1 live, 0 unavailable managed turns\)/u);
   assert.match(text, /@terminal1 \| codex \| active \| idle \| tmux work:0\.0/u);
+  assert.match(text, /AKK session: @session1/u);
   assert.match(text, /recent turn: @managed1 \| codex \| idle \| Review the repository/u);
+  assert.match(text, /recent turn actions: status/u);
   assert.match(text, /older managed turns: 2/u);
   assert.doesNotMatch(text, /managed-1/u);
   assert.doesNotMatch(text, /delegated|terminal-controlled/u);
@@ -315,12 +416,19 @@ test("/akk list renders current, expanded history, and unavailable managed turns
       agent: "claude",
       process_state: "active",
       managed: {
+        session_id: "session-current-long-id",
+        session_short_ref: "@session2",
         current_turn: {
           conversation_id: "managed-current-long-id",
           short_ref: "@current123",
           agent: "claude",
           lifecycle_state: "working",
-          request: "Implement the fix"
+          request: "Implement the fix",
+          available_actions: {
+            follow_up: { arguments: { selector: "managed-current-long-id" } },
+            respond: { arguments: { turn_id: "managed-current-long-id" } },
+            status: { arguments: { turn_id: "managed-current-long-id" } }
+          }
         },
         recent_turn: null,
         history: [{
@@ -344,10 +452,13 @@ test("/akk list renders current, expanded history, and unavailable managed turns
   });
 
   assert.match(text, /AKK terminals \(1 live, 1 unavailable managed turns\)/u);
+  assert.match(text, /AKK session: @session2/u);
   assert.match(text, /current turn: @current123/u);
+  assert.match(text, /current turn actions: respond, status/u);
   assert.match(text, /history: @history123/u);
   assert.match(text, /unavailable managed turns:\n- @unavail123/u);
   assert.doesNotMatch(text, /managed-(?:current|history|unavailable)-long-id/u);
+  assert.doesNotMatch(text, /follow_up/u);
 });
 
 test("/akk list reports an empty terminal-first view", () => {

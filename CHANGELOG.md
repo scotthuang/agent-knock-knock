@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.9.0 - 2026-08-05
+
+### Added
+
+- Add a durable AKK `session_id` for the continuing native coding-agent context and a unique `turn_id` for every accepted terminal dispatch.
+- Add an explicit `respond(turn_id, answer)` path for questions and blocked requests that must continue the same in-flight turn.
+
+### Changed
+
+- Make ordinary sends to an existing AKK Session target its `session_id` and create a new Turn, while managed status, approval, cancellation, retry, renewal, and close operations target an exact `turn_id`.
+- Keep first attach and raw-terminal control compatibility narrow and list-driven: an unmanaged row may prefill its own `selector` for initial send or `conversation_id` for an advertised raw status, approval, cancellation, or orphan-close action; callers must never construct, guess, or reuse either value.
+- Publish the v4 list/action contract with terminal → session → turn history, and include both identities in messages, callbacks, delivery ledgers, and recovery output.
+- Treat existing `conversation_id` values as legacy Store aliases; new records keep `conversation_id` equal to `turn_id`, while legacy records receive in-memory identity fallbacks.
+- Upgrade the Store writer protocol to v2 and atomically migrate exact v1 manifests on the first mutation while preserving legacy Turn records.
+
+### Security
+
+- Fail closed when native Codex or Claude Code session evidence is unavailable or changes, when persisted identity fields conflict, or when callback identity sources disagree.
+- Fence terminal receipts and late callbacks to the exact Store, Session, Turn, message, and native process incarnation so stale work cannot cross execution boundaries.
+
 ## 0.8.1 - 2026-08-03
 
 ### Fixed

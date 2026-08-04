@@ -26,15 +26,20 @@ test("OpenClaw contract removes the top-level workspace and keeps rule-scoped ap
   assert.equal(manifest.configSchema.properties.agentHardTimeoutMinutes.exclusiveMinimum, 0);
   assert.equal(manifest.contracts.tools.includes("agent_knock_knock_renew"), true);
   assert.equal(manifest.toolMetadata.agent_knock_knock_renew.optional, true);
+  assert.equal(manifest.contracts.tools.includes("agent_knock_knock_respond"), true);
+  assert.equal(manifest.toolMetadata.agent_knock_knock_respond.optional, true);
 
   const pluginSource = fs.readFileSync(path.join(packageRoot, "src", "openclaw-plugin.ts"), "utf8");
   assert.match(pluginSource, /const sendParameters =[\s\S]*?agentTimeoutMinutes:[\s\S]*?agentHardTimeoutMinutes:/u);
-  assert.match(pluginSource, /const approveParameters =[\s\S]*?required: \["conversation_id", "expected_approval_fingerprint"\]/u);
+  assert.match(
+    pluginSource,
+    /const approveParameters =[\s\S]*?required: \["expected_approval_fingerprint"\][\s\S]*?anyOf: \[[\s\S]*?required: \["turn_id"\][\s\S]*?required: \["conversation_id"\]/u
+  );
   assert.match(pluginSource, /--expected-approval-fingerprint/u);
   assert.match(pluginSource, /name: "agent_knock_knock_renew"/u);
   assert.match(
     pluginSource,
-    /Claude Code uses no Hooks:[\s\S]*?exact one-time Bash permission screen[\s\S]*?current managed turn[\s\S]*?trusted default-disabled plugin configuration[\s\S]*?auto-approve[\s\S]*?durable completion[\s\S]*?local Claude transcript/u
+    /Managed approval uses exact turn_id[\s\S]*?Claude Code uses no Hooks:[\s\S]*?exact one-time Bash permission screen[\s\S]*?trusted default-disabled plugin configuration[\s\S]*?auto-approve[\s\S]*?durable completion[\s\S]*?local Claude transcript/u
   );
   assert.doesNotMatch(pluginSource, /structured one-time Hook|pending structured permission/u);
   assert.doesNotMatch(pluginSource, /install-claude-hooks/u);

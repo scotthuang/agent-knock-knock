@@ -53,7 +53,7 @@ The second command proves that AKK can find the one eligible idle pane, revalida
 
 **Delegate from anywhere.** Use any configured OpenClaw channel to hand work to a local coding agent while you are away from your computer. AKK reports when the agent needs attention or finishes, and you can continue from chat or the shared terminal.
 
-**Orchestrate specialist agents.** OpenClaw can coordinate handoffs: Claude Code can plan, Codex can implement, and Claude Code can review. At any point, you can take over the live terminal, keep working yourself, then hand the same task back to OpenClaw with its context intact.
+**Orchestrate specialist agents.** OpenClaw can coordinate handoffs: Claude Code can plan, Codex can implement, and Claude Code can review. At any point, you can take over the live terminal, keep working yourself, then hand the same native session back to OpenClaw with its context intact.
 
 ![Agent Knock Knock cover: OpenClaw knocking on coding agents' door](docs/assets/agent-knock-knock-cover.jpg)
 
@@ -61,13 +61,30 @@ The second command proves that AKK can find the one eligible idle pane, revalida
 
 AKK connects OpenClaw to Codex or Claude Code already running inside tmux:
 
-1. OpenClaw sends a task or follow-up through the AKK plugin.
-2. AKK finds an eligible agent pane and writes only the user-facing task into that terminal.
-3. AKK monitors the same pane for reliable approval, completion, cancellation, and failure evidence.
-4. AKK reports the result to the originating OpenClaw conversation.
-5. A human can attach to the same tmux session at any time and continue directly.
+1. OpenClaw selects an AKK session and sends the next user-facing request.
+2. AKK verifies the bound agent pane, creates a new Turn, and writes only that request into the terminal.
+3. AKK monitors the same pane for reliable approval, completion, cancellation, and failure evidence correlated to that Turn.
+4. AKK reports the result, `session_id`, and `turn_id` to the originating OpenClaw conversation.
+5. A human can attach to the same tmux terminal at any time and continue directly.
 
 AKK is local-first. It has no hosted control plane or telemetry and does not change the coding agent's configured permission mode.
+
+### Terminal, native session, AKK session, and Turn
+
+AKK keeps four identities separate:
+
+```text
+tmux terminal / process incarnation
+└─ native Codex or Claude Code session
+   └─ AKK session (session_id)
+      ├─ Turn 1 (turn_id)
+      ├─ Turn 2 (turn_id)
+      └─ Turn 3 (turn_id)
+```
+
+Once an AKK session exists, an ordinary `send(session_id, request)` creates a new `turn_id` while preserving the native coding-agent context. On first attach only, an unmanaged raw-terminal row may instead offer `send` with that row's prefilled `selector`; AKK binds the verified native context to an AKK session before accepting the new Turn. Never construct, guess, or copy that selector from another row. The `turn_id` is not a destination for later ordinary sends; it is the exact identity used for status, approval, cancellation, renewal, callback retry, close, and callback correlation. If a Turn is `waiting_for_openclaw`, `respond(turn_id, answer)` supplies the answer inside that same Turn instead of creating another one.
+
+Human-friendly selectors such as `only`, `codex`, `claude`, a terminal ID, or `@short-ref` remain a discovery layer. When an AKK session already exists, `AKK list` pre-fills its authoritative `session_id` for send and the exact `turn_id` for managed controls. A first-attach send from an unmanaged raw-terminal row uses only that row's prefilled `selector`. The same row may advertise a raw status, approval, cancellation, or orphan-close action with its own prefilled `conversation_id` compatibility selector. Use only the exact returned action and never construct, guess, or reuse either compatibility selector. Native clear/new/resume operations are separate lifecycle features and are not performed as part of ordinary Turn creation.
 
 ## Optional: Natural-Language Delegation
 
@@ -194,16 +211,17 @@ The core command surface is intentionally small:
 /akk <selector>: <message>
 /akk list
 /akk status [only|latest|codex|claude|@short-ref]
-/akk cancel <session-selector>
+/akk respond <turn-selector>: <answer>
+/akk cancel <turn-selector>
 ```
 
 `/akk list` performs a controlled reconciliation across managed turns, and `/akk status` limits reconciliation to the selected turn. This can close records whose idle retention has elapsed and restore eligible missing monitors, but it does not send terminal input or retry callback delivery. Standalone shell queries are read-only unless `--reconcile` is explicitly passed, and resolving a selector never changes turn state.
 
-Selectors fail closed: `only` works only with one actionable target, `latest` requires a unique newest target, and `codex` or `claude` must identify exactly one eligible pane. `AKK list` shows stable short references while JSON output retains the authoritative full IDs. Before every terminal operation, AKK revalidates the expected agent PID and tmux pane identity, then confirms that the process and pane working directories still match; every send also revalidates the idle prompt immediately before typing.
+Selectors fail closed: `only` works only with one actionable target, `latest` requires a unique newest target, and `codex` or `claude` must identify exactly one eligible pane. These names and `@short-ref` are human-facing resolution inputs; managed JSON actions contain the authoritative full `session_id` or `turn_id`. For first attach, an unmanaged raw-terminal row's send action may instead contain its own prefilled `selector`; its advertised raw controls may contain that row's prefilled `conversation_id`. Neither compatibility selector may be guessed, constructed, copied, or reused elsewhere. Before every terminal operation, AKK revalidates the expected agent PID and tmux pane identity, then confirms that the process and pane working directories still match; every send also revalidates the idle prompt immediately before typing.
 
-For natural-language tool use, `agent_knock_knock_list` is terminal-first. Each live pane appears exactly once in `terminals[]`; `process_state` reports whether its coding-agent process is alive and `activity_state` reports the parsed screen state. Its optional `managed.current_turn` is the authoritative active AKK turn, while `managed.recent_turn` is retained history and does not occupy the terminal. Pass `all=true` to include older entries in `managed.history`. By default, `unavailable_managed_turns[]` contains attention-needed records whose pane cannot be presented as a live terminal; `all=true` also includes retained unavailable history.
+For natural-language tool use, `agent_knock_knock_list` is terminal-first. Each live pane appears exactly once in `terminals[]`; `process_state` reports whether its coding-agent process is alive and `activity_state` reports the parsed screen state. `managed.session_id` identifies the continuing AKK session, `managed.current_turn` is its optional active Turn, and `managed.recent_turn` is retained history; retained Turns do not occupy the terminal. Pass `all=true` to include older entries in `managed.history`. By default, `unavailable_managed_turns[]` contains attention-needed records whose pane cannot be presented as a live terminal; `all=true` also includes retained unavailable history.
 
-Use only an `available_actions` entry returned in that snapshot, begin with its prefilled authoritative arguments, and supply every `missing_required` field. A terminal's `send` action starts a new managed turn; a managed turn's `follow_up` action continues that exact turn through the same `agent_knock_knock_send` tool. Status, approval, cancellation, renewal, callback retry, and close use `conversation_id`. For an ordinary send or follow-up, add only `request`—`timeoutSeconds` is unsupported, and monitoring limits should be omitted unless the user explicitly asks to change them. AKK revalidates availability before every side effect.
+Use only an `available_actions` entry returned in that snapshot, begin with its prefilled authoritative arguments, and supply every `missing_required` field. A managed Session's `send` uses its prefilled `session_id` and creates a new Turn. For first attach only, an unmanaged raw-terminal row's `send` uses that row's prefilled `selector`; do not construct or reuse it. `respond` is available only while a Turn is `waiting_for_openclaw`; it uses `turn_id` and keeps the answer inside that Turn. Managed status, approval, cancellation, renewal, callback retry, and close also use the exact `turn_id`. A raw terminal may be controlled only through the exact status, approval, cancellation, or orphan-close action that its own row advertises with a prefilled `conversation_id`; never construct or guess one. For an ordinary send, add only `request`—`timeoutSeconds` is unsupported, and monitoring limits should be omitted unless the user explicitly asks to change them. AKK revalidates availability before every side effect.
 
 Workspace is not a routing boundary. AKK can list, inspect, and control verified panes across projects; when more than one target matches, use a selector to choose one explicitly.
 
@@ -275,8 +293,8 @@ With the global npm CLI installed, start with `agent-knock-knock doctor`. It run
 | No eligible terminal is available | Start Codex or Claude Code inside tmux as the same OS user, then run `AKK list`. |
 | The npm installer or callbacks cannot find a local OpenClaw CLI | Set `openclawBin` and pass `--openclaw-bin` to `install-openclaw`. |
 | Source changes do not appear | Build, reinstall from the checkout, and restart the Gateway. |
-| Terminal task is `stalled` | Inspect `status` and the terminal; use `/akk renew only <minutes>` only when exactly one live stalled task needs more monitoring time. |
-| Task is `callback_failed` | Run `/akk retry-callback only` when it is the only actionable failed callback, or use its `@short-ref`. |
+| Terminal Turn is `stalled` | Inspect `status` and the terminal; use `/akk renew only <minutes>` only when exactly one live stalled Turn needs more monitoring time. |
+| Turn is `callback_failed` | Run `/akk retry-callback only` when it is the only actionable failed callback, or use its `@short-ref`. |
 | `AKK list` reports an orphaned terminal dispatch | Inspect the named pane first, then run the exact `/akk close ... --expected-message-id ...` recovery command returned by `list`. AKK leaves the coding agent and tmux pane running. |
 | Claude permission is not offered through AKK | Resolve unsupported dialogs in the terminal. The AKK path requires the exact supported one-time Bash prompt for the current managed turn. |
 | Claude request was not auto-approved | Check `autoApprove.enabled`, the agent, the rule's canonical `workspaces`, and the exact command vector. The request must also have matching current screen and local transcript evidence. |
@@ -319,11 +337,11 @@ gh workflow run clawhub-publish.yml --ref vX.Y.Z -f dry_run=false
 
 ## Storage and Logs
 
-Managed state now lives in the stable `~/.agent-knock-knock/store` root. Its manifest prevents an incompatible AKK writer from changing task state. Directories use mode `0700`; state and log files use `0600`.
+Managed state now lives in the stable `~/.agent-knock-knock/store` root. Its manifest prevents an incompatible AKK writer from changing Turn state. Directories use mode `0700`; state and log files use `0600`.
 
-The manifest checks storage format and writer behavior separately. An unknown `format_version` is not read. When the format is readable but `writer_protocol` differs, normal queries remain available, explicit reconciliation reports `skipped`, and every mutation fails closed before terminal or Gateway side effects.
+The manifest checks storage format and writer behavior separately. An unknown `format_version` is not read. Writer protocol 1 is the one supported predecessor: inspection reports it as `upgradeable`, and the first mutation validates every stored Session/Turn identity before atomically upgrading only the manifest to protocol 2. Conversation state and `created_at` are preserved. Any other writer-protocol mismatch remains readable for normal queries, while explicit reconciliation reports `skipped` and every mutation fails closed before terminal or Gateway side effects.
 
-The former `~/.agent-knock-knock/conversations` directory is left untouched; AKK does not read or migrate it. Existing Codex and Claude Code tmux panes remain available through live discovery, while their old managed-turn IDs, callback associations, and follow-up records are not carried into the new Store. Compatible future upgrades continue using the stable Store rather than creating a directory per package version.
+The former `~/.agent-knock-knock/conversations` directory is left untouched; AKK does not read or migrate it. Existing Codex and Claude Code tmux panes remain available through live discovery, while their old managed-turn IDs, callback associations, and legacy conversation aliases are not carried into the new Store. Compatible future upgrades continue using the stable Store rather than creating a directory per package version.
 
 Runtime logs redact common secrets and default to 14-day retention. Configure storage and logging with `--store-dir`, `AKK_LOG_DIR`, `AKK_LOG_LEVEL`, and `AKK_LOG_RETENTION_DAYS`; use a dedicated custom log directory.
 
