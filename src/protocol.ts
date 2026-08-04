@@ -15,6 +15,11 @@ export type { Actor, Executor, ExecutorKind } from "./executors.js";
 export { ACTORS, EXECUTORS, resolveExecutor } from "./executors.js";
 
 export interface Conversation {
+  /** Authoritative identity for the continuing managed agent context. */
+  session_id: string;
+  /** Authoritative identity for this accepted dispatch lifecycle. */
+  turn_id: string;
+  /** Legacy Store/path alias. New records keep this equal to turn_id. */
   conversation_id: string;
   user_request: string;
   openclaw_session: string;
@@ -47,6 +52,10 @@ export interface AgentMessage {
   id: string;
   ts: string;
   conversation_id: string;
+  /** Authoritative session identity. Optional only when reading legacy messages. */
+  session_id?: string;
+  /** Exact dispatch identity. Optional only when reading legacy messages. */
+  turn_id?: string;
   from: Actor;
   to: Actor;
   type: MessageType;
@@ -64,6 +73,8 @@ export interface BudgetAction {
 
 interface CreateConversationOptions {
   userRequest: string;
+  sessionId?: string;
+  turnId?: string;
   workspace?: string;
   openclawSession?: string;
   claudeSession?: string;
@@ -126,6 +137,8 @@ export const ALLOWED_MESSAGE_TYPES_BY_ROUTE: Record<string, Set<MessageType>> = 
 
 export function createConversation({
   userRequest,
+  sessionId,
+  turnId,
   workspace = process.cwd(),
   openclawSession = "agent:main:main",
   claudeSession = "claude",
@@ -135,11 +148,22 @@ export function createConversation({
   hardLimit = 100,
   now = new Date()
 }: CreateConversationOptions): Conversation {
-  const conversationId = `task-${formatTimestamp(now)}-${randomUUID().slice(0, 8)}`;
+  const resolvedSessionId = sessionId ??
+    `session-${formatTimestamp(now)}-${randomUUID().slice(0, 8)}`;
+  const resolvedTurnId = turnId ??
+    `turn-${formatTimestamp(now)}-${randomUUID().slice(0, 8)}`;
+  if (!nonEmptyString(resolvedSessionId)) {
+    throw new Error("session_id must be a non-empty string");
+  }
+  if (!nonEmptyString(resolvedTurnId)) {
+    throw new Error("turn_id must be a non-empty string");
+  }
   const executor = resolveExecutor({ kind: executorKind, session: executorSession ?? claudeSession });
 
   return {
-    conversation_id: conversationId,
+    session_id: resolvedSessionId,
+    turn_id: resolvedTurnId,
+    conversation_id: resolvedTurnId,
     user_request: userRequest,
     openclaw_session: openclawSession,
     claude_session: executor.kind === "claude" ? executor.session : claudeSession,
@@ -152,6 +176,38 @@ export function createConversation({
     created_at: now.toISOString(),
     updated_at: now.toISOString()
   };
+}
+
+/**
+ * Return the authoritative managed-session identity, falling back to the
+ * historical Store alias for records written before session_id existed.
+ */
+export function sessionIdForConversation(
+  conversation: Partial<Conversation> | null | undefined
+): string {
+  assertConversationIdentityShape(conversation);
+  const sessionId = nonEmptyString(conversation?.session_id) ??
+    nonEmptyString(conversation?.conversation_id);
+  if (!sessionId) {
+    throw new Error("conversation session_id is required");
+  }
+  return sessionId;
+}
+
+/**
+ * Return the authoritative dispatch identity, falling back to the historical
+ * Store alias for records written before turn_id existed.
+ */
+export function turnIdForConversation(
+  conversation: Partial<Conversation> | null | undefined
+): string {
+  assertConversationIdentityShape(conversation);
+  const turnId = nonEmptyString(conversation?.turn_id) ??
+    nonEmptyString(conversation?.conversation_id);
+  if (!turnId) {
+    throw new Error("conversation turn_id is required");
+  }
+  return turnId;
 }
 
 export function executorForConversation(conversation: Partial<Conversation> | null | undefined): Executor {
@@ -180,6 +236,9 @@ export function createMessage({
     throw new Error("conversation is required");
   }
 
+  const sessionId = sessionIdForConversation(conversation);
+  const turnId = turnIdForConversation(conversation);
+
   const resolvedRequiresResponse =
     typeof requiresResponse === "boolean"
       ? requiresResponse
@@ -189,6 +248,8 @@ export function createMessage({
     id: id ?? `msg-${randomUUID()}`,
     ts: now.toISOString(),
     conversation_id: conversation.conversation_id,
+    session_id: sessionId,
+    turn_id: turnId,
     from,
     to,
     type,
@@ -199,7 +260,9 @@ export function createMessage({
     metadata: {
       workspace: conversation.workspace,
       task_id: conversation.conversation_id,
-      ...metadata
+      ...metadata,
+      session_id: sessionId,
+      turn_id: turnId
     }
   };
 
@@ -217,6 +280,31 @@ export function validateMessage(message: unknown): message is AgentMessage {
     if (!(key in message)) {
       throw new Error(`message.${key} is required`);
     }
+  }
+
+  const hasSessionId = Object.hasOwn(message, "session_id");
+  const hasTurnId = Object.hasOwn(message, "turn_id");
+  if (hasSessionId !== hasTurnId) {
+    throw new Error(
+      "message.session_id and message.turn_id must either both be present or both be absent"
+    );
+  }
+
+  if (hasSessionId && !nonEmptyString(message.session_id)) {
+    throw new Error("message.session_id must be a non-empty string");
+  }
+
+  if (hasTurnId && !nonEmptyString(message.turn_id)) {
+    throw new Error("message.turn_id must be a non-empty string");
+  }
+
+  if (
+    hasTurnId &&
+    nonEmptyString(message.turn_id) !== nonEmptyString(message.conversation_id)
+  ) {
+    throw new Error(
+      "message.conversation_id must equal message.turn_id for modern messages"
+    );
   }
 
   if (!isActor(message.from)) {
@@ -259,6 +347,20 @@ export function validateMessageForConversation(conversation: Conversation, messa
 
   if (message.conversation_id !== conversation.conversation_id) {
     throw new Error(`message.conversation_id ${message.conversation_id} does not match conversation ${conversation.conversation_id}`);
+  }
+
+  const sessionId = sessionIdForConversation(conversation);
+  if (message.session_id !== undefined && message.session_id !== sessionId) {
+    throw new Error(
+      `message.session_id ${message.session_id} does not match session ${sessionId}`
+    );
+  }
+
+  const turnId = turnIdForConversation(conversation);
+  if (message.turn_id !== undefined && message.turn_id !== turnId) {
+    throw new Error(
+      `message.turn_id ${message.turn_id} does not match turn ${turnId}`
+    );
   }
 
   const route = `${message.from}->${message.to}`;
@@ -496,4 +598,39 @@ function requiredMessageType(value: unknown): MessageType {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function assertConversationIdentityShape(
+  conversation: Partial<Conversation> | null | undefined
+): void {
+  const hasSessionId = Boolean(
+    conversation && Object.hasOwn(conversation, "session_id")
+  );
+  const hasTurnId = Boolean(
+    conversation && Object.hasOwn(conversation, "turn_id")
+  );
+  if (hasSessionId !== hasTurnId) {
+    throw new Error(
+      "conversation session_id and turn_id must either both be present or both be absent"
+    );
+  }
+  if (!hasSessionId) {
+    return;
+  }
+  if (!nonEmptyString(conversation?.session_id)) {
+    throw new Error("conversation session_id must be a non-empty string");
+  }
+  const turnId = nonEmptyString(conversation?.turn_id);
+  if (!turnId) {
+    throw new Error("conversation turn_id must be a non-empty string");
+  }
+  if (turnId !== nonEmptyString(conversation?.conversation_id)) {
+    throw new Error(
+      "conversation.conversation_id must equal turn_id for modern records"
+    );
+  }
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
 }

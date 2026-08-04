@@ -3,7 +3,13 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { AgentMessage, Conversation } from "./protocol.js";
+import {
+  sessionIdForConversation,
+  turnIdForConversation,
+  validateMessage,
+  type AgentMessage,
+  type Conversation
+} from "./protocol.js";
 
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
@@ -24,7 +30,8 @@ const NO_FOLLOW_FLAG = typeof fs.constants.O_NOFOLLOW === "number"
   : 0;
 
 export const STORE_FORMAT_VERSION = 1;
-export const STORE_WRITER_PROTOCOL = 1;
+export const STORE_WRITER_PROTOCOL = 2;
+const STORE_UPGRADEABLE_WRITER_PROTOCOL = 1;
 
 export interface StoreManifest {
   schema: typeof STORE_SCHEMA;
@@ -33,12 +40,19 @@ export interface StoreManifest {
   created_at: string;
 }
 
+interface StoreManifestSnapshot {
+  manifest: StoreManifest;
+  device: bigint;
+  inode: bigint;
+}
+
 export interface StoreCompatibility {
-  status: "uninitialized" | "legacy" | "compatible" | "incompatible";
+  status: "uninitialized" | "legacy" | "upgradeable" | "compatible" | "incompatible";
   store_dir: string;
   manifest_path: string;
   readable: boolean;
   writable: boolean;
+  upgradeable?: boolean;
   format_version?: number;
   writer_protocol?: number;
   reason?: string;
@@ -124,7 +138,15 @@ export function inspectStoreCompatibility(
   if (!storeStat.isDirectory()) {
     throw new Error(`store directory must be a real directory: ${storeDir}`);
   }
-  if (!fs.existsSync(manifestPath)) {
+  let manifestStat: fs.Stats | undefined;
+  try {
+    manifestStat = fs.lstatSync(manifestPath);
+  } catch (error) {
+    if (!isNodeError(error, "ENOENT")) {
+      throw error;
+    }
+  }
+  if (!manifestStat) {
     if (storeHasConversationData(resolvedStoreDir)) {
       return {
         status: "legacy",
@@ -143,16 +165,28 @@ export function inspectStoreCompatibility(
       writable: true
     };
   }
+  if (manifestStat.isSymbolicLink() || !manifestStat.isFile()) {
+    throw new Error(`store manifest must be a regular file: ${manifestPath}`);
+  }
 
   const manifest = readStoreManifest(manifestPath);
   const readable = manifest.format_version === STORE_FORMAT_VERSION;
-  const writable = readable && manifest.writer_protocol === STORE_WRITER_PROTOCOL;
+  const compatible = readable && manifest.writer_protocol === STORE_WRITER_PROTOCOL;
+  const upgradeable =
+    readable &&
+    manifest.writer_protocol === STORE_UPGRADEABLE_WRITER_PROTOCOL;
+  const writable = compatible || upgradeable;
   return {
-    status: readable && writable ? "compatible" : "incompatible",
+    status: compatible
+      ? "compatible"
+      : upgradeable
+        ? "upgradeable"
+        : "incompatible",
     store_dir: storeDir,
     manifest_path: manifestPath,
     readable,
     writable,
+    upgradeable,
     format_version: manifest.format_version,
     writer_protocol: manifest.writer_protocol,
     ...(!readable
@@ -335,7 +369,15 @@ export function logPathForStatePath(statePath: string): string {
 }
 
 export function saveState(statePath: string, conversation: Conversation): void {
+  // Validate the state identity before acquiring a writer lease. In particular,
+  // a malformed state must not initialize or upgrade the Store manifest.
+  assertConversationStateIdentity(conversation);
   const paths = assertCanonicalConversationDataPath(statePath, "state.json");
+  assertConversationStateIdentity(
+    conversation,
+    path.basename(paths.conversationDir)
+  );
+  assertConversationStorageMetadata(statePath, conversation);
   withStoreWriterLease(paths.storeDir, () => {
     saveStateWithWriterLease(statePath, conversation);
   });
@@ -345,7 +387,6 @@ function saveStateWithWriterLease(
   statePath: string,
   conversation: Conversation
 ): void {
-  validateConversationId(conversation.conversation_id);
   secureConversationStorageMetadata(statePath, conversation);
   prepareDataDirectory(statePath);
   const serialized = `${JSON.stringify(conversation, null, 2)}\n`;
@@ -394,7 +435,9 @@ export function loadState(statePath: string): Conversation {
   assertNotSymlink(path.dirname(statePath), "conversation directory");
   const fd = openRegularFileNoFollow(statePath, fs.constants.O_RDONLY, "state file");
   try {
-    return JSON.parse(fs.readFileSync(fd, "utf8")) as Conversation;
+    return withConversationIdentity(
+      JSON.parse(fs.readFileSync(fd, "utf8")) as Conversation
+    );
   } finally {
     fs.closeSync(fd);
   }
@@ -452,6 +495,42 @@ function withCanonicalConversationStorage(
     state_path: path.resolve(paths.statePath),
     event_log_path: path.resolve(paths.logPath)
   };
+}
+
+function withConversationIdentity(conversation: Conversation): Conversation {
+  const { sessionId, turnId } = assertConversationStateIdentity(conversation);
+  return {
+    ...conversation,
+    session_id: sessionId,
+    turn_id: turnId
+  };
+}
+
+function assertConversationStateIdentity(
+  value: unknown,
+  expectedConversationId?: string
+): { conversation: Conversation; sessionId: string; turnId: string } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("conversation state must be an object");
+  }
+  const conversation = value as Conversation;
+  validateConversationId(conversation.conversation_id);
+  const sessionId = sessionIdForConversation(conversation);
+  const turnId = turnIdForConversation(conversation);
+  if (turnId !== conversation.conversation_id) {
+    throw new Error(
+      `conversation turn_id ${turnId} does not match its store identity ${conversation.conversation_id}`
+    );
+  }
+  if (
+    expectedConversationId !== undefined &&
+    conversation.conversation_id !== expectedConversationId
+  ) {
+    throw new Error(
+      `conversation id ${conversation.conversation_id} does not match its store directory ${expectedConversationId}`
+    );
+  }
+  return { conversation, sessionId, turnId };
 }
 
 export function appendEvent(logPath: string, event: EventRecord): void {
@@ -593,6 +672,16 @@ function secureConversationStorageMetadata(
   statePath: string,
   conversation: Conversation
 ): void {
+  const paths = assertConversationStorageMetadata(statePath, conversation);
+  ensureStoreWritable(paths.storeDir);
+  ensureStoreDir(paths.storeDir, paths.conversationDir);
+  ensureDir(paths.conversationDir);
+}
+
+function assertConversationStorageMetadata(
+  statePath: string,
+  conversation: Conversation
+): ConversationPaths {
   if (
     typeof conversation.store_dir !== "string" ||
     typeof conversation.conversation_dir !== "string" ||
@@ -613,10 +702,7 @@ function secureConversationStorageMetadata(
       `conversation storage metadata does not match state path: ${statePath}`
     );
   }
-
-  ensureStoreWritable(paths.storeDir);
-  ensureStoreDir(paths.storeDir, paths.conversationDir);
-  ensureDir(paths.conversationDir);
+  return paths;
 }
 
 function secureEventStorageMetadata(logPath: string, event: EventRecord): void {
@@ -740,6 +826,9 @@ function ensureStoreWritableWhileLocked(storeDir: string): StoreManifest {
   let compatibility = inspectStoreCompatibility(storeDir);
   if (compatibility.status === "uninitialized") {
     createStoreManifest(storeDir);
+    compatibility = inspectStoreCompatibility(storeDir);
+  } else if (compatibility.status === "upgradeable") {
+    upgradeStoreWriterProtocolWhileLocked(storeDir);
     compatibility = inspectStoreCompatibility(storeDir);
   }
   assertWritableCompatibility(compatibility);
@@ -874,13 +963,177 @@ function createStoreManifest(storeDir: string): void {
   }
 }
 
+/** Upgrade the one explicitly supported predecessor while holding the root lock. */
+function upgradeStoreWriterProtocolWhileLocked(storeDir: string): void {
+  const manifestPath = storeManifestPath(storeDir);
+  const previous = readStoreManifestSnapshot(manifestPath);
+  assertUpgradeableStoreManifest(previous.manifest, storeDir);
+
+  // Protocol 2 makes the Session/Turn identity pair a writer invariant. Check
+  // every existing state before publishing that claim, but do not rewrite any
+  // conversation state as part of the manifest upgrade.
+  assertUpgradeableStoreStateIdentities(storeDir);
+
+  const upgraded: StoreManifest = {
+    ...previous.manifest,
+    writer_protocol: STORE_WRITER_PROTOCOL,
+    created_at: previous.manifest.created_at
+  };
+  const tempPath = path.join(
+    storeDir,
+    `${STORE_MANIFEST_TEMP_PREFIX}${process.pid}.${randomUUID()}${STORE_MANIFEST_TEMP_SUFFIX}`
+  );
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(
+      tempPath,
+      fs.constants.O_CREAT |
+        fs.constants.O_EXCL |
+        fs.constants.O_WRONLY |
+        NO_FOLLOW_FLAG,
+      PRIVATE_FILE_MODE
+    );
+    fs.fchmodSync(fd, PRIVATE_FILE_MODE);
+    fs.writeFileSync(fd, `${JSON.stringify(upgraded, null, 2)}\n`, "utf8");
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+
+    // A process that ignores the root writer lock must not trick us into
+    // replacing a different manifest. Re-check both file identity and the
+    // supported predecessor immediately before the atomic rename.
+    const current = readStoreManifestSnapshot(manifestPath);
+    if (
+      current.device !== previous.device ||
+      current.inode !== previous.inode ||
+      current.manifest.schema !== previous.manifest.schema ||
+      current.manifest.format_version !== previous.manifest.format_version ||
+      current.manifest.writer_protocol !== STORE_UPGRADEABLE_WRITER_PROTOCOL ||
+      current.manifest.created_at !== previous.manifest.created_at
+    ) {
+      throw new Error(
+        "AKK store manifest changed while upgrading writer protocol; refusing to replace it"
+      );
+    }
+    const manifestPathStat = fs.lstatSync(manifestPath, { bigint: true });
+    if (
+      manifestPathStat.isSymbolicLink() ||
+      !manifestPathStat.isFile() ||
+      manifestPathStat.dev !== current.device ||
+      manifestPathStat.ino !== current.inode
+    ) {
+      throw new Error(
+        "AKK store manifest path changed while upgrading writer protocol; refusing to replace it"
+      );
+    }
+
+    fs.renameSync(tempPath, manifestPath);
+    fsyncDirectory(storeDir);
+  } finally {
+    if (fd !== undefined) {
+      fs.closeSync(fd);
+    }
+    try {
+      fs.unlinkSync(tempPath);
+    } catch (error) {
+      if (!isNodeError(error, "ENOENT")) {
+        throw error;
+      }
+    }
+  }
+}
+
+function assertUpgradeableStoreManifest(
+  manifest: StoreManifest,
+  storeDir: string
+): void {
+  if (
+    manifest.schema !== STORE_SCHEMA ||
+    manifest.format_version !== STORE_FORMAT_VERSION ||
+    manifest.writer_protocol !== STORE_UPGRADEABLE_WRITER_PROTOCOL
+  ) {
+    throw new StoreCompatibilityError(
+      `store is not the supported writer protocol ${STORE_UPGRADEABLE_WRITER_PROTOCOL} predecessor`,
+      inspectStoreCompatibility(storeDir)
+    );
+  }
+}
+
+function assertUpgradeableStoreStateIdentities(storeDir: string): void {
+  const conversationsDir = storeConversationsDir(storeDir);
+  let conversationsStat: fs.Stats;
+  try {
+    conversationsStat = fs.lstatSync(conversationsDir);
+  } catch (error) {
+    if (isNodeError(error, "ENOENT")) {
+      return;
+    }
+    throw error;
+  }
+  if (conversationsStat.isSymbolicLink() || !conversationsStat.isDirectory()) {
+    throw new Error(
+      `conversations directory must be a real directory: ${conversationsDir}`
+    );
+  }
+
+  for (const entry of fs.readdirSync(conversationsDir, { withFileTypes: true })) {
+    const conversationDir = path.join(conversationsDir, entry.name);
+    const conversationStat = fs.lstatSync(conversationDir);
+    if (conversationStat.isSymbolicLink()) {
+      throw new Error(
+        `conversation directory must not be a symlink: ${conversationDir}`
+      );
+    }
+    if (!conversationStat.isDirectory()) {
+      continue;
+    }
+
+    const statePath = path.join(conversationDir, "state.json");
+    let stateStat: fs.Stats;
+    try {
+      stateStat = fs.lstatSync(statePath);
+    } catch (error) {
+      if (isNodeError(error, "ENOENT")) {
+        continue;
+      }
+      throw error;
+    }
+    if (stateStat.isSymbolicLink() || !stateStat.isFile()) {
+      throw new Error(`state file must be a regular file: ${statePath}`);
+    }
+    const stateFd = openRegularFileNoFollow(
+      statePath,
+      fs.constants.O_RDONLY,
+      "state file"
+    );
+    try {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(fs.readFileSync(stateFd, "utf8"));
+      } catch (error) {
+        throw new Error(
+          `invalid conversation state during Store upgrade: ${statePath}: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+      assertConversationStateIdentity(parsed, entry.name);
+    } finally {
+      fs.closeSync(stateFd);
+    }
+  }
+}
+
 function readStoreManifest(manifestPath: string): StoreManifest {
+  return readStoreManifestSnapshot(manifestPath).manifest;
+}
+
+function readStoreManifestSnapshot(manifestPath: string): StoreManifestSnapshot {
   const fd = openRegularFileNoFollow(
     manifestPath,
     fs.constants.O_RDONLY,
     "store manifest"
   );
   try {
+    const stat = fs.fstatSync(fd, { bigint: true });
     const parsed = JSON.parse(fs.readFileSync(fd, "utf8")) as Partial<StoreManifest>;
     if (
       parsed.schema !== STORE_SCHEMA ||
@@ -890,7 +1143,11 @@ function readStoreManifest(manifestPath: string): StoreManifest {
     ) {
       throw new Error(`invalid AKK store manifest: ${manifestPath}`);
     }
-    return parsed as StoreManifest;
+    return {
+      manifest: parsed as StoreManifest,
+      device: stat.dev,
+      inode: stat.ino
+    };
   } finally {
     fs.closeSync(fd);
   }
@@ -1132,9 +1389,12 @@ function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoExcepti
 }
 
 export function messageEvent(message: AgentMessage): EventRecord {
+  validateMessage(message);
   return {
     ts: message.ts,
     conversation_id: message.conversation_id,
+    session_id: message.session_id ?? message.conversation_id,
+    turn_id: message.turn_id ?? message.conversation_id,
     event: "message",
     from: message.from,
     to: message.to,

@@ -9,14 +9,35 @@ Agent Knock Knock coordinates OpenClaw, a local coding agent, and a human throug
 - AKK sends input only after it verifies the selected agent, pane, process, pane/process working directory, and idle prompt.
 - AKK reports approval or completion only when the terminal adapter has reliable evidence. Uncertain states fail closed.
 
-## Task Flow
+## Identity Model
 
-1. OpenClaw calls the AKK delegate or send tool with the user-facing task.
-2. AKK resolves exactly one eligible Codex or Claude Code pane in tmux.
-3. AKK records the managed turn, writes the task to the verified idle pane, and starts a monitor bound to that pane, process, and message.
+AKK models shared work as:
+
+```text
+tmux terminal / verified process incarnation
+└─ native Codex or Claude Code session
+   └─ AKK session (session_id)
+      ├─ Turn (turn_id)
+      └─ Turn (turn_id)
+```
+
+- The terminal is the physical pane and coding-agent process incarnation.
+- The native session is the continuing context owned by Codex or Claude Code.
+- The AKK `session_id` is the authoritative target for ordinary sends into that context.
+- A `turn_id` identifies exactly one accepted dispatch through its final monitor and callback state.
+
+Human-friendly selectors such as `only`, `codex`, `claude`, terminal IDs, and `@short-ref` are list/discovery inputs. They must resolve unambiguously to the authoritative `session_id` used by send or the `turn_id` used by managed controls. An unmanaged raw-terminal row may publish its own exact compatibility selector for status or recovery controls; callers must use only the prefilled action and never construct that selector.
+
+## Turn Flow
+
+1. OpenClaw calls ordinary send with a `session_id` and the user-facing request. Initial discovery may first resolve one eligible Codex or Claude Code terminal into an AKK session.
+2. AKK verifies that the session is bound to the expected native session, terminal, and idle coding-agent process.
+3. AKK creates a unique `turn_id`, writes the request to the verified idle pane, and starts a monitor bound to that Turn, pane, process, and message.
 4. The coding agent works in the same terminal that the human can inspect or take over.
-5. AKK sends a structured callback to the originating OpenClaw session when it has reliable approval, completion, cancellation, stall, or failure evidence.
-6. OpenClaw may send a follow-up to the same managed terminal conversation.
+5. AKK sends a structured callback containing both `session_id` and `turn_id` to the originating OpenClaw session when it has reliable approval, completion, cancellation, stall, or failure evidence.
+6. After completion, another ordinary send to the same `session_id` creates a new Turn without clearing the native coding-agent context.
+
+An ordinary send never targets a completed or historical `turn_id`. If the current Turn is `waiting_for_openclaw` because the coding agent asked a question, OpenClaw uses `respond(turn_id, answer)`; that answer remains inside the same Turn.
 
 If no eligible terminal exists, AKK stops and returns an actionable setup message. It does not launch an invisible replacement agent.
 
@@ -24,8 +45,8 @@ If no eligible terminal exists, AKK stops and returns an actionable setup messag
 
 | Type | Purpose |
 | --- | --- |
-| `task` | OpenClaw assigns work to the coding agent. |
-| `answer` | OpenClaw supplies a decision or follow-up. |
+| `task` | OpenClaw starts a new Turn with work for the coding agent. |
+| `answer` | OpenClaw answers a question inside a `waiting_for_openclaw` Turn. |
 | `progress` | AKK reports reliable non-final progress. |
 | `blocked` | AKK reports that the task needs attention. |
 | `done` | AKK reports that the current terminal turn completed. |
@@ -36,13 +57,13 @@ The coding agent does not run a callback command and does not need an AKK-specif
 
 ## Terminal Identity
 
-Each managed turn is bound to a concrete terminal identity, including:
+Each managed Turn is bound to a concrete identity, including:
 
 - coding agent (`codex` or `claude`)
-- canonical working directory captured for this pane and managed turn
+- canonical working directory captured for this pane and Turn
 - tmux socket and pane target
 - pane and agent process identity
-- managed conversation and message identity
+- native session evidence, AKK `session_id`, `turn_id`, and message identity
 - monitor owner and lease
 
 AKK revalidates that identity before sending tasks, interrupt keys, or approval input. Stale, changed, ambiguous, or replayed actions are rejected.
@@ -53,8 +74,11 @@ The tmux pane remains the source of visible truth:
 
 - Attach to tmux to inspect or continue the work yourself.
 - Use AKK status for a bounded remote view.
-- Send a follow-up only when AKK verifies the pane is idle.
+- Send the next request to `session_id` only when AKK verifies the pane is idle; this creates a new Turn.
+- Answer an in-flight agent question only through `respond(turn_id, answer)`.
 - Interrupt the current turn without closing the pane.
 - Renew monitoring only when the same live task remains in that pane.
 
 This makes handoff reversible: OpenClaw and the human operate the same coding-agent session instead of creating parallel, hidden conversations.
+
+Native clear/new/resume operations are separate session-lifecycle features. Ordinary send and Turn creation do not invoke them.

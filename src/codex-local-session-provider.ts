@@ -1,4 +1,5 @@
 import type {
+  ActiveAgentSessionIdentity,
   AgentSessionCapabilities,
   CodingAgentSessionProvider,
   ForkContextOptions
@@ -19,6 +20,10 @@ export interface CodexLocalSessionAdapter {
   listThreadRows(): Promise<CodexThreadRow[]>;
   readRollout(path: string): Promise<string | undefined>;
   listProcessSnapshots(): Promise<CodexProcessSnapshot[]>;
+  resolveActiveSessionIdentityForPid?(
+    pid: number,
+    cwd?: string
+  ): Promise<ActiveAgentSessionIdentity | undefined>;
 }
 
 export class CodexLocalSessionProvider implements CodingAgentSessionProvider {
@@ -70,6 +75,27 @@ export class CodexLocalSessionProvider implements CodingAgentSessionProvider {
   async listActiveSessions(): Promise<ActiveCodexProcess[]> {
     return discoverCodexProcesses(await this.adapter.listProcessSnapshots())
       .filter((process) => process.kind === "codex_cli");
+  }
+
+  async resolveActiveSessionIdentityForPid(
+    pid: number,
+    cwd?: string
+  ): Promise<ActiveAgentSessionIdentity | undefined> {
+    if (!Number.isSafeInteger(pid) || pid <= 1) {
+      throw new Error("Codex process pid must be a positive integer greater than 1");
+    }
+    if (this.adapter.resolveActiveSessionIdentityForPid) {
+      return this.adapter.resolveActiveSessionIdentityForPid(pid, cwd);
+    }
+    const sessionId = (await this.listActiveSessions())
+      .find((process) => process.pid === pid)?.sessionId;
+    return sessionId
+      ? {
+          sessionId,
+          processUuid: `static-pid:${pid}`,
+          evidence: "process_command_session_id"
+        }
+      : undefined;
   }
 
   async getSession(sessionId: string): Promise<CodexSessionSummary | undefined> {

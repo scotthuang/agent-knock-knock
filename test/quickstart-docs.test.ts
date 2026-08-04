@@ -45,8 +45,8 @@ test("ClawHub quickstarts reach a first task without a top-level workspace", () 
   assert.match(tmux, /appears once in `terminals\[\]`/u);
   assert.match(tmux, /`managed\.current_turn`/u);
   assert.match(tmux, /`managed\.recent_turn`/u);
-  assert.match(tmux, /terminal's `send` action/u);
-  assert.match(tmux, /managed turn's `follow_up` action/u);
+  assert.match(tmux, /`send` action with its prefilled authoritative `session_id`/u);
+  assert.match(tmux, /`respond` action with its prefilled `turn_id`/u);
   assert.match(tmux, /multiple canonical roots/u);
   assert.match(tmux, /autoApprove\.rules\[\]\.workspaces/u);
   assert.match(readme, /multiple canonical workspace roots/u);
@@ -71,7 +71,7 @@ test("ClawHub quickstarts reach a first task without a top-level workspace", () 
     parseAkkCommand("codex: inspect this repository and summarize it"),
     {
       action: "send",
-      conversationId: "codex",
+      selector: "codex",
       message: "inspect this repository and summarize it"
     }
   );
@@ -79,7 +79,7 @@ test("ClawHub quickstarts reach a first task without a top-level workspace", () 
   const targeted = parseAkkCommand("@a1b2c3d4: run the tests and explain any failures");
   assert.deepEqual(targeted, {
     action: "send",
-    conversationId: "@a1b2c3d4",
+    selector: "@a1b2c3d4",
     message: "run the tests and explain any failures"
   });
   assert.deepEqual(
@@ -88,7 +88,7 @@ test("ClawHub quickstarts reach a first task without a top-level workspace", () 
     }),
     [
       "send",
-      "--conversation",
+      "--session",
       "@a1b2c3d4",
       "--message",
       "run the tests and explain any failures",
@@ -106,11 +106,12 @@ test("ClawHub quickstarts reach a first task without a top-level workspace", () 
 test("README and bundled skill keep advanced commands in their workflows", () => {
   const readme = read("README.md");
   const skill = read("templates/openclaw-skills/agent-knock-knock/SKILL.md");
+  const changelog = read("CHANGELOG.md");
   const usage = markdownSection(readme, "## Usage", "## Configuration");
   const routing = markdownSection(
     skill,
     "## Chat Routing",
-    "## Starting and Reusing Work"
+    "## Sessions and Turns"
   );
 
   assert.match(readme, /docs\/quickstart-tmux\.md/u);
@@ -121,6 +122,7 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
     "/akk <selector>: <message>",
     "/akk list",
     "/akk status",
+    "/akk respond",
     "/akk cancel"
   ]) {
     assert.match(usage, new RegExp(escapeRegex(coreCommand), "u"));
@@ -149,12 +151,32 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
     assert.match(document, /`managed\.current_turn`/u);
     assert.match(document, /`managed\.recent_turn`/u);
     assert.match(document, /`unavailable_managed_turns\[\]`/u);
-    assert.match(document, /`follow_up`/u);
+    assert.match(document, /`session_id`/u);
+    assert.match(document, /`turn_id`/u);
+    assert.match(document, /`respond`/u);
+    assert.doesNotMatch(document, /`follow_up`/u);
+    assert.match(
+      document,
+      /first attach only[\s\S]*unmanaged raw-terminal row[\s\S]*prefilled `selector`/ui
+    );
+    assert.match(
+      document,
+      /raw (?:terminal|status)[\s\S]*prefilled `conversation_id`/ui
+    );
+    assert.match(document, /never construct[\s\S]*guess/ui);
     assert.match(
       document,
       /\/akk approve @a1b2c3d4 --expected-approval-fingerprint <fresh-fingerprint>/u
     );
   }
+  assert.match(
+    changelog,
+    /ordinary sends to an existing AKK Session target its `session_id`/u
+  );
+  assert.match(
+    changelog,
+    /unmanaged row may prefill its own `selector`[\s\S]*`conversation_id`/u
+  );
 });
 
 function read(relativePath: string): string {

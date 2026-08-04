@@ -23,12 +23,29 @@ export interface ForkContextOptions extends RolloutExcerptOptions {
   sessionId: string;
 }
 
+export interface ActiveAgentSessionIdentity {
+  sessionId: string;
+  processUuid?: string;
+  processBirth?: string;
+  rollout?: {
+    fd: string;
+    device: string;
+    inode: string;
+    path: string;
+  };
+  evidence: string;
+}
+
 export interface CodingAgentSessionProvider {
   agent: CodingAgentSessionProviderAgent;
 
   getCapabilities(): Promise<AgentSessionCapabilities>;
   listHistoricalSessions(): Promise<CodexSessionSummary[]>;
   listActiveSessions(): Promise<ActiveCodexProcess[]>;
+  resolveActiveSessionIdentityForPid(
+    pid: number,
+    cwd?: string
+  ): Promise<ActiveAgentSessionIdentity | undefined>;
   getSession(sessionId: string): Promise<CodexSessionSummary | undefined>;
   getForkContext(options: ForkContextOptions): Promise<ForkContextPackage | undefined>;
 }

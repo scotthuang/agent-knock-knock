@@ -5,7 +5,7 @@ Active work is tracked in the [GitHub issue tracker](https://github.com/scotthua
 Current priorities are:
 
 - Reliability, callback delivery, and repeatable live-agent smoke tests.
-- Simpler session selection and follow-ups.
+- Simpler Session/Turn selection and later requests.
 - Safer and clearer human/OpenClaw handoff in shared tmux terminals.
 - OpenClaw tool relay, artifact delivery, and a local operations console.
 

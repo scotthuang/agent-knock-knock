@@ -6,19 +6,174 @@ import {
   createConversation,
   createMessage,
   extractStructuredMessage,
+  sessionIdForConversation,
+  turnIdForConversation,
+  validateMessage,
   validateMessageForConversation
 } from "../src/protocol.js";
 
-test("conversation ids use local wall-clock time", () => {
+test("session and turn ids use local wall-clock time and retain the Store alias", () => {
   withTimezone("Asia/Shanghai", () => {
     const conversation = createConversation({
       userRequest: "Build feature",
       now: new Date("2026-06-20T10:01:56.000Z")
     });
 
-    assert.match(conversation.conversation_id, /^task-20260620T180156-[0-9a-f]{8}$/);
+    assert.match(conversation.session_id, /^session-20260620T180156-[0-9a-f]{8}$/);
+    assert.match(conversation.turn_id, /^turn-20260620T180156-[0-9a-f]{8}$/);
+    assert.equal(conversation.conversation_id, conversation.turn_id);
+    assert.equal(sessionIdForConversation(conversation), conversation.session_id);
+    assert.equal(turnIdForConversation(conversation), conversation.turn_id);
     assert.equal(conversation.created_at, "2026-06-20T10:01:56.000Z");
   });
+});
+
+test("sequential sends use independent turn records in the same session", () => {
+  const first = createConversation({
+    userRequest: "First request",
+    now: new Date("2026-08-05T00:00:00.000Z")
+  });
+  const second = createConversation({
+    userRequest: "Second request",
+    sessionId: first.session_id,
+    now: new Date("2026-08-05T00:00:04.000Z")
+  });
+
+  assert.equal(second.session_id, first.session_id);
+  assert.notEqual(second.turn_id, first.turn_id);
+  assert.equal(first.conversation_id, first.turn_id);
+  assert.equal(second.conversation_id, second.turn_id);
+});
+
+test("messages carry the authoritative session and turn ids", () => {
+  const conversation = createConversation({
+    userRequest: "Build feature",
+    sessionId: "session-explicit",
+    turnId: "turn-explicit"
+  });
+  const task = createMessage({
+    conversation,
+    from: "openclaw",
+    to: "claude-code",
+    type: "task",
+    body: "Build feature",
+    metadata: {
+      session_id: "spoofed-session",
+      turn_id: "spoofed-turn"
+    }
+  });
+
+  assert.equal(task.session_id, "session-explicit");
+  assert.equal(task.turn_id, "turn-explicit");
+  assert.equal(task.conversation_id, "turn-explicit");
+  assert.equal(task.metadata.session_id, "session-explicit");
+  assert.equal(task.metadata.turn_id, "turn-explicit");
+});
+
+test("explicit session and turn ids must be non-empty", () => {
+  assert.throws(
+    () => createConversation({ userRequest: "Build feature", sessionId: "" }),
+    /session_id must be a non-empty string/
+  );
+  assert.throws(
+    () => createConversation({ userRequest: "Build feature", turnId: "" }),
+    /turn_id must be a non-empty string/
+  );
+  assert.throws(
+    () => createConversation({ userRequest: "Build feature", sessionId: "   " }),
+    /session_id must be a non-empty string/
+  );
+});
+
+test("a stale message from another turn cannot mutate this turn", () => {
+  const first = createConversation({
+    userRequest: "First request",
+    sessionId: "session-shared",
+    turnId: "turn-old"
+  });
+  const second = createConversation({
+    userRequest: "Second request",
+    sessionId: "session-shared",
+    turnId: "turn-new"
+  });
+  const stale = createMessage({
+    conversation: first,
+    from: "claude-code",
+    to: "openclaw",
+    type: "done",
+    body: "Late completion."
+  });
+
+  assert.throws(
+    () => applyMessageToConversation(second, {
+      ...stale,
+      conversation_id: second.conversation_id
+    }),
+    /message.conversation_id must equal message.turn_id/
+  );
+});
+
+test("legacy conversations and messages remain readable", () => {
+  const modern = createConversation({ userRequest: "Legacy request" });
+  const legacy: any = { ...modern };
+  delete legacy.session_id;
+  delete legacy.turn_id;
+
+  const modernMessage = createMessage({
+    conversation: legacy,
+    from: "openclaw",
+    to: "claude-code",
+    type: "task",
+    body: "Legacy request"
+  });
+  const legacyMessage: any = { ...modernMessage };
+  delete legacyMessage.session_id;
+  delete legacyMessage.turn_id;
+
+  assert.equal(sessionIdForConversation(legacy), legacy.conversation_id);
+  assert.equal(turnIdForConversation(legacy), legacy.conversation_id);
+  assert.equal(validateMessageForConversation(legacy, legacyMessage), true);
+});
+
+test("partially modern conversation identities fail closed", () => {
+  const modern = createConversation({ userRequest: "Identity shape" });
+  const missingSession: any = { ...modern };
+  delete missingSession.session_id;
+  const missingTurn: any = { ...modern };
+  delete missingTurn.turn_id;
+
+  for (const partial of [missingSession, missingTurn]) {
+    assert.throws(
+      () => sessionIdForConversation(partial),
+      /session_id and turn_id must either both be present or both be absent/u
+    );
+    assert.throws(
+      () => turnIdForConversation(partial),
+      /session_id and turn_id must either both be present or both be absent/u
+    );
+  }
+});
+
+test("partially modern message identities fail closed", () => {
+  const conversation = createConversation({ userRequest: "Identity shape" });
+  const modern = createMessage({
+    conversation,
+    from: "openclaw",
+    to: "codex",
+    type: "task",
+    body: "Identity shape"
+  });
+  const missingSession: any = { ...modern };
+  delete missingSession.session_id;
+  const missingTurn: any = { ...modern };
+  delete missingTurn.turn_id;
+
+  for (const partial of [missingSession, missingTurn]) {
+    assert.throws(
+      () => validateMessage(partial),
+      /session_id and message.turn_id must either both be present or both be absent/u
+    );
+  }
 });
 
 test("only response-requiring messages consume rounds", () => {

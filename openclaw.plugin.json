@@ -18,6 +18,7 @@
       "agent_knock_knock_list",
       "agent_knock_knock_status",
       "agent_knock_knock_send",
+      "agent_knock_knock_respond",
       "agent_knock_knock_renew",
       "agent_knock_knock_retry_callback",
       "agent_knock_knock_cancel",
@@ -33,6 +34,9 @@
       "optional": true
     },
     "agent_knock_knock_send": {
+      "optional": true
+    },
+    "agent_knock_knock_respond": {
       "optional": true
     },
     "agent_knock_knock_renew": {
@@ -72,7 +76,7 @@
       },
       "idleTimeoutMinutes": {
         "type": "number",
-        "description": "Minutes an idle AKK session remains open before controlled reconciliation closes its managed-turn record. Defaults to 10080."
+        "description": "Minutes a completed or idle AKK turn record remains retained before controlled reconciliation closes that turn. The continuing AKK session identity is preserved. Defaults to 10080."
       },
       "agentTimeoutMinutes": {
         "type": "number",

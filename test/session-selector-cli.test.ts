@@ -161,7 +161,7 @@ test("unavailable managed turns expose only pane-independent actions", () => {
       );
       for (const action of testCase.actions) {
         const argumentsValue = entry.available_actions[action].arguments;
-        const targetKey = "conversation_id";
+        const targetKey = "turn_id";
         assert.deepEqual(
           Object.keys(argumentsValue),
           [targetKey],
@@ -556,10 +556,13 @@ test("an unsupported legacy record without a dispatch ledger does not hide its t
     assert.equal(listed.terminals.length, 1);
     assert.equal(listed.terminals[0].management_state, "unmanaged");
     assert.deepEqual(listed.terminals[0].managed, {
+      session_id: null,
+      session_short_ref: null,
       current_turn: null,
       recent_turn: null,
       turn_count: 0,
       hidden_turn_count: 0,
+      session_count: 0,
       history: []
     });
     assert.deepEqual(
@@ -657,11 +660,11 @@ test("CLI keeps an owned terminal visible and routes its canonical actions to th
     assert.equal(terminal.available_actions.send, undefined);
     assert.deepEqual(
       terminal.available_actions.status.arguments,
-      { conversation_id: managedId }
+      { turn_id: managedId }
     );
     assert.deepEqual(
       terminal.available_actions.cancel.arguments,
-      { conversation_id: managedId }
+      { turn_id: managedId }
     );
     assert.deepEqual(listed.unavailable_managed_turns, []);
 
@@ -689,15 +692,15 @@ test("CLI keeps an owned terminal visible and routes its canonical actions to th
     );
     assert.deepEqual(
       approvalTerminal.available_actions.approve.arguments,
-      { conversation_id: managedId }
+      { turn_id: managedId }
     );
     assert.deepEqual(
       approvalTerminal.available_actions.approve.before_call.arguments,
-      { conversation_id: managedId }
+      { turn_id: managedId }
     );
     assert.deepEqual(
       approvalTerminal.managed.current_turn.available_actions.approve.arguments,
-      { conversation_id: managedId }
+      { turn_id: managedId }
     );
 
     const restartedListed = runCli([
@@ -809,7 +812,7 @@ test("a cross-store terminal owner is visible but never advertised as locally ac
   }
 });
 
-test("multiple idle turns stay terminal history while default send targets the physical pane", () => {
+test("multiple idle turns stay terminal history while the pane short ref routes to its managed session", () => {
   const tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-selector-cli-terminal-history-")
   );
@@ -817,6 +820,11 @@ test("multiple idle turns stay terminal history while default send targets the p
   const workspace = path.join(tempDir, "workspace");
   const terminalTarget = "codex-history:0.0";
   const codexPid = 2222;
+  const managedSessionId = "session-selector-history";
+  const nativeIdentity = codexNativeIdentityFixture({
+    workspace,
+    codexPid
+  });
   const runtimeArgs = codexTerminalStaticArgs({
     workspace,
     terminalTarget,
@@ -829,12 +837,14 @@ test("multiple idle turns stay terminal history while default send targets the p
     const older = storeConversationFixture({
       storeDir,
       request: "Older completed turn",
-      agent: "codex"
+      agent: "codex",
+      sessionId: managedSessionId
     });
     const newer = storeConversationFixture({
       storeDir,
       request: "Newer completed turn",
-      agent: "codex"
+      agent: "codex",
+      sessionId: managedSessionId
     });
     for (const [fixture, timestamp] of [
       [older, "2026-07-28T01:00:00.000Z"],
@@ -854,6 +864,11 @@ test("multiple idle turns stay terminal history while default send targets the p
       state.native_session_takeover = {
         ...takeover,
         terminal_agent_pid: codexPid,
+        terminal_agent_session_id: nativeIdentity.sessionId,
+        terminal_agent_process_uuid: nativeIdentity.processUuid,
+        terminal_agent_process_birth: nativeIdentity.processBirth,
+        terminal_agent_rollout: nativeIdentity.rollout,
+        terminal_agent_identity_evidence: nativeIdentity.evidence,
         native_session_id:
           `terminal:v2:tmux:codex:${terminalTarget}:${codexPid}`,
         terminal_control: {
@@ -880,16 +895,17 @@ test("multiple idle turns stay terminal history while default send targets the p
       newer.conversation.conversation_id
     );
     assert.equal(terminal.managed.recent_turn.source, "managed_turn");
-    assert.deepEqual(
-      terminal.managed.recent_turn.available_actions.follow_up.arguments,
-      { selector: newer.conversation.conversation_id }
+    assert.equal(terminal.managed.session_id, managedSessionId);
+    assert.equal(
+      terminal.managed.recent_turn.available_actions.follow_up,
+      undefined
     );
     assert.equal(terminal.managed.turn_count, 2);
     assert.equal(terminal.managed.hidden_turn_count, 1);
     assert.equal("history" in terminal.managed, false);
     assert.deepEqual(
       terminal.available_actions.send.arguments,
-      { selector: terminal.id }
+      { session_id: managedSessionId }
     );
 
     const restarted = runCli([
@@ -915,6 +931,10 @@ test("multiple idle turns stay terminal history while default send targets the p
       restarted.terminals[0].available_actions.send,
       undefined
     );
+    assert.deepEqual(
+      restarted.terminals[0].available_actions.send.arguments,
+      { selector: restarted.terminals[0].id }
+    );
 
     const listedAll = runCli([
       "list",
@@ -930,14 +950,32 @@ test("multiple idle turns stay terminal history while default send targets the p
       [older.conversation.conversation_id]
     );
     assert.equal(
-      terminalAll.managed.history[0].available_actions.follow_up.arguments.selector,
-      older.conversation.conversation_id
+      terminalAll.managed.history[0].available_actions.follow_up,
+      undefined
+    );
+
+    const rejectedTurnTarget = spawnCli([
+      "send",
+      "--session",
+      newer.conversation.turn_id,
+      "--message",
+      "Do not target an execution turn",
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--disable-terminal-bridge-monitor",
+      ...runtimeArgs
+    ]);
+    assert.notEqual(rejectedTurnTarget.status, 0);
+    assert.match(
+      rejectedTurnTarget.stderr,
+      /not an ordinary send target/u
     );
 
     const sent = runCli([
       "send",
       "--conversation",
-      "only",
+      terminal.short_ref,
       "--message",
       "Start a new independent turn",
       "--background",
@@ -958,6 +996,8 @@ test("multiple idle turns stay terminal history while default send targets the p
       sent.conversation.native_session_takeover.native_session_id,
       terminal.id
     );
+    assert.equal(sent.session_id, managedSessionId);
+    assert.equal(sent.turn_id, sent.conversation.turn_id);
     assert.notEqual(
       sent.conversation.conversation_id,
       older.conversation.conversation_id
@@ -1107,10 +1147,12 @@ function storeConversationFixture(options: {
   storeDir: string;
   request: string;
   agent: ExecutorKind;
+  sessionId?: string;
 }) {
   const now = new Date("2026-07-28T00:00:00.000Z");
   const base = createConversation({
     userRequest: options.request,
+    sessionId: options.sessionId,
     executorKind: options.agent,
     executorSession: `${options.agent}-selector`,
     now
@@ -1160,6 +1202,7 @@ function codexTerminalStaticArgs(options: {
   codexPid: number;
   screen: string;
 }): string[] {
+  const nativeIdentity = codexNativeIdentityFixture(options);
   return [
     "--processes-json",
     JSON.stringify([{
@@ -1172,8 +1215,34 @@ function codexTerminalStaticArgs(options: {
     "--terminals-json",
     JSON.stringify([terminalPane(options.terminalTarget, options.workspace)]),
     "--terminal-screens-json",
-    JSON.stringify({ [options.terminalTarget]: options.screen })
+    JSON.stringify({ [options.terminalTarget]: options.screen }),
+    "--codex-active-session-identities-json",
+    JSON.stringify({ [options.codexPid]: nativeIdentity })
   ];
+}
+
+function codexNativeIdentityFixture(options: {
+  workspace: string;
+  codexPid: number;
+}): Record<string, any> {
+  const sessionId = `codex-native-session-${options.codexPid}`;
+  return {
+    sessionId,
+    processUuid: `codex-process-${options.codexPid}`,
+    processBirth: `fixture-process-birth-${options.codexPid}`,
+    rollout: {
+      fd: "17",
+      device: `fixture-device-${options.codexPid}`,
+      inode: String(100_000 + options.codexPid),
+      path: path.join(
+        options.workspace,
+        ".codex",
+        "sessions",
+        `${sessionId}.jsonl`
+      )
+    },
+    evidence: "static_exact_fixture"
+  };
 }
 
 function claudeTerminalStaticArgs(options: {

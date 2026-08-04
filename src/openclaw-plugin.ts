@@ -13,6 +13,7 @@ import {
   akkUsageText,
   buildAkkCommandCliArgs,
   formatAkkListCommandResult,
+  formatAkkRespondCommandResult,
   parseAkkCommand,
   resolvePluginStoreDir
 } from "./openclaw-plugin-helpers.js";
@@ -28,25 +29,36 @@ const sendParameters = {
   type: "object",
   additionalProperties: false,
   required: ["request"],
+  not: { required: ["session_id", "selector"] },
   properties: {
+    session_id: {
+      type: "string",
+      minLength: 1,
+      description:
+        "Authoritative AKK session id returned by list or a previous send. Ordinary sends target a session and create a new turn; a turn id is never a send destination."
+    },
     selector: {
       type: "string",
+      minLength: 1,
       description:
-        "Optional existing tmux target selector from AKK list: codex, claude, only, latest, an @short-ref, or an authoritative full id. Omit it to start a new managed turn through the unique eligible idle pane."
+        "Compatibility/discovery selector: codex, claude, only, latest, an @short-ref, or a live terminal id. Prefer session_id once a session exists. Omit both fields only when AKK should attach the unique eligible idle pane."
     },
     request: {
       type: "string",
+      minLength: 1,
       description:
-        "New task or follow-up message for the coding agent. For an ordinary send, omit monitoring timeout fields. timeoutSeconds is not a supported argument."
+        "Message for the coding agent. Each accepted ordinary send creates a new turn inside the selected session without clearing native agent context."
     },
     type: {
       type: "string",
-      enum: ["answer", "task", "control", "error"]
+      enum: ["task"],
+      description:
+        "Ordinary sends always create a task turn. Use agent_knock_knock_respond for an answer to an in-flight turn."
     },
     idleTimeoutMinutes: {
       type: "number",
       description:
-        "Minutes an idle AKK session remains open before controlled reconciliation closes its managed-turn record."
+        "Minutes an idle or completed AKK Turn record is retained before controlled reconciliation closes it."
     },
     agentTimeoutMinutes: {
       type: "number",
@@ -56,6 +68,23 @@ const sendParameters = {
       type: "number",
       exclusiveMinimum: 0,
       description: "Maximum terminal monitor lifetime in minutes."
+    }
+  }
+};
+
+const respondParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["turn_id", "request"],
+  properties: {
+    turn_id: {
+      type: "string",
+      description:
+        "Authoritative AKK turn id from a question or blocked callback. A response continues this exact in-flight turn and does not create a new turn."
+    },
+    request: {
+      type: "string",
+      description: "Answer or decision for the coding agent's exact in-flight turn."
     }
   }
 };
@@ -91,11 +120,20 @@ const listParameters = {
 const renewParameters = {
   type: "object",
   additionalProperties: false,
-  required: ["conversation_id"],
+  not: { required: ["turn_id", "conversation_id"] },
+  anyOf: [
+    { required: ["turn_id"] },
+    { required: ["conversation_id"] }
+  ],
   properties: {
+    turn_id: {
+      type: "string",
+      description: "Authoritative AKK turn id whose monitoring should be renewed."
+    },
     conversation_id: {
       type: "string",
-      description: "Stalled AKK-managed terminal bridge conversation id."
+      deprecated: true,
+      description: "Deprecated compatibility alias for turn_id."
     },
     minutes: {
       type: "number",
@@ -108,11 +146,20 @@ const renewParameters = {
 const retryCallbackParameters = {
   type: "object",
   additionalProperties: false,
-  required: ["conversation_id"],
+  not: { required: ["turn_id", "conversation_id"] },
+  anyOf: [
+    { required: ["turn_id"] },
+    { required: ["conversation_id"] }
+  ],
   properties: {
+    turn_id: {
+      type: "string",
+      description: "Authoritative AKK turn id whose persisted callback should be retried."
+    },
     conversation_id: {
       type: "string",
-      description: "AKK-managed conversation whose persisted callback delivery is pending or failed."
+      deprecated: true,
+      description: "Deprecated compatibility alias for turn_id."
     }
   }
 };
@@ -120,12 +167,21 @@ const retryCallbackParameters = {
 const statusParameters = {
   type: "object",
   additionalProperties: false,
-  required: ["conversation_id"],
+  not: { required: ["turn_id", "conversation_id"] },
+  anyOf: [
+    { required: ["turn_id"] },
+    { required: ["conversation_id"] }
+  ],
   properties: {
+    turn_id: {
+      type: "string",
+      description: "Authoritative AKK turn id to inspect."
+    },
     conversation_id: {
       type: "string",
+      deprecated: true,
       description:
-        "Managed-turn conversation id, or a live terminal id from AKK list such as terminal:v2:tmux:codex:codex-work:0.1:33389."
+        "Deprecated legacy Turn alias, or the exact raw-terminal selector prefilled by that terminal row's available status action. Managed Turn status must use turn_id; never construct or guess a raw-terminal selector."
     },
     idleTimeoutMinutes: {
       type: "number"
@@ -140,12 +196,21 @@ const statusParameters = {
 const cancelParameters = {
   type: "object",
   additionalProperties: false,
-  required: ["conversation_id"],
+  not: { required: ["turn_id", "conversation_id"] },
+  anyOf: [
+    { required: ["turn_id"] },
+    { required: ["conversation_id"] }
+  ],
   properties: {
+    turn_id: {
+      type: "string",
+      description: "Authoritative AKK turn id to interrupt."
+    },
     conversation_id: {
       type: "string",
+      deprecated: true,
       description:
-        "Managed-turn conversation id, or a live terminal id from AKK list such as terminal:v2:tmux:codex:codex-work:0.1:33389."
+        "Deprecated legacy Turn alias, or the exact raw-terminal selector prefilled by that terminal row's available cancel action. Managed Turn cancellation must use turn_id; never construct or guess a raw-terminal selector."
     },
     idleTimeoutMinutes: {
       type: "number"
@@ -156,10 +221,21 @@ const cancelParameters = {
 const closeParameters = {
   type: "object",
   additionalProperties: false,
-  required: ["conversation_id"],
+  not: { required: ["turn_id", "conversation_id"] },
+  anyOf: [
+    { required: ["turn_id"] },
+    { required: ["conversation_id"] }
+  ],
   properties: {
+    turn_id: {
+      type: "string",
+      description: "Authoritative AKK turn id whose managed record should be closed."
+    },
     conversation_id: {
-      type: "string"
+      type: "string",
+      deprecated: true,
+      description:
+        "Deprecated legacy Turn alias, or an exact list-prefilled raw-terminal/orphan recovery selector. Managed Turn close must use turn_id; never construct or guess a raw-terminal selector."
     },
     reason: {
       type: "string"
@@ -175,12 +251,22 @@ const closeParameters = {
 const approveParameters = {
   type: "object",
   additionalProperties: false,
-  required: ["conversation_id", "expected_approval_fingerprint"],
+  required: ["expected_approval_fingerprint"],
+  not: { required: ["turn_id", "conversation_id"] },
+  anyOf: [
+    { required: ["turn_id"] },
+    { required: ["conversation_id"] }
+  ],
   properties: {
+    turn_id: {
+      type: "string",
+      description: "Authoritative AKK turn id containing the approval prompt."
+    },
     conversation_id: {
       type: "string",
+      deprecated: true,
       description:
-        "Managed-turn conversation id, or a live terminal id from AKK list such as terminal:v2:tmux:codex:codex-work:0.1:33389."
+        "Deprecated legacy Turn alias, or the exact raw-terminal selector prefilled by that terminal row's available approval action. Managed Turn approval must use turn_id; never construct or guess a raw-terminal selector."
     },
     expected_approval_fingerprint: {
       type: "string",
@@ -262,7 +348,7 @@ function createPlugin(relayPath: string): OpenClawPluginDefinition {
 
     registerCliTool(api, {
       name: "agent_knock_knock_list",
-      description: "List existing Codex and Claude Code tmux panes as the primary terminals[] resources. Each terminal may include managed.current_turn or managed.recent_turn; all=true also includes older managed.history and retained unavailable history. By default, unavailable_managed_turns contains attention-needed records whose pane is unavailable. Use only each row's available_actions and its authoritative prefilled arguments: send starts a new turn on a terminal, while follow_up continues a specific managed turn. AKK revalidates every side effect and never starts a coding agent.",
+      description: "List existing Codex and Claude Code tmux panes as the primary terminals[] resources. Each terminal may include managed.current_turn or managed.recent_turn; all=true also includes older managed.history and retained unavailable history. By default, unavailable_managed_turns contains attention-needed records whose pane is unavailable. Use only each row's available_actions and authoritative prefilled arguments: send targets a session and starts a new turn; respond targets the exact in-flight turn; managed controls target the exact turn; a raw terminal row may prefill its own compatibility selector for status or recovery controls. Never construct that selector. AKK revalidates every side effect and never starts a coding agent.",
       parameters: listParameters,
       buildArgs: (params) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
@@ -293,7 +379,7 @@ function createPlugin(relayPath: string): OpenClawPluginDefinition {
         label: "AKK Status",
         name: "agent_knock_knock_status",
         description:
-          "Inspect one AKK-managed turn or existing coding-agent tmux terminal. Returns live state, a bounded terminal screen, and available purpose/context with confidence and limitations. AKK never starts a coding agent.",
+          "Inspect one exact AKK-managed turn by its authoritative turn_id, or use only a raw terminal row's own prefilled compatibility selector. The deprecated conversation_id remains a legacy Turn alias and the list-prefilled raw-terminal input; never construct it. Returns live state, a bounded terminal screen, and available purpose/context with confidence and limitations. AKK never starts a coding agent.",
         parameters: statusParameters,
         async execute(_toolCallId, params) {
           const result = runCli(
@@ -311,7 +397,7 @@ function createPlugin(relayPath: string): OpenClawPluginDefinition {
         label: "AKK Send",
         name: "agent_knock_knock_send",
         description:
-          "Send through an existing Codex or Claude Code tmux terminal. Use a terminal row's send action to start a new managed turn, or a managed turn's follow_up action to continue that exact turn; both call this tool with the prefilled selector. Omit selector only when AKK should require one unique eligible idle pane. For ordinary use add only request and omit monitoring timeouts unless the user explicitly asks to change them. timeoutSeconds is unsupported. AKK never starts a coding agent. This is asynchronous: after acceptance, yield and wait for the callback or a later explicit status request.",
+          "Start a new turn in an existing AKK session without clearing the coding agent's native context. Target session_id from list or a prior send; never pass a turn id. selector is compatibility-only for initial live-terminal discovery, and both fields may be omitted only when AKK should require one unique eligible idle pane. To answer an in-flight question, use agent_knock_knock_respond instead. For ordinary use add only request and omit monitoring timeouts unless the user explicitly asks to change them. timeoutSeconds is unsupported. AKK never starts a coding agent. This is asynchronous: after acceptance, yield and wait for the callback or a later explicit status request.",
         parameters: sendParameters,
         async execute(_toolCallId, params) {
           const result = await runSendRequest(
@@ -319,20 +405,40 @@ function createPlugin(relayPath: string): OpenClawPluginDefinition {
             isRecord(params) ? params : {},
             toolContext
           );
-          return toolResult(result);
+          return toolResult(result, { submissionErrors: true });
         }
       }),
       { name: "agent_knock_knock_send", optional: true }
     );
 
     registerCliTool(api, {
+      name: "agent_knock_knock_respond",
+      description:
+        "Respond to a question or blocked callback in one exact in-flight AKK turn. This continues that turn and does not create a new turn; use agent_knock_knock_send with session_id for later ordinary work.",
+      parameters: respondParameters,
+      buildArgs: (params) => {
+        const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+        const args = [
+          "respond",
+          "--turn",
+          requiredString(params.turn_id, "turn_id"),
+          "--message",
+          requiredString(params.request, "request")
+        ];
+        pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
+        return args;
+      }
+    });
+
+    registerCliTool(api, {
       name: "agent_knock_knock_approve",
       description:
-        "Manually approve the current AKK terminal permission request only after the user reviews and explicitly confirms it. Claude Code uses no Hooks: this manual path accepts only an exact one-time Bash permission screen for the current managed turn, then recaptures its short-lived evidence and process identity before sending Enter. Separately, trusted default-disabled plugin configuration can auto-approve an exact Claude command/workspace match without exposing policy control to the model. Hook-free durable completion is independently verified from the local Claude transcript.",
+        "Manually approve a permission request only after the user reviews and explicitly confirms it. Managed approval uses exact turn_id; an unmanaged raw terminal may be approved only through its own list-prefilled action. Claude Code uses no Hooks: this manual path accepts only an exact one-time Bash permission screen, then recaptures its short-lived evidence and process identity before sending Enter. Separately, trusted default-disabled plugin configuration can auto-approve an exact Claude command/workspace match without exposing policy control to the model. Hook-free durable completion is independently verified from the local Claude transcript.",
       parameters: approveParameters,
       buildArgs: (params) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
-        const args = ["approve", "--conversation", requiredString(params.conversation_id, "conversation_id")];
+        const args = ["approve"];
+        pushTurnTarget(args, params);
         pushOptional(
           args,
           "--expected-approval-fingerprint",
@@ -349,11 +455,12 @@ function createPlugin(relayPath: string): OpenClawPluginDefinition {
 
     registerCliTool(api, {
       name: "agent_knock_knock_renew",
-      description: "Renew monitoring for a stalled AKK-managed terminal bridge task without sending text or keys to the coding agent. Use this when the user wants a still-live long-running terminal task to keep monitoring after an inactivity stall.",
+      description: "Renew monitoring for one exact stalled turn_id without sending text or keys to the coding agent. Use this when the user wants a still-live long-running terminal task to keep monitoring after an inactivity stall.",
       parameters: renewParameters,
       buildArgs: (params) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
-        const args = ["renew", "--conversation", requiredString(params.conversation_id, "conversation_id")];
+        const args = ["renew"];
+        pushTurnTarget(args, params);
         pushOptional(args, "--minutes", numberString(params.minutes) ?? numberString(config.agentTimeoutMinutes));
         pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
         return args;
@@ -362,11 +469,12 @@ function createPlugin(relayPath: string): OpenClawPluginDefinition {
 
     registerCliTool(api, {
       name: "agent_knock_knock_retry_callback",
-      description: "Retry a persisted AKK callback that failed before reaching OpenClaw. The original callback message id is reused for idempotent delivery; a completed terminal task remains available for follow-up until its idle retention is reconciled.",
+      description: "Retry a persisted AKK callback for an exact turn that failed before reaching OpenClaw. The original callback message id and turn identity are reused for idempotent delivery.",
       parameters: retryCallbackParameters,
       buildArgs: (params) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
-        const args = ["retry-callback", "--conversation", requiredString(params.conversation_id, "conversation_id")];
+        const args = ["retry-callback"];
+        pushTurnTarget(args, params);
         pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
         return args;
       }
@@ -374,11 +482,12 @@ function createPlugin(relayPath: string): OpenClawPluginDefinition {
 
     registerCliTool(api, {
       name: "agent_knock_knock_cancel",
-      description: "Interrupt an existing Agent Knock Knock Codex or Claude Code tmux task. Claude sends Escape; Codex uses its declared interrupt key. The shared tmux pane remains open for human takeover.",
+      description: "Interrupt one exact AKK turn_id, or use only an unmanaged raw terminal row's own prefilled cancel action. Claude sends Escape; Codex uses its declared interrupt key. The shared tmux pane remains open for human takeover.",
       parameters: cancelParameters,
       buildArgs: (params) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
-        const args = ["cancel", "--conversation", requiredString(params.conversation_id, "conversation_id")];
+        const args = ["cancel"];
+        pushTurnTarget(args, params);
         pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
         pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(config.idleTimeoutMinutes));
         return args;
@@ -392,7 +501,8 @@ function createPlugin(relayPath: string): OpenClawPluginDefinition {
       parameters: closeParameters,
       buildArgs: (params) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
-        const args = ["close", "--conversation", requiredString(params.conversation_id, "conversation_id")];
+        const args = ["close"];
+        pushTurnTarget(args, params);
         pushOptional(args, "--reason", stringValue(params.reason));
         pushOptional(
           args,
@@ -464,10 +574,13 @@ async function handleAkkCommand(api, ctx) {
       case "send":
         return {
           text: formatSendCommandResult(result),
-          isError: ["uncertain", "aborted"].includes(
-            String(result.submission_outcome ?? "")
-          )
+          isError:
+            ["uncertain", "aborted"].includes(
+              String(result.submission_outcome ?? "")
+            ) || result.status === "delivered_unfenced"
         };
+      case "respond":
+        return formatAkkRespondCommandResult(result);
       case "approve":
         return { text: formatApproveCommandResult(result) };
       case "renew":
@@ -490,26 +603,35 @@ async function handleAkkCommand(api, ctx) {
 
 function formatDelegateCommandResult(result) {
   const agent = executorDisplayName(result.agent);
+  const { sessionId, turnId } = publicTurnIdentity(result);
+  if (result.status === "submission_unfenced") {
+    return [
+      `AKK sent the terminal input to ${agent}, but could not bind later side effects to an exact native session.`,
+      `session: ${sessionId}`,
+      `turn: ${turnId}`,
+      "next: do not retry or continue automatically; inspect the named pane and close this Turn before sending more work."
+    ].join("\n");
+  }
   if (result.status === "submission_uncertain") {
     return [
       `AKK could not prove whether ${agent} received the terminal task.`,
-      `conversation: ${result.conversation_id ?? "unknown"}`,
-      `session: ${result.session ?? "unknown"}`,
+      `session: ${sessionId}`,
+      `turn: ${turnId}`,
       "next: do not retry automatically; inspect AKK status and the named tmux pane."
     ].join("\n");
   }
   if (result.status === "submission_aborted") {
     return [
       `AKK stopped before sending the terminal task to ${agent}.`,
-      `conversation: ${result.conversation_id ?? "unknown"}`,
-      `session: ${result.session ?? "unknown"}`,
+      `session: ${sessionId}`,
+      `turn: ${turnId}`,
       "next: no tmux input was sent, so this request may be retried."
     ].join("\n");
   }
   return [
     `AKK sent the task to ${agent} in the shared terminal.`,
-    `conversation: ${result.conversation_id ?? "unknown"}`,
-    `session: ${result.session ?? "unknown"}`,
+    `session: ${sessionId}`,
+    `turn: ${turnId}`,
     `status: ${result.conversation_status ?? result.status ?? "unknown"}`,
     "The result will return to this OpenClaw session through the callback."
   ].join("\n");
@@ -526,12 +648,13 @@ function executorDisplayName(kind) {
 function formatStatusCommandResult(result) {
   const summary = result.summary ?? result.conversation ?? result ?? {};
   const terminalStatus = isRecord(result.terminal_status) ? result.terminal_status : {};
-  const terminalControl = isRecord(result.terminal_control) ? result.terminal_control : {};
+  const { sessionId, turnId } = publicTurnIdentity(result);
   const lines = [
-    `AKK status: ${summary.conversation_id ?? result.conversation_id ?? "unknown"}`,
+    "AKK status:",
+    `session: ${sessionId}`,
+    `turn: ${turnId}`,
     `agent: ${summary.agent ?? summary.executor?.kind ?? terminalStatus.agent ?? "unknown"}`,
-    `status: ${summary.status ?? terminalStatus.activity_state ?? "unknown"}`,
-    `session: ${summary.session ?? summary.executor?.session ?? terminalControl.target ?? "unknown"}`
+    `status: ${summary.status ?? terminalStatus.activity_state ?? "unknown"}`
   ];
   if (summary.request) {
     lines.push(`request: ${truncateText(summary.request, 180)}`);
@@ -584,8 +707,11 @@ function formatDoctorCommandResult(result) {
 }
 
 function formatRenewCommandResult(result) {
+  const { sessionId, turnId } = publicTurnIdentity(result);
   return [
-    `AKK monitoring renewed: ${result.conversation?.conversation_id ?? "unknown"}`,
+    "AKK monitoring renewed.",
+    `session: ${sessionId}`,
+    `turn: ${turnId}`,
     `inactivity timeout: ${result.agent_timeout_minutes ?? "unknown"} minutes`,
     `hard lifetime: ${result.agent_hard_timeout_minutes ?? "unknown"} minutes`,
     "No message or key was sent to the coding agent."
@@ -593,8 +719,11 @@ function formatRenewCommandResult(result) {
 }
 
 function formatRetryCallbackCommandResult(result) {
+  const { sessionId, turnId } = publicTurnIdentity(result);
   return [
-    `AKK callback delivered: ${result.conversation?.conversation_id ?? "unknown"}`,
+    "AKK callback delivered.",
+    `session: ${sessionId}`,
+    `turn: ${turnId}`,
     `status: ${result.conversation?.status ?? "unknown"}`,
     `attempts: ${result.conversation?.callback_delivery?.attempts ?? "unknown"}`
   ].join("\n");
@@ -603,12 +732,24 @@ function formatRetryCallbackCommandResult(result) {
 function formatSendCommandResult(result) {
   const conversation = result.conversation ?? {};
   const conversationId = conversation.conversation_id ?? result.conversation_id ?? "unknown";
+  const sessionId = conversation.session_id ?? result.session_id ?? conversationId;
+  const turnId = conversation.turn_id ?? result.turn_id ?? conversationId;
   const status = conversation.status ?? result.status ?? "unknown";
   const nextAction = isRecord(result.openclaw_next_action) ? result.openclaw_next_action : undefined;
+  if (result.status === "delivered_unfenced") {
+    return [
+      "AKK sent the terminal input but could not bind an exact native session.",
+      `session: ${sessionId}`,
+      `turn: ${turnId}`,
+      `status: ${status}`,
+      "next: do not retry or continue automatically; inspect the shared tmux pane and close this Turn before sending more work."
+    ].join("\n");
+  }
   if (result.submission_outcome === "uncertain") {
     return [
       "AKK terminal submission outcome is uncertain.",
-      `conversation: ${conversationId}`,
+      `session: ${sessionId}`,
+      `turn: ${turnId}`,
       `status: ${result.status ?? status}`,
       "next: do not retry automatically; inspect AKK status and the named tmux pane."
     ].join("\n");
@@ -616,14 +757,16 @@ function formatSendCommandResult(result) {
   if (result.submission_outcome === "aborted") {
     return [
       "AKK terminal submission was aborted before tmux input.",
-      `conversation: ${conversationId}`,
+      `session: ${sessionId}`,
+      `turn: ${turnId}`,
       `status: ${result.status ?? status}`,
       "next: this request was not sent and may be retried."
     ].join("\n");
   }
   const lines = [
-    "AKK follow-up sent.",
-    `conversation: ${conversationId}`,
+    "AKK turn sent.",
+    `session: ${sessionId}`,
+    `turn: ${turnId}`,
     `status: ${status}`
   ];
   if (result.source) {
@@ -639,23 +782,25 @@ function formatSendCommandResult(result) {
 
 function formatCancelCommandResult(result) {
   const conversation = result.conversation ?? {};
-  const terminalControl = isRecord(result.terminal_control) ? result.terminal_control : {};
+  const { sessionId, turnId } = publicTurnIdentity(result);
   return [
     "AKK cancel requested.",
-    `conversation: ${conversation.conversation_id ?? result.conversation_id ?? "unknown"}`,
+    `session: ${sessionId}`,
+    `turn: ${turnId}`,
     `agent: ${result.executor?.kind ?? conversation.executor?.kind ?? "unknown"}`,
-    `session: ${result.executor?.session ?? conversation.executor?.session ?? terminalControl.target ?? "unknown"}`,
     `status: ${conversation.status ?? (result.cancel_requested === true ? "cancel requested" : "not cancelled")}`
   ].join("\n");
 }
 
 function formatApproveCommandResult(result) {
   const conversation = result.conversation ?? {};
+  const { sessionId, turnId } = publicTurnIdentity(result);
   return [
     result.approved === true
       ? "AKK approved the current terminal request."
       : "AKK did not approve the terminal request.",
-    `conversation: ${conversation.conversation_id ?? result.conversation_id ?? "unknown"}`,
+    `session: ${sessionId}`,
+    `turn: ${turnId}`,
     `status: ${conversation.status ?? "unknown"}`,
     ...(result.reason ? [`reason: ${result.reason}`] : [])
   ].join("\n");
@@ -672,26 +817,50 @@ function formatCloseCommandResult(result) {
     return [
       "AKK cleared the unresolved terminal dispatch fence.",
       `terminal: ${terminalControl.target ?? "unknown"}`,
-      `previous owner: ${result.owner_conversation_id ?? "unknown"}`,
+      `previous turn: ${result.owner_turn_id ?? result.owner_conversation_id ?? "unknown"}`,
       "The coding agent and tmux pane remain open."
     ].join("\n");
   }
   const conversation = result.conversation ?? {};
+  const { sessionId, turnId } = publicTurnIdentity(result);
   return [
-    "AKK session closed.",
-    `conversation: ${conversation.conversation_id ?? "unknown"}`,
+    "AKK Turn record closed.",
+    `session: ${sessionId}`,
+    `turn: ${turnId}`,
     `status: ${conversation.status ?? "unknown"}`
   ].join("\n");
+}
+
+function publicTurnIdentity(result) {
+  const conversation = isRecord(result.conversation) ? result.conversation : {};
+  const summary = isRecord(result.summary) ? result.summary : {};
+  const compatibilityId =
+    stringValue(conversation.conversation_id) ??
+    stringValue(summary.conversation_id) ??
+    stringValue(result.conversation_id);
+  return {
+    sessionId:
+      stringValue(conversation.session_id) ??
+      stringValue(summary.session_id) ??
+      stringValue(result.session_id) ??
+      compatibilityId ??
+      "unknown",
+    turnId:
+      stringValue(conversation.turn_id) ??
+      stringValue(summary.turn_id) ??
+      stringValue(result.turn_id) ??
+      compatibilityId ??
+      "unknown"
+  };
 }
 
 function buildStatusCliArgs(api, params) {
   const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
   const args = [
     "status",
-    "--reconcile",
-    "--conversation",
-    requiredString(params.conversation_id, "conversation_id")
+    "--reconcile"
   ];
+  pushTurnTarget(args, params);
   pushOptional(
     args,
     "--store-dir",
@@ -727,8 +896,24 @@ function terminalScreenExcerpt(result): string | undefined {
 }
 
 async function runSendRequest(api, params, toolContext) {
-  const selector = stringValue(params.selector);
-  if (!selector) {
+  const requestedType = Object.hasOwn(params, "type")
+    ? stringValue(params.type)
+    : "task";
+  if (requestedType !== "task") {
+    throw new Error(
+      "ordinary send type must be task; use agent_knock_knock_respond for an in-flight response"
+    );
+  }
+  if (Object.hasOwn(params, "session_id") && Object.hasOwn(params, "selector")) {
+    throw new Error("ordinary send accepts only one of session_id or selector");
+  }
+  const sessionId = Object.hasOwn(params, "session_id")
+    ? requiredString(params.session_id, "session_id")
+    : undefined;
+  const selector = Object.hasOwn(params, "selector")
+    ? requiredString(params.selector, "selector")
+    : undefined;
+  if (!sessionId && !selector) {
     return runDelegate(api, params, toolContext);
   }
 
@@ -737,13 +922,18 @@ async function runSendRequest(api, params, toolContext) {
     stringValue(toolContext?.sessionKey) ??
     "agent:main:main";
   const args = [
-    "send",
-    "--conversation",
-    selector,
+    "send"
+  ];
+  if (sessionId) {
+    args.push("--session", sessionId);
+  } else {
+    args.push("--conversation", requiredString(selector, "selector"));
+  }
+  args.push(
     "--message",
     requiredString(params.request, "request"),
     "--background"
-  ];
+  );
   pushOptional(args, "--type", stringValue(params.type));
   pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
   pushOptional(
@@ -771,16 +961,118 @@ async function runSendRequest(api, params, toolContext) {
   return runCli(api, args);
 }
 
-function toolResult(result) {
+function toolResult(
+  result,
+  { submissionErrors = false }: { submissionErrors?: boolean } = {}
+) {
+  const normalized = withTurnIdentity(result);
+  const submissionError = submissionErrors && isSubmissionError(normalized);
   return {
     content: [
       {
         type: "text" as const,
-        text: JSON.stringify(result, null, 2)
+        text: JSON.stringify(normalized, null, 2)
       }
     ],
-    details: result
+    details: normalized,
+    ...(submissionError ? { isError: true } : {})
   };
+}
+
+function isSubmissionError(result: unknown): boolean {
+  if (!isRecord(result)) {
+    return false;
+  }
+  return [
+    "submission_unfenced",
+    "submission_uncertain",
+    "submission_aborted"
+  ].includes(String(result.status ?? "")) ||
+    ["uncertain", "aborted"].includes(
+      String(result.submission_outcome ?? "")
+    ) ||
+    result.status === "delivered_unfenced";
+}
+
+function withTurnIdentity(result) {
+  if (!isRecord(result)) {
+    return result;
+  }
+  const sources = [
+    { label: "result", value: result },
+    { label: "result.conversation", value: result.conversation },
+    { label: "result.summary", value: result.summary },
+    { label: "result.message", value: result.message }
+  ];
+  const compatibilityId = consistentResultIdentity(
+    "conversation_id",
+    sources
+  );
+  const explicitSessionId = consistentResultIdentity("session_id", sources);
+  const explicitTurnId = consistentResultIdentity("turn_id", sources);
+  const hasModernIdentity = Boolean(explicitSessionId || explicitTurnId);
+  if (hasModernIdentity && (!explicitSessionId || !explicitTurnId)) {
+    throw new Error(
+      "agent-knock-knock CLI returned a partial session_id/turn_id identity"
+    );
+  }
+  if (hasModernIdentity && !compatibilityId) {
+    throw new Error(
+      "agent-knock-knock CLI returned modern identity without conversation_id"
+    );
+  }
+  if (hasModernIdentity && compatibilityId !== explicitTurnId) {
+    throw new Error(
+      "agent-knock-knock CLI returned conversation_id that differs from turn_id"
+    );
+  }
+  if (!hasModernIdentity && !compatibilityId) {
+    return result;
+  }
+  if (
+    !hasModernIdentity &&
+    (
+      compatibilityId?.startsWith("terminal:") ||
+      stringValue(result.source) === "terminal" ||
+      (
+        isRecord(result.summary) &&
+        stringValue(result.summary.source) === "terminal"
+      )
+    )
+  ) {
+    return result;
+  }
+  const sessionId = explicitSessionId ?? compatibilityId;
+  const turnId = explicitTurnId ?? compatibilityId;
+  return {
+    ...result,
+    session_id: sessionId,
+    turn_id: turnId
+  };
+}
+
+function consistentResultIdentity(field, sources) {
+  const values = sources.flatMap(({ label, value }) => {
+    if (!isRecord(value) || !Object.hasOwn(value, field)) {
+      return [];
+    }
+    const identity = stringValue(value[field]);
+    if (!identity) {
+      throw new Error(
+        `agent-knock-knock CLI returned invalid ${label}.${field}`
+      );
+    }
+    return [{ label, identity }];
+  });
+  const expected = values[0];
+  for (const candidate of values.slice(1)) {
+    if (candidate.identity !== expected.identity) {
+      throw new Error(
+        `agent-knock-knock CLI returned conflicting ${field} between ${expected.label} and ${candidate.label}`
+      );
+    }
+  }
+  return expected?.identity;
 }
 
 async function runDelegate(api, params, toolContext) {
@@ -805,55 +1097,91 @@ async function runDelegate(api, params, toolContext) {
   pushOptional(args, "--agent-timeout-minutes", numberString(params.agentTimeoutMinutes) ?? numberString(config.agentTimeoutMinutes));
   pushOptional(args, "--agent-hard-timeout-minutes", numberString(params.agentHardTimeoutMinutes) ?? numberString(config.agentHardTimeoutMinutes));
 
-  const parsed = await runCliAsync(api, args);
-  const conversationId =
-    parsed.conversation?.conversation_id ??
-    parsed.conversation_id;
+  const parsed = withTurnIdentity(await runCliAsync(api, args));
+  if (!isRecord(parsed)) {
+    throw new Error("agent-knock-knock delegate returned a non-object result");
+  }
+  const conversationId = stringValue(parsed.conversation_id) ??
+    (isRecord(parsed.conversation)
+      ? stringValue(parsed.conversation.conversation_id)
+      : undefined);
+  const sessionId = stringValue(parsed.session_id);
+  const turnId = stringValue(parsed.turn_id);
+  if (!conversationId || !sessionId || !turnId) {
+    throw new Error("agent-knock-knock delegate returned incomplete Turn identity");
+  }
+  const parsedConversation = isRecord(parsed.conversation)
+    ? parsed.conversation
+    : undefined;
+  const parsedPaths = isRecord(parsed.paths) ? parsed.paths : undefined;
+  const parsedTerminalControl = isRecord(parsed.terminal_control)
+    ? parsed.terminal_control
+    : undefined;
   const statePath =
-    parsed.conversation?.state_path ??
-    parsed.paths?.statePath;
+    parsedConversation?.state_path ??
+    parsedPaths?.statePath;
   const logPath =
-    parsed.conversation?.event_log_path ??
-    parsed.paths?.logPath;
+    parsedConversation?.event_log_path ??
+    parsedPaths?.logPath;
   const submissionUncertain = parsed.submission_outcome === "uncertain";
   const submissionAborted = parsed.submission_outcome === "aborted";
+  const submissionUnfenced = parsed.status === "delivered_unfenced";
   const agent =
-    stringValue(parsed.conversation?.executor?.kind) ??
+    (isRecord(parsedConversation?.executor)
+      ? stringValue(parsedConversation.executor.kind)
+      : undefined) ??
     stringValue(parsed.agent);
   return {
-    status: submissionUncertain
+    status: submissionUnfenced
+      ? "submission_unfenced"
+      : submissionUncertain
       ? "submission_uncertain"
       : submissionAborted
         ? "submission_aborted"
         : "async_pending",
-    submission_status: submissionUncertain
+    submission_status: submissionUnfenced
+      ? "submitted_unfenced"
+      : submissionUncertain
       ? "uncertain"
       : submissionAborted
         ? "aborted"
         : "accepted",
     conversation_id: conversationId,
-    conversation_status: parsed.conversation?.status,
+    session_id: sessionId,
+    turn_id: turnId,
+    conversation_status: parsedConversation?.status,
     state_path: statePath,
     event_log_path: logPath,
     agent,
-    executor: parsed.conversation?.executor,
+    executor: parsedConversation?.executor,
     session:
-      parsed.conversation?.executor?.session ??
-      parsed.terminal_control?.target,
+      (isRecord(parsedConversation?.executor)
+        ? parsedConversation.executor.session
+        : undefined) ??
+      parsedTerminalControl?.target,
     openclaw_session: openclawSession,
     launched: parsed.launched === true,
     replayed: parsed.replayed === true,
     background: parsed.background === true,
-    pid: parsed.pid ?? parsed.terminal_control?.panePid ?? null,
+    pid: parsed.pid ?? parsedTerminalControl?.panePid ?? null,
     callback_method: CALLBACK_METHOD,
-    ...(submissionUncertain
+    ...(submissionUnfenced
+      ? {
+          submission_outcome: "submitted",
+          do_not_retry: true,
+          reason: parsed.reason,
+          openclaw_next_action: parsed.openclaw_next_action,
+          note:
+            "AKK sent the terminal input but could not fence later side effects to an exact native session. Do not retry or continue automatically; inspect the pane and close this Turn."
+        }
+      : submissionUncertain
       ? {
           submission_outcome: "uncertain",
           do_not_retry: true,
           reason: parsed.reason,
           openclaw_next_action: parsed.openclaw_next_action,
           note:
-            "AKK could not prove whether tmux accepted Enter. Do not retry automatically; inspect the durable AKK conversation and shared terminal."
+            "AKK could not prove whether tmux accepted Enter. Do not retry automatically; inspect the exact AKK Turn record and shared terminal."
         }
       : submissionAborted
         ? {
@@ -870,7 +1198,7 @@ async function runDelegate(api, params, toolContext) {
             reason:
               "The coding agent is working in the shared tmux terminal. End this OpenClaw turn now and wait for an Agent Knock Knock callback.",
             do_not:
-              "Do not poll terminal internals while waiting. Follow-up communication must use Agent Knock Knock tools so the same shared terminal remains authoritative.",
+              "Do not poll terminal internals while waiting. Further communication must use Agent Knock Knock tools so the same shared terminal remains authoritative.",
             expected_callback:
               "The callback will be injected and scheduled into this OpenClaw session by the agent-knock-knock.callback Gateway method."
           },
@@ -889,15 +1217,9 @@ function registerCliTool(api, { name, description, parameters, buildArgs }) {
       parameters,
       async execute(_toolCallId, params) {
         const result = runCli(api, buildArgs(isRecord(params) ? params : {}, toolContext));
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(result, null, 2)
-            }
-          ],
-          details: result
-        };
+        return toolResult(result, {
+          submissionErrors: name === "agent_knock_knock_respond"
+        });
       }
     }),
     { name, optional: true }
@@ -1050,6 +1372,174 @@ function relayPathForApi(api): string {
   return relayPathByApi.get(api) ?? defaultBinPath;
 }
 
+function callbackIdentity({ params, conversation, message, messageMetadata }) {
+  const messageHasSessionId = isRecord(message) &&
+    Object.hasOwn(message, "session_id");
+  const messageHasTurnId = isRecord(message) &&
+    Object.hasOwn(message, "turn_id");
+  if (messageHasSessionId !== messageHasTurnId) {
+    throw new Error(
+      "modern callback messages require both session_id and turn_id"
+    );
+  }
+  const identityMode = messageHasSessionId ? "modern" : "legacy";
+  const sources = [
+    { label: "message", value: message },
+    { label: "message.metadata", value: messageMetadata },
+    { label: "conversation", value: conversation },
+    { label: "params", value: params }
+  ];
+  const explicitConversationId = consistentCallbackIdentity(
+    "conversation_id",
+    sources
+  );
+  const explicitTurnId = consistentCallbackIdentity("turn_id", sources);
+  const explicitSessionId = consistentCallbackIdentity("session_id", sources);
+  const hasModernIdentity = Boolean(explicitSessionId || explicitTurnId);
+  if (hasModernIdentity && (!explicitSessionId || !explicitTurnId)) {
+    throw new Error(
+      "modern callbacks require both session_id and turn_id"
+    );
+  }
+  if (hasModernIdentity && !explicitConversationId) {
+    throw new Error(
+      "modern callbacks require conversation_id as the Turn Store alias"
+    );
+  }
+  if (hasModernIdentity && explicitConversationId !== explicitTurnId) {
+    throw new Error(
+      "callback conversation_id must equal turn_id for modern callback identities"
+    );
+  }
+  if (!explicitConversationId) {
+    throw new Error(
+      "callback identity requires session_id and turn_id, or a legacy conversation_id"
+    );
+  }
+  const turnId = explicitTurnId ?? explicitConversationId;
+  const conversationId = explicitConversationId;
+  const sessionId = explicitSessionId ?? explicitConversationId;
+  return {
+    conversationId,
+    sessionId,
+    turnId,
+    identityMode
+  };
+}
+
+function consistentCallbackIdentity(field, sources) {
+  const values = sources.flatMap(({ label, value }) => {
+    if (!isRecord(value) || !Object.hasOwn(value, field)) {
+      return [];
+    }
+    const identity = stringValue(value[field]);
+    if (!identity) {
+      throw new Error(`callback ${label}.${field} must be a non-empty string`);
+    }
+    return [{ label, identity }];
+  });
+  const expected = values[0];
+  for (const candidate of values.slice(1)) {
+    if (candidate.identity !== expected.identity) {
+      throw new Error(
+        `callback ${field} mismatch between ${expected.label} and ${candidate.label}`
+      );
+    }
+  }
+  return expected?.identity;
+}
+
+function callbackSessionKey({ params, conversation, message, messageMetadata }) {
+  const sessionKey = callbackStringField(
+    "params.sessionKey",
+    params,
+    "sessionKey"
+  );
+  if (!sessionKey) {
+    throw new Error("callback params.sessionKey is required");
+  }
+
+  const gatewaySession = consistentCallbackTarget(
+    "Gateway session",
+    [
+      {
+        label: "conversation.gateway_session",
+        owner: conversation,
+        field: "gateway_session"
+      },
+      {
+        label: "message.gateway_session",
+        owner: message,
+        field: "gateway_session"
+      },
+      {
+        label: "message.metadata.gateway_session",
+        owner: messageMetadata,
+        field: "gateway_session"
+      }
+    ]
+  );
+  const openclawSession = consistentCallbackTarget(
+    "OpenClaw session",
+    [
+      {
+        label: "params.openclaw_session",
+        owner: params,
+        field: "openclaw_session"
+      },
+      {
+        label: "conversation.openclaw_session",
+        owner: conversation,
+        field: "openclaw_session"
+      },
+      {
+        label: "message.openclaw_session",
+        owner: message,
+        field: "openclaw_session"
+      },
+      {
+        label: "message.metadata.openclaw_session",
+        owner: messageMetadata,
+        field: "openclaw_session"
+      }
+    ]
+  );
+  const expectedGatewayTarget = gatewaySession ?? openclawSession;
+  if (expectedGatewayTarget && expectedGatewayTarget !== sessionKey) {
+    throw new Error(
+      "callback Gateway session mismatch with params.sessionKey"
+    );
+  }
+  return sessionKey;
+}
+
+function consistentCallbackTarget(label, sources) {
+  const values = sources.flatMap((source) => {
+    const value = callbackStringField(source.label, source.owner, source.field);
+    return value ? [{ label: source.label, value }] : [];
+  });
+  const expected = values[0];
+  for (const candidate of values.slice(1)) {
+    if (candidate.value !== expected.value) {
+      throw new Error(
+        `callback ${label} mismatch between ${expected.label} and ${candidate.label}`
+      );
+    }
+  }
+  return expected?.value;
+}
+
+function callbackStringField(label, owner, field) {
+  if (!isRecord(owner) || !Object.hasOwn(owner, field)) {
+    return undefined;
+  }
+  const value = stringValue(owner[field]);
+  if (!value) {
+    throw new Error(`callback ${label} must be a non-empty string`);
+  }
+  return value;
+}
+
 async function handleCallback(api, params) {
   if (!isRecord(params)) {
     throw new Error("callback params must be an object");
@@ -1058,20 +1548,26 @@ async function handleCallback(api, params) {
   const message = isRecord(params.message) ? params.message : undefined;
   const conversation = isRecord(params.conversation) ? params.conversation : undefined;
   const messageMetadata = isRecord(message?.metadata) ? message.metadata : undefined;
-  const sessionKey =
-    stringValue(params.sessionKey) ??
-    stringValue(conversation?.openclaw_session) ??
-    stringValue(messageMetadata?.openclaw_session);
-
-  if (!sessionKey) {
-    throw new Error("callback params.sessionKey is required");
-  }
   if (!message) {
     throw new Error("callback params.message is required");
   }
+  const sessionKey = callbackSessionKey({
+    params,
+    conversation,
+    message,
+    messageMetadata
+  });
 
-  const conversationId = stringValue(message.conversation_id) ?? stringValue(conversation?.conversation_id);
-  const messageId = stringValue(message.id) ?? `${conversationId ?? "unknown"}:${stringValue(message.type) ?? "message"}:${Date.now()}`;
+  const {
+    conversationId,
+    sessionId,
+    turnId,
+    identityMode
+  } = callbackIdentity({ params, conversation, message, messageMetadata });
+  const messageId = stringValue(message.id);
+  if (!messageId) {
+    throw new Error("callback message.id is required");
+  }
   const autoApproval = tryAutoApproveCallback({
     api,
     message,
@@ -1086,6 +1582,8 @@ async function handleCallback(api, params) {
       delivery_mode: "none",
       session_key: sessionKey,
       conversation_id: conversationId,
+      session_id: sessionId,
+      turn_id: turnId,
       message_id: messageId,
       message_type: stringValue(message.type) ?? "unknown",
       auto_approved: autoApproval.approved === true,
@@ -1094,16 +1592,26 @@ async function handleCallback(api, params) {
       approval: autoApproval
     };
   }
-  const formatted = formatCallbackInjection({ conversation, message, statePath: stringValue(params.statePath) });
+  const formatted = formatCallbackInjection({
+    message,
+    sessionId,
+    turnId,
+    statePath: stringValue(params.statePath)
+  });
+  const dedupeIdentity = identityMode === "legacy"
+    ? conversationId
+    : `${sessionId}:${turnId}`;
   const injection = await api.session.workflow.enqueueNextTurnInjection({
     sessionKey,
     text: formatted,
-    idempotencyKey: `agent-knock-knock:${conversationId ?? "unknown"}:${messageId}`,
+    idempotencyKey: `agent-knock-knock:${dedupeIdentity}:${messageId}`,
     placement: "append_context",
     ttlMs: 24 * 60 * 60 * 1000,
     metadata: {
       kind: "agent-knock-knock-callback",
       conversation_id: conversationId,
+      session_id: sessionId,
+      turn_id: turnId,
       message_id: messageId,
       message_type: stringValue(message.type) ?? "unknown",
       state_path: stringValue(params.statePath),
@@ -1113,6 +1621,9 @@ async function handleCallback(api, params) {
   const delivery = buildCallbackDeliveryPlan({
     sessionKey,
     conversationId,
+    sessionId,
+    turnId,
+    identityMode,
     messageId,
     message,
     formatted
@@ -1128,6 +1639,8 @@ async function handleCallback(api, params) {
     injection_id: injection?.id,
     session_key: injection?.sessionKey ?? sessionKey,
     conversation_id: conversationId,
+    session_id: sessionId,
+    turn_id: turnId,
     message_id: messageId,
     message_type: stringValue(message.type) ?? "unknown"
   };
@@ -1151,7 +1664,16 @@ function tryAutoApproveCallback({ api, message, conversationId, statePath }) {
   return result;
 }
 
-function buildCallbackDeliveryPlan({ sessionKey, conversationId, messageId, message, formatted }) {
+function buildCallbackDeliveryPlan({
+  sessionKey,
+  conversationId,
+  sessionId,
+  turnId,
+  identityMode,
+  messageId,
+  message,
+  formatted
+}) {
   const type = stringValue(message.type) ?? "unknown";
   const shouldWake =
     message.requires_response === true ||
@@ -1167,6 +1689,9 @@ function buildCallbackDeliveryPlan({ sessionKey, conversationId, messageId, mess
     };
   }
 
+  const dedupeIdentity = identityMode === "legacy"
+    ? conversationId
+    : `${sessionId}:${turnId}`;
   return {
     required: true,
     mode: "chat.send",
@@ -1175,29 +1700,33 @@ function buildCallbackDeliveryPlan({ sessionKey, conversationId, messageId, mess
       message: [
         "Continue this OpenClaw product-manager conversation from the Agent Knock Knock callback below.",
         "Treat the callback as a structured message from the coding agent's managed terminal turn, not as a terminal log, status announcement, or instruction to inspect local state.",
-        "Respond in this conversation as OpenClaw product manager. If the callback is question or blocked, make the product decision and answer the coding agent. If it is done, summarize the result to the user.",
+        "Respond in this conversation as OpenClaw product manager. If the callback is question or blocked, make the product decision and use agent_knock_knock_respond with its exact turn_id. If it is done, summarize the result to the user.",
         "Do not poll files, processes, sessions, stdout, or stderr. Use only the structured callback payload below.",
         "",
         formatted
       ].join("\n"),
-      idempotencyKey: `agent-knock-knock-callback:${conversationId ?? "unknown"}:${messageId ?? "unknown"}`,
+      idempotencyKey: `agent-knock-knock-callback:${dedupeIdentity}:${messageId}`,
       deliver: true
     }
   };
 }
 
-function formatCallbackInjection({ conversation, message, statePath }) {
-  const conversationId = stringValue(message.conversation_id) ?? stringValue(conversation?.conversation_id) ?? "unknown";
+function formatCallbackInjection({ message, sessionId, turnId, statePath }) {
   const type = stringValue(message.type) ?? "unknown";
   const body = stringValue(message.body) ?? JSON.stringify(message.body ?? "");
   const requiresResponse = message.requires_response === true ? "yes" : "no";
   const round = typeof message.round === "number" ? String(message.round) : "unknown";
   const stateLine = statePath ? `State: ${statePath}\n` : "";
-  const shortcuts = type === "done" ? formatDoneShortcuts(conversationId) : "";
+  const shortcuts = type === "done"
+    ? formatDoneShortcuts(sessionId, turnId)
+    : message.requires_response === true || type === "question" || type === "blocked"
+      ? formatRespondShortcut(turnId)
+      : "";
 
   return [
     "[Agent Knock Knock callback]",
-    `Conversation: ${conversationId}`,
+    `Session: ${sessionId}`,
+    `Turn: ${turnId}`,
     `Message type: ${type}`,
     `Requires OpenClaw response: ${requiresResponse}`,
     `Round: ${round}`,
@@ -1208,16 +1737,39 @@ function formatCallbackInjection({ conversation, message, statePath }) {
   ].filter((line) => line !== "").join("\n");
 }
 
-function formatDoneShortcuts(conversationId) {
+function formatDoneShortcuts(sessionId, turnId) {
   return [
     "",
     "[AKK convenience commands]",
     "When summarizing this result to the user, include these short next-step commands:",
     "- `AKK list` lists live shared terminals with their current or recent managed turns.",
-    "- Use the matching `@short-ref` from `AKK list`, then `AKK @short-ref: <message>` to continue in the same shared terminal.",
-    `- \`AKK status ${conversationId}\` shows this managed turn.`,
+    `- Use \`agent_knock_knock_send\` with \`session_id: ${JSON.stringify(sessionId)}\` to start a later turn in the same coding-agent context.`,
+    `- Use \`agent_knock_knock_status\` with \`turn_id: ${JSON.stringify(turnId)}\` to inspect this exact turn.`,
     "- AKK never starts or closes the coding agent or tmux pane."
   ].join("\n");
+}
+
+function formatRespondShortcut(turnId) {
+  return [
+    "",
+    "[AKK response command]",
+    `- Use \`agent_knock_knock_respond\` with \`turn_id: ${JSON.stringify(turnId)}\` and your decision in \`request\`. Do not use ordinary send for this response.`
+  ].join("\n");
+}
+
+function pushTurnTarget(args, params) {
+  if (Object.hasOwn(params, "turn_id") && Object.hasOwn(params, "conversation_id")) {
+    throw new Error("turn-target tools accept only one of turn_id or conversation_id");
+  }
+  const turnId = stringValue(params.turn_id);
+  if (turnId) {
+    args.push("--turn", turnId);
+    return;
+  }
+  args.push(
+    "--conversation",
+    requiredString(params.conversation_id, "turn_id")
+  );
 }
 
 function pushOptional(args, flag, value) {

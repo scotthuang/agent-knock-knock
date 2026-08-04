@@ -93,15 +93,26 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     assert.equal(terminal.approval_state.approvable, true);
     assert.equal(terminal.management_state, "unmanaged");
     assert.deepEqual(terminal.managed, {
+      session_id: null,
+      session_short_ref: null,
       current_turn: null,
       recent_turn: null,
       turn_count: 0,
-      hidden_turn_count: 0
+      hidden_turn_count: 0,
+      session_count: 0
     });
-    assert.equal(listed.action_contracts.version, 3);
+    assert.equal(listed.action_contracts.version, 4);
     assert.match(
       listed.action_contracts.instructions.join("\n"),
       /Treat terminals\[\] as the primary resource/u
+    );
+    assert.match(
+      listed.action_contracts.instructions.join("\n"),
+      /first attach only[\s\S]*prefilled[\s\S]*never construct/u
+    );
+    assert.match(
+      listed.action_contracts.instructions.join("\n"),
+      /Managed controls target turn_id[\s\S]*list-prefilled conversation_id/u
     );
     assert.deepEqual(
       listed.action_contracts.field_semantics.process_state,
@@ -126,6 +137,10 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       listed.action_contracts.field_semantics.managed.current_turn,
       "the authoritative dispatch-ledger owner, never inferred from history"
     );
+    assert.equal(
+      listed.action_contracts.field_semantics.managed.session_id,
+      "the continuing agent context and authoritative ordinary-send target"
+    );
     assert.deepEqual(
       listed.action_contracts.field_semantics.available_actions,
       {
@@ -137,7 +152,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       Object.keys(listed.action_contracts.actions),
       [
         "send",
-        "follow_up",
+        "respond",
         "status",
         "approve",
         "cancel",
@@ -148,7 +163,15 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     );
     assert.equal(
       listed.action_contracts.actions.send.target_argument,
+      "session_id"
+    );
+    assert.equal(
+      listed.action_contracts.actions.send.initial_attach_target_argument,
       "selector"
+    );
+    assert.match(
+      listed.action_contracts.actions.send.initial_attach_scope,
+      /unmanaged raw-terminal row[\s\S]*never construct/u
     );
     assert.deepEqual(
       listed.action_contracts.actions.send.required,
@@ -162,14 +185,49 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       listed.action_contracts.actions.send.unsupported,
       ["timeoutSeconds"]
     );
+    for (const action of [
+      "respond",
+      "status",
+      "approve",
+      "cancel",
+      "renew",
+      "retry_callback",
+      "close"
+    ]) {
+      assert.equal(
+        listed.action_contracts.actions[action].target_argument,
+        "turn_id",
+        `${action} must target the exact managed turn`
+      );
+    }
     assert.equal(
-      listed.action_contracts.actions.approve.target_argument,
-      "conversation_id"
+      listed.action_contracts.actions.respond.compatibility_target_argument,
+      undefined
     );
-    assert.equal(
-      listed.action_contracts.actions.follow_up.target_argument,
-      "selector"
-    );
+    for (const action of ["status", "approve", "cancel", "close"]) {
+      assert.equal(
+        listed.action_contracts.actions[action].compatibility_target_argument,
+        "conversation_id",
+        `${action} must document its narrow raw-terminal compatibility target`
+      );
+      assert.match(
+        listed.action_contracts.actions[action].compatibility_scope,
+        /unmanaged raw-terminal row[\s\S]*never construct/u,
+        `${action} must forbid invented raw-terminal selectors`
+      );
+    }
+    for (const action of ["renew", "retry_callback"]) {
+      assert.equal(
+        listed.action_contracts.actions[action].compatibility_target_argument,
+        "conversation_id",
+        `${action} must document its legacy Turn alias`
+      );
+      assert.match(
+        listed.action_contracts.actions[action].compatibility_scope,
+        /legacy Turn alias only[\s\S]*never advertise/u,
+        `${action} must not advertise a raw-terminal compatibility action`
+      );
+    }
     const approvalActions = terminal.available_actions;
     assert.deepEqual(
       approvalActions.status.arguments,
@@ -584,6 +642,7 @@ test("list discovers Claude and Codex tmux sessions from static runtime snapshot
         kind: "interactive",
         pid: 5201,
         sessionId: "claude-session-list",
+        startedAt: 1784870000000,
         cwd: claudeWorkspace,
         status: "idle"
       }])
@@ -612,7 +671,7 @@ test("list discovers Claude and Codex tmux sessions from static runtime snapshot
 
     const claude = listed.terminals.find((entry: any) => entry.agent === "claude");
     assert.equal(claude.id, "terminal:v2:tmux:claude:claude-work:1.0:5201");
-    assert.equal(claude.session_id, "claude-session-list");
+    assert.equal(claude.native_agent_session_id, "claude-session-list");
     assert.equal(claude.confidence, "high");
     assert.equal(claude.activity_state, "idle");
     assert.equal(claude.source, "terminal");

@@ -5,19 +5,20 @@ export type AkkCommand =
   | { action: "help" }
   | { action: "doctor" }
   | { action: "list" }
-  | { action: "status"; conversationId?: string }
-  | { action: "send"; conversationId: string; message: string }
+  | { action: "status"; turnId?: string }
+  | { action: "send"; selector: string; message: string }
+  | { action: "respond"; turnId: string; message: string }
   | {
       action: "approve";
-      conversationId: string;
+      turnId: string;
       expectedApprovalFingerprint: string;
     }
-  | { action: "cancel"; conversationId: string }
-  | { action: "renew"; conversationId: string; minutes?: string }
-  | { action: "retry-callback"; conversationId: string }
+  | { action: "cancel"; turnId: string }
+  | { action: "renew"; turnId: string; minutes?: string }
+  | { action: "retry-callback"; turnId: string }
   | {
       action: "close";
-      conversationId: string;
+      turnId: string;
       reason: string;
       expectedMessageId?: string;
     }
@@ -33,7 +34,7 @@ export function parseAkkCommand(args: unknown): AkkCommand {
   if (selectorMessage) {
     return {
       action: "send",
-      conversationId: selectorMessage.selector,
+      selector: selectorMessage.selector,
       message: selectorMessage.message
     };
   }
@@ -50,74 +51,87 @@ export function parseAkkCommand(args: unknown): AkkCommand {
     return { action: "doctor" };
   }
   if (action === "status" || action === "show") {
-    const { token: conversationId, rest: extra } = takeToken(rest);
+    const { token: turnId, rest: extra } = takeToken(rest);
     if (extra.trim()) {
-      throw new Error("Usage: /akk status [session-selector]");
+      throw new Error("Usage: /akk status [turn-selector]");
     }
-    return { action: "status", conversationId: conversationId || undefined };
+    return { action: "status", turnId: turnId || undefined };
   }
   if (action === "describe" || action === "summary" || action === "about") {
     throw new Error(
-      "AKK describe was removed; use /akk status [session-selector]"
+      "AKK describe was removed; use /akk status [turn-selector]"
     );
   }
-  if (action === "send" || action === "reply") {
+  if (action === "respond") {
+    const response = parseTurnResponse(rest);
+    return {
+      action: "respond",
+      turnId: response.selector,
+      message: response.message
+    };
+  }
+  if (action === "send") {
     throw new Error(
       "AKK send syntax changed; use /akk <session-selector>: <message>"
     );
   }
+  if (action === "reply") {
+    throw new Error(
+      "AKK reply syntax changed; use /akk respond <turn-selector>: <answer>"
+    );
+  }
   if (action === "approve") {
-    const { token: conversationId, rest: approvalInput } = takeRequiredToken(
+    const { token: turnId, rest: approvalInput } = takeRequiredToken(
       rest,
-      "Usage: /akk approve <session-selector> --expected-approval-fingerprint <fingerprint>"
+      "Usage: /akk approve <turn-selector> --expected-approval-fingerprint <fingerprint>"
     );
     const approval = /^--expected-approval-fingerprint\s+(\S+)$/u.exec(
       approvalInput.trim()
     );
     if (!approval) {
       throw new Error(
-        "Usage: /akk approve <session-selector> --expected-approval-fingerprint <fingerprint>"
+        "Usage: /akk approve <turn-selector> --expected-approval-fingerprint <fingerprint>"
       );
     }
     return {
       action: "approve",
-      conversationId,
+      turnId,
       expectedApprovalFingerprint: approval[1]
     };
   }
   if (action === "cancel" || action === "stop") {
-    const { token: conversationId } = takeRequiredToken(rest, "Usage: /akk cancel <session-selector>");
-    return { action: "cancel", conversationId };
+    const { token: turnId } = takeRequiredToken(rest, "Usage: /akk cancel <turn-selector>");
+    return { action: "cancel", turnId };
   }
   if (action === "renew") {
-    const { token: conversationId, rest: minutesInput } = takeRequiredToken(
+    const { token: turnId, rest: minutesInput } = takeRequiredToken(
       rest,
-      "Usage: /akk renew <session-selector> [minutes]"
+      "Usage: /akk renew <turn-selector> [minutes]"
     );
     const minutes = minutesInput.trim();
     if (minutes && (!Number.isFinite(Number(minutes)) || Number(minutes) <= 0)) {
-      throw new Error("Usage: /akk renew <session-selector> [positive-minutes]");
+      throw new Error("Usage: /akk renew <turn-selector> [positive-minutes]");
     }
-    return { action: "renew", conversationId, minutes: minutes || undefined };
+    return { action: "renew", turnId, minutes: minutes || undefined };
   }
   if (action === "retry-callback" || action === "retry") {
-    const { token: conversationId } = takeRequiredToken(
+    const { token: turnId } = takeRequiredToken(
       rest,
-      "Usage: /akk retry-callback <session-selector>"
+      "Usage: /akk retry-callback <turn-selector>"
     );
-    return { action: "retry-callback", conversationId };
+    return { action: "retry-callback", turnId };
   }
   if (action === "close" || action === "done") {
-    const { token: conversationId, rest: reason } = takeRequiredToken(
+    const { token: turnId, rest: reason } = takeRequiredToken(
       rest,
-      "Usage: /akk close <session-selector> [--expected-message-id <id>] [reason]"
+      "Usage: /akk close <turn-selector> [--expected-message-id <id>] [reason]"
     );
     const recovery = /^--expected-message-id\s+(\S+)(?:\s+([\s\S]*))?$/u.exec(
       reason.trim()
     );
     return {
       action: "close",
-      conversationId,
+      turnId,
       reason:
         recovery?.[2]?.trim() ||
         (recovery
@@ -135,15 +149,16 @@ export function parseAkkCommand(args: unknown): AkkCommand {
 export function akkUsageText(): string {
   return [
     "AKK usage:",
-    "/akk <task>",
-    "/akk codex: <task>",
-    "/akk claude: <task>",
-    "/akk <only|latest|@short-ref>: <message>",
+    "/akk <request>",
+    "/akk codex: <request>",
+    "/akk claude: <request>",
+    "/akk <session-selector>: <message>",
     "/akk list",
     "/akk doctor",
-    "/akk status [only|latest|codex|claude|@short-ref]",
-    "/akk approve <session-selector> --expected-approval-fingerprint <fingerprint>",
-    "/akk cancel <session-selector>"
+    "/akk status [turn-selector]",
+    "/akk respond <turn-selector>: <answer>",
+    "/akk approve <turn-selector> --expected-approval-fingerprint <fingerprint>",
+    "/akk cancel <turn-selector>"
   ].join("\n");
 }
 
@@ -160,18 +175,33 @@ export function formatAkkListCommandResult(result: Record<string, unknown>): str
     const currentTurn = recordValue(managed.current_turn);
     const recentTurn = recordValue(managed.recent_turn);
     const history = arrayValue(managed.history);
+    const sessionId = nonEmptyString(managed.session_id);
+    const sessionShortRef = nonEmptyString(managed.session_short_ref);
     const hiddenTurnCount = finiteNumber(managed.hidden_turn_count) ?? 0;
     const recovery = orphanedTerminalDispatchRecovery(terminal);
     return [
       `- ${formatTerminalLine(terminal)}`,
+      ...(sessionId || sessionShortRef
+        ? [`  AKK session: ${sessionShortRef ?? sessionId}`]
+        : []),
+      ...formatAvailableActions("terminal actions", terminal),
       ...(currentTurn
-        ? [`  current turn: ${formatManagedTurnLine(currentTurn)}`]
+        ? [
+            `  current turn: ${formatManagedTurnLine(currentTurn)}`,
+            ...formatAvailableActions("current turn actions", currentTurn)
+          ]
         : []),
       ...(recentTurn
-        ? [`  recent turn: ${formatManagedTurnLine(recentTurn)}`]
+        ? [
+            `  recent turn: ${formatManagedTurnLine(recentTurn)}`,
+            ...formatAvailableActions("recent turn actions", recentTurn)
+          ]
         : []),
-      ...history.slice(0, 20).map(
-        (turn) => `  history: ${formatManagedTurnLine(turn)}`
+      ...history.slice(0, 20).flatMap(
+        (turn) => [
+          `  history: ${formatManagedTurnLine(turn)}`,
+          ...formatAvailableActions("history actions", turn)
+        ]
       ),
       ...(hiddenTurnCount > 0 && history.length === 0
         ? [`  older managed turns: ${hiddenTurnCount} (use all=true to include)`]
@@ -196,12 +226,77 @@ export function formatAkkListCommandResult(result: Record<string, unknown>): str
     ...(unavailableManagedTurns.length > 0
       ? [
           "unavailable managed turns:",
-          ...unavailableManagedTurns.slice(0, 20).map(
-            (turn) => `- ${formatManagedTurnLine(turn)}`
+          ...unavailableManagedTurns.slice(0, 20).flatMap(
+            (turn) => [
+              `- ${formatManagedTurnLine(turn)}`,
+              ...formatAvailableActions("  actions", turn)
+            ]
           )
         ]
       : [])
   ].join("\n");
+}
+
+export function formatAkkRespondCommandResult(
+  result: Record<string, unknown>
+): { text: string; isError: boolean } {
+  const conversation = recordValue(result.conversation) ?? {};
+  const compatibilityId =
+    nonEmptyString(conversation.conversation_id) ??
+    nonEmptyString(result.conversation_id) ??
+    "unknown";
+  const sessionId =
+    nonEmptyString(conversation.session_id) ??
+    nonEmptyString(result.session_id) ??
+    compatibilityId;
+  const turnId =
+    nonEmptyString(conversation.turn_id) ??
+    nonEmptyString(result.turn_id) ??
+    compatibilityId;
+  const status =
+    nonEmptyString(conversation.status) ??
+    nonEmptyString(result.status) ??
+    "unknown";
+  const identityLines = [
+    `session: ${sessionId}`,
+    `turn: ${turnId}`,
+    `status: ${status}`
+  ];
+
+  if (result.submission_outcome === "submitted") {
+    return {
+      text: ["AKK response sent.", ...identityLines].join("\n"),
+      isError: false
+    };
+  }
+  if (result.submission_outcome === "uncertain") {
+    return {
+      text: [
+        "AKK may have delivered the response, but its submission outcome is uncertain.",
+        ...identityLines,
+        "next: do not retry automatically; inspect this Turn and the shared tmux pane."
+      ].join("\n"),
+      isError: true
+    };
+  }
+  if (result.submission_outcome === "aborted") {
+    return {
+      text: [
+        "AKK response was not sent.",
+        ...identityLines,
+        "next: it is safe to retry this response."
+      ].join("\n"),
+      isError: true
+    };
+  }
+  return {
+    text: [
+      "AKK could not confirm the response submission outcome.",
+      ...identityLines,
+      "next: do not retry automatically; inspect this Turn and the shared tmux pane."
+    ].join("\n"),
+    isError: true
+  };
 }
 
 export function buildAkkCommandCliArgs(
@@ -235,8 +330,8 @@ export function buildAkkCommandCliArgs(
         [
           "status",
           "--reconcile",
-          ...(command.conversationId
-            ? ["--conversation", command.conversationId]
+          ...(command.turnId
+            ? ["--turn", command.turnId]
             : [])
         ],
         ["--store-dir", storeDir],
@@ -249,8 +344,8 @@ export function buildAkkCommandCliArgs(
       return withOptionalArgs(
         [
           "send",
-          "--conversation",
-          command.conversationId,
+          "--session",
+          command.selector,
           "--message",
           command.message,
           "--background"
@@ -265,12 +360,23 @@ export function buildAkkCommandCliArgs(
         ["--openclaw-bin", nonEmptyString(config.openclawBin)]
       );
     }
+    case "respond":
+      return withOptionalArgs(
+        [
+          "respond",
+          "--turn",
+          command.turnId,
+          "--message",
+          command.message
+        ],
+        ["--store-dir", storeDir]
+      );
     case "approve":
       return withOptionalArgs(
         [
           "approve",
-          "--conversation",
-          command.conversationId,
+          "--turn",
+          command.turnId,
           "--expected-approval-fingerprint",
           command.expectedApprovalFingerprint
         ],
@@ -278,7 +384,7 @@ export function buildAkkCommandCliArgs(
       );
     case "renew":
       return withOptionalArgs(
-        ["renew", "--conversation", command.conversationId],
+        ["renew", "--turn", command.turnId],
         [
           "--minutes",
           command.minutes ?? finiteNumberString(config.agentTimeoutMinutes)
@@ -287,12 +393,12 @@ export function buildAkkCommandCliArgs(
       );
     case "retry-callback":
       return withOptionalArgs(
-        ["retry-callback", "--conversation", command.conversationId],
+        ["retry-callback", "--turn", command.turnId],
         ["--store-dir", storeDir]
       );
     case "cancel": {
       return withOptionalArgs(
-        ["cancel", "--conversation", command.conversationId],
+        ["cancel", "--turn", command.turnId],
         ["--store-dir", storeDir],
         ["--idle-timeout-minutes", idleTimeoutMinutes]
       );
@@ -301,8 +407,8 @@ export function buildAkkCommandCliArgs(
       return withOptionalArgs(
         [
           "close",
-          "--conversation",
-          command.conversationId,
+          "--turn",
+          command.turnId,
           "--reason",
           command.reason
         ],
@@ -330,6 +436,18 @@ function parseSelectorMessage(
     selector: match[1].toLowerCase(),
     message
   };
+}
+
+function parseTurnResponse(
+  input: string
+): { selector: string; message: string } {
+  const match = /^(\S+)\s*:\s*([\s\S]*)$/u.exec(input.trim());
+  const selector = match?.[1]?.trim();
+  const message = match?.[2]?.trim();
+  if (!selector || !message) {
+    throw new Error("Usage: /akk respond <turn-selector>: <answer>");
+  }
+  return { selector, message };
 }
 
 export function resolvePluginStoreDir(
@@ -439,6 +557,7 @@ function formatManagedTurnLine(turn: Record<string, unknown>): string {
     ].filter((value): value is string => Boolean(value)).join(" · ");
   return [
     nonEmptyString(turn.short_ref) ??
+      nonEmptyString(turn.turn_id) ??
       nonEmptyString(turn.conversation_id) ??
       nonEmptyString(turn.id) ??
       "unknown",
@@ -446,6 +565,30 @@ function formatManagedTurnLine(turn: Record<string, unknown>): string {
     nonEmptyString(turn.lifecycle_state) ?? nonEmptyString(turn.status) ?? "unknown",
     truncateText(context, 90)
   ].filter(Boolean).join(" | ");
+}
+
+function formatAvailableActions(
+  label: string,
+  resource: Record<string, unknown>
+): string[] {
+  const actions = recordValue(resource.available_actions);
+  if (!actions) {
+    return [];
+  }
+  const displayedActions = new Set([
+    "send",
+    "respond",
+    "status",
+    "approve",
+    "cancel",
+    "renew",
+    "retry_callback",
+    "close"
+  ]);
+  const names = Object.keys(actions)
+    .filter((name) => displayedActions.has(name))
+    .sort();
+  return names.length > 0 ? [`  ${label}: ${names.join(", ")}`] : [];
 }
 
 function orphanedTerminalDispatchRecovery(

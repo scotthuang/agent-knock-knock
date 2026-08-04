@@ -37,6 +37,8 @@ import {
   extractStructuredMessage,
   parseMessageJson,
   resolveExecutor,
+  sessionIdForConversation,
+  turnIdForConversation,
   type Conversation,
   type ConversationStatus
 } from "./protocol.js";
@@ -131,6 +133,16 @@ const TERMINAL_DISPATCH_RELEASE_STATUSES = new Set<ConversationStatus>([
   "closed",
   "cancelled"
 ]);
+const SESSION_SEND_BLOCKING_STATUSES = new Set<ConversationStatus>([
+  "created",
+  "running",
+  "waiting_for_agent",
+  "waiting_for_openclaw",
+  "stalled",
+  "callback_pending",
+  "callback_failed",
+  "cancelling"
+]);
 const TERMINAL_BRIDGE_MONITOR_LOCK_VERSION = 1;
 const MINIMUM_NODE_VERSION = "22.19.0";
 const PRIVATE_LOCK_FILE_MODE = 0o600;
@@ -154,6 +166,7 @@ const CONVERSATION_STATUSES = new Set<ConversationStatus>([
 const SESSION_SELECTOR_COMMANDS = new Set([
   "status",
   "send",
+  "respond",
   "approve",
   "cancel",
   "renew",
@@ -163,6 +176,7 @@ const SESSION_SELECTOR_COMMANDS = new Set([
 const STORE_MUTATION_COMMANDS = new Set([
   "delegate",
   "send",
+  "respond",
   "approve",
   "cancel",
   "renew",
@@ -179,15 +193,21 @@ class InlineCodexSessionAdapter implements CodexLocalSessionAdapter {
   private readonly processBatches: CodexProcessSnapshot[][];
   private processBatchIndex = 0;
   private readonly rollouts: Map<string, string>;
+  private readonly activeSessionIdentities: Map<
+    number,
+    NativeAgentSessionIdentity
+  >;
 
   constructor({
     threads,
     processes,
-    rollouts
+    rollouts,
+    activeSessionIdentities
   }: {
     threads?: CodexThreadRow[];
     processes?: CodexProcessSnapshot[] | CodexProcessSnapshot[][];
     rollouts?: Record<string, string>;
+    activeSessionIdentities?: Record<string, unknown>;
   }) {
     this.threads = Array.isArray(threads) ? threads : [];
     this.processBatches = Array.isArray(processes?.[0])
@@ -195,6 +215,51 @@ class InlineCodexSessionAdapter implements CodexLocalSessionAdapter {
       : [];
     this.processes = Array.isArray(processes) && !Array.isArray(processes[0]) ? processes as CodexProcessSnapshot[] : [];
     this.rollouts = new Map(Object.entries(rollouts ?? {}));
+    this.activeSessionIdentities = new Map(
+      Object.entries(activeSessionIdentities ?? {}).flatMap(([pidValue, value]) => {
+        const pid = Number(pidValue);
+        if (!Number.isSafeInteger(pid) || pid <= 1 || !isRecord(value)) {
+          return [];
+        }
+        const sessionId = stringValue(value.sessionId ?? value.session_id);
+        if (!sessionId) {
+          return [];
+        }
+        return [[pid, {
+          sessionId,
+          ...(stringValue(value.processUuid ?? value.process_uuid)
+            ? {
+                processUuid: stringValue(
+                  value.processUuid ?? value.process_uuid
+                )
+              }
+            : {}),
+          ...(stringValue(value.processBirth ?? value.process_birth)
+            ? {
+                processBirth: stringValue(
+                  value.processBirth ?? value.process_birth
+                )
+              }
+            : {}),
+          ...(isRecord(value.rollout) &&
+              stringValue(value.rollout.fd) &&
+              stringValue(value.rollout.device) &&
+              stringValue(value.rollout.inode) &&
+              stringValue(value.rollout.path)
+            ? {
+                rollout: {
+                  fd: stringValue(value.rollout.fd) as string,
+                  device: stringValue(value.rollout.device) as string,
+                  inode: stringValue(value.rollout.inode) as string,
+                  path: stringValue(value.rollout.path) as string
+                }
+              }
+            : {}),
+          evidence:
+            stringValue(value.evidence) ?? "static_exact_fixture"
+        }]];
+      })
+    );
   }
 
   async listThreadRows(): Promise<CodexThreadRow[]> {
@@ -213,6 +278,12 @@ class InlineCodexSessionAdapter implements CodexLocalSessionAdapter {
     }
 
     return this.processes;
+  }
+
+  async resolveActiveSessionIdentityForPid(
+    pid: number
+  ): Promise<NativeAgentSessionIdentity | undefined> {
+    return this.activeSessionIdentities.get(pid);
   }
 }
 
@@ -257,6 +328,8 @@ async function runCommand(commandName, options) {
     await runStatus(options);
   } else if (commandName === "send") {
     await runSend(options);
+  } else if (commandName === "respond") {
+    await runRespond(options);
   } else if (commandName === "approve") {
     await runApprove(options);
   } else if (commandName === "cancel") {
@@ -692,7 +765,10 @@ function createTerminalProcessSource(options): TerminalProcessSource {
   return new SystemTerminalProcessSource();
 }
 
-function loadClaudeAgentRows(options: Record<string, any> = {}): ClaudeAgentRow[] {
+function loadClaudeAgentRows(
+  options: Record<string, any> = {},
+  observation: { required?: boolean } = {}
+): ClaudeAgentRow[] {
   let value: unknown;
   if (options.claudeAgentsJson !== undefined) {
     value = typeof options.claudeAgentsJson === "string"
@@ -703,6 +779,11 @@ function loadClaudeAgentRows(options: Record<string, any> = {}): ClaudeAgentRow[
   } else {
     const claudeExecutable = resolveOptionalExecutable("claude");
     if (!claudeExecutable) {
+      if (observation.required) {
+        throw new Error(
+          "Claude agent session observation is unavailable because the Claude CLI could not be resolved"
+        );
+      }
       return [];
     }
     const result = spawnSync(claudeExecutable, ["agents", "--json", "--all"], {
@@ -716,6 +797,11 @@ function loadClaudeAgentRows(options: Record<string, any> = {}): ClaudeAgentRow[
         error: result.error?.message,
         stderr: textSummary(cleanProcessText(result.stderr))
       });
+      if (observation.required) {
+        throw new Error(
+          "Claude agent session observation failed; refusing to treat the process as a virgin session"
+        );
+      }
       return [];
     }
     try {
@@ -724,6 +810,11 @@ function loadClaudeAgentRows(options: Record<string, any> = {}): ClaudeAgentRow[
       runtimeLog("warn", "claude_agents_list_invalid_json", {
         stdout: textSummary(result.stdout)
       });
+      if (observation.required) {
+        throw new Error(
+          "Claude agent session observation returned invalid JSON; refusing to treat the process as a virgin session"
+        );
+      }
       return [];
     }
   }
@@ -732,7 +823,15 @@ function loadClaudeAgentRows(options: Record<string, any> = {}): ClaudeAgentRow[
     ? value
     : isRecord(value) && Array.isArray(value.agents)
       ? value.agents
-      : [];
+      : undefined;
+  if (!rows) {
+    if (observation.required) {
+      throw new Error(
+        "Claude agent session observation returned an unsupported result shape; refusing to treat the process as a virgin session"
+      );
+    }
+    return [];
+  }
   return rows.flatMap((row): ClaudeAgentRow[] => {
     if (!isRecord(row) || !Number.isInteger(Number(row.pid))) {
       return [];
@@ -833,7 +932,7 @@ function createTerminalAgentBridge(
   return new TerminalAgentBridge({
     registry,
     terminalProvider,
-    async verifyIdentity({ agent, pid, terminalControl }) {
+    async verifyIdentity({ agent, pid, terminalControl, runtime }) {
       const adapter = registry.require(agent);
       const expectedWorkspace =
         options.workspace ?? terminalControl.currentPath;
@@ -876,6 +975,19 @@ function createTerminalAgentBridge(
         pane.currentPath,
         `terminal access to ${terminalControl.target} by tmux pane`
       );
+      const currentNativeIdentity =
+        await resolveCurrentNativeAgentSessionIdentity({
+          options,
+          agent,
+          pid,
+          cwd: snapshot.cwd ?? pane.currentPath
+        });
+      assertNativeAgentIdentityForRuntime({
+        runtime,
+        currentIdentity: currentNativeIdentity,
+        agent,
+        pid
+      });
       return {
         terminalControl: {
           ...terminalControl,
@@ -943,11 +1055,42 @@ function terminalRuntimeIdentityForConversation(
   const terminalIdentity = parseTerminalConversationId(nativeSessionId);
   const explicitSessionId = stringValue(nativeTakeover?.terminal_agent_session_id) ??
     (terminalIdentity ? undefined : nativeSessionId);
+  const nativeRollout = isRecord(nativeTakeover?.terminal_agent_rollout)
+    ? nativeTakeover.terminal_agent_rollout
+    : undefined;
+  const strictNativeIdentity =
+    Number(nativeTakeover?.terminal_agent_identity_protocol) === 1;
+  const requireNativeProcessUuid =
+    strictNativeIdentity && executorForConversation(conversation).kind === "claude";
+  const requireNativeRolloutIdentity =
+    strictNativeIdentity && executorForConversation(conversation).kind === "codex";
   return {
     pid: Number.isInteger(Number(nativeTakeover?.terminal_agent_pid))
       ? Number(nativeTakeover?.terminal_agent_pid)
       : terminalIdentity?.pid,
     sessionId: explicitSessionId,
+    nativeSessionId: stringValue(nativeTakeover?.terminal_agent_session_id),
+    nativeProcessUuid: stringValue(
+      nativeTakeover?.terminal_agent_process_uuid
+    ),
+    nativeProcessBirth: stringValue(
+      nativeTakeover?.terminal_agent_process_birth
+    ),
+    requireNativeProcessUuid,
+    requireNativeRolloutIdentity,
+    ...(nativeRollout
+      ? {
+          nativeRollout: {
+            fd: String(nativeRollout.fd ?? ""),
+            device: String(nativeRollout.device ?? ""),
+            inode: String(nativeRollout.inode ?? ""),
+            path: String(nativeRollout.path ?? "")
+          }
+        }
+      : {}),
+    expectedEmptyNativeSession:
+      strictNativeIdentity &&
+      !stringValue(nativeTakeover?.terminal_agent_session_id),
     cwd: stringValue(nativeTakeover?.source_cwd) ?? terminalControl.currentPath,
     conversationId: stringValue(conversation?.conversation_id),
     messageId: stringValue(nativeTakeover?.terminal_bridge_message_id),
@@ -1537,6 +1680,8 @@ function withTerminalBridgeSubmission({
       ...nativeTakeover,
       terminal_bridge_submission: {
         status,
+        session_id: sessionIdForConversation(conversation),
+        turn_id: turnIdForConversation(conversation),
         message_id: messageId,
         request_hash: terminalBridgeRequestFingerprint(requestText),
         prepared_at: preparedAt,
@@ -1910,14 +2055,21 @@ function managedTurnListEntry(
     conversation?: Record<string, any>;
   } = {}
 ) {
+  const sessionId = stringValue(task.session_id) ??
+    stringValue(task.conversation_id);
+  const turnId = stringValue(task.turn_id) ??
+    stringValue(task.conversation_id) ??
+    String(task.id ?? "");
   const entry = {
     ...task,
-    id: task.conversation_id,
-    short_ref: sessionShortRef(task.conversation_id),
+    session_id: sessionId,
+    turn_id: turnId,
+    id: turnId,
+    short_ref: sessionShortRef(turnId),
     source: "managed_turn",
     ...(approvalState ? { approval_state: approvalState } : {}),
     commands: {
-      send: canFollowUpManagedTurn(task.status),
+      respond: task.status === "waiting_for_openclaw",
       cancel: isWaitingForAgent(task.status),
       close: task.status !== "closed",
       status: true,
@@ -1956,6 +2108,22 @@ async function terminalControlledListEntry(
   );
   const orphanedDispatch =
     orphanedTerminalDispatchForRecovery(terminalControl);
+  let nativeAgentIdentity: NativeAgentSessionIdentity | undefined;
+  try {
+    nativeAgentIdentity = await resolveCurrentNativeAgentSessionIdentity({
+      options,
+      agent: session.agent,
+      pid: session.pid,
+      cwd: session.cwd ?? terminalControl.currentPath
+    });
+  } catch (error) {
+    runtimeLog("warn", "terminal_native_session_identity_unavailable", {
+      agent: session.agent,
+      terminal_target: terminalControl.target,
+      pid: session.pid,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
   const entry = {
     id: bridge.terminalConversationId(session),
     short_ref: sessionShortRef(bridge.terminalConversationId(session)),
@@ -1968,7 +2136,11 @@ async function terminalControlledListEntry(
     cwd: session.cwd,
     workspace: session.cwd,
     elapsed: session.elapsed,
-    session_id: session.sessionId,
+    native_agent_session_id: nativeAgentIdentity?.sessionId,
+    native_agent_process_uuid: nativeAgentIdentity?.processUuid,
+    native_agent_process_birth: nativeAgentIdentity?.processBirth,
+    native_agent_rollout: nativeAgentIdentity?.rollout,
+    native_agent_identity_evidence: nativeAgentIdentity?.evidence,
     confidence: session.confidence,
     reason: session.reason,
     terminal_control: terminalControl,
@@ -2074,6 +2246,34 @@ function terminalFirstListProjection({
       allRelated.push(ownership.conversation);
     }
 
+    const sessionIds = new Set(
+      allRelated.map((conversation) => sessionIdForConversation(conversation))
+    );
+    const managedSessionId = ownership.state === "current"
+      ? sessionIdForConversation(ownership.conversation)
+      : [...displayedRelated]
+          .sort(compareManagedConversationRecency)
+          .map((conversation) => sessionIdForConversation(conversation))[0] ??
+        [...allRelated]
+          .sort(compareManagedConversationRecency)
+          .map((conversation) => sessionIdForConversation(conversation))[0];
+    const sessionAllRelated = managedSessionId
+      ? allRelated.filter((conversation) =>
+          sessionIdForConversation(conversation) === managedSessionId
+        )
+      : [];
+    const sessionDisplayedRelated = managedSessionId
+      ? displayedRelated.filter((conversation) =>
+          sessionIdForConversation(conversation) === managedSessionId
+        )
+      : [];
+    const sessionBindingTurn = [...sessionAllRelated]
+      .sort(compareManagedConversationRecency)[0];
+    const sessionBindingMatchesLiveTerminal = Boolean(
+      sessionBindingTurn &&
+      managedTurnMatchesLiveTerminal(sessionBindingTurn, terminal)
+    );
+
     const currentTurnValue = ownership.state === "current"
       ? currentManagedTurnForTerminal(
           ownership.conversation,
@@ -2084,7 +2284,7 @@ function terminalFirstListProjection({
     const currentTurn = currentTurnValue && !mutationsAllowed
       ? readOnlyManagedTurn(currentTurnValue)
       : currentTurnValue;
-    const sortedDisplayed = [...displayedRelated]
+    const sortedDisplayed = [...sessionDisplayedRelated]
       .filter((conversation) =>
         conversation.conversation_id !== currentTurn?.conversation_id
       )
@@ -2120,19 +2320,34 @@ function terminalFirstListProjection({
         .filter((id): id is string => id !== undefined)
     );
     const management = {
+      session_id: managedSessionId ?? null,
+      session_short_ref: managedSessionId
+        ? sessionShortRef(managedSessionId)
+        : null,
       current_turn: currentTurn ?? null,
       recent_turn: recentTurn ?? null,
-      turn_count: allRelated.length,
-      hidden_turn_count: allRelated.filter((conversation) =>
+      turn_count: sessionAllRelated.length,
+      hidden_turn_count: sessionAllRelated.filter((conversation) =>
         !visibleTurnIds.has(conversation.conversation_id)
       ).length,
+      session_count: sessionIds.size,
       ...(includeAll ? { history } : {})
     };
     const availableActions = ownership.state === "current"
       ? currentTerminalActions(currentTurn)
       : ownership.state === "conflict"
         ? safeTerminalActionsDuringConflict(rawActions)
-        : rawActions;
+        : managedSessionId &&
+            sessionBindingMatchesLiveTerminal &&
+            isRecord(rawActions.send)
+          ? {
+              ...rawActions,
+              send: sendActionForManagedSession(
+                rawActions.send,
+                managedSessionId
+              )
+            }
+          : rawActions;
 
     return {
       ...terminal,
@@ -2404,7 +2619,7 @@ function currentTerminalActions(
     return {};
   }
   const actions: Record<string, any> = {};
-  for (const action of ["status", "approve", "cancel", "renew", "retry_callback"]) {
+  for (const action of ["status", "respond", "approve", "cancel", "renew", "retry_callback"]) {
     if (isRecord(currentTurn.available_actions[action])) {
       actions[action] = currentTurn.available_actions[action];
     }
@@ -2422,6 +2637,22 @@ function safeTerminalActionsDuringConflict(
     }
   }
   return actions;
+}
+
+function sendActionForManagedSession(
+  action: Record<string, any>,
+  sessionId: string
+): Record<string, any> {
+  const { selector: _selector, ...existingArguments } = isRecord(action.arguments)
+    ? action.arguments
+    : {};
+  return {
+    ...action,
+    arguments: {
+      ...existingArguments,
+      session_id: sessionId
+    }
+  };
 }
 
 function safeUnavailableManagedTurnActions(
@@ -2474,13 +2705,6 @@ function historicalManagedTurnForTerminal(
     ? managedTurn.available_actions
     : {};
   const safeActions = safeUnavailableManagedTurnActions(availableActions);
-  if (
-    terminalCanAcceptSend &&
-    managedTurnMatchesLiveTerminal(conversation, terminal) &&
-    isRecord(availableActions.follow_up)
-  ) {
-    safeActions.follow_up = availableActions.follow_up;
-  }
   return {
     ...managedTurn,
     available_actions: safeActions
@@ -2511,9 +2735,31 @@ function managedTurnMatchesLiveTerminal(
   ) {
     return false;
   }
-  const storedSessionId = stringValue(takeover?.terminal_agent_session_id);
-  const liveSessionId = stringValue(terminal.session_id);
-  if (storedSessionId && storedSessionId !== liveSessionId) {
+  const liveSessionId = stringValue(terminal.native_agent_session_id);
+  const liveProcessUuid = stringValue(terminal.native_agent_process_uuid);
+  const liveProcessBirth = stringValue(terminal.native_agent_process_birth);
+  const liveRollout = isRecord(terminal.native_agent_rollout)
+    ? terminal.native_agent_rollout
+    : undefined;
+  const liveNativeIdentity = liveSessionId
+    ? {
+        sessionId: liveSessionId,
+        ...(liveProcessUuid ? { processUuid: liveProcessUuid } : {}),
+        ...(liveProcessBirth ? { processBirth: liveProcessBirth } : {}),
+        ...(liveRollout
+          ? {
+              rollout: {
+                fd: String(liveRollout.fd ?? ""),
+                device: String(liveRollout.device ?? ""),
+                inode: String(liveRollout.inode ?? ""),
+                path: String(liveRollout.path ?? "")
+              }
+            }
+          : {}),
+        evidence: "live_terminal"
+      }
+    : undefined;
+  if (!nativeAgentIdentityMatchesTurn(conversation, liveNativeIdentity)) {
     return false;
   }
   const liveWorkspace = terminal.workspace ?? terminal.cwd;
@@ -2579,7 +2825,8 @@ function retargetConversationAction(
     ...action,
     arguments: {
       ...(isRecord(action.arguments) ? action.arguments : {}),
-      conversation_id: conversationId
+      turn_id: conversationId,
+      conversation_id: undefined
     },
     ...(beforeCall
       ? {
@@ -2589,7 +2836,8 @@ function retargetConversationAction(
               ...(isRecord(beforeCall.arguments)
                 ? beforeCall.arguments
                 : {}),
-              conversation_id: conversationId
+              turn_id: conversationId,
+              conversation_id: undefined
             }
           }
         }
@@ -2671,10 +2919,6 @@ function childPidsForRoot(root: ActiveTerminalProcess, processes: ActiveTerminal
     .map((process) => process.pid);
 }
 
-function canFollowUpManagedTurn(status) {
-  return !["done", "failed", "closed", "cancelled"].includes(status);
-}
-
 function managedListApprovalState(
   conversation
 ): Record<string, any> | undefined {
@@ -2721,10 +2965,13 @@ function managedListApprovalState(
 
 function listActionContracts() {
   return {
-    version: 3,
+    version: 4,
     instructions: [
       "Treat terminals[] as the primary resource and use only actions present in available_actions.",
-      "Use a terminal send action to start a new managed turn. Use a managed turn follow_up action only when continuing that specific managed turn.",
+      "An existing managed session's ordinary send targets session_id and creates a new turn. A turn id is never an ordinary send target.",
+      "For first attach only, use the selector prefilled by that unmanaged raw-terminal row's available send action; never construct, guess, or reuse it.",
+      "Use respond only for an in-flight turn that is explicitly waiting for OpenClaw.",
+      "Managed controls target turn_id. A raw terminal may be controlled only through its own list-prefilled conversation_id action; never construct, guess, or reuse that compatibility selector.",
       "Start with the action's prefilled arguments, supply every missing_required field, and consult the top-level action's optional fields only when needed.",
       "Authoritative full IDs are prefilled; short_ref is for display and human input.",
       "Availability is a snapshot. AKK revalidates process, tmux pane, workspace, activity, approval, and recovery state before side effects."
@@ -2744,7 +2991,8 @@ function listActionContracts() {
       },
       managed: {
         current_turn: "the authoritative dispatch-ledger owner, never inferred from history",
-        recent_turn: "the latest visible non-owning turn for intentional follow-up",
+        recent_turn: "the latest visible non-owning turn in the current managed session",
+        session_id: "the continuing agent context and authoritative ordinary-send target",
         history: "older turns, present only with --all"
       },
       available_actions: {
@@ -2755,7 +3003,10 @@ function listActionContracts() {
     actions: {
       send: {
         tool: "agent_knock_knock_send",
-        target_argument: "selector",
+        target_argument: "session_id",
+        initial_attach_target_argument: "selector",
+        initial_attach_scope:
+          "Only the selector prefilled by an unmanaged raw-terminal row's available send action; never construct, guess, or reuse it.",
         required: ["request"],
         optional: [
           "selector",
@@ -2766,56 +3017,68 @@ function listActionContracts() {
         ],
         unsupported: ["timeoutSeconds"],
         ordinary_use:
-          "Start a new managed turn on the selected physical terminal. Add request only and omit timeout fields unless the user explicitly asks to change monitoring limits."
+          "Create a new managed turn in the selected session. A live terminal selector is accepted only for initial attach/discovery compatibility."
       },
-      follow_up: {
-        tool: "agent_knock_knock_send",
-        target_argument: "selector",
-        required: ["request"],
-        optional: [
-          "selector",
-          "idleTimeoutMinutes",
-          "agentTimeoutMinutes",
-          "agentHardTimeoutMinutes"
-        ],
+      respond: {
+        tool: "agent_knock_knock_respond",
+        target_argument: "turn_id",
+        required: ["turn_id", "request"],
         ordinary_use:
-          "Continue the explicitly selected managed turn. Start from its prefilled selector and add request."
+          "Answer an agent question inside the explicitly selected in-flight turn without creating another turn."
       },
       status: {
         tool: "agent_knock_knock_status",
-        target_argument: "conversation_id",
-        required: ["conversation_id"],
+        target_argument: "turn_id",
+        compatibility_target_argument: "conversation_id",
+        compatibility_scope:
+          "A deprecated legacy Turn alias, or only the exact selector prefilled by an unmanaged raw-terminal row's available status action; never construct, guess, or reuse it.",
+        required: ["turn_id"],
         optional: ["idleTimeoutMinutes", "trace"]
       },
       approve: {
         tool: "agent_knock_knock_approve",
-        target_argument: "conversation_id",
-        required: ["conversation_id", "expected_approval_fingerprint"],
+        target_argument: "turn_id",
+        compatibility_target_argument: "conversation_id",
+        compatibility_scope:
+          "A deprecated legacy Turn alias, or only the exact selector prefilled by an unmanaged raw-terminal row's available approval action; never construct, guess, or reuse it.",
+        required: ["turn_id", "expected_approval_fingerprint"],
         requires_explicit_user_confirmation: true,
         requires_fresh_status: true
       },
       cancel: {
         tool: "agent_knock_knock_cancel",
-        target_argument: "conversation_id",
-        required: ["conversation_id"],
+        target_argument: "turn_id",
+        compatibility_target_argument: "conversation_id",
+        compatibility_scope:
+          "A deprecated legacy Turn alias, or only the exact selector prefilled by an unmanaged raw-terminal row's available cancellation action; never construct, guess, or reuse it.",
+        required: ["turn_id"],
         optional: ["idleTimeoutMinutes"],
         requires_user_intent: true
       },
       renew: {
         tool: "agent_knock_knock_renew",
-        target_argument: "conversation_id",
-        required: ["conversation_id"],
+        target_argument: "turn_id",
+        compatibility_target_argument: "conversation_id",
+        compatibility_scope:
+          "Deprecated legacy Turn alias only; unmanaged raw-terminal rows never advertise renew.",
+        required: ["turn_id"],
         optional: ["minutes"]
       },
       retry_callback: {
         tool: "agent_knock_knock_retry_callback",
-        target_argument: "conversation_id",
-        required: ["conversation_id"]
+        target_argument: "turn_id",
+        compatibility_target_argument: "conversation_id",
+        compatibility_scope:
+          "Deprecated legacy Turn alias only; unmanaged raw-terminal rows never advertise callback retry.",
+        required: ["turn_id"]
       },
       close: {
         tool: "agent_knock_knock_close",
-        target_argument: "conversation_id",
-        required: ["conversation_id"],
+        target_argument: "turn_id",
+        compatibility_target_argument: "conversation_id",
+        compatibility_scope:
+          "A deprecated legacy Turn alias, or only the exact selector prefilled by an unmanaged raw-terminal row's orphan-close action; never construct, guess, or reuse it.",
+        required: ["turn_id"],
         optional: ["reason", "expected_message_id"],
         requires_explicit_user_confirmation: true
       }
@@ -2832,14 +3095,17 @@ function availableListActions(
     return {};
   }
   const commands = isRecord(entry.commands) ? entry.commands : {};
+  const managed = entry.source === "managed_turn";
+  const targetArguments = managed
+    ? { turn_id: id }
+    : { conversation_id: id };
   const actions: Record<string, any> = {
     status: {
       tool: "agent_knock_knock_status",
-      arguments: { conversation_id: id }
+      arguments: targetArguments
     }
   };
   const terminalControlled = entry.source === "terminal";
-  const managed = entry.source === "managed_turn";
   const approvalState = isRecord(entry.approval_state)
     ? entry.approval_state
     : {};
@@ -2855,24 +3121,29 @@ function availableListActions(
     terminalControlFromTakeover(nativeTakeover) !== undefined;
 
   if (
+    terminalControlled &&
     commands.send === true &&
-    (
-      (
-        terminalBridgeReady &&
-        ["waiting_for_openclaw", "idle"].includes(String(entry.status)) &&
-        !managedApprovalPending &&
-        approvalState.blocked !== true
-      ) ||
-      (
-        terminalControlled &&
-        entry.activity_state === "idle" &&
-        approvalState.blocked !== true
-      )
-    )
+    entry.activity_state === "idle" &&
+    approvalState.blocked !== true
   ) {
-    actions[managed ? "follow_up" : "send"] = {
+    actions.send = {
       tool: "agent_knock_knock_send",
       arguments: { selector: id },
+      missing_required: ["request"]
+    };
+  }
+
+  if (
+    managed &&
+    commands.respond === true &&
+    terminalBridgeReady &&
+    entry.status === "waiting_for_openclaw" &&
+    !managedApprovalPending &&
+    approvalState.blocked !== true
+  ) {
+    actions.respond = {
+      tool: "agent_knock_knock_respond",
+      arguments: { turn_id: id },
       missing_required: ["request"]
     };
   }
@@ -2899,11 +3170,11 @@ function availableListActions(
   ) {
     actions.approve = {
       tool: "agent_knock_knock_approve",
-      arguments: { conversation_id: id },
+      arguments: targetArguments,
       missing_required: ["expected_approval_fingerprint"],
       before_call: {
         tool: "agent_knock_knock_status",
-        arguments: { conversation_id: id },
+        arguments: targetArguments,
         use:
           "After explicit user confirmation, copy the latest terminal_status.approval_state.fingerprint into expected_approval_fingerprint."
       },
@@ -2934,14 +3205,14 @@ function availableListActions(
   if (rawCancellable || managedCancellable) {
     actions.cancel = {
       tool: "agent_knock_knock_cancel",
-      arguments: { conversation_id: id },
+      arguments: targetArguments,
       requires_user_intent: true
     };
   }
   if (terminalBridgeReady && entry.status === "stalled") {
     actions.renew = {
       tool: "agent_knock_knock_renew",
-      arguments: { conversation_id: id }
+      arguments: targetArguments
     };
   }
   const callbackDelivery = isRecord(conversation?.callback_delivery)
@@ -2954,7 +3225,7 @@ function availableListActions(
   ) {
     actions.retry_callback = {
       tool: "agent_knock_knock_retry_callback",
-      arguments: { conversation_id: id }
+      arguments: targetArguments
     };
   }
   if (commands.close === true) {
@@ -2965,7 +3236,7 @@ function availableListActions(
     actions.close = {
       tool: "agent_knock_knock_close",
       arguments: {
-        conversation_id: id,
+        ...(managed ? { turn_id: id } : { conversation_id: id }),
         ...(expectedMessageId
           ? { expected_message_id: expectedMessageId }
           : {})
@@ -2983,17 +3254,32 @@ async function resolveConversationSelectorOption(commandName, options): Promise<
   ) {
     return;
   }
-  const supplied = stringValue(options.conversation ?? options.conversationId)?.trim();
+  const sendOperation = commandName === "send";
+  const supplied = stringValue(
+    sendOperation
+      ? options.session ?? options.conversation ?? options.conversationId
+      : options.turn ?? options.conversation ?? options.conversationId
+  )?.trim();
   if (supplied && !isSessionSelectorSyntax(supplied)) {
     // Full authoritative IDs keep their existing command-specific validation
     // path. This avoids a discovery scan before option validation and preserves
     // precise downstream errors for closed or currently non-actionable state.
+    if (sendOperation) {
+      options.session = supplied;
+    } else {
+      options.turn = supplied;
+    }
     return;
   }
   const candidates = await sessionSelectorCandidates(commandName, options);
   const resolution = resolveSessionSelector(supplied, candidates, {
     operation: commandName
   });
+  if (sendOperation) {
+    options.session = resolution.id;
+  } else {
+    options.turn = resolution.id;
+  }
   options.conversation = resolution.id;
   delete options.conversationId;
 }
@@ -3053,6 +3339,98 @@ async function sessionSelectorCandidates(
     mutationsAllowed
   });
   const observedAtMs = Date.now();
+  if (commandName === "send") {
+    const sessionEntries = terminalProjection.terminals.flatMap((entry) => {
+      const managedState = isRecord(entry.managed) ? entry.managed : undefined;
+      const recentTurn = isRecord(managedState?.recent_turn)
+        ? managedState.recent_turn
+        : undefined;
+      const currentTurn = isRecord(managedState?.current_turn)
+        ? managedState.current_turn
+        : undefined;
+      const sessionId = stringValue(managedState?.session_id);
+      const actions = isRecord(entry.available_actions)
+        ? entry.available_actions
+        : undefined;
+      const sendAction = isRecord(actions?.send)
+        ? actions.send
+        : undefined;
+      const sendArguments = isRecord(sendAction?.arguments)
+        ? sendAction.arguments
+        : undefined;
+      if (
+        !sessionId ||
+        !sendAction ||
+        stringValue(sendArguments?.session_id) !== sessionId
+      ) {
+        return [];
+      }
+      const commonEntry = {
+        agent: entry.agent,
+        status: "idle",
+        workspace: entry.workspace ?? entry.cwd,
+        updated_at:
+          recentTurn?.updated_at ??
+          currentTurn?.updated_at,
+        available_actions: {
+          send: sendAction
+        }
+      };
+      return [
+        {
+          ...commonEntry,
+          id: sessionId,
+          short_ref: sessionShortRef(sessionId),
+          source: "managed_session"
+        },
+        {
+          ...commonEntry,
+          id: String(entry.id),
+          short_ref: stringValue(entry.short_ref) ??
+            sessionShortRef(String(entry.id)),
+          source: "managed_session_terminal_alias"
+        }
+      ];
+    });
+    const rawTerminalEntries = terminalProjection.terminals.filter((entry) => {
+      const managedState = isRecord(entry.managed) ? entry.managed : undefined;
+      const actions = isRecord(entry.available_actions)
+        ? entry.available_actions
+        : undefined;
+      const sendAction = isRecord(actions?.send) ? actions.send : undefined;
+      const sendArguments = isRecord(sendAction?.arguments)
+        ? sendAction.arguments
+        : undefined;
+      return (
+        !stringValue(managedState?.session_id) ||
+        !stringValue(sendArguments?.session_id)
+      );
+    });
+    return [
+      ...managed.map((entry) =>
+        sessionSelectorCandidateForEntry(entry, commandName, observedAtMs, {
+          defaultActionable: false,
+          mutationsAllowed
+        })
+      ),
+      ...sessionEntries.map((entry) =>
+        sessionSelectorCandidateForEntry(entry, commandName, observedAtMs, {
+          // A managed terminal's full id/@short-ref is an explicit alias for
+          // its Session send target. It must not duplicate the Session in
+          // omitted, only, latest, or agent-name selection.
+          defaultActionable:
+            entry.source !== "managed_session_terminal_alias",
+          mutationsAllowed
+        })
+      ),
+      ...rawTerminalEntries.map((entry) =>
+        sessionSelectorCandidateForEntry(entry, commandName, observedAtMs, {
+          defaultActionable: true,
+          mutationsAllowed
+        })
+      )
+    ];
+  }
   return [
     ...managed.map((entry) =>
       sessionSelectorCandidateForEntry(entry, commandName, observedAtMs, {
@@ -3108,9 +3486,7 @@ function listActionForCommand(
     : {};
   const actionName = commandName === "retry-callback"
     ? "retry_callback"
-    : commandName === "send" && entry.source === "managed_turn"
-      ? "follow_up"
-      : commandName;
+    : commandName;
   if (isRecord(actions[actionName])) {
     return actions[actionName];
   }
@@ -3154,7 +3530,10 @@ function listActionTargetId(action: Record<string, any> | undefined): string | u
     ? action.arguments
     : undefined;
   return stringValue(
-    actionArguments?.selector ?? actionArguments?.conversation_id
+    actionArguments?.session_id ??
+      actionArguments?.turn_id ??
+      actionArguments?.selector ??
+      actionArguments?.conversation_id
   );
 }
 
@@ -3190,7 +3569,12 @@ async function resolveTerminalConversationFromOptions(
   options
 ): Promise<ResolvedTerminalConversation | undefined> {
   return createTerminalAgentBridge(options).resolveConversationId(
-    stringValue(options.conversation ?? options.conversationId)
+    stringValue(
+      options.session ??
+      options.turn ??
+      options.conversation ??
+      options.conversationId
+    )
   );
 }
 
@@ -3202,7 +3586,7 @@ async function runStatus(options) {
     ? pathsForConversationDir(path.dirname(explicitStatePath)).storeDir
     : storeDirFromOptions(options);
   const reconciliationConversationId =
-    stringValue(options.conversation ?? options.conversationId) ??
+    stringValue(options.turn ?? options.conversation ?? options.conversationId) ??
     (explicitStatePath
       ? path.basename(
           pathsForConversationDir(path.dirname(explicitStatePath))
@@ -3840,13 +4224,18 @@ function prepareManagedSend({
   }
 
   const conversation = loadState(statePath);
-  if (!["waiting_for_agent", "waiting_for_openclaw", "idle"].includes(conversation.status)) {
-    throw new Error(`cannot send to ${conversation.conversation_id}; conversation is ${conversation.status}`);
+  if (
+    conversation.status !== "waiting_for_openclaw" ||
+    options.type !== "answer"
+  ) {
+    throw new Error(
+      `cannot respond to turn ${turnIdForConversation(conversation)}; ` +
+      `turn is ${conversation.status}`
+    );
   }
 
   const executor = executorForConversation(conversation);
-  const type = options.type ??
-    (conversation.status === "waiting_for_openclaw" ? "answer" : "task");
+  const type = "answer";
   const nativeTakeoverForSend = isRecord(conversation.native_session_takeover)
     ? conversation.native_session_takeover
     : undefined;
@@ -3911,6 +4300,15 @@ async function runSend(options) {
   if (options.agentHardTimeoutMinutes !== undefined) {
     positiveMinutes(options.agentHardTimeoutMinutes, "--agent-hard-timeout-minutes");
   }
+  if (options.respond === true) {
+    return runTurnResponse({ options, messageBody });
+  }
+  if ((options.type ?? "task") !== "task") {
+    throw new Error(
+      "ordinary send only accepts message type task; use respond --turn to answer an in-flight Turn"
+    );
+  }
+
   const terminalConversation = await resolveTerminalConversationFromOptions(options);
   if (terminalConversation) {
     if (!options.background) {
@@ -3927,13 +4325,35 @@ async function runSend(options) {
     );
     let releaseStateLock: (() => void) | undefined;
     try {
-      const managed = createManagedTerminalConversationFromRawId({
+      const currentNativeIdentity =
+        await resolveCurrentNativeAgentSessionIdentity({
+          options,
+          agent: terminalConversation.agent,
+          pid: terminalConversation.pid,
+          cwd: terminalConversation.terminalControl.currentPath
+        });
+      const reusableTurn = reusableManagedSessionTurnForTerminal({
+        options,
+        terminalConversation,
+        currentNativeIdentity
+      });
+      assertManagedSessionCanStartTurn(
+        reusableTurn
+          ? managedTurnsForSession(
+              storeDirFromOptions(options),
+              sessionIdForConversation(reusableTurn)
+            )
+          : []
+      );
+      const managed = createManagedTerminalTurn({
         options,
         conversationId: terminalConversation.conversationId,
         agent: terminalConversation.agent,
         pid: terminalConversation.pid,
         messageBody,
-        terminalControl: terminalConversation.terminalControl
+        terminalControl: terminalConversation.terminalControl,
+        previousTurn: reusableTurn,
+        nativeAgentIdentity: currentNativeIdentity
       });
       ensureStoreWritable(managed.conversation.store_dir);
       ensureDir(path.dirname(managed.statePath));
@@ -3950,7 +4370,7 @@ async function runSend(options) {
         terminalSendLockHeld: true,
         terminalStateLockHeld: true,
         recordMessageAfterSend: true,
-        recordRawAttachmentAfterSend: true
+        recordRawAttachmentAfterSend: reusableTurn === undefined
       });
     } finally {
       try {
@@ -3962,71 +4382,236 @@ async function runSend(options) {
     return;
   }
 
+  const sessionId = required(
+    stringValue(options.session ?? options.conversation ?? options.conversationId),
+    "--session is required for an ordinary managed send"
+  );
+  const initialTurns = managedTurnsForSessionTarget(
+    storeDirFromOptions(options),
+    sessionId
+  );
+  assertManagedSessionCanStartTurn(initialTurns);
+  const bindingTurn = initialTurns[0];
+  const bindingTakeover = isRecord(bindingTurn.native_session_takeover)
+    ? bindingTurn.native_session_takeover
+    : undefined;
+  const rawTerminalId = stringValue(bindingTakeover?.native_session_id);
+  const resolvedTerminal = await createTerminalAgentBridge(options)
+    .resolveConversationId(rawTerminalId);
+  if (!resolvedTerminal) {
+    throw new Error(
+      `session ${sessionId} is not attached to a live tmux terminal`
+    );
+  }
+  const currentNativeIdentity =
+    await resolveCurrentNativeAgentSessionIdentity({
+      options,
+      agent: resolvedTerminal.agent,
+      pid: resolvedTerminal.pid,
+      cwd: resolvedTerminal.terminalControl.currentPath
+    });
+  assertNativeAgentIdentityForTurn({
+    conversation: bindingTurn,
+    currentIdentity: currentNativeIdentity,
+    operation: "send to"
+  });
+  if (!managedTurnMatchesResolvedTerminal(
+    bindingTurn,
+    resolvedTerminal,
+    currentNativeIdentity
+  )) {
+    throw new Error(
+      `session ${sessionId} no longer matches its terminal or agent process incarnation`
+    );
+  }
+
+  const releaseTerminalLock = acquireFileLock(
+    terminalBridgeSendLockPath(
+      storeDirFromOptions(options),
+      resolvedTerminal.terminalControl
+    ),
+    { timeoutMs: 30000 }
+  );
+  let releaseStateLock: (() => void) | undefined;
+  try {
+    const currentTurns = managedTurnsForSessionTarget(
+      storeDirFromOptions(options),
+      sessionId
+    );
+    assertManagedSessionCanStartTurn(currentTurns);
+    const currentBinding = currentTurns[0];
+    const lockedNativeIdentity =
+      await resolveCurrentNativeAgentSessionIdentity({
+        options,
+        agent: resolvedTerminal.agent,
+        pid: resolvedTerminal.pid,
+        cwd: resolvedTerminal.terminalControl.currentPath
+      });
+    assertNativeAgentIdentityForTurn({
+      conversation: currentBinding,
+      currentIdentity: lockedNativeIdentity,
+      operation: "send to"
+    });
+    if (!managedTurnMatchesResolvedTerminal(
+      currentBinding,
+      resolvedTerminal,
+      lockedNativeIdentity
+    )) {
+      throw new Error(
+        "managed session identity changed while waiting to send; refresh list and retry"
+      );
+    }
+    const managed = createManagedTerminalTurn({
+      options,
+      conversationId: resolvedTerminal.conversationId,
+      agent: resolvedTerminal.agent,
+      pid: resolvedTerminal.pid,
+      messageBody,
+      terminalControl: resolvedTerminal.terminalControl,
+      previousTurn: currentBinding,
+      nativeAgentIdentity: lockedNativeIdentity
+    });
+    ensureStoreWritable(managed.conversation.store_dir);
+    ensureDir(path.dirname(managed.statePath));
+    releaseStateLock = acquireFileLock(`${managed.statePath}.lock`);
+    await runTerminalControlSend({
+      options,
+      conversation: managed.conversation,
+      nextConversation: managed.nextConversation,
+      statePath: managed.statePath,
+      logPath: managed.logPath,
+      executor: managed.executor,
+      message: managed.message,
+      terminalControl: resolvedTerminal.terminalControl,
+      terminalSendLockHeld: true,
+      terminalStateLockHeld: true,
+      recordMessageAfterSend: true
+    });
+  } finally {
+    try {
+      releaseStateLock?.();
+    } finally {
+      releaseTerminalLock();
+    }
+  }
+}
+
+async function runRespond(options) {
+  const turnId = required(
+    stringValue(options.turn ?? options.conversation ?? options.conversationId),
+    "--turn is required"
+  );
+  return runSend({
+    ...options,
+    turn: turnId,
+    conversation: turnId,
+    session: undefined,
+    type: "answer",
+    respond: true
+  });
+}
+
+async function runTurnResponse({ options, messageBody }) {
   const loaded = loadConversationFromOptions(options);
   const { statePath, logPath } = loaded;
-  const migratedConversation = await migrateLegacyTerminalAgentIdentity({
+  const conversation = await migrateLegacyTerminalAgentIdentity({
     ...loaded,
     options
   });
-  const migratedTakeover = isRecord(migratedConversation.native_session_takeover)
-    ? migratedConversation.native_session_takeover
-    : undefined;
-  const migratedTerminalControl = terminalControlFromTakeover(migratedTakeover);
-  if (migratedTerminalControl) {
-    const releaseTerminalLock = acquireFileLock(
-      terminalBridgeSendLockPath(storeDirFromOptions(options), migratedTerminalControl),
-      { timeoutMs: 30000 }
+  if (conversation.status !== "waiting_for_openclaw") {
+    throw new Error(
+      `cannot respond to turn ${turnIdForConversation(conversation)}; ` +
+      `turn is ${conversation.status}, not waiting_for_openclaw`
     );
-    let releaseStateLock: (() => void) | undefined;
-    try {
-      releaseStateLock = acquireFileLock(`${statePath}.lock`);
-      const prepared = prepareManagedSend({
-        options,
-        statePath,
-        logPath,
-        messageBody,
-        stateLockHeld: true,
-        persist: false
-      });
-      const currentTerminalControl = terminalControlFromTakeover(
-        prepared.nativeTakeoverForSend
-      );
-      if (
-        !currentTerminalControl ||
-        currentTerminalControl.kind !== migratedTerminalControl.kind ||
-        currentTerminalControl.target !== migratedTerminalControl.target ||
-        currentTerminalControl.socketPath !== migratedTerminalControl.socketPath ||
-        currentTerminalControl.panePid !== migratedTerminalControl.panePid
-      ) {
-        throw new Error(
-          "terminal control changed while waiting to send; refresh status and retry"
-        );
-      }
-      await runTerminalControlSend({
-        options,
-        conversation: prepared.conversation,
-        nextConversation: prepared.nextConversation,
-        statePath,
-        logPath,
-        executor: prepared.executor,
-        message: prepared.message,
-        terminalControl: currentTerminalControl,
-        terminalSendLockHeld: true,
-        terminalStateLockHeld: true,
-        recordMessageAfterSend: true
-      });
-    } finally {
-      try {
-        releaseStateLock?.();
-      } finally {
-        releaseTerminalLock();
-      }
-    }
-    return;
   }
-  throw new Error(
-    `conversation ${migratedConversation.conversation_id} is not attached to a live tmux terminal`
+  const nativeTakeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const terminalControl = terminalControlFromTakeover(nativeTakeover);
+  if (!terminalControl) {
+    throw new Error(
+      `turn ${turnIdForConversation(conversation)} is not attached to a live tmux terminal`
+    );
+  }
+  const releaseTerminalLock = acquireFileLock(
+    terminalBridgeSendLockPath(storeDirFromOptions(options), terminalControl),
+    { timeoutMs: 30000 }
   );
+  let releaseStateLock: (() => void) | undefined;
+  try {
+    releaseStateLock = acquireFileLock(`${statePath}.lock`);
+    const prepared = prepareManagedSend({
+      options: { ...options, type: "answer" },
+      statePath,
+      logPath,
+      messageBody,
+      stateLockHeld: true,
+      persist: false
+    });
+    const preparedTakeover = isRecord(
+      prepared.conversation.native_session_takeover
+    )
+      ? prepared.conversation.native_session_takeover
+      : undefined;
+    const terminalAgentPid = Number(preparedTakeover?.terminal_agent_pid);
+    const currentNativeIdentity =
+      await resolveCurrentNativeAgentSessionIdentity({
+        options,
+        agent: prepared.executor.kind,
+        pid: terminalAgentPid,
+        cwd: terminalControl.currentPath
+      });
+    assertNativeAgentIdentityForTurn({
+      conversation: prepared.conversation,
+      currentIdentity: currentNativeIdentity,
+      operation: "respond to"
+    });
+    const currentTerminalControl = terminalControlFromTakeover(
+      prepared.nativeTakeoverForSend
+    );
+    if (
+      !currentTerminalControl ||
+      currentTerminalControl.target !== terminalControl.target ||
+      currentTerminalControl.socketPath !== terminalControl.socketPath ||
+      currentTerminalControl.panePid !== terminalControl.panePid
+    ) {
+      throw new Error(
+        "terminal control changed while waiting to respond; refresh status and retry"
+      );
+    }
+    const responseOptions = {
+      ...options,
+      type: "answer",
+      agentTimeoutMinutes:
+        options.agentTimeoutMinutes ??
+        preparedTakeover?.terminal_bridge_inactivity_timeout_minutes ??
+        DEFAULT_AGENT_TIMEOUT_MINUTES,
+      agentHardTimeoutMinutes:
+        options.agentHardTimeoutMinutes ??
+        preparedTakeover?.terminal_bridge_hard_timeout_minutes ??
+        DEFAULT_AGENT_HARD_TIMEOUT_MINUTES
+    };
+    await runTerminalControlSend({
+      options: responseOptions,
+      conversation: prepared.conversation,
+      nextConversation: prepared.nextConversation,
+      statePath,
+      logPath,
+      executor: prepared.executor,
+      message: prepared.message,
+      terminalControl: currentTerminalControl,
+      terminalSendLockHeld: true,
+      terminalStateLockHeld: true,
+      recordMessageAfterSend: true,
+      continuingTurnResponse: true
+    });
+  } finally {
+    try {
+      releaseStateLock?.();
+    } finally {
+      releaseTerminalLock();
+    }
+  }
 }
 
 async function runApprove(options) {
@@ -4196,7 +4781,6 @@ async function runApprove(options) {
   const autoApprovalPolicy = autoApproved
     ? parseJsonOption(options.autoApprovalPolicyJson, "--auto-approval-policy-json")
     : undefined;
-  const runtimeIdentity = terminalRuntimeIdentityForConversation(conversation, terminalControl);
   let executorPolicyDecision;
   const policyCandidateForInspection = ({
     agent,
@@ -4279,16 +4863,20 @@ async function runApprove(options) {
       action: "approve"
     });
     lockedConversation = currentConversation;
+    const currentRuntimeIdentity = terminalRuntimeIdentityForConversation(
+      currentConversation,
+      currentControl
+    );
     approval = await createTerminalAgentBridge(options).approve(
       executor.kind,
-      terminalControl,
+      currentControl,
       {
         expectedFingerprint,
         scrollbackLines: Number(options.scrollbackLines ?? 120),
-        runtime: runtimeIdentity,
+        runtime: currentRuntimeIdentity,
         managedRequest: terminalDurableRequestForConversation(
           currentConversation,
-          terminalControl
+          currentControl
         ),
         requiredDecisionMode:
           autoApproved && executor.kind === "claude" ? "keys" : undefined,
@@ -4728,7 +5316,8 @@ async function runTerminalControlSend({
   terminalStateLockHeld = false,
   storeWriterLeaseHeld = false,
   recordMessageAfterSend = false,
-  recordRawAttachmentAfterSend = false
+  recordRawAttachmentAfterSend = false,
+  continuingTurnResponse = false
 }) {
   const bridge = terminalBridgeEnabled(conversation);
   if (!terminalSendLockHeld) {
@@ -4750,7 +5339,8 @@ async function runTerminalControlSend({
         terminalStateLockHeld,
         storeWriterLeaseHeld,
         recordMessageAfterSend,
-        recordRawAttachmentAfterSend
+        recordRawAttachmentAfterSend,
+        continuingTurnResponse
       });
     } finally {
       releaseTerminalLock();
@@ -4789,7 +5379,8 @@ async function runTerminalControlSend({
         terminalStateLockHeld: true,
         storeWriterLeaseHeld,
         recordMessageAfterSend,
-        recordRawAttachmentAfterSend
+        recordRawAttachmentAfterSend,
+        continuingTurnResponse
       });
     } finally {
       releaseStateLock();
@@ -4814,7 +5405,8 @@ async function runTerminalControlSend({
         terminalStateLockHeld,
         storeWriterLeaseHeld: true,
         recordMessageAfterSend,
-        recordRawAttachmentAfterSend
+        recordRawAttachmentAfterSend,
+        continuingTurnResponse
       })
     );
   }
@@ -4861,23 +5453,52 @@ async function runTerminalControlSend({
         "or explicitly resolve that conversation before sending another task"
       );
     }
-    if (!TERMINAL_DISPATCH_RELEASE_STATUSES.has(owner.status)) {
-      if (
+    const continuingSameTurn = Boolean(
+      continuingTurnResponse &&
+      sessionIdForConversation(owner) === sessionIdForConversation(conversation) &&
+      turnIdForConversation(owner) === turnIdForConversation(conversation) &&
+      sameCanonicalStatePath(previousDispatchLedger.state_path, statePath)
+    );
+    if (
+      !TERMINAL_DISPATCH_RELEASE_STATUSES.has(owner.status) &&
+      !continuingSameTurn
+    ) {
+      const exactDispatchReplay = Boolean(
         stringValue(previousDispatchLedger.request_hash) ===
-        terminalRequestHash
-      ) {
+          terminalRequestHash &&
+        stringValue(previousDispatchLedger.conversation_id) ===
+          conversation.conversation_id &&
+        stringValue(previousDispatchLedger.message_id) === message.id &&
+        sameCanonicalStatePath(
+          previousDispatchLedger.state_path,
+          statePath
+        )
+      );
+      if (exactDispatchReplay) {
         const receiptConversationId =
           stringValue(previousDispatchLedger.conversation_id) ??
           owner.conversation_id;
+        const receiptSessionId = sessionIdForConversation(owner);
+        const receiptTurnId = turnIdForConversation(owner);
         const receiptMessageId =
           stringValue(previousDispatchLedger.message_id) ??
           message.id;
         printJson({
+          session_id: receiptSessionId,
+          turn_id: receiptTurnId,
           conversation: owner,
           message: {
             ...message,
             id: receiptMessageId,
-            conversation_id: receiptConversationId
+            conversation_id: receiptConversationId,
+            session_id: receiptSessionId,
+            turn_id: receiptTurnId,
+            metadata: {
+              ...(isRecord(message.metadata) ? message.metadata : {}),
+              task_id: receiptConversationId,
+              session_id: receiptSessionId,
+              turn_id: receiptTurnId
+            }
           },
           delivered: true,
           status: "async_pending",
@@ -4894,6 +5515,8 @@ async function runTerminalControlSend({
             "AKK replayed the durable receipt for an identical active terminal request and did not send tmux input again.",
           openclaw_next_action: openClawYieldNextAction({
             conversationId: receiptConversationId,
+            sessionId: receiptSessionId,
+            turnId: receiptTurnId,
             source: "terminal_control",
             callbackExpected: Boolean(
               owner.gateway_method ??
@@ -4918,6 +5541,34 @@ async function runTerminalControlSend({
       conversation.conversation_id,
       terminalPayload
     );
+  }
+  const sendTakeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const terminalAgentPid = Number(sendTakeover?.terminal_agent_pid);
+  const currentNativeIdentity =
+    await resolveCurrentNativeAgentSessionIdentity({
+      options,
+      agent: executor.kind,
+      pid: terminalAgentPid,
+      cwd: terminalControl.currentPath
+    });
+  const virginRawAttach = Boolean(
+    recordRawAttachmentAfterSend &&
+    !stringValue(sendTakeover?.terminal_agent_session_id)
+  );
+  if (virginRawAttach) {
+    if (currentNativeIdentity) {
+      throw new Error(
+        "native agent session appeared while preparing a virgin terminal attach; refresh list and retry"
+      );
+    }
+  } else {
+    assertNativeAgentIdentityForTurn({
+      conversation,
+      currentIdentity: currentNativeIdentity,
+      operation: "send to"
+    });
   }
   const preSendRuntime: TerminalRuntimeIdentity = {
     ...terminalRuntimeIdentityForConversation(nextConversation, terminalControl),
@@ -4984,6 +5635,8 @@ async function runTerminalControlSend({
     status: "prepared",
     generation_id: message.id,
     conversation_id: preparedConversation.conversation_id,
+    session_id: sessionIdForConversation(preparedConversation),
+    turn_id: turnIdForConversation(preparedConversation),
     message_id: message.id,
     request_hash: terminalRequestHash,
     prepared_at: bridgeStartedAt,
@@ -5154,6 +5807,8 @@ async function runTerminalControlSend({
       safe_to_retry: dispatchLedgerRestored
     });
     printJson({
+      session_id: sessionIdForConversation(abortedConversation),
+      turn_id: turnIdForConversation(abortedConversation),
       conversation: abortedConversation,
       message,
       delivered: false,
@@ -5172,6 +5827,8 @@ async function runTerminalControlSend({
       openclaw_next_action: {
         action: dispatchLedgerRestored ? "retry" : "inspect",
         conversation_id: abortedConversation.conversation_id,
+        session_id: sessionIdForConversation(abortedConversation),
+        turn_id: turnIdForConversation(abortedConversation),
         safe_to_retry: dispatchLedgerRestored,
         do_not_retry: !dispatchLedgerRestored,
         reason: dispatchLedgerRestored
@@ -5188,8 +5845,137 @@ async function runTerminalControlSend({
       runtime: preSendRuntime
     });
     const submittedAt = new Date().toISOString();
+    let submittedBase = preparedConversation;
+    if (virginRawAttach) {
+      let boundIdentity: NativeAgentSessionIdentity | undefined;
+      let boundConversation: Conversation | undefined;
+      let bindingError: string | undefined;
+      try {
+        boundIdentity = await pollNativeAgentSessionIdentity({
+          options,
+          executor,
+          terminalControl,
+          pid: terminalAgentPid
+        });
+      } catch (error) {
+        bindingError = error instanceof Error ? error.message : String(error);
+      }
+      if (boundIdentity) {
+        try {
+          boundConversation = withNativeAgentSessionIdentity(
+            preparedConversation,
+            boundIdentity
+          );
+          assertNativeAgentIdentityForTurn({
+            conversation: boundConversation,
+            currentIdentity: boundIdentity,
+            operation: "bind"
+          });
+        } catch (error) {
+          bindingError = error instanceof Error ? error.message : String(error);
+          boundIdentity = undefined;
+          boundConversation = undefined;
+        }
+      }
+      if (!boundIdentity) {
+        const bindingFailedAt = new Date().toISOString();
+        const bindingReason = bindingError
+          ? `AKK delivered the terminal input but could not verify the new native agent session: ${bindingError}`
+          : "AKK delivered the terminal input but no exact native agent session appeared within the binding window";
+        const unfencedBase = {
+          ...preparedConversation,
+          status: "stalled" as const,
+          stalled_at: bindingFailedAt,
+          stalled_reason: bindingReason,
+          native_session_takeover: {
+            ...(isRecord(preparedConversation.native_session_takeover)
+              ? preparedConversation.native_session_takeover
+              : {}),
+            terminal_agent_identity_status: "unresolved_after_submit",
+            terminal_agent_identity_error: textSummary(bindingReason)
+          },
+          updated_at: bindingFailedAt
+        };
+        const unfencedConversation = withTerminalBridgeSubmission({
+          conversation: unfencedBase,
+          messageId: message.id,
+          requestText: terminalPayload,
+          status: "submitted",
+          preparedAt: bridgeStartedAt,
+          submittedAt
+        });
+        saveTerminalBridgeDispatchLedger(terminalControl, {
+          status: "submitted",
+          generation_id: message.id,
+          conversation_id: unfencedConversation.conversation_id,
+          session_id: sessionIdForConversation(unfencedConversation),
+          turn_id: turnIdForConversation(unfencedConversation),
+          message_id: message.id,
+          request_hash: terminalRequestHash,
+          prepared_at: bridgeStartedAt,
+          submitted_at: submittedAt,
+          dispatcher_pid: process.pid,
+          state_path: statePath,
+          event_log_path: logPath,
+          callback_expected: false,
+          native_identity_status: "unresolved_after_submit",
+          error: textSummary(bindingReason),
+          previous_generation_id:
+            stringValue(previousDispatchLedger?.generation_id) ??
+            stringValue(previousDispatchLedger?.message_id)
+        });
+        saveState(statePath, unfencedConversation);
+        appendEvent(logPath, {
+          ts: bindingFailedAt,
+          conversation_id: unfencedConversation.conversation_id,
+          event: "terminal_agent_identity_binding_failed",
+          message_id: message.id,
+          executor,
+          terminal_control: terminalControl,
+          error: textSummary(bindingReason),
+          delivered: true,
+          do_not_retry: true
+        });
+        runtimeLog("error", "terminal_agent_identity_binding_failed", {
+          conversation_id: unfencedConversation.conversation_id,
+          agent: executor.kind,
+          terminal_target: terminalControl.target,
+          error: bindingReason,
+          delivered: true,
+          do_not_retry: true
+        });
+        printJson({
+          session_id: sessionIdForConversation(unfencedConversation),
+          turn_id: turnIdForConversation(unfencedConversation),
+          conversation: unfencedConversation,
+          message,
+          delivered: true,
+          status: "delivered_unfenced",
+          submission_outcome: "submitted",
+          background: true,
+          callback_expected: false,
+          terminal_control: terminalControl,
+          monitor_pid: bridgeMonitor?.pid ?? null,
+          executor,
+          delivery_receipt: "submitted",
+          do_not_retry: true,
+          reason: bindingReason,
+          openclaw_next_action: {
+            action: "inspect",
+            conversation_id: unfencedConversation.conversation_id,
+            session_id: sessionIdForConversation(unfencedConversation),
+            turn_id: turnIdForConversation(unfencedConversation),
+            do_not_retry: true,
+            reason:
+              "The input was submitted, but AKK could not fence later side effects to an exact native session. Inspect the pane and close this Turn before continuing."
+          }
+        });
+        return;
+      }
+      submittedBase = boundConversation as Conversation;
+    }
     deliveredConversation = withTerminalBridgeSubmission({
-      conversation: preparedConversation,
+      conversation: submittedBase,
       messageId: message.id,
       requestText: terminalPayload,
       status: "submitted",
@@ -5201,6 +5987,8 @@ async function runTerminalControlSend({
       status: "submitted",
       generation_id: message.id,
       conversation_id: deliveredConversation.conversation_id,
+      session_id: sessionIdForConversation(deliveredConversation),
+      turn_id: turnIdForConversation(deliveredConversation),
       message_id: message.id,
       request_hash: terminalRequestHash,
       prepared_at: bridgeStartedAt,
@@ -5242,6 +6030,8 @@ async function runTerminalControlSend({
         status: "uncertain",
         generation_id: message.id,
         conversation_id: uncertainConversation.conversation_id,
+        session_id: sessionIdForConversation(uncertainConversation),
+        turn_id: turnIdForConversation(uncertainConversation),
         message_id: message.id,
         request_hash: terminalRequestHash,
         prepared_at: bridgeStartedAt,
@@ -5291,6 +6081,8 @@ async function runTerminalControlSend({
       stalled_conversation_ids: stalledConversationIds
     });
     printJson({
+      session_id: sessionIdForConversation(uncertainConversation),
+      turn_id: turnIdForConversation(uncertainConversation),
       conversation: uncertainConversation,
       message,
       delivered: false,
@@ -5308,6 +6100,8 @@ async function runTerminalControlSend({
       openclaw_next_action: {
         action: "inspect",
         conversation_id: uncertainConversation.conversation_id,
+        session_id: sessionIdForConversation(uncertainConversation),
+        turn_id: turnIdForConversation(uncertainConversation),
         do_not_retry: true,
         reason:
           "The terminal submission outcome is uncertain. Inspect AKK status and the shared tmux pane before deciding whether to close or continue."
@@ -5357,6 +6151,8 @@ async function runTerminalControlSend({
     }
   }
   printJson({
+    session_id: sessionIdForConversation(deliveredConversation),
+    turn_id: turnIdForConversation(deliveredConversation),
     conversation: deliveredConversation,
     message,
     delivered: true,
@@ -5375,6 +6171,8 @@ async function runTerminalControlSend({
       : {}),
     openclaw_next_action: openClawYieldNextAction({
       conversationId: deliveredConversation.conversation_id,
+      sessionId: sessionIdForConversation(deliveredConversation),
+      turnId: turnIdForConversation(deliveredConversation),
       source: "terminal_control",
       callbackExpected: Boolean(deliveredConversation.gateway_method)
     })
@@ -5385,25 +6183,502 @@ function terminalSubmissionPayload(payload: string): string {
   return payload.trimEnd();
 }
 
-function createManagedTerminalConversationFromRawId({
+interface NativeAgentSessionIdentity {
+  sessionId: string;
+  processUuid?: string;
+  processBirth?: string;
+  rollout?: {
+    fd: string;
+    device: string;
+    inode: string;
+    path: string;
+  };
+  evidence: string;
+}
+
+function isCompleteNativeRollout(value: unknown): value is {
+  fd: string;
+  device: string;
+  inode: string;
+  path: string;
+} {
+  return isRecord(value) &&
+    Boolean(stringValue(value.fd)) &&
+    Boolean(stringValue(value.device)) &&
+    Boolean(stringValue(value.inode)) &&
+    Boolean(stringValue(value.path));
+}
+
+async function resolveCurrentNativeAgentSessionIdentity({
+  options,
+  agent,
+  pid,
+  cwd
+}: {
+  options: Record<string, any>;
+  agent: ExecutorKind;
+  pid: number;
+  cwd?: string;
+}): Promise<NativeAgentSessionIdentity | undefined> {
+  if (agent === "codex") {
+    return createAgentSessionProvider("codex", options)
+      .resolveActiveSessionIdentityForPid(pid, cwd);
+  }
+  const rows = loadClaudeAgentRows(options, { required: true })
+    .filter((row) => row.pid === pid);
+  if (rows.length === 0) {
+    return undefined;
+  }
+  const sessionIds = [...new Set(
+    rows.map((row) => stringValue(row.sessionId)).filter(
+      (value): value is string => value !== undefined
+    )
+  )];
+  if (sessionIds.length > 1) {
+    throw new Error(
+      `Claude process ${pid} has conflicting exact session identities`
+    );
+  }
+  const sessionId = sessionIds[0];
+  if (!sessionId) {
+    throw new Error(
+      `Claude process ${pid} is visible but its exact sessionId is unavailable`
+    );
+  }
+  const startedAtValues = [...new Set(
+    rows
+      .map((row) => Number(row.startedAt))
+      .filter((value) => Number.isSafeInteger(value) && value > 0)
+  )];
+  if (startedAtValues.length > 1) {
+    throw new Error(
+      `Claude process ${pid} has conflicting process-incarnation timestamps`
+    );
+  }
+  const startedAt = startedAtValues[0];
+  if (!startedAt) {
+    throw new Error(
+      `Claude process ${pid} is visible but its process-incarnation startedAt is unavailable`
+    );
+  }
+  return {
+    sessionId,
+    processUuid: `claude-pid:${pid}:started:${startedAt}`,
+    evidence: "claude_agents_exact_pid"
+  };
+}
+
+function nativeAgentIdentityMatchesTurn(
+  conversation: Conversation,
+  currentIdentity: NativeAgentSessionIdentity | undefined
+): boolean {
+  const takeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const storedSessionId = stringValue(takeover?.terminal_agent_session_id);
+  const storedProcessUuid = stringValue(
+    takeover?.terminal_agent_process_uuid
+  );
+  const storedProcessBirth = stringValue(
+    takeover?.terminal_agent_process_birth
+  );
+  const storedRollout = isRecord(takeover?.terminal_agent_rollout)
+    ? takeover.terminal_agent_rollout
+    : undefined;
+  const strictNativeIdentity =
+    Number(takeover?.terminal_agent_identity_protocol) === 1;
+  const strictClaudeTurn =
+    strictNativeIdentity && executorForConversation(conversation).kind === "claude";
+  const strictCodexTurn =
+    strictNativeIdentity && executorForConversation(conversation).kind === "codex";
+  if (
+    strictNativeIdentity &&
+    (!storedSessionId || !currentIdentity?.sessionId)
+  ) {
+    return false;
+  }
+  if (
+    strictClaudeTurn &&
+    (
+      !storedProcessUuid ||
+      !currentIdentity?.processUuid ||
+      storedProcessUuid !== currentIdentity.processUuid
+    )
+  ) {
+    return false;
+  }
+  if (
+    strictCodexTurn &&
+    (
+      !storedProcessUuid ||
+      !storedProcessBirth ||
+      !isCompleteNativeRollout(storedRollout) ||
+      !currentIdentity?.processUuid ||
+      !currentIdentity.processBirth ||
+      !isCompleteNativeRollout(currentIdentity.rollout)
+    )
+  ) {
+    return false;
+  }
+  if (storedSessionId && storedSessionId !== currentIdentity?.sessionId) {
+    return false;
+  }
+  if (
+    storedProcessUuid &&
+    storedProcessUuid !== currentIdentity?.processUuid
+  ) {
+    return false;
+  }
+  if (
+    storedProcessBirth &&
+    storedProcessBirth !== currentIdentity?.processBirth
+  ) {
+    return false;
+  }
+  if (
+    storedRollout &&
+    (
+      stringValue(storedRollout.fd) !== currentIdentity?.rollout?.fd ||
+      stringValue(storedRollout.device) !== currentIdentity?.rollout?.device ||
+      stringValue(storedRollout.inode) !== currentIdentity?.rollout?.inode ||
+      stringValue(storedRollout.path) !== currentIdentity?.rollout?.path
+    )
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function assertNativeAgentIdentityForRuntime({
+  runtime,
+  currentIdentity,
+  agent,
+  pid
+}: {
+  runtime?: TerminalRuntimeIdentity;
+  currentIdentity: NativeAgentSessionIdentity | undefined;
+  agent: ExecutorKind;
+  pid: number;
+}): void {
+  if (runtime?.expectedEmptyNativeSession === true) {
+    if (!currentIdentity) {
+      return;
+    }
+    throw new Error(
+      `native ${agent} session appeared for process ${pid} during terminal control`
+    );
+  }
+  if (
+    runtime?.requireNativeRolloutIdentity === true &&
+    (
+      !runtime.nativeSessionId ||
+      !runtime.nativeProcessUuid ||
+      !runtime.nativeProcessBirth ||
+      !isCompleteNativeRollout(runtime.nativeRollout) ||
+      !currentIdentity?.sessionId ||
+      !currentIdentity.processUuid ||
+      !currentIdentity.processBirth ||
+      !isCompleteNativeRollout(currentIdentity.rollout)
+    )
+  ) {
+    throw new Error(
+      `native ${agent} rollout incarnation cannot be verified for process ${pid}; ` +
+      "refresh list before controlling the terminal"
+    );
+  }
+  if (
+    runtime?.requireNativeProcessUuid === true &&
+    (
+      !runtime.nativeProcessUuid ||
+      !currentIdentity?.processUuid ||
+      currentIdentity.processUuid !== runtime.nativeProcessUuid
+    )
+  ) {
+    throw new Error(
+      `native ${agent} process incarnation cannot be verified for process ${pid}; ` +
+      "refresh list before controlling the terminal"
+    );
+  }
+  if (!runtime?.nativeSessionId) {
+    return;
+  }
+  const expectedRollout = runtime.nativeRollout;
+  if (
+    currentIdentity?.sessionId !== runtime.nativeSessionId ||
+    (
+      runtime.nativeProcessUuid &&
+      currentIdentity?.processUuid !== runtime.nativeProcessUuid
+    ) ||
+    (
+      runtime.nativeProcessBirth &&
+      currentIdentity?.processBirth !== runtime.nativeProcessBirth
+    ) ||
+    (
+      expectedRollout &&
+      (
+        currentIdentity?.rollout?.fd !== expectedRollout.fd ||
+        currentIdentity?.rollout?.device !== expectedRollout.device ||
+        currentIdentity?.rollout?.inode !== expectedRollout.inode ||
+        currentIdentity?.rollout?.path !== expectedRollout.path
+      )
+    )
+  ) {
+    throw new Error(
+      `native ${agent} session identity changed for process ${pid}; ` +
+      "refresh list before controlling the terminal"
+    );
+  }
+}
+
+function assertNativeAgentIdentityForTurn({
+  conversation,
+  currentIdentity,
+  operation
+}: {
+  conversation: Conversation;
+  currentIdentity: NativeAgentSessionIdentity | undefined;
+  operation: string;
+}): void {
+  if (nativeAgentIdentityMatchesTurn(conversation, currentIdentity)) {
+    return;
+  }
+  const takeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const strictClaudeTurn = Boolean(
+    Number(takeover?.terminal_agent_identity_protocol) === 1 &&
+    executorForConversation(conversation).kind === "claude"
+  );
+  const storedProcessUuid = stringValue(
+    takeover?.terminal_agent_process_uuid
+  );
+  if (
+    strictClaudeTurn &&
+    (!storedProcessUuid || !currentIdentity?.processUuid)
+  ) {
+    throw new Error(
+      `cannot ${operation} Turn ${turnIdForConversation(conversation)}: ` +
+      "native Claude process incarnation cannot be verified; this Claude CLI " +
+      "must report both sessionId and startedAt before AKK can control it"
+    );
+  }
+  const expected = stringValue(takeover?.terminal_agent_session_id) ??
+    "unavailable";
+  const observed = currentIdentity?.sessionId ?? "unverifiable";
+  throw new Error(
+    `cannot ${operation} Turn ${turnIdForConversation(conversation)}: native ` +
+    `agent session identity changed or cannot be verified ` +
+    `(expected ${expected}, observed ${observed})`
+  );
+}
+
+function withNativeAgentSessionIdentity(
+  conversation: Conversation,
+  identity: NativeAgentSessionIdentity
+): Conversation {
+  const takeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : {};
+  return {
+    ...conversation,
+    native_session_takeover: {
+      ...takeover,
+      terminal_agent_identity_protocol: 1,
+      terminal_agent_session_id: identity.sessionId,
+      terminal_agent_process_uuid: identity.processUuid,
+      terminal_agent_process_birth: identity.processBirth,
+      terminal_agent_rollout: identity.rollout,
+      terminal_agent_identity_evidence: identity.evidence,
+      terminal_agent_identity_bound_at: new Date().toISOString()
+    }
+  };
+}
+
+async function pollNativeAgentSessionIdentity({
+  options,
+  executor,
+  terminalControl,
+  pid,
+  attempts = 40,
+  delayMs = 50
+}: {
+  options: Record<string, any>;
+  executor: { kind: ExecutorKind };
+  terminalControl: TerminalControlRef;
+  pid: number;
+  attempts?: number;
+  delayMs?: number;
+}): Promise<NativeAgentSessionIdentity | undefined> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const identity = await resolveCurrentNativeAgentSessionIdentity({
+      options,
+      agent: executor.kind,
+      pid,
+      cwd: terminalControl.currentPath
+    });
+    if (identity) {
+      return identity;
+    }
+    if (attempt + 1 < attempts) {
+      await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  return undefined;
+}
+
+function managedTurnsForSession(
+  storeDir: string,
+  sessionId: string
+): Conversation[] {
+  return listConversations(storeDir)
+    .filter(isDiscoverableTmuxConversation)
+    .filter((conversation) =>
+      sessionIdForConversation(conversation) === sessionId
+    )
+    .sort(compareManagedConversationRecency);
+}
+
+function managedTurnsForSessionTarget(
+  storeDir: string,
+  targetId: string
+): Conversation[] {
+  const allTurns = listConversations(storeDir)
+    .filter(isDiscoverableTmuxConversation);
+  const exactTurn = allTurns.find((conversation) =>
+    turnIdForConversation(conversation) === targetId ||
+    conversation.conversation_id === targetId
+  );
+  if (
+    exactTurn &&
+    sessionIdForConversation(exactTurn) !== targetId
+  ) {
+    throw new Error(
+      `turn ${targetId} is an execution identity, not an ordinary send target; ` +
+      `send to session ${sessionIdForConversation(exactTurn)} instead`
+    );
+  }
+  const turns = allTurns
+    .filter((conversation) =>
+      sessionIdForConversation(conversation) === targetId
+    )
+    .sort(compareManagedConversationRecency);
+  if (turns.length === 0) {
+    throw new Error(`managed session ${targetId} was not found`);
+  }
+  return turns;
+}
+
+function assertManagedSessionCanStartTurn(turns: Conversation[]): void {
+  const blocking = turns.filter((conversation) =>
+    SESSION_SEND_BLOCKING_STATUSES.has(conversation.status)
+  );
+  if (blocking.length > 0) {
+    const owner = blocking[0];
+    throw new Error(
+      `session ${sessionIdForConversation(owner)} already has active turn ` +
+      `${turnIdForConversation(owner)} (${owner.status}); wait for its callback, ` +
+      "respond to it if it is waiting for OpenClaw, cancel it, or close it before sending another turn"
+    );
+  }
+}
+
+function reusableManagedSessionTurnForTerminal({
+  options,
+  terminalConversation,
+  currentNativeIdentity
+}: {
+  options: Record<string, any>;
+  terminalConversation: ResolvedTerminalConversation;
+  currentNativeIdentity: NativeAgentSessionIdentity | undefined;
+}): Conversation | undefined {
+  const matches = listConversations(storeDirFromOptions(options))
+    .filter(isDiscoverableTmuxConversation)
+    .filter((conversation) =>
+      managedTurnMatchesResolvedTerminal(
+        conversation,
+        terminalConversation,
+        currentNativeIdentity
+      )
+    );
+  const sessions = new Map<string, Conversation[]>();
+  for (const turn of matches) {
+    const sessionId = sessionIdForConversation(turn);
+    const group = sessions.get(sessionId) ?? [];
+    group.push(turn);
+    sessions.set(sessionId, group);
+  }
+  if (sessions.size > 1) {
+    throw new Error(
+      `terminal ${terminalConversation.terminalControl.target} matches multiple ` +
+      "managed sessions; send to an explicit session_id from AKK list"
+    );
+  }
+  const group = [...sessions.values()][0];
+  return group?.sort(compareManagedConversationRecency)[0];
+}
+
+function managedTurnMatchesResolvedTerminal(
+  conversation: Conversation,
+  terminalConversation: ResolvedTerminalConversation,
+  currentNativeIdentity?: NativeAgentSessionIdentity
+): boolean {
+  const takeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const storedControl = terminalControlFromTakeover(takeover);
+  const storedTerminalIdentity = parseTerminalConversationId(
+    stringValue(takeover?.native_session_id)
+  );
+  const currentTerminalIdentity = parseTerminalConversationId(
+    terminalConversation.conversationId
+  );
+  return Boolean(
+    storedControl &&
+    storedTerminalIdentity &&
+    currentTerminalIdentity &&
+    executorForConversation(conversation).kind === terminalConversation.agent &&
+    storedTerminalIdentity.agent === currentTerminalIdentity.agent &&
+    storedTerminalIdentity.target === currentTerminalIdentity.target &&
+    storedTerminalIdentity.pid === currentTerminalIdentity.pid &&
+    Number(takeover?.terminal_agent_pid) === terminalConversation.pid &&
+    nativeAgentIdentityMatchesTurn(conversation, currentNativeIdentity) &&
+    terminalControlSelectorKey(storedControl) ===
+      terminalControlSelectorKey(terminalConversation.terminalControl) &&
+    matchesConfiguredWorkspace(
+      conversation.workspace,
+      terminalConversation.terminalControl.currentPath
+    )
+  );
+}
+
+function createManagedTerminalTurn({
   options,
   conversationId,
   agent,
   pid,
   messageBody,
-  terminalControl
+  terminalControl,
+  previousTurn,
+  nativeAgentIdentity
 }) {
   const workspace = terminalControl.currentPath ?? process.cwd();
   const storeDir = expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(workspace));
-  const executor = resolveExecutor({
-    kind: agent,
-    session: conversationId
-  });
+  const executor = previousTurn
+    ? executorForConversation(previousTurn)
+    : resolveExecutor({
+        kind: agent,
+        session: conversationId
+      });
   const now = new Date();
   const conversation = createConversation({
     userRequest: String(messageBody),
+    sessionId: previousTurn
+      ? sessionIdForConversation(previousTurn)
+      : undefined,
     workspace,
-    openclawSession: options.openclawSession ?? "agent:main:main",
+    openclawSession:
+      options.openclawSession ?? previousTurn?.openclaw_session ??
+      "agent:main:main",
     executorKind: executor.kind,
     executorSession: executor.session,
     softLimit: Number(options.softLimit ?? 50),
@@ -5411,8 +6686,10 @@ function createManagedTerminalConversationFromRawId({
     now
   });
   const paths = pathsForConversation(conversation.conversation_id, storeDir);
-  const claudeAgent = agent === "claude"
-    ? loadClaudeAgentRows(options).find((row) => row.pid === pid)
+  const previousTakeover = previousTurn && isRecord(
+    previousTurn.native_session_takeover
+  )
+    ? previousTurn.native_session_takeover
     : undefined;
   const attachedConversation = withStoragePaths({
     ...conversation,
@@ -5420,20 +6697,35 @@ function createManagedTerminalConversationFromRawId({
     status: "idle" as const,
     idle_since: now.toISOString(),
     updated_at: now.toISOString(),
-    gateway_url: options.gatewayUrl ?? "ws://127.0.0.1:18789",
-    gateway_method: options.gatewayMethod,
-    gateway_session: options.gatewaySession ?? options.openclawSession ?? "agent:main:main",
-    openclaw_bin: options.openclawBin ?? resolveOptionalExecutable("openclaw"),
+    gateway_url:
+      options.gatewayUrl ?? previousTurn?.gateway_url ??
+      "ws://127.0.0.1:18789",
+    gateway_method: options.gatewayMethod ?? previousTurn?.gateway_method,
+    gateway_session:
+      options.gatewaySession ?? options.openclawSession ??
+      previousTurn?.gateway_session ?? previousTurn?.openclaw_session ??
+      "agent:main:main",
+    openclaw_bin:
+      options.openclawBin ?? previousTurn?.openclaw_bin ??
+      resolveOptionalExecutable("openclaw"),
     native_session_takeover: {
       agent,
+      terminal_agent_identity_protocol: 1,
       native_session_id: conversationId,
       terminal_agent_pid: pid,
-      terminal_agent_session_id: claudeAgent?.sessionId,
+      terminal_agent_session_id: nativeAgentIdentity?.sessionId,
+      terminal_agent_process_uuid: nativeAgentIdentity?.processUuid,
+      terminal_agent_process_birth: nativeAgentIdentity?.processBirth,
+      terminal_agent_rollout: nativeAgentIdentity?.rollout,
+      terminal_agent_identity_evidence: nativeAgentIdentity?.evidence,
       source_cwd: workspace,
       source_title: `Terminal-controlled ${executor.display_name} ${terminalControl.target}`,
       strategy: "terminal_control",
-      attached_at: now.toISOString(),
-      takeover_match_kind: "raw_terminal_send",
+      attached_at:
+        stringValue(previousTakeover?.attached_at) ?? now.toISOString(),
+      takeover_match_kind: previousTurn
+        ? "managed_session_send"
+        : "raw_terminal_send",
       terminal_control: terminalControl,
       needs_bootstrap: false,
       terminal_bridge: true
@@ -5462,16 +6754,24 @@ function createManagedTerminalConversationFromRawId({
   };
 }
 
-function openClawYieldNextAction({ conversationId, source, callbackExpected }) {
+function openClawYieldNextAction({
+  conversationId,
+  sessionId,
+  turnId,
+  source,
+  callbackExpected
+}) {
   const callbackText = callbackExpected
     ? "The coding agent should report completion, questions, or errors through the existing Agent Knock Knock callback for this conversation."
     : "No AKK-managed callback is registered for this raw terminal-controlled id; do not wait synchronously. Use AKK status/list later or attach/create an AKK conversation when callback delivery is required.";
   return {
     action: "yield",
     reason:
-      "The follow-up was handed off asynchronously. End this OpenClaw turn now instead of waiting, polling, or treating the send as a synchronous agent result.",
+      "The requested agent work was handed off asynchronously. End this OpenClaw turn now instead of waiting, polling, or treating the send as a synchronous agent result.",
     source,
     conversation_id: conversationId,
+    session_id: sessionId,
+    turn_id: turnId,
     callback_expected: callbackExpected,
     do_not:
       "Do not inspect event logs, process lists, terminal screens, files, stdout, or stderr while waiting unless the user explicitly asks for status.",
@@ -9153,6 +10453,15 @@ function prepareLockedCallback(options) {
     sameDeliveryMessage &&
     isRetryableCallbackDelivery(conversation, inheritedDelivery);
   const duplicateMessage = isDuplicateMessage(existingEvents, message);
+  if (
+    TERMINAL_DISPATCH_RELEASE_STATUSES.has(conversation.status) &&
+    !duplicateMessage
+  ) {
+    throw new Error(
+      `refusing late callback ${message.id} for released Turn ` +
+      `${turnIdForConversation(conversation)} (${conversation.status})`
+    );
+  }
   const recoveryMessageAlreadyLogged = options.recoverMissingOutbox === true
     ? exactLoggedMessageForRecovery(existingEvents, message)
     : false;
@@ -9967,7 +11276,7 @@ function readExistingEvents(logPath) {
 
 function loadConversationFromOptions(options) {
   const storeDir = storeDirFromOptions(options);
-  const conversationId = options.conversation ?? options.conversationId;
+  const conversationId = options.turn ?? options.conversation ?? options.conversationId;
   const statePath = expandHome(options.state ?? (conversationId ? statePathForConversationId(conversationId, storeDir) : undefined));
   if (!statePath) {
     throw new Error("--conversation or --state is required");
@@ -10004,6 +11313,8 @@ function storeDirFromOptions(options) {
 function summarizeConversation(conversation) {
   const executor = executorForConversation(conversation);
   return {
+    session_id: sessionIdForConversation(conversation),
+    turn_id: turnIdForConversation(conversation),
     conversation_id: conversation.conversation_id,
     agent: executor.kind,
     executor,
@@ -10573,11 +11884,12 @@ function markConversationStalled({ statePath, logPath, reason, detail = {} }) {
           body: [
             `AKK marked this ${executor.display_name} task as stalled: ${reason}.`,
             "",
-            `Conversation: ${conversation.conversation_id}`,
-            `Session: ${executor.session}`,
+            `Turn: ${turnIdForConversation(conversation)}`,
+            `AKK session: ${sessionIdForConversation(conversation)}`,
+            `Agent session: ${executor.session}`,
             terminalBridge
-              ? `Use \`AKK status ${conversation.conversation_id}\` for details, \`AKK renew ${conversation.conversation_id}\` to resume monitoring without sending another task, or \`AKK close ${conversation.conversation_id}\` to close it.`
-              : "Use `AKK status` for details, `AKK send` to retry/follow up, or `AKK close` to close it."
+              ? `Use \`AKK status --turn ${turnIdForConversation(conversation)}\` for details, \`AKK renew --turn ${turnIdForConversation(conversation)}\` to resume monitoring in this Turn, or \`AKK close --turn ${turnIdForConversation(conversation)}\` to close it. Start any independent retry with \`AKK send --session ${sessionIdForConversation(conversation)}\`.`
+              : `Use \`AKK status --turn ${turnIdForConversation(conversation)}\` for details or \`AKK close --turn ${turnIdForConversation(conversation)}\` to close this Turn.`
           ].join("\n")
         })
       : undefined;
@@ -10854,6 +12166,8 @@ function canonicalJson(value): string {
 
 function messageFingerprint(message) {
   return JSON.stringify({
+    session_id: message.session_id,
+    turn_id: message.turn_id,
     conversation_id: message.conversation_id,
     from: message.from,
     to: message.to,
@@ -10871,6 +12185,8 @@ function deliverToGatewayMethod({ method, openclawBin, gatewayUrl, token, sessio
     "--params",
     JSON.stringify({
       sessionKey,
+      session_id: sessionIdForConversation(conversation),
+      turn_id: turnIdForConversation(conversation),
       statePath,
       logPath,
       conversation: redactCliOutput(conversation),
@@ -11200,11 +12516,20 @@ function createAgentSessionProvider(agent, options) {
     throw new Error(`unsupported agent session provider: ${agent}`);
   }
 
-  if (options.threadsJson || options.processesJson || options.rolloutsJson) {
+  if (
+    options.threadsJson ||
+    options.processesJson ||
+    options.rolloutsJson ||
+    options.codexActiveSessionIdentitiesJson
+  ) {
     return new CodexLocalSessionProvider(new InlineCodexSessionAdapter({
       threads: parseJsonOption(options.threadsJson, "--threads-json"),
       processes: parseJsonOption(options.processesJson, "--processes-json"),
-      rollouts: parseJsonOption(options.rolloutsJson, "--rollouts-json")
+      rollouts: parseJsonOption(options.rolloutsJson, "--rollouts-json"),
+      activeSessionIdentities: parseJsonOption(
+        options.codexActiveSessionIdentitiesJson,
+        "--codex-active-session-identities-json"
+      )
     }));
   }
 
@@ -11352,10 +12677,14 @@ function usage() {
   agent-knock-knock --version
   agent-knock-knock delegate --request <text> [--agent ${agentList}] [--workspace <path>] [--store-dir <dir>]
   agent-knock-knock list [--store-dir <dir>] [--agent ${agentList}] [--status <status>] [--all] [--reconcile] [--no-approval-scan] [--terminal-debug]
-  agent-knock-knock status [--conversation <id|selector>] [--store-dir <dir>] [--reconcile] [--trace]
-  agent-knock-knock send [--conversation <id|selector>] --message <text> [--type answer|task|control] [--agent-timeout-minutes <minutes>] [--agent-hard-timeout-minutes <minutes>]
-  agent-knock-knock approve [--conversation <id|selector>] --expected-approval-fingerprint <fingerprint>
-  agent-knock-knock cancel [--conversation <id|selector>]
+  agent-knock-knock status [--turn <turn-id|selector>] [--conversation <selector>] [--store-dir <dir>] [--reconcile] [--trace]
+  agent-knock-knock send [--session <session-id|selector>] [--conversation <selector>] --message <text> [--type task] [--agent-timeout-minutes <minutes>] [--agent-hard-timeout-minutes <minutes>]
+  agent-knock-knock respond --turn <turn-id|selector> --message <text> [--conversation <selector>]
+  agent-knock-knock approve [--turn <turn-id|selector>] [--conversation <selector>] --expected-approval-fingerprint <fingerprint>
+  agent-knock-knock cancel [--turn <turn-id|selector>] [--conversation <selector>]
+  agent-knock-knock renew [--turn <turn-id|selector>] [--conversation <selector>]
+  agent-knock-knock retry-callback [--turn <turn-id|selector>] [--conversation <selector>]
+  agent-knock-knock close [--turn <turn-id|selector>] [--conversation <selector>]
   agent-knock-knock install-openclaw [--verify] [--openclaw-bin <path>] [--skill-path <path>] [--skill-only] [--no-restart]
   agent-knock-knock doctor [--openclaw-bin <path>]
   agent-knock-knock callback --state <file> --message-json <json> [--record-only]

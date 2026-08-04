@@ -21,7 +21,7 @@ Include:
 
 ## Sensitive Data Guidelines
 
-Agent Knock Knock stores local task state and diagnostic logs under `~/.agent-knock-knock` by default. Do not share those files publicly without reviewing them first.
+Agent Knock Knock stores local Session/Turn state and diagnostic logs under `~/.agent-knock-knock` by default. Do not share those files publicly without reviewing them first.
 
 Sensitive data that should not appear in issues, logs, screenshots, or pull requests includes:
 

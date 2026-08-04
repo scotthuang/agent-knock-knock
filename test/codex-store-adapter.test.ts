@@ -7,6 +7,7 @@ import {
   CodexStoreAdapter,
   buildThreadSelect,
   latestStateDbPath,
+  parseLsofOpenFiles,
   parseLsofCwdMap,
   parsePsProcessSnapshots,
   type CommandResult
@@ -27,6 +28,409 @@ test("Codex store adapter selects the newest state sqlite database without hardc
     fs.utimesSync(newDb, now, now);
 
     assert.equal(latestStateDbPath(dir), newDb);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Codex store adapter resolves the one open root rollout for an exact process pid", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-rollout-adapter-"));
+  const sessionsDir = path.join(dir, "sessions", "2026", "08", "05");
+  const rootPath = path.join(sessionsDir, `rollout-root-${SESSION_ID}.jsonl`);
+  const childThreadId = "019ee559-7bb8-7fd1-970c-0f7b6978c450";
+  const childPath = path.join(sessionsDir, `rollout-child-${childThreadId}.jsonl`);
+  const calls: string[] = [];
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const adapter = new CodexStoreAdapter({
+    codexHome: dir,
+    runCommand(command, args): CommandResult {
+      calls.push([command, ...args].join(" "));
+      if (command === "ps") {
+        return ok(`${processBirth}\n`);
+      }
+      if (command === "lsof") {
+        const rootStat = fs.statSync(rootPath, { bigint: true });
+        const childStat = fs.statSync(childPath, { bigint: true });
+        return ok([
+          "p4242",
+          "fcwd",
+          "tDIR",
+          "n/repo/project",
+          "f12r",
+          "tREG",
+          `D${rootStat.dev}`,
+          `i${rootStat.ino}`,
+          `n${rootPath}`,
+          "f13r",
+          "tREG",
+          `D${childStat.dev}`,
+          `i${childStat.ino}`,
+          `n${childPath}`
+        ].join("\n"));
+      }
+      return { status: 1, stdout: "", stderr: "unexpected command" };
+    }
+  });
+
+  try {
+    fs.mkdirSync(sessionsDir, { recursive: true });
+    fs.writeFileSync(rootPath, JSON.stringify({
+      type: "session_meta",
+      payload: {
+        id: SESSION_ID,
+        cwd: "/repo/project",
+        originator: "codex-tui",
+        source: "cli"
+      }
+    }) + "\n", "utf8");
+    fs.writeFileSync(childPath, JSON.stringify({
+      type: "session_meta",
+      payload: {
+        id: childThreadId,
+        cwd: "/repo/project",
+        originator: "codex-tui",
+        source: { subagent: { thread_spawn: { parent_thread_id: SESSION_ID } } }
+      }
+    }) + "\n", "utf8");
+    assert.deepEqual(
+      await adapter.resolveActiveSessionIdentityForPid(4242, "/repo/project"),
+      {
+      sessionId: SESSION_ID,
+      processUuid: `codex-pid:4242:birth:${processBirth}`,
+      processBirth,
+      rollout: {
+        fd: "12r",
+        device: String(fs.statSync(rootPath, { bigint: true }).dev),
+        inode: String(fs.statSync(rootPath, { bigint: true }).ino),
+        path: fs.realpathSync(rootPath)
+      },
+      evidence: "codex_open_root_rollout"
+      }
+    );
+    assert.equal(
+      calls.includes("lsof -a -p 4242 -FnfDit"),
+      true
+    );
+    assert.deepEqual(
+      parseLsofOpenFiles(`p4242\nfcwd\ntDIR\nn/repo/project\nf12r\ntREG\nD1\ni2\nn${rootPath}\n`),
+      [
+        { fd: "cwd", type: "DIR", path: "/repo/project" },
+        { fd: "12r", type: "REG", device: "1", inode: "2", path: rootPath }
+      ]
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Codex store adapter fails closed when multiple root rollouts are open", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-rollout-ambiguous-"));
+  const sessionsDir = path.join(dir, "sessions");
+  const secondId = "019ee559-7bb8-7fd1-970c-0f7b6978c451";
+  const paths = [SESSION_ID, secondId].map((id) =>
+    path.join(sessionsDir, `rollout-${id}.jsonl`)
+  );
+  const adapter = new CodexStoreAdapter({
+    codexHome: dir,
+    runCommand(command): CommandResult {
+      if (command === "ps") {
+        return ok("Tue Aug  4 14:15:13 2026\n");
+      }
+      return ok(paths.flatMap((filePath, index) => {
+        const stat = fs.statSync(filePath, { bigint: true });
+        return [
+          `f${20 + index}r`,
+          "tREG",
+          `D${stat.dev}`,
+          `i${stat.ino}`,
+          `n${filePath}`
+        ];
+      }).join("\n"));
+    }
+  });
+  try {
+    fs.mkdirSync(sessionsDir, { recursive: true });
+    for (let index = 0; index < paths.length; index += 1) {
+      fs.writeFileSync(paths[index], JSON.stringify({
+        type: "session_meta",
+        payload: {
+          id: [SESSION_ID, secondId][index],
+          cwd: "/repo/project",
+          originator: "codex-tui",
+          source: "cli"
+        }
+      }) + "\n", "utf8");
+    }
+    await assert.rejects(
+      adapter.resolveActiveSessionIdentityForPid(4242, "/repo/project"),
+      /2 open root rollout files/u
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Codex store adapter fails closed when the same root rollout has multiple descriptors", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-rollout-duplicate-fd-"));
+  const sessionsDir = path.join(dir, "sessions");
+  const rolloutPath = path.join(sessionsDir, `rollout-${SESSION_ID}.jsonl`);
+  const adapter = new CodexStoreAdapter({
+    codexHome: dir,
+    runCommand(command): CommandResult {
+      if (command === "ps") {
+        return ok("Tue Aug  4 14:15:13 2026\n");
+      }
+      const stat = fs.statSync(rolloutPath, { bigint: true });
+      return ok([12, 13].flatMap((fd) => [
+        `f${fd}r`,
+        "tREG",
+        `D${stat.dev}`,
+        `i${stat.ino}`,
+        `n${rolloutPath}`
+      ]).join("\n"));
+    }
+  });
+  try {
+    fs.mkdirSync(sessionsDir, { recursive: true });
+    fs.writeFileSync(rolloutPath, JSON.stringify({
+      type: "session_meta",
+      payload: {
+        id: SESSION_ID,
+        cwd: "/repo/project",
+        originator: "codex-tui",
+        source: "cli"
+      }
+    }) + "\n", "utf8");
+    await assert.rejects(
+      adapter.resolveActiveSessionIdentityForPid(4242, "/repo/project"),
+      /2 open root rollout files/u
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Codex store adapter never treats a rollout outside CODEX_HOME sessions as virgin", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-rollout-outside-"));
+  const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-rollout-external-"));
+  const rolloutPath = path.join(outsideDir, `rollout-${SESSION_ID}.jsonl`);
+  const adapter = new CodexStoreAdapter({
+    codexHome: dir,
+    runCommand(command): CommandResult {
+      if (command === "ps") {
+        return ok("Tue Aug  4 14:15:13 2026\n");
+      }
+      const stat = fs.statSync(rolloutPath, { bigint: true });
+      return ok([
+        "f12r",
+        "tREG",
+        `D${stat.dev}`,
+        `i${stat.ino}`,
+        `n${rolloutPath}`
+      ].join("\n"));
+    }
+  });
+  try {
+    fs.mkdirSync(path.join(dir, "sessions"), { recursive: true });
+    fs.writeFileSync(rolloutPath, "{}\n", "utf8");
+    await assert.rejects(
+      adapter.resolveActiveSessionIdentityForPid(4242, "/repo/project"),
+      /outside CODEX_HOME\/sessions/u
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(outsideDir, { recursive: true, force: true });
+  }
+});
+
+test("Codex store adapter never treats a rollout as virgin when the configured sessions root is absent", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-rollout-no-root-"));
+  const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-rollout-no-root-open-"));
+  const rolloutPath = path.join(outsideDir, `rollout-${SESSION_ID}.jsonl`);
+  const adapter = new CodexStoreAdapter({
+    codexHome: dir,
+    runCommand(command): CommandResult {
+      if (command === "ps") {
+        return ok("Tue Aug  4 14:15:13 2026\n");
+      }
+      const stat = fs.statSync(rolloutPath, { bigint: true });
+      return ok([
+        "f12r",
+        "tREG",
+        `D${stat.dev}`,
+        `i${stat.ino}`,
+        `n${rolloutPath}`
+      ].join("\n"));
+    }
+  });
+  try {
+    fs.writeFileSync(rolloutPath, "{}\n", "utf8");
+    await assert.rejects(
+      adapter.resolveActiveSessionIdentityForPid(4242, "/repo/project"),
+      /CODEX_HOME\/sessions is unavailable/u
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(outsideDir, { recursive: true, force: true });
+  }
+});
+
+test("Codex store adapter fails closed for deleted rollout descriptors", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-rollout-deleted-"));
+  const sessionsDir = path.join(dir, "sessions");
+  const rolloutPath = path.join(sessionsDir, `rollout-${SESSION_ID}.jsonl`);
+  const adapter = new CodexStoreAdapter({
+    codexHome: dir,
+    runCommand(command): CommandResult {
+      if (command === "ps") {
+        return ok("Tue Aug  4 14:15:13 2026\n");
+      }
+      const stat = fs.statSync(rolloutPath, { bigint: true });
+      return ok([
+        "f12r",
+        "tREG",
+        `D${stat.dev}`,
+        `i${stat.ino}`,
+        `n${rolloutPath} (deleted)`
+      ].join("\n"));
+    }
+  });
+  try {
+    fs.mkdirSync(sessionsDir, { recursive: true });
+    fs.writeFileSync(rolloutPath, "{}\n", "utf8");
+    await assert.rejects(
+      adapter.resolveActiveSessionIdentityForPid(4242, "/repo/project"),
+      /unverifiable open rollout descriptor/u
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Codex store adapter rechecks rollout device and inode on the no-follow metadata fd", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-rollout-fstat-"));
+  const sessionsDir = path.join(dir, "sessions");
+  const rolloutPath = path.join(sessionsDir, `rollout-${SESSION_ID}.jsonl`);
+  const adapter = new CodexStoreAdapter({
+    codexHome: dir,
+    runCommand(command): CommandResult {
+      if (command === "ps") {
+        return ok("Tue Aug  4 14:15:13 2026\n");
+      }
+      const stat = fs.statSync(rolloutPath, { bigint: true });
+      return ok([
+        "f12r",
+        "tREG",
+        `D${stat.dev}`,
+        `i${stat.ino + 1n}`,
+        `n${rolloutPath}`
+      ].join("\n"));
+    }
+  });
+  try {
+    fs.mkdirSync(sessionsDir, { recursive: true });
+    fs.writeFileSync(rolloutPath, "{}\n", "utf8");
+    await assert.rejects(
+      adapter.resolveActiveSessionIdentityForPid(4242, "/repo/project"),
+      /rollout descriptor no longer matches its file/u
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Codex store adapter does not follow a rollout symlink while reading metadata", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-rollout-symlink-"));
+  const sessionsDir = path.join(dir, "sessions");
+  const targetPath = path.join(sessionsDir, "target.jsonl");
+  const rolloutPath = path.join(sessionsDir, `rollout-${SESSION_ID}.jsonl`);
+  const adapter = new CodexStoreAdapter({
+    codexHome: dir,
+    runCommand(command): CommandResult {
+      if (command === "ps") {
+        return ok("Tue Aug  4 14:15:13 2026\n");
+      }
+      const stat = fs.statSync(targetPath, { bigint: true });
+      return ok([
+        "f12r",
+        "tREG",
+        `D${stat.dev}`,
+        `i${stat.ino}`,
+        `n${rolloutPath}`
+      ].join("\n"));
+    }
+  });
+  try {
+    fs.mkdirSync(sessionsDir, { recursive: true });
+    fs.writeFileSync(targetPath, JSON.stringify({
+      type: "session_meta",
+      payload: {
+        id: SESSION_ID,
+        cwd: "/repo/project",
+        originator: "codex-tui",
+        source: "cli"
+      }
+    }) + "\n", "utf8");
+    fs.symlinkSync(targetPath, rolloutPath);
+    await assert.rejects(
+      adapter.resolveActiveSessionIdentityForPid(4242, "/repo/project"),
+      /unreadable open rollout descriptor/u
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Codex store adapter never treats an unverifiable sessions rollout fd as virgin", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-rollout-unverifiable-"));
+  const rolloutPath = path.join(
+    dir,
+    "sessions",
+    `rollout-${SESSION_ID}.jsonl`
+  );
+  const adapter = new CodexStoreAdapter({
+    codexHome: dir,
+    runCommand(command): CommandResult {
+      if (command === "ps") {
+        return ok("Tue Aug  4 14:15:13 2026\n");
+      }
+      return ok([
+        "f12r",
+        "tREG",
+        "D1",
+        // Missing inode: the descriptor cannot be tied to the current file.
+        `n${rolloutPath}`
+      ].join("\n"));
+    }
+  });
+  try {
+    fs.mkdirSync(path.dirname(rolloutPath), { recursive: true });
+    fs.writeFileSync(rolloutPath, "{}\n", "utf8");
+    await assert.rejects(
+      adapter.resolveActiveSessionIdentityForPid(4242, "/repo/project"),
+      /unverifiable open rollout descriptor/u
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Codex store adapter reports virgin only when the process has no sessions rollout fd", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-rollout-virgin-"));
+  const adapter = new CodexStoreAdapter({
+    codexHome: dir,
+    runCommand(command): CommandResult {
+      if (command === "ps") {
+        return ok("Tue Aug  4 14:15:13 2026\n");
+      }
+      return ok("p4242\nfcwd\ntDIR\nn/repo/project\n");
+    }
+  });
+  try {
+    assert.equal(
+      await adapter.resolveActiveSessionIdentityForPid(4242, "/repo/project"),
+      undefined
+    );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

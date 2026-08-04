@@ -43,6 +43,10 @@ test("callback records a structured Claude message before delivery", () => {
     assert.equal(callback.delivered, false);
     assert.equal(callback.message.type, "done");
     assert.equal(callback.conversation.status, "idle");
+    assert.equal(callback.message.session_id, created.conversation.session_id);
+    assert.equal(callback.message.turn_id, created.conversation.turn_id);
+    assert.equal(callback.conversation.session_id, created.conversation.session_id);
+    assert.equal(callback.conversation.turn_id, created.conversation.turn_id);
 
     const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
     assert.equal(state.status, "idle");
@@ -101,6 +105,57 @@ test("callback does not record duplicate structured messages", () => {
       event.body === "Duplicate-safe completion."
     );
     assert.equal(doneEvents.length, 1);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+  }
+});
+
+test("a unique late callback cannot reopen a released turn", () => {
+  const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-late-"));
+
+  try {
+    const created = createCallbackConversation(
+      storeDir,
+      "Released turn callback test"
+    );
+    const releasedAt = new Date().toISOString();
+    saveState(created.paths.statePath, {
+      ...created.conversation,
+      status: "closed",
+      closed_at: releasedAt,
+      close_reason: "closed before the agent callback arrived",
+      updated_at: releasedAt
+    });
+    const stateBefore = fs.readFileSync(created.paths.statePath, "utf8");
+    const logBefore = fs.readFileSync(created.paths.logPath, "utf8");
+
+    const result = spawnSync(process.execPath, [
+      binPath,
+      "callback",
+      "--state",
+      created.paths.statePath,
+      "--record-only",
+      "--message-json",
+      JSON.stringify({
+        id: "msg-late-after-close",
+        conversation_id: created.conversation.conversation_id,
+        session_id: created.conversation.session_id,
+        turn_id: created.conversation.turn_id,
+        from: "claude-code",
+        to: "openclaw",
+        type: "done",
+        requires_response: false,
+        round: 1,
+        max_rounds: 50,
+        body: "Late completion must not reopen the Turn.",
+        metadata: {}
+      })
+    ], { encoding: "utf8" });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /refusing late callback .* released Turn/u);
+    assert.equal(fs.readFileSync(created.paths.statePath, "utf8"), stateBefore);
+    assert.equal(fs.readFileSync(created.paths.logPath, "utf8"), logBefore);
   } finally {
     fs.rmSync(storeDir, { recursive: true, force: true });
   }
@@ -258,6 +313,12 @@ console.log(JSON.stringify({ ok: true }));
     assert.equal(params.sessionKey, "agent:main:main");
     assert.equal(params.message.type, "question");
     assert.equal(params.message.body, "Should the export include CSV?");
+    assert.equal(params.message.session_id, created.conversation.session_id);
+    assert.equal(params.message.turn_id, created.conversation.turn_id);
+    assert.equal(params.conversation.session_id, created.conversation.session_id);
+    assert.equal(params.conversation.turn_id, created.conversation.turn_id);
+    assert.equal(params.message.session_id, params.conversation.session_id);
+    assert.equal(params.message.turn_id, params.conversation.turn_id);
     assert.equal(params.statePath, created.paths.statePath);
 
     const events = fs.readFileSync(created.paths.logPath, "utf8")
@@ -270,6 +331,67 @@ console.log(JSON.stringify({ ok: true }));
       event.method === "agent-knock-knock.callback" &&
       event.status === 0
     ), true);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(fakeBinDir, { recursive: true, force: true });
+  }
+});
+
+test("callback Gateway delivery derives session and turn identities for legacy state", () => {
+  const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-legacy-identity-"));
+  const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-openclaw-legacy-identity-"));
+  const gatewayCallPath = path.join(fakeBinDir, "gateway-call.json");
+
+  try {
+    const fakeOpenClaw = path.join(fakeBinDir, "openclaw");
+    fs.writeFileSync(
+      fakeOpenClaw,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.writeFileSync(${JSON.stringify(gatewayCallPath)}, JSON.stringify(process.argv.slice(2)), "utf8");
+console.log(JSON.stringify({ ok: true }));
+`,
+      "utf8"
+    );
+    fs.chmodSync(fakeOpenClaw, 0o755);
+
+    const created = createCallbackConversation(storeDir, "Legacy callback identity");
+    const persisted = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
+    delete persisted.session_id;
+    delete persisted.turn_id;
+    saveState(created.paths.statePath, persisted);
+
+    const callback = runCli([
+      "callback",
+      "--state",
+      created.paths.statePath,
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      "agent:main:main",
+      "--openclaw-bin",
+      fakeOpenClaw,
+      "--message-json",
+      JSON.stringify({
+        from: "claude-code",
+        to: "openclaw",
+        type: "done",
+        body: "Legacy state still correlates this callback."
+      })
+    ]);
+
+    const legacyId = created.conversation.conversation_id;
+    assert.equal(callback.conversation.session_id, legacyId);
+    assert.equal(callback.conversation.turn_id, legacyId);
+    assert.equal(callback.message.session_id, legacyId);
+    assert.equal(callback.message.turn_id, legacyId);
+
+    const gatewayArgs = JSON.parse(fs.readFileSync(gatewayCallPath, "utf8"));
+    const params = JSON.parse(gatewayArgs[gatewayArgs.indexOf("--params") + 1]);
+    assert.equal(params.conversation.session_id, legacyId);
+    assert.equal(params.conversation.turn_id, legacyId);
+    assert.equal(params.message.session_id, legacyId);
+    assert.equal(params.message.turn_id, legacyId);
   } finally {
     fs.rmSync(storeDir, { recursive: true, force: true });
     fs.rmSync(fakeBinDir, { recursive: true, force: true });
@@ -737,7 +859,8 @@ if (method === "agent-knock-knock.callback") {
       sessionKey: params.sessionKey,
       message: [
         "[Agent Knock Knock callback]",
-        \`Conversation: \${params.message.conversation_id}\`,
+        \`Session: \${params.message.session_id}\`,
+        \`Turn: \${params.message.turn_id}\`,
         "Message type: done",
         "",
         params.message.body,
@@ -745,9 +868,9 @@ if (method === "agent-knock-knock.callback") {
         "[AKK convenience commands]",
         "When summarizing this result to the user, include these short next-step commands:",
         "- \`AKK list\` lists open AKK sessions.",
-        \`- \\\`AKK send \${params.message.conversation_id}: <message>\\\` sends a follow-up to this same AKK session.\`,
-        \`- \\\`AKK status \${params.message.conversation_id}\\\` shows this session status.\`,
-        \`- \\\`AKK close \${params.message.conversation_id}\\\` closes this AKK session.\`
+        \`- \\\`AKK send \${params.message.session_id}: <message>\\\` starts a new turn in this AKK session.\`,
+        \`- \\\`AKK status \${params.message.turn_id}\\\` shows this turn status.\`,
+        \`- \\\`AKK close \${params.message.turn_id}\\\` closes this turn.\`
       ].join("\\n"),
       idempotencyKey: "akk-test-chat-send",
       deliver: true
@@ -810,7 +933,11 @@ if (method === "agent-knock-knock.callback") {
     assert.equal(chatSendParams.idempotencyKey, "akk-test-chat-send");
     assert.match(chatSendParams.message, /AKK convenience commands/);
     assert.match(chatSendParams.message, /AKK list/);
-    assert.match(chatSendParams.message, new RegExp(`AKK send ${created.conversation.conversation_id}: <message>`));
+    assert.match(chatSendParams.message, new RegExp(`Session: ${created.conversation.session_id}`));
+    assert.match(chatSendParams.message, new RegExp(`Turn: ${created.conversation.turn_id}`));
+    assert.match(chatSendParams.message, new RegExp(`AKK send ${created.conversation.session_id}: <message>`));
+    assert.match(chatSendParams.message, new RegExp(`AKK status ${created.conversation.turn_id}`));
+    assert.match(chatSendParams.message, new RegExp(`AKK close ${created.conversation.turn_id}`));
     assert.equal(chatSendParams.deliver, true);
     const agentWaitParams = JSON.parse(calls[2][calls[2].indexOf("--params") + 1]);
     assert.equal(agentWaitParams.runId, "akk-test-chat-send");
