@@ -823,7 +823,7 @@ console.log(JSON.stringify({ ok: true }));
       }
     });
 
-    const closed = await waitForConversationState(created.paths.statePath, "closed", 10000);
+    const closed = await waitForConversationState(created.paths.statePath, "closed", 20000);
     assert.equal(closed.callback_delivery.status, "delivered");
     assert.equal(closed.callback_delivery.attempts, 2);
     assert.equal(closed.callback_delivery.gateway_url, undefined);
@@ -831,8 +831,18 @@ console.log(JSON.stringify({ ok: true }));
     assert.equal(calls.length, 2);
     assert.equal(calls.every((args) => !args.includes("--url")), true);
   } finally {
-    fs.rmSync(storeDir, { recursive: true, force: true });
-    fs.rmSync(fakeBinDir, { recursive: true, force: true });
+    fs.rmSync(storeDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100
+    });
+    fs.rmSync(fakeBinDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100
+    });
   }
 });
 

@@ -8,6 +8,9 @@ import {
   captureClaudeTranscriptAnchor,
   detectClaudeTranscriptCompletion,
   detectClaudeTranscriptPendingApproval,
+  listClaudeHistoricalSessions,
+  listClaudeThreadLifecycleCandidates,
+  revalidateClaudeThreadLifecycleCandidate,
   type ClaudeTranscriptAnchor
 } from "../src/claude-local-transcript-provider.js";
 import type { ClaudeAgentRow } from "../src/claude-terminal-agent-adapter.js";
@@ -21,6 +24,124 @@ const STARTED_AT = "2026-07-24T02:00:00.000Z";
 const CAPTURED_AT = "2026-07-24T02:00:00.100Z";
 const PROMPT_AT = "2026-07-24T02:00:00.200Z";
 const COMPLETED_AT = "2026-07-24T02:00:00.400Z";
+
+test("Claude lifecycle candidates are root-interactive and carry a revalidated file token", (t) => {
+  const fixture = createFixture(t);
+  const historicalRecords = fixture.normalizeRecords(turnRecords({
+    request: "Historical request",
+    assistantText: "Historical answer",
+    ids: 20
+  }));
+  fixture.writeRaw([
+    { type: "mode", sessionId: SESSION_ID, mode: "default" },
+    ...historicalRecords
+  ].map(jsonLine).join(""));
+
+  const sessions = listClaudeHistoricalSessions({
+    cwd: fixture.workspace,
+    claudeHome: fixture.claudeHome,
+    agentVersion: VERSION
+  });
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].id, SESSION_ID);
+  assert.equal(sessions[0].claudeVersion, VERSION);
+  assert.equal(sessions[0].rootInteractive, true);
+  assert.equal(sessions[0].fileToken.path, fs.realpathSync(fixture.transcriptPath));
+  assert.match(sessions[0].fileToken.device, /^\d+$/u);
+  assert.match(sessions[0].fileToken.inode, /^\d+$/u);
+  assert.ok(sessions[0].fileToken.size > 0);
+
+  const candidate = listClaudeThreadLifecycleCandidates({
+    cwd: fixture.workspace,
+    claudeHome: fixture.claudeHome,
+    agentVersion: VERSION
+  })[0];
+  assert.equal(candidate.source, "claude_transcript");
+  assert.equal(
+    candidate.candidateToken.schema,
+    "agent-knock-knock/thread-candidate-token"
+  );
+  assert.equal(
+    revalidateClaudeThreadLifecycleCandidate(candidate.candidateToken, {
+      cwd: fixture.workspace,
+      claudeHome: fixture.claudeHome,
+      agentVersion: VERSION
+    }).status,
+    "valid"
+  );
+
+  fixture.append(turnRecords({
+    request: "A later request",
+    assistantText: "A later answer",
+    ids: 40
+  }));
+  assert.equal(
+    revalidateClaudeThreadLifecycleCandidate(candidate.candidateToken, {
+      cwd: fixture.workspace,
+      claudeHome: fixture.claudeHome,
+      agentVersion: VERSION
+    }).status,
+    "changed"
+  );
+  assert.throws(
+    () => listClaudeHistoricalSessions({
+      cwd: fixture.workspace,
+      claudeHome: fixture.claudeHome,
+      agentVersion: "2.1.219"
+    }),
+    /exact version 2\.1\.218/u
+  );
+});
+
+test("Claude lifecycle candidate discovery excludes sidechains, teams, daemons, and loops", (t) => {
+  const fixture = createFixture(t);
+  const base = () => turnRecords({
+    request: "Historical request",
+    assistantText: "Historical answer",
+    ids: 60
+  });
+  for (const [label, mutate] of [
+    ["sidechain", (record: Record<string, unknown>) => {
+      record.isSidechain = true;
+    }],
+    ["team", (record: Record<string, unknown>) => {
+      record.teamName = "team-one";
+    }],
+    ["daemon", (record: Record<string, unknown>) => {
+      record.sessionKind = "daemon";
+    }],
+    ["loop", (record: Record<string, unknown>) => {
+      record.isLoopSession = true;
+    }],
+    ["subagent", (record: Record<string, unknown>) => {
+      record.agentId = "agent-one";
+    }]
+  ] as const) {
+    const records = base();
+    mutate(records[0]);
+    fixture.write(records);
+    assert.equal(
+      listClaudeHistoricalSessions({
+        cwd: fixture.workspace,
+        claudeHome: fixture.claudeHome,
+        agentVersion: VERSION
+      }).length,
+      0,
+      label
+    );
+  }
+
+  fixture.write(base());
+  fs.chmodSync(fixture.transcriptPath, 0o644);
+  assert.equal(
+    listClaudeHistoricalSessions({
+      cwd: fixture.workspace,
+      claudeHome: fixture.claudeHome,
+      agentVersion: VERSION
+    }).length,
+    0
+  );
+});
 
 test("detects one anchored foreground Bash tool use waiting for approval", (t) => {
   const fixture = createFixture(t);

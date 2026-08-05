@@ -25,6 +25,7 @@ tmux terminal / verified process incarnation
 - The native session is the continuing context owned by Codex or Claude Code.
 - The AKK `session_id` is the authoritative target for ordinary sends into that context.
 - A `turn_id` identifies exactly one accepted dispatch through its final monitor and callback state.
+- A terminal binding generation identifies one verified terminal-to-native-thread attachment. Native lifecycle transitions advance it even though they create no Turn.
 
 Human-friendly selectors such as `only`, `codex`, `claude`, terminal IDs, and `@short-ref` are list/discovery inputs. They must resolve unambiguously to the authoritative `session_id` used by send or the `turn_id` used by managed controls. An unmanaged raw-terminal row may publish its own exact compatibility selector for status or recovery controls; callers must use only the prefilled action and never construct that selector.
 
@@ -41,6 +42,23 @@ An ordinary send never targets a completed or historical `turn_id`. If the curre
 
 If no eligible terminal exists, AKK stops and returns an actionable setup message. It does not launch an invisible replacement agent.
 
+## Native Thread Transitions
+
+New/clear and resume are lifecycle transitions, not message types and not ordinary sends:
+
+```text
+verified idle terminal + current binding token
+├─ new_thread ────> new native thread + new AKK Session
+└─ resume_thread ─> exact historical native thread + restored/new AKK Session
+                                      (no Turn created)
+```
+
+Before either transition, AKK requires the exact full `terminal_id`, a fresh compare-and-swap `expected_binding_token`, a supported adapter/version, an idle prompt, and no active or unresolved Turn. Resume additionally requires a complete native thread UUID and the selected row's opaque `candidate_token` from the same terminal's same verified candidate snapshot. The candidate token fingerprints the historical identity evidence so a replaced or changed transcript/rollout cannot be resumed under stale metadata. Candidates from another workspace, archived or ambiguous threads, and threads active in another process are not resumable.
+
+The lifecycle operation is serialized against send, approval, monitor, cancellation, and recovery work for that pane. AKK records the previous and next native identities, verifies the post-operation identity and idle prompt, creates or reactivates the corresponding AKK Session, and advances the binding generation. It fails closed if any identity or capability evidence is missing or changed. AKK does not poll stale bindings in the background; a later lifecycle listing may classify one bound historical Session as resumable only when its recorded process has conclusively exited, and the resume mutation compare-and-swap detaches that binding before terminal input. Every first-line native slash command is rejected as ordinary task or answer text, including clear/new/resume/status, Codex fork/side-thread commands, and Claude conversation branching; supported context changes must use the lifecycle boundary.
+
+The next ordinary send targets the resulting `session_id` and creates its first new `turn_id`. A callback, monitor, approval, receipt, or recovery action bound to an earlier Session, native identity, terminal incarnation, or binding generation cannot mutate the newly active context.
+
 ## Message Types
 
 | Type | Purpose |
@@ -51,7 +69,7 @@ If no eligible terminal exists, AKK stops and returns an actionable setup messag
 | `blocked` | AKK reports that the task needs attention. |
 | `done` | AKK reports that the current terminal turn completed. |
 | `error` | AKK reports a terminal, monitor, callback, or protocol failure. |
-| `control` | AKK records lifecycle control such as cancellation or timeout. |
+| `control` | AKK records Turn-level control such as cancellation or timeout. |
 
 The coding agent does not run a callback command and does not need an AKK-specific hook or plugin. AKK's terminal monitor owns callback delivery.
 
@@ -64,6 +82,7 @@ Each managed Turn is bound to a concrete identity, including:
 - tmux socket and pane target
 - pane and agent process identity
 - native session evidence, AKK `session_id`, `turn_id`, and message identity
+- terminal binding ID and generation, including the transition that established it
 - monitor owner and lease
 
 AKK revalidates that identity before sending tasks, interrupt keys, or approval input. Stale, changed, ambiguous, or replayed actions are rejected.
@@ -81,4 +100,4 @@ The tmux pane remains the source of visible truth:
 
 This makes handoff reversible: OpenClaw and the human operate the same coding-agent session instead of creating parallel, hidden conversations.
 
-Native clear/new/resume operations are separate session-lifecycle features. Ordinary send and Turn creation do not invoke them.
+Native clear/new/resume operations are separate Session-lifecycle features. Ordinary send and Turn creation do not invoke them; successful lifecycle transitions create no Turn.

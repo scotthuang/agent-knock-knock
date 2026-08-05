@@ -12,10 +12,15 @@ import {
 } from "../src/protocol.js";
 import {
   appendEvent,
+  loadState,
   messageEvent,
   pathsForConversation,
   saveState
 } from "../src/store.js";
+import {
+  managedSessionStatesFromConversations
+} from "../src/managed-session.js";
+import { saveManagedSession } from "../src/session-store.js";
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 const testRuntimeDir = fs.mkdtempSync(
@@ -878,6 +883,11 @@ test("multiple idle turns stay terminal history while the pane short ref routes 
       };
       saveState(fixture.paths.statePath, state);
     }
+    const [managedSession] = managedSessionStatesFromConversations([
+      loadState(older.paths.statePath),
+      loadState(newer.paths.statePath)
+    ]);
+    saveManagedSession(storeDir, managedSession, { expectedRevision: null });
 
     const listed = runCli([
       "list",
@@ -888,7 +898,7 @@ test("multiple idle turns stay terminal history while the pane short ref routes 
     assert.equal(listed.terminals.length, 1);
     assert.deepEqual(listed.unavailable_managed_turns, []);
     const terminal = listed.terminals[0];
-    assert.equal(terminal.management_state, "unmanaged");
+    assert.equal(terminal.management_state, "managed");
     assert.equal(terminal.managed.current_turn, null);
     assert.equal(
       terminal.managed.recent_turn.conversation_id,
@@ -1225,7 +1235,8 @@ function codexNativeIdentityFixture(options: {
   workspace: string;
   codexPid: number;
 }): Record<string, any> {
-  const sessionId = `codex-native-session-${options.codexPid}`;
+  const sessionId =
+    `00000000-0000-4000-8000-${String(options.codexPid).padStart(12, "0")}`;
   return {
     sessionId,
     processUuid: `codex-process-${options.codexPid}`,

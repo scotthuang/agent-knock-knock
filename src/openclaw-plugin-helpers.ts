@@ -1,10 +1,36 @@
 import path from "node:path";
 
 export const AKK_CALLBACK_METHOD = "agent-knock-knock.callback";
+type AkkCloseCommand = {
+  action: "close";
+  turnId: string;
+  reason: string;
+} & (
+  | {
+      expectedMessageId?: undefined;
+      expectedTransitionId?: undefined;
+    }
+  | {
+      expectedMessageId: string;
+      expectedTransitionId?: never;
+    }
+  | {
+      expectedMessageId?: never;
+      expectedTransitionId: string;
+    }
+);
+
 export type AkkCommand =
   | { action: "help" }
   | { action: "doctor" }
   | { action: "list" }
+  | { action: "list-resumable-threads"; terminalId: string }
+  | { action: "new-thread"; terminalId: string }
+  | {
+      action: "resume-thread";
+      terminalId: string;
+      nativeThreadId?: string;
+    }
   | { action: "status"; turnId?: string }
   | { action: "send"; selector: string; message: string }
   | { action: "respond"; turnId: string; message: string }
@@ -16,12 +42,7 @@ export type AkkCommand =
   | { action: "cancel"; turnId: string }
   | { action: "renew"; turnId: string; minutes?: string }
   | { action: "retry-callback"; turnId: string }
-  | {
-      action: "close";
-      turnId: string;
-      reason: string;
-      expectedMessageId?: string;
-    }
+  | AkkCloseCommand
   | { action: "delegate"; request: string };
 
 export function parseAkkCommand(args: unknown): AkkCommand {
@@ -49,6 +70,49 @@ export function parseAkkCommand(args: unknown): AkkCommand {
       throw new Error("Usage: /akk doctor");
     }
     return { action: "doctor" };
+  }
+  if (action === "threads" || action === "list-resumable-threads") {
+    const usage = "Usage: /akk threads <exact-terminal-id>";
+    const { token: terminalId, rest: extra } = takeRequiredToken(rest, usage);
+    assertExactTerminalId(terminalId, usage);
+    if (extra.trim()) {
+      throw new Error(usage);
+    }
+    return { action: "list-resumable-threads", terminalId };
+  }
+  if (action === "new-thread" || action === "clear-thread") {
+    const usage = `Usage: /akk ${action} <exact-terminal-id>`;
+    const { token: terminalId, rest: extra } = takeRequiredToken(rest, usage);
+    assertExactTerminalId(terminalId, usage);
+    if (extra.trim()) {
+      throw new Error(usage);
+    }
+    return { action: "new-thread", terminalId };
+  }
+  if (action === "resume-thread") {
+    const usage =
+      "Usage: /akk resume-thread <exact-terminal-id> [native-thread-uuid]";
+    const { token: terminalId, rest: nativeInput } = takeRequiredToken(
+      rest,
+      usage
+    );
+    assertExactTerminalId(terminalId, usage);
+    const { token: nativeThreadId, rest: extra } = takeToken(nativeInput);
+    if (extra.trim()) {
+      throw new Error(usage);
+    }
+    if (nativeThreadId && !isExactNativeThreadId(nativeThreadId)) {
+      throw new Error(
+        `${usage}; native-thread-uuid must be the complete UUID returned by /akk threads`
+      );
+    }
+    return {
+      action: "resume-thread",
+      terminalId,
+      ...(nativeThreadId
+        ? { nativeThreadId: nativeThreadId.toLowerCase() }
+        : {})
+    };
   }
   if (action === "status" || action === "show") {
     const { token: turnId, rest: extra } = takeToken(rest);
@@ -122,25 +186,50 @@ export function parseAkkCommand(args: unknown): AkkCommand {
     return { action: "retry-callback", turnId };
   }
   if (action === "close" || action === "done") {
-    const { token: turnId, rest: reason } = takeRequiredToken(
+    const usage =
+      "Usage: /akk close <turn-selector> " +
+      "[(--expected-message-id <id> | --expected-transition-id <id>)] [reason]";
+    const { token: turnId, rest: reasonInput } = takeRequiredToken(
       rest,
-      "Usage: /akk close <turn-selector> [--expected-message-id <id>] [reason]"
+      usage
     );
-    const recovery = /^--expected-message-id\s+(\S+)(?:\s+([\s\S]*))?$/u.exec(
-      reason.trim()
-    );
+    const recoveryInput = reasonInput.trim();
+    const recoveryFlags = recoveryInput.match(
+      /(?:^|\s)--expected-(?:message|transition)-id(?=\s|$)/gu
+    ) ?? [];
+    if (recoveryFlags.length > 1) {
+      throw new Error(
+        `${usage}; expected-message-id and expected-transition-id are mutually exclusive`
+      );
+    }
+    const recovery =
+      /^--expected-(message|transition)-id\s+(\S+)(?:\s+([\s\S]*))?$/u.exec(
+        recoveryInput
+      );
+    if (recoveryFlags.length === 1 && !recovery) {
+      throw new Error(usage);
+    }
+    const recoveryKind = recovery?.[1];
+    const recoveryId = recovery?.[2];
+    const recoveryReason = recovery?.[3]?.trim();
+    const defaultRecoveryReason = recoveryKind === "transition"
+      ? "Native-thread lifecycle transition recovered from /akk command"
+      : "Orphaned terminal dispatch resolved from /akk command";
     return {
       action: "close",
       turnId,
       reason:
-        recovery?.[2]?.trim() ||
+        recoveryReason ||
         (recovery
-          ? "Orphaned terminal dispatch resolved from /akk command"
-          : reason.trim() || "Closed from /akk command"),
-      ...(recovery?.[1]
-        ? { expectedMessageId: recovery[1] }
+          ? defaultRecoveryReason
+          : recoveryInput || "Closed from /akk command"),
+      ...(recoveryKind === "message" && recoveryId
+        ? { expectedMessageId: recoveryId }
+        : {}),
+      ...(recoveryKind === "transition" && recoveryId
+        ? { expectedTransitionId: recoveryId }
         : {})
-    };
+    } as AkkCloseCommand;
   }
 
   return { action: "delegate", request: input };
@@ -154,6 +243,10 @@ export function akkUsageText(): string {
     "/akk claude: <request>",
     "/akk <session-selector>: <message>",
     "/akk list",
+    "/akk threads <exact-terminal-id>",
+    "/akk new-thread <exact-terminal-id>",
+    "/akk clear-thread <exact-terminal-id>",
+    "/akk resume-thread <exact-terminal-id> [native-thread-uuid]",
     "/akk doctor",
     "/akk status [turn-selector]",
     "/akk respond <turn-selector>: <answer>",
@@ -179,8 +272,18 @@ export function formatAkkListCommandResult(result: Record<string, unknown>): str
     const sessionShortRef = nonEmptyString(managed.session_short_ref);
     const hiddenTurnCount = finiteNumber(managed.hidden_turn_count) ?? 0;
     const recovery = orphanedTerminalDispatchRecovery(terminal);
+    const terminalId = nonEmptyString(terminal.id);
+    const availableActions = recordValue(terminal.available_actions) ?? {};
+    const hasLifecycleAction = [
+      "list_resumable_threads",
+      "new_thread",
+      "resume_thread"
+    ].some((name) => Object.hasOwn(availableActions, name));
     return [
       `- ${formatTerminalLine(terminal)}`,
+      ...(hasLifecycleAction && terminalId
+        ? [`  lifecycle terminal_id: ${terminalId}`]
+        : []),
       ...(sessionId || sessionShortRef
         ? [`  AKK session: ${sessionShortRef ?? sessionId}`]
         : []),
@@ -299,10 +402,117 @@ export function formatAkkRespondCommandResult(
   };
 }
 
+export function formatAkkThreadsCommandResult(
+  result: Record<string, unknown>
+): string {
+  const terminalId = nonEmptyString(result.terminal_id) ?? "unknown";
+  const currentSessionId = nonEmptyString(result.current_session_id);
+  const currentNativeThreadId = nonEmptyString(
+    result.current_native_thread_id
+  );
+  const threads = arrayValue(result.threads);
+  const resumableCount = threads.filter(
+    (thread) => thread.resumable === true
+  ).length;
+  const threadLines = threads.slice(0, 30).flatMap((thread) => {
+    const nativeThreadId =
+      nonEmptyString(thread.native_thread_id) ?? "unknown";
+    const status = thread.resumable === true
+      ? "resumable"
+      : nonEmptyString(thread.unavailable_reason) ?? "unavailable";
+    const context = [
+      nonEmptyString(thread.title),
+      nonEmptyString(thread.preview)
+    ].filter((value): value is string => Boolean(value)).join(" · ");
+    return [
+      `- ${nativeThreadId} | ${status}`,
+      ...(nonEmptyString(thread.updated_at)
+        ? [`  updated: ${nonEmptyString(thread.updated_at)}`]
+        : []),
+      ...(context ? [`  context: ${truncateText(context, 180)}`] : [])
+    ];
+  });
+  return [
+    `AKK native threads (${threads.length} found, ${resumableCount} resumable):`,
+    `terminal: ${terminalId}`,
+    `current session: ${currentSessionId ?? "none"}`,
+    `current native thread: ${currentNativeThreadId ?? "none"}`,
+    ...(threadLines.length > 0
+      ? ["threads:", ...threadLines]
+      : ["threads: none"]),
+    ...(resumableCount > 0
+      ? [
+          `next: /akk resume-thread ${terminalId} <native-thread-uuid>`
+        ]
+      : []),
+    "Listing or switching native threads does not create an AKK Turn."
+  ].join("\n");
+}
+
+export function formatAkkThreadTransitionCommandResult(
+  result: Record<string, unknown>
+): string {
+  if (!isAkkThreadTransitionSuccess(result)) {
+    const status = nonEmptyString(result.status) ?? "unknown";
+    const heading = status === "verified_recovery_required"
+      ? "AKK verified the native thread transition, but its Session commit requires recovery."
+      : "AKK could not verify the native thread transition outcome.";
+    return [
+      heading,
+      `status: ${status}`,
+      `terminal: ${nonEmptyString(result.terminal_id) ?? "unknown"}`,
+      ...(nonEmptyString(result.transition_id)
+        ? [`transition: ${nonEmptyString(result.transition_id)}`]
+        : []),
+      ...(nonEmptyString(result.reason)
+        ? [`reason: ${nonEmptyString(result.reason)}`]
+        : []),
+      "No AKK Turn was created.",
+      "Next: do not retry automatically; refresh /akk list and use only its exact lifecycle recovery action."
+    ].join("\n");
+  }
+  const alreadyActive = result.status === "already_active";
+  const operation = nonEmptyString(result.operation) ?? "resume_thread";
+  const heading = alreadyActive
+    ? "AKK native thread was already active; no switch was needed."
+    : operation === "new_thread"
+      ? "AKK started and verified a new native thread."
+      : "AKK resumed and verified the selected native thread.";
+  return [
+    heading,
+    `terminal: ${nonEmptyString(result.terminal_id) ?? "unknown"}`,
+    ...(nonEmptyString(result.previous_session_id)
+      ? [`previous session: ${nonEmptyString(result.previous_session_id)}`]
+      : []),
+    `session: ${nonEmptyString(result.session_id) ?? "none"}`,
+    ...(nonEmptyString(result.previous_native_thread_id)
+      ? [
+          `previous native thread: ${nonEmptyString(result.previous_native_thread_id)}`
+        ]
+      : []),
+    `native thread: ${nonEmptyString(result.native_thread_id) ?? "unknown"}`,
+    ...(finiteNumber(result.binding_generation) !== undefined
+      ? [`binding generation: ${finiteNumber(result.binding_generation)}`]
+      : []),
+    "No AKK Turn was created. The next ordinary send creates the first Turn in this native context."
+  ].join("\n");
+}
+
+export function isAkkThreadTransitionSuccess(
+  result: unknown
+): boolean {
+  const record = recordValue(result);
+  return record?.status === "committed" || record?.status === "already_active";
+}
+
 export function buildAkkCommandCliArgs(
   command: AkkCommand,
   config: Record<string, unknown>,
-  context: { sessionKey?: unknown } = {}
+  context: {
+    sessionKey?: unknown;
+    expectedBindingToken?: unknown;
+    candidateToken?: unknown;
+  } = {}
 ): string[] | undefined {
   switch (command.action) {
     case "help":
@@ -324,6 +534,51 @@ export function buildAkkCommandCliArgs(
         ["list", "--reconcile"],
         ["--store-dir", storeDir],
         ["--idle-timeout-minutes", idleTimeoutMinutes]
+      );
+    case "list-resumable-threads":
+      return withOptionalArgs(
+        [
+          "list-resumable-threads",
+          "--terminal",
+          command.terminalId
+        ],
+        ["--store-dir", storeDir]
+      );
+    case "new-thread":
+      return withOptionalArgs(
+        [
+          "new-thread",
+          "--terminal",
+          command.terminalId,
+          "--expected-binding-token",
+          requiredExpectedBindingToken(context.expectedBindingToken)
+        ],
+        ["--store-dir", storeDir]
+      );
+    case "resume-thread":
+      if (!command.nativeThreadId) {
+        return withOptionalArgs(
+          [
+            "list-resumable-threads",
+            "--terminal",
+            command.terminalId
+          ],
+          ["--store-dir", storeDir]
+        );
+      }
+      return withOptionalArgs(
+        [
+          "resume-thread",
+          "--terminal",
+          command.terminalId,
+          "--native-thread",
+          command.nativeThreadId,
+          "--expected-binding-token",
+          requiredExpectedBindingToken(context.expectedBindingToken),
+          "--candidate-token",
+          requiredCandidateToken(context.candidateToken)
+        ],
+        ["--store-dir", storeDir]
       );
     case "status":
       return withOptionalArgs(
@@ -413,6 +668,7 @@ export function buildAkkCommandCliArgs(
           command.reason
         ],
         ["--expected-message-id", command.expectedMessageId],
+        ["--expected-transition-id", command.expectedTransitionId],
         ["--store-dir", storeDir]
       );
   }
@@ -448,6 +704,40 @@ function parseTurnResponse(
     throw new Error("Usage: /akk respond <turn-selector>: <answer>");
   }
   return { selector, message };
+}
+
+function assertExactTerminalId(value: string, usage: string): void {
+  if (!/^terminal:v\d+:[^\s]+$/u.test(value)) {
+    throw new Error(
+      `${usage}; use the exact terminal_id returned by /akk list`
+    );
+  }
+}
+
+function isExactNativeThreadId(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(
+    value
+  );
+}
+
+function requiredExpectedBindingToken(value: unknown): string {
+  const token = nonEmptyString(value);
+  if (!token) {
+    throw new Error(
+      "expected binding token is required; refresh the lifecycle snapshot before switching native threads"
+    );
+  }
+  return token;
+}
+
+function requiredCandidateToken(value: unknown): string {
+  const token = nonEmptyString(value);
+  if (!token) {
+    throw new Error(
+      "candidate token is required; select an exact resumable row from the current lifecycle snapshot"
+    );
+  }
+  return token;
 }
 
 export function resolvePluginStoreDir(
@@ -583,7 +873,10 @@ function formatAvailableActions(
     "cancel",
     "renew",
     "retry_callback",
-    "close"
+    "close",
+    "list_resumable_threads",
+    "new_thread",
+    "resume_thread"
   ]);
   const names = Object.keys(actions)
     .filter((name) => displayedActions.has(name))

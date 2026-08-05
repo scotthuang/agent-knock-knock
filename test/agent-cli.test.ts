@@ -7,9 +7,18 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import {
   ensureStoreWritable,
+  listConversations,
   pathsForConversation,
-  storeConversationsDir
+  storeConversationsDir,
+  storeManifestPath,
+  storeSessionsDir
 } from "../src/store.js";
+import {
+  listManagedSessions,
+  loadManagedSession,
+  saveManagedSession,
+  tryLoadManagedSession
+} from "../src/session-store.js";
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 const testRuntimeDir = fs.mkdtempSync(
@@ -3548,6 +3557,16 @@ test("v0.8.1 terminal state without native identity metadata remains bound to it
       updated_at: idleAt,
       native_session_takeover: legacyTakeover
     }, null, 2)}\n`);
+    // Recreate the actual predecessor layout: v0.8.1 had neither first-class
+    // Session state nor writer protocol 3. Keeping the modern Session beside a
+    // stripped legacy Turn would be an impossible mixed-generation Store.
+    fs.rmSync(storeSessionsDir(storeDir), { recursive: true, force: true });
+    const manifestPath = storeManifestPath(storeDir);
+    const legacyManifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    fs.writeFileSync(manifestPath, `${JSON.stringify({
+      ...legacyManifest,
+      writer_protocol: 2
+    }, null, 2)}\n`);
     const ledgerPath = findTerminalDispatchLedgerPath(
       modernState.conversation_id,
       path.join(tempDir, ".akk-cli-test-runtime")
@@ -4053,7 +4072,7 @@ test("modern Claude send requires a session id and process-incarnation timestamp
     assert.notEqual(sent.status, 0);
     assert.match(
       sent.stderr,
-      /native Claude process incarnation cannot be verified|no longer available/u
+      /native Claude process incarnation cannot be verified|process-incarnation startedAt is unavailable|no longer available/u
     );
     const stateFiles = fs.existsSync(storeConversationsDir(storeDir))
       ? fs.readdirSync(storeConversationsDir(storeDir), { withFileTypes: true })
@@ -4335,10 +4354,9 @@ test("an orphaned prepared submission becomes uncertain without terminal attribu
   }
 });
 
-test("a released terminal owner permits the same task text in a new conversation", async () => {
+test("a released terminal owner permits the same task text as a new Turn in its Store", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-submit-receipt-"));
   const storeDir = path.join(tempDir, "conversations");
-  const retryStoreDir = path.join(tempDir, "retry-conversations");
   const fakeBinDir = path.join(tempDir, "bin");
   const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
   const screenPath = path.join(tempDir, "screen.txt");
@@ -4504,7 +4522,6 @@ test("a released terminal owner permits the same task text in a new conversation
       }, null, 2)}\n`
     );
     const retryArgs = [...args];
-    retryArgs[retryArgs.indexOf("--store-dir") + 1] = retryStoreDir;
     const retried = runAgentCli(retryArgs, testEnv);
     assert.equal(retried.status, 0, retried.stderr || retried.stdout);
     const retriedParsed = JSON.parse(retried.stdout);
@@ -4515,7 +4532,14 @@ test("a released terminal owner permits the same task text in a new conversation
       retriedParsed.conversation.conversation_id,
       parsed.conversation.conversation_id
     );
+    assert.equal(
+      retriedParsed.conversation.session_id,
+      parsed.conversation.session_id,
+      "a released Turn must continue the native thread in its authoritative Store Session"
+    );
     assert.notEqual(retriedParsed.message.id, parsed.message.id);
+    assert.equal(listManagedSessions(storeDir).length, 1);
+    assert.equal(listConversations(storeDir).length, 2);
     const entersAfterRetry = readJsonLines(tmuxCallsPath)
       .filter((call) => call.args[0] === "send-keys" && call.args.at(-1) === "C-m")
       .length;
@@ -5559,7 +5583,7 @@ test("concurrent raw terminal sends allow exactly one active generation", async 
   }
 });
 
-test("terminal generation ownership spans different stores", async () => {
+test("native thread Store authority spans concurrent terminal sends", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-cross-store-"));
   const firstStoreDir = path.join(tempDir, "first-conversations");
   const secondStoreDir = path.join(tempDir, "second-conversations");
@@ -5615,9 +5639,15 @@ test("terminal generation ownership spans different stores", async () => {
     );
     const rejected = first.status === 0 ? second : first;
     const accepted = first.status === 0 ? first : second;
+    const acceptedStoreDir = first.status === 0
+      ? firstStoreDir
+      : secondStoreDir;
+    const rejectedStoreDir = first.status === 0
+      ? secondStoreDir
+      : firstStoreDir;
     assert.match(
       rejected.stderr,
-      /still owned by active AKK conversation/u
+      /authoritative in another Store/u
     );
     const acceptedParsed = JSON.parse(accepted.stdout);
     assert.notEqual(acceptedParsed.replayed, true);
@@ -5632,6 +5662,27 @@ test("terminal generation ownership spans different stores", async () => {
     assert.equal(
       acceptedParsed.message.turn_id,
       acceptedParsed.conversation.turn_id
+    );
+    assert.equal(
+      listManagedSessions(rejectedStoreDir).length,
+      0,
+      "the rejected Store must not retain a duplicate Session"
+    );
+    assert.equal(
+      listConversations(rejectedStoreDir).length,
+      0,
+      "the rejected Store must not retain a duplicate Turn"
+    );
+    const sessions = [
+      ...listManagedSessions(acceptedStoreDir),
+      ...listManagedSessions(rejectedStoreDir)
+    ];
+    assert.equal(sessions.length, 1);
+    assert.equal(
+      sessions.filter((session) =>
+        session.binding?.native_thread_id === sessionId
+      ).length,
+      1
     );
 
     const calls = readJsonLines(tmuxCallsPath);
@@ -5651,7 +5702,7 @@ test("terminal generation ownership spans different stores", async () => {
   }
 });
 
-test("only the uncertain cross-store owner can resolve its terminal fence", () => {
+test("only the uncertain owner can resolve its fence without moving native Store authority", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-cross-store-fence-"));
   const firstStoreDir = path.join(tempDir, "first-conversations");
   const secondStoreDir = path.join(tempDir, "second-conversations");
@@ -5744,7 +5795,9 @@ test("only the uncertain cross-store owner can resolve its terminal fence", () =
       testEnv
     );
     assert.notEqual(second.status, 0);
-    assert.match(second.stderr, /still owned by active AKK conversation/u);
+    assert.match(second.stderr, /authoritative in another Store/u);
+    assert.equal(listManagedSessions(secondStoreDir).length, 0);
+    assert.equal(listConversations(secondStoreDir).length, 0);
     assert.equal(
       JSON.parse(fs.readFileSync(firstStatePath, "utf8")).status,
       "waiting_for_agent"
@@ -5767,7 +5820,7 @@ test("only the uncertain cross-store owner can resolve its terminal fence", () =
     );
 
     const uncertain = runAgentCli(
-      sendArgs("Second cross-store task", secondStoreDir),
+      sendArgs("Second cross-store task", firstStoreDir),
       testEnv
     );
     assert.equal(
@@ -5804,14 +5857,16 @@ test("only the uncertain cross-store owner can resolve its terminal fence", () =
       testEnv
     );
     assert.notEqual(blocked.status, 0);
-    assert.match(blocked.stderr, /terminal-level uncertain dispatch/u);
+    assert.match(blocked.stderr, /authoritative in another Store/u);
+    assert.equal(listManagedSessions(thirdStoreDir).length, 0);
+    assert.equal(listConversations(thirdStoreDir).length, 0);
 
     const ownerClosed = runAgentCli([
       "close",
       "--conversation",
       secondParsed.conversation.conversation_id,
       "--store-dir",
-      secondStoreDir,
+      firstStoreDir,
       ...nativeIdentityArgs,
       "--reason",
       "operator inspected the uncertain terminal dispatch"
@@ -5833,11 +5888,26 @@ test("only the uncertain cross-store owner can resolve its terminal fence", () =
       listPanesOutput
     );
     const third = runAgentCli(
-      sendArgs("Third cross-store task", thirdStoreDir),
+      sendArgs("Third cross-store task", firstStoreDir),
       testEnv
     );
     assert.equal(third.status, 0, third.stderr || third.stdout);
     assert.equal(JSON.parse(third.stdout).delivered, true);
+    assert.equal(listManagedSessions(firstStoreDir).length, 1);
+    assert.equal(listManagedSessions(secondStoreDir).length, 0);
+    assert.equal(listManagedSessions(thirdStoreDir).length, 0);
+    assert.equal(listConversations(secondStoreDir).length, 0);
+    assert.equal(listConversations(thirdStoreDir).length, 0);
+    assert.equal(
+      [
+        ...listManagedSessions(firstStoreDir),
+        ...listManagedSessions(secondStoreDir),
+        ...listManagedSessions(thirdStoreDir)
+      ].filter((session) =>
+        session.binding?.native_thread_id === sessionId
+      ).length,
+      1
+    );
   } finally {
     if (dispatchLedgerPath) {
       fs.rmSync(dispatchLedgerPath, { force: true });
@@ -6147,7 +6217,7 @@ test("stale managed approve and cancel cannot control a newer cross-store genera
     assert.notEqual(approved.status, 0);
     assert.match(
       approved.stderr,
-      /does not own the current terminal dispatch generation/u
+      /Session binding generation is no longer current|does not own the current terminal dispatch generation/u
     );
 
     const cancelled = runAgentCli([
@@ -6160,7 +6230,7 @@ test("stale managed approve and cancel cannot control a newer cross-store genera
     assert.notEqual(cancelled.status, 0);
     assert.match(
       cancelled.stderr,
-      /does not own the current terminal dispatch generation/u
+      /Session binding generation is no longer current|does not own the current terminal dispatch generation/u
     );
     assert.equal(
       readJsonLines(tmuxCallsPath)
@@ -6851,6 +6921,12 @@ test("renew restarts a stalled terminal bridge without input and completion call
   const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
   const screenPath = path.join(tempDir, "screen.txt");
   const workspace = path.join(tempDir, "workspace");
+  const nativeIdentityArgs = codexNativeIdentityArgs({
+    pid: 33389,
+    sessionId,
+    processUuid: "codex-renew-process",
+    rolloutPath
+  });
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
@@ -6883,6 +6959,7 @@ test("renew restarts a stalled terminal bridge without input and completion call
       openclawBin,
       "--agent-hard-timeout-minutes",
       "60",
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
@@ -6927,6 +7004,7 @@ test("renew restarts a stalled terminal bridge without input and completion call
       "5",
       "--agent-hard-timeout-minutes",
       "120",
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
@@ -6997,6 +7075,7 @@ test("renew restarts a stalled terminal bridge without input and completion call
       })]),
       "--terminal-screens-json",
       JSON.stringify({ "codex-work:0.1": "› \n" }),
+      ...nativeIdentityArgs,
       "--rollouts-json",
       JSON.stringify({ [rolloutPath]: rollout })
     ];
@@ -9290,6 +9369,7 @@ function writeConversationClone(
   mutate: (state: any) => any
 ): string {
   ensureStoreWritable(storeDir);
+  copyManagedSessionForConversationClone(storeDir, sourceState);
   const paths = pathsForConversation(conversationId, storeDir);
   const conversationDir = paths.conversationDir;
   const statePath = paths.statePath;
@@ -9308,6 +9388,47 @@ function writeConversationClone(
   });
   fs.writeFileSync(statePath, `${JSON.stringify(cloned, null, 2)}\n`);
   return statePath;
+}
+
+function copyManagedSessionForConversationClone(
+  targetStoreDir: string,
+  sourceState: any
+): void {
+  const sessionId = typeof sourceState?.session_id === "string"
+    ? sourceState.session_id
+    : undefined;
+  const nativeTakeover = sourceState?.native_session_takeover;
+  if (!sessionId || nativeTakeover?.terminal_bridge !== true) {
+    return;
+  }
+
+  const sourceStoreDir = typeof sourceState.store_dir === "string"
+    ? sourceState.store_dir
+    : undefined;
+  assert.ok(
+    sourceStoreDir,
+    `managed Turn clone ${sourceState.conversation_id} has no source Store`
+  );
+  const sourceSession = loadManagedSession(sourceStoreDir, sessionId);
+  const existingTarget = tryLoadManagedSession(targetStoreDir, sessionId);
+  const withoutRevision = (state: typeof sourceSession) => {
+    const { revision: _revision, ...rest } = state;
+    return rest;
+  };
+  if (existingTarget) {
+    assert.deepEqual(
+      withoutRevision(existingTarget),
+      withoutRevision(sourceSession),
+      `managed Session ${sessionId} differs in cloned Store`
+    );
+    return;
+  }
+
+  saveManagedSession(
+    targetStoreDir,
+    withoutRevision(sourceSession),
+    { expectedRevision: null }
+  );
 }
 
 function threadRow(overrides: Record<string, unknown> = {}) {

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   CodexStoreAdapter,
+  buildThreadByIdSelect,
   buildThreadSelect,
   latestStateDbPath,
   parseLsofOpenFiles,
@@ -127,14 +128,16 @@ test("Codex store adapter fails closed when multiple root rollouts are open", as
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-rollout-ambiguous-"));
   const sessionsDir = path.join(dir, "sessions");
   const secondId = "019ee559-7bb8-7fd1-970c-0f7b6978c451";
+  const missingId = "019ee559-7bb8-7fd1-970c-0f7b6978c452";
   const paths = [SESSION_ID, secondId].map((id) =>
     path.join(sessionsDir, `rollout-${id}.jsonl`)
   );
+  const processBirth = "Tue Aug  4 14:15:13 2026";
   const adapter = new CodexStoreAdapter({
     codexHome: dir,
     runCommand(command): CommandResult {
       if (command === "ps") {
-        return ok("Tue Aug  4 14:15:13 2026\n");
+        return ok(`${processBirth}\n`);
       }
       return ok(paths.flatMap((filePath, index) => {
         const stat = fs.statSync(filePath, { bigint: true });
@@ -164,6 +167,288 @@ test("Codex store adapter fails closed when multiple root rollouts are open", as
     await assert.rejects(
       adapter.resolveActiveSessionIdentityForPid(4242, "/repo/project"),
       /2 open root rollout files/u
+    );
+    await assert.rejects(
+      adapter.resolveActiveSessionIdentityForPid(
+        4242,
+        "/repo/project",
+        secondId
+      ),
+      /does not have the preferred session as its sole open root rollout/u
+    );
+    const companionStat = fs.statSync(paths[0], { bigint: true });
+    const allowedCompanionIdentity = {
+      sessionId: SESSION_ID,
+      processUuid: `codex-pid:4242:birth:${processBirth}`,
+      processBirth,
+      rollout: {
+        fd: "20r",
+        device: String(companionStat.dev),
+        inode: String(companionStat.ino),
+        path: fs.realpathSync(paths[0])
+      },
+      evidence: "codex_open_root_rollout"
+    };
+    const selected = await adapter.resolveActiveSessionIdentityForPid(
+      4242,
+      "/repo/project",
+      secondId,
+      allowedCompanionIdentity
+    );
+    const selectedStat = fs.statSync(paths[1], { bigint: true });
+    assert.deepEqual(selected, {
+      sessionId: secondId,
+      processUuid: `codex-pid:4242:birth:${processBirth}`,
+      processBirth,
+      rollout: {
+        fd: "21r",
+        device: String(selectedStat.dev),
+        inode: String(selectedStat.ino),
+        path: fs.realpathSync(paths[1])
+      },
+      evidence: "codex_open_root_rollout"
+    });
+    await assert.rejects(
+      adapter.resolveActiveSessionIdentityForPid(
+        4242,
+        "/repo/project",
+        missingId
+      ),
+      /does not have the preferred session as its sole open root rollout/u
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Codex store adapter falls back to an exact open companion when the preferred rollout is missing and the primary identity is status-only", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-rollout-companion-fallback-"));
+  const sessionsDir = path.join(dir, "sessions");
+  const companionId = "019ee559-7bb8-7fd1-970c-0f7b6978c451";
+  const preferredId = "019ee559-7bb8-7fd1-970c-0f7b6978c452";
+  const companionPath = path.join(sessionsDir, `rollout-${companionId}.jsonl`);
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  const adapter = new CodexStoreAdapter({
+    codexHome: dir,
+    runCommand(command): CommandResult {
+      if (command === "ps") {
+        return ok(`${processBirth}\n`);
+      }
+      const stat = fs.statSync(companionPath, { bigint: true });
+      return ok([
+        "f20r",
+        "tREG",
+        `D${stat.dev}`,
+        `i${stat.ino}`,
+        `n${companionPath}`
+      ].join("\n"));
+    }
+  });
+  try {
+    fs.mkdirSync(sessionsDir, { recursive: true });
+    fs.writeFileSync(companionPath, `${JSON.stringify({
+      type: "session_meta",
+      payload: {
+        id: companionId,
+        cwd: "/repo/project",
+        originator: "codex-tui",
+        source: "cli"
+      }
+    })}\n`, "utf8");
+    const stat = fs.statSync(companionPath, { bigint: true });
+    const exactCompanionIdentity = {
+      sessionId: companionId,
+      processUuid,
+      processBirth,
+      rollout: {
+        fd: "20r",
+        device: String(stat.dev),
+        inode: String(stat.ino),
+        path: fs.realpathSync(companionPath)
+      },
+      evidence: "codex_open_root_rollout"
+    };
+
+    assert.deepEqual(
+      await adapter.resolveActiveSessionIdentityForPid(
+        4242,
+        "/repo/project",
+        preferredId,
+        {
+          sessionId: SESSION_ID,
+          processUuid,
+          processBirth,
+          evidence: "codex_status_card"
+        },
+        [exactCompanionIdentity]
+      ),
+      exactCompanionIdentity
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Codex store adapter fails closed when the preferred rollout is missing and only an unknown root is open", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-rollout-unknown-only-"));
+  const sessionsDir = path.join(dir, "sessions");
+  const knownCompanionId = "019ee559-7bb8-7fd1-970c-0f7b6978c451";
+  const preferredId = "019ee559-7bb8-7fd1-970c-0f7b6978c452";
+  const unknownId = "019ee559-7bb8-7fd1-970c-0f7b6978c453";
+  const knownCompanionPath = path.join(
+    sessionsDir,
+    `rollout-${knownCompanionId}.jsonl`
+  );
+  const unknownPath = path.join(sessionsDir, `rollout-${unknownId}.jsonl`);
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  const adapter = new CodexStoreAdapter({
+    codexHome: dir,
+    runCommand(command): CommandResult {
+      if (command === "ps") {
+        return ok(`${processBirth}\n`);
+      }
+      const stat = fs.statSync(unknownPath, { bigint: true });
+      return ok([
+        "f21r",
+        "tREG",
+        `D${stat.dev}`,
+        `i${stat.ino}`,
+        `n${unknownPath}`
+      ].join("\n"));
+    }
+  });
+  try {
+    fs.mkdirSync(sessionsDir, { recursive: true });
+    for (const [id, rolloutPath] of [
+      [knownCompanionId, knownCompanionPath],
+      [unknownId, unknownPath]
+    ]) {
+      fs.writeFileSync(rolloutPath, `${JSON.stringify({
+        type: "session_meta",
+        payload: {
+          id,
+          cwd: "/repo/project",
+          originator: "codex-tui",
+          source: "cli"
+        }
+      })}\n`, "utf8");
+    }
+    const knownStat = fs.statSync(knownCompanionPath, { bigint: true });
+
+    await assert.rejects(
+      adapter.resolveActiveSessionIdentityForPid(
+        4242,
+        "/repo/project",
+        preferredId,
+        {
+          sessionId: SESSION_ID,
+          processUuid,
+          processBirth,
+          evidence: "codex_status_card"
+        },
+        [{
+          sessionId: knownCompanionId,
+          processUuid,
+          processBirth,
+          rollout: {
+            fd: "20r",
+            device: String(knownStat.dev),
+            inode: String(knownStat.ino),
+            path: fs.realpathSync(knownCompanionPath)
+          },
+          evidence: "codex_open_root_rollout"
+        }]
+      ),
+      /unexpected open root rollout outside the preferred and exact companion identities/u
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Codex store adapter allows multiple exact historical roots but rejects an unknown extra root", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-rollout-history-set-"));
+  const sessionsDir = path.join(dir, "sessions");
+  const secondOldId = "019ee559-7bb8-7fd1-970c-0f7b6978c451";
+  const targetId = "019ee559-7bb8-7fd1-970c-0f7b6978c452";
+  const unknownId = "019ee559-7bb8-7fd1-970c-0f7b6978c453";
+  const ids = [SESSION_ID, secondOldId, targetId, unknownId];
+  const paths = ids.map((id) =>
+    path.join(sessionsDir, `rollout-${id}.jsonl`)
+  );
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  let openRootCount = 3;
+  const adapter = new CodexStoreAdapter({
+    codexHome: dir,
+    runCommand(command): CommandResult {
+      if (command === "ps") {
+        return ok(`${processBirth}\n`);
+      }
+      return ok(paths.slice(0, openRootCount).flatMap((filePath, index) => {
+        const stat = fs.statSync(filePath, { bigint: true });
+        return [
+          `f${20 + index}r`,
+          "tREG",
+          `D${stat.dev}`,
+          `i${stat.ino}`,
+          `n${filePath}`
+        ];
+      }).join("\n"));
+    }
+  });
+  try {
+    fs.mkdirSync(sessionsDir, { recursive: true });
+    for (let index = 0; index < paths.length; index += 1) {
+      fs.writeFileSync(paths[index], `${JSON.stringify({
+        type: "session_meta",
+        payload: {
+          id: ids[index],
+          cwd: "/repo/project",
+          originator: "codex-tui",
+          source: "cli"
+        }
+      })}\n`, "utf8");
+    }
+    const identityFor = (index: number) => {
+      const stat = fs.statSync(paths[index], { bigint: true });
+      return {
+        sessionId: ids[index],
+        processUuid: `codex-pid:4242:birth:${processBirth}`,
+        processBirth,
+        rollout: {
+          fd: `${20 + index}r`,
+          device: String(stat.dev),
+          inode: String(stat.ino),
+          path: fs.realpathSync(paths[index])
+        },
+        evidence: "codex_open_root_rollout"
+      };
+    };
+    const primaryOldIdentity = identityFor(0);
+    const additionalOldIdentity = identityFor(1);
+    assert.deepEqual(
+      await adapter.resolveActiveSessionIdentityForPid(
+        4242,
+        "/repo/project",
+        targetId,
+        primaryOldIdentity,
+        [additionalOldIdentity]
+      ),
+      identityFor(2)
+    );
+
+    openRootCount = 4;
+    await assert.rejects(
+      adapter.resolveActiveSessionIdentityForPid(
+        4242,
+        "/repo/project",
+        targetId,
+        primaryOldIdentity,
+        [additionalOldIdentity]
+      ),
+      /unexpected open root rollout outside the preferred and exact companion identities/u
     );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -204,6 +489,17 @@ test("Codex store adapter fails closed when the same root rollout has multiple d
     await assert.rejects(
       adapter.resolveActiveSessionIdentityForPid(4242, "/repo/project"),
       /2 open root rollout files/u
+    );
+    await assert.rejects(
+      adapter.resolveActiveSessionIdentityForPid(
+        4242,
+        "/repo/project",
+        SESSION_ID
+      ),
+      new RegExp(
+        `multiple open root rollouts for preferred session ${SESSION_ID}`,
+        "u"
+      )
     );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -439,11 +735,15 @@ test("Codex store adapter reports virgin only when the process has no sessions r
 test("Codex store adapter builds thread selects from detected columns", () => {
   assert.equal(
     buildThreadSelect(["id", "cwd", "updated_at"], 25),
-    "select id, cwd, null as rollout_path, null as title, null as preview, null as first_user_message, updated_at * 1000 as updated_at_ms, 0 as archived from threads order by updated_at * 1000 desc limit 25"
+    "select id, cwd, null as rollout_path, null as title, null as preview, null as first_user_message, updated_at * 1000 as updated_at_ms, 0 as archived, null as source, null as model_provider, null as cli_version, null as name from threads order by updated_at * 1000 desc limit 25"
   );
   assert.equal(
     buildThreadSelect(["id", "cwd", "rollout_path", "updated_at_ms", "archived"], 0),
-    "select id, cwd, rollout_path, null as title, null as preview, null as first_user_message, updated_at_ms, archived from threads order by updated_at_ms desc limit 1"
+    "select id, cwd, rollout_path, null as title, null as preview, null as first_user_message, updated_at_ms, archived, null as source, null as model_provider, null as cli_version, null as name from threads order by updated_at_ms desc limit 1"
+  );
+  assert.match(
+    buildThreadByIdSelect(["id", "cwd", "updated_at_ms"], SESSION_ID),
+    new RegExp(`where id = '${SESSION_ID}'`, "u")
   );
 });
 
@@ -474,7 +774,7 @@ test("Codex store adapter wraps sqlite and process command output behind the ada
     codexHome: dir,
     runCommand(command, args): CommandResult {
       calls.push([command, ...args].join(" "));
-      if (command === "sqlite3" && args[0] === "-json" && args[2] === "pragma table_info(threads)") {
+      if (command === "sqlite3" && args[0] === "-readonly" && args[1] === "-json" && args[3] === "pragma table_info(threads)") {
         return ok(JSON.stringify([
           { name: "id" },
           { name: "cwd" },
@@ -482,7 +782,7 @@ test("Codex store adapter wraps sqlite and process command output behind the ada
           { name: "updated_at_ms" }
         ]));
       }
-      if (command === "sqlite3" && args[0] === "-json" && args[2].startsWith("select id")) {
+      if (command === "sqlite3" && args[0] === "-readonly" && args[1] === "-json" && args[3].startsWith("select id")) {
         return ok(JSON.stringify([{
           id: SESSION_ID,
           cwd: "/repo/project",
@@ -516,7 +816,107 @@ test("Codex store adapter wraps sqlite and process command output behind the ada
 
     assert.equal((await adapter.listThreadRows())[0].id, SESSION_ID);
     assert.equal((await adapter.listProcessSnapshots())[0].cwd, "/repo/project");
-    assert.equal(calls.some((call) => call.startsWith("sqlite3 -json")), true);
+    assert.equal(calls.some((call) => call.startsWith("sqlite3 -readonly -json")), true);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Codex lifecycle candidates require exact root metadata and revalidate the rollout token", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-candidates-"));
+  const dbPath = path.join(dir, "state_5.sqlite");
+  const rolloutPath = path.join(
+    dir,
+    "sessions",
+    "2026",
+    "08",
+    "06",
+    `rollout-root-${SESSION_ID}.jsonl`
+  );
+  const row = {
+    id: SESSION_ID,
+    cwd: "/repo/project",
+    rollout_path: rolloutPath,
+    title: "Candidate title",
+    preview: "Candidate preview",
+    updated_at_ms: 1234,
+    archived: 0,
+    source: "cli",
+    model_provider: "openai",
+    cli_version: "0.146.0",
+    name: "Candidate name"
+  };
+  const columns = Object.keys(row).map((name) => ({ name }));
+  const adapter = new CodexStoreAdapter({
+    codexHome: dir,
+    runCommand(command, args): CommandResult {
+      if (command !== "sqlite3" || args[0] !== "-readonly" || args[1] !== "-json") {
+        return { status: 1, stdout: "", stderr: "unexpected command" };
+      }
+      if (args[3] === "pragma table_info(threads)") {
+        return ok(JSON.stringify(columns));
+      }
+      if (args[3].startsWith("select id")) {
+        return ok(JSON.stringify([row]));
+      }
+      return { status: 1, stdout: "", stderr: "unexpected SQL" };
+    }
+  });
+  try {
+    fs.mkdirSync(path.dirname(rolloutPath), { recursive: true });
+    fs.writeFileSync(rolloutPath, `${JSON.stringify({
+      type: "session_meta",
+      payload: {
+        id: SESSION_ID,
+        cwd: "/repo/project",
+        originator: "codex-tui",
+        source: "cli",
+        cli_version: "0.146.0",
+        model_provider: "openai"
+      }
+    })}\n`, "utf8");
+    fs.writeFileSync(dbPath, "", "utf8");
+
+    const request = {
+      cwd: "/repo/project",
+      agentVersion: "0.146.0",
+      modelProvider: "openai"
+    };
+    const candidate = (await adapter.listThreadLifecycleCandidates(request))[0];
+    assert.equal(candidate.nativeThreadId, SESSION_ID);
+    assert.equal(candidate.rootInteractive, true);
+    assert.equal(candidate.fileToken.path, fs.realpathSync(rolloutPath));
+    assert.equal(
+      candidate.candidateToken.schema,
+      "agent-knock-knock/thread-candidate-token"
+    );
+    assert.match(candidate.fileToken.device, /^\d+$/u);
+    assert.match(candidate.fileToken.inode, /^\d+$/u);
+    assert.equal(
+      (await adapter.revalidateThreadLifecycleCandidate(
+        candidate.candidateToken,
+        request
+      )).status,
+      "valid"
+    );
+
+    fs.appendFileSync(rolloutPath, "{}\n", "utf8");
+    assert.equal(
+      (await adapter.revalidateThreadLifecycleCandidate(
+        candidate.candidateToken,
+        request
+      )).status,
+      "changed"
+    );
+    await assert.rejects(
+      adapter.listThreadLifecycleCandidates({
+        ...request,
+        agentVersion: "0.146.1"
+      }),
+      /exact version 0\.146\.0/u
+    );
+    row.source = JSON.stringify({ subagent: { thread_spawn: {} } });
+    assert.deepEqual(await adapter.listThreadLifecycleCandidates(request), []);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

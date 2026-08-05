@@ -114,6 +114,18 @@ export interface TerminalCompletionEvidence {
   metadata?: Record<string, unknown>;
 }
 
+export interface TerminalNativeIdentityFence {
+  sessionId: string;
+  processUuid: string;
+  processBirth: string;
+  rollout: {
+    fd: string;
+    device: string;
+    inode: string;
+    path: string;
+  };
+}
+
 export interface TerminalRuntimeIdentity {
   pid?: number;
   sessionId?: string;
@@ -138,7 +150,22 @@ export interface TerminalRuntimeIdentity {
     inode: string;
     path: string;
   };
+  /**
+   * Exact native thread that an unmaterialized managed binding is allowed to
+   * acquire while a terminal submission is in flight. This is deliberately
+   * narrower than allowing any session to appear between tmux's text and
+   * Enter operations.
+   */
+  expectedNativeSessionId?: string;
   expectedEmptyNativeSession?: boolean;
+  /**
+   * Exact pre-materialization Codex rollout that may remain visible after a
+   * native `/clear`. This exception is scoped to the in-process text/Enter
+   * handoff; it is never persisted as the new logical thread's rollout.
+   */
+  allowedPreMaterializationNativeIdentity?: TerminalNativeIdentityFence;
+  /** Other exact managed rollouts that may remain open in the same process. */
+  allowedAdditionalNativeIdentities?: TerminalNativeIdentityFence[];
   cwd?: string;
   conversationId?: string;
   messageId?: string;
@@ -180,6 +207,148 @@ export interface TerminalAgentAdapterCapabilities {
   cancellation: boolean;
 }
 
+export interface TerminalThreadLifecycleCapabilities {
+  status: "supported" | "unsupported" | "unknown";
+  agentVersion?: string;
+  /** Exact, version-scoped behavior profile selected by the adapter. */
+  behaviorProfile?: string;
+  newThread: boolean;
+  resumeExact: boolean;
+  /** Candidate discovery is exposed only when identity metadata can be revalidated. */
+  candidateDiscovery?: boolean;
+  reason: string;
+}
+
+export type TerminalThreadLifecycleOperation =
+  | { kind: "new_thread" }
+  | { kind: "resume_thread"; nativeThreadId: string };
+
+export type TerminalThreadLifecycleStepKind =
+  | "identity_probe_before"
+  | "transition"
+  | "identity_probe_after";
+
+export interface TerminalThreadLifecycleStep {
+  kind: TerminalThreadLifecycleStepKind;
+  command: string;
+  effect: "read_only" | "thread_transition";
+  /** Every lifecycle command is dispatched only from a verified idle composer. */
+  requiresIdle: true;
+}
+
+export interface TerminalThreadLifecyclePlan {
+  operation: TerminalThreadLifecycleOperation;
+  /** Exact adapter behavior profile that authorized these commands. */
+  behaviorProfile: string;
+  /** Ordered, closed command set. Callers must not synthesize extra slash commands. */
+  steps: readonly TerminalThreadLifecycleStep[];
+  /** @deprecated Use the step whose kind is `transition`. */
+  command: string;
+  /** @deprecated Use the step whose kind is `identity_probe_after`. */
+  identityProbeCommand?: string;
+  expectedResult:
+    | { kind: "different_native_thread" }
+    | { kind: "exact_native_thread"; nativeThreadId: string };
+}
+
+export interface TerminalThreadLifecycleAgentRow {
+  pid?: number;
+  cwd?: string;
+  kind?: string;
+  sessionId?: string;
+  startedAt?: number;
+  status?: string;
+}
+
+export interface TerminalThreadLifecycleObservationRequest {
+  operation: TerminalThreadLifecycleOperation;
+  phase: "before" | "after";
+  screen?: string;
+  beforeNativeThreadId?: string;
+  expectedNativeThreadId?: string;
+  pid?: number;
+  processStartedAt?: number;
+  cwd?: string;
+  agentRows?: readonly TerminalThreadLifecycleAgentRow[];
+}
+
+export interface TerminalThreadLifecycleObservation {
+  status: "observed" | "verified" | "missing" | "ambiguous" | "mismatch";
+  nativeThreadId?: string;
+  evidence?: string;
+  idle?: boolean;
+  reason?: string;
+}
+
+export interface TerminalThreadLifecycleObserver {
+  (request: TerminalThreadLifecycleObservationRequest): TerminalThreadLifecycleObservation;
+  /** @deprecated Pass a typed observation request. */
+  (
+    screen: string,
+    operation: TerminalThreadLifecycleOperation
+  ): TerminalThreadLifecycleObservation;
+}
+
+export interface TerminalThreadFileToken {
+  path: string;
+  device: string;
+  inode: string;
+  size: number;
+  mtimeMs: number;
+}
+
+export interface TerminalThreadLifecycleCandidateToken {
+  schema: "agent-knock-knock/thread-candidate-token";
+  version: 1;
+  agent: ExecutorKind;
+  nativeThreadId: string;
+  cwd: string;
+  source: "codex_rollout" | "claude_transcript";
+  agentVersion: string;
+  fileToken: TerminalThreadFileToken;
+  metadataFingerprint: string;
+  modelProvider?: string;
+}
+
+export interface TerminalThreadLifecycleCandidate {
+  agent: ExecutorKind;
+  nativeThreadId: string;
+  cwd: string;
+  source: "codex_rollout" | "claude_transcript";
+  rootInteractive: true;
+  fileToken: TerminalThreadFileToken;
+  agentVersion: string;
+  title?: string;
+  preview?: string;
+  updatedAtMs?: number;
+  modelProvider?: string;
+  metadataFingerprint: string;
+  /** Opaque, JSON-safe identity that must be revalidated under the terminal lock. */
+  candidateToken: TerminalThreadLifecycleCandidateToken;
+}
+
+export interface TerminalThreadLifecycleCandidateRequest {
+  cwd: string;
+  agentVersion: string;
+  modelProvider?: string;
+}
+
+export interface TerminalThreadLifecycleCandidateValidation {
+  status: "valid" | "changed" | "unavailable" | "unsafe";
+  candidate?: TerminalThreadLifecycleCandidate;
+  reason?: string;
+}
+
+export interface TerminalThreadLifecycleCandidateProvider {
+  listThreadLifecycleCandidates(
+    request: TerminalThreadLifecycleCandidateRequest
+  ): Promise<readonly TerminalThreadLifecycleCandidate[]>;
+  revalidateThreadLifecycleCandidate(
+    candidate: TerminalThreadLifecycleCandidate | TerminalThreadLifecycleCandidateToken,
+    request: TerminalThreadLifecycleCandidateRequest
+  ): Promise<TerminalThreadLifecycleCandidateValidation>;
+}
+
 export interface TerminalAgentAdapter<ProcessKind extends string = string> {
   readonly agent: ExecutorKind;
   readonly displayName: string;
@@ -192,6 +361,21 @@ export interface TerminalAgentAdapter<ProcessKind extends string = string> {
   detectDurableCompletion?(
     request: TerminalDurableCompletionRequest
   ): Promise<TerminalCompletionEvidence | undefined>;
+  probeThreadLifecycle?(
+    agentVersion: string | undefined
+  ): TerminalThreadLifecycleCapabilities;
+  planThreadLifecycle?(
+    operation: TerminalThreadLifecycleOperation,
+    capabilities: TerminalThreadLifecycleCapabilities
+  ): TerminalThreadLifecyclePlan;
+  observeThreadLifecycle?: TerminalThreadLifecycleObserver;
+  listThreadLifecycleCandidates?(
+    request: TerminalThreadLifecycleCandidateRequest
+  ): Promise<readonly TerminalThreadLifecycleCandidate[]>;
+  revalidateThreadLifecycleCandidate?(
+    candidate: TerminalThreadLifecycleCandidate | TerminalThreadLifecycleCandidateToken,
+    request: TerminalThreadLifecycleCandidateRequest
+  ): Promise<TerminalThreadLifecycleCandidateValidation>;
 }
 
 export class TerminalAgentAdapterRegistry {
@@ -215,6 +399,24 @@ export class TerminalAgentAdapterRegistry {
     if (adapter.capabilities.cancellation && adapter.cancelKeys.length === 0) {
       throw new Error(
         `terminal agent adapter ${adapter.agent} advertises cancellation without an ordered key sequence`
+      );
+    }
+    const lifecycleMethodCount = [
+      adapter.probeThreadLifecycle,
+      adapter.planThreadLifecycle,
+      adapter.observeThreadLifecycle
+    ].filter((method) => method !== undefined).length;
+    if (lifecycleMethodCount !== 0 && lifecycleMethodCount !== 3) {
+      throw new Error(
+        `terminal agent adapter ${adapter.agent} must implement lifecycle probe, plan, and observer methods together`
+      );
+    }
+    if (
+      (adapter.listThreadLifecycleCandidates === undefined) !==
+      (adapter.revalidateThreadLifecycleCandidate === undefined)
+    ) {
+      throw new Error(
+        `terminal agent adapter ${adapter.agent} must implement lifecycle candidate listing and revalidation together`
       );
     }
     this.adapters.set(adapter.agent, adapter);

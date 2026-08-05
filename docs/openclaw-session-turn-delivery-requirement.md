@@ -15,6 +15,8 @@ The current flow is:
 
 The identity chain is terminal → native coding-agent session → AKK `session_id` → `turn_id`. An ordinary send targets only `session_id` and creates a new Turn. Exact callbacks and managed control operations target `turn_id`. An unmanaged raw-terminal row may expose its own prefilled compatibility selector for status or recovery controls, but that selector is not a Turn ID and must never be constructed. If the coding agent asks a question, the callback marks that Turn `waiting_for_openclaw`; `respond(turn_id, answer)` continues the same Turn.
 
+Native new/clear and resume controls operate between the terminal and Session layers. They require the exact `terminal_id` and a fresh compare-and-swap binding token; resume also requires one complete, verified historical native-thread UUID and that candidate row's opaque snapshot token. A successful transition creates or activates an AKK Session, advances the terminal binding generation, and creates no Turn. The next ordinary send creates the first Turn in that selected context.
+
 The coding agent does not invoke a callback command. Terminal monitoring and callback delivery belong to AKK.
 
 ## Delivery Invariants
@@ -29,7 +31,8 @@ Callback delivery must:
 6. Persist the canonical message before attempting external delivery.
 7. Expose actionable callback failure and retry state without requiring raw-log inspection.
 8. Refuse to report completion when terminal evidence is stale, ambiguous, or unsupported.
+9. Fence every callback to the terminal incarnation, native identity, Session, Turn, and binding generation that created it, so a pre-transition callback cannot mutate the active post-transition context.
 
 These invariants apply even if OpenClaw later exposes a more direct plugin session-turn API.
 
-Native clear/new/resume operations are outside callback delivery and ordinary Turn creation.
+Native clear/new/resume operations are outside callback delivery and ordinary Turn creation. They are serialized against monitors and callback/recovery mutations; unresolved work blocks the transition, and stale delivery remains attached only to its historical Turn.

@@ -10,8 +10,15 @@ import type {
   TerminalProcessSnapshot,
   TerminalRuntimeIdentity,
   TerminalScreenInspection,
-  TerminalScreenInspectionOptions
+  TerminalScreenInspectionOptions,
+  TerminalThreadLifecycleCapabilities,
+  TerminalThreadLifecycleObservation,
+  TerminalThreadLifecycleObservationRequest,
+  TerminalThreadLifecycleObserver,
+  TerminalThreadLifecycleOperation,
+  TerminalThreadLifecyclePlan
 } from "./terminal-agent-adapter.js";
+import { isExactNativeThreadId } from "./managed-session.js";
 
 export type ClaudeProcessKind = "claude_cli";
 
@@ -136,6 +143,8 @@ const CLAUDE_EXCERPT_LINES = 80;
 const CLAUDE_PERMISSION_DETAIL_LENGTH = 600;
 const CLAUDE_AUTO_APPROVAL_COMMAND_LENGTH = 2000;
 const CLAUDE_NATIVE_VERSION_PATTERN = /^\d+\.\d+\.\d+$/u;
+const CLAUDE_LIFECYCLE_VERSION = "2.1.218";
+const CLAUDE_LIFECYCLE_PROFILE = "claude-code-2.1.218";
 const ANSI_ESCAPE_PATTERN = /\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/gu;
 
 export function createClaudeTerminalAgentAdapter(
@@ -146,6 +155,16 @@ export function createClaudeTerminalAgentAdapter(
   const transcriptApprovalDetector = options.detectPendingApproval;
   const durableCompletion =
     transcriptCompletionDetector !== undefined;
+  const lifecycleObserver: TerminalThreadLifecycleObserver = (
+    requestOrScreen: TerminalThreadLifecycleObservationRequest | string,
+    legacyOperation?: TerminalThreadLifecycleOperation
+  ) => typeof requestOrScreen === "string"
+    ? observeClaudeThreadLifecycle(
+        requestOrScreen,
+        legacyOperation ?? { kind: "new_thread" },
+        agentRows
+      )
+    : observeClaudeThreadLifecycle(requestOrScreen, undefined, agentRows);
   return {
     agent: "claude",
     displayName: "Claude Code",
@@ -169,6 +188,9 @@ export function createClaudeTerminalAgentAdapter(
         transcriptApprovalDetector
       );
     },
+    probeThreadLifecycle: probeClaudeThreadLifecycle,
+    planThreadLifecycle: planClaudeThreadLifecycle,
+    observeThreadLifecycle: lifecycleObserver,
     ...(durableCompletion
       ? {
           async detectDurableCompletion(request: TerminalDurableCompletionRequest) {
@@ -178,6 +200,213 @@ export function createClaudeTerminalAgentAdapter(
       : {})
   };
 }
+
+export function probeClaudeThreadLifecycle(
+  agentVersion: string | undefined
+): TerminalThreadLifecycleCapabilities {
+  if (!agentVersion) {
+    return {
+      status: "unknown",
+      newThread: false,
+      resumeExact: false,
+      reason: "the running Claude Code version could not be verified"
+    };
+  }
+  const supported = agentVersion === CLAUDE_LIFECYCLE_VERSION;
+  return {
+    status: supported ? "supported" : "unsupported",
+    agentVersion,
+    behaviorProfile: supported ? CLAUDE_LIFECYCLE_PROFILE : undefined,
+    newThread: supported,
+    resumeExact: supported,
+    candidateDiscovery: supported,
+    reason: supported
+      ? "Claude Code /clear and exact /resume are supported by the verified version"
+      : "this exact Claude Code version has no AKK native-thread lifecycle behavior profile"
+  };
+}
+
+export function planClaudeThreadLifecycle(
+  operation: TerminalThreadLifecycleOperation,
+  capabilities: TerminalThreadLifecycleCapabilities
+): TerminalThreadLifecyclePlan {
+  if (
+    capabilities.status !== "supported" ||
+    capabilities.agentVersion !== CLAUDE_LIFECYCLE_VERSION ||
+    capabilities.behaviorProfile !== CLAUDE_LIFECYCLE_PROFILE
+  ) {
+    throw new Error(capabilities.reason);
+  }
+  if (operation.kind === "new_thread") {
+    if (!capabilities.newThread) {
+      throw new Error("this Claude Code version does not support verified new-thread control");
+    }
+    return {
+      operation,
+      behaviorProfile: CLAUDE_LIFECYCLE_PROFILE,
+      steps: [{
+        kind: "transition",
+        command: "/clear",
+        effect: "thread_transition",
+        requiresIdle: true
+      }],
+      command: "/clear",
+      expectedResult: { kind: "different_native_thread" }
+    };
+  }
+  if (!capabilities.resumeExact) {
+    throw new Error("this Claude Code version does not support verified exact resume control");
+  }
+  if (!isExactNativeThreadId(operation.nativeThreadId)) {
+    throw new Error("Claude Code resume requires a complete native thread UUID");
+  }
+  return {
+    operation,
+    behaviorProfile: CLAUDE_LIFECYCLE_PROFILE,
+    steps: [{
+      kind: "transition",
+      command: `/resume ${operation.nativeThreadId}`,
+      effect: "thread_transition",
+      requiresIdle: true
+    }],
+    command: `/resume ${operation.nativeThreadId}`,
+    expectedResult: {
+      kind: "exact_native_thread",
+      nativeThreadId: operation.nativeThreadId
+    }
+  };
+}
+
+export function observeClaudeThreadLifecycle(
+  request: TerminalThreadLifecycleObservationRequest,
+  legacyOperation?: undefined,
+  fallbackAgentRows?: readonly ClaudeAgentRow[]
+): TerminalThreadLifecycleObservation;
+/** @deprecated Claude lifecycle identity requires a typed agents-row request. */
+export function observeClaudeThreadLifecycle(
+  screen: string,
+  operation: TerminalThreadLifecycleOperation,
+  fallbackAgentRows?: readonly ClaudeAgentRow[]
+): TerminalThreadLifecycleObservation;
+export function observeClaudeThreadLifecycle(
+  requestOrScreen: TerminalThreadLifecycleObservationRequest | string,
+  legacyOperation?: TerminalThreadLifecycleOperation,
+  fallbackAgentRows: readonly ClaudeAgentRow[] = []
+): TerminalThreadLifecycleObservation {
+  if (typeof requestOrScreen === "string") {
+    return {
+      status: "missing",
+      reason:
+        "Claude lifecycle identity is not available from screen text; exact agents JSON is required"
+    };
+  }
+  const request = requestOrScreen;
+  const pid = Number(request.pid);
+  const startedAt = Number(request.processStartedAt);
+  if (
+    !Number.isSafeInteger(pid) ||
+    pid <= 1 ||
+    !Number.isSafeInteger(startedAt) ||
+    startedAt <= 0
+  ) {
+    return {
+      status: "missing",
+      reason: "Claude lifecycle observation requires exact PID and startedAt identity"
+    };
+  }
+  const rows = request.agentRows ?? fallbackAgentRows;
+  const matches = rows.filter((row) => Number(row.pid) === pid);
+  if (matches.length === 0) {
+    return {
+      status: "missing",
+      reason: `Claude agents JSON has no row for PID ${pid}`
+    };
+  }
+  if (matches.length !== 1) {
+    return {
+      status: "ambiguous",
+      reason: `Claude agents JSON has ${matches.length} rows for PID ${pid}`
+    };
+  }
+  const row = matches[0];
+  const nativeThreadId = nonEmptyString(row.sessionId)?.toLowerCase();
+  if (
+    row.kind !== "interactive" ||
+    !isExactNativeThreadId(nativeThreadId) ||
+    Number(row.startedAt) !== startedAt ||
+    (
+      request.cwd !== undefined &&
+      (
+        !path.isAbsolute(request.cwd) ||
+        typeof row.cwd !== "string" ||
+        !path.isAbsolute(row.cwd) ||
+        normalizeLifecyclePath(row.cwd) !== normalizeLifecyclePath(request.cwd)
+      )
+    )
+  ) {
+    return {
+      status: "mismatch",
+      nativeThreadId,
+      evidence: "claude_agents_exact_pid",
+      reason: "Claude agents JSON does not match the expected interactive process incarnation"
+    };
+  }
+  const observed: TerminalThreadLifecycleObservation = {
+    status: "observed",
+    nativeThreadId,
+    evidence: "claude_agents_exact_pid",
+    idle: row.status === "idle"
+  };
+  if (request.phase === "before") {
+    return observed;
+  }
+  if (row.status !== "idle") {
+    return {
+      ...observed,
+      status: "mismatch",
+      reason: `Claude agents JSON reports ${row.status ?? "unknown"}, not idle`
+    };
+  }
+  if (request.operation.kind === "new_thread") {
+    if (!isExactNativeThreadId(request.beforeNativeThreadId)) {
+      return {
+        ...observed,
+        status: "mismatch",
+        reason: "a verified before-session UUID is required for Claude /clear"
+      };
+    }
+    return nativeThreadId === request.beforeNativeThreadId.toLowerCase()
+      ? {
+          ...observed,
+          status: "mismatch",
+          reason: "Claude /clear did not change the sessionId"
+        }
+      : { ...observed, status: "verified" };
+  }
+  const expected = (
+    request.expectedNativeThreadId ?? request.operation.nativeThreadId
+  ).toLowerCase();
+  if (!isExactNativeThreadId(expected)) {
+    return {
+      ...observed,
+      status: "mismatch",
+      reason: "Claude resume postcondition requires an exact target UUID"
+    };
+  }
+  return nativeThreadId === expected
+    ? { ...observed, status: "verified" }
+    : {
+        ...observed,
+        status: "mismatch",
+        reason: `Claude resumed ${nativeThreadId}, not the requested native thread ${expected}`
+      };
+}
+
+function normalizeLifecyclePath(value: unknown): string | undefined {
+  const candidate = nonEmptyString(value);
+  return candidate === undefined ? undefined : path.resolve(candidate);
+}
+
 
 export const claudeTerminalAgentAdapter = createClaudeTerminalAgentAdapter();
 

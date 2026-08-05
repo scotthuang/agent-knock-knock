@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.10.0 - 2026-08-06
+
+### Added
+
+- Add capability-scoped native-thread lifecycle controls for starting or clearing context, listing verified same-workspace resume candidates, and resuming one exact Codex or Claude Code native thread in the existing tmux pane.
+- Add the optional OpenClaw tools `agent_knock_knock_new_thread`, `agent_knock_knock_list_resumable_threads`, and `agent_knock_knock_resume_thread`, plus `/akk new-thread`, `/akk clear-thread`, `/akk threads`, and `/akk resume-thread` human-facing commands.
+- Publish the v5 list/action contract with exact terminal lifecycle targets, complete native-thread identities, fresh compare-and-swap binding tokens, per-candidate evidence fingerprints, and capability-gated availability.
+
+### Changed
+
+- Keep ordinary sends scoped to the current native context: each accepted send creates a new Turn, while a successful native lifecycle transition creates or activates an AKK Session and creates no Turn.
+- Treat a sole historical Session whose recorded coding-agent PID has conclusively exited as resumable on the next lifecycle listing; the resume mutation compare-and-swap detaches that stale binding before terminal input, without background polling.
+- Let human-facing lifecycle slash commands fetch a fresh binding token internally immediately before mutation; plugin tools retain the explicit token so OpenClaw follows an auditable list-then-mutate flow.
+- Record terminal binding generations and native-thread transition lineage so sends after new/clear or resume target only the newly verified context.
+- Upgrade the Store writer protocol to v3. The first mutation of a v1 or v2 predecessor durably materializes authoritative Session records before publishing the new manifest, quarantines ambiguous bindings, and leaves existing Turn state and event logs unchanged.
+
+### Security
+
+- Serialize native-thread transitions against sends, approvals, monitors, callbacks, and recovery; require an exact idle terminal with no unresolved Turn and fail closed on unsupported, ambiguous, stale, active-elsewhere, or unverifiable native identity evidence.
+- Fence old monitors, receipts, approvals, callbacks, and recovery mutations to their original terminal incarnation, native thread, AKK Session, Turn, and binding generation.
+- Reject every first-line native slash command at the ordinary send/respond boundary before creating Session, Turn, ledger, or terminal side effects, including lifecycle-changing `/clear`, `/new`, `/resume`, Codex `/fork`/side threads, and Claude `/branch`.
+
 ## 0.9.0 - 2026-08-05
 
 ### Added

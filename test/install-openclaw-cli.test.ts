@@ -28,6 +28,14 @@ test("OpenClaw contract removes the top-level workspace and keeps rule-scoped ap
   assert.equal(manifest.toolMetadata.agent_knock_knock_renew.optional, true);
   assert.equal(manifest.contracts.tools.includes("agent_knock_knock_respond"), true);
   assert.equal(manifest.toolMetadata.agent_knock_knock_respond.optional, true);
+  for (const lifecycleTool of [
+    "agent_knock_knock_list_resumable_threads",
+    "agent_knock_knock_new_thread",
+    "agent_knock_knock_resume_thread"
+  ]) {
+    assert.equal(manifest.contracts.tools.includes(lifecycleTool), true);
+    assert.equal(manifest.toolMetadata[lifecycleTool].optional, true);
+  }
 
   const pluginSource = fs.readFileSync(path.join(packageRoot, "src", "openclaw-plugin.ts"), "utf8");
   assert.match(pluginSource, /const sendParameters =[\s\S]*?agentTimeoutMinutes:[\s\S]*?agentHardTimeoutMinutes:/u);
@@ -37,6 +45,9 @@ test("OpenClaw contract removes the top-level workspace and keeps rule-scoped ap
   );
   assert.match(pluginSource, /--expected-approval-fingerprint/u);
   assert.match(pluginSource, /name: "agent_knock_knock_renew"/u);
+  assert.match(pluginSource, /name: "agent_knock_knock_new_thread"/u);
+  assert.match(pluginSource, /name: "agent_knock_knock_list_resumable_threads"/u);
+  assert.match(pluginSource, /name: "agent_knock_knock_resume_thread"/u);
   assert.match(
     pluginSource,
     /Managed approval uses exact turn_id[\s\S]*?Claude Code uses no Hooks:[\s\S]*?exact one-time Bash permission screen[\s\S]*?trusted default-disabled plugin configuration[\s\S]*?auto-approve[\s\S]*?durable completion[\s\S]*?local Claude transcript/u
@@ -46,6 +57,10 @@ test("OpenClaw contract removes the top-level workspace and keeps rule-scoped ap
   assert.match(pluginSource, /api\.registerService\?\.\(\{[\s\S]*?agent-knock-knock-monitor-reconciliation/u);
   assert.match(pluginSource, /const args = \["reconcile-monitors"\][\s\S]*?catch \(error\)[\s\S]*?logger\.warn/u);
   assert.match(fs.readFileSync(skillSource, "utf8"), /agent_knock_knock_renew/u);
+  assert.match(
+    fs.readFileSync(skillSource, "utf8"),
+    /agent_knock_knock_list_resumable_threads/u
+  );
 });
 
 test("install-openclaw replaces an existing plugin and installs its skill", () => {
