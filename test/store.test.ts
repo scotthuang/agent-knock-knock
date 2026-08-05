@@ -10,6 +10,7 @@ import {
   assertAppendableEventLog,
   assertStoreWriterCompatible,
   defaultStoreDir,
+  ensureDir,
   ensureStoreWritable,
   inspectStoreCompatibility,
   listConversations,
@@ -26,6 +27,10 @@ import {
   withStoreWriterLease,
   withStoreWriterLeaseAsync
 } from "../src/store.js";
+import {
+  loadManagedSession,
+  pathsForManagedSession
+} from "../src/session-store.js";
 
 function mode(filePath: string): number {
   return fs.statSync(filePath).mode & 0o777;
@@ -100,6 +105,50 @@ test("reading an absent store does not initialize it", () => {
     assert.equal(fs.existsSync(storeDir), false);
     assert.equal(inspectStoreCompatibility(storeDir).status, "uninitialized");
   } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("durable directory creation fsyncs every newly created parent entry", () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "akk-store-durable-dir-"));
+  const first = path.join(sandbox, "first");
+  const nested = path.join(first, "second");
+  const opened = new Map<number, string>();
+  const fsynced: string[] = [];
+  const originalOpenSync = fs.openSync;
+  const originalFsyncSync = fs.fsyncSync;
+  const mutableFs = fs as unknown as {
+    openSync: (...args: unknown[]) => number;
+    fsyncSync: (fd: number) => void;
+  };
+  try {
+    mutableFs.openSync = (...args: unknown[]): number => {
+      const fd = Reflect.apply(originalOpenSync, fs, args) as number;
+      opened.set(fd, path.resolve(String(args[0])));
+      return fd;
+    };
+    mutableFs.fsyncSync = (fd: number): void => {
+      const openedPath = opened.get(fd);
+      if (openedPath) {
+        fsynced.push(openedPath);
+      }
+      originalFsyncSync(fd);
+    };
+
+    ensureDir(nested);
+
+    assert.equal(fs.statSync(nested).isDirectory(), true);
+    assert.ok(
+      fsynced.includes(path.resolve(sandbox)),
+      "creating first/ must fsync its parent"
+    );
+    assert.ok(
+      fsynced.includes(path.resolve(first)),
+      "creating first/second/ must fsync first/"
+    );
+  } finally {
+    mutableFs.openSync = originalOpenSync as unknown as (...args: unknown[]) => number;
+    mutableFs.fsyncSync = originalFsyncSync;
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
 });
@@ -333,6 +382,306 @@ test("a non-empty protocol 1 Store preserves state, events, and created_at while
       legacyEvents: fileSnapshot(legacy.paths.logPath)
     }, before);
     assert.equal(loadState(legacy.paths.statePath).session_id, "turn-legacy-upgrade");
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("protocol 2 migration materializes one hashed Session before publishing protocol 3", () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "akk-store-session-migration-"));
+  const storeDir = path.join(sandbox, "store");
+  const sessionId = "session/legacy/path/会话";
+  const nativeThreadId = "00000000-0000-4000-8000-000000000301";
+  try {
+    writeStoreManifest(storeDir, { writerProtocol: 2 });
+    const stateSnapshots: Array<{ path: string; contents: string }> = [];
+    for (const [index, turnId] of ["turn-migrate-1", "turn-migrate-2"].entries()) {
+      const paths = pathsForConversation(turnId, storeDir);
+      const now = new Date(Date.parse("2026-08-06T03:00:00.000Z") + index * 1000);
+      const conversation = {
+        ...createConversation({
+          userRequest: `migration turn ${index + 1}`,
+          sessionId,
+          turnId,
+          executorKind: "codex",
+          executorSession: "codex",
+          workspace: "/workspace/project",
+          now
+        }),
+        terminal_binding_id: "binding-existing",
+        terminal_binding_generation: 4,
+        native_thread_id: nativeThreadId,
+        native_session_takeover: {
+          agent: "codex",
+          native_session_id: "tmux:codex:akk:0.0:101",
+          terminal_agent_pid: 202,
+          terminal_agent_session_id: nativeThreadId,
+          terminal_agent_expected_session_id: nativeThreadId,
+          terminal_agent_process_birth: "process-birth-202",
+          terminal_agent_rollout: {
+            fd: "9",
+            device: "1",
+            inode: "303",
+            path: "/tmp/codex-rollout.jsonl"
+          },
+          terminal_agent_identity_evidence: "codex_rollout_fd",
+          terminal_control: {
+            kind: "tmux",
+            target: "akk:0.0",
+            session: "akk",
+            window: 0,
+            pane: 0,
+            panePid: 101,
+            currentCommand: "codex",
+            currentPath: "/workspace/project",
+            capabilities: ["screen_status", "send_keys", "durable_completion"]
+          }
+        },
+        store_dir: paths.storeDir,
+        conversation_dir: paths.conversationDir,
+        event_log_path: paths.logPath,
+        state_path: paths.statePath
+      };
+      fs.mkdirSync(paths.conversationDir, { recursive: true, mode: 0o700 });
+      const contents = `${JSON.stringify(conversation, null, 2)}\n`;
+      fs.writeFileSync(paths.statePath, contents, { mode: 0o600 });
+      stateSnapshots.push({ path: paths.statePath, contents });
+    }
+
+    ensureStoreWritable(storeDir);
+
+    const manifest = JSON.parse(fs.readFileSync(storeManifestPath(storeDir), "utf8"));
+    assert.equal(manifest.writer_protocol, 3);
+    const sessionPaths = pathsForManagedSession(sessionId, storeDir);
+    assert.match(path.basename(sessionPaths.directory), /^[0-9a-f]{64}$/u);
+    const session = loadManagedSession(storeDir, sessionId);
+    assert.equal(session.revision, 1);
+    assert.equal(session.status, "bound");
+    assert.equal(session.binding?.binding_id, "binding-existing");
+    assert.equal(session.binding?.generation, 4);
+    assert.equal(session.binding?.native_thread_id, nativeThreadId);
+    for (const snapshot of stateSnapshots) {
+      assert.equal(fs.readFileSync(snapshot.path, "utf8"), snapshot.contents);
+    }
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("migration quarantines native threads referenced by multiple Sessions", () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "akk-store-native-owner-conflict-"));
+  const storeDir = path.join(sandbox, "store");
+  const nativeThreadId = "00000000-0000-4000-8000-000000000399";
+  const sessionIds = ["session-native-owner-a", "session-native-owner-b"];
+  try {
+    writeStoreManifest(storeDir, { writerProtocol: 2 });
+    for (const [index, sessionId] of sessionIds.entries()) {
+      const turnId = `turn-native-owner-${index + 1}`;
+      const paths = pathsForConversation(turnId, storeDir);
+      const target = `owner-${index + 1}:0.0`;
+      const conversation = {
+        ...createConversation({
+          userRequest: `native owner ${index + 1}`,
+          sessionId,
+          turnId,
+          executorKind: "claude",
+          workspace: "/workspace/project",
+          now: new Date(`2026-08-06T03:10:0${index}.000Z`)
+        }),
+        terminal_binding_id: `binding-native-owner-${index + 1}`,
+        terminal_binding_generation: 1,
+        native_thread_id: nativeThreadId,
+        native_session_takeover: {
+          native_session_id: `tmux:claude:${target}:${101 + index}`,
+          terminal_agent_pid: 201 + index,
+          terminal_agent_session_id: nativeThreadId,
+          terminal_agent_process_uuid: `process-native-owner-${index + 1}`,
+          terminal_agent_identity_evidence: "claude_process_uuid",
+          terminal_control: {
+            kind: "tmux",
+            target,
+            session: `owner-${index + 1}`,
+            window: 0,
+            pane: 0,
+            panePid: 101 + index,
+            currentCommand: "claude",
+            currentPath: "/workspace/project",
+            capabilities: ["screen_status", "send_keys", "durable_completion"]
+          }
+        },
+        store_dir: paths.storeDir,
+        conversation_dir: paths.conversationDir,
+        event_log_path: paths.logPath,
+        state_path: paths.statePath
+      };
+      fs.mkdirSync(paths.conversationDir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(
+        paths.statePath,
+        `${JSON.stringify(conversation, null, 2)}\n`,
+        { mode: 0o600 }
+      );
+    }
+
+    ensureStoreWritable(storeDir);
+
+    for (const [index, sessionId] of sessionIds.entries()) {
+      const session = loadManagedSession(storeDir, sessionId);
+      assert.equal(session.status, "quarantined");
+      assert.match(
+        session.quarantine_reason ?? "",
+        new RegExp(sessionIds[1 - index], "u")
+      );
+    }
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("protocol 1 legacy Turn migration uses its storage id and never rewrites the Turn", () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "akk-store-legacy-session-migration-"));
+  const storeDir = path.join(sandbox, "store");
+  const turn = storedConversation(storeDir, "task-legacy-session");
+  try {
+    writeStoreManifest(storeDir, { writerProtocol: 1 });
+    const legacy: any = { ...turn.conversation };
+    delete legacy.session_id;
+    delete legacy.turn_id;
+    fs.mkdirSync(turn.paths.conversationDir, { recursive: true, mode: 0o700 });
+    const before = `${JSON.stringify(legacy, null, 2)}\n`;
+    fs.writeFileSync(turn.paths.statePath, before, { mode: 0o600 });
+
+    ensureStoreWritable(storeDir);
+
+    const session = loadManagedSession(storeDir, "task-legacy-session");
+    assert.equal(session.session_id, "task-legacy-session");
+    assert.equal(session.status, "detached");
+    assert.equal(session.lineage.created_by, "migration");
+    assert.equal(fs.readFileSync(turn.paths.statePath, "utf8"), before);
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("migration quarantines conflicting binding evidence instead of choosing the newest Turn", () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "akk-store-binding-conflict-"));
+  const storeDir = path.join(sandbox, "store");
+  const sessionId = "session-conflicting-bindings";
+  try {
+    writeStoreManifest(storeDir, { writerProtocol: 2 });
+    for (const [index, target] of ["first:0.0", "second:0.0"].entries()) {
+      const turnId = `turn-conflict-${index + 1}`;
+      const paths = pathsForConversation(turnId, storeDir);
+      const now = new Date(Date.parse("2026-08-06T04:00:00.000Z") + index * 60_000);
+      const conversation = {
+        ...createConversation({
+          userRequest: `conflict ${index + 1}`,
+          sessionId,
+          turnId,
+          executorKind: "claude",
+          workspace: "/workspace/project",
+          now
+        }),
+        terminal_binding_id: `binding-conflict-${index + 1}`,
+        terminal_binding_generation: 1,
+        native_thread_id: "00000000-0000-4000-8000-000000000302",
+        native_session_takeover: {
+          native_session_id: `tmux:claude:${target}:111`,
+          terminal_agent_pid: 222,
+          terminal_agent_session_id: "00000000-0000-4000-8000-000000000302",
+          terminal_agent_process_uuid: "process-conflict",
+          terminal_agent_identity_evidence: "claude_process_uuid",
+          terminal_control: {
+            kind: "tmux",
+            target,
+            session: target.split(":")[0],
+            window: 0,
+            pane: 0,
+            panePid: 111,
+            capabilities: ["screen_status", "send_keys"]
+          }
+        },
+        store_dir: paths.storeDir,
+        conversation_dir: paths.conversationDir,
+        event_log_path: paths.logPath,
+        state_path: paths.statePath
+      };
+      fs.mkdirSync(paths.conversationDir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(paths.statePath, `${JSON.stringify(conversation, null, 2)}\n`, {
+        mode: 0o600
+      });
+    }
+
+    ensureStoreWritable(storeDir);
+
+    const session = loadManagedSession(storeDir, sessionId);
+    assert.equal(session.status, "quarantined");
+    assert.equal(session.binding, undefined);
+    assert.match(session.quarantine_reason ?? "", /conflicting binding generation 1/u);
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("failed Session derivation leaves the predecessor manifest unpublished", () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "akk-store-session-upgrade-fail-"));
+  const storeDir = path.join(sandbox, "store");
+  const sessionId = "session-workspace-conflict";
+  try {
+    const manifestPath = writeStoreManifest(storeDir, { writerProtocol: 2 });
+    const manifestBefore = fs.readFileSync(manifestPath, "utf8");
+    for (const [index, workspace] of ["/workspace/one", "/workspace/two"].entries()) {
+      const turnId = `turn-workspace-${index + 1}`;
+      const paths = pathsForConversation(turnId, storeDir);
+      const conversation = {
+        ...createConversation({
+          userRequest: "workspace conflict",
+          sessionId,
+          turnId,
+          executorKind: "codex",
+          workspace
+        }),
+        store_dir: paths.storeDir,
+        conversation_dir: paths.conversationDir,
+        event_log_path: paths.logPath,
+        state_path: paths.statePath
+      };
+      fs.mkdirSync(paths.conversationDir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(paths.statePath, `${JSON.stringify(conversation, null, 2)}\n`, {
+        mode: 0o600
+      });
+    }
+
+    assert.throws(
+      () => ensureStoreWritable(storeDir),
+      /Turns disagree on agent or workspace/u
+    );
+    assert.equal(fs.readFileSync(manifestPath, "utf8"), manifestBefore);
+    assert.equal(
+      fs.existsSync(pathsForManagedSession(sessionId, storeDir).statePath),
+      false
+    );
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("upgrade refuses an unexpected predecessor Session tree before publishing protocol 3", () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "akk-store-unexpected-session-"));
+  const storeDir = path.join(sandbox, "store");
+  try {
+    const manifestPath = writeStoreManifest(storeDir, { writerProtocol: 2 });
+    const manifestBefore = fs.readFileSync(manifestPath, "utf8");
+    fs.mkdirSync(path.join(storeDir, "sessions", "not-a-sha256-key"), {
+      recursive: true,
+      mode: 0o700
+    });
+
+    assert.throws(
+      () => ensureStoreWritable(storeDir),
+      /invalid managed Session entry/u
+    );
+    assert.equal(fs.readFileSync(manifestPath, "utf8"), manifestBefore);
+    assert.equal(inspectStoreCompatibility(storeDir).writer_protocol, 2);
   } finally {
     fs.rmSync(sandbox, { recursive: true, force: true });
   }

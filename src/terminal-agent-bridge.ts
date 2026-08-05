@@ -350,6 +350,30 @@ export class TerminalAgentBridge {
     });
   }
 
+  /**
+   * Clear a terminal composer's current input without submitting it. This is
+   * intentionally narrower than arbitrary key dispatch and always revalidates
+   * the exact terminal/process identity first.
+   */
+  async clearInputLine(
+    agent: ExecutorKind,
+    terminalControl: TerminalControlRef,
+    options: { runtime?: TerminalRuntimeIdentity } = {}
+  ): Promise<void> {
+    const adapter = this.registry.require(agent);
+    if (!terminalControl.capabilities.includes("send_keys")) {
+      throw new Error(`${adapter.displayName} terminal input is not supported`);
+    }
+    const verified = await this.verifyTerminalIdentity(
+      adapter.agent,
+      terminalControl,
+      options.runtime
+    );
+    await this.terminalProvider.sendKeys(verified.target, ["C-u"], {
+      socketPath: verified.socketPath
+    });
+  }
+
   async cancel(
     agent: ExecutorKind,
     terminalControl: TerminalControlRef,

@@ -44,7 +44,10 @@ export interface CodingAgentSessionProvider {
   listActiveSessions(): Promise<ActiveCodexProcess[]>;
   resolveActiveSessionIdentityForPid(
     pid: number,
-    cwd?: string
+    cwd?: string,
+    preferredSessionId?: string,
+    allowedCompanionIdentity?: ActiveAgentSessionIdentity,
+    allowedAdditionalIdentities?: readonly ActiveAgentSessionIdentity[]
   ): Promise<ActiveAgentSessionIdentity | undefined>;
   getSession(sessionId: string): Promise<CodexSessionSummary | undefined>;
   getForkContext(options: ForkContextOptions): Promise<ForkContextPackage | undefined>;

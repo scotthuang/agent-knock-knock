@@ -14,6 +14,9 @@ import {
   buildAkkCommandCliArgs,
   formatAkkListCommandResult,
   formatAkkRespondCommandResult,
+  formatAkkThreadsCommandResult,
+  formatAkkThreadTransitionCommandResult,
+  isAkkThreadTransitionSuccess,
   parseAkkCommand,
   resolvePluginStoreDir
 } from "./openclaw-plugin-helpers.js";
@@ -35,13 +38,13 @@ const sendParameters = {
       type: "string",
       minLength: 1,
       description:
-        "Authoritative AKK session id returned by list or a previous send. Ordinary sends target a session and create a new turn; a turn id is never a send destination."
+        "Authoritative AKK session id returned by list or a previous send. Ordinary sends target a session and create a new turn; discovery selectors, terminal ids, and turn ids are never session_id destinations."
     },
     selector: {
       type: "string",
       minLength: 1,
       description:
-        "Compatibility/discovery selector: codex, claude, only, latest, an @short-ref, or a live terminal id. Prefer session_id once a session exists. Omit both fields only when AKK should attach the unique eligible idle pane."
+        "Compatibility/discovery selector: codex, claude, only, latest, an @short-ref, or a live terminal id. Use one only when explicitly named by the user or prefilled by list; never infer it. Prefer session_id once a session exists. Omit both fields only when AKK should attach the unique eligible idle pane."
     },
     request: {
       type: "string",
@@ -80,7 +83,7 @@ const respondParameters = {
     turn_id: {
       type: "string",
       description:
-        "Authoritative AKK turn id from a question or blocked callback. A response continues this exact in-flight turn and does not create a new turn."
+        "Authoritative AKK turn id from a question or blocked callback, never a discovery selector or terminal id. A response continues this exact in-flight turn and does not create a new turn."
     },
     request: {
       type: "string",
@@ -113,6 +116,81 @@ const listParameters = {
     },
     idleTimeoutMinutes: {
       type: "number"
+    }
+  }
+};
+
+const listResumableThreadsParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["terminal_id"],
+  properties: {
+    terminal_id: {
+      type: "string",
+      minLength: 1,
+      pattern: "^terminal:v[0-9]+:\\S+$",
+      description:
+        "Exact full terminal_id from the selected terminal row's current available_actions. Do not use a short ref, session id, turn id, or constructed selector."
+    }
+  }
+};
+
+const newThreadParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["terminal_id", "expected_binding_token"],
+  properties: {
+    terminal_id: {
+      type: "string",
+      minLength: 1,
+      pattern: "^terminal:v[0-9]+:\\S+$",
+      description:
+        "Exact full terminal_id from the same current lifecycle snapshot as expected_binding_token."
+    },
+    expected_binding_token: {
+      type: "string",
+      minLength: 1,
+      description:
+        "Fresh compare-and-swap token prefilled by this terminal's available new_thread action or returned by agent_knock_knock_list_resumable_threads. Never guess, construct, or reuse it after another terminal action."
+    }
+  }
+};
+
+const resumeThreadParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "terminal_id",
+    "native_thread_id",
+    "expected_binding_token",
+    "candidate_token"
+  ],
+  properties: {
+    terminal_id: {
+      type: "string",
+      minLength: 1,
+      pattern: "^terminal:v[0-9]+:\\S+$",
+      description:
+        "Exact full terminal_id passed to agent_knock_knock_list_resumable_threads."
+    },
+    native_thread_id: {
+      type: "string",
+      pattern:
+        "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+      description:
+        "Complete native thread UUID from a resumable=true row returned for this exact terminal. Never truncate, guess, or select an unavailable row."
+    },
+    expected_binding_token: {
+      type: "string",
+      minLength: 1,
+      description:
+        "Fresh compare-and-swap token from the same agent_knock_knock_list_resumable_threads result as native_thread_id."
+    },
+    candidate_token: {
+      type: "string",
+      minLength: 1,
+      description:
+        "Opaque fingerprint from the selected resumable thread row in the same current list result. It binds resume to that exact historical file/evidence snapshot; never construct or reuse it."
     }
   }
 };
@@ -221,7 +299,12 @@ const cancelParameters = {
 const closeParameters = {
   type: "object",
   additionalProperties: false,
-  not: { required: ["turn_id", "conversation_id"] },
+  not: {
+    anyOf: [
+      { required: ["turn_id", "conversation_id"] },
+      { required: ["expected_message_id", "expected_transition_id"] }
+    ]
+  },
   anyOf: [
     { required: ["turn_id"] },
     { required: ["conversation_id"] }
@@ -243,7 +326,12 @@ const closeParameters = {
     expected_message_id: {
       type: "string",
       description:
-        "Required only to clear an orphaned terminal dispatch shown by AKK list. Must exactly match that entry's current message_id."
+        "Required only to clear an orphaned terminal dispatch shown by AKK list. Must exactly match that entry's current message_id and must not be combined with expected_transition_id."
+    },
+    expected_transition_id: {
+      type: "string",
+      description:
+        "Required only to recover an unresolved native-thread lifecycle transition shown by AKK list. Must exactly match that entry's current transition_id and must not be combined with expected_message_id."
     }
   }
 };
@@ -334,21 +422,21 @@ function createPlugin(relayPath: string): OpenClawPluginDefinition {
 
     api.registerCommand?.({
       name: "akk",
-      description: "Send coding work through existing Codex or Claude Code tmux terminals, inspect managed turns, approve exact prompts, and cancel running work.",
+      description: "Send coding work through existing Codex or Claude Code tmux terminals, inspect managed turns, and explicitly start, clear, list, or resume native threads.",
       acceptsArgs: true,
       requireAuth: true,
       nativeProgressMessages: {
         default: "AKK is handling the request..."
       },
       agentPromptGuidance: [
-        "Use /akk <task> when exactly one eligible idle coding-agent tmux pane should receive new work. Use /akk codex: <task>, /akk claude: <task>, or another selector returned by /akk list to target an existing pane. AKK never starts a coding agent."
+        "Use /akk <task> when exactly one eligible idle coding-agent tmux pane should receive new work. Use /akk codex: <task>, /akk claude: <task>, or another selector returned by /akk list to target an existing pane. Ordinary sends preserve native context. Use /akk threads, /akk new-thread or clear-thread, and /akk resume-thread only with an exact full terminal_id returned by /akk list; these switch native context without creating a Turn. AKK never starts a coding-agent process."
       ],
       handler: async (ctx) => handleAkkCommand(api, ctx)
     });
 
     registerCliTool(api, {
       name: "agent_knock_knock_list",
-      description: "List existing Codex and Claude Code tmux panes as the primary terminals[] resources. Each terminal may include managed.current_turn or managed.recent_turn; all=true also includes older managed.history and retained unavailable history. By default, unavailable_managed_turns contains attention-needed records whose pane is unavailable. Use only each row's available_actions and authoritative prefilled arguments: send targets a session and starts a new turn; respond targets the exact in-flight turn; managed controls target the exact turn; a raw terminal row may prefill its own compatibility selector for status or recovery controls. Never construct that selector. AKK revalidates every side effect and never starts a coding agent.",
+      description: "List existing Codex and Claude Code tmux panes as the primary terminals[] resources. Each terminal may include managed.current_turn or managed.recent_turn; all=true also includes older managed.history and retained unavailable history. By default, unavailable_managed_turns contains attention-needed records whose pane is unavailable. Use only each row's available_actions and authoritative prefilled arguments: send targets a session and starts a new turn; respond targets the exact in-flight turn; read-only thread listing targets the exact terminal, while new/resume mutations also require the current binding token and create no Turn; managed controls target the exact turn; a raw terminal row may prefill its own compatibility selector for status or recovery controls. Never construct identifiers or tokens. AKK revalidates every side effect and never starts a coding-agent process.",
       parameters: listParameters,
       buildArgs: (params) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
@@ -374,6 +462,79 @@ function createPlugin(relayPath: string): OpenClawPluginDefinition {
       }
     });
 
+    registerCliTool(api, {
+      name: "agent_knock_knock_list_resumable_threads",
+      description:
+        "List verified native Codex or Claude Code threads for one exact terminal. Call this only from that terminal row's available list_resumable_threads action. The result includes the current native identity, a fresh expected_binding_token, and exact candidate UUIDs with opaque candidate_token fingerprints; resume only a row with resumable=true and preserve both tokens from that same result. This is read-only and creates no AKK Turn.",
+      parameters: listResumableThreadsParameters,
+      normalizeTurnIdentity: false,
+      buildArgs: (params) => {
+        const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+        const args = [
+          "list-resumable-threads",
+          "--terminal",
+          requiredString(params.terminal_id, "terminal_id")
+        ];
+        pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
+        return args;
+      }
+    });
+
+    registerCliTool(api, {
+      name: "agent_knock_knock_new_thread",
+      description:
+        "Start and verify a clean native coding-agent thread in the same exact tmux terminal. Call only from a current available new_thread action, using its exact terminal_id and expected_binding_token, or immediately after agent_knock_knock_list_resumable_threads using that result's token. Never send /clear as ordinary task text. This lifecycle transition creates a new AKK Session but no Turn; use ordinary send afterward.",
+      parameters: newThreadParameters,
+      normalizeTurnIdentity: false,
+      isErrorResult: (result) => !isAkkThreadTransitionSuccess(result),
+      buildArgs: (params) => {
+        const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+        const args = [
+          "new-thread",
+          "--terminal",
+          requiredString(params.terminal_id, "terminal_id"),
+          "--expected-binding-token",
+          requiredString(
+            params.expected_binding_token,
+            "expected_binding_token"
+          )
+        ];
+        pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
+        return args;
+      }
+    });
+
+    registerCliTool(api, {
+      name: "agent_knock_knock_resume_thread",
+      description:
+        "Resume one exact verified historical native thread in the same tmux terminal. First call agent_knock_knock_list_resumable_threads, then pass its exact terminal_id and expected_binding_token plus one complete native_thread_id whose row says resumable=true and that same row's candidate_token. Never guess, truncate, or reuse IDs or tokens, and never send a resume slash command as ordinary task text. This creates or reactivates an AKK Session but creates no Turn.",
+      parameters: resumeThreadParameters,
+      normalizeTurnIdentity: false,
+      isErrorResult: (result) => !isAkkThreadTransitionSuccess(result),
+      buildArgs: (params) => {
+        const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+        const args = [
+          "resume-thread",
+          "--terminal",
+          requiredString(params.terminal_id, "terminal_id"),
+          "--native-thread",
+          requiredString(params.native_thread_id, "native_thread_id"),
+          "--expected-binding-token",
+          requiredString(
+            params.expected_binding_token,
+            "expected_binding_token"
+          ),
+          "--candidate-token",
+          requiredString(
+            params.candidate_token,
+            "candidate_token"
+          )
+        ];
+        pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
+        return args;
+      }
+    });
+
     api.registerTool(
       (_toolContext) => ({
         label: "AKK Status",
@@ -395,9 +556,9 @@ function createPlugin(relayPath: string): OpenClawPluginDefinition {
     api.registerTool(
       (toolContext) => ({
         label: "AKK Send",
-        name: "agent_knock_knock_send",
-        description:
-          "Start a new turn in an existing AKK session without clearing the coding agent's native context. Target session_id from list or a prior send; never pass a turn id. selector is compatibility-only for initial live-terminal discovery, and both fields may be omitted only when AKK should require one unique eligible idle pane. To answer an in-flight question, use agent_knock_knock_respond instead. For ordinary use add only request and omit monitoring timeouts unless the user explicitly asks to change them. timeoutSeconds is unsupported. AKK never starts a coding agent. This is asynchronous: after acceptance, yield and wait for the callback or a later explicit status request.",
+      name: "agent_knock_knock_send",
+      description:
+          "Start a new turn in an existing AKK session without clearing the coding agent's native context. Target the exact session_id from list or a prior send; never pass a turn id or discovery selector as session_id. selector is compatibility-only for initial live-terminal discovery: use one explicitly named by the user or prefilled by list, and never infer one. Both fields may be omitted only when AKK should require one unique eligible idle pane. To answer an in-flight question, use agent_knock_knock_respond instead. For ordinary use add only request and omit monitoring timeouts unless the user explicitly asks to change them. timeoutSeconds is unsupported. AKK never starts a coding agent. This is asynchronous: after acceptance, yield and wait for the callback or a later explicit status request.",
         parameters: sendParameters,
         async execute(_toolCallId, params) {
           const result = await runSendRequest(
@@ -421,7 +582,7 @@ function createPlugin(relayPath: string): OpenClawPluginDefinition {
         const args = [
           "respond",
           "--turn",
-          requiredString(params.turn_id, "turn_id"),
+          authoritativeManagedId(params.turn_id, "turn_id"),
           "--message",
           requiredString(params.request, "request")
         ];
@@ -497,17 +658,24 @@ function createPlugin(relayPath: string): OpenClawPluginDefinition {
     registerCliTool(api, {
       name: "agent_knock_knock_close",
       description:
-        "Close an AKK-managed turn record without terminating the shared tmux pane. For an orphaned terminal dispatch only, the user must explicitly request recovery and provide the exact expected_message_id reported by AKK list.",
+        "Close an AKK-managed turn record without terminating the shared tmux pane. For a list-prefilled raw-terminal recovery, the user must explicitly request it and provide the exact expected_message_id or expected_transition_id reported by that AKK list entry.",
       parameters: closeParameters,
+      isErrorResult: isBlockedTerminalDispatchResult,
       buildArgs: (params) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
         const args = ["close"];
+        assertExclusiveRecoveryFence(params);
         pushTurnTarget(args, params);
         pushOptional(args, "--reason", stringValue(params.reason));
         pushOptional(
           args,
           "--expected-message-id",
           stringValue(params.expected_message_id)
+        );
+        pushOptional(
+          args,
+          "--expected-transition-id",
+          stringValue(params.expected_transition_id)
         );
         pushOptional(
           args,
@@ -550,6 +718,67 @@ async function handleAkkCommand(api, ctx) {
       };
     }
     const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+    if (
+      parsed.action === "list-resumable-threads" ||
+      parsed.action === "new-thread" ||
+      parsed.action === "resume-thread"
+    ) {
+      const discoveryArgs = buildAkkCommandCliArgs(
+        {
+          action: "list-resumable-threads",
+          terminalId: parsed.terminalId
+        },
+        config
+      );
+      if (!discoveryArgs) {
+        throw new Error("could not build native-thread discovery command");
+      }
+      const discovery = runCli(api, discoveryArgs);
+      if (
+        parsed.action === "list-resumable-threads" ||
+        (
+          parsed.action === "resume-thread" &&
+          !parsed.nativeThreadId
+        )
+      ) {
+        return { text: formatAkkThreadsCommandResult(discovery) };
+      }
+      const expectedBindingToken = requiredString(
+        discovery.expected_binding_token,
+        "expected_binding_token from lifecycle discovery"
+      );
+      let candidateToken: string | undefined;
+      if (parsed.action === "resume-thread") {
+        const candidate = Array.isArray(discovery.threads)
+          ? discovery.threads.find((thread) =>
+              isRecord(thread) &&
+              stringValue(thread.native_thread_id) === parsed.nativeThreadId
+            )
+          : undefined;
+        if (!isRecord(candidate) || candidate.resumable !== true) {
+          throw new Error(
+            `native thread ${parsed.nativeThreadId} is not resumable in the current lifecycle snapshot`
+          );
+        }
+        candidateToken = requiredString(
+          candidate.candidate_token,
+          "candidate_token from the selected resumable thread"
+        );
+      }
+      const mutationArgs = buildAkkCommandCliArgs(parsed, config, {
+        sessionKey: ctx.sessionKey,
+        expectedBindingToken,
+        candidateToken
+      });
+      if (!mutationArgs) {
+        throw new Error("could not build native-thread lifecycle command");
+      }
+      const transitionResult = runCli(api, mutationArgs);
+      return {
+        text: formatAkkThreadTransitionCommandResult(transitionResult),
+        isError: !isAkkThreadTransitionSuccess(transitionResult)
+      };
+    }
     const args = buildAkkCommandCliArgs(parsed, config, {
       sessionKey: ctx.sessionKey
     });
@@ -590,7 +819,10 @@ async function handleAkkCommand(api, ctx) {
       case "cancel":
         return { text: formatCancelCommandResult(result) };
       case "close":
-        return { text: formatCloseCommandResult(result) };
+        return {
+          text: formatCloseCommandResult(result),
+          isError: isBlockedTerminalDispatchResult(result)
+        };
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -807,17 +1039,29 @@ function formatApproveCommandResult(result) {
 }
 
 function formatCloseCommandResult(result) {
-  if (
-    result.source === "terminal_control" &&
-    result.terminal_dispatch_resolved === true
-  ) {
+  if (result.source === "terminal_control") {
     const terminalControl = isRecord(result.terminal_control)
       ? result.terminal_control
       : {};
+    if (result.terminal_dispatch_resolved !== true) {
+      return [
+        "AKK did not clear the unresolved terminal dispatch fence.",
+        `terminal: ${terminalControl.target ?? "unknown"}`,
+        ...(stringValue(result.transition_id)
+          ? [`transition: ${stringValue(result.transition_id)}`]
+          : []),
+        `reason: ${stringValue(result.reason) ?? "the recorded lifecycle outcome could not be verified"}`,
+        "This terminal remains blocked. Do not retry or continue automatically; inspect the pane and use the fresh recovery action from /akk list."
+      ].join("\n");
+    }
     return [
       "AKK cleared the unresolved terminal dispatch fence.",
       `terminal: ${terminalControl.target ?? "unknown"}`,
-      `previous turn: ${result.owner_turn_id ?? result.owner_conversation_id ?? "unknown"}`,
+      ...(stringValue(result.transition_id)
+        ? [`transition: ${stringValue(result.transition_id)}`]
+        : [
+            `previous turn: ${result.owner_turn_id ?? result.owner_conversation_id ?? "unknown"}`
+          ]),
       "The coding agent and tmux pane remain open."
     ].join("\n");
   }
@@ -908,7 +1152,7 @@ async function runSendRequest(api, params, toolContext) {
     throw new Error("ordinary send accepts only one of session_id or selector");
   }
   const sessionId = Object.hasOwn(params, "session_id")
-    ? requiredString(params.session_id, "session_id")
+    ? authoritativeManagedId(params.session_id, "session_id")
     : undefined;
   const selector = Object.hasOwn(params, "selector")
     ? requiredString(params.selector, "selector")
@@ -963,9 +1207,17 @@ async function runSendRequest(api, params, toolContext) {
 
 function toolResult(
   result,
-  { submissionErrors = false }: { submissionErrors?: boolean } = {}
+  {
+    submissionErrors = false,
+    normalizeTurnIdentity = true,
+    forceError = false
+  }: {
+    submissionErrors?: boolean;
+    normalizeTurnIdentity?: boolean;
+    forceError?: boolean;
+  } = {}
 ) {
-  const normalized = withTurnIdentity(result);
+  const normalized = normalizeTurnIdentity ? withTurnIdentity(result) : result;
   const submissionError = submissionErrors && isSubmissionError(normalized);
   return {
     content: [
@@ -975,8 +1227,16 @@ function toolResult(
       }
     ],
     details: normalized,
-    ...(submissionError ? { isError: true } : {})
+    ...(submissionError || forceError ? { isError: true } : {})
   };
+}
+
+function isBlockedTerminalDispatchResult(result: unknown): boolean {
+  return Boolean(
+    isRecord(result) &&
+    result.source === "terminal_control" &&
+    result.terminal_dispatch_resolved !== true
+  );
 }
 
 function isSubmissionError(result: unknown): boolean {
@@ -1208,7 +1468,17 @@ async function runDelegate(api, params, toolContext) {
   };
 }
 
-function registerCliTool(api, { name, description, parameters, buildArgs }) {
+function registerCliTool(
+  api,
+  {
+    name,
+    description,
+    parameters,
+    buildArgs,
+    normalizeTurnIdentity = true,
+    isErrorResult = (_result: unknown) => false
+  }
+) {
   api.registerTool(
     (toolContext) => ({
       label: toolLabel(name),
@@ -1218,7 +1488,10 @@ function registerCliTool(api, { name, description, parameters, buildArgs }) {
       async execute(_toolCallId, params) {
         const result = runCli(api, buildArgs(isRecord(params) ? params : {}, toolContext));
         return toolResult(result, {
-          submissionErrors: name === "agent_knock_knock_respond"
+          submissionErrors: name === "agent_knock_knock_respond",
+          normalizeTurnIdentity,
+          forceError:
+            typeof isErrorResult === "function" && isErrorResult(result) === true
         });
       }
     }),
@@ -1763,13 +2036,38 @@ function pushTurnTarget(args, params) {
   }
   const turnId = stringValue(params.turn_id);
   if (turnId) {
-    args.push("--turn", turnId);
+    args.push("--turn", authoritativeManagedId(turnId, "turn_id"));
     return;
   }
   args.push(
     "--conversation",
     requiredString(params.conversation_id, "turn_id")
   );
+}
+
+function authoritativeManagedId(value, name) {
+  const id = requiredString(value, name).trim();
+  if (
+    /^(?:only|latest|codex|claude|(?:codex|claude):latest)$/iu.test(id) ||
+    /^@[0-9a-f]+$/iu.test(id) ||
+    /^terminal:/iu.test(id)
+  ) {
+    throw new Error(
+      `${name} must be an authoritative managed id, not a discovery selector or terminal id`
+    );
+  }
+  return id;
+}
+
+function assertExclusiveRecoveryFence(params) {
+  if (
+    stringValue(params.expected_message_id) &&
+    stringValue(params.expected_transition_id)
+  ) {
+    throw new Error(
+      "close accepts only one of expected_message_id or expected_transition_id"
+    );
+  }
 }
 
 function pushOptional(args, flag, value) {

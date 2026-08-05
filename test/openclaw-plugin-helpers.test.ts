@@ -7,9 +7,15 @@ import {
   buildAkkCommandCliArgs,
   formatAkkListCommandResult,
   formatAkkRespondCommandResult,
+  formatAkkThreadsCommandResult,
+  formatAkkThreadTransitionCommandResult,
   parseAkkCommand,
   resolvePluginStoreDir
 } from "../src/openclaw-plugin-helpers.js";
+
+const exactTerminalId = "terminal:v2:tmux:codex:work:0.0:1234";
+const currentNativeThreadId = "11111111-1111-4111-8111-111111111111";
+const resumableNativeThreadId = "22222222-2222-4222-8222-222222222222";
 
 test("bare /akk task leaves routing unset for unique-pane selection", () => {
   assert.deepEqual(
@@ -53,11 +59,208 @@ test("/akk help lists the supported tmux executors", () => {
   assert.match(usage, /\/akk doctor/);
   assert.match(usage, /\/akk respond <turn-selector>: <answer>/);
   assert.match(usage, /\/akk approve <turn-selector>/);
+  assert.match(usage, /\/akk threads <exact-terminal-id>/);
+  assert.match(usage, /\/akk new-thread <exact-terminal-id>/);
+  assert.match(usage, /\/akk clear-thread <exact-terminal-id>/);
+  assert.match(usage, /\/akk resume-thread <exact-terminal-id>/);
   assert.doesNotMatch(
     usage,
     /\/akk (?:status|respond|approve|cancel)[^\n]*session-selector/u
   );
   assert.doesNotMatch(usage, /\/akk (?:describe|send|renew|retry-callback|close)\b/u);
+});
+
+test("/akk native-thread commands require exact identities and keep clear as an alias", () => {
+  assert.deepEqual(parseAkkCommand(`threads ${exactTerminalId}`), {
+    action: "list-resumable-threads",
+    terminalId: exactTerminalId
+  });
+  assert.deepEqual(parseAkkCommand(`new-thread ${exactTerminalId}`), {
+    action: "new-thread",
+    terminalId: exactTerminalId
+  });
+  assert.deepEqual(parseAkkCommand(`clear-thread ${exactTerminalId}`), {
+    action: "new-thread",
+    terminalId: exactTerminalId
+  });
+  assert.deepEqual(parseAkkCommand(`resume-thread ${exactTerminalId}`), {
+    action: "resume-thread",
+    terminalId: exactTerminalId
+  });
+  assert.deepEqual(
+    parseAkkCommand(
+      `resume-thread ${exactTerminalId} ${resumableNativeThreadId.toUpperCase()}`
+    ),
+    {
+      action: "resume-thread",
+      terminalId: exactTerminalId,
+      nativeThreadId: resumableNativeThreadId
+    }
+  );
+  assert.throws(
+    () => parseAkkCommand("threads @a1b2c3d4"),
+    /exact terminal_id returned by \/akk list/u
+  );
+  assert.throws(
+    () => parseAkkCommand(`resume-thread ${exactTerminalId} 22222222`),
+    /complete UUID returned by \/akk threads/u
+  );
+});
+
+test("/akk lifecycle CLI arguments use a fresh internal binding token", () => {
+  const config = { storeDir: "/private/akk-store" };
+  assert.deepEqual(
+    buildAkkCommandCliArgs(
+      parseAkkCommand(`threads ${exactTerminalId}`),
+      config
+    ),
+    [
+      "list-resumable-threads",
+      "--terminal",
+      exactTerminalId,
+      "--store-dir",
+      "/private/akk-store"
+    ]
+  );
+  assert.deepEqual(
+    buildAkkCommandCliArgs(
+      parseAkkCommand(`resume-thread ${exactTerminalId}`),
+      config
+    ),
+    [
+      "list-resumable-threads",
+      "--terminal",
+      exactTerminalId,
+      "--store-dir",
+      "/private/akk-store"
+    ]
+  );
+  assert.deepEqual(
+    buildAkkCommandCliArgs(
+      parseAkkCommand(`new-thread ${exactTerminalId}`),
+      config,
+      { expectedBindingToken: "binding-token-1" }
+    ),
+    [
+      "new-thread",
+      "--terminal",
+      exactTerminalId,
+      "--expected-binding-token",
+      "binding-token-1",
+      "--store-dir",
+      "/private/akk-store"
+    ]
+  );
+  assert.deepEqual(
+    buildAkkCommandCliArgs(
+      parseAkkCommand(
+        `resume-thread ${exactTerminalId} ${resumableNativeThreadId}`
+      ),
+      config,
+      {
+        expectedBindingToken: "binding-token-2",
+        candidateToken: "candidate-token-2"
+      }
+    ),
+    [
+      "resume-thread",
+      "--terminal",
+      exactTerminalId,
+      "--native-thread",
+      resumableNativeThreadId,
+      "--expected-binding-token",
+      "binding-token-2",
+      "--candidate-token",
+      "candidate-token-2",
+      "--store-dir",
+      "/private/akk-store"
+    ]
+  );
+  assert.throws(
+    () => buildAkkCommandCliArgs(
+      parseAkkCommand(`new-thread ${exactTerminalId}`),
+      config
+    ),
+    /expected binding token is required/u
+  );
+  assert.throws(
+    () => buildAkkCommandCliArgs(
+      parseAkkCommand(
+        `resume-thread ${exactTerminalId} ${resumableNativeThreadId}`
+      ),
+      config,
+      { expectedBindingToken: "binding-token-without-candidate" }
+    ),
+    /candidate token is required/u
+  );
+});
+
+test("/akk close parses and forwards exactly one recovery identity", () => {
+  const transitionCommand = parseAkkCommand(
+    `close ${exactTerminalId} ` +
+    "--expected-transition-id transition-current"
+  );
+  assert.deepEqual(transitionCommand, {
+    action: "close",
+    turnId: exactTerminalId,
+    reason:
+      "Native-thread lifecycle transition recovered from /akk command",
+    expectedTransitionId: "transition-current"
+  });
+  assert.deepEqual(
+    buildAkkCommandCliArgs(
+      transitionCommand,
+      { storeDir: "/private/akk-store" }
+    ),
+    [
+      "close",
+      "--turn",
+      exactTerminalId,
+      "--reason",
+      "Native-thread lifecycle transition recovered from /akk command",
+      "--expected-transition-id",
+      "transition-current",
+      "--store-dir",
+      "/private/akk-store"
+    ]
+  );
+
+  const messageCommand = parseAkkCommand(
+    `close ${exactTerminalId} --expected-message-id message-current inspected`
+  );
+  assert.deepEqual(messageCommand, {
+    action: "close",
+    turnId: exactTerminalId,
+    reason: "inspected",
+    expectedMessageId: "message-current"
+  });
+  assert.deepEqual(
+    buildAkkCommandCliArgs(messageCommand, {}),
+    [
+      "close",
+      "--turn",
+      exactTerminalId,
+      "--reason",
+      "inspected",
+      "--expected-message-id",
+      "message-current"
+    ]
+  );
+
+  assert.throws(
+    () => parseAkkCommand(
+      `close ${exactTerminalId} --expected-message-id message-current ` +
+      "--expected-transition-id transition-current"
+    ),
+    /mutually exclusive/u
+  );
+  assert.throws(
+    () => parseAkkCommand(
+      `close ${exactTerminalId} --expected-transition-id transition-current ` +
+      "--expected-message-id message-current"
+    ),
+    /mutually exclusive/u
+  );
 });
 
 test("/akk doctor ignores the removed top-level workspace and uses the OpenClaw binary", () => {
@@ -329,6 +532,13 @@ test("/akk list renders each live terminal once with its managed-turn context", 
       process_state: "active",
       activity_state: "idle",
       terminal_control: { target: "work:0.0" },
+      available_actions: {
+        new_thread: { arguments: { terminal_id: exactTerminalId } },
+        list_resumable_threads: {
+          arguments: { terminal_id: exactTerminalId }
+        },
+        resume_thread: { arguments: { terminal_id: exactTerminalId } }
+      },
       managed: {
         session_id: "session-managed-long-id",
         session_short_ref: "@session1",
@@ -352,6 +562,11 @@ test("/akk list renders each live terminal once with its managed-turn context", 
   assert.match(text, /AKK terminals \(1 live, 0 unavailable managed turns\)/u);
   assert.match(text, /@terminal1 \| codex \| active \| idle \| tmux work:0\.0/u);
   assert.match(text, /AKK session: @session1/u);
+  assert.match(text, new RegExp(`lifecycle terminal_id: ${exactTerminalId.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}`, "u"));
+  assert.match(
+    text,
+    /terminal actions: list_resumable_threads, new_thread, resume_thread/u
+  );
   assert.match(text, /recent turn: @managed1 \| codex \| idle \| Review the repository/u);
   assert.match(text, /recent turn actions: status/u);
   assert.match(text, /older managed turns: 2/u);
@@ -378,6 +593,29 @@ test("/akk list exposes the exact orphaned terminal dispatch recovery command", 
   assert.match(
     text,
     /recovery: \/akk close terminal:v2:tmux:codex:work:0\.0:1234 --expected-message-id message-1/u
+  );
+});
+
+test("/akk list exposes the exact native-thread transition recovery command", () => {
+  const text = formatAkkListCommandResult({
+    terminals: [{
+      id: "terminal:v2:tmux:codex:work:0.0:1234",
+      short_ref: "@terminal1",
+      agent: "codex",
+      process_state: "active",
+      orphaned_terminal_dispatch: {
+        kind: "lifecycle",
+        transition_id: "transition-current",
+        recovery:
+          "/akk close terminal:v2:tmux:codex:work:0.0:1234 " +
+          "--expected-transition-id transition-current"
+      }
+    }]
+  });
+
+  assert.match(
+    text,
+    /recovery: \/akk close terminal:v2:tmux:codex:work:0\.0:1234 --expected-transition-id transition-current/u
   );
 });
 
@@ -466,6 +704,70 @@ test("/akk list reports an empty terminal-first view", () => {
     formatAkkListCommandResult({ terminals: [], unavailable_managed_turns: [] }),
     "AKK found no live terminals or unavailable managed turns."
   );
+});
+
+test("/akk threads renders exact candidates without exposing the CAS token", () => {
+  const text = formatAkkThreadsCommandResult({
+    terminal_id: exactTerminalId,
+    current_session_id: "session-current",
+    current_native_thread_id: currentNativeThreadId,
+    expected_binding_token: "binding-token-private-to-handler",
+    threads: [
+      {
+        native_thread_id: currentNativeThreadId,
+        resumable: false,
+        unavailable_reason: "already_active",
+        updated_at: "2026-08-06T08:00:00.000Z"
+      },
+      {
+        native_thread_id: resumableNativeThreadId,
+        resumable: true,
+        candidate_token: "candidate-token-private-to-handler",
+        title: "Implement lifecycle controls",
+        preview: "Continue the exact historical context"
+      }
+    ]
+  });
+
+  assert.match(
+    text,
+    new RegExp(
+      exactTerminalId.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"),
+      "u"
+    )
+  );
+  assert.match(text, new RegExp(resumableNativeThreadId, "u"));
+  assert.match(text, /already_active/u);
+  assert.match(text, /1 resumable/u);
+  assert.match(
+    text,
+    new RegExp(
+      `/akk resume-thread ${exactTerminalId.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")} <native-thread-uuid>`,
+      "u"
+    )
+  );
+  assert.match(text, /does not create an AKK Turn/u);
+  assert.doesNotMatch(text, /binding-token-private-to-handler/u);
+  assert.doesNotMatch(text, /candidate-token-private-to-handler/u);
+});
+
+test("/akk thread transition output distinguishes Session switching from Turn creation", () => {
+  const text = formatAkkThreadTransitionCommandResult({
+    status: "committed",
+    operation: "new_thread",
+    terminal_id: exactTerminalId,
+    previous_session_id: "session-before",
+    session_id: "session-after",
+    previous_native_thread_id: currentNativeThreadId,
+    native_thread_id: resumableNativeThreadId,
+    binding_generation: 2,
+    turn_created: false
+  });
+
+  assert.match(text, /started and verified a new native thread/u);
+  assert.match(text, /^session: session-after$/mu);
+  assert.match(text, /^binding generation: 2$/mu);
+  assert.match(text, /No AKK Turn was created/u);
 });
 
 test("relative plugin storeDir resolves against the Gateway cwd", () => {

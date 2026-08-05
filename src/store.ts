@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs";
 import os from "node:os";
@@ -10,6 +10,12 @@ import {
   type AgentMessage,
   type Conversation
 } from "./protocol.js";
+import {
+  assertManagedSessionState,
+  managedSessionStatesFromConversations,
+  managedSessionStorageKey,
+  type ManagedSessionState
+} from "./managed-session.js";
 
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
@@ -17,6 +23,8 @@ const STORE_SCHEMA = "agent-knock-knock/store";
 const STORE_MANIFEST_FILE = "manifest.json";
 const STORE_CONVERSATIONS_DIRECTORY = "conversations";
 const STORE_RUNTIME_DIRECTORY = "runtime";
+const STORE_SESSIONS_DIRECTORY = "sessions";
+const STORE_TRANSITIONS_DIRECTORY = "transitions";
 const STORE_WRITER_LOCK_FILE = ".akk-writer.lock";
 const STORE_MANIFEST_TEMP_PREFIX = `.${STORE_MANIFEST_FILE}.`;
 const STORE_MANIFEST_TEMP_SUFFIX = ".tmp";
@@ -30,8 +38,8 @@ const NO_FOLLOW_FLAG = typeof fs.constants.O_NOFOLLOW === "number"
   : 0;
 
 export const STORE_FORMAT_VERSION = 1;
-export const STORE_WRITER_PROTOCOL = 2;
-const STORE_UPGRADEABLE_WRITER_PROTOCOL = 1;
+export const STORE_WRITER_PROTOCOL = 3;
+const STORE_UPGRADEABLE_WRITER_PROTOCOLS = new Set([1, 2]);
 
 export interface StoreManifest {
   schema: typeof STORE_SCHEMA;
@@ -44,6 +52,14 @@ interface StoreManifestSnapshot {
   manifest: StoreManifest;
   device: bigint;
   inode: bigint;
+}
+
+interface UpgradeableStoreStateSnapshot {
+  conversation: Conversation;
+  statePath: string;
+  device: bigint;
+  inode: bigint;
+  contentsSha256: string;
 }
 
 export interface StoreCompatibility {
@@ -93,8 +109,48 @@ export function defaultLogDir(workspace = process.cwd()): string {
 
 export function ensureDir(dir: string): void {
   const resolvedDir = path.resolve(dir);
-  assertNotSymlink(resolvedDir, "store directory");
-  fs.mkdirSync(resolvedDir, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
+  const missing: string[] = [];
+  let cursor = resolvedDir;
+  while (true) {
+    try {
+      const existing = fs.lstatSync(cursor);
+      if (existing.isSymbolicLink() || !existing.isDirectory()) {
+        throw new Error(
+          `store directory must be a real directory, not a symlink: ${cursor}`
+        );
+      }
+      break;
+    } catch (error) {
+      if (!isNodeError(error, "ENOENT")) {
+        throw error;
+      }
+      missing.unshift(cursor);
+      const parent = path.dirname(cursor);
+      if (parent === cursor) {
+        throw new Error(`could not find an existing parent directory for ${dir}`);
+      }
+      cursor = parent;
+    }
+  }
+  for (const directory of missing) {
+    try {
+      fs.mkdirSync(directory, { mode: PRIVATE_DIRECTORY_MODE });
+    } catch (error) {
+      if (!isNodeError(error, "EEXIST")) {
+        throw error;
+      }
+    }
+    const created = fs.lstatSync(directory);
+    if (created.isSymbolicLink() || !created.isDirectory()) {
+      throw new Error(
+        `store directory must be a real directory, not a symlink: ${directory}`
+      );
+    }
+    fs.chmodSync(directory, PRIVATE_DIRECTORY_MODE);
+    // Persist each newly created directory entry before a child entry can be
+    // treated as durable. This also covers a recursively new custom Store path.
+    fsyncDirectory(path.dirname(directory));
+  }
   const stat = fs.lstatSync(resolvedDir);
   if (stat.isSymbolicLink() || !stat.isDirectory()) {
     throw new Error(`store directory must be a real directory, not a symlink: ${dir}`);
@@ -116,6 +172,10 @@ export function storeManifestPath(storeDir = defaultStoreDir()): string {
 
 export function storeConversationsDir(storeDir = defaultStoreDir()): string {
   return path.join(storeDir, STORE_CONVERSATIONS_DIRECTORY);
+}
+
+export function storeSessionsDir(storeDir = defaultStoreDir()): string {
+  return path.join(storeDir, STORE_SESSIONS_DIRECTORY);
 }
 
 export function inspectStoreCompatibility(
@@ -174,7 +234,7 @@ export function inspectStoreCompatibility(
   const compatible = readable && manifest.writer_protocol === STORE_WRITER_PROTOCOL;
   const upgradeable =
     readable &&
-    manifest.writer_protocol === STORE_UPGRADEABLE_WRITER_PROTOCOL;
+    STORE_UPGRADEABLE_WRITER_PROTOCOLS.has(manifest.writer_protocol);
   const writable = compatible || upgradeable;
   return {
     status: compatible
@@ -752,6 +812,181 @@ function assertCanonicalConversationDataPath(
   return canonical;
 }
 
+function managedSessionStatePath(storeDir: string, sessionId: string): string {
+  return path.join(
+    storeSessionsDir(storeDir),
+    managedSessionStorageKey(sessionId),
+    "state.json"
+  );
+}
+
+function tryReadMaterializedManagedSession(
+  statePath: string,
+  expectedSessionId: string
+): ManagedSessionState | undefined {
+  try {
+    const fd = openRegularFileNoFollow(
+      statePath,
+      fs.constants.O_RDONLY,
+      "managed session state"
+    );
+    try {
+      const parsed = JSON.parse(fs.readFileSync(fd, "utf8"));
+      assertManagedSessionState(parsed, expectedSessionId);
+      return parsed;
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (error) {
+    if (isNodeError(error, "ENOENT")) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+function materializeManagedSessionStatesWhileLocked(
+  storeDir: string,
+  states: readonly ManagedSessionState[],
+  replaceMigrationRevisionOne: boolean
+): void {
+  const sessionsDir = storeSessionsDir(storeDir);
+  assertNotSymlink(sessionsDir, "managed sessions directory");
+  ensureDir(sessionsDir);
+
+  const writes: Array<{ path: string; state: ManagedSessionState }> = [];
+  for (const state of states) {
+    assertManagedSessionState(state, state.session_id);
+    const statePath = managedSessionStatePath(storeDir, state.session_id);
+    const existing = tryReadMaterializedManagedSession(
+      statePath,
+      state.session_id
+    );
+    if (existing && JSON.stringify(existing) === JSON.stringify(state)) {
+      continue;
+    }
+    if (
+      existing &&
+      !(
+        replaceMigrationRevisionOne &&
+        existing.revision === 1 &&
+        existing.lineage.created_by === "migration"
+      )
+    ) {
+      throw new Error(
+        `managed Session ${state.session_id} already has non-migration state; ` +
+        "refusing to overwrite it during Store materialization"
+      );
+    }
+    writes.push({ path: statePath, state });
+  }
+
+  for (const write of writes) {
+    atomicSaveManagedSessionState(write.path, write.state);
+  }
+  // Record-directory creation and every state rename are durable before a
+  // protocol-3 manifest can become visible.
+  fsyncDirectory(sessionsDir);
+  fsyncDirectory(storeDir);
+}
+
+function assertUpgradeableManagedSessionTree(
+  storeDir: string,
+  expectedStates: readonly ManagedSessionState[]
+): void {
+  const sessionsDir = storeSessionsDir(storeDir);
+  let rootStat: fs.Stats;
+  try {
+    rootStat = fs.lstatSync(sessionsDir);
+  } catch (error) {
+    if (isNodeError(error, "ENOENT")) {
+      return;
+    }
+    throw error;
+  }
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    throw new Error(
+      `managed sessions directory must be a real directory: ${sessionsDir}`
+    );
+  }
+  const expectedByKey = new Map(
+    expectedStates.map((state) => [managedSessionStorageKey(state.session_id), state])
+  );
+  for (const entry of fs.readdirSync(sessionsDir, { withFileTypes: true })) {
+    const entryPath = path.join(sessionsDir, entry.name);
+    if (
+      entry.isSymbolicLink() ||
+      !entry.isDirectory() ||
+      !/^[0-9a-f]{64}$/u.test(entry.name)
+    ) {
+      throw new Error(
+        `predecessor Store contains an invalid managed Session entry: ${entryPath}`
+      );
+    }
+    const expected = expectedByKey.get(entry.name);
+    if (!expected) {
+      throw new Error(
+        `predecessor Store contains unexpected managed Session state: ${entryPath}`
+      );
+    }
+    const statePath = path.join(entryPath, "state.json");
+    // An expected empty record directory is a recoverable crash residue. Any
+    // present state must already be a strict, correctly keyed Session record.
+    tryReadMaterializedManagedSession(statePath, expected.session_id);
+  }
+}
+
+function atomicSaveManagedSessionState(
+  statePath: string,
+  state: ManagedSessionState
+): void {
+  const recordDir = path.dirname(statePath);
+  const sessionsDir = path.dirname(recordDir);
+  assertNotSymlink(sessionsDir, "managed sessions directory");
+  ensureDir(recordDir);
+  assertNotSymlink(recordDir, "managed session directory");
+  const recordStat = fs.lstatSync(recordDir);
+  if (!recordStat.isDirectory()) {
+    throw new Error(`managed session directory must be a real directory: ${recordDir}`);
+  }
+  assertWritableDataPath(statePath, "managed session state");
+  const tempPath = path.join(
+    recordDir,
+    `.state.json.${process.pid}.${randomUUID()}.tmp`
+  );
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(
+      tempPath,
+      fs.constants.O_CREAT |
+        fs.constants.O_EXCL |
+        fs.constants.O_WRONLY |
+        NO_FOLLOW_FLAG,
+      PRIVATE_FILE_MODE
+    );
+    fs.fchmodSync(fd, PRIVATE_FILE_MODE);
+    fs.writeFileSync(fd, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+    assertWritableDataPath(statePath, "managed session state");
+    fs.renameSync(tempPath, statePath);
+    fs.chmodSync(statePath, PRIVATE_FILE_MODE);
+    fsyncDirectory(recordDir);
+  } finally {
+    if (fd !== undefined) {
+      fs.closeSync(fd);
+    }
+    try {
+      fs.unlinkSync(tempPath);
+    } catch (error) {
+      if (!isNodeError(error, "ENOENT")) {
+        throw error;
+      }
+    }
+  }
+}
+
 function ensureStoreDir(storeDir: string, currentConversationDir: string): void {
   const resolvedStoreDir = path.resolve(storeDir);
   assertNotSymlink(resolvedStoreDir, "store directory");
@@ -776,6 +1011,13 @@ function ensureStoreDir(storeDir: string, currentConversationDir: string): void 
       return true;
     }
     if (entry.name === STORE_RUNTIME_DIRECTORY && entry.isDirectory()) {
+      return true;
+    }
+    if (
+      (entry.name === STORE_SESSIONS_DIRECTORY ||
+        entry.name === STORE_TRANSITIONS_DIRECTORY) &&
+      entry.isDirectory()
+    ) {
       return true;
     }
     if (entryPath !== resolvedConversationsDir || !entry.isDirectory()) {
@@ -806,10 +1048,7 @@ function ensureStoreDir(storeDir: string, currentConversationDir: string): void 
 function prepareStoreRootForWriterLock(storeDir: string): void {
   const resolvedStoreDir = path.resolve(storeDir);
   if (!fs.existsSync(resolvedStoreDir)) {
-    fs.mkdirSync(resolvedStoreDir, {
-      recursive: true,
-      mode: PRIVATE_DIRECTORY_MODE
-    });
+    ensureDir(resolvedStoreDir);
   }
   assertNotSymlink(resolvedStoreDir, "store directory");
   const stat = fs.lstatSync(resolvedStoreDir);
@@ -837,6 +1076,7 @@ function ensureStoreWritableWhileLocked(storeDir: string): StoreManifest {
   // manifest has been validated under the root writer lock.
   fs.chmodSync(storeDir, PRIVATE_DIRECTORY_MODE);
   ensureDir(storeConversationsDir(storeDir));
+  ensureDir(storeSessionsDir(storeDir));
   return readStoreManifest(storeManifestPath(storeDir));
 }
 
@@ -969,10 +1209,16 @@ function upgradeStoreWriterProtocolWhileLocked(storeDir: string): void {
   const previous = readStoreManifestSnapshot(manifestPath);
   assertUpgradeableStoreManifest(previous.manifest, storeDir);
 
-  // Protocol 2 makes the Session/Turn identity pair a writer invariant. Check
-  // every existing state before publishing that claim, but do not rewrite any
-  // conversation state as part of the manifest upgrade.
-  assertUpgradeableStoreStateIdentities(storeDir);
+  // Protocol 3 makes Session state the routing/binding authority. Validate all
+  // predecessor Turns, derive every Session without using mutable Turn
+  // recency, and durably materialize those records before publishing the new
+  // manifest. Turn files and event logs remain byte-for-byte untouched.
+  const stateSnapshots = readUpgradeableStoreStateSnapshots(storeDir);
+  const sessions = managedSessionStatesFromConversations(
+    stateSnapshots.map(({ conversation }) => conversation)
+  );
+  assertUpgradeableManagedSessionTree(storeDir, sessions);
+  materializeManagedSessionStatesWhileLocked(storeDir, sessions, true);
 
   const upgraded: StoreManifest = {
     ...previous.manifest,
@@ -1002,13 +1248,14 @@ function upgradeStoreWriterProtocolWhileLocked(storeDir: string): void {
     // A process that ignores the root writer lock must not trick us into
     // replacing a different manifest. Re-check both file identity and the
     // supported predecessor immediately before the atomic rename.
+    revalidateUpgradeableStoreStateSnapshots(storeDir, stateSnapshots);
     const current = readStoreManifestSnapshot(manifestPath);
     if (
       current.device !== previous.device ||
       current.inode !== previous.inode ||
       current.manifest.schema !== previous.manifest.schema ||
       current.manifest.format_version !== previous.manifest.format_version ||
-      current.manifest.writer_protocol !== STORE_UPGRADEABLE_WRITER_PROTOCOL ||
+      current.manifest.writer_protocol !== previous.manifest.writer_protocol ||
       current.manifest.created_at !== previous.manifest.created_at
     ) {
       throw new Error(
@@ -1050,23 +1297,27 @@ function assertUpgradeableStoreManifest(
   if (
     manifest.schema !== STORE_SCHEMA ||
     manifest.format_version !== STORE_FORMAT_VERSION ||
-    manifest.writer_protocol !== STORE_UPGRADEABLE_WRITER_PROTOCOL
+    !STORE_UPGRADEABLE_WRITER_PROTOCOLS.has(manifest.writer_protocol)
   ) {
     throw new StoreCompatibilityError(
-      `store is not the supported writer protocol ${STORE_UPGRADEABLE_WRITER_PROTOCOL} predecessor`,
+      `store is not one of the supported writer protocol predecessors ${[
+        ...STORE_UPGRADEABLE_WRITER_PROTOCOLS
+      ].join(", ")}`,
       inspectStoreCompatibility(storeDir)
     );
   }
 }
 
-function assertUpgradeableStoreStateIdentities(storeDir: string): void {
+function readUpgradeableStoreStateSnapshots(
+  storeDir: string
+): UpgradeableStoreStateSnapshot[] {
   const conversationsDir = storeConversationsDir(storeDir);
   let conversationsStat: fs.Stats;
   try {
     conversationsStat = fs.lstatSync(conversationsDir);
   } catch (error) {
     if (isNodeError(error, "ENOENT")) {
-      return;
+      return [];
     }
     throw error;
   }
@@ -1076,6 +1327,7 @@ function assertUpgradeableStoreStateIdentities(storeDir: string): void {
     );
   }
 
+  const snapshots: UpgradeableStoreStateSnapshot[] = [];
   for (const entry of fs.readdirSync(conversationsDir, { withFileTypes: true })) {
     const conversationDir = path.join(conversationsDir, entry.name);
     const conversationStat = fs.lstatSync(conversationDir);
@@ -1108,16 +1360,57 @@ function assertUpgradeableStoreStateIdentities(storeDir: string): void {
     );
     try {
       let parsed: unknown;
+      let contents: string;
       try {
-        parsed = JSON.parse(fs.readFileSync(stateFd, "utf8"));
+        contents = fs.readFileSync(stateFd, "utf8");
+        parsed = JSON.parse(contents);
       } catch (error) {
         throw new Error(
           `invalid conversation state during Store upgrade: ${statePath}: ${error instanceof Error ? error.message : String(error)}`
         );
       }
-      assertConversationStateIdentity(parsed, entry.name);
+      const identity = assertConversationStateIdentity(parsed, entry.name);
+      const stat = fs.fstatSync(stateFd, { bigint: true });
+      snapshots.push({
+        conversation: {
+          ...identity.conversation,
+          session_id: identity.sessionId,
+          turn_id: identity.turnId
+        },
+        statePath,
+        device: stat.dev,
+        inode: stat.ino,
+        contentsSha256: createHash("sha256").update(contents).digest("hex")
+      });
     } finally {
       fs.closeSync(stateFd);
+    }
+  }
+  return snapshots;
+}
+
+function revalidateUpgradeableStoreStateSnapshots(
+  storeDir: string,
+  snapshots: readonly UpgradeableStoreStateSnapshot[]
+): void {
+  const current = readUpgradeableStoreStateSnapshots(storeDir);
+  const expectedByPath = new Map(
+    snapshots.map((snapshot) => [snapshot.statePath, snapshot])
+  );
+  if (current.length !== snapshots.length) {
+    throw new Error("conversation set changed during Store upgrade");
+  }
+  for (const actual of current) {
+    const expected = expectedByPath.get(actual.statePath);
+    if (
+      !expected ||
+      actual.device !== expected.device ||
+      actual.inode !== expected.inode ||
+      actual.contentsSha256 !== expected.contentsSha256
+    ) {
+      throw new Error(
+        `conversation state changed during Store upgrade: ${actual.statePath}`
+      );
     }
   }
 }

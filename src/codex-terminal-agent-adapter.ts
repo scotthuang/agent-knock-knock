@@ -11,8 +11,14 @@ import type {
   TerminalCompletionEvidence,
   TerminalDurableCompletionRequest,
   TerminalScreenInspection,
-  TerminalScreenInspectionOptions
+  TerminalScreenInspectionOptions,
+  TerminalThreadLifecycleCapabilities,
+  TerminalThreadLifecycleObservation,
+  TerminalThreadLifecycleObservationRequest,
+  TerminalThreadLifecycleOperation,
+  TerminalThreadLifecyclePlan
 } from "./terminal-agent-adapter.js";
+import { isExactNativeThreadId } from "./managed-session.js";
 
 export type CodexApprovalPromptDetection =
   | {
@@ -45,6 +51,10 @@ const CODEX_TRANSCRIPT_PROMPT_LINE = /^[›»](?:\s|$).*$/gmu;
 const CODEX_SKILLS_HINT = /^[›»]\s+Use \/skills\b/u;
 const CODEX_FOOTER_LINE =
   /^(?:gpt-[\w.-]+(?:\s|$)|[-\w.]+ default ·)/u;
+const CODEX_LIFECYCLE_VERSIONS = new Set(["0.146.0"]);
+const CODEX_LIFECYCLE_PROFILE = "codex-tui-0.146.0";
+const CODEX_SESSION_STATUS_PATTERN =
+  /\bSession:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/giu;
 
 export function createCodexTerminalAgentAdapter(
   options: CreateCodexTerminalAgentAdapterOptions = {}
@@ -66,10 +76,224 @@ export function createCodexTerminalAgentAdapter(
       return process?.kind === "codex_cli" ? process : undefined;
     },
     inspectScreen: inspectCodexScreen,
+    probeThreadLifecycle: probeCodexThreadLifecycle,
+    planThreadLifecycle: planCodexThreadLifecycle,
+    observeThreadLifecycle: observeCodexThreadLifecycle,
     detectDurableCompletion: options.detectDurableCompletion ?? (async (request) =>
       detectCodexDurableCompletion(request))
   };
 }
+
+export function probeCodexThreadLifecycle(
+  agentVersion: string | undefined
+): TerminalThreadLifecycleCapabilities {
+  if (!agentVersion) {
+    return {
+      status: "unknown",
+      newThread: false,
+      resumeExact: false,
+      reason: "the running Codex version could not be verified"
+    };
+  }
+  const supported = CODEX_LIFECYCLE_VERSIONS.has(agentVersion);
+  return {
+    status: supported ? "supported" : "unsupported",
+    agentVersion,
+    behaviorProfile: supported ? CODEX_LIFECYCLE_PROFILE : undefined,
+    newThread: supported,
+    resumeExact: supported,
+    candidateDiscovery: supported,
+    reason: supported
+      ? "Codex /clear, /status identity proof, and exact inline /resume are supported by the verified version"
+      : "this exact Codex version has no AKK native-thread lifecycle behavior profile"
+  };
+}
+
+export function planCodexThreadLifecycle(
+  operation: TerminalThreadLifecycleOperation,
+  capabilities: TerminalThreadLifecycleCapabilities
+): TerminalThreadLifecyclePlan {
+  if (
+    capabilities.status !== "supported" ||
+    !capabilities.agentVersion ||
+    !CODEX_LIFECYCLE_VERSIONS.has(capabilities.agentVersion) ||
+    capabilities.behaviorProfile !== CODEX_LIFECYCLE_PROFILE
+  ) {
+    throw new Error(capabilities.reason);
+  }
+  if (operation.kind === "new_thread") {
+    if (!capabilities.newThread) {
+      throw new Error("this Codex version does not support verified new-thread control");
+    }
+    return {
+      operation,
+      behaviorProfile: CODEX_LIFECYCLE_PROFILE,
+      steps: [
+        {
+          kind: "identity_probe_before",
+          command: "/status",
+          effect: "read_only",
+          requiresIdle: true
+        },
+        {
+          kind: "transition",
+          command: "/clear",
+          effect: "thread_transition",
+          requiresIdle: true
+        },
+        {
+          kind: "identity_probe_after",
+          command: "/status",
+          effect: "read_only",
+          requiresIdle: true
+        }
+      ],
+      command: "/clear",
+      identityProbeCommand: "/status",
+      expectedResult: { kind: "different_native_thread" }
+    };
+  }
+  if (!capabilities.resumeExact) {
+    throw new Error("this Codex version does not support verified exact resume control");
+  }
+  if (!isExactNativeThreadId(operation.nativeThreadId)) {
+    throw new Error("Codex resume requires a complete native thread UUID");
+  }
+  return {
+    operation,
+    behaviorProfile: CODEX_LIFECYCLE_PROFILE,
+    steps: [
+      {
+        kind: "transition",
+        command: `/resume ${operation.nativeThreadId}`,
+        effect: "thread_transition",
+        requiresIdle: true
+      },
+      {
+        kind: "identity_probe_after",
+        command: "/status",
+        effect: "read_only",
+        requiresIdle: true
+      }
+    ],
+    command: `/resume ${operation.nativeThreadId}`,
+    identityProbeCommand: "/status",
+    expectedResult: {
+      kind: "exact_native_thread",
+      nativeThreadId: operation.nativeThreadId
+    }
+  };
+}
+
+export function observeCodexThreadLifecycle(
+  request: TerminalThreadLifecycleObservationRequest
+): TerminalThreadLifecycleObservation;
+/** @deprecated Pass a typed observation request. */
+export function observeCodexThreadLifecycle(
+  screen: string,
+  operation: TerminalThreadLifecycleOperation
+): TerminalThreadLifecycleObservation;
+export function observeCodexThreadLifecycle(
+  requestOrScreen: TerminalThreadLifecycleObservationRequest | string,
+  legacyOperation?: TerminalThreadLifecycleOperation
+): TerminalThreadLifecycleObservation {
+  const request = typeof requestOrScreen === "string"
+    ? {
+        screen: requestOrScreen,
+        operation: legacyOperation ?? { kind: "new_thread" as const },
+        phase: "after" as const
+      }
+    : requestOrScreen;
+  const screen = request.screen ?? "";
+  const statusRegion = newestCodexStatusRegion(screen);
+  if (statusRegion === undefined) {
+    return {
+      status: "missing",
+      reason: "Codex /status marker is not visible in the observed screen region"
+    };
+  }
+  const matches = [...statusRegion.matchAll(CODEX_SESSION_STATUS_PATTERN)];
+  const ids = [...new Set(matches.map((match) => match[1].toLowerCase()))];
+  if (ids.length === 0) {
+    return {
+      status: "missing",
+      reason: "Codex /status did not expose a complete Session UUID"
+    };
+  }
+  if (ids.length !== 1) {
+    return {
+      status: "ambiguous",
+      reason: "the newest Codex /status region contains multiple Session UUIDs"
+    };
+  }
+  const nativeThreadId = ids[0];
+  const observed: TerminalThreadLifecycleObservation = {
+    status: "observed",
+    nativeThreadId,
+    evidence: "codex_status_card"
+  };
+  if (request.phase === "before") {
+    return observed;
+  }
+  if (request.operation.kind === "new_thread") {
+    if (!isExactNativeThreadId(request.beforeNativeThreadId)) {
+      return {
+        ...observed,
+        status: "mismatch",
+        reason: "a verified before-thread UUID is required for Codex /clear"
+      };
+    }
+    return nativeThreadId === request.beforeNativeThreadId.toLowerCase()
+      ? {
+          ...observed,
+          status: "mismatch",
+          reason: "Codex /clear did not change the Session UUID"
+        }
+      : { ...observed, status: "verified" };
+  }
+  const expected = (
+    request.expectedNativeThreadId ?? request.operation.nativeThreadId
+  ).toLowerCase();
+  if (!isExactNativeThreadId(expected)) {
+    return {
+      ...observed,
+      status: "mismatch",
+      reason: "Codex resume postcondition requires an exact target UUID"
+    };
+  }
+  return nativeThreadId === expected
+    ? { ...observed, status: "verified" }
+    : {
+        ...observed,
+        status: "mismatch",
+        reason: `Codex resumed ${nativeThreadId}, not the requested native thread ${expected}`
+      };
+}
+
+function newestCodexStatusRegion(screen: string): string | undefined {
+  const lines = screen.split(/\r?\n/u);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const command = codexLifecycleCommandLine(lines[index]);
+    if (command !== undefined) {
+      return command === "/status"
+        ? lines.slice(index).join("\n")
+        : undefined;
+    }
+  }
+  return undefined;
+}
+
+function codexLifecycleCommandLine(line: string): string | undefined {
+  const normalized = line
+    .trim()
+    .replace(/^[›»│]\s*/u, "")
+    .replace(/\s*│$/u, "")
+    .trim();
+  return /^\/(?:status|clear|resume)(?:\s|$)/u.test(normalized)
+    ? normalized
+    : undefined;
+}
+
 
 export const codexTerminalAgentAdapter = createCodexTerminalAgentAdapter();
 

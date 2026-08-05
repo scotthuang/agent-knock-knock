@@ -31,7 +31,10 @@ type ToolDefinition = {
     additionalProperties?: boolean;
     required?: string[];
     anyOf?: Array<{ required?: string[] }>;
-    not?: { required?: string[] };
+    not?: {
+      required?: string[];
+      anyOf?: Array<{ required?: string[] }>;
+    };
     properties?: Record<string, unknown>;
   };
   execute?: (
@@ -154,6 +157,15 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
   assert.equal(contractedTools.includes("agent_knock_knock_send"), true);
   assert.equal(contractedTools.includes("agent_knock_knock_respond"), true);
+  assert.equal(
+    contractedTools.includes("agent_knock_knock_list_resumable_threads"),
+    true
+  );
+  assert.equal(contractedTools.includes("agent_knock_knock_new_thread"), true);
+  assert.equal(
+    contractedTools.includes("agent_knock_knock_resume_thread"),
+    true
+  );
   for (const removedTool of [
     "agent_knock_knock_delegate",
     "agent_knock_knock_describe",
@@ -168,6 +180,259 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   ).configSchema?.properties ?? {};
   assert.equal("defaultAgent" in configProperties, false);
   assert.equal("workspace" in configProperties, false);
+});
+
+test("OpenClaw native-thread tools keep explicit CAS while slash commands refresh it internally", async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-plugin-native-thread-")
+  );
+  const fakeCli = path.join(tempDir, "native-thread.cjs");
+  const callsPath = path.join(tempDir, "calls.ndjson");
+  const terminalId = "terminal:v2:tmux:codex:work:0.0:1234";
+  const currentThreadId = "11111111-1111-4111-8111-111111111111";
+  const resumeThreadId = "22222222-2222-4222-8222-222222222222";
+  const lifecycleFailurePath = path.join(tempDir, "lifecycle-failure.txt");
+  const tools = new Map<string, ToolDefinition>();
+  let command:
+    | { handler?: (context: { args: string; sessionKey: string }) => Promise<any> }
+    | undefined;
+
+  try {
+    fs.writeFileSync(
+      fakeCli,
+      [
+        `const fs = require("node:fs");`,
+        `const args = process.argv.slice(2);`,
+        `fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(args) + "\\n");`,
+        `const action = args[0];`,
+        `const failureStatus = fs.existsSync(${JSON.stringify(lifecycleFailurePath)}) ? fs.readFileSync(${JSON.stringify(lifecycleFailurePath)}, "utf8").trim() : "";`,
+        `const terminalId = ${JSON.stringify(terminalId)};`,
+        `const currentThreadId = ${JSON.stringify(currentThreadId)};`,
+        `const resumeThreadId = ${JSON.stringify(resumeThreadId)};`,
+        `const result = action === "list-resumable-threads" ? {`,
+        `  terminal_id: terminalId,`,
+        `  current_session_id: "session-current",`,
+        `  current_native_thread_id: currentThreadId,`,
+        `  expected_binding_token: "fresh-binding-token",`,
+        `  threads: [{ native_thread_id: resumeThreadId, resumable: true, candidate_token: "fresh-candidate-token" }]`,
+        `} : failureStatus && (action === "new-thread" || action === "resume-thread") ? {`,
+        `  status: failureStatus, operation: action === "new-thread" ? "new_thread" : "resume_thread", terminal_id: terminalId,`,
+        `  transition_id: "transition-recovery-required", do_not_retry: true, turn_created: false,`,
+        `  reason: "lifecycle outcome requires exact recovery"`,
+        `} : action === "new-thread" ? {`,
+        `  status: "committed", operation: "new_thread", terminal_id: terminalId,`,
+        `  previous_session_id: "session-current", session_id: "session-new",`,
+        `  previous_native_thread_id: currentThreadId, native_thread_id: "33333333-3333-4333-8333-333333333333",`,
+        `  binding_generation: 2, turn_created: false`,
+        `} : {`,
+        `  status: "committed", operation: "resume_thread", terminal_id: terminalId,`,
+        `  previous_session_id: "session-current", session_id: "session-resumed",`,
+        `  previous_native_thread_id: currentThreadId, native_thread_id: resumeThreadId,`,
+        `  binding_generation: 2, turn_created: false`,
+        `};`,
+        `process.stdout.write(JSON.stringify(result));`
+      ].join("\n"),
+      "utf8"
+    );
+
+    (
+      createOpenClawPluginForTest(fakeCli) as unknown as {
+        register(api: Record<string, any>): void;
+      }
+    ).register({
+      pluginConfig: { storeDir: "/private/akk-store" },
+      logger: { info() {}, warn() {} },
+      registerGatewayMethod() {},
+      registerService() {},
+      registerCommand(value: typeof command) {
+        command = value;
+      },
+      registerTool(
+        tool: ToolDefinition | ToolFactory,
+        options?: { name?: string }
+      ) {
+        const definition = typeof tool === "function" ? tool({}) : tool;
+        if (options?.name) {
+          tools.set(options.name, definition);
+        }
+      }
+    });
+
+    const listTool = tools.get("agent_knock_knock_list_resumable_threads");
+    const newTool = tools.get("agent_knock_knock_new_thread");
+    const resumeTool = tools.get("agent_knock_knock_resume_thread");
+    assert.ok(listTool);
+    assert.ok(newTool);
+    assert.ok(resumeTool);
+    assert.deepEqual(listTool.parameters?.required, ["terminal_id"]);
+    assert.deepEqual(newTool.parameters?.required, [
+      "terminal_id",
+      "expected_binding_token"
+    ]);
+    assert.deepEqual(resumeTool.parameters?.required, [
+      "terminal_id",
+      "native_thread_id",
+      "expected_binding_token",
+      "candidate_token"
+    ]);
+    assert.equal(listTool.parameters?.additionalProperties, false);
+    assert.equal(newTool.parameters?.additionalProperties, false);
+    assert.equal(resumeTool.parameters?.additionalProperties, false);
+    for (const definition of [listTool, newTool, resumeTool]) {
+      const terminalSchema = definition.parameters?.properties?.terminal_id;
+      assert.match(
+        isRecord(terminalSchema) ? String(terminalSchema.pattern ?? "") : "",
+        /terminal:v/u
+      );
+    }
+    assert.match(newTool.description ?? "", /no Turn/u);
+    assert.match(resumeTool.description ?? "", /resumable=true/u);
+
+    const listed = await listTool.execute?.("list-threads", {
+      terminal_id: terminalId
+    });
+    assert.equal(listed?.details?.expected_binding_token, "fresh-binding-token");
+    const created = await newTool.execute?.("new-thread", {
+      terminal_id: terminalId,
+      expected_binding_token: "tool-binding-token"
+    });
+    assert.equal(created?.details?.session_id, "session-new");
+    assert.equal(Object.hasOwn(created?.details ?? {}, "turn_id"), false);
+    const resumed = await resumeTool.execute?.("resume-thread", {
+      terminal_id: terminalId,
+      native_thread_id: resumeThreadId,
+      expected_binding_token: "tool-resume-token",
+      candidate_token: "tool-candidate-token"
+    });
+    assert.equal(resumed?.details?.session_id, "session-resumed");
+    assert.equal(Object.hasOwn(resumed?.details ?? {}, "turn_id"), false);
+    await assert.rejects(
+      () => resumeTool.execute!("resume-without-candidate-token", {
+        terminal_id: terminalId,
+        native_thread_id: resumeThreadId,
+        expected_binding_token: "tool-resume-token"
+      }),
+      /candidate_token is required/u
+    );
+
+    const threadsSlash = await command?.handler?.({
+      args: `threads ${terminalId}`,
+      sessionKey: "agent:test:lifecycle"
+    });
+    assert.match(threadsSlash?.text ?? "", /1 resumable/u);
+    const chooseSlash = await command?.handler?.({
+      args: `resume-thread ${terminalId}`,
+      sessionKey: "agent:test:lifecycle"
+    });
+    assert.match(chooseSlash?.text ?? "", new RegExp(resumeThreadId, "u"));
+    const newSlash = await command?.handler?.({
+      args: `new-thread ${terminalId}`,
+      sessionKey: "agent:test:lifecycle"
+    });
+    assert.match(newSlash?.text ?? "", /No AKK Turn was created/u);
+    const clearSlash = await command?.handler?.({
+      args: `clear-thread ${terminalId}`,
+      sessionKey: "agent:test:lifecycle"
+    });
+    assert.match(clearSlash?.text ?? "", /started and verified/u);
+    const resumeSlash = await command?.handler?.({
+      args: `resume-thread ${terminalId} ${resumeThreadId}`,
+      sessionKey: "agent:test:lifecycle"
+    });
+    assert.match(resumeSlash?.text ?? "", /resumed and verified/u);
+
+    const calls = fs.readFileSync(callsPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as string[]);
+    assert.deepEqual(calls[0], [
+      "list-resumable-threads",
+      "--terminal",
+      terminalId,
+      "--store-dir",
+      "/private/akk-store"
+    ]);
+    assert.deepEqual(calls[1]?.slice(0, 7), [
+      "new-thread",
+      "--terminal",
+      terminalId,
+      "--expected-binding-token",
+      "tool-binding-token",
+      "--store-dir",
+      "/private/akk-store"
+    ]);
+    assert.deepEqual(calls[2]?.slice(0, 11), [
+      "resume-thread",
+      "--terminal",
+      terminalId,
+      "--native-thread",
+      resumeThreadId,
+      "--expected-binding-token",
+      "tool-resume-token",
+      "--candidate-token",
+      "tool-candidate-token",
+      "--store-dir",
+      "/private/akk-store"
+    ]);
+    const slashMutationCalls = calls.slice(5).filter((args) =>
+      args[0] === "new-thread" || args[0] === "resume-thread"
+    );
+    assert.equal(slashMutationCalls.length, 3);
+    for (const args of slashMutationCalls) {
+      assert.equal(
+        args[args.indexOf("--expected-binding-token") + 1],
+        "fresh-binding-token"
+      );
+    }
+    const slashResume = slashMutationCalls.find(
+      (args) => args[0] === "resume-thread"
+    );
+    assert.equal(
+      slashResume?.[slashResume.indexOf("--candidate-token") + 1],
+      "fresh-candidate-token"
+    );
+    assert.deepEqual(calls.slice(5).map((args) => args[0]), [
+      "list-resumable-threads",
+      "new-thread",
+      "list-resumable-threads",
+      "new-thread",
+      "list-resumable-threads",
+      "resume-thread"
+    ]);
+
+    fs.writeFileSync(lifecycleFailurePath, "uncertain");
+    const uncertainNewTool = await newTool.execute?.("new-thread-uncertain", {
+      terminal_id: terminalId,
+      expected_binding_token: "tool-binding-token-uncertain"
+    });
+    const uncertainResumeTool = await resumeTool.execute?.(
+      "resume-thread-uncertain",
+      {
+        terminal_id: terminalId,
+        native_thread_id: resumeThreadId,
+        expected_binding_token: "tool-resume-token-uncertain",
+        candidate_token: "tool-candidate-token-uncertain"
+      }
+    );
+    for (const failed of [uncertainNewTool, uncertainResumeTool]) {
+      assert.equal(failed?.isError, true);
+      assert.equal(failed?.details?.status, "uncertain");
+      assert.equal(failed?.details?.do_not_retry, true);
+    }
+
+    fs.writeFileSync(lifecycleFailurePath, "verified_recovery_required");
+    const failedResumeSlash = await command?.handler?.({
+      args: `resume-thread ${terminalId} ${resumeThreadId}`,
+      sessionKey: "agent:test:lifecycle-recovery-required"
+    });
+    assert.equal(failedResumeSlash?.isError, true);
+    assert.match(failedResumeSlash?.text ?? "", /Session commit requires recovery/u);
+    assert.match(failedResumeSlash?.text ?? "", /do not retry automatically/iu);
+    assert.match(failedResumeSlash?.text ?? "", /exact lifecycle recovery action/u);
+    assert.doesNotMatch(failedResumeSlash?.text ?? "", /resumed and verified/u);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("OpenClaw routing and reconciliation omit a global workspace argument", async () => {
@@ -373,13 +638,27 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
   const fakeCli = path.join(tempDir, "controls.cjs");
   const callsPath = path.join(tempDir, "calls.ndjson");
   const tools = new Map<string, ToolDefinition>();
+  let command:
+    | { handler?: (context: { args: string; sessionKey: string }) => Promise<any> }
+    | undefined;
 
   try {
     fs.writeFileSync(
       fakeCli,
       [
-        `require("node:fs").appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(process.argv.slice(2)) + "\\n");`,
-        `process.stdout.write("{}");`
+        `const args = process.argv.slice(2);`,
+        `require("node:fs").appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(args) + "\\n");`,
+        `const unresolvedLifecycle = args.includes("transition-current") || args.includes("transition-from-list");`,
+        `process.stdout.write(JSON.stringify(unresolvedLifecycle ? {`,
+        `  source: "terminal_control",`,
+        `  terminal_control: { target: "work:0.0" },`,
+        `  closed: false,`,
+        `  terminal_dispatch_resolved: false,`,
+        `  transition_id: "transition-from-list",`,
+        `  blocked: true,`,
+        `  do_not_retry: true,`,
+        `  reason: "live identity mismatch"`,
+        `} : {}));`
       ].join("\n"),
       "utf8"
     );
@@ -392,7 +671,9 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
       logger: { info() {}, warn() {} },
       registerGatewayMethod() {},
       registerService() {},
-      registerCommand() {},
+      registerCommand(value: typeof command) {
+        command = value;
+      },
       registerTool(
         tool: ToolDefinition | ToolFactory,
         options?: { name?: string }
@@ -420,9 +701,22 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
         { required: ["turn_id"] },
         { required: ["conversation_id"] }
       ]);
-      assert.deepEqual(definition.parameters?.not, {
-        required: ["turn_id", "conversation_id"]
-      });
+      assert.deepEqual(
+        definition.parameters?.not,
+        name === "agent_knock_knock_close"
+          ? {
+              anyOf: [
+                { required: ["turn_id", "conversation_id"] },
+                {
+                  required: [
+                    "expected_message_id",
+                    "expected_transition_id"
+                  ]
+                }
+              ]
+            }
+          : { required: ["turn_id", "conversation_id"] }
+      );
     }
     assert.equal(
       Object.hasOwn(
@@ -445,6 +739,20 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
       assert.match(description, /raw-terminal|raw terminal/u, name);
       assert.match(description, /never construct|never guess/u, name);
     }
+    const closeTool = tools.get("agent_knock_knock_close");
+    assert.equal(closeTool?.parameters?.additionalProperties, false);
+    assert.ok(closeTool?.parameters?.properties?.expected_message_id);
+    assert.ok(closeTool?.parameters?.properties?.expected_transition_id);
+    assert.match(closeTool?.description ?? "", /expected_transition_id/u);
+
+    await assert.rejects(
+      () => closeTool!.execute!("ambiguous-recovery-fence", {
+        conversation_id: "terminal:v2:tmux:codex:work:0.0:1234",
+        expected_message_id: "message-current",
+        expected_transition_id: "transition-current"
+      }),
+      /only one of expected_message_id or expected_transition_id/u
+    );
 
     for (const name of [
       "agent_knock_knock_status",
@@ -467,6 +775,42 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
       );
     }
 
+    const sendTool = tools.get("agent_knock_knock_send");
+    const respondTool = tools.get("agent_knock_knock_respond");
+    for (const invalidSessionId of [
+      "only",
+      "@deadbeef",
+      "terminal:v2:tmux:codex:work:0.0:1234"
+    ]) {
+      await assert.rejects(
+        () => sendTool!.execute!("invalid-session-id", {
+          session_id: invalidSessionId,
+          request: "must not reinterpret an authoritative id"
+        }),
+        /session_id must be an authoritative managed id/u
+      );
+    }
+    for (const invalidTurnId of [
+      "latest",
+      "@deadbeef",
+      "terminal:v2:tmux:codex:work:0.0:1234"
+    ]) {
+      await assert.rejects(
+        () => respondTool!.execute!("invalid-turn-id", {
+          turn_id: invalidTurnId,
+          request: "must not reinterpret an authoritative id"
+        }),
+        /turn_id must be an authoritative managed id/u
+      );
+      await assert.rejects(
+        () => tools.get("agent_knock_knock_status")!.execute!(
+          "invalid-status-turn-id",
+          { turn_id: invalidTurnId }
+        ),
+        /turn_id must be an authoritative managed id/u
+      );
+    }
+
     await tools.get("agent_knock_knock_status")?.execute?.("status", {
       turn_id: "turn-status"
     });
@@ -486,6 +830,31 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
     await tools.get("agent_knock_knock_close")?.execute?.("close", {
       turn_id: "turn-close"
     });
+    const blockedCloseTool = await tools.get("agent_knock_knock_close")?.execute?.(
+      "recover-lifecycle",
+      {
+        conversation_id:
+          "terminal:v2:tmux:codex:work:0.0:1234",
+        expected_transition_id: "transition-current"
+      }
+    );
+    assert.equal(blockedCloseTool?.isError, true);
+    assert.equal(blockedCloseTool?.details?.terminal_dispatch_resolved, false);
+    assert.equal(blockedCloseTool?.details?.blocked, true);
+    const slashRecovery = await command?.handler?.({
+      args:
+        `close terminal:v2:tmux:codex:work:0.0:1234 ` +
+        "--expected-transition-id transition-from-list",
+      sessionKey: "agent:test:lifecycle-recovery"
+    });
+    assert.equal(slashRecovery?.isError, true);
+    assert.match(
+      slashRecovery?.text ?? "",
+      /did not clear the unresolved terminal dispatch fence/u
+    );
+    assert.match(slashRecovery?.text ?? "", /remains blocked/u);
+    assert.match(slashRecovery?.text ?? "", /Do not retry/u);
+    assert.doesNotMatch(slashRecovery?.text ?? "", /Turn record closed/u);
 
     const calls = fs.readFileSync(callsPath, "utf8")
       .trim()
@@ -497,7 +866,35 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
       ["renew", "--turn", "turn-renew"],
       ["retry-callback", "--turn", "turn-retry"],
       ["cancel", "--turn", "turn-cancel"],
-      ["close", "--turn", "turn-close"]
+      ["close", "--turn", "turn-close"],
+      [
+        "close",
+        "--conversation",
+        "terminal:v2:tmux:codex:work:0.0:1234",
+        "--expected-transition-id"
+      ],
+      [
+        "close",
+        "--turn",
+        "terminal:v2:tmux:codex:work:0.0:1234",
+        "--reason"
+      ]
+    ]);
+    assert.deepEqual(calls.at(-2)?.slice(0, 5), [
+      "close",
+      "--conversation",
+      "terminal:v2:tmux:codex:work:0.0:1234",
+      "--expected-transition-id",
+      "transition-current"
+    ]);
+    assert.deepEqual(calls.at(-1), [
+      "close",
+      "--turn",
+      "terminal:v2:tmux:codex:work:0.0:1234",
+      "--reason",
+      "Native-thread lifecycle transition recovered from /akk command",
+      "--expected-transition-id",
+      "transition-from-list"
     ]);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });

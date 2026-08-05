@@ -6,7 +6,10 @@ import {
   codexTerminalAgentAdapter,
   detectCodexApprovalPrompt,
   detectCodexDurableCompletion,
-  inspectCodexScreen
+  inspectCodexScreen,
+  observeCodexThreadLifecycle,
+  planCodexThreadLifecycle,
+  probeCodexThreadLifecycle
 } from "../src/codex-terminal-agent-adapter.js";
 import { claudeTerminalAgentAdapter } from "../src/claude-terminal-agent-adapter.js";
 import { terminalAgentAdapterFor } from "../src/terminal-agent-registry.js";
@@ -362,5 +365,150 @@ test("adapter capabilities advertise semantic terminal behavior explicitly", () 
   assert.equal(
     codexTerminalAgentAdapter.classifyProcess({ pid: 42, command: "codex", cwd: "/repo" })?.kind,
     "codex_cli"
+  );
+});
+
+test("Codex 0.146.0 lifecycle plan uses closed status-clear-status steps", () => {
+  const capabilities = probeCodexThreadLifecycle("0.146.0");
+  assert.equal(capabilities.status, "supported");
+  assert.equal(
+    capabilities.behaviorProfile,
+    "codex-tui-0.146.0"
+  );
+  assert.equal(probeCodexThreadLifecycle("0.146.1").status, "unsupported");
+  assert.equal(probeCodexThreadLifecycle("0.146.2").status, "unsupported");
+  assert.equal(probeCodexThreadLifecycle(undefined).status, "unknown");
+
+  const fresh = planCodexThreadLifecycle(
+    { kind: "new_thread" },
+    capabilities
+  );
+  assert.deepEqual(fresh.steps, [
+    {
+      kind: "identity_probe_before",
+      command: "/status",
+      effect: "read_only",
+      requiresIdle: true
+    },
+    {
+      kind: "transition",
+      command: "/clear",
+      effect: "thread_transition",
+      requiresIdle: true
+    },
+    {
+      kind: "identity_probe_after",
+      command: "/status",
+      effect: "read_only",
+      requiresIdle: true
+    }
+  ]);
+
+  const target = "11111111-1111-4111-8111-111111111111";
+  const resume = planCodexThreadLifecycle(
+    { kind: "resume_thread", nativeThreadId: target },
+    capabilities
+  );
+  assert.deepEqual(
+    resume.steps.map((step) => [step.kind, step.command]),
+    [
+      ["transition", `/resume ${target}`],
+      ["identity_probe_after", "/status"]
+    ]
+  );
+  assert.throws(
+    () => planCodexThreadLifecycle(
+      { kind: "resume_thread", nativeThreadId: "partial" },
+      capabilities
+    ),
+    /complete native thread UUID/u
+  );
+});
+
+test("Codex lifecycle observer verifies only a fresh exact status UUID", () => {
+  const before = "11111111-1111-4111-8111-111111111111";
+  const after = "22222222-2222-4222-8222-222222222222";
+  const statusScreen = [
+    "/status",
+    "╭────────────────────────────────────╮",
+    `│  Session:          ${after} │`,
+    "╰────────────────────────────────────╯"
+  ].join("\n");
+  assert.deepEqual(
+    observeCodexThreadLifecycle({
+      operation: { kind: "new_thread" },
+      phase: "after",
+      beforeNativeThreadId: before,
+      screen: statusScreen
+    }),
+    {
+      status: "verified",
+      nativeThreadId: after,
+      evidence: "codex_status_card"
+    }
+  );
+  assert.equal(
+    observeCodexThreadLifecycle({
+      operation: { kind: "new_thread" },
+      phase: "after",
+      beforeNativeThreadId: after,
+      screen: statusScreen
+    }).status,
+    "mismatch"
+  );
+  assert.equal(
+    observeCodexThreadLifecycle({
+      operation: { kind: "resume_thread", nativeThreadId: before },
+      phase: "after",
+      expectedNativeThreadId: before,
+      screen: statusScreen
+    }).status,
+    "mismatch"
+  );
+  assert.equal(
+    observeCodexThreadLifecycle({
+      operation: { kind: "resume_thread", nativeThreadId: after },
+      phase: "after",
+      screen: statusScreen
+    }).status,
+    "verified"
+  );
+  assert.equal(
+    observeCodexThreadLifecycle({
+      operation: { kind: "resume_thread", nativeThreadId: after },
+      phase: "after",
+      screen: `Session: ${after}`
+    }).status,
+    "missing"
+  );
+  assert.equal(
+    observeCodexThreadLifecycle({
+      operation: { kind: "new_thread" },
+      phase: "after",
+      beforeNativeThreadId: before,
+      screen: [
+        "/status",
+        `Session: ${after}`,
+        "/clear",
+        "Cleared",
+        "› "
+      ].join("\n")
+    }).status,
+    "missing"
+  );
+
+  const ambiguous = [
+    "/status",
+    `Session: ${before}`,
+    `Session: ${after}`
+  ].join("\n");
+  assert.equal(
+    observeCodexThreadLifecycle({
+      operation: { kind: "new_thread" },
+      phase: "after",
+      beforeNativeThreadId: before,
+      screen: ambiguous
+    }).status,
+    "ambiguous"
   );
 });

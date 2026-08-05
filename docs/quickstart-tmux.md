@@ -76,7 +76,18 @@ If the coding agent asks a question and the active Turn becomes `waiting_for_ope
 /akk respond <turn-selector>: <answer>
 ```
 
-This answer stays in the same Turn. Managed status, approval, cancellation, renewal, callback retry, and close also use the exact `turn_id`. Only an unmanaged raw-terminal row's own returned status or recovery action may use its prefilled compatibility selector; never construct one. Starting a new native context, clearing it, or resuming an older native session is outside ordinary send and Turn creation.
+This answer stays in the same Turn. Managed status, approval, cancellation, renewal, callback retry, and close also use the exact `turn_id`. Only an unmanaged raw-terminal row's own returned status or recovery action may use its prefilled compatibility selector; never construct one.
+
+Starting a new native context, clearing it, or resuming an older native thread is an explicit lifecycle operation, not an ordinary send. Copy the full `terminal_id` from `/akk list`, then use:
+
+```text
+/akk threads <exact-terminal-id>
+/akk new-thread <exact-terminal-id>
+/akk clear-thread <exact-terminal-id>
+/akk resume-thread <exact-terminal-id> [native-thread-uuid]
+```
+
+Omitting the resume UUID lists exact verified candidates; select only a complete returned UUID. The human-facing slash handler obtains a fresh binding token internally. A successful switch creates or activates an AKK Session but creates no Turn, so send the next request separately. There is no background binding poll: after an old coding-agent process exits, the next lifecycle listing can expose its sole historical Session as resumable, and resume safely detaches that stale binding before terminal input. Unsupported, busy, ambiguous, stale-token, active-elsewhere, or unverifiable transitions stop without falling back to raw `/clear`, `/new`, `/resume`, `/status`, Codex `/fork`, `/side`, or `/btw`, or Claude `/branch` text.
 
 ## Optional: Enable natural-language routing
 

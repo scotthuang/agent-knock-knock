@@ -81,6 +81,10 @@ test("delegate routes asynchronously to the only idle matching tmux pane", () =>
         5101: codexNativeIdentityFixture({
           workspace,
           codexPid: 5101
+        }),
+        5102: codexNativeIdentityFixture({
+          workspace: otherWorkspace,
+          codexPid: 5102
         })
       })
     ]);
@@ -618,7 +622,8 @@ function codexNativeIdentityFixture(options: {
   workspace: string;
   codexPid: number;
 }): Record<string, unknown> {
-  const sessionId = `codex-native-session-${options.codexPid}`;
+  const sessionId =
+    `00000000-0000-4000-8000-${String(options.codexPid).padStart(12, "0")}`;
   return {
     sessionId,
     processUuid: `codex-process-${options.codexPid}`,

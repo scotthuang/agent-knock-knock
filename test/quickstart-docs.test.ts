@@ -47,6 +47,8 @@ test("ClawHub quickstarts reach a first task without a top-level workspace", () 
   assert.match(tmux, /`managed\.recent_turn`/u);
   assert.match(tmux, /`send` action with its prefilled authoritative `session_id`/u);
   assert.match(tmux, /`respond` action with its prefilled `turn_id`/u);
+  assert.match(tmux, /\/akk threads <exact-terminal-id>/u);
+  assert.match(tmux, /creates or activates an AKK Session but creates no Turn/u);
   assert.match(tmux, /multiple canonical roots/u);
   assert.match(tmux, /autoApprove\.rules\[\]\.workspaces/u);
   assert.match(readme, /multiple canonical workspace roots/u);
@@ -121,6 +123,10 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
     "/akk <task>",
     "/akk <selector>: <message>",
     "/akk list",
+    "/akk threads",
+    "/akk new-thread",
+    "/akk clear-thread",
+    "/akk resume-thread",
     "/akk status",
     "/akk respond",
     "/akk cancel"
@@ -154,10 +160,20 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
     assert.match(document, /`session_id`/u);
     assert.match(document, /`turn_id`/u);
     assert.match(document, /`respond`/u);
+    assert.match(document, /`expected_binding_token`/u);
+    assert.match(document, /`native_thread_id`/u);
+    assert.match(document, /`candidate_token`/u);
+    assert.match(document, /v5 `action_contracts`/u);
+    assert.match(document, /creates no (?:AKK )?Turn/u);
+    assert.match(document, /Do not send `\/clear`/u);
     assert.doesNotMatch(document, /`follow_up`/u);
     assert.match(
       document,
-      /first attach only[\s\S]*unmanaged raw-terminal row[\s\S]*prefilled `selector`/ui
+      /first attach only[\s\S]*explicitly named by the user/ui
+    );
+    assert.match(
+      document,
+      /(?:prefilled[^.\n]*unmanaged raw-terminal row|unmanaged raw-terminal row[^.\n]*prefilled)/ui
     );
     assert.match(
       document,
@@ -177,6 +193,8 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
     changelog,
     /unmanaged row may prefill its own `selector`[\s\S]*`conversation_id`/u
   );
+  assert.match(changelog, /## 0\.10\.0 - 2026-08-06/u);
+  assert.match(changelog, /Publish the v5 list\/action contract/u);
 });
 
 function read(relativePath: string): string {

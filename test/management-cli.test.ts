@@ -101,14 +101,14 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       hidden_turn_count: 0,
       session_count: 0
     });
-    assert.equal(listed.action_contracts.version, 4);
+    assert.equal(listed.action_contracts.version, 5);
     assert.match(
       listed.action_contracts.instructions.join("\n"),
       /Treat terminals\[\] as the primary resource/u
     );
     assert.match(
       listed.action_contracts.instructions.join("\n"),
-      /first attach only[\s\S]*prefilled[\s\S]*never construct/u
+      /first attach only[\s\S]*explicitly named by the user[\s\S]*prefilled[\s\S]*never infer/u
     );
     assert.match(
       listed.action_contracts.instructions.join("\n"),
@@ -152,6 +152,9 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       Object.keys(listed.action_contracts.actions),
       [
         "send",
+        "new_thread",
+        "list_resumable_threads",
+        "resume_thread",
         "respond",
         "status",
         "approve",
@@ -171,7 +174,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     );
     assert.match(
       listed.action_contracts.actions.send.initial_attach_scope,
-      /unmanaged raw-terminal row[\s\S]*never construct/u
+      /explicitly named by the user[\s\S]*unmanaged raw-terminal row[\s\S]*never infer/u
     );
     assert.deepEqual(
       listed.action_contracts.actions.send.required,
@@ -228,6 +231,10 @@ test("list exposes physical tmux terminals with the terminal-first action contra
         `${action} must not advertise a raw-terminal compatibility action`
       );
     }
+    assert.deepEqual(
+      listed.action_contracts.actions.close.optional,
+      ["reason", "expected_message_id", "expected_transition_id"]
+    );
     const approvalActions = terminal.available_actions;
     assert.deepEqual(
       approvalActions.status.arguments,

@@ -22,7 +22,10 @@ export interface CodexLocalSessionAdapter {
   listProcessSnapshots(): Promise<CodexProcessSnapshot[]>;
   resolveActiveSessionIdentityForPid?(
     pid: number,
-    cwd?: string
+    cwd?: string,
+    preferredSessionId?: string,
+    allowedCompanionIdentity?: ActiveAgentSessionIdentity,
+    allowedAdditionalIdentities?: readonly ActiveAgentSessionIdentity[]
   ): Promise<ActiveAgentSessionIdentity | undefined>;
 }
 
@@ -79,13 +82,22 @@ export class CodexLocalSessionProvider implements CodingAgentSessionProvider {
 
   async resolveActiveSessionIdentityForPid(
     pid: number,
-    cwd?: string
+    cwd?: string,
+    preferredSessionId?: string,
+    allowedCompanionIdentity?: ActiveAgentSessionIdentity,
+    allowedAdditionalIdentities?: readonly ActiveAgentSessionIdentity[]
   ): Promise<ActiveAgentSessionIdentity | undefined> {
     if (!Number.isSafeInteger(pid) || pid <= 1) {
       throw new Error("Codex process pid must be a positive integer greater than 1");
     }
     if (this.adapter.resolveActiveSessionIdentityForPid) {
-      return this.adapter.resolveActiveSessionIdentityForPid(pid, cwd);
+      return this.adapter.resolveActiveSessionIdentityForPid(
+        pid,
+        cwd,
+        preferredSessionId,
+        allowedCompanionIdentity,
+        allowedAdditionalIdentities
+      );
     }
     const sessionId = (await this.listActiveSessions())
       .find((process) => process.pid === pid)?.sessionId;

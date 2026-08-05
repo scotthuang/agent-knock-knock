@@ -6,7 +6,13 @@ import type { ClaudeAgentRow } from "./claude-terminal-agent-adapter.js";
 import { redactString } from "./runtime-log.js";
 import type {
   TerminalCompletionEvidence,
-  TerminalDurableCompletionRequest
+  TerminalDurableCompletionRequest,
+  TerminalThreadLifecycleCandidate,
+  TerminalThreadLifecycleCandidateProvider,
+  TerminalThreadLifecycleCandidateRequest,
+  TerminalThreadLifecycleCandidateToken,
+  TerminalThreadLifecycleCandidateValidation,
+  TerminalThreadFileToken
 } from "./terminal-agent-adapter.js";
 
 const CLAUDE_TRANSCRIPT_ANCHOR_VERSION = 1;
@@ -19,6 +25,8 @@ const CLAUDE_TRANSCRIPT_VERSION_PATTERN =
 const NO_FOLLOW_FLAG = typeof fs.constants.O_NOFOLLOW === "number"
   ? fs.constants.O_NOFOLLOW
   : 0;
+const CLAUDE_LIFECYCLE_VERSION = "2.1.218";
+const CLAUDE_HISTORICAL_METADATA_MAX_BYTES = 1024 * 1024;
 
 export interface ClaudeTranscriptAnchor {
   schema_version: 1;
@@ -47,6 +55,18 @@ export interface DetectClaudeTranscriptCompletionOptions {
   claudeHome?: string;
   agentRows: readonly ClaudeAgentRow[];
   maxTurnBytes?: number;
+}
+
+export interface ClaudeHistoricalSessionSummary {
+  id: string;
+  cwd: string;
+  transcriptPath: string;
+  updatedAtMs: number;
+  claudeVersion: string;
+  rootInteractive: true;
+  fileToken: TerminalThreadFileToken;
+  metadataFingerprint: string;
+  candidateToken: TerminalThreadLifecycleCandidateToken;
 }
 
 /**
@@ -94,6 +114,385 @@ interface ClaudeTranscriptTurnSnapshot {
 export function defaultClaudeHome(): string {
   const configured = process.env.CLAUDE_CONFIG_DIR?.trim();
   return configured || path.join(os.homedir(), ".claude");
+}
+
+/** List exact, root-interactive Claude sessions from owner-private transcripts. */
+export function listClaudeHistoricalSessions(options: {
+  cwd: string;
+  claudeHome?: string;
+  agentVersion?: string;
+}): ClaudeHistoricalSessionSummary[] {
+  if (!options.cwd || !path.isAbsolute(options.cwd)) {
+    throw new Error("Claude lifecycle candidate discovery requires an absolute cwd");
+  }
+  const cwd = path.resolve(options.cwd);
+  const claudeHome = path.resolve(options.claudeHome ?? defaultClaudeHome());
+  const agentVersion = options.agentVersion ?? CLAUDE_LIFECYCLE_VERSION;
+  if (agentVersion !== CLAUDE_LIFECYCLE_VERSION) {
+    throw new Error(
+      `Claude lifecycle candidates require exact version ${CLAUDE_LIFECYCLE_VERSION}`
+    );
+  }
+  const projectsRoot = projectsRootPath(claudeHome);
+  if (!isRealDirectory(projectsRoot)) {
+    return [];
+  }
+  const projectRelative = path.dirname(
+    expectedTranscriptRelativePath("00000000-0000-0000-0000-000000000000", cwd)
+  );
+  const projectDirectory = path.join(projectsRoot, projectRelative);
+  if (!isRealDirectory(projectDirectory)) {
+    return [];
+  }
+  return fs.readdirSync(projectDirectory, { withFileTypes: true })
+    .flatMap((entry): ClaudeHistoricalSessionSummary[] => {
+      if (!entry.isFile() || entry.isSymbolicLink()) {
+        return [];
+      }
+      const match = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/iu.exec(
+        entry.name
+      );
+      if (!match) {
+        return [];
+      }
+      try {
+        const summary = inspectClaudeHistoricalSession({
+          projectsRoot,
+          cwd,
+          sessionId: match[1].toLowerCase(),
+          agentVersion
+        });
+        return summary ? [summary] : [];
+      } catch {
+        // Unsafe, malformed, or unstable transcript files are not candidates.
+        return [];
+      }
+    })
+    .sort((left, right) => right.updatedAtMs - left.updatedAtMs);
+}
+
+export function listClaudeThreadLifecycleCandidates(options: {
+  cwd: string;
+  claudeHome?: string;
+  agentVersion: string;
+}): TerminalThreadLifecycleCandidate[] {
+  return listClaudeHistoricalSessions(options).map((session) => ({
+    agent: "claude",
+    nativeThreadId: session.id,
+    cwd: session.cwd,
+    source: "claude_transcript",
+    rootInteractive: true,
+    fileToken: session.fileToken,
+    agentVersion: session.claudeVersion,
+    updatedAtMs: session.updatedAtMs,
+    metadataFingerprint: session.metadataFingerprint,
+    candidateToken: session.candidateToken
+  }));
+}
+
+export function createClaudeThreadLifecycleCandidateProvider(options: {
+  claudeHome?: string;
+} = {}): TerminalThreadLifecycleCandidateProvider {
+  return {
+    async listThreadLifecycleCandidates(request) {
+      return listClaudeThreadLifecycleCandidates({
+        cwd: request.cwd,
+        agentVersion: request.agentVersion,
+        claudeHome: options.claudeHome
+      });
+    },
+    async revalidateThreadLifecycleCandidate(candidate, request) {
+      return revalidateClaudeThreadLifecycleCandidate(candidate, {
+        ...request,
+        claudeHome: options.claudeHome
+      });
+    }
+  };
+}
+
+export function revalidateClaudeThreadLifecycleCandidate(
+  candidate: TerminalThreadLifecycleCandidate | TerminalThreadLifecycleCandidateToken,
+  options: TerminalThreadLifecycleCandidateRequest & { claudeHome?: string }
+): TerminalThreadLifecycleCandidateValidation {
+  try {
+    const token = "candidateToken" in candidate
+      ? candidate.candidateToken
+      : candidate;
+    if (
+      token.schema !== "agent-knock-knock/thread-candidate-token" ||
+      token.version !== 1 ||
+      token.agent !== "claude" ||
+      token.source !== "claude_transcript" ||
+      token.agentVersion !== options.agentVersion ||
+      !path.isAbsolute(options.cwd) ||
+      !path.isAbsolute(token.cwd) ||
+      path.resolve(token.cwd) !== path.resolve(options.cwd) ||
+      !CLAUDE_SESSION_ID_PATTERN.test(token.nativeThreadId) ||
+      options.agentVersion !== CLAUDE_LIFECYCLE_VERSION
+    ) {
+      return {
+        status: "unsafe",
+        reason: "candidate is not an exact Claude root-interactive session"
+      };
+    }
+    const claudeHome = path.resolve(options.claudeHome ?? defaultClaudeHome());
+    const summary = inspectClaudeHistoricalSession({
+      projectsRoot: projectsRootPath(claudeHome),
+      cwd: path.resolve(options.cwd),
+      sessionId: token.nativeThreadId.toLowerCase(),
+      agentVersion: options.agentVersion
+    });
+    if (!summary) {
+      return {
+        status: "unavailable",
+        reason: "the Claude transcript no longer exists"
+      };
+    }
+    const current: TerminalThreadLifecycleCandidate = {
+      agent: "claude",
+      nativeThreadId: summary.id,
+      cwd: summary.cwd,
+      source: "claude_transcript",
+      rootInteractive: true,
+      fileToken: summary.fileToken,
+      agentVersion: summary.claudeVersion,
+      updatedAtMs: summary.updatedAtMs,
+      metadataFingerprint: summary.metadataFingerprint,
+      candidateToken: summary.candidateToken
+    };
+    if (
+      !sameClaudeThreadFileToken(token.fileToken, current.fileToken) ||
+      token.metadataFingerprint !== current.metadataFingerprint
+    ) {
+      return {
+        status: "changed",
+        candidate: current,
+        reason: "the Claude transcript changed after candidate discovery"
+      };
+    }
+    return { status: "valid", candidate: current };
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") {
+      return {
+        status: "unavailable",
+        reason: "the Claude transcript no longer exists"
+      };
+    }
+    return {
+      status: "unsafe",
+      reason: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+function inspectClaudeHistoricalSession({
+  projectsRoot,
+  cwd,
+  sessionId,
+  agentVersion
+}: {
+  projectsRoot: string;
+  cwd: string;
+  sessionId: string;
+  agentVersion: string;
+}): ClaudeHistoricalSessionSummary | undefined {
+  if (
+    !isRealDirectory(projectsRoot) ||
+    !CLAUDE_SESSION_ID_PATTERN.test(sessionId) ||
+    agentVersion !== CLAUDE_LIFECYCLE_VERSION
+  ) {
+    return undefined;
+  }
+  const relativePath = expectedTranscriptRelativePath(sessionId, cwd);
+  const opened = openRelativeTranscript(projectsRoot, relativePath);
+  if (!opened) {
+    return undefined;
+  }
+  try {
+    const transcriptPath = fs.realpathSync(
+      path.join(projectsRoot, opened.relativePath)
+    );
+    const realProjectsRoot = fs.realpathSync(projectsRoot);
+    const relative = path.relative(realProjectsRoot, transcriptPath);
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+      throw new Error("Claude transcript resolves outside the projects directory");
+    }
+    const metadata = readClaudeHistoricalMetadata(
+      opened.fd,
+      opened.stat.size
+    );
+    if (!metadata) {
+      return undefined;
+    }
+    if (
+      metadata.sessionId !== sessionId ||
+      !path.isAbsolute(metadata.cwd) ||
+      normalizePath(metadata.cwd) !== normalizePath(cwd) ||
+      metadata.version !== agentVersion ||
+      metadata.isSidechain !== false ||
+      metadata.entrypoint !== "cli" ||
+      metadata.agentId !== undefined ||
+      metadata.teamName !== undefined ||
+      metadata.loopSession ||
+      ![undefined, "interactive", "main"].includes(metadata.sessionKind)
+    ) {
+      return undefined;
+    }
+    const stable = fs.fstatSync(opened.fd);
+    if (
+      stable.dev !== opened.stat.dev ||
+      stable.ino !== opened.stat.ino ||
+      stable.size !== opened.stat.size ||
+      stable.mtimeMs !== opened.stat.mtimeMs ||
+      fs.realpathSync(path.join(projectsRoot, opened.relativePath)) !==
+        transcriptPath
+    ) {
+      throw new Error("Claude transcript changed while it was inspected");
+    }
+    const fileToken: TerminalThreadFileToken = {
+      path: transcriptPath,
+      device: String(stable.dev),
+      inode: String(stable.ino),
+      size: stable.size,
+      mtimeMs: stable.mtimeMs
+    };
+    const metadataFingerprint = createHash("sha256")
+      .update(JSON.stringify({
+        sessionId,
+        cwd: path.resolve(cwd),
+        version: metadata.version,
+        entrypoint: metadata.entrypoint,
+        sessionKind: metadata.sessionKind ?? null,
+        transcriptPath
+      }))
+      .digest("hex");
+    const candidateToken: TerminalThreadLifecycleCandidateToken = {
+      schema: "agent-knock-knock/thread-candidate-token",
+      version: 1,
+      agent: "claude",
+      nativeThreadId: sessionId,
+      cwd: path.resolve(cwd),
+      source: "claude_transcript",
+      agentVersion: metadata.version,
+      fileToken,
+      metadataFingerprint
+    };
+    return {
+      id: sessionId,
+      cwd: path.resolve(cwd),
+      transcriptPath,
+      updatedAtMs: stable.mtimeMs,
+      claudeVersion: metadata.version,
+      rootInteractive: true,
+      fileToken,
+      metadataFingerprint,
+      candidateToken
+    };
+  } finally {
+    fs.closeSync(opened.fd);
+  }
+}
+
+function readClaudeHistoricalMetadata(
+  fd: number,
+  fileSize: number
+): {
+  sessionId: string;
+  cwd: string;
+  version: string;
+  isSidechain: boolean;
+  entrypoint: string;
+  agentId?: string;
+  teamName?: string;
+  sessionKind?: string;
+  loopSession: boolean;
+} | undefined {
+  if (fileSize <= 0 || !Number.isSafeInteger(fileSize)) {
+    return undefined;
+  }
+  const bytesToRead = Math.min(
+    fileSize,
+    CLAUDE_HISTORICAL_METADATA_MAX_BYTES
+  );
+  const buffer = Buffer.allocUnsafe(bytesToRead);
+  const bytesRead = fs.readSync(fd, buffer, 0, bytesToRead, 0);
+  if (bytesRead !== bytesToRead) {
+    throw new Error("Claude transcript changed while metadata was read");
+  }
+  const text = buffer.subarray(0, bytesRead).toString("utf8");
+  const lastCompleteNewline = text.lastIndexOf("\n");
+  if (lastCompleteNewline < 0) {
+    if (fileSize > bytesRead) {
+      throw new Error("Claude transcript metadata line exceeds the read limit");
+    }
+    return undefined;
+  }
+  const completeLines = text.slice(0, lastCompleteNewline).split("\n");
+  for (const line of completeLines) {
+    if (!line.trim()) {
+      continue;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      throw new Error("Claude transcript contains invalid root metadata JSONL");
+    }
+    if (!isRecord(parsed)) {
+      throw new Error("Claude transcript root metadata must be an object");
+    }
+    const sessionId = nonEmptyString(parsed.sessionId);
+    if (!sessionId) {
+      continue;
+    }
+    const cwd = nonEmptyString(parsed.cwd);
+    const version = nonEmptyString(parsed.version);
+    const entrypoint = nonEmptyString(parsed.entrypoint);
+    const hasIdentityMetadata =
+      cwd !== undefined ||
+      version !== undefined ||
+      entrypoint !== undefined ||
+      typeof parsed.isSidechain === "boolean" ||
+      nonEmptyString(parsed.agentId) !== undefined ||
+      nonEmptyString(parsed.teamName) !== undefined ||
+      nonEmptyString(parsed.sessionKind) !== undefined;
+    if (!hasIdentityMetadata) {
+      // Claude 2.1.218 can prepend mode/permission-mode records carrying only
+      // sessionId. Continue to the first full root transcript record.
+      continue;
+    }
+    if (!cwd || !version || !entrypoint || typeof parsed.isSidechain !== "boolean") {
+      throw new Error("Claude transcript has incomplete root session metadata");
+    }
+    const sessionKind = nonEmptyString(parsed.sessionKind);
+    return {
+      sessionId: sessionId.toLowerCase(),
+      cwd,
+      version,
+      isSidechain: parsed.isSidechain,
+      entrypoint,
+      agentId: nonEmptyString(parsed.agentId),
+      teamName: nonEmptyString(parsed.teamName),
+      sessionKind,
+      loopSession:
+        parsed.isLoop === true ||
+        parsed.isLoopSession === true ||
+        parsed.loopSession === true ||
+        sessionKind === "loop"
+    };
+  }
+  return undefined;
+}
+
+function sameClaudeThreadFileToken(
+  left: TerminalThreadFileToken,
+  right: TerminalThreadFileToken
+): boolean {
+  return left.path === right.path &&
+    left.device === right.device &&
+    left.inode === right.inode &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs;
 }
 
 /**

@@ -19,6 +19,12 @@ export interface Conversation {
   session_id: string;
   /** Authoritative identity for this accepted dispatch lifecycle. */
   turn_id: string;
+  /** Immutable terminal binding that authorized this Turn. */
+  terminal_binding_id?: string;
+  /** Session-local binding epoch that fences stale asynchronous work. */
+  terminal_binding_generation?: number;
+  /** Exact native Codex/Claude thread observed when this Turn was created. */
+  native_thread_id?: string;
   /** Legacy Store/path alias. New records keep this equal to turn_id. */
   conversation_id: string;
   user_request: string;

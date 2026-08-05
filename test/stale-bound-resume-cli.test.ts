@@ -1,0 +1,384 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
+import {
+  managedSessionBindingToken,
+  terminalBindingFrom
+} from "../src/managed-session.js";
+import {
+  listManagedSessions,
+  loadNativeThreadTransition,
+  nativeThreadTransitionsDir,
+  pathsForManagedSession,
+  saveManagedSession
+} from "../src/session-store.js";
+import { ensureStoreWritable, listConversations } from "../src/store.js";
+import type { TerminalControlRef } from "../src/terminal-agent-adapter.js";
+
+const binPath = new URL("../src/cli.js", import.meta.url).pathname;
+
+test("resume lists a conclusively dead bound Session read-only, then CAS-detaches it before prepared input", () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-stale-bound-resume-")
+  );
+  const fakeBinDir = path.join(root, "bin");
+  const workspace = path.join(root, "workspace");
+  const storeDir = path.join(root, "store");
+  const runtimeDir = path.join(root, "runtime");
+  const claudeHome = path.join(root, ".claude");
+  const tmuxCallsPath = path.join(root, "tmux-calls.ndjson");
+  const target = "stale-bound-resume:0.0";
+  const panePid = 76_100;
+  const claudePid = 76_001;
+  // Above the platform PID range in supported environments, but still a valid
+  // positive pid_t value for process.kill(pid, 0).
+  const stalePid = 9_000_001;
+  const startedAt = 1_786_000_000_001;
+  const currentNativeThreadId =
+    "11111111-1111-4111-8111-111111111111";
+  const resumeNativeThreadId =
+    "22222222-2222-4222-8222-222222222222";
+  const terminalId = `terminal:v2:tmux:claude:${target}:${claudePid}`;
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.mkdirSync(claudeHome, { recursive: true, mode: 0o700 });
+    writeFakeTmux({
+      fakeBinDir,
+      callsPath: tmuxCallsPath,
+      target,
+      panePid,
+      workspace
+    });
+    writeFakeProcessTools({
+      fakeBinDir,
+      panePid,
+      claudePid,
+      workspace
+    });
+    writeClaudeTranscript({
+      claudeHome,
+      workspace,
+      nativeThreadId: resumeNativeThreadId
+    });
+
+    assert.throws(
+      () => process.kill(stalePid, 0),
+      (error: NodeJS.ErrnoException) => error.code === "ESRCH"
+    );
+
+    const terminalControl: TerminalControlRef = {
+      kind: "tmux",
+      target,
+      session: "stale-bound-resume",
+      window: 0,
+      pane: 0,
+      panePid,
+      currentCommand: "claude",
+      currentPath: workspace,
+      capabilities: [
+        "screen_status",
+        "send_keys",
+        "terminal_approval",
+        "screen_completion",
+        "durable_completion",
+        "terminal_cancel"
+      ]
+    };
+    const staleTerminalControl: TerminalControlRef = {
+      ...terminalControl,
+      target: "closed-claude-pane:0.0",
+      session: "closed-claude-pane",
+      panePid: 76_900
+    };
+    const now = new Date("2026-08-06T06:00:00.000Z");
+    ensureStoreWritable(storeDir);
+    const source = saveManagedSession(storeDir, {
+      schema: "agent-knock-knock/session",
+      version: 1,
+      session_id: "session-current-claude-thread",
+      agent: "claude",
+      workspace,
+      status: "bound",
+      binding: terminalBindingFrom({
+        terminalId,
+        terminalControl,
+        pid: claudePid,
+        nativeThreadId: currentNativeThreadId,
+        processUuid: `claude-pid:${claudePid}:started:${startedAt}`,
+        evidence: "claude_agents_exact_pid",
+        generation: 1,
+        now
+      }),
+      lineage: { created_by: "attach" },
+      created_at: now.toISOString(),
+      updated_at: now.toISOString()
+    }, { expectedRevision: null });
+    const staleTarget = saveManagedSession(storeDir, {
+      schema: "agent-knock-knock/session",
+      version: 1,
+      session_id: "session-stale-bound-resume-target",
+      agent: "claude",
+      workspace,
+      status: "bound",
+      binding: terminalBindingFrom({
+        terminalId:
+          `terminal:v2:tmux:claude:${staleTerminalControl.target}:${stalePid}`,
+        terminalControl: staleTerminalControl,
+        pid: stalePid,
+        nativeThreadId: resumeNativeThreadId,
+        processUuid: `claude-pid:${stalePid}:started:1785000000000`,
+        evidence: "claude_agents_exact_pid",
+        generation: 3,
+        now
+      }),
+      lineage: { created_by: "attach" },
+      created_at: now.toISOString(),
+      updated_at: now.toISOString()
+    }, { expectedRevision: null });
+
+    const commonArgs = [
+      "--store-dir",
+      storeDir,
+      "--claude-home",
+      claudeHome,
+      "--claude-agents-json",
+      JSON.stringify([{
+        pid: claudePid,
+        cwd: workspace,
+        kind: "interactive",
+        sessionId: currentNativeThreadId,
+        startedAt,
+        status: "idle"
+      }]),
+      "--agent-versions-json",
+      JSON.stringify({ claude: "2.1.218" })
+    ];
+    const environment = {
+      ...process.env,
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      AKK_RUNTIME_DIR: runtimeDir,
+      // Avoid allowing a developer's real tmux socket to affect this fixture.
+      TMUX: ""
+    };
+    const sourceStatePath = pathsForManagedSession(
+      source.session_id,
+      storeDir
+    ).statePath;
+    const targetStatePath = pathsForManagedSession(
+      staleTarget.session_id,
+      storeDir
+    ).statePath;
+    const sourceBeforeList = fs.readFileSync(sourceStatePath, "utf8");
+    const targetBeforeList = fs.readFileSync(targetStatePath, "utf8");
+
+    const listed = runCli([
+      "list-resumable-threads",
+      "--terminal",
+      terminalId,
+      ...commonArgs
+    ], environment);
+    assert.equal(listed.status, 0, listed.stderr || listed.stdout);
+    const listOutput = JSON.parse(listed.stdout);
+    assert.equal(listOutput.current_session_id, source.session_id);
+    assert.equal(
+      listOutput.expected_binding_token,
+      managedSessionBindingToken(source)
+    );
+    const candidate = listOutput.threads.find(
+      (entry: Record<string, unknown>) =>
+        entry.native_thread_id === resumeNativeThreadId
+    );
+    assert.ok(candidate, listed.stdout);
+    assert.equal(candidate.managed_session_id, staleTarget.session_id);
+    assert.equal(candidate.resumable, true);
+    assert.equal(candidate.unavailable_reason, undefined);
+    assert.equal(typeof candidate.candidate_token, "string");
+    assert.equal(
+      candidate.available_actions.resume_thread.arguments.candidate_token,
+      candidate.candidate_token
+    );
+
+    // Discovery is strictly read-only: even a conclusively dead binding is
+    // still authoritative until a resume mutation performs its CAS update.
+    assert.equal(fs.readFileSync(sourceStatePath, "utf8"), sourceBeforeList);
+    assert.equal(fs.readFileSync(targetStatePath, "utf8"), targetBeforeList);
+    assert.equal(
+      listManagedSessions(storeDir).find((entry) =>
+        entry.session_id === staleTarget.session_id
+      )?.status,
+      "bound"
+    );
+    assert.equal(listConversations(storeDir).length, 0);
+
+    const resumed = runCli([
+      "resume-thread",
+      "--terminal",
+      terminalId,
+      "--native-thread",
+      resumeNativeThreadId,
+      "--expected-binding-token",
+      listOutput.expected_binding_token,
+      "--candidate-token",
+      candidate.candidate_token,
+      ...commonArgs
+    ], {
+      ...environment,
+      AKK_TEST_EXIT_AFTER_LIFECYCLE_PREPARED: "1"
+    });
+    assert.equal(
+      resumed.status,
+      86,
+      resumed.stderr || resumed.stdout
+    );
+
+    const sessionsAfterCrash = listManagedSessions(storeDir);
+    const sourceAfterCrash = sessionsAfterCrash.find((entry) =>
+      entry.session_id === source.session_id
+    );
+    const targetAfterCrash = sessionsAfterCrash.find((entry) =>
+      entry.session_id === staleTarget.session_id
+    );
+    assert.equal(sourceAfterCrash?.status, "bound");
+    assert.equal(fs.readFileSync(sourceStatePath, "utf8"), sourceBeforeList);
+    assert.equal(targetAfterCrash?.status, "detached");
+    assert.equal(
+      targetAfterCrash?.revision,
+      (staleTarget.revision as number) + 1
+    );
+    assert.deepEqual(
+      targetAfterCrash?.binding,
+      JSON.parse(JSON.stringify(staleTarget.binding))
+    );
+    assert.match(targetAfterCrash?.detached_at ?? "", /^\d{4}-\d{2}-\d{2}T/u);
+
+    const transitionIds = fs.readdirSync(
+      nativeThreadTransitionsDir(storeDir),
+      { withFileTypes: true }
+    ).filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+    assert.equal(transitionIds.length, 1);
+    const transition = loadNativeThreadTransition(
+      storeDir,
+      transitionIds[0]
+    );
+    assert.equal(transition.status, "prepared");
+    assert.equal(transition.operation, "resume_thread");
+    assert.equal(transition.source_session_id, source.session_id);
+    assert.equal(transition.target_session_id, staleTarget.session_id);
+    assert.equal(
+      transition.target_native_thread_id,
+      resumeNativeThreadId
+    );
+    assert.equal(
+      transition.target_expected_revision,
+      targetAfterCrash?.revision
+    );
+
+    // The prepared crash hook runs at the last durable boundary before
+    // terminal dispatch. No /resume text or Enter may have reached tmux, and
+    // lifecycle operations must not create an ordinary Turn.
+    assert.equal(
+      readTmuxCalls(tmuxCallsPath).some((call) =>
+        call.args.includes("send-keys") ||
+        call.args.includes("paste-buffer")
+      ),
+      false
+    );
+    assert.equal(listConversations(storeDir).length, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function runCli(args: string[], env: NodeJS.ProcessEnv) {
+  return spawnSync(process.execPath, [binPath, ...args], {
+    encoding: "utf8",
+    env,
+    timeout: 30_000
+  });
+}
+
+function writeFakeTmux(options: {
+  fakeBinDir: string;
+  callsPath: string;
+  target: string;
+  panePid: number;
+  workspace: string;
+}): void {
+  fs.writeFileSync(path.join(options.fakeBinDir, "tmux"), `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(options.callsPath)}, JSON.stringify({ args }) + "\\n");
+const offset = args[0] === "-S" ? 2 : 0;
+if (args[offset] === "list-panes") {
+  process.stdout.write(${JSON.stringify(
+    `stale-bound-resume\t0\t0\t${options.panePid}\tclaude\t${options.workspace}\n`
+  )});
+  process.exit(0);
+}
+if (args[offset] === "capture-pane") {
+  process.stdout.write("Ready\\n❯ ");
+  process.exit(0);
+}
+process.exit(0);
+`, { mode: 0o755 });
+}
+
+function writeFakeProcessTools(options: {
+  fakeBinDir: string;
+  panePid: number;
+  claudePid: number;
+  workspace: string;
+}): void {
+  fs.writeFileSync(path.join(options.fakeBinDir, "ps"), `#!/usr/bin/env node
+process.stdout.write("  PID  PPID ELAPSED COMMAND\\n" +
+  ${JSON.stringify(`${options.panePid} 1 00:10 zsh\n`)} +
+  ${JSON.stringify(`${options.claudePid} ${options.panePid} 00:09 claude\n`)});
+`, { mode: 0o755 });
+  fs.writeFileSync(path.join(options.fakeBinDir, "lsof"), `#!/usr/bin/env node
+process.stdout.write("COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\\n" +
+  ${JSON.stringify(
+    `claude ${options.claudePid} me cwd DIR 1,18 64 123 ${options.workspace}\n`
+  )});
+`, { mode: 0o755 });
+}
+
+function writeClaudeTranscript(options: {
+  claudeHome: string;
+  workspace: string;
+  nativeThreadId: string;
+}): void {
+  const projectDirectory = path.join(
+    options.claudeHome,
+    "projects",
+    options.workspace.replace(/[^A-Za-z0-9]/gu, "-")
+  );
+  fs.mkdirSync(projectDirectory, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(
+    path.join(projectDirectory, `${options.nativeThreadId}.jsonl`),
+    `${JSON.stringify({
+      type: "user",
+      uuid: "33333333-3333-4333-8333-333333333333",
+      parentUuid: null,
+      sessionId: options.nativeThreadId,
+      cwd: options.workspace,
+      version: "2.1.218",
+      isSidechain: false,
+      entrypoint: "cli",
+      message: { role: "user", content: "Historical task" }
+    })}\n`,
+    { mode: 0o600 }
+  );
+}
+
+function readTmuxCalls(filePath: string): Array<{ args: string[] }> {
+  return fs.readFileSync(filePath, "utf8")
+    .trim()
+    .split(/\r?\n/u)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}

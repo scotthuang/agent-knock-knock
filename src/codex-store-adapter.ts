@@ -1,9 +1,18 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { ActiveAgentSessionIdentity } from "./agent-session-provider.js";
 import { discoverCodexProcesses, type CodexProcessSnapshot, type CodexThreadRow } from "./codex-session-provider.js";
 import type { CodexLocalSessionAdapter } from "./codex-local-session-provider.js";
+import type {
+  TerminalThreadLifecycleCandidate,
+  TerminalThreadLifecycleCandidateProvider,
+  TerminalThreadLifecycleCandidateRequest,
+  TerminalThreadLifecycleCandidateToken,
+  TerminalThreadLifecycleCandidateValidation,
+  TerminalThreadFileToken
+} from "./terminal-agent-adapter.js";
 import {
   SystemTerminalProcessSource,
   runProcessCommand,
@@ -22,7 +31,24 @@ export interface CodexStoreAdapterOptions {
   maxSessions?: number;
 }
 
-export class CodexStoreAdapter implements CodexLocalSessionAdapter {
+interface CodexLifecycleThreadRow extends CodexThreadRow {
+  source?: string;
+  model_provider?: string;
+  cli_version?: string;
+  name?: string;
+}
+
+const CODEX_LIFECYCLE_VERSION = "0.146.0";
+const NATIVE_THREAD_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+const MAX_CODEX_SESSION_META_BYTES = 1024 * 1024;
+const NO_FOLLOW_FLAG = typeof fs.constants.O_NOFOLLOW === "number"
+  ? fs.constants.O_NOFOLLOW
+  : 0;
+
+export class CodexStoreAdapter implements
+  CodexLocalSessionAdapter,
+  TerminalThreadLifecycleCandidateProvider {
   private readonly codexHome: string;
   private readonly runCommand: (command: string, args: string[]) => ProcessCommandResult;
   private readonly maxSessions: number;
@@ -48,6 +74,116 @@ export class CodexStoreAdapter implements CodexLocalSessionAdapter {
     return this.queryJson<CodexThreadRow>(dbPath, buildThreadSelect(columns, this.maxSessions));
   }
 
+  async listThreadLifecycleCandidates(
+    request: TerminalThreadLifecycleCandidateRequest
+  ): Promise<TerminalThreadLifecycleCandidate[]> {
+    assertCodexLifecycleCandidateRequest(request);
+    const candidates: TerminalThreadLifecycleCandidate[] = [];
+    for (const row of await this.listThreadRows() as CodexLifecycleThreadRow[]) {
+      try {
+        const candidate = codexLifecycleCandidateFromRow({
+          row,
+          codexHome: this.codexHome,
+          request
+        });
+        if (candidate) {
+          candidates.push(candidate);
+        }
+      } catch {
+        // Historical rows are untrusted discovery input. Unsafe or unstable rows
+        // are hidden and can never become resume targets.
+      }
+    }
+    return candidates.sort((left, right) =>
+      Number(right.updatedAtMs ?? 0) - Number(left.updatedAtMs ?? 0)
+    );
+  }
+
+  async revalidateThreadLifecycleCandidate(
+    candidate: TerminalThreadLifecycleCandidate | TerminalThreadLifecycleCandidateToken,
+    request: TerminalThreadLifecycleCandidateRequest
+  ): Promise<TerminalThreadLifecycleCandidateValidation> {
+    try {
+      assertCodexLifecycleCandidateRequest(request);
+      const token = "candidateToken" in candidate
+        ? candidate.candidateToken
+        : candidate;
+      if (
+        token.schema !== "agent-knock-knock/thread-candidate-token" ||
+        token.version !== 1 ||
+        token.agent !== "codex" ||
+        token.source !== "codex_rollout" ||
+        token.agentVersion !== request.agentVersion ||
+        !path.isAbsolute(token.cwd) ||
+        path.resolve(token.cwd) !== path.resolve(request.cwd) ||
+        !NATIVE_THREAD_ID_PATTERN.test(token.nativeThreadId)
+      ) {
+        return {
+          status: "unsafe",
+          reason: "candidate is not an exact Codex root-thread identity"
+        };
+      }
+      const row = await this.getThreadRow(token.nativeThreadId);
+      if (!row) {
+        return {
+          status: "unavailable",
+          reason: "the Codex thread row no longer exists"
+        };
+      }
+      const current = codexLifecycleCandidateFromRow({
+        row,
+        codexHome: this.codexHome,
+        request
+      });
+      if (!current) {
+        return {
+          status: "unavailable",
+          reason: "the Codex thread is no longer a resumable root CLI session"
+        };
+      }
+      if (
+        !sameThreadFileToken(current.fileToken, token.fileToken) ||
+        current.metadataFingerprint !== token.metadataFingerprint ||
+        current.modelProvider !== token.modelProvider
+      ) {
+        return {
+          status: "changed",
+          candidate: current,
+          reason: "the Codex rollout changed after candidate discovery"
+        };
+      }
+      return { status: "valid", candidate: current };
+    } catch (error) {
+      return {
+        status: "unsafe",
+        reason: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  private async getThreadRow(
+    nativeThreadId: string
+  ): Promise<CodexLifecycleThreadRow | undefined> {
+    if (!NATIVE_THREAD_ID_PATTERN.test(nativeThreadId)) {
+      throw new Error("Codex thread lookup requires an exact UUID");
+    }
+    const dbPath = latestStateDbPath(this.codexHome);
+    if (!dbPath) {
+      return undefined;
+    }
+    const columns = this.queryJson<{ name: string }>(
+      dbPath,
+      "pragma table_info(threads)"
+    ).map((column) => column.name);
+    if (!columns.includes("id") || !columns.includes("cwd")) {
+      throw new Error("Codex threads table is missing required id or cwd columns");
+    }
+    return this.queryJson<CodexLifecycleThreadRow>(
+      dbPath,
+      buildThreadByIdSelect(columns, nativeThreadId)
+    )[0];
+  }
+
   async readRollout(rolloutPath: string): Promise<string | undefined> {
     if (!fs.existsSync(rolloutPath)) {
       return undefined;
@@ -63,7 +199,10 @@ export class CodexStoreAdapter implements CodexLocalSessionAdapter {
 
   async resolveActiveSessionIdentityForPid(
     pid: number,
-    cwd?: string
+    cwd?: string,
+    preferredSessionId?: string,
+    allowedCompanionIdentity?: ActiveAgentSessionIdentity,
+    allowedAdditionalIdentities?: readonly ActiveAgentSessionIdentity[]
   ): Promise<ActiveAgentSessionIdentity | undefined> {
     if (!Number.isSafeInteger(pid) || pid <= 1) {
       throw new Error("Codex process pid must be a positive integer greater than 1");
@@ -92,13 +231,16 @@ export class CodexStoreAdapter implements CodexLocalSessionAdapter {
       codexHome: this.codexHome,
       pid,
       cwd,
+      preferredSessionId,
+      allowedCompanionIdentity,
+      allowedAdditionalIdentities,
       processBirth,
       lsofOutput: result.stdout
     });
   }
 
   private queryJson<T>(dbPath: string, sql: string): T[] {
-    const result = this.runCommand("sqlite3", ["-json", dbPath, sql]);
+    const result = this.runCommand("sqlite3", ["-readonly", "-json", dbPath, sql]);
     if (result.status !== 0) {
       throw new Error(result.stderr || result.error?.message || "sqlite3 query failed");
     }
@@ -156,12 +298,18 @@ export function resolveCodexOpenRolloutIdentity({
   codexHome,
   pid,
   cwd,
+  preferredSessionId,
+  allowedCompanionIdentity,
+  allowedAdditionalIdentities,
   processBirth,
   lsofOutput
 }: {
   codexHome: string;
   pid: number;
   cwd?: string;
+  preferredSessionId?: string;
+  allowedCompanionIdentity?: ActiveAgentSessionIdentity;
+  allowedAdditionalIdentities?: readonly ActiveAgentSessionIdentity[];
   processBirth: string;
   lsofOutput: string;
 }): ActiveAgentSessionIdentity | undefined {
@@ -293,6 +441,75 @@ export function resolveCodexOpenRolloutIdentity({
       `Codex process ${pid} has open rollout files but no exact TUI root identity`
     );
   }
+  if (preferredSessionId) {
+    const preferred = identities.filter((identity) =>
+      identity.sessionId === preferredSessionId
+    );
+    if (preferred.length > 1) {
+      throw new Error(
+        `Codex process ${pid} has multiple open root rollouts for preferred ` +
+        `session ${preferredSessionId}`
+      );
+    }
+    if (allowedCompanionIdentity) {
+      const allowedConstraints = [
+        allowedCompanionIdentity,
+        ...(allowedAdditionalIdentities ?? [])
+      ];
+      const allowedMatches: ActiveAgentSessionIdentity[] = [];
+      for (const constraint of allowedConstraints) {
+        const matches = identities.filter((identity) =>
+          sameActiveCodexIdentity(identity, constraint)
+        );
+        if (matches.length > 1) {
+          throw new Error(
+            `Codex process ${pid} has multiple open root rollouts for an ` +
+            "allowed companion session"
+          );
+        }
+        if (matches[0] && !allowedMatches.includes(matches[0])) {
+          allowedMatches.push(matches[0]);
+        }
+      }
+      const unexpected = identities.filter((identity) =>
+        identity !== preferred[0] && !allowedMatches.includes(identity)
+      );
+      if (unexpected.length > 0) {
+        throw new Error(
+          `Codex process ${pid} has an unexpected open root rollout outside ` +
+          "the preferred and exact companion identities"
+        );
+      }
+      if (preferred.length === 1) {
+        return preferred[0];
+      }
+      const primaryCompanion = identities.find((identity) =>
+        sameActiveCodexIdentity(identity, allowedCompanionIdentity)
+      );
+      if (primaryCompanion) {
+        return primaryCompanion;
+      }
+      if (allowedMatches.length > 0) {
+        // The immediately preceding rollout can close while an older,
+        // independently verified managed ancestor remains open. Constraint
+        // order is authoritative and deterministic; unknown roots were
+        // rejected above, so the first surviving exact companion is safe
+        // process-incarnation evidence for a fresh status-card proof.
+        return allowedMatches[0];
+      }
+      throw new Error(
+        `Codex process ${pid} has neither the preferred session nor an ` +
+        "exact managed companion rollout open"
+      );
+    } else if (preferred.length === 1 && identities.length === 1) {
+      return preferred[0];
+    } else {
+      throw new Error(
+        `Codex process ${pid} does not have the preferred session as its ` +
+        "sole open root rollout"
+      );
+    }
+  }
   if (identities.length !== 1) {
     throw new Error(
       `Codex process ${pid} has ${identities.length} open root rollout files; ` +
@@ -300,6 +517,21 @@ export function resolveCodexOpenRolloutIdentity({
     );
   }
   return identities[0];
+}
+
+function sameActiveCodexIdentity(
+  left: ActiveAgentSessionIdentity,
+  right: ActiveAgentSessionIdentity
+): boolean {
+  return Boolean(
+    left.sessionId === right.sessionId &&
+    left.processUuid === right.processUuid &&
+    left.processBirth === right.processBirth &&
+    left.rollout?.fd === right.rollout?.fd &&
+    left.rollout?.device === right.rollout?.device &&
+    left.rollout?.inode === right.rollout?.inode &&
+    left.rollout?.path === right.rollout?.path
+  );
 }
 
 function parseLsofInteger(value: string): bigint {
@@ -385,8 +617,281 @@ export function buildThreadSelect(columns: string[], limit: number): string {
     columnSet.has("preview") ? "preview" : "null as preview",
     columnSet.has("first_user_message") ? "first_user_message" : "null as first_user_message",
     columnSet.has("updated_at_ms") ? "updated_at_ms" : columnSet.has("updated_at") ? "updated_at * 1000 as updated_at_ms" : "null as updated_at_ms",
-    columnSet.has("archived") ? "archived" : "0 as archived"
+    columnSet.has("archived") ? "archived" : "0 as archived",
+    columnSet.has("source") ? "source" : "null as source",
+    columnSet.has("model_provider") ? "model_provider" : "null as model_provider",
+    columnSet.has("cli_version") ? "cli_version" : "null as cli_version",
+    columnSet.has("name") ? "name" : "null as name"
   ].join(", ");
 
   return `select ${select} from threads order by ${updatedAtExpression} desc limit ${Math.max(1, Math.floor(limit))}`;
+}
+
+export function buildThreadByIdSelect(
+  columns: string[],
+  nativeThreadId: string
+): string {
+  if (!NATIVE_THREAD_ID_PATTERN.test(nativeThreadId)) {
+    throw new Error("Codex thread lookup requires an exact UUID");
+  }
+  const base = buildThreadSelect(columns, 1);
+  return base.replace(
+    " from threads order by ",
+    ` from threads where id = '${nativeThreadId.toLowerCase()}' order by `
+  );
+}
+
+function assertCodexLifecycleCandidateRequest(
+  request: TerminalThreadLifecycleCandidateRequest
+): void {
+  if (request.agentVersion !== CODEX_LIFECYCLE_VERSION) {
+    throw new Error(
+      `Codex lifecycle candidates require exact version ${CODEX_LIFECYCLE_VERSION}`
+    );
+  }
+  if (!request.cwd || !path.isAbsolute(request.cwd)) {
+    throw new Error("Codex lifecycle candidate discovery requires an absolute cwd");
+  }
+}
+
+function codexLifecycleCandidateFromRow({
+  row,
+  codexHome,
+  request
+}: {
+  row: CodexLifecycleThreadRow;
+  codexHome: string;
+  request: TerminalThreadLifecycleCandidateRequest;
+}): TerminalThreadLifecycleCandidate | undefined {
+  const nativeThreadId = stringField(row.id)?.toLowerCase();
+  const rowCwd = stringField(row.cwd);
+  const rolloutPath = stringField(row.rollout_path ?? row.rolloutPath);
+  const rowSource = stringField(row.source);
+  const rowVersion = stringField(row.cli_version);
+  const rowModelProvider = stringField(row.model_provider);
+  if (
+    !nativeThreadId ||
+    !NATIVE_THREAD_ID_PATTERN.test(nativeThreadId) ||
+    !rowCwd ||
+    !rolloutPath ||
+    !path.isAbsolute(rowCwd) ||
+    !path.isAbsolute(rolloutPath) ||
+    rowSource !== "cli" ||
+    rowVersion !== CODEX_LIFECYCLE_VERSION ||
+    row.archived === true ||
+    row.archived === 1 ||
+    path.resolve(rowCwd) !== path.resolve(request.cwd) ||
+    (
+      request.modelProvider !== undefined &&
+      rowModelProvider !== request.modelProvider
+    )
+  ) {
+    return undefined;
+  }
+
+  const opened = readCodexLifecycleMetadata({
+    codexHome,
+    rolloutPath,
+    nativeThreadId
+  });
+  if (
+    opened.metadata.id !== nativeThreadId ||
+    !path.isAbsolute(opened.metadata.cwd) ||
+    path.resolve(opened.metadata.cwd) !== path.resolve(request.cwd) ||
+    opened.metadata.originator !== "codex-tui" ||
+    opened.metadata.source !== "cli" ||
+    opened.metadata.cliVersion !== CODEX_LIFECYCLE_VERSION ||
+    (
+      rowModelProvider !== undefined &&
+      opened.metadata.modelProvider !== rowModelProvider
+    ) ||
+    (
+      request.modelProvider !== undefined &&
+      opened.metadata.modelProvider !== request.modelProvider
+    )
+  ) {
+    return undefined;
+  }
+  const title = boundedCandidateText(row.name ?? row.title);
+  const preview = boundedCandidateText(
+    row.preview ?? row.first_user_message ?? row.firstUserMessage
+  );
+  const updatedAtMs = finiteNumber(row.updated_at_ms ?? row.updatedAtMs) ??
+    opened.fileToken.mtimeMs;
+  const metadataFingerprint = createHash("sha256")
+    .update(JSON.stringify({
+      nativeThreadId,
+      cwd: path.resolve(opened.metadata.cwd),
+      originator: opened.metadata.originator,
+      source: opened.metadata.source,
+      cliVersion: opened.metadata.cliVersion,
+      modelProvider: opened.metadata.modelProvider ?? null,
+      rolloutPath: opened.fileToken.path
+    }))
+    .digest("hex");
+  const candidateToken: TerminalThreadLifecycleCandidateToken = {
+    schema: "agent-knock-knock/thread-candidate-token",
+    version: 1,
+    agent: "codex",
+    nativeThreadId,
+    cwd: path.resolve(request.cwd),
+    source: "codex_rollout",
+    agentVersion: CODEX_LIFECYCLE_VERSION,
+    fileToken: opened.fileToken,
+    metadataFingerprint,
+    modelProvider: opened.metadata.modelProvider
+  };
+  return {
+    agent: "codex",
+    nativeThreadId,
+    cwd: path.resolve(request.cwd),
+    source: "codex_rollout",
+    rootInteractive: true,
+    fileToken: opened.fileToken,
+    agentVersion: CODEX_LIFECYCLE_VERSION,
+    title,
+    preview,
+    updatedAtMs,
+    modelProvider: opened.metadata.modelProvider,
+    metadataFingerprint,
+    candidateToken
+  };
+}
+
+function readCodexLifecycleMetadata({
+  codexHome,
+  rolloutPath,
+  nativeThreadId
+}: {
+  codexHome: string;
+  rolloutPath: string;
+  nativeThreadId: string;
+}): {
+  fileToken: TerminalThreadFileToken;
+  metadata: {
+    id: string;
+    cwd: string;
+    originator: string;
+    source: string;
+    cliVersion: string;
+    modelProvider?: string;
+  };
+} {
+  const configuredRoot = path.resolve(codexHome, "sessions");
+  const lexicalRelative = path.relative(configuredRoot, path.resolve(rolloutPath));
+  if (
+    !lexicalRelative ||
+    lexicalRelative.startsWith("..") ||
+    path.isAbsolute(lexicalRelative)
+  ) {
+    throw new Error("Codex lifecycle rollout is outside CODEX_HOME/sessions");
+  }
+  const sessionsRoot = fs.realpathSync(configuredRoot);
+  const lstat = fs.lstatSync(rolloutPath);
+  if (lstat.isSymbolicLink() || !lstat.isFile()) {
+    throw new Error("Codex lifecycle rollout must be a non-symlink regular file");
+  }
+  const realPath = fs.realpathSync(rolloutPath);
+  const realRelative = path.relative(sessionsRoot, realPath);
+  if (
+    !realRelative ||
+    realRelative.startsWith("..") ||
+    path.isAbsolute(realRelative)
+  ) {
+    throw new Error("Codex lifecycle rollout resolves outside CODEX_HOME/sessions");
+  }
+  const filenameId = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/iu
+    .exec(path.basename(realPath))?.[1]?.toLowerCase();
+  if (filenameId !== nativeThreadId) {
+    throw new Error("Codex lifecycle rollout filename does not match its thread UUID");
+  }
+
+  const fd = fs.openSync(realPath, fs.constants.O_RDONLY | NO_FOLLOW_FLAG);
+  try {
+    const before = fs.fstatSync(fd);
+    if (!before.isFile() || before.size <= 0 || !Number.isSafeInteger(before.size)) {
+      throw new Error("Codex lifecycle rollout has an invalid file identity");
+    }
+    if (
+      process.platform !== "win32" &&
+      typeof process.getuid === "function" &&
+      before.uid !== process.getuid()
+    ) {
+      throw new Error("Codex lifecycle rollout is not owned by the current user");
+    }
+    if (process.platform !== "win32" && (before.mode & 0o022) !== 0) {
+      throw new Error("Codex lifecycle rollout is writable by another user");
+    }
+    const bytesToRead = Math.min(before.size, MAX_CODEX_SESSION_META_BYTES);
+    const buffer = Buffer.allocUnsafe(bytesToRead);
+    const bytesRead = fs.readSync(fd, buffer, 0, bytesToRead, 0);
+    const text = buffer.subarray(0, bytesRead).toString("utf8");
+    const newline = text.indexOf("\n");
+    if (newline < 0 && before.size > bytesRead) {
+      throw new Error("Codex lifecycle session metadata line exceeds the read limit");
+    }
+    const parsed = JSON.parse(newline >= 0 ? text.slice(0, newline) : text);
+    const payload = parsed?.type === "session_meta" ? parsed.payload : undefined;
+    const id = stringField(payload?.id)?.toLowerCase();
+    const cwd = stringField(payload?.cwd);
+    const originator = stringField(payload?.originator);
+    const source = stringField(payload?.source);
+    const cliVersion = stringField(payload?.cli_version);
+    const modelProvider = stringField(payload?.model_provider);
+    if (!id || !cwd || !originator || !source || !cliVersion) {
+      throw new Error("Codex lifecycle rollout has incomplete session metadata");
+    }
+    const after = fs.fstatSync(fd);
+    if (
+      after.dev !== before.dev ||
+      after.ino !== before.ino ||
+      after.size !== before.size ||
+      after.mtimeMs !== before.mtimeMs ||
+      fs.realpathSync(realPath) !== realPath
+    ) {
+      throw new Error("Codex lifecycle rollout changed while it was inspected");
+    }
+    return {
+      fileToken: {
+        path: realPath,
+        device: String(before.dev),
+        inode: String(before.ino),
+        size: before.size,
+        mtimeMs: before.mtimeMs
+      },
+      metadata: { id, cwd, originator, source, cliVersion, modelProvider }
+    };
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function sameThreadFileToken(
+  left: TerminalThreadFileToken,
+  right: TerminalThreadFileToken
+): boolean {
+  return left.path === right.path &&
+    left.device === right.device &&
+    left.inode === right.inode &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs;
+}
+
+function stringField(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim()
+    : undefined;
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : undefined;
+}
+
+function boundedCandidateText(value: unknown): string | undefined {
+  const text = stringField(value)?.replace(/\s+/gu, " ");
+  if (!text) {
+    return undefined;
+  }
+  return text.length <= 400 ? text : `${text.slice(0, 399)}…`;
 }

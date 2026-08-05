@@ -23,7 +23,11 @@ export interface TerminalPane {
 
 export interface TerminalControlProvider {
   listPanes(): Promise<TerminalPane[]>;
-  capture(target: string, options?: { scrollbackLines?: number; socketPath?: string }): Promise<string>;
+  capture(target: string, options?: {
+    scrollbackLines?: number;
+    socketPath?: string;
+    preserveEscapes?: boolean;
+  }): Promise<string>;
   sendText(target: string, text: string, options?: { socketPath?: string }): Promise<void>;
   sendKeys(target: string, keys: readonly string[], options?: { socketPath?: string }): Promise<void>;
 }
@@ -119,12 +123,17 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
     };
   }
 
-  async capture(target: string, options: { scrollbackLines?: number; socketPath?: string } = {}): Promise<string> {
+  async capture(target: string, options: {
+    scrollbackLines?: number;
+    socketPath?: string;
+    preserveEscapes?: boolean;
+  } = {}): Promise<string> {
     const scrollbackLines = Math.max(0, Math.floor(options.scrollbackLines ?? 200));
     let lastResult: CommandResult | undefined;
     for (const command of this.commands) {
       const result = this.runCommand(command, tmuxArgs(options.socketPath, [
         "capture-pane",
+        ...(options.preserveEscapes ? ["-e"] : []),
         "-t",
         target,
         "-p",

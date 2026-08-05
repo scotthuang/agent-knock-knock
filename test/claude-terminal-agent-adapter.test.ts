@@ -8,7 +8,10 @@ import {
   createClaudeTerminalAgentAdapter,
   detectClaudeApprovalPrompt,
   extractClaudeSessionId,
-  inspectClaudeScreen
+  inspectClaudeScreen,
+  observeClaudeThreadLifecycle,
+  planClaudeThreadLifecycle,
+  probeClaudeThreadLifecycle
 } from "../src/claude-terminal-agent-adapter.js";
 import { terminalControlCapabilitiesForAdapter } from "../src/terminal-agent-adapter.js";
 
@@ -756,6 +759,123 @@ test("Claude terminal capabilities expose durable completion only with a configu
   assert.equal(
     (await transcriptAdapter.detectDurableCompletion?.({}))?.text,
     "Transcript-complete"
+  );
+});
+
+test("Claude 2.1.218 lifecycle plan is exact-version and UUID scoped", () => {
+  const capabilities = probeClaudeThreadLifecycle("2.1.218");
+  assert.equal(capabilities.status, "supported");
+  assert.equal(capabilities.behaviorProfile, "claude-code-2.1.218");
+  assert.equal(probeClaudeThreadLifecycle("2.1.219").status, "unsupported");
+  assert.equal(probeClaudeThreadLifecycle(undefined).status, "unknown");
+  assert.deepEqual(
+    planClaudeThreadLifecycle({ kind: "new_thread" }, capabilities).steps,
+    [{
+      kind: "transition",
+      command: "/clear",
+      effect: "thread_transition",
+      requiresIdle: true
+    }]
+  );
+
+  const target = "22222222-2222-4222-8222-222222222222";
+  assert.equal(
+    planClaudeThreadLifecycle(
+      { kind: "resume_thread", nativeThreadId: target },
+      capabilities
+    ).steps[0].command,
+    `/resume ${target}`
+  );
+  assert.throws(
+    () => planClaudeThreadLifecycle(
+      { kind: "resume_thread", nativeThreadId: "partial" },
+      capabilities
+    ),
+    /complete native thread UUID/u
+  );
+});
+
+test("Claude lifecycle observer requires one idle exact-PID agents row", () => {
+  const before = "11111111-1111-4111-8111-111111111111";
+  const after = "22222222-2222-4222-8222-222222222222";
+  const baseRequest = {
+    operation: { kind: "new_thread" as const },
+    phase: "after" as const,
+    beforeNativeThreadId: before,
+    pid: 29466,
+    processStartedAt: 1784870000000,
+    cwd: "/repo",
+    agentRows: [{
+      pid: 29466,
+      cwd: "/repo",
+      kind: "interactive",
+      sessionId: after,
+      startedAt: 1784870000000,
+      status: "idle"
+    }]
+  };
+  assert.deepEqual(observeClaudeThreadLifecycle(baseRequest), {
+    status: "verified",
+    nativeThreadId: after,
+    evidence: "claude_agents_exact_pid",
+    idle: true
+  });
+  assert.equal(
+    observeClaudeThreadLifecycle({
+      ...baseRequest,
+      operation: { kind: "resume_thread", nativeThreadId: after }
+    }).status,
+    "verified"
+  );
+  assert.equal(
+    observeClaudeThreadLifecycle({
+      ...baseRequest,
+      agentRows: [{ ...baseRequest.agentRows[0], status: "working" }]
+    }).status,
+    "mismatch"
+  );
+  assert.equal(
+    observeClaudeThreadLifecycle({
+      ...baseRequest,
+      agentRows: [baseRequest.agentRows[0], baseRequest.agentRows[0]]
+    }).status,
+    "ambiguous"
+  );
+  assert.equal(
+    observeClaudeThreadLifecycle({
+      ...baseRequest,
+      processStartedAt: 1784870000001
+    }).status,
+    "mismatch"
+  );
+  assert.equal(
+    observeClaudeThreadLifecycle({
+      ...baseRequest,
+      processStartedAt: -1,
+      agentRows: [{ ...baseRequest.agentRows[0], startedAt: -1 }]
+    }).status,
+    "missing"
+  );
+  assert.equal(
+    observeClaudeThreadLifecycle({
+      ...baseRequest,
+      agentRows: [{ ...baseRequest.agentRows[0], kind: "background" }]
+    }).status,
+    "mismatch"
+  );
+  assert.equal(
+    observeClaudeThreadLifecycle({
+      ...baseRequest,
+      agentRows: [{ ...baseRequest.agentRows[0], cwd: "/another-repo" }]
+    }).status,
+    "mismatch"
+  );
+  assert.equal(
+    observeClaudeThreadLifecycle(
+      "Session: untrusted-screen-text",
+      { kind: "new_thread" }
+    ).status,
+    "missing"
   );
 });
 
