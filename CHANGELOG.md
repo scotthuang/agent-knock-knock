@@ -4,15 +4,19 @@
 
 ### Added
 
-- Add an opt-in native lifecycle live-smoke release gate that records redacted, commit-bound Codex and Claude Code `new → send → resume` evidence for annotated release tags.
+- Add an opt-in native lifecycle live-smoke diagnostic that records redacted, commit-bound Codex and Claude Code `new → send → resume` evidence.
 - Add an exact Codex 0.146.1 native lifecycle behavior profile while preserving 0.146.0 support.
 
 ### Fixed
 
-- Let the lifecycle release gate attest a persisted unmanaged Codex 0.146.1 thread whose identity is first proved by New's locked, fresh `/status` probe, then fail before `/clear` unless that exact origin remains a uniquely owned, revalidated resume candidate; ordinary list and New behavior remain unchanged outside the opt-in gate.
+- Let the lifecycle diagnostic attest a persisted unmanaged Codex 0.146.1 thread whose identity is first proved by New's locked, fresh `/status` probe, then fail before `/clear` unless that exact origin remains a uniquely owned, revalidated resume candidate; ordinary list and New behavior remain unchanged outside the opt-in diagnostic.
 - Keep the semantic Turn phase independent from callback transport delivery, so a failed or pending `done` notification leaves the Turn idle and a failed or pending `question` or `blocked` notification remains actionable through respond or cancel.
 - Treat accepted OpenClaw injection and wake acknowledgements as durable delivery while keeping `agent.wait` timeout, error, or malformed output as observation-only evidence that cannot replay an accepted callback.
 - Serialize callback claims with exact in-flight diagnostics, preserve immutable outbox delivery across close and Session binding-generation changes, and migrate valid legacy callback-owned statuses without letting malformed records poison Store-wide listing.
+
+### Changed
+
+- Keep the native lifecycle smoke optional during rapid iteration: npm and ClawHub publishing no longer require an annotated-tag attestation, while the manual runner and evidence verifier remain available for diagnostics.
 
 ## 0.10.0 - 2026-08-06
 

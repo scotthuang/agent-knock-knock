@@ -326,13 +326,14 @@ AKK_RUN_LIVE_TMUX_SMOKE=1 node scripts/smoke-tmux.js --confirm-live --agent code
 
 This command can use coding-agent credentials and may incur cost. Read the warning before opting in.
 
-Lifecycle-sensitive releases use the stricter native lifecycle gate described
-in [CONTRIBUTING.md](CONTRIBUTING.md#native-lifecycle-live-smoke-release-gate).
+Maintainers can opt into the stricter native lifecycle diagnostic described
+in [CONTRIBUTING.md](CONTRIBUTING.md#native-lifecycle-live-smoke-diagnostic).
 It runs `A → new B → send in B → exact resume A` against explicitly selected
 Codex and Claude panes, and writes redacted evidence bound to the clean checkout's
 exact version and commit. It supports both managed and verified unmanaged `A`
 starts, recording whether the starting Session was materialized instead of
-inventing one for evidence. It never runs as part of ordinary `npm test`.
+inventing one for evidence. It never runs as part of ordinary `npm test` and
+is not currently required for publishing.
 
 ## Development
 
@@ -346,16 +347,13 @@ See [CONTRIBUTING.md](https://github.com/scotthuang/agent-knock-knock/blob/main/
 
 ### Maintainer Release
 
-Before creating a release tag from a commit containing this gate, run the native
-lifecycle release gate and embed its validated evidence in the annotated tag.
-For those tags, both npm and ClawHub publishing reject a lightweight tag or
-evidence that is missing, failed, older than 72 hours, incomplete, or bound to a
-different package version or commit. See the
-[maintainer procedure](CONTRIBUTING.md#native-lifecycle-live-smoke-release-gate)
-for the exact commands.
+Create the matching `vX.Y.Z` tag from the intended clean `main` commit and push
+it to trigger npm publishing and the GitHub Release. During rapid iteration,
+the native lifecycle smoke remains an optional manual diagnostic rather than a
+publishing prerequisite.
 
 The package is configured for ClawHub trusted publishing. After pushing the
-matching annotated release tag (replace `vX.Y.Z` below), dispatch the `ClawHub
+matching release tag (replace `vX.Y.Z` below), dispatch the `ClawHub
 Publish` workflow from that tag. It derives `beta` versus `latest` and defaults
 to a dry run:
 
