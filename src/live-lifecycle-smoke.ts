@@ -471,6 +471,10 @@ export async function runLifecycleScenario(
         abort("configuration_invalid");
       }
       mutationAttempted = true;
+      const smokeRequest = [
+        `AKK lifecycle smoke sentinel ${nonce}.`,
+        "请确认这条多语言、多行请求已经由原生 Agent 接收；不要修改任何文件。"
+      ].join("\n");
       const output = await invoke(
         dependencies.client,
         "send",
@@ -478,7 +482,7 @@ export async function runLifecycleScenario(
           "--session",
           sessionId,
           "--message",
-          `AKK lifecycle smoke sentinel ${nonce}: acknowledge completion without modifying files.`,
+          smokeRequest,
           "--background",
           "--disable-terminal-bridge-monitor"
         ],
@@ -1208,7 +1212,8 @@ function parseSend(value: unknown, expectedSessionId: string): {
   );
   if (
     record.status !== "async_pending" ||
-    record.delivery_receipt !== "submitted" ||
+    record.submission_outcome !== "agent_accepted" ||
+    record.delivery_receipt !== "agent_accepted" ||
     record.replayed === true ||
     record.background !== true ||
     sessionId !== expectedSessionId ||

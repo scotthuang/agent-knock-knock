@@ -185,7 +185,10 @@ function scenarioFixture(
         "--session",
         SESSION_B,
         "--message",
-        `AKK lifecycle smoke sentinel ${nonce}: acknowledge completion without modifying files.`,
+        [
+          `AKK lifecycle smoke sentinel ${nonce}.`,
+          "请确认这条多语言、多行请求已经由原生 Agent 接收；不要修改任何文件。"
+        ].join("\n"),
         "--background",
         "--disable-terminal-bridge-monitor"
       ],
@@ -195,8 +198,9 @@ function scenarioFixture(
         turn_id: TURN_B,
         delivered: true,
         status: "async_pending",
+        submission_outcome: "agent_accepted",
         background: true,
-        delivery_receipt: "submitted",
+        delivery_receipt: "agent_accepted",
         conversation: {
           session_id: SESSION_B,
           turn_id: TURN_B,

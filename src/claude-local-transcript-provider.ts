@@ -14,6 +14,9 @@ import type {
   TerminalThreadLifecycleCandidateValidation,
   TerminalThreadFileToken
 } from "./terminal-agent-adapter.js";
+import type {
+  TerminalSubmissionAcceptanceEvidence
+} from "./terminal-submission-acceptance.js";
 
 const CLAUDE_TRANSCRIPT_ANCHOR_VERSION = 1;
 const CLAUDE_TRANSCRIPT_MAX_TURN_BYTES = 64 * 1024 * 1024;
@@ -89,6 +92,14 @@ export interface ClaudeTranscriptPendingApprovalEvidence {
   evidenceFingerprint: string;
   observedEndOffsetBytes: number;
 }
+
+/**
+ * Durable, privacy-preserving proof that the exact managed request became a
+ * native root Claude turn. The request text and transcript path are
+ * intentionally omitted so this evidence is safe to persist in a receipt.
+ */
+export type ClaudeTranscriptAcceptanceEvidence =
+  TerminalSubmissionAcceptanceEvidence & { source: "claude_transcript" };
 
 interface TranscriptRecord {
   [key: string]: unknown;
@@ -563,6 +574,12 @@ export function captureClaudeTranscriptAnchor(
     if (located.stat.size > 0 && !fileEndsWithNewline(located.fd, located.stat.size)) {
       throw new Error("Claude transcript did not end at a complete JSONL record before send");
     }
+    const stableStat = fs.fstatSync(located.fd);
+    if (!sameStableTranscriptFile(located.stat, stableStat)) {
+      throw new Error(
+        "Claude transcript changed while its terminal submission anchor was captured"
+      );
+    }
     return {
       schema_version: CLAUDE_TRANSCRIPT_ANCHOR_VERSION,
       session_id: sessionId,
@@ -594,14 +611,54 @@ export function detectClaudeTranscriptCompletion(
   if (!snapshot) {
     return undefined;
   }
-  return completionFromRecords({
-    records: snapshot.records,
-    sessionId: snapshot.sessionId,
-    cwd: snapshot.cwd,
-    expectedRequestHash: snapshot.expectedRequestHash,
-    expectedPromptText: snapshot.expectedPromptText,
-    transcriptFileId: snapshot.transcriptFileId
-  });
+  return completionFromRecords(snapshot);
+}
+
+/**
+ * Detects native acceptance as soon as Claude appends the unique root user
+ * row matching the managed request after the immutable pre-send byte anchor.
+ * Unlike completion detection, acceptance does not require the agent to be
+ * idle because the row is normally written while Claude is working.
+ */
+export function detectClaudeTranscriptAcceptance(
+  request: TerminalDurableCompletionRequest,
+  options: DetectClaudeTranscriptCompletionOptions
+): ClaudeTranscriptAcceptanceEvidence | undefined {
+  const snapshot = readClaudeTranscriptTurnSnapshot(request, options);
+  if (!snapshot) {
+    return undefined;
+  }
+  const prompt = matchingManagedPrompt(snapshot);
+  if (!prompt) {
+    return undefined;
+  }
+  const promptUuid = uuidValue(prompt.uuid);
+  const claudeVersion = nonEmptyString(prompt.version);
+  if (!promptUuid || !claudeVersion) {
+    throw new Error("matched Claude transcript prompt has no stable native identity");
+  }
+  const acceptedAt = String(prompt.timestamp);
+  const evidenceBase = {
+    source: "claude_transcript" as const,
+    kind: "native_user_turn" as const,
+    nativeThreadId: snapshot.sessionId,
+    requestHash: snapshot.expectedRequestHash,
+    acceptanceId: promptUuid,
+    acceptedAt,
+    anchorFingerprint: claudeTranscriptAnchorFingerprint(snapshot.anchor),
+    metadata: {
+      prompt_uuid: promptUuid,
+      claude_version: claudeVersion,
+      transcript_file_id: snapshot.transcriptFileId,
+      anchor_offset_bytes: snapshot.anchor.offset_bytes,
+      observed_end_offset_bytes: snapshot.observedEndOffsetBytes,
+      agent_started_at_ms: snapshot.anchor.agent_started_at_ms
+    }
+  };
+  return {
+    ...evidenceBase,
+    evidenceFingerprint: sha256Hex(JSON.stringify(evidenceBase))
+  };
 }
 
 /**
@@ -634,7 +691,7 @@ function readClaudeTranscriptTurnSnapshot(
   const sessionId = nonEmptyString(request.sessionId);
   const cwd = nonEmptyString(request.cwd);
   const expectedRequestHash = nonEmptyString(request.requestHash);
-  const requestTextHash = requestFingerprint(request.requestText);
+  const requestTextHash = exactRequestFingerprint(request.requestText);
   const expectedPromptText = exactPromptText(request.requestText);
   const startedAtMs = validTimestampMs(request.startedAt);
   const capturedAtMs = validTimestampMs(anchor.captured_at);
@@ -716,12 +773,7 @@ function readClaudeTranscriptTurnSnapshot(
       bytesToRead
     );
     const stableStat = fs.fstatSync(opened.fd);
-    if (
-      stableStat.dev !== opened.stat.dev ||
-      stableStat.ino !== opened.stat.ino ||
-      stableStat.size !== opened.stat.size ||
-      stableStat.mtimeMs !== opened.stat.mtimeMs
-    ) {
+    if (!sameStableTranscriptFile(opened.stat, stableStat)) {
       return undefined;
     }
     if (records.length === 0) {
@@ -743,34 +795,22 @@ function readClaudeTranscriptTurnSnapshot(
   }
 }
 
-function completionFromRecords({
-  records,
-  sessionId,
-  cwd,
-  expectedRequestHash,
-  expectedPromptText,
-  transcriptFileId: fileId
-}: {
-  records: readonly TranscriptRecord[];
-  sessionId: string;
-  cwd: string;
-  expectedRequestHash: string;
-  expectedPromptText: string;
-  transcriptFileId: string;
-}): TerminalCompletionEvidence | undefined {
-  const promptCandidates = records.filter((record) => {
+function matchingManagedPrompt(
+  snapshot: ClaudeTranscriptTurnSnapshot
+): TranscriptRecord | undefined {
+  const promptCandidates = snapshot.records.filter((record) => {
     const promptText = userPromptText(record);
     return record.type === "user" &&
       isRecord(record.message) &&
       record.message.role === "user" &&
       record.isSidechain !== true &&
       nonEmptyString(record.agentId) === undefined &&
-      record.sessionId === sessionId &&
-      normalizePath(record.cwd) === normalizePath(cwd) &&
+      record.sessionId === snapshot.sessionId &&
+      normalizePath(record.cwd) === normalizePath(snapshot.cwd) &&
       validTimestampMs(record.timestamp) !== undefined &&
       promptText !== undefined &&
-      exactPromptText(promptText) === expectedPromptText &&
-      requestFingerprint(promptText) === expectedRequestHash;
+      exactPromptText(promptText) === snapshot.expectedPromptText &&
+      exactRequestFingerprint(promptText) === snapshot.expectedRequestHash;
   });
   if (promptCandidates.length === 0) {
     return undefined;
@@ -784,7 +824,26 @@ function completionFromRecords({
   if (!promptUuid) {
     throw new Error("matched Claude transcript prompt has no stable UUID");
   }
-  assertSupportedRecord(prompt, sessionId, cwd);
+  assertSupportedRecord(prompt, snapshot.sessionId, snapshot.cwd);
+  return prompt;
+}
+
+function completionFromRecords(
+  snapshot: ClaudeTranscriptTurnSnapshot
+): TerminalCompletionEvidence | undefined {
+  const {
+    records,
+    sessionId,
+    transcriptFileId: fileId
+  } = snapshot;
+  const prompt = matchingManagedPrompt(snapshot);
+  if (!prompt) {
+    return undefined;
+  }
+  const promptUuid = uuidValue(prompt.uuid);
+  if (!promptUuid) {
+    throw new Error("matched Claude transcript prompt has no stable UUID");
+  }
 
   const promptIndex = records.indexOf(prompt);
   const nextHumanPromptIndex = records.findIndex((record, index) =>
@@ -955,33 +1014,14 @@ function completionFromRecords({
 function pendingApprovalFromRecords(
   snapshot: ClaudeTranscriptTurnSnapshot
 ): ClaudeTranscriptPendingApprovalEvidence | undefined {
-  const promptCandidates = snapshot.records.filter((record) => {
-    const promptText = userPromptText(record);
-    return record.type === "user" &&
-      isRecord(record.message) &&
-      record.message.role === "user" &&
-      record.isSidechain !== true &&
-      nonEmptyString(record.agentId) === undefined &&
-      record.sessionId === snapshot.sessionId &&
-      normalizePath(record.cwd) === normalizePath(snapshot.cwd) &&
-      validTimestampMs(record.timestamp) !== undefined &&
-      promptText !== undefined &&
-      exactPromptText(promptText) === snapshot.expectedPromptText &&
-      requestFingerprint(promptText) === snapshot.expectedRequestHash;
-  });
-  if (promptCandidates.length === 0) {
+  const prompt = matchingManagedPrompt(snapshot);
+  if (!prompt) {
     return undefined;
   }
-  if (promptCandidates.length !== 1) {
-    throw new Error("multiple Claude transcript prompts matched the managed request");
-  }
-
-  const prompt = promptCandidates[0];
   const promptUuid = uuidValue(prompt.uuid);
   if (!promptUuid) {
     throw new Error("matched Claude transcript prompt has no stable UUID");
   }
-  assertSupportedRecord(prompt, snapshot.sessionId, snapshot.cwd);
 
   const promptIndex = snapshot.records.indexOf(prompt);
   const nextHumanPrompt = snapshot.records.find((record, index) =>
@@ -1228,6 +1268,9 @@ function transcriptAnchorFromContext(context: unknown): ClaudeTranscriptAnchor |
   const capturedAt = nonEmptyString(value.captured_at);
   const relativePath = nonEmptyString(value.relative_path);
   const offsetBytes = nonNegativeInteger(value.offset_bytes);
+  const device = nonEmptyString(value.device);
+  const inode = nonEmptyString(value.inode);
+  const fileExisted = value.file_existed;
   if (
     schemaVersion !== CLAUDE_TRANSCRIPT_ANCHOR_VERSION ||
     !sessionId ||
@@ -1235,11 +1278,17 @@ function transcriptAnchorFromContext(context: unknown): ClaudeTranscriptAnchor |
     pid === undefined ||
     agentStartedAtMs === undefined ||
     !capturedAt ||
+    validTimestampMs(capturedAt) === undefined ||
     !relativePath ||
     offsetBytes === undefined ||
-    typeof value.file_existed !== "boolean"
+    typeof fileExisted !== "boolean" ||
+    (
+      fileExisted
+        ? !decimalFileIdentity(device) || !decimalFileIdentity(inode)
+        : offsetBytes !== 0 || device !== undefined || inode !== undefined
+    )
   ) {
-    return undefined;
+    throw new Error("Claude transcript anchor is invalid");
   }
   return {
     schema_version: CLAUDE_TRANSCRIPT_ANCHOR_VERSION,
@@ -1250,9 +1299,9 @@ function transcriptAnchorFromContext(context: unknown): ClaudeTranscriptAnchor |
     captured_at: capturedAt,
     relative_path: relativePath,
     offset_bytes: offsetBytes,
-    file_existed: value.file_existed,
-    ...(nonEmptyString(value.device) ? { device: nonEmptyString(value.device) } : {}),
-    ...(nonEmptyString(value.inode) ? { inode: nonEmptyString(value.inode) } : {})
+    file_existed: fileExisted,
+    ...(device ? { device } : {}),
+    ...(inode ? { inode } : {})
   };
 }
 
@@ -1753,6 +1802,14 @@ function fileEndsWithNewline(fd: number, size: number): boolean {
   return fs.readSync(fd, buffer, 0, 1, size - 1) === 1 && buffer[0] === 0x0a;
 }
 
+function sameStableTranscriptFile(left: fs.Stats, right: fs.Stats): boolean {
+  return left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs &&
+    left.ctimeMs === right.ctimeMs;
+}
+
 function isRealDirectory(value: string): boolean {
   const stat = lstatOrUndefined(value);
   return Boolean(stat?.isDirectory() && !stat.isSymbolicLink());
@@ -1789,9 +1846,28 @@ function safeErrorCode(value: unknown): string {
     : "claude_api_error";
 }
 
-function requestFingerprint(value: unknown): string | undefined {
-  const text = String(value ?? "").replace(/\s+/gu, " ").trim();
+function exactRequestFingerprint(value: unknown): string | undefined {
+  const text = String(value ?? "");
   return text ? createHash("sha256").update(text).digest("hex") : undefined;
+}
+
+function claudeTranscriptAnchorFingerprint(
+  anchor: ClaudeTranscriptAnchor
+): string {
+  return sha256Hex(JSON.stringify({
+    schema: "agent-knock-knock/claude-transcript-acceptance-anchor",
+    version: 1,
+    session_id: anchor.session_id,
+    cwd: anchor.cwd,
+    pid: anchor.pid,
+    agent_started_at_ms: anchor.agent_started_at_ms,
+    captured_at: anchor.captured_at,
+    relative_path: anchor.relative_path,
+    offset_bytes: anchor.offset_bytes,
+    file_existed: anchor.file_existed,
+    device: anchor.device ?? null,
+    inode: anchor.inode ?? null
+  }));
 }
 
 function exactPromptText(value: unknown): string | undefined {
@@ -1835,6 +1911,10 @@ function positiveInteger(value: unknown): number | undefined {
 function nonNegativeInteger(value: unknown): number | undefined {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+function decimalFileIdentity(value: string | undefined): value is string {
+  return value !== undefined && /^(?:0|[1-9]\d*)$/u.test(value);
 }
 
 function uuidValue(value: unknown): string | undefined {

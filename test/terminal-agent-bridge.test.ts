@@ -10,6 +10,7 @@ import {
   type TerminalScreenInspection
 } from "../src/terminal-agent-adapter.js";
 import { createClaudeTerminalAgentAdapter } from "../src/claude-terminal-agent-adapter.js";
+import { codexTerminalAgentAdapter } from "../src/codex-terminal-agent-adapter.js";
 import { TerminalAgentBridge } from "../src/terminal-agent-bridge.js";
 import {
   terminalRefFromPane,
@@ -285,12 +286,394 @@ test("bridge status and send dispatch through a non-Codex adapter and tmux provi
   assert.equal(status.approval_state.scanned, true);
   assert.equal(status.approval_state.approvable, false);
 
-  await bridge.send("claude", control, "run the focused tests\n");
+  const stages: string[] = [];
+  const result = await bridge.send("claude", control, "run the focused tests\n", {
+    onTransportStage(event) {
+      stages.push(event.stage);
+    }
+  });
+  assert.deepEqual(stages, ["text_injected", "enter_dispatched"]);
+  assert.equal(result.stage, "enter_dispatched");
+  assert.equal(result.multiline, false);
   assert.deepEqual(provider.operations, [
     { kind: "capture", target: PANE.target, socketPath: PANE.socketPath },
     { kind: "text", target: PANE.target, text: "run the focused tests", socketPath: PANE.socketPath },
     { kind: "keys", target: PANE.target, keys: ["C-m"], socketPath: PANE.socketPath }
   ]);
+});
+
+test("send awaits the text-injected persistence boundary before Enter", async () => {
+  const adapter = createTestClaudeAdapter();
+  const provider = new RecordingTerminalProvider([PANE]);
+  const bridge = createBridge(adapter, provider);
+
+  await assert.rejects(
+    () => bridge.send("claude", terminalControl(adapter), "do work", {
+      async onTransportStage(event) {
+        if (event.stage === "text_injected") {
+          throw new Error("could not persist text injection");
+        }
+      }
+    }),
+    /could not persist text injection/u
+  );
+  assert.deepEqual(provider.operations, [{
+    kind: "text",
+    target: PANE.target,
+    text: "do work",
+    socketPath: PANE.socketPath
+  }]);
+});
+
+test("Codex multiline send crosses the paste window and requires a stable exact composer", async () => {
+  const request = "第一行：检查状态\nThen run the focused tests.";
+  class SettlingCodexProvider extends RecordingTerminalProvider {
+    textInjectedAt?: number;
+    enterDispatchedAt?: number;
+
+    override async sendText(
+      target: string,
+      text: string,
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      await super.sendText(target, text, options);
+      this.textInjectedAt = performance.now();
+      this.setScreen(target, [
+        "Ready",
+        "› 第一行：检查状态",
+        "  Then run the focused tests.",
+        "gpt-5.6-sol high · /repo"
+      ].join("\n"));
+    }
+
+    override async sendKeys(
+      target: string,
+      keys: readonly string[],
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      if (keys.includes("C-m")) {
+        this.enterDispatchedAt = performance.now();
+      }
+      await super.sendKeys(target, keys, options);
+    }
+  }
+
+  const provider = new SettlingCodexProvider([PANE]);
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+    terminalProvider: provider,
+    async verifyIdentity() {}
+  });
+  const stages: string[] = [];
+  const result = await bridge.send(
+    "codex",
+    terminalControl(codexTerminalAgentAdapter),
+    request,
+    {
+      runtime: { pid: 110 },
+      onTransportStage(event) {
+        stages.push(event.stage);
+      }
+    }
+  );
+
+  assert.equal(result.stage, "enter_dispatched");
+  assert.equal(result.multiline, true);
+  assert.deepEqual(stages, ["text_injected", "enter_dispatched"]);
+  assert.ok(provider.textInjectedAt !== undefined);
+  assert.ok(provider.enterDispatchedAt !== undefined);
+  assert.ok(
+    provider.enterDispatchedAt - provider.textInjectedAt >= 120,
+    "Enter must cross Codex's upstream 120ms suppression window"
+  );
+  assert.ok(
+    provider.operations.filter((operation) => operation.kind === "capture").length >= 3
+  );
+  assert.equal(
+    provider.operations.filter((operation) =>
+      operation.kind === "keys" && operation.keys.includes("C-m")
+    ).length,
+    1
+  );
+});
+
+test("Codex multiline settle starts only after the exact composer materializes", async () => {
+  const request = "延迟出现的第一行\nDelayed second line.";
+  class DelayedComposerProvider extends RecordingTerminalProvider {
+    materializedAt?: number;
+    enterDispatchedAt?: number;
+
+    override async sendText(
+      target: string,
+      text: string,
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      await super.sendText(target, text, options);
+      setTimeout(() => {
+        this.materializedAt = performance.now();
+        this.setScreen(target, [
+          "Ready",
+          "› 延迟出现的第一行",
+          "  Delayed second line.",
+          "gpt-5.6-sol high · /repo"
+        ].join("\n"));
+      }, 90);
+    }
+
+    override async sendKeys(
+      target: string,
+      keys: readonly string[],
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      if (keys.includes("C-m")) {
+        this.enterDispatchedAt = performance.now();
+      }
+      await super.sendKeys(target, keys, options);
+    }
+  }
+
+  const provider = new DelayedComposerProvider([PANE]);
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+    terminalProvider: provider,
+    async verifyIdentity() {}
+  });
+  await bridge.send(
+    "codex",
+    terminalControl(codexTerminalAgentAdapter),
+    request,
+    { runtime: { pid: 110 } }
+  );
+
+  assert.ok(provider.materializedAt !== undefined);
+  assert.ok(provider.enterDispatchedAt !== undefined);
+  assert.ok(
+    provider.enterDispatchedAt - provider.materializedAt >= 120,
+    "Enter must cross the suppression window after Codex consumes the full paste"
+  );
+  assert.equal(
+    provider.operations.filter((operation) =>
+      operation.kind === "keys" && operation.keys.includes("C-m")
+    ).length,
+    1
+  );
+});
+
+test("unchanged multilingual multiline composer after one Enter is proven not accepted", async () => {
+  const request = "第一行：保留精确内容\nSecond line with  two spaces.";
+  class UnchangedComposerProvider extends RecordingTerminalProvider {
+    override async sendText(
+      target: string,
+      text: string,
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      await super.sendText(target, text, options);
+      this.setScreen(target, [
+        "Ready",
+        "› 第一行：保留精确内容",
+        "  Second line with  two spaces.",
+        "",
+        "gpt-5.6-sol high · /repo"
+      ].join("\n"));
+    }
+  }
+  const provider = new UnchangedComposerProvider([PANE]);
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+    terminalProvider: provider,
+    async verifyIdentity() {}
+  });
+  await bridge.send(
+    "codex",
+    terminalControl(codexTerminalAgentAdapter),
+    request,
+    { runtime: { pid: 110 } }
+  );
+  assert.equal(
+    provider.operations.filter((operation) =>
+      operation.kind === "keys" && operation.keys.includes("C-m")
+    ).length,
+    1
+  );
+  assert.equal(await bridge.proveExactDraftStillPresent(
+    "codex",
+    terminalControl(codexTerminalAgentAdapter),
+    request,
+    { runtime: { pid: 110 } }
+  ), true);
+});
+
+test("Claude exact-draft proof only accepts the complete bottom composer frame", async () => {
+  const request = "检查历史提示\nKeep the exact second line.";
+  const adapter = createClaudeTerminalAgentAdapter();
+  const provider = new RecordingTerminalProvider([PANE], {
+    [PANE.target]: [
+      "❯ 检查历史提示",
+      "  Keep the exact second line.",
+      "",
+      "Completed the earlier request.",
+      "────────────────────────────────────",
+      "❯ ",
+      "────────────────────────────────────",
+      "  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents"
+    ].join("\n")
+  });
+  const bridge = createBridge(adapter, provider);
+  const control = terminalControl(adapter);
+
+  assert.equal(await bridge.proveExactDraftStillPresent(
+    "claude",
+    control,
+    request,
+    { runtime: MANAGED_CLAUDE_RUNTIME }
+  ), false, "a matching historical prompt is not the live composer");
+
+  provider.setScreen(PANE.target, [
+    "Older output",
+    "────────────────────────────────────",
+    "❯ 检查历史提示",
+    "  Keep the exact second line.",
+    "────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+  ].join("\n"));
+  assert.equal(await bridge.proveExactDraftStillPresent(
+    "claude",
+    control,
+    request,
+    { runtime: MANAGED_CLAUDE_RUNTIME }
+  ), true, "the exact draft in the complete bottom frame is authoritative");
+
+  provider.setScreen(PANE.target, [
+    "❯ 检查历史提示",
+    "  Keep the exact second line.",
+    "Completed output without a bottom composer frame"
+  ].join("\n"));
+  assert.equal(await bridge.proveExactDraftStillPresent(
+    "claude",
+    control,
+    request,
+    { runtime: MANAGED_CLAUDE_RUNTIME }
+  ), false, "an unframed scrollback match must fail closed");
+
+  provider.setScreen(PANE.target, [
+    "────────────────────────────────────",
+    "❯ 检查历史提示",
+    "  Keep the exact second line.",
+    "────────────────────────────────────",
+    "Assistant output: press Esc to dismiss this note."
+  ].join("\n"));
+  assert.equal(await bridge.proveExactDraftStillPresent(
+    "claude",
+    control,
+    request,
+    { runtime: MANAGED_CLAUDE_RUNTIME }
+  ), false, "ordinary prose containing a key hint is not a composer footer");
+});
+
+test("Codex multiline send fails closed when the stable composer drifts before Enter", async () => {
+  const request = "first exact line\nsecond exact line";
+  class DriftingCodexProvider extends RecordingTerminalProvider {
+    textInjectedAt?: number;
+    capturesAfterText = 0;
+    drifted = false;
+
+    override async sendText(
+      target: string,
+      text: string,
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      await super.sendText(target, text, options);
+      this.textInjectedAt = performance.now();
+      this.setScreen(target, [
+        "› first exact line",
+        "  second exact line",
+        "gpt-5.6-sol high · /repo"
+      ].join("\n"));
+    }
+
+    override async capture(
+      target: string,
+      options: { scrollbackLines?: number; socketPath?: string } = {}
+    ): Promise<string> {
+      const screen = await super.capture(target, options);
+      if (this.textInjectedAt !== undefined) {
+        this.capturesAfterText += 1;
+        if (
+          !this.drifted &&
+          this.capturesAfterText >= 2 &&
+          performance.now() - this.textInjectedAt >= 120
+        ) {
+          this.drifted = true;
+          this.setScreen(target, [
+            "› first exact line",
+            "  second exact line changed",
+            "gpt-5.6-sol high · /repo"
+          ].join("\n"));
+        }
+      }
+      return screen;
+    }
+  }
+
+  const provider = new DriftingCodexProvider([PANE]);
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+    terminalProvider: provider,
+    async verifyIdentity() {}
+  });
+  await assert.rejects(
+    () => bridge.send(
+      "codex",
+      terminalControl(codexTerminalAgentAdapter),
+      request,
+      { runtime: { pid: 110 } }
+    ),
+    /composer changed/u
+  );
+  assert.equal(
+    provider.operations.some((operation) =>
+      operation.kind === "keys" && operation.keys.includes("C-m")
+    ),
+    false
+  );
+});
+
+test("Codex multiline send fails closed on identity drift without cleanup or Enter", async () => {
+  const request = "first line\nsecond line";
+  const provider = new RecordingTerminalProvider([PANE], {
+    [PANE.target]: [
+      "› first line",
+      "  second line",
+      "gpt-5.6-sol high · /repo"
+    ].join("\n")
+  });
+  let checks = 0;
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+    terminalProvider: provider,
+    async verifyIdentity() {
+      checks += 1;
+      if (checks > 1) {
+        throw new Error("Codex process identity drifted after multiline paste");
+      }
+    }
+  });
+
+  await assert.rejects(
+    () => bridge.send(
+      "codex",
+      terminalControl(codexTerminalAgentAdapter),
+      request,
+      { runtime: { pid: 110 } }
+    ),
+    /identity drifted/u
+  );
+  assert.deepEqual(provider.operations, [{
+    kind: "text",
+    target: PANE.target,
+    text: request,
+    socketPath: PANE.socketPath
+  }]);
 });
 
 test("bridge preserves ordered approval and cancellation key sequences", async () => {

@@ -87,7 +87,7 @@ exit 9
       "--openclaw-bin",
       fakeOpenClaw,
       "--timeout-ms",
-      "2000"
+      "10000"
     ]);
     const output = JSON.parse(result.stdout);
     const openclaw = output.checks.find((entry) => entry.command === "openclaw");

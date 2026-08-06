@@ -9,6 +9,7 @@ import {
   formatAkkRespondCommandResult,
   formatAkkThreadsCommandResult,
   formatAkkThreadTransitionCommandResult,
+  isAkkNativeSubmissionAccepted,
   parseAkkCommand,
   resolvePluginStoreDir
 } from "../src/openclaw-plugin-helpers.js";
@@ -392,7 +393,9 @@ test("/akk respond keeps an answer inside one exact in-flight Turn", () => {
   );
 
   const submitted = formatAkkRespondCommandResult({
-    submission_outcome: "submitted",
+    submission_outcome: "agent_accepted",
+    delivery_receipt: "agent_accepted",
+    delivered: true,
     session_id: "session-respond",
     turn_id: "turn-respond",
     status: "async_pending"
@@ -418,21 +421,94 @@ test("/akk respond reports an uncertain submission and forbids automatic retry",
   assert.doesNotMatch(formatted.text, /^AKK response sent\.$/mu);
 });
 
-test("/akk respond reports an aborted submission as unsent and safe to retry", () => {
-  const formatted = formatAkkRespondCommandResult({
+test("/akk respond never upgrades transport-only or pending receipts to accepted", () => {
+  for (const result of [
+    {
+      submission_outcome: "agent_accepted",
+      delivery_receipt: "agent_accepted",
+      delivered: false,
+      status: "submission_pending_acceptance"
+    },
+    {
+      submission_outcome: "submitted",
+      delivery_receipt: "submitted",
+      status: "submission_pending_acceptance"
+    },
+    {
+      submission_outcome: "pending_acceptance",
+      delivery_receipt: "enter_dispatched",
+      status: "submission_pending_acceptance"
+    },
+    {
+      submission_outcome: "not_accepted",
+      delivery_receipt: "enter_dispatched",
+      status: "submission_not_accepted"
+    }
+  ]) {
+    const formatted = formatAkkRespondCommandResult({
+      ...result,
+      session_id: "session-not-accepted",
+      turn_id: "turn-not-accepted"
+    });
+    assert.equal(formatted.isError, true);
+    assert.doesNotMatch(formatted.text, /^AKK response sent\.$/mu);
+    assert.match(formatted.text, /do not retry automatically/u);
+  }
+});
+
+test("native terminal submission acceptance requires the full proof tuple", () => {
+  assert.equal(isAkkNativeSubmissionAccepted({
+    submission_outcome: "agent_accepted",
+    delivery_receipt: "agent_accepted",
+    delivered: true
+  }), true);
+  for (const result of [
+    { submission_outcome: "agent_accepted", delivery_receipt: "agent_accepted" },
+    { submission_outcome: "agent_accepted", delivery_receipt: "enter_dispatched", delivered: true },
+    { submission_outcome: "pending_acceptance", delivery_receipt: "agent_accepted", delivered: true }
+  ]) {
+    assert.equal(isAkkNativeSubmissionAccepted(result), false);
+  }
+});
+
+test("/akk respond preserves safe and unsafe aborted retry boundaries", () => {
+  const safe = formatAkkRespondCommandResult({
     submission_outcome: "aborted",
+    safe_to_retry: true,
+    do_not_retry: false,
     conversation: {
       conversation_id: "legacy-aborted-turn",
       status: "waiting_for_openclaw"
     }
   });
 
-  assert.equal(formatted.isError, true);
-  assert.match(formatted.text, /^AKK response was not sent\.$/mu);
-  assert.match(formatted.text, /safe to retry this response/u);
-  assert.match(formatted.text, /^session: legacy-aborted-turn$/mu);
-  assert.match(formatted.text, /^turn: legacy-aborted-turn$/mu);
-  assert.doesNotMatch(formatted.text, /^AKK response sent\.$/mu);
+  assert.equal(safe.isError, true);
+  assert.match(safe.text, /^AKK response was not sent\.$/mu);
+  assert.match(safe.text, /safe to retry this response/u);
+  assert.match(safe.text, /^session: legacy-aborted-turn$/mu);
+  assert.match(safe.text, /^turn: legacy-aborted-turn$/mu);
+  assert.doesNotMatch(safe.text, /^AKK response sent\.$/mu);
+
+  for (const unsafeInput of [
+    { submission_outcome: "aborted" },
+    {
+      submission_outcome: "aborted",
+      safe_to_retry: false,
+      do_not_retry: true
+    }
+  ]) {
+    const unsafe = formatAkkRespondCommandResult({
+      ...unsafeInput,
+      conversation: {
+        conversation_id: "unsafe-aborted-turn",
+        status: "waiting_for_openclaw"
+      }
+    });
+    assert.equal(unsafe.isError, true);
+    assert.match(unsafe.text, /do not retry automatically/u);
+    assert.match(unsafe.text, /inspect/u);
+    assert.doesNotMatch(unsafe.text, /safe to retry this response/u);
+  }
 });
 
 test("/akk stateful commands consistently use the trusted plugin store", () => {

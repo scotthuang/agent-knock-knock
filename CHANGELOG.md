@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.2 - 2026-08-07
+
+### Fixed
+
+- Require exact post-anchor Codex rollout or owner-private Claude transcript evidence before reporting a terminal submission as delivered; tmux transport success alone now remains pending or uncertain and is never automatically retried.
+- Track durable `prepared → text_injected → enter_dispatched → agent_accepted` proof, preserve that exact proof level across replay and recovery, and fence stable OpenClaw retries to their original Store, Session, Turn, message, binding, and terminal incarnation.
+- Settle an exact multiline Codex composer before dispatching Enter once, promptly report an unchanged exact draft as not accepted, and extend the opt-in lifecycle smoke payload to verify multilingual multiline native acceptance.
+- Keep append-only submission receipts bound to the pane incarnation that received their input while allowing a replacement tmux pane to establish a new dispatch generation.
+
 ## 0.10.1 - 2026-08-06
 
 ### Added

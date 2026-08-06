@@ -108,7 +108,9 @@ test("verified lifecycle target conflict preserves source and later rolls forwar
     const environment = {
       ...process.env,
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
-      AKK_RUNTIME_DIR: runtimeDir
+      AKK_RUNTIME_DIR: runtimeDir,
+      AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "1",
+      AKK_TEST_TERMINAL_ACCEPTANCE_OUTCOME: "accepted"
     };
 
     const ledgerKey = createHash("sha256")

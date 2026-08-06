@@ -22,12 +22,21 @@ import {
 import {
   captureClaudeTranscriptAnchor,
   defaultClaudeHome,
+  detectClaudeTranscriptAcceptance,
   detectClaudeTranscriptCompletion,
   detectClaudeTranscriptPendingApproval,
   listClaudeThreadLifecycleCandidates,
   revalidateClaudeThreadLifecycleCandidate,
   type ClaudeTranscriptAnchor
 } from "./claude-local-transcript-provider.js";
+import {
+  captureCodexRolloutAcceptanceAnchor,
+  detectCodexRolloutAcceptance,
+  terminalSubmissionReplayReceipt,
+  type CodexRolloutAcceptanceAnchor,
+  type TerminalSubmissionAcceptanceEvidence,
+  validateTerminalSubmissionAcceptanceEvidence
+} from "./terminal-submission-acceptance.js";
 import { CodexLocalSessionProvider, type CodexLocalSessionAdapter } from "./codex-local-session-provider.js";
 import { CodexStoreAdapter } from "./codex-store-adapter.js";
 import {
@@ -72,6 +81,7 @@ import {
   pathsForConversationDir,
   saveState,
   statePathForConversationId,
+  withStoreWriterLease,
   withStoreWriterLeaseAsync
 } from "./store.js";
 import {
@@ -148,6 +158,8 @@ const DEFAULT_IDLE_TIMEOUT_MINUTES = 10080;
 const DEFAULT_AGENT_TIMEOUT_MINUTES = 60;
 const DEFAULT_AGENT_HARD_TIMEOUT_MINUTES = 720;
 const DEFAULT_MONITOR_POLL_INTERVAL_MS = 5000;
+const DEFAULT_TERMINAL_ACCEPTANCE_TIMEOUT_MS = 5000;
+const DEFAULT_TERMINAL_ACCEPTANCE_POLL_INTERVAL_MS = 50;
 const CLAUDE_SCREEN_APPROVAL_TTL_MS = 10 * 60 * 1000;
 const CALLBACK_DELIVERY_TIMEOUT_MS = 30_000;
 const CALLBACK_AGENT_WAIT_TIMEOUT_MS = 20_000;
@@ -155,6 +167,32 @@ const CALLBACK_AGENT_WAIT_CLI_TIMEOUT_MS = 25_000;
 const CALLBACK_AGENT_WAIT_PROCESS_TIMEOUT_MS = 30_000;
 const CALLBACK_ATTEMPT_LEASE_MS = 2 * 60 * 1000;
 const CALLBACK_RETRY_DELAYS_MS = [5000, 15000, 60000, 60000];
+const TERMINAL_LEDGER_RECEIPT_STATUSES = new Set([
+  "text_injected",
+  "enter_dispatched",
+  "submitted",
+  "agent_accepted",
+  "not_accepted",
+  "uncertain",
+  "aborted"
+]);
+const TERMINAL_LEDGER_RECEIPT_IMMUTABLE_FIELDS = [
+  "binding_id",
+  "binding_generation",
+  "native_thread_id",
+  "store_dir",
+  "conversation_id",
+  "session_id",
+  "turn_id",
+  "message_id",
+  "message_type",
+  "message_body_hash",
+  "request_hash",
+  "executor_kind",
+  "openclaw_session",
+  "state_path",
+  "event_log_path"
+] as const;
 
 interface CallbackDeliveryOutcome {
   kind: string;
@@ -1391,6 +1429,214 @@ function isTerminalControlCapability(value: unknown): value is TerminalControlCa
   ].includes(value);
 }
 
+function assertSafeAbortedTerminalRetryBinding({
+  owner,
+  receipt,
+  storeDir,
+  terminalControl,
+  messageId
+}: {
+  owner: Conversation;
+  receipt: Record<string, any>;
+  storeDir: string;
+  terminalControl: TerminalControlRef;
+  messageId: string;
+}): void {
+  if (!(receipt.status === "aborted" && receipt.safe_to_retry === true)) {
+    return;
+  }
+  const sessionId = sessionIdForConversation(owner);
+  const managedSession = tryLoadManagedSession(storeDir, sessionId);
+  const binding = managedSession?.binding;
+  const receiptBindingId = stringValue(receipt.binding_id);
+  const receiptBindingGeneration = Number(receipt.binding_generation);
+  const receiptNativeThreadId = stringValue(receipt.native_thread_id);
+  const ownerTakeover = isRecord(owner.native_session_takeover)
+    ? owner.native_session_takeover
+    : undefined;
+  const ownerControl = terminalControlFromTakeover(ownerTakeover);
+  const ownerNativeThreadId = stringValue(owner.native_thread_id) ??
+    stringValue(ownerTakeover?.terminal_agent_session_id) ??
+    stringValue(ownerTakeover?.terminal_agent_expected_session_id);
+  const ownerAgentPid = Number(ownerTakeover?.terminal_agent_pid);
+  if (
+    !managedSession ||
+    managedSession.status !== "bound" ||
+    !binding ||
+    !receiptBindingId ||
+    !Number.isSafeInteger(receiptBindingGeneration) ||
+    !receiptNativeThreadId ||
+    receiptBindingId !== stringValue(owner.terminal_binding_id) ||
+    receiptBindingGeneration !== Number(owner.terminal_binding_generation) ||
+    receiptNativeThreadId !== ownerNativeThreadId ||
+    binding.binding_id !== receiptBindingId ||
+    binding.generation !== receiptBindingGeneration ||
+    binding.native_thread_id !== receiptNativeThreadId ||
+    !Number.isSafeInteger(ownerAgentPid) ||
+    binding.native_process.pid !== ownerAgentPid ||
+    !ownerControl ||
+    terminalControlSelectorKey(ownerControl) !==
+      terminalControlSelectorKey(terminalControl) ||
+    terminalControlSelectorKey(binding.terminal_control) !==
+      terminalControlSelectorKey(terminalControl)
+  ) {
+    throw new Error(
+      `terminal idempotency key ${messageId} belongs to a safe-aborted Turn ` +
+      "whose Session binding is no longer current; no terminal input was sent"
+    );
+  }
+}
+
+function stableDelegateTerminalRoute({
+  options,
+  request,
+  workspace,
+  requestedAgent
+}: {
+  options: Record<string, any>;
+  request: string;
+  workspace?: string;
+  requestedAgent?: ExecutorKind;
+}):
+  | { kind: "terminal"; conversationId: string; workspace: string }
+  | { kind: "session"; sessionId: string; workspace: string }
+  | undefined {
+  const messageId = stringValue(options.messageId);
+  if (!messageId) {
+    return undefined;
+  }
+  const storeDir = path.resolve(storeDirFromOptions(options));
+  const requestHash = terminalBridgeRequestFingerprint(
+    terminalSubmissionPayload(request)
+  );
+  const bodyHash = createHash("sha256").update(request).digest("hex");
+  const requestedOpenClawSession = stringValue(options.openclawSession);
+  const matches = listConversations(storeDir).flatMap((owner) =>
+    terminalBridgeSubmissionReceipts(owner)
+      .filter((receipt) => stringValue(receipt.message_id) === messageId)
+      .map((receipt) => ({ owner, receipt }))
+  );
+  if (matches.length === 0) {
+    return undefined;
+  }
+  const routed = matches.map(({ owner, receipt }) => {
+    const ownerStoreDir = managedSessionStoreDirForConversation(owner);
+    const takeover = isRecord(owner.native_session_takeover)
+      ? owner.native_session_takeover
+      : undefined;
+    const terminalControl = terminalControlFromTakeover(takeover);
+    const conversationId = stringValue(takeover?.native_session_id);
+    let eventMessages: Record<string, any>[] = [];
+    const eventLogPath = stringValue(owner.event_log_path);
+    if (eventLogPath) {
+      try {
+        eventMessages = readNdjsonLog(eventLogPath)
+          .filter((event) =>
+            isRecord(event.message) && event.message.id === messageId
+          )
+          .map((event) => event.message as Record<string, any>);
+      } catch {
+        eventMessages = [];
+      }
+    }
+    if (eventMessages.length > 1) {
+      throw new Error(
+        `terminal idempotency key ${messageId} has duplicate durable messages`
+      );
+    }
+    const eventMessage = eventMessages[0];
+    const messageType = stringValue(receipt.message_type) ??
+      (isRecord(eventMessage) ? stringValue(eventMessage.type) : undefined);
+    const storedBodyHash = stringValue(receipt.message_body_hash) ??
+      (isRecord(eventMessage) && typeof eventMessage.body === "string"
+        ? createHash("sha256").update(eventMessage.body).digest("hex")
+        : undefined);
+    const ownerWorkspace = canonicalWorkspace(owner.workspace);
+    if (
+      !ownerStoreDir ||
+      path.resolve(ownerStoreDir) !== storeDir ||
+      (stringValue(receipt.store_dir) !== undefined &&
+        path.resolve(String(receipt.store_dir)) !== storeDir) ||
+      !terminalControl ||
+      !conversationId ||
+      stringValue(receipt.request_hash) !== requestHash ||
+      messageType !== "task" ||
+      storedBodyHash !== bodyHash ||
+      (requestedOpenClawSession &&
+        (stringValue(receipt.openclaw_session) ?? owner.openclaw_session) !==
+          requestedOpenClawSession) ||
+      (requestedAgent && executorForConversation(owner).kind !== requestedAgent) ||
+      (workspace && ownerWorkspace !== workspace)
+    ) {
+      throw new Error(
+        `terminal idempotency key ${messageId} does not match its original ` +
+        "delegate request boundary; no terminal input was sent"
+      );
+    }
+    return {
+      owner,
+      receipt,
+      conversationId,
+      workspace: ownerWorkspace,
+      terminalKey: terminalControlSelectorKey(terminalControl),
+      panePid: terminalControl.panePid
+    };
+  });
+  const authoritative = routed.filter(({ receipt }) =>
+    !(receipt.status === "aborted" && receipt.safe_to_retry === true)
+  );
+  if (authoritative.length > 1) {
+    throw new Error(
+      `terminal idempotency key ${messageId} has multiple durable delegate receipts`
+    );
+  }
+  const terminalKeys = new Set(routed.map((entry) =>
+    `${entry.conversationId}\0${entry.terminalKey}\0${entry.panePid}`
+  ));
+  if (terminalKeys.size !== 1) {
+    throw new Error(
+      `terminal idempotency key ${messageId} has conflicting terminal routes`
+    );
+  }
+  const selected = authoritative[0] ?? routed.at(-1);
+  if (!selected) {
+    return undefined;
+  }
+  if (
+    selected.receipt.status === "aborted" &&
+    selected.receipt.safe_to_retry === true
+  ) {
+    const sessionId = sessionIdForConversation(selected.owner);
+    const ownerControl = terminalControlFromTakeover(
+      isRecord(selected.owner.native_session_takeover)
+        ? selected.owner.native_session_takeover
+        : undefined
+    );
+    if (!ownerControl) {
+      throw new Error(
+        `terminal idempotency key ${messageId} has no durable terminal route`
+      );
+    }
+    assertSafeAbortedTerminalRetryBinding({
+      owner: selected.owner,
+      receipt: selected.receipt,
+      storeDir,
+      terminalControl: ownerControl,
+      messageId
+    });
+    return {
+      kind: "session",
+      sessionId,
+      workspace: selected.workspace
+    };
+  }
+  return {
+    kind: "terminal",
+    conversationId: selected.conversationId,
+    workspace: selected.workspace
+  };
+}
+
 async function runDelegate(options) {
   const request = required(options.request, "--request is required");
   const workspace = options.workspace === undefined
@@ -1399,6 +1645,32 @@ async function runDelegate(options) {
   const requestedAgent = options.agent === undefined
     ? undefined
     : resolveExecutor({ kind: options.agent }).kind;
+  const stableRoute = stableDelegateTerminalRoute({
+    options,
+    request,
+    workspace,
+    requestedAgent
+  });
+  if (stableRoute) {
+    await runSend(stableRoute.kind === "session"
+      ? {
+          ...options,
+          session: stableRoute.sessionId,
+          conversation: undefined,
+          message: request,
+          workspace: stableRoute.workspace,
+          background: true
+        }
+      : {
+          ...options,
+          conversation: stableRoute.conversationId,
+          session: undefined,
+          message: request,
+          workspace: stableRoute.workspace,
+          background: true
+        });
+    return;
+  }
   const scan = await buildTerminalListGroup({
     options: {
       ...options,
@@ -1730,6 +2002,7 @@ function withTerminalBridgeState({
   agentTimeoutMinutes,
   agentHardTimeoutMinutes,
   preSendScreenFingerprint,
+  codexRolloutAcceptanceAnchor,
   claudeTranscriptAnchor,
   claudeHome
 }) {
@@ -1746,6 +2019,7 @@ function withTerminalBridgeState({
       terminal_bridge_request_text: requestText,
       terminal_bridge_request_hash: terminalBridgeRequestFingerprint(requestText),
       terminal_bridge_pre_send_screen_fingerprint: preSendScreenFingerprint,
+      codex_rollout_acceptance_anchor: codexRolloutAcceptanceAnchor,
       claude_transcript_anchor: claudeTranscriptAnchor,
       claude_home: claudeHome,
       terminal_bridge_completion_claim: undefined,
@@ -1764,6 +2038,11 @@ function withTerminalBridgeState({
 
 type TerminalBridgeSubmissionStatus =
   | "prepared"
+  | "text_injected"
+  | "enter_dispatched"
+  | "agent_accepted"
+  | "not_accepted"
+  // Legacy `submitted` proves only that tmux accepted the Enter dispatch.
   | "submitted"
   | "uncertain"
   | "aborted";
@@ -1771,23 +2050,41 @@ type TerminalBridgeSubmissionStatus =
 function withTerminalBridgeSubmission({
   conversation,
   messageId,
+  messageType,
+  messageBody,
   requestText,
   status,
   preparedAt,
+  textInjectedAt,
+  enterDispatchedAt,
+  agentAcceptedAt,
+  notAcceptedAt,
   submittedAt,
   uncertainAt,
   abortedAt,
-  error
+  error,
+  acceptanceEvidence,
+  lastProvenStage,
+  safeToRetry
 }: {
   conversation: Conversation;
   messageId: string;
+  messageType?: "task" | "answer";
+  messageBody?: string;
   requestText: string;
   status: TerminalBridgeSubmissionStatus;
   preparedAt: string;
+  textInjectedAt?: string;
+  enterDispatchedAt?: string;
+  agentAcceptedAt?: string;
+  notAcceptedAt?: string;
   submittedAt?: string;
   uncertainAt?: string;
   abortedAt?: string;
   error?: string;
+  acceptanceEvidence?: TerminalSubmissionAcceptanceEvidence;
+  lastProvenStage?: "prepared" | "text_injected" | "enter_dispatched" | "agent_accepted";
+  safeToRetry?: boolean;
 }): Conversation {
   const nativeTakeover = isRecord(conversation.native_session_takeover)
     ? conversation.native_session_takeover
@@ -1795,32 +2092,863 @@ function withTerminalBridgeSubmission({
   const previousSubmission = isRecord(nativeTakeover.terminal_bridge_submission)
     ? nativeTakeover.terminal_bridge_submission
     : undefined;
-  const previousDispatcherPid = Number(previousSubmission?.dispatcher_pid);
+  const receiptsValue = nativeTakeover.terminal_bridge_submission_receipts;
+  if (receiptsValue !== undefined && !Array.isArray(receiptsValue)) {
+    throw new Error("terminal submission receipt history is malformed");
+  }
+  const storedReceipts = (Array.isArray(receiptsValue) ? receiptsValue : [])
+    .map((value) => {
+      if (!isRecord(value) || !stringValue(value.message_id)) {
+        throw new Error("terminal submission receipt history is malformed");
+      }
+      return value;
+    });
+  const storedReceiptIds = new Set<string>();
+  for (const receipt of storedReceipts) {
+    const receiptId = String(receipt.message_id);
+    if (storedReceiptIds.has(receiptId)) {
+      throw new Error(`terminal submission receipt ${receiptId} is duplicated`);
+    }
+    storedReceiptIds.add(receiptId);
+  }
+  // A v0.10.1 Turn has only the latest singleton receipt. Seed it into the
+  // append-only history before recording a later response so upgrading cannot
+  // erase the only proof that an older message was already dispatched.
+  const previousSubmissionId = stringValue(previousSubmission?.message_id);
+  const previousReceipts = previousSubmissionId &&
+    !storedReceiptIds.has(previousSubmissionId)
+    ? [...storedReceipts, previousSubmission as Record<string, any>]
+    : storedReceipts;
+  const matchingReceipts = previousReceipts.filter((receipt) =>
+    stringValue(receipt.message_id) === messageId
+  );
+  if (matchingReceipts.length > 1) {
+    throw new Error(`terminal submission receipt ${messageId} is duplicated`);
+  }
+  const previousReceipt = matchingReceipts[0];
+  const previousGenerationSubmission =
+    stringValue(previousSubmission?.message_id) === messageId
+      ? previousSubmission
+      : undefined;
+  if (
+    previousReceipt &&
+    previousGenerationSubmission &&
+    canonicalJson(previousReceipt) !== canonicalJson(previousGenerationSubmission)
+  ) {
+    throw new Error(
+      `terminal submission receipt ${messageId} conflicts with its current generation`
+    );
+  }
+  const durableMessageType = messageType ??
+    (stringValue(previousReceipt?.message_type) === "answer"
+      ? "answer"
+      : stringValue(previousReceipt?.message_type) === "task"
+        ? "task"
+        : stringValue(previousGenerationSubmission?.message_type) === "answer"
+          ? "answer"
+          : stringValue(previousGenerationSubmission?.message_type) === "task"
+            ? "task"
+            : undefined);
+  const messageBodyHash = messageBody !== undefined
+    ? createHash("sha256").update(messageBody).digest("hex")
+    : stringValue(previousReceipt?.message_body_hash) ??
+      stringValue(previousGenerationSubmission?.message_body_hash);
+  const previousDispatcherPid = Number(
+    previousGenerationSubmission?.dispatcher_pid
+  );
   const dispatcherPid = status === "prepared" ||
     !Number.isSafeInteger(previousDispatcherPid) ||
     previousDispatcherPid <= 1
     ? process.pid
     : previousDispatcherPid;
+  const provenStage = lastProvenStage ?? terminalSubmissionLastProvenStage(
+    status,
+    stringValue(previousGenerationSubmission?.last_proven_stage)
+  );
+  const validatedAcceptanceEvidence = status === "agent_accepted"
+    ? terminalAcceptanceEvidenceForConversation(
+        conversation,
+        requestText,
+        acceptanceEvidence
+      )
+    : undefined;
+  const storedControl = terminalControlFromTakeover(nativeTakeover);
+  const requestHash = terminalBridgeRequestFingerprint(requestText);
+  const candidateImmutableReceiptFields = {
+    session_id: sessionIdForConversation(conversation),
+    turn_id: turnIdForConversation(conversation),
+    message_id: messageId,
+    binding_id: stringValue(conversation.terminal_binding_id),
+    binding_generation: Number.isSafeInteger(
+      Number(conversation.terminal_binding_generation)
+    )
+      ? Number(conversation.terminal_binding_generation)
+      : undefined,
+    ...(durableMessageType ? { message_type: durableMessageType } : {}),
+    ...(messageBodyHash ? { message_body_hash: messageBodyHash } : {}),
+    request_hash: requestHash,
+    executor_kind: executorForConversation(conversation).kind,
+    openclaw_session: conversation.openclaw_session,
+    store_dir: managedSessionStoreDirForConversation(conversation),
+    native_thread_id:
+      stringValue(conversation.native_thread_id) ??
+      stringValue(nativeTakeover.terminal_agent_session_id) ??
+      stringValue(nativeTakeover.terminal_agent_expected_session_id),
+    terminal_target: storedControl?.target,
+    terminal_socket_path: storedControl?.socketPath ?? null,
+    terminal_pane_pid: storedControl?.panePid
+  };
+  const immutableReceiptFields = Object.fromEntries(
+    Object.entries(candidateImmutableReceiptFields).map(([key, value]) => [
+      key,
+      value === undefined && previousReceipt?.[key] !== undefined
+        ? previousReceipt[key]
+        : value
+    ])
+  );
+  if (previousReceipt) {
+    for (const [key, value] of Object.entries(candidateImmutableReceiptFields)) {
+      if (
+        previousReceipt[key] !== undefined &&
+        value !== undefined &&
+        String(previousReceipt[key]) !== String(value)
+      ) {
+        throw new Error(
+          `terminal submission receipt ${messageId} changed immutable ${key}`
+        );
+      }
+    }
+  }
+  const nextSubmission = {
+    status,
+    ...immutableReceiptFields,
+    prepared_at: preparedAt,
+    dispatcher_pid: dispatcherPid,
+    last_proven_stage: provenStage,
+    ...(textInjectedAt ? { text_injected_at: textInjectedAt } : {}),
+    ...(enterDispatchedAt ? { enter_dispatched_at: enterDispatchedAt } : {}),
+    ...(agentAcceptedAt ? { agent_accepted_at: agentAcceptedAt } : {}),
+    ...(notAcceptedAt ? { not_accepted_at: notAcceptedAt } : {}),
+    ...(submittedAt ? { submitted_at: submittedAt } : {}),
+    ...(uncertainAt ? { uncertain_at: uncertainAt } : {}),
+    ...(abortedAt ? { aborted_at: abortedAt } : {}),
+    ...(error ? { error: textSummary(error) } : {}),
+    ...(safeToRetry !== undefined ? { safe_to_retry: safeToRetry } : {}),
+    ...(validatedAcceptanceEvidence
+      ? { acceptance_evidence: validatedAcceptanceEvidence }
+      : {})
+  };
+  const nextReceipts = previousReceipt
+    ? previousReceipts.map((receipt) =>
+        stringValue(receipt.message_id) === messageId
+          ? nextSubmission
+          : receipt
+      )
+    : [...previousReceipts, nextSubmission];
   return {
     ...conversation,
     native_session_takeover: {
       ...nativeTakeover,
-      terminal_bridge_submission: {
-        status,
-        session_id: sessionIdForConversation(conversation),
-        turn_id: turnIdForConversation(conversation),
-        message_id: messageId,
-        request_hash: terminalBridgeRequestFingerprint(requestText),
-        prepared_at: preparedAt,
-        dispatcher_pid: dispatcherPid,
-        ...(submittedAt ? { submitted_at: submittedAt } : {}),
-        ...(uncertainAt ? { uncertain_at: uncertainAt } : {}),
-        ...(abortedAt ? { aborted_at: abortedAt } : {}),
-        ...(error ? { error: textSummary(error) } : {})
-      }
+      terminal_bridge_submission: nextSubmission,
+      terminal_bridge_submission_receipts: nextReceipts
     },
-    updated_at: submittedAt ?? uncertainAt ?? abortedAt ?? preparedAt
+    updated_at:
+      agentAcceptedAt ?? notAcceptedAt ?? uncertainAt ?? abortedAt ??
+      enterDispatchedAt ?? textInjectedAt ?? submittedAt ?? preparedAt
   };
+}
+
+function terminalAcceptanceEvidenceForConversation(
+  conversation: Conversation,
+  requestText: string,
+  evidence: unknown
+): TerminalSubmissionAcceptanceEvidence {
+  return validateTerminalSubmissionAcceptanceEvidence(
+    evidence,
+    terminalAcceptanceEvidenceExpectation(conversation, requestText)
+  );
+}
+
+function terminalAcceptanceEvidenceExpectation(
+  conversation: Conversation,
+  requestText: string
+): {
+  source: TerminalSubmissionAcceptanceEvidence["source"];
+  nativeThreadId: string;
+  requestHash: string;
+} {
+  const nativeTakeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const executor = executorForConversation(conversation).kind;
+  const nativeThreadId = stringValue(conversation.native_thread_id) ??
+    stringValue(nativeTakeover?.terminal_agent_session_id) ??
+    stringValue(nativeTakeover?.terminal_agent_expected_session_id);
+  if (!nativeThreadId) {
+    throw new Error(
+      "native acceptance evidence cannot be bound without an exact native thread"
+    );
+  }
+  const requestHash = terminalBridgeRequestFingerprint(requestText);
+  if (!requestHash) {
+    throw new Error("native acceptance evidence has no exact request hash");
+  }
+  return {
+    source: executor === "codex" ? "codex_rollout" : "claude_transcript",
+    nativeThreadId,
+    requestHash
+  };
+}
+
+function replayExactActiveTerminalSubmission({
+  options,
+  terminalControl,
+  requestText,
+  expectedStoreDir,
+  expectedSessionId,
+  expectedTurnId,
+  expectedMessageType = "task",
+  expectedStatePath
+}: {
+  options: Record<string, any>;
+  terminalControl: TerminalControlRef;
+  requestText: string;
+  expectedStoreDir: string;
+  expectedSessionId?: string;
+  expectedTurnId?: string;
+  expectedMessageType?: "task" | "answer";
+  expectedStatePath?: string;
+}): boolean {
+  const messageId = stringValue(options.messageId);
+  if (!messageId) {
+    return false;
+  }
+  const terminalPayload = terminalSubmissionPayload(requestText);
+  const requestHash = terminalBridgeRequestFingerprint(terminalPayload);
+  if (!requestHash) {
+    return false;
+  }
+  const loadedLedger = loadTerminalBridgeDispatchLedger(terminalControl);
+  const ledgerReceiptMatches = terminalLedgerReceiptHistory(loadedLedger)
+    .filter((receipt) => stringValue(receipt.message_id) === messageId);
+  if (ledgerReceiptMatches.length > 1) {
+    throw new Error(
+      `terminal idempotency key ${messageId} has multiple terminal-ledger receipts`
+    );
+  }
+  const ledgerReceipt = ledgerReceiptMatches[0];
+  const loadedLedgerControl = isRecord(loadedLedger?.terminal_control)
+    ? loadedLedger.terminal_control
+    : undefined;
+  const loadedLedgerMessageId = stringValue(loadedLedger?.message_id);
+  const loadedLedgerStoreDir = stringValue(loadedLedger?.store_dir);
+  const loadedLedgerStatePath = stringValue(loadedLedger?.state_path);
+  const loadedLedgerOwner = loadedLedger && loadedLedgerMessageId === messageId
+    ? loadTerminalDispatchLedgerOwner(loadedLedger)
+    : undefined;
+  const ledgerReceiptControl = isRecord(ledgerReceipt?.terminal_control)
+    ? ledgerReceipt.terminal_control
+    : undefined;
+  const expectedMessageBodyHash = createHash("sha256")
+    .update(requestText)
+    .digest("hex");
+  if (
+    ledgerReceipt &&
+    !(ledgerReceipt.status === "aborted" && ledgerReceipt.safe_to_retry === true) &&
+    (
+      stringValue(ledgerReceiptControl?.target) !== terminalControl.target ||
+      (stringValue(ledgerReceiptControl?.socket_path) ?? undefined) !==
+        terminalControl.socketPath ||
+      Number(ledgerReceiptControl?.pane_pid) !== Number(terminalControl.panePid) ||
+      (stringValue(ledgerReceipt.store_dir) !== undefined &&
+        path.resolve(String(ledgerReceipt.store_dir)) !==
+          path.resolve(expectedStoreDir)) ||
+      (expectedSessionId && stringValue(ledgerReceipt.session_id) !== undefined &&
+        stringValue(ledgerReceipt.session_id) !== expectedSessionId) ||
+      (expectedTurnId && stringValue(ledgerReceipt.turn_id) !== undefined &&
+        stringValue(ledgerReceipt.turn_id) !== expectedTurnId) ||
+      (expectedStatePath && stringValue(ledgerReceipt.state_path) !== undefined &&
+        !sameCanonicalStatePath(ledgerReceipt.state_path, expectedStatePath)) ||
+      (stringValue(ledgerReceipt.message_type) !== undefined &&
+        stringValue(ledgerReceipt.message_type) !== expectedMessageType) ||
+      (stringValue(ledgerReceipt.message_body_hash) !== undefined &&
+        stringValue(ledgerReceipt.message_body_hash) !== expectedMessageBodyHash) ||
+      (stringValue(ledgerReceipt.request_hash) !== undefined &&
+        stringValue(ledgerReceipt.request_hash) !== requestHash) ||
+      (stringValue(options.openclawSession) !== undefined &&
+        stringValue(ledgerReceipt.openclaw_session) !== undefined &&
+        stringValue(ledgerReceipt.openclaw_session) !==
+          stringValue(options.openclawSession))
+    )
+  ) {
+    throw new Error(
+      `terminal idempotency key ${messageId} does not match its durable ` +
+      "terminal receipt; no terminal input was sent"
+    );
+  }
+  if (
+    loadedLedger &&
+    loadedLedgerMessageId === messageId &&
+    (
+      stringValue(loadedLedgerControl?.target) !== terminalControl.target ||
+      (stringValue(loadedLedgerControl?.socket_path) ?? undefined) !==
+        terminalControl.socketPath ||
+      Number(loadedLedgerControl?.pane_pid) !== Number(terminalControl.panePid) ||
+      (loadedLedgerStoreDir !== undefined &&
+        path.resolve(loadedLedgerStoreDir) !== path.resolve(expectedStoreDir)) ||
+      (expectedSessionId && stringValue(loadedLedger.session_id) !== undefined &&
+        stringValue(loadedLedger.session_id) !== expectedSessionId) ||
+      (expectedTurnId && stringValue(loadedLedger.turn_id) !== undefined &&
+        stringValue(loadedLedger.turn_id) !== expectedTurnId) ||
+      (expectedStatePath && loadedLedgerStatePath !== undefined &&
+        !sameCanonicalStatePath(loadedLedgerStatePath, expectedStatePath)) ||
+      (stringValue(loadedLedger.message_type) !== undefined &&
+        stringValue(loadedLedger.message_type) !== expectedMessageType) ||
+      (stringValue(loadedLedger.request_hash) !== undefined &&
+        stringValue(loadedLedger.request_hash) !== requestHash) ||
+      (stringValue(options.openclawSession) !== undefined &&
+        loadedLedgerOwner !== undefined &&
+        loadedLedgerOwner.openclaw_session !==
+          stringValue(options.openclawSession))
+    )
+  ) {
+    throw new Error(
+      `terminal idempotency key ${messageId} does not match its original ` +
+      "Store, Session, Turn, OpenClaw session, message, or tmux pane binding; " +
+      "no terminal input was sent"
+    );
+  }
+  if (replayExactStoredTerminalSubmission({
+    options,
+    terminalControl,
+    requestText,
+    requestHash,
+    messageId,
+    expectedStoreDir,
+    expectedSessionId,
+    expectedTurnId,
+    expectedMessageType,
+    expectedStatePath
+  })) {
+    return true;
+  }
+  if (
+    ledgerReceipt &&
+    (
+      loadedLedgerMessageId !== messageId ||
+      !["submitted", "enter_dispatched", "agent_accepted"].includes(
+        String(ledgerReceipt.status)
+      ) ||
+      !["submitted", "enter_dispatched", "agent_accepted"].includes(
+        String(loadedLedger?.status)
+      )
+    )
+  ) {
+    throw new Error(
+      `terminal idempotency key ${messageId} already has durable ` +
+      `${String(ledgerReceipt.status)} proof and cannot be dispatched again; ` +
+      "no terminal input was sent"
+    );
+  }
+  const incarnationLedger = resolveTerminalDispatchLedgerPaneIncarnation(
+    terminalControl,
+    loadedLedger
+  );
+  const ledger = reconcilePreparedTerminalDispatchLedger(
+    terminalControl,
+    incarnationLedger
+  );
+  const ledgerControl = isRecord(ledger?.terminal_control)
+    ? ledger.terminal_control
+    : undefined;
+  if (
+    !ledger ||
+    !["submitted", "enter_dispatched", "agent_accepted"].includes(
+      String(ledger.status)
+    ) ||
+    stringValue(ledgerControl?.target) !== terminalControl.target ||
+    (stringValue(ledgerControl?.socket_path) ?? undefined) !==
+      terminalControl.socketPath ||
+    Number(ledgerControl?.pane_pid) !== Number(terminalControl.panePid) ||
+    stringValue(ledger.message_id) !== messageId ||
+    (
+      stringValue(ledger.message_type) !== undefined &&
+      stringValue(ledger.message_type) !== expectedMessageType
+    ) ||
+    stringValue(ledger.request_hash) !== requestHash
+  ) {
+    return false;
+  }
+  const owner = loadTerminalDispatchLedgerOwner(ledger);
+  const ledgerStoreDir = stringValue(ledger.store_dir);
+  const ownerStoreDir = owner
+    ? managedSessionStoreDirForConversation(owner)
+    : undefined;
+  if (
+    !owner ||
+    TERMINAL_DISPATCH_RELEASE_STATUSES.has(owner.status) ||
+    !ledgerStoreDir ||
+    !ownerStoreDir ||
+    path.resolve(ledgerStoreDir) !== path.resolve(expectedStoreDir) ||
+    path.resolve(ownerStoreDir) !== path.resolve(expectedStoreDir) ||
+    (expectedSessionId && sessionIdForConversation(owner) !== expectedSessionId) ||
+    (expectedTurnId && turnIdForConversation(owner) !== expectedTurnId) ||
+    (expectedStatePath && !sameCanonicalStatePath(ledger.state_path, expectedStatePath)) ||
+    (
+      stringValue(options.openclawSession) &&
+      owner.openclaw_session !== stringValue(options.openclawSession)
+    )
+  ) {
+    return false;
+  }
+  const submission = terminalBridgeSubmission(owner);
+  const nativeTakeover = isRecord(owner.native_session_takeover)
+    ? owner.native_session_takeover
+    : undefined;
+  if (
+    stringValue(nativeTakeover?.terminal_bridge_message_id) !== messageId ||
+    stringValue(submission?.message_id) !== messageId ||
+    (
+      stringValue(submission?.message_type) !== undefined &&
+      stringValue(submission?.message_type) !== expectedMessageType
+    ) ||
+    stringValue(submission?.request_hash) !== requestHash
+  ) {
+    return false;
+  }
+  const executor = executorForConversation(owner);
+  const nativeThreadId = stringValue(owner.native_thread_id) ??
+    stringValue(nativeTakeover?.terminal_agent_session_id) ??
+    stringValue(nativeTakeover?.terminal_agent_expected_session_id) ??
+    sessionIdForConversation(owner);
+  const proofLevel = String(ledger.status) as
+    | "submitted"
+    | "enter_dispatched"
+    | "agent_accepted";
+  const replayReceipt = terminalSubmissionReplayReceipt({
+    proofLevel,
+    evidence: ledger.acceptance_evidence,
+    expected: {
+      source: executor.kind === "codex"
+        ? "codex_rollout"
+        : "claude_transcript",
+      nativeThreadId,
+      requestHash
+    }
+  });
+  const logPath = stringValue(ledger.event_log_path) ??
+    stringValue(owner.event_log_path);
+  let loggedMessage: unknown;
+  if (logPath) {
+    try {
+      loggedMessage = readNdjsonLog(logPath).find((event) =>
+        isRecord(event.message) && event.message.id === messageId
+      )?.message;
+    } catch {
+      loggedMessage = undefined;
+    }
+  }
+  if (
+    isRecord(loggedMessage) &&
+    (
+      loggedMessage.type !== expectedMessageType ||
+      loggedMessage.body !== requestText ||
+      loggedMessage.conversation_id !== owner.conversation_id ||
+      loggedMessage.session_id !== sessionIdForConversation(owner) ||
+      loggedMessage.turn_id !== turnIdForConversation(owner)
+    )
+  ) {
+    return false;
+  }
+  const durableMessageType = stringValue(ledger.message_type) ??
+    stringValue(submission?.message_type) ??
+    (isRecord(loggedMessage) ? stringValue(loggedMessage.type) : undefined);
+  if (durableMessageType !== expectedMessageType) {
+    return false;
+  }
+  const replayedMessage = isRecord(loggedMessage)
+    ? loggedMessage
+    : createMessage({
+        conversation: owner,
+        id: messageId,
+        from: "openclaw",
+        to: executor.actor,
+        type: expectedMessageType,
+        body: requestText,
+        metadata: {
+          executor_kind: executor.kind,
+          executor_session: executor.session
+        }
+      });
+  const acceptanceInvalid = replayReceipt.submission_outcome === "uncertain";
+  printJson({
+    session_id: sessionIdForConversation(owner),
+    turn_id: turnIdForConversation(owner),
+    conversation: owner,
+    message: replayedMessage,
+    delivered: replayReceipt.delivered,
+    status: replayReceipt.status,
+    submission_outcome: replayReceipt.submission_outcome,
+    background: true,
+    callback_expected: !acceptanceInvalid && Boolean(
+      owner.gateway_method ?? ledger.callback_expected
+    ),
+    terminal_control: terminalControl,
+    executor,
+    replayed: replayReceipt.replayed,
+    delivery_receipt: replayReceipt.delivery_receipt,
+    ...(replayReceipt.do_not_retry
+      ? { do_not_retry: replayReceipt.do_not_retry }
+      : {}),
+    reason: replayReceipt.delivered
+      ? "AKK replayed the durable native acceptance receipt and sent no additional tmux input."
+      : acceptanceInvalid
+        ? "AKK replayed an invalid native acceptance receipt as uncertain and sent no additional tmux input."
+        : "AKK replayed the original transport proof without upgrading it and sent no additional tmux input.",
+    openclaw_next_action: replayReceipt.delivered
+      ? openClawYieldNextAction({
+          conversationId: owner.conversation_id,
+          sessionId: sessionIdForConversation(owner),
+          turnId: turnIdForConversation(owner),
+          source: "terminal_control",
+          callbackExpected: Boolean(owner.gateway_method ?? ledger.callback_expected)
+        })
+      : {
+          action: "inspect",
+          conversation_id: owner.conversation_id,
+          session_id: sessionIdForConversation(owner),
+          turn_id: turnIdForConversation(owner),
+          do_not_retry: true,
+          reason: acceptanceInvalid
+            ? "Stored native acceptance evidence is invalid."
+            : "Only terminal transport is proven."
+        }
+  });
+  return true;
+}
+
+function validateStoredTerminalSubmissionMatch({
+  owner,
+  receipt,
+  options,
+  terminalControl,
+  requestText,
+  requestHash,
+  expectedStoreDir,
+  expectedSessionId,
+  expectedTurnId,
+  expectedMessageType,
+  expectedStatePath
+}: {
+  owner: Conversation;
+  receipt: Record<string, any>;
+  options: Record<string, any>;
+  terminalControl: TerminalControlRef;
+  requestText: string;
+  requestHash: string;
+  expectedStoreDir: string;
+  expectedSessionId?: string;
+  expectedTurnId?: string;
+  expectedMessageType: "task" | "answer";
+  expectedStatePath?: string;
+}): Record<string, any> | undefined {
+  const messageId = required(
+    stringValue(receipt.message_id),
+    "stored terminal receipt message id is required"
+  );
+  const ownerStoreDir = managedSessionStoreDirForConversation(owner);
+  const nativeTakeover = isRecord(owner.native_session_takeover)
+    ? owner.native_session_takeover
+    : undefined;
+  const storedControl = terminalControlFromTakeover(nativeTakeover);
+  const receiptStoreDir = stringValue(receipt.store_dir) ?? ownerStoreDir;
+  const receiptSessionId = stringValue(receipt.session_id) ??
+    sessionIdForConversation(owner);
+  const receiptTurnId = stringValue(receipt.turn_id) ??
+    turnIdForConversation(owner);
+  const receiptOpenClawSession = stringValue(receipt.openclaw_session) ??
+    owner.openclaw_session;
+  const receiptTarget = stringValue(receipt.terminal_target) ??
+    storedControl?.target;
+  const receiptSocketPath = receipt.terminal_socket_path === null
+    ? undefined
+    : stringValue(receipt.terminal_socket_path) ?? storedControl?.socketPath;
+  const receiptPanePid = Number(
+    receipt.terminal_pane_pid ?? storedControl?.panePid
+  );
+  const requestedOpenClawSession = stringValue(options.openclawSession);
+  if (
+    !ownerStoreDir ||
+    !receiptStoreDir ||
+    path.resolve(ownerStoreDir) !== path.resolve(expectedStoreDir) ||
+    path.resolve(receiptStoreDir) !== path.resolve(expectedStoreDir) ||
+    !storedControl ||
+    receiptTarget !== terminalControl.target ||
+    receiptSocketPath !== terminalControl.socketPath ||
+    receiptPanePid !== Number(terminalControl.panePid) ||
+    receiptSessionId !== sessionIdForConversation(owner) ||
+    receiptTurnId !== turnIdForConversation(owner) ||
+    (expectedSessionId && receiptSessionId !== expectedSessionId) ||
+    (expectedTurnId && receiptTurnId !== expectedTurnId) ||
+    (expectedStatePath && !sameCanonicalStatePath(owner.state_path, expectedStatePath)) ||
+    (requestedOpenClawSession && receiptOpenClawSession !== requestedOpenClawSession) ||
+    stringValue(receipt.request_hash) !== requestHash ||
+    (stringValue(receipt.executor_kind) !== undefined &&
+      stringValue(receipt.executor_kind) !== executorForConversation(owner).kind)
+  ) {
+    throw new Error(
+      `terminal idempotency key ${messageId} does not match its original ` +
+      "Store, Session, Turn, OpenClaw session, or tmux pane binding; no terminal input was sent"
+    );
+  }
+
+  const logPath = stringValue(owner.event_log_path);
+  let loggedMessages: Record<string, any>[] = [];
+  if (logPath) {
+    try {
+      loggedMessages = readNdjsonLog(logPath)
+        .filter((event) =>
+          isRecord(event.message) && event.message.id === messageId
+        )
+        .map((event) => event.message as Record<string, any>);
+    } catch {
+      loggedMessages = [];
+    }
+  }
+  if (loggedMessages.length > 1) {
+    throw new Error(
+      `terminal idempotency key ${messageId} has duplicate durable messages`
+    );
+  }
+  const loggedMessage = loggedMessages[0];
+  if (
+    isRecord(loggedMessage) &&
+    (
+      loggedMessage.type !== expectedMessageType ||
+      loggedMessage.body !== requestText ||
+      loggedMessage.conversation_id !== owner.conversation_id ||
+      loggedMessage.session_id !== sessionIdForConversation(owner) ||
+      loggedMessage.turn_id !== turnIdForConversation(owner)
+    )
+  ) {
+    throw new Error(
+      `terminal idempotency key ${messageId} does not match its durable message; no terminal input was sent`
+    );
+  }
+  const durableMessageType = stringValue(receipt.message_type) ??
+    (isRecord(loggedMessage) ? stringValue(loggedMessage.type) : undefined);
+  const durableMessageBodyHash = stringValue(receipt.message_body_hash) ??
+    (isRecord(loggedMessage) && typeof loggedMessage.body === "string"
+      ? createHash("sha256").update(loggedMessage.body).digest("hex")
+      : undefined);
+  const expectedMessageBodyHash = createHash("sha256")
+    .update(requestText)
+    .digest("hex");
+  if (
+    durableMessageType !== expectedMessageType ||
+    durableMessageBodyHash !== expectedMessageBodyHash
+  ) {
+    throw new Error(
+      `terminal idempotency key ${messageId} was already used for a different message; no terminal input was sent`
+    );
+  }
+  return loggedMessage;
+}
+
+function replayExactStoredTerminalSubmission({
+  options,
+  terminalControl,
+  requestText,
+  requestHash,
+  messageId,
+  expectedStoreDir,
+  expectedSessionId,
+  expectedTurnId,
+  expectedMessageType,
+  expectedStatePath
+}: {
+  options: Record<string, any>;
+  terminalControl: TerminalControlRef;
+  requestText: string;
+  requestHash: string;
+  messageId: string;
+  expectedStoreDir: string;
+  expectedSessionId?: string;
+  expectedTurnId?: string;
+  expectedMessageType: "task" | "answer";
+  expectedStatePath?: string;
+}): boolean {
+  const allMatches = listConversations(expectedStoreDir).flatMap((owner) =>
+    terminalBridgeSubmissionReceipts(owner)
+      .filter((receipt) => stringValue(receipt.message_id) === messageId)
+      .map((receipt) => ({ owner, receipt }))
+  );
+  const validatedMatches = allMatches.map((match) => ({
+    ...match,
+    loggedMessage: validateStoredTerminalSubmissionMatch({
+      ...match,
+      options,
+      terminalControl,
+      requestText,
+      requestHash,
+      expectedStoreDir,
+      expectedSessionId,
+      expectedTurnId,
+      expectedMessageType,
+      expectedStatePath
+    })
+  }));
+  const matches = validatedMatches.filter(({ receipt }) =>
+    !(receipt.status === "aborted" && receipt.safe_to_retry === true)
+  );
+  if (matches.length > 1) {
+    throw new Error(
+      `terminal idempotency key ${messageId} has multiple durable receipts in one Store`
+    );
+  }
+  const match = matches[0];
+  if (!match) {
+    for (const { owner, receipt } of validatedMatches) {
+      assertSafeAbortedTerminalRetryBinding({
+        owner,
+        receipt,
+        storeDir: expectedStoreDir,
+        terminalControl,
+        messageId
+      });
+    }
+    // A prepared-stage failure with a restored ledger proves that tmux was
+    // untouched. The same exact id may therefore start a fresh attempt; all
+    // immutable boundaries above were still validated before allowing it.
+    return false;
+  }
+  const { owner, receipt, loggedMessage } = match;
+  const nativeTakeover = isRecord(owner.native_session_takeover)
+    ? owner.native_session_takeover
+    : undefined;
+  const currentSubmission = terminalBridgeSubmission(owner);
+
+  const isCurrentSubmission =
+    stringValue(currentSubmission?.message_id) === messageId;
+  if (
+    isCurrentSubmission &&
+    !TERMINAL_DISPATCH_RELEASE_STATUSES.has(owner.status)
+  ) {
+    return false;
+  }
+  if (!["submitted", "enter_dispatched", "agent_accepted"].includes(
+    String(receipt.status)
+  )) {
+    throw new Error(
+      `terminal idempotency key ${messageId} has durable ${String(receipt.status)} ` +
+      "proof and must not be retried; no terminal input was sent"
+    );
+  }
+
+  const executor = executorForConversation(owner);
+  const nativeThreadId = stringValue(receipt.native_thread_id) ??
+    stringValue(owner.native_thread_id) ??
+    stringValue(nativeTakeover?.terminal_agent_session_id) ??
+    stringValue(nativeTakeover?.terminal_agent_expected_session_id) ??
+    sessionIdForConversation(owner);
+  const proofLevel = String(receipt.status) as
+    | "submitted"
+    | "enter_dispatched"
+    | "agent_accepted";
+  const replayReceipt = terminalSubmissionReplayReceipt({
+    proofLevel,
+    evidence: receipt.acceptance_evidence,
+    expected: {
+      source: executor.kind === "codex"
+        ? "codex_rollout"
+        : "claude_transcript",
+      nativeThreadId,
+      requestHash
+    }
+  });
+  const replayedMessage = isRecord(loggedMessage)
+    ? loggedMessage
+    : createMessage({
+        conversation: owner,
+        id: messageId,
+        from: "openclaw",
+        to: executor.actor,
+        type: expectedMessageType,
+        body: requestText,
+        metadata: {
+          executor_kind: executor.kind,
+          executor_session: executor.session
+        }
+      });
+  const acceptanceInvalid = replayReceipt.submission_outcome === "uncertain";
+  const callbackExpected = Boolean(owner.gateway_method);
+  printJson({
+    session_id: sessionIdForConversation(owner),
+    turn_id: turnIdForConversation(owner),
+    conversation: owner,
+    message: replayedMessage,
+    delivered: replayReceipt.delivered,
+    status: replayReceipt.status,
+    submission_outcome: replayReceipt.submission_outcome,
+    background: true,
+    callback_expected: !acceptanceInvalid && callbackExpected,
+    terminal_control: terminalControl,
+    executor,
+    replayed: true,
+    delivery_receipt: replayReceipt.delivery_receipt,
+    ...(replayReceipt.do_not_retry
+      ? { do_not_retry: replayReceipt.do_not_retry }
+      : {}),
+    reason: replayReceipt.delivered
+      ? "AKK replayed the stored durable native acceptance receipt and sent no additional tmux input."
+      : acceptanceInvalid
+        ? "AKK replayed an invalid stored native acceptance receipt as uncertain and sent no additional tmux input."
+        : "AKK replayed the stored transport proof without upgrading it and sent no additional tmux input.",
+    openclaw_next_action: replayReceipt.delivered
+      ? openClawYieldNextAction({
+          conversationId: owner.conversation_id,
+          sessionId: sessionIdForConversation(owner),
+          turnId: turnIdForConversation(owner),
+          source: "terminal_control",
+          callbackExpected
+        })
+      : {
+          action: "inspect",
+          conversation_id: owner.conversation_id,
+          session_id: sessionIdForConversation(owner),
+          turn_id: turnIdForConversation(owner),
+          do_not_retry: true,
+          reason: acceptanceInvalid
+            ? "Stored native acceptance evidence is invalid."
+            : "Only terminal transport is proven."
+        }
+  });
+  return true;
+}
+
+function terminalSubmissionLastProvenStage(
+  status: TerminalBridgeSubmissionStatus,
+  previous?: string
+): "prepared" | "text_injected" | "enter_dispatched" | "agent_accepted" {
+  if (status === "agent_accepted") {
+    return "agent_accepted";
+  }
+  if (
+    status === "enter_dispatched" ||
+    status === "submitted" ||
+    status === "not_accepted"
+  ) {
+    return "enter_dispatched";
+  }
+  if (
+    status === "uncertain" &&
+    ["prepared", "text_injected", "enter_dispatched", "agent_accepted"].includes(
+      previous ?? ""
+    )
+  ) {
+    return previous as "prepared" | "text_injected" | "enter_dispatched" | "agent_accepted";
+  }
+  return status === "text_injected" ? "text_injected" : "prepared";
 }
 
 function terminalBridgeSubmission(
@@ -1834,10 +2962,54 @@ function terminalBridgeSubmission(
     : undefined;
 }
 
+function terminalBridgeSubmissionReceipts(
+  conversation: Conversation
+): Record<string, any>[] {
+  const nativeTakeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const historyValue = nativeTakeover?.terminal_bridge_submission_receipts;
+  if (historyValue !== undefined && !Array.isArray(historyValue)) {
+    throw new Error("terminal submission receipt history is malformed");
+  }
+  const receipts = (Array.isArray(historyValue) ? historyValue : []).map(
+    (value) => {
+      if (!isRecord(value) || !stringValue(value.message_id)) {
+        throw new Error("terminal submission receipt history is malformed");
+      }
+      return value;
+    }
+  );
+  const ids = new Set<string>();
+  for (const receipt of receipts) {
+    const id = String(receipt.message_id);
+    if (ids.has(id)) {
+      throw new Error(`terminal submission receipt ${id} is duplicated`);
+    }
+    ids.add(id);
+  }
+  const current = terminalBridgeSubmission(conversation);
+  const currentId = stringValue(current?.message_id);
+  if (current && currentId && ids.has(currentId)) {
+    const historical = receipts.find((receipt) =>
+      stringValue(receipt.message_id) === currentId
+    );
+    if (!historical || canonicalJson(historical) !== canonicalJson(current)) {
+      throw new Error(
+        `terminal submission receipt ${currentId} conflicts with its current generation`
+      );
+    }
+  }
+  return current && currentId && !ids.has(currentId)
+    ? [...receipts, current]
+    : receipts;
+}
+
 function unresolvedTerminalBridgeSubmission(conversation): Record<string, any> | undefined {
   const submission = terminalBridgeSubmission(conversation);
   return submission &&
-    (submission.status === "prepared" || submission.status === "uncertain")
+    ["prepared", "text_injected", "enter_dispatched", "not_accepted", "uncertain"]
+      .includes(String(submission.status))
     ? submission
     : undefined;
 }
@@ -1859,12 +3031,20 @@ function assertNoUnresolvedTerminalBridgeSubmission(
       candidate.conversation_id === currentConversationId ||
       !isActiveStatus(candidate.status) ||
       !submission ||
-      !["prepared", "submitted", "uncertain"].includes(String(submission.status))
+      ![
+        "prepared",
+        "text_injected",
+        "enter_dispatched",
+        "agent_accepted",
+        "submitted",
+        "not_accepted",
+        "uncertain"
+      ].includes(String(submission.status))
     ) {
       continue;
     }
     if (
-      submission.status === "submitted" &&
+      ["submitted", "agent_accepted"].includes(String(submission.status)) &&
       stringValue(submission.request_hash) !== requestHash
     ) {
       continue;
@@ -2995,8 +4175,12 @@ function terminalDispatchOwnership(
   }
   if (![
     "prepared",
+    "text_injected",
+    "enter_dispatched",
+    "agent_accepted",
     "dispatching",
     "submitted",
+    "not_accepted",
     "uncertain"
   ].includes(String(ledger.status))) {
     return { state: "none" };
@@ -3028,7 +4212,16 @@ function terminalDispatchOwnership(
   const ledgerMessageId = stringValue(ledger.message_id);
   const ownerMessageId = stringValue(ownerTakeover?.terminal_bridge_message_id);
   if (
-    ["prepared", "dispatching", "submitted", "uncertain"].includes(
+    [
+      "prepared",
+      "text_injected",
+      "enter_dispatched",
+      "agent_accepted",
+      "dispatching",
+      "submitted",
+      "not_accepted",
+      "uncertain"
+    ].includes(
       String(ledger.status)
     ) &&
     ledgerMessageId &&
@@ -5308,14 +6501,21 @@ function assertTerminalLifecycleReady({
   }
   if (
     ledger &&
-    ["prepared", "dispatching", "uncertain"].includes(String(ledger.status))
+    [
+      "prepared",
+      "text_injected",
+      "enter_dispatched",
+      "dispatching",
+      "not_accepted",
+      "uncertain"
+    ].includes(String(ledger.status))
   ) {
     throw new Error(
       `terminal ${terminal.terminalControl.target} has an unresolved ` +
       `${String(ledger.kind ?? "turn")} operation (${String(ledger.status)})`
     );
   }
-  if (ledger?.status === "submitted") {
+  if (ledger && ["submitted", "agent_accepted"].includes(String(ledger.status))) {
     const owner = loadTerminalDispatchLedgerOwner(ledger);
     if (!owner || !TERMINAL_DISPATCH_RELEASE_STATUSES.has(owner.status)) {
       throw new Error(
@@ -7943,6 +9143,7 @@ function prepareManagedSend({
   }
   const message = createMessage({
     conversation,
+    id: stringValue(options.messageId),
     from: "openclaw",
     to: executor.actor,
     type,
@@ -8015,7 +9216,6 @@ async function runSend(options) {
       ),
       { timeoutMs: 30000 }
     );
-    let releaseStateLock: (() => void) | undefined;
     try {
       await withStoreWriterLeaseAsync(rawStoreDir, async () => {
       await recoverLifecycleFenceBeforeMutation({
@@ -8026,6 +9226,15 @@ async function runSend(options) {
       // protocol migration, rather than mutable Turn recency, is the only code
       // allowed to materialize Session records from existing Turns.
       ensureStoreWritable(rawStoreDir);
+      if (replayExactActiveTerminalSubmission({
+        options,
+        terminalControl: terminalConversation.terminalControl,
+        requestText: String(messageBody),
+        expectedStoreDir: rawStoreDir,
+        expectedMessageType: "task"
+      })) {
+        return;
+      }
       const claimedSession = soleBoundManagedSessionClaimForTerminal(
         rawStoreDir,
         terminalConversation
@@ -8150,31 +9359,31 @@ async function runSend(options) {
       });
       ensureStoreWritable(managed.conversation.store_dir);
       ensureDir(path.dirname(managed.statePath));
-      releaseStateLock = acquireFileLock(`${managed.statePath}.lock`);
-      await runTerminalControlSend({
-        options,
-        conversation: managed.conversation,
-        nextConversation: managed.nextConversation,
-        statePath: managed.statePath,
-        logPath: managed.logPath,
-        executor: managed.executor,
-        message: managed.message,
-        terminalControl: terminalConversation.terminalControl,
-        terminalSendLockHeld: true,
-        terminalStateLockHeld: true,
-        storeWriterLeaseHeld: true,
-        recordMessageAfterSend: true,
-        recordRawAttachmentAfterSend: reusableTurn === undefined,
-        allowedPreMaterializationIdentity,
-        allowedAdditionalIdentities
-      });
+      const releaseStateLock = acquireFileLock(`${managed.statePath}.lock`);
+      try {
+        await runTerminalControlSend({
+          options,
+          conversation: managed.conversation,
+          nextConversation: managed.nextConversation,
+          statePath: managed.statePath,
+          logPath: managed.logPath,
+          executor: managed.executor,
+          message: managed.message,
+          terminalControl: terminalConversation.terminalControl,
+          terminalSendLockHeld: true,
+          terminalStateLockHeld: true,
+          storeWriterLeaseHeld: true,
+          recordMessageAfterSend: true,
+          recordRawAttachmentAfterSend: reusableTurn === undefined,
+          allowedPreMaterializationIdentity,
+          allowedAdditionalIdentities
+        });
+      } finally {
+        releaseStateLock();
+      }
       });
     } finally {
-      try {
-        releaseStateLock?.();
-      } finally {
-        releaseTerminalLock();
-      }
+      releaseTerminalLock();
     }
     return;
   }
@@ -8233,7 +9442,6 @@ async function runSend(options) {
     ),
     { timeoutMs: 30000 }
   );
-  let releaseStateLock: (() => void) | undefined;
   try {
     await withStoreWriterLeaseAsync(storeDir, async () => {
     await recoverLifecycleFenceBeforeMutation({
@@ -8244,6 +9452,16 @@ async function runSend(options) {
     // atomic migration. Once protocol 3 is active, a missing Session is corrupt
     // state and must not be reconstructed from whichever Turn looks newest.
     ensureStoreWritable(storeDir);
+    if (replayExactActiveTerminalSubmission({
+      options,
+      terminalControl: resolvedTerminal.terminalControl,
+      requestText: String(messageBody),
+      expectedStoreDir: storeDir,
+      expectedSessionId: sessionId,
+      expectedMessageType: "task"
+    })) {
+      return;
+    }
     let currentSession = tryLoadManagedSession(storeDir, sessionId);
     const knownCodexCompanions: CodexAllowedCompanionSet = currentSession
       ? codexAllowedCompanionSetForManagedSession({
@@ -8349,30 +9567,30 @@ async function runSend(options) {
     });
     ensureStoreWritable(managed.conversation.store_dir);
     ensureDir(path.dirname(managed.statePath));
-    releaseStateLock = acquireFileLock(`${managed.statePath}.lock`);
-    await runTerminalControlSend({
-      options,
-      conversation: managed.conversation,
-      nextConversation: managed.nextConversation,
-      statePath: managed.statePath,
-      logPath: managed.logPath,
-      executor: managed.executor,
-      message: managed.message,
-      terminalControl: resolvedTerminal.terminalControl,
-      terminalSendLockHeld: true,
-      terminalStateLockHeld: true,
-      storeWriterLeaseHeld: true,
-      recordMessageAfterSend: true,
-      allowedPreMaterializationIdentity,
-      allowedAdditionalIdentities
-    });
+    const releaseStateLock = acquireFileLock(`${managed.statePath}.lock`);
+    try {
+      await runTerminalControlSend({
+        options,
+        conversation: managed.conversation,
+        nextConversation: managed.nextConversation,
+        statePath: managed.statePath,
+        logPath: managed.logPath,
+        executor: managed.executor,
+        message: managed.message,
+        terminalControl: resolvedTerminal.terminalControl,
+        terminalSendLockHeld: true,
+        terminalStateLockHeld: true,
+        storeWriterLeaseHeld: true,
+        recordMessageAfterSend: true,
+        allowedPreMaterializationIdentity,
+        allowedAdditionalIdentities
+      });
+    } finally {
+      releaseStateLock();
+    }
     });
   } finally {
-    try {
-      releaseStateLock?.();
-    } finally {
-      releaseTerminalLock();
-    }
+    releaseTerminalLock();
   }
 }
 
@@ -8394,124 +9612,194 @@ async function runRespond(options) {
 async function runTurnResponse({ options, messageBody }) {
   const loaded = loadConversationFromOptions(options);
   const { statePath, logPath } = loaded;
-  const conversation = await migrateLegacyTerminalAgentIdentity({
-    ...loaded,
-    options
-  });
-  if (conversation.status !== "waiting_for_openclaw") {
+  const initialConversation = loaded.conversation;
+  const requestedOpenClawSession = stringValue(options.openclawSession);
+  if (
+    requestedOpenClawSession &&
+    initialConversation.openclaw_session !== requestedOpenClawSession
+  ) {
     throw new Error(
-      `cannot respond to turn ${turnIdForConversation(conversation)}; ` +
-      `turn is ${conversation.status}, not waiting_for_openclaw`
+      `turn ${turnIdForConversation(initialConversation)} belongs to a ` +
+      "different OpenClaw session; no terminal input was sent"
     );
   }
-  const nativeTakeover = isRecord(conversation.native_session_takeover)
-    ? conversation.native_session_takeover
+  const nativeTakeover = isRecord(initialConversation.native_session_takeover)
+    ? initialConversation.native_session_takeover
     : undefined;
-  const terminalControl = terminalControlFromTakeover(nativeTakeover);
-  if (!terminalControl) {
+  const storedTerminalControl = terminalControlFromTakeover(nativeTakeover);
+  const nativeTerminalId = stringValue(nativeTakeover?.native_session_id);
+  if (!storedTerminalControl || !nativeTerminalId) {
     throw new Error(
-      `turn ${turnIdForConversation(conversation)} is not attached to a live tmux terminal`
+      `turn ${turnIdForConversation(initialConversation)} is not attached to a live tmux terminal`
     );
   }
+  const liveTerminal = await createTerminalAgentBridge(options)
+    .resolveConversationId(nativeTerminalId);
+  if (
+    !liveTerminal ||
+    liveTerminal.agent !== executorForConversation(initialConversation).kind ||
+    liveTerminal.terminalControl.target !== storedTerminalControl.target ||
+    liveTerminal.terminalControl.socketPath !== storedTerminalControl.socketPath ||
+    liveTerminal.terminalControl.panePid !== storedTerminalControl.panePid
+  ) {
+    throw new Error(
+      `turn ${turnIdForConversation(initialConversation)} is not attached to its expected live tmux terminal`
+    );
+  }
+  const terminalControl = liveTerminal.terminalControl;
+  const responseStoreDir = pathsForConversationDir(
+    path.dirname(statePath)
+  ).storeDir;
   const releaseTerminalLock = acquireFileLock(
-    terminalBridgeSendLockPath(storeDirFromOptions(options), terminalControl),
+    terminalBridgeSendLockPath(responseStoreDir, terminalControl),
     { timeoutMs: 30000 }
   );
-  let releaseStateLock: (() => void) | undefined;
   try {
-    releaseStateLock = acquireFileLock(`${statePath}.lock`);
-    const prepared = prepareManagedSend({
-      options: { ...options, type: "answer" },
-      statePath,
-      logPath,
-      messageBody,
-      stateLockHeld: true,
-      persist: false
-    });
-    const preparedTakeover = isRecord(
-      prepared.conversation.native_session_takeover
-    )
-      ? prepared.conversation.native_session_takeover
-      : undefined;
-    const terminalAgentPid = Number(preparedTakeover?.terminal_agent_pid);
-    const responseManagedSession = tryLoadManagedSession(
-      storeDirFromOptions(options),
-      sessionIdForConversation(prepared.conversation)
-    );
-    const responseCodexCompanions: CodexAllowedCompanionSet =
-      prepared.executor.kind === "codex" && responseManagedSession
-        ? codexAllowedCompanionSetForManagedSession({
-            storeDir: storeDirFromOptions(options),
-            session: responseManagedSession
-          })
-        : { additional: [] };
-    const currentNativeIdentity =
-      await resolveCurrentNativeAgentSessionIdentity({
-        options,
-        agent: prepared.executor.kind,
-        pid: terminalAgentPid,
-        cwd: terminalControl.currentPath,
-        preferredSessionId: responseCodexCompanions.primary
-          ? stringValue(preparedTakeover?.terminal_agent_session_id)
-          : undefined,
-        allowedCompanionIdentity: responseCodexCompanions.primary,
-        allowedAdditionalIdentities:
-          responseCodexCompanions.additional
-      });
-    assertNativeAgentIdentityForTurn({
-      conversation: prepared.conversation,
-      currentIdentity: currentNativeIdentity,
-      operation: "respond to"
-    });
-    const currentTerminalControl = terminalControlFromTakeover(
-      prepared.nativeTakeoverForSend
-    );
-    if (
-      !currentTerminalControl ||
-      currentTerminalControl.target !== terminalControl.target ||
-      currentTerminalControl.socketPath !== terminalControl.socketPath ||
-      currentTerminalControl.panePid !== terminalControl.panePid
-    ) {
-      throw new Error(
-        "terminal control changed while waiting to respond; refresh status and retry"
-      );
-    }
-    const responseOptions = {
-      ...options,
-      type: "answer",
-      agentTimeoutMinutes:
-        options.agentTimeoutMinutes ??
-        preparedTakeover?.terminal_bridge_inactivity_timeout_minutes ??
-        DEFAULT_AGENT_TIMEOUT_MINUTES,
-      agentHardTimeoutMinutes:
-        options.agentHardTimeoutMinutes ??
-        preparedTakeover?.terminal_bridge_hard_timeout_minutes ??
-        DEFAULT_AGENT_HARD_TIMEOUT_MINUTES
-    };
-    await runTerminalControlSend({
-      options: responseOptions,
-      conversation: prepared.conversation,
-      nextConversation: prepared.nextConversation,
-      statePath,
-      logPath,
-      executor: prepared.executor,
-      message: prepared.message,
-      terminalControl: currentTerminalControl,
-      terminalSendLockHeld: true,
-      terminalStateLockHeld: true,
-      recordMessageAfterSend: true,
-      allowedPreMaterializationIdentity:
-        responseCodexCompanions.primary,
-      allowedAdditionalIdentities:
-        responseCodexCompanions.additional,
-      continuingTurnResponse: true
+    await withStoreWriterLeaseAsync(responseStoreDir, async () => {
+      // Legacy identity migration may write the Turn, so keep it inside the
+      // canonical terminal -> Store writer -> state ordering as well.
+      await migrateLegacyTerminalAgentIdentity({ ...loaded, options });
+      const releaseStateLock = acquireFileLock(`${statePath}.lock`);
+      try {
+        const lockedConversation = loadState(statePath);
+        const lockedTakeover = isRecord(
+          lockedConversation.native_session_takeover
+        )
+          ? lockedConversation.native_session_takeover
+          : undefined;
+        const lockedControl = terminalControlFromTakeover(lockedTakeover);
+        if (
+          stringValue(lockedTakeover?.native_session_id) !== nativeTerminalId ||
+          executorForConversation(lockedConversation).kind !== liveTerminal.agent ||
+          !lockedControl ||
+          lockedControl.target !== terminalControl.target ||
+          lockedControl.socketPath !== terminalControl.socketPath ||
+          lockedControl.panePid !== terminalControl.panePid
+        ) {
+          throw new Error(
+            "terminal control changed while waiting to respond; refresh status and retry"
+          );
+        }
+        if (
+          requestedOpenClawSession &&
+          lockedConversation.openclaw_session !== requestedOpenClawSession
+        ) {
+          throw new Error(
+            `turn ${turnIdForConversation(lockedConversation)} belongs to a ` +
+            "different OpenClaw session; no terminal input was sent"
+          );
+        }
+        if (replayExactActiveTerminalSubmission({
+          options,
+          terminalControl,
+          requestText: String(messageBody),
+          expectedStoreDir: responseStoreDir,
+          expectedSessionId: sessionIdForConversation(lockedConversation),
+          expectedTurnId: turnIdForConversation(lockedConversation),
+          expectedMessageType: "answer",
+          expectedStatePath: statePath
+        })) {
+          return;
+        }
+        if (lockedConversation.status !== "waiting_for_openclaw") {
+          throw new Error(
+            `cannot respond to turn ${turnIdForConversation(lockedConversation)}; ` +
+            `turn is ${lockedConversation.status}, not waiting_for_openclaw`
+          );
+        }
+        const prepared = prepareManagedSend({
+          options: { ...options, type: "answer" },
+          statePath,
+          logPath,
+          messageBody,
+          stateLockHeld: true,
+          persist: false
+        });
+        const preparedTakeover = isRecord(
+          prepared.conversation.native_session_takeover
+        )
+          ? prepared.conversation.native_session_takeover
+          : undefined;
+        const terminalAgentPid = Number(preparedTakeover?.terminal_agent_pid);
+        const responseManagedSession = tryLoadManagedSession(
+          responseStoreDir,
+          sessionIdForConversation(prepared.conversation)
+        );
+        const responseCodexCompanions: CodexAllowedCompanionSet =
+          prepared.executor.kind === "codex" && responseManagedSession
+            ? codexAllowedCompanionSetForManagedSession({
+                storeDir: responseStoreDir,
+                session: responseManagedSession
+              })
+            : { additional: [] };
+        const currentNativeIdentity =
+          await resolveCurrentNativeAgentSessionIdentity({
+            options,
+            agent: prepared.executor.kind,
+            pid: terminalAgentPid,
+            cwd: terminalControl.currentPath,
+            preferredSessionId: responseCodexCompanions.primary
+              ? stringValue(preparedTakeover?.terminal_agent_session_id)
+              : undefined,
+            allowedCompanionIdentity: responseCodexCompanions.primary,
+            allowedAdditionalIdentities:
+              responseCodexCompanions.additional
+          });
+        assertNativeAgentIdentityForTurn({
+          conversation: prepared.conversation,
+          currentIdentity: currentNativeIdentity,
+          operation: "respond to"
+        });
+        const currentTerminalControl = terminalControlFromTakeover(
+          prepared.nativeTakeoverForSend
+        );
+        if (
+          !currentTerminalControl ||
+          currentTerminalControl.target !== terminalControl.target ||
+          currentTerminalControl.socketPath !== terminalControl.socketPath ||
+          currentTerminalControl.panePid !== terminalControl.panePid
+        ) {
+          throw new Error(
+            "terminal control changed while waiting to respond; refresh status and retry"
+          );
+        }
+        const responseOptions = {
+          ...options,
+          type: "answer",
+          agentTimeoutMinutes:
+            options.agentTimeoutMinutes ??
+            preparedTakeover?.terminal_bridge_inactivity_timeout_minutes ??
+            DEFAULT_AGENT_TIMEOUT_MINUTES,
+          agentHardTimeoutMinutes:
+            options.agentHardTimeoutMinutes ??
+            preparedTakeover?.terminal_bridge_hard_timeout_minutes ??
+            DEFAULT_AGENT_HARD_TIMEOUT_MINUTES
+        };
+        await runTerminalControlSend({
+          options: responseOptions,
+          conversation: prepared.conversation,
+          nextConversation: prepared.nextConversation,
+          statePath,
+          logPath,
+          executor: prepared.executor,
+          message: prepared.message,
+          terminalControl: currentTerminalControl,
+          terminalSendLockHeld: true,
+          terminalStateLockHeld: true,
+          storeWriterLeaseHeld: true,
+          recordMessageAfterSend: true,
+          allowedPreMaterializationIdentity:
+            responseCodexCompanions.primary,
+          allowedAdditionalIdentities:
+            responseCodexCompanions.additional,
+          continuingTurnResponse: true
+        });
+      } finally {
+        releaseStateLock();
+      }
     });
   } finally {
-    try {
-      releaseStateLock?.();
-    } finally {
-      releaseTerminalLock();
-    }
+    releaseTerminalLock();
   }
 }
 
@@ -9353,8 +10641,10 @@ async function runTerminalControlSend({
   }
   if (
     previousDispatchLedger?.status === "prepared" ||
+    previousDispatchLedger?.status === "text_injected" ||
     previousDispatchLedger?.status === "dispatching" ||
-    previousDispatchLedger?.status === "uncertain"
+    previousDispatchLedger?.status === "uncertain" ||
+    previousDispatchLedger?.status === "not_accepted"
   ) {
     throw new Error(
       `terminal ${terminalControl.target} has a terminal-level ` +
@@ -9363,7 +10653,11 @@ async function runTerminalControlSend({
       "inspect the shared tmux pane and explicitly close that AKK conversation before retrying"
     );
   }
-  if (previousDispatchLedger?.status === "submitted") {
+  if (
+    previousDispatchLedger?.status === "submitted" ||
+    previousDispatchLedger?.status === "enter_dispatched" ||
+    previousDispatchLedger?.status === "agent_accepted"
+  ) {
     const owner = loadTerminalDispatchLedgerOwner(
       previousDispatchLedger
     );
@@ -9396,6 +10690,21 @@ async function runTerminalControlSend({
         )
       );
       if (exactDispatchReplay) {
+        const proofLevel = String(previousDispatchLedger.status) as
+          | "submitted"
+          | "enter_dispatched"
+          | "agent_accepted";
+        const replayReceipt = terminalSubmissionReplayReceipt({
+          proofLevel,
+          evidence: previousDispatchLedger.acceptance_evidence,
+          expected: terminalAcceptanceEvidenceExpectation(
+            owner,
+            terminalPayload
+          )
+        });
+        const accepted = replayReceipt.delivered;
+        const acceptanceInvalid =
+          replayReceipt.submission_outcome === "uncertain";
         const receiptConversationId =
           stringValue(previousDispatchLedger.conversation_id) ??
           owner.conversation_id;
@@ -9421,29 +10730,49 @@ async function runTerminalControlSend({
               turn_id: receiptTurnId
             }
           },
-          delivered: true,
-          status: "async_pending",
+          delivered: replayReceipt.delivered,
+          status: replayReceipt.status,
+          submission_outcome: replayReceipt.submission_outcome,
           background: true,
-          callback_expected: Boolean(
-            owner.gateway_method ??
-              previousDispatchLedger.callback_expected
-          ),
-          terminal_control: terminalControl,
-          executor,
-          replayed: true,
-          delivery_receipt: "submitted",
-          reason:
-            "AKK replayed the durable receipt for an identical active terminal request and did not send tmux input again.",
-          openclaw_next_action: openClawYieldNextAction({
-            conversationId: receiptConversationId,
-            sessionId: receiptSessionId,
-            turnId: receiptTurnId,
-            source: "terminal_control",
-            callbackExpected: Boolean(
+          callback_expected: !acceptanceInvalid && Boolean(
               owner.gateway_method ??
                 previousDispatchLedger.callback_expected
-            )
-          })
+            ),
+          terminal_control: terminalControl,
+          executor,
+          replayed: replayReceipt.replayed,
+          delivery_receipt: replayReceipt.delivery_receipt,
+          ...(replayReceipt.do_not_retry
+            ? { do_not_retry: replayReceipt.do_not_retry }
+            : {}),
+          reason:
+            accepted
+              ? "AKK replayed the durable native acceptance receipt for an identical active terminal request and did not send tmux input again."
+              : acceptanceInvalid
+                ? `AKK refused to replay an invalid native acceptance receipt (${replayReceipt.evidence_error ?? "evidence validation failed"}); no tmux input was sent.`
+                : "AKK replayed the original transport-level receipt without upgrading it to native acceptance and did not send tmux input again.",
+          openclaw_next_action: accepted
+            ? openClawYieldNextAction({
+                conversationId: receiptConversationId,
+                sessionId: receiptSessionId,
+                turnId: receiptTurnId,
+                source: "terminal_control",
+                callbackExpected: Boolean(
+                  owner.gateway_method ??
+                    previousDispatchLedger.callback_expected
+                )
+              })
+            : {
+                action: "inspect",
+                conversation_id: receiptConversationId,
+                session_id: receiptSessionId,
+                turn_id: receiptTurnId,
+                do_not_retry: true,
+                reason:
+                  acceptanceInvalid
+                    ? "The stored native acceptance evidence is invalid; inspect and explicitly close this Turn."
+                    : "Only terminal transport is proven; wait for native acceptance or inspect the shared pane."
+              }
         });
         return;
       }
@@ -9519,6 +10848,7 @@ async function runTerminalControlSend({
     messageId: message.id
   };
   let preSendScreenFingerprint: string | undefined;
+  let codexRolloutAcceptanceAnchor: CodexRolloutAcceptanceAnchor | undefined;
   let claudeTranscriptAnchor: ClaudeTranscriptAnchor | undefined;
   const claudeHome = executor.kind === "claude"
     ? path.resolve(expandHome(options.claudeHome) ?? defaultClaudeHome())
@@ -9561,7 +10891,15 @@ async function runTerminalControlSend({
     if (bridge) {
       preSendScreenFingerprint = stringValue(status.screen.digest) ??
         terminalBridgeScreenFingerprint(status.screen.excerpt);
-      if (executor.kind === "claude") {
+      if (executor.kind === "codex") {
+        codexRolloutAcceptanceAnchor = captureCodexAcceptanceAnchorForSend({
+          options,
+          currentIdentity: currentNativeIdentity,
+          expectedNativeThreadId: expectedManagedNativeThreadId,
+          allowedPreMaterializationIdentity,
+          needsPostSendNativeBinding
+        });
+      } else {
         claudeTranscriptAnchor = captureClaudeTranscriptAnchor({
           sessionId: preSendRuntime.sessionId,
           cwd: preSendRuntime.cwd,
@@ -9592,6 +10930,7 @@ async function runTerminalControlSend({
         agentTimeoutMinutes,
         agentHardTimeoutMinutes,
         preSendScreenFingerprint,
+        codexRolloutAcceptanceAnchor,
         claudeTranscriptAnchor,
         claudeHome
       })
@@ -9599,6 +10938,8 @@ async function runTerminalControlSend({
   const preparedConversation = withTerminalBridgeSubmission({
     conversation: bridgeConversation,
     messageId: message.id,
+    messageType: message.type,
+    messageBody: String(message.body),
     requestText: terminalPayload,
     status: "prepared",
     preparedAt: bridgeStartedAt
@@ -9612,6 +10953,7 @@ async function runTerminalControlSend({
     session_id: sessionIdForConversation(preparedConversation),
     turn_id: turnIdForConversation(preparedConversation),
     message_id: message.id,
+    message_type: message.type,
     request_hash: terminalRequestHash,
     prepared_at: bridgeStartedAt,
     dispatcher_pid: process.pid,
@@ -9689,32 +11031,6 @@ async function runTerminalControlSend({
       dispatcher_pid: process.pid
     });
 
-    bridgeMonitor = bridge
-      ? startTerminalBridgeMonitorForConversation({
-          conversation: preparedConversation,
-          statePath,
-          logPath,
-          options
-        })
-      : undefined;
-    if (bridgeMonitor) {
-      appendEvent(logPath, {
-        ts: new Date().toISOString(),
-        conversation_id: preparedConversation.conversation_id,
-        event: "terminal_bridge_monitor_launch",
-        pid: bridgeMonitor.pid ?? null,
-        terminal_control: terminalControl,
-        phase: "before_terminal_submit",
-        agent_timeout_minutes: agentTimeoutMinutes,
-        agent_hard_timeout_minutes: agentHardTimeoutMinutes
-      });
-      runtimeLog("info", "terminal_bridge_monitor_launch", {
-        conversation_id: preparedConversation.conversation_id,
-        monitor_pid: bridgeMonitor.pid ?? null,
-        terminal_target: terminalControl.target,
-        phase: "before_terminal_submit"
-      });
-    }
   } catch (error) {
     const abortedAt = new Date().toISOString();
     const errorMessage = error instanceof Error ? error.message : String(error);
@@ -9743,28 +11059,36 @@ async function runTerminalControlSend({
           failure_reason:
             "terminal submission setup failed before tmux input"
         }
-      : conversation;
+      : {
+          ...preparedConversation,
+          status: conversation.status,
+          ...(conversation.idle_since
+            ? { idle_since: conversation.idle_since }
+            : {})
+        };
     const abortedConversation = withTerminalBridgeSubmission({
       conversation: failureBase,
       messageId: message.id,
+      messageType: message.type,
+      messageBody: String(message.body),
       requestText: terminalPayload,
       status: "aborted",
       preparedAt: bridgeStartedAt,
       abortedAt,
-      error: errorMessage
+      error: errorMessage,
+      safeToRetry: dispatchLedgerRestored
     });
+    let abortedStatePersisted = false;
     try {
+      if (
+        process.env.AKK_TEST_ABORTED_STATE_PERSISTENCE_FAILURE === "1"
+      ) {
+        throw new Error(
+          "injected aborted submission state persistence failure"
+        );
+      }
       saveState(statePath, abortedConversation);
-      appendEvent(logPath, {
-        ts: abortedAt,
-        conversation_id: abortedConversation.conversation_id,
-        event: "terminal_message_submit_aborted",
-        message_id: message.id,
-        executor,
-        terminal_control: terminalControl,
-        error: textSummary(errorMessage),
-        safe_to_retry: dispatchLedgerRestored
-      });
+      abortedStatePersisted = true;
     } catch (persistenceError) {
       runtimeLog("error", "terminal_message_submit_aborted_persist_failed", {
         conversation_id: abortedConversation.conversation_id,
@@ -9774,16 +11098,53 @@ async function runTerminalControlSend({
           : String(persistenceError)
       });
     }
+    const safeToRetry = dispatchLedgerRestored && abortedStatePersisted;
+    try {
+      appendEvent(logPath, {
+        ts: abortedAt,
+        conversation_id: abortedConversation.conversation_id,
+        event: "terminal_message_submit_aborted",
+        message_id: message.id,
+        executor,
+        terminal_control: terminalControl,
+        error: textSummary(errorMessage),
+        safe_to_retry: safeToRetry
+      });
+    } catch (persistenceError) {
+      runtimeLog("error", "terminal_message_submit_aborted_event_failed", {
+        conversation_id: abortedConversation.conversation_id,
+        terminal_target: terminalControl.target,
+        error: persistenceError instanceof Error
+          ? persistenceError.message
+        : String(persistenceError)
+      });
+    }
+    const reportedAbortedConversation = safeToRetry
+      ? abortedConversation
+      : withTerminalBridgeSubmission({
+          conversation: abortedConversation,
+          messageId: message.id,
+          messageType: message.type,
+          messageBody: String(message.body),
+          requestText: terminalPayload,
+          status: "aborted",
+          preparedAt: bridgeStartedAt,
+          abortedAt,
+          error: errorMessage,
+          safeToRetry: false
+        });
     runtimeLog("error", "terminal_message_submit_aborted", {
       conversation_id: abortedConversation.conversation_id,
       terminal_target: terminalControl.target,
       error: errorMessage,
-      safe_to_retry: dispatchLedgerRestored
+      safe_to_retry: safeToRetry,
+      dispatch_ledger_restored: dispatchLedgerRestored,
+      aborted_state_persisted: abortedStatePersisted
     });
     printJson({
       session_id: sessionIdForConversation(abortedConversation),
       turn_id: turnIdForConversation(abortedConversation),
-      conversation: abortedConversation,
+      conversation: reportedAbortedConversation,
       message,
       delivered: false,
       status: "submission_aborted",
@@ -9793,33 +11154,111 @@ async function runTerminalControlSend({
       terminal_control: terminalControl,
       monitor_pid: bridgeMonitor?.pid ?? null,
       executor,
-      safe_to_retry: dispatchLedgerRestored,
-      do_not_retry: !dispatchLedgerRestored,
-      reason: dispatchLedgerRestored
+      safe_to_retry: safeToRetry,
+      do_not_retry: !safeToRetry,
+      reason: safeToRetry
         ? "AKK failed before touching tmux; this terminal submission was not sent and may be retried."
-        : "AKK failed before tmux input but could not restore the terminal dispatch ledger; inspect and close the conversation before retrying.",
+        : !dispatchLedgerRestored
+          ? "AKK failed before tmux input but could not restore the terminal dispatch ledger; inspect and close the conversation before retrying."
+          : "AKK failed before tmux input but could not persist the aborted receipt; inspect the conversation before retrying.",
       openclaw_next_action: {
-        action: dispatchLedgerRestored ? "retry" : "inspect",
+        action: safeToRetry ? "retry" : "inspect",
         conversation_id: abortedConversation.conversation_id,
-        session_id: sessionIdForConversation(abortedConversation),
-        turn_id: turnIdForConversation(abortedConversation),
-        safe_to_retry: dispatchLedgerRestored,
-        do_not_retry: !dispatchLedgerRestored,
-        reason: dispatchLedgerRestored
+        session_id: sessionIdForConversation(reportedAbortedConversation),
+        turn_id: turnIdForConversation(reportedAbortedConversation),
+        safe_to_retry: safeToRetry,
+        do_not_retry: !safeToRetry,
+        reason: safeToRetry
           ? "The failure occurred before any tmux input."
-          : "The terminal ledger could not be restored automatically."
+          : !dispatchLedgerRestored
+            ? "The terminal ledger could not be restored automatically."
+            : "The aborted receipt could not be made durable."
       }
     });
     return;
   }
 
-  let deliveredConversation;
+  let deliveredConversation: Conversation;
+  let stagedConversation = preparedConversation;
+  let textInjectedAt: string | undefined;
+  let enterDispatchedAt: string | undefined;
+  let acceptanceResult: TerminalAcceptancePollResult | undefined;
+  let bookkeepingWarning: string | undefined;
+  const recordPostTransportBookkeepingFailure = (
+    phase: string,
+    error: unknown
+  ): void => {
+    const message = error instanceof Error ? error.message : String(error);
+    bookkeepingWarning ??= message;
+    runtimeLog("warn", "terminal_message_post_transport_bookkeeping_failed", {
+      conversation_id: stagedConversation.conversation_id,
+      terminal_target: terminalControl.target,
+      phase,
+      error: message
+    });
+  };
   try {
     await terminalBridge.send(executor.kind, terminalControl, terminalPayload, {
-      runtime: preSendRuntime
+      runtime: preSendRuntime,
+      async onTransportStage(event) {
+        const stageAt = new Date().toISOString();
+        if (event.stage === "text_injected") {
+          textInjectedAt = stageAt;
+        } else {
+          enterDispatchedAt = stageAt;
+        }
+        stagedConversation = withTerminalBridgeSubmission({
+          conversation: stagedConversation,
+          messageId: message.id,
+          messageType: message.type,
+          messageBody: String(message.body),
+          requestText: terminalPayload,
+          status: event.stage,
+          preparedAt: bridgeStartedAt,
+          textInjectedAt,
+          enterDispatchedAt
+        });
+        saveState(statePath, stagedConversation);
+        saveTerminalBridgeDispatchLedger(terminalControl, {
+          ...terminalBindingLedgerFields(stagedConversation),
+          status: event.stage,
+          generation_id: message.id,
+          conversation_id: stagedConversation.conversation_id,
+          session_id: sessionIdForConversation(stagedConversation),
+          turn_id: turnIdForConversation(stagedConversation),
+          message_id: message.id,
+          message_type: message.type,
+          request_hash: terminalRequestHash,
+          prepared_at: bridgeStartedAt,
+          ...(textInjectedAt ? { text_injected_at: textInjectedAt } : {}),
+          ...(enterDispatchedAt ? { enter_dispatched_at: enterDispatchedAt } : {}),
+          dispatcher_pid: process.pid,
+          state_path: statePath,
+          event_log_path: logPath,
+          callback_expected: Boolean(stagedConversation.gateway_method),
+          previous_generation_id:
+            stringValue(previousDispatchLedger?.generation_id) ??
+            stringValue(previousDispatchLedger?.message_id)
+        });
+        try {
+          appendEvent(logPath, {
+            ts: stageAt,
+            conversation_id: stagedConversation.conversation_id,
+            event: `terminal_message_${event.stage}`,
+            message_id: message.id,
+            executor,
+            terminal_control: terminalControl,
+            request_hash: terminalRequestHash
+          });
+        } catch (error) {
+          recordPostTransportBookkeepingFailure(event.stage, error);
+        }
+      }
     });
-    const submittedAt = new Date().toISOString();
-    let submittedBase = preparedConversation;
+    if (!enterDispatchedAt) {
+      throw new Error("terminal bridge returned without an enter_dispatched receipt");
+    }
+    let submittedBase = stagedConversation;
     if (needsPostSendNativeBinding) {
       let boundIdentity: NativeAgentSessionIdentity | undefined;
       let boundConversation: Conversation | undefined;
@@ -9854,7 +11293,7 @@ async function runTerminalControlSend({
             );
           }
           boundConversation = withNativeAgentSessionIdentity(
-            preparedConversation,
+            stagedConversation,
             boundIdentity
           );
           const bindingStoreDir = managedSessionStoreDirForConversation(
@@ -9900,16 +11339,16 @@ async function runTerminalControlSend({
       if (!boundIdentity) {
         const bindingFailedAt = new Date().toISOString();
         const bindingReason = bindingError
-          ? `AKK delivered the terminal input but could not verify the new native agent session: ${bindingError}`
-          : "AKK delivered the terminal input but no exact native agent session appeared within the binding window";
+          ? `AKK dispatched terminal input but could not verify the new native agent session: ${bindingError}`
+          : "AKK dispatched terminal input but no exact native agent session appeared within the binding window";
         const unfencedBase = {
-          ...preparedConversation,
+          ...stagedConversation,
           status: "stalled" as const,
           stalled_at: bindingFailedAt,
           stalled_reason: bindingReason,
           native_session_takeover: {
-            ...(isRecord(preparedConversation.native_session_takeover)
-              ? preparedConversation.native_session_takeover
+            ...(isRecord(stagedConversation.native_session_takeover)
+              ? stagedConversation.native_session_takeover
               : {}),
             terminal_agent_identity_status: "unresolved_after_submit",
             terminal_agent_identity_error: textSummary(bindingReason)
@@ -9919,10 +11358,16 @@ async function runTerminalControlSend({
         const unfencedConversation = withTerminalBridgeSubmission({
           conversation: unfencedBase,
           messageId: message.id,
+          messageType: message.type,
+          messageBody: String(message.body),
           requestText: terminalPayload,
-          status: "submitted",
+          status: "uncertain",
           preparedAt: bridgeStartedAt,
-          submittedAt
+          textInjectedAt,
+          enterDispatchedAt,
+          uncertainAt: bindingFailedAt,
+          error: bindingReason,
+          lastProvenStage: "enter_dispatched"
         });
         quarantineManagedSessionBinding({
           conversation: unfencedConversation,
@@ -9930,15 +11375,18 @@ async function runTerminalControlSend({
         });
         saveTerminalBridgeDispatchLedger(terminalControl, {
           ...terminalBindingLedgerFields(unfencedConversation),
-          status: "submitted",
+          status: "uncertain",
           generation_id: message.id,
           conversation_id: unfencedConversation.conversation_id,
           session_id: sessionIdForConversation(unfencedConversation),
           turn_id: turnIdForConversation(unfencedConversation),
           message_id: message.id,
+          message_type: message.type,
           request_hash: terminalRequestHash,
           prepared_at: bridgeStartedAt,
-          submitted_at: submittedAt,
+          text_injected_at: textInjectedAt,
+          enter_dispatched_at: enterDispatchedAt,
+          uncertain_at: bindingFailedAt,
           dispatcher_pid: process.pid,
           state_path: statePath,
           event_log_path: logPath,
@@ -9958,7 +11406,7 @@ async function runTerminalControlSend({
           executor,
           terminal_control: terminalControl,
           error: textSummary(bindingReason),
-          delivered: true,
+          delivered: false,
           do_not_retry: true
         });
         runtimeLog("error", "terminal_agent_identity_binding_failed", {
@@ -9966,7 +11414,7 @@ async function runTerminalControlSend({
           agent: executor.kind,
           terminal_target: terminalControl.target,
           error: bindingReason,
-          delivered: true,
+          delivered: false,
           do_not_retry: true
         });
         printJson({
@@ -9974,15 +11422,15 @@ async function runTerminalControlSend({
           turn_id: turnIdForConversation(unfencedConversation),
           conversation: unfencedConversation,
           message,
-          delivered: true,
-          status: "delivered_unfenced",
-          submission_outcome: "submitted",
+          delivered: false,
+          status: "submission_uncertain",
+          submission_outcome: "uncertain",
           background: true,
           callback_expected: false,
           terminal_control: terminalControl,
           monitor_pid: bridgeMonitor?.pid ?? null,
           executor,
-          delivery_receipt: "submitted",
+          delivery_receipt: "enter_dispatched",
           do_not_retry: true,
           reason: bindingReason,
           openclaw_next_action: {
@@ -9999,41 +11447,156 @@ async function runTerminalControlSend({
       }
       submittedBase = boundConversation as Conversation;
     }
-    deliveredConversation = withTerminalBridgeSubmission({
+    acceptanceResult = await pollTerminalSubmissionAcceptance({
+      options,
+      executor: executor.kind,
       conversation: submittedBase,
+      terminalControl,
+      terminalBridge
+    });
+    const acceptanceResolvedAt = new Date().toISOString();
+    const terminalStatus: TerminalBridgeSubmissionStatus =
+      acceptanceResult.outcome === "pending_acceptance"
+        ? "enter_dispatched"
+        : acceptanceResult.outcome;
+    const outcomeBase =
+      acceptanceResult.outcome === "not_accepted" ||
+      acceptanceResult.outcome === "uncertain"
+        ? {
+            ...submittedBase,
+            status: "stalled" as const,
+            stalled_at: acceptanceResolvedAt,
+            stalled_reason: acceptanceResult.reason,
+            updated_at: acceptanceResolvedAt
+          }
+        : submittedBase;
+    deliveredConversation = withTerminalBridgeSubmission({
+      conversation: outcomeBase,
       messageId: message.id,
+      messageType: message.type,
+      messageBody: String(message.body),
       requestText: terminalPayload,
-      status: "submitted",
+      status: terminalStatus,
       preparedAt: bridgeStartedAt,
-      submittedAt
+      textInjectedAt,
+      enterDispatchedAt,
+      ...(acceptanceResult.outcome === "agent_accepted"
+        ? {
+            agentAcceptedAt: acceptanceResolvedAt,
+            acceptanceEvidence: acceptanceResult.evidence
+          }
+        : {}),
+      ...(acceptanceResult.outcome === "not_accepted"
+        ? { notAcceptedAt: acceptanceResolvedAt }
+        : {}),
+      ...(acceptanceResult.outcome === "uncertain"
+        ? {
+            uncertainAt: acceptanceResolvedAt,
+            error: acceptanceResult.reason,
+            lastProvenStage: "enter_dispatched" as const
+          }
+        : {})
     });
     saveState(statePath, deliveredConversation);
-    saveTerminalBridgeDispatchLedger(terminalControl, {
-      ...terminalBindingLedgerFields(deliveredConversation),
-      status: "submitted",
-      generation_id: message.id,
-      conversation_id: deliveredConversation.conversation_id,
-      session_id: sessionIdForConversation(deliveredConversation),
-      turn_id: turnIdForConversation(deliveredConversation),
-      message_id: message.id,
-      request_hash: terminalRequestHash,
-      prepared_at: bridgeStartedAt,
-      submitted_at: submittedAt,
-      dispatcher_pid: process.pid,
-      state_path: statePath,
-      event_log_path: logPath,
-      callback_expected: Boolean(deliveredConversation.gateway_method),
-      previous_generation_id:
-        stringValue(previousDispatchLedger?.generation_id) ??
-        stringValue(previousDispatchLedger?.message_id)
-    });
+    try {
+      if (process.env.AKK_TEST_FINAL_TERMINAL_LEDGER_FAILURE === "1") {
+        throw new Error("injected final terminal ledger persistence failure");
+      }
+      saveTerminalBridgeDispatchLedger(terminalControl, {
+        ...terminalBindingLedgerFields(deliveredConversation),
+        status: terminalStatus,
+        generation_id: message.id,
+        conversation_id: deliveredConversation.conversation_id,
+        session_id: sessionIdForConversation(deliveredConversation),
+        turn_id: turnIdForConversation(deliveredConversation),
+        message_id: message.id,
+        message_type: message.type,
+        request_hash: terminalRequestHash,
+        prepared_at: bridgeStartedAt,
+        text_injected_at: textInjectedAt,
+        enter_dispatched_at: enterDispatchedAt,
+        ...(acceptanceResult.outcome === "agent_accepted"
+          ? {
+              agent_accepted_at: acceptanceResolvedAt,
+              acceptance_evidence: acceptanceResult.evidence
+            }
+          : {}),
+        ...(acceptanceResult.outcome === "not_accepted"
+          ? { not_accepted_at: acceptanceResolvedAt }
+          : {}),
+        ...(acceptanceResult.outcome === "uncertain"
+          ? {
+              uncertain_at: acceptanceResolvedAt,
+              error: textSummary(acceptanceResult.reason)
+            }
+          : {}),
+        dispatcher_pid: null,
+        state_path: statePath,
+        event_log_path: logPath,
+        callback_expected: Boolean(deliveredConversation.gateway_method),
+        previous_generation_id:
+          stringValue(previousDispatchLedger?.generation_id) ??
+          stringValue(previousDispatchLedger?.message_id)
+      });
+    } catch (error) {
+      // State is the durable proof authority. Once a valid native ACK has
+      // committed there, a lagging ledger is bookkeeping debt and must never
+      // overwrite that strongest proof with `uncertain`.
+      recordPostTransportBookkeepingFailure(
+        "final_terminal_ledger",
+        error
+      );
+    }
+    try {
+      appendEvent(logPath, {
+        ts: acceptanceResolvedAt,
+        conversation_id: deliveredConversation.conversation_id,
+        event: acceptanceResult.outcome === "agent_accepted"
+          ? "terminal_message_agent_accepted"
+          : acceptanceResult.outcome === "pending_acceptance"
+            ? "terminal_message_acceptance_pending"
+            : `terminal_message_${acceptanceResult.outcome}`,
+        message_id: message.id,
+        executor,
+        terminal_control: terminalControl,
+        delivery_receipt: terminalStatus,
+        do_not_retry: acceptanceResult.outcome !== "agent_accepted"
+      });
+    } catch (error) {
+      recordPostTransportBookkeepingFailure(terminalStatus, error);
+    }
+    if (
+      bridge &&
+      (acceptanceResult.outcome === "agent_accepted" ||
+        acceptanceResult.outcome === "pending_acceptance")
+    ) {
+      try {
+        bridgeMonitor = startTerminalBridgeMonitorForConversation({
+          conversation: deliveredConversation,
+          statePath,
+          logPath,
+          options
+        });
+        if (bridgeMonitor) {
+          appendEvent(logPath, {
+            ts: new Date().toISOString(),
+            conversation_id: deliveredConversation.conversation_id,
+            event: "terminal_bridge_monitor_launch",
+            pid: bridgeMonitor.pid ?? null,
+            terminal_control: terminalControl,
+            phase: acceptanceResult.outcome,
+            agent_timeout_minutes: agentTimeoutMinutes,
+            agent_hard_timeout_minutes: agentHardTimeoutMinutes
+          });
+        }
+      } catch (error) {
+        recordPostTransportBookkeepingFailure("monitor_launch", error);
+      }
+    }
   } catch (error) {
     const uncertainAt = new Date().toISOString();
     const errorMessage = error instanceof Error ? error.message : String(error);
-    const failureBase =
-      !recordRawAttachmentAfterSend && terminalBridgeEnabled(conversation)
-        ? conversation
-        : preparedConversation;
+    const failureBase = stagedConversation;
     const stalledFailureBase = {
       ...failureBase,
       status: "stalled" as const,
@@ -10045,11 +11608,20 @@ async function runTerminalControlSend({
     const uncertainConversation = withTerminalBridgeSubmission({
       conversation: stalledFailureBase,
       messageId: message.id,
+      messageType: message.type,
+      messageBody: String(message.body),
       requestText: terminalPayload,
       status: "uncertain",
       preparedAt: bridgeStartedAt,
+      textInjectedAt,
+      enterDispatchedAt,
       uncertainAt,
-      error: errorMessage
+      error: errorMessage,
+      lastProvenStage: enterDispatchedAt
+        ? "enter_dispatched"
+        : textInjectedAt
+          ? "text_injected"
+          : "prepared"
     });
     try {
       saveTerminalBridgeDispatchLedger(terminalControl, {
@@ -10060,8 +11632,11 @@ async function runTerminalControlSend({
         session_id: sessionIdForConversation(uncertainConversation),
         turn_id: turnIdForConversation(uncertainConversation),
         message_id: message.id,
+        message_type: message.type,
         request_hash: terminalRequestHash,
         prepared_at: bridgeStartedAt,
+        ...(textInjectedAt ? { text_injected_at: textInjectedAt } : {}),
+        ...(enterDispatchedAt ? { enter_dispatched_at: enterDispatchedAt } : {}),
         uncertain_at: uncertainAt,
         dispatcher_pid: process.pid,
         state_path: statePath,
@@ -10123,7 +11698,11 @@ async function runTerminalControlSend({
       do_not_retry: true,
       stalled_conversation_ids: stalledConversationIds,
       reason:
-        "AKK durably recorded the terminal submission, but could not prove whether tmux accepted Enter. Do not retry automatically; inspect this conversation and pane.",
+        enterDispatchedAt
+          ? "AKK dispatched Enter but native acceptance or its exact identity became uncertain. Do not retry automatically; inspect this conversation and pane."
+          : textInjectedAt
+            ? "AKK injected text but could not prove that Enter was dispatched. Do not retry automatically; inspect this conversation and pane."
+            : "AKK could not prove that terminal input remained untouched. Inspect this conversation before retrying.",
       openclaw_next_action: {
         action: "inspect",
         conversation_id: uncertainConversation.conversation_id,
@@ -10137,7 +11716,8 @@ async function runTerminalControlSend({
     return;
   }
 
-  let bookkeepingWarning: string | undefined;
+  const nativeAccepted = acceptanceResult?.outcome === "agent_accepted";
+  const acceptancePending = acceptanceResult?.outcome === "pending_acceptance";
   try {
     appendEvent(logPath, {
       ts: new Date().toISOString(),
@@ -10162,7 +11742,7 @@ async function runTerminalControlSend({
       conversation_id: deliveredConversation.conversation_id,
       terminal_target: terminalControl.target,
       error: bookkeepingWarning,
-      delivered: true
+      delivered: nativeAccepted
     });
     try {
       appendEvent(logPath, {
@@ -10171,7 +11751,7 @@ async function runTerminalControlSend({
         event: "terminal_message_post_submit_bookkeeping_failed",
         terminal_control: terminalControl,
         error: textSummary(bookkeepingWarning),
-        delivered: true
+        delivered: nativeAccepted
       });
     } catch {
       // The durable submitted receipt remains authoritative even if the event log is unavailable.
@@ -10182,33 +11762,619 @@ async function runTerminalControlSend({
     turn_id: turnIdForConversation(deliveredConversation),
     conversation: deliveredConversation,
     message,
-    delivered: true,
-    status: "async_pending",
+    delivered: nativeAccepted,
+    status: nativeAccepted
+      ? "async_pending"
+      : acceptancePending
+        ? "submission_pending_acceptance"
+        : acceptanceResult?.outcome === "not_accepted"
+          ? "submission_not_accepted"
+          : "submission_uncertain",
+    submission_outcome: acceptanceResult?.outcome,
     background: true,
-    callback_expected: Boolean(deliveredConversation.gateway_method),
+    callback_expected: Boolean(
+      deliveredConversation.gateway_method &&
+      (nativeAccepted || acceptancePending)
+    ),
     terminal_control: terminalControl,
     monitor_pid: bridgeMonitor?.pid ?? null,
     executor,
     budget: budgetAction(deliveredConversation),
-    delivery_receipt: "submitted",
+    delivery_receipt: nativeAccepted
+      ? "agent_accepted"
+      : acceptancePending
+        ? "enter_dispatched"
+        : acceptanceResult?.outcome,
+    ...(!nativeAccepted ? { do_not_retry: true } : {}),
     ...(bookkeepingWarning
       ? {
           bookkeeping_warning: textSummary(bookkeepingWarning)
         }
       : {}),
-    openclaw_next_action: openClawYieldNextAction({
-      conversationId: deliveredConversation.conversation_id,
-      sessionId: sessionIdForConversation(deliveredConversation),
-      turnId: turnIdForConversation(deliveredConversation),
-      source: "terminal_control",
-      callbackExpected: Boolean(deliveredConversation.gateway_method)
-    })
+    openclaw_next_action: nativeAccepted
+      ? openClawYieldNextAction({
+          conversationId: deliveredConversation.conversation_id,
+          sessionId: sessionIdForConversation(deliveredConversation),
+          turnId: turnIdForConversation(deliveredConversation),
+          source: "terminal_control",
+          callbackExpected: Boolean(deliveredConversation.gateway_method)
+        })
+      : {
+          action: acceptancePending ? "wait_for_acceptance" : "inspect",
+          conversation_id: deliveredConversation.conversation_id,
+          session_id: sessionIdForConversation(deliveredConversation),
+          turn_id: turnIdForConversation(deliveredConversation),
+          do_not_retry: true,
+          reason: acceptancePending
+            ? "Terminal transport is proven and the background monitor is still waiting for native acceptance."
+            : acceptanceResult?.outcome === "not_accepted"
+              ? "The exact draft is still present; inspect the composer and do not send a duplicate."
+              : "Native acceptance evidence became uncertain; inspect the shared pane."
+        }
   });
 }
 
 function terminalSubmissionPayload(payload: string): string {
   assertOrdinaryTerminalPayloadDoesNotInvokeNativeLifecycle(payload);
   return payload.trimEnd();
+}
+
+type TerminalAcceptancePollResult =
+  | {
+      outcome: "agent_accepted";
+      evidence: TerminalSubmissionAcceptanceEvidence;
+    }
+  | { outcome: "pending_acceptance" }
+  | { outcome: "not_accepted"; reason: string }
+  | { outcome: "uncertain"; reason: string };
+
+function allowsSyntheticTerminalAcceptance(
+  _options: Record<string, any>
+): boolean {
+  return process.env.AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE === "1";
+}
+
+function syntheticTerminalAcceptanceEvidence({
+  options,
+  executor,
+  conversation,
+  requestHash
+}: {
+  options: Record<string, any>;
+  executor: ExecutorKind;
+  conversation: Conversation;
+  requestHash: string;
+}): TerminalSubmissionAcceptanceEvidence | undefined {
+  if (!allowsSyntheticTerminalAcceptance(options)) {
+    return undefined;
+  }
+  const outcome = process.env.AKK_TEST_TERMINAL_ACCEPTANCE_OUTCOME ?? "accepted";
+  if (outcome === "pending" || outcome === "not_accepted") {
+    return undefined;
+  }
+  if (outcome === "identity_drift" || outcome === "uncertain") {
+    throw new Error("injected terminal acceptance identity drift");
+  }
+  if (outcome !== "accepted") {
+    throw new Error(`unsupported injected terminal acceptance outcome ${outcome}`);
+  }
+  const nativeTakeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const nativeThreadId = stringValue(
+    nativeTakeover?.terminal_agent_session_id
+  ) ?? stringValue(nativeTakeover?.terminal_agent_expected_session_id) ??
+    sessionIdForConversation(conversation);
+  const evidenceBase = {
+    source: executor === "codex"
+      ? "codex_rollout" as const
+      : "claude_transcript" as const,
+    kind: "native_user_turn" as const,
+    nativeThreadId,
+    requestHash,
+    acceptanceId: `test-${turnIdForConversation(conversation)}`,
+    anchorFingerprint: createHash("sha256")
+      .update(`test-anchor:${nativeThreadId}:${requestHash}`)
+      .digest("hex")
+  };
+  return {
+    ...evidenceBase,
+    evidenceFingerprint: createHash("sha256")
+      .update(JSON.stringify(evidenceBase))
+      .digest("hex")
+  };
+}
+
+function captureCodexAcceptanceAnchorForSend({
+  options,
+  currentIdentity,
+  expectedNativeThreadId,
+  allowedPreMaterializationIdentity,
+  needsPostSendNativeBinding
+}: {
+  options: Record<string, any>;
+  currentIdentity?: NativeAgentSessionIdentity;
+  expectedNativeThreadId?: string;
+  allowedPreMaterializationIdentity?: CodexPreMaterializationIdentity;
+  needsPostSendNativeBinding: boolean;
+}): CodexRolloutAcceptanceAnchor | undefined {
+  if (allowsSyntheticTerminalAcceptance(options)) {
+    return undefined;
+  }
+  const nativeThreadId = needsPostSendNativeBinding
+    ? expectedNativeThreadId
+    : currentIdentity?.sessionId;
+  const processUuid = currentIdentity?.processUuid ??
+    allowedPreMaterializationIdentity?.processUuid;
+  const processBirth = currentIdentity?.processBirth ??
+    allowedPreMaterializationIdentity?.processBirth;
+  if (!nativeThreadId || !processUuid || !processBirth) {
+    throw new Error(
+      "Codex native acceptance anchor requires an exact thread and process incarnation"
+    );
+  }
+  const base = { nativeThreadId, processUuid, processBirth };
+  if (!needsPostSendNativeBinding && currentIdentity?.rollout) {
+    return captureCodexRolloutAcceptanceAnchor({
+      ...base,
+      mode: "existing",
+      rollout: currentIdentity.rollout
+    });
+  }
+  return captureCodexRolloutAcceptanceAnchor({
+    ...base,
+    mode: "pre_materialization",
+    expectedEmptyNativeSession: true
+  });
+}
+
+async function detectTerminalSubmissionAcceptance({
+  options,
+  executor,
+  conversation,
+  terminalControl
+}: {
+  options: Record<string, any>;
+  executor: ExecutorKind;
+  conversation: Conversation;
+  terminalControl: TerminalControlRef;
+}): Promise<TerminalSubmissionAcceptanceEvidence | undefined> {
+  const nativeTakeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const requestHash = stringValue(
+    nativeTakeover?.terminal_bridge_request_hash
+  );
+  if (!requestHash) {
+    throw new Error("terminal acceptance request hash is unavailable");
+  }
+  assertTurnBindingCurrent(conversation, "monitor");
+  const synthetic = syntheticTerminalAcceptanceEvidence({
+    options,
+    executor,
+    conversation,
+    requestHash
+  });
+  if (synthetic) {
+    return synthetic;
+  }
+  if (allowsSyntheticTerminalAcceptance(options)) {
+    return undefined;
+  }
+
+  if (executor === "codex") {
+    const anchor = nativeTakeover?.codex_rollout_acceptance_anchor;
+    if (!isRecord(anchor)) {
+      throw new Error("Codex rollout acceptance anchor is unavailable");
+    }
+    const pid = Number(nativeTakeover?.terminal_agent_pid);
+    const currentIdentity = await resolveCurrentNativeAgentSessionIdentity({
+      options,
+      agent: "codex",
+      pid,
+      cwd: terminalControl.currentPath,
+      preferredSessionId: stringValue(anchor.native_thread_id)
+    });
+    if (!currentIdentity) {
+      return undefined;
+    }
+    return detectCodexRolloutAcceptance({
+      anchor: anchor as unknown as CodexRolloutAcceptanceAnchor,
+      currentIdentity,
+      requestHash
+    });
+  }
+
+  const claudeEvidence = detectClaudeTranscriptAcceptance(
+    terminalDurableRequestForConversation(conversation, terminalControl),
+    {
+      claudeHome: expandHome(options.claudeHome),
+      agentRows: loadClaudeAgentRows(options)
+    }
+  );
+  if (!claudeEvidence) {
+    return undefined;
+  }
+  return claudeEvidence;
+}
+
+async function pollTerminalSubmissionAcceptance({
+  options,
+  executor,
+  conversation,
+  terminalControl,
+  terminalBridge
+}: {
+  options: Record<string, any>;
+  executor: ExecutorKind;
+  conversation: Conversation;
+  terminalControl: TerminalControlRef;
+  terminalBridge: TerminalAgentBridge;
+}): Promise<TerminalAcceptancePollResult> {
+  const timeoutMs = positiveMilliseconds(
+    options.terminalAcceptanceTimeoutMs ??
+      DEFAULT_TERMINAL_ACCEPTANCE_TIMEOUT_MS,
+    "--terminal-acceptance-timeout-ms"
+  );
+  const pollIntervalMs = Math.max(
+    10,
+    Math.min(
+      timeoutMs,
+      Number(options.terminalAcceptancePollIntervalMs ??
+        DEFAULT_TERMINAL_ACCEPTANCE_POLL_INTERVAL_MS)
+    )
+  );
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    try {
+      const evidence = await detectTerminalSubmissionAcceptance({
+        options,
+        executor,
+        conversation,
+        terminalControl
+      });
+      if (evidence) {
+        return { outcome: "agent_accepted", evidence };
+      }
+    } catch (error) {
+      return {
+        outcome: "uncertain",
+        reason: error instanceof Error ? error.message : String(error)
+      };
+    }
+    if (Date.now() >= deadline) {
+      break;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, pollIntervalMs));
+  }
+
+  if (
+    allowsSyntheticTerminalAcceptance(options) &&
+    process.env.AKK_TEST_TERMINAL_ACCEPTANCE_OUTCOME === "not_accepted"
+  ) {
+    return {
+      outcome: "not_accepted",
+      reason: "the exact managed draft remains in the terminal composer"
+    };
+  }
+  try {
+    const requestText = String(
+      isRecord(conversation.native_session_takeover)
+        ? conversation.native_session_takeover.terminal_bridge_request_text ?? ""
+        : ""
+    );
+    if (
+      await terminalBridge.proveExactDraftStillPresent(
+        executor,
+        terminalControl,
+        requestText,
+        {
+          scrollbackLines: Number(options.scrollbackLines ?? 240),
+          runtime: terminalRuntimeIdentityForConversation(
+            conversation,
+            terminalControl
+          )
+        }
+      )
+    ) {
+      return {
+        outcome: "not_accepted",
+        reason: "the exact managed draft remains in the terminal composer"
+      };
+    }
+  } catch {
+    // Native acceptance evidence remains authoritative. A best-effort draft
+    // inspection failure does not turn a bounded no-ACK into an identity claim.
+  }
+  return { outcome: "pending_acceptance" };
+}
+
+async function reconcileTerminalAcceptanceInMonitor({
+  options,
+  conversation,
+  statePath,
+  logPath,
+  terminalControl,
+  executor,
+  terminalBridge
+}: {
+  options: Record<string, any>;
+  conversation: Conversation;
+  statePath: string;
+  logPath: string;
+  terminalControl: TerminalControlRef;
+  executor: ReturnType<typeof executorForConversation>;
+  terminalBridge: TerminalAgentBridge;
+}): Promise<
+  | { outcome: "accepted"; conversation: Conversation }
+  | { outcome: "pending" }
+  | { outcome: "not_accepted"; conversation: Conversation }
+> {
+  const evidence = await detectTerminalSubmissionAcceptance({
+    options,
+    executor: executor.kind,
+    conversation,
+    terminalControl
+  });
+  const submission = terminalBridgeSubmission(conversation);
+  const nativeTakeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const messageId = stringValue(submission?.message_id);
+  if (!messageId) {
+    throw new Error("terminal acceptance monitor lost its exact message identity");
+  }
+  let notAcceptedReason: string | undefined;
+  if (!evidence) {
+    const enterAt = validTimestampMs(submission?.enter_dispatched_at);
+    if (enterAt !== undefined && Date.now() - enterAt >= 250) {
+      const requestText = String(
+        nativeTakeover?.terminal_bridge_request_text ?? ""
+      );
+      if (
+        await terminalBridge.proveExactDraftStillPresent(
+          executor.kind,
+          terminalControl,
+          requestText,
+          {
+            scrollbackLines: Number(options.scrollbackLines ?? 240),
+            runtime: terminalRuntimeIdentityForConversation(
+              conversation,
+              terminalControl
+            )
+          }
+        )
+      ) {
+        notAcceptedReason =
+          "the exact managed draft remains in the terminal composer";
+      }
+    }
+    if (!notAcceptedReason) {
+      return { outcome: "pending" };
+    }
+  }
+
+  const resolvedAt = new Date().toISOString();
+  const writerStoreDir = pathsForConversationDir(
+    path.dirname(statePath)
+  ).storeDir;
+  return await withStoreWriterLeaseAsync(writerStoreDir, async () => {
+    const releaseStateLock = acquireFileLock(`${statePath}.lock`);
+    try {
+      const current = loadState(statePath);
+    const currentSubmission = terminalBridgeSubmission(current);
+    const currentTakeover = isRecord(current.native_session_takeover)
+      ? current.native_session_takeover
+      : undefined;
+    if (
+      current.status !== conversation.status ||
+      stringValue(currentTakeover?.terminal_bridge_message_id) !== messageId ||
+      stringValue(currentSubmission?.message_id) !== messageId ||
+      currentSubmission?.status !== "enter_dispatched"
+    ) {
+      throw new Error(
+        "terminal acceptance generation changed before monitor reconciliation"
+      );
+    }
+    const requestText = String(
+      currentTakeover?.terminal_bridge_request_text ?? current.user_request ?? ""
+    );
+    const nextBase = notAcceptedReason
+      ? {
+          ...current,
+          status: "stalled" as const,
+          stalled_at: resolvedAt,
+          stalled_reason: notAcceptedReason,
+          updated_at: resolvedAt
+        }
+      : current;
+    const acceptedConversation = withTerminalBridgeSubmission({
+      conversation: nextBase,
+      messageId,
+      requestText,
+      status: notAcceptedReason ? "not_accepted" : "agent_accepted",
+      preparedAt:
+        stringValue(currentSubmission.prepared_at) ?? resolvedAt,
+      textInjectedAt: stringValue(currentSubmission.text_injected_at),
+      enterDispatchedAt: stringValue(currentSubmission.enter_dispatched_at),
+      ...(notAcceptedReason
+        ? { notAcceptedAt: resolvedAt }
+        : {
+            agentAcceptedAt: resolvedAt,
+            acceptanceEvidence: evidence as TerminalSubmissionAcceptanceEvidence
+          })
+    });
+    const ledger = reconcilePreparedTerminalDispatchLedger(
+      terminalControl,
+      loadTerminalBridgeDispatchLedger(terminalControl)
+    );
+    if (
+      stringValue(ledger?.message_id) !== messageId ||
+      ledger?.status !== "enter_dispatched"
+    ) {
+      throw new Error(
+        "terminal dispatch ledger changed before acceptance reconciliation"
+      );
+    }
+    saveState(statePath, acceptedConversation);
+    try {
+      if (
+        process.env.AKK_TEST_MONITOR_FINAL_TERMINAL_LEDGER_FAILURE === "1"
+      ) {
+        throw new Error(
+          "injected monitor final terminal ledger persistence failure"
+        );
+      }
+      saveTerminalBridgeDispatchLedger(terminalControl, {
+        ...ledger,
+        ...terminalBindingLedgerFields(acceptedConversation),
+        status: notAcceptedReason ? "not_accepted" : "agent_accepted",
+        ...(notAcceptedReason
+          ? { not_accepted_at: resolvedAt }
+          : {
+              agent_accepted_at: resolvedAt,
+              acceptance_evidence: evidence
+            }),
+        dispatcher_pid: null
+      });
+    } catch (error) {
+      runtimeLog("warn", "terminal_acceptance_monitor_ledger_lagging", {
+        conversation_id: acceptedConversation.conversation_id,
+        message_id: messageId,
+        terminal_target: terminalControl.target,
+        durable_submission_status: notAcceptedReason
+          ? "not_accepted"
+          : "agent_accepted",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+    try {
+      if (
+        process.env.AKK_TEST_MONITOR_FINAL_EVENT_FAILURE === "1"
+      ) {
+        throw new Error(
+          "injected monitor final acceptance event persistence failure"
+        );
+      }
+      appendEvent(logPath, {
+        ts: resolvedAt,
+        conversation_id: acceptedConversation.conversation_id,
+        event: notAcceptedReason
+          ? "terminal_message_not_accepted"
+          : "terminal_message_agent_accepted",
+        message_id: messageId,
+        terminal_control: terminalControl,
+        do_not_retry: Boolean(notAcceptedReason)
+      });
+    } catch (error) {
+      runtimeLog("warn", "terminal_acceptance_monitor_event_lagging", {
+        conversation_id: acceptedConversation.conversation_id,
+        message_id: messageId,
+        terminal_target: terminalControl.target,
+        durable_submission_status: notAcceptedReason
+          ? "not_accepted"
+          : "agent_accepted",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+      return notAcceptedReason
+        ? { outcome: "not_accepted", conversation: acceptedConversation }
+        : { outcome: "accepted", conversation: acceptedConversation };
+    } finally {
+      releaseStateLock();
+    }
+  });
+}
+
+function markTerminalAcceptanceUncertain({
+  conversation,
+  statePath,
+  logPath,
+  terminalControl,
+  reason
+}: {
+  conversation: Conversation;
+  statePath: string;
+  logPath: string;
+  terminalControl: TerminalControlRef;
+  reason: string;
+}): Conversation {
+  const messageId = stringValue(
+    terminalBridgeSubmission(conversation)?.message_id
+  );
+  const uncertainAt = new Date().toISOString();
+  const writerStoreDir = pathsForConversationDir(
+    path.dirname(statePath)
+  ).storeDir;
+  return withStoreWriterLease(writerStoreDir, () => {
+    const releaseStateLock = acquireFileLock(`${statePath}.lock`);
+    try {
+      const current = loadState(statePath);
+    const submission = terminalBridgeSubmission(current);
+    const currentMessageId = stringValue(submission?.message_id);
+    if (
+      !messageId ||
+      currentMessageId !== messageId ||
+      !["text_injected", "enter_dispatched"].includes(
+        String(submission?.status)
+      )
+    ) {
+      return current;
+    }
+    const takeover = isRecord(current.native_session_takeover)
+      ? current.native_session_takeover
+      : undefined;
+    const requestText = String(
+      takeover?.terminal_bridge_request_text ?? current.user_request ?? ""
+    );
+    const uncertain = withTerminalBridgeSubmission({
+      conversation: {
+        ...current,
+        status: "stalled" as const,
+        stalled_at: uncertainAt,
+        stalled_reason: reason,
+        updated_at: uncertainAt
+      },
+      messageId,
+      requestText,
+      status: "uncertain",
+      preparedAt: stringValue(submission?.prepared_at) ?? uncertainAt,
+      textInjectedAt: stringValue(submission?.text_injected_at),
+      enterDispatchedAt: stringValue(submission?.enter_dispatched_at),
+      uncertainAt,
+      error: reason,
+      lastProvenStage: submission?.status === "enter_dispatched"
+        ? "enter_dispatched"
+        : "text_injected"
+    });
+    const ledger = loadTerminalBridgeDispatchLedger(terminalControl);
+    if (
+      stringValue(ledger?.message_id) === messageId &&
+      ["text_injected", "enter_dispatched"].includes(String(ledger?.status))
+    ) {
+      saveTerminalBridgeDispatchLedger(terminalControl, {
+        ...ledger,
+        status: "uncertain",
+        uncertain_at: uncertainAt,
+        error: textSummary(reason),
+        dispatcher_pid: null
+      });
+    }
+    saveState(statePath, uncertain);
+    appendEvent(logPath, {
+      ts: uncertainAt,
+      conversation_id: uncertain.conversation_id,
+      event: "terminal_message_acceptance_uncertain",
+      message_id: messageId,
+      terminal_control: terminalControl,
+      error: textSummary(reason),
+      do_not_retry: true
+    });
+      return uncertain;
+    } finally {
+      releaseStateLock();
+    }
+  });
 }
 
 function assertOrdinaryTerminalPayloadDoesNotInvokeNativeLifecycle(
@@ -11274,6 +13440,7 @@ function createManagedTerminalTurn({
   }, paths);
   const message = createMessage({
     conversation: attachedConversation,
+    id: stringValue(options.messageId),
     from: "openclaw",
     to: executor.actor,
     type: options.type ?? "task",
@@ -11914,7 +14081,13 @@ function terminalBridgeReconciliationEligibility(conversation) {
     dispatchLedger &&
     (
       stringValue(dispatchLedger.message_id) !== terminalMessageId ||
-      !["prepared", "submitted"].includes(
+      ![
+        "prepared",
+        "text_injected",
+        "enter_dispatched",
+        "agent_accepted",
+        "submitted"
+      ].includes(
         String(dispatchLedger.status)
       )
     )
@@ -11928,8 +14101,11 @@ function terminalBridgeReconciliationEligibility(conversation) {
   }
   const submission = terminalBridgeSubmission(conversation);
   if (
-    stringValue(submission?.message_id) === terminalMessageId &&
-    (submission?.status === "uncertain" || submission?.status === "aborted")
+    submission &&
+    stringValue(submission.message_id) === terminalMessageId &&
+    ["not_accepted", "uncertain", "aborted"].includes(
+      String(submission.status)
+    )
   ) {
     return {
       eligible: false as const,
@@ -12389,8 +14565,12 @@ async function runTerminalDispatchClose({
     }
     if (![
       "prepared",
+      "text_injected",
+      "enter_dispatched",
       "dispatching",
+      "agent_accepted",
       "submitted",
+      "not_accepted",
       "uncertain",
       "verified"
     ].includes(ledger.status)) {
@@ -13001,6 +15181,103 @@ async function runTerminalBridgeMonitorWithLock(options) {
       stringValue(submission.message_id) === currentMessageId
     ) {
       const submissionStatus = stringValue(submission.status);
+      if (
+        submissionStatus === "text_injected" ||
+        submissionStatus === "enter_dispatched"
+      ) {
+        const dispatcherPid = Number(submission.dispatcher_pid);
+        if (
+          Number.isSafeInteger(dispatcherPid) &&
+          dispatcherPid > 1 &&
+          isProcessAlive(dispatcherPid)
+        ) {
+          sleepSync(pollIntervalMs);
+          continue;
+        }
+        if (submissionStatus === "text_injected") {
+          conversation = markTerminalAcceptanceUncertain({
+            conversation,
+            statePath,
+            logPath,
+            terminalControl,
+            reason:
+              "terminal dispatcher exited after text injection but before Enter dispatch was durably proven"
+          });
+          printJson({
+            conversation,
+            monitored: true,
+            terminal_bridge: true,
+            completed: false,
+            submission_outcome: "uncertain",
+            delivery_receipt: "text_injected",
+            do_not_retry: true,
+            reason:
+              "text was injected but native submission was not proven; inspect the composer"
+          });
+          return;
+        }
+
+        const releaseTerminalLock = acquireFileLock(
+          terminalBridgeSendLockPath(
+            storeDirFromOptions(options),
+            terminalControl
+          ),
+          { timeoutMs: 30000 }
+        );
+        try {
+          const reconciliation = await reconcileTerminalAcceptanceInMonitor({
+            options,
+            conversation,
+            statePath,
+            logPath,
+            terminalControl,
+            executor,
+            terminalBridge
+          });
+          if (reconciliation.outcome === "accepted") {
+            conversation = reconciliation.conversation;
+            continue;
+          }
+          if (reconciliation.outcome === "not_accepted") {
+            printJson({
+              conversation: reconciliation.conversation,
+              monitored: true,
+              terminal_bridge: true,
+              completed: false,
+              submission_outcome: "not_accepted",
+              delivery_receipt: "enter_dispatched",
+              do_not_retry: true,
+              reason:
+                "the exact managed draft remains in the terminal composer"
+            });
+            return;
+          }
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          conversation = markTerminalAcceptanceUncertain({
+            conversation,
+            statePath,
+            logPath,
+            terminalControl,
+            reason
+          });
+          printJson({
+            conversation,
+            monitored: true,
+            terminal_bridge: true,
+            completed: false,
+            submission_outcome: "uncertain",
+            delivery_receipt: "enter_dispatched",
+            do_not_retry: true,
+            reason
+          });
+          return;
+        } finally {
+          releaseTerminalLock();
+        }
+        sleepSync(pollIntervalMs);
+        continue;
+      }
       if (submissionStatus === "prepared") {
         const dispatcherPid = Number(submission.dispatcher_pid);
         if (
@@ -13020,10 +15297,14 @@ async function runTerminalBridgeMonitorWithLock(options) {
           { timeoutMs: 30000 }
         );
         try {
-          const dispatchLedger =
-            loadTerminalBridgeDispatchLedger(terminalControl);
-          const releaseStateLock = acquireFileLock(`${statePath}.lock`);
-          try {
+          const writerStoreDir = pathsForConversationDir(
+            path.dirname(statePath)
+          ).storeDir;
+          await withStoreWriterLeaseAsync(writerStoreDir, async () => {
+            const dispatchLedger =
+              loadTerminalBridgeDispatchLedger(terminalControl);
+            const releaseStateLock = acquireFileLock(`${statePath}.lock`);
+            try {
             const current = loadState(statePath);
             const currentSubmission = terminalBridgeSubmission(current);
             const currentTakeover = isRecord(current.native_session_takeover)
@@ -13043,21 +15324,33 @@ async function runTerminalBridgeMonitorWithLock(options) {
                   ""
               );
               if (
-                dispatchLedger?.status === "submitted" &&
+                dispatchLedger &&
+                ["submitted", "agent_accepted"].includes(
+                  String(dispatchLedger.status)
+                ) &&
                 stringValue(dispatchLedger.message_id) === currentMessageId
               ) {
                 const submittedAt =
+                  stringValue(dispatchLedger.agent_accepted_at) ??
                   stringValue(dispatchLedger.submitted_at) ??
                   new Date().toISOString();
+                const recoveredStatus = dispatchLedger.status === "agent_accepted"
+                  ? "agent_accepted" as const
+                  : "submitted" as const;
                 const submittedConversation = withTerminalBridgeSubmission({
                   conversation: current,
                   messageId: currentMessageId,
                   requestText,
-                  status: "submitted",
+                  status: recoveredStatus,
                   preparedAt:
                     stringValue(currentSubmission.prepared_at) ??
                     submittedAt,
-                  submittedAt
+                  ...(recoveredStatus === "agent_accepted"
+                    ? {
+                        agentAcceptedAt: submittedAt,
+                        acceptanceEvidence: dispatchLedger.acceptance_evidence
+                      }
+                    : { submittedAt })
                 });
                 saveState(statePath, submittedConversation);
                 conversation = submittedConversation;
@@ -13134,19 +15427,20 @@ async function runTerminalBridgeMonitorWithLock(options) {
             } else {
               conversation = current;
             }
-          } finally {
-            releaseStateLock();
-          }
-          if (
-            terminalBridgeSubmission(conversation)?.status === "uncertain"
-          ) {
-            stallOtherTerminalBridgeConversationsForUncertainDispatch({
-              storeDir: storeDirFromOptions(options),
-              terminalControl,
-              currentConversationId: conversation.conversation_id,
-              uncertainMessageId: currentMessageId
-            });
-          }
+            } finally {
+              releaseStateLock();
+            }
+            if (
+              terminalBridgeSubmission(conversation)?.status === "uncertain"
+            ) {
+              stallOtherTerminalBridgeConversationsForUncertainDispatch({
+                storeDir: writerStoreDir,
+                terminalControl,
+                currentConversationId: conversation.conversation_id,
+                uncertainMessageId: currentMessageId
+              });
+            }
+          });
         } finally {
           releaseTerminalLock();
         }
@@ -13154,7 +15448,9 @@ async function runTerminalBridgeMonitorWithLock(options) {
         const afterSubmission = terminalBridgeSubmission(conversation);
         if (
           stringValue(afterSubmission?.message_id) === currentMessageId &&
-          afterSubmission?.status === "submitted"
+          ["submitted", "agent_accepted"].includes(
+            String(afterSubmission?.status)
+          )
         ) {
           continue;
         }
@@ -13171,23 +15467,37 @@ async function runTerminalBridgeMonitorWithLock(options) {
         });
         return;
       }
-      if (submissionStatus === "uncertain" || submissionStatus === "aborted") {
+      if (
+        submissionStatus === "not_accepted" ||
+        submissionStatus === "uncertain" ||
+        submissionStatus === "aborted"
+      ) {
+        const abortedSafeToRetry =
+          submissionStatus === "aborted" &&
+          submission.safe_to_retry === true;
         printJson({
           conversation,
           monitored: true,
           terminal_bridge: true,
           completed: false,
           submission_outcome: submissionStatus,
-          do_not_retry: submissionStatus === "uncertain",
-          safe_to_retry: submissionStatus === "aborted",
+          do_not_retry: !abortedSafeToRetry,
+          safe_to_retry: abortedSafeToRetry,
           reason:
-            submissionStatus === "uncertain"
-              ? "terminal submission outcome is uncertain; automatic completion and approval attribution are disabled"
-              : "terminal submission was aborted before tmux input"
+            submissionStatus === "not_accepted"
+              ? "the exact terminal draft was not accepted; automatic retry is disabled"
+              : submissionStatus === "uncertain"
+                ? "terminal submission outcome is uncertain; automatic completion and approval attribution are disabled"
+                : abortedSafeToRetry
+                  ? "terminal submission was durably aborted before tmux input"
+                  : "terminal submission was aborted but safe retry was not durably proven"
         });
         return;
       }
-      if (submissionStatus !== "submitted") {
+      if (
+        submissionStatus !== "submitted" &&
+        submissionStatus !== "agent_accepted"
+      ) {
         printJson({
           conversation,
           monitored: true,
@@ -13231,22 +15541,34 @@ async function runTerminalBridgeMonitorWithLock(options) {
       { timeoutMs: 30000 }
     );
     try {
-      let dispatchLedger =
-        loadTerminalBridgeDispatchLedger(terminalControl);
+      let dispatchLedger = reconcilePreparedTerminalDispatchLedger(
+        terminalControl,
+        loadTerminalBridgeDispatchLedger(terminalControl)
+      );
       const durableSubmission = terminalBridgeSubmission(conversation);
       if (
         dispatchLedger?.status === "prepared" &&
         stringValue(dispatchLedger.message_id) === currentMessageId &&
-        durableSubmission?.status === "submitted" &&
+        durableSubmission &&
+        ["submitted", "agent_accepted"].includes(
+          String(durableSubmission.status)
+        ) &&
         stringValue(durableSubmission.message_id) === currentMessageId
       ) {
         const submittedAt =
+          stringValue(durableSubmission.agent_accepted_at) ??
           stringValue(durableSubmission.submitted_at) ??
           new Date().toISOString();
         saveTerminalBridgeDispatchLedger(terminalControl, {
           ...dispatchLedger,
-          status: "submitted",
-          submitted_at: submittedAt,
+          status: durableSubmission.status,
+          ...(durableSubmission.status === "agent_accepted"
+            ? {
+                agent_accepted_at: submittedAt,
+                acceptance_evidence:
+                  durableSubmission.acceptance_evidence
+              }
+            : { submitted_at: submittedAt }),
           reason:
             "recovered from the durable conversation submission receipt"
         });
@@ -13257,7 +15579,7 @@ async function runTerminalBridgeMonitorWithLock(options) {
         const ledgerStatus = stringValue(dispatchLedger.status);
         const ledgerMessageId = stringValue(dispatchLedger.message_id);
         if (
-          ledgerStatus !== "submitted" ||
+          !["submitted", "agent_accepted"].includes(ledgerStatus ?? "") ||
           ledgerMessageId !== currentMessageId
         ) {
           appendEvent(logPath, {
@@ -14185,7 +16507,17 @@ function orphanedTerminalDispatchForRecovery(
     const currentPanePid = Number(terminalControl.panePid);
     if (
       !ledger ||
-      !["prepared", "dispatching", "submitted", "uncertain", "verified"]
+      ![
+        "prepared",
+        "text_injected",
+        "enter_dispatched",
+        "dispatching",
+        "agent_accepted",
+        "submitted",
+        "not_accepted",
+        "uncertain",
+        "verified"
+      ]
         .includes(String(ledger.status)) ||
       !recoveryIdentity ||
       (
@@ -14317,6 +16649,160 @@ function saveLifecycleTerminalDispatchLedger(
   saveTerminalBridgeDispatchLedger(terminalControl, ledger);
 }
 
+function terminalLedgerReceiptHistory(
+  ledger: Record<string, any> | undefined
+): Record<string, any>[] {
+  if (!ledger) {
+    return [];
+  }
+  const value = ledger.terminal_submission_receipts;
+  if (value !== undefined && !Array.isArray(value)) {
+    throw new Error("terminal dispatch receipt history is malformed");
+  }
+  const receipts = (Array.isArray(value) ? value : []).map((receipt) => {
+    if (!isRecord(receipt) || !stringValue(receipt.message_id)) {
+      throw new Error("terminal dispatch receipt history is malformed");
+    }
+    return receipt;
+  });
+  const ids = new Set<string>();
+  for (const receipt of receipts) {
+    const id = String(receipt.message_id);
+    if (ids.has(id)) {
+      throw new Error(`terminal dispatch receipt ${id} is duplicated`);
+    }
+    ids.add(id);
+  }
+  const current = terminalLedgerReceiptCandidate(ledger);
+  const currentId = stringValue(current?.message_id);
+  if (!current || !currentId) {
+    return receipts;
+  }
+  const previous = receipts.find((receipt) =>
+    stringValue(receipt.message_id) === currentId
+  );
+  if (!previous) {
+    return [...receipts, current];
+  }
+  // A resolved top-level ledger may already point at a replacement tmux pane.
+  // Resolution cannot strengthen or rebind an existing submission receipt, so
+  // its append-only historical copy remains authoritative.
+  if (ledger.status === "resolved") {
+    return receipts;
+  }
+  const merged = mergeTerminalLedgerReceipt(previous, current);
+  return receipts.map((receipt) =>
+    stringValue(receipt.message_id) === currentId ? merged : receipt
+  );
+}
+
+function terminalLedgerReceiptCandidate(
+  ledger: Record<string, any>
+): Record<string, any> | undefined {
+  const storedStatus = String(ledger.status);
+  const receiptStatus = TERMINAL_LEDGER_RECEIPT_STATUSES.has(storedStatus)
+    ? storedStatus
+    : storedStatus === "resolved" && ledger.agent_accepted_at
+      ? "agent_accepted"
+      : storedStatus === "resolved" && ledger.uncertain_at
+        ? "uncertain"
+        : storedStatus === "resolved" && ledger.not_accepted_at
+          ? "not_accepted"
+          : storedStatus === "resolved" && ledger.aborted_at
+            ? "aborted"
+            : storedStatus === "resolved" && ledger.enter_dispatched_at
+              ? "enter_dispatched"
+              : storedStatus === "resolved" && ledger.submitted_at
+                ? "submitted"
+                : undefined;
+  if (
+    terminalDispatchLedgerLooksLifecycle(ledger) ||
+    !receiptStatus ||
+    !stringValue(ledger.message_id)
+  ) {
+    return undefined;
+  }
+  const {
+    terminal_submission_receipts: _history,
+    terminal_key: _terminalKey,
+    version: _version,
+    ...receipt
+  } = ledger;
+  return { ...receipt, status: receiptStatus };
+}
+
+function mergeTerminalLedgerReceipt(
+  previous: Record<string, any>,
+  next: Record<string, any>
+): Record<string, any> {
+  const messageId = required(
+    stringValue(previous.message_id),
+    "terminal dispatch receipt message id is required"
+  );
+  for (const field of TERMINAL_LEDGER_RECEIPT_IMMUTABLE_FIELDS) {
+    const previousValue = previous[field];
+    const nextValue = next[field];
+    if (
+      previousValue !== undefined &&
+      nextValue !== undefined &&
+      canonicalJson(previousValue) !== canonicalJson(nextValue)
+    ) {
+      throw new Error(
+        `terminal dispatch receipt ${messageId} changed immutable ${field}`
+      );
+    }
+  }
+  const previousControl = isRecord(previous.terminal_control)
+    ? previous.terminal_control
+    : undefined;
+  const nextControl = isRecord(next.terminal_control)
+    ? next.terminal_control
+    : undefined;
+  if (
+    previousControl &&
+    nextControl &&
+    (
+      stringValue(previousControl.target) !== stringValue(nextControl.target) ||
+      (stringValue(previousControl.socket_path) ?? undefined) !==
+        (stringValue(nextControl.socket_path) ?? undefined) ||
+      Number(previousControl.pane_pid) !== Number(nextControl.pane_pid)
+    )
+  ) {
+    throw new Error(
+      `terminal dispatch receipt ${messageId} changed immutable terminal_control`
+    );
+  }
+  if (
+    previous.status === "agent_accepted" &&
+    next.status !== "agent_accepted"
+  ) {
+    return previous;
+  }
+  const previousIsTerminalFailure = [
+    "not_accepted",
+    "uncertain",
+    "aborted"
+  ].includes(String(previous.status)) && previous.safe_to_retry !== true;
+  const nextIsTransportOnly = [
+    "text_injected",
+    "enter_dispatched",
+    "submitted"
+  ].includes(String(next.status));
+  if (previousIsTerminalFailure && nextIsTransportOnly) {
+    return previous;
+  }
+  const merged = { ...next };
+  for (const field of TERMINAL_LEDGER_RECEIPT_IMMUTABLE_FIELDS) {
+    if (merged[field] === undefined && previous[field] !== undefined) {
+      merged[field] = previous[field];
+    }
+  }
+  if (!merged.terminal_control && previousControl) {
+    merged.terminal_control = previousControl;
+  }
+  return merged;
+}
+
 function saveTerminalBridgeDispatchLedger(
   terminalControl,
   ledger: Record<string, unknown>
@@ -14326,8 +16812,32 @@ function saveTerminalBridgeDispatchLedger(
   if (fs.existsSync(ledgerPath) && fs.lstatSync(ledgerPath).isSymbolicLink()) {
     throw new Error(`terminal dispatch ledger is a symlink: ${ledgerPath}`);
   }
-  const nextLedger = {
-    ...ledger,
+  const previousLedger = fs.existsSync(ledgerPath)
+    ? loadTerminalBridgeDispatchLedger(terminalControl)
+    : undefined;
+  let baseReceiptHistory = terminalLedgerReceiptHistory(previousLedger);
+  for (const incomingReceipt of terminalLedgerReceiptHistory(
+    ledger as Record<string, any>
+  )) {
+    const incomingId = String(incomingReceipt.message_id);
+    const previousReceipt = baseReceiptHistory.find((receipt) =>
+      stringValue(receipt.message_id) === incomingId
+    );
+    const merged = previousReceipt
+      ? mergeTerminalLedgerReceipt(previousReceipt, incomingReceipt)
+      : incomingReceipt;
+    baseReceiptHistory = previousReceipt
+      ? baseReceiptHistory.map((receipt) =>
+          stringValue(receipt.message_id) === incomingId ? merged : receipt
+        )
+      : [...baseReceiptHistory, merged];
+  }
+  const {
+    terminal_submission_receipts: _incomingReceiptHistory,
+    ...ledgerWithoutReceiptHistory
+  } = ledger;
+  const nextWithoutHistory = {
+    ...ledgerWithoutReceiptHistory,
     version: 1,
     terminal_key: terminalBridgeRuntimeKey(terminalControl),
     terminal_control: {
@@ -14337,6 +16847,45 @@ function saveTerminalBridgeDispatchLedger(
       pane_pid: terminalControl.panePid ?? null,
       current_path: terminalControl.currentPath ?? null
     }
+  };
+  // The top-level ledger follows the current tmux pane incarnation, while an
+  // append-only receipt must retain the pane that actually accepted its
+  // input.  Reconciliation may save an old ledger through a newly-created
+  // pane with the same selector, so derive that receipt from the caller's
+  // original control record instead of silently rebinding its proof.
+  const receiptCandidateLedger = isRecord(
+    ledgerWithoutReceiptHistory.terminal_control
+  )
+    ? {
+        ...nextWithoutHistory,
+        terminal_control: ledgerWithoutReceiptHistory.terminal_control
+      }
+    : nextWithoutHistory;
+  const nextCandidate = terminalLedgerReceiptCandidate(
+    receiptCandidateLedger
+  );
+  let nextReceiptHistory = baseReceiptHistory;
+  if (nextCandidate) {
+    const messageId = String(nextCandidate.message_id);
+    const previousReceipt = baseReceiptHistory.find((receipt) =>
+      stringValue(receipt.message_id) === messageId
+    );
+    const nextReceipt = previousReceipt
+      ? mergeTerminalLedgerReceipt(previousReceipt, nextCandidate)
+      : nextCandidate;
+    nextReceiptHistory = previousReceipt
+      ? baseReceiptHistory.map((receipt) =>
+          stringValue(receipt.message_id) === messageId
+            ? nextReceipt
+            : receipt
+        )
+      : [...baseReceiptHistory, nextReceipt];
+  }
+  const nextLedger = {
+    ...nextWithoutHistory,
+    ...(nextReceiptHistory.length > 0
+      ? { terminal_submission_receipts: nextReceiptHistory }
+      : {})
   };
   const tempPath = `${ledgerPath}.${process.pid}.${randomUUID()}.tmp`;
   let tempFd: number | undefined;
@@ -14474,7 +17023,8 @@ function assertManagedTerminalDispatchOwner({
   const ledger = loadTerminalBridgeDispatchLedger(terminalControl);
   if (
     !messageId ||
-    ledger?.status !== "submitted" ||
+    !ledger ||
+    !["submitted", "agent_accepted"].includes(String(ledger.status)) ||
     stringValue(ledger.conversation_id) !==
       conversation.conversation_id ||
     stringValue(ledger.message_id) !== messageId ||
@@ -14512,13 +17062,22 @@ function terminalBindingLedgerFields(
   const nativeThreadId = stringValue(conversation.native_thread_id) ??
     stringValue(takeover?.terminal_agent_session_id);
   const storeDir = managedSessionStoreDirForConversation(conversation);
+  const submission = terminalBridgeSubmission(conversation);
+  const messageType = stringValue(submission?.message_type);
+  const messageBodyHash = stringValue(submission?.message_body_hash);
   return {
     ...(bindingId ? { binding_id: bindingId } : {}),
     ...(Number.isSafeInteger(generation)
       ? { binding_generation: generation }
       : {}),
     ...(nativeThreadId ? { native_thread_id: nativeThreadId } : {}),
-    ...(storeDir ? { store_dir: path.resolve(storeDir) } : {})
+    ...(storeDir ? { store_dir: path.resolve(storeDir) } : {}),
+    ...(messageType ? { message_type: messageType } : {}),
+    ...(messageBodyHash ? { message_body_hash: messageBodyHash } : {}),
+    executor_kind: executorForConversation(conversation).kind,
+    ...(conversation.openclaw_session
+      ? { openclaw_session: conversation.openclaw_session }
+      : {})
   };
 }
 
@@ -14530,7 +17089,10 @@ function reconcilePreparedTerminalDispatchLedger(
     return ledger;
   }
   if (ledger?.status !== "prepared") {
-    return ledger;
+    return reconcileLaggingTerminalDispatchLedger(
+      terminalControl,
+      ledger
+    );
   }
   const dispatcherPid = Number(ledger.dispatcher_pid);
   if (
@@ -14587,15 +17149,35 @@ function reconcilePreparedTerminalDispatchLedger(
     storedMessageId === messageId &&
     stringValue(submission?.message_id) === messageId
   ) {
-    if (submission?.status === "submitted") {
+    if (
+      submission &&
+      ["submitted", "text_injected", "enter_dispatched", "agent_accepted"]
+        .includes(String(submission.status))
+    ) {
       const submittedAt =
+        stringValue(submission.agent_accepted_at) ??
+        stringValue(submission.enter_dispatched_at) ??
+        stringValue(submission.text_injected_at) ??
         stringValue(submission.submitted_at) ??
         stringValue(conversation.updated_at) ??
         new Date().toISOString();
       saveTerminalBridgeDispatchLedger(terminalControl, {
         ...ledger,
-        status: "submitted",
-        submitted_at: submittedAt,
+        status: submission.status,
+        ...(submission.text_injected_at
+          ? { text_injected_at: submission.text_injected_at }
+          : {}),
+        ...(submission.enter_dispatched_at
+          ? { enter_dispatched_at: submission.enter_dispatched_at }
+          : {}),
+        ...(submission.status === "agent_accepted"
+          ? {
+              agent_accepted_at: submittedAt,
+              acceptance_evidence: submission.acceptance_evidence
+            }
+          : submission.status === "submitted"
+            ? { submitted_at: submittedAt }
+            : {}),
         reason:
           "recovered from the durable conversation submission receipt"
       });
@@ -14613,7 +17195,8 @@ function reconcilePreparedTerminalDispatchLedger(
 
   if (
     storedMessageId &&
-    submission?.status === "submitted" &&
+    submission &&
+    ["submitted", "agent_accepted"].includes(String(submission.status)) &&
     stringValue(submission.message_id) === storedMessageId
   ) {
     const requestText = String(
@@ -14623,18 +17206,30 @@ function reconcilePreparedTerminalDispatchLedger(
     );
     saveTerminalBridgeDispatchLedger(terminalControl, {
       ...terminalBindingLedgerFields(conversation),
-      status: "submitted",
+      status: submission.status,
       generation_id: storedMessageId,
       conversation_id: conversation.conversation_id,
       message_id: storedMessageId,
+      ...(stringValue(submission.message_type)
+        ? { message_type: stringValue(submission.message_type) }
+        : {}),
       request_hash:
         terminalBridgeRequestFingerprint(requestText),
       prepared_at:
         stringValue(submission.prepared_at) ??
         stringValue(conversation.updated_at),
-      submitted_at:
-        stringValue(submission.submitted_at) ??
-        stringValue(conversation.updated_at),
+      ...(submission.status === "agent_accepted"
+        ? {
+            agent_accepted_at:
+              stringValue(submission.agent_accepted_at) ??
+              stringValue(conversation.updated_at),
+            acceptance_evidence: submission.acceptance_evidence
+          }
+        : {
+            submitted_at:
+              stringValue(submission.submitted_at) ??
+              stringValue(conversation.updated_at)
+          }),
       dispatcher_pid: null,
       state_path: statePath,
       event_log_path:
@@ -14654,6 +17249,259 @@ function reconcilePreparedTerminalDispatchLedger(
     });
   }
   return loadTerminalBridgeDispatchLedger(terminalControl);
+}
+
+function reconcileLaggingTerminalDispatchLedger(
+  terminalControl: TerminalControlRef,
+  ledger?: Record<string, any>
+): Record<string, any> | undefined {
+  if (
+    !ledger ||
+    terminalDispatchLedgerLooksLifecycle(ledger) ||
+    ![
+      "text_injected",
+      "enter_dispatched",
+      "submitted",
+      "agent_accepted",
+      "not_accepted",
+      "uncertain"
+    ].includes(String(ledger.status))
+  ) {
+    return ledger;
+  }
+  const statePath = stringValue(ledger.state_path);
+  const messageId = stringValue(ledger.message_id);
+  if (!statePath || !messageId) {
+    return ledger;
+  }
+  let conversation: Conversation;
+  try {
+    conversation = loadState(statePath);
+  } catch {
+    return ledger;
+  }
+  const nativeTakeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const submission = terminalBridgeSubmission(conversation);
+  const storedControl = terminalControlFromTakeover(nativeTakeover);
+  if (
+    conversation.conversation_id !== stringValue(ledger.conversation_id) ||
+    stringValue(nativeTakeover?.terminal_bridge_message_id) !== messageId ||
+    stringValue(submission?.message_id) !== messageId ||
+    !storedControl ||
+    terminalBridgeRuntimeKey(storedControl) !==
+      terminalBridgeRuntimeKey(terminalControl)
+  ) {
+    return ledger;
+  }
+  const requestText = String(
+    nativeTakeover?.terminal_bridge_request_text ?? conversation.user_request ?? ""
+  );
+  const requestHash = terminalBridgeRequestFingerprint(requestText);
+  if (
+    stringValue(ledger.request_hash) !== requestHash ||
+    stringValue(submission?.request_hash) !== requestHash
+  ) {
+    return ledger;
+  }
+  const bindingFields = terminalBindingLedgerFields(conversation);
+  for (const key of [
+    "binding_id",
+    "binding_generation",
+    "native_thread_id",
+    "store_dir"
+  ]) {
+    if (
+      ledger[key] !== undefined &&
+      bindingFields[key] !== undefined &&
+      String(ledger[key]) !== String(bindingFields[key])
+    ) {
+      return ledger;
+    }
+  }
+
+  const stateStatus = String(submission?.status ?? "");
+  let stateAcceptanceEvidence: TerminalSubmissionAcceptanceEvidence | undefined;
+  if (stateStatus === "agent_accepted") {
+    try {
+      stateAcceptanceEvidence = terminalAcceptanceEvidenceForConversation(
+        conversation,
+        requestText,
+        submission?.acceptance_evidence
+      );
+    } catch {
+      stateAcceptanceEvidence = undefined;
+    }
+  }
+  let ledgerAcceptanceEvidence: TerminalSubmissionAcceptanceEvidence | undefined;
+  let ledgerAcceptanceError: string | undefined;
+  if (ledger.status === "agent_accepted") {
+    try {
+      ledgerAcceptanceEvidence = terminalAcceptanceEvidenceForConversation(
+        conversation,
+        requestText,
+        ledger.acceptance_evidence
+      );
+    } catch (error) {
+      ledgerAcceptanceError = error instanceof Error
+        ? error.message
+        : String(error);
+    }
+  }
+
+  if (ledgerAcceptanceEvidence) {
+    if (!stateAcceptanceEvidence) {
+      const acceptedAt =
+        stringValue(ledger.agent_accepted_at) ?? new Date().toISOString();
+      const acceptedConversation = withTerminalBridgeSubmission({
+        conversation,
+        messageId,
+        requestText,
+        status: "agent_accepted",
+        preparedAt:
+          stringValue(submission?.prepared_at) ??
+          stringValue(ledger.prepared_at) ??
+          acceptedAt,
+        textInjectedAt:
+          stringValue(submission?.text_injected_at) ??
+          stringValue(ledger.text_injected_at),
+        enterDispatchedAt:
+          stringValue(submission?.enter_dispatched_at) ??
+          stringValue(ledger.enter_dispatched_at),
+        agentAcceptedAt: acceptedAt,
+        acceptanceEvidence: ledgerAcceptanceEvidence
+      });
+      saveState(statePath, acceptedConversation);
+    }
+    return ledger;
+  }
+
+  if (stateAcceptanceEvidence) {
+    const acceptedAt =
+      stringValue(submission?.agent_accepted_at) ?? new Date().toISOString();
+    saveTerminalBridgeDispatchLedger(terminalControl, {
+      ...ledger,
+      ...bindingFields,
+      status: "agent_accepted",
+      text_injected_at: submission?.text_injected_at,
+      enter_dispatched_at: submission?.enter_dispatched_at,
+      agent_accepted_at: acceptedAt,
+      acceptance_evidence: stateAcceptanceEvidence,
+      dispatcher_pid: null,
+      reason: "recovered the strongest durable native acceptance receipt"
+    });
+    return loadTerminalBridgeDispatchLedger(terminalControl);
+  }
+
+  if (ledger.status === "agent_accepted") {
+    const uncertainAt = new Date().toISOString();
+    const uncertainConversation = withTerminalBridgeSubmission({
+      conversation: {
+        ...conversation,
+        status: "stalled" as const,
+        stalled_at: uncertainAt,
+        stalled_reason: "stored native acceptance evidence is invalid",
+        updated_at: uncertainAt
+      },
+      messageId,
+      requestText,
+      status: "uncertain",
+      preparedAt:
+        stringValue(submission?.prepared_at) ??
+        stringValue(ledger.prepared_at) ??
+        uncertainAt,
+      textInjectedAt:
+        stringValue(submission?.text_injected_at) ??
+        stringValue(ledger.text_injected_at),
+      enterDispatchedAt:
+        stringValue(submission?.enter_dispatched_at) ??
+        stringValue(ledger.enter_dispatched_at),
+      uncertainAt,
+      error: ledgerAcceptanceError ??
+        "stored native acceptance evidence is invalid",
+      lastProvenStage: "enter_dispatched"
+    });
+    saveState(statePath, uncertainConversation);
+    saveTerminalBridgeDispatchLedger(terminalControl, {
+      ...ledger,
+      ...bindingFields,
+      status: "uncertain",
+      uncertain_at: uncertainAt,
+      dispatcher_pid: null,
+      reason: "stored native acceptance evidence is invalid"
+    });
+    return loadTerminalBridgeDispatchLedger(terminalControl);
+  }
+
+  const stateRank = terminalSubmissionProofRank(
+    stateStatus,
+    stringValue(submission?.last_proven_stage)
+  );
+  const ledgerRank = terminalSubmissionProofRank(
+    String(ledger.status),
+    stringValue(ledger.last_proven_stage)
+  );
+  const stateIsTerminal = ["not_accepted", "uncertain", "aborted"]
+    .includes(stateStatus);
+  if (!stateIsTerminal && stateRank <= ledgerRank) {
+    return ledger;
+  }
+  if (
+    ![
+      "text_injected",
+      "enter_dispatched",
+      "submitted",
+      "not_accepted",
+      "uncertain",
+      "aborted"
+    ].includes(stateStatus)
+  ) {
+    return ledger;
+  }
+  saveTerminalBridgeDispatchLedger(terminalControl, {
+    ...ledger,
+    ...bindingFields,
+    status: stateStatus,
+    ...(submission?.text_injected_at
+      ? { text_injected_at: submission.text_injected_at }
+      : {}),
+    ...(submission?.enter_dispatched_at
+      ? { enter_dispatched_at: submission.enter_dispatched_at }
+      : {}),
+    ...(submission?.submitted_at
+      ? { submitted_at: submission.submitted_at }
+      : {}),
+    ...(submission?.not_accepted_at
+      ? { not_accepted_at: submission.not_accepted_at }
+      : {}),
+    ...(submission?.uncertain_at
+      ? { uncertain_at: submission.uncertain_at }
+      : {}),
+    ...(submission?.aborted_at
+      ? { aborted_at: submission.aborted_at }
+      : {}),
+    last_proven_stage: submission?.last_proven_stage,
+    ...(stateIsTerminal ? { dispatcher_pid: null } : {}),
+    reason: "recovered the strongest durable conversation proof level"
+  });
+  return loadTerminalBridgeDispatchLedger(terminalControl);
+}
+
+function terminalSubmissionProofRank(status: string, lastProven?: string): number {
+  if (status === "agent_accepted" || lastProven === "agent_accepted") {
+    return 3;
+  }
+  if (
+    ["enter_dispatched", "submitted", "not_accepted"].includes(status) ||
+    lastProven === "enter_dispatched"
+  ) {
+    return 2;
+  }
+  if (status === "text_injected" || lastProven === "text_injected") {
+    return 1;
+  }
+  return 0;
 }
 
 async function recoverLifecycleFenceBeforeMutation({
@@ -19549,6 +22397,8 @@ function redactCliOutput(value: unknown): unknown {
         if (
           key === "claude_transcript_anchor" ||
           key === "claudeTranscriptAnchor" ||
+          key === "codex_rollout_acceptance_anchor" ||
+          key === "codexRolloutAcceptanceAnchor" ||
           key === "claude_home" ||
           key === "claudeHome"
         ) {
