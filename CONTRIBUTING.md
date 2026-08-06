@@ -58,6 +58,16 @@ npm run build
 node dist/src/cli.js list --terminal-debug
 ```
 
+Each starting native thread `A` must already be persisted by its agent as an
+exact same-workspace resume candidate. In particular, a newly launched Codex
+composer with no completed native turn is not a safe origin: `/clear` can erase
+its only identity before Codex writes a resumable thread row and rollout. Seed
+that pane with one harmless native turn, wait until it is idle, and verify the
+thread is listed before running the gate. The gate's internal New preflight
+rechecks unique Session ownership and a fresh candidate token before `/clear`.
+Do not type in either selected pane while the matrix is running: AKK's locks
+serialize AKK operations, but they cannot fence direct human tmux input.
+
 Keep the evidence outside the repository. The worktree must be clean because
 the result is bound to `git rev-parse HEAD` and the current `package.json`
 version. The runner also fingerprints its compiled JavaScript before and after
@@ -91,8 +101,9 @@ The runner reports one of three outcomes:
   `node dist/src/cli.js list --terminal-debug`, and recover manually with only
   the newly advertised exact action once the current native thread is known.
 
-The starting thread `A` may already have a managed AKK Session or may be an
-unmanaged, verified native thread. Evidence records that distinction explicitly.
+The persisted starting thread `A` may already have a managed AKK Session or
+may be an unmanaged, verified native thread. Evidence records that distinction
+explicitly.
 For an unmanaged start, New has no source Session, creates `B` at binding
 generation 1, and exact Resume materializes a new Session for `A` at generation
 1. For a managed start, exact Resume returns to the same `A` Session and advances

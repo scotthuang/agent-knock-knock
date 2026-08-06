@@ -120,6 +120,7 @@ test("tmux smoke requires verified idle state and exact pane identity before sen
 
 test("lifecycle live smoke requires two opt-ins and never retries a mutation", () => {
   const source = readPackageFile("scripts/smoke-lifecycle-tmux.js");
+  const coreSource = readPackageFile("src/live-lifecycle-smoke.ts");
 
   assert.match(source, /AKK_RUN_LIVE_LIFECYCLE_SMOKE/u);
   assert.match(source, /options\.confirmLive !== true/u);
@@ -148,6 +149,11 @@ test("lifecycle live smoke requires two opt-ins and never retries a mutation", (
     /source identity changed during live lifecycle smoke; refusing evidence/u
   );
   assert.match(source, /Inspect the selected panes and do not retry/u);
+  assert.match(
+    coreSource,
+    /"--require-restorable-origin"/u,
+    "the release gate must prove A is resumable before New clears it"
+  );
   assert.ok(
     source.indexOf("assertSourceIdentityUnchanged(source, matrix.status)") <
       source.indexOf("lifecycleMatrixToEvidenceInput(matrix, source)"),

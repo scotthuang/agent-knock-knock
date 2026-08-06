@@ -157,7 +157,8 @@ function scenarioFixture(
         "--terminal",
         terminalId,
         "--expected-binding-token",
-        managedStart ? "fence-a-1" : "fence-a-unmanaged"
+        managedStart ? "fence-a-1" : "fence-a-unmanaged",
+        "--require-restorable-origin"
       ],
       options: mutation,
       result: transition({
@@ -515,7 +516,7 @@ test("runs the strict Codex lifecycle chain once and emits only allowlisted evid
 });
 
 test(
-  "materializes a virgin Codex unmanaged origin from the committed New probe",
+  "materializes a persisted Codex unmanaged origin from the committed New probe",
   async () => {
     const fixture = scenarioFixture("codex", { managedStart: false });
     delete rowFrom(fixture.calls[0]).native_agent_session_id;
@@ -538,7 +539,7 @@ test(
   }
 );
 
-test("missing native identity remains fail-closed outside the virgin Codex origin", async (t) => {
+test("missing native identity remains fail-closed outside the deferred Codex origin", async (t) => {
   await t.test("Claude unmanaged preflight", async () => {
     const fixture = scenarioFixture("claude", { managedStart: false });
     rowFrom(fixture.calls[0]).native_agent_session_id = null;
