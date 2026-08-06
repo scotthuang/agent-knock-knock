@@ -51,6 +51,11 @@ jobs:
 
           git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
           release_commit="$(git rev-parse "${GITHUB_REF_NAME}^{commit}")"
+          checkout_commit="$(git rev-parse HEAD)"
+          if [[ "${checkout_commit}" != "${release_commit}" ]]; then
+            echo "::error::Checked-out commit ${checkout_commit} does not match release tag commit ${release_commit}."
+            exit 1
+          fi
           if ! git merge-base --is-ancestor "${release_commit}" origin/main; then
             echo "::error::Release commit ${release_commit} is not on origin/main."
             exit 1
@@ -77,6 +82,49 @@ jobs:
 
       - name: Run tests
         run: npm test
+
+      - name: Extract lifecycle smoke attestation from annotated tag
+        shell: bash
+        run: |
+          tag_ref="refs/tags/${GITHUB_REF_NAME}"
+          tag_type="$(git cat-file -t "${tag_ref}" 2>/dev/null || true)"
+          if [[ "${tag_type}" != "tag" ]]; then
+            echo "::error::Release tag ${GITHUB_REF_NAME} must be an annotated tag."
+            exit 1
+          fi
+
+          attestation_path="${RUNNER_TEMP}/akk-live-lifecycle-attestation.txt"
+          TAG_REF="${tag_ref}" ATTESTATION_PATH="${attestation_path}" node <<'NODE'
+          const fs = require("node:fs");
+          const { execFileSync } = require("node:child_process");
+
+          const tagObject = execFileSync(
+            "git",
+            ["cat-file", "tag", process.env.TAG_REF],
+            { encoding: null, stdio: ["ignore", "pipe", "inherit"] }
+          );
+          const separator = tagObject.indexOf(Buffer.from("\n\n"));
+          if (separator < 0) {
+            throw new Error("annotated tag object has no message separator");
+          }
+          fs.writeFileSync(
+            process.env.ATTESTATION_PATH,
+            tagObject.subarray(separator + 2),
+            { mode: 0o600 }
+          );
+          NODE
+
+      - name: Verify lifecycle smoke attestation
+        shell: bash
+        run: |
+          node scripts/verify-lifecycle-smoke-evidence.js \
+            --attestation "${RUNNER_TEMP}/akk-live-lifecycle-attestation.txt" \
+            --expected-commit "${RELEASE_COMMIT}" \
+            --expected-version "${GITHUB_REF_NAME#v}" \
+            --require-matrix \
+            --max-age-hours 72
+        env:
+          RELEASE_COMMIT: ${{ steps.release.outputs.release_commit }}
 
       - name: Publish npm package with provenance
         shell: bash

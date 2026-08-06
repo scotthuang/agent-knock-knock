@@ -20,6 +20,7 @@ jobs:
       contents: read
     outputs:
       release_channel: ${{ steps.release.outputs.release_channel }}
+      release_commit: ${{ steps.release.outputs.release_commit }}
       package_version: ${{ steps.release.outputs.package_version }}
     steps:
       - name: Check out repository
@@ -46,8 +47,14 @@ jobs:
           fi
 
           git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
-          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
-            echo "::error::Release commit ${GITHUB_SHA} is not on origin/main."
+          release_commit="$(git rev-parse "${GITHUB_REF_NAME}^{commit}")"
+          checkout_commit="$(git rev-parse HEAD)"
+          if [[ "${checkout_commit}" != "${release_commit}" ]]; then
+            echo "::error::Checked-out commit ${checkout_commit} does not match release tag commit ${release_commit}."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "${release_commit}" origin/main; then
+            echo "::error::Release commit ${release_commit} is not on origin/main."
             exit 1
           fi
 
@@ -59,6 +66,7 @@ jobs:
           echo "Publishing ${package_version} on the ClawHub ${release_channel} channel."
           {
             echo "release_channel=${release_channel}"
+            echo "release_commit=${release_commit}"
             echo "package_version=${package_version}"
           } >> "${GITHUB_OUTPUT}"
 
@@ -67,6 +75,49 @@ jobs:
 
       - name: Run tests
         run: npm test
+
+      - name: Extract lifecycle smoke attestation from annotated tag
+        shell: bash
+        run: |
+          tag_ref="refs/tags/${GITHUB_REF_NAME}"
+          tag_type="$(git cat-file -t "${tag_ref}" 2>/dev/null || true)"
+          if [[ "${tag_type}" != "tag" ]]; then
+            echo "::error::Release tag ${GITHUB_REF_NAME} must be an annotated tag."
+            exit 1
+          fi
+
+          attestation_path="${RUNNER_TEMP}/akk-live-lifecycle-attestation.txt"
+          TAG_REF="${tag_ref}" ATTESTATION_PATH="${attestation_path}" node <<'NODE'
+          const fs = require("node:fs");
+          const { execFileSync } = require("node:child_process");
+
+          const tagObject = execFileSync(
+            "git",
+            ["cat-file", "tag", process.env.TAG_REF],
+            { encoding: null, stdio: ["ignore", "pipe", "inherit"] }
+          );
+          const separator = tagObject.indexOf(Buffer.from("\n\n"));
+          if (separator < 0) {
+            throw new Error("annotated tag object has no message separator");
+          }
+          fs.writeFileSync(
+            process.env.ATTESTATION_PATH,
+            tagObject.subarray(separator + 2),
+            { mode: 0o600 }
+          );
+          NODE
+
+      - name: Verify lifecycle smoke attestation
+        shell: bash
+        run: |
+          node scripts/verify-lifecycle-smoke-evidence.js \
+            --attestation "${RUNNER_TEMP}/akk-live-lifecycle-attestation.txt" \
+            --expected-commit "${RELEASE_COMMIT}" \
+            --expected-version "${GITHUB_REF_NAME#v}" \
+            --require-matrix \
+            --max-age-hours 72
+        env:
+          RELEASE_COMMIT: ${{ steps.release.outputs.release_commit }}
 
       - name: Validate ClawHub package
         run: npm run clawhub:validate
@@ -99,6 +150,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Set up Node.js
@@ -110,6 +162,57 @@ jobs:
       - name: Install pinned ClawHub CLI
         run: npm ci --ignore-scripts
 
+      - name: Build lifecycle evidence verifier
+        run: npm run build
+
+      - name: Reverify lifecycle smoke attestation before publishing
+        shell: bash
+        run: |
+          tag_ref="refs/tags/${GITHUB_REF_NAME}"
+          tag_type="$(git cat-file -t "${tag_ref}" 2>/dev/null || true)"
+          if [[ "${tag_type}" != "tag" ]]; then
+            echo "::error::Release tag ${GITHUB_REF_NAME} must be an annotated tag."
+            exit 1
+          fi
+
+          release_commit="$(git rev-parse "${tag_ref}^{commit}")"
+          checkout_commit="$(git rev-parse HEAD)"
+          if [[ "${checkout_commit}" != "${release_commit}" || "${release_commit}" != "${EXPECTED_RELEASE_COMMIT}" ]]; then
+            echo "::error::Checkout, release tag, and prepared artifact commits do not match."
+            exit 1
+          fi
+
+          attestation_path="${RUNNER_TEMP}/akk-live-lifecycle-attestation.txt"
+          TAG_REF="${tag_ref}" ATTESTATION_PATH="${attestation_path}" node <<'NODE'
+          const fs = require("node:fs");
+          const { execFileSync } = require("node:child_process");
+
+          const tagObject = execFileSync(
+            "git",
+            ["cat-file", "tag", process.env.TAG_REF],
+            { encoding: null, stdio: ["ignore", "pipe", "inherit"] }
+          );
+          const separator = tagObject.indexOf(Buffer.from("\n\n"));
+          if (separator < 0) {
+            throw new Error("annotated tag object has no message separator");
+          }
+          fs.writeFileSync(
+            process.env.ATTESTATION_PATH,
+            tagObject.subarray(separator + 2),
+            { mode: 0o600 }
+          );
+          NODE
+
+          node scripts/verify-lifecycle-smoke-evidence.js \
+            --attestation "${attestation_path}" \
+            --expected-commit "${release_commit}" \
+            --expected-version "${PACKAGE_VERSION}" \
+            --require-matrix \
+            --max-age-hours 72
+        env:
+          EXPECTED_RELEASE_COMMIT: ${{ needs.prepare.outputs.release_commit }}
+          PACKAGE_VERSION: ${{ needs.prepare.outputs.package_version }}
+
       - name: Download prebuilt plugin
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -120,6 +223,7 @@ jobs:
         env:
           DRY_RUN: ${{ inputs.dry_run }}
           RELEASE_CHANNEL: ${{ needs.prepare.outputs.release_channel }}
+          RELEASE_COMMIT: ${{ needs.prepare.outputs.release_commit }}
           PACKAGE_VERSION: ${{ needs.prepare.outputs.package_version }}
         shell: bash
         run: |
@@ -136,7 +240,7 @@ jobs:
             --tags "${RELEASE_CHANNEL}"
             --topics "tmux,codex,claude-code,agent-orchestration,terminal-handoff"
             --source-repo "${GITHUB_REPOSITORY}"
-            --source-commit "${GITHUB_SHA}"
+            --source-commit "${RELEASE_COMMIT}"
             --source-ref "${GITHUB_REF}"
             --json
           )
