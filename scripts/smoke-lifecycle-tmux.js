@@ -57,7 +57,7 @@ main().catch((error) => {
   process.stderr.write(
     "Lifecycle smoke failed before a complete safe result could be produced. No command was retried.\n"
   );
-  process.exitCode = 1;
+  process.exitCode = error?.exitCode === 2 || process.exitCode === 2 ? 2 : 1;
 });
 
 async function main() {
@@ -106,7 +106,12 @@ async function main() {
       client,
       nonce: randomUUID
     });
-    assertSourceIdentityUnchanged(source);
+    process.exitCode = matrix.status === "uncertain"
+      ? 2
+      : matrix.status === "failed"
+        ? 1
+        : 0;
+    assertSourceIdentityUnchanged(source, matrix.status);
     const rawEvidence = lifecycleMatrixToEvidenceInput(matrix, source);
     const evidence = createLiveLifecycleEvidence(rawEvidence);
 
@@ -292,7 +297,11 @@ function exactSourceIdentity() {
   if (!/^[0-9a-f]{40}$/u.test(commit)) {
     usageFail("git HEAD is not an exact commit");
   }
-  const worktreeChanges = checkedGit(["status", "--porcelain"]);
+  const worktreeChanges = checkedGit([
+    "status",
+    "--porcelain=v1",
+    "--untracked-files=all"
+  ]);
   if (worktreeChanges !== "") {
     usageFail("worktree must be clean before live evidence");
   }
@@ -310,18 +319,33 @@ function exactSourceIdentity() {
   };
 }
 
-function assertSourceIdentityUnchanged(expected) {
-  const actual = exactSourceIdentity();
+function assertSourceIdentityUnchanged(expected, matrixStatus) {
+  let actual;
+  try {
+    actual = exactSourceIdentity();
+  } catch {
+    sourceIdentityChanged(matrixStatus);
+  }
   if (
     actual.packageName !== expected.packageName ||
     actual.packageVersion !== expected.packageVersion ||
     actual.commit !== expected.commit ||
     actual.buildDigest !== expected.buildDigest
   ) {
-    usageFail(
-      "source identity changed during live lifecycle smoke; refusing evidence"
-    );
+    sourceIdentityChanged(matrixStatus);
   }
+}
+
+function sourceIdentityChanged(matrixStatus) {
+  const error = new Error(
+    "source identity changed during live lifecycle smoke; refusing evidence"
+  );
+  error.exitCode = matrixStatus === "uncertain" ? 2 : 1;
+  process.stderr.write(
+    `${error.message}. Inspect the selected panes and do not retry.\n`
+  );
+  process.exitCode = error.exitCode;
+  throw error;
 }
 
 function buildOutputDigest() {

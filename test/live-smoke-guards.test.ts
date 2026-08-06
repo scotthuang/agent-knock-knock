@@ -128,13 +128,29 @@ test("lifecycle live smoke requires two opt-ins and never retries a mutation", (
   assert.match(source, /attemptedMutations\.has/u);
   assert.match(source, /attemptedMutations\.add/u);
   assert.match(source, /Refusing to retry lifecycle mutation/u);
-  assert.match(source, /assertSourceIdentityUnchanged\(source\)/u);
+  assert.match(
+    source,
+    /assertSourceIdentityUnchanged\(source, matrix\.status\)/u
+  );
   assert.match(source, /buildDigest: buildOutputDigest\(\)/u);
   assert.match(source, /actual\.buildDigest !== expected\.buildDigest/u);
-  assert.match(source, /checkedGit\(\["status", "--porcelain"\]\)/u);
-  assert.doesNotMatch(source, /--untracked-files=no/u);
+  assert.match(source, /"--porcelain=v1"/u);
+  assert.match(source, /"--untracked-files=all"/u);
+  assert.match(source, /matrixStatus === "uncertain" \? 2 : 1/u);
+  assert.match(
+    source,
+    /error\?\.exitCode === 2 \|\| process\.exitCode === 2 \? 2 : 1/u
+  );
+  assert.match(source, /process\.exitCode = matrix\.status === "uncertain"/u);
+  assert.match(source, /catch \{\s*sourceIdentityChanged\(matrixStatus\);/u);
   assert.match(
     source,
     /source identity changed during live lifecycle smoke; refusing evidence/u
+  );
+  assert.match(source, /Inspect the selected panes and do not retry/u);
+  assert.ok(
+    source.indexOf("assertSourceIdentityUnchanged(source, matrix.status)") <
+      source.indexOf("lifecycleMatrixToEvidenceInput(matrix, source)"),
+    "final source identity must be proven before evidence conversion"
   );
 });
