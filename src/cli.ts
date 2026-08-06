@@ -2221,13 +2221,44 @@ async function terminalControlledListEntry(
   );
   const orphanedDispatch =
     orphanedTerminalDispatchForRecovery(terminalControl);
+  let codexIdentityContext:
+    | ReturnType<typeof codexManagedIdentityResolutionContext>
+    | undefined;
+  if (session.agent === "codex") {
+    try {
+      codexIdentityContext = codexManagedIdentityResolutionContext({
+        storeDir: storeDirFromOptions(options),
+        terminal: {
+          conversationId: bridge.terminalConversationId(session),
+          agent: session.agent,
+          pid: session.pid,
+          terminalControl
+        }
+      });
+    } catch (error) {
+      // Preserve generic discovery when Store hints are unavailable. Once an
+      // exact hint exists, however, the constrained resolver below must fail
+      // closed rather than retrying without its managed lineage fences.
+      runtimeLog("warn", "terminal_managed_identity_context_unavailable", {
+        agent: session.agent,
+        terminal_target: terminalControl.target,
+        pid: session.pid,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
   let nativeAgentIdentity: NativeAgentSessionIdentity | undefined;
   try {
     nativeAgentIdentity = await resolveCurrentNativeAgentSessionIdentity({
       options,
       agent: session.agent,
       pid: session.pid,
-      cwd: session.cwd ?? terminalControl.currentPath
+      cwd: session.cwd ?? terminalControl.currentPath,
+      preferredSessionId: codexIdentityContext?.preferredSessionId,
+      allowedCompanionIdentity:
+        codexIdentityContext?.companions.primary,
+      allowedAdditionalIdentities:
+        codexIdentityContext?.companions.additional
     });
   } catch (error) {
     runtimeLog("warn", "terminal_native_session_identity_unavailable", {
@@ -4443,6 +4474,42 @@ function codexAllowedCompanionSetForManagedSession({
   return { primary: selectedPrimary, additional };
 }
 
+function codexManagedIdentityResolutionContext({
+  storeDir,
+  terminal
+}: {
+  storeDir: string;
+  terminal: Pick<
+    ResolvedTerminalConversation,
+    "conversationId" | "agent" | "pid" | "terminalControl"
+  >;
+}): {
+  claimedSession?: ManagedSessionState;
+  companions: CodexAllowedCompanionSet;
+  preferredSessionId?: string;
+} {
+  const claimedSession = soleBoundManagedSessionClaimForTerminal(
+    storeDir,
+    terminal
+  );
+  const companions = claimedSession
+    ? codexAllowedCompanionSetForManagedSession({
+        storeDir,
+        session: claimedSession
+      })
+    : { additional: [] };
+  return {
+    claimedSession,
+    companions,
+    // A preferred rollout is only safe when committed managed lineage also
+    // supplies an exact predecessor/companion fence. The constrained resolver
+    // will reject every unknown root instead of guessing among open FDs.
+    preferredSessionId: companions.primary
+      ? claimedSession?.binding?.native_thread_id
+      : undefined
+  };
+}
+
 function codexIdentityFence(
   identity: NativeAgentSessionIdentity | undefined
 ): CodexPreMaterializationIdentity | undefined {
@@ -4885,7 +4952,10 @@ function boundManagedSessionForTerminal({
 
 function soleBoundManagedSessionClaimForTerminal(
   storeDir: string,
-  terminal: ResolvedTerminalConversation
+  terminal: Pick<
+    ResolvedTerminalConversation,
+    "conversationId" | "agent" | "pid" | "terminalControl"
+  >
 ): ManagedSessionState | undefined {
   const claims = listManagedSessions(storeDir).filter((session) =>
     session.status === "bound" &&
@@ -5755,23 +5825,19 @@ async function currentLifecycleSnapshot(
   { materialize = false }: { materialize?: boolean } = {}
 ) {
   const storeDir = storeDirFromOptions(options);
-  const claimedSession = terminal.agent === "codex"
-    ? soleBoundManagedSessionClaimForTerminal(storeDir, terminal)
+  const codexIdentityContext = terminal.agent === "codex"
+    ? codexManagedIdentityResolutionContext({ storeDir, terminal })
     : undefined;
-  const claimedCodexCompanions: CodexAllowedCompanionSet = claimedSession
-    ? codexAllowedCompanionSetForManagedSession({
-        storeDir,
-        session: claimedSession
-      })
-    : { additional: [] };
+  const claimedSession = codexIdentityContext?.claimedSession;
+  const claimedCodexCompanions = codexIdentityContext?.companions ?? {
+    additional: []
+  };
   const observedIdentity = await resolveCurrentNativeAgentSessionIdentity({
     options,
     agent: terminal.agent,
     pid: terminal.pid,
     cwd: terminal.terminalControl.currentPath,
-    preferredSessionId: claimedCodexCompanions.primary
-      ? claimedSession?.binding?.native_thread_id
-      : undefined,
+    preferredSessionId: codexIdentityContext?.preferredSessionId,
     allowedCompanionIdentity: claimedCodexCompanions.primary,
     allowedAdditionalIdentities: claimedCodexCompanions.additional
   });
