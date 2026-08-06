@@ -340,7 +340,7 @@ function validScenario(
   };
   return {
     status: "passed",
-    agentVersion: codex ? "0.146.0" : "2.1.218",
+    agentVersion: codex ? "0.146.1" : "2.1.218",
     tmuxTarget,
     panePid,
     startedAt: new Date(envelopeStart.getTime() + startOffsetMs).toISOString(),

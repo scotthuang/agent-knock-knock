@@ -623,7 +623,7 @@ function validScenario(agent: LiveLifecycleAgent): RawLiveLifecycleScenarioResul
   };
   return {
     status: "passed",
-    agentVersion: codex ? "0.146.0" : "2.1.218",
+    agentVersion: codex ? "0.146.1" : "2.1.218",
     tmuxTarget: target,
     panePid,
     startedAt: codex

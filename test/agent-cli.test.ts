@@ -7711,6 +7711,27 @@ test("reconcile-monitors launches only recoverable waiting terminal bridges", as
   }
 });
 
+test("event polling ignores only an unterminated trailing record", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-event-poll-"));
+  const logPath = path.join(tempDir, "events.ndjson");
+  try {
+    fs.writeFileSync(
+      logPath,
+      `${JSON.stringify({ event: "terminal_bridge_monitor_started" })}\n{"event":`,
+      "utf8"
+    );
+    assert.equal(eventCount(logPath, "terminal_bridge_monitor_started"), 1);
+
+    fs.appendFileSync(logPath, "}\n", "utf8");
+    assert.throws(
+      () => eventCount(logPath, "terminal_bridge_monitor_started"),
+      SyntaxError
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("reconcile-monitors restarts transcript-backed Claude bridges without sending terminal input", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-reconcile-"));
   const storeDir = path.join(tempDir, "conversations");
@@ -9410,7 +9431,14 @@ function eventCount(logPath: string, eventName: string): number {
   if (!fs.existsSync(logPath)) {
     return 0;
   }
-  return fs.readFileSync(logPath, "utf8")
+  const snapshot = fs.readFileSync(logPath, "utf8");
+  // The monitor may still be appending the final record while this polling
+  // reader runs. Ignore only that unterminated tail; malformed completed
+  // records must still fail the test.
+  const completeSnapshot = snapshot.endsWith("\n")
+    ? snapshot
+    : snapshot.slice(0, snapshot.lastIndexOf("\n") + 1);
+  return completeSnapshot
     .split(/\r?\n/u)
     .filter(Boolean)
     .map((line) => JSON.parse(line))

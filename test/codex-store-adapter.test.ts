@@ -843,7 +843,7 @@ test("Codex lifecycle candidates require exact root metadata and revalidate the 
     archived: 0,
     source: "cli",
     model_provider: "openai",
-    cli_version: "0.146.0",
+    cli_version: "0.146.1",
     name: "Candidate name"
   };
   const columns = Object.keys(row).map((name) => ({ name }));
@@ -862,8 +862,7 @@ test("Codex lifecycle candidates require exact root metadata and revalidate the 
       return { status: 1, stdout: "", stderr: "unexpected SQL" };
     }
   });
-  try {
-    fs.mkdirSync(path.dirname(rolloutPath), { recursive: true });
+  const writeRollout = (cliVersion: string): void => {
     fs.writeFileSync(rolloutPath, `${JSON.stringify({
       type: "session_meta",
       payload: {
@@ -871,15 +870,19 @@ test("Codex lifecycle candidates require exact root metadata and revalidate the 
         cwd: "/repo/project",
         originator: "codex-tui",
         source: "cli",
-        cli_version: "0.146.0",
+        cli_version: cliVersion,
         model_provider: "openai"
       }
     })}\n`, "utf8");
+  };
+  try {
+    fs.mkdirSync(path.dirname(rolloutPath), { recursive: true });
+    writeRollout("0.146.1");
     fs.writeFileSync(dbPath, "", "utf8");
 
     const request = {
       cwd: "/repo/project",
-      agentVersion: "0.146.0",
+      agentVersion: "0.146.1",
       modelProvider: "openai"
     };
     const candidate = (await adapter.listThreadLifecycleCandidates(request))[0];
@@ -890,6 +893,8 @@ test("Codex lifecycle candidates require exact root metadata and revalidate the 
       candidate.candidateToken.schema,
       "agent-knock-knock/thread-candidate-token"
     );
+    assert.equal(candidate.agentVersion, "0.146.1");
+    assert.equal(candidate.candidateToken.agentVersion, "0.146.1");
     assert.match(candidate.fileToken.device, /^\d+$/u);
     assert.match(candidate.fileToken.inode, /^\d+$/u);
     assert.equal(
@@ -898,6 +903,13 @@ test("Codex lifecycle candidates require exact root metadata and revalidate the 
         request
       )).status,
       "valid"
+    );
+    assert.deepEqual(
+      await adapter.listThreadLifecycleCandidates({
+        ...request,
+        agentVersion: "0.146.0"
+      }),
+      []
     );
 
     fs.appendFileSync(rolloutPath, "{}\n", "utf8");
@@ -911,12 +923,28 @@ test("Codex lifecycle candidates require exact root metadata and revalidate the 
     await assert.rejects(
       adapter.listThreadLifecycleCandidates({
         ...request,
-        agentVersion: "0.146.1"
+        agentVersion: "0.146.2"
       }),
-      /exact version 0\.146\.0/u
+      /supported exact versions: 0\.146\.0, 0\.146\.1/u
     );
+
+    row.cli_version = "0.146.0";
+    writeRollout("0.146.0");
+    const legacyRequest = {
+      ...request,
+      agentVersion: "0.146.0"
+    };
+    const legacyCandidate = (
+      await adapter.listThreadLifecycleCandidates(legacyRequest)
+    )[0];
+    assert.equal(legacyCandidate.agentVersion, "0.146.0");
+    assert.equal(legacyCandidate.candidateToken.agentVersion, "0.146.0");
+
     row.source = JSON.stringify({ subagent: { thread_spawn: {} } });
-    assert.deepEqual(await adapter.listThreadLifecycleCandidates(request), []);
+    assert.deepEqual(
+      await adapter.listThreadLifecycleCandidates(legacyRequest),
+      []
+    );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

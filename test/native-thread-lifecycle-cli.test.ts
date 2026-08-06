@@ -46,7 +46,7 @@ test("verified lifecycle target conflict preserves source and later rolls forwar
     `rollout-2026-08-06T00-00-00-${newNativeThreadId}.jsonl`
   );
   const executablePath =
-    "/opt/akk-test/releases/0.146.0-aarch64-apple-darwin/bin/codex";
+    "/opt/akk-test/releases/0.146.1-aarch64-apple-darwin/bin/codex";
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
@@ -61,7 +61,7 @@ test("verified lifecycle target conflict preserves source and later rolls forwar
         cwd: workspace,
         originator: "codex-tui",
         source: "cli",
-        cli_version: "0.146.0"
+        cli_version: "0.146.1"
       }
     })}\n`, { mode: 0o600 });
     writeLifecycleFakeTmux({

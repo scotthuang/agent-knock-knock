@@ -368,14 +368,20 @@ test("adapter capabilities advertise semantic terminal behavior explicitly", () 
   );
 });
 
-test("Codex 0.146.0 lifecycle plan uses closed status-clear-status steps", () => {
-  const capabilities = probeCodexThreadLifecycle("0.146.0");
+test("verified Codex lifecycle profiles use closed status-clear-status steps", () => {
+  const legacyCapabilities = probeCodexThreadLifecycle("0.146.0");
+  assert.equal(legacyCapabilities.status, "supported");
+  assert.equal(
+    legacyCapabilities.behaviorProfile,
+    "codex-tui-0.146.0"
+  );
+
+  const capabilities = probeCodexThreadLifecycle("0.146.1");
   assert.equal(capabilities.status, "supported");
   assert.equal(
     capabilities.behaviorProfile,
-    "codex-tui-0.146.0"
+    "codex-tui-0.146.1"
   );
-  assert.equal(probeCodexThreadLifecycle("0.146.1").status, "unsupported");
   assert.equal(probeCodexThreadLifecycle("0.146.2").status, "unsupported");
   assert.equal(probeCodexThreadLifecycle(undefined).status, "unknown");
 

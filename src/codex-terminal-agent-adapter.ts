@@ -4,6 +4,7 @@ import {
   type CodexProcessKind,
   type ForkContextPackage
 } from "./codex-session-provider.js";
+import { codexLifecycleBehaviorProfile } from "./codex-lifecycle-compatibility.js";
 import { redactString } from "./runtime-log.js";
 import type {
   TerminalAgentAdapter,
@@ -51,8 +52,6 @@ const CODEX_TRANSCRIPT_PROMPT_LINE = /^[›»](?:\s|$).*$/gmu;
 const CODEX_SKILLS_HINT = /^[›»]\s+Use \/skills\b/u;
 const CODEX_FOOTER_LINE =
   /^(?:gpt-[\w.-]+(?:\s|$)|[-\w.]+ default ·)/u;
-const CODEX_LIFECYCLE_VERSIONS = new Set(["0.146.0"]);
-const CODEX_LIFECYCLE_PROFILE = "codex-tui-0.146.0";
 const CODEX_SESSION_STATUS_PATTERN =
   /\bSession:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/giu;
 
@@ -95,11 +94,12 @@ export function probeCodexThreadLifecycle(
       reason: "the running Codex version could not be verified"
     };
   }
-  const supported = CODEX_LIFECYCLE_VERSIONS.has(agentVersion);
+  const behaviorProfile = codexLifecycleBehaviorProfile(agentVersion);
+  const supported = behaviorProfile !== undefined;
   return {
     status: supported ? "supported" : "unsupported",
     agentVersion,
-    behaviorProfile: supported ? CODEX_LIFECYCLE_PROFILE : undefined,
+    behaviorProfile,
     newThread: supported,
     resumeExact: supported,
     candidateDiscovery: supported,
@@ -113,11 +113,14 @@ export function planCodexThreadLifecycle(
   operation: TerminalThreadLifecycleOperation,
   capabilities: TerminalThreadLifecycleCapabilities
 ): TerminalThreadLifecyclePlan {
+  const behaviorProfile = codexLifecycleBehaviorProfile(
+    capabilities.agentVersion
+  );
   if (
     capabilities.status !== "supported" ||
     !capabilities.agentVersion ||
-    !CODEX_LIFECYCLE_VERSIONS.has(capabilities.agentVersion) ||
-    capabilities.behaviorProfile !== CODEX_LIFECYCLE_PROFILE
+    !behaviorProfile ||
+    capabilities.behaviorProfile !== behaviorProfile
   ) {
     throw new Error(capabilities.reason);
   }
@@ -127,7 +130,7 @@ export function planCodexThreadLifecycle(
     }
     return {
       operation,
-      behaviorProfile: CODEX_LIFECYCLE_PROFILE,
+      behaviorProfile,
       steps: [
         {
           kind: "identity_probe_before",
@@ -161,7 +164,7 @@ export function planCodexThreadLifecycle(
   }
   return {
     operation,
-    behaviorProfile: CODEX_LIFECYCLE_PROFILE,
+    behaviorProfile,
     steps: [
       {
         kind: "transition",
