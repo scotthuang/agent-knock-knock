@@ -184,7 +184,7 @@ function scenarioFixture(
         "--session",
         SESSION_B,
         "--message",
-        `AKK lifecycle smoke ${nonce}: reply with the nonce only and do not modify files.`,
+        `AKK lifecycle smoke sentinel ${nonce}: acknowledge completion without modifying files.`,
         "--background",
         "--disable-terminal-bridge-monitor"
       ],
@@ -514,6 +514,35 @@ test("runs the strict Codex lifecycle chain once and emits only allowlisted evid
   client.assertComplete();
 });
 
+test(
+  "accepts structurally exact completion when the model does not echo the sentinel",
+  async () => {
+    const fixture = scenarioFixture("claude");
+    const monitor = fixture.calls[4].result as {
+      message: Record<string, unknown>;
+    };
+    monitor.message.body = "Lifecycle probe completed successfully.";
+    const client = new ScriptedAkkClient(fixture.calls);
+    const result = await runLifecycleScenario(
+      fixture.config,
+      dependencies(client, [fixture.nonce])
+    );
+
+    assert.equal(result.status, "passed");
+    assert.equal(result.steps.at(3)?.name, "wait_completion");
+    assert.equal(result.steps.at(3)?.status, "passed");
+    assert.equal(
+      client.calls.filter((call) => call.command === "monitor").length,
+      1
+    );
+    assert.equal(
+      client.calls.filter((call) => call.command === "resume-thread").length,
+      1
+    );
+    client.assertComplete();
+  }
+);
+
 test("requires Resume to name the managed B source Session", async () => {
   const fixture = scenarioFixture("codex");
   const resume = fixture.calls[7].result as Record<string, unknown>;
@@ -758,6 +787,23 @@ test("monitor timeout, nonzero, and malformed outcomes are uncertain and never r
   await t.test("malformed success JSON", async () => {
     const fixture = scenarioFixture("codex");
     fixture.calls[4] = { ...fixture.calls[4], result: { delivered: false } };
+    const client = new ScriptedAkkClient(fixture.calls.slice(0, 5));
+    const result = await runLifecycleScenario(
+      fixture.config,
+      dependencies(client, [fixture.nonce])
+    );
+    assert.equal(result.status, "uncertain");
+    assert.equal(result.error_code, "monitor_invalid");
+    assert.equal(client.calls.some((call) => call.command === "resume-thread"), false);
+    client.assertComplete();
+  });
+
+  await t.test("empty done message", async () => {
+    const fixture = scenarioFixture("claude");
+    const monitor = fixture.calls[4].result as {
+      message: Record<string, unknown>;
+    };
+    monitor.message.body = "   ";
     const client = new ScriptedAkkClient(fixture.calls.slice(0, 5));
     const result = await runLifecycleScenario(
       fixture.config,

@@ -440,13 +440,13 @@ export async function runLifecycleScenario(
           "--session",
           sessionId,
           "--message",
-          `AKK lifecycle smoke ${nonce}: reply with the nonce only and do not modify files.`,
+          `AKK lifecycle smoke sentinel ${nonce}: acknowledge completion without modifying files.`,
           "--background",
           "--disable-terminal-bridge-monitor"
         ],
         { kind: "mutation", timeoutMs: timeouts.mutationMs }
       );
-      return { ...parseSend(output, sessionId), nonce };
+      return parseSend(output, sessionId);
     });
 
     const monitored = await runStep("wait_completion", "mutation", async () => {
@@ -470,7 +470,7 @@ export async function runLifecycleScenario(
         ],
         { kind: "mutation", timeoutMs: timeouts.completionMs }
       );
-      return parseMonitor(output, sent, sent.nonce);
+      return parseMonitor(output, sent);
     });
 
     const resumable = await runStep(
@@ -1162,8 +1162,7 @@ function parseMonitor(
     turnId: string;
     statePath: string;
     eventLogPath: string;
-  },
-  nonce: string
+  }
 ): { status: "idle" } {
   const record = recordValue(value, "monitor_invalid");
   if (
@@ -1182,7 +1181,7 @@ function parseMonitor(
     record.duplicate !== false ||
     message.type !== "done" ||
     typeof message.body !== "string" ||
-    !message.body.includes(nonce) ||
+    message.body.trim() === "" ||
     message.session_id !== sent.sessionId ||
     message.turn_id !== sent.turnId ||
     conversation.session_id !== sent.sessionId ||
