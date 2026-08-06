@@ -49,14 +49,16 @@ export interface RawLiveLifecycleSnapshot {
   processBirth?: string;
   workspace: string;
   nativeThreadId: string;
-  sessionId: string;
-  bindingId: string;
-  bindingGeneration: number;
+  sessionMaterialized: boolean;
+  sessionId: string | null;
+  bindingId: string | null;
+  bindingGeneration: number | null;
   idle: boolean;
 }
 
 export interface RawLiveLifecycleResumeCandidateResult {
   nativeThreadId: string;
+  managedSessionId: string | null;
   exactCandidateCount: number;
   resumable: boolean;
   activeElsewhere: boolean;
@@ -66,9 +68,9 @@ export interface RawLiveLifecycleResumeCandidateResult {
 export interface RawLiveLifecycleTransitionResult {
   transitionId: string;
   status: LiveLifecycleTransitionStatus;
-  sourceSessionId: string;
+  sourceSessionId: string | null;
   targetSessionId: string;
-  sourceBindingId: string;
+  sourceBindingId: string | null;
   targetBindingId: string;
 }
 
@@ -128,14 +130,16 @@ export interface LiveLifecycleFingerprintSnapshot {
   process_birth_fingerprint?: string;
   workspace_fingerprint: string;
   native_thread_fingerprint: string;
-  session_fingerprint: string;
-  binding_fingerprint: string;
-  binding_generation: number;
+  session_materialized: boolean;
+  session_fingerprint: string | null;
+  binding_fingerprint: string | null;
+  binding_generation: number | null;
   idle: boolean;
 }
 
 export interface LiveLifecycleResumeCandidateEvidence {
   native_thread_fingerprint: string;
+  managed_session_fingerprint: string | null;
   exact_candidate_count: number;
   resumable: boolean;
   active_elsewhere: boolean;
@@ -145,9 +149,9 @@ export interface LiveLifecycleResumeCandidateEvidence {
 export interface LiveLifecycleTransitionEvidence {
   status: LiveLifecycleTransitionStatus;
   transition_fingerprint: string;
-  source_session_fingerprint: string;
+  source_session_fingerprint: string | null;
   target_session_fingerprint: string;
-  source_binding_fingerprint: string;
+  source_binding_fingerprint: string | null;
   target_binding_fingerprint: string;
 }
 
@@ -173,9 +177,8 @@ export interface LiveLifecycleRelationshipAssertions {
   final_native_thread_matches_start: boolean;
   resume_candidate_matches_start: boolean;
   new_session_differs: boolean;
-  resumed_session_matches_start: boolean;
-  original_binding_generation_advanced: boolean;
-  binding_generations_exact: boolean;
+  resume_session_relationship_valid: boolean;
+  binding_generation_relationship_valid: boolean;
   binding_fingerprints_distinct: boolean;
   send_bound_to_new_session: boolean;
   transitions_match_sessions: boolean;
@@ -523,6 +526,9 @@ function createScenarioEvidence(
           "native_thread",
           raw.resumeCandidate.nativeThreadId
         ),
+        managed_session_fingerprint: raw.resumeCandidate.managedSessionId === null
+          ? null
+          : fingerprint("session", raw.resumeCandidate.managedSessionId),
         exact_candidate_count: raw.resumeCandidate.exactCandidateCount,
         resumable: raw.resumeCandidate.resumable,
         active_elsewhere: raw.resumeCandidate.activeElsewhere,
@@ -574,39 +580,17 @@ function createScenarioEvidence(
       );
     }
   }
-  const hasAllSnapshots =
-    before !== undefined && afterNew !== undefined && afterResume !== undefined;
-  const sameTmuxPane = hasAllSnapshots &&
-    [before, afterNew, afterResume].every(
-      (snapshot) =>
-        snapshot.tmux_target === raw.tmuxTarget &&
-        snapshot.pane_pid === raw.panePid
-    );
-  const sameProcess = hasAllSnapshots &&
-    [before, afterNew, afterResume].every(
-      (snapshot) =>
-        snapshot.agent_pid === before.agent_pid &&
-        snapshot.process_uuid_fingerprint === before.process_uuid_fingerprint &&
-        snapshot.process_birth_fingerprint === before.process_birth_fingerprint
-    );
-  const sameWorkspace = hasAllSnapshots &&
-    [before, afterNew, afterResume].every(
-      (snapshot) => snapshot.workspace_fingerprint === before.workspace_fingerprint
-    );
-  const transitionsMatchSessions = hasAllSnapshots &&
-    newTransition !== undefined &&
-    resumeTransition !== undefined &&
-    newTransition.source_session_fingerprint === before.session_fingerprint &&
-    newTransition.target_session_fingerprint === afterNew.session_fingerprint &&
-    resumeTransition.source_session_fingerprint === afterNew.session_fingerprint &&
-    resumeTransition.target_session_fingerprint === afterResume.session_fingerprint;
-  const transitionsMatchBindings = hasAllSnapshots &&
-    newTransition !== undefined &&
-    resumeTransition !== undefined &&
-    newTransition.source_binding_fingerprint === before.binding_fingerprint &&
-    newTransition.target_binding_fingerprint === afterNew.binding_fingerprint &&
-    resumeTransition.source_binding_fingerprint === afterNew.binding_fingerprint &&
-    resumeTransition.target_binding_fingerprint === afterResume.binding_fingerprint;
+  const assertions = deriveRelationshipAssertions({
+    before,
+    afterNew,
+    afterResume,
+    resumeCandidate,
+    send,
+    newTransition,
+    resumeTransition,
+    tmuxTarget: raw.tmuxTarget,
+    panePid: raw.panePid
+  });
 
   return {
     status,
@@ -638,53 +622,7 @@ function createScenarioEvidence(
       send: raw.turnDeltas?.send ?? null,
       resume_thread: raw.turnDeltas?.resumeThread ?? null
     },
-    assertions: {
-      start_idle: before?.idle === true,
-      new_idle: afterNew?.idle === true,
-      final_idle: afterResume?.idle === true,
-      new_native_thread_differs: before !== undefined && afterNew !== undefined &&
-        afterNew.native_thread_fingerprint !== before.native_thread_fingerprint,
-      final_native_thread_matches_start: before !== undefined && afterResume !== undefined &&
-        afterResume.native_thread_fingerprint === before.native_thread_fingerprint,
-      resume_candidate_matches_start: before !== undefined && resumeCandidate !== undefined &&
-        resumeCandidate.native_thread_fingerprint === before.native_thread_fingerprint,
-      new_session_differs: before !== undefined && afterNew !== undefined &&
-        afterNew.session_fingerprint !== before.session_fingerprint,
-      resumed_session_matches_start: before !== undefined && afterResume !== undefined &&
-        afterResume.session_fingerprint === before.session_fingerprint,
-      original_binding_generation_advanced: before !== undefined && afterResume !== undefined &&
-        afterResume.binding_generation > before.binding_generation,
-      binding_generations_exact: before !== undefined && afterNew !== undefined &&
-        afterResume !== undefined &&
-        afterNew.binding_generation === 1 &&
-        afterResume.binding_generation === before.binding_generation + 1,
-      binding_fingerprints_distinct: before !== undefined && afterNew !== undefined &&
-        afterResume !== undefined &&
-        new Set([
-          before.binding_fingerprint,
-          afterNew.binding_fingerprint,
-          afterResume.binding_fingerprint
-        ]).size === 3,
-      send_bound_to_new_session: send !== undefined && afterNew !== undefined &&
-        send.status === "completed" &&
-        send.session_fingerprint === afterNew.session_fingerprint &&
-        send.binding_fingerprint === afterNew.binding_fingerprint &&
-        send.binding_generation === afterNew.binding_generation,
-      transitions_match_sessions: transitionsMatchSessions,
-      transitions_match_bindings: transitionsMatchBindings,
-      transitions_distinct: newTransition !== undefined &&
-        resumeTransition !== undefined &&
-        newTransition.transition_fingerprint !==
-          resumeTransition.transition_fingerprint,
-      resume_candidate_safe: resumeCandidate !== undefined &&
-        resumeCandidate.exact_candidate_count === 1 &&
-        resumeCandidate.resumable === true &&
-        resumeCandidate.active_elsewhere === false &&
-        resumeCandidate.fresh_candidate_token_present === true,
-      same_tmux_pane: sameTmuxPane,
-      same_process_incarnation: sameProcess,
-      same_workspace: sameWorkspace
-    },
+    assertions,
     steps
   };
 }
@@ -695,12 +633,28 @@ function createSnapshotEvidence(
 ): LiveLifecycleFingerprintSnapshot {
   assertSafeInteger(raw.panePid, "invalid_pane_pid", "panePid", 2);
   assertSafeInteger(raw.agentPid, "invalid_agent_pid", "agentPid", 2);
-  assertSafeInteger(
-    raw.bindingGeneration,
-    "invalid_binding_generation",
-    "bindingGeneration",
-    0
-  );
+  if (typeof raw.sessionMaterialized !== "boolean") {
+    fail("invalid_boolean", "sessionMaterialized must be boolean.");
+  }
+  if (raw.sessionMaterialized) {
+    requireRawIdentifier(raw.sessionId, "session");
+    requireRawIdentifier(raw.bindingId, "binding");
+    assertSafeInteger(
+      raw.bindingGeneration,
+      "invalid_binding_generation",
+      "bindingGeneration",
+      1
+    );
+  } else if (
+    raw.sessionId !== null ||
+    raw.bindingId !== null ||
+    raw.bindingGeneration !== null
+  ) {
+    fail(
+      "session_materialization_invalid",
+      "An unmanaged snapshot cannot claim a Session, binding, or generation."
+    );
+  }
   return {
     tmux_target: requireBoundedString(raw.tmuxTarget, "tmuxTarget", 512),
     pane_pid: raw.panePid,
@@ -727,16 +681,21 @@ function createSnapshotEvidence(
       "native_thread",
       requireRawIdentifier(raw.nativeThreadId, "native_thread")
     ),
-    session_fingerprint: fingerprintValue(
-      salt,
-      "session",
-      requireRawIdentifier(raw.sessionId, "session")
-    ),
-    binding_fingerprint: fingerprintValue(
-      salt,
-      "binding",
-      requireRawIdentifier(raw.bindingId, "binding")
-    ),
+    session_materialized: raw.sessionMaterialized,
+    session_fingerprint: raw.sessionId === null
+      ? null
+      : fingerprintValue(
+          salt,
+          "session",
+          requireRawIdentifier(raw.sessionId, "session")
+        ),
+    binding_fingerprint: raw.bindingId === null
+      ? null
+      : fingerprintValue(
+          salt,
+          "binding",
+          requireRawIdentifier(raw.bindingId, "binding")
+        ),
     binding_generation: raw.bindingGeneration,
     idle: raw.idle === true
   };
@@ -753,26 +712,152 @@ function createTransitionEvidence(
       "transition",
       requireRawIdentifier(raw.transitionId, "transition")
     ),
-    source_session_fingerprint: fingerprintValue(
-      salt,
-      "session",
-      requireRawIdentifier(raw.sourceSessionId, "session")
-    ),
+    source_session_fingerprint: raw.sourceSessionId === null
+      ? null
+      : fingerprintValue(
+          salt,
+          "session",
+          requireRawIdentifier(raw.sourceSessionId, "session")
+        ),
     target_session_fingerprint: fingerprintValue(
       salt,
       "session",
       requireRawIdentifier(raw.targetSessionId, "session")
     ),
-    source_binding_fingerprint: fingerprintValue(
-      salt,
-      "binding",
-      requireRawIdentifier(raw.sourceBindingId, "binding")
-    ),
+    source_binding_fingerprint: raw.sourceBindingId === null
+      ? null
+      : fingerprintValue(
+          salt,
+          "binding",
+          requireRawIdentifier(raw.sourceBindingId, "binding")
+        ),
     target_binding_fingerprint: fingerprintValue(
       salt,
       "binding",
       requireRawIdentifier(raw.targetBindingId, "binding")
     )
+  };
+}
+
+function deriveRelationshipAssertions({
+  before,
+  afterNew,
+  afterResume,
+  resumeCandidate,
+  send,
+  newTransition,
+  resumeTransition,
+  tmuxTarget,
+  panePid
+}: {
+  before?: LiveLifecycleFingerprintSnapshot;
+  afterNew?: LiveLifecycleFingerprintSnapshot;
+  afterResume?: LiveLifecycleFingerprintSnapshot;
+  resumeCandidate?: LiveLifecycleResumeCandidateEvidence;
+  send?: LiveLifecycleTurnEvidence;
+  newTransition?: LiveLifecycleTransitionEvidence;
+  resumeTransition?: LiveLifecycleTransitionEvidence;
+  tmuxTarget: unknown;
+  panePid: unknown;
+}): LiveLifecycleRelationshipAssertions {
+  const hasAllSnapshots =
+    before !== undefined && afterNew !== undefined && afterResume !== undefined;
+  const managedStart = before?.session_materialized === true;
+  const resumeCandidateSessionMatchesStart =
+    before !== undefined && resumeCandidate !== undefined &&
+    (managedStart
+      ? resumeCandidate.managed_session_fingerprint === before.session_fingerprint
+      : before.session_fingerprint === null &&
+        before.binding_fingerprint === null &&
+        before.binding_generation === null &&
+        resumeCandidate.managed_session_fingerprint === null);
+  const resumeSessionRelationshipValid = hasAllSnapshots &&
+    afterNew.session_materialized &&
+    afterResume.session_materialized &&
+    (managedStart
+      ? afterResume.session_fingerprint === before.session_fingerprint
+      : before.session_fingerprint === null &&
+        before.binding_fingerprint === null &&
+        before.binding_generation === null &&
+        afterResume.session_fingerprint !== afterNew.session_fingerprint);
+  const bindingGenerationsExact = hasAllSnapshots &&
+    afterNew.session_materialized &&
+    afterNew.binding_generation === 1 &&
+    afterResume.session_materialized &&
+    (managedStart
+      ? before.binding_generation !== null &&
+        afterResume.binding_generation === before.binding_generation + 1
+      : afterResume.binding_generation === 1);
+  const materializedBindingFingerprints = [before, afterNew, afterResume]
+    .filter((snapshot) => snapshot?.session_materialized === true)
+    .map((snapshot) => snapshot!.binding_fingerprint);
+  const bindingFingerprintsDistinct = hasAllSnapshots &&
+    materializedBindingFingerprints.every((value) => value !== null) &&
+    new Set(materializedBindingFingerprints).size ===
+      materializedBindingFingerprints.length;
+  const sameTmuxPane = hasAllSnapshots &&
+    [before, afterNew, afterResume].every(
+      (snapshot) =>
+        snapshot.tmux_target === tmuxTarget && snapshot.pane_pid === panePid
+    );
+  const sameProcess = hasAllSnapshots &&
+    [before, afterNew, afterResume].every(
+      (snapshot) =>
+        snapshot.agent_pid === before.agent_pid &&
+        snapshot.process_uuid_fingerprint === before.process_uuid_fingerprint &&
+        snapshot.process_birth_fingerprint === before.process_birth_fingerprint
+    );
+  const sameWorkspace = hasAllSnapshots &&
+    [before, afterNew, afterResume].every(
+      (snapshot) => snapshot.workspace_fingerprint === before.workspace_fingerprint
+    );
+  return {
+    start_idle: before?.idle === true,
+    new_idle: afterNew?.idle === true,
+    final_idle: afterResume?.idle === true,
+    new_native_thread_differs: before !== undefined && afterNew !== undefined &&
+      afterNew.native_thread_fingerprint !== before.native_thread_fingerprint,
+    final_native_thread_matches_start: before !== undefined && afterResume !== undefined &&
+      afterResume.native_thread_fingerprint === before.native_thread_fingerprint,
+    resume_candidate_matches_start: before !== undefined && resumeCandidate !== undefined &&
+      resumeCandidate.native_thread_fingerprint === before.native_thread_fingerprint,
+    new_session_differs: before !== undefined && afterNew !== undefined &&
+      afterNew.session_materialized &&
+      afterNew.session_fingerprint !== before.session_fingerprint,
+    resume_session_relationship_valid: resumeSessionRelationshipValid,
+    binding_generation_relationship_valid: bindingGenerationsExact,
+    binding_fingerprints_distinct: bindingFingerprintsDistinct,
+    send_bound_to_new_session: send !== undefined && afterNew !== undefined &&
+      send.status === "completed" &&
+      send.session_fingerprint === afterNew.session_fingerprint &&
+      send.binding_fingerprint === afterNew.binding_fingerprint &&
+      send.binding_generation === afterNew.binding_generation,
+    transitions_match_sessions: hasAllSnapshots &&
+      newTransition !== undefined &&
+      resumeTransition !== undefined &&
+      newTransition.source_session_fingerprint === before.session_fingerprint &&
+      newTransition.target_session_fingerprint === afterNew.session_fingerprint &&
+      resumeTransition.source_session_fingerprint === afterNew.session_fingerprint &&
+      resumeTransition.target_session_fingerprint === afterResume.session_fingerprint,
+    transitions_match_bindings: hasAllSnapshots &&
+      newTransition !== undefined &&
+      resumeTransition !== undefined &&
+      newTransition.source_binding_fingerprint === before.binding_fingerprint &&
+      newTransition.target_binding_fingerprint === afterNew.binding_fingerprint &&
+      resumeTransition.source_binding_fingerprint === afterNew.binding_fingerprint &&
+      resumeTransition.target_binding_fingerprint === afterResume.binding_fingerprint,
+    transitions_distinct: newTransition !== undefined &&
+      resumeTransition !== undefined &&
+      newTransition.transition_fingerprint !== resumeTransition.transition_fingerprint,
+    resume_candidate_safe: resumeCandidate !== undefined &&
+      resumeCandidate.exact_candidate_count === 1 &&
+      resumeCandidate.resumable === true &&
+      resumeCandidate.active_elsewhere === false &&
+      resumeCandidate.fresh_candidate_token_present === true &&
+      resumeCandidateSessionMatchesStart,
+    same_tmux_pane: sameTmuxPane,
+    same_process_incarnation: sameProcess,
+    same_workspace: sameWorkspace
   };
 }
 
@@ -1030,6 +1115,18 @@ function assertScenarioEvidence(
     assertSnapshot(snapshots.after_new, `${path}.snapshots.after_new`);
   const afterResume = snapshots.after_resume === undefined ? undefined :
     assertSnapshot(snapshots.after_resume, `${path}.snapshots.after_resume`);
+  if (afterNew !== undefined && !afterNew.session_materialized) {
+    fail(
+      "session_materialization_invalid",
+      `${path}.snapshots.after_new must contain a materialized Session.`
+    );
+  }
+  if (afterResume !== undefined && !afterResume.session_materialized) {
+    fail(
+      "session_materialization_invalid",
+      `${path}.snapshots.after_resume must contain a materialized Session.`
+    );
+  }
   const resumeCandidate = scenario.resume_candidate === undefined ? undefined :
     assertResumeCandidate(scenario.resume_candidate, `${path}.resume_candidate`);
   const send = scenario.send === undefined ? undefined :
@@ -1084,71 +1181,17 @@ function assertScenarioEvidence(
   assertExactInteger(turnDeltas.new_thread, 0, `${path}.turn_deltas.new_thread`);
   assertExactInteger(turnDeltas.send, 1, `${path}.turn_deltas.send`);
   assertExactInteger(turnDeltas.resume_thread, 0, `${path}.turn_deltas.resume_thread`);
-  const recomputed: LiveLifecycleRelationshipAssertions = {
-    start_idle: before.idle,
-    new_idle: afterNew.idle,
-    final_idle: afterResume.idle,
-    new_native_thread_differs:
-      afterNew.native_thread_fingerprint !== before.native_thread_fingerprint,
-    final_native_thread_matches_start:
-      afterResume.native_thread_fingerprint === before.native_thread_fingerprint,
-    resume_candidate_matches_start:
-      resumeCandidate.native_thread_fingerprint === before.native_thread_fingerprint,
-    new_session_differs:
-      afterNew.session_fingerprint !== before.session_fingerprint,
-    resumed_session_matches_start:
-      afterResume.session_fingerprint === before.session_fingerprint,
-    original_binding_generation_advanced:
-      afterResume.binding_generation > before.binding_generation,
-    binding_generations_exact:
-      afterNew.binding_generation === 1 &&
-      afterResume.binding_generation === before.binding_generation + 1,
-    binding_fingerprints_distinct:
-      new Set([
-        before.binding_fingerprint,
-        afterNew.binding_fingerprint,
-        afterResume.binding_fingerprint
-      ]).size === 3,
-    send_bound_to_new_session:
-      send.status === "completed" &&
-      send.session_fingerprint === afterNew.session_fingerprint &&
-      send.binding_fingerprint === afterNew.binding_fingerprint &&
-      send.binding_generation === afterNew.binding_generation,
-    transitions_match_sessions:
-      newTransition.source_session_fingerprint === before.session_fingerprint &&
-      newTransition.target_session_fingerprint === afterNew.session_fingerprint &&
-      resumeTransition.source_session_fingerprint === afterNew.session_fingerprint &&
-      resumeTransition.target_session_fingerprint === afterResume.session_fingerprint,
-    transitions_match_bindings:
-      newTransition.source_binding_fingerprint === before.binding_fingerprint &&
-      newTransition.target_binding_fingerprint === afterNew.binding_fingerprint &&
-      resumeTransition.source_binding_fingerprint === afterNew.binding_fingerprint &&
-      resumeTransition.target_binding_fingerprint === afterResume.binding_fingerprint,
-    transitions_distinct:
-      newTransition.transition_fingerprint !==
-      resumeTransition.transition_fingerprint,
-    resume_candidate_safe:
-      resumeCandidate.exact_candidate_count === 1 &&
-      resumeCandidate.resumable === true &&
-      resumeCandidate.active_elsewhere === false &&
-      resumeCandidate.fresh_candidate_token_present === true,
-    same_tmux_pane: [afterNew, afterResume].every(
-      (snapshot) =>
-        snapshot.tmux_target === scenario.tmux_target &&
-        snapshot.pane_pid === scenario.pane_pid
-    ) &&
-      before.tmux_target === scenario.tmux_target &&
-      before.pane_pid === scenario.pane_pid,
-    same_process_incarnation: [afterNew, afterResume].every(
-      (snapshot) =>
-        snapshot.agent_pid === before.agent_pid &&
-        snapshot.process_uuid_fingerprint === before.process_uuid_fingerprint &&
-        snapshot.process_birth_fingerprint === before.process_birth_fingerprint
-    ),
-    same_workspace: [afterNew, afterResume].every(
-      (snapshot) => snapshot.workspace_fingerprint === before.workspace_fingerprint
-    )
-  };
+  const recomputed = deriveRelationshipAssertions({
+    before,
+    afterNew,
+    afterResume,
+    resumeCandidate,
+    send,
+    newTransition,
+    resumeTransition,
+    tmuxTarget: scenario.tmux_target as string,
+    panePid: scenario.pane_pid as number
+  });
   for (const key of Object.keys(recomputed) as Array<keyof typeof recomputed>) {
     if (assertions[key] !== recomputed[key] || recomputed[key] !== true) {
       fail(
@@ -1196,6 +1239,7 @@ function assertSnapshot(
     "process_birth_fingerprint",
     "workspace_fingerprint",
     "native_thread_fingerprint",
+    "session_materialized",
     "session_fingerprint",
     "binding_fingerprint",
     "binding_generation",
@@ -1207,6 +1251,7 @@ function assertSnapshot(
     "process_uuid_fingerprint",
     "workspace_fingerprint",
     "native_thread_fingerprint",
+    "session_materialized",
     "session_fingerprint",
     "binding_fingerprint",
     "binding_generation",
@@ -1230,14 +1275,28 @@ function assertSnapshot(
     snapshot.native_thread_fingerprint,
     `${path}.native_thread_fingerprint`
   );
-  assertFingerprint(snapshot.session_fingerprint, `${path}.session_fingerprint`);
-  assertFingerprint(snapshot.binding_fingerprint, `${path}.binding_fingerprint`);
-  assertSafeInteger(
-    snapshot.binding_generation,
-    "invalid_binding_generation",
-    `${path}.binding_generation`,
-    0
-  );
+  if (typeof snapshot.session_materialized !== "boolean") {
+    fail("invalid_boolean", `${path}.session_materialized must be boolean.`);
+  }
+  if (snapshot.session_materialized) {
+    assertFingerprint(snapshot.session_fingerprint, `${path}.session_fingerprint`);
+    assertFingerprint(snapshot.binding_fingerprint, `${path}.binding_fingerprint`);
+    assertSafeInteger(
+      snapshot.binding_generation,
+      "invalid_binding_generation",
+      `${path}.binding_generation`,
+      1
+    );
+  } else if (
+    snapshot.session_fingerprint !== null ||
+    snapshot.binding_fingerprint !== null ||
+    snapshot.binding_generation !== null
+  ) {
+    fail(
+      "session_materialization_invalid",
+      `${path} cannot claim Session data when session_materialized=false.`
+    );
+  }
   if (typeof snapshot.idle !== "boolean") {
     fail("invalid_boolean", `${path}.idle must be boolean.`);
   }
@@ -1250,6 +1309,7 @@ function assertResumeCandidate(
 ): LiveLifecycleResumeCandidateEvidence {
   const candidate = requireRecord(value, path, [
     "native_thread_fingerprint",
+    "managed_session_fingerprint",
     "exact_candidate_count",
     "resumable",
     "active_elsewhere",
@@ -1258,6 +1318,10 @@ function assertResumeCandidate(
   assertFingerprint(
     candidate.native_thread_fingerprint,
     `${path}.native_thread_fingerprint`
+  );
+  assertFingerprintOrNull(
+    candidate.managed_session_fingerprint,
+    `${path}.managed_session_fingerprint`
   );
   assertSafeInteger(
     candidate.exact_candidate_count,
@@ -1292,15 +1356,23 @@ function assertTransition(
   if (!(["committed", "failed", "uncertain"] as unknown[]).includes(transition.status)) {
     fail("invalid_transition_status", `${path}.status is invalid.`);
   }
-  for (const key of [
-    "transition_fingerprint",
-    "source_session_fingerprint",
-    "target_session_fingerprint",
-    "source_binding_fingerprint",
-    "target_binding_fingerprint"
-  ] as const) {
-    assertFingerprint(transition[key], `${path}.${key}`);
-  }
+  assertFingerprint(transition.transition_fingerprint, `${path}.transition_fingerprint`);
+  assertFingerprintOrNull(
+    transition.source_session_fingerprint,
+    `${path}.source_session_fingerprint`
+  );
+  assertFingerprint(
+    transition.target_session_fingerprint,
+    `${path}.target_session_fingerprint`
+  );
+  assertFingerprintOrNull(
+    transition.source_binding_fingerprint,
+    `${path}.source_binding_fingerprint`
+  );
+  assertFingerprint(
+    transition.target_binding_fingerprint,
+    `${path}.target_binding_fingerprint`
+  );
   return transition as unknown as LiveLifecycleTransitionEvidence;
 }
 
@@ -1339,9 +1411,8 @@ function assertAssertions(
     "final_native_thread_matches_start",
     "resume_candidate_matches_start",
     "new_session_differs",
-    "resumed_session_matches_start",
-    "original_binding_generation_advanced",
-    "binding_generations_exact",
+    "resume_session_relationship_valid",
+    "binding_generation_relationship_valid",
     "binding_fingerprints_distinct",
     "send_bound_to_new_session",
     "transitions_match_sessions",
@@ -1464,7 +1535,7 @@ function assertRawScenario(raw: RawLiveLifecycleScenarioResult): void {
     raw.afterResume?.bindingGeneration,
     raw.send?.bindingGeneration
   ]) {
-    if (generation === undefined) {
+    if (generation === undefined || generation === null) {
       continue;
     }
     assertSafeInteger(
@@ -1479,6 +1550,12 @@ function assertRawScenario(raw: RawLiveLifecycleScenarioResult): void {
       raw.resumeCandidate.nativeThreadId,
       "resume_candidate_native_thread"
     );
+    if (raw.resumeCandidate.managedSessionId !== null) {
+      requireRawIdentifier(
+        raw.resumeCandidate.managedSessionId,
+        "resume_candidate_managed_session"
+      );
+    }
     assertSafeInteger(
       raw.resumeCandidate.exactCandidateCount,
       "invalid_candidate_count",
@@ -1620,6 +1697,15 @@ function assertFingerprint(value: unknown, path: string): asserts value is strin
     "invalid_fingerprint",
     path
   );
+}
+
+function assertFingerprintOrNull(
+  value: unknown,
+  path: string
+): asserts value is string | null {
+  if (value !== null) {
+    assertFingerprint(value, path);
+  }
 }
 
 function assertPattern(

@@ -85,7 +85,7 @@ export interface LifecycleTerminalEvidence {
   native_thread_id: string;
   session_id: string | null;
   binding_id: string | null;
-  binding_generation: number;
+  binding_generation: number | null;
   /** Exact current binding fence; the evidence layer must fingerprint it. */
   binding_fence: string;
   turn_count: number;
@@ -97,7 +97,7 @@ export interface LifecycleTransitionEvidence {
   terminal_id: string;
   transition_id: string;
   operation: "new_thread" | "resume_thread";
-  previous_session_id: string;
+  previous_session_id: string | null;
   session_id: string;
   previous_native_thread_id: string;
   native_thread_id: string;
@@ -116,6 +116,8 @@ export interface LifecycleTurnEvidence {
 
 export interface LifecycleResumeCandidateEvidence {
   native_thread_id: string;
+  /** Managed A Session advertised by the candidate, or null before AKK owns A. */
+  managed_session_id: string | null;
   exact_candidate_count: 1;
   resumable: true;
   active_elsewhere: false;
@@ -393,6 +395,7 @@ export async function runLifecycleScenario(
           start.evidence.native_thread_id ||
         transition.native_thread_id !== snapshot.evidence.native_thread_id ||
         transition.session_id !== snapshot.evidence.session_id ||
+        transition.previous_session_id !== start.evidence.session_id ||
         transition.session_id === transition.previous_session_id ||
         transition.binding_id !== snapshot.evidence.binding_id ||
         transition.binding_generation !==
@@ -404,12 +407,6 @@ export async function runLifecycleScenario(
         snapshot.evidence.binding_fence === start.evidence.binding_fence ||
         snapshot.evidence.binding_id ===
           (start.evidence.binding_id ?? start.evidence.binding_fence)
-      ) {
-        abort("new_thread_invalid");
-      }
-      if (
-        start.evidence.session_id &&
-        transition.previous_session_id !== start.evidence.session_id
       ) {
         abort("new_thread_invalid");
       }
@@ -527,7 +524,7 @@ export async function runLifecycleScenario(
         output,
         snapshot,
         start.evidence.native_thread_id,
-        newThread.previous_session_id
+        start.evidence.session_id
       );
       return { snapshot, candidate };
       }
@@ -581,6 +578,7 @@ export async function runLifecycleScenario(
           afterTurn.evidence.native_thread_id ||
         resumed.native_thread_id !== start.evidence.native_thread_id ||
         resumed.session_id !== snapshot.evidence.session_id ||
+        resumed.session_id === afterTurn.evidence.session_id ||
         resumed.binding_id !== snapshot.evidence.binding_id ||
         resumed.binding_generation !== snapshot.evidence.binding_generation ||
         resumed.transition_id === newThread.transition_id ||
@@ -589,22 +587,27 @@ export async function runLifecycleScenario(
         snapshot.evidence.binding_id ===
           (start.evidence.binding_id ?? start.evidence.binding_fence) ||
         snapshot.evidence.binding_fence === afterTurn.evidence.binding_fence ||
-        snapshot.evidence.turn_count !== start.evidence.turn_count ||
-        resumed.session_id !== candidate.managedSessionId
+        snapshot.evidence.turn_count !== start.evidence.turn_count
       ) {
         abort("restore_verification_failed");
       }
-      if (
-        resumed.session_id !== newThread.previous_session_id ||
-        snapshot.evidence.session_id !== newThread.previous_session_id ||
-        snapshot.evidence.binding_generation !==
-          start.evidence.binding_generation + 1
-      ) {
-        abort("restore_verification_failed");
-      }
-      if (
-        start.evidence.session_id &&
-        newThread.previous_session_id !== start.evidence.session_id
+      if (start.evidence.session_id) {
+        if (
+          start.evidence.binding_generation === null ||
+          newThread.previous_session_id !== start.evidence.session_id ||
+          candidate.managedSessionId !== start.evidence.session_id ||
+          resumed.session_id !== start.evidence.session_id ||
+          snapshot.evidence.session_id !== start.evidence.session_id ||
+          snapshot.evidence.binding_generation !==
+            start.evidence.binding_generation + 1
+        ) {
+          abort("restore_verification_failed");
+        }
+      } else if (
+        start.evidence.binding_generation !== null ||
+        newThread.previous_session_id !== null ||
+        candidate.managedSessionId !== undefined ||
+        snapshot.evidence.binding_generation !== 1
       ) {
         abort("restore_verification_failed");
       }
@@ -863,6 +866,12 @@ function selectTerminalSnapshot(
     abort("preflight_unresolved_turn");
   }
   assertNoUnresolvedManagedTurns(managed);
+  // The public list contract always names the Session slot explicitly. Treat
+  // an absent value as schema drift instead of silently normalizing it to the
+  // unmanaged state.
+  if (!("session_id" in managed)) {
+    abort("preflight_management");
+  }
   const sessionId = nullableString(managed.session_id, "preflight_management");
   const turnCount = nonNegativeInteger(
     managed.turn_count,
@@ -893,8 +902,25 @@ function selectTerminalSnapshot(
     ) {
       abort("preflight_management");
     }
-  } else if (managementState !== "unmanaged") {
-    abort("preflight_management");
+  } else {
+    if (managementState !== "unmanaged") {
+      abort("preflight_management");
+    }
+    // An unmanaged terminal has a lifecycle fence, but no persisted Session
+    // or binding. Reject stale binding material rather than laundering a
+    // contradictory list response into a clean unmanaged origin.
+    for (const key of [
+      "session_short_ref",
+      "binding_status",
+      "binding_id",
+      "binding_generation",
+      "native_thread_id",
+      "binding_token"
+    ]) {
+      if (managed[key] !== undefined && managed[key] !== null) {
+        abort("preflight_management");
+      }
+    }
   }
 
   const actions = recordValue(row.available_actions, "preflight_action");
@@ -949,10 +975,10 @@ function selectTerminalSnapshot(
       native_thread_id: nativeThreadId,
       session_id: sessionId,
       binding_id: bindingId,
-      // The first materialized binding generation is contractually one. An
-      // unmanaged starting pane has not persisted that binding yet, but the
-      // advertised lifecycle fence is the exact pre-materialization fence.
-      binding_generation: bindingGeneration ?? 1,
+      // An unmanaged pane has a lifecycle fence but no persisted binding yet.
+      // Generation one only exists after a lifecycle operation materializes
+      // the first Session/binding pair.
+      binding_generation: bindingGeneration,
       binding_fence: bindingFence,
       turn_count: turnCount,
       agent_version: agentVersion,
@@ -1064,7 +1090,8 @@ function parseTransition(
   if (
     status !== "committed" ||
     record.operation !== operation ||
-    record.turn_created !== false
+    record.turn_created !== false ||
+    !("previous_session_id" in record)
   ) {
     abort(invalidCode);
   }
@@ -1072,10 +1099,9 @@ function parseTransition(
     terminal_id: requiredString(record.terminal_id, invalidCode),
     transition_id: requiredString(record.transition_id, invalidCode),
     operation,
-    previous_session_id: requiredString(
-      record.previous_session_id,
-      invalidCode
-    ),
+    previous_session_id: operation === "new_thread"
+      ? nullableString(record.previous_session_id, invalidCode)
+      : requiredString(record.previous_session_id, invalidCode),
     session_id: requiredString(record.session_id, invalidCode),
     previous_native_thread_id: exactNativeThreadId(
       record.previous_native_thread_id,
@@ -1174,7 +1200,7 @@ function parseResumeCandidate(
   value: unknown,
   current: InternalTerminalSnapshot,
   nativeThreadId: string,
-  expectedManagedSessionId: string
+  expectedManagedSessionId: string | null
 ): ResumeCandidateAction {
   const record = recordValue(value, "candidate_invalid");
   if (
@@ -1205,11 +1231,15 @@ function parseResumeCandidate(
     abort("candidate_invalid");
   }
   const candidate = matches[0] as Record<string, unknown>;
+  const managedSessionId = nullableString(
+    candidate.managed_session_id,
+    "candidate_invalid"
+  );
   if (
     candidate.resumable !== true ||
     candidate.active_elsewhere !== false ||
     candidate.unavailable_reason !== undefined ||
-    candidate.managed_session_id !== expectedManagedSessionId
+    managedSessionId !== expectedManagedSessionId
   ) {
     abort("candidate_invalid");
   }
@@ -1239,9 +1269,10 @@ function parseResumeCandidate(
     nativeThreadId,
     expectedBindingToken,
     candidateToken,
-    managedSessionId: expectedManagedSessionId,
+    ...(managedSessionId ? { managedSessionId } : {}),
     evidence: {
       native_thread_id: nativeThreadId,
+      managed_session_id: managedSessionId,
       exact_candidate_count: 1,
       resumable: true,
       active_elsewhere: false,

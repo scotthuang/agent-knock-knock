@@ -41,14 +41,8 @@ export function lifecycleMatrixToEvidenceInput(
 export function lifecycleScenarioToEvidenceInput(
   scenario: LifecycleScenarioResult
 ): RawLiveLifecycleScenarioResult {
-  const startSessionId =
-    scenario.start?.session_id ?? scenario.new_thread?.previous_session_id;
-  const startBindingId =
-    scenario.start?.binding_id ?? scenario.start?.binding_fence;
   const before = snapshotEvidence({
     snapshot: scenario.start,
-    sessionId: startSessionId,
-    bindingId: startBindingId,
     target: scenario.target,
     panePid: scenario.pane_pid
   });
@@ -93,6 +87,7 @@ export function lifecycleScenarioToEvidenceInput(
       ? {
           resumeCandidate: {
             nativeThreadId: scenario.resume_candidate.native_thread_id,
+            managedSessionId: scenario.resume_candidate.managed_session_id,
             exactCandidateCount:
               scenario.resume_candidate.exact_candidate_count,
             resumable: scenario.resume_candidate.resumable,
@@ -102,7 +97,10 @@ export function lifecycleScenarioToEvidenceInput(
           }
         }
       : {}),
-    ...(scenario.turn && afterNew
+    ...(scenario.turn &&
+      afterNew?.sessionMaterialized === true &&
+      afterNew.bindingId !== null &&
+      afterNew.bindingGeneration !== null
       ? {
           send: {
             status: "completed" as const,
@@ -148,20 +146,20 @@ function transitionEvidence(
     transitions.newThread = {
       transitionId: scenario.new_thread.transition_id,
       status: "committed",
-      sourceSessionId: before.sessionId,
-      targetSessionId: afterNew.sessionId,
+      sourceSessionId: scenario.new_thread.previous_session_id,
+      targetSessionId: scenario.new_thread.session_id,
       sourceBindingId: before.bindingId,
-      targetBindingId: afterNew.bindingId
+      targetBindingId: scenario.new_thread.binding_id
     };
   }
   if (scenario.resume_thread && afterNew && afterResume) {
     transitions.resumeThread = {
       transitionId: scenario.resume_thread.transition_id,
       status: "committed",
-      sourceSessionId: afterNew.sessionId,
-      targetSessionId: afterResume.sessionId,
+      sourceSessionId: scenario.resume_thread.previous_session_id,
+      targetSessionId: scenario.resume_thread.session_id,
       sourceBindingId: afterNew.bindingId,
-      targetBindingId: afterResume.bindingId
+      targetBindingId: scenario.resume_thread.binding_id
     };
   }
   return Object.keys(transitions).length > 0 ? { transitions } : {};
@@ -169,20 +167,23 @@ function transitionEvidence(
 
 function snapshotEvidence({
   snapshot,
-  sessionId = snapshot?.session_id,
-  bindingId = snapshot?.binding_id,
   target,
   panePid
 }: {
   snapshot?: LifecycleTerminalEvidence;
-  sessionId?: string | null;
-  bindingId?: string | null;
   target: string;
   panePid: number;
 }): RawLiveLifecycleSnapshot | undefined {
-  if (!snapshot || !sessionId || !bindingId) {
+  if (!snapshot) {
     return undefined;
   }
+  // Preserve an unmanaged start as such. A binding fence and the Session later
+  // materialized by resume are identities of different objects, not fallbacks
+  // for the missing start Session/binding.
+  const sessionMaterialized =
+    snapshot.session_id !== null ||
+    snapshot.binding_id !== null ||
+    snapshot.binding_generation !== null;
   return {
     tmuxTarget: target,
     panePid,
@@ -193,8 +194,9 @@ function snapshotEvidence({
       : {}),
     workspace: snapshot.workspace,
     nativeThreadId: snapshot.native_thread_id,
-    sessionId,
-    bindingId,
+    sessionMaterialized,
+    sessionId: snapshot.session_id,
+    bindingId: snapshot.binding_id,
     bindingGeneration: snapshot.binding_generation,
     idle: true
   };

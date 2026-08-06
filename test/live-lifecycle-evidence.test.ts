@@ -60,6 +60,10 @@ test("creates redacted, domain-separated evidence and round-trips an annotated-t
     codex.snapshots.before!.native_thread_fingerprint,
     codex.snapshots.after_resume!.native_thread_fingerprint
   );
+  assert.equal(
+    codex.resume_candidate!.managed_session_fingerprint,
+    codex.snapshots.before!.session_fingerprint
+  );
 
   const block = serializeAttestation(evidence);
   assert.match(block, new RegExp(`^${escapeRegex(LIVE_LIFECYCLE_ATTESTATION_BEGIN)}`));
@@ -97,6 +101,7 @@ test("fingerprints separate identity domains even when raw values are identical"
   const sharedRawIdentity = scenario.before!.nativeThreadId;
   scenario.before!.sessionId = sharedRawIdentity;
   scenario.afterResume!.sessionId = sharedRawIdentity;
+  scenario.resumeCandidate!.managedSessionId = sharedRawIdentity;
   scenario.transitions!.newThread!.sourceSessionId = sharedRawIdentity;
   scenario.transitions!.resumeThread!.targetSessionId = sharedRawIdentity;
   const evidence = create(input);
@@ -106,6 +111,96 @@ test("fingerprints separate identity domains even when raw values are identical"
     evidence.matrix.codex!.snapshots.before!.session_fingerprint
   );
   assert.equal(validate(evidence, validationOptions()), evidence);
+});
+
+test("models an unmanaged start without inventing a Session or binding", () => {
+  const input = validInput();
+  input.scenarios.codex = unmanagedScenario("codex");
+  const evidence = create(input);
+  const codex = evidence.matrix.codex!;
+
+  assert.equal(codex.snapshots.before!.session_materialized, false);
+  assert.equal(codex.snapshots.before!.session_fingerprint, null);
+  assert.equal(codex.snapshots.before!.binding_fingerprint, null);
+  assert.equal(codex.snapshots.before!.binding_generation, null);
+  assert.equal(codex.resume_candidate!.managed_session_fingerprint, null);
+  assert.equal(codex.transitions.new_thread!.source_session_fingerprint, null);
+  assert.equal(codex.transitions.new_thread!.source_binding_fingerprint, null);
+  assert.equal(codex.snapshots.after_new!.session_materialized, true);
+  assert.equal(codex.snapshots.after_new!.binding_generation, 1);
+  assert.equal(codex.snapshots.after_resume!.session_materialized, true);
+  assert.equal(codex.snapshots.after_resume!.binding_generation, 1);
+  assert.notEqual(
+    codex.snapshots.after_resume!.session_fingerprint,
+    codex.snapshots.after_new!.session_fingerprint
+  );
+  assert.equal(codex.assertions.resume_session_relationship_valid, true);
+  assert.equal(validate(evidence, validationOptions()), evidence);
+});
+
+test("rejects contradictions in unmanaged Session materialization relationships", async (t) => {
+  await t.test("unmanaged snapshot carrying a synthetic Session", () => {
+    const input = validInput();
+    const scenario = unmanagedScenario("codex");
+    scenario.before!.sessionId = "synthetic-session-a";
+    input.scenarios.codex = scenario;
+    expectCode(() => create(input), "session_materialization_invalid");
+  });
+  await t.test("new transition claiming a source Session", () => {
+    const input = validInput();
+    const scenario = unmanagedScenario("codex");
+    scenario.transitions!.newThread!.sourceSessionId = "synthetic-session-a";
+    input.scenarios.codex = scenario;
+    expectCode(
+      () => validate(create(input), validationOptions()),
+      "relationship_invalid"
+    );
+  });
+  await t.test("resume candidate claiming a managed Session", () => {
+    const input = validInput();
+    const scenario = unmanagedScenario("codex");
+    scenario.resumeCandidate!.managedSessionId = "synthetic-session-a";
+    input.scenarios.codex = scenario;
+    expectCode(
+      () => validate(create(input), validationOptions()),
+      "relationship_invalid"
+    );
+  });
+  await t.test("after-new snapshot remaining unmanaged", () => {
+    const input = validInput();
+    const scenario = unmanagedScenario("codex");
+    scenario.afterNew = {
+      ...scenario.afterNew!,
+      sessionMaterialized: false,
+      sessionId: null,
+      bindingId: null,
+      bindingGeneration: null
+    };
+    input.scenarios.codex = scenario;
+    expectCode(() => create(input), "session_materialization_invalid");
+  });
+  await t.test("resume materializing A at generation two", () => {
+    const input = validInput();
+    const scenario = unmanagedScenario("codex");
+    scenario.afterResume!.bindingGeneration = 2;
+    input.scenarios.codex = scenario;
+    expectCode(
+      () => validate(create(input), validationOptions()),
+      "relationship_invalid"
+    );
+  });
+  await t.test("resume reusing B's Session for A", () => {
+    const input = validInput();
+    const scenario = unmanagedScenario("codex");
+    scenario.afterResume!.sessionId = scenario.afterNew!.sessionId;
+    scenario.transitions!.resumeThread!.targetSessionId =
+      scenario.afterNew!.sessionId!;
+    input.scenarios.codex = scenario;
+    expectCode(
+      () => validate(create(input), validationOptions()),
+      "relationship_invalid"
+    );
+  });
 });
 
 test("canonical digest rejects content tampering and strict schema rejects unknown or sensitive keys", () => {
@@ -123,6 +218,14 @@ test("canonical digest rejects content tampering and strict schema rejects unkno
   const sensitive = structuredClone(evidence) as unknown as Record<string, unknown>;
   sensitive.stdout = "harmless-looking but forbidden";
   expectCode(() => validate(sensitive, validationOptions()), "sensitive_key");
+
+  const missingCandidateSession = structuredClone(evidence);
+  delete (missingCandidateSession.matrix.codex!.resume_candidate as unknown as
+    Record<string, unknown>).managed_session_fingerprint;
+  expectCode(
+    () => validate(missingCandidateSession, validationOptions()),
+    "missing_key"
+  );
 });
 
 test("validates exact package name, version, commit, and clean worktree", () => {
@@ -285,6 +388,15 @@ test("rejects A equals B, final differs from A, and candidate mismatch", async (
       "relationship_invalid"
     );
   });
+  await t.test("resume candidate points at another managed Session", () => {
+    const input = validInput();
+    input.scenarios.codex!.resumeCandidate!.managedSessionId =
+      input.scenarios.codex!.afterNew!.sessionId;
+    expectCode(
+      () => validate(create(input), validationOptions()),
+      "relationship_invalid"
+    );
+  });
 });
 
 test("rejects Session, binding generation, send, and transition relationship violations", async (t) => {
@@ -327,7 +439,7 @@ test("rejects Session, binding generation, send, and transition relationship vio
     input.scenarios.codex!.afterResume!.bindingId =
       input.scenarios.codex!.before!.bindingId;
     input.scenarios.codex!.transitions!.resumeThread!.targetBindingId =
-      input.scenarios.codex!.before!.bindingId;
+      input.scenarios.codex!.before!.bindingId!;
     expectCode(
       () => validate(create(input), validationOptions()),
       "relationship_invalid"
@@ -335,7 +447,8 @@ test("rejects Session, binding generation, send, and transition relationship vio
   });
   await t.test("send is bound to another Session", () => {
     const input = validInput();
-    input.scenarios.codex!.send!.sessionId = input.scenarios.codex!.before!.sessionId;
+    input.scenarios.codex!.send!.sessionId =
+      input.scenarios.codex!.before!.sessionId!;
     expectCode(
       () => validate(create(input), validationOptions()),
       "relationship_invalid"
@@ -344,7 +457,7 @@ test("rejects Session, binding generation, send, and transition relationship vio
   await t.test("resume transition targets the wrong binding", () => {
     const input = validInput();
     input.scenarios.codex!.transitions!.resumeThread!.targetBindingId =
-      input.scenarios.codex!.afterNew!.bindingId;
+      input.scenarios.codex!.afterNew!.bindingId!;
     expectCode(
       () => validate(create(input), validationOptions()),
       "relationship_invalid"
@@ -487,6 +600,7 @@ function validScenario(agent: LiveLifecycleAgent): RawLiveLifecycleScenarioResul
   const before: RawLiveLifecycleSnapshot = {
     ...base,
     nativeThreadId: aNative,
+    sessionMaterialized: true,
     sessionId: aSession,
     bindingId: aBinding1,
     bindingGeneration: 1
@@ -494,6 +608,7 @@ function validScenario(agent: LiveLifecycleAgent): RawLiveLifecycleScenarioResul
   const afterNew: RawLiveLifecycleSnapshot = {
     ...base,
     nativeThreadId: bNative,
+    sessionMaterialized: true,
     sessionId: bSession,
     bindingId: bBinding1,
     bindingGeneration: 1
@@ -501,6 +616,7 @@ function validScenario(agent: LiveLifecycleAgent): RawLiveLifecycleScenarioResul
   const afterResume: RawLiveLifecycleSnapshot = {
     ...base,
     nativeThreadId: aNative,
+    sessionMaterialized: true,
     sessionId: aSession,
     bindingId: aBinding2,
     bindingGeneration: 2
@@ -521,6 +637,7 @@ function validScenario(agent: LiveLifecycleAgent): RawLiveLifecycleScenarioResul
     afterResume,
     resumeCandidate: {
       nativeThreadId: aNative,
+      managedSessionId: aSession,
       exactCandidateCount: 1,
       resumable: true,
       activeElsewhere: false,
@@ -562,6 +679,37 @@ function validScenario(agent: LiveLifecycleAgent): RawLiveLifecycleScenarioResul
       durationMs: (index + 1) * 10
     }))
   };
+}
+
+function unmanagedScenario(
+  agent: LiveLifecycleAgent
+): RawLiveLifecycleScenarioResult {
+  const scenario = validScenario(agent);
+  scenario.resumeCandidate!.managedSessionId = null;
+  scenario.before = {
+    ...scenario.before!,
+    sessionMaterialized: false,
+    sessionId: null,
+    bindingId: null,
+    bindingGeneration: null
+  };
+  scenario.afterResume = {
+    ...scenario.afterResume!,
+    bindingGeneration: 1
+  };
+  scenario.transitions = {
+    newThread: {
+      ...scenario.transitions!.newThread!,
+      sourceSessionId: null,
+      sourceBindingId: null
+    },
+    resumeThread: {
+      ...scenario.transitions!.resumeThread!,
+      targetSessionId: scenario.afterResume.sessionId!,
+      targetBindingId: scenario.afterResume.bindingId!
+    }
+  };
+  return scenario;
 }
 
 function failedPreflightScenario(
@@ -636,8 +784,8 @@ function rawPrivateValues(input: RawLiveLifecycleEvidenceInput): string[] {
           ...(snapshot.processBirth === undefined ? [] : [snapshot.processBirth]),
           snapshot.workspace,
           snapshot.nativeThreadId,
-          snapshot.sessionId,
-          snapshot.bindingId
+          ...(snapshot.sessionId === null ? [] : [snapshot.sessionId]),
+          ...(snapshot.bindingId === null ? [] : [snapshot.bindingId])
         );
       }
     }
@@ -649,7 +797,12 @@ function rawPrivateValues(input: RawLiveLifecycleEvidenceInput): string[] {
       );
     }
     if (scenario.resumeCandidate !== undefined) {
-      values.push(scenario.resumeCandidate.nativeThreadId);
+      values.push(
+        scenario.resumeCandidate.nativeThreadId,
+        ...(scenario.resumeCandidate.managedSessionId === null
+          ? []
+          : [scenario.resumeCandidate.managedSessionId])
+      );
     }
     for (const transition of [
       scenario.transitions?.newThread,
@@ -658,9 +811,13 @@ function rawPrivateValues(input: RawLiveLifecycleEvidenceInput): string[] {
       if (transition !== undefined) {
         values.push(
           transition.transitionId,
-          transition.sourceSessionId,
+          ...(transition.sourceSessionId === null
+            ? []
+            : [transition.sourceSessionId]),
           transition.targetSessionId,
-          transition.sourceBindingId,
+          ...(transition.sourceBindingId === null
+            ? []
+            : [transition.sourceBindingId]),
           transition.targetBindingId
         );
       }

@@ -317,6 +317,7 @@ function validScenario(
   const before: RawLiveLifecycleSnapshot = {
     ...common,
     nativeThreadId: nativeA,
+    sessionMaterialized: true,
     sessionId: sessionA,
     bindingId: bindingA1,
     bindingGeneration: 1
@@ -324,6 +325,7 @@ function validScenario(
   const afterNew: RawLiveLifecycleSnapshot = {
     ...common,
     nativeThreadId: nativeB,
+    sessionMaterialized: true,
     sessionId: sessionB,
     bindingId: bindingB1,
     bindingGeneration: 1
@@ -331,6 +333,7 @@ function validScenario(
   const afterResume: RawLiveLifecycleSnapshot = {
     ...common,
     nativeThreadId: nativeA,
+    sessionMaterialized: true,
     sessionId: sessionA,
     bindingId: bindingA2,
     bindingGeneration: 2
@@ -347,6 +350,7 @@ function validScenario(
     afterResume,
     resumeCandidate: {
       nativeThreadId: nativeA,
+      managedSessionId: sessionA,
       exactCandidateCount: 1,
       resumable: true,
       activeElsewhere: false,
@@ -440,11 +444,18 @@ function assertPrivateValuesAbsent(
       }
       values.add(snapshot.workspace);
       values.add(snapshot.nativeThreadId);
-      values.add(snapshot.sessionId);
-      values.add(snapshot.bindingId);
+      if (snapshot.sessionId !== null) {
+        values.add(snapshot.sessionId);
+      }
+      if (snapshot.bindingId !== null) {
+        values.add(snapshot.bindingId);
+      }
     }
     if (scenario.resumeCandidate !== undefined) {
       values.add(scenario.resumeCandidate.nativeThreadId);
+      if (scenario.resumeCandidate.managedSessionId !== null) {
+        values.add(scenario.resumeCandidate.managedSessionId);
+      }
     }
     if (scenario.send !== undefined) {
       values.add(scenario.send.turnId);
@@ -459,9 +470,13 @@ function assertPrivateValuesAbsent(
         continue;
       }
       values.add(transition.transitionId);
-      values.add(transition.sourceSessionId);
+      if (transition.sourceSessionId !== null) {
+        values.add(transition.sourceSessionId);
+      }
       values.add(transition.targetSessionId);
-      values.add(transition.sourceBindingId);
+      if (transition.sourceBindingId !== null) {
+        values.add(transition.sourceBindingId);
+      }
       values.add(transition.targetBindingId);
     }
   }

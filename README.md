@@ -330,7 +330,9 @@ Lifecycle-sensitive releases use the stricter native lifecycle gate described
 in [CONTRIBUTING.md](CONTRIBUTING.md#native-lifecycle-live-smoke-release-gate).
 It runs `A → new B → send in B → exact resume A` against explicitly selected
 Codex and Claude panes, and writes redacted evidence bound to the clean checkout's
-exact version and commit. It never runs as part of ordinary `npm test`.
+exact version and commit. It supports both managed and verified unmanaged `A`
+starts, recording whether the starting Session was materialized instead of
+inventing one for evidence. It never runs as part of ordinary `npm test`.
 
 ## Development
 

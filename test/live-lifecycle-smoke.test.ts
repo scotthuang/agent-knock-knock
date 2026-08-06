@@ -13,6 +13,7 @@ import {
 const THREAD_A = "11111111-1111-4111-8111-111111111111";
 const THREAD_B = "22222222-2222-4222-8222-222222222222";
 const SESSION_A = "session-a";
+const SESSION_A_MATERIALIZED = "session-a-materialized";
 const SESSION_B = "session-b";
 const TURN_B = "turn-b-1";
 const STATE_PATH = "/private/akk/session-b/state.json";
@@ -73,7 +74,7 @@ interface ScenarioFixture {
 
 function scenarioFixture(
   agent: LifecycleSmokeAgent,
-  { managedStart = true }: { managedStart?: boolean } = {}
+  { managedStart = false }: { managedStart?: boolean } = {}
 ): ScenarioFixture {
   const target = agent === "codex" ? "akk:codex.0" : "akk:claude.0";
   const panePid = agent === "codex" ? 4101 : 4201;
@@ -124,6 +125,8 @@ function scenarioFixture(
     turnCount: 1,
     recentTurn: { conversation_id: TURN_B, status: "idle" }
   });
+  const restoredSessionId = managedStart ? SESSION_A : SESSION_A_MATERIALIZED;
+  const restoredBindingGeneration = managedStart ? 2 : 1;
   const final = terminalRow({
     agent,
     target,
@@ -132,10 +135,10 @@ function scenarioFixture(
     version,
     terminalId,
     nativeThreadId: THREAD_A,
-    sessionId: SESSION_A,
-    bindingId: "binding-a-2",
-    bindingGeneration: 2,
-    bindingFence: "fence-a-2",
+    sessionId: restoredSessionId,
+    bindingId: managedStart ? "binding-a-2" : "binding-a-1",
+    bindingGeneration: restoredBindingGeneration,
+    bindingFence: managedStart ? "fence-a-2" : "fence-a-1",
     turnCount: 0
   });
   const read = { kind: "read" as const, timeoutMs: 60_000 };
@@ -161,7 +164,7 @@ function scenarioFixture(
         operation: "new_thread",
         terminalId,
         transitionId: `transition-new-${agent}`,
-        previousSessionId: SESSION_A,
+        previousSessionId: managedStart ? SESSION_A : null,
         sessionId: SESSION_B,
         previousNativeThreadId: THREAD_A,
         nativeThreadId: THREAD_B,
@@ -258,8 +261,8 @@ function scenarioFixture(
             native_thread_id: THREAD_A,
             candidate_token: `candidate-${agent}`,
             active_elsewhere: false,
-            managed_session_id: SESSION_A,
             resumable: true,
+            ...(managedStart ? { managed_session_id: SESSION_A } : {}),
             available_actions: {
               resume_thread: {
                 arguments: {
@@ -292,11 +295,11 @@ function scenarioFixture(
         terminalId,
         transitionId: `transition-resume-${agent}`,
         previousSessionId: SESSION_B,
-        sessionId: SESSION_A,
+        sessionId: restoredSessionId,
         previousNativeThreadId: THREAD_B,
         nativeThreadId: THREAD_A,
-        bindingId: "binding-a-2",
-        bindingGeneration: 2
+        bindingId: managedStart ? "binding-a-2" : "binding-a-1",
+        bindingGeneration: restoredBindingGeneration
       })
     },
     {
@@ -414,7 +417,7 @@ function transition(input: {
   operation: "new_thread" | "resume_thread";
   terminalId: string;
   transitionId: string;
-  previousSessionId: string;
+  previousSessionId: string | null;
   sessionId: string;
   previousNativeThreadId: string;
   nativeThreadId: string;
@@ -461,8 +464,12 @@ function rowFrom(call: ScriptedCall): Record<string, any> {
 test("runs the strict Codex lifecycle chain once and emits only allowlisted evidence", async () => {
   const fixture = scenarioFixture("codex", { managedStart: false });
   const initialSend = rowFrom(fixture.calls[0]).available_actions.send;
+  const candidate = (
+    fixture.calls[6].result as { threads: Array<Record<string, unknown>> }
+  ).threads[0];
   assert.deepEqual(initialSend.missing_required, ["message"]);
   assert.equal(initialSend.arguments.session_id, undefined);
+  assert.equal(candidate.managed_session_id, undefined);
   const client = new ScriptedAkkClient(fixture.calls);
   const result = await runLifecycleScenario(
     fixture.config,
@@ -480,18 +487,22 @@ test("runs the strict Codex lifecycle chain once and emits only allowlisted evid
     "final_verify"
   ]);
   assert.equal(result.start?.session_id, null);
-  assert.equal(result.start?.binding_generation, 1);
-  assert.equal(result.new_thread?.previous_session_id, SESSION_A);
+  assert.equal(result.start?.binding_generation, null);
+  assert.equal(result.new_thread?.previous_session_id, null);
   assert.equal(result.active_after_new?.binding_generation, 1);
   assert.deepEqual(result.resume_candidate, {
     native_thread_id: THREAD_A,
+    managed_session_id: null,
     exact_candidate_count: 1,
     resumable: true,
     active_elsewhere: false,
     fresh_candidate_token_present: true
   });
   assert.equal(result.turn?.turn_count_after, 1);
-  assert.equal(result.final?.binding_generation, 2);
+  assert.equal(result.resume_thread?.session_id, SESSION_A_MATERIALIZED);
+  assert.notEqual(result.resume_thread?.session_id, SESSION_B);
+  assert.equal(result.final?.session_id, SESSION_A_MATERIALIZED);
+  assert.equal(result.final?.binding_generation, 1);
   assert.equal(client.calls.filter((call) => call.command === "monitor").length, 1);
   assert.equal(client.calls.filter((call) => call.command === "new-thread").length, 1);
   assert.equal(client.calls.filter((call) => call.command === "resume-thread").length, 1);
@@ -500,6 +511,48 @@ test("runs the strict Codex lifecycle chain once and emits only allowlisted evid
   assert.equal(serialized.includes(STATE_PATH), false);
   assert.equal(serialized.includes(EVENT_LOG_PATH), false);
   assert.equal(serialized.includes("candidate-codex"), false);
+  client.assertComplete();
+});
+
+test("requires Resume to name the managed B source Session", async () => {
+  const fixture = scenarioFixture("codex");
+  const resume = fixture.calls[7].result as Record<string, unknown>;
+  resume.previous_session_id = null;
+  const client = new ScriptedAkkClient(fixture.calls.slice(0, 8));
+  const result = await runLifecycleScenario(
+    fixture.config,
+    dependencies(client, [fixture.nonce])
+  );
+
+  assert.equal(result.status, "uncertain");
+  assert.equal(result.error_code, "resume_thread_invalid");
+  assert.equal(result.resume_thread, undefined);
+  assert.equal(client.calls.length, 8);
+  assert.equal(client.calls.at(-1)?.command, "resume-thread");
+  client.assertComplete();
+});
+
+test("restores a managed start by reusing its Session at generation plus one", async () => {
+  const fixture = scenarioFixture("codex", { managedStart: true });
+  const candidate = (
+    fixture.calls[6].result as { threads: Array<Record<string, unknown>> }
+  ).threads[0];
+  assert.equal(candidate.managed_session_id, SESSION_A);
+  const client = new ScriptedAkkClient(fixture.calls);
+  const result = await runLifecycleScenario(
+    fixture.config,
+    dependencies(client, [fixture.nonce])
+  );
+
+  assert.equal(result.status, "passed");
+  assert.equal(result.start?.session_id, SESSION_A);
+  assert.equal(result.start?.binding_generation, 1);
+  assert.equal(result.new_thread?.previous_session_id, SESSION_A);
+  assert.equal(result.resume_candidate?.managed_session_id, SESSION_A);
+  assert.equal(result.resume_thread?.previous_session_id, SESSION_B);
+  assert.equal(result.resume_thread?.session_id, SESSION_A);
+  assert.equal(result.final?.session_id, SESSION_A);
+  assert.equal(result.final?.binding_generation, 2);
   client.assertComplete();
 });
 
@@ -583,6 +636,11 @@ test("preflight rejects unsafe or incomplete pane state before mutation", async 
       }
     },
     {
+      name: "unmanaged Session slot omitted",
+      errorCode: "preflight_management",
+      mutate: (row) => { delete row.managed.session_id; }
+    },
+    {
       name: "unsupported lifecycle",
       errorCode: "preflight_capability",
       mutate: (row) => { row.native_thread_lifecycle.status = "unsupported"; }
@@ -605,6 +663,35 @@ test("preflight rejects unsafe or incomplete pane state before mutation", async 
       );
       assert.equal(result.status, "failed");
       assert.equal(result.error_code, entry.errorCode);
+      assert.deepEqual(result.steps.map((step) => step.name), ["preflight"]);
+      assert.equal(client.calls.length, 1);
+      client.assertComplete();
+    });
+  }
+});
+
+test("preflight rejects every residual unmanaged binding field", async (t) => {
+  const residuals: Array<[string, unknown]> = [
+    ["session_short_ref", "session-a"],
+    ["binding_status", "bound"],
+    ["binding_id", "stale-binding"],
+    ["binding_generation", 1],
+    ["native_thread_id", THREAD_A],
+    ["binding_token", "stale-fence"]
+  ];
+
+  for (const [field, value] of residuals) {
+    await t.test(field, async () => {
+      const fixture = scenarioFixture("codex");
+      rowFrom(fixture.calls[0]).managed[field] = value;
+      const client = new ScriptedAkkClient([fixture.calls[0]]);
+      const result = await runLifecycleScenario(
+        fixture.config,
+        dependencies(client, [])
+      );
+
+      assert.equal(result.status, "failed");
+      assert.equal(result.error_code, "preflight_management");
       assert.deepEqual(result.steps.map((step) => step.name), ["preflight"]);
       assert.equal(client.calls.length, 1);
       client.assertComplete();

@@ -38,11 +38,11 @@ test("core matrix conversion creates strict passing full-matrix evidence", () =>
     fingerprintSalt: "c".repeat(64)
   });
 
-  assert.equal(input.scenarios.codex?.before?.sessionId, "codex-session-a");
-  assert.equal(
-    input.scenarios.codex?.before?.bindingId,
-    "codex-unmanaged-binding-fence"
-  );
+  assert.equal(input.scenarios.codex?.before?.sessionMaterialized, false);
+  assert.equal(input.scenarios.codex?.before?.sessionId, null);
+  assert.equal(input.scenarios.codex?.before?.bindingId, null);
+  assert.equal(input.scenarios.codex?.before?.bindingGeneration, null);
+  assert.equal(input.scenarios.codex?.resumeCandidate?.managedSessionId, null);
   assert.deepEqual(input.scenarios.codex?.turnDeltas, {
     newThread: 0,
     send: 1,
@@ -58,11 +58,106 @@ test("core matrix conversion creates strict passing full-matrix evidence", () =>
     maxAgeHours: 72
   });
   assert.equal(validated.overall_status, "passed");
+  assert.equal(
+    validated.matrix.codex?.transitions.new_thread?.source_session_fingerprint,
+    null
+  );
+  assert.equal(validated.matrix.codex?.snapshots.after_resume?.binding_generation, 1);
+  assert.equal(
+    validated.matrix.codex?.assertions.resume_session_relationship_valid,
+    true
+  );
+  assert.equal(
+    validated.matrix.codex?.resume_candidate?.managed_session_fingerprint,
+    null
+  );
   assert.doesNotMatch(JSON.stringify(validated), /fingerprint_salt/u);
   assert.doesNotMatch(
     serializeAttestation(validated),
     /session-a|binding-fence|candidate-token/u
   );
+});
+
+test("core conversion durably proves the managed resume candidate Session", () => {
+  const matrix: LifecycleMatrixResult = {
+    schema: "agent-knock-knock/live-lifecycle-smoke-core-matrix",
+    version: 1,
+    status: "passed",
+    started_at_ms: STARTED_AT,
+    finished_at_ms: STARTED_AT + 100_000,
+    scenarios: [
+      managedPassingScenario("codex"),
+      managedPassingScenario("claude")
+    ]
+  };
+  const input = lifecycleMatrixToEvidenceInput(matrix, sourceIdentity());
+  const evidence = createLiveLifecycleEvidence({
+    ...input,
+    runId: "f".repeat(32),
+    fingerprintSalt: "1".repeat(64)
+  });
+
+  assert.equal(
+    input.scenarios.codex?.resumeCandidate?.managedSessionId,
+    input.scenarios.codex?.before?.sessionId
+  );
+  assert.equal(
+    evidence.matrix.codex?.resume_candidate?.managed_session_fingerprint,
+    evidence.matrix.codex?.snapshots.before?.session_fingerprint
+  );
+  assert.equal(validateLiveLifecycleEvidence(evidence, {
+    expectedPackageName: PACKAGE_NAME,
+    expectedPackageVersion: PACKAGE_VERSION,
+    expectedCommit: COMMIT,
+    requireAgents: ["codex", "claude"],
+    maxAgeHours: 72
+  }), evidence);
+});
+
+test("failed and uncertain partial evidence retain only the candidate Session fingerprint", async (t) => {
+  for (const status of ["failed", "uncertain"] as const) {
+    await t.test(status, () => {
+      const base = managedPassingScenario("codex");
+      const scenario: LifecycleScenarioResult = {
+        ...base,
+        status,
+        finished_at_ms: base.started_at_ms + 1_000,
+        steps: [
+          ...base.steps.slice(0, 5),
+          { name: "resume_thread", status, duration_ms: 950 }
+        ],
+        error_code: status === "failed"
+          ? "resume_thread_invalid"
+          : "resume_thread_uncertain",
+        recovery: "inspect_selected_pane_do_not_retry",
+        resume_thread: undefined,
+        final: undefined
+      };
+      const matrix: LifecycleMatrixResult = {
+        schema: "agent-knock-knock/live-lifecycle-smoke-core-matrix",
+        version: 1,
+        status,
+        started_at_ms: scenario.started_at_ms,
+        finished_at_ms: scenario.finished_at_ms,
+        scenarios: [scenario]
+      };
+      const evidence = createLiveLifecycleEvidence({
+        ...lifecycleMatrixToEvidenceInput(matrix, sourceIdentity()),
+        runId: status === "failed" ? "2".repeat(32) : "4".repeat(32),
+        fingerprintSalt: "3".repeat(64)
+      });
+      const codex = evidence.matrix.codex!;
+
+      assert.equal(codex.status, status);
+      assert.equal(codex.do_not_retry, status === "uncertain" ? true : undefined);
+      assert.equal(
+        codex.resume_candidate?.managed_session_fingerprint,
+        codex.snapshots.before?.session_fingerprint
+      );
+      assert.equal(JSON.stringify(evidence).includes("codex-session-a"), false);
+      assert.throws(() => serializeAttestation(evidence), /must be passed/u);
+    });
+  }
 });
 
 test("core uncertain result converts to durable do-not-retry partial evidence", () => {
@@ -103,6 +198,9 @@ test("core uncertain result converts to durable do-not-retry partial evidence", 
   assert.equal(evidence.matrix.codex?.failure_stage, "new_thread");
   assert.equal(evidence.matrix.codex?.reason_code, "new_thread_uncertain");
   assert.equal(evidence.matrix.codex?.do_not_retry, true);
+  assert.equal(evidence.matrix.codex?.snapshots.before?.session_materialized, false);
+  assert.equal(evidence.matrix.codex?.snapshots.before?.session_fingerprint, null);
+  assert.equal(evidence.matrix.codex?.snapshots.before?.binding_fingerprint, null);
   assert.equal(evidence.matrix.codex?.snapshots.after_new, undefined);
   assert.throws(() => serializeAttestation(evidence), /must be passed/u);
 });
@@ -128,7 +226,7 @@ function passingScenario(agent: LifecycleSmokeAgent): LifecycleScenarioResult {
   const nativeB = codex
     ? "22222222-2222-4222-8222-222222222222"
     : "44444444-4444-4444-8444-444444444444";
-  const start = terminalEvidence(agent, nativeA, null, null, 1, 0);
+  const start = terminalEvidence(agent, nativeA, null, null, null, 0);
   const afterNew = terminalEvidence(
     agent,
     nativeB,
@@ -141,8 +239,8 @@ function passingScenario(agent: LifecycleSmokeAgent): LifecycleScenarioResult {
     agent,
     nativeA,
     `${agent}-session-a`,
-    `${agent}-binding-a2`,
-    2,
+    `${agent}-binding-a1`,
+    1,
     0
   );
   return {
@@ -165,7 +263,7 @@ function passingScenario(agent: LifecycleSmokeAgent): LifecycleScenarioResult {
       terminal_id: start.terminal_id,
       transition_id: `${agent}-transition-new`,
       operation: "new_thread",
-      previous_session_id: `${agent}-session-a`,
+      previous_session_id: null,
       session_id: `${agent}-session-b`,
       previous_native_thread_id: nativeA,
       native_thread_id: nativeB,
@@ -183,6 +281,7 @@ function passingScenario(agent: LifecycleSmokeAgent): LifecycleScenarioResult {
     },
     resume_candidate: {
       native_thread_id: nativeA,
+      managed_session_id: null,
       exact_candidate_count: 1,
       resumable: true,
       active_elsewhere: false,
@@ -196,12 +295,45 @@ function passingScenario(agent: LifecycleSmokeAgent): LifecycleScenarioResult {
       session_id: `${agent}-session-a`,
       previous_native_thread_id: nativeB,
       native_thread_id: nativeA,
-      binding_id: `${agent}-binding-a2`,
-      binding_generation: 2,
+      binding_id: `${agent}-binding-a1`,
+      binding_generation: 1,
       turn_created: false
     },
     final
   };
+}
+
+function managedPassingScenario(
+  agent: LifecycleSmokeAgent
+): LifecycleScenarioResult {
+  const scenario = passingScenario(agent);
+  const nativeA = scenario.start!.native_thread_id;
+  const sessionA = `${agent}-session-a`;
+  scenario.start = terminalEvidence(
+    agent,
+    nativeA,
+    sessionA,
+    `${agent}-binding-a1`,
+    1,
+    0
+  );
+  scenario.new_thread!.previous_session_id = sessionA;
+  scenario.resume_candidate!.managed_session_id = sessionA;
+  scenario.resume_thread = {
+    ...scenario.resume_thread!,
+    session_id: sessionA,
+    binding_id: `${agent}-binding-a2`,
+    binding_generation: 2
+  };
+  scenario.final = terminalEvidence(
+    agent,
+    nativeA,
+    sessionA,
+    `${agent}-binding-a2`,
+    2,
+    0
+  );
+  return scenario;
 }
 
 function terminalEvidence(
@@ -209,7 +341,7 @@ function terminalEvidence(
   nativeThreadId: string,
   sessionId: string | null,
   bindingId: string | null,
-  bindingGeneration: number,
+  bindingGeneration: number | null,
   turnCount: number
 ): LifecycleTerminalEvidence {
   const codex = agent === "codex";
