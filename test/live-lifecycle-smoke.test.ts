@@ -515,6 +515,152 @@ test("runs the strict Codex lifecycle chain once and emits only allowlisted evid
 });
 
 test(
+  "materializes a virgin Codex unmanaged origin from the committed New probe",
+  async () => {
+    const fixture = scenarioFixture("codex", { managedStart: false });
+    delete rowFrom(fixture.calls[0]).native_agent_session_id;
+    const client = new ScriptedAkkClient(fixture.calls);
+    const result = await runLifecycleScenario(
+      fixture.config,
+      dependencies(client, [fixture.nonce])
+    );
+
+    assert.equal(result.status, "passed");
+    assert.equal(result.start?.native_thread_id, THREAD_A);
+    assert.equal(result.start?.session_id, null);
+    assert.equal(result.new_thread?.previous_native_thread_id, THREAD_A);
+    assert.equal(result.final?.native_thread_id, THREAD_A);
+    assert.equal(
+      client.calls.filter((call) => call.command === "new-thread").length,
+      1
+    );
+    client.assertComplete();
+  }
+);
+
+test("missing native identity remains fail-closed outside the virgin Codex origin", async (t) => {
+  await t.test("Claude unmanaged preflight", async () => {
+    const fixture = scenarioFixture("claude", { managedStart: false });
+    rowFrom(fixture.calls[0]).native_agent_session_id = null;
+    const client = new ScriptedAkkClient([fixture.calls[0]]);
+    const result = await runLifecycleScenario(
+      fixture.config,
+      dependencies(client, [])
+    );
+
+    assert.equal(result.status, "failed");
+    assert.equal(result.error_code, "preflight_native_identity");
+    assert.equal(
+      client.calls.some((call) => call.command === "new-thread"),
+      false
+    );
+    client.assertComplete();
+  });
+
+  await t.test("managed Codex preflight", async () => {
+    const fixture = scenarioFixture("codex", { managedStart: true });
+    rowFrom(fixture.calls[0]).native_agent_session_id = null;
+    const client = new ScriptedAkkClient([fixture.calls[0]]);
+    const result = await runLifecycleScenario(
+      fixture.config,
+      dependencies(client, [])
+    );
+
+    assert.equal(result.status, "failed");
+    assert.equal(result.error_code, "preflight_native_identity");
+    assert.equal(
+      client.calls.some((call) => call.command === "new-thread"),
+      false
+    );
+    client.assertComplete();
+  });
+
+  await t.test("managed Codex snapshot after New", async () => {
+    const fixture = scenarioFixture("codex", { managedStart: false });
+    rowFrom(fixture.calls[0]).native_agent_session_id = null;
+    rowFrom(fixture.calls[2]).native_agent_session_id = null;
+    const client = new ScriptedAkkClient(fixture.calls.slice(0, 3));
+    const result = await runLifecycleScenario(
+      fixture.config,
+      dependencies(client, [])
+    );
+
+    assert.equal(result.status, "uncertain");
+    assert.equal(result.error_code, "preflight_native_identity");
+    assert.equal(result.start, undefined);
+    assert.equal(client.calls.some((call) => call.command === "send"), false);
+    client.assertComplete();
+  });
+});
+
+test("deferred Codex origin identity fails closed on invalid New evidence", async (t) => {
+  await t.test("missing previous native thread", async () => {
+    const fixture = scenarioFixture("codex");
+    rowFrom(fixture.calls[0]).native_agent_session_id = null;
+    delete (fixture.calls[1].result as Record<string, unknown>)
+      .previous_native_thread_id;
+    const client = new ScriptedAkkClient(fixture.calls.slice(0, 2));
+    const result = await runLifecycleScenario(
+      fixture.config,
+      dependencies(client, [])
+    );
+
+    assert.equal(result.status, "uncertain");
+    assert.equal(result.error_code, "new_thread_invalid");
+    assert.equal(result.start, undefined);
+    assert.equal(
+      client.calls.filter((call) => call.command === "new-thread").length,
+      1
+    );
+    assert.equal(client.calls.some((call) => call.command === "send"), false);
+    client.assertComplete();
+  });
+
+  await t.test("New reports the same native thread before and after", async () => {
+    const fixture = scenarioFixture("codex");
+    rowFrom(fixture.calls[0]).native_agent_session_id = null;
+    (fixture.calls[1].result as Record<string, unknown>)
+      .previous_native_thread_id = THREAD_B;
+    const client = new ScriptedAkkClient(fixture.calls.slice(0, 3));
+    const result = await runLifecycleScenario(
+      fixture.config,
+      dependencies(client, [])
+    );
+
+    assert.equal(result.status, "uncertain");
+    assert.equal(result.error_code, "new_thread_invalid");
+    assert.equal(result.start, undefined);
+    assert.equal(
+      client.calls.filter((call) => call.command === "new-thread").length,
+      1
+    );
+    assert.equal(client.calls.some((call) => call.command === "send"), false);
+    client.assertComplete();
+  });
+});
+
+test("known Codex origin must match the native thread proved by New", async () => {
+  const fixture = scenarioFixture("codex");
+  (fixture.calls[1].result as Record<string, unknown>)
+    .previous_native_thread_id = "33333333-3333-4333-8333-333333333333";
+  const client = new ScriptedAkkClient(fixture.calls.slice(0, 2));
+  const result = await runLifecycleScenario(
+    fixture.config,
+    dependencies(client, [])
+  );
+
+  assert.equal(result.status, "uncertain");
+  assert.equal(result.error_code, "new_thread_invalid");
+  assert.equal(result.start?.native_thread_id, THREAD_A);
+  assert.equal(
+    client.calls.filter((call) => call.command === "new-thread").length,
+    1
+  );
+  assert.equal(client.calls.some((call) => call.command === "send"), false);
+  client.assertComplete();
+});
+
+test(
   "accepts structurally exact completion when the model does not echo the sentinel",
   async () => {
     const fixture = scenarioFixture("claude");
@@ -678,6 +824,11 @@ test("preflight rejects unsafe or incomplete pane state before mutation", async 
       name: "missing Codex process birth",
       errorCode: "preflight_process_identity",
       mutate: (row) => { row.native_agent_process_birth = null; }
+    },
+    {
+      name: "malformed native thread identity",
+      errorCode: "preflight_native_identity",
+      mutate: (row) => { row.native_agent_session_id = "not-a-uuid"; }
     }
   ];
 
