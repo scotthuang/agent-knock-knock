@@ -5,6 +5,7 @@
 ### Added
 
 - Add an opt-in native lifecycle live-smoke release gate that records redacted, commit-bound Codex and Claude Code `new → send → resume` evidence for annotated release tags.
+- Add an exact Codex 0.146.1 native lifecycle behavior profile while preserving 0.146.0 support.
 
 ### Fixed
 

@@ -359,8 +359,8 @@ function terminalEvidence(
     binding_generation: bindingGeneration,
     binding_fence: bindingId ?? `${agent}-unmanaged-binding-fence`,
     turn_count: turnCount,
-    agent_version: codex ? "0.146.0" : "2.1.218",
-    behavior_profile: codex ? "codex-tui-0.146.0" : "claude-code-2.1.218"
+    agent_version: codex ? "0.146.1" : "2.1.218",
+    behavior_profile: codex ? "codex-tui-0.146.1" : "claude-code-2.1.218"
   };
 }
 

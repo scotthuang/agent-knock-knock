@@ -3,6 +3,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { ActiveAgentSessionIdentity } from "./agent-session-provider.js";
+import {
+  codexLifecycleBehaviorProfile,
+  supportedCodexLifecycleVersions
+} from "./codex-lifecycle-compatibility.js";
 import { discoverCodexProcesses, type CodexProcessSnapshot, type CodexThreadRow } from "./codex-session-provider.js";
 import type { CodexLocalSessionAdapter } from "./codex-local-session-provider.js";
 import type {
@@ -38,7 +42,6 @@ interface CodexLifecycleThreadRow extends CodexThreadRow {
   name?: string;
 }
 
-const CODEX_LIFECYCLE_VERSION = "0.146.0";
 const NATIVE_THREAD_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const MAX_CODEX_SESSION_META_BYTES = 1024 * 1024;
@@ -644,9 +647,10 @@ export function buildThreadByIdSelect(
 function assertCodexLifecycleCandidateRequest(
   request: TerminalThreadLifecycleCandidateRequest
 ): void {
-  if (request.agentVersion !== CODEX_LIFECYCLE_VERSION) {
+  if (!codexLifecycleBehaviorProfile(request.agentVersion)) {
     throw new Error(
-      `Codex lifecycle candidates require exact version ${CODEX_LIFECYCLE_VERSION}`
+      "Codex lifecycle candidates require one of the supported exact versions: " +
+      supportedCodexLifecycleVersions().join(", ")
     );
   }
   if (!request.cwd || !path.isAbsolute(request.cwd)) {
@@ -677,7 +681,7 @@ function codexLifecycleCandidateFromRow({
     !path.isAbsolute(rowCwd) ||
     !path.isAbsolute(rolloutPath) ||
     rowSource !== "cli" ||
-    rowVersion !== CODEX_LIFECYCLE_VERSION ||
+    rowVersion !== request.agentVersion ||
     row.archived === true ||
     row.archived === 1 ||
     path.resolve(rowCwd) !== path.resolve(request.cwd) ||
@@ -700,7 +704,7 @@ function codexLifecycleCandidateFromRow({
     path.resolve(opened.metadata.cwd) !== path.resolve(request.cwd) ||
     opened.metadata.originator !== "codex-tui" ||
     opened.metadata.source !== "cli" ||
-    opened.metadata.cliVersion !== CODEX_LIFECYCLE_VERSION ||
+    opened.metadata.cliVersion !== request.agentVersion ||
     (
       rowModelProvider !== undefined &&
       opened.metadata.modelProvider !== rowModelProvider
@@ -736,7 +740,7 @@ function codexLifecycleCandidateFromRow({
     nativeThreadId,
     cwd: path.resolve(request.cwd),
     source: "codex_rollout",
-    agentVersion: CODEX_LIFECYCLE_VERSION,
+    agentVersion: request.agentVersion,
     fileToken: opened.fileToken,
     metadataFingerprint,
     modelProvider: opened.metadata.modelProvider
@@ -748,7 +752,7 @@ function codexLifecycleCandidateFromRow({
     source: "codex_rollout",
     rootInteractive: true,
     fileToken: opened.fileToken,
-    agentVersion: CODEX_LIFECYCLE_VERSION,
+    agentVersion: request.agentVersion,
     title,
     preview,
     updatedAtMs,
