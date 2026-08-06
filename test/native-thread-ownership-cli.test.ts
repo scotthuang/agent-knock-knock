@@ -488,7 +488,12 @@ function createOwnershipFixture({
     ], {
       encoding: "utf8",
       timeout: 30_000,
-      env: { ...process.env, AKK_RUNTIME_DIR: runtimeDir }
+      env: {
+        ...process.env,
+        AKK_RUNTIME_DIR: runtimeDir,
+        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "1",
+        AKK_TEST_TERMINAL_ACCEPTANCE_OUTCOME: "accepted"
+      }
     });
   return {
     root,

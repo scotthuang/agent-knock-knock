@@ -104,6 +104,81 @@ test("delegate routes asynchronously to the only idle matching tmux pane", () =>
   }
 });
 
+test("a recreated pane keeps the prior receipt immutable while accepting a new delegate", () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-delegate-recreated-pane-")
+  );
+  const workspace = path.join(tempDir, "workspace");
+  const terminalTarget = "codex-recreated-receipt:0.0";
+  const send = (options: {
+    request: string;
+    storeDir: string;
+    codexPid: number;
+    panePid: number;
+  }) => runDelegate([
+    "--agent",
+    "codex",
+    "--request",
+    options.request,
+    "--workspace",
+    workspace,
+    "--store-dir",
+    options.storeDir,
+    "--background",
+    "--disable-terminal-bridge-monitor",
+    "--processes-json",
+    JSON.stringify([{
+      pid: options.codexPid,
+      ppid: options.panePid,
+      elapsed: "00:20",
+      command: "codex",
+      cwd: workspace
+    }]),
+    "--terminals-json",
+    JSON.stringify([tmuxPane({
+      target: terminalTarget,
+      session: "codex-recreated-receipt",
+      panePid: options.panePid,
+      currentPath: workspace
+    })]),
+    "--terminal-screens-json",
+    JSON.stringify({ [terminalTarget]: "› " }),
+    "--codex-active-session-identities-json",
+    JSON.stringify({
+      [options.codexPid]: codexNativeIdentityFixture({
+        workspace,
+        codexPid: options.codexPid
+      })
+    })
+  ]);
+
+  try {
+    fs.mkdirSync(workspace, { recursive: true });
+    const first = send({
+      request: "First pane incarnation",
+      storeDir: path.join(tempDir, "first-store"),
+      codexPid: 6101,
+      panePid: 9601
+    });
+    assert.equal(first.status, 0, first.stderr || first.stdout);
+
+    const second = send({
+      request: "Replacement pane incarnation",
+      storeDir: path.join(tempDir, "second-store"),
+      codexPid: 6102,
+      panePid: 9602
+    });
+    assert.equal(second.status, 0, second.stderr || second.stdout);
+    const parsed = JSON.parse(second.stdout);
+    assert.equal(parsed.delivered, true);
+    assert.notEqual(parsed.replayed, true);
+    assert.equal(parsed.terminal_control.target, terminalTarget);
+    assert.equal(parsed.terminal_control.panePid, 9602);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("delegate without an agent selects the only idle supported pane", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-delegate-any-agent-"));
   const workspace = path.join(tempDir, "workspace");
@@ -467,7 +542,8 @@ test("delegate without an agent fails closed across mixed idle panes", () => {
       "--terminals-json",
       JSON.stringify([
         tmuxPane({
-          target: "codex-work:0.0",
+          target: "codex-mixed-work:0.0",
+          session: "codex-mixed-work",
           panePid: 9001,
           currentPath: workspace
         }),
@@ -480,14 +556,14 @@ test("delegate without an agent fails closed across mixed idle panes", () => {
       ]),
       "--terminal-screens-json",
       JSON.stringify({
-        "codex-work:0.0": "› ",
+        "codex-mixed-work:0.0": "› ",
         "claude-work:0.0": "❯ "
       })
     ]);
 
     assert.equal(result.status, 1, result.stdout);
     assert.match(result.stderr, /Multiple idle coding-agent panes match/);
-    assert.match(result.stderr, /\(codex, codex-work:0\.0\)/);
+    assert.match(result.stderr, /\(codex, codex-mixed-work:0\.0\)/);
     assert.match(result.stderr, /\(claude, claude-work:0\.0\)/);
     assert.match(result.stderr, /\/akk claude: <task>/);
   } finally {
@@ -599,7 +675,11 @@ function runDelegate(args: string[]) {
 function runCli(command: string, args: string[]) {
   return spawnSync(process.execPath, [binPath, command, ...args], {
     encoding: "utf8",
-    env: process.env
+    env: {
+      ...process.env,
+      AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "1",
+      AKK_TEST_TERMINAL_ACCEPTANCE_OUTCOME: "accepted"
+    }
   });
 }
 

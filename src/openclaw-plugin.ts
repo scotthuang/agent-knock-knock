@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import {
   definePluginEntry,
@@ -16,6 +17,7 @@ import {
   formatAkkRespondCommandResult,
   formatAkkThreadsCommandResult,
   formatAkkThreadTransitionCommandResult,
+  isAkkNativeSubmissionAccepted,
   isAkkThreadTransitionSuccess,
   parseAkkCommand,
   resolvePluginStoreDir
@@ -560,11 +562,17 @@ function createPlugin(relayPath: string): OpenClawPluginDefinition {
       description:
           "Start a new turn in an existing AKK session without clearing the coding agent's native context. Target the exact session_id from list or a prior send; never pass a turn id or discovery selector as session_id. selector is compatibility-only for initial live-terminal discovery: use one explicitly named by the user or prefilled by list, and never infer one. Both fields may be omitted only when AKK should require one unique eligible idle pane. To answer an in-flight question, use agent_knock_knock_respond instead. For ordinary use add only request and omit monitoring timeouts unless the user explicitly asks to change them. timeoutSeconds is unsupported. AKK never starts a coding agent. This is asynchronous: after acceptance, yield and wait for the callback or a later explicit status request.",
         parameters: sendParameters,
-        async execute(_toolCallId, params) {
+        async execute(toolCallId, params) {
           const result = await runSendRequest(
             api,
             isRecord(params) ? params : {},
-            toolContext
+            toolContext,
+            terminalMessageIdForToolCall({
+              toolCallId,
+              sessionKey: toolContext?.sessionKey,
+              sessionId: toolContext?.sessionId,
+              toolName: "agent_knock_knock_send"
+            })
           );
           return toolResult(result, { submissionErrors: true });
         }
@@ -577,8 +585,10 @@ function createPlugin(relayPath: string): OpenClawPluginDefinition {
       description:
         "Respond to a question or blocked callback in one exact in-flight AKK turn. This continues that turn and does not create a new turn; use agent_knock_knock_send with session_id for later ordinary work.",
       parameters: respondParameters,
-      buildArgs: (params) => {
+      buildArgs: (params, toolContext, toolCallId) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+        const openclawSession =
+          stringValue(toolContext?.sessionKey) ?? "agent:main:main";
         const args = [
           "respond",
           "--turn",
@@ -586,7 +596,18 @@ function createPlugin(relayPath: string): OpenClawPluginDefinition {
           "--message",
           requiredString(params.request, "request")
         ];
+        pushOptional(
+          args,
+          "--message-id",
+          terminalMessageIdForToolCall({
+            toolCallId,
+            sessionKey: openclawSession,
+            sessionId: toolContext?.sessionId,
+            toolName: "agent_knock_knock_respond"
+          })
+        );
         pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
+        pushOptional(args, "--openclaw-session", openclawSession);
         return args;
       }
     });
@@ -803,10 +824,9 @@ async function handleAkkCommand(api, ctx) {
       case "send":
         return {
           text: formatSendCommandResult(result),
-          isError:
-            ["uncertain", "aborted"].includes(
-              String(result.submission_outcome ?? "")
-            ) || result.status === "delivered_unfenced"
+          isError: terminalSubmissionReported(result)
+            ? !isAkkNativeSubmissionAccepted(result)
+            : result.status === "delivered_unfenced"
         };
       case "respond":
         return formatAkkRespondCommandResult(result);
@@ -853,11 +873,31 @@ function formatDelegateCommandResult(result) {
     ].join("\n");
   }
   if (result.status === "submission_aborted") {
+    const safeToRetry =
+      result.safe_to_retry === true && result.do_not_retry !== true;
     return [
       `AKK stopped before sending the terminal task to ${agent}.`,
       `session: ${sessionId}`,
       `turn: ${turnId}`,
-      "next: no tmux input was sent, so this request may be retried."
+      safeToRetry
+        ? "next: no tmux input was sent and the aborted receipt is durable, so this request may be retried."
+        : "next: do not retry automatically; AKK could not prove a durable safe abort, so inspect this Turn and its tmux dispatch ledger."
+    ].join("\n");
+  }
+  if (result.status === "submission_pending_acceptance") {
+    return [
+      `AKK dispatched terminal input to ${agent}, but native acceptance is still pending.`,
+      `session: ${sessionId}`,
+      `turn: ${turnId}`,
+      "next: do not retry or report success; wait for acceptance or inspect the shared tmux pane."
+    ].join("\n");
+  }
+  if (result.status === "submission_not_accepted") {
+    return [
+      `AKK proved that ${agent} did not accept the terminal draft.`,
+      `session: ${sessionId}`,
+      `turn: ${turnId}`,
+      "next: do not retry automatically; inspect the exact draft in the shared tmux pane."
     ].join("\n");
   }
   return [
@@ -1014,12 +1054,46 @@ function formatSendCommandResult(result) {
     ].join("\n");
   }
   if (result.submission_outcome === "aborted") {
+    const safeToRetry =
+      result.safe_to_retry === true && result.do_not_retry !== true;
     return [
       "AKK terminal submission was aborted before tmux input.",
       `session: ${sessionId}`,
       `turn: ${turnId}`,
       `status: ${result.status ?? status}`,
-      "next: this request was not sent and may be retried."
+      safeToRetry
+        ? "next: this request was not sent, the aborted receipt is durable, and it may be retried."
+        : "next: do not retry automatically; inspect the Turn because a durable safe abort was not proven."
+    ].join("\n");
+  }
+  if (result.submission_outcome === "pending_acceptance") {
+    return [
+      "AKK dispatched the terminal input but native acceptance is still pending.",
+      `session: ${sessionId}`,
+      `turn: ${turnId}`,
+      `status: ${result.status ?? status}`,
+      "next: do not retry or report success; wait for acceptance or inspect the shared tmux pane."
+    ].join("\n");
+  }
+  if (result.submission_outcome === "not_accepted") {
+    return [
+      "AKK proved that the agent did not accept the terminal draft.",
+      `session: ${sessionId}`,
+      `turn: ${turnId}`,
+      `status: ${result.status ?? status}`,
+      "next: do not retry automatically; inspect the exact draft in the shared tmux pane."
+    ].join("\n");
+  }
+  if (
+    terminalSubmissionReported(result) &&
+    !isAkkNativeSubmissionAccepted(result)
+  ) {
+    return [
+      "AKK could not verify native agent acceptance for this terminal input.",
+      `session: ${sessionId}`,
+      `turn: ${turnId}`,
+      `status: ${result.status ?? status}`,
+      "next: do not retry or report success; inspect the exact Turn receipt and shared tmux pane."
     ].join("\n");
   }
   const lines = [
@@ -1166,7 +1240,7 @@ function terminalScreenExcerpt(result): string | undefined {
     : `…${text.slice(-1599)}`;
 }
 
-async function runSendRequest(api, params, toolContext) {
+async function runSendRequest(api, params, toolContext, messageId?: string) {
   const requestedType = Object.hasOwn(params, "type")
     ? stringValue(params.type)
     : "task";
@@ -1185,7 +1259,7 @@ async function runSendRequest(api, params, toolContext) {
     ? requiredString(params.selector, "selector")
     : undefined;
   if (!sessionId && !selector) {
-    return runDelegate(api, params, toolContext);
+    return runDelegate(api, { ...params, messageId }, toolContext);
   }
 
   const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
@@ -1206,6 +1280,7 @@ async function runSendRequest(api, params, toolContext) {
     "--background"
   );
   pushOptional(args, "--type", stringValue(params.type));
+  pushOptional(args, "--message-id", messageId);
   pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
   pushOptional(
     args,
@@ -1270,15 +1345,26 @@ function isSubmissionError(result: unknown): boolean {
   if (!isRecord(result)) {
     return false;
   }
+  if (terminalSubmissionReported(result)) {
+    return !isAkkNativeSubmissionAccepted(result);
+  }
   return [
     "submission_unfenced",
     "submission_uncertain",
-    "submission_aborted"
+    "submission_aborted",
+    "submission_pending_acceptance",
+    "submission_not_accepted"
   ].includes(String(result.status ?? "")) ||
-    ["uncertain", "aborted"].includes(
+    ["uncertain", "aborted", "pending_acceptance", "not_accepted"].includes(
       String(result.submission_outcome ?? "")
     ) ||
     result.status === "delivered_unfenced";
+}
+
+function terminalSubmissionReported(result: Record<string, unknown>): boolean {
+  return result.submission_outcome !== undefined ||
+    result.delivery_receipt !== undefined ||
+    result.delivered !== undefined;
 }
 
 function withTurnIdentity(result) {
@@ -1376,6 +1462,7 @@ async function runDelegate(api, params, toolContext) {
   ];
 
   pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
+  pushOptional(args, "--message-id", stringValue(params.messageId));
   pushOptional(args, "--openclaw-session", openclawSession);
   pushOptional(args, "--gateway-method", CALLBACK_METHOD);
   pushOptional(args, "--gateway-session", openclawSession);
@@ -1412,6 +1499,14 @@ async function runDelegate(api, params, toolContext) {
     parsedPaths?.logPath;
   const submissionUncertain = parsed.submission_outcome === "uncertain";
   const submissionAborted = parsed.submission_outcome === "aborted";
+  const submissionAccepted = parsed.submission_outcome === "agent_accepted" &&
+    parsed.delivery_receipt === "agent_accepted" &&
+    parsed.delivered === true;
+  const submissionNotAccepted = parsed.submission_outcome === "not_accepted";
+  const submissionPending = !submissionAccepted &&
+    !submissionUncertain &&
+    !submissionAborted &&
+    !submissionNotAccepted;
   const submissionUnfenced = parsed.status === "delivered_unfenced";
   const agent =
     (isRecord(parsedConversation?.executor)
@@ -1425,14 +1520,22 @@ async function runDelegate(api, params, toolContext) {
       ? "submission_uncertain"
       : submissionAborted
         ? "submission_aborted"
-        : "async_pending",
+        : submissionNotAccepted
+          ? "submission_not_accepted"
+          : submissionPending
+            ? "submission_pending_acceptance"
+            : "async_pending",
     submission_status: submissionUnfenced
       ? "submitted_unfenced"
       : submissionUncertain
       ? "uncertain"
       : submissionAborted
         ? "aborted"
-        : "accepted",
+        : submissionNotAccepted
+          ? "not_accepted"
+          : submissionPending
+            ? "pending_acceptance"
+            : "accepted",
     conversation_id: conversationId,
     session_id: sessionId,
     turn_id: turnId,
@@ -1471,13 +1574,42 @@ async function runDelegate(api, params, toolContext) {
             "AKK could not prove whether tmux accepted Enter. Do not retry automatically; inspect the exact AKK Turn record and shared terminal."
         }
       : submissionAborted
+        ? parsed.safe_to_retry === true && parsed.do_not_retry !== true
+          ? {
+              submission_outcome: "aborted",
+              safe_to_retry: true,
+              do_not_retry: false,
+              reason: parsed.reason,
+              openclaw_next_action: parsed.openclaw_next_action,
+              note:
+                "AKK stopped before sending tmux input and durably proved a safe abort. The request may be retried."
+            }
+          : {
+              submission_outcome: "aborted",
+              safe_to_retry: false,
+              do_not_retry: true,
+              reason: parsed.reason,
+              openclaw_next_action: parsed.openclaw_next_action,
+              note:
+                "AKK could not prove a durable safe abort. Do not retry automatically; inspect the exact Turn and terminal dispatch ledger."
+            }
+      : submissionNotAccepted
         ? {
-            submission_outcome: "aborted",
-            safe_to_retry: true,
+            submission_outcome: "not_accepted",
+            do_not_retry: true,
             reason: parsed.reason,
             openclaw_next_action: parsed.openclaw_next_action,
             note:
-              "AKK stopped before sending tmux input. The request was not submitted and may be retried."
+              "AKK proved terminal transport but the exact draft is still present in the agent composer. Do not retry automatically; inspect the shared pane."
+          }
+      : submissionPending
+        ? {
+            submission_outcome: "pending_acceptance",
+            do_not_retry: true,
+            reason: parsed.reason,
+            openclaw_next_action: parsed.openclaw_next_action,
+            note:
+              "AKK proved only terminal transport and is still waiting for native agent acceptance. Do not retry or report the task as accepted."
           }
       : {
           openclaw_next_action: {
@@ -1493,6 +1625,32 @@ async function runDelegate(api, params, toolContext) {
             "The task was sent to the shared tmux terminal. OpenClaw should yield now and wait for the scheduled callback turn."
         })
   };
+}
+
+function terminalMessageIdForToolCall({
+  toolCallId: toolCallIdValue,
+  sessionKey: sessionKeyValue,
+  sessionId: sessionIdValue,
+  toolName
+}: {
+  toolCallId: unknown;
+  sessionKey: unknown;
+  sessionId: unknown;
+  toolName: "agent_knock_knock_send" | "agent_knock_knock_respond";
+}): string | undefined {
+  const toolCallId = stringValue(toolCallIdValue);
+  if (!toolCallId) {
+    return undefined;
+  }
+  const sessionKey = stringValue(sessionKeyValue) ?? "agent:main:main";
+  // sessionId is the OpenClaw conversation incarnation. It changes across
+  // /new and /reset even when sessionKey remains stable. Keep a literal null
+  // fallback so retries with the same legacy context remain deterministic.
+  const sessionId = stringValue(sessionIdValue) ?? null;
+  const digest = createHash("sha256")
+    .update(JSON.stringify([sessionKey, sessionId, toolName, toolCallId]))
+    .digest("hex");
+  return `msg-openclaw-${digest}`;
 }
 
 function registerCliTool(
@@ -1512,8 +1670,15 @@ function registerCliTool(
       name,
       description,
       parameters,
-      async execute(_toolCallId, params) {
-        const result = runCli(api, buildArgs(isRecord(params) ? params : {}, toolContext));
+      async execute(toolCallId, params) {
+        const result = runCli(
+          api,
+          buildArgs(
+            isRecord(params) ? params : {},
+            toolContext,
+            toolCallId
+          )
+        );
         return toolResult(result, {
           submissionErrors: name === "agent_knock_knock_respond",
           normalizeTurnIdentity,

@@ -1205,7 +1205,12 @@ function runCli(args: string[]): Record<string, any> {
 
 function spawnCli(args: string[]) {
   return spawnSync(process.execPath, [binPath, ...args], {
-    encoding: "utf8"
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "1",
+      AKK_TEST_TERMINAL_ACCEPTANCE_OUTCOME: "accepted"
+    }
   });
 }
 

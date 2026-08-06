@@ -366,7 +366,7 @@ export function formatAkkRespondCommandResult(
     `status: ${status}`
   ];
 
-  if (result.submission_outcome === "submitted") {
+  if (isAkkNativeSubmissionAccepted(result)) {
     return {
       text: ["AKK response sent.", ...identityLines].join("\n"),
       isError: false
@@ -383,11 +383,35 @@ export function formatAkkRespondCommandResult(
     };
   }
   if (result.submission_outcome === "aborted") {
+    const safeToRetry =
+      result.safe_to_retry === true && result.do_not_retry !== true;
     return {
       text: [
         "AKK response was not sent.",
         ...identityLines,
-        "next: it is safe to retry this response."
+        safeToRetry
+          ? "next: the aborted receipt is durable, so it is safe to retry this response."
+          : "next: do not retry automatically; a durable safe abort was not proven, so inspect this Turn and its terminal dispatch ledger."
+      ].join("\n"),
+      isError: true
+    };
+  }
+  if (result.submission_outcome === "pending_acceptance") {
+    return {
+      text: [
+        "AKK dispatched the response, but native acceptance is still pending.",
+        ...identityLines,
+        "next: do not retry automatically; wait for native acceptance or inspect the shared tmux pane."
+      ].join("\n"),
+      isError: true
+    };
+  }
+  if (result.submission_outcome === "not_accepted") {
+    return {
+      text: [
+        "AKK proved that the coding agent did not accept the response draft.",
+        ...identityLines,
+        "next: do not retry automatically; inspect the exact composer draft."
       ].join("\n"),
       isError: true
     };
@@ -400,6 +424,14 @@ export function formatAkkRespondCommandResult(
     ].join("\n"),
     isError: true
   };
+}
+
+export function isAkkNativeSubmissionAccepted(
+  result: Record<string, unknown>
+): boolean {
+  return result.submission_outcome === "agent_accepted" &&
+    result.delivery_receipt === "agent_accepted" &&
+    result.delivered === true;
 }
 
 export function formatAkkThreadsCommandResult(

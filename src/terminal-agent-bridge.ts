@@ -21,6 +21,19 @@ import {
   type TerminalControlProvider
 } from "./terminal-control-provider.js";
 
+// Codex 0.146.x keeps Enter in paste/newline mode for 120ms after burst input.
+// Cross that boundary rather than landing on it, and also require observable
+// composer stability instead of treating this delay alone as acceptance.
+const CODEX_PASTE_ENTER_SETTLE_MS = 121;
+const CODEX_MULTILINE_SETTLE_POLL_MS = 30;
+const CODEX_MULTILINE_SETTLE_TIMEOUT_MS = 2_000;
+const CODEX_MULTILINE_STABLE_CAPTURES = 2;
+const CODEX_MULTILINE_SETTLE_SCROLLBACK_LINES = 240;
+const CODEX_COMPOSER_MARKER = /^[›»](?:\s|$)/u;
+const CODEX_COMPOSER_FOOTER =
+  /^(?:gpt-[\w.-]+(?:\s|$)|[-\w.]+ default ·)/u;
+const CODEX_LARGE_PASTE_CHAR_THRESHOLD = 1_000;
+
 export interface TerminalBridgeStatus {
   provider: "tmux";
   target: string;
@@ -104,6 +117,33 @@ export interface TerminalIdentityVerificationResult {
 export type TerminalIdentityVerifier = (
   request: TerminalIdentityVerificationRequest
 ) => Promise<TerminalIdentityVerificationResult | void>;
+
+export type TerminalTransportStage = "text_injected" | "enter_dispatched";
+
+export interface TerminalTransportStageEvent {
+  stage: TerminalTransportStage;
+  agent: ExecutorKind;
+  terminalControl: TerminalControlRef;
+  multiline: boolean;
+}
+
+export interface TerminalSendOptions {
+  runtime?: TerminalRuntimeIdentity;
+  /**
+   * Awaited immediately after each irreversible transport boundary so the
+   * caller can durably persist the exact proof level before continuing.
+   */
+  onTransportStage?: (
+    event: TerminalTransportStageEvent
+  ) => void | Promise<void>;
+}
+
+export interface TerminalSendResult {
+  stage: "enter_dispatched";
+  agent: ExecutorKind;
+  terminalControl: TerminalControlRef;
+  multiline: boolean;
+}
 
 export interface TerminalApprovalAuthorizationContext {
   agent: ExecutorKind;
@@ -308,8 +348,8 @@ export class TerminalAgentBridge {
     agent: ExecutorKind,
     terminalControl: TerminalControlRef,
     text: string,
-    options: { runtime?: TerminalRuntimeIdentity } = {}
-  ): Promise<void> {
+    options: TerminalSendOptions = {}
+  ): Promise<TerminalSendResult> {
     const adapter = this.registry.require(agent);
     if (!terminalControl.capabilities.includes("send_keys")) {
       throw new Error(`${adapter.displayName} terminal input is not supported`);
@@ -318,6 +358,7 @@ export class TerminalAgentBridge {
     if (!normalized) {
       throw new Error("terminal message is empty");
     }
+    const multiline = /[\r\n]/u.test(normalized);
     const verifiedForText = await this.verifyTerminalIdentity(
       adapter.agent,
       terminalControl,
@@ -326,28 +367,222 @@ export class TerminalAgentBridge {
     await this.terminalProvider.sendText(verifiedForText.target, normalized, {
       socketPath: verifiedForText.socketPath
     });
-    // Text and Enter are separate tmux operations. Revalidate between them; if the
-    // identity changed, clear the line best-effort and never submit it.
+    await options.onTransportStage?.({
+      stage: "text_injected",
+      agent: adapter.agent,
+      terminalControl: verifiedForText,
+      multiline
+    });
+    // Text and Enter are separate tmux operations. Revalidate between them and
+    // never submit after identity or composer drift. The legacy single-line
+    // path retains its best-effort pre-submit cleanup behavior.
     let verifiedForEnter: TerminalControlRef;
-    try {
-      verifiedForEnter = await this.verifyTerminalIdentity(
-        adapter.agent,
+    if (adapter.agent === "codex" && multiline) {
+      verifiedForEnter = await this.settleCodexMultilineComposer(
+        adapter,
         terminalControl,
+        normalized,
         options.runtime
       );
-    } catch (error) {
+    } else {
       try {
-        await this.terminalProvider.sendKeys(verifiedForText.target, ["C-u"], {
-          socketPath: verifiedForText.socketPath
-        });
-      } catch {
-        // Best effort only: preserving the identity failure is more important than cleanup.
+        verifiedForEnter = await this.verifyTerminalIdentity(
+          adapter.agent,
+          terminalControl,
+          options.runtime
+        );
+      } catch (error) {
+        try {
+          await this.terminalProvider.sendKeys(verifiedForText.target, ["C-u"], {
+            socketPath: verifiedForText.socketPath
+          });
+        } catch {
+          // Best effort only: preserving the identity failure is more important than cleanup.
+        }
+        throw error;
       }
-      throw error;
     }
     await this.terminalProvider.sendKeys(verifiedForEnter.target, ["C-m"], {
       socketPath: verifiedForEnter.socketPath
     });
+    await options.onTransportStage?.({
+      stage: "enter_dispatched",
+      agent: adapter.agent,
+      terminalControl: verifiedForEnter,
+      multiline
+    });
+    return {
+      stage: "enter_dispatched",
+      agent: adapter.agent,
+      terminalControl: verifiedForEnter,
+      multiline
+    };
+  }
+
+  private async settleCodexMultilineComposer(
+    adapter: TerminalAgentAdapter,
+    terminalControl: TerminalControlRef,
+    expectedText: string,
+    runtime?: TerminalRuntimeIdentity
+  ): Promise<TerminalControlRef> {
+    const startedAt = performance.now();
+    let stableDigest: string | undefined;
+    let stableSince: number | undefined;
+    let stableCaptures = 0;
+
+    while (performance.now() - startedAt <= CODEX_MULTILINE_SETTLE_TIMEOUT_MS) {
+      const captured = await this.captureInspection(adapter, terminalControl, {
+        runtime,
+        scrollbackLines: CODEX_MULTILINE_SETTLE_SCROLLBACK_LINES
+      });
+      if (
+        captured.inspection.approval.blocked ||
+        captured.inspection.activity.state === "awaiting_approval" ||
+        captured.inspection.activity.state === "working"
+      ) {
+        throw new Error(
+          "Codex became busy or blocked while its multiline composer was settling"
+        );
+      }
+
+      const composer = exactCodexComposerCapture(captured.screen, expectedText);
+      const composerIsIdle = captured.inspection.activity.state === "idle" ||
+        (
+          captured.inspection.activity.state === "unknown" &&
+          composer !== undefined
+        );
+      if (composer && composerIsIdle) {
+        if (composer.digest === stableDigest) {
+          stableCaptures += 1;
+        } else {
+          stableDigest = composer.digest;
+          stableSince = performance.now();
+          stableCaptures = 1;
+        }
+        if (
+          stableCaptures >= CODEX_MULTILINE_STABLE_CAPTURES &&
+          stableSince !== undefined &&
+          performance.now() - stableSince >= CODEX_PASTE_ENTER_SETTLE_MS
+        ) {
+          const finalCapture = await this.captureInspection(
+            adapter,
+            captured.terminalControl,
+            {
+              runtime,
+              scrollbackLines: CODEX_MULTILINE_SETTLE_SCROLLBACK_LINES
+            }
+          );
+          const finalComposer = exactCodexComposerCapture(
+            finalCapture.screen,
+            expectedText
+          );
+          const finalIsIdle = finalCapture.inspection.activity.state === "idle" ||
+            (
+              finalCapture.inspection.activity.state === "unknown" &&
+              finalComposer !== undefined
+            );
+          if (
+            finalCapture.inspection.approval.blocked ||
+            !finalIsIdle ||
+            !finalComposer ||
+            finalComposer.digest !== stableDigest
+          ) {
+            throw new Error(
+              "Codex multiline composer changed after its stable pre-submit capture"
+            );
+          }
+          const verifiedImmediatelyBeforeEnter = await this.verifyTerminalIdentity(
+            adapter.agent,
+            finalCapture.terminalControl,
+            runtime
+          );
+          if (
+            !sameTerminalControlIdentity(
+              finalCapture.terminalControl,
+              verifiedImmediatelyBeforeEnter
+            )
+          ) {
+            throw new Error(
+              "terminal control identity changed after the final Codex composer capture"
+            );
+          }
+          return verifiedImmediatelyBeforeEnter;
+        }
+      } else {
+        stableDigest = undefined;
+        stableSince = undefined;
+        stableCaptures = 0;
+      }
+
+      const remainingSuppressionMs = CODEX_PASTE_ENTER_SETTLE_MS -
+        (stableSince === undefined ? 0 : performance.now() - stableSince);
+      await terminalSettleDelay(Math.max(
+        1,
+        Math.min(
+          CODEX_MULTILINE_SETTLE_POLL_MS,
+          remainingSuppressionMs > 0
+            ? remainingSuppressionMs
+            : CODEX_MULTILINE_SETTLE_POLL_MS
+        )
+      ));
+    }
+    throw new Error(
+      "Codex multiline composer did not become exact, idle, and stable before the bounded submit deadline"
+    );
+  }
+
+  /**
+   * Prove that the exact managed draft is still present after Enter dispatch.
+   * Two identity-fenced captures are required so transient repaint state never
+   * becomes a hard `not_accepted` conclusion.
+   */
+  async proveExactDraftStillPresent(
+    agent: ExecutorKind,
+    terminalControl: TerminalControlRef,
+    expectedText: string,
+    options: { runtime?: TerminalRuntimeIdentity; scrollbackLines?: number } = {}
+  ): Promise<boolean> {
+    const adapter = this.registry.require(agent);
+    const captureExactDraft = async (control: TerminalControlRef) => {
+      const captured = await this.captureInspection(adapter, control, {
+        runtime: options.runtime,
+        scrollbackLines: options.scrollbackLines ??
+          CODEX_MULTILINE_SETTLE_SCROLLBACK_LINES
+      });
+      if (
+        captured.inspection.approval.blocked ||
+        captured.inspection.activity.state === "awaiting_approval" ||
+        captured.inspection.activity.state === "working"
+      ) {
+        return { captured, draft: undefined };
+      }
+      return {
+        captured,
+        draft: exactTerminalComposerCapture(
+          adapter.agent,
+          captured.screen,
+          expectedText
+        )
+      };
+    };
+
+    const first = await captureExactDraft(terminalControl);
+    if (!first.draft) {
+      return false;
+    }
+    await terminalSettleDelay(CODEX_MULTILINE_SETTLE_POLL_MS);
+    const second = await captureExactDraft(first.captured.terminalControl);
+    if (
+      !sameTerminalControlIdentity(
+        first.captured.terminalControl,
+        second.captured.terminalControl
+      )
+    ) {
+      throw new Error(
+        "terminal control identity changed while proving the exact draft remained"
+      );
+    }
+    return Boolean(second.draft && second.draft.digest === first.draft.digest);
   }
 
   /**
@@ -919,6 +1154,126 @@ export class TerminalAgentBridge {
     });
     return result?.terminalControl ?? terminalControl;
   }
+}
+
+function exactCodexComposerCapture(
+  screen: string,
+  expectedText: string
+): { digest: string } | undefined {
+  const lines = screen.replace(/\r\n?/gu, "\n").split("\n");
+  const expectedComparable = composerComparableText(expectedText);
+  const expectedCharacterCount = Array.from(expectedText).length;
+  const largePasteComparable = composerComparableText(
+    `[Pasted Content ${expectedCharacterCount} chars]`
+  );
+  const matches: { digest: string }[] = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!CODEX_COMPOSER_MARKER.test(lines[index])) {
+      continue;
+    }
+    const footerIndex = lines.findIndex((line, candidateIndex) =>
+      candidateIndex > index && CODEX_COMPOSER_FOOTER.test(line.trim())
+    );
+    const region = lines.slice(
+      index,
+      footerIndex < 0 ? lines.length : footerIndex
+    );
+    while (region.length > 1 && region.at(-1)?.trim() === "") {
+      region.pop();
+    }
+    const body = [
+      region[0].replace(/^[›»]\s?/u, ""),
+      ...region.slice(1).map((line) =>
+        line.startsWith("  ") ? line.slice(2) : line
+      )
+    ].join("\n");
+    const comparable = composerComparableText(body);
+    const exactVisibleDraft = comparable === expectedComparable;
+    const exactLargePastePlaceholder =
+      expectedCharacterCount > CODEX_LARGE_PASTE_CHAR_THRESHOLD &&
+      comparable === largePasteComparable;
+    if (!exactVisibleDraft && !exactLargePastePlaceholder) {
+      continue;
+    }
+    matches.push({
+      digest: createHash("sha256")
+        .update(region.join("\n"))
+        .digest("hex")
+    });
+  }
+
+  if (matches.length > 1) {
+    throw new Error(
+      "multiple Codex composer regions matched the multiline terminal request"
+    );
+  }
+  return matches[0];
+}
+
+function exactTerminalComposerCapture(
+  agent: ExecutorKind,
+  screen: string,
+  expectedText: string
+): { digest: string } | undefined {
+  return agent === "codex"
+    ? exactCodexComposerCapture(screen, expectedText)
+    : exactClaudeComposerCapture(screen, expectedText);
+}
+
+function exactClaudeComposerCapture(
+  screen: string,
+  expectedText: string
+): { digest: string } | undefined {
+  const lines = screen.replace(/\r\n?/gu, "\n").split("\n");
+  const dividerIndexes = lines
+    .map((line, index) => /^\s*[─━]{8,}\s*$/u.test(line) ? index : -1)
+    .filter((index) => index >= 0);
+  if (dividerIndexes.length < 2) {
+    return undefined;
+  }
+  const closeIndex = dividerIndexes.at(-1)!;
+  const openIndex = dividerIndexes.at(-2)!;
+  const trailing = lines.slice(closeIndex + 1)
+    .filter((line) => line.trim().length > 0);
+  if (
+    trailing.length > 2 ||
+    trailing.some((line) =>
+      !/^\s*(?:[⏵⏴]{1,2}|\?)\s*.*(?:shift\+tab|accept edits|bypass permissions|for shortcuts|← for agents)/iu
+        .test(line)
+    )
+  ) {
+    return undefined;
+  }
+  const region = lines.slice(openIndex + 1, closeIndex);
+  while (region.length > 1 && region.at(-1)?.trim() === "") {
+    region.pop();
+  }
+  if (region.length === 0 || !/^\s*❯(?:\s|$)/u.test(region[0])) {
+    return undefined;
+  }
+  const body = [
+    region[0].replace(/^\s*❯\s?/u, ""),
+    ...region.slice(1).map((line) =>
+      line.startsWith("  ") ? line.slice(2) : line
+    )
+  ].join("\n");
+  if (composerComparableText(body) !== composerComparableText(expectedText)) {
+    return undefined;
+  }
+  return {
+    digest: createHash("sha256")
+      .update(lines.slice(openIndex, closeIndex + 1).join("\n"))
+      .digest("hex")
+  };
+}
+
+function composerComparableText(value: string): string {
+  return value.replace(/\r\n?/gu, "\n");
+}
+
+async function terminalSettleDelay(milliseconds: number): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function sameTerminalControlIdentity(

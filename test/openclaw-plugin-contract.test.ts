@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
@@ -442,6 +443,7 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
   const statePath = path.join(tempDir, "state.json");
   const eventLogPath = path.join(tempDir, "events.ndjson");
   let sendTool: ToolDefinition | undefined;
+  let sendToolFactory: ToolFactory | undefined;
   let respondTool: ToolDefinition | undefined;
   let reconciliationService: { start?(): void } | undefined;
 
@@ -494,10 +496,14 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
         options?: { name?: string }
       ) {
         const definition = typeof tool === "function"
-          ? tool({ sessionKey: "agent:test:main" } as never)
+          ? tool({
+              sessionKey: "agent:test:main",
+              sessionId: "openclaw-conversation-a"
+            } as never)
           : tool;
         if (options?.name === "agent_knock_knock_send") {
           sendTool = definition;
+          sendToolFactory = typeof tool === "function" ? tool : undefined;
         }
         if (options?.name === "agent_knock_knock_respond") {
           respondTool = definition;
@@ -580,6 +586,9 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
     assert.equal(result?.details?.event_log_path, eventLogPath);
     assert.equal(result?.details?.session_id, "session-1");
     assert.equal(result?.details?.turn_id, "turn-1");
+    await sendTool?.execute?.("tool-call-1", {
+      request: "Verify the send output contract"
+    });
     await sendTool?.execute?.("tool-call-2", {
       session_id: "session-1",
       request: "Start a distinct turn"
@@ -595,8 +604,30 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
     });
     assert.equal(respondResult?.details?.session_id, "session-1");
     assert.equal(respondResult?.details?.turn_id, "turn-1");
+    await respondTool?.execute?.("tool-call-4", {
+      turn_id: "turn-1",
+      request: "Use the safer implementation"
+    });
     assert.equal(typeof reconciliationService?.start, "function");
     reconciliationService?.start?.();
+    const otherSessionSend = sendToolFactory?.({
+      sessionKey: "agent:test:other",
+      sessionId: "openclaw-conversation-a"
+    } as never);
+    await otherSessionSend?.execute?.("tool-call-1", {
+      request: "Verify the send output contract"
+    });
+    await respondTool?.execute?.("tool-call-1", {
+      turn_id: "turn-1",
+      request: "Keep send and respond idempotency domains separate"
+    });
+    const nextConversationSend = sendToolFactory?.({
+      sessionKey: "agent:test:main",
+      sessionId: "openclaw-conversation-b"
+    } as never);
+    await nextConversationSend?.execute?.("tool-call-1", {
+      request: "Verify a reset OpenClaw conversation is isolated"
+    });
     const calls = fs.readFileSync(callsPath, "utf8")
       .trim()
       .split("\n")
@@ -604,30 +635,103 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
     assert.equal(calls[0]?.[0], "delegate");
     assert.equal(calls[0]?.includes("--agent"), false);
     assert.equal(calls[0]?.includes("--workspace"), false);
-    assert.deepEqual(calls[1]?.slice(0, 5), [
+    const expectedToolCall1MessageId =
+      `msg-openclaw-${createHash("sha256").update(JSON.stringify([
+        "agent:test:main",
+        "openclaw-conversation-a",
+        "agent_knock_knock_send",
+        "tool-call-1"
+      ])).digest("hex")}`;
+    const optionValue = (args: string[], name: string): string | undefined => {
+      const index = args.indexOf(name);
+      return index >= 0 ? args[index + 1] : undefined;
+    };
+    assert.equal(
+      optionValue(calls[0] ?? [], "--message-id"),
+      expectedToolCall1MessageId
+    );
+    assert.equal(
+      optionValue(calls[1] ?? [], "--message-id"),
+      expectedToolCall1MessageId,
+      "the same OpenClaw tool call must reuse one redacted idempotency key"
+    );
+    assert.deepEqual(calls[2]?.slice(0, 5), [
       "send",
       "--session",
       "session-1",
       "--message",
       "Start a distinct turn"
     ]);
-    assert.equal(calls[1]?.includes("--workspace"), false);
-    assert.deepEqual(calls[2]?.slice(0, 5), [
+    assert.equal(calls[2]?.includes("--workspace"), false);
+    assert.equal(
+      optionValue(calls[2] ?? [], "--message-id"),
+      `msg-openclaw-${createHash("sha256").update(JSON.stringify([
+        "agent:test:main",
+        "openclaw-conversation-a",
+        "agent_knock_knock_send",
+        "tool-call-2"
+      ])).digest("hex")}`
+    );
+    assert.deepEqual(calls[3]?.slice(0, 5), [
       "send",
       "--conversation",
       "@a1b2c3d4",
       "--message",
       "Discover the initial terminal"
     ]);
-    assert.deepEqual(calls[3]?.slice(0, 5), [
+    assert.equal(
+      optionValue(calls[3] ?? [], "--message-id"),
+      `msg-openclaw-${createHash("sha256").update(JSON.stringify([
+        "agent:test:main",
+        "openclaw-conversation-a",
+        "agent_knock_knock_send",
+        "tool-call-3"
+      ])).digest("hex")}`
+    );
+    assert.deepEqual(calls[4]?.slice(0, 5), [
       "respond",
       "--turn",
       "turn-1",
       "--message",
       "Use the safer implementation"
     ]);
-    assert.equal(calls[4]?.[0], "reconcile-monitors");
-    assert.equal(calls[4]?.includes("--workspace"), false);
+    const expectedRespondMessageId =
+      `msg-openclaw-${createHash("sha256").update(JSON.stringify([
+        "agent:test:main",
+        "openclaw-conversation-a",
+        "agent_knock_knock_respond",
+        "tool-call-4"
+      ])).digest("hex")}`;
+    assert.equal(
+      optionValue(calls[4] ?? [], "--message-id"),
+      expectedRespondMessageId
+    );
+    assert.equal(
+      optionValue(calls[5] ?? [], "--message-id"),
+      expectedRespondMessageId,
+      "the same OpenClaw respond call must reuse one redacted idempotency key"
+    );
+    assert.equal(
+      optionValue(calls[4] ?? [], "--openclaw-session"),
+      "agent:test:main"
+    );
+    assert.equal(calls[6]?.[0], "reconcile-monitors");
+    assert.equal(calls[6]?.includes("--workspace"), false);
+    assert.notEqual(
+      optionValue(calls[7] ?? [], "--message-id"),
+      expectedToolCall1MessageId,
+      "the same tool call id in another OpenClaw Session must be isolated"
+    );
+    assert.notEqual(
+      optionValue(calls[8] ?? [], "--message-id"),
+      expectedToolCall1MessageId,
+      "send and respond must have separate idempotency domains"
+    );
+    assert.notEqual(
+      optionValue(calls[9] ?? [], "--message-id"),
+      expectedToolCall1MessageId,
+      "a new OpenClaw conversation incarnation must not replay an old receipt"
+    );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -1217,6 +1321,100 @@ test("OpenClaw surfaces delivered-but-unfenced sends as errors that must not be 
     assert.equal(toolResponse?.isError, true);
     assert.equal(toolResponse?.details?.status, "submission_unfenced");
     assert.equal(toolResponse?.details?.do_not_retry, true);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("OpenClaw preserves safe and unsafe aborted submission retry boundaries", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-plugin-aborted-"));
+  const fakeCli = path.join(tempDir, "aborted.cjs");
+  const modePath = path.join(tempDir, "mode.txt");
+  let command:
+    | { handler?: (context: { args: string; sessionKey: string }) => Promise<any> }
+    | undefined;
+  let sendTool: ToolDefinition | undefined;
+
+  try {
+    fs.writeFileSync(
+      fakeCli,
+      [
+        `const fs = require("node:fs");`,
+        `const safe = fs.readFileSync(${JSON.stringify(modePath)}, "utf8").trim() === "safe";`,
+        `process.stdout.write(JSON.stringify({`,
+        `  conversation_id: "turn-aborted",`,
+        `  session_id: "session-aborted",`,
+        `  turn_id: "turn-aborted",`,
+        `  status: "submission_aborted",`,
+        `  submission_outcome: "aborted",`,
+        `  delivered: false,`,
+        `  safe_to_retry: safe,`,
+        `  do_not_retry: !safe,`,
+        `  reason: safe ? "durable safe abort" : "aborted receipt was not durable",`,
+        `  conversation: {`,
+        `    conversation_id: "turn-aborted",`,
+        `    session_id: "session-aborted",`,
+        `    turn_id: "turn-aborted",`,
+        `    status: "idle",`,
+        `    executor: { kind: "codex", session: "native-aborted" }`,
+        `  }`,
+        `}));`
+      ].join("\n"),
+      "utf8"
+    );
+    (
+      createOpenClawPluginForTest(fakeCli) as unknown as {
+        register(api: Record<string, any>): void;
+      }
+    ).register({
+      pluginConfig: {},
+      logger: { info() {}, warn() {} },
+      registerGatewayMethod() {},
+      registerService() {},
+      registerTool(
+        tool: ToolDefinition | ToolFactory,
+        options?: { name?: string }
+      ) {
+        if (options?.name === "agent_knock_knock_send") {
+          sendTool = typeof tool === "function"
+            ? tool({ sessionKey: "agent:test:aborted" } as never)
+            : tool;
+        }
+      },
+      registerCommand(value: typeof command) {
+        command = value;
+      }
+    });
+
+    for (const safe of [true, false]) {
+      fs.writeFileSync(modePath, safe ? "safe" : "unsafe", "utf8");
+      const slashResult = await command?.handler?.({
+        args: "Inspect the repository",
+        sessionKey: "agent:test:aborted"
+      });
+      assert.equal(slashResult?.isError, true);
+      if (safe) {
+        assert.match(slashResult?.text ?? "", /may be retried/u);
+        assert.doesNotMatch(slashResult?.text ?? "", /do not retry/u);
+      } else {
+        assert.match(slashResult?.text ?? "", /do not retry/u);
+        assert.match(slashResult?.text ?? "", /inspect/u);
+        assert.doesNotMatch(slashResult?.text ?? "", /may be retried/u);
+      }
+
+      const toolResult = await sendTool?.execute?.(
+        safe ? "safe-abort" : "unsafe-abort",
+        { request: "Inspect the repository" }
+      );
+      assert.equal(toolResult?.isError, true);
+      assert.equal(toolResult?.details?.submission_outcome, "aborted");
+      assert.equal(toolResult?.details?.safe_to_retry, safe);
+      assert.equal(toolResult?.details?.do_not_retry, !safe);
+      assert.match(
+        String(toolResult?.details?.note ?? ""),
+        safe ? /may be retried/u : /do not retry/iu
+      );
+    }
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

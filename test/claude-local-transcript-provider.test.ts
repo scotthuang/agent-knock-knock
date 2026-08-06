@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   captureClaudeTranscriptAnchor,
+  detectClaudeTranscriptAcceptance,
   detectClaudeTranscriptCompletion,
   detectClaudeTranscriptPendingApproval,
   listClaudeHistoricalSessions,
@@ -564,6 +565,228 @@ test("detects a hookless Claude turn when the transcript is created after send",
     JSON.stringify(completion),
     /\/projects\/|\.jsonl|Implement the focused/u
   );
+});
+
+test("proves Claude native acceptance from one anchored user row regardless of idle status", (t) => {
+  const fixture = createFixture(t);
+  const anchor = fixture.capture();
+  const request = "请精确接收第一行  两个空格\nThen keep\tthe tab on line two.";
+  const prompt = userRecord({
+    uuid: uuid(1600),
+    request,
+    timestamp: PROMPT_AT,
+    parentUuid: null
+  });
+  fixture.agentRows[0] = { ...fixture.agentRows[0], status: "working" };
+  fixture.write([prompt]);
+
+  const evidence = fixture.detectAcceptance(anchor, request);
+  assert.ok(evidence);
+  const stat = fs.statSync(fixture.transcriptPath);
+  const requestSha256 = fingerprint(request);
+  const transcriptFileId = sha256(
+    `${fixture.sessionId}\0${stat.dev}:${stat.ino}`
+  ).slice(0, 24);
+  const evidenceBase = {
+    source: "claude_transcript",
+    kind: "native_user_turn",
+    nativeThreadId: fixture.sessionId,
+    requestHash: requestSha256,
+    acceptanceId: uuid(1600),
+    acceptedAt: PROMPT_AT,
+    anchorFingerprint: fingerprintClaudeAnchor(anchor),
+    metadata: {
+      prompt_uuid: uuid(1600),
+      claude_version: VERSION,
+      transcript_file_id: transcriptFileId,
+      anchor_offset_bytes: 0,
+      observed_end_offset_bytes: stat.size,
+      agent_started_at_ms: AGENT_STARTED_AT_MS
+    }
+  } as const;
+  assert.deepEqual(evidence, {
+    ...evidenceBase,
+    evidenceFingerprint: sha256(JSON.stringify(evidenceBase))
+  });
+
+  fixture.agentRows[0] = { ...fixture.agentRows[0], status: "idle" };
+  assert.deepEqual(fixture.detectAcceptance(anchor, request), evidence);
+  const serialized = JSON.stringify(evidence);
+  assert.equal(serialized.includes(request), false);
+  assert.equal(evidence.requestHash, sha256(request));
+  assert.notEqual(
+    evidence.requestHash,
+    sha256(request.replace(/\s+/gu, " ").trim()),
+    "multiline and consecutive whitespace must not be collapsed before hashing"
+  );
+  assert.equal(serialized.includes(fixture.workspace), false);
+  assert.doesNotMatch(serialized, /\.jsonl|\/projects\//u);
+});
+
+test("Claude acceptance ignores pre-anchor prompts and waits for a complete matching row", (t) => {
+  const fixture = createFixture(t);
+  const request = "Repeat this accepted request";
+  fixture.write([userRecord({
+    uuid: uuid(1700),
+    request,
+    timestamp: "2026-07-24T01:59:58.000Z",
+    parentUuid: null
+  })]);
+  const anchor = fixture.capture();
+  assert.ok(anchor.offset_bytes > 0);
+  assert.equal(fixture.detectAcceptance(anchor, request), undefined);
+
+  fixture.append([{ type: "mode", mode: "default" }]);
+  assert.equal(fixture.detectAcceptance(anchor, request), undefined);
+
+  const promptLine = JSON.stringify(fixture.normalizeRecords([userRecord({
+    uuid: uuid(1701),
+    request,
+    timestamp: PROMPT_AT,
+    parentUuid: uuid(1700)
+  })])[0]);
+  fixture.appendRaw(promptLine.slice(0, -1));
+  assert.equal(fixture.detectAcceptance(anchor, request), undefined);
+  fixture.appendRaw(`${promptLine.slice(-1)}\n`);
+  assert.equal(
+    fixture.detectAcceptance(anchor, request)?.acceptanceId,
+    uuid(1701)
+  );
+});
+
+test("Claude acceptance uses the byte anchor across prompt clock skew", (t) => {
+  const fixture = createFixture(t);
+  const anchor = fixture.capture();
+  const request = "Accept despite native clock skew";
+  fixture.write([userRecord({
+    uuid: uuid(1800),
+    request,
+    timestamp: "2026-07-24T01:59:59.000Z",
+    parentUuid: null
+  })]);
+
+  assert.equal(
+    fixture.detectAcceptance(anchor, request)?.acceptanceId,
+    uuid(1800)
+  );
+});
+
+test("Claude acceptance fails closed on duplicate prompts, identity drift, and rotation", (t) => {
+  const duplicate = createFixture(t);
+  const duplicateAnchor = duplicate.capture();
+  duplicate.write([
+    userRecord({
+      uuid: uuid(1900),
+      request: "Ambiguous acceptance",
+      timestamp: PROMPT_AT,
+      parentUuid: null
+    }),
+    userRecord({
+      uuid: uuid(1901),
+      request: "Ambiguous acceptance",
+      timestamp: "2026-07-24T02:00:00.300Z",
+      parentUuid: uuid(1900)
+    })
+  ]);
+  assert.throws(
+    () => duplicate.detectAcceptance(duplicateAnchor, "Ambiguous acceptance"),
+    /multiple Claude transcript prompts/u
+  );
+
+  const drifted = createFixture(t, 2);
+  const driftedAnchor = drifted.capture();
+  drifted.write([userRecord({
+    uuid: uuid(1910),
+    request: "Reject identity drift",
+    timestamp: PROMPT_AT,
+    parentUuid: null,
+    sessionId: drifted.sessionId
+  })]);
+  drifted.agentRows[0] = {
+    ...drifted.agentRows[0],
+    startedAt: AGENT_STARTED_AT_MS + 1
+  };
+  assert.throws(
+    () => drifted.detectAcceptance(driftedAnchor, "Reject identity drift"),
+    /session identity changed/u
+  );
+
+  const rotated = createFixture(t, 3);
+  rotated.write([{ type: "mode", sessionId: rotated.sessionId }]);
+  const rotatedAnchor = rotated.capture();
+  fs.renameSync(rotated.transcriptPath, `${rotated.transcriptPath}.old`);
+  rotated.write([userRecord({
+    uuid: uuid(1920),
+    request: "Reject transcript rotation",
+    timestamp: PROMPT_AT,
+    parentUuid: null,
+    sessionId: rotated.sessionId
+  })]);
+  assert.throws(
+    () => rotated.detectAcceptance(rotatedAnchor, "Reject transcript rotation"),
+    /replaced or rotated/u
+  );
+});
+
+test("Claude acceptance rejects malformed persisted anchor invariants", (t) => {
+  const fresh = createFixture(t);
+  const freshAnchor = fresh.capture();
+  assert.equal(freshAnchor.file_existed, false);
+  assert.throws(
+    () => fresh.detectAcceptance({
+      ...freshAnchor,
+      captured_at: "not-a-timestamp"
+    }, "Reject malformed capture time"),
+    /transcript anchor is invalid/u
+  );
+  assert.throws(
+    () => fresh.detectAcceptance({
+      ...freshAnchor,
+      offset_bytes: 1,
+      device: "1",
+      inode: "2"
+    }, "Reject a forged absent-file boundary"),
+    /transcript anchor is invalid/u
+  );
+
+  const existing = createFixture(t, 2);
+  existing.write([{ type: "mode", mode: "default" }]);
+  const existingAnchor = existing.capture();
+  assert.equal(existingAnchor.file_existed, true);
+  assert.throws(
+    () => existing.detectAcceptance({
+      ...existingAnchor,
+      device: undefined
+    }, "Reject missing file identity"),
+    /transcript anchor is invalid/u
+  );
+  assert.throws(
+    () => existing.detectAcceptance({
+      ...existingAnchor,
+      inode: "not-numeric"
+    }, "Reject malformed file identity"),
+    /transcript anchor is invalid/u
+  );
+});
+
+test("Claude anchor capture rejects a transcript append during boundary capture", (t) => {
+  const fixture = createFixture(t);
+  fixture.write([{ type: "mode", mode: "default" }]);
+  const originalFstatSync = fs.fstatSync.bind(fs);
+  let fstatCalls = 0;
+  t.mock.method(fs, "fstatSync", (fd: number) => {
+    fstatCalls += 1;
+    if (fstatCalls === 2) {
+      fixture.append([{ type: "mode", mode: "acceptance-race" }]);
+    }
+    return originalFstatSync(fd);
+  });
+
+  assert.throws(
+    () => fixture.capture(),
+    /changed while its terminal submission anchor was captured/u
+  );
+  assert.equal(fstatCalls, 2);
 });
 
 test("accepts verified and forward-compatible Claude transcript versions", (t) => {
@@ -1300,6 +1523,24 @@ function createFixture(
       claudeHome,
       agentRows
     });
+  const detectAcceptance = (anchor: ClaudeTranscriptAnchor, request: string) =>
+    detectClaudeTranscriptAcceptance({
+      sessionId,
+      cwd: workspace,
+      requestText: request,
+      requestHash: fingerprint(request),
+      startedAt: STARTED_AT,
+      context: {
+        pid: PID,
+        sessionId,
+        nativeTakeover: {
+          claude_transcript_anchor: anchor
+        }
+      }
+    }, {
+      claudeHome,
+      agentRows
+    });
   const detectPending = (anchor: ClaudeTranscriptAnchor, request: string) =>
     detectClaudeTranscriptPendingApproval({
       sessionId,
@@ -1334,6 +1575,7 @@ function createFixture(
     appendRaw,
     normalizeRecords,
     detect,
+    detectAcceptance,
     detectPending
   };
 }
@@ -1617,9 +1859,24 @@ function uuid(value: number): string {
 }
 
 function fingerprint(value: string): string {
-  return createHash("sha256")
-    .update(value.replace(/\s+/gu, " ").trim())
-    .digest("hex");
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function fingerprintClaudeAnchor(anchor: ClaudeTranscriptAnchor): string {
+  return sha256(JSON.stringify({
+    schema: "agent-knock-knock/claude-transcript-acceptance-anchor",
+    version: 1,
+    session_id: anchor.session_id,
+    cwd: anchor.cwd,
+    pid: anchor.pid,
+    agent_started_at_ms: anchor.agent_started_at_ms,
+    captured_at: anchor.captured_at,
+    relative_path: anchor.relative_path,
+    offset_bytes: anchor.offset_bytes,
+    file_existed: anchor.file_existed,
+    device: anchor.device ?? null,
+    inode: anchor.inode ?? null
+  }));
 }
 
 function sha256(value: string): string {

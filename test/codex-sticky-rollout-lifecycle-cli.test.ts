@@ -177,7 +177,9 @@ test("Codex new-thread does not attach a sticky before-thread rollout to the new
     const environment = {
       ...process.env,
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
-      AKK_RUNTIME_DIR: runtimeDir
+      AKK_RUNTIME_DIR: runtimeDir,
+      AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "1",
+      AKK_TEST_TERMINAL_ACCEPTANCE_OUTCOME: "accepted"
     };
     const rolloutRealPath = fs.realpathSync(beforeRolloutPath);
     const rolloutStat = fs.statSync(rolloutRealPath);
