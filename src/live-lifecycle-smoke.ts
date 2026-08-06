@@ -216,9 +216,21 @@ interface TerminalAction {
   sessionId?: string;
 }
 
+type InternalTerminalEvidence = Omit<
+  LifecycleTerminalEvidence,
+  "native_thread_id"
+>;
+
 interface InternalTerminalSnapshot {
   agent: LifecycleSmokeAgent;
-  evidence: LifecycleTerminalEvidence;
+  evidence: InternalTerminalEvidence;
+  /**
+   * A virgin Codex 0.146.1 process may have no open rollout descriptor, so
+   * the unmanaged preflight list row cannot name its native thread yet. The
+   * committed New transition must materialize this from its fresh /status
+   * probe before any public evidence is emitted.
+   */
+  nativeThreadId: string | null;
   target: string;
   panePid: number;
   managementState: string;
@@ -349,12 +361,15 @@ export async function runLifecycleScenario(
         start: selectTerminalSnapshot(initialList, config, {
           requireNewThread: true,
           requireListResumable: true,
-          requireSend: false
+          requireSend: false,
+          allowUnmanagedCodexNativeProbe: true
         })
       };
     });
     const { timeouts, start } = prepared;
-    partial.start = start.evidence;
+    if (start.nativeThreadId) {
+      partial.start = terminalEvidence(start, "preflight_native_identity");
+    }
 
     const newPhase = await runStep("new_thread", "mutation", async () => {
       const action = start.newThreadAction;
@@ -377,6 +392,17 @@ export async function runLifecycleScenario(
       if (transition.terminal_id !== start.evidence.terminal_id) {
         abort("new_thread_invalid");
       }
+      const startEvidence = terminalEvidence(
+        start,
+        "new_thread_invalid",
+        transition.previous_native_thread_id
+      );
+      if (
+        start.nativeThreadId !== null &&
+        transition.previous_native_thread_id !== start.nativeThreadId
+      ) {
+        abort("new_thread_invalid");
+      }
       const listed = await invoke(
         dependencies.client,
         "list",
@@ -386,42 +412,53 @@ export async function runLifecycleScenario(
       const snapshot = selectTerminalSnapshot(listed, config, {
         requireNewThread: false,
         requireListResumable: true,
-        requireSend: true
+        requireSend: true,
+        allowUnmanagedCodexNativeProbe: false
       });
       assertSameTerminalIncarnation(start, snapshot);
+      const snapshotEvidence = terminalEvidence(
+        snapshot,
+        "new_thread_invalid"
+      );
       if (
-        snapshot.evidence.native_thread_id === start.evidence.native_thread_id ||
+        snapshotEvidence.native_thread_id === startEvidence.native_thread_id ||
         transition.previous_native_thread_id !==
-          start.evidence.native_thread_id ||
-        transition.native_thread_id !== snapshot.evidence.native_thread_id ||
-        transition.session_id !== snapshot.evidence.session_id ||
-        transition.previous_session_id !== start.evidence.session_id ||
+          startEvidence.native_thread_id ||
+        transition.native_thread_id !== snapshotEvidence.native_thread_id ||
+        transition.session_id !== snapshotEvidence.session_id ||
+        transition.previous_session_id !== startEvidence.session_id ||
         transition.session_id === transition.previous_session_id ||
-        transition.binding_id !== snapshot.evidence.binding_id ||
+        transition.binding_id !== snapshotEvidence.binding_id ||
         transition.binding_generation !==
-          snapshot.evidence.binding_generation ||
-        snapshot.evidence.binding_generation !== 1 ||
+          snapshotEvidence.binding_generation ||
+        snapshotEvidence.binding_generation !== 1 ||
         transition.turn_created !== false ||
-        snapshot.evidence.turn_count !== 0 ||
-        snapshot.sendAction?.sessionId !== snapshot.evidence.session_id ||
-        snapshot.evidence.binding_fence === start.evidence.binding_fence ||
-        snapshot.evidence.binding_id ===
-          (start.evidence.binding_id ?? start.evidence.binding_fence)
+        snapshotEvidence.turn_count !== 0 ||
+        snapshot.sendAction?.sessionId !== snapshotEvidence.session_id ||
+        snapshotEvidence.binding_fence === startEvidence.binding_fence ||
+        snapshotEvidence.binding_id ===
+          (startEvidence.binding_id ?? startEvidence.binding_fence)
       ) {
         abort("new_thread_invalid");
       }
       if (
-        start.evidence.binding_id &&
-        snapshot.evidence.binding_id === start.evidence.binding_id
+        startEvidence.binding_id &&
+        snapshotEvidence.binding_id === startEvidence.binding_id
       ) {
         abort("new_thread_invalid");
       }
-      return { transition, snapshot };
+      return { transition, snapshot, startEvidence, snapshotEvidence };
     });
     const newThread = newPhase.transition;
     const afterNew = newPhase.snapshot;
+    const startEvidence = newPhase.startEvidence;
+    const afterNewEvidence = newPhase.snapshotEvidence;
+    // For a Codex unmanaged origin without an open rollout descriptor, the
+    // fully verified New step proves A under the lifecycle locks with a fresh
+    // /status card. Only now expose that exact identity as public evidence.
+    partial.start = startEvidence;
     partial.newThread = newThread;
-    partial.activeAfterNew = afterNew.evidence;
+    partial.activeAfterNew = afterNewEvidence;
 
     const sent = await runStep("send", "mutation", async () => {
       const sessionId = afterNew.sendAction?.sessionId;
@@ -486,17 +523,22 @@ export async function runLifecycleScenario(
       const snapshot = selectTerminalSnapshot(listed, config, {
         requireNewThread: false,
         requireListResumable: true,
-        requireSend: true
+        requireSend: true,
+        allowUnmanagedCodexNativeProbe: false
       });
       assertSameTerminalIncarnation(afterNew, snapshot);
+      const snapshotEvidence = terminalEvidence(
+        snapshot,
+        "turn_verification_failed"
+      );
       if (
-        snapshot.evidence.session_id !== afterNew.evidence.session_id ||
-        snapshot.evidence.native_thread_id !==
-          afterNew.evidence.native_thread_id ||
-        snapshot.evidence.binding_id !== afterNew.evidence.binding_id ||
-        snapshot.evidence.binding_generation !==
-          afterNew.evidence.binding_generation ||
-        snapshot.evidence.turn_count !== afterNew.evidence.turn_count + 1 ||
+        snapshotEvidence.session_id !== afterNewEvidence.session_id ||
+        snapshotEvidence.native_thread_id !==
+          afterNewEvidence.native_thread_id ||
+        snapshotEvidence.binding_id !== afterNewEvidence.binding_id ||
+        snapshotEvidence.binding_generation !==
+          afterNewEvidence.binding_generation ||
+        snapshotEvidence.turn_count !== afterNewEvidence.turn_count + 1 ||
         !snapshot.recentTurn ||
         stringValue(snapshot.recentTurn.conversation_id) !== sent.turnId ||
         stringValue(snapshot.recentTurn.status) !== "idle"
@@ -507,8 +549,8 @@ export async function runLifecycleScenario(
         session_id: sent.sessionId,
         turn_id: sent.turnId,
         status: monitored.status,
-        turn_count_before: afterNew.evidence.turn_count,
-        turn_count_after: snapshot.evidence.turn_count
+        turn_count_before: afterNewEvidence.turn_count,
+        turn_count_after: snapshotEvidence.turn_count
       };
       const action = snapshot.listResumableAction;
       if (!action) {
@@ -523,13 +565,14 @@ export async function runLifecycleScenario(
       const candidate = parseResumeCandidate(
         output,
         snapshot,
-        start.evidence.native_thread_id,
-        start.evidence.session_id
+        startEvidence.native_thread_id,
+        startEvidence.session_id
       );
-      return { snapshot, candidate };
+      return { snapshot, snapshotEvidence, candidate };
       }
     );
     const afterTurn = resumable.snapshot;
+    const afterTurnEvidence = resumable.snapshotEvidence;
     const candidate = resumable.candidate;
     partial.resumeCandidate = candidate.evidence;
 
@@ -568,52 +611,57 @@ export async function runLifecycleScenario(
       const snapshot = selectTerminalSnapshot(listed, config, {
         requireNewThread: true,
         requireListResumable: true,
-        requireSend: true
+        requireSend: true,
+        allowUnmanagedCodexNativeProbe: false
       });
       assertSameTerminalIncarnation(start, snapshot);
+      const snapshotEvidence = terminalEvidence(
+        snapshot,
+        "restore_verification_failed"
+      );
       if (
-        snapshot.evidence.native_thread_id !== start.evidence.native_thread_id ||
-        resumed.previous_session_id !== afterTurn.evidence.session_id ||
+        snapshotEvidence.native_thread_id !== startEvidence.native_thread_id ||
+        resumed.previous_session_id !== afterTurnEvidence.session_id ||
         resumed.previous_native_thread_id !==
-          afterTurn.evidence.native_thread_id ||
-        resumed.native_thread_id !== start.evidence.native_thread_id ||
-        resumed.session_id !== snapshot.evidence.session_id ||
-        resumed.session_id === afterTurn.evidence.session_id ||
-        resumed.binding_id !== snapshot.evidence.binding_id ||
-        resumed.binding_generation !== snapshot.evidence.binding_generation ||
+          afterTurnEvidence.native_thread_id ||
+        resumed.native_thread_id !== startEvidence.native_thread_id ||
+        resumed.session_id !== snapshotEvidence.session_id ||
+        resumed.session_id === afterTurnEvidence.session_id ||
+        resumed.binding_id !== snapshotEvidence.binding_id ||
+        resumed.binding_generation !== snapshotEvidence.binding_generation ||
         resumed.transition_id === newThread.transition_id ||
         resumed.turn_created !== false ||
-        snapshot.evidence.binding_id === afterTurn.evidence.binding_id ||
-        snapshot.evidence.binding_id ===
-          (start.evidence.binding_id ?? start.evidence.binding_fence) ||
-        snapshot.evidence.binding_fence === afterTurn.evidence.binding_fence ||
-        snapshot.evidence.turn_count !== start.evidence.turn_count
+        snapshotEvidence.binding_id === afterTurnEvidence.binding_id ||
+        snapshotEvidence.binding_id ===
+          (startEvidence.binding_id ?? startEvidence.binding_fence) ||
+        snapshotEvidence.binding_fence === afterTurnEvidence.binding_fence ||
+        snapshotEvidence.turn_count !== startEvidence.turn_count
       ) {
         abort("restore_verification_failed");
       }
-      if (start.evidence.session_id) {
+      if (startEvidence.session_id) {
         if (
-          start.evidence.binding_generation === null ||
-          newThread.previous_session_id !== start.evidence.session_id ||
-          candidate.managedSessionId !== start.evidence.session_id ||
-          resumed.session_id !== start.evidence.session_id ||
-          snapshot.evidence.session_id !== start.evidence.session_id ||
-          snapshot.evidence.binding_generation !==
-            start.evidence.binding_generation + 1
+          startEvidence.binding_generation === null ||
+          newThread.previous_session_id !== startEvidence.session_id ||
+          candidate.managedSessionId !== startEvidence.session_id ||
+          resumed.session_id !== startEvidence.session_id ||
+          snapshotEvidence.session_id !== startEvidence.session_id ||
+          snapshotEvidence.binding_generation !==
+            startEvidence.binding_generation + 1
         ) {
           abort("restore_verification_failed");
         }
       } else if (
-        start.evidence.binding_generation !== null ||
+        startEvidence.binding_generation !== null ||
         newThread.previous_session_id !== null ||
         candidate.managedSessionId !== undefined ||
-        snapshot.evidence.binding_generation !== 1
+        snapshotEvidence.binding_generation !== 1
       ) {
         abort("restore_verification_failed");
       }
-      return snapshot;
+      return snapshotEvidence;
     });
-    partial.final = final.evidence;
+    partial.final = final;
     return result("passed");
   } catch (error) {
     if (error instanceof ScenarioStopped) {
@@ -742,6 +790,7 @@ function selectTerminalSnapshot(
     requireNewThread: boolean;
     requireListResumable: boolean;
     requireSend: boolean;
+    allowUnmanagedCodexNativeProbe: boolean;
   }
 ): InternalTerminalSnapshot {
   const root = recordValue(value, "preflight_terminal_match");
@@ -823,10 +872,13 @@ function selectTerminalSnapshot(
     row.workspace ?? row.cwd,
     "preflight_workspace"
   );
-  const nativeThreadId = exactNativeThreadId(
-    row.native_agent_session_id,
-    "preflight_native_identity"
-  );
+  const nativeIdentity = row.native_agent_session_id;
+  const nativeThreadId = nativeIdentity === null || nativeIdentity === undefined
+    ? null
+    : exactNativeThreadId(
+        nativeIdentity,
+        "preflight_native_identity"
+      );
   if (row.activity_state !== "idle") {
     abort("preflight_not_idle");
   }
@@ -884,6 +936,9 @@ function selectTerminalSnapshot(
     "preflight_management"
   );
   if (sessionId) {
+    if (nativeThreadId === null) {
+      abort("preflight_native_identity");
+    }
     if (
       managementState !== "managed" ||
       managed.binding_status !== "bound" ||
@@ -905,6 +960,15 @@ function selectTerminalSnapshot(
   } else {
     if (managementState !== "unmanaged") {
       abort("preflight_management");
+    }
+    if (
+      nativeThreadId === null &&
+      !(
+        requirements.allowUnmanagedCodexNativeProbe &&
+        config.agent === "codex"
+      )
+    ) {
+      abort("preflight_native_identity");
     }
     // An unmanaged terminal has a lifecycle fence, but no persisted Session
     // or binding. Reject stale binding material rather than laundering a
@@ -972,7 +1036,6 @@ function selectTerminalSnapshot(
       process_uuid: processUuid,
       process_birth: processBirth,
       workspace,
-      native_thread_id: nativeThreadId,
       session_id: sessionId,
       binding_id: bindingId,
       // An unmanaged pane has a lifecycle fence but no persisted binding yet.
@@ -984,6 +1047,7 @@ function selectTerminalSnapshot(
       agent_version: agentVersion,
       behavior_profile: behaviorProfile
     },
+    nativeThreadId,
     target,
     panePid,
     managementState,
@@ -1201,6 +1265,10 @@ function parseResumeCandidate(
   nativeThreadId: string,
   expectedManagedSessionId: string | null
 ): ResumeCandidateAction {
+  const currentNativeThreadId = exactNativeThreadId(
+    current.nativeThreadId,
+    "candidate_invalid"
+  );
   const record = recordValue(value, "candidate_invalid");
   if (
     record.terminal_id !== current.evidence.terminal_id ||
@@ -1211,7 +1279,7 @@ function parseResumeCandidate(
   if (
     record.workspace !== current.evidence.workspace ||
     record.current_session_id !== current.evidence.session_id ||
-    record.current_native_thread_id !== current.evidence.native_thread_id
+    record.current_native_thread_id !== currentNativeThreadId
   ) {
     abort("candidate_invalid");
   }
@@ -1277,6 +1345,28 @@ function parseResumeCandidate(
       active_elsewhere: false,
       fresh_candidate_token_present: true
     }
+  };
+}
+
+function terminalEvidence(
+  snapshot: InternalTerminalSnapshot,
+  errorCode: LifecycleSmokeErrorCode,
+  probedNativeThreadId?: string
+): LifecycleTerminalEvidence {
+  const nativeThreadId = exactNativeThreadId(
+    snapshot.nativeThreadId ?? probedNativeThreadId,
+    errorCode
+  );
+  if (
+    snapshot.nativeThreadId !== null &&
+    probedNativeThreadId !== undefined &&
+    snapshot.nativeThreadId !== probedNativeThreadId
+  ) {
+    abort(errorCode);
+  }
+  return {
+    ...snapshot.evidence,
+    native_thread_id: nativeThreadId
   };
 }
 

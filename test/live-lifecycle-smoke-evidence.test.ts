@@ -43,6 +43,10 @@ test("core matrix conversion creates strict passing full-matrix evidence", () =>
   assert.equal(input.scenarios.codex?.before?.bindingId, null);
   assert.equal(input.scenarios.codex?.before?.bindingGeneration, null);
   assert.equal(input.scenarios.codex?.resumeCandidate?.managedSessionId, null);
+  assert.equal(
+    input.scenarios.codex?.before?.nativeThreadId,
+    matrix.scenarios[0].new_thread?.previous_native_thread_id
+  );
   assert.deepEqual(input.scenarios.codex?.turnDeltas, {
     newThread: 0,
     send: 1,
@@ -70,6 +74,18 @@ test("core matrix conversion creates strict passing full-matrix evidence", () =>
   assert.equal(
     validated.matrix.codex?.resume_candidate?.managed_session_fingerprint,
     null
+  );
+  assert.equal(
+    validated.matrix.codex?.snapshots.before?.native_thread_fingerprint,
+    validated.matrix.codex?.resume_candidate?.native_thread_fingerprint
+  );
+  assert.equal(
+    validated.matrix.codex?.snapshots.before?.native_thread_fingerprint,
+    validated.matrix.codex?.snapshots.after_resume?.native_thread_fingerprint
+  );
+  assert.notEqual(
+    validated.matrix.codex?.snapshots.before?.native_thread_fingerprint,
+    validated.matrix.codex?.snapshots.after_new?.native_thread_fingerprint
   );
   assert.doesNotMatch(JSON.stringify(validated), /fingerprint_salt/u);
   assert.doesNotMatch(
