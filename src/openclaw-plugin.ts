@@ -880,6 +880,18 @@ function executorDisplayName(kind) {
 function formatStatusCommandResult(result) {
   const summary = result.summary ?? result.conversation ?? result ?? {};
   const terminalStatus = isRecord(result.terminal_status) ? result.terminal_status : {};
+  const rawCallbackDelivery = isRecord(result.conversation?.callback_delivery)
+    ? result.conversation.callback_delivery
+    : undefined;
+  const summarizedCallbackDelivery = isRecord(summary.callback_delivery)
+    ? summary.callback_delivery
+    : undefined;
+  const callbackDelivery = rawCallbackDelivery || summarizedCallbackDelivery
+    ? {
+        ...(rawCallbackDelivery ?? {}),
+        ...(summarizedCallbackDelivery ?? {})
+      }
+    : undefined;
   const { sessionId, turnId } = publicTurnIdentity(result);
   const lines = [
     "AKK status:",
@@ -888,6 +900,21 @@ function formatStatusCommandResult(result) {
     `agent: ${summary.agent ?? summary.executor?.kind ?? terminalStatus.agent ?? "unknown"}`,
     `status: ${summary.status ?? terminalStatus.activity_state ?? "unknown"}`
   ];
+  if (callbackDelivery) {
+    const callbackParts = [
+      String(callbackDelivery.status ?? "unknown"),
+      Number.isSafeInteger(Number(callbackDelivery.attempts))
+        ? `attempt ${Number(callbackDelivery.attempts)}`
+        : undefined,
+      callbackDelivery.attempt_state === "in_flight"
+        ? "in flight"
+        : undefined,
+      stringValue(callbackDelivery.next_attempt_at)
+        ? `next retry ${stringValue(callbackDelivery.next_attempt_at)}`
+        : undefined
+    ].filter(Boolean);
+    lines.push(`callback: ${callbackParts.join(", ")}`);
+  }
   if (summary.request) {
     lines.push(`request: ${truncateText(summary.request, 180)}`);
   }

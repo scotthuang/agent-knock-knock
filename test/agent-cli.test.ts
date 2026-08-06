@@ -1180,14 +1180,17 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
     await waitForCondition(
       () => {
         try {
-          return JSON.parse(
+          const state = JSON.parse(
             fs.readFileSync(crashAfterDeliveryStatePath, "utf8")
-          ).status === "idle";
+          );
+          return state.status === "idle" &&
+            state.callback_delivery?.status === "delivered" &&
+            state.callback_delivery?.message?.type === "done";
         } catch {
           return false;
         }
       },
-      "handoff watchdog to replace a monitor that exited after callback delivery",
+      "handoff watchdog to replace a monitor and deliver completion after callback delivery",
       15_000
     );
     assert.equal(
@@ -1334,9 +1337,12 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
     await waitForCondition(
       () => {
         try {
-          return JSON.parse(
+          const state = JSON.parse(
             fs.readFileSync(retryBeforeApprovalStatePath, "utf8")
-          ).status === "idle";
+          );
+          return state.status === "idle" &&
+            state.callback_delivery?.status === "delivered" &&
+            state.callback_delivery?.message?.type === "done";
         } catch {
           return false;
         }
@@ -1448,9 +1454,12 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
     await waitForCondition(
       () => {
         try {
-          return JSON.parse(
+          const state = JSON.parse(
             fs.readFileSync(retryAfterApprovalStatePath, "utf8")
-          ).status === "idle";
+          );
+          return state.status === "idle" &&
+            state.callback_delivery?.status === "delivered" &&
+            state.callback_delivery?.message?.type === "done";
         } catch {
           return false;
         }
@@ -1551,7 +1560,12 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
     assert.equal(consumedTimeoutParsed.stalled, true);
     assert.equal(consumedTimeoutParsed.hard_timeout, true);
   } finally {
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    fs.rmSync(tempDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100
+    });
   }
 });
 
@@ -3771,6 +3785,27 @@ test("ordinary sends create distinct turns in one session and respond stays on i
       ...JSON.parse(fs.readFileSync(firstStatePath, "utf8")),
       status: "idle",
       idle_since: new Date().toISOString(),
+      callback_delivery: {
+        status: "failed",
+        attempts: 1,
+        final_status: "idle",
+        preserve_conversation_status: true,
+        message: {
+          id: "msg-first-turn-callback-failed",
+          ts: new Date().toISOString(),
+          conversation_id: firstParsed.turn_id,
+          session_id: firstParsed.session_id,
+          turn_id: firstParsed.turn_id,
+          from: "codex",
+          to: "openclaw",
+          type: "done",
+          requires_response: false,
+          round: 1,
+          max_rounds: 50,
+          body: "First session turn completed.",
+          metadata: {}
+        }
+      },
       updated_at: new Date().toISOString()
     };
     fs.writeFileSync(firstStatePath, `${JSON.stringify(firstIdle, null, 2)}\n`);
@@ -3854,6 +3889,27 @@ test("ordinary sends create distinct turns in one session and respond stays on i
     const waitingForOpenClaw = {
       ...JSON.parse(fs.readFileSync(secondStatePath, "utf8")),
       status: "waiting_for_openclaw",
+      callback_delivery: {
+        status: "failed",
+        attempts: 1,
+        final_status: "waiting_for_openclaw",
+        preserve_conversation_status: true,
+        message: {
+          id: "msg-second-turn-question-callback-failed",
+          ts: new Date().toISOString(),
+          conversation_id: secondParsed.turn_id,
+          session_id: secondParsed.session_id,
+          turn_id: secondParsed.turn_id,
+          from: "codex",
+          to: "openclaw",
+          type: "question",
+          requires_response: true,
+          round: 2,
+          max_rounds: 50,
+          body: "Which release channel should I use?",
+          metadata: {}
+        }
+      },
       updated_at: new Date().toISOString()
     };
     const secondLegStartedAt =

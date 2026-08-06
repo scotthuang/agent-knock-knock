@@ -179,6 +179,154 @@ test("legacy states gain session and turn ids in memory without rewriting disk",
   }
 });
 
+test("legacy callback statuses normalize in memory without rewriting Store state", () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "akk-store-callback-status-"));
+  const storeDir = path.join(sandbox, "store");
+  const cases = [
+    {
+      conversationId: "turn-legacy-callback-pending",
+      status: "callback_pending",
+      deliveryStatus: "pending",
+      finalStatus: "idle"
+    },
+    {
+      conversationId: "turn-legacy-callback-failed",
+      status: "callback_failed",
+      deliveryStatus: "failed",
+      finalStatus: "waiting_for_openclaw"
+    }
+  ] as const;
+
+  try {
+    const persisted = new Map<string, string>();
+    for (const testCase of cases) {
+      const { conversation, paths } = storedConversation(
+        storeDir,
+        testCase.conversationId
+      );
+      saveState(paths.statePath, conversation);
+      const legacy = {
+        ...conversation,
+        status: testCase.status,
+        callback_delivery: {
+          status: testCase.deliveryStatus,
+          final_status: testCase.finalStatus,
+          created_at: "2026-08-06T04:04:17.650Z",
+          message: {
+            id: `message-${testCase.conversationId}`,
+            type: testCase.finalStatus === "idle" ? "done" : "blocked"
+          }
+        }
+      };
+      const serialized = `${JSON.stringify(legacy, null, 2)}\n`;
+      fs.writeFileSync(paths.statePath, serialized, "utf8");
+      persisted.set(paths.statePath, serialized);
+
+      const first = loadState(paths.statePath);
+      const second = loadState(paths.statePath);
+      assert.equal(first.status, testCase.finalStatus);
+      assert.deepEqual(second, first);
+      assert.equal(first.legacy_callback_status_error, undefined);
+      assert.equal(fs.readFileSync(paths.statePath, "utf8"), serialized);
+
+      const byId = loadConversationById(testCase.conversationId, storeDir);
+      assert.equal(byId.status, testCase.finalStatus);
+      assert.equal(fs.readFileSync(paths.statePath, "utf8"), serialized);
+    }
+
+    const listed = listConversations(storeDir);
+    assert.deepEqual(
+      new Map(listed.map((conversation) => [conversation.conversation_id, conversation.status])),
+      new Map(cases.map((testCase) => [testCase.conversationId, testCase.finalStatus]))
+    );
+    for (const [statePath, serialized] of persisted) {
+      assert.equal(fs.readFileSync(statePath, "utf8"), serialized);
+    }
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("malformed legacy callback phases remain fail-closed and do not poison Store listing", () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "akk-store-callback-status-invalid-"));
+  const storeDir = path.join(sandbox, "store");
+  const cases = [
+    {
+      conversationId: "turn-legacy-callback-missing-final",
+      callbackDelivery: { status: "failed" }
+    },
+    {
+      conversationId: "turn-legacy-callback-invalid-final",
+      callbackDelivery: {
+        status: "failed",
+        final_status: "callback_pending"
+      }
+    },
+    {
+      conversationId: "turn-legacy-callback-invalid-close-shortcut",
+      callbackDelivery: {
+        status: "failed",
+        close_terminal_bridge_on_done: true,
+        message: { id: "message-invalid-close-shortcut", type: "done" }
+      }
+    },
+    {
+      conversationId: "turn-legacy-callback-mismatched-transport",
+      callbackDelivery: {
+        status: "delivered",
+        final_status: "idle",
+        message: { id: "message-mismatched-transport", type: "done" }
+      }
+    }
+  ];
+
+  try {
+    const persisted = new Map<string, string>();
+    for (const testCase of cases) {
+      const { conversation, paths } = storedConversation(
+        storeDir,
+        testCase.conversationId
+      );
+      saveState(paths.statePath, conversation);
+      const legacy = {
+        ...conversation,
+        status: "callback_failed",
+        callback_delivery: testCase.callbackDelivery
+      };
+      const serialized = `${JSON.stringify(legacy, null, 2)}\n`;
+      fs.writeFileSync(paths.statePath, serialized, "utf8");
+      persisted.set(paths.statePath, serialized);
+
+      const first = loadState(paths.statePath);
+      const second = loadState(paths.statePath);
+      assert.equal(first.status, "callback_failed");
+      assert.match(
+        String(first.legacy_callback_status_error),
+        /missing a valid callback_delivery\.final_status Turn phase/u
+      );
+      assert.deepEqual(second, first);
+      assert.equal(fs.readFileSync(paths.statePath, "utf8"), serialized);
+    }
+
+    const listed = listConversations(storeDir);
+    assert.equal(listed.length, cases.length);
+    assert.equal(
+      listed.every((conversation) =>
+        conversation.status === "callback_failed" &&
+        /missing a valid callback_delivery\.final_status Turn phase/u.test(
+          String(conversation.legacy_callback_status_error)
+        )
+      ),
+      true
+    );
+    for (const [statePath, serialized] of persisted) {
+      assert.equal(fs.readFileSync(statePath, "utf8"), serialized);
+    }
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
 test("modern states reject a turn id that differs from the store identity", () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "akk-store-identity-mismatch-"));
   const storeDir = path.join(sandbox, "store");

@@ -916,13 +916,30 @@ test("OpenClaw status includes purpose context and a bounded terminal screen", a
   conversation_id: "managed-terminal-1",
   session_id: "session-status",
   turn_id: "managed-terminal-1",
+  conversation: {
+    conversation_id: "managed-terminal-1",
+    session_id: "session-status",
+    turn_id: "managed-terminal-1",
+    status: "waiting_for_agent",
+    callback_delivery: {
+      status: "pending",
+      attempts: 2,
+      next_attempt_at: "2026-08-06T12:30:00.000Z"
+    }
+  },
   summary: {
     conversation_id: "managed-terminal-1",
     session_id: "session-status",
     turn_id: "managed-terminal-1",
     agent: "codex",
     status: "waiting_for_agent",
-    session: "work:0.0"
+    session: "work:0.0",
+    callback_delivery: {
+      status: "pending",
+      attempts: 2,
+      attempt_state: "in_flight",
+      next_attempt_at: "2026-08-06T12:30:00.000Z"
+    }
   },
   about: "Review the current branch",
   confidence: "high",
@@ -976,6 +993,10 @@ process.stdout.write(JSON.stringify(result));`,
     assert.match(slashResult?.text ?? "", /terminal screen:\nRunning focused tests/u);
     assert.match(slashResult?.text ?? "", /^session: session-status$/mu);
     assert.match(slashResult?.text ?? "", /^turn: managed-terminal-1$/mu);
+    assert.match(
+      slashResult?.text ?? "",
+      /^callback: pending, attempt 2, in flight, next retry 2026-08-06T12:30:00\.000Z$/mu
+    );
     assert.doesNotMatch(slashResult?.text ?? "", /^conversation:/mu);
     assert.doesNotMatch(slashResult?.text ?? "", /work:0\.0/u);
   } finally {

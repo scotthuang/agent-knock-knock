@@ -5,7 +5,9 @@ import {
   budgetAction,
   createConversation,
   createMessage,
+  effectiveTurnStatus,
   extractStructuredMessage,
+  normalizeLegacyCallbackStatus,
   sessionIdForConversation,
   turnIdForConversation,
   validateMessage,
@@ -133,6 +135,138 @@ test("legacy conversations and messages remain readable", () => {
   assert.equal(sessionIdForConversation(legacy), legacy.conversation_id);
   assert.equal(turnIdForConversation(legacy), legacy.conversation_id);
   assert.equal(validateMessageForConversation(legacy, legacyMessage), true);
+});
+
+test("legacy callback transport statuses resolve and normalize to their persisted Turn phase", () => {
+  const updatedAt = "2026-08-06T04:04:17.678Z";
+  const createdAt = "2026-08-06T04:04:17.650Z";
+  const cases = [
+    {
+      legacyStatus: "callback_pending",
+      deliveryStatus: "pending",
+      finalStatus: "idle"
+    },
+    {
+      legacyStatus: "callback_failed",
+      deliveryStatus: "failed",
+      finalStatus: "waiting_for_openclaw"
+    },
+    {
+      legacyStatus: "callback_pending",
+      deliveryStatus: "pending",
+      finalStatus: "waiting_for_agent"
+    },
+    {
+      legacyStatus: "callback_failed",
+      deliveryStatus: "failed",
+      finalStatus: "failed"
+    }
+  ] as const;
+
+  for (const testCase of cases) {
+    const conversation: any = {
+      ...createConversation({ userRequest: `Normalize ${testCase.legacyStatus}` }),
+      status: testCase.legacyStatus,
+      updated_at: updatedAt,
+      idle_since: "2026-08-06T03:00:00.000Z",
+      callback_delivery: {
+        status: testCase.deliveryStatus,
+        final_status: testCase.finalStatus,
+        created_at: createdAt,
+        message: {
+          id: `message-${testCase.legacyStatus}-${testCase.finalStatus}`,
+          type: testCase.finalStatus === "idle" ? "done" : "blocked"
+        }
+      }
+    };
+
+    assert.equal(effectiveTurnStatus(conversation), testCase.finalStatus);
+    const normalized = normalizeLegacyCallbackStatus(conversation);
+    assert.equal(normalized.status, testCase.finalStatus);
+    assert.deepEqual(normalized.callback_delivery, conversation.callback_delivery);
+    if (testCase.finalStatus === "idle") {
+      assert.equal(normalized.idle_since, conversation.idle_since);
+    } else {
+      assert.equal(normalized.idle_since, undefined);
+    }
+  }
+});
+
+test("legacy callback status normalization fails closed without a valid final Turn phase", () => {
+  const invalidFinalStatuses = [
+    undefined,
+    "callback_pending",
+    "callback_failed",
+    "not-a-turn-phase"
+  ];
+
+  for (const finalStatus of invalidFinalStatuses) {
+    const conversation: any = {
+      ...createConversation({ userRequest: "Reject ambiguous legacy phase" }),
+      status: "callback_failed",
+      callback_delivery: {
+        status: "failed",
+        ...(finalStatus === undefined ? {} : { final_status: finalStatus })
+      }
+    };
+    assert.throws(
+      () => effectiveTurnStatus(conversation),
+      /missing a valid callback_delivery\.final_status Turn phase/u
+    );
+    assert.throws(
+      () => normalizeLegacyCallbackStatus(conversation),
+      /missing a valid callback_delivery\.final_status Turn phase/u
+    );
+  }
+
+  const invalidCloseShortcut: any = {
+    ...createConversation({ userRequest: "Reject an ambiguous legacy close" }),
+    status: "callback_failed",
+    callback_delivery: {
+      status: "failed",
+      close_terminal_bridge_on_done: true,
+      final_status: "not-a-turn-phase",
+      message: { id: "message-invalid-close", type: "done" }
+    }
+  };
+  assert.throws(
+    () => effectiveTurnStatus(invalidCloseShortcut),
+    /missing a valid callback_delivery\.final_status Turn phase/u
+  );
+
+  const mismatchedTransport: any = {
+    ...createConversation({ userRequest: "Reject mismatched legacy transport" }),
+    status: "callback_failed",
+    callback_delivery: {
+      status: "delivered",
+      final_status: "idle",
+      message: { id: "message-mismatched-transport", type: "done" }
+    }
+  };
+  assert.throws(
+    () => normalizeLegacyCallbackStatus(mismatchedTransport),
+    /matching transport status/u
+  );
+});
+
+test("legacy callback status normalization is idempotent", () => {
+  const conversation: any = {
+    ...createConversation({ userRequest: "Normalize once" }),
+    status: "callback_pending",
+    callback_delivery: {
+      status: "pending",
+      final_status: "idle",
+      created_at: "2026-08-06T04:04:17.650Z",
+      message: { id: "message-normalize-once", type: "done" }
+    }
+  };
+
+  const normalized = normalizeLegacyCallbackStatus(conversation);
+  const normalizedAgain = normalizeLegacyCallbackStatus(normalized);
+  assert.strictEqual(normalizedAgain, normalized);
+  assert.deepEqual(normalizedAgain, normalized);
+  assert.equal(normalizedAgain.status, "idle");
+  assert.equal(normalizedAgain.idle_since, "2026-08-06T04:04:17.650Z");
 });
 
 test("partially modern conversation identities fail closed", () => {

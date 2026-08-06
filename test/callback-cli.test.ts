@@ -10,12 +10,15 @@ import {
   createMessage,
   type ExecutorKind
 } from "../src/protocol.js";
+import { terminalBindingFrom } from "../src/managed-session.js";
+import { saveManagedSession } from "../src/session-store.js";
 import {
   appendEvent,
   messageEvent,
   pathsForConversation,
   saveState
 } from "../src/store.js";
+import type { TerminalControlRef } from "../src/terminal-agent-adapter.js";
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 
@@ -31,6 +34,8 @@ test("callback records a structured Claude message before delivery", () => {
       "--state",
       statePath,
       "--record-only",
+      "--gateway-method",
+      "must.not.be.delivered",
       "--message-json",
       JSON.stringify({
         from: "claude-code",
@@ -51,6 +56,7 @@ test("callback records a structured Claude message before delivery", () => {
     const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
     assert.equal(state.status, "idle");
     assert.match(state.idle_since, /^\d{4}-\d{2}-\d{2}T/);
+    assert.equal(state.callback_delivery, undefined);
 
     const log = fs.readFileSync(created.paths.logPath, "utf8");
     assert.match(log, /Implemented callback recording/);
@@ -303,6 +309,8 @@ console.log(JSON.stringify({ ok: true }));
 
     assert.equal(callback.delivered, true);
     assert.equal(callback.delivery, "gateway_method");
+    assert.equal(callback.conversation.status, "waiting_for_openclaw");
+    assert.equal(callback.conversation.callback_delivery.status, "delivered");
 
     const gatewayArgs = JSON.parse(fs.readFileSync(gatewayCallPath, "utf8"));
     assert.deepEqual(gatewayArgs.slice(0, 3), ["gateway", "call", "agent-knock-knock.callback"]);
@@ -331,6 +339,65 @@ console.log(JSON.stringify({ ok: true }));
       event.method === "agent-knock-knock.callback" &&
       event.status === 0
     ), true);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(fakeBinDir, { recursive: true, force: true });
+  }
+});
+
+test("a failed question notification keeps the Turn waiting_for_openclaw", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-callback-question-failed-")
+  );
+  const fakeBinDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-openclaw-question-failed-")
+  );
+  try {
+    const fakeOpenClaw = path.join(fakeBinDir, "openclaw");
+    fs.writeFileSync(
+      fakeOpenClaw,
+      `#!/usr/bin/env node
+console.error("question callback channel unavailable");
+process.exit(1);
+`,
+      "utf8"
+    );
+    fs.chmodSync(fakeOpenClaw, 0o755);
+    const created = createCallbackConversation(
+      storeDir,
+      "Keep question phase independent from transport",
+      { agent: "codex", openclawSession: "agent:main:main" }
+    );
+    const result = spawnSync(process.execPath, [
+      binPath,
+      "callback",
+      "--state",
+      created.paths.statePath,
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      "agent:main:main",
+      "--openclaw-bin",
+      fakeOpenClaw,
+      "--disable-callback-retry",
+      "--message-json",
+      JSON.stringify({
+        from: "codex",
+        to: "openclaw",
+        type: "question",
+        body: "Which release channel should I use?"
+      })
+    ], { encoding: "utf8" });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /question callback channel unavailable/u);
+
+    const state = JSON.parse(
+      fs.readFileSync(created.paths.statePath, "utf8")
+    );
+    assert.equal(state.status, "waiting_for_openclaw");
+    assert.equal(state.callback_delivery.status, "failed");
+    assert.equal(state.callback_delivery.final_status, "waiting_for_openclaw");
+    assert.equal(state.idle_since, undefined);
   } finally {
     fs.rmSync(storeDir, { recursive: true, force: true });
     fs.rmSync(fakeBinDir, { recursive: true, force: true });
@@ -398,7 +465,7 @@ console.log(JSON.stringify({ ok: true }));
   }
 });
 
-test("terminal bridge callback stays retryable until gateway delivery succeeds", () => {
+test("closing a Turn does not abandon its failed callback outbox", () => {
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-retry-"));
   const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-openclaw-retry-"));
   const allowDeliveryPath = path.join(fakeBinDir, "allow-delivery");
@@ -469,7 +536,6 @@ console.log(JSON.stringify({ ok: true }));
       "--openclaw-bin",
       fakeOpenClaw,
       "--disable-callback-retry",
-      "--close-terminal-bridge-on-done",
       "--message-json",
       JSON.stringify(message)
     ], {
@@ -484,7 +550,8 @@ console.log(JSON.stringify({ ok: true }));
     assert.match(failed.stderr, /gateway temporarily unavailable/);
 
     const failedState = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
-    assert.equal(failedState.status, "callback_failed");
+    assert.equal(failedState.status, "idle");
+    assert.match(failedState.idle_since, /^\d{4}-\d{2}-\d{2}T/u);
     assert.equal(failedState.closed_at, undefined);
     assert.equal(failedState.callback_delivery.status, "failed");
     assert.equal(failedState.callback_delivery.attempts, 1);
@@ -499,6 +566,22 @@ console.log(JSON.stringify({ ok: true }));
       }
     });
 
+    const closed = runCli([
+      "close",
+      "--state",
+      created.paths.statePath,
+      "--reason",
+      "close while callback delivery is failed"
+    ]);
+    assert.equal(closed.conversation.status, "closed");
+    assert.equal(
+      closed.conversation.callback_delivery.status,
+      "failed"
+    );
+    const closedAt = closed.conversation.closed_at;
+    const closeReason = closed.conversation.close_reason;
+    const turnUpdatedAt = closed.conversation.updated_at;
+
     fs.writeFileSync(allowDeliveryPath, "yes", "utf8");
     const retried = runCli([
       "retry-callback",
@@ -510,7 +593,9 @@ console.log(JSON.stringify({ ok: true }));
     });
     assert.equal(retried.delivered, true);
     assert.equal(retried.conversation.status, "closed");
-    assert.equal(retried.conversation.close_reason, "terminal bridge task completed");
+    assert.equal(retried.conversation.closed_at, closedAt);
+    assert.equal(retried.conversation.close_reason, closeReason);
+    assert.equal(retried.conversation.updated_at, turnUpdatedAt);
     assert.equal(retried.conversation.callback_delivery.status, "delivered");
     assert.equal(retried.conversation.callback_delivery.attempts, 2);
     assert.equal(retried.message.id, persistedMessageId);
@@ -528,6 +613,317 @@ console.log(JSON.stringify({ ok: true }));
     const calls = readJsonLines(callsPath);
     assert.equal(calls.length, 2);
     assert.equal(calls.every((args) => !args.includes("--url")), true);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(fakeBinDir, { recursive: true, force: true });
+  }
+});
+
+test("closing during callback delivery preserves a later failure and retry", async () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-callback-close-pending-")
+  );
+  const fakeBinDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-openclaw-close-pending-")
+  );
+  const startedPath = path.join(fakeBinDir, "gateway-started");
+  const releasePath = path.join(fakeBinDir, "gateway-release");
+  const allowSuccessPath = path.join(fakeBinDir, "allow-success");
+  try {
+    const fakeOpenClaw = path.join(fakeBinDir, "openclaw");
+    fs.writeFileSync(
+      fakeOpenClaw,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+if (fs.existsSync(${JSON.stringify(allowSuccessPath)})) {
+  console.log(JSON.stringify({ ok: true }));
+  process.exit(0);
+}
+fs.writeFileSync(${JSON.stringify(startedPath)}, "started");
+const deadline = Date.now() + 5000;
+while (!fs.existsSync(${JSON.stringify(releasePath)}) && Date.now() < deadline) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+}
+console.error("gateway failed after the Turn was closed");
+process.exit(1);
+`,
+      "utf8"
+    );
+    fs.chmodSync(fakeOpenClaw, 0o755);
+    const created = createCallbackConversation(
+      storeDir,
+      "Close while callback delivery is pending",
+      { agent: "codex", openclawSession: "agent:main:main" }
+    );
+    const callbackPromise = runCliAsync(
+      callbackDeliveryArgs(created.paths.statePath, fakeOpenClaw)
+    );
+    await waitForFile(startedPath, 2_000);
+    const pending = JSON.parse(
+      fs.readFileSync(created.paths.statePath, "utf8")
+    );
+    assert.equal(pending.status, "idle");
+    assert.equal(pending.callback_delivery.status, "pending");
+
+    const closed = runCli([
+      "close",
+      "--state",
+      created.paths.statePath,
+      "--reason",
+      "closed while callback attempt was in flight"
+    ]);
+    assert.equal(closed.conversation.status, "closed");
+    assert.equal(closed.conversation.callback_delivery.status, "pending");
+    const closedAt = closed.conversation.closed_at;
+    const closeReason = closed.conversation.close_reason;
+    const turnUpdatedAt = closed.conversation.updated_at;
+
+    fs.writeFileSync(releasePath, "release", "utf8");
+    const callback = await callbackPromise;
+    assert.notEqual(callback.status, 0);
+    assert.match(callback.stderr, /failed after the Turn was closed/u);
+    const failed = JSON.parse(
+      fs.readFileSync(created.paths.statePath, "utf8")
+    );
+    assert.equal(failed.status, "closed");
+    assert.equal(failed.closed_at, closedAt);
+    assert.equal(failed.close_reason, closeReason);
+    assert.equal(failed.updated_at, turnUpdatedAt);
+    assert.equal(failed.callback_delivery.status, "failed");
+
+    fs.writeFileSync(allowSuccessPath, "yes", "utf8");
+    const retried = runCli([
+      "retry-callback",
+      "--state",
+      created.paths.statePath
+    ]);
+    assert.equal(retried.delivered, true);
+    assert.equal(retried.conversation.status, "closed");
+    assert.equal(retried.conversation.closed_at, closedAt);
+    assert.equal(retried.conversation.close_reason, closeReason);
+    assert.equal(retried.conversation.updated_at, turnUpdatedAt);
+    assert.equal(retried.conversation.callback_delivery.status, "delivered");
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(fakeBinDir, { recursive: true, force: true });
+  }
+});
+
+test("a claimed callback message id cannot be reused with a different payload", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-callback-immutable-outbox-")
+  );
+  const fakeBinDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-openclaw-immutable-outbox-")
+  );
+  try {
+    const fakeOpenClaw = path.join(fakeBinDir, "openclaw");
+    fs.writeFileSync(
+      fakeOpenClaw,
+      `#!/usr/bin/env node
+console.error("gateway unavailable while claiming immutable callback");
+process.exit(1);
+`,
+      "utf8"
+    );
+    fs.chmodSync(fakeOpenClaw, 0o755);
+    const created = createCallbackConversation(
+      storeDir,
+      "Reject payload substitution after callback claim",
+      { agent: "codex", openclawSession: "agent:main:main" }
+    );
+    const initial = runCallbackExpectFailure(
+      created.paths.statePath,
+      fakeOpenClaw
+    );
+    assert.match(initial.stderr, /gateway unavailable/u);
+    const claimed = JSON.parse(
+      fs.readFileSync(created.paths.statePath, "utf8")
+    );
+    assert.equal(claimed.status, "idle");
+    assert.equal(claimed.callback_delivery.status, "failed");
+    const stateBefore = fs.readFileSync(created.paths.statePath, "utf8");
+    const logBefore = fs.readFileSync(created.paths.logPath, "utf8");
+    const tamperedMessage = {
+      ...claimed.callback_delivery.message,
+      body: "A different payload must not inherit the old callback claim."
+    };
+
+    const tampered = spawnSync(process.execPath, [
+      binPath,
+      "callback",
+      "--state",
+      created.paths.statePath,
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      "agent:main:main",
+      "--openclaw-bin",
+      fakeOpenClaw,
+      "--disable-callback-retry",
+      "--preserve-message-id",
+      "--message-json",
+      JSON.stringify(tamperedMessage)
+    ], { encoding: "utf8" });
+    assert.notEqual(tampered.status, 0);
+    assert.match(
+      tampered.stderr,
+      /conflicts with its persisted immutable outbox payload/u
+    );
+    assert.equal(fs.readFileSync(created.paths.statePath, "utf8"), stateBefore);
+    assert.equal(fs.readFileSync(created.paths.logPath, "utf8"), logBefore);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(fakeBinDir, { recursive: true, force: true });
+  }
+});
+
+test("an immutable callback retry survives a later Session binding generation", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-callback-binding-retry-")
+  );
+  const fakeBinDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-openclaw-binding-retry-")
+  );
+  const allowDeliveryPath = path.join(fakeBinDir, "allow-delivery");
+  try {
+    const fakeOpenClaw = path.join(fakeBinDir, "openclaw");
+    fs.writeFileSync(
+      fakeOpenClaw,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+if (!fs.existsSync(${JSON.stringify(allowDeliveryPath)})) {
+  console.error("binding callback gateway unavailable");
+  process.exit(1);
+}
+console.log(JSON.stringify({ ok: true }));
+`,
+      "utf8"
+    );
+    fs.chmodSync(fakeOpenClaw, 0o755);
+
+    const created = createCallbackConversation(
+      storeDir,
+      "Retry an already-claimed callback after Session rebinding",
+      { agent: "codex", openclawSession: "agent:main:main" }
+    );
+    const nativeThreadId = "22222222-2222-4222-8222-222222222222";
+    const processUuid = "codex-pid:52001:birth:callback-fixture";
+    const terminalControl: TerminalControlRef = {
+      kind: "tmux",
+      target: "akk-callback-binding:0.0",
+      session: "akk-callback-binding",
+      window: 0,
+      pane: 0,
+      panePid: 52000,
+      currentCommand: "codex",
+      currentPath: created.conversation.workspace,
+      capabilities: [
+        "screen_status",
+        "send_keys",
+        "terminal_approval",
+        "screen_completion",
+        "durable_completion",
+        "terminal_cancel"
+      ]
+    };
+    const terminalId =
+      `terminal:v2:tmux:codex:${terminalControl.target}:52001`;
+    const firstBinding = terminalBindingFrom({
+      terminalId,
+      terminalControl,
+      pid: 52001,
+      nativeThreadId,
+      processUuid,
+      processBirth: processUuid,
+      evidence: "callback_binding_fixture",
+      generation: 1
+    });
+    const now = new Date().toISOString();
+    const managedSession = saveManagedSession(storeDir, {
+      schema: "agent-knock-knock/session",
+      version: 1,
+      session_id: created.conversation.session_id,
+      agent: "codex",
+      workspace: created.conversation.workspace,
+      status: "bound",
+      binding: firstBinding,
+      lineage: { created_by: "attach" },
+      created_at: now,
+      updated_at: now
+    }, { expectedRevision: null });
+    saveState(created.paths.statePath, {
+      ...JSON.parse(fs.readFileSync(created.paths.statePath, "utf8")),
+      terminal_binding_id: firstBinding.binding_id,
+      terminal_binding_generation: firstBinding.generation,
+      native_thread_id: nativeThreadId,
+      native_session_takeover: {
+        agent: "codex",
+        terminal_agent_identity_protocol: 1,
+        native_session_id: terminalId,
+        terminal_agent_pid: 52001,
+        terminal_agent_session_id: nativeThreadId,
+        terminal_agent_process_uuid: processUuid,
+        terminal_agent_process_birth: processUuid,
+        terminal_agent_identity_evidence: "callback_binding_fixture",
+        source_cwd: created.conversation.workspace,
+        strategy: "terminal_control",
+        terminal_control: terminalControl,
+        terminal_bridge: true
+      }
+    });
+
+    const initial = runCallbackExpectFailure(
+      created.paths.statePath,
+      fakeOpenClaw
+    );
+    assert.match(initial.stderr, /binding callback gateway unavailable/u);
+    const claimed = JSON.parse(
+      fs.readFileSync(created.paths.statePath, "utf8")
+    );
+    assert.equal(claimed.status, "idle");
+    assert.equal(claimed.callback_delivery.status, "failed");
+    const callbackMessageId = claimed.callback_delivery.message.id;
+
+    const secondBinding = terminalBindingFrom({
+      terminalId,
+      terminalControl,
+      pid: 52001,
+      nativeThreadId,
+      processUuid,
+      processBirth: processUuid,
+      evidence: "callback_binding_fixture",
+      generation: 2
+    });
+    saveManagedSession(storeDir, {
+      ...managedSession,
+      binding: secondBinding,
+      updated_at: new Date().toISOString()
+    }, { expectedRevision: managedSession.revision! });
+
+    fs.writeFileSync(allowDeliveryPath, "yes", "utf8");
+    const retried = runCli([
+      "retry-callback",
+      "--state",
+      created.paths.statePath
+    ]);
+    assert.equal(retried.delivered, true);
+    assert.equal(retried.message.id, callbackMessageId);
+    assert.equal(retried.conversation.status, "idle");
+    assert.equal(retried.conversation.callback_delivery.status, "delivered");
+    assert.equal(retried.conversation.callback_delivery.attempts, 2);
+    assert.equal(retried.conversation.terminal_binding_generation, 1);
+    const duplicate = runCli([
+      "callback",
+      "--state",
+      created.paths.statePath,
+      "--record-only",
+      "--preserve-message-id",
+      "--message-json",
+      JSON.stringify(retried.message)
+    ]);
+    assert.equal(duplicate.duplicate, true);
+    assert.equal(duplicate.conversation.status, "idle");
   } finally {
     fs.rmSync(storeDir, { recursive: true, force: true });
     fs.rmSync(fakeBinDir, { recursive: true, force: true });
@@ -719,11 +1115,12 @@ console.log(JSON.stringify({ ok: true }));
     ]);
     assert.equal(reconciliation.launched, 1);
     assert.equal(reconciliation.items[0].reason, "callback_delivery_reconciliation");
-    const recovered = await waitForConversationState(
+    const recovered = await waitForCallbackDeliveryState(
       created.paths.statePath,
-      "closed",
+      "delivered",
       5_000
     );
+    assert.equal(recovered.status, "closed");
     assert.equal(recovered.callback_delivery.message.id, message.id);
     assert.equal(recovered.callback_delivery.status, "delivered");
     assert.equal(recovered.callback_delivery.attempts, 2);
@@ -823,7 +1220,12 @@ console.log(JSON.stringify({ ok: true }));
       }
     });
 
-    const closed = await waitForConversationState(created.paths.statePath, "closed", 20000);
+    const closed = await waitForCallbackDeliveryState(
+      created.paths.statePath,
+      "delivered",
+      20_000
+    );
+    assert.equal(closed.status, "closed");
     assert.equal(closed.callback_delivery.status, "delivered");
     assert.equal(closed.callback_delivery.attempts, 2);
     assert.equal(closed.callback_delivery.gateway_url, undefined);
@@ -843,6 +1245,285 @@ console.log(JSON.stringify({ ok: true }));
       maxRetries: 5,
       retryDelay: 100
     });
+  }
+});
+
+test("manual callback retry reports the exact automatic attempt in flight", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-callback-retry-in-flight-")
+  );
+  try {
+    const created = createCallbackConversation(
+      storeDir,
+      "Report the callback claim instead of a generic retry error",
+      { agent: "codex", openclawSession: "agent:main:main" }
+    );
+    const message = createMessage({
+      conversation: created.conversation,
+      id: "msg-callback-attempt-in-flight",
+      from: "codex",
+      to: "openclaw",
+      type: "done",
+      body: "The immutable completion payload is already being delivered."
+    });
+    const claimedAt = new Date().toISOString();
+    const leaseExpiresAt = new Date(Date.now() + 120_000).toISOString();
+    const nextAttemptAt = new Date(Date.now() + 15_000).toISOString();
+    const semanticState = applyMessageToConversation(
+      JSON.parse(fs.readFileSync(created.paths.statePath, "utf8")),
+      message
+    );
+    saveState(created.paths.statePath, {
+      ...semanticState,
+      callback_delivery: {
+        status: "pending",
+        message,
+        attempts: 2,
+        attempt_id: "callback-attempt-2",
+        attempt_pid: process.pid,
+        attempt_lease_expires_at: leaseExpiresAt,
+        created_at: claimedAt,
+        last_attempt_at: claimedAt,
+        updated_at: claimedAt,
+        gateway_method: "agent-knock-knock.callback",
+        gateway_session: "agent:main:main",
+        openclaw_bin: "openclaw",
+        close_terminal_bridge_on_done: false,
+        track_delivery: true,
+        final_status: "idle",
+        preserve_conversation_status: true,
+        retry_monitor_pid: process.pid,
+        next_attempt_at: nextAttemptAt
+      }
+    });
+    appendEvent(created.paths.logPath, messageEvent(message));
+    const stateBefore = fs.readFileSync(created.paths.statePath, "utf8");
+
+    const result = spawnSync(process.execPath, [
+      binPath,
+      "retry-callback",
+      "--state",
+      created.paths.statePath
+    ], { encoding: "utf8" });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /attempt 2[^\n]*in flight/iu);
+    assert.match(result.stderr, new RegExp(escapeRegExp(nextAttemptAt), "u"));
+    assert.equal(fs.readFileSync(created.paths.statePath, "utf8"), stateBefore);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+  }
+});
+
+test("concurrent callback retries claim one attempt and report the winner in flight", async () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-callback-retry-cas-")
+  );
+  const fakeBinDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-openclaw-retry-cas-")
+  );
+  const callsPath = path.join(fakeBinDir, "calls.ndjson");
+  const releasePath = path.join(fakeBinDir, "release");
+  try {
+    const fakeOpenClaw = path.join(fakeBinDir, "openclaw");
+    fs.writeFileSync(
+      fakeOpenClaw,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.appendFileSync(
+  ${JSON.stringify(callsPath)},
+  JSON.stringify({ method: "gateway" }) + "\\n"
+);
+const deadline = Date.now() + 5000;
+while (!fs.existsSync(${JSON.stringify(releasePath)}) && Date.now() < deadline) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+}
+if (!fs.existsSync(${JSON.stringify(releasePath)})) {
+  console.error("test gate timed out");
+  process.exit(2);
+}
+console.log(JSON.stringify({ ok: true }));
+`,
+      "utf8"
+    );
+    fs.chmodSync(fakeOpenClaw, 0o755);
+    const created = createCallbackConversation(
+      storeDir,
+      "Serialize callback retry claims",
+      { agent: "codex", openclawSession: "agent:main:main" }
+    );
+    const message = createMessage({
+      conversation: created.conversation,
+      id: "msg-callback-retry-cas",
+      from: "codex",
+      to: "openclaw",
+      type: "done",
+      body: "Retry this immutable callback once."
+    });
+    const failedAt = new Date().toISOString();
+    const semanticState = applyMessageToConversation(
+      JSON.parse(fs.readFileSync(created.paths.statePath, "utf8")),
+      message
+    );
+    saveState(created.paths.statePath, {
+      ...semanticState,
+      callback_delivery: {
+        status: "failed",
+        message,
+        attempts: 1,
+        attempt_id: "callback-attempt-1",
+        created_at: failedAt,
+        last_attempt_at: failedAt,
+        failed_at: failedAt,
+        last_error: "seeded transient failure",
+        gateway_method: "agent-knock-knock.callback",
+        gateway_session: "agent:main:main",
+        openclaw_bin: fakeOpenClaw,
+        close_terminal_bridge_on_done: false,
+        track_delivery: true,
+        final_status: "idle",
+        preserve_conversation_status: true
+      }
+    });
+    appendEvent(created.paths.logPath, messageEvent(message));
+
+    const winnerPromise = runCliAsync([
+      "retry-callback",
+      "--state",
+      created.paths.statePath
+    ]);
+    const claimed = await waitForCallbackDeliveryState(
+      created.paths.statePath,
+      "pending",
+      2_000
+    );
+    assert.equal(claimed.callback_delivery.attempts, 2);
+    assert.equal(typeof claimed.callback_delivery.attempt_id, "string");
+    assert.equal(typeof claimed.callback_delivery.attempt_pid, "number");
+
+    const loser = spawnSync(process.execPath, [
+      binPath,
+      "retry-callback",
+      "--state",
+      created.paths.statePath
+    ], { encoding: "utf8" });
+    assert.notEqual(loser.status, 0);
+    assert.match(loser.stderr, /attempt 2[^\n]*in flight/iu);
+
+    fs.writeFileSync(releasePath, "release", "utf8");
+    const winner = await winnerPromise;
+    assert.equal(winner.status, 0, winner.stderr || winner.stdout);
+    const finalState = JSON.parse(
+      fs.readFileSync(created.paths.statePath, "utf8")
+    );
+    assert.equal(finalState.status, "idle");
+    assert.equal(finalState.callback_delivery.status, "delivered");
+    assert.equal(finalState.callback_delivery.attempts, 2);
+    assert.equal(readJsonLines(callsPath).length, 1);
+    const events = readJsonLines(created.paths.logPath);
+    assert.equal(events.filter((event) =>
+      event.event === "message" && event.message?.id === message.id
+    ).length, 1);
+    assert.equal(events.filter((event) =>
+      event.event === "callback_delivery_succeeded" &&
+      event.message_id === message.id
+    ).length, 1);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(fakeBinDir, { recursive: true, force: true });
+  }
+});
+
+test("retry settles persisted accepted wake evidence without redelivery", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-callback-accepted-recovery-")
+  );
+  const fakeBinDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-openclaw-accepted-recovery-")
+  );
+  const callsPath = path.join(fakeBinDir, "calls.ndjson");
+  try {
+    const fakeOpenClaw = path.join(fakeBinDir, "openclaw");
+    fs.writeFileSync(
+      fakeOpenClaw,
+      `#!/usr/bin/env node
+require("node:fs").appendFileSync(${JSON.stringify(callsPath)}, "called\\n");
+process.exit(99);
+`,
+      "utf8"
+    );
+    fs.chmodSync(fakeOpenClaw, 0o755);
+    const created = createCallbackConversation(
+      storeDir,
+      "Recover a wake accepted before process interruption",
+      { agent: "codex", openclawSession: "agent:main:main" }
+    );
+    const message = createMessage({
+      conversation: created.conversation,
+      id: "msg-callback-accepted-before-crash",
+      from: "codex",
+      to: "openclaw",
+      type: "done",
+      body: "The callback wake was already accepted."
+    });
+    const acceptedAt = new Date().toISOString();
+    const semanticState = applyMessageToConversation(
+      JSON.parse(fs.readFileSync(created.paths.statePath, "utf8")),
+      message
+    );
+    saveState(created.paths.statePath, {
+      ...semanticState,
+      callback_delivery: {
+        status: "pending",
+        message,
+        attempts: 2,
+        attempt_id: "callback-attempt-interrupted-after-wake",
+        created_at: acceptedAt,
+        last_attempt_at: acceptedAt,
+        updated_at: acceptedAt,
+        gateway_method: "agent-knock-knock.callback",
+        gateway_session: "agent:main:main",
+        openclaw_bin: fakeOpenClaw,
+        close_terminal_bridge_on_done: false,
+        track_delivery: true,
+        final_status: "idle",
+        preserve_conversation_status: true,
+        injection: {
+          status: "accepted",
+          enqueued: true,
+          accepted_at: acceptedAt
+        },
+        wake: {
+          status: "accepted",
+          mode: "chat.send",
+          run_id: "accepted-callback-run",
+          acknowledgement_status: "started",
+          idempotency_key: "accepted-callback-run",
+          accepted_at: acceptedAt
+        }
+      }
+    });
+    appendEvent(created.paths.logPath, messageEvent(message));
+    const turnUpdatedAt = semanticState.updated_at;
+
+    const recovered = runCli([
+      "retry-callback",
+      "--state",
+      created.paths.statePath
+    ]);
+    assert.equal(recovered.delivered, true);
+    assert.equal(recovered.delivery, "accepted_transport_recovered");
+    assert.equal(recovered.conversation.status, "idle");
+    assert.equal(recovered.conversation.updated_at, turnUpdatedAt);
+    assert.equal(recovered.conversation.callback_delivery.status, "delivered");
+    assert.equal(recovered.conversation.callback_delivery.attempts, 2);
+    assert.equal(
+      recovered.conversation.callback_delivery.accepted_at,
+      acceptedAt
+    );
+    assert.equal(fs.existsSync(callsPath), false);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(fakeBinDir, { recursive: true, force: true });
   }
 });
 
@@ -974,10 +1655,9 @@ if (method === "agent-knock-knock.callback") {
   }
 });
 
-test("callback keeps chat_send retryable until agent.wait reports success", () => {
-  const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-chat-wait-retry-"));
+test("in_flight chat.send is delivered even when agent.wait times out", () => {
+  const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-chat-wait-accepted-"));
   const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-fake-openclaw-"));
-  const allowWaitPath = path.join(fakeBinDir, "allow-wait");
   const callsPath = path.join(fakeBinDir, "calls.ndjson");
   const configuredGatewayUrl = "ws://127.0.0.1:29875";
   try {
@@ -1008,9 +1688,7 @@ if (method === "agent-knock-knock.callback") {
 } else if (method === "chat.send") {
   console.log(JSON.stringify({ runId: "akk-wait-retry", status: "in_flight" }));
 } else if (method === "agent.wait") {
-  console.log(JSON.stringify(fs.existsSync(${JSON.stringify(allowWaitPath)})
-    ? { runId: "akk-wait-retry", status: "ok", endedAt: Date.now() }
-    : { runId: "akk-wait-retry", status: "timeout" }));
+  console.log(JSON.stringify({ runId: "akk-wait-retry", status: "timeout" }));
 }
 `,
       "utf8"
@@ -1029,8 +1707,7 @@ if (method === "agent-knock-knock.callback") {
       ...JSON.parse(fs.readFileSync(created.paths.statePath, "utf8")),
       gateway_url: configuredGatewayUrl
     });
-    const failed = spawnSync(process.execPath, [
-      binPath,
+    const callback = runCli([
       "callback",
       "--state",
       created.paths.statePath,
@@ -1041,56 +1718,42 @@ if (method === "agent-knock-knock.callback") {
       "--openclaw-bin",
       fakeOpenClaw,
       "--disable-callback-retry",
-      "--close-terminal-bridge-on-done",
       "--message-json",
       JSON.stringify({ from: "codex", to: "openclaw", type: "done", body: "Finished." })
-    ], {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        AKK_GATEWAY_TOKEN: "",
-        OPENCLAW_GATEWAY_TOKEN: ""
-      }
-    });
-    assert.notEqual(failed.status, 0);
-    assert.match(failed.stderr, /agent\.wait returned timeout/);
-
-    const failedState = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
-    assert.equal(failedState.status, "callback_failed");
-    assert.equal(failedState.callback_delivery.status, "failed");
-    assert.equal(failedState.closed_at, undefined);
-    assert.equal(failedState.callback_delivery.gateway_url, undefined);
-
-    fs.writeFileSync(allowWaitPath, "yes", "utf8");
-    const retried = runCli([
-      "retry-callback",
-      "--state",
-      created.paths.statePath
     ], {
       AKK_GATEWAY_TOKEN: "",
       OPENCLAW_GATEWAY_TOKEN: ""
     });
-    assert.equal(retried.delivered, true);
-    assert.equal(retried.delivery, "gateway_method+chat_send");
-    assert.equal(retried.conversation.status, "closed");
-    assert.equal(retried.conversation.callback_delivery.status, "delivered");
+    assert.equal(callback.delivered, true);
+    assert.equal(callback.delivery, "gateway_method+chat_send");
+    assert.equal(callback.conversation.status, "idle");
+    assert.equal(callback.conversation.closed_at, undefined);
+    assert.equal(callback.conversation.callback_delivery.status, "delivered");
+    assert.equal(callback.conversation.callback_delivery.attempts, 1);
+    assert.equal(
+      callback.conversation.callback_delivery.wake.acknowledgement_status,
+      "in_flight"
+    );
+    assert.equal(
+      callback.conversation.callback_delivery.run_observation.status,
+      "timeout"
+    );
 
     const calls = readJsonLines(callsPath);
     assert.equal(calls.every((args) => !args.includes("--url")), true);
     const chatSendCalls = calls.filter((args) => args[2] === "chat.send");
-    assert.equal(chatSendCalls.length, 2);
-    const idempotencyKeys = chatSendCalls.map((args) => {
-      const params = JSON.parse(args[args.indexOf("--params") + 1]);
-      return params.idempotencyKey;
-    });
-    assert.deepEqual(idempotencyKeys, ["akk-wait-retry", "akk-wait-retry"]);
+    assert.equal(chatSendCalls.length, 1);
+    assert.equal(
+      calls.filter((args) => args[2] === "agent.wait").length,
+      1
+    );
   } finally {
     fs.rmSync(storeDir, { recursive: true, force: true });
     fs.rmSync(fakeBinDir, { recursive: true, force: true });
   }
 });
 
-test("callback treats agent.wait timeout as a retryable delivery failure", () => {
+test("started chat.send stays delivered when agent.wait reports timeout", () => {
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-chat-wait-timeout-"));
   const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-fake-openclaw-"));
   try {
@@ -1113,18 +1776,24 @@ test("callback treats agent.wait timeout as a retryable delivery failure", () =>
       "Timeout callback run",
       { openclawSession: "agent:main:main" }
     );
-    const result = runCallbackExpectFailure(created.paths.statePath, fakeOpenClaw);
-    assert.match(result.stderr, /agent\.wait returned timeout/);
+    const result = runCallbackExpectSuccess(
+      created.paths.statePath,
+      fakeOpenClaw
+    );
+    assert.equal(result.delivered, true);
+    assert.equal(result.conversation.status, "idle");
     const state = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
-    assert.equal(state.callback_delivery.status, "failed");
-    assert.equal(state.status, "callback_failed");
+    assert.equal(state.callback_delivery.status, "delivered");
+    assert.equal(state.callback_delivery.wake.acknowledgement_status, "started");
+    assert.equal(state.callback_delivery.run_observation.status, "timeout");
+    assert.equal(state.status, "idle");
   } finally {
     fs.rmSync(storeDir, { recursive: true, force: true });
     fs.rmSync(fakeBinDir, { recursive: true, force: true });
   }
 });
 
-test("callback does not mark an agent.wait error as delivered", () => {
+test("agent.wait error cannot roll back an accepted callback wake", () => {
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-chat-wait-error-"));
   const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-fake-openclaw-"));
   try {
@@ -1152,11 +1821,21 @@ test("callback does not mark an agent.wait error as delivered", () => {
       "Failed callback run",
       { openclawSession: "agent:main:main" }
     );
-    const result = runCallbackExpectFailure(created.paths.statePath, fakeOpenClaw);
-    assert.match(result.stderr, /channel delivery failed/);
+    const result = runCallbackExpectSuccess(
+      created.paths.statePath,
+      fakeOpenClaw
+    );
+    assert.equal(result.delivered, true);
+    assert.equal(result.conversation.status, "idle");
     const state = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
-    assert.equal(state.callback_delivery.status, "failed");
-    assert.equal(state.status, "callback_failed");
+    assert.equal(state.callback_delivery.status, "delivered");
+    assert.equal(state.callback_delivery.wake.acknowledgement_status, "started");
+    assert.equal(state.callback_delivery.run_observation.status, "error");
+    assert.equal(
+      state.callback_delivery.run_observation.error,
+      "channel delivery failed"
+    );
+    assert.equal(state.status, "idle");
     assert.equal(state.closed_at, undefined);
   } finally {
     fs.rmSync(storeDir, { recursive: true, force: true });
@@ -1164,55 +1843,156 @@ test("callback does not mark an agent.wait error as delivered", () => {
   }
 });
 
-test("callback rejects mismatched Gateway run identities", () => {
+test("callback rejects a mismatched chat.send acknowledgement before acceptance", () => {
+  const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-run-id-"));
+  const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-fake-openclaw-"));
+  try {
+    const fakeOpenClaw = writeCallbackPlanOpenClaw(fakeBinDir, {
+      gatewayPayload: {
+        ok: true,
+        delivery_required: true,
+        delivery_mode: "chat.send",
+        chat_send: {
+          sessionKey: "agent:main:main",
+          message: "Verify the Gateway run identity.",
+          idempotencyKey: "akk-expected-run",
+          deliver: true
+        }
+      },
+      chatSendPayload: { runId: "different-run", status: "started" },
+      agentWaitPayload: { runId: "akk-expected-run", status: "ok" }
+    });
+    const created = createCallbackConversation(
+      storeDir,
+      "Reject mismatched chat.send runId",
+      { openclawSession: "agent:main:main" }
+    );
+    const result = runCallbackExpectFailure(
+      created.paths.statePath,
+      fakeOpenClaw
+    );
+    assert.match(result.stderr, /runId does not match its idempotencyKey/u);
+    const state = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
+    assert.equal(state.callback_delivery.status, "failed");
+    assert.equal(state.status, "idle");
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(fakeBinDir, { recursive: true, force: true });
+  }
+});
+
+test("durably enqueued injection stays delivered when wake acknowledgement is invalid", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-callback-injection-accepted-")
+  );
+  const fakeBinDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-fake-openclaw-")
+  );
+  try {
+    const fakeOpenClaw = writeCallbackPlanOpenClaw(fakeBinDir, {
+      gatewayPayload: {
+        ok: true,
+        enqueued: true,
+        injection_id: "durable-injection-1",
+        delivery_required: true,
+        delivery_mode: "chat.send",
+        chat_send: {
+          sessionKey: "agent:main:main",
+          message: "Wake the already-enqueued callback.",
+          idempotencyKey: "akk-enqueued-run",
+          deliver: true
+        }
+      },
+      chatSendPayload: { runId: "different-run", status: "started" }
+    });
+    const created = createCallbackConversation(
+      storeDir,
+      "Keep durable injection accepted",
+      { openclawSession: "agent:main:main" }
+    );
+    const result = runCallbackExpectSuccess(
+      created.paths.statePath,
+      fakeOpenClaw
+    );
+    assert.equal(result.delivered, true);
+    assert.equal(result.conversation.status, "idle");
+    const delivery = result.conversation.callback_delivery;
+    assert.equal(delivery.status, "delivered");
+    assert.equal(delivery.injection.status, "accepted");
+    assert.equal(delivery.injection.injection_id, "durable-injection-1");
+    assert.equal(delivery.wake.status, "uncertain");
+    assert.match(delivery.wake.error, /runId does not match/u);
+    assert.equal(delivery.attempts, 1);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(fakeBinDir, { recursive: true, force: true });
+  }
+});
+
+test("invalid agent.wait observations cannot roll back an accepted wake", async (t) => {
   const cases = [
     {
-      name: "chat.send runId",
-      chatSendPayload: { runId: "different-run", status: "started" },
-      agentWaitPayload: { runId: "akk-expected-run", status: "ok" },
-      error: /runId does not match its idempotencyKey/
+      name: "mismatched run id",
+      agentWaitPayload: { runId: "different-run", status: "ok" },
+      error: /different runId/u
     },
     {
-      name: "agent.wait runId",
-      chatSendPayload: { runId: "akk-expected-run", status: "started" },
-      agentWaitPayload: { runId: "different-run", status: "ok" },
-      error: /result for a different runId/
+      name: "non-object payload",
+      agentWaitPayload: "not-an-object",
+      error: /malformed JSON/u
+    },
+    {
+      name: "unexpected status",
+      agentWaitPayload: { runId: "akk-expected-run", status: "mystery" },
+      error: /unexpected status/u
     }
   ];
 
   for (const testCase of cases) {
-    const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-run-id-"));
-    const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-fake-openclaw-"));
-    try {
-      const fakeOpenClaw = writeCallbackPlanOpenClaw(fakeBinDir, {
-        gatewayPayload: {
-          ok: true,
-          delivery_required: true,
-          delivery_mode: "chat.send",
-          chat_send: {
-            sessionKey: "agent:main:main",
-            message: "Verify the Gateway run identity.",
-            idempotencyKey: "akk-expected-run",
-            deliver: true
-          }
-        },
-        chatSendPayload: testCase.chatSendPayload,
-        agentWaitPayload: testCase.agentWaitPayload
-      });
-      const created = createCallbackConversation(
-        storeDir,
-        `Reject mismatched ${testCase.name}`,
-        { openclawSession: "agent:main:main" }
+    await t.test(testCase.name, () => {
+      const storeDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "akk-callback-wait-invalid-")
       );
-      const result = runCallbackExpectFailure(created.paths.statePath, fakeOpenClaw);
-      assert.match(result.stderr, testCase.error);
-      const state = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
-      assert.equal(state.callback_delivery.status, "failed");
-      assert.equal(state.status, "callback_failed");
-    } finally {
-      fs.rmSync(storeDir, { recursive: true, force: true });
-      fs.rmSync(fakeBinDir, { recursive: true, force: true });
-    }
+      const fakeBinDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "akk-fake-openclaw-")
+      );
+      try {
+        const fakeOpenClaw = writeCallbackPlanOpenClaw(fakeBinDir, {
+          gatewayPayload: {
+            ok: true,
+            delivery_required: true,
+            delivery_mode: "chat.send",
+            chat_send: {
+              sessionKey: "agent:main:main",
+              message: "Observe this accepted callback run.",
+              idempotencyKey: "akk-expected-run",
+              deliver: true
+            }
+          },
+          chatSendPayload: { runId: "akk-expected-run", status: "started" },
+          agentWaitPayload: testCase.agentWaitPayload
+        });
+        const created = createCallbackConversation(
+          storeDir,
+          `Ignore invalid agent.wait ${testCase.name}`,
+          { openclawSession: "agent:main:main" }
+        );
+        const result = runCallbackExpectSuccess(
+          created.paths.statePath,
+          fakeOpenClaw
+        );
+        assert.equal(result.delivered, true);
+        assert.equal(result.conversation.status, "idle");
+        const delivery = result.conversation.callback_delivery;
+        assert.equal(delivery.status, "delivered");
+        assert.equal(delivery.wake.acknowledgement_status, "started");
+        assert.equal(delivery.run_observation.status, "invalid");
+        assert.match(delivery.run_observation.error, testCase.error);
+      } finally {
+        fs.rmSync(storeDir, { recursive: true, force: true });
+        fs.rmSync(fakeBinDir, { recursive: true, force: true });
+      }
+    });
   }
 });
 
@@ -1374,7 +2154,8 @@ test("callback fails closed for malformed or incomplete gateway delivery plans",
       assert.match(result.stderr, testCase.error);
       const state = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
       assert.equal(state.callback_delivery.status, "failed");
-      assert.equal(state.status, "callback_failed");
+      assert.equal(state.status, "idle");
+      assert.match(state.idle_since, /^\d{4}-\d{2}-\d{2}T/u);
     } finally {
       fs.rmSync(storeDir, { recursive: true, force: true });
       fs.rmSync(fakeBinDir, { recursive: true, force: true });
@@ -1473,8 +2254,27 @@ if (method === "agent-knock-knock.callback") {
 }
 
 function runCallbackExpectFailure(statePath, fakeOpenClaw) {
-  const result = spawnSync(process.execPath, [
-    binPath,
+  const result = spawnSync(
+    process.execPath,
+    [binPath, ...callbackDeliveryArgs(statePath, fakeOpenClaw)],
+    { encoding: "utf8" }
+  );
+  assert.notEqual(result.status, 0);
+  return result;
+}
+
+function runCallbackExpectSuccess(statePath, fakeOpenClaw) {
+  const result = spawnSync(
+    process.execPath,
+    [binPath, ...callbackDeliveryArgs(statePath, fakeOpenClaw)],
+    { encoding: "utf8" }
+  );
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  return JSON.parse(result.stdout);
+}
+
+function callbackDeliveryArgs(statePath, fakeOpenClaw) {
+  return [
     "callback",
     "--state",
     statePath,
@@ -1485,12 +2285,14 @@ function runCallbackExpectFailure(statePath, fakeOpenClaw) {
     "--openclaw-bin",
     fakeOpenClaw,
     "--disable-callback-retry",
-    "--close-terminal-bridge-on-done",
     "--message-json",
-    JSON.stringify({ from: "codex", to: "openclaw", type: "done", body: "Finished." })
-  ], { encoding: "utf8" });
-  assert.notEqual(result.status, 0);
-  return result;
+    JSON.stringify({
+      from: "codex",
+      to: "openclaw",
+      type: "done",
+      body: "Finished."
+    })
+  ];
 }
 
 function readJsonLines(filePath) {
@@ -1499,6 +2301,10 @@ function readJsonLines(filePath) {
     .split(/\r?\n/)
     .filter(Boolean)
     .map((line) => JSON.parse(line));
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
 
 function runCli(args, env = {}) {
@@ -1514,16 +2320,31 @@ function runCli(args, env = {}) {
   return JSON.parse(result.stdout);
 }
 
-async function waitForConversationState(statePath: string, status: string, timeoutMs: number) {
+async function waitForFile(filePath: string, timeoutMs: number) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(filePath)) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`timed out waiting for file ${filePath}`);
+}
+
+async function waitForCallbackDeliveryState(
+  statePath: string,
+  status: string,
+  timeoutMs: number
+) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
-    if (state.status === status) {
+    if (state.callback_delivery?.status === status) {
       return state;
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error(`timed out waiting for ${status}`);
+  throw new Error(`timed out waiting for callback delivery ${status}`);
 }
 
 interface CliAsyncResult {
