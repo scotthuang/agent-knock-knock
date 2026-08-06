@@ -13,49 +13,43 @@ function readPackageFile(relativePath: string): string {
   return fs.readFileSync(path.join(packageRoot, relativePath), "utf8");
 }
 
-function assertLifecycleAttestationGateBefore(
+function assertOrdinaryChecksBeforePublish(
   workflowSource: string,
   publishMarker: string
 ): void {
   const testsIndex = workflowSource.indexOf("run: npm test");
-  const extractIndex = workflowSource.indexOf(
-    "Extract lifecycle smoke attestation from annotated tag"
-  );
-  const verifyIndex = workflowSource.indexOf(
-    "node scripts/verify-lifecycle-smoke-evidence.js"
-  );
   const publishIndex = workflowSource.indexOf(publishMarker);
 
   assert.notEqual(testsIndex, -1, "workflow must run the ordinary test suite");
-  assert.notEqual(extractIndex, -1, "workflow must extract the tag attestation");
-  assert.notEqual(verifyIndex, -1, "workflow must verify the tag attestation");
   assert.notEqual(publishIndex, -1, "workflow publish command must remain visible");
-  assert.ok(testsIndex < extractIndex, "attestation extraction must follow npm test");
-  assert.ok(extractIndex < verifyIndex, "attestation must be extracted before verification");
-  assert.ok(verifyIndex < publishIndex, "attestation verification must precede publish");
+  assert.ok(testsIndex < publishIndex, "ordinary tests must precede publish");
 
   assert.match(workflowSource, /fetch-depth: 0/u);
-  assert.match(workflowSource, /git cat-file -t "\$\{tag_ref\}"/u);
-  assert.match(workflowSource, /\[\[ "\$\{tag_type\}" != "tag" \]\]/u);
-  assert.match(
-    workflowSource,
-    /\["cat-file", "tag", process\.env\.TAG_REF\]/u
-  );
-  assert.match(
-    workflowSource,
-    /--attestation "\$\{RUNNER_TEMP\}\/akk-live-lifecycle-attestation\.txt"/u
-  );
-  assert.match(workflowSource, /--expected-commit "\$\{RELEASE_COMMIT\}"/u);
-  assert.match(
-    workflowSource,
-    /--expected-version "\$\{GITHUB_REF_NAME#v\}"/u
-  );
-  assert.match(workflowSource, /--require-matrix/u);
-  assert.match(workflowSource, /--max-age-hours 72/u);
+  assert.doesNotMatch(workflowSource, /lifecycle smoke attestation/iu);
   assert.doesNotMatch(
     workflowSource,
-    /(?:cat|echo|printf)[^\n]*akk-live-lifecycle-attestation/u,
-    "workflow must not print attestation evidence"
+    /verify-lifecycle-smoke-evidence\.js/u
+  );
+  assert.doesNotMatch(workflowSource, /--require-matrix/u);
+}
+
+function assertReleaseCommitGuards(workflowSource: string): void {
+  assert.match(
+    workflowSource,
+    /git fetch --no-tags origin "\+refs\/heads\/main:refs\/remotes\/origin\/main"/u
+  );
+  assert.match(
+    workflowSource,
+    /release_commit="\$\(git rev-parse "\$\{GITHUB_REF_NAME\}\^\{commit\}"\)"/u
+  );
+  assert.match(workflowSource, /checkout_commit="\$\(git rev-parse HEAD\)"/u);
+  assert.match(
+    workflowSource,
+    /\[\[ "\$\{checkout_commit\}" != "\$\{release_commit\}" \]\]/u
+  );
+  assert.match(
+    workflowSource,
+    /git merge-base --is-ancestor "\$\{release_commit\}" origin\/main/u
   );
 }
 
@@ -67,25 +61,55 @@ test("ordinary npm test never opts into either live tmux smoke", () => {
   assert.doesNotMatch(testScript, /smoke-(?:lifecycle-)?tmux\.js/u);
 });
 
-test("tag publish workflows verify annotated-tag lifecycle evidence before publishing", () => {
+test("tag publish workflows keep release provenance guards without requiring live evidence", () => {
   const releaseWorkflow = readPackageFile(".github/workflows/release.yml");
   const clawHubWorkflow = readPackageFile(
     ".github/workflows/clawhub-publish.yml"
   );
 
-  assertLifecycleAttestationGateBefore(releaseWorkflow, "npm publish \\");
-  assertLifecycleAttestationGateBefore(
+  assertOrdinaryChecksBeforePublish(releaseWorkflow, "npm publish \\");
+  assertOrdinaryChecksBeforePublish(
     clawHubWorkflow,
     './node_modules/.bin/clawhub "${publish_args[@]}"'
   );
-  assert.equal(
-    clawHubWorkflow.match(/verify-lifecycle-smoke-evidence\.js/gu)?.length,
-    2,
-    "ClawHub must reverify freshness in the independently rerunnable publish job"
+
+  assertReleaseCommitGuards(releaseWorkflow);
+  assertReleaseCommitGuards(clawHubWorkflow);
+  assert.match(releaseWorkflow, /expected_tag="v\$\{package_version\}"/u);
+  assert.match(
+    releaseWorkflow,
+    /\[\[ "\$\{GITHUB_REF_NAME\}" != "\$\{expected_tag\}" \]\]/u
   );
   assert.match(
     clawHubWorkflow,
-    /Checkout, release tag, and prepared artifact commits do not match/u
+    /expected_ref="refs\/tags\/v\$\{package_version\}"/u
+  );
+  assert.match(
+    clawHubWorkflow,
+    /\[\[ "\$\{GITHUB_REF\}" != "\$\{expected_ref\}" \]\]/u
+  );
+
+  assert.match(clawHubWorkflow, /needs: prepare/u);
+  assert.equal(
+    clawHubWorkflow.match(/name: clawhub-package/gu)?.length,
+    2,
+    "ClawHub must download the exact named artifact built by prepare"
+  );
+  assert.match(
+    clawHubWorkflow,
+    /EXPECTED_RELEASE_COMMIT: \$\{\{ needs\.prepare\.outputs\.release_commit \}\}/u
+  );
+  assert.match(
+    clawHubWorkflow,
+    /"\$\{checkout_commit\}" != "\$\{release_commit\}" \|\| "\$\{release_commit\}" != "\$\{EXPECTED_RELEASE_COMMIT\}"/u
+  );
+  assert.match(
+    clawHubWorkflow,
+    /\[\[ "\$\{#packages\[@\]\}" -ne 1 \]\]/u
+  );
+  assert.match(
+    clawHubWorkflow,
+    /--source-commit "\$\{RELEASE_COMMIT\}"/u
   );
 });
 
@@ -152,7 +176,7 @@ test("lifecycle live smoke requires two opt-ins and never retries a mutation", (
   assert.match(
     coreSource,
     /"--require-restorable-origin"/u,
-    "the release gate must prove A is resumable before New clears it"
+    "the lifecycle smoke must prove A is resumable before New clears it"
   );
   assert.ok(
     source.indexOf("assertSourceIdentityUnchanged(source, matrix.status)") <

@@ -40,12 +40,14 @@ The matrix derives the supported Host, Plugin API, and build versions from `pack
 
 If your change touches logging, callbacks, or trace output, also review the output for secrets and local-only data. Trace output must not expose agent thinking text, raw callback payloads, gateway tokens, API keys, passwords, or proxy credentials.
 
-## Native Lifecycle Live-Smoke Release Gate
+## Native Lifecycle Live-Smoke Diagnostic
 
-Lifecycle-sensitive releases require a fresh real-agent check in addition to
-the deterministic suite. The runner uses existing authenticated coding-agent
+This optional diagnostic runs a fresh real-agent check in addition to the
+deterministic suite. The runner uses existing authenticated coding-agent
 processes and can incur API cost. It never launches, upgrades, restarts, kills,
 or arbitrarily selects a process, and ordinary `npm test` never invokes it.
+During the current rapid-iteration phase, npm and ClawHub publishing do not
+require this diagnostic or consume its evidence.
 
 Prepare one supported Codex pane and one supported Claude Code pane in tmux.
 Both must be idle with an empty composer and have no active Turn, approval,
@@ -63,7 +65,7 @@ exact same-workspace resume candidate. In particular, a newly launched Codex
 composer with no completed native turn is not a safe origin: `/clear` can erase
 its only identity before Codex writes a resumable thread row and rollout. Seed
 that pane with one harmless native turn, wait until it is idle, and verify the
-thread is listed before running the gate. The gate's internal New preflight
+thread is listed before running the diagnostic. The diagnostic's internal New preflight
 rechecks unique Session ownership and a fresh candidate token before `/clear`.
 Do not type in either selected pane while the matrix is running: AKK's locks
 serialize AKK operations, but they cannot fence direct human tmux input.
@@ -87,8 +89,8 @@ AKK_RUN_LIVE_LIFECYCLE_SMOKE=1 npm run smoke:lifecycle -- \
 ```
 
 Omit all three `--claude-*` arguments for a Codex-only diagnostic run, or all
-three `--codex-*` arguments for a Claude-only run. A release attestation still
-requires the complete Codex + Claude matrix.
+three `--codex-*` arguments for a Claude-only run. Complete matrix evidence
+still requires both agents.
 
 The runner reports one of three outcomes:
 
@@ -110,37 +112,27 @@ generation 1, and exact Resume materializes a new Session for `A` at generation
 its binding generation by exactly one. Neither lifecycle operation may create a
 Turn in either path.
 
-The JSON contains only allowlisted release facts and salted fingerprints. It
+The JSON contains only allowlisted diagnostic facts and salted fingerprints. It
 does not contain prompts, replies, transcripts, raw native/Session/Turn/
 transition/binding IDs, callback payloads, or credentials. A non-passing run
-still writes evidence for diagnosis, but it cannot be attested for release.
+still writes evidence for diagnosis, but it cannot pass local verification.
 
-After the version change is committed and the full matrix passes on that exact
-clean commit, validate the evidence and create the annotated tag:
+To validate passing evidence against the exact clean commit locally:
 
 ```bash
 release_version="$(node -p "require('./package.json').version")"
 release_commit="$(git rev-parse HEAD)"
-tag_message="$(mktemp)"
 
 npm run smoke:lifecycle:attest -- \
   --evidence </absolute/private/path/live-lifecycle-evidence.json> \
   --expected-version "${release_version}" \
   --expected-commit "${release_commit}" \
   --require-matrix \
-  --max-age-hours 72 \
-  --output "${tag_message}"
-
-git tag -a "v${release_version}" -F "${tag_message}"
-git push origin "v${release_version}"
+  --max-age-hours 72
 ```
 
-The npm release workflow and both ClawHub stages independently extract and
-verify that annotated-tag attestation before publishing. The ClawHub publish
-job repeats the freshness check because GitHub permits a single job to be rerun
-later. Missing, malformed, failed, stale, wrong-version, wrong-commit, or
-single-agent evidence fails closed. Delete the temporary tag-message file after
-pushing the tag.
+The verifier and attestation format remain available so a mandatory release
+gate can be restored later without redesigning the lifecycle evidence model.
 
 ## Adding a Terminal Agent Adapter
 

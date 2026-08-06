@@ -161,7 +161,7 @@ async function main() {
     fs.closeSync(evidenceFd);
     if (!evidenceWritten) {
       process.stderr.write(
-        "Reserved evidence file is incomplete and cannot satisfy a release gate.\n"
+        "Reserved lifecycle evidence file is incomplete.\n"
       );
     }
   }
@@ -507,7 +507,7 @@ function usage() {
     --evidence </absolute/private/new-file.json> [--store-dir <dir>]
 
 Runs the exact native lifecycle A -> new B -> one Send -> exact resume A.
-At least one complete agent selector is required; release evidence requires both.
+At least one complete agent selector is required; complete matrix evidence requires both.
 `);
 }
 
