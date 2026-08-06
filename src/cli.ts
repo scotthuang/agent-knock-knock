@@ -15374,15 +15374,21 @@ function codexComposerEmpty(screen: string | undefined): boolean {
 }
 
 function codexStyledComposerEmpty(screen: string | undefined): boolean {
-  const lines = String(screen ?? "").split(/\r?\n/u).slice(-12);
-  const composerLine = [...lines].reverse().find((line) =>
+  const lines = String(screen ?? "").split(/\r?\n/u);
+  const withoutEscapes = (line: string): string =>
+    line.replace(
+      /\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/gu,
+      ""
+    );
+  while (
+    lines.length > 0 &&
+    withoutEscapes(lines[lines.length - 1]).trim() === ""
+  ) {
+    lines.pop();
+  }
+  const composerLine = [...lines.slice(-12)].reverse().find((line) =>
     /^[›»](?:\s|$)/u.test(
-      line
-        .replace(
-          /\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/gu,
-          ""
-        )
-        .trimEnd()
+      withoutEscapes(line).trimEnd()
     )
   );
   if (composerLine === undefined) {

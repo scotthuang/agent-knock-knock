@@ -38,6 +38,10 @@ test("Codex new-thread does not attach a sticky before-thread rollout to the new
     tempDir,
     "draft-after-next-status"
   );
+  const blankRowsAfterNextStatusPath = path.join(
+    tempDir,
+    "blank-rows-after-next-status"
+  );
   const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
   const target = "tmux-sticky-rollout:0.0";
   const panePid = 73_000;
@@ -104,6 +108,7 @@ test("Codex new-thread does not attach a sticky before-thread rollout to the new
       clearCountPath,
       wrongNextStatusPath,
       draftAfterNextStatusPath,
+      blankRowsAfterNextStatusPath,
       target,
       panePid,
       workspace,
@@ -269,7 +274,8 @@ test("Codex new-thread does not attach a sticky before-thread rollout to the new
     assert.equal(listManagedSessions(storeDir)[0].status, "bound");
 
     fs.writeFileSync(statusCountPath, "0");
-    fs.writeFileSync(screenPath, "Ready\n› ");
+    fs.writeFileSync(screenPath, `Ready\n› \n${"\n".repeat(30)}`);
+    fs.writeFileSync(blankRowsAfterNextStatusPath, "ready");
     const result = runCli([
       "new-thread",
       "--terminal",
@@ -913,6 +919,7 @@ function writeFakeTmux(options: {
   clearCountPath: string;
   wrongNextStatusPath: string;
   draftAfterNextStatusPath: string;
+  blankRowsAfterNextStatusPath: string;
   target: string;
   panePid: number;
   workspace: string;
@@ -956,6 +963,10 @@ if (args[0] === "send-keys" && args.includes("-l")) {
     if (draftAfterStatus) {
       fs.unlinkSync(${JSON.stringify(options.draftAfterNextStatusPath)});
     }
+    const blankRowsAfterStatus = fs.existsSync(${JSON.stringify(options.blankRowsAfterNextStatusPath)});
+    if (blankRowsAfterStatus) {
+      fs.unlinkSync(${JSON.stringify(options.blankRowsAfterNextStatusPath)});
+    }
     const clearCount = fs.existsSync(${JSON.stringify(options.clearCountPath)})
       ? Number(fs.readFileSync(${JSON.stringify(options.clearCountPath)}, "utf8"))
       : 0;
@@ -970,7 +981,7 @@ if (args[0] === "send-keys" && args.includes("-l")) {
       "/status\\nprobe-" + next + "\\nSession: " + id +
       (draftAfterStatus
         ? "\\n› unsent lifecycle draft\\ngpt-5.4 default · 100% left"
-        : "\\n› "));
+        : "\\n› " + (blankRowsAfterStatus ? "\\n".repeat(30) : "")));
   } else if (text === "/clear") {
     const clearCount = fs.existsSync(${JSON.stringify(options.clearCountPath)})
       ? Number(fs.readFileSync(${JSON.stringify(options.clearCountPath)}, "utf8"))
