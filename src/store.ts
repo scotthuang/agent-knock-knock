@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  normalizeLegacyCallbackStatus,
   sessionIdForConversation,
   turnIdForConversation,
   validateMessage,
@@ -559,11 +560,26 @@ function withCanonicalConversationStorage(
 
 function withConversationIdentity(conversation: Conversation): Conversation {
   const { sessionId, turnId } = assertConversationStateIdentity(conversation);
-  return {
+  const identified = {
     ...conversation,
     session_id: sessionId,
     turn_id: turnId
   };
+  try {
+    return normalizeLegacyCallbackStatus(identified);
+  } catch (error) {
+    if (!["callback_pending", "callback_failed"].includes(identified.status)) {
+      throw error;
+    }
+    // One malformed legacy callback record must not poison Store-wide list or
+    // recovery. Keep its transport-owned status as a fail-closed phase and
+    // surface a durable in-memory diagnostic to callers.
+    return {
+      ...identified,
+      legacy_callback_status_error:
+        error instanceof Error ? error.message : String(error)
+    };
+  }
 }
 
 function assertConversationStateIdentity(

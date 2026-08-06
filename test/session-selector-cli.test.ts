@@ -134,6 +134,9 @@ test("unavailable managed turns expose only pane-independent actions", () => {
         state.callback_delivery = {
           status: "failed",
           attempts: 1,
+          final_status: testCase.status === "callback_failed"
+            ? "idle"
+            : testCase.status,
           ...("callbackRetry" in testCase && testCase.callbackRetry
             ? { preserve_conversation_status: true }
             : {}),

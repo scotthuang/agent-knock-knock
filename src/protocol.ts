@@ -9,7 +9,13 @@ import {
 } from "./executors.js";
 
 export type MessageType = "task" | "question" | "answer" | "progress" | "blocked" | "done" | "error" | "control";
+/**
+ * `callback_pending` and `callback_failed` are retained only so Stores written
+ * by earlier releases can still be read. New writes keep callback transport state in
+ * `conversation.callback_delivery` and use a TurnPhaseStatus here.
+ */
 export type ConversationStatus = "created" | "running" | "waiting_for_agent" | "waiting_for_openclaw" | "idle" | "stalled" | "callback_pending" | "callback_failed" | "failed" | "closed" | "cancelled" | "cancelling";
+export type TurnPhaseStatus = Exclude<ConversationStatus, "callback_pending" | "callback_failed">;
 export type BudgetLevel = "normal" | "converge" | "warning" | "soft_stop" | "hard_stop";
 export type { Actor, Executor, ExecutorKind } from "./executors.js";
 export { ACTORS, EXECUTORS, resolveExecutor } from "./executors.js";
@@ -52,6 +58,109 @@ export interface Conversation {
   event_log_path?: string;
   state_path?: string;
   [key: string]: unknown;
+}
+
+const TURN_PHASE_STATUSES = new Set<TurnPhaseStatus>([
+  "created",
+  "running",
+  "waiting_for_agent",
+  "waiting_for_openclaw",
+  "idle",
+  "stalled",
+  "failed",
+  "closed",
+  "cancelled",
+  "cancelling"
+]);
+
+const LEGACY_CALLBACK_STATUSES = new Set<ConversationStatus>([
+  "callback_pending",
+  "callback_failed"
+]);
+
+/**
+ * Resolve the semantic Turn phase for both current and legacy callback state.
+ * Invalid legacy records fail closed instead of guessing that a Turn is idle.
+ */
+export function effectiveTurnStatus(
+  conversation: Partial<Conversation> | null | undefined
+): TurnPhaseStatus {
+  const status = conversation?.status;
+  if (isTurnPhaseStatus(status)) {
+    return status;
+  }
+  if (!status || !LEGACY_CALLBACK_STATUSES.has(status)) {
+    throw new Error(`invalid conversation status: ${String(status)}`);
+  }
+
+  const delivery = isRecord(conversation?.callback_delivery)
+    ? conversation.callback_delivery
+    : undefined;
+  const message = isRecord(delivery?.message) ? delivery.message : undefined;
+  const expectedDeliveryStatus = status === "callback_pending"
+    ? "pending"
+    : "failed";
+  const finalStatus = delivery?.final_status;
+  if (
+    !delivery ||
+    !message ||
+    delivery.status !== expectedDeliveryStatus ||
+    !isTurnPhaseStatus(finalStatus)
+  ) {
+    throw new Error(
+      `legacy ${status} conversation is missing a valid ` +
+      "callback_delivery.final_status Turn phase, message, or matching transport status"
+    );
+  }
+  if (
+    delivery?.close_terminal_bridge_on_done === true &&
+    message?.type === "done"
+  ) {
+    return "closed";
+  }
+  return finalStatus;
+}
+
+/** Materialize a legacy callback-owned status as an ordinary Turn phase. */
+export function normalizeLegacyCallbackStatus(
+  conversation: Conversation
+): Conversation {
+  if (!LEGACY_CALLBACK_STATUSES.has(conversation.status)) {
+    return conversation;
+  }
+  const status = effectiveTurnStatus(conversation);
+  if (status === conversation.status) {
+    return conversation;
+  }
+
+  const delivery = isRecord(conversation.callback_delivery)
+    ? conversation.callback_delivery
+    : undefined;
+  const transitionAt = nonEmptyString(delivery?.created_at) ??
+    nonEmptyString(delivery?.last_attempt_at) ??
+    conversation.updated_at;
+  const next: Conversation = {
+    ...conversation,
+    status
+  };
+  if (status === "idle") {
+    next.idle_since = conversation.idle_since ?? transitionAt;
+    delete next.closed_at;
+    delete next.close_reason;
+  } else {
+    delete next.idle_since;
+  }
+  if (status === "closed") {
+    next.closed_at = conversation.closed_at ?? transitionAt;
+    next.close_reason = conversation.close_reason ??
+      "terminal bridge task completed";
+  }
+  return next;
+}
+
+export function isTurnPhaseStatus(value: unknown): value is TurnPhaseStatus {
+  return typeof value === "string" &&
+    TURN_PHASE_STATUSES.has(value as TurnPhaseStatus);
 }
 
 export interface AgentMessage {
