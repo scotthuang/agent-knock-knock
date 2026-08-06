@@ -76,6 +76,8 @@
     "clawhub:validate": "npm run build && clawhub --workdir . package validate . --out .clawhub-validation --runtime --allow-execute --no-mock-sdk",
     "clawhub:dry-run": "npm run build && clawhub package publish . --family code-plugin --owner scotthuang --tags latest --topics tmux,codex,claude-code,agent-orchestration,terminal-handoff --dry-run",
     "compat:openclaw": "npm run build && node scripts/verify-openclaw-compatibility.js",
+    "smoke:lifecycle": "npm run build && node scripts/smoke-lifecycle-tmux.js",
+    "smoke:lifecycle:attest": "npm run build && node scripts/verify-lifecycle-smoke-evidence.js",
     "transcript": "node dist/src/cli.js transcript"
   },
   "engines": {

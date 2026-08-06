@@ -38,6 +38,10 @@ test("Codex new-thread does not attach a sticky before-thread rollout to the new
     tempDir,
     "draft-after-next-status"
   );
+  const blankRowsAfterNextStatusPath = path.join(
+    tempDir,
+    "blank-rows-after-next-status"
+  );
   const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
   const target = "tmux-sticky-rollout:0.0";
   const panePid = 73_000;
@@ -104,6 +108,7 @@ test("Codex new-thread does not attach a sticky before-thread rollout to the new
       clearCountPath,
       wrongNextStatusPath,
       draftAfterNextStatusPath,
+      blankRowsAfterNextStatusPath,
       target,
       panePid,
       workspace,
@@ -269,7 +274,8 @@ test("Codex new-thread does not attach a sticky before-thread rollout to the new
     assert.equal(listManagedSessions(storeDir)[0].status, "bound");
 
     fs.writeFileSync(statusCountPath, "0");
-    fs.writeFileSync(screenPath, "Ready\n› ");
+    fs.writeFileSync(screenPath, `Ready\n› \n${"\n".repeat(30)}`);
+    fs.writeFileSync(blankRowsAfterNextStatusPath, "ready");
     const result = runCli([
       "new-thread",
       "--terminal",
@@ -519,6 +525,7 @@ test("Codex new-thread does not attach a sticky before-thread rollout to the new
     const targetAfterSend = listManagedSessions(storeDir).find((entry) =>
       entry.session_id === boundTarget.session_id
     );
+    assert.ok(targetAfterSend);
     assert.equal(targetAfterSend?.status, "bound");
     assert.equal(
       targetAfterSend?.binding?.native_thread_id,
@@ -553,6 +560,63 @@ test("Codex new-thread does not attach a sticky before-thread rollout to the new
     assert.equal(closedOutput.closed, true);
     assert.equal(closedOutput.terminal_dispatch_resolved, true);
     assert.equal(closedOutput.conversation.status, "closed");
+
+    // A completed Turn leaves both the previous A rollout and current B
+    // rollout open while the TUI returns to a fresh composer. Generic Codex
+    // discovery is intentionally ambiguous here; plain list must reuse only
+    // the exact committed managed lineage and continue to project B.
+    fs.writeFileSync(
+      screenPath,
+      "Ready\n› Summarize recent commits\n\ngpt-5.4 default · 100% left"
+    );
+    const listedAfterCompletedTurn = runCli([
+      "list",
+      "--all",
+      "--terminal-debug",
+      "--store-dir",
+      storeDir,
+      "--codex-home",
+      codexHome
+    ], environment);
+    assert.equal(
+      listedAfterCompletedTurn.status,
+      0,
+      listedAfterCompletedTurn.stderr || listedAfterCompletedTurn.stdout
+    );
+    const completedTurnTerminal = JSON.parse(
+      listedAfterCompletedTurn.stdout
+    ).terminals[0];
+    assert.equal(
+      completedTurnTerminal.activity_state,
+      "idle",
+      JSON.stringify({
+        activity_reason: completedTurnTerminal.activity_reason,
+        approval_state: completedTurnTerminal.approval_state,
+        terminal_control: completedTurnTerminal.terminal_control
+      })
+    );
+    assert.equal(completedTurnTerminal.management_state, "managed");
+    assert.equal(
+      completedTurnTerminal.managed.session_id,
+      targetAfterSend.session_id
+    );
+    assert.equal(
+      completedTurnTerminal.managed.native_thread_id,
+      afterNativeThreadId
+    );
+    assert.equal(
+      completedTurnTerminal.native_agent_session_id,
+      afterNativeThreadId
+    );
+    assert.deepEqual(completedTurnTerminal.native_agent_rollout, afterRollout);
+    assert.equal(
+      completedTurnTerminal.lifecycle_binding_token,
+      managedSessionBindingToken(targetAfterSend)
+    );
+    assert.equal(
+      completedTurnTerminal.available_actions.send.arguments.session_id,
+      targetAfterSend.session_id
+    );
 
     fs.writeFileSync(screenPath, "Ready\n› ");
     const secondMessage =
@@ -836,6 +900,35 @@ test("Codex new-thread does not attach a sticky before-thread rollout to the new
       }
     })}\n`, { mode: 0o600 });
     fs.writeFileSync(screenPath, "Ready\n› ");
+    const listedWithUnknownRoot = runCli([
+      "list",
+      "--all",
+      "--terminal-debug",
+      "--store-dir",
+      storeDir,
+      "--codex-home",
+      codexHome
+    ], environment);
+    assert.equal(
+      listedWithUnknownRoot.status,
+      0,
+      listedWithUnknownRoot.stderr || listedWithUnknownRoot.stdout
+    );
+    const unknownRootTerminal = JSON.parse(
+      listedWithUnknownRoot.stdout
+    ).terminals[0];
+    assert.notEqual(
+      unknownRootTerminal.managed.session_id,
+      thirdSession.session_id
+    );
+    assert.notEqual(
+      unknownRootTerminal.native_agent_session_id,
+      thirdNativeThreadId
+    );
+    assert.notEqual(
+      unknownRootTerminal.available_actions.send?.arguments?.session_id,
+      thirdSession.session_id
+    );
     const thirdStatePath = pathsForManagedSession(
       thirdSession.session_id,
       storeDir
@@ -913,6 +1006,7 @@ function writeFakeTmux(options: {
   clearCountPath: string;
   wrongNextStatusPath: string;
   draftAfterNextStatusPath: string;
+  blankRowsAfterNextStatusPath: string;
   target: string;
   panePid: number;
   workspace: string;
@@ -956,6 +1050,10 @@ if (args[0] === "send-keys" && args.includes("-l")) {
     if (draftAfterStatus) {
       fs.unlinkSync(${JSON.stringify(options.draftAfterNextStatusPath)});
     }
+    const blankRowsAfterStatus = fs.existsSync(${JSON.stringify(options.blankRowsAfterNextStatusPath)});
+    if (blankRowsAfterStatus) {
+      fs.unlinkSync(${JSON.stringify(options.blankRowsAfterNextStatusPath)});
+    }
     const clearCount = fs.existsSync(${JSON.stringify(options.clearCountPath)})
       ? Number(fs.readFileSync(${JSON.stringify(options.clearCountPath)}, "utf8"))
       : 0;
@@ -970,7 +1068,7 @@ if (args[0] === "send-keys" && args.includes("-l")) {
       "/status\\nprobe-" + next + "\\nSession: " + id +
       (draftAfterStatus
         ? "\\n› unsent lifecycle draft\\ngpt-5.4 default · 100% left"
-        : "\\n› "));
+        : "\\n› " + (blankRowsAfterStatus ? "\\n".repeat(30) : "")));
   } else if (text === "/clear") {
     const clearCount = fs.existsSync(${JSON.stringify(options.clearCountPath)})
       ? Number(fs.readFileSync(${JSON.stringify(options.clearCountPath)}, "utf8"))
