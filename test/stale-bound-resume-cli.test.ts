@@ -294,6 +294,153 @@ test("resume lists a conclusively dead bound Session read-only, then CAS-detache
   }
 });
 
+test("live-gate New requires a persisted unmanaged Claude origin before preparing input", () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-claude-restorable-origin-")
+  );
+  const fakeBinDir = path.join(root, "bin");
+  const workspace = path.join(root, "workspace");
+  const storeDir = path.join(root, "store");
+  const runtimeDir = path.join(root, "runtime");
+  const claudeHome = path.join(root, ".claude");
+  const tmuxCallsPath = path.join(root, "tmux-calls.ndjson");
+  const target = "stale-bound-resume:0.0";
+  const panePid = 76_200;
+  const claudePid = 76_201;
+  const startedAt = 1_786_000_000_002;
+  const nativeThreadId = "44444444-4444-4444-8444-444444444444";
+  const terminalId = `terminal:v2:tmux:claude:${target}:${claudePid}`;
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.mkdirSync(claudeHome, { recursive: true, mode: 0o700 });
+    writeFakeTmux({
+      fakeBinDir,
+      callsPath: tmuxCallsPath,
+      target,
+      panePid,
+      workspace
+    });
+    writeFakeProcessTools({
+      fakeBinDir,
+      panePid,
+      claudePid,
+      workspace
+    });
+
+    const commonArgs = [
+      "--store-dir",
+      storeDir,
+      "--claude-home",
+      claudeHome,
+      "--claude-agents-json",
+      JSON.stringify([{
+        pid: claudePid,
+        cwd: workspace,
+        kind: "interactive",
+        sessionId: nativeThreadId,
+        startedAt,
+        status: "idle"
+      }]),
+      "--agent-versions-json",
+      JSON.stringify({ claude: "2.1.218" })
+    ];
+    const environment = {
+      ...process.env,
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      AKK_RUNTIME_DIR: runtimeDir,
+      TMUX: ""
+    };
+    const listed = runCli([
+      "list",
+      "--all",
+      "--terminal-debug",
+      "--no-approval-scan",
+      ...commonArgs
+    ], environment);
+    assert.equal(listed.status, 0, listed.stderr || listed.stdout);
+    const terminal = JSON.parse(listed.stdout).terminals.find(
+      (entry: Record<string, unknown>) => entry.id === terminalId
+    );
+    assert.ok(terminal, listed.stdout);
+    assert.equal(terminal.management_state, "unmanaged");
+    assert.equal(typeof terminal.lifecycle_binding_token, "string");
+
+    const rejected = runCli([
+      "new-thread",
+      "--terminal",
+      terminalId,
+      "--expected-binding-token",
+      terminal.lifecycle_binding_token,
+      "--require-restorable-origin",
+      ...commonArgs
+    ], environment);
+    assert.equal(rejected.status, 1, rejected.stdout);
+    assert.match(
+      rejected.stderr,
+      /--require-restorable-origin could not prove that the current native thread is a unique persisted resume candidate/u
+    );
+    assert.equal(
+      readTmuxCalls(tmuxCallsPath).some((call) =>
+        call.args.includes("send-keys") || call.args.includes("paste-buffer")
+      ),
+      false
+    );
+    const transitionsDir = nativeThreadTransitionsDir(storeDir);
+    assert.equal(
+      fs.existsSync(transitionsDir)
+        ? fs.readdirSync(transitionsDir).length
+        : 0,
+      0
+    );
+    assert.equal(listManagedSessions(storeDir).length, 0);
+    assert.equal(listConversations(storeDir).length, 0);
+
+    writeClaudeTranscript({
+      claudeHome,
+      workspace,
+      nativeThreadId
+    });
+    const prepared = runCli([
+      "new-thread",
+      "--terminal",
+      terminalId,
+      "--expected-binding-token",
+      terminal.lifecycle_binding_token,
+      "--require-restorable-origin",
+      ...commonArgs
+    ], {
+      ...environment,
+      AKK_TEST_EXIT_AFTER_LIFECYCLE_PREPARED: "1"
+    });
+    assert.equal(prepared.status, 86, prepared.stderr || prepared.stdout);
+
+    const transitionIds = fs.readdirSync(transitionsDir, {
+      withFileTypes: true
+    }).filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+    assert.equal(transitionIds.length, 1);
+    const transition = loadNativeThreadTransition(
+      storeDir,
+      transitionIds[0]
+    );
+    assert.equal(transition.status, "prepared");
+    assert.equal(transition.operation, "new_thread");
+    assert.equal(transition.source_session_id, undefined);
+    assert.equal(transition.before_native_thread_id, nativeThreadId);
+    assert.equal(
+      readTmuxCalls(tmuxCallsPath).some((call) =>
+        call.args.includes("send-keys") || call.args.includes("paste-buffer")
+      ),
+      false
+    );
+    assert.equal(listManagedSessions(storeDir).length, 0);
+    assert.equal(listConversations(storeDir).length, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function runCli(args: string[], env: NodeJS.ProcessEnv) {
   return spawnSync(process.execPath, [binPath, ...args], {
     encoding: "utf8",

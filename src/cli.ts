@@ -5805,6 +5805,141 @@ async function revalidateNativeThreadCandidate({
   return token;
 }
 
+function assertRestorableOriginSessionRelationship({
+  agent,
+  nativeThreadId,
+  currentSession,
+  storeDir
+}: {
+  agent: ExecutorKind;
+  nativeThreadId: string;
+  currentSession?: ManagedSessionState;
+  storeDir: string;
+}): void {
+  const claimingSessions = listManagedSessions(storeDir).filter((session) =>
+    session.agent === agent &&
+    session.binding?.native_thread_id?.toLowerCase() === nativeThreadId
+  );
+  if (currentSession) {
+    if (
+      claimingSessions.length !== 1 ||
+      claimingSessions[0].session_id !== currentSession.session_id
+    ) {
+      throw new Error(
+        "the current native thread is not owned exclusively by its source Session"
+      );
+    }
+    const blockingTurns = managedTurnsForSession(
+      storeDir,
+      currentSession.session_id
+    ).filter((turn) => SESSION_SEND_BLOCKING_STATUSES.has(turn.status));
+    if (blockingTurns.length > 0) {
+      throw new Error(
+        `the source Session has unresolved Turn ` +
+        turnIdForConversation(blockingTurns[0])
+      );
+    }
+    return;
+  }
+  if (claimingSessions.length !== 0) {
+    throw new Error(
+      "the unmanaged native thread is already claimed by a managed Session"
+    );
+  }
+}
+
+async function requireRestorableLifecycleOrigin({
+  options,
+  terminal,
+  currentIdentity,
+  currentSession,
+  storeDir,
+  agentVersion
+}: {
+  options: Record<string, any>;
+  terminal: ResolvedTerminalConversation;
+  currentIdentity: NativeAgentSessionIdentity;
+  currentSession?: ManagedSessionState;
+  storeDir: string;
+  agentVersion: string;
+}): Promise<string> {
+  const nativeThreadId = currentIdentity.sessionId.toLowerCase();
+  const failure =
+    "--require-restorable-origin could not prove that the current native " +
+    "thread is a unique persisted resume candidate";
+  try {
+    if (!isExactNativeThreadId(nativeThreadId)) {
+      throw new Error("the current native thread identity is not exact");
+    }
+    assertRestorableOriginSessionRelationship({
+      agent: terminal.agent,
+      nativeThreadId,
+      currentSession,
+      storeDir
+    });
+    await assertNativeThreadHasExclusiveOwnership({
+      options,
+      agent: terminal.agent,
+      currentPid: terminal.pid,
+      nativeThreadId,
+      storeDir,
+      terminalControl: terminal.terminalControl,
+      excludedManagedSessionId: currentSession?.session_id
+    });
+
+    const candidates = await resumableThreadCandidates({
+      options,
+      terminal,
+      currentIdentity
+    });
+    const exactCandidates = candidates.filter((candidate) =>
+      candidate.native_thread_id === nativeThreadId
+    );
+    if (exactCandidates.length !== 1) {
+      throw new Error(
+        `expected one exact candidate for ${nativeThreadId}, found ` +
+        String(exactCandidates.length)
+      );
+    }
+    const candidate = exactCandidates[0];
+    const encodedToken = stringValue(candidate.candidate_token);
+    if (!encodedToken) {
+      throw new Error("the exact candidate has no revalidation token");
+    }
+    if (candidate.active_elsewhere !== false) {
+      throw new Error("the exact candidate is active in another process");
+    }
+    if (
+      candidate.resumable !== false ||
+      candidate.unavailable_reason !== "already_active"
+    ) {
+      throw new Error(
+        "the exact candidate is not the currently active native thread"
+      );
+    }
+    if (
+      (candidate.managed_session_id ?? undefined) !==
+      currentSession?.session_id
+    ) {
+      throw new Error(
+        "the exact candidate does not have the source Session relationship"
+      );
+    }
+    await revalidateNativeThreadCandidate({
+      options,
+      terminal,
+      nativeThreadId,
+      encodedToken,
+      agentVersion
+    });
+    return encodedToken;
+  } catch (error) {
+    throw new Error(
+      `${failure}: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+}
+
 function sameFilesystemDevice(left: string, right: string): boolean {
   try {
     return BigInt(left) === BigInt(right);
@@ -6349,7 +6484,17 @@ async function probeCodexCurrentThread({
 }
 
 async function runNewThread(options) {
-  return runNativeThreadTransition(options, { kind: "new_thread" });
+  const requireRestorableOrigin = options.requireRestorableOrigin;
+  if (
+    requireRestorableOrigin !== undefined &&
+    requireRestorableOrigin !== true
+  ) {
+    throw new Error("--require-restorable-origin does not take a value");
+  }
+  return runNativeThreadTransition(options, {
+    kind: "new_thread",
+    requireRestorableOrigin: requireRestorableOrigin === true
+  });
 }
 
 async function runResumeThread(options) {
@@ -6368,7 +6513,9 @@ async function runResumeThread(options) {
 
 async function runNativeThreadTransition(
   options: Record<string, any>,
-  operation: { kind: "new_thread" } | { kind: "resume_thread"; nativeThreadId: string }
+  operation:
+    | { kind: "new_thread"; requireRestorableOrigin: boolean }
+    | { kind: "resume_thread"; nativeThreadId: string }
 ) {
   const initiallyResolved = await resolveLifecycleTerminal(options);
   const storeDir = storeDirFromOptions(options);
@@ -6518,6 +6665,22 @@ async function runNativeThreadTransition(
         terminal,
         beforeIdentity as NativeAgentSessionIdentity
       );
+
+      const restorableOriginCandidateToken =
+        operation.kind === "new_thread" &&
+          operation.requireRestorableOrigin
+          ? await requireRestorableLifecycleOrigin({
+              options,
+              terminal,
+              currentIdentity: beforeIdentity,
+              currentSession: snapshot.session,
+              storeDir,
+              agentVersion: required(
+                stringValue(snapshot.version),
+                "restorable origin requires the exact running agent version"
+              )
+            })
+          : undefined;
 
       let candidates: NativeThreadCandidate[] = [];
       let targetSession: ManagedSessionState | undefined;
@@ -6760,10 +6923,37 @@ async function runNativeThreadTransition(
             "the adapter lifecycle plan has no exact transition step"
           );
         }
+        if (restorableOriginCandidateToken) {
+          assertRestorableOriginSessionRelationship({
+            agent: terminal.agent,
+            nativeThreadId: beforeIdentity.sessionId.toLowerCase(),
+            currentSession: snapshot.session,
+            storeDir
+          });
+          await assertNativeThreadHasExclusiveOwnership({
+            options,
+            agent: terminal.agent,
+            currentPid: terminal.pid,
+            nativeThreadId: beforeIdentity.sessionId.toLowerCase(),
+            storeDir,
+            terminalControl: terminal.terminalControl,
+            excludedManagedSessionId: snapshot.session?.session_id
+          });
+          await revalidateNativeThreadCandidate({
+            options,
+            terminal,
+            nativeThreadId: beforeIdentity.sessionId.toLowerCase(),
+            encodedToken: restorableOriginCandidateToken,
+            agentVersion: required(
+              stringValue(snapshot.version),
+              "restorable origin requires the exact running agent version"
+            )
+          });
+        }
         if (terminal.agent === "codex") {
-          // Candidate discovery and transition preparation can take long
-          // enough for a human to start typing after the /status probe. Check
-          // again at the last safe point before /clear or /resume is submitted.
+          // Candidate discovery and ownership revalidation can take long
+          // enough for a human to start typing after the /status probe. Keep
+          // this check immediately adjacent to the terminal mutation.
           await assertCodexComposerReadyForAutomatedInput({
             options,
             terminalControl: terminal.terminalControl

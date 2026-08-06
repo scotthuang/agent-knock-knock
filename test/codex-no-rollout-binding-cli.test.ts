@@ -9,7 +9,10 @@ import {
   type ManagedSessionState
 } from "../src/managed-session.js";
 import {
+  listManagedSessions,
   loadManagedSession,
+  loadNativeThreadTransition,
+  nativeThreadTransitionsDir,
   saveManagedSession
 } from "../src/session-store.js";
 import {
@@ -256,6 +259,118 @@ test("unmanaged Codex lifecycle token changes when a PID is reused", () => {
   }
 });
 
+test("live-gate New rejects an unmanaged Codex origin that is not persisted", () => {
+  const fixture = createNoRolloutFixture();
+  try {
+    const listed = runCli([
+      "list",
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome,
+      "--no-approval-scan"
+    ], fixture.environment);
+    assert.equal(listed.status, 0, listed.stderr || listed.stdout);
+    const terminal = JSON.parse(listed.stdout).terminals[0];
+    const expectedBindingToken = terminal.lifecycle_binding_token;
+    assert.equal(typeof expectedBindingToken, "string");
+
+    const rejected = runCli([
+      "new-thread",
+      "--terminal",
+      fixture.terminalId,
+      "--expected-binding-token",
+      expectedBindingToken,
+      "--require-restorable-origin",
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome
+    ], {
+      ...fixture.environment,
+      AKK_TEST_EXIT_AFTER_LIFECYCLE_PREPARED: "1"
+    });
+
+    assert.equal(rejected.status, 1, rejected.stdout);
+    assert.match(
+      rejected.stderr,
+      /--require-restorable-origin could not prove that the current native thread is a unique persisted resume candidate/u
+    );
+    const literalSends = readTmuxCalls(fixture.tmuxCallsPath)
+      .filter((call) =>
+        call.args[0] === "send-keys" && call.args.includes("-l")
+      )
+      .map((call) => call.args.at(-1));
+    assert.deepEqual(literalSends, ["/status"]);
+    assert.equal(literalSends.includes("/clear"), false);
+    assert.equal(listConversations(fixture.storeDir).length, 0);
+    assert.equal(listManagedSessions(fixture.storeDir).length, 0);
+    const transitionsDir = nativeThreadTransitionsDir(fixture.storeDir);
+    assert.equal(
+      fs.existsSync(transitionsDir)
+        ? fs.readdirSync(transitionsDir).length
+        : 0,
+      0
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("live-gate New accepts a persisted unmanaged Codex origin", () => {
+  const fixture = createNoRolloutFixture({ persistedCandidate: true });
+  try {
+    const listed = runCli([
+      "list",
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome,
+      "--no-approval-scan"
+    ], fixture.environment);
+    assert.equal(listed.status, 0, listed.stderr || listed.stdout);
+    const terminal = JSON.parse(listed.stdout).terminals[0];
+    const expectedBindingToken = terminal.lifecycle_binding_token;
+    assert.equal(typeof expectedBindingToken, "string");
+
+    const prepared = runCli([
+      "new-thread",
+      "--terminal",
+      fixture.terminalId,
+      "--expected-binding-token",
+      expectedBindingToken,
+      "--require-restorable-origin",
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome
+    ], {
+      ...fixture.environment,
+      AKK_TEST_EXIT_AFTER_LIFECYCLE_PREPARED: "1"
+    });
+
+    assert.equal(prepared.status, 86, prepared.stderr || prepared.stdout);
+    const literalSends = readTmuxCalls(fixture.tmuxCallsPath)
+      .filter((call) =>
+        call.args[0] === "send-keys" && call.args.includes("-l")
+      )
+      .map((call) => call.args.at(-1));
+    assert.deepEqual(literalSends, ["/status"]);
+    assert.equal(listConversations(fixture.storeDir).length, 0);
+    assert.equal(listManagedSessions(fixture.storeDir).length, 0);
+    const transitions = fs.readdirSync(
+      nativeThreadTransitionsDir(fixture.storeDir)
+    );
+    assert.equal(transitions.length, 1);
+    assert.equal(
+      loadNativeThreadTransition(fixture.storeDir, transitions[0]).status,
+      "prepared"
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 interface NoRolloutFixture {
   tempDir: string;
   storeDir: string;
@@ -271,7 +386,9 @@ interface NoRolloutFixture {
   cleanup(): void;
 }
 
-function createNoRolloutFixture(): NoRolloutFixture {
+function createNoRolloutFixture(
+  { persistedCandidate = false }: { persistedCandidate?: boolean } = {}
+): NoRolloutFixture {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-birth-"));
   const fakeBinDir = path.join(tempDir, "bin");
   const workspace = path.join(tempDir, "workspace");
@@ -311,6 +428,17 @@ function createNoRolloutFixture(): NoRolloutFixture {
       cli_version: "0.146.0"
     }
   })}\n`, { mode: 0o600 });
+  if (persistedCandidate) {
+    fs.writeFileSync(path.join(codexHome, "state_1.sqlite"), "", {
+      mode: 0o600
+    });
+    writeFakeSqlite({
+      fakeBinDir,
+      nativeThreadId: NATIVE_THREAD_ID,
+      rolloutPath,
+      workspace
+    });
+  }
   writeFakeTmux({
     fakeBinDir,
     callsPath: tmuxCallsPath,
@@ -490,6 +618,44 @@ if (args.includes("cwd")) {
   const stat = fs.statSync(${JSON.stringify(options.rolloutPath)});
   process.stdout.write("p${options.codexPid}\\nf12u\\ntREG\\nD" + stat.dev +
     "\\ni" + stat.ino + "\\nn${options.rolloutPath}\\n");
+}
+`, { mode: 0o755 });
+}
+
+function writeFakeSqlite(options: {
+  fakeBinDir: string;
+  nativeThreadId: string;
+  rolloutPath: string;
+  workspace: string;
+}): void {
+  const columns = [
+    "id",
+    "cwd",
+    "rollout_path",
+    "updated_at_ms",
+    "archived",
+    "source",
+    "cli_version"
+  ].map((name) => ({ name }));
+  const rows = [{
+    id: options.nativeThreadId,
+    cwd: options.workspace,
+    rollout_path: options.rolloutPath,
+    updated_at_ms: 1_786_000_000_000,
+    archived: 0,
+    source: "cli",
+    cli_version: "0.146.0"
+  }];
+  fs.writeFileSync(path.join(options.fakeBinDir, "sqlite3"), `#!/usr/bin/env node
+const args = process.argv.slice(2);
+const sql = args[3] || "";
+if (sql === "pragma table_info(threads)") {
+  process.stdout.write(${JSON.stringify(JSON.stringify(columns))});
+} else if (sql.startsWith("select id")) {
+  process.stdout.write(${JSON.stringify(JSON.stringify(rows))});
+} else {
+  process.stderr.write("unexpected sqlite query: " + sql);
+  process.exit(1);
 }
 `, { mode: 0o755 });
 }

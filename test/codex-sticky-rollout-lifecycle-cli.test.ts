@@ -282,6 +282,7 @@ test("Codex new-thread does not attach a sticky before-thread rollout to the new
       terminalId,
       "--expected-binding-token",
       expectedSourceBindingToken,
+      "--require-restorable-origin",
       "--store-dir",
       storeDir,
       "--codex-home",

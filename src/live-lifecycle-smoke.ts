@@ -225,10 +225,10 @@ interface InternalTerminalSnapshot {
   agent: LifecycleSmokeAgent;
   evidence: InternalTerminalEvidence;
   /**
-   * A virgin Codex 0.146.1 process may have no open rollout descriptor, so
-   * the unmanaged preflight list row cannot name its native thread yet. The
-   * committed New transition must materialize this from its fresh /status
-   * probe before any public evidence is emitted.
+   * A persisted Codex 0.146.1 thread may currently have no open rollout
+   * descriptor, so the unmanaged preflight list row cannot name it yet. New
+   * must prove the identity from its fresh /status probe and pass the
+   * restorable-origin guard before any public evidence is emitted.
    */
   nativeThreadId: string | null;
   target: string;
@@ -384,7 +384,8 @@ export async function runLifecycleScenario(
           "--terminal",
           action.terminalId,
           "--expected-binding-token",
-          action.expectedBindingToken
+          action.expectedBindingToken,
+          "--require-restorable-origin"
         ],
         { kind: "mutation", timeoutMs: timeouts.mutationMs }
       );
