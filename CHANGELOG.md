@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.10.1 - 2026-08-06
+
+### Added
+
+- Add an opt-in native lifecycle live-smoke release gate that records redacted, commit-bound Codex and Claude Code `new → send → resume` evidence for annotated release tags.
+
+### Fixed
+
+- Keep the semantic Turn phase independent from callback transport delivery, so a failed or pending `done` notification leaves the Turn idle and a failed or pending `question` or `blocked` notification remains actionable through respond or cancel.
+- Treat accepted OpenClaw injection and wake acknowledgements as durable delivery while keeping `agent.wait` timeout, error, or malformed output as observation-only evidence that cannot replay an accepted callback.
+- Serialize callback claims with exact in-flight diagnostics, preserve immutable outbox delivery across close and Session binding-generation changes, and migrate valid legacy callback-owned statuses without letting malformed records poison Store-wide listing.
+
 ## 0.10.0 - 2026-08-06
 
 ### Added
