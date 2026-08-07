@@ -28,6 +28,7 @@ import {
 
 const CALLBACK_METHOD = AKK_CALLBACK_METHOD;
 const MONITOR_SUPERVISOR_INTERVAL_MS = 5_000;
+const MAX_DISPLAYED_RESUME_SNAPSHOTS = 512;
 const defaultBinPath = fileURLToPath(new URL("./cli.js", import.meta.url));
 const relayPathByApi = new WeakMap<object, string>();
 
@@ -375,6 +376,10 @@ function createPlugin(
     monitorSupervisorIntervalMs?: number;
   } = {}
 ): OpenClawPluginDefinition {
+  const displayedResumeSnapshots = new Map<
+    string,
+    { snapshotId: string; expiresAtMs: number }
+  >();
   return definePluginEntry({
   id: "agent-knock-knock",
   name: "Agent Knock Knock",
@@ -423,9 +428,13 @@ function createPlugin(
         default: "AKK is handling the request..."
       },
       agentPromptGuidance: [
-        "Use /akk <task> when exactly one eligible idle coding-agent tmux pane should receive new work. Use /akk codex: <task>, /akk claude: <task>, or another selector returned by /akk list to target an existing pane. Ordinary sends preserve native context. Use /akk threads, /akk new-thread or clear-thread, and /akk resume-thread only with an exact full terminal_id returned by /akk list; these switch native context without creating a Turn. AKK never starts a coding-agent process."
+        "Use /akk <task> when exactly one eligible idle coding-agent tmux pane should receive new work. Use /akk codex: <task>, /akk claude: <task>, or another selector returned by /akk list to target an existing pane. Ordinary sends preserve native context. Use /akk threads, /akk new-thread or clear-thread, and /akk resume-thread only with an exact full terminal_id returned by /akk list; these switch native context without creating a Turn. Resume numbers and short IDs are bound to the last displayed snapshot, while previous is available only from the latest verified committed transition. AKK never starts a coding-agent process."
       ],
-      handler: async (ctx) => handleAkkCommand(api, ctx)
+      handler: async (ctx) => handleAkkCommand(
+        api,
+        ctx,
+        displayedResumeSnapshots
+      )
     });
 
     registerCliTool(api, {
@@ -459,7 +468,7 @@ function createPlugin(
     registerCliTool(api, {
       name: "agent_knock_knock_list_resumable_threads",
       description:
-        "List verified native Codex or Claude Code threads for one exact terminal. Call this only from that terminal row's available list_resumable_threads action. The result includes the current native identity, a fresh expected_binding_token, and exact candidate UUIDs with opaque candidate_token fingerprints; resume only a row with resumable=true and preserve both tokens from that same result. This is read-only and creates no AKK Turn.",
+        "List verified native Codex or Claude Code threads for one exact terminal. Call this only from that terminal row's available list_resumable_threads action. The result includes the current native identity, a fresh expected_binding_token, exact candidate UUIDs with opaque candidate_token fingerprints, and an exact previous action only when the latest committed transition has one uniquely resumable source. Resume only a row with resumable=true or that previous action, preserving all full prefilled arguments from the same result. Number/short/handle fields are human display aids, never exact tool arguments. This is read-only for Session/Turn state and creates no AKK Turn.",
       parameters: listResumableThreadsParameters,
       normalizeTurnIdentity: false,
       buildArgs: (params) => {
@@ -812,7 +821,78 @@ export function createOpenClawPluginForTest(
 
 export default plugin;
 
-async function handleAkkCommand(api, ctx) {
+function resumeSelectionScope(
+  sessionKey: unknown,
+  sessionId: unknown
+): string {
+  const key = requiredString(
+    sessionKey,
+    "OpenClaw session identity is required for snapshot-bound Resume"
+  );
+  const incarnation = stringValue(sessionId) ?? null;
+  return `openclaw:${createHash("sha256")
+    .update(JSON.stringify([key, incarnation]))
+    .digest("hex")}`;
+}
+
+function resumeSnapshotCacheKey(
+  sessionKey: unknown,
+  sessionId: unknown,
+  terminalId: string
+): string {
+  const key = requiredString(
+    sessionKey,
+    "OpenClaw session identity is required for snapshot-bound Resume"
+  );
+  return JSON.stringify([key, stringValue(sessionId) ?? null, terminalId]);
+}
+
+function rememberDisplayedResumeSnapshot(
+  snapshots: Map<string, { snapshotId: string; expiresAtMs: number }>,
+  key: string,
+  snapshotId: string,
+  expiresAtMs: number
+): void {
+  const now = Date.now();
+  for (const [candidateKey, value] of snapshots) {
+    if (value.expiresAtMs <= now) {
+      snapshots.delete(candidateKey);
+    }
+  }
+  snapshots.delete(key);
+  while (snapshots.size >= MAX_DISPLAYED_RESUME_SNAPSHOTS) {
+    const oldestKey = snapshots.keys().next().value;
+    if (typeof oldestKey !== "string") {
+      break;
+    }
+    snapshots.delete(oldestKey);
+  }
+  snapshots.set(key, { snapshotId, expiresAtMs });
+}
+
+function currentDisplayedResumeSnapshotId(
+  snapshots: Map<string, { snapshotId: string; expiresAtMs: number }>,
+  key: string
+): string | undefined {
+  const value = snapshots.get(key);
+  if (!value) {
+    return undefined;
+  }
+  if (value.expiresAtMs <= Date.now()) {
+    snapshots.delete(key);
+    return undefined;
+  }
+  return value.snapshotId;
+}
+
+async function handleAkkCommand(
+  api,
+  ctx,
+  displayedResumeSnapshots: Map<
+    string,
+    { snapshotId: string; expiresAtMs: number }
+  >
+) {
   try {
     const parsed = parseAkkCommand(ctx.args);
     if (parsed.action === "help") {
@@ -835,12 +915,52 @@ async function handleAkkCommand(api, ctx) {
       parsed.action === "new-thread" ||
       parsed.action === "resume-thread"
     ) {
+      const selectionScope = resumeSelectionScope(
+        ctx.sessionKey,
+        ctx.sessionId
+      );
+      const snapshotCacheKey = resumeSnapshotCacheKey(
+        ctx.sessionKey,
+        ctx.sessionId,
+        parsed.terminalId
+      );
+      if (
+        parsed.action === "resume-thread" &&
+        parsed.selection &&
+        ["number", "short-id", "snapshot-handle"].includes(
+          parsed.selection.kind
+        )
+      ) {
+        const mutationArgs = buildAkkCommandCliArgs(parsed, config, {
+          sessionKey: ctx.sessionKey,
+          selectionScope,
+          selectionSnapshotId:
+            parsed.selection.kind === "snapshot-handle"
+              ? undefined
+              : currentDisplayedResumeSnapshotId(
+                  displayedResumeSnapshots,
+                  snapshotCacheKey
+                )
+        });
+        if (!mutationArgs) {
+          throw new Error("could not build snapshot-bound resume command");
+        }
+        const transitionResult = runCli(api, mutationArgs);
+        if (isAkkThreadTransitionSuccess(transitionResult)) {
+          displayedResumeSnapshots.delete(snapshotCacheKey);
+        }
+        return {
+          text: formatAkkThreadTransitionCommandResult(transitionResult),
+          isError: !isAkkThreadTransitionSuccess(transitionResult)
+        };
+      }
       const discoveryArgs = buildAkkCommandCliArgs(
         {
           action: "list-resumable-threads",
           terminalId: parsed.terminalId
         },
-        config
+        config,
+        { selectionScope }
       );
       if (!discoveryArgs) {
         throw new Error("could not build native-thread discovery command");
@@ -850,42 +970,101 @@ async function handleAkkCommand(api, ctx) {
         parsed.action === "list-resumable-threads" ||
         (
           parsed.action === "resume-thread" &&
-          !parsed.nativeThreadId
+          !parsed.selection
         )
       ) {
+        const snapshotId = isRecord(discovery.selection_snapshot)
+          ? stringValue(discovery.selection_snapshot.snapshot_id)
+          : undefined;
+        const expiresAt = isRecord(discovery.selection_snapshot)
+          ? Date.parse(String(discovery.selection_snapshot.expires_at ?? ""))
+          : Number.NaN;
+        if (snapshotId && Number.isFinite(expiresAt) && expiresAt > Date.now()) {
+          rememberDisplayedResumeSnapshot(
+            displayedResumeSnapshots,
+            snapshotCacheKey,
+            snapshotId,
+            expiresAt
+          );
+        } else {
+          displayedResumeSnapshots.delete(snapshotCacheKey);
+        }
         return { text: formatAkkThreadsCommandResult(discovery) };
       }
-      const expectedBindingToken = requiredString(
+      let expectedBindingToken = requiredString(
         discovery.expected_binding_token,
         "expected_binding_token from lifecycle discovery"
       );
       let candidateToken: string | undefined;
+      let mutationCommand = parsed;
       if (parsed.action === "resume-thread") {
-        const candidate = Array.isArray(discovery.threads)
-          ? discovery.threads.find((thread) =>
-              isRecord(thread) &&
-              stringValue(thread.native_thread_id) === parsed.nativeThreadId
-            )
-          : undefined;
-        if (!isRecord(candidate) || candidate.resumable !== true) {
-          throw new Error(
-            `native thread ${parsed.nativeThreadId} is not resumable in the current lifecycle snapshot`
+        let nativeThreadId: string;
+        if (parsed.selection?.kind === "previous") {
+          const previous = isRecord(discovery.previous)
+            ? discovery.previous
+            : undefined;
+          const action = isRecord(previous?.available_actions) &&
+              isRecord(previous.available_actions.resume_thread)
+            ? previous.available_actions.resume_thread
+            : undefined;
+          const actionArguments = isRecord(action?.arguments)
+            ? action.arguments
+            : undefined;
+          nativeThreadId = requiredString(
+            actionArguments?.native_thread_id,
+            "no verified previous native thread is available; run /akk threads"
+          );
+          if (stringValue(actionArguments?.terminal_id) !== parsed.terminalId) {
+            throw new Error("previous resume action belongs to another terminal");
+          }
+          expectedBindingToken = requiredString(
+            actionArguments?.expected_binding_token,
+            "expected_binding_token from the previous resume action"
+          );
+          candidateToken = requiredString(
+            actionArguments?.candidate_token,
+            "candidate_token from the previous resume action"
+          );
+        } else {
+          if (parsed.selection?.kind !== "exact") {
+            throw new Error("resume selection could not be resolved");
+          }
+          nativeThreadId = parsed.selection.nativeThreadId;
+          const candidate = Array.isArray(discovery.threads)
+            ? discovery.threads.find((thread) =>
+                isRecord(thread) &&
+                stringValue(thread.native_thread_id) === nativeThreadId
+              )
+            : undefined;
+          if (!isRecord(candidate) || candidate.resumable !== true) {
+            throw new Error(
+              `native thread ${nativeThreadId} is not resumable in the current lifecycle snapshot`
+            );
+          }
+          candidateToken = requiredString(
+            candidate.candidate_token,
+            "candidate_token from the selected resumable thread"
           );
         }
-        candidateToken = requiredString(
-          candidate.candidate_token,
-          "candidate_token from the selected resumable thread"
-        );
+        mutationCommand = {
+          action: "resume-thread",
+          terminalId: parsed.terminalId,
+          selection: { kind: "exact", nativeThreadId }
+        };
       }
-      const mutationArgs = buildAkkCommandCliArgs(parsed, config, {
+      const mutationArgs = buildAkkCommandCliArgs(mutationCommand, config, {
         sessionKey: ctx.sessionKey,
         expectedBindingToken,
-        candidateToken
+        candidateToken,
+        selectionScope
       });
       if (!mutationArgs) {
         throw new Error("could not build native-thread lifecycle command");
       }
       const transitionResult = runCli(api, mutationArgs);
+      if (isAkkThreadTransitionSuccess(transitionResult)) {
+        displayedResumeSnapshots.delete(snapshotCacheKey);
+      }
       return {
         text: formatAkkThreadTransitionCommandResult(transitionResult),
         isError: !isAkkThreadTransitionSuccess(transitionResult)

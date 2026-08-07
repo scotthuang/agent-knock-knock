@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.11.0 - 2026-08-07
+
+### Added
+
+- Add snapshot-bound native Resume navigation with deterministic numbers, collision-safe display-only short IDs, opaque five-minute handles, and a `previous` / `刚才那个` shortcut derived from the current Session's latest committed lifecycle transition.
+
+### Security
+
+- Resolve every Resume shortcut back to the complete UUID and exact evidence tuple, then fail closed if the terminal action generation, process, workspace, binding, ordered candidate snapshot, ownership, or TTL changed before native input.
+
 ## 0.10.4 - 2026-08-07
 
 ### Fixed

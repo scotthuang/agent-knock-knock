@@ -1,6 +1,6 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.10.4",
+  "version": "0.11.0",
   "description": "Control local Codex and Claude Code from OpenClaw through shared tmux terminals, with seamless human-agent handoff.",
   "license": "MIT",
   "type": "module",

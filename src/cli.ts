@@ -107,6 +107,17 @@ import {
   isFreshCodexPostProbeScreen
 } from "./native-thread-lifecycle-policy.js";
 import {
+  createNativeThreadResumeSnapshot,
+  nativeThreadCandidateSnapshotFingerprint,
+  nativeThreadResumeSnapshotRowsMatchCandidates,
+  resolveNativeThreadResumeSelection,
+  saveNativeThreadResumeSnapshot,
+  sortNativeThreadCandidates,
+  terminalActionFingerprint,
+  verifiedPreviousResumeCandidate,
+  type NativeThreadResumeSnapshot
+} from "./native-thread-resume-snapshot.js";
+import {
   listManagedSessions,
   loadManagedSession,
   loadNativeThreadTransition,
@@ -7015,7 +7026,7 @@ async function resumableThreadCandidates({
       });
     }
   }
-  return [...deduplicated.values()]
+  return sortNativeThreadCandidates([...deduplicated.values()]
     .map((candidate): NativeThreadCandidate => {
       const nativeThreadId = candidate.native_thread_id;
       const managed = managedByNativeId.get(nativeThreadId) ?? [];
@@ -7056,10 +7067,7 @@ async function resumableThreadCandidates({
           ? new Date(Number(candidate.updated_at_ms)).toISOString()
           : undefined
       };
-    })
-    .sort((left, right) =>
-      Number(right.updated_at_ms ?? 0) - Number(left.updated_at_ms ?? 0)
-    );
+    }));
 }
 
 function encodeThreadCandidateToken(
@@ -7414,10 +7422,62 @@ async function runListResumableThreads(options) {
     terminal,
     currentIdentity: snapshot.identity
   });
+  const storeDir = storeDirFromOptions(options);
+  const workspace = path.resolve(
+    terminal.terminalControl.currentPath ?? process.cwd()
+  );
+  const selectionScope =
+    stringValue(options.selectionScope) ?? "cli:unscoped";
+  const resumeSnapshot = createNativeThreadResumeSnapshot({
+    storeDir,
+    selectionScope,
+    terminalId: terminal.conversationId,
+    agent: terminal.agent,
+    workspace,
+    terminalControl: terminal.terminalControl,
+    currentSessionId: snapshot.session?.session_id,
+    currentNativeThreadId:
+      snapshot.identity?.sessionId ??
+      snapshot.session?.binding?.native_thread_id,
+    expectedBindingToken: snapshot.bindingToken,
+    terminalActionFingerprint: terminalActionFingerprint(
+      loadTerminalBridgeDispatchLedger(terminal.terminalControl)
+    ),
+    candidates
+  });
+  saveNativeThreadResumeSnapshot(
+    terminalBridgeRuntimeDir(),
+    storeDir,
+    resumeSnapshot
+  );
+  const snapshotRows = new Map(
+    resumeSnapshot.rows.map((row) => [row.native_thread_id, row])
+  );
+  const resumeAction = (candidate: NativeThreadCandidate) => ({
+    tool: "agent_knock_knock_resume_thread",
+    arguments: {
+      terminal_id: terminal.conversationId,
+      native_thread_id: candidate.native_thread_id,
+      expected_binding_token: snapshot.bindingToken,
+      ...(candidate.candidate_token
+        ? { candidate_token: candidate.candidate_token }
+        : {})
+    },
+    requires_user_intent: true
+  });
+  const previousCandidate = previousCommittedResumeCandidate({
+    storeDir,
+    terminal,
+    currentSession: snapshot.session,
+    candidates
+  });
+  const previousSnapshotRow = previousCandidate
+    ? snapshotRows.get(previousCandidate.native_thread_id)
+    : undefined;
   printJson({
     terminal_id: terminal.conversationId,
     agent: terminal.agent,
-    workspace: terminal.terminalControl.currentPath,
+    workspace,
     current_session_id: snapshot.session?.session_id ?? null,
     current_native_thread_id:
       snapshot.identity?.sessionId ??
@@ -7425,25 +7485,76 @@ async function runListResumableThreads(options) {
       null,
     expected_binding_token: snapshot.bindingToken,
     capability: snapshot.capabilities,
+    selection_snapshot: {
+      schema: resumeSnapshot.schema,
+      version: resumeSnapshot.version,
+      snapshot_id: resumeSnapshot.snapshot_id,
+      created_at: resumeSnapshot.created_at,
+      expires_at: resumeSnapshot.expires_at,
+      scope: "exact selection snapshot, scope, and terminal",
+      display_only: true
+    },
+    ...(previousCandidate && previousSnapshotRow
+      ? {
+          previous: {
+            keyword: "previous",
+            native_thread_id: previousCandidate.native_thread_id,
+            selection_number: previousSnapshotRow.selection_number,
+            short_id: previousSnapshotRow.short_id,
+            selection_handle: previousSnapshotRow.selection_handle,
+            available_actions: {
+              resume_thread: resumeAction(previousCandidate)
+            }
+          }
+        }
+      : {}),
     threads: candidates.map((candidate) => ({
       ...candidate,
+      selection_number:
+        snapshotRows.get(candidate.native_thread_id)?.selection_number,
+      short_id: snapshotRows.get(candidate.native_thread_id)?.short_id,
+      selection_handle:
+        snapshotRows.get(candidate.native_thread_id)?.selection_handle,
+      selection_scope: "current_snapshot",
       available_actions: candidate.resumable
         ? {
-            resume_thread: {
-              tool: "agent_knock_knock_resume_thread",
-              arguments: {
-                terminal_id: terminal.conversationId,
-                native_thread_id: candidate.native_thread_id,
-                expected_binding_token: snapshot.bindingToken,
-                ...(candidate.candidate_token
-                  ? { candidate_token: candidate.candidate_token }
-                  : {})
-              },
-              requires_user_intent: true
-            }
+            resume_thread: resumeAction(candidate)
           }
         : {}
     }))
+  });
+}
+
+function previousCommittedResumeCandidate({
+  storeDir,
+  terminal,
+  currentSession,
+  candidates
+}: {
+  storeDir: string;
+  terminal: ResolvedTerminalConversation;
+  currentSession?: ManagedSessionState;
+  candidates: NativeThreadCandidate[];
+}): NativeThreadCandidate | undefined {
+  if (!currentSession?.last_transition_id) {
+    return undefined;
+  }
+  let transition: NativeThreadTransition;
+  try {
+    transition = loadNativeThreadTransition(
+      storeDir,
+      currentSession.last_transition_id
+    );
+  } catch {
+    return undefined;
+  }
+  return verifiedPreviousResumeCandidate({
+    terminalId: terminal.conversationId,
+    agent: terminal.agent,
+    workspace: terminal.terminalControl.currentPath ?? process.cwd(),
+    currentSession,
+    transition,
+    candidates
   });
 }
 
@@ -7837,24 +7948,154 @@ async function runNewThread(options) {
 }
 
 async function runResumeThread(options) {
-  const nativeThreadId = required(
-    stringValue(options.nativeThread ?? options.nativeThreadId),
-    "--native-thread is required"
+  const exactNativeThreadId = stringValue(
+    options.nativeThread ?? options.nativeThreadId
   );
-  if (!isExactNativeThreadId(nativeThreadId)) {
-    throw new Error("--native-thread must be a complete native thread UUID");
+  const hasSnapshotSelection = Boolean(
+    options.selectionSnapshot ||
+    options.selectionNumber ||
+    options.selectionShortId ||
+    options.selectionHandle
+  );
+  if (exactNativeThreadId && hasSnapshotSelection) {
+    throw new Error(
+      "--native-thread cannot be combined with a snapshot-bound selection"
+    );
   }
-  return runNativeThreadTransition(options, {
-    kind: "resume_thread",
-    nativeThreadId: nativeThreadId.toLowerCase()
+  if (exactNativeThreadId) {
+    if (!isExactNativeThreadId(exactNativeThreadId)) {
+      throw new Error("--native-thread must be a complete native thread UUID");
+    }
+    return runNativeThreadTransition(options, {
+      kind: "resume_thread",
+      nativeThreadId: exactNativeThreadId.toLowerCase()
+    });
+  }
+  if (!hasSnapshotSelection) {
+    throw new Error(
+      "--native-thread or a snapshot-bound resume selection is required"
+    );
+  }
+  const terminal = await resolveLifecycleTerminal(options);
+  const storeDir = storeDirFromOptions(options);
+  const selectionScope = required(
+    stringValue(options.selectionScope),
+    "--selection-scope is required for snapshot-bound resume"
+  );
+  const rawSelectionNumber = options.selectionNumber;
+  if (
+    rawSelectionNumber !== undefined &&
+    (
+      typeof rawSelectionNumber !== "string" ||
+      !/^[1-9][0-9]*$/u.test(rawSelectionNumber)
+    )
+  ) {
+    throw new Error("--selection-number must be a positive integer");
+  }
+  const selectionNumber = rawSelectionNumber === undefined
+    ? undefined
+    : Number(rawSelectionNumber);
+  if (
+    selectionNumber !== undefined &&
+    !Number.isSafeInteger(selectionNumber)
+  ) {
+    throw new Error("--selection-number must be a positive safe integer");
+  }
+  const selection = resolveNativeThreadResumeSelection({
+    runtimeDir: terminalBridgeRuntimeDir(),
+    storeDir,
+    terminalId: terminal.conversationId,
+    selectionScope,
+    snapshotId: stringValue(options.selectionSnapshot),
+    selectionNumber,
+    shortId: stringValue(options.selectionShortId),
+    selectionHandle: stringValue(options.selectionHandle)
   });
+  assertResumeSnapshotMatchesTerminal(selection.snapshot, terminal);
+  assertResumeSnapshotActionFingerprint(selection.snapshot, terminal);
+  const selectedOptions = {
+    ...options,
+    expectedBindingToken: selection.snapshot.expected_binding_token,
+    candidateToken: selection.row.candidate_token
+  };
+  return runNativeThreadTransition(selectedOptions, {
+    kind: "resume_thread",
+    nativeThreadId: selection.row.native_thread_id.toLowerCase(),
+    selectionSnapshot: selection.snapshot
+  });
+}
+
+function assertResumeSnapshotMatchesTerminal(
+  snapshot: NativeThreadResumeSnapshot,
+  terminal: ResolvedTerminalConversation
+): void {
+  const workspace = path.resolve(
+    terminal.terminalControl.currentPath ?? process.cwd()
+  );
+  if (
+    snapshot.terminal_id !== terminal.conversationId ||
+    snapshot.agent !== terminal.agent ||
+    path.resolve(snapshot.workspace) !== workspace ||
+    snapshot.terminal_control.target !== terminal.terminalControl.target ||
+    snapshot.terminal_control.socket_path !== terminal.terminalControl.socketPath ||
+    snapshot.terminal_control.pane_pid !== terminal.terminalControl.panePid
+  ) {
+    throw new Error(
+      "resume selection terminal, process, or workspace changed; run /akk threads again"
+    );
+  }
+}
+
+function assertResumeSnapshotActionFingerprint(
+  snapshot: NativeThreadResumeSnapshot,
+  terminal: ResolvedTerminalConversation
+): void {
+  const current = terminalActionFingerprint(
+    loadTerminalBridgeDispatchLedger(terminal.terminalControl)
+  );
+  if (current !== snapshot.terminal_action_fingerprint) {
+    throw new Error(
+      "terminal action history changed after the resume snapshot; run /akk threads again"
+    );
+  }
+}
+
+function assertResumeSnapshotCandidates(
+  snapshot: NativeThreadResumeSnapshot,
+  candidates: readonly NativeThreadCandidate[]
+): void {
+  if (
+    nativeThreadCandidateSnapshotFingerprint(candidates) !==
+      snapshot.candidate_snapshot_fingerprint
+  ) {
+    throw new Error(
+      "resume candidates changed or reordered after the snapshot; run /akk threads again"
+    );
+  }
+  if (!nativeThreadResumeSnapshotRowsMatchCandidates(snapshot, candidates)) {
+    throw new Error(
+      "resume selection rows no longer match the exact candidate snapshot; run /akk threads again"
+    );
+  }
+}
+
+function assertResumeSnapshotNotExpired(
+  snapshot: NativeThreadResumeSnapshot
+): void {
+  if (Date.parse(snapshot.expires_at) <= Date.now()) {
+    throw new Error("resume selection snapshot expired; run /akk threads again");
+  }
 }
 
 async function runNativeThreadTransition(
   options: Record<string, any>,
   operation:
     | { kind: "new_thread"; requireRestorableOrigin: boolean }
-    | { kind: "resume_thread"; nativeThreadId: string }
+    | {
+        kind: "resume_thread";
+        nativeThreadId: string;
+        selectionSnapshot?: NativeThreadResumeSnapshot;
+      }
 ) {
   const initiallyResolved = await resolveLifecycleTerminal(options);
   const storeDir = storeDirFromOptions(options);
@@ -7874,7 +8115,18 @@ async function runNativeThreadTransition(
           "terminal identity changed while waiting for lifecycle control; refresh list"
         );
       }
+      if (operation.kind === "resume_thread" && operation.selectionSnapshot) {
+        assertResumeSnapshotNotExpired(operation.selectionSnapshot);
+        assertResumeSnapshotMatchesTerminal(operation.selectionSnapshot, terminal);
+        assertResumeSnapshotActionFingerprint(operation.selectionSnapshot, terminal);
+      }
       await recoverLifecycleFenceBeforeMutation({ options, terminal });
+      if (operation.kind === "resume_thread" && operation.selectionSnapshot) {
+        // Recovery may resolve or otherwise rewrite a durable dispatch fence.
+        // A snapshot created before that mutation is stale even when the
+        // binding and candidate files themselves did not change.
+        assertResumeSnapshotActionFingerprint(operation.selectionSnapshot, terminal);
+      }
       const snapshot = await currentLifecycleSnapshot(
         options,
         terminal,
@@ -7903,6 +8155,17 @@ async function runNativeThreadTransition(
         snapshot.capabilities.resumeExact !== true
       ) {
         throw new Error(snapshot.capabilities.reason);
+      }
+      if (operation.kind === "resume_thread" && operation.selectionSnapshot) {
+        const guardedCandidates = await resumableThreadCandidates({
+          options,
+          terminal,
+          currentIdentity: snapshot.identity
+        });
+        assertResumeSnapshotCandidates(
+          operation.selectionSnapshot,
+          guardedCandidates
+        );
       }
       const plan = snapshot.adapter.planThreadLifecycle?.(
         operation,
@@ -8047,6 +8310,16 @@ async function runNativeThreadTransition(
           terminal,
           currentIdentity: beforeIdentity
         });
+        if (operation.selectionSnapshot) {
+          // The Codex identity probe and other readiness checks above are
+          // asynchronous. Rebind the whole displayed snapshot, not only its
+          // selected UUID, after those checks and before any lifecycle state
+          // is persisted.
+          assertResumeSnapshotCandidates(
+            operation.selectionSnapshot,
+            candidates
+          );
+        }
         const candidate = candidates.find((entry) =>
           entry.native_thread_id === operation.nativeThreadId
         );
@@ -8297,6 +8570,9 @@ async function runNativeThreadTransition(
             options,
             terminalControl: terminal.terminalControl
           });
+        }
+        if (operation.kind === "resume_thread" && operation.selectionSnapshot) {
+          assertResumeSnapshotNotExpired(operation.selectionSnapshot);
         }
         inputStarted = true;
         await bridge.send(
@@ -23048,8 +23324,9 @@ function usage() {
   agent-knock-knock send [--session <session-id|selector>] [--conversation <selector>] --message <text> [--type task] [--agent-timeout-minutes <minutes>] [--agent-hard-timeout-minutes <minutes>]
   agent-knock-knock new-thread --terminal <exact-terminal-id> --expected-binding-token <token>
   agent-knock-knock clear-thread --terminal <exact-terminal-id> --expected-binding-token <token>
-  agent-knock-knock list-resumable-threads --terminal <exact-terminal-id>
+  agent-knock-knock list-resumable-threads --terminal <exact-terminal-id> [--selection-scope <opaque-scope>]
   agent-knock-knock resume-thread --terminal <exact-terminal-id> --native-thread <uuid> --expected-binding-token <token> --candidate-token <token>
+  agent-knock-knock resume-thread --terminal <exact-terminal-id> (--selection-handle <handle> | --selection-snapshot <id> (--selection-number <n> | --selection-short-id <@id>)) --selection-scope <opaque-scope>
   agent-knock-knock respond --turn <turn-id|selector> --message <text> [--conversation <selector>]
   agent-knock-knock approve [--turn <turn-id|selector>] [--conversation <selector>] --expected-approval-fingerprint <fingerprint>
   agent-knock-knock cancel [--turn <turn-id|selector>] [--conversation <selector>]

@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   managedSessionBindingToken,
   terminalBindingFrom
@@ -60,7 +61,7 @@ test("resume lists a conclusively dead bound Session read-only, then CAS-detache
       claudePid,
       workspace
     });
-    writeClaudeTranscript({
+    const resumeTranscriptPath = writeClaudeTranscript({
       claudeHome,
       workspace,
       nativeThreadId: resumeNativeThreadId
@@ -214,17 +215,230 @@ test("resume lists a conclusively dead bound Session read-only, then CAS-detache
       "bound"
     );
     assert.equal(listConversations(storeDir).length, 0);
+    assert.equal(listOutput.previous, undefined);
+
+    const snapshotPath = findResumeSnapshot(
+      runtimeDir,
+      listOutput.selection_snapshot.snapshot_id
+    );
+    const originalSnapshot = fs.readFileSync(snapshotPath, "utf8");
+    const terminalInputsBeforeSnapshotFailures = readTmuxCalls(
+      tmuxCallsPath
+    ).filter((call) =>
+      call.args.includes("send-keys") || call.args.includes("paste-buffer")
+    ).length;
+
+    const wrongScope = runCli([
+      "resume-thread",
+      "--terminal",
+      terminalId,
+      "--selection-snapshot",
+      listOutput.selection_snapshot.snapshot_id,
+      "--selection-number",
+      String(candidate.selection_number),
+      "--selection-scope",
+      "openclaw:another-session",
+      ...commonArgs
+    ], environment);
+    assert.equal(wrongScope.status, 1);
+    assert.match(wrongScope.stderr, /another terminal or OpenClaw session/u);
+
+    const expiredSnapshot = JSON.parse(originalSnapshot);
+    expiredSnapshot.created_at = new Date(Date.now() - 600_000).toISOString();
+    expiredSnapshot.expires_at = new Date(Date.now() - 300_000).toISOString();
+    fs.writeFileSync(
+      snapshotPath,
+      `${JSON.stringify(expiredSnapshot, null, 2)}\n`,
+      "utf8"
+    );
+    const expired = runCli([
+      "resume-thread",
+      "--terminal",
+      terminalId,
+      "--selection-handle",
+      candidate.selection_handle,
+      "--selection-scope",
+      "cli:unscoped",
+      ...commonArgs
+    ], environment);
+    assert.equal(expired.status, 1);
+    assert.match(expired.stderr, /snapshot expired/u);
+    fs.writeFileSync(snapshotPath, originalSnapshot, "utf8");
+
+    for (const changedSnapshot of [
+      {
+        ...JSON.parse(originalSnapshot),
+        terminal_control: {
+          ...JSON.parse(originalSnapshot).terminal_control,
+          pane_pid: panePid + 1
+        }
+      },
+      {
+        ...JSON.parse(originalSnapshot),
+        workspace: path.join(root, "different-workspace")
+      }
+    ]) {
+      fs.writeFileSync(
+        snapshotPath,
+        `${JSON.stringify(changedSnapshot, null, 2)}\n`,
+        "utf8"
+      );
+      const terminalChanged = runCli([
+        "resume-thread",
+        "--terminal",
+        terminalId,
+        "--selection-handle",
+        candidate.selection_handle,
+        "--selection-scope",
+        "cli:unscoped",
+        ...commonArgs
+      ], environment);
+      assert.equal(terminalChanged.status, 1);
+      assert.match(
+        terminalChanged.stderr,
+        /terminal, process, or workspace changed/u
+      );
+    }
+    fs.writeFileSync(snapshotPath, originalSnapshot, "utf8");
+
+    const changedBinding = JSON.parse(sourceBeforeList);
+    changedBinding.binding.generation += 1;
+    fs.writeFileSync(
+      sourceStatePath,
+      `${JSON.stringify(changedBinding, null, 2)}\n`,
+      "utf8"
+    );
+    const bindingChanged = runCli([
+      "resume-thread",
+      "--terminal",
+      terminalId,
+      "--selection-handle",
+      candidate.selection_handle,
+      "--selection-scope",
+      "cli:unscoped",
+      ...commonArgs
+    ], environment);
+    assert.equal(bindingChanged.status, 1);
+    assert.match(bindingChanged.stderr, /binding changed/u);
+    fs.writeFileSync(sourceStatePath, sourceBeforeList, "utf8");
+
+    assert.equal(
+      readTmuxCalls(tmuxCallsPath).filter((call) =>
+        call.args.includes("send-keys") || call.args.includes("paste-buffer")
+      ).length,
+      terminalInputsBeforeSnapshotFailures,
+      "stale snapshot failures must happen before terminal input"
+    );
+    assert.equal(listConversations(storeDir).length, 0);
+
+    const missingSelectionNumber = runCli([
+      "resume-thread",
+      "--terminal",
+      terminalId,
+      "--selection-snapshot",
+      listOutput.selection_snapshot.snapshot_id,
+      "--selection-number",
+      "--selection-scope",
+      "cli:unscoped",
+      ...commonArgs
+    ], environment);
+    assert.equal(missingSelectionNumber.status, 1);
+    assert.match(missingSelectionNumber.stderr, /positive integer/u);
+
+    const ledgerKey = createHash("sha256")
+      .update(JSON.stringify({ target, socket_path: null }))
+      .digest("hex")
+      .slice(0, 20);
+    const ledgerDir = path.join(runtimeDir, "terminal-dispatch");
+    const ledgerPath = path.join(
+      ledgerDir,
+      `terminal-dispatch-${ledgerKey}.json`
+    );
+    fs.mkdirSync(ledgerDir, { recursive: true });
+    fs.writeFileSync(ledgerPath, JSON.stringify({
+      version: 1,
+      terminal_key: ledgerKey,
+      status: "resolved",
+      generation_id: "message-after-snapshot",
+      message_id: "message-after-snapshot",
+      terminal_control: {
+        kind: "tmux",
+        target,
+        socket_path: null,
+        pane_pid: panePid,
+        current_path: workspace
+      }
+    }));
+    const invalidated = runCli([
+      "resume-thread",
+      "--terminal",
+      terminalId,
+      "--selection-snapshot",
+      listOutput.selection_snapshot.snapshot_id,
+      "--selection-number",
+      String(candidate.selection_number),
+      "--selection-scope",
+      "cli:unscoped",
+      ...commonArgs
+    ], environment);
+    assert.equal(invalidated.status, 1);
+    assert.match(invalidated.stderr, /terminal action history changed/u);
+    fs.rmSync(ledgerPath);
+
+    const originalTranscript = fs.readFileSync(resumeTranscriptPath, "utf8");
+    fs.appendFileSync(resumeTranscriptPath, `${JSON.stringify({
+      type: "assistant",
+      uuid: "44444444-4444-4444-8444-444444444444",
+      parentUuid: "33333333-3333-4333-8333-333333333333",
+      sessionId: resumeNativeThreadId,
+      cwd: workspace,
+      version: "2.1.218",
+      message: { role: "assistant", content: "Changed after listing" }
+    })}\n`);
+    const changedCandidate = runCli([
+      "resume-thread",
+      "--terminal",
+      terminalId,
+      "--selection-snapshot",
+      listOutput.selection_snapshot.snapshot_id,
+      "--selection-short-id",
+      candidate.short_id,
+      "--selection-scope",
+      "cli:unscoped",
+      ...commonArgs
+    ], environment);
+    assert.equal(changedCandidate.status, 1);
+    assert.match(changedCandidate.stderr, /candidates changed or reordered/u);
+    assert.equal(
+      readTmuxCalls(tmuxCallsPath).some((call) =>
+        call.args.includes(`/resume ${resumeNativeThreadId}`)
+      ),
+      false
+    );
+    fs.writeFileSync(resumeTranscriptPath, originalTranscript, "utf8");
+
+    const relisted = runCli([
+      "list-resumable-threads",
+      "--terminal",
+      terminalId,
+      ...commonArgs
+    ], environment);
+    assert.equal(relisted.status, 0, relisted.stderr || relisted.stdout);
+    const relistedOutput = JSON.parse(relisted.stdout);
+    const relistedCandidate = relistedOutput.threads.find(
+      (entry: Record<string, unknown>) =>
+        entry.native_thread_id === resumeNativeThreadId
+    );
+    assert.ok(relistedCandidate);
 
     const resumed = runCli([
       "resume-thread",
       "--terminal",
       terminalId,
-      "--native-thread",
-      resumeNativeThreadId,
-      "--expected-binding-token",
-      listOutput.expected_binding_token,
-      "--candidate-token",
-      candidate.candidate_token,
+      "--selection-handle",
+      relistedCandidate.selection_handle,
+      "--selection-scope",
+      "cli:unscoped",
       ...commonArgs
     ], {
       ...environment,
@@ -449,6 +663,12 @@ function runCli(args: string[], env: NodeJS.ProcessEnv) {
   });
 }
 
+function findResumeSnapshot(runtimeDir: string, snapshotId: string): string {
+  const root = path.join(runtimeDir, "resume-snapshots");
+  const storeKey = fs.readdirSync(root)[0];
+  return path.join(root, storeKey, `${snapshotId}.json`);
+}
+
 function writeFakeTmux(options: {
   fakeBinDir: string;
   callsPath: string;
@@ -498,15 +718,19 @@ function writeClaudeTranscript(options: {
   claudeHome: string;
   workspace: string;
   nativeThreadId: string;
-}): void {
+}): string {
   const projectDirectory = path.join(
     options.claudeHome,
     "projects",
     options.workspace.replace(/[^A-Za-z0-9]/gu, "-")
   );
   fs.mkdirSync(projectDirectory, { recursive: true, mode: 0o700 });
+  const transcriptPath = path.join(
+    projectDirectory,
+    `${options.nativeThreadId}.jsonl`
+  );
   fs.writeFileSync(
-    path.join(projectDirectory, `${options.nativeThreadId}.jsonl`),
+    transcriptPath,
     `${JSON.stringify({
       type: "user",
       uuid: "33333333-3333-4333-8333-333333333333",
@@ -520,6 +744,7 @@ function writeClaudeTranscript(options: {
     })}\n`,
     { mode: 0o600 }
   );
+  return transcriptPath;
 }
 
 function readTmuxCalls(filePath: string): Array<{ args: string[] }> {
