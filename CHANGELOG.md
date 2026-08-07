@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.11.1 - 2026-08-07
+
+### Fixed
+
+- Harden Codex resumable-thread discovery across transient SQLite WAL/SHM creation, replacement, and checkpoint windows with one read transaction, identity-checked bounded `SQLITE_CANTOPEN` recovery, and a query-only sidecar-materialization fallback that does not use `immutable=1`.
+- Forward configured `codexHome` to Codex lifecycle discovery, new, and resume paths in OpenClaw tools and `/akk` commands.
+
 ## 0.11.0 - 2026-08-07
 
 ### Added
