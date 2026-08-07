@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   captureCodexRolloutAcceptanceAnchor,
+  detectCodexBoundRolloutCompletion,
   detectCodexRolloutAcceptance,
   terminalSubmissionReplayReceipt,
   validateTerminalSubmissionAcceptanceEvidence,
@@ -268,6 +269,23 @@ test("a pre-materialization Codex anchor accepts only the exact newly opened rol
       requestHash: REQUEST_HASH
     });
     assert.equal(evidence?.acceptanceId, "019f0000-0000-7000-8000-000000000007");
+    assert.ok(evidence);
+    appendRecords(fixture.path, [taskCompleteRecord(7, "Materialized exact result")]);
+    const completion = detectCodexBoundRolloutCompletion({
+      anchor,
+      acceptanceEvidence: evidence,
+      currentIdentity: {
+        sessionId: SESSION_ID,
+        processUuid: "codex-process-6",
+        processBirth: "codex-birth-6",
+        rollout: fixture.identity
+      },
+      requestHash: REQUEST_HASH
+    });
+    assert.equal(completion.status, "completed");
+    if (completion.status === "completed") {
+      assert.equal(completion.completion.id, turnId(7));
+    }
   } finally {
     fixture.cleanup();
   }
@@ -335,6 +353,246 @@ test("Codex acceptance rejects a mismatched response turn identity", () => {
   }
 });
 
+test("bound Codex completion scans the exact accepted turn beyond the recent 12-turn window", () => {
+  const fixture = codexFixture();
+  try {
+    const processUuid = "codex-bound-process";
+    const processBirth = "codex-bound-birth";
+    const targetSuffix = 100;
+    const anchor = captureCodexRolloutAcceptanceAnchor({
+      nativeThreadId: SESSION_ID,
+      processUuid,
+      processBirth,
+      mode: "existing",
+      rollout: fixture.identity,
+      now: new Date("2026-08-07T01:00:00.000Z")
+    });
+    appendRecords(fixture.path, acceptedTurnRecords(REQUEST, targetSuffix));
+    const acceptanceEvidence = detectCodexRolloutAcceptance({
+      anchor,
+      currentIdentity: {
+        sessionId: SESSION_ID,
+        processUuid,
+        processBirth,
+        rollout: fixture.identity
+      },
+      requestHash: REQUEST_HASH
+    });
+    assert.ok(acceptanceEvidence);
+
+    appendRecords(fixture.path, [
+      taskCompleteRecord(targetSuffix, "Exact bound result. sk-supersecret123456789 was redacted."),
+      ...Array.from({ length: 20 }, (_, index) => {
+        const suffix = 101 + index;
+        return [
+          ...acceptedTurnRecords(`later native request ${suffix}`, suffix),
+          taskCompleteRecord(suffix, `Later result ${suffix}`)
+        ];
+      }).flat()
+    ]);
+
+    const result = detectCodexBoundRolloutCompletion({
+      anchor,
+      acceptanceEvidence,
+      currentIdentity: {
+        sessionId: SESSION_ID,
+        processUuid,
+        processBirth,
+        rollout: fixture.identity
+      },
+      requestHash: REQUEST_HASH
+    });
+
+    assert.equal(result.status, "completed");
+    if (result.status !== "completed") {
+      return;
+    }
+    assert.equal(result.completion.id, turnId(targetSuffix));
+    assert.equal(result.completion.source, "durable");
+    assert.equal(result.completion.confidence, "high");
+    assert.equal(
+      result.completion.text,
+      "Exact bound result. sk-[REDACTED] was redacted."
+    );
+    assert.equal(
+      result.completion.metadata?.match,
+      "bound_rollout_task_complete"
+    );
+    assert.equal(result.diagnostics.code, "completion_found");
+    assert.equal(result.diagnostics.observed_task_complete_records, 21);
+    assert.ok(Number(result.diagnostics.scanned_records) > 12);
+    assert.doesNotMatch(JSON.stringify(result), new RegExp(escapeRegExp(fixture.path), "u"));
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("bound Codex completion remains pending when only other native turns complete", () => {
+  const fixture = codexFixture();
+  try {
+    const processUuid = "codex-pending-process";
+    const processBirth = "codex-pending-birth";
+    const anchor = captureCodexRolloutAcceptanceAnchor({
+      nativeThreadId: SESSION_ID,
+      processUuid,
+      processBirth,
+      mode: "existing",
+      rollout: fixture.identity
+    });
+    appendRecords(fixture.path, acceptedTurnRecords(REQUEST, 200));
+    const acceptanceEvidence = detectCodexRolloutAcceptance({
+      anchor,
+      currentIdentity: {
+        sessionId: SESSION_ID,
+        processUuid,
+        processBirth,
+        rollout: fixture.identity
+      },
+      requestHash: REQUEST_HASH
+    });
+    assert.ok(acceptanceEvidence);
+    appendRecords(fixture.path, [taskCompleteRecord(201, "Not the bound turn")]);
+
+    const result = detectCodexBoundRolloutCompletion({
+      anchor,
+      acceptanceEvidence,
+      currentIdentity: {
+        sessionId: SESSION_ID,
+        processUuid,
+        processBirth,
+        rollout: fixture.identity
+      },
+      requestHash: REQUEST_HASH
+    });
+    assert.equal(result.status, "pending");
+    assert.equal(result.diagnostics.code, "exact_turn_not_complete");
+    assert.equal(result.diagnostics.observed_task_complete_records, 1);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("bound Codex completion returns typed failures for identity drift and duplicate completion", () => {
+  const fixture = codexFixture();
+  try {
+    const processUuid = "codex-failure-process";
+    const processBirth = "codex-failure-birth";
+    const anchor = captureCodexRolloutAcceptanceAnchor({
+      nativeThreadId: SESSION_ID,
+      processUuid,
+      processBirth,
+      mode: "existing",
+      rollout: fixture.identity
+    });
+    appendRecords(fixture.path, acceptedTurnRecords(REQUEST, 300));
+    const acceptanceEvidence = detectCodexRolloutAcceptance({
+      anchor,
+      currentIdentity: {
+        sessionId: SESSION_ID,
+        processUuid,
+        processBirth,
+        rollout: fixture.identity
+      },
+      requestHash: REQUEST_HASH
+    });
+    assert.ok(acceptanceEvidence);
+
+    const drift = detectCodexBoundRolloutCompletion({
+      anchor,
+      acceptanceEvidence,
+      currentIdentity: {
+        sessionId: SESSION_ID,
+        processUuid: "different-process",
+        processBirth,
+        rollout: fixture.identity
+      },
+      requestHash: REQUEST_HASH
+    });
+    assert.equal(drift.status, "failure");
+    assert.equal(drift.diagnostics.code, "binding_identity_mismatch");
+
+    const missingRollout = detectCodexBoundRolloutCompletion({
+      anchor,
+      acceptanceEvidence,
+      currentIdentity: {
+        sessionId: SESSION_ID,
+        processUuid,
+        processBirth
+      },
+      requestHash: REQUEST_HASH
+    });
+    assert.equal(missingRollout.status, "failure");
+    assert.equal(
+      missingRollout.diagnostics.code,
+      "rollout_identity_mismatch"
+    );
+
+    appendRecords(fixture.path, [
+      taskCompleteRecord(300, "First exact result"),
+      taskCompleteRecord(300, "Duplicated exact result")
+    ]);
+    const duplicate = detectCodexBoundRolloutCompletion({
+      anchor,
+      acceptanceEvidence,
+      currentIdentity: {
+        sessionId: SESSION_ID,
+        processUuid,
+        processBirth,
+        rollout: fixture.identity
+      },
+      requestHash: REQUEST_HASH
+    });
+    assert.equal(duplicate.status, "failure");
+    assert.equal(duplicate.diagnostics.code, "duplicate_exact_completion");
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("bound Codex completion treats an incomplete stable record as retryable pending", () => {
+  const fixture = codexFixture();
+  try {
+    const processUuid = "codex-partial-process";
+    const processBirth = "codex-partial-birth";
+    const anchor = captureCodexRolloutAcceptanceAnchor({
+      nativeThreadId: SESSION_ID,
+      processUuid,
+      processBirth,
+      mode: "existing",
+      rollout: fixture.identity
+    });
+    appendRecords(fixture.path, acceptedTurnRecords(REQUEST, 400));
+    const acceptanceEvidence = detectCodexRolloutAcceptance({
+      anchor,
+      currentIdentity: {
+        sessionId: SESSION_ID,
+        processUuid,
+        processBirth,
+        rollout: fixture.identity
+      },
+      requestHash: REQUEST_HASH
+    });
+    assert.ok(acceptanceEvidence);
+    fs.appendFileSync(fixture.path, '{"type":"event_msg"');
+
+    const result = detectCodexBoundRolloutCompletion({
+      anchor,
+      acceptanceEvidence,
+      currentIdentity: {
+        sessionId: SESSION_ID,
+        processUuid,
+        processBirth,
+        rollout: fixture.identity
+      },
+      requestHash: REQUEST_HASH
+    });
+    assert.equal(result.status, "pending");
+    assert.equal(result.diagnostics.code, "partial_rollout_record");
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 function codexFixture(initialRecords: readonly unknown[] = []) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-acceptance-"));
   const rolloutPath = path.join(directory, `rollout-${SESSION_ID}.jsonl`);
@@ -369,24 +627,39 @@ function codexFixture(initialRecords: readonly unknown[] = []) {
 }
 
 function acceptedTurnRecords(request: string, suffix = 1): unknown[] {
-  const id = String(suffix).padStart(12, "0");
-  const turnId = `019f0000-0000-7000-8000-${id}`;
+  const nativeTurnId = turnId(suffix);
   return [
     {
       timestamp: "2026-08-07T01:00:01.000Z",
       type: "event_msg",
       payload: {
         type: "task_started",
-        turn_id: turnId
+        turn_id: nativeTurnId
       }
     },
-    userResponseRecord(request, turnId),
+    userResponseRecord(request, nativeTurnId),
     {
       timestamp: "2026-08-07T01:00:01.011Z",
       type: "event_msg",
       payload: { type: "user_message", message: request }
     }
   ];
+}
+
+function taskCompleteRecord(suffix: number, message: string): unknown {
+  return {
+    timestamp: "2026-08-07T01:00:02.000Z",
+    type: "event_msg",
+    payload: {
+      type: "task_complete",
+      turn_id: turnId(suffix),
+      last_agent_message: message
+    }
+  };
+}
+
+function turnId(suffix: number): string {
+  return `019f0000-0000-7000-8000-${String(suffix).padStart(12, "0")}`;
 }
 
 function userResponseRecord(request: string, turnId: string): unknown {

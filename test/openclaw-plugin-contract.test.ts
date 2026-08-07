@@ -445,7 +445,10 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
   let sendTool: ToolDefinition | undefined;
   let sendToolFactory: ToolFactory | undefined;
   let respondTool: ToolDefinition | undefined;
-  let reconciliationService: { start?(): void } | undefined;
+  let reconciliationService: {
+    start?(): void;
+    stop?(): void | Promise<void>;
+  } | undefined;
 
   try {
     fs.writeFileSync(
@@ -487,7 +490,10 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
         warn() {}
       },
       registerGatewayMethod() {},
-      registerService(service: { start?(): void }) {
+      registerService(service: {
+        start?(): void;
+        stop?(): void | Promise<void>;
+      }) {
         reconciliationService = service;
       },
       registerCommand() {},
@@ -733,6 +739,91 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
       "a new OpenClaw conversation incarnation must not replay an old receipt"
     );
   } finally {
+    await reconciliationService?.stop?.();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("OpenClaw monitor supervisor reconciles repeatedly without overlap and stops cleanly", async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-plugin-monitor-supervisor-")
+  );
+  const fakeCli = path.join(tempDir, "supervisor.cjs");
+  const callsPath = path.join(tempDir, "calls.ndjson");
+  const activePath = path.join(tempDir, "active");
+  let service: {
+    start?(): void;
+    stop?(): void | Promise<void>;
+  } | undefined;
+
+  try {
+    fs.writeFileSync(
+      fakeCli,
+      [
+        'const fs = require("node:fs");',
+        `const callsPath = ${JSON.stringify(callsPath)};`,
+        `const activePath = ${JSON.stringify(activePath)};`,
+        "const args = process.argv.slice(2);",
+        "if (fs.existsSync(activePath)) { fs.appendFileSync(callsPath, JSON.stringify({ phase: 'overlap', args }) + '\\n'); }",
+        "fs.writeFileSync(activePath, String(process.pid));",
+        "fs.appendFileSync(callsPath, JSON.stringify({ phase: 'start', args }) + '\\n');",
+        "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 80);",
+        "fs.rmSync(activePath, { force: true });",
+        "fs.appendFileSync(callsPath, JSON.stringify({ phase: 'end', args }) + '\\n');",
+        "process.stdout.write(JSON.stringify({ checked: 1, launched: 0, already_running: 1, skipped: 0, errors: 0 }));"
+      ].join("\n"),
+      "utf8"
+    );
+
+    (
+      createOpenClawPluginForTest(fakeCli, {
+        monitorSupervisorIntervalMs: 20
+      }) as unknown as {
+        register(api: Record<string, any>): void;
+      }
+    ).register({
+      pluginConfig: {},
+      logger: { info() {}, warn() {} },
+      registerGatewayMethod() {},
+      registerService(value: typeof service) {
+        service = value;
+      },
+      registerCommand() {},
+      registerTool() {}
+    });
+
+    assert.equal(typeof service?.start, "function");
+    assert.equal(typeof service?.stop, "function");
+    service?.start?.();
+    const deadline = Date.now() + 2_000;
+    while (
+      (!fs.existsSync(callsPath) ||
+        readSupervisorCalls(callsPath).filter((entry) => entry.phase === "start")
+          .length < 2) &&
+      Date.now() < deadline
+    ) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+    await service?.stop?.();
+    const stoppedCalls = readSupervisorCalls(callsPath);
+    assert.equal(
+      stoppedCalls.filter((entry) => entry.phase === "start").length >= 2,
+      true
+    );
+    assert.equal(
+      stoppedCalls.some((entry) => entry.phase === "overlap"),
+      false
+    );
+    const starts = stoppedCalls.filter((entry) => entry.phase === "start");
+    assert.equal(optionAfter(starts[0]?.args ?? [], "--reason"), "startup_reconciliation");
+    assert.equal(optionAfter(starts[1]?.args ?? [], "--reason"), "monitor_supervision");
+    assert.equal(starts[0]?.args.includes("--terminal-monitors-only"), false);
+    assert.equal(starts[1]?.args.includes("--terminal-monitors-only"), true);
+    const countAfterStop = stoppedCalls.length;
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    assert.equal(readSupervisorCalls(callsPath).length, countAfterStop);
+  } finally {
+    await service?.stop?.();
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
@@ -2204,6 +2295,23 @@ function requiredName(value: unknown, label: string): string {
   assert.equal(typeof value, "string", `${label} must have a name`);
   assert.notEqual(value, "", `${label} name must not be empty`);
   return value as string;
+}
+
+function readSupervisorCalls(
+  callsPath: string
+): Array<{ phase: string; args: string[] }> {
+  if (!fs.existsSync(callsPath)) {
+    return [];
+  }
+  return fs.readFileSync(callsPath, "utf8")
+    .split(/\r?\n/u)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
+function optionAfter(args: string[], name: string): string | undefined {
+  const index = args.indexOf(name);
+  return index >= 0 ? args[index + 1] : undefined;
 }
 
 function requiredStringArray(value: unknown, label: string): string[] {

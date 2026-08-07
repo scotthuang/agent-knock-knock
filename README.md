@@ -1,7 +1,6 @@
 # Agent Knock Knock (AKK)
 
 [![npm](https://img.shields.io/npm/v/%40scotthuang%2Fagent-knock-knock)](https://www.npmjs.com/package/@scotthuang/agent-knock-knock)
-[![CI](https://github.com/scotthuang/agent-knock-knock/actions/workflows/ci.yml/badge.svg)](https://github.com/scotthuang/agent-knock-knock/actions/workflows/ci.yml)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.19-339933)](https://nodejs.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/scotthuang/agent-knock-knock/blob/main/LICENSE)
 
@@ -221,7 +220,7 @@ The core command surface is intentionally small:
 /akk cancel <turn-selector>
 ```
 
-`/akk list` performs a controlled reconciliation across managed turns, and `/akk status` limits reconciliation to the selected turn. This can close records whose idle retention has elapsed and restore eligible missing monitors, but it does not send terminal input or retry callback delivery. Standalone shell queries are read-only unless `--reconcile` is explicitly passed, and resolving a selector never changes turn state.
+`/akk list` performs a controlled reconciliation across managed turns, and `/akk status` limits reconciliation to the selected turn. This can close records whose idle retention has elapsed and restore eligible missing monitors, but it does not send terminal input or retry callback delivery. Independently, the running OpenClaw plugin supervises eligible `waiting_for_agent` monitors every five seconds; this liveness pass only restores missing monitors and likewise never retries callback transport. Standalone shell queries are read-only unless `--reconcile` is explicitly passed, and resolving a selector never changes turn state.
 
 Selectors fail closed: `only` works only with one actionable target, `latest` requires a unique newest target, and `codex` or `claude` must identify exactly one eligible pane. These names and `@short-ref` are human-facing resolution inputs; a natural-language tool call may preserve one explicitly named by the user, but must not infer one. Managed JSON actions contain the authoritative full `session_id` or `turn_id`. For first attach, an unmanaged raw-terminal row's send action may instead contain its own prefilled `selector`; its advertised raw controls may contain that row's prefilled `conversation_id`. Neither compatibility selector may be guessed, copied from another row, or passed in an authoritative ID field. Before every terminal operation, AKK revalidates the expected agent PID and tmux pane identity, then confirms that the process and pane working directories still match; every send also revalidates the idle prompt immediately before typing.
 
@@ -290,7 +289,7 @@ Place `autoApprove` inside the plugin `config` object. It is disabled by default
 
 AKK has no hosted control plane or telemetry and does not modify coding-agent settings. Its terminal state and logs stay on your machine; Claude approval callbacks omit raw commands, while Codex may include the visible command details OpenClaw needs to present for review.
 
-At startup, AKK only registers its tools and reconciles monitors for existing managed turns. It never launches a coding agent; new work reuses exactly one eligible agent pane that you already started in tmux.
+At startup, AKK registers its tools and reconciles monitors for existing managed turns. While the OpenClaw Gateway remains healthy, its single-flight supervisor schedules the next reconciliation five seconds after the previous sweep finishes, so an unexpectedly exited monitor is recreated without a `list` or `status` call. With the Store writable, reconciliation returning normally, and the same Turn binding still current, AKK prepares one immutable `done` message/outbox entry within 30 seconds after reliable native completion evidence becomes stable. External callback transport and wake acknowledgement are outside this bound. It never launches a coding agent; new work reuses exactly one eligible agent pane that you already started in tmux.
 
 Your task content is still processed by OpenClaw and the coding-agent or model providers you configure. Review agent permissions and keep secrets out of task prompts.
 
@@ -347,20 +346,16 @@ See [CONTRIBUTING.md](https://github.com/scotthuang/agent-knock-knock/blob/main/
 
 ### Maintainer Release
 
-Create the matching `vX.Y.Z` tag from the intended clean `main` commit and push
-it to trigger npm publishing and the GitHub Release. During rapid iteration,
-the native lifecycle smoke remains an optional manual diagnostic rather than a
-publishing prerequisite.
-
-The package is configured for ClawHub trusted publishing. After pushing the
-matching release tag (replace `vX.Y.Z` below), dispatch the `ClawHub
-Publish` workflow from that tag. It derives `beta` versus `latest` and defaults
-to a dry run:
-
-```bash
-gh workflow run clawhub-publish.yml --ref vX.Y.Z -f dry_run=true
-gh workflow run clawhub-publish.yml --ref vX.Y.Z -f dry_run=false
-```
+GitHub Actions runners are intentionally disabled during the current
+rapid-iteration phase. From the intended clean merged `main` commit, complete
+the local typecheck, full test, OpenClaw compatibility, package dry-run, and
+ClawHub validation/dry-run gates; then create and push the matching `vX.Y.Z`
+tag and publish npm, the GitHub Release, and ClawHub manually. Publish each
+version to ClawHub once: its public index may lag the successful upload, so
+verify the version-specific record instead of submitting a duplicate. The
+checked-in workflows remain templates for restoring hosted release automation
+later. The native lifecycle smoke remains an optional manual diagnostic rather
+than a publishing prerequisite.
 
 ## Storage and Logs
 

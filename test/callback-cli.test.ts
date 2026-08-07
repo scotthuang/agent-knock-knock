@@ -1106,6 +1106,22 @@ console.log(JSON.stringify({ ok: true }));
     };
     fs.writeFileSync(created.paths.statePath, `${JSON.stringify(seededState, null, 2)}\n`, "utf8");
 
+    const terminalOnlyReconciliation = runCli([
+      "reconcile-monitors",
+      "--store-dir",
+      storeDir,
+      "--reason",
+      "monitor_supervision",
+      "--terminal-monitors-only"
+    ]);
+    assert.equal(terminalOnlyReconciliation.launched, 0);
+    assert.equal(fs.existsSync(callsPath), false);
+    assert.equal(
+      JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"))
+        .callback_delivery.status,
+      "pending"
+    );
+
     const reconciliation = runCli([
       "reconcile-monitors",
       "--store-dir",

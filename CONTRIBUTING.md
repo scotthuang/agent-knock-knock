@@ -4,7 +4,7 @@ Thanks for taking the time to improve Agent Knock Knock.
 
 ## Development Setup
 
-Use Node.js 22.19 or newer; Node.js 24 is recommended. CI currently verifies the latest Node.js 22 and 24 releases.
+Use Node.js 22.19 or newer; Node.js 24 is recommended. GitHub Actions runners are intentionally disabled during the current rapid-iteration phase, so pull requests must include the local verification results described below. The supported Node.js boundary remains part of release compatibility even though GitHub does not currently run a hosted matrix.
 
 ```bash
 npm ci
@@ -29,6 +29,12 @@ npm run typecheck
 npm test
 npm pack --dry-run
 ```
+
+The pull request description is the verification record while hosted Actions
+are disabled: include the local Node.js version, exact commands, pass counts,
+and any intentionally skipped credentialed smoke. `package.json` currently has
+no separate lint script, so use `git diff --check` as the whitespace/patch
+format gate and report that fact explicitly.
 
 OpenClaw compatibility changes must also pass the isolated host matrix:
 
@@ -134,6 +140,40 @@ npm run smoke:lifecycle:attest -- \
 The verifier and attestation format remain available so a mandatory release
 gate can be restored later without redesigning the lifecycle evidence model.
 
+### Opt-in monitor fault injection
+
+#93 adds a separate liveness check to the #88 diagnostic contract. Run it only
+against a disposable, already managed Turn while the OpenClaw Gateway and its
+AKK plugin service are running:
+
+1. Start one real background Turn in an explicitly selected idle tmux pane and
+   retain its `state_path` and `event_log_path` from the send result.
+2. From that Turn's event log, read the latest
+   `terminal_bridge_monitor_launch.pid`. Verify it is neither the tmux pane PID
+   nor the Codex/Claude process PID, then terminate only that monitor process.
+3. Do not invoke AKK `status`, `list`, or `reconcile-monitors`. Let the native
+   Turn finish normally.
+4. Within 30 seconds after durable completion, while the Store remains
+   writable, require evidence for `terminal_bridge_monitor_exit_observed`, a
+   `terminal_bridge_monitor_launch` whose reason is
+   `unexpected_exit_recovery`, and the replacement
+   `terminal_bridge_monitor_started`. The detached child and supervisor append
+   their records independently, so do not require those diagnostic records to
+   have a total ordering. Require exactly one
+   `terminal_bridge_completion_detected`, exactly one
+   `terminal_bridge_completion_claimed`, and one immutable `done` callback or
+   outbox entry.
+5. Verify the replacement kept the same Session, Turn, terminal binding ID and
+   binding generation. A changed binding must fence the old monitor instead of
+   completing the Turn.
+
+This scenario deliberately kills only AKK's detached monitor. It does not
+weaken the lifecycle runner's promise never to launch, restart, upgrade, or
+kill a coding-agent process. Store-lock fault injection is deterministic in the
+test suite: holding `.akk-writer.lock` beyond ten seconds must produce a
+deferred diagnostic, resume after release, and never be reported as binding
+supersession.
+
 ## Adding a Terminal Agent Adapter
 
 - Implement the `TerminalAgentAdapter` interface defined in `src/terminal-agent-adapter.ts`, including process classification, screen parsing, declared capabilities, ordered approval keys, ordered cancellation keys, and any screen or durable completion detection.
@@ -147,7 +187,7 @@ gate can be restored later without redesigning the lifecycle evidence model.
 - Include tests for CLI behavior, protocol changes, callback delivery, or trace parsing.
 - Update `README.md` or `CHANGELOG.md` when user-visible behavior changes.
 - Do not commit `dist/`, `node_modules/`, runtime logs, local OpenClaw state, or `.env` files.
-- Complete the pull request checklist and wait for the Node.js 22 and 24 CI jobs to pass.
+- Complete the pull request checklist and attach local typecheck, full test, package, and compatibility results. When hosted Actions are re-enabled, the Node.js 22 and 24 jobs become required again.
 
 For installation and usage help, see [SUPPORT.md](SUPPORT.md).
 
