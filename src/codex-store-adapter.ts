@@ -1,7 +1,9 @@
-import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import type { ActiveAgentSessionIdentity } from "./agent-session-provider.js";
 import {
   codexLifecycleBehaviorProfile,
@@ -32,8 +34,30 @@ export {
 export interface CodexStoreAdapterOptions {
   codexHome?: string;
   runCommand?: (command: string, args: string[]) => ProcessCommandResult;
+  runSqliteThreadQuery?: CodexSqliteThreadQueryRunner;
+  sqliteCantOpenRetryDelaysMs?: readonly number[];
+  sleep?: (milliseconds: number) => Promise<void>;
   maxSessions?: number;
 }
+
+export type CodexSqliteOpenMode = "readonly" | "query_only";
+
+export interface CodexSqliteThreadQueryRequest {
+  dbPath: string;
+  openMode: CodexSqliteOpenMode;
+  maxSessions: number;
+  nativeThreadId?: string;
+  afterSchema?: (columns: readonly string[]) => void | Promise<void>;
+}
+
+export interface CodexSqliteThreadQueryResult {
+  columns: string[];
+  rows: CodexThreadRow[];
+}
+
+export type CodexSqliteThreadQueryRunner = (
+  request: CodexSqliteThreadQueryRequest
+) => Promise<CodexSqliteThreadQueryResult>;
 
 interface CodexLifecycleThreadRow extends CodexThreadRow {
   source?: string;
@@ -45,6 +69,10 @@ interface CodexLifecycleThreadRow extends CodexThreadRow {
 const NATIVE_THREAD_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const MAX_CODEX_SESSION_META_BYTES = 1024 * 1024;
+const MAX_SQLITE_QUERY_OUTPUT_BYTES = 10 * 1024 * 1024;
+const MAX_SQLITE_ERROR_OUTPUT_BYTES = 1024 * 1024;
+const SQLITE_QUERY_TIMEOUT_MS = 10_000;
+const DEFAULT_SQLITE_CANTOPEN_RETRY_DELAYS_MS = [25, 75, 150] as const;
 const NO_FOLLOW_FLAG = typeof fs.constants.O_NOFOLLOW === "number"
   ? fs.constants.O_NOFOLLOW
   : 0;
@@ -54,27 +82,25 @@ export class CodexStoreAdapter implements
   TerminalThreadLifecycleCandidateProvider {
   private readonly codexHome: string;
   private readonly runCommand: (command: string, args: string[]) => ProcessCommandResult;
+  private readonly runSqliteThreadQuery: CodexSqliteThreadQueryRunner;
+  private readonly sqliteCantOpenRetryDelaysMs: readonly number[];
+  private readonly sleep: (milliseconds: number) => Promise<void>;
   private readonly maxSessions: number;
 
   constructor(options: CodexStoreAdapterOptions = {}) {
     this.codexHome = options.codexHome ?? path.join(os.homedir(), ".codex");
     this.runCommand = options.runCommand ?? runProcessCommand;
+    this.runSqliteThreadQuery = options.runSqliteThreadQuery ??
+      runCodexSqliteThreadQuery;
+    this.sqliteCantOpenRetryDelaysMs =
+      options.sqliteCantOpenRetryDelaysMs ??
+      DEFAULT_SQLITE_CANTOPEN_RETRY_DELAYS_MS;
+    this.sleep = options.sleep ?? waitForMilliseconds;
     this.maxSessions = options.maxSessions ?? 100;
   }
 
   async listThreadRows(): Promise<CodexThreadRow[]> {
-    const dbPath = latestStateDbPath(this.codexHome);
-    if (!dbPath) {
-      throw new Error("no Codex state sqlite database found");
-    }
-
-    const columns = this.queryJson<{ name: string }>(dbPath, "pragma table_info(threads)")
-      .map((column) => column.name);
-    if (!columns.includes("id") || !columns.includes("cwd")) {
-      throw new Error("Codex threads table is missing required id or cwd columns");
-    }
-
-    return this.queryJson<CodexThreadRow>(dbPath, buildThreadSelect(columns, this.maxSessions));
+    return this.queryThreadRows({ maxSessions: this.maxSessions });
   }
 
   async listThreadLifecycleCandidates(
@@ -170,21 +196,10 @@ export class CodexStoreAdapter implements
     if (!NATIVE_THREAD_ID_PATTERN.test(nativeThreadId)) {
       throw new Error("Codex thread lookup requires an exact UUID");
     }
-    const dbPath = latestStateDbPath(this.codexHome);
-    if (!dbPath) {
-      return undefined;
-    }
-    const columns = this.queryJson<{ name: string }>(
-      dbPath,
-      "pragma table_info(threads)"
-    ).map((column) => column.name);
-    if (!columns.includes("id") || !columns.includes("cwd")) {
-      throw new Error("Codex threads table is missing required id or cwd columns");
-    }
-    return this.queryJson<CodexLifecycleThreadRow>(
-      dbPath,
-      buildThreadByIdSelect(columns, nativeThreadId)
-    )[0];
+    return (await this.queryThreadRows({
+      maxSessions: 1,
+      nativeThreadId
+    }) as CodexLifecycleThreadRow[])[0];
   }
 
   async readRollout(rolloutPath: string): Promise<string | undefined> {
@@ -242,14 +257,527 @@ export class CodexStoreAdapter implements
     });
   }
 
-  private queryJson<T>(dbPath: string, sql: string): T[] {
-    const result = this.runCommand("sqlite3", ["-readonly", "-json", dbPath, sql]);
-    if (result.status !== 0) {
-      throw new Error(result.stderr || result.error?.message || "sqlite3 query failed");
+  private async queryThreadRows({
+    maxSessions,
+    nativeThreadId
+  }: {
+    maxSessions: number;
+    nativeThreadId?: string;
+  }): Promise<CodexThreadRow[]> {
+    const dbPath = latestStateDbPath(this.codexHome);
+    if (!dbPath) {
+      throw new Error("no Codex state sqlite database found");
+    }
+    const baseline = inspectCodexSqliteFiles(dbPath);
+    assertStableCodexSqliteMain({
+      baseline,
+      current: baseline,
+      stage: "initial"
+    });
+
+    let lastFailure: CodexSqliteQueryFailure | undefined;
+    const attempts = this.sqliteCantOpenRetryDelaysMs.length + 1;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      if (attempt > 0) {
+        await this.sleep(this.sqliteCantOpenRetryDelaysMs[attempt - 1]);
+      }
+      const currentPath = latestStateDbPath(this.codexHome);
+      const before = inspectCodexSqliteFiles(currentPath ?? dbPath);
+      assertStableCodexSqliteMain({
+        baseline,
+        current: before,
+        stage: `readonly_attempt_${attempt + 1}`,
+        selectedPath: currentPath
+      });
+      let result: CodexSqliteThreadQueryResult;
+      try {
+        result = await this.runSqliteThreadQuery({
+          dbPath,
+          openMode: "readonly",
+          maxSessions,
+          nativeThreadId
+        });
+      } catch (error) {
+        const failedPath = latestStateDbPath(this.codexHome);
+        const failedFiles = inspectCodexSqliteFiles(failedPath ?? dbPath);
+        assertStableCodexSqliteMain({
+          baseline,
+          current: failedFiles,
+          stage: `readonly_attempt_${attempt + 1}_failed`,
+          selectedPath: failedPath
+        });
+        const failure = codexSqliteQueryFailure(error, {
+          dbPath,
+          stage: `readonly_attempt_${attempt + 1}`,
+          files: failedFiles
+        });
+        if (!isSqliteCantOpen(failure)) {
+          throw codexSqliteQueryDiagnosticError(failure);
+        }
+        lastFailure = failure;
+        continue;
+      }
+      const completedPath = latestStateDbPath(this.codexHome);
+      assertStableCodexSqliteMain({
+        baseline,
+        current: inspectCodexSqliteFiles(completedPath ?? dbPath),
+        stage: `readonly_attempt_${attempt + 1}_complete`,
+        selectedPath: completedPath
+      });
+      return validateCodexThreadQueryResult(result);
     }
 
-    return JSON.parse(result.stdout || "[]") as T[];
+    const currentPath = latestStateDbPath(this.codexHome);
+    const beforeMaterialization = inspectCodexSqliteFiles(currentPath ?? dbPath);
+    assertStableCodexSqliteMain({
+      baseline,
+      current: beforeMaterialization,
+      stage: "query_only_materialization",
+      selectedPath: currentPath
+    });
+    let materializedResult: CodexSqliteThreadQueryResult;
+    try {
+      materializedResult = await this.runSqliteThreadQuery({
+        dbPath,
+        openMode: "query_only",
+        maxSessions,
+        nativeThreadId
+      });
+    } catch (error) {
+      const failedPath = latestStateDbPath(this.codexHome);
+      const failedFiles = inspectCodexSqliteFiles(failedPath ?? dbPath);
+      assertStableCodexSqliteMain({
+        baseline,
+        current: failedFiles,
+        stage: "query_only_materialization_failed",
+        selectedPath: failedPath
+      });
+      throw codexSqliteQueryDiagnosticError(codexSqliteQueryFailure(error, {
+        dbPath,
+        stage: "query_only_materialization",
+        files: failedFiles,
+        previousFailure: lastFailure
+      }));
+    }
+    const completedPath = latestStateDbPath(this.codexHome);
+    assertStableCodexSqliteMain({
+      baseline,
+      current: inspectCodexSqliteFiles(completedPath ?? dbPath),
+      stage: "query_only_materialization_complete",
+      selectedPath: completedPath
+    });
+    return validateCodexThreadQueryResult(materializedResult);
   }
+}
+
+interface CodexSqliteFileIdentity {
+  path: string;
+  exists: boolean;
+  kind?: "file" | "directory" | "other";
+  device?: string;
+  inode?: string;
+  size?: number;
+  mtimeMs?: number;
+  errorCode?: string;
+}
+
+interface CodexSqliteFilesSnapshot {
+  dbPath: string;
+  main: CodexSqliteFileIdentity;
+  wal: CodexSqliteFileIdentity;
+  shm: CodexSqliteFileIdentity;
+}
+
+interface CodexSqliteQueryFailure {
+  dbPath: string;
+  stage: string;
+  status: number | null;
+  detail: string;
+  files: CodexSqliteFilesSnapshot;
+  previousFailure?: CodexSqliteQueryFailure;
+}
+
+class CodexSqliteSessionError extends Error {
+  readonly status: number | null;
+  readonly stage: string;
+
+  constructor({
+    message,
+    status,
+    stage
+  }: {
+    message: string;
+    status: number | null;
+    stage: string;
+  }) {
+    super(message);
+    this.name = "CodexSqliteSessionError";
+    this.status = status;
+    this.stage = stage;
+  }
+}
+
+export async function runCodexSqliteThreadQuery(
+  request: CodexSqliteThreadQueryRequest
+): Promise<CodexSqliteThreadQueryResult> {
+  if (
+    request.nativeThreadId &&
+    !NATIVE_THREAD_ID_PATTERN.test(request.nativeThreadId)
+  ) {
+    throw new Error("Codex thread lookup requires an exact UUID");
+  }
+  const nonce = randomUUID();
+  const controlColumn = "__akk_sqlite_control";
+  const schemaControl = `schema:${nonce}`;
+  const rowsControl = `rows:${nonce}`;
+  const schemaMarker = JSON.stringify([{ [controlColumn]: schemaControl }]);
+  const rowsMarker = JSON.stringify([{ [controlColumn]: rowsControl }]);
+  const databaseArgument = request.openMode === "query_only"
+    ? sqliteReadWriteUri(request.dbPath)
+    : request.dbPath;
+  const args = ["-batch", "-bail", "-json"];
+  if (request.openMode === "readonly") {
+    args.push("-readonly");
+  } else {
+    // This is the first SQL statement for the mode=rw connection. It lets
+    // SQLite materialize WAL/SHM bookkeeping while forbidding business SQL
+    // writes for the entire AKK session.
+    args.push("-cmd", "PRAGMA query_only=ON");
+  }
+  args.push(databaseArgument);
+
+  return new Promise<CodexSqliteThreadQueryResult>((resolve, reject) => {
+    const child = spawn("sqlite3", args, {
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    let phase: "schema" | "schema_hook" | "rows" | "complete" = "schema";
+    let output = "";
+    let stderr = "";
+    let result: CodexSqliteThreadQueryResult | undefined;
+    let authoritativeColumns: string[] = [];
+    let terminalError: Error | undefined;
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (!terminalError) {
+        terminalError = new CodexSqliteSessionError({
+          message: `sqlite3 thread query timed out after ${SQLITE_QUERY_TIMEOUT_MS}ms`,
+          status: null,
+          stage: phase
+        });
+      }
+      child.kill("SIGKILL");
+    }, SQLITE_QUERY_TIMEOUT_MS);
+
+    const stopWithError = (error: Error): void => {
+      if (!terminalError) {
+        terminalError = error instanceof CodexSqliteSessionError
+          ? error
+          : new CodexSqliteSessionError({
+            message: error.message,
+            status: null,
+            stage: phase
+          });
+      }
+      child.kill("SIGKILL");
+    };
+    const appendOutput = (current: string, chunk: string, limit: number): string => {
+      const next = current + chunk;
+      if (Buffer.byteLength(next, "utf8") > limit) {
+        throw new Error(`sqlite3 ${phase} output exceeded ${limit} bytes`);
+      }
+      return next;
+    };
+    const parseArray = <T>(text: string, label: string): T[] => {
+      if (!text.trim()) {
+        return [];
+      }
+      const parsed: unknown = JSON.parse(text);
+      if (!Array.isArray(parsed)) {
+        throw new Error(`sqlite3 ${label} output was not a JSON array`);
+      }
+      return parsed as T[];
+    };
+    const writeRowsQuery = (columns: string[]): void => {
+      validateCodexThreadColumns(columns);
+      authoritativeColumns = columns;
+      const sql = request.nativeThreadId
+        ? buildThreadByIdSelect(columns, request.nativeThreadId)
+        : buildThreadSelect(columns, request.maxSessions);
+      phase = "rows";
+      child.stdin.write(
+        `${sql};\nselect '${rowsControl}' as "${controlColumn}";\n`
+      );
+    };
+    const consumeOutput = (): void => {
+      if (phase === "schema") {
+        const markerIndex = output.indexOf(schemaMarker);
+        if (markerIndex < 0) {
+          return;
+        }
+        const schema = parseArray<{ name?: unknown }>(
+          output.slice(0, markerIndex).trim(),
+          "schema"
+        );
+        const columns = schema
+          .map((column) => typeof column.name === "string" ? column.name : "")
+          .filter(Boolean);
+        output = output.slice(markerIndex + schemaMarker.length).trimStart();
+        phase = "schema_hook";
+        void Promise.resolve(request.afterSchema?.(columns))
+          .then(() => writeRowsQuery(columns))
+          .catch((error) => stopWithError(
+            error instanceof Error ? error : new Error(String(error))
+          ));
+      }
+      if (phase === "rows") {
+        const markerIndex = output.indexOf(rowsMarker);
+        if (markerIndex < 0) {
+          return;
+        }
+        const rows = parseArray<CodexThreadRow>(
+          output.slice(0, markerIndex).trim(),
+          "rows"
+        );
+        result = {
+          columns: authoritativeColumns,
+          rows
+        };
+        phase = "complete";
+        child.stdin.end("COMMIT;\n.quit\n");
+      }
+    };
+
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      try {
+        output = appendOutput(output, chunk, MAX_SQLITE_QUERY_OUTPUT_BYTES);
+        consumeOutput();
+      } catch (error) {
+        stopWithError(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+    child.stderr.on("data", (chunk: string) => {
+      try {
+        stderr = appendOutput(stderr, chunk, MAX_SQLITE_ERROR_OUTPUT_BYTES);
+      } catch (error) {
+        stopWithError(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+    child.on("error", (error) => {
+      if (!terminalError) {
+        terminalError = new CodexSqliteSessionError({
+          message: error.message,
+          status: null,
+          stage: phase
+        });
+      }
+    });
+    child.stdin.on("error", (error) => {
+      if (!terminalError && phase !== "complete") {
+        terminalError = error;
+      }
+    });
+    child.on("close", (status) => {
+      clearTimeout(timeout);
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (terminalError) {
+        reject(terminalError);
+        return;
+      }
+      if (status !== 0) {
+        reject(new CodexSqliteSessionError({
+          message: stderr.trim() || `sqlite3 exited with status ${status ?? "unknown"}`,
+          status,
+          stage: phase
+        }));
+        return;
+      }
+      if (!result || phase !== "complete") {
+        reject(new CodexSqliteSessionError({
+          message: "sqlite3 exited before the thread query protocol completed",
+          status,
+          stage: phase
+        }));
+        return;
+      }
+      resolve(result);
+    });
+
+    child.stdin.write(
+      `BEGIN;\npragma table_info(threads);\n` +
+      `select '${schemaControl}' as "${controlColumn}";\n`
+    );
+  });
+}
+
+function validateCodexThreadQueryResult(
+  result: CodexSqliteThreadQueryResult
+): CodexThreadRow[] {
+  validateCodexThreadColumns(result.columns);
+  return result.rows;
+}
+
+function validateCodexThreadColumns(columns: readonly string[]): void {
+  if (!columns.includes("id") || !columns.includes("cwd")) {
+    throw new Error("Codex threads table is missing required id or cwd columns");
+  }
+}
+
+function sqliteReadWriteUri(dbPath: string): string {
+  const uri = pathToFileURL(path.resolve(dbPath));
+  uri.searchParams.set("mode", "rw");
+  return uri.href;
+}
+
+function waitForMilliseconds(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, milliseconds)));
+}
+
+function inspectCodexSqliteFiles(dbPath: string): CodexSqliteFilesSnapshot {
+  return {
+    dbPath: path.resolve(dbPath),
+    main: inspectCodexSqliteFile(dbPath),
+    wal: inspectCodexSqliteFile(`${dbPath}-wal`),
+    shm: inspectCodexSqliteFile(`${dbPath}-shm`)
+  };
+}
+
+function inspectCodexSqliteFile(filePath: string): CodexSqliteFileIdentity {
+  try {
+    const stat = fs.statSync(filePath);
+    return {
+      path: path.resolve(filePath),
+      exists: true,
+      kind: stat.isFile()
+        ? "file"
+        : stat.isDirectory()
+          ? "directory"
+          : "other",
+      device: String(stat.dev),
+      inode: String(stat.ino),
+      size: stat.size,
+      mtimeMs: stat.mtimeMs
+    };
+  } catch (error) {
+    const code = typeof error === "object" && error !== null && "code" in error
+      ? String(error.code)
+      : undefined;
+    return {
+      path: path.resolve(filePath),
+      exists: false,
+      ...(code ? { errorCode: code } : {})
+    };
+  }
+}
+
+function assertStableCodexSqliteMain({
+  baseline,
+  current,
+  stage,
+  selectedPath = current.dbPath
+}: {
+  baseline: CodexSqliteFilesSnapshot;
+  current: CodexSqliteFilesSnapshot;
+  stage: string;
+  selectedPath?: string;
+}): void {
+  const samePath = Boolean(
+    selectedPath &&
+    path.resolve(selectedPath) === baseline.dbPath &&
+    current.dbPath === baseline.dbPath
+  );
+  const sameFile = Boolean(
+    baseline.main.exists &&
+    baseline.main.kind === "file" &&
+    current.main.exists &&
+    current.main.kind === "file" &&
+    baseline.main.device === current.main.device &&
+    baseline.main.inode === current.main.inode
+  );
+  if (samePath && sameFile) {
+    return;
+  }
+  throw new Error(
+    `Codex SQLite main database changed during ${stage}; refusing stale ` +
+    `thread discovery (selected_db=${selectedPath ?? "missing"}, ` +
+    `baseline_db=${baseline.dbPath}, current_db=${current.dbPath}; ` +
+    `${formatCodexSqliteFiles(current)})`
+  );
+}
+
+function codexSqliteQueryFailure(
+  error: unknown,
+  context: {
+    dbPath: string;
+    stage: string;
+    files: CodexSqliteFilesSnapshot;
+    previousFailure?: CodexSqliteQueryFailure;
+  }
+): CodexSqliteQueryFailure {
+  const errorRecord = typeof error === "object" && error !== null
+    ? error as Record<string, unknown>
+    : undefined;
+  const reportedStatus = typeof errorRecord?.status === "number"
+    ? errorRecord.status
+    : null;
+  const reportedStage = typeof errorRecord?.stage === "string"
+    ? errorRecord.stage
+    : undefined;
+  return {
+    dbPath: path.resolve(context.dbPath),
+    stage: reportedStage
+      ? `${context.stage}:${reportedStage}`
+      : context.stage,
+    status: reportedStatus !== null && Number.isInteger(reportedStatus)
+      ? reportedStatus
+      : null,
+    detail: error instanceof Error ? error.message : String(error),
+    files: context.files,
+    previousFailure: context.previousFailure
+  };
+}
+
+function isSqliteCantOpen(failure: CodexSqliteQueryFailure): boolean {
+  return failure.status === 14 ||
+    /(?:SQLITE_CANTOPEN|unable to open database file|\(14\))/iu.test(
+      failure.detail
+    );
+}
+
+function codexSqliteQueryDiagnosticError(
+  failure: CodexSqliteQueryFailure
+): Error {
+  const prior = failure.previousFailure
+    ? `; previous=[stage=${failure.previousFailure.stage},status=` +
+      `${failure.previousFailure.status ?? "unknown"},` +
+      `${formatCodexSqliteFiles(failure.previousFailure.files)}]`
+    : "";
+  return new Error(
+    `Codex SQLite thread query failed ` +
+    `(stage=${failure.stage}, db=${failure.dbPath}, ` +
+    `status=${failure.status ?? "unknown"}${prior}; ` +
+    `${formatCodexSqliteFiles(failure.files)}): ` +
+    failure.detail.replace(/\s+/gu, " ").trim()
+  );
+}
+
+function formatCodexSqliteFiles(snapshot: CodexSqliteFilesSnapshot): string {
+  return [
+    ["main", snapshot.main],
+    ["wal", snapshot.wal],
+    ["shm", snapshot.shm]
+  ].map(([label, value]) => {
+    const file = value as CodexSqliteFileIdentity;
+    if (!file.exists) {
+      return `${label}=missing${file.errorCode ? `(${file.errorCode})` : ""}`;
+    }
+    return `${label}=${file.kind}(dev=${file.device},ino=${file.inode},` +
+      `size=${file.size},mtime_ms=${Math.trunc(file.mtimeMs ?? 0)})`;
+  }).join(" ");
 }
 
 export function latestStateDbPath(codexHome: string): string | undefined {
@@ -260,7 +788,17 @@ export function latestStateDbPath(codexHome: string): string | undefined {
   return fs.readdirSync(codexHome)
     .filter((entry) => /^state_\d+\.sqlite$/u.test(entry))
     .map((entry) => path.join(codexHome, entry))
-    .sort((left, right) => fs.statSync(right).mtimeMs - fs.statSync(left).mtimeMs)[0];
+    .flatMap((filePath) => {
+      try {
+        const stat = fs.statSync(filePath);
+        return stat.isFile() ? [{ filePath, mtimeMs: stat.mtimeMs }] : [];
+      } catch {
+        // Codex may rotate a versioned state database while discovery is
+        // enumerating it. The caller will re-resolve and validate identity.
+        return [];
+      }
+    })
+    .sort((left, right) => right.mtimeMs - left.mtimeMs)[0]?.filePath;
 }
 
 export interface LsofOpenFileRecord {

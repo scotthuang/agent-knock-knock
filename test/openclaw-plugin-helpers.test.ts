@@ -267,6 +267,80 @@ test("/akk lifecycle CLI arguments use a fresh internal binding token", () => {
   );
 });
 
+test("/akk forwards configured codexHome through every lifecycle discovery and mutation", () => {
+  const config = {
+    storeDir: "/private/akk-store",
+    codexHome: "/private/custom-codex"
+  };
+  const commands = [
+    {
+      input: `threads ${exactTerminalId}`,
+      context: {}
+    },
+    {
+      input: `new-thread ${exactTerminalId}`,
+      context: { expectedBindingToken: "binding-token-new" }
+    },
+    {
+      input: `clear-thread ${exactTerminalId}`,
+      context: { expectedBindingToken: "binding-token-clear" }
+    },
+    {
+      input: `resume-thread ${exactTerminalId}`,
+      context: {}
+    },
+    {
+      input: `resume-thread ${exactTerminalId} previous`,
+      context: {}
+    },
+    {
+      input: `resume-thread ${exactTerminalId} 2`,
+      context: {
+        selectionScope: "openclaw:scope",
+        selectionSnapshotId: "rs_abcdefghijklmnopqrstuv"
+      }
+    },
+    {
+      input: `resume-thread ${exactTerminalId} @22222222`,
+      context: {
+        selectionScope: "openclaw:scope",
+        selectionSnapshotId: "rs_abcdefghijklmnopqrstuv"
+      }
+    },
+    {
+      input:
+        `resume-thread ${exactTerminalId} rs_abcdefghijklmnopqrstuv:2`,
+      context: { selectionScope: "openclaw:scope" }
+    },
+    {
+      input: `resume-thread ${exactTerminalId} ${resumableNativeThreadId}`,
+      context: {
+        expectedBindingToken: "binding-token-resume",
+        candidateToken: "candidate-token-resume"
+      }
+    }
+  ];
+
+  for (const { input, context } of commands) {
+    const args = buildAkkCommandCliArgs(
+      parseAkkCommand(input),
+      config,
+      context
+    );
+    assert.ok(args, input);
+    assert.equal(
+      args.filter((argument) => argument === "--codex-home").length,
+      1,
+      input
+    );
+    assert.equal(
+      args[args.indexOf("--codex-home") + 1],
+      "/private/custom-codex",
+      input
+    );
+  }
+});
+
 test("/akk close parses and forwards exactly one recovery identity", () => {
   const transitionCommand = parseAkkCommand(
     `close ${exactTerminalId} ` +

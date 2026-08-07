@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -11,6 +12,7 @@ import {
   parseLsofOpenFiles,
   parseLsofCwdMap,
   parsePsProcessSnapshots,
+  runCodexSqliteThreadQuery,
   type CommandResult
 } from "../src/codex-store-adapter.js";
 
@@ -770,27 +772,27 @@ test("Codex store adapter wraps sqlite and process command output behind the ada
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-adapter-"));
   const dbPath = path.join(dir, "state_6.sqlite");
   const calls: string[] = [];
+  const sqliteCalls: Array<{ openMode: string; nativeThreadId?: string }> = [];
   const adapter = new CodexStoreAdapter({
     codexHome: dir,
-    runCommand(command, args): CommandResult {
-      calls.push([command, ...args].join(" "));
-      if (command === "sqlite3" && args[0] === "-readonly" && args[1] === "-json" && args[3] === "pragma table_info(threads)") {
-        return ok(JSON.stringify([
-          { name: "id" },
-          { name: "cwd" },
-          { name: "rollout_path" },
-          { name: "updated_at_ms" }
-        ]));
-      }
-      if (command === "sqlite3" && args[0] === "-readonly" && args[1] === "-json" && args[3].startsWith("select id")) {
-        return ok(JSON.stringify([{
+    async runSqliteThreadQuery(request) {
+      sqliteCalls.push({
+        openMode: request.openMode,
+        nativeThreadId: request.nativeThreadId
+      });
+      return {
+        columns: ["id", "cwd", "rollout_path", "updated_at_ms"],
+        rows: [{
           id: SESSION_ID,
           cwd: "/repo/project",
           rollout_path: "/rollout.jsonl",
           updated_at_ms: 20,
           archived: 0
-        }]));
-      }
+        }]
+      };
+    },
+    runCommand(command, args): CommandResult {
+      calls.push([command, ...args].join(" "));
       if (command === "ps") {
         return ok([
           "  PID  PPID     ELAPSED COMMAND",
@@ -816,7 +818,8 @@ test("Codex store adapter wraps sqlite and process command output behind the ada
 
     assert.equal((await adapter.listThreadRows())[0].id, SESSION_ID);
     assert.equal((await adapter.listProcessSnapshots())[0].cwd, "/repo/project");
-    assert.equal(calls.some((call) => call.startsWith("sqlite3 -readonly -json")), true);
+    assert.deepEqual(sqliteCalls, [{ openMode: "readonly", nativeThreadId: undefined }]);
+    assert.equal(calls.some((call) => call.startsWith("sqlite3 ")), false);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -846,20 +849,16 @@ test("Codex lifecycle candidates require exact root metadata and revalidate the 
     cli_version: "0.146.1",
     name: "Candidate name"
   };
-  const columns = Object.keys(row).map((name) => ({ name }));
+  const columns = Object.keys(row);
   const adapter = new CodexStoreAdapter({
     codexHome: dir,
-    runCommand(command, args): CommandResult {
-      if (command !== "sqlite3" || args[0] !== "-readonly" || args[1] !== "-json") {
-        return { status: 1, stdout: "", stderr: "unexpected command" };
-      }
-      if (args[3] === "pragma table_info(threads)") {
-        return ok(JSON.stringify(columns));
-      }
-      if (args[3].startsWith("select id")) {
-        return ok(JSON.stringify([row]));
-      }
-      return { status: 1, stdout: "", stderr: "unexpected SQL" };
+    async runSqliteThreadQuery(request) {
+      return {
+        columns,
+        rows: request.nativeThreadId && request.nativeThreadId !== row.id
+          ? []
+          : [row]
+      };
     }
   });
   const writeRollout = (cliVersion: string): void => {
@@ -949,6 +948,328 @@ test("Codex lifecycle candidates require exact root metadata and revalidate the 
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+const SQLITE_AVAILABLE = spawnSync("sqlite3", ["-version"], {
+  encoding: "utf8"
+}).status === 0;
+
+test("Codex store adapter materializes missing WAL sidecars through a query-only connection", {
+  skip: !SQLITE_AVAILABLE
+}, async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-wal-missing-"));
+  const dbPath = path.join(dir, "state_5.sqlite");
+  try {
+    createWalThreadDatabase(dbPath, [{
+      id: SESSION_ID,
+      cwd: "/repo/project",
+      updatedAtMs: 20
+    }]);
+    fs.rmSync(`${dbPath}-wal`, { force: true });
+    fs.rmSync(`${dbPath}-shm`, { force: true });
+    const directReadonly = spawnSync("sqlite3", [
+      "-readonly",
+      "-json",
+      dbPath,
+      "pragma table_info(threads)"
+    ], { encoding: "utf8" });
+    const readonlyObservedCantOpen = directReadonly.status === 14 ||
+      /(?:SQLITE_CANTOPEN|unable to open database file|\(14\))/iu.test(
+        directReadonly.stderr
+      );
+    assert.equal(
+      directReadonly.status === 0 || readonlyObservedCantOpen,
+      true,
+      directReadonly.stderr
+    );
+
+    const before = fs.readFileSync(dbPath);
+    const modes: string[] = [];
+    let simulatedCantOpen = false;
+    const adapter = new CodexStoreAdapter({
+      codexHome: dir,
+      sqliteCantOpenRetryDelaysMs: [],
+      async runSqliteThreadQuery(request) {
+        modes.push(request.openMode);
+        if (
+          request.openMode === "readonly" &&
+          !readonlyObservedCantOpen &&
+          !simulatedCantOpen
+        ) {
+          simulatedCantOpen = true;
+          throw sqliteFailure(14, "schema", "SQLITE_CANTOPEN (14)");
+        }
+        return runCodexSqliteThreadQuery(request);
+      }
+    });
+    const rows = await adapter.listThreadRows();
+
+    assert.deepEqual(rows.map((row) => row.id), [SESSION_ID]);
+    assert.deepEqual(modes, ["readonly", "query_only"]);
+    assert.equal(fs.readFileSync(dbPath).equals(before), true);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Codex store adapter tolerates WAL and SHM replacement during bounded CANTOPEN retry", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-wal-rebuild-"));
+  const dbPath = path.join(dir, "state_5.sqlite");
+  const modes: string[] = [];
+  const waits: number[] = [];
+  let attempt = 0;
+  try {
+    fs.writeFileSync(dbPath, "fixture", "utf8");
+    const adapter = new CodexStoreAdapter({
+      codexHome: dir,
+      sqliteCantOpenRetryDelaysMs: [5],
+      async sleep(milliseconds) {
+        waits.push(milliseconds);
+        fs.writeFileSync(`${dbPath}-wal`, "rebuilt-wal", "utf8");
+        fs.writeFileSync(`${dbPath}-shm`, "rebuilt-shm", "utf8");
+      },
+      async runSqliteThreadQuery(request) {
+        modes.push(request.openMode);
+        attempt += 1;
+        if (attempt === 1) {
+          throw sqliteFailure(14, "schema", "unable to open database file (14)");
+        }
+        return threadQueryResult();
+      }
+    });
+
+    assert.equal((await adapter.listThreadRows())[0].id, SESSION_ID);
+    assert.deepEqual(modes, ["readonly", "readonly"]);
+    assert.deepEqual(waits, [5]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Codex store adapter fails closed when the main state database changes during retry", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-db-rotate-"));
+  const dbPath = path.join(dir, "state_5.sqlite");
+  let calls = 0;
+  try {
+    fs.writeFileSync(dbPath, "before", "utf8");
+    const adapter = new CodexStoreAdapter({
+      codexHome: dir,
+      sqliteCantOpenRetryDelaysMs: [1],
+      async sleep() {
+        const replacement = path.join(dir, "replacement.sqlite");
+        fs.writeFileSync(replacement, "after", "utf8");
+        fs.renameSync(replacement, dbPath);
+      },
+      async runSqliteThreadQuery() {
+        calls += 1;
+        throw sqliteFailure(14, "schema", "unable to open database file (14)");
+      }
+    });
+
+    await assert.rejects(
+      adapter.listThreadRows(),
+      /main database changed during readonly_attempt_2/u
+    );
+    assert.equal(calls, 1);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Codex store adapter fails closed when a newer state database appears during a query", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-db-newer-"));
+  const dbPath = path.join(dir, "state_5.sqlite");
+  const newerPath = path.join(dir, "state_6.sqlite");
+  try {
+    fs.writeFileSync(dbPath, "before", "utf8");
+    const adapter = new CodexStoreAdapter({
+      codexHome: dir,
+      async runSqliteThreadQuery() {
+        fs.writeFileSync(newerPath, "newer", "utf8");
+        const future = new Date(Date.now() + 2_000);
+        fs.utimesSync(newerPath, future, future);
+        return threadQueryResult();
+      }
+    });
+
+    await assert.rejects(
+      adapter.listThreadRows(),
+      /main database changed during readonly_attempt_1_complete/u
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Codex store adapter reports query stage and main WAL SHM state after recovery is exhausted", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-wal-diagnostic-"));
+  const dbPath = path.join(dir, "state_5.sqlite");
+  const modes: string[] = [];
+  try {
+    fs.writeFileSync(dbPath, "fixture", "utf8");
+    const adapter = new CodexStoreAdapter({
+      codexHome: dir,
+      sqliteCantOpenRetryDelaysMs: [0],
+      async sleep() {},
+      async runSqliteThreadQuery(request) {
+        modes.push(request.openMode);
+        throw sqliteFailure(14, "schema", "unable to open database file (14)");
+      }
+    });
+
+    await assert.rejects(adapter.listThreadRows(), (error: unknown) => {
+      assert.equal(error instanceof Error, true);
+      const message = error instanceof Error ? error.message : String(error);
+      assert.match(message, /stage=query_only_materialization:schema/u);
+      assert.match(message, /status=14/u);
+      assert.match(message, new RegExp(`db=${escapeRegExp(dbPath)}`, "u"));
+      assert.match(message, /main=file\(dev=\d+,ino=\d+,size=7,/u);
+      assert.match(message, /wal=missing\(ENOENT\)/u);
+      assert.match(message, /shm=missing\(ENOENT\)/u);
+      return true;
+    });
+    assert.deepEqual(modes, ["readonly", "readonly", "query_only"]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Codex store adapter never retries non-CANTOPEN SQLite failures", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-db-busy-"));
+  const dbPath = path.join(dir, "state_5.sqlite");
+  const modes: string[] = [];
+  try {
+    fs.writeFileSync(dbPath, "fixture", "utf8");
+    const adapter = new CodexStoreAdapter({
+      codexHome: dir,
+      async runSqliteThreadQuery(request) {
+        modes.push(request.openMode);
+        throw sqliteFailure(5, "schema", "database is locked (5)");
+      }
+    });
+
+    await assert.rejects(adapter.listThreadRows(), /status=5/u);
+    assert.deepEqual(modes, ["readonly"]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Codex sqlite keeps one snapshot while a concurrent checkpoint is blocked, then survives checkpoint", {
+  skip: !SQLITE_AVAILABLE
+}, async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-wal-checkpoint-"));
+  const dbPath = path.join(dir, "state_5.sqlite");
+  const secondId = "019ee559-7bb8-7fd1-970c-0f7b6978c450";
+  try {
+    createWalThreadDatabase(dbPath, [{
+      id: SESSION_ID,
+      cwd: "/repo/project",
+      updatedAtMs: 20
+    }]);
+    const first = await runCodexSqliteThreadQuery({
+      dbPath,
+      openMode: "query_only",
+      maxSessions: 10,
+      afterSchema() {
+        const writer = spawnSync("sqlite3", [dbPath, [
+          `insert into threads(id,cwd,updated_at_ms,archived) values('${secondId}','/repo/project',30,0);`,
+          "pragma wal_checkpoint(TRUNCATE);"
+        ].join(" ")], { encoding: "utf8", timeout: 5_000 });
+        assert.equal(writer.status, 0, writer.stderr);
+        assert.match(writer.stdout.trim(), /^1\|\d+\|\d+$/u);
+      }
+    });
+    assert.deepEqual(first.rows.map((row) => row.id), [SESSION_ID]);
+
+    const checkpoint = spawnSync("sqlite3", [
+      dbPath,
+      "pragma wal_checkpoint(TRUNCATE);"
+    ], { encoding: "utf8", timeout: 5_000 });
+    assert.equal(checkpoint.status, 0, checkpoint.stderr);
+    assert.match(checkpoint.stdout.trim(), /^0\|\d+\|\d+$/u);
+
+    const second = await runCodexSqliteThreadQuery({
+      dbPath,
+      openMode: "query_only",
+      maxSessions: 10
+    });
+    assert.deepEqual(
+      second.rows.map((row) => row.id),
+      [secondId, SESSION_ID]
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Codex sqlite query rejects a threads schema missing required columns before selecting rows", {
+  skip: !SQLITE_AVAILABLE
+}, async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-db-schema-"));
+  const dbPath = path.join(dir, "state_5.sqlite");
+  try {
+    const setup = spawnSync("sqlite3", [
+      dbPath,
+      "create table threads(id text primary key);"
+    ], { encoding: "utf8" });
+    assert.equal(setup.status, 0, setup.stderr);
+
+    await assert.rejects(
+      runCodexSqliteThreadQuery({
+        dbPath,
+        openMode: "query_only",
+        maxSessions: 10
+      }),
+      /threads table is missing required id or cwd columns/u
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function createWalThreadDatabase(
+  dbPath: string,
+  rows: Array<{ id: string; cwd: string; updatedAtMs: number }>
+): void {
+  const statements = [
+    "pragma journal_mode=WAL;",
+    "create table threads(" +
+      "id text primary key," +
+      "cwd text not null," +
+      "updated_at_ms integer not null," +
+      "archived integer not null default 0" +
+      ");",
+    ...rows.map((row) =>
+      `insert into threads(id,cwd,updated_at_ms,archived) values(` +
+      `'${row.id}','${row.cwd}',${row.updatedAtMs},0);`
+    ),
+    "pragma wal_checkpoint(TRUNCATE);"
+  ];
+  const created = spawnSync("sqlite3", [dbPath, statements.join(" ")], {
+    encoding: "utf8"
+  });
+  assert.equal(created.status, 0, created.stderr);
+}
+
+function threadQueryResult() {
+  return {
+    columns: ["id", "cwd", "updated_at_ms", "archived"],
+    rows: [{
+      id: SESSION_ID,
+      cwd: "/repo/project",
+      updated_at_ms: 20,
+      archived: 0
+    }]
+  };
+}
+
+function sqliteFailure(status: number, stage: string, message: string): Error {
+  return Object.assign(new Error(message), { status, stage });
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
 
 function ok(stdout: string): CommandResult {
   return {
