@@ -47,7 +47,15 @@ export interface CodexSqliteThreadQueryRequest {
   openMode: CodexSqliteOpenMode;
   maxSessions: number;
   nativeThreadId?: string;
+  filters?: CodexThreadQueryFilters;
   afterSchema?: (columns: readonly string[]) => void | Promise<void>;
+}
+
+export interface CodexThreadQueryFilters {
+  cwd?: string;
+  source?: string;
+  archived?: boolean;
+  modelProvider?: string;
 }
 
 export interface CodexSqliteThreadQueryResult {
@@ -108,7 +116,16 @@ export class CodexStoreAdapter implements
   ): Promise<TerminalThreadLifecycleCandidate[]> {
     assertCodexLifecycleCandidateRequest(request);
     const candidates: TerminalThreadLifecycleCandidate[] = [];
-    for (const row of await this.listThreadRows() as CodexLifecycleThreadRow[]) {
+    const rows = await this.queryThreadRows({
+      maxSessions: this.maxSessions,
+      filters: {
+        cwd: path.resolve(request.cwd),
+        source: "cli",
+        archived: false,
+        modelProvider: request.modelProvider
+      }
+    });
+    for (const row of rows as CodexLifecycleThreadRow[]) {
       try {
         const candidate = codexLifecycleCandidateFromRow({
           row,
@@ -139,7 +156,15 @@ export class CodexStoreAdapter implements
         : candidate;
       if (
         token.schema !== "agent-knock-knock/thread-candidate-token" ||
-        token.version !== 1 ||
+        ![1, 2].includes(token.version) ||
+        (
+          token.version === 1
+            ? "sourceAgentVersion" in token
+            : (
+                !stringField(token.sourceAgentVersion) ||
+                token.sourceAgentVersion === token.agentVersion
+              )
+        ) ||
         token.agent !== "codex" ||
         token.source !== "codex_rollout" ||
         token.agentVersion !== request.agentVersion ||
@@ -173,6 +198,7 @@ export class CodexStoreAdapter implements
       if (
         !sameThreadFileToken(current.fileToken, token.fileToken) ||
         current.metadataFingerprint !== token.metadataFingerprint ||
+        current.sourceAgentVersion !== candidateSourceAgentVersion(token) ||
         current.modelProvider !== token.modelProvider
       ) {
         return {
@@ -259,10 +285,12 @@ export class CodexStoreAdapter implements
 
   private async queryThreadRows({
     maxSessions,
-    nativeThreadId
+    nativeThreadId,
+    filters
   }: {
     maxSessions: number;
     nativeThreadId?: string;
+    filters?: CodexThreadQueryFilters;
   }): Promise<CodexThreadRow[]> {
     const dbPath = latestStateDbPath(this.codexHome);
     if (!dbPath) {
@@ -295,7 +323,8 @@ export class CodexStoreAdapter implements
           dbPath,
           openMode: "readonly",
           maxSessions,
-          nativeThreadId
+          nativeThreadId,
+          filters
         });
       } catch (error) {
         const failedPath = latestStateDbPath(this.codexHome);
@@ -341,7 +370,8 @@ export class CodexStoreAdapter implements
         dbPath,
         openMode: "query_only",
         maxSessions,
-        nativeThreadId
+        nativeThreadId,
+        filters
       });
     } catch (error) {
       const failedPath = latestStateDbPath(this.codexHome);
@@ -420,11 +450,17 @@ class CodexSqliteSessionError extends Error {
 export async function runCodexSqliteThreadQuery(
   request: CodexSqliteThreadQueryRequest
 ): Promise<CodexSqliteThreadQueryResult> {
+  if (request.nativeThreadId && request.filters) {
+    throw new Error("Codex thread query cannot combine an exact UUID with lifecycle filters");
+  }
   if (
     request.nativeThreadId &&
     !NATIVE_THREAD_ID_PATTERN.test(request.nativeThreadId)
   ) {
     throw new Error("Codex thread lookup requires an exact UUID");
+  }
+  if (request.filters?.cwd && !path.isAbsolute(request.filters.cwd)) {
+    throw new Error("Codex lifecycle thread query requires an absolute cwd");
   }
   const nonce = randomUUID();
   const controlColumn = "__akk_sqlite_control";
@@ -438,10 +474,16 @@ export async function runCodexSqliteThreadQuery(
   const args = ["-batch", "-bail", "-json"];
   if (request.openMode === "readonly") {
     args.push("-readonly");
-  } else {
-    // This is the first SQL statement for the mode=rw connection. It lets
-    // SQLite materialize WAL/SHM bookkeeping while forbidding business SQL
-    // writes for the entire AKK session.
+  }
+  const parameterCommands = sqliteThreadFilterParameterCommands(request.filters);
+  for (const command of parameterCommands) {
+    args.push("-cmd", command);
+  }
+  if (request.openMode === "query_only") {
+    // SQLite may materialize WAL/SHM bookkeeping on this mode=rw connection,
+    // while query_only forbids business SQL writes for the AKK session.
+    // Parameter initialization, when needed, only creates a TEMP table and
+    // must precede query_only because SQLite also applies it to TEMP writes.
     args.push("-cmd", "PRAGMA query_only=ON");
   }
   args.push(databaseArgument);
@@ -502,7 +544,7 @@ export async function runCodexSqliteThreadQuery(
       authoritativeColumns = columns;
       const sql = request.nativeThreadId
         ? buildThreadByIdSelect(columns, request.nativeThreadId)
-        : buildThreadSelect(columns, request.maxSessions);
+        : buildThreadSelect(columns, request.maxSessions, request.filters);
       phase = "rows";
       child.stdin.write(
         `${sql};\nselect '${rowsControl}' as "${controlColumn}";\n`
@@ -1143,7 +1185,11 @@ function readCodexSessionMetadata(
   }
 }
 
-export function buildThreadSelect(columns: string[], limit: number): string {
+export function buildThreadSelect(
+  columns: string[],
+  limit: number,
+  filters: CodexThreadQueryFilters = {}
+): string {
   const columnSet = new Set(columns);
   const updatedAtExpression = columnSet.has("updated_at_ms")
     ? "updated_at_ms"
@@ -1165,7 +1211,59 @@ export function buildThreadSelect(columns: string[], limit: number): string {
     columnSet.has("name") ? "name" : "null as name"
   ].join(", ");
 
-  return `select ${select} from threads order by ${updatedAtExpression} desc limit ${Math.max(1, Math.floor(limit))}`;
+  const predicates: string[] = [];
+  if (filters.cwd !== undefined) {
+    predicates.push("cwd collate binary = :akk_cwd");
+  }
+  if (filters.source !== undefined) {
+    predicates.push(columnSet.has("source")
+      ? "source collate binary = :akk_source"
+      : "0 = 1");
+  }
+  if (filters.archived !== undefined) {
+    if (columnSet.has("archived")) {
+      predicates.push(`archived = ${filters.archived ? "1" : "0"}`);
+    } else if (filters.archived) {
+      predicates.push("0 = 1");
+    }
+  }
+  if (filters.modelProvider !== undefined) {
+    predicates.push(columnSet.has("model_provider")
+      ? "model_provider collate binary = :akk_model_provider"
+      : "0 = 1");
+  }
+  const where = predicates.length > 0
+    ? ` where ${predicates.join(" and ")}`
+    : "";
+
+  const deterministicTieBreak = predicates.length > 0 ? ", id desc" : "";
+  return `select ${select} from threads${where} order by ${updatedAtExpression} desc${deterministicTieBreak} limit ${Math.max(1, Math.floor(limit))}`;
+}
+
+function sqliteThreadFilterParameterCommands(
+  filters: CodexThreadQueryFilters | undefined
+): string[] {
+  if (!filters) {
+    return [];
+  }
+  const values: Array<[string, string | undefined]> = [
+    ["akk_cwd", filters.cwd],
+    ["akk_source", filters.source],
+    ["akk_model_provider", filters.modelProvider]
+  ];
+  const present = values.filter(
+    (entry): entry is [string, string] => entry[1] !== undefined
+  );
+  if (present.length === 0) {
+    return [];
+  }
+  return [
+    ".parameter init",
+    ...present.map(([name, value]) => {
+      const hex = Buffer.from(value, "utf8").toString("hex");
+      return `.parameter set :${name} "CAST(X'${hex}' AS TEXT)"`;
+    })
+  ];
 }
 
 export function buildThreadByIdSelect(
@@ -1219,9 +1317,12 @@ function codexLifecycleCandidateFromRow({
     !path.isAbsolute(rowCwd) ||
     !path.isAbsolute(rolloutPath) ||
     rowSource !== "cli" ||
-    rowVersion !== request.agentVersion ||
-    row.archived === true ||
-    row.archived === 1 ||
+    !rowVersion ||
+    !(
+      row.archived === undefined ||
+      row.archived === false ||
+      row.archived === 0
+    ) ||
     path.resolve(rowCwd) !== path.resolve(request.cwd) ||
     (
       request.modelProvider !== undefined &&
@@ -1242,7 +1343,7 @@ function codexLifecycleCandidateFromRow({
     path.resolve(opened.metadata.cwd) !== path.resolve(request.cwd) ||
     opened.metadata.originator !== "codex-tui" ||
     opened.metadata.source !== "cli" ||
-    opened.metadata.cliVersion !== request.agentVersion ||
+    opened.metadata.cliVersion !== rowVersion ||
     (
       rowModelProvider !== undefined &&
       opened.metadata.modelProvider !== rowModelProvider
@@ -1271,9 +1372,7 @@ function codexLifecycleCandidateFromRow({
       rolloutPath: opened.fileToken.path
     }))
     .digest("hex");
-  const candidateToken: TerminalThreadLifecycleCandidateToken = {
-    schema: "agent-knock-knock/thread-candidate-token",
-    version: 1,
+  const tokenFields = {
     agent: "codex",
     nativeThreadId,
     cwd: path.resolve(request.cwd),
@@ -1282,7 +1381,20 @@ function codexLifecycleCandidateFromRow({
     fileToken: opened.fileToken,
     metadataFingerprint,
     modelProvider: opened.metadata.modelProvider
-  };
+  } as const;
+  const candidateToken: TerminalThreadLifecycleCandidateToken =
+    opened.metadata.cliVersion === request.agentVersion
+      ? {
+          schema: "agent-knock-knock/thread-candidate-token",
+          version: 1,
+          ...tokenFields
+        }
+      : {
+          schema: "agent-knock-knock/thread-candidate-token",
+          version: 2,
+          ...tokenFields,
+          sourceAgentVersion: opened.metadata.cliVersion
+        };
   return {
     agent: "codex",
     nativeThreadId,
@@ -1291,6 +1403,7 @@ function codexLifecycleCandidateFromRow({
     rootInteractive: true,
     fileToken: opened.fileToken,
     agentVersion: request.agentVersion,
+    sourceAgentVersion: opened.metadata.cliVersion,
     title,
     preview,
     updatedAtMs,
@@ -1298,6 +1411,12 @@ function codexLifecycleCandidateFromRow({
     metadataFingerprint,
     candidateToken
   };
+}
+
+function candidateSourceAgentVersion(
+  token: TerminalThreadLifecycleCandidateToken
+): string {
+  return token.version === 2 ? token.sourceAgentVersion : token.agentVersion;
 }
 
 function readCodexLifecycleMetadata({

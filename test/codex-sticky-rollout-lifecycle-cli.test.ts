@@ -92,7 +92,7 @@ test("Codex new-thread does not attach a sticky before-thread rollout to the new
         cwd: workspace,
         originator: "codex-tui",
         source: "cli",
-        cli_version: "0.146.0"
+        cli_version: "0.140.0"
       }
     })}\n`, { mode: 0o600 });
     fs.writeFileSync(stateDbPath, "", { mode: 0o600 });
@@ -430,6 +430,14 @@ test("Codex new-thread does not attach a sticky before-thread rollout to the new
         ?.arguments?.candidate_token,
       "string"
     );
+    const historicalCandidateToken = JSON.parse(Buffer.from(
+      resumableOutput.previous.available_actions.resume_thread.arguments
+        .candidate_token,
+      "base64url"
+    ).toString("utf8"));
+    assert.equal(historicalCandidateToken.version, 2);
+    assert.equal(historicalCandidateToken.agentVersion, "0.146.0");
+    assert.equal(historicalCandidateToken.sourceAgentVersion, "0.140.0");
 
     // The raw resolver still sees the sticky before-thread rollout. Public
     // discovery must nevertheless project the authoritative logical Session.
@@ -1365,7 +1373,7 @@ function writeFakeSqlite(options: {
       updated_at_ms: 1_786_000_000_000,
       archived: 0,
       source: "cli",
-      cli_version: "0.146.0"
+      cli_version: "0.140.0"
     },
     {
       id: options.afterNativeThreadId,
