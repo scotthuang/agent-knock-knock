@@ -33,6 +33,7 @@ test("Codex new-thread does not attach a sticky before-thread rollout to the new
   const screenPath = path.join(tempDir, "screen.txt");
   const statusCountPath = path.join(tempDir, "status-count.txt");
   const clearCountPath = path.join(tempDir, "clear-count.txt");
+  const activeThreadPath = path.join(tempDir, "active-thread.txt");
   const wrongNextStatusPath = path.join(tempDir, "wrong-next-status");
   const draftAfterNextStatusPath = path.join(
     tempDir,
@@ -82,6 +83,7 @@ test("Codex new-thread does not attach a sticky before-thread rollout to the new
     fs.mkdirSync(workspace, { recursive: true });
     fs.mkdirSync(sessionsDir, { recursive: true, mode: 0o700 });
     fs.writeFileSync(screenPath, "Ready\n› ");
+    fs.writeFileSync(activeThreadPath, beforeNativeThreadId);
     fs.writeFileSync(beforeRolloutPath, `${JSON.stringify({
       timestamp: "2026-08-06T00:00:00.000Z",
       type: "session_meta",
@@ -98,6 +100,10 @@ test("Codex new-thread does not attach a sticky before-thread rollout to the new
       fakeBinDir,
       nativeThreadId: beforeNativeThreadId,
       rolloutPath: beforeRolloutPath,
+      afterNativeThreadId,
+      afterRolloutPath,
+      thirdNativeThreadId,
+      thirdRolloutPath,
       workspace
     });
     writeFakeTmux({
@@ -106,6 +112,7 @@ test("Codex new-thread does not attach a sticky before-thread rollout to the new
       screenPath,
       statusCountPath,
       clearCountPath,
+      activeThreadPath,
       wrongNextStatusPath,
       draftAfterNextStatusPath,
       blankRowsAfterNextStatusPath,
@@ -352,6 +359,23 @@ test("Codex new-thread does not attach a sticky before-thread rollout to the new
     assert.equal(ledger.binding.native_thread_id, afterNativeThreadId);
     assert.equal(ledger.binding.native_process.rollout, undefined);
 
+    // Historical lineage is intentionally stale: previous navigation must
+    // follow the current Session's latest committed transition instead.
+    const boundTargetStatePath = pathsForManagedSession(
+      boundTarget.session_id,
+      storeDir
+    ).statePath;
+    const staleLineageTarget = JSON.parse(
+      fs.readFileSync(boundTargetStatePath, "utf8")
+    );
+    staleLineageTarget.lineage.previous_session_id =
+      "session-lineage-must-not-win";
+    fs.writeFileSync(
+      boundTargetStatePath,
+      `${JSON.stringify(staleLineageTarget, null, 2)}\n`,
+      "utf8"
+    );
+
     const listed = runCli([
       "list",
       "--store-dir",
@@ -386,6 +410,26 @@ test("Codex new-thread does not attach a sticky before-thread rollout to the new
       afterNativeThreadId
     );
     assert.equal(resumableOutput.expected_binding_token, targetBindingToken);
+    assert.equal(
+      resumableOutput.previous?.native_thread_id,
+      beforeNativeThreadId,
+      "previous must come from the latest committed transition"
+    );
+    assert.equal(
+      resumableOutput.previous?.available_actions?.resume_thread?.arguments
+        ?.native_thread_id,
+      beforeNativeThreadId
+    );
+    assert.equal(
+      resumableOutput.previous?.available_actions?.resume_thread?.arguments
+        ?.expected_binding_token,
+      targetBindingToken
+    );
+    assert.equal(
+      typeof resumableOutput.previous?.available_actions?.resume_thread
+        ?.arguments?.candidate_token,
+      "string"
+    );
 
     // The raw resolver still sees the sticky before-thread rollout. Public
     // discovery must nevertheless project the authoritative logical Session.
@@ -619,6 +663,116 @@ test("Codex new-thread does not attach a sticky before-thread rollout to the new
     assert.equal(
       completedTurnTerminal.available_actions.send.arguments.session_id,
       targetAfterSend.session_id
+    );
+
+    // Exercise the advertised exact previous action through the real CLI
+    // lifecycle twice. This is the common A -> New B -> previous A ->
+    // previous B path, and proves that convenience navigation changes only
+    // the active Session: it never creates another Turn.
+    fs.writeFileSync(screenPath, "Ready\n› ");
+    const previousAfterNew = runCli([
+      "list-resumable-threads",
+      "--terminal",
+      terminalId,
+      "--store-dir",
+      storeDir,
+      "--codex-home",
+      codexHome
+    ], environment);
+    assert.equal(
+      previousAfterNew.status,
+      0,
+      previousAfterNew.stderr || previousAfterNew.stdout
+    );
+    const previousAfterNewOutput = JSON.parse(previousAfterNew.stdout);
+    assert.equal(
+      previousAfterNewOutput.previous?.native_thread_id,
+      beforeNativeThreadId
+    );
+    const turnsBeforePrevious = listConversations(storeDir).length;
+    const resumedPrevious = runCli([
+      "resume-thread",
+      ...resumeActionCliArgs(
+        previousAfterNewOutput.previous.available_actions.resume_thread
+          .arguments
+      ),
+      "--store-dir",
+      storeDir,
+      "--codex-home",
+      codexHome
+    ], environment);
+    assert.equal(
+      resumedPrevious.status,
+      0,
+      `${resumedPrevious.stderr}${resumedPrevious.stdout}`
+    );
+    const resumedPreviousOutput = JSON.parse(resumedPrevious.stdout);
+    assert.equal(resumedPreviousOutput.status, "committed");
+    assert.equal(resumedPreviousOutput.operation, "resume_thread");
+    assert.equal(resumedPreviousOutput.native_thread_id, beforeNativeThreadId);
+    assert.equal(resumedPreviousOutput.turn_created, false);
+    assert.equal(listConversations(storeDir).length, turnsBeforePrevious);
+
+    const previousAfterResume = runCli([
+      "list-resumable-threads",
+      "--terminal",
+      terminalId,
+      "--store-dir",
+      storeDir,
+      "--codex-home",
+      codexHome
+    ], environment);
+    assert.equal(
+      previousAfterResume.status,
+      0,
+      previousAfterResume.stderr || previousAfterResume.stdout
+    );
+    const previousAfterResumeOutput = JSON.parse(previousAfterResume.stdout);
+    assert.equal(
+      previousAfterResumeOutput.previous?.native_thread_id,
+      afterNativeThreadId,
+      "a committed Resume must make its source the next previous context"
+    );
+    const resumedBack = runCli([
+      "resume-thread",
+      ...resumeActionCliArgs(
+        previousAfterResumeOutput.previous.available_actions.resume_thread
+          .arguments
+      ),
+      "--store-dir",
+      storeDir,
+      "--codex-home",
+      codexHome
+    ], environment);
+    assert.equal(
+      resumedBack.status,
+      0,
+      `${resumedBack.stderr}${resumedBack.stdout}`
+    );
+    const resumedBackOutput = JSON.parse(resumedBack.stdout);
+    assert.equal(resumedBackOutput.status, "committed");
+    assert.equal(resumedBackOutput.native_thread_id, afterNativeThreadId);
+    assert.equal(resumedBackOutput.turn_created, false);
+    assert.equal(listConversations(storeDir).length, turnsBeforePrevious);
+
+    const previousAfterToggle = runCli([
+      "list-resumable-threads",
+      "--terminal",
+      terminalId,
+      "--store-dir",
+      storeDir,
+      "--codex-home",
+      codexHome
+    ], environment);
+    assert.equal(
+      previousAfterToggle.status,
+      0,
+      previousAfterToggle.stderr || previousAfterToggle.stdout
+    );
+    assert.equal(
+      JSON.parse(previousAfterToggle.stdout).previous?.native_thread_id,
+      beforeNativeThreadId,
+      "repeated A/B navigation must follow the latest committed edge"
     );
 
     fs.writeFileSync(screenPath, "Ready\n› ");
@@ -969,23 +1123,22 @@ test("Codex new-thread does not attach a sticky before-thread rollout to the new
     assert.equal(readLiteralSends(tmuxCallsPath).length, literalsBeforeUnknown);
 
     const literalSends = readLiteralSends(tmuxCallsPath);
-    assert.deepEqual(literalSends, [
-      "/status",
-      "/status",
-      "/clear",
-      "/status",
-      "/status",
-      "/status",
-      message,
-      "/status",
-      secondMessage,
-      "/status",
-      "/clear",
-      "/status",
-      "/status",
-      thirdMessage
-    ]);
-    assert.equal(fs.readFileSync(statusCountPath, "utf8"), "8");
+    assert.deepEqual(
+      literalSends.filter((text) => text !== "/status"),
+      [
+        "/clear",
+        message,
+        `/resume ${beforeNativeThreadId}`,
+        `/resume ${afterNativeThreadId}`,
+        secondMessage,
+        "/clear",
+        thirdMessage
+      ]
+    );
+    // One earlier draft-rejection probe remains in the append-only tmux log,
+    // while the fake status counter is deliberately reset before the first
+    // committed New. The two Resume transitions add four post-reset probes.
+    assert.equal(fs.readFileSync(statusCountPath, "utf8"), "12");
     assert.equal(fs.readFileSync(clearCountPath, "utf8"), "2");
     assert.equal(literalSends.filter((text) => text === "/clear").length, 2);
   } finally {
@@ -1007,6 +1160,7 @@ function writeFakeTmux(options: {
   screenPath: string;
   statusCountPath: string;
   clearCountPath: string;
+  activeThreadPath: string;
   wrongNextStatusPath: string;
   draftAfterNextStatusPath: string;
   blankRowsAfterNextStatusPath: string;
@@ -1057,16 +1211,12 @@ if (args[0] === "send-keys" && args.includes("-l")) {
     if (blankRowsAfterStatus) {
       fs.unlinkSync(${JSON.stringify(options.blankRowsAfterNextStatusPath)});
     }
-    const clearCount = fs.existsSync(${JSON.stringify(options.clearCountPath)})
-      ? Number(fs.readFileSync(${JSON.stringify(options.clearCountPath)}, "utf8"))
-      : 0;
     const id = wrongNext
       ? ${JSON.stringify(options.unexpectedNativeThreadId)}
-      : next === 1
-        ? ${JSON.stringify(options.beforeNativeThreadId)}
-        : clearCount >= 2
-          ? ${JSON.stringify(options.thirdNativeThreadId)}
-          : ${JSON.stringify(options.afterNativeThreadId)};
+      : fs.readFileSync(
+          ${JSON.stringify(options.activeThreadPath)},
+          "utf8"
+        ).trim();
     fs.writeFileSync(${JSON.stringify(options.screenPath)},
       "/status\\nprobe-" + next + "\\nSession: " + id +
       (draftAfterStatus
@@ -1080,23 +1230,47 @@ if (args[0] === "send-keys" && args.includes("-l")) {
       ${JSON.stringify(options.clearCountPath)},
       String(clearCount + 1)
     );
+    fs.writeFileSync(
+      ${JSON.stringify(options.activeThreadPath)},
+      clearCount + 1 >= 2
+        ? ${JSON.stringify(options.thirdNativeThreadId)}
+        : ${JSON.stringify(options.afterNativeThreadId)}
+    );
     fs.writeFileSync(${JSON.stringify(options.screenPath)}, "Cleared\\n› ");
+  } else if (text.startsWith("/resume ")) {
+    const requested = text.slice("/resume ".length).trim().toLowerCase();
+    const allowed = new Set([
+      ${JSON.stringify(options.beforeNativeThreadId)},
+      ${JSON.stringify(options.afterNativeThreadId)},
+      ${JSON.stringify(options.thirdNativeThreadId)}
+    ]);
+    if (!allowed.has(requested)) {
+      process.stderr.write("unexpected resume target: " + requested);
+      process.exit(1);
+    }
+    fs.writeFileSync(${JSON.stringify(options.activeThreadPath)}, requested);
+    fs.writeFileSync(${JSON.stringify(options.screenPath)}, "Resumed\\n› ");
   } else {
-    const clearCount = fs.existsSync(${JSON.stringify(options.clearCountPath)})
-      ? Number(fs.readFileSync(${JSON.stringify(options.clearCountPath)}, "utf8"))
-      : 0;
-    if (clearCount >= 2) {
-      fs.writeFileSync(
-        ${JSON.stringify(options.thirdRolloutPath)},
-        ${JSON.stringify(options.thirdRolloutContents)},
-        { mode: 384 }
-      );
+    const activeThread = fs.readFileSync(
+      ${JSON.stringify(options.activeThreadPath)},
+      "utf8"
+    ).trim();
+    if (activeThread === ${JSON.stringify(options.thirdNativeThreadId)}) {
+      if (!fs.existsSync(${JSON.stringify(options.thirdRolloutPath)})) {
+        fs.writeFileSync(
+          ${JSON.stringify(options.thirdRolloutPath)},
+          ${JSON.stringify(options.thirdRolloutContents)},
+          { mode: 384 }
+        );
+      }
     } else {
-      fs.writeFileSync(
-        ${JSON.stringify(options.afterRolloutPath)},
-        ${JSON.stringify(options.afterRolloutContents)},
-        { mode: 384 }
-      );
+      if (!fs.existsSync(${JSON.stringify(options.afterRolloutPath)})) {
+        fs.writeFileSync(
+          ${JSON.stringify(options.afterRolloutPath)},
+          ${JSON.stringify(options.afterRolloutContents)},
+          { mode: 384 }
+        );
+      }
       fs.writeFileSync(
         ${JSON.stringify(options.afterRolloutMaterializedPath)},
         "ready"
@@ -1168,6 +1342,10 @@ function writeFakeSqlite(options: {
   fakeBinDir: string;
   nativeThreadId: string;
   rolloutPath: string;
+  afterNativeThreadId: string;
+  afterRolloutPath: string;
+  thirdNativeThreadId: string;
+  thirdRolloutPath: string;
   workspace: string;
 }): void {
   const columns = [
@@ -1179,22 +1357,46 @@ function writeFakeSqlite(options: {
     "source",
     "cli_version"
   ].map((name) => ({ name }));
-  const rows = [{
-    id: options.nativeThreadId,
-    cwd: options.workspace,
-    rollout_path: options.rolloutPath,
-    updated_at_ms: 1_786_000_000_000,
-    archived: 0,
-    source: "cli",
-    cli_version: "0.146.0"
-  }];
+  const rows = [
+    {
+      id: options.nativeThreadId,
+      cwd: options.workspace,
+      rollout_path: options.rolloutPath,
+      updated_at_ms: 1_786_000_000_000,
+      archived: 0,
+      source: "cli",
+      cli_version: "0.146.0"
+    },
+    {
+      id: options.afterNativeThreadId,
+      cwd: options.workspace,
+      rollout_path: options.afterRolloutPath,
+      updated_at_ms: 1_786_000_060_000,
+      archived: 0,
+      source: "cli",
+      cli_version: "0.146.0"
+    },
+    {
+      id: options.thirdNativeThreadId,
+      cwd: options.workspace,
+      rollout_path: options.thirdRolloutPath,
+      updated_at_ms: 1_786_000_120_000,
+      archived: 0,
+      source: "cli",
+      cli_version: "0.146.0"
+    }
+  ];
   fs.writeFileSync(path.join(options.fakeBinDir, "sqlite3"), `#!/usr/bin/env node
 const args = process.argv.slice(2);
 const sql = args[3] || "";
+const rows = ${JSON.stringify(rows)};
 if (sql === "pragma table_info(threads)") {
   process.stdout.write(${JSON.stringify(JSON.stringify(columns))});
 } else if (sql.startsWith("select id")) {
-  process.stdout.write(${JSON.stringify(JSON.stringify(rows))});
+  const exactId = /where id = '([0-9a-f-]+)'/u.exec(sql)?.[1];
+  process.stdout.write(JSON.stringify(
+    exactId ? rows.filter((row) => row.id === exactId) : rows
+  ));
 } else {
   process.stderr.write("unexpected sqlite query: " + sql);
   process.exit(1);
@@ -1214,6 +1416,19 @@ function readLiteralSends(filePath: string): Array<string | undefined> {
   return readJsonLines(filePath)
     .filter((call) => call.args[0] === "send-keys" && call.args.includes("-l"))
     .map((call) => call.args.at(-1));
+}
+
+function resumeActionCliArgs(argumentsValue: Record<string, string>): string[] {
+  return [
+    "--terminal",
+    argumentsValue.terminal_id,
+    "--native-thread",
+    argumentsValue.native_thread_id,
+    "--expected-binding-token",
+    argumentsValue.expected_binding_token,
+    "--candidate-token",
+    argumentsValue.candidate_token
+  ];
 }
 
 function debugJsonFiles(root: string): Record<string, unknown> {

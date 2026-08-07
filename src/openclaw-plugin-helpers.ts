@@ -1,6 +1,12 @@
 import path from "node:path";
 
 export const AKK_CALLBACK_METHOD = "agent-knock-knock.callback";
+export type AkkResumeSelection =
+  | { kind: "exact"; nativeThreadId: string }
+  | { kind: "previous" }
+  | { kind: "number"; selectionNumber: number }
+  | { kind: "short-id"; shortId: string }
+  | { kind: "snapshot-handle"; selectionHandle: string };
 type AkkCloseCommand = {
   action: "close";
   turnId: string;
@@ -29,7 +35,7 @@ export type AkkCommand =
   | {
       action: "resume-thread";
       terminalId: string;
-      nativeThreadId?: string;
+      selection?: AkkResumeSelection;
     }
   | { action: "status"; turnId?: string }
   | { action: "send"; selector: string; message: string }
@@ -91,26 +97,25 @@ export function parseAkkCommand(args: unknown): AkkCommand {
   }
   if (action === "resume-thread") {
     const usage =
-      "Usage: /akk resume-thread <exact-terminal-id> [native-thread-uuid]";
+      "Usage: /akk resume-thread <exact-terminal-id> " +
+      "[native-thread-uuid|previous|刚才那个|number|@short-id|snapshot-handle]";
     const { token: terminalId, rest: nativeInput } = takeRequiredToken(
       rest,
       usage
     );
     assertExactTerminalId(terminalId, usage);
-    const { token: nativeThreadId, rest: extra } = takeToken(nativeInput);
+    const { token: selectionInput, rest: extra } = takeToken(nativeInput);
     if (extra.trim()) {
       throw new Error(usage);
     }
-    if (nativeThreadId && !isExactNativeThreadId(nativeThreadId)) {
-      throw new Error(
-        `${usage}; native-thread-uuid must be the complete UUID returned by /akk threads`
-      );
-    }
+    const selection = selectionInput
+      ? parseAkkResumeSelection(selectionInput, usage)
+      : undefined;
     return {
       action: "resume-thread",
       terminalId,
-      ...(nativeThreadId
-        ? { nativeThreadId: nativeThreadId.toLowerCase() }
+      ...(selection
+        ? { selection }
         : {})
     };
   }
@@ -246,7 +251,7 @@ export function akkUsageText(): string {
     "/akk threads <exact-terminal-id>",
     "/akk new-thread <exact-terminal-id>",
     "/akk clear-thread <exact-terminal-id>",
-    "/akk resume-thread <exact-terminal-id> [native-thread-uuid]",
+    "/akk resume-thread <exact-terminal-id> [uuid|previous|number|@short-id|snapshot-handle]",
     "/akk doctor",
     "/akk status [turn-selector]",
     "/akk respond <turn-selector>: <answer>",
@@ -446,9 +451,15 @@ export function formatAkkThreadsCommandResult(
   const resumableCount = threads.filter(
     (thread) => thread.resumable === true
   ).length;
+  const previous = recordValue(result.previous);
+  const previousNativeThreadId = nonEmptyString(previous?.native_thread_id);
+  const selectionSnapshot = recordValue(result.selection_snapshot);
   const threadLines = threads.slice(0, 30).flatMap((thread) => {
     const nativeThreadId =
       nonEmptyString(thread.native_thread_id) ?? "unknown";
+    const selectionNumber = finiteNumber(thread.selection_number);
+    const shortId = nonEmptyString(thread.short_id);
+    const selectionHandle = nonEmptyString(thread.selection_handle);
     const status = thread.resumable === true
       ? "resumable"
       : nonEmptyString(thread.unavailable_reason) ?? "unavailable";
@@ -456,8 +467,19 @@ export function formatAkkThreadsCommandResult(
       nonEmptyString(thread.title),
       nonEmptyString(thread.preview)
     ].filter((value): value is string => Boolean(value)).join(" · ");
+    const selector = selectionNumber !== undefined || shortId || selectionHandle
+      ? [
+          selectionNumber !== undefined ? `${selectionNumber}.` : undefined,
+          shortId,
+          selectionHandle ? `[${selectionHandle}]` : undefined
+        ].filter(Boolean).join(" ")
+      : `- ${nativeThreadId}`;
+    const previousMarker = nativeThreadId === previousNativeThreadId
+      ? " | previous / 刚才那个"
+      : "";
     return [
-      `- ${nativeThreadId} | ${status}`,
+      `${selector} | ${status}${previousMarker}`,
+      `  full UUID: ${nativeThreadId}`,
       ...(nonEmptyString(thread.updated_at)
         ? [`  updated: ${nonEmptyString(thread.updated_at)}`]
         : []),
@@ -469,12 +491,20 @@ export function formatAkkThreadsCommandResult(
     `terminal: ${terminalId}`,
     `current session: ${currentSessionId ?? "none"}`,
     `current native thread: ${currentNativeThreadId ?? "none"}`,
+    ...(nonEmptyString(selectionSnapshot?.expires_at)
+      ? [`selection expires: ${nonEmptyString(selectionSnapshot?.expires_at)}`]
+      : []),
     ...(threadLines.length > 0
       ? ["threads:", ...threadLines]
       : ["threads: none"]),
     ...(resumableCount > 0
       ? [
-          `next: /akk resume-thread ${terminalId} <native-thread-uuid>`
+          `next: /akk resume-thread ${terminalId} <native-thread-uuid>`,
+          `shortcuts: /akk resume-thread ${terminalId} <number|@short-id|snapshot-handle>`,
+          ...(previousNativeThreadId
+            ? [`previous: /akk resume-thread ${terminalId} previous`]
+            : []),
+          "Numbers and short IDs refer only to this displayed snapshot; relist after expiry or any terminal change."
         ]
       : []),
     "Listing or switching native threads does not create an AKK Turn."
@@ -544,6 +574,8 @@ export function buildAkkCommandCliArgs(
     sessionKey?: unknown;
     expectedBindingToken?: unknown;
     candidateToken?: unknown;
+    selectionScope?: unknown;
+    selectionSnapshotId?: unknown;
   } = {}
 ): string[] | undefined {
   switch (command.action) {
@@ -574,7 +606,8 @@ export function buildAkkCommandCliArgs(
           "--terminal",
           command.terminalId
         ],
-        ["--store-dir", storeDir]
+        ["--store-dir", storeDir],
+        ["--selection-scope", nonEmptyString(context.selectionScope)]
       );
     case "new-thread":
       return withOptionalArgs(
@@ -588,12 +621,59 @@ export function buildAkkCommandCliArgs(
         ["--store-dir", storeDir]
       );
     case "resume-thread":
-      if (!command.nativeThreadId) {
+      if (!command.selection || command.selection.kind === "previous") {
         return withOptionalArgs(
           [
             "list-resumable-threads",
             "--terminal",
             command.terminalId
+          ],
+          ["--store-dir", storeDir],
+          ["--selection-scope", nonEmptyString(context.selectionScope)]
+        );
+      }
+      if (command.selection.kind === "number") {
+        return withOptionalArgs(
+          [
+            "resume-thread",
+            "--terminal",
+            command.terminalId,
+            "--selection-snapshot",
+            requiredSelectionSnapshotId(context.selectionSnapshotId),
+            "--selection-number",
+            String(command.selection.selectionNumber),
+            "--selection-scope",
+            requiredSelectionScope(context.selectionScope)
+          ],
+          ["--store-dir", storeDir]
+        );
+      }
+      if (command.selection.kind === "short-id") {
+        return withOptionalArgs(
+          [
+            "resume-thread",
+            "--terminal",
+            command.terminalId,
+            "--selection-snapshot",
+            requiredSelectionSnapshotId(context.selectionSnapshotId),
+            "--selection-short-id",
+            command.selection.shortId,
+            "--selection-scope",
+            requiredSelectionScope(context.selectionScope)
+          ],
+          ["--store-dir", storeDir]
+        );
+      }
+      if (command.selection.kind === "snapshot-handle") {
+        return withOptionalArgs(
+          [
+            "resume-thread",
+            "--terminal",
+            command.terminalId,
+            "--selection-handle",
+            command.selection.selectionHandle,
+            "--selection-scope",
+            requiredSelectionScope(context.selectionScope)
           ],
           ["--store-dir", storeDir]
         );
@@ -604,7 +684,7 @@ export function buildAkkCommandCliArgs(
           "--terminal",
           command.terminalId,
           "--native-thread",
-          command.nativeThreadId,
+          command.selection.nativeThreadId,
           "--expected-binding-token",
           requiredExpectedBindingToken(context.expectedBindingToken),
           "--candidate-token",
@@ -752,6 +832,34 @@ function isExactNativeThreadId(value: string): boolean {
   );
 }
 
+function parseAkkResumeSelection(
+  value: string,
+  usage: string
+): AkkResumeSelection {
+  const normalized = value.toLowerCase();
+  if (normalized === "previous" || normalized === "prev" || value === "刚才那个") {
+    return { kind: "previous" };
+  }
+  if (isExactNativeThreadId(value)) {
+    return { kind: "exact", nativeThreadId: normalized };
+  }
+  if (/^[1-9][0-9]*$/u.test(value)) {
+    const selectionNumber = Number(value);
+    if (Number.isSafeInteger(selectionNumber)) {
+      return { kind: "number", selectionNumber };
+    }
+  }
+  if (/^@[a-f0-9]{8,32}$/u.test(normalized)) {
+    return { kind: "short-id", shortId: normalized };
+  }
+  if (/^rs_[A-Za-z0-9_-]{22}:[1-9][0-9]*$/u.test(value)) {
+    return { kind: "snapshot-handle", selectionHandle: value };
+  }
+  throw new Error(
+    `${usage}; use a complete UUID or a selection exactly returned by /akk threads`
+  );
+}
+
 function requiredExpectedBindingToken(value: unknown): string {
   const token = nonEmptyString(value);
   if (!token) {
@@ -770,6 +878,26 @@ function requiredCandidateToken(value: unknown): string {
     );
   }
   return token;
+}
+
+function requiredSelectionScope(value: unknown): string {
+  const scope = nonEmptyString(value);
+  if (!scope) {
+    throw new Error(
+      "snapshot-bound resume requires the current OpenClaw session scope; run /akk threads again"
+    );
+  }
+  return scope;
+}
+
+function requiredSelectionSnapshotId(value: unknown): string {
+  const snapshotId = nonEmptyString(value);
+  if (!snapshotId) {
+    throw new Error(
+      "snapshot-bound resume requires the last displayed snapshot; run /akk threads again"
+    );
+  }
+  return snapshotId;
 }
 
 export function resolvePluginStoreDir(

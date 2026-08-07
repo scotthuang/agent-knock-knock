@@ -195,7 +195,13 @@ test("OpenClaw native-thread tools keep explicit CAS while slash commands refres
   const lifecycleFailurePath = path.join(tempDir, "lifecycle-failure.txt");
   const tools = new Map<string, ToolDefinition>();
   let command:
-    | { handler?: (context: { args: string; sessionKey: string }) => Promise<any> }
+    | {
+        handler?: (context: {
+          args: string;
+          sessionKey: string;
+          sessionId?: string;
+        }) => Promise<any>;
+      }
     | undefined;
 
   try {
@@ -431,6 +437,135 @@ test("OpenClaw native-thread tools keep explicit CAS while slash commands refres
     assert.match(failedResumeSlash?.text ?? "", /do not retry automatically/iu);
     assert.match(failedResumeSlash?.text ?? "", /exact lifecycle recovery action/u);
     assert.doesNotMatch(failedResumeSlash?.text ?? "", /resumed and verified/u);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("OpenClaw Resume shortcuts preserve the displayed snapshot and previous exact action", async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-plugin-resume-navigation-")
+  );
+  const fakeCli = path.join(tempDir, "resume-navigation.cjs");
+  const callsPath = path.join(tempDir, "calls.ndjson");
+  const terminalId = "terminal:v2:tmux:codex:work:0.0:1234";
+  const firstThreadId = "11111111-1111-4111-8111-111111111111";
+  const secondThreadId = "22222222-2222-4222-8222-222222222222";
+  const snapshotId = "rs_abcdefghijklmnopqrstuv";
+  let command:
+    | {
+        handler?: (context: {
+          args: string;
+          sessionKey: string;
+          sessionId?: string;
+        }) => Promise<any>;
+      }
+    | undefined;
+  try {
+    fs.writeFileSync(fakeCli, [
+      `const fs = require("node:fs");`,
+      `const args = process.argv.slice(2);`,
+      `fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(args) + "\\n");`,
+      `const terminalId = ${JSON.stringify(terminalId)};`,
+      `const first = ${JSON.stringify(firstThreadId)};`,
+      `const second = ${JSON.stringify(secondThreadId)};`,
+      `const snapshotId = ${JSON.stringify(snapshotId)};`,
+      `const result = args[0] === "list-resumable-threads" ? {`,
+      `  terminal_id: terminalId, current_session_id: "session-current", current_native_thread_id: first,`,
+      `  expected_binding_token: "fresh-binding",`,
+      `  selection_snapshot: { snapshot_id: snapshotId, expires_at: "2099-01-01T00:00:00.000Z" },`,
+      `  previous: { native_thread_id: second, available_actions: { resume_thread: { arguments: { terminal_id: terminalId, native_thread_id: second, expected_binding_token: "previous-binding", candidate_token: "previous-candidate" } } } },`,
+      `  threads: [`,
+      `    { native_thread_id: first, selection_number: 1, short_id: "@11111111", selection_handle: snapshotId + ":1", resumable: true, candidate_token: "first-candidate" },`,
+      `    { native_thread_id: second, selection_number: 2, short_id: "@22222222", selection_handle: snapshotId + ":2", resumable: true, candidate_token: "second-candidate" }`,
+      `  ]`,
+      `} : { status: "committed", operation: "resume_thread", terminal_id: terminalId, session_id: "session-resumed", native_thread_id: second, turn_created: false };`,
+      `process.stdout.write(JSON.stringify(result));`
+    ].join("\n"), "utf8");
+
+    (
+      createOpenClawPluginForTest(fakeCli) as unknown as {
+        register(api: Record<string, any>): void;
+      }
+    ).register({
+      pluginConfig: { storeDir: "/private/akk-store" },
+      logger: { info() {}, warn() {} },
+      registerGatewayMethod() {},
+      registerService() {},
+      registerCommand(value: typeof command) {
+        command = value;
+      },
+      registerTool() {}
+    });
+
+    await command?.handler?.({
+      args: `threads ${terminalId}`,
+      sessionKey: "agent:test:snapshot",
+      sessionId: "openclaw-conversation-a"
+    });
+    await command?.handler?.({
+      args: `resume-thread ${terminalId} 2`,
+      sessionKey: "agent:test:snapshot",
+      sessionId: "openclaw-conversation-a"
+    });
+    await command?.handler?.({
+      args: `threads ${terminalId}`,
+      sessionKey: "agent:test:snapshot",
+      sessionId: "openclaw-conversation-a"
+    });
+    const resetRejected = await command?.handler?.({
+      args: `resume-thread ${terminalId} @22222222`,
+      sessionKey: "agent:test:snapshot",
+      sessionId: "openclaw-conversation-b"
+    });
+    assert.equal(resetRejected?.isError, true);
+    assert.match(resetRejected?.text ?? "", /last displayed snapshot/u);
+    await command?.handler?.({
+      args: `resume-thread ${terminalId} @22222222`,
+      sessionKey: "agent:test:snapshot",
+      sessionId: "openclaw-conversation-a"
+    });
+    await command?.handler?.({
+      args: `resume-thread ${terminalId} ${snapshotId}:2`,
+      sessionKey: "agent:test:snapshot",
+      sessionId: "openclaw-conversation-a"
+    });
+    await command?.handler?.({
+      args: `resume-thread ${terminalId} previous`,
+      sessionKey: "agent:test:snapshot",
+      sessionId: "openclaw-conversation-a"
+    });
+
+    const calls = fs.readFileSync(callsPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as string[]);
+    assert.deepEqual(calls.map((args) => args[0]), [
+      "list-resumable-threads",
+      "resume-thread",
+      "list-resumable-threads",
+      "resume-thread",
+      "resume-thread",
+      "list-resumable-threads",
+      "resume-thread"
+    ]);
+    assert.deepEqual(
+      calls[1].slice(0, 7),
+      [
+        "resume-thread",
+        "--terminal",
+        terminalId,
+        "--selection-snapshot",
+        snapshotId,
+        "--selection-number",
+        "2"
+      ]
+    );
+    assert.equal(calls[3][calls[3].indexOf("--selection-short-id") + 1], "@22222222");
+    assert.equal(calls[4][calls[4].indexOf("--selection-handle") + 1], `${snapshotId}:2`);
+    assert.equal(calls[6][calls[6].indexOf("--native-thread") + 1], secondThreadId);
+    assert.equal(calls[6][calls[6].indexOf("--expected-binding-token") + 1], "previous-binding");
+    assert.equal(calls[6][calls[6].indexOf("--candidate-token") + 1], "previous-candidate");
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

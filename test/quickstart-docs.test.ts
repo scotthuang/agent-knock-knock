@@ -48,6 +48,9 @@ test("ClawHub quickstarts reach a first task without a top-level workspace", () 
   assert.match(tmux, /`send` action with its prefilled authoritative `session_id`/u);
   assert.match(tmux, /`respond` action with its prefilled `turn_id`/u);
   assert.match(tmux, /\/akk threads <exact-terminal-id>/u);
+  assert.match(tmux, /previous.*刚才那个/u);
+  assert.match(tmux, /collision-safe `@short-id`/u);
+  assert.match(tmux, /latest list shown in the same OpenClaw session/u);
   assert.match(tmux, /creates or activates an AKK Session but creates no Turn/u);
   assert.match(tmux, /multiple canonical roots/u);
   assert.match(tmux, /autoApprove\.rules\[\]\.workspaces/u);
@@ -108,6 +111,8 @@ test("ClawHub quickstarts reach a first task without a top-level workspace", () 
 test("README and bundled skill keep advanced commands in their workflows", () => {
   const readme = read("README.md");
   const skill = read("templates/openclaw-skills/agent-knock-knock/SKILL.md");
+  const protocol = read("docs/bidirectional-agent-protocol.md");
+  const quickstart = read("docs/quickstart-tmux.md");
   const changelog = read("CHANGELOG.md");
   const usage = markdownSection(readme, "## Usage", "## Configuration");
   const routing = markdownSection(
@@ -165,6 +170,8 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
     assert.match(document, /`candidate_token`/u);
     assert.match(document, /v5 `action_contracts`/u);
     assert.match(document, /creates no (?:AKK )?Turn/u);
+    assert.match(document, /previous/u);
+    assert.match(document, /snapshot/ui);
     assert.match(document, /Do not send `\/clear`/u);
     assert.doesNotMatch(document, /`follow_up`/u);
     assert.match(
@@ -185,6 +192,36 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
       /\/akk approve @a1b2c3d4 --expected-approval-fingerprint <fresh-fingerprint>/u
     );
   }
+  assert.match(
+    readme,
+    /If `previous` is present, use only its exact prefilled action for a natural-language “刚才那个” request/u
+  );
+  assert.match(
+    skill,
+    /A top-level `previous` block, when present, is the only authority for a “previous\/刚才那个” request/u
+  );
+  assert.match(
+    skill,
+    /For “previous” \/ “刚才那个”[^\n]*`previous\.available_actions\.resume_thread`[^\n]*use that exact action; never substitute the newest row/u
+  );
+  assert.match(
+    readme,
+    /Numbers, short IDs, and handles are human display\/navigation aids, never tool arguments or authoritative native identity/u
+  );
+  for (const document of [readme, protocol, quickstart]) {
+    assert.match(document, /five(?:-| )minute(?:s)?/u);
+    assert.match(document, /complete(?: native thread)? UUID/u);
+  }
+  assert.match(readme, /candidate-set[^.]*changes/u);
+  assert.match(quickstart, /candidate change/u);
+  assert.match(
+    protocol,
+    /replaced or changed transcript\/rollout cannot be resumed under stale metadata/u
+  );
+  assert.match(
+    protocol,
+    /revalidates the entire ordered candidate set, terminal dispatch generation, process, workspace, and binding before input/u
+  );
   assert.match(
     changelog,
     /ordinary sends to an existing AKK Session target its `session_id`/u

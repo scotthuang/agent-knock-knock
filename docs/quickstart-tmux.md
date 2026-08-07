@@ -84,10 +84,10 @@ Starting a new native context, clearing it, or resuming an older native thread i
 /akk threads <exact-terminal-id>
 /akk new-thread <exact-terminal-id>
 /akk clear-thread <exact-terminal-id>
-/akk resume-thread <exact-terminal-id> [native-thread-uuid]
+/akk resume-thread <exact-terminal-id> [uuid|previous|number|@short-id|snapshot-handle]
 ```
 
-Omitting the resume UUID lists exact verified candidates; select only a complete returned UUID. The human-facing slash handler obtains a fresh binding token internally. A successful switch creates or activates an AKK Session but creates no Turn, so send the next request separately. There is no background binding poll: after an old coding-agent process exits, the next lifecycle listing can expose its sole historical Session as resumable, and resume safely detaches that stale binding before terminal input. Unsupported, busy, ambiguous, stale-token, active-elsewhere, or unverifiable transitions stop without falling back to raw `/clear`, `/new`, `/resume`, `/status`, Codex `/fork`, `/side`, or `/btw`, or Claude `/branch` text.
+Omitting the resume selection lists exact verified candidates. You may use the complete UUID, the deterministic number or collision-safe `@short-id` from that same displayed snapshot, or its opaque snapshot handle. Numbers and short IDs are valid only for the latest list shown in the same OpenClaw session; handles, too, expire after five minutes and any relevant terminal, process, workspace, binding, or candidate change. `previous` / `刚才那个` works only when the list advertises a single verified source from the current Session's latest committed lifecycle transition; AKK never treats “previous” as “newest”. These display selectors are resolved back to the complete UUID and exact saved tokens before the native Resume path runs. A successful switch creates or activates an AKK Session but creates no Turn, so send the next request separately. There is no background binding poll: after an old coding-agent process exits, the next lifecycle listing can expose its sole historical Session as resumable, and resume safely detaches that stale binding before terminal input. Unsupported, busy, ambiguous, stale, expired, active-elsewhere, or unverifiable transitions stop without falling back to raw `/clear`, `/new`, `/resume`, `/status`, Codex `/fork`, `/side`, or `/btw`, or Claude `/branch` text.
 
 ## Optional: Enable natural-language routing
 

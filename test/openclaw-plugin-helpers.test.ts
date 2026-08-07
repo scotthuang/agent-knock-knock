@@ -95,7 +95,51 @@ test("/akk native-thread commands require exact identities and keep clear as an 
     {
       action: "resume-thread",
       terminalId: exactTerminalId,
-      nativeThreadId: resumableNativeThreadId
+      selection: {
+        kind: "exact",
+        nativeThreadId: resumableNativeThreadId
+      }
+    }
+  );
+  assert.deepEqual(
+    parseAkkCommand(`resume-thread ${exactTerminalId} previous`),
+    {
+      action: "resume-thread",
+      terminalId: exactTerminalId,
+      selection: { kind: "previous" }
+    }
+  );
+  assert.deepEqual(
+    parseAkkCommand(`resume-thread ${exactTerminalId} 刚才那个`),
+    {
+      action: "resume-thread",
+      terminalId: exactTerminalId,
+      selection: { kind: "previous" }
+    }
+  );
+  assert.deepEqual(
+    parseAkkCommand(`resume-thread ${exactTerminalId} 2`),
+    {
+      action: "resume-thread",
+      terminalId: exactTerminalId,
+      selection: { kind: "number", selectionNumber: 2 }
+    }
+  );
+  assert.deepEqual(
+    parseAkkCommand(`resume-thread ${exactTerminalId} @abcdef12`),
+    {
+      action: "resume-thread",
+      terminalId: exactTerminalId,
+      selection: { kind: "short-id", shortId: "@abcdef12" }
+    }
+  );
+  const snapshotHandle = "rs_abcdefghijklmnopqrstuv:2";
+  assert.deepEqual(
+    parseAkkCommand(`resume-thread ${exactTerminalId} ${snapshotHandle}`),
+    {
+      action: "resume-thread",
+      terminalId: exactTerminalId,
+      selection: { kind: "snapshot-handle", selectionHandle: snapshotHandle }
     }
   );
   assert.throws(
@@ -103,8 +147,12 @@ test("/akk native-thread commands require exact identities and keep clear as an 
     /exact terminal_id returned by \/akk list/u
   );
   assert.throws(
-    () => parseAkkCommand(`resume-thread ${exactTerminalId} 22222222`),
-    /complete UUID returned by \/akk threads/u
+    () => parseAkkCommand(`resume-thread ${exactTerminalId} 0`),
+    /selection exactly returned by \/akk threads/u
+  );
+  assert.throws(
+    () => parseAkkCommand(`resume-thread ${exactTerminalId} 2222222a`),
+    /selection exactly returned by \/akk threads/u
   );
 });
 
@@ -119,6 +167,29 @@ test("/akk lifecycle CLI arguments use a fresh internal binding token", () => {
       "list-resumable-threads",
       "--terminal",
       exactTerminalId,
+      "--store-dir",
+      "/private/akk-store"
+    ]
+  );
+  assert.deepEqual(
+    buildAkkCommandCliArgs(
+      parseAkkCommand(`resume-thread ${exactTerminalId} 2`),
+      config,
+      {
+        selectionScope: "openclaw:scope",
+        selectionSnapshotId: "rs_abcdefghijklmnopqrstuv"
+      }
+    ),
+    [
+      "resume-thread",
+      "--terminal",
+      exactTerminalId,
+      "--selection-snapshot",
+      "rs_abcdefghijklmnopqrstuv",
+      "--selection-number",
+      "2",
+      "--selection-scope",
+      "openclaw:scope",
       "--store-dir",
       "/private/akk-store"
     ]
@@ -788,15 +859,28 @@ test("/akk threads renders exact candidates without exposing the CAS token", () 
     current_session_id: "session-current",
     current_native_thread_id: currentNativeThreadId,
     expected_binding_token: "binding-token-private-to-handler",
+    selection_snapshot: {
+      snapshot_id: "rs_abcdefghijklmnopqrstuv",
+      expires_at: "2026-08-06T08:05:00.000Z"
+    },
+    previous: {
+      native_thread_id: resumableNativeThreadId
+    },
     threads: [
       {
         native_thread_id: currentNativeThreadId,
+        selection_number: 1,
+        short_id: "@11111111",
+        selection_handle: "rs_abcdefghijklmnopqrstuv:1",
         resumable: false,
         unavailable_reason: "already_active",
         updated_at: "2026-08-06T08:00:00.000Z"
       },
       {
         native_thread_id: resumableNativeThreadId,
+        selection_number: 2,
+        short_id: "@22222222",
+        selection_handle: "rs_abcdefghijklmnopqrstuv:2",
         resumable: true,
         candidate_token: "candidate-token-private-to-handler",
         title: "Implement lifecycle controls",
@@ -815,6 +899,11 @@ test("/akk threads renders exact candidates without exposing the CAS token", () 
   assert.match(text, new RegExp(resumableNativeThreadId, "u"));
   assert.match(text, /already_active/u);
   assert.match(text, /1 resumable/u);
+  assert.match(text, /1\. @11111111 \[rs_abcdefghijklmnopqrstuv:1\]/u);
+  assert.match(text, /2\. @22222222 \[rs_abcdefghijklmnopqrstuv:2\]/u);
+  assert.match(text, /previous \/ 刚才那个/u);
+  assert.match(text, /resume-thread[^\n]+ previous/u);
+  assert.match(text, /refer only to this displayed snapshot/u);
   assert.match(
     text,
     new RegExp(
