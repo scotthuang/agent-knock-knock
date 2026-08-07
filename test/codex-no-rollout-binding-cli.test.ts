@@ -649,16 +649,37 @@ function writeFakeSqlite(options: {
     cli_version: "0.146.0"
   }];
   fs.writeFileSync(path.join(options.fakeBinDir, "sqlite3"), `#!/usr/bin/env node
-const args = process.argv.slice(2);
-const sql = args[3] || "";
-if (sql === "pragma table_info(threads)") {
-  process.stdout.write(${JSON.stringify(JSON.stringify(columns))});
-} else if (sql.startsWith("select id")) {
-  process.stdout.write(${JSON.stringify(JSON.stringify(rows))});
-} else {
-  process.stderr.write("unexpected sqlite query: " + sql);
-  process.exit(1);
-}
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  input += chunk;
+  let newline;
+  while ((newline = input.indexOf("\\n")) >= 0) {
+    const sql = input.slice(0, newline).trim();
+    input = input.slice(newline + 1);
+    if (!sql || sql === "BEGIN;" || sql === "COMMIT;" || sql === ".quit") {
+      continue;
+    }
+    if (sql === "pragma table_info(threads);") {
+      process.stdout.write(${JSON.stringify(JSON.stringify(columns) + "\n")});
+      continue;
+    }
+    const control = /^select '([^']+)' as "__akk_sqlite_control";$/u.exec(sql);
+    if (control) {
+      process.stdout.write(JSON.stringify([{
+        __akk_sqlite_control: control[1]
+      }]) + "\\n");
+      continue;
+    }
+    if (sql.startsWith("select id")) {
+      process.stdout.write(${JSON.stringify(JSON.stringify(rows) + "\n")});
+      continue;
+    }
+    process.stderr.write("unexpected sqlite query: " + sql);
+    process.exitCode = 1;
+  }
+});
+process.stdin.resume();
 `, { mode: 0o755 });
 }
 
