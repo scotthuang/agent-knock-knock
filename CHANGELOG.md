@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.10.3 - 2026-08-07
+
+### Added
+
+- Supervise active terminal bridge monitors from the OpenClaw plugin every five seconds and automatically recreate an unexpectedly exited owner without requiring `list` or `status`.
+- Retain redacted durable-completion detector limitation and recovery diagnostics in each Turn's event history.
+
+### Fixed
+
+- Treat Store writer-lock timeouts as transient monitor deferrals with bounded backoff while preserving the hard fence for a genuinely superseded Session binding generation.
+- Complete accepted Codex turns from their exact bound rollout and native turn UUID beyond the legacy recent-turn window, while preserving the existing exactly-once completion claim across recovery.
+
 ## 0.10.2 - 2026-08-07
 
 ### Fixed

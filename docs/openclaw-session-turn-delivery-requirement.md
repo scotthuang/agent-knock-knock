@@ -8,7 +8,7 @@ The current flow is:
 
 1. OpenClaw sends a request to an authoritative AKK `session_id` through the plugin tool.
 2. AKK creates a new `turn_id` and sends the user-facing request to the verified Codex or Claude Code tmux pane bound to that session.
-3. AKK monitors the exact terminal, native session evidence, AKK session, Turn, process, and message.
+3. AKK monitors the exact terminal, native session evidence, AKK session, Turn, process, and message. The running OpenClaw service independently replaces an unexpectedly exited eligible monitor without waiting for `list` or `status`.
 4. When the adapter has reliable evidence, AKK records a canonical approval, completion, cancellation, stall, or error message.
 5. AKK calls the plugin Gateway method `agent-knock-knock.callback` and receives a validated delivery plan.
 6. AKK completes delivery into the originating OpenClaw session.
@@ -18,6 +18,13 @@ The identity chain is terminal → native coding-agent session → AKK `session_
 Native new/clear and resume controls operate between the terminal and Session layers. They require the exact `terminal_id` and a fresh compare-and-swap binding token; resume also requires one complete, verified historical native-thread UUID and that candidate row's opaque snapshot token. A successful transition creates or activates an AKK Session, advances the terminal binding generation, and creates no Turn. The next ordinary send creates the first Turn in that selected context.
 
 The coding agent does not invoke a callback command. Terminal monitoring and callback delivery belong to AKK.
+
+For an accepted Codex dispatch, durable completion prefers the exact rollout,
+byte anchor, process incarnation, and native turn UUID already persisted on the
+Turn. An exact identity or integrity failure is retained as a redacted detector
+diagnostic and never falls through to a same-workspace rollout guess. Monitor
+replacement reuses the immutable completion claim so recovery prepares at most
+one `done` callback/outbox entry.
 
 ## Delivery Invariants
 

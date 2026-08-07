@@ -100,6 +100,22 @@ export class StoreCompatibilityError extends Error {
   }
 }
 
+export class StoreLockTimeoutError extends Error {
+  readonly code = "AKK_STORE_LOCK_TIMEOUT";
+  readonly lockPath: string;
+  readonly lockKind: "writer" | "conversation";
+
+  constructor(lockPath: string) {
+    const lockKind = path.basename(lockPath) === STORE_WRITER_LOCK_FILE
+      ? "writer"
+      : "conversation";
+    super(`timed out waiting for ${lockKind} store lock: ${lockPath}`);
+    this.name = "StoreLockTimeoutError";
+    this.lockPath = lockPath;
+    this.lockKind = lockKind;
+  }
+}
+
 export function defaultStoreDir(_workspace = process.cwd()): string {
   return path.join(os.homedir(), ".agent-knock-knock", "store");
 }
@@ -1557,7 +1573,7 @@ function acquireConversationLock(lockPath: string, token: string, deadline: numb
       continue;
     }
     if (Date.now() >= deadline) {
-      throw new Error(`timed out waiting for conversation store lock: ${lockPath}`);
+      throw new StoreLockTimeoutError(lockPath);
     }
     sleepSync(STORE_LOCK_RETRY_MS);
   }

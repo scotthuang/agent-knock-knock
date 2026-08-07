@@ -54,8 +54,8 @@ test("OpenClaw contract removes the top-level workspace and keeps rule-scoped ap
   );
   assert.doesNotMatch(pluginSource, /structured one-time Hook|pending structured permission/u);
   assert.doesNotMatch(pluginSource, /install-claude-hooks/u);
-  assert.match(pluginSource, /api\.registerService\?\.\(\{[\s\S]*?agent-knock-knock-monitor-reconciliation/u);
-  assert.match(pluginSource, /const args = \["reconcile-monitors"\][\s\S]*?catch \(error\)[\s\S]*?logger\.warn/u);
+  assert.match(pluginSource, /createMonitorReconciliationService[\s\S]*?agent-knock-knock-monitor-reconciliation/u);
+  assert.match(pluginSource, /const args = \["reconcile-monitors", "--reason", reason\][\s\S]*?--terminal-monitors-only[\s\S]*?catch \(error\)[\s\S]*?logger\.warn/u);
   assert.match(fs.readFileSync(skillSource, "utf8"), /agent_knock_knock_renew/u);
   assert.match(
     fs.readFileSync(skillSource, "utf8"),

@@ -31,6 +31,7 @@ import {
 } from "./claude-local-transcript-provider.js";
 import {
   captureCodexRolloutAcceptanceAnchor,
+  detectCodexBoundRolloutCompletion,
   detectCodexRolloutAcceptance,
   terminalSubmissionReplayReceipt,
   type CodexRolloutAcceptanceAnchor,
@@ -80,6 +81,7 @@ import {
   pathsForConversation,
   pathsForConversationDir,
   saveState,
+  StoreLockTimeoutError,
   statePathForConversationId,
   withStoreWriterLease,
   withStoreWriterLeaseAsync
@@ -278,6 +280,15 @@ const STORE_MUTATION_COMMANDS = new Set([
   "clear-thread",
   "resume-thread"
 ]);
+
+class TurnBindingSupersededError extends Error {
+  readonly code = "AKK_TURN_BINDING_SUPERSEDED";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "TurnBindingSupersededError";
+  }
+}
 
 class InlineCodexSessionAdapter implements CodexLocalSessionAdapter {
   private readonly threads: CodexThreadRow[];
@@ -960,6 +971,16 @@ function createRuntimeTerminalAgentRegistry(options) {
           if (!isRecord(conversation)) {
             return undefined;
           }
+          const exactCompletion = detectExactBoundCodexCompletion({
+            conversation,
+            nativeTakeover,
+            request,
+            runtime,
+            options
+          });
+          if (exactCompletion.handled) {
+            return exactCompletion.completion;
+          }
           const contextMatches = await loadCodexTerminalContexts({
             nativeTakeover,
             options
@@ -1019,6 +1040,123 @@ function createRuntimeTerminalAgentRegistry(options) {
       })
     ]
   });
+}
+
+function detectExactBoundCodexCompletion({
+  conversation,
+  nativeTakeover,
+  request,
+  runtime,
+  options
+}: {
+  conversation: Record<string, any>;
+  nativeTakeover?: Record<string, any>;
+  request: TerminalDurableCompletionRequest;
+  runtime?: Record<string, any>;
+  options: Record<string, any>;
+}): { handled: boolean; completion?: TerminalCompletionEvidence } {
+  const submission = terminalBridgeSubmission(conversation);
+  const acceptanceEvidence = isRecord(submission?.acceptance_evidence)
+    ? submission.acceptance_evidence
+    : undefined;
+  const anchor = isRecord(nativeTakeover?.codex_rollout_acceptance_anchor)
+    ? nativeTakeover.codex_rollout_acceptance_anchor
+    : undefined;
+  if (submission?.status !== "agent_accepted") {
+    return { handled: false };
+  }
+  const exactRequired = requiresExactBoundCodexCompletion(
+    conversation,
+    options
+  );
+  if (!exactRequired) {
+    return { handled: false };
+  }
+  if (acceptanceEvidence?.source !== "codex_rollout") {
+    throw new Error(
+      "[codex_exact_bound_rollout:invalid_acceptance_evidence] " +
+      "the accepted modern Codex Turn has no exact rollout acceptance evidence"
+    );
+  }
+  if (!anchor) {
+    throw new Error(
+      "[codex_exact_bound_rollout:invalid_anchor] " +
+      "the accepted modern Codex Turn has no exact rollout byte anchor"
+    );
+  }
+
+  const nativeRollout = isRecord(runtime?.nativeRollout)
+    ? runtime.nativeRollout
+    : undefined;
+  const result = detectCodexBoundRolloutCompletion({
+    anchor: anchor as unknown as CodexRolloutAcceptanceAnchor,
+    acceptanceEvidence:
+      acceptanceEvidence as unknown as TerminalSubmissionAcceptanceEvidence,
+    currentIdentity: {
+      sessionId:
+        stringValue(runtime?.nativeSessionId) ??
+        stringValue(runtime?.sessionId) ??
+        "",
+      processUuid: stringValue(runtime?.nativeProcessUuid),
+      processBirth: stringValue(runtime?.nativeProcessBirth),
+      ...(nativeRollout
+        ? {
+            rollout: {
+              fd: String(nativeRollout.fd ?? ""),
+              device: String(nativeRollout.device ?? ""),
+              inode: String(nativeRollout.inode ?? ""),
+              path: String(nativeRollout.path ?? "")
+            }
+          }
+        : {})
+    },
+    requestHash:
+      stringValue(request.requestHash) ??
+      stringValue(nativeTakeover?.terminal_bridge_request_hash) ??
+      ""
+  });
+  if (result.status === "failure") {
+    throw new Error(
+      `[codex_exact_bound_rollout:${result.diagnostics.code}] ${
+        result.diagnostics.detail ?? "the exact bound rollout is not safely inspectable"
+      }`
+    );
+  }
+  if (result.status === "pending") {
+    return { handled: true };
+  }
+  return {
+    handled: true,
+    completion: {
+      ...result.completion,
+      metadata: {
+        ...result.completion.metadata,
+        context_match: "exact_bound_rollout",
+        detector_code: result.diagnostics.code
+      }
+    }
+  };
+}
+
+function requiresExactBoundCodexCompletion(
+  conversation: Record<string, any>,
+  options: Record<string, any>
+): boolean {
+  const nativeTakeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const submission = terminalBridgeSubmission(conversation);
+  if (submission?.status !== "agent_accepted") {
+    return false;
+  }
+  const hasExactArtifacts =
+    isRecord(nativeTakeover?.codex_rollout_acceptance_anchor) &&
+    isRecord(submission.acceptance_evidence) &&
+    submission.acceptance_evidence.source === "codex_rollout";
+  const modernProductionTurn =
+    Number(nativeTakeover?.terminal_agent_identity_protocol) === 1 &&
+    !allowsSyntheticTerminalAcceptance(options);
+  return hasExactArtifacts || modernProductionTurn;
 }
 
 function createTerminalAgentBridge(
@@ -2024,6 +2162,7 @@ function withTerminalBridgeState({
       claude_home: claudeHome,
       terminal_bridge_completion_claim: undefined,
       terminal_bridge_approval_dispatch: undefined,
+      terminal_bridge_detector_diagnostic: undefined,
       terminal_bridge_monitor_lock_version: TERMINAL_BRIDGE_MONITOR_LOCK_VERSION,
       terminal_bridge_monitor_started_at: startedAt,
       terminal_bridge_last_activity_at: startedAt,
@@ -12853,7 +12992,7 @@ function assertTurnBindingCurrent(
     })
   );
   if (!exactModernBinding && !compatibleMigratedBinding) {
-    throw new Error(
+    throw new TurnBindingSupersededError(
       `cannot ${operation} Turn ${turnIdForConversation(conversation)}: its ` +
       `Session binding generation is no longer current`
     );
@@ -13659,9 +13798,12 @@ async function runRenew(options) {
 }
 
 async function runReconcileMonitors(options) {
+  const reason = stringValue(options.reason) ?? "startup_reconciliation";
   printJson(await reconcileMonitors(options, {
-    includeCallbackRecovery: true,
-    reason: "startup_reconciliation",
+    includeCallbackRecovery:
+      options.terminalMonitorsOnly !== true &&
+      reason !== "monitor_supervision",
+    reason,
     conversationId: undefined
   }));
 }
@@ -13773,6 +13915,10 @@ async function reconcileMonitors(
         continue;
       }
 
+      const previousMonitorPid = latestTerminalBridgeMonitorLaunchPid(logPath);
+      const unexpectedMonitorExit = previousMonitorPid !== undefined &&
+        !isProcessAlive(previousMonitorPid);
+
       const activeOwner = activeTerminalBridgeMonitorOwner(
         statePath,
         initialEligibility.terminalMessageId
@@ -13866,13 +14012,33 @@ async function reconcileMonitors(
       }
 
       const launchedAt = new Date().toISOString();
+      const launchReason = unexpectedMonitorExit
+        ? "unexpected_exit_recovery"
+        : reason;
+      if (unexpectedMonitorExit) {
+        appendEvent(logPath, {
+          ts: launchedAt,
+          conversation_id: prepared.conversation.conversation_id,
+          event: "terminal_bridge_monitor_exit_observed",
+          previous_monitor_pid: previousMonitorPid,
+          terminal_control: prepared.terminalControl,
+          reason: "monitor_owner_process_missing",
+          observed_by: reason
+        });
+        runtimeLog("warn", "terminal_bridge_monitor_exit_observed", {
+          conversation_id: prepared.conversation.conversation_id,
+          previous_monitor_pid: previousMonitorPid,
+          terminal_target: prepared.terminalControl.target,
+          observed_by: reason
+        });
+      }
       appendEvent(logPath, {
         ts: launchedAt,
         conversation_id: prepared.conversation.conversation_id,
         event: "terminal_bridge_monitor_launch",
         pid: monitor.pid ?? null,
         terminal_control: prepared.terminalControl,
-        reason,
+        reason: launchReason,
         agent_timeout_minutes: prepared.inactivityTimeoutMinutes,
         agent_hard_timeout_minutes: prepared.hardTimeoutMinutes
       });
@@ -13885,10 +14051,22 @@ async function reconcileMonitors(
       items.push({
         conversation_id: prepared.conversation.conversation_id,
         status: "launched",
-        reason,
-        monitor_pid: monitor.pid ?? null
+        reason: launchReason,
+        monitor_pid: monitor.pid ?? null,
+        ...(unexpectedMonitorExit
+          ? { previous_monitor_pid: previousMonitorPid }
+          : {})
       });
     } catch (error) {
+      if (error instanceof TurnBindingSupersededError) {
+        skipped += 1;
+        items.push({
+          conversation_id: listedConversation.conversation_id,
+          status: "skipped",
+          reason: "session_binding_superseded"
+        });
+        continue;
+      }
       errors += 1;
       items.push({
         conversation_id: listedConversation.conversation_id,
@@ -14160,10 +14338,15 @@ function latestTerminalBridgeMonitorLaunchPid(logPath: string): number | undefin
   } catch {
     return undefined;
   }
-  const launch = [...events].reverse().find((event) =>
-    event.event === "terminal_bridge_monitor_launch"
+  const ownership = [...events].reverse().find((event) =>
+    event.event === "terminal_bridge_monitor_launch" ||
+    event.event === "terminal_bridge_monitor_started"
   );
-  const pid = Number(launch?.pid);
+  const pid = Number(
+    ownership?.event === "terminal_bridge_monitor_started"
+      ? ownership.monitor_pid
+      : ownership?.pid
+  );
   return Number.isSafeInteger(pid) && pid > 1 ? pid : undefined;
 }
 
@@ -15021,6 +15204,7 @@ function runTerminalBridgeMonitorHandoff(options) {
 
 async function runTerminalBridgeMonitor(options) {
   const statePath = expandHome(required(options.state, "--state is required"));
+  const logPath = expandHome(options.log ?? logPathForStatePath(statePath));
   const conversation = loadState(statePath);
   const nativeTakeover = isRecord(conversation.native_session_takeover)
     ? conversation.native_session_takeover
@@ -15044,14 +15228,95 @@ async function runTerminalBridgeMonitor(options) {
     return;
   }
 
+  const lifecycle = { startedRecorded: false };
+  let storeDeferredAttempts = 0;
+  let storeFirstDeferredAt: string | undefined;
   try {
-    await runTerminalBridgeMonitorWithLock(options);
+    while (true) {
+      try {
+        if (storeDeferredAttempts > 0) {
+          const resumedAt = new Date().toISOString();
+          const resumedConversation = loadState(statePath);
+          const resumedTakeover = isRecord(
+            resumedConversation.native_session_takeover
+          )
+            ? resumedConversation.native_session_takeover
+            : undefined;
+          if (
+            stringValue(resumedTakeover?.terminal_bridge_message_id) !==
+            terminalMessageId
+          ) {
+            runtimeLog("info", "terminal_bridge_monitor_finished", {
+              conversation_id: resumedConversation.conversation_id,
+              terminal_bridge_message_id: terminalMessageId,
+              reason: "terminal_bridge_generation_replaced_during_store_deferral"
+            });
+            printJson({
+              conversation: resumedConversation,
+              monitored: true,
+              terminal_bridge: true,
+              completed: false,
+              reason: "terminal_bridge_generation_replaced"
+            });
+            return;
+          }
+          appendEvent(logPath, {
+            ts: resumedAt,
+            conversation_id: resumedConversation.conversation_id,
+            event: "terminal_bridge_monitor_store_operation_deferred",
+            terminal_bridge_message_id: terminalMessageId,
+            error_code: "AKK_STORE_LOCK_TIMEOUT",
+            first_deferred_at: storeFirstDeferredAt,
+            resumed_at: resumedAt,
+            attempts: storeDeferredAttempts,
+            outcome: "resumed"
+          });
+          runtimeLog("info", "terminal_bridge_monitor_store_operation_resumed", {
+            conversation_id: resumedConversation.conversation_id,
+            terminal_bridge_message_id: terminalMessageId,
+            attempts: storeDeferredAttempts,
+            first_deferred_at: storeFirstDeferredAt
+          });
+          storeDeferredAttempts = 0;
+          storeFirstDeferredAt = undefined;
+        }
+        await runTerminalBridgeMonitorWithLock(
+          options,
+          lifecycle,
+          terminalMessageId
+        );
+        return;
+      } catch (error) {
+        if (!(error instanceof StoreLockTimeoutError)) {
+          throw error;
+        }
+        storeDeferredAttempts += 1;
+        storeFirstDeferredAt ??= new Date().toISOString();
+        const retryInMs = Math.min(
+          5_000,
+          250 * (2 ** Math.min(5, storeDeferredAttempts - 1))
+        );
+        runtimeLog("warn", "terminal_bridge_monitor_store_operation_deferred", {
+          conversation_id: conversation.conversation_id,
+          terminal_bridge_message_id: terminalMessageId,
+          error_code: error.code,
+          lock_kind: error.lockKind,
+          attempt: storeDeferredAttempts,
+          retry_in_ms: retryInMs
+        });
+        sleepSync(retryInMs);
+      }
+    }
   } finally {
     monitorLock.release();
   }
 }
 
-async function runTerminalBridgeMonitorWithLock(options) {
+async function runTerminalBridgeMonitorWithLock(
+  options,
+  lifecycle: { startedRecorded: boolean },
+  expectedTerminalMessageId: string
+) {
   const statePath = expandHome(required(options.state, "--state is required"));
   const logPath = expandHome(options.log ?? logPathForStatePath(statePath));
   const pollIntervalMs = Math.max(50, Number(options.pollIntervalMs ?? DEFAULT_MONITOR_POLL_INTERVAL_MS));
@@ -15065,6 +15330,24 @@ async function runTerminalBridgeMonitorWithLock(options) {
   const initialNativeTakeover = isRecord(conversation.native_session_takeover)
     ? conversation.native_session_takeover
     : undefined;
+  if (
+    stringValue(initialNativeTakeover?.terminal_bridge_message_id) !==
+    expectedTerminalMessageId
+  ) {
+    runtimeLog("info", "terminal_bridge_monitor_finished", {
+      conversation_id: conversation.conversation_id,
+      terminal_bridge_message_id: expectedTerminalMessageId,
+      reason: "terminal_bridge_generation_replaced_before_monitor_restart"
+    });
+    printJson({
+      conversation,
+      monitored: true,
+      terminal_bridge: true,
+      completed: false,
+      reason: "terminal_bridge_generation_replaced"
+    });
+    return;
+  }
   const timeoutMinutes = Number(
     options.agentTimeoutMinutes ??
       initialNativeTakeover?.["terminal_bridge_inactivity_timeout_minutes"] ??
@@ -15077,7 +15360,7 @@ async function runTerminalBridgeMonitorWithLock(options) {
     "--agent-hard-timeout-minutes"
   );
   const monitorStartedAtMs = Date.now();
-  const monitorMessageId = stringValue(initialNativeTakeover?.["terminal_bridge_message_id"]);
+  const monitorMessageId = expectedTerminalMessageId;
   const taskStartedAtMs = validTimestampMs(initialNativeTakeover?.["terminal_bridge_started_at"]) ?? monitorStartedAtMs;
   let lastActivityAtMs = validTimestampMs(initialNativeTakeover?.["terminal_bridge_last_activity_at"]) ?? taskStartedAtMs;
   let lastPersistedActivityAtMs = lastActivityAtMs;
@@ -15088,34 +15371,52 @@ async function runTerminalBridgeMonitorWithLock(options) {
   let previousScreenFingerprint: string | undefined = preSendScreenFingerprint;
   let previousDurableFingerprint: string | undefined;
   let persistedActivityReason = stringValue(initialNativeTakeover?.["terminal_bridge_last_activity_reason"]);
+  const initialDetectorDiagnostic = isRecord(
+    initialNativeTakeover?.["terminal_bridge_detector_diagnostic"]
+  )
+    ? initialNativeTakeover.terminal_bridge_detector_diagnostic
+    : undefined;
+  let persistedDetectorDiagnosticFingerprint = stringValue(
+    initialDetectorDiagnostic?.fingerprint
+  );
+  let persistedDetectorDiagnosticStatus = stringValue(
+    initialDetectorDiagnostic?.status
+  );
   const executor = executorForConversation(conversation);
   const terminalBridge = createTerminalAgentBridge(options);
-  appendEvent(logPath, {
-    ts: new Date().toISOString(),
-    conversation_id: conversation.conversation_id,
-    event: "terminal_bridge_monitor_started",
-    executor,
-    agent_timeout_minutes: timeoutMinutes,
-    agent_hard_timeout_minutes: hardTimeoutMinutes,
-    poll_interval_ms: pollIntervalMs,
-    task_started_at: new Date(taskStartedAtMs).toISOString(),
-    last_activity_at: new Date(lastActivityAtMs).toISOString(),
-    inactivity_deadline_at: timeoutMinutes > 0
-      ? new Date(lastActivityAtMs + timeoutMinutes * 60 * 1000).toISOString()
-      : null,
-    hard_deadline_at: hardTimeoutMinutes > 0
-      ? new Date(taskStartedAtMs + hardTimeoutMinutes * 60 * 1000).toISOString()
-      : null
-  });
-  runtimeLog("info", "terminal_bridge_monitor_started", {
-    conversation_id: conversation.conversation_id,
-    agent: executor.kind,
-    executor_session: executor.session,
-    agent_timeout_minutes: timeoutMinutes,
-    agent_hard_timeout_minutes: hardTimeoutMinutes
-  });
+  if (!lifecycle.startedRecorded) {
+    appendEvent(logPath, {
+      ts: new Date().toISOString(),
+      conversation_id: conversation.conversation_id,
+      event: "terminal_bridge_monitor_started",
+      monitor_pid: process.pid,
+      executor,
+      agent_timeout_minutes: timeoutMinutes,
+      agent_hard_timeout_minutes: hardTimeoutMinutes,
+      poll_interval_ms: pollIntervalMs,
+      task_started_at: new Date(taskStartedAtMs).toISOString(),
+      last_activity_at: new Date(lastActivityAtMs).toISOString(),
+      inactivity_deadline_at: timeoutMinutes > 0
+        ? new Date(lastActivityAtMs + timeoutMinutes * 60 * 1000).toISOString()
+        : null,
+      hard_deadline_at: hardTimeoutMinutes > 0
+        ? new Date(taskStartedAtMs + hardTimeoutMinutes * 60 * 1000).toISOString()
+        : null
+    });
+    runtimeLog("info", "terminal_bridge_monitor_started", {
+      conversation_id: conversation.conversation_id,
+      monitor_pid: process.pid,
+      agent: executor.kind,
+      executor_session: executor.session,
+      agent_timeout_minutes: timeoutMinutes,
+      agent_hard_timeout_minutes: hardTimeoutMinutes
+    });
+    lifecycle.startedRecorded = true;
+  }
 
   let idleCompletionFingerprint: string | undefined;
+  let bindingCheckDeferredAttempts = 0;
+  let bindingCheckFirstDeferredAt: string | undefined;
   while (true) {
     conversation = loadState(statePath);
     if (!isWaitingForAgent(conversation.status)) {
@@ -15512,11 +15813,57 @@ async function runTerminalBridgeMonitorWithLock(options) {
       assertTurnBindingCurrent(conversation, "monitor");
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
+      if (error instanceof StoreLockTimeoutError) {
+        bindingCheckDeferredAttempts += 1;
+        bindingCheckFirstDeferredAt ??= new Date().toISOString();
+        const backoffMs = Math.min(
+          5_000,
+          250 * (2 ** Math.min(5, bindingCheckDeferredAttempts - 1))
+        );
+        runtimeLog("warn", "terminal_bridge_monitor_binding_check_deferred", {
+          conversation_id: conversation.conversation_id,
+          terminal_target: terminalControl.target,
+          error_code: error.code,
+          lock_kind: error.lockKind,
+          attempt: bindingCheckDeferredAttempts,
+          retry_in_ms: backoffMs
+        });
+        sleepSync(backoffMs);
+        continue;
+      }
+      if (!(error instanceof TurnBindingSupersededError)) {
+        runtimeLog("error", "terminal_bridge_monitor_binding_check_failed", {
+          conversation_id: conversation.conversation_id,
+          terminal_target: terminalControl.target,
+          error_code: isRecord(error) ? stringValue(error.code) : undefined,
+          reason
+        });
+        throw error;
+      }
       runtimeLog("warn", "terminal_bridge_monitor_binding_superseded", {
         conversation_id: conversation.conversation_id,
         terminal_target: terminalControl.target,
         reason
       });
+      try {
+        appendEvent(logPath, {
+          ts: new Date().toISOString(),
+          conversation_id: conversation.conversation_id,
+          event: "terminal_bridge_monitor_binding_superseded",
+          terminal_control: terminalControl,
+          error_code: error.code,
+          reason
+        });
+      } catch (diagnosticError) {
+        runtimeLog("warn", "terminal_bridge_monitor_diagnostic_write_failed", {
+          conversation_id: conversation.conversation_id,
+          terminal_target: terminalControl.target,
+          diagnostic_event: "terminal_bridge_monitor_binding_superseded",
+          reason: diagnosticError instanceof Error
+            ? diagnosticError.message
+            : String(diagnosticError)
+        });
+      }
       printJson({
         conversation,
         monitored: true,
@@ -15526,6 +15873,43 @@ async function runTerminalBridgeMonitorWithLock(options) {
         detail: reason
       });
       return;
+    }
+    if (bindingCheckDeferredAttempts > 0) {
+      const resumedAt = new Date().toISOString();
+      try {
+        appendEvent(logPath, {
+          ts: resumedAt,
+          conversation_id: conversation.conversation_id,
+          event: "terminal_bridge_monitor_binding_check_deferred",
+          terminal_control: terminalControl,
+          error_code: "AKK_STORE_LOCK_TIMEOUT",
+          lock_kind: "writer",
+          first_deferred_at: bindingCheckFirstDeferredAt,
+          resumed_at: resumedAt,
+          attempts: bindingCheckDeferredAttempts,
+          outcome: "resumed"
+        });
+        runtimeLog("info", "terminal_bridge_monitor_binding_check_resumed", {
+          conversation_id: conversation.conversation_id,
+          terminal_target: terminalControl.target,
+          attempts: bindingCheckDeferredAttempts,
+          first_deferred_at: bindingCheckFirstDeferredAt
+        });
+        bindingCheckDeferredAttempts = 0;
+        bindingCheckFirstDeferredAt = undefined;
+      } catch (error) {
+        if (!(error instanceof StoreLockTimeoutError)) {
+          throw error;
+        }
+        runtimeLog("warn", "terminal_bridge_monitor_diagnostic_write_deferred", {
+          conversation_id: conversation.conversation_id,
+          terminal_target: terminalControl.target,
+          error_code: error.code,
+          lock_kind: error.lockKind
+        });
+        sleepSync(Math.max(250, pollIntervalMs));
+        continue;
+      }
     }
     const screenChangedSinceSend = preSendScreenFingerprint !== undefined &&
       previousScreenFingerprint !== undefined &&
@@ -15658,6 +16042,52 @@ async function runTerminalBridgeMonitorWithLock(options) {
       releaseTerminalPollLock();
     }
     const terminalStatus = poll.status;
+    const detectorLimitation = stringValue(
+      terminalStatus.capability_limitation
+    );
+    const detectorDiagnosticFingerprint = detectorLimitation
+      ? terminalBridgeActivityFingerprint(detectorLimitation)
+      : undefined;
+    const detectorDiagnosticChanged = detectorLimitation
+      ? detectorDiagnosticFingerprint !== persistedDetectorDiagnosticFingerprint ||
+        persistedDetectorDiagnosticStatus !== "limited"
+      : persistedDetectorDiagnosticStatus === "limited";
+    if (detectorDiagnosticChanged) {
+      try {
+        const diagnostic = persistTerminalBridgeDetectorDiagnostic({
+          statePath,
+          logPath,
+          expectedConversationId: conversation.conversation_id,
+          expectedMessageId: currentMessageId,
+          limitation: detectorLimitation,
+          fingerprint: detectorDiagnosticFingerprint
+        });
+        if (diagnostic.diagnostic) {
+          conversation = diagnostic.conversation;
+          nativeTakeover = isRecord(conversation.native_session_takeover)
+            ? conversation.native_session_takeover
+            : undefined;
+          persistedDetectorDiagnosticFingerprint = stringValue(
+            diagnostic.diagnostic?.fingerprint
+          );
+          persistedDetectorDiagnosticStatus = stringValue(
+            diagnostic.diagnostic?.status
+          );
+        }
+      } catch (error) {
+        if (!(error instanceof StoreLockTimeoutError)) {
+          throw error;
+        }
+        runtimeLog("warn", "terminal_bridge_detector_diagnostic_deferred", {
+          conversation_id: conversation.conversation_id,
+          terminal_target: terminalControl.target,
+          error_code: error.code,
+          lock_kind: error.lockKind
+        });
+        sleepSync(Math.max(250, pollIntervalMs));
+        continue;
+      }
+    }
     const approval = terminalStatus.approval_state;
     const currentScreenFingerprint = stringValue(terminalStatus?.screen?.digest) ??
       terminalBridgeScreenFingerprint(terminalStatus?.screen?.excerpt);
@@ -19345,6 +19775,123 @@ function persistTerminalBridgeActivity({
       });
     }
     return nextConversation;
+  } finally {
+    releaseLock();
+  }
+}
+
+function persistTerminalBridgeDetectorDiagnostic({
+  statePath,
+  logPath,
+  expectedConversationId,
+  expectedMessageId,
+  limitation,
+  fingerprint
+}: {
+  statePath: string;
+  logPath: string;
+  expectedConversationId: string;
+  expectedMessageId?: string;
+  limitation?: string;
+  fingerprint?: string;
+}) {
+  const storeDir = pathsForConversationDir(path.dirname(statePath)).storeDir;
+  const releaseLock = acquireFileLock(`${statePath}.lock`);
+  try {
+    return withStoreWriterLease(storeDir, () => {
+    const conversation = loadState(statePath);
+    const nativeTakeover = isRecord(conversation.native_session_takeover)
+      ? conversation.native_session_takeover
+      : {};
+    if (
+      conversation.conversation_id !== expectedConversationId ||
+      stringValue(nativeTakeover.terminal_bridge_message_id) !==
+        expectedMessageId
+    ) {
+      return {
+        persisted: false as const,
+        conversation,
+        reason: "terminal_bridge_task_replaced"
+      };
+    }
+    const existing = isRecord(nativeTakeover.terminal_bridge_detector_diagnostic)
+      ? nativeTakeover.terminal_bridge_detector_diagnostic
+      : undefined;
+    const now = new Date().toISOString();
+    const nextDiagnostic = limitation && fingerprint
+      ? {
+          status: "limited",
+          source: "terminal_completion_detector",
+          fingerprint,
+          detail: truncateText(redactString(limitation), 1000),
+          observed_at: now
+        }
+      : existing && stringValue(existing.status) === "limited"
+        ? {
+            ...existing,
+            status: "recovered",
+            recovered_at: now
+          }
+        : undefined;
+    if (!nextDiagnostic) {
+      return {
+        persisted: false as const,
+        conversation,
+        diagnostic: existing,
+        reason: "detector_diagnostic_unchanged"
+      };
+    }
+    if (
+      stringValue(existing?.status) === stringValue(nextDiagnostic.status) &&
+      stringValue(existing?.fingerprint) ===
+        stringValue(nextDiagnostic.fingerprint)
+    ) {
+      return {
+        persisted: false as const,
+        conversation,
+        diagnostic: existing,
+        reason: "detector_diagnostic_unchanged"
+      };
+    }
+    const nextConversation = {
+      ...conversation,
+      native_session_takeover: {
+        ...nativeTakeover,
+        terminal_bridge_detector_diagnostic: nextDiagnostic
+      },
+      updated_at: now
+    };
+    saveState(statePath, nextConversation);
+    const event = nextDiagnostic.status === "limited"
+      ? "terminal_bridge_completion_detector_limited"
+      : "terminal_bridge_completion_detector_recovered";
+    appendEvent(logPath, {
+      ts: now,
+      conversation_id: conversation.conversation_id,
+      event,
+      terminal_bridge_message_id: expectedMessageId,
+      detector_source: nextDiagnostic.source,
+      diagnostic_fingerprint: nextDiagnostic.fingerprint,
+      detail: nextDiagnostic.status === "limited"
+        ? nextDiagnostic.detail
+        : undefined
+    });
+    runtimeLog(
+      nextDiagnostic.status === "limited" ? "warn" : "info",
+      event,
+      {
+        conversation_id: conversation.conversation_id,
+        terminal_bridge_message_id: expectedMessageId,
+        detector_source: nextDiagnostic.source,
+        diagnostic_fingerprint: nextDiagnostic.fingerprint
+      }
+    );
+    return {
+      persisted: true as const,
+      conversation: nextConversation,
+      diagnostic: nextDiagnostic
+    };
+    });
   } finally {
     releaseLock();
   }
