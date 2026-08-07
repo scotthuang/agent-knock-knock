@@ -247,7 +247,10 @@ test("OpenClaw native-thread tools keep explicit CAS while slash commands refres
         register(api: Record<string, any>): void;
       }
     ).register({
-      pluginConfig: { storeDir: "/private/akk-store" },
+      pluginConfig: {
+        storeDir: "/private/akk-store",
+        codexHome: "/private/custom-codex"
+      },
       logger: { info() {}, warn() {} },
       registerGatewayMethod() {},
       registerService() {},
@@ -357,7 +360,9 @@ test("OpenClaw native-thread tools keep explicit CAS while slash commands refres
       "--terminal",
       terminalId,
       "--store-dir",
-      "/private/akk-store"
+      "/private/akk-store",
+      "--codex-home",
+      "/private/custom-codex"
     ]);
     assert.deepEqual(calls[1]?.slice(0, 7), [
       "new-thread",
@@ -381,6 +386,12 @@ test("OpenClaw native-thread tools keep explicit CAS while slash commands refres
       "--store-dir",
       "/private/akk-store"
     ]);
+    for (const args of calls) {
+      assert.equal(
+        args[args.indexOf("--codex-home") + 1],
+        "/private/custom-codex"
+      );
+    }
     const slashMutationCalls = calls.slice(5).filter((args) =>
       args[0] === "new-thread" || args[0] === "resume-thread"
     );

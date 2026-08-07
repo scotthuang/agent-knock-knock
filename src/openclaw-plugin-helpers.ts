@@ -590,6 +590,7 @@ export function buildAkkCommandCliArgs(
   }
 
   const storeDir = resolvePluginStoreDir(config);
+  const codexHome = nonEmptyString(config.codexHome);
   const idleTimeoutMinutes = finiteNumberString(config.idleTimeoutMinutes);
 
   switch (command.action) {
@@ -607,6 +608,7 @@ export function buildAkkCommandCliArgs(
           command.terminalId
         ],
         ["--store-dir", storeDir],
+        ["--codex-home", codexHome],
         ["--selection-scope", nonEmptyString(context.selectionScope)]
       );
     case "new-thread":
@@ -618,7 +620,8 @@ export function buildAkkCommandCliArgs(
           "--expected-binding-token",
           requiredExpectedBindingToken(context.expectedBindingToken)
         ],
-        ["--store-dir", storeDir]
+        ["--store-dir", storeDir],
+        ["--codex-home", codexHome]
       );
     case "resume-thread":
       if (!command.selection || command.selection.kind === "previous") {
@@ -629,6 +632,7 @@ export function buildAkkCommandCliArgs(
             command.terminalId
           ],
           ["--store-dir", storeDir],
+          ["--codex-home", codexHome],
           ["--selection-scope", nonEmptyString(context.selectionScope)]
         );
       }
@@ -645,7 +649,8 @@ export function buildAkkCommandCliArgs(
             "--selection-scope",
             requiredSelectionScope(context.selectionScope)
           ],
-          ["--store-dir", storeDir]
+          ["--store-dir", storeDir],
+          ["--codex-home", codexHome]
         );
       }
       if (command.selection.kind === "short-id") {
@@ -661,7 +666,8 @@ export function buildAkkCommandCliArgs(
             "--selection-scope",
             requiredSelectionScope(context.selectionScope)
           ],
-          ["--store-dir", storeDir]
+          ["--store-dir", storeDir],
+          ["--codex-home", codexHome]
         );
       }
       if (command.selection.kind === "snapshot-handle") {
@@ -675,7 +681,8 @@ export function buildAkkCommandCliArgs(
             "--selection-scope",
             requiredSelectionScope(context.selectionScope)
           ],
-          ["--store-dir", storeDir]
+          ["--store-dir", storeDir],
+          ["--codex-home", codexHome]
         );
       }
       return withOptionalArgs(
@@ -690,7 +697,8 @@ export function buildAkkCommandCliArgs(
           "--candidate-token",
           requiredCandidateToken(context.candidateToken)
         ],
-        ["--store-dir", storeDir]
+        ["--store-dir", storeDir],
+        ["--codex-home", codexHome]
       );
     case "status":
       return withOptionalArgs(

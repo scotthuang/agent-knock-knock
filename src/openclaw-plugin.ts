@@ -479,6 +479,7 @@ function createPlugin(
           requiredString(params.terminal_id, "terminal_id")
         ];
         pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
+        pushOptional(args, "--codex-home", stringValue(config.codexHome));
         return args;
       }
     });
@@ -503,6 +504,7 @@ function createPlugin(
           )
         ];
         pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
+        pushOptional(args, "--codex-home", stringValue(config.codexHome));
         return args;
       }
     });
@@ -534,6 +536,7 @@ function createPlugin(
           )
         ];
         pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
+        pushOptional(args, "--codex-home", stringValue(config.codexHome));
         return args;
       }
     });
