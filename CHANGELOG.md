@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.4 - 2026-08-07
+
+### Fixed
+
+- Recognize exact Codex multiline drafts across TUI-painted visual wraps before dispatching Enter once, while preserving authored newlines, indentation, repeated spaces, stable-capture checks, and fail-closed content drift detection.
+
 ## 0.10.3 - 2026-08-07
 
 ### Added

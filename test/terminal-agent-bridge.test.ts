@@ -397,6 +397,144 @@ test("Codex multiline send crosses the paste window and requires a stable exact 
   );
 });
 
+test("Codex multiline send proves an exact draft across visual composer wraps", async () => {
+  const request = [
+    "请核对这次投递，并保持下面内容逐字不变。",
+    "   - 碰撞安全的短 ID 只用于展示；实际 resume 仍用完整 UUID + fresh tokens。",
+    "Second line with  two spaces.",
+    "Markdown hard break  ",
+    "continues on the next logical line.",
+    "",
+    "完成后只回复 ACK。"
+  ].join("\n");
+  class WrappedCodexComposerProvider extends RecordingTerminalProvider {
+    textInjectedAt?: number;
+    enterDispatchedAt?: number;
+    acceptedEnterCount = 0;
+    suppressedEnterCount = 0;
+
+    override async sendText(
+      target: string,
+      text: string,
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      await super.sendText(target, text, options);
+      this.textInjectedAt = performance.now();
+      this.setScreen(target, [
+        "Ready",
+        "› 请核对这次投递，并保持下面内容",
+        "  逐字不变。",
+        "     - 碰撞安全的短 ID 只用于展示；实际 resume 仍用完整",
+        "  UUID + fresh tokens。",
+        "  Second line with  two spaces.",
+        "  Markdown hard break",
+        "  continues on the next logical line.",
+        "  ",
+        "  完成后只回复 ACK。",
+        "gpt-5.6-sol high · /repo"
+      ].join("\n"));
+    }
+
+    override async sendKeys(
+      target: string,
+      keys: readonly string[],
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      if (keys.includes("C-m")) {
+        this.enterDispatchedAt = performance.now();
+        if (
+          this.textInjectedAt !== undefined &&
+          this.enterDispatchedAt - this.textInjectedAt >= 120
+        ) {
+          this.acceptedEnterCount += 1;
+          this.setScreen(target, "working: accepted wrapped request");
+        } else {
+          this.suppressedEnterCount += 1;
+        }
+      }
+      await super.sendKeys(target, keys, options);
+    }
+  }
+
+  const provider = new WrappedCodexComposerProvider([PANE]);
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+    terminalProvider: provider,
+    async verifyIdentity() {}
+  });
+  const stages: string[] = [];
+  const result = await bridge.send(
+    "codex",
+    terminalControl(codexTerminalAgentAdapter),
+    request,
+    {
+      runtime: { pid: 110 },
+      onTransportStage(event) {
+        stages.push(event.stage);
+      }
+    }
+  );
+
+  assert.equal(result.stage, "enter_dispatched");
+  assert.deepEqual(stages, ["text_injected", "enter_dispatched"]);
+  assert.ok(provider.textInjectedAt !== undefined);
+  assert.ok(provider.enterDispatchedAt !== undefined);
+  assert.ok(provider.enterDispatchedAt - provider.textInjectedAt >= 120);
+  assert.equal(provider.acceptedEnterCount, 1);
+  assert.equal(provider.suppressedEnterCount, 0);
+  assert.equal(
+    provider.operations.filter((operation) =>
+      operation.kind === "keys" && operation.keys.includes("C-m")
+    ).length,
+    1
+  );
+});
+
+test("Codex multiline send rejects mutated content across visual composer wraps", async () => {
+  const request = [
+    "请核对这次投递，并保持下面内容逐字不变。",
+    "实际 resume 仍用完整 UUID + fresh tokens。"
+  ].join("\n");
+  class MutatedWrappedComposerProvider extends RecordingTerminalProvider {
+    override async sendText(
+      target: string,
+      text: string,
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      await super.sendText(target, text, options);
+      this.setScreen(target, [
+        "› 请核对这次投递，并保持下面内容",
+        "  逐字不符。",
+        "  实际 resume 仍用完整 UUID + fresh tokens。",
+        "gpt-5.6-sol high · /repo"
+      ].join("\n"));
+    }
+  }
+
+  const provider = new MutatedWrappedComposerProvider([PANE]);
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+    terminalProvider: provider,
+    async verifyIdentity() {}
+  });
+
+  await assert.rejects(
+    () => bridge.send(
+      "codex",
+      terminalControl(codexTerminalAgentAdapter),
+      request,
+      { runtime: { pid: 110 } }
+    ),
+    /did not become exact/u
+  );
+  assert.equal(
+    provider.operations.some((operation) =>
+      operation.kind === "keys" && operation.keys.includes("C-m")
+    ),
+    false
+  );
+});
+
 test("Codex multiline settle starts only after the exact composer materializes", async () => {
   const request = "延迟出现的第一行\nDelayed second line.";
   class DelayedComposerProvider extends RecordingTerminalProvider {
