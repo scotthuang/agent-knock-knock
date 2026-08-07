@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.11.2 - 2026-08-08
+
+### Fixed
+
+- Filter Codex resume candidates by workspace, source, archive state, and provider before applying the SQLite result limit, so older same-workspace threads are not dropped by unrelated global history.
+- Keep the current adapter version separate from each candidate's source agent version, allowing historical Codex threads to remain resumable when their rollout metadata agrees while preserving the complete snapshot, ownership, binding, and identity safety fences.
+
 ## 0.11.1 - 2026-08-07
 
 ### Fixed
