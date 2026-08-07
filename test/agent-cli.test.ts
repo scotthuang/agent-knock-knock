@@ -4653,6 +4653,99 @@ test("CLI reports a multilingual multiline draft left in Codex after one Enter",
   }
 });
 
+test("CLI accepts a visually wrapped Codex multiline composer with exactly one Enter", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-wrapped-composer-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+  const tmuxSession = `akk-wrapped-composer-${process.pid}`;
+  const target = `${tmuxSession}:0.1`;
+  const pid = 43394;
+  const request = [
+    "请核对这次投递，并保持下面内容逐字不变。",
+    "   - 碰撞安全的短 ID 只用于展示；实际 resume 仍用完整 UUID + fresh tokens。",
+    "Second line with  two spaces.",
+    "",
+    "完成后只回复 ACK。"
+  ].join("\n");
+  const wrappedComposer = [
+    "Ready",
+    "› 请核对这次投递，并保持下面内容",
+    "  逐字不变。",
+    "     - 碰撞安全的短 ID 只用于展示；实际 resume 仍用完整",
+    "  UUID + fresh tokens。",
+    "  Second line with  two spaces.",
+    "  ",
+    "  完成后只回复 ACK。",
+    "gpt-5.6-sol high · /repo"
+  ].join("\n");
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "› \n");
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `${tmuxSession}\t0\t1\t${pid}\tnode\t${workspace}\n`
+    );
+    const result = runAgentCli([
+      "send",
+      "--conversation",
+      `terminal:tmux:${target}:${pid}`,
+      "--message",
+      request,
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor",
+      ...codexNativeIdentityArgs({
+        pid,
+        sessionId,
+        processUuid: "codex-wrapped-composer",
+        rolloutPath: path.join(tempDir, "rollout.jsonl")
+      })
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      AKK_TEST_TMUX_COMPOSER_AFTER_PASTE: wrappedComposer
+    });
+
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.delivered, true);
+    assert.equal(parsed.delivery_receipt, "agent_accepted");
+    assert.deepEqual(
+      readJsonLines(parsed.conversation.event_log_path)
+        .map((event) => event.event)
+        .filter((event) => [
+          "terminal_message_submit_prepared",
+          "terminal_message_text_injected",
+          "terminal_message_enter_dispatched",
+          "terminal_message_agent_accepted"
+        ].includes(event)),
+      [
+        "terminal_message_submit_prepared",
+        "terminal_message_text_injected",
+        "terminal_message_enter_dispatched",
+        "terminal_message_agent_accepted"
+      ]
+    );
+    assert.equal(
+      readJsonLines(tmuxCallsPath)
+        .filter((call) =>
+          call.args[0] === "send-keys" && call.args.at(-1) === "C-m"
+        ).length,
+      1
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("modern Claude send requires a session id and process-incarnation timestamp", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-incarnation-"));
   const storeDir = path.join(tempDir, "conversations");

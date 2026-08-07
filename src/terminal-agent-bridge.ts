@@ -1182,14 +1182,17 @@ function exactCodexComposerCapture(
     while (region.length > 1 && region.at(-1)?.trim() === "") {
       region.pop();
     }
-    const body = [
+    const bodyRows = [
       region[0].replace(/^[›»]\s?/u, ""),
       ...region.slice(1).map((line) =>
         line.startsWith("  ") ? line.slice(2) : line
       )
-    ].join("\n");
-    const comparable = composerComparableText(body);
-    const exactVisibleDraft = comparable === expectedComparable;
+    ];
+    const comparable = composerComparableText(bodyRows.join("\n"));
+    const exactVisibleDraft = codexComposerRowsMatchExpected(
+      bodyRows,
+      expectedComparable
+    );
     const exactLargePastePlaceholder =
       expectedCharacterCount > CODEX_LARGE_PASTE_CHAR_THRESHOLD &&
       comparable === largePasteComparable;
@@ -1209,6 +1212,66 @@ function exactCodexComposerCapture(
     );
   }
   return matches[0];
+}
+
+/**
+ * Codex paints wrapped composer content as independent terminal rows, so tmux
+ * cannot distinguish a visual wrap from an authored newline. Align the rows
+ * against the exact text AKK injected instead of joining every row with `\n`.
+ *
+ * Only row boundaries are ambiguous: they may consume an authored newline, an
+ * omitted run of ASCII spaces at a word wrap, or no character at a CJK/token
+ * wrap. Every visible character remains character-for-character exact, and an
+ * empty row can only advance through an authored newline (plus terminal-trimmed
+ * spaces before it), so blank-line structure is preserved.
+ */
+function codexComposerRowsMatchExpected(
+  rows: readonly string[],
+  expectedText: string
+): boolean {
+  const expected = composerComparableText(expectedText);
+  if (rows.length === 0) {
+    return expected.length === 0;
+  }
+  if (!expected.startsWith(rows[0])) {
+    return false;
+  }
+
+  let offsets = new Set<number>([rows[0].length]);
+  for (let index = 1; index < rows.length && offsets.size > 0; index += 1) {
+    const row = rows[index];
+    const previousRow = rows[index - 1];
+    const nextOffsets = new Set<number>();
+    for (const offset of offsets) {
+      const candidateStarts = new Set<number>();
+      if (expected[offset] === "\n") {
+        candidateStarts.add(offset + 1);
+      }
+      let whitespaceEnd = offset;
+      while (expected[whitespaceEnd] === " ") {
+        whitespaceEnd += 1;
+      }
+      if (previousRow.length > 0 && row.length > 0) {
+        candidateStarts.add(offset);
+        if (whitespaceEnd > offset) {
+          candidateStarts.add(whitespaceEnd);
+        }
+      }
+      if (
+        whitespaceEnd > offset &&
+        expected[whitespaceEnd] === "\n"
+      ) {
+        candidateStarts.add(whitespaceEnd + 1);
+      }
+      for (const candidateStart of candidateStarts) {
+        if (expected.startsWith(row, candidateStart)) {
+          nextOffsets.add(candidateStart + row.length);
+        }
+      }
+    }
+    offsets = nextOffsets;
+  }
+  return offsets.has(expected.length);
 }
 
 function exactTerminalComposerCapture(
