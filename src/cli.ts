@@ -7088,12 +7088,20 @@ function decodeThreadCandidateToken(
   if (
     !isRecord(parsed) ||
     parsed.schema !== "agent-knock-knock/thread-candidate-token" ||
-    parsed.version !== 1 ||
+    !(parsed.version === 1 || parsed.version === 2) ||
     !["codex", "claude"].includes(String(parsed.agent)) ||
     !isExactNativeThreadId(parsed.nativeThreadId) ||
     !stringValue(parsed.cwd) ||
     !["codex_rollout", "claude_transcript"].includes(String(parsed.source)) ||
     !stringValue(parsed.agentVersion) ||
+    (
+      parsed.version === 1
+        ? parsed.sourceAgentVersion !== undefined
+        : (
+            !stringValue(parsed.sourceAgentVersion) ||
+            parsed.sourceAgentVersion === parsed.agentVersion
+          )
+    ) ||
     !isRecord(parsed.fileToken) ||
     !stringValue(parsed.fileToken.path) ||
     !stringValue(parsed.fileToken.device) ||

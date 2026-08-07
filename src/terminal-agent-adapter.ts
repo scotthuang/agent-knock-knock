@@ -297,18 +297,40 @@ export interface TerminalThreadFileToken {
   mtimeMs: number;
 }
 
-export interface TerminalThreadLifecycleCandidateToken {
+interface TerminalThreadLifecycleCandidateTokenBase {
   schema: "agent-knock-knock/thread-candidate-token";
-  version: 1;
   agent: ExecutorKind;
   nativeThreadId: string;
   cwd: string;
   source: "codex_rollout" | "claude_transcript";
+  /** Exact running adapter version that authorizes lifecycle terminal behavior. */
   agentVersion: string;
   fileToken: TerminalThreadFileToken;
   metadataFingerprint: string;
   modelProvider?: string;
 }
+
+/** Existing same-version token semantics, retained byte-for-byte for compatibility. */
+export interface TerminalThreadLifecycleCandidateTokenV1
+  extends TerminalThreadLifecycleCandidateTokenBase {
+  version: 1;
+  sourceAgentVersion?: never;
+}
+
+/**
+ * Token for a persisted thread created by an agent version other than the
+ * currently running adapter version.
+ */
+export interface TerminalThreadLifecycleCandidateTokenV2
+  extends TerminalThreadLifecycleCandidateTokenBase {
+  version: 2;
+  /** Historical agent version that created the candidate's persisted source. */
+  sourceAgentVersion: string;
+}
+
+export type TerminalThreadLifecycleCandidateToken =
+  | TerminalThreadLifecycleCandidateTokenV1
+  | TerminalThreadLifecycleCandidateTokenV2;
 
 export interface TerminalThreadLifecycleCandidate {
   agent: ExecutorKind;
@@ -317,7 +339,10 @@ export interface TerminalThreadLifecycleCandidate {
   source: "codex_rollout" | "claude_transcript";
   rootInteractive: true;
   fileToken: TerminalThreadFileToken;
+  /** Exact running adapter version that authorizes lifecycle terminal behavior. */
   agentVersion: string;
+  /** Historical source version; required for cross-version lifecycle candidates. */
+  sourceAgentVersion?: string;
   title?: string;
   preview?: string;
   updatedAtMs?: number;

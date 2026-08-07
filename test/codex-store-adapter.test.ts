@@ -747,6 +747,32 @@ test("Codex store adapter builds thread selects from detected columns", () => {
     buildThreadByIdSelect(["id", "cwd", "updated_at_ms"], SESSION_ID),
     new RegExp(`where id = '${SESSION_ID}'`, "u")
   );
+  const lifecycleSelect = buildThreadSelect([
+    "id",
+    "cwd",
+    "updated_at_ms",
+    "archived",
+    "source",
+    "model_provider"
+  ], 25, {
+    cwd: "/repo/o'hare\n.quit",
+    source: "cli",
+    archived: false,
+    modelProvider: "openai"
+  });
+  assert.match(
+    lifecycleSelect,
+    /where cwd collate binary = :akk_cwd and source collate binary = :akk_source and archived = 0 and model_provider collate binary = :akk_model_provider/u
+  );
+  assert.match(
+    lifecycleSelect,
+    /order by updated_at_ms desc, id desc limit 25$/u
+  );
+  assert.equal(lifecycleSelect.includes("o'hare"), false);
+  assert.match(
+    buildThreadSelect(["id", "cwd", "updated_at_ms"], 5, { source: "cli" }),
+    /where 0 = 1 order by updated_at_ms desc, id desc limit 5$/u
+  );
 });
 
 test("Codex store adapter parses process and cwd command output", () => {
@@ -850,9 +876,22 @@ test("Codex lifecycle candidates require exact root metadata and revalidate the 
     name: "Candidate name"
   };
   const columns = Object.keys(row);
+  const queryRequests: Array<{
+    nativeThreadId?: string;
+    filters?: {
+      cwd?: string;
+      source?: string;
+      archived?: boolean;
+      modelProvider?: string;
+    };
+  }> = [];
   const adapter = new CodexStoreAdapter({
     codexHome: dir,
     async runSqliteThreadQuery(request) {
+      queryRequests.push({
+        nativeThreadId: request.nativeThreadId,
+        filters: request.filters
+      });
       return {
         columns,
         rows: request.nativeThreadId && request.nativeThreadId !== row.id
@@ -893,7 +932,19 @@ test("Codex lifecycle candidates require exact root metadata and revalidate the 
       "agent-knock-knock/thread-candidate-token"
     );
     assert.equal(candidate.agentVersion, "0.146.1");
+    assert.equal(candidate.sourceAgentVersion, "0.146.1");
+    assert.equal(candidate.candidateToken.version, 1);
     assert.equal(candidate.candidateToken.agentVersion, "0.146.1");
+    assert.equal("sourceAgentVersion" in candidate.candidateToken, false);
+    assert.deepEqual(queryRequests[0], {
+      nativeThreadId: undefined,
+      filters: {
+        cwd: "/repo/project",
+        source: "cli",
+        archived: false,
+        modelProvider: "openai"
+      }
+    });
     assert.match(candidate.fileToken.device, /^\d+$/u);
     assert.match(candidate.fileToken.inode, /^\d+$/u);
     assert.equal(
@@ -903,14 +954,6 @@ test("Codex lifecycle candidates require exact root metadata and revalidate the 
       )).status,
       "valid"
     );
-    assert.deepEqual(
-      await adapter.listThreadLifecycleCandidates({
-        ...request,
-        agentVersion: "0.146.0"
-      }),
-      []
-    );
-
     fs.appendFileSync(rolloutPath, "{}\n", "utf8");
     assert.equal(
       (await adapter.revalidateThreadLifecycleCandidate(
@@ -927,21 +970,71 @@ test("Codex lifecycle candidates require exact root metadata and revalidate the 
       /supported exact versions: 0\.146\.0, 0\.146\.1/u
     );
 
-    row.cli_version = "0.146.0";
-    writeRollout("0.146.0");
-    const legacyRequest = {
-      ...request,
-      agentVersion: "0.146.0"
-    };
-    const legacyCandidate = (
-      await adapter.listThreadLifecycleCandidates(legacyRequest)
+    row.cli_version = "0.140.0";
+    writeRollout("0.140.0");
+    const historicalCandidate = (
+      await adapter.listThreadLifecycleCandidates(request)
     )[0];
-    assert.equal(legacyCandidate.agentVersion, "0.146.0");
-    assert.equal(legacyCandidate.candidateToken.agentVersion, "0.146.0");
+    assert.equal(historicalCandidate.agentVersion, "0.146.1");
+    assert.equal(historicalCandidate.sourceAgentVersion, "0.140.0");
+    assert.equal(historicalCandidate.candidateToken.version, 2);
+    assert.equal(historicalCandidate.candidateToken.agentVersion, "0.146.1");
+    assert.equal(
+      historicalCandidate.candidateToken.sourceAgentVersion,
+      "0.140.0"
+    );
+    assert.equal(
+      (await adapter.revalidateThreadLifecycleCandidate(
+        historicalCandidate.candidateToken,
+        request
+      )).status,
+      "valid"
+    );
+
+    if (historicalCandidate.candidateToken.version !== 2) {
+      assert.fail("historical Codex candidate must use a v2 token");
+    }
+    assert.equal(
+      (await adapter.revalidateThreadLifecycleCandidate({
+        ...historicalCandidate.candidateToken,
+        sourceAgentVersion: "0.139.0"
+      }, request)).status,
+      "changed"
+    );
+    const {
+      sourceAgentVersion: _sourceAgentVersion,
+      ...historicalTokenBase
+    } = historicalCandidate.candidateToken;
+    assert.equal(
+      (await adapter.revalidateThreadLifecycleCandidate({
+        ...historicalTokenBase,
+        version: 1
+      }, request)).status,
+      "changed"
+    );
+
+    row.cli_version = "0.146.0";
+    assert.deepEqual(
+      await adapter.listThreadLifecycleCandidates(request),
+      []
+    );
+    writeRollout("0.146.0");
+    assert.equal(
+      (await adapter.listThreadLifecycleCandidates(request))[0]
+        .sourceAgentVersion,
+      "0.146.0"
+    );
+
+    row.archived = 2;
+    assert.deepEqual(
+      await adapter.listThreadLifecycleCandidates(request),
+      []
+    );
+    row.archived = 0;
 
     row.source = JSON.stringify({ subagent: { thread_spawn: {} } });
     assert.deepEqual(
-      await adapter.listThreadLifecycleCandidates(legacyRequest),
+      await adapter.listThreadLifecycleCandidates(request),
       []
     );
   } finally {
@@ -952,6 +1045,213 @@ test("Codex lifecycle candidates require exact root metadata and revalidate the 
 const SQLITE_AVAILABLE = spawnSync("sqlite3", ["-version"], {
   encoding: "utf8"
 }).status === 0;
+
+test("Codex lifecycle discovery filters before LIMIT and lists older producer versions", {
+  skip: !SQLITE_AVAILABLE
+}, async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-candidate-limit-"));
+  const dbPath = path.join(dir, "state_5.sqlite");
+  const cwd = "/repo/o'hare\n.quit";
+  const rolloutPath = path.join(
+    dir,
+    "sessions",
+    "2026",
+    "08",
+    "08",
+    `rollout-root-${SESSION_ID}.jsonl`
+  );
+  try {
+    fs.mkdirSync(path.dirname(rolloutPath), { recursive: true });
+    fs.writeFileSync(rolloutPath, `${JSON.stringify({
+      type: "session_meta",
+      payload: {
+        id: SESSION_ID,
+        cwd,
+        originator: "codex-tui",
+        source: "cli",
+        cli_version: "0.140.0",
+        model_provider: "openai"
+      }
+    })}\n`, "utf8");
+
+    const rowSql = ({
+      id,
+      rowCwd,
+      rowRolloutPath,
+      updatedAtMs,
+      archived = 0,
+      source = "cli"
+    }: {
+      id: string;
+      rowCwd: string;
+      rowRolloutPath: string;
+      updatedAtMs: number;
+      archived?: number;
+      source?: string;
+    }): string =>
+      "insert into threads(" +
+      "id,cwd,rollout_path,updated_at_ms,archived,source," +
+      "model_provider,cli_version,title,preview,name" +
+      ") values(" + [
+        sqliteLiteral(id),
+        sqliteLiteral(rowCwd),
+        sqliteLiteral(rowRolloutPath),
+        String(updatedAtMs),
+        String(archived),
+        sqliteLiteral(source),
+        sqliteLiteral("openai"),
+        sqliteLiteral(id === SESSION_ID ? "0.140.0" : "0.146.1"),
+        sqliteLiteral("title"),
+        sqliteLiteral("preview"),
+        sqliteLiteral("name")
+      ].join(",") + ");";
+    const decoys = Array.from({ length: 105 }, (_, index) => rowSql({
+      id: `10000000-0000-4000-8000-${index.toString(16).padStart(12, "0")}`,
+      rowCwd: `/repo/unrelated-${index}`,
+      rowRolloutPath: path.join(dir, `missing-${index}.jsonl`),
+      updatedAtMs: 10_000 + index
+    }));
+    const statements = [
+      "pragma journal_mode=WAL;",
+      "create table threads(" +
+        "id text primary key," +
+        "cwd text not null," +
+        "rollout_path text not null," +
+        "updated_at_ms integer not null," +
+        "archived integer not null," +
+        "source text not null," +
+        "model_provider text not null," +
+        "cli_version text not null," +
+        "title text,preview text,name text" +
+        ");",
+      ...decoys,
+      rowSql({
+        id: "20000000-0000-4000-8000-000000000001",
+        rowCwd: cwd,
+        rowRolloutPath: path.join(dir, "archived.jsonl"),
+        updatedAtMs: 30_000,
+        archived: 1
+      }),
+      rowSql({
+        id: "20000000-0000-4000-8000-000000000002",
+        rowCwd: cwd,
+        rowRolloutPath: path.join(dir, "subagent.jsonl"),
+        updatedAtMs: 20_000,
+        source: "exec"
+      }),
+      rowSql({
+        id: SESSION_ID,
+        rowCwd: cwd,
+        rowRolloutPath: rolloutPath,
+        updatedAtMs: 1
+      }),
+      "pragma wal_checkpoint(TRUNCATE);"
+    ];
+    const setup = spawnSync("sqlite3", [dbPath, statements.join(" ")], {
+      encoding: "utf8"
+    });
+    assert.equal(setup.status, 0, setup.stderr);
+
+    const queryOnlyRows = await runCodexSqliteThreadQuery({
+      dbPath,
+      openMode: "query_only",
+      maxSessions: 1,
+      filters: {
+        cwd,
+        source: "cli",
+        archived: false,
+        modelProvider: "openai"
+      }
+    });
+    assert.deepEqual(queryOnlyRows.rows.map((row) => row.id), [SESSION_ID]);
+
+    const adapter = new CodexStoreAdapter({
+      codexHome: dir,
+      maxSessions: 1,
+      sqliteCantOpenRetryDelaysMs: []
+    });
+    const candidates = await adapter.listThreadLifecycleCandidates({
+      cwd,
+      agentVersion: "0.146.1",
+      modelProvider: "openai"
+    });
+
+    assert.equal(candidates.length, 1);
+    assert.equal(candidates[0].nativeThreadId, SESSION_ID);
+    assert.equal(candidates[0].agentVersion, "0.146.1");
+    assert.equal(candidates[0].sourceAgentVersion, "0.140.0");
+    assert.equal(candidates[0].candidateToken.version, 2);
+    assert.equal(
+      (await adapter.revalidateThreadLifecycleCandidate(
+        candidates[0].candidateToken,
+        { cwd, agentVersion: "0.146.1", modelProvider: "openai" }
+      )).status,
+      "valid"
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Codex lifecycle filters survive CANTOPEN recovery on the WAL-safe path", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-filter-retry-"));
+  const dbPath = path.join(dir, "state_5.sqlite");
+  const requests: Array<{
+    openMode: string;
+    filters: unknown;
+    nativeThreadId?: string;
+  }> = [];
+  try {
+    fs.writeFileSync(dbPath, "fixture", "utf8");
+    const adapter = new CodexStoreAdapter({
+      codexHome: dir,
+      sqliteCantOpenRetryDelaysMs: [],
+      async runSqliteThreadQuery(request) {
+        requests.push({
+          openMode: request.openMode,
+          filters: request.filters,
+          nativeThreadId: request.nativeThreadId
+        });
+        if (request.openMode === "readonly") {
+          throw sqliteFailure(14, "schema", "unable to open database file (14)");
+        }
+        return {
+          columns: ["id", "cwd", "source", "archived"],
+          rows: []
+        };
+      }
+    });
+
+    assert.deepEqual(
+      await adapter.listThreadLifecycleCandidates({
+        cwd: "/repo/project",
+        agentVersion: "0.146.1",
+        modelProvider: "openai"
+      }),
+      []
+    );
+    const expectedFilters = {
+      cwd: "/repo/project",
+      source: "cli",
+      archived: false,
+      modelProvider: "openai"
+    };
+    assert.deepEqual(requests, [
+      {
+        openMode: "readonly",
+        filters: expectedFilters,
+        nativeThreadId: undefined
+      },
+      {
+        openMode: "query_only",
+        filters: expectedFilters,
+        nativeThreadId: undefined
+      }
+    ]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("Codex store adapter materializes missing WAL sidecars through a query-only connection", {
   skip: !SQLITE_AVAILABLE
@@ -1269,6 +1569,10 @@ function sqliteFailure(status: number, stage: string, message: string): Error {
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function sqliteLiteral(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
 }
 
 function ok(stdout: string): CommandResult {
