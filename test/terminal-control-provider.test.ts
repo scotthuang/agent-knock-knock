@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   StaticTerminalControlProvider,
+  TerminalControlInputNotSentError,
   TmuxTerminalControlProvider,
   discoverTmuxSocketPaths,
   enrichActiveProcessesWithTerminalControl,
@@ -402,4 +403,51 @@ test("tmux provider uses bracketed paste for multiline text", async () => {
     "claude-work:0.0"
   ]);
   assert.equal(calls.some((args) => args.includes("send-keys")), false);
+});
+
+test("tmux provider proves no input when commands reject or cannot start", async () => {
+  const calls: string[] = [];
+  const provider = new TmuxTerminalControlProvider({
+    socketPaths: [],
+    commands: ["tmux", "/missing/tmux"],
+    runCommand(command) {
+      calls.push(command);
+      if (command === "tmux") {
+        return { status: 1, stdout: "", stderr: "no pane" };
+      }
+      const error = Object.assign(new Error("spawn ENOENT"), {
+        code: "ENOENT"
+      });
+      return { status: null, stdout: "", stderr: "", error };
+    }
+  });
+
+  await assert.rejects(
+    provider.sendText("codex-work:0.0", "hello"),
+    TerminalControlInputNotSentError
+  );
+  assert.deepEqual(calls, ["tmux", "/missing/tmux"]);
+});
+
+test("tmux provider stops after an uncertain input attempt", async () => {
+  const calls: string[] = [];
+  const provider = new TmuxTerminalControlProvider({
+    socketPaths: [],
+    commands: ["tmux", "/fallback/tmux"],
+    runCommand(command) {
+      calls.push(command);
+      return {
+        status: null,
+        stdout: "",
+        stderr: "",
+        error: Object.assign(new Error("timed out"), { code: "ETIMEDOUT" })
+      };
+    }
+  });
+
+  await assert.rejects(
+    provider.sendText("codex-work:0.0", "hello"),
+    /timed out/u
+  );
+  assert.deepEqual(calls, ["tmux"]);
 });

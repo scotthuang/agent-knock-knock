@@ -101,7 +101,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       hidden_turn_count: 0,
       session_count: 0
     });
-    assert.equal(listed.action_contracts.version, 5);
+    assert.equal(listed.action_contracts.version, 6);
     assert.match(
       listed.action_contracts.instructions.join("\n"),
       /Treat terminals\[\] as the primary resource/u
@@ -155,6 +155,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
         "new_thread",
         "list_resumable_threads",
         "resume_thread",
+        "reconcile_binding",
         "respond",
         "status",
         "approve",
@@ -187,6 +188,20 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     assert.deepEqual(
       listed.action_contracts.actions.send.unsupported,
       ["timeoutSeconds"]
+    );
+    assert.deepEqual(
+      listed.action_contracts.actions.reconcile_binding.required,
+      [
+        "terminal_id",
+        "conflicting_session_id",
+        "expected_session_revision",
+        "expected_binding_token",
+        "expected_terminal_token"
+      ]
+    );
+    assert.equal(
+      listed.action_contracts.actions.reconcile_binding.sends_terminal_input,
+      false
     );
     for (const action of [
       "respond",

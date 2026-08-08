@@ -164,6 +164,10 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
   assert.equal(contractedTools.includes("agent_knock_knock_new_thread"), true);
   assert.equal(
+    contractedTools.includes("agent_knock_knock_reconcile_binding"),
+    true
+  );
+  assert.equal(
     contractedTools.includes("agent_knock_knock_resume_thread"),
     true
   );
@@ -231,6 +235,9 @@ test("OpenClaw native-thread tools keep explicit CAS while slash commands refres
         `  previous_session_id: "session-current", session_id: "session-new",`,
         `  previous_native_thread_id: currentThreadId, native_thread_id: "33333333-3333-4333-8333-333333333333",`,
         `  binding_generation: 2, turn_created: false`,
+        `} : action === "reconcile-binding" ? {`,
+        `  status: "reconciled", outcome: "detached_conflicting_binding", terminal_id: terminalId,`,
+        `  session_id: "session-conflict", session_revision: 8, terminal_input_sent: false, turn_created: false, refresh_required: true`,
         `} : {`,
         `  status: "committed", operation: "resume_thread", terminal_id: terminalId,`,
         `  previous_session_id: "session-current", session_id: "session-resumed",`,
@@ -270,9 +277,11 @@ test("OpenClaw native-thread tools keep explicit CAS while slash commands refres
 
     const listTool = tools.get("agent_knock_knock_list_resumable_threads");
     const newTool = tools.get("agent_knock_knock_new_thread");
+    const reconcileTool = tools.get("agent_knock_knock_reconcile_binding");
     const resumeTool = tools.get("agent_knock_knock_resume_thread");
     assert.ok(listTool);
     assert.ok(newTool);
+    assert.ok(reconcileTool);
     assert.ok(resumeTool);
     assert.deepEqual(listTool.parameters?.required, ["terminal_id"]);
     assert.deepEqual(newTool.parameters?.required, [
@@ -285,10 +294,23 @@ test("OpenClaw native-thread tools keep explicit CAS while slash commands refres
       "expected_binding_token",
       "candidate_token"
     ]);
+    assert.deepEqual(reconcileTool.parameters?.required, [
+      "terminal_id",
+      "conflicting_session_id",
+      "expected_session_revision",
+      "expected_binding_token",
+      "expected_terminal_token"
+    ]);
     assert.equal(listTool.parameters?.additionalProperties, false);
     assert.equal(newTool.parameters?.additionalProperties, false);
+    assert.equal(reconcileTool.parameters?.additionalProperties, false);
     assert.equal(resumeTool.parameters?.additionalProperties, false);
-    for (const definition of [listTool, newTool, resumeTool]) {
+    for (const definition of [
+      listTool,
+      newTool,
+      reconcileTool,
+      resumeTool
+    ]) {
       const terminalSchema = definition.parameters?.properties?.terminal_id;
       assert.match(
         isRecord(terminalSchema) ? String(terminalSchema.pattern ?? "") : "",
@@ -296,6 +318,8 @@ test("OpenClaw native-thread tools keep explicit CAS while slash commands refres
       );
     }
     assert.match(newTool.description ?? "", /no Turn/u);
+    assert.match(reconcileTool.description ?? "", /explicitly requests/u);
+    assert.match(reconcileTool.description ?? "", /creates no Turn/u);
     assert.match(resumeTool.description ?? "", /resumable=true/u);
 
     const listed = await listTool.execute?.("list-threads", {
@@ -316,6 +340,16 @@ test("OpenClaw native-thread tools keep explicit CAS while slash commands refres
     });
     assert.equal(resumed?.details?.session_id, "session-resumed");
     assert.equal(Object.hasOwn(resumed?.details ?? {}, "turn_id"), false);
+    const reconciled = await reconcileTool.execute?.("reconcile-binding", {
+      terminal_id: terminalId,
+      conflicting_session_id: "session-conflict",
+      expected_session_revision: 7,
+      expected_binding_token: "tool-conflict-binding-token",
+      expected_terminal_token: "tool-live-terminal-token"
+    });
+    assert.equal(reconciled?.details?.status, "reconciled");
+    assert.equal(reconciled?.details?.terminal_input_sent, false);
+    assert.equal(reconciled?.details?.turn_created, false);
     await assert.rejects(
       () => resumeTool.execute!("resume-without-candidate-token", {
         terminal_id: terminalId,
@@ -386,13 +420,30 @@ test("OpenClaw native-thread tools keep explicit CAS while slash commands refres
       "--store-dir",
       "/private/akk-store"
     ]);
+    assert.deepEqual(calls[3]?.slice(0, 15), [
+      "reconcile-binding",
+      "--terminal",
+      terminalId,
+      "--conflicting-session",
+      "session-conflict",
+      "--expected-session-revision",
+      "7",
+      "--expected-binding-token",
+      "tool-conflict-binding-token",
+      "--expected-terminal-token",
+      "tool-live-terminal-token",
+      "--store-dir",
+      "/private/akk-store",
+      "--codex-home",
+      "/private/custom-codex"
+    ]);
     for (const args of calls) {
       assert.equal(
         args[args.indexOf("--codex-home") + 1],
         "/private/custom-codex"
       );
     }
-    const slashMutationCalls = calls.slice(5).filter((args) =>
+    const slashMutationCalls = calls.slice(6).filter((args) =>
       args[0] === "new-thread" || args[0] === "resume-thread"
     );
     assert.equal(slashMutationCalls.length, 3);
@@ -409,7 +460,7 @@ test("OpenClaw native-thread tools keep explicit CAS while slash commands refres
       slashResume?.[slashResume.indexOf("--candidate-token") + 1],
       "fresh-candidate-token"
     );
-    assert.deepEqual(calls.slice(5).map((args) => args[0]), [
+    assert.deepEqual(calls.slice(6).map((args) => args[0]), [
       "list-resumable-threads",
       "new-thread",
       "list-resumable-threads",

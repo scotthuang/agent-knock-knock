@@ -160,6 +160,51 @@ const newThreadParameters = {
   }
 };
 
+const reconcileBindingParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "terminal_id",
+    "conflicting_session_id",
+    "expected_session_revision",
+    "expected_binding_token",
+    "expected_terminal_token"
+  ],
+  properties: {
+    terminal_id: {
+      type: "string",
+      minLength: 1,
+      pattern: "^terminal:v[0-9]+:\\S+$",
+      description:
+        "Exact full terminal_id from the same current reconcile_binding action as every expected token."
+    },
+    conflicting_session_id: {
+      type: "string",
+      minLength: 1,
+      description:
+        "Exact conflicting managed Session id prefilled by AKK list. Never choose or construct one independently."
+    },
+    expected_session_revision: {
+      type: "integer",
+      minimum: 1,
+      description:
+        "Exact managed Session revision from the advertised reconcile_binding action."
+    },
+    expected_binding_token: {
+      type: "string",
+      minLength: 1,
+      description:
+        "Fresh fingerprint of the conflicting binding from the advertised action."
+    },
+    expected_terminal_token: {
+      type: "string",
+      minLength: 1,
+      description:
+        "Fresh fingerprint of the live terminal process incarnation from the same advertised action."
+    }
+  }
+};
+
 const resumeThreadParameters = {
   type: "object",
   additionalProperties: false,
@@ -439,7 +484,7 @@ function createPlugin(
 
     registerCliTool(api, {
       name: "agent_knock_knock_list",
-      description: "List existing Codex and Claude Code tmux panes as the primary terminals[] resources. Each terminal may include managed.current_turn or managed.recent_turn; all=true also includes older managed.history and retained unavailable history. By default, unavailable_managed_turns contains attention-needed records whose pane is unavailable. Use only each row's available_actions and authoritative prefilled arguments: send targets a session and starts a new turn; respond targets the exact in-flight turn; read-only thread listing targets the exact terminal, while new/resume mutations also require the current binding token and create no Turn; managed controls target the exact turn; a raw terminal row may prefill its own compatibility selector for status or recovery controls. Never construct identifiers or tokens. AKK revalidates every side effect and never starts a coding-agent process.",
+      description: "List existing Codex and Claude Code tmux panes as the primary terminals[] resources. Each terminal may include managed.current_turn or managed.recent_turn; all=true also includes older managed.history and retained unavailable history. By default, unavailable_managed_turns contains attention-needed records whose pane is unavailable. Use only each row's available_actions and authoritative prefilled arguments: send targets a session and starts a new turn; respond targets the exact in-flight turn; read-only thread listing targets the exact terminal, while new/resume mutations also require the current binding token and create no Turn; reconcile_binding detaches only the exact listed conflict and requires explicit user intent; managed controls target the exact turn; a raw terminal row may prefill its own compatibility selector for status or recovery controls. Never construct identifiers or tokens. AKK revalidates every side effect and never starts a coding-agent process.",
       parameters: listParameters,
       buildArgs: (params) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
@@ -501,6 +546,48 @@ function createPlugin(
           requiredString(
             params.expected_binding_token,
             "expected_binding_token"
+          )
+        ];
+        pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
+        pushOptional(args, "--codex-home", stringValue(config.codexHome));
+        return args;
+      }
+    });
+
+    registerCliTool(api, {
+      name: "agent_knock_knock_reconcile_binding",
+      description:
+        "Detach one exact conflicting managed Session binding without adopting the live replacement thread. Call only after the user explicitly requests recovery and only from a current terminal row's advertised reconcile_binding action. Preserve its terminal_id, conflicting_session_id, Session revision, binding token, and terminal token exactly. This action sends no coding-agent input and creates no Turn; refresh AKK list afterward.",
+      parameters: reconcileBindingParameters,
+      normalizeTurnIdentity: false,
+      buildArgs: (params) => {
+        const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+        const revision = Number(params.expected_session_revision);
+        if (!Number.isSafeInteger(revision) || revision < 1) {
+          throw new Error(
+            "expected_session_revision must be a positive safe integer"
+          );
+        }
+        const args = [
+          "reconcile-binding",
+          "--terminal",
+          requiredString(params.terminal_id, "terminal_id"),
+          "--conflicting-session",
+          requiredString(
+            params.conflicting_session_id,
+            "conflicting_session_id"
+          ),
+          "--expected-session-revision",
+          String(revision),
+          "--expected-binding-token",
+          requiredString(
+            params.expected_binding_token,
+            "expected_binding_token"
+          ),
+          "--expected-terminal-token",
+          requiredString(
+            params.expected_terminal_token,
+            "expected_terminal_token"
           )
         ];
         pushOptional(args, "--store-dir", resolvePluginStoreDir(config));

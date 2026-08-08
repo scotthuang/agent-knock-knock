@@ -31,6 +31,7 @@ test("OpenClaw contract removes the top-level workspace and keeps rule-scoped ap
   for (const lifecycleTool of [
     "agent_knock_knock_list_resumable_threads",
     "agent_knock_knock_new_thread",
+    "agent_knock_knock_reconcile_binding",
     "agent_knock_knock_resume_thread"
   ]) {
     assert.equal(manifest.contracts.tools.includes(lifecycleTool), true);
@@ -46,6 +47,7 @@ test("OpenClaw contract removes the top-level workspace and keeps rule-scoped ap
   assert.match(pluginSource, /--expected-approval-fingerprint/u);
   assert.match(pluginSource, /name: "agent_knock_knock_renew"/u);
   assert.match(pluginSource, /name: "agent_knock_knock_new_thread"/u);
+  assert.match(pluginSource, /name: "agent_knock_knock_reconcile_binding"/u);
   assert.match(pluginSource, /name: "agent_knock_knock_list_resumable_threads"/u);
   assert.match(pluginSource, /name: "agent_knock_knock_resume_thread"/u);
   assert.match(

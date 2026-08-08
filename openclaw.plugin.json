@@ -18,6 +18,7 @@
       "agent_knock_knock_list",
       "agent_knock_knock_list_resumable_threads",
       "agent_knock_knock_new_thread",
+      "agent_knock_knock_reconcile_binding",
       "agent_knock_knock_resume_thread",
       "agent_knock_knock_status",
       "agent_knock_knock_send",
@@ -37,6 +38,9 @@
       "optional": true
     },
     "agent_knock_knock_new_thread": {
+      "optional": true
+    },
+    "agent_knock_knock_reconcile_binding": {
       "optional": true
     },
     "agent_knock_knock_resume_thread": {

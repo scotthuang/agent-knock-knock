@@ -17,6 +17,7 @@ import {
 } from "./terminal-agent-adapter.js";
 import {
   enrichActiveProcessesWithTerminalControl,
+  TerminalControlInputNotSentError,
   terminalRefFromPane,
   type TerminalControlProvider
 } from "./terminal-control-provider.js";
@@ -33,6 +34,16 @@ const CODEX_COMPOSER_MARKER = /^[›»](?:\s|$)/u;
 const CODEX_COMPOSER_FOOTER =
   /^(?:gpt-[\w.-]+(?:\s|$)|[-\w.]+ default ·)/u;
 const CODEX_LARGE_PASTE_CHAR_THRESHOLD = 1_000;
+
+/** A terminal send failed at a boundary that proves input never started. */
+export class TerminalInputNotStartedError extends Error {
+  readonly code = "AKK_TERMINAL_INPUT_NOT_STARTED";
+
+  constructor(message: string, options: { cause?: unknown } = {}) {
+    super(message, options);
+    this.name = "TerminalInputNotStartedError";
+  }
+}
 
 export interface TerminalBridgeStatus {
   provider: "tmux";
@@ -352,21 +363,40 @@ export class TerminalAgentBridge {
   ): Promise<TerminalSendResult> {
     const adapter = this.registry.require(agent);
     if (!terminalControl.capabilities.includes("send_keys")) {
-      throw new Error(`${adapter.displayName} terminal input is not supported`);
+      throw new TerminalInputNotStartedError(
+        `${adapter.displayName} terminal input is not supported`
+      );
     }
     const normalized = text.trimEnd();
     if (!normalized) {
-      throw new Error("terminal message is empty");
+      throw new TerminalInputNotStartedError("terminal message is empty");
     }
     const multiline = /[\r\n]/u.test(normalized);
-    const verifiedForText = await this.verifyTerminalIdentity(
-      adapter.agent,
-      terminalControl,
-      options.runtime
-    );
-    await this.terminalProvider.sendText(verifiedForText.target, normalized, {
-      socketPath: verifiedForText.socketPath
-    });
+    let verifiedForText: TerminalControlRef;
+    try {
+      verifiedForText = await this.verifyTerminalIdentity(
+        adapter.agent,
+        terminalControl,
+        options.runtime
+      );
+    } catch (error) {
+      throw new TerminalInputNotStartedError(
+        error instanceof Error ? error.message : String(error),
+        { cause: error }
+      );
+    }
+    try {
+      await this.terminalProvider.sendText(verifiedForText.target, normalized, {
+        socketPath: verifiedForText.socketPath
+      });
+    } catch (error) {
+      if (error instanceof TerminalControlInputNotSentError) {
+        throw new TerminalInputNotStartedError(error.message, {
+          cause: error
+        });
+      }
+      throw error;
+    }
     await options.onTransportStage?.({
       stage: "text_injected",
       agent: adapter.agent,

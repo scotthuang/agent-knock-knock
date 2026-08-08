@@ -2361,6 +2361,7 @@ test("idle cleanup locks and reloads a stale candidate before closing it", async
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-idle-cleanup-race-"));
   const storeDir = path.join(tempDir, "conversations");
   const workspace = path.join(tempDir, "workspace");
+  const fakeBinDir = path.join(tempDir, "bin");
   const preloadPath = path.join(tempDir, "state-read-gate.cjs");
   const snapshotReadPath = path.join(tempDir, "snapshot-read");
   const snapshotReleasePath = path.join(tempDir, "snapshot-release");
@@ -2370,7 +2371,14 @@ test("idle cleanup locks and reloads a stale candidate before closing it", async
   let stateLockPath = "";
 
   try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
+    writeFakeProcessTools(fakeBinDir, [{
+      pid: 33389,
+      ppid: 999,
+      command: "codex",
+      cwd: workspace
+    }]);
     const created = runAgentCli([
       "send",
       "--conversation",
@@ -2404,7 +2412,9 @@ test("idle cleanup locks and reloads a stale candidate before closing it", async
       JSON.stringify({
         "codex-work:0.0": "› "
       })
-    ]);
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
     assert.equal(created.status, 0, created.stderr || created.stdout);
     const parsed = JSON.parse(created.stdout);
     const statePath = parsed.conversation.state_path;
@@ -2615,7 +2625,9 @@ test("approve sends y only when the terminal screen shows a primary Codex approv
       JSON.stringify([tmuxPane({ panePid: 999, currentPath: workspace })]),
       "--terminal-screens-json",
       JSON.stringify({ "codex-work:0.0": "› \n" })
-    ]);
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
     assert.equal(attached.status, 0, attached.stderr || attached.stdout);
     const parsed = JSON.parse(attached.stdout);
     fs.writeFileSync(screenPath, approvalScreen);
@@ -4167,11 +4179,19 @@ test("virgin terminal send is uncertain when no exact native session can be boun
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-native-bind-timeout-"));
   const storeDir = path.join(tempDir, "conversations");
   const workspace = path.join(tempDir, "workspace");
+  const fakeBinDir = path.join(tempDir, "bin");
   const target = "codex-virgin:0.0";
   const pid = 33401;
   const rawTerminalId = `terminal:v2:tmux:codex:${target}:${pid}`;
   try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
+    writeFakeProcessTools(fakeBinDir, [{
+      pid,
+      ppid: 1,
+      command: "codex",
+      cwd: workspace
+    }]);
     const startedAt = Date.now();
     const sent = runAgentCli([
       "send",
@@ -4202,7 +4222,9 @@ test("virgin terminal send is uncertain when no exact native session can be boun
       JSON.stringify({ [target]: "› \n" }),
       "--codex-active-session-identities-json",
       "{}"
-    ]);
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
     const elapsedMs = Date.now() - startedAt;
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
     const parsed = JSON.parse(sent.stdout);
@@ -7175,7 +7197,8 @@ test("only the uncertain owner can resolve its fence without moving native Store
       tmuxCallsPath,
       screenPath,
       listPanesOutput,
-      "Second cross-store task"
+      "Second cross-store task",
+      true
     );
     const second = runAgentCli(
       sendArgs("Second cross-store task", secondStoreDir),
@@ -11554,7 +11577,8 @@ function writeFakeTmux(
   callsPath: string,
   screenPath?: string,
   listPanesOutput = "",
-  failSendText = ""
+  failSendText = "",
+  failSendOutcomeUncertain = false
 ) {
   const fakeTmux = path.join(fakeBinDir, "tmux");
   fs.writeFileSync(
@@ -11564,6 +11588,9 @@ const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({ args }) + "\\n", "utf8");
 if (${JSON.stringify(failSendText)} && args.includes(${JSON.stringify(failSendText)})) {
+  if (${JSON.stringify(failSendOutcomeUncertain)}) {
+    process.kill(process.pid, "SIGKILL");
+  }
   process.exit(1);
 }
 if (args[0] === "send-keys" && args.includes("-l")) {
@@ -11644,7 +11671,12 @@ function writeFakeProcessTools(
   fs.writeFileSync(
     fakePs,
     `#!/usr/bin/env node
-process.stdout.write(${JSON.stringify(psOutput)});
+const args = process.argv.slice(2);
+if (args.includes("lstart=")) {
+  process.stdout.write("Thu Aug  6 10:00:00 2026\\n");
+} else {
+  process.stdout.write(${JSON.stringify(psOutput)});
+}
 `,
     "utf8"
   );
