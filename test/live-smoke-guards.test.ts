@@ -53,12 +53,25 @@ function assertReleaseCommitGuards(workflowSource: string): void {
   );
 }
 
-test("ordinary npm test never opts into either live tmux smoke", () => {
+test("ordinary npm test stays non-live and the explicit live release tier is wired end to end", () => {
   const packageJson = JSON.parse(readPackageFile("package.json"));
   const testScript = String(packageJson.scripts?.test ?? "");
+  const releaseScript = String(packageJson.scripts?.["test:release"] ?? "");
+  const liveScript = String(packageJson.scripts?.["test:release:live"] ?? "");
+  const runner = readPackageFile("scripts/run-release-tests.js");
 
   assert.doesNotMatch(testScript, /AKK_RUN_LIVE/u);
   assert.doesNotMatch(testScript, /smoke-(?:lifecycle-)?tmux\.js/u);
+  assert.match(releaseScript, /run-release-tests\.js$/u);
+  assert.match(liveScript, /run-release-tests\.js --live$/u);
+  assert.doesNotMatch(releaseScript, /--live/u);
+  assert.match(runner, /AKK_RUN_LIVE_LIFECYCLE_SMOKE/u);
+  assert.match(runner, /"--confirm-live"/u);
+  assert.match(runner, /"--codex-target"/u);
+  assert.match(runner, /"--claude-target"/u);
+  assert.match(runner, /runNpmScript\("smoke:lifecycle", invocation\.smokeArgs\)/u);
+  assert.match(runner, /"smoke:lifecycle:attest"/u);
+  assert.match(runner, /"--require-matrix"/u);
 });
 
 test("tag publish workflows keep release provenance guards without requiring live evidence", () => {

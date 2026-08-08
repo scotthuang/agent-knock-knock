@@ -9,8 +9,13 @@ Use Node.js 22.19 or newer; Node.js 24 is recommended. GitHub Actions runners ar
 ```bash
 npm ci
 npm run build
-npm test
+npm run test:fast
 ```
+
+The fast tier is the default development loop. Add the integration files
+mapped to the subsystem you changed, then run the full suite before opening a
+pull request. The checked-in tier manifest and targeted commands are documented
+in [docs/testing.md](docs/testing.md).
 
 For local OpenClaw testing, link the plugin from this checkout:
 
@@ -29,6 +34,10 @@ npm run typecheck
 npm test
 npm pack --dry-run
 ```
+
+`npm test` is an alias for `test:full`; it never selects a weaker tier. Use
+`npm run test:profile -- --output /tmp/akk-test-profile.json` when a change may
+affect test runtime, subprocess behavior, polling, or concurrency.
 
 The pull request description is the verification record while hosted Actions
 are disabled: include the local Node.js version, exact commands, pass counts,
