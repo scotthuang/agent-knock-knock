@@ -339,10 +339,14 @@ is not currently required for publishing.
 ```bash
 npm run build
 npm run typecheck
-npm test
+npm run test:fast
 ```
 
-See [CONTRIBUTING.md](https://github.com/scotthuang/agent-knock-knock/blob/main/CONTRIBUTING.md) for the development and pull request workflow. For local OpenClaw testing, rebuild, run `node dist/src/cli.js install-openclaw`, and restart the Gateway.
+Use the fast tier for the inner loop, add the integration files mapped to the
+subsystem you changed, and run `npm test` once before opening a pull request.
+`npm test` remains the complete suite. See [Testing](docs/testing.md) for the
+tier manifest, targeted integration map, profiling command, and release gates,
+and [CONTRIBUTING.md](https://github.com/scotthuang/agent-knock-knock/blob/main/CONTRIBUTING.md) for the development and pull request workflow. For local OpenClaw testing, rebuild, run `node dist/src/cli.js install-openclaw`, and restart the Gateway.
 
 ### Maintainer Release
 
