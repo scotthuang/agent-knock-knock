@@ -121,6 +121,7 @@ import {
   listManagedSessions,
   loadManagedSession,
   loadNativeThreadTransition,
+  nativeThreadTransitionsDir,
   saveManagedSession,
   saveNativeThreadTransition,
   tryLoadManagedSession
@@ -150,6 +151,7 @@ import {
 } from "./terminal-process-source.js";
 import {
   TerminalAgentBridge,
+  TerminalInputNotStartedError,
   type ResolvedTerminalConversation
 } from "./terminal-agent-bridge.js";
 import {
@@ -289,7 +291,8 @@ const STORE_MUTATION_COMMANDS = new Set([
   "monitor",
   "new-thread",
   "clear-thread",
-  "resume-thread"
+  "resume-thread",
+  "reconcile-binding"
 ]);
 
 class TurnBindingSupersededError extends Error {
@@ -448,6 +451,8 @@ async function runCommand(commandName, options) {
     await runListResumableThreads(options);
   } else if (commandName === "resume-thread") {
     await runResumeThread(options);
+  } else if (commandName === "reconcile-binding") {
+    await runReconcileBinding(options);
   } else if (commandName === "respond") {
     await runRespond(options);
   } else if (commandName === "approve") {
@@ -3639,6 +3644,21 @@ async function terminalControlledListEntry(
       });
     }
   }
+  const statusCardObservation = session.agent === "codex" &&
+      typeof terminalState.screen_excerpt === "string"
+    ? bridge.registry.require("codex").observeThreadLifecycle?.({
+        operation: { kind: "new_thread" },
+        phase: "before",
+        screen: terminalState.screen_excerpt
+      })
+    : undefined;
+  const statusCardNativeThreadId =
+    statusCardObservation?.status === "observed" &&
+      terminalState.activity_state === "idle" &&
+      terminalState.approval_state.blocked !== true &&
+      isExactNativeThreadId(statusCardObservation.nativeThreadId)
+      ? statusCardObservation.nativeThreadId
+      : undefined;
   const agentVersion = agentVersionForRunningProcess(
     session.agent,
     session.pid,
@@ -3679,6 +3699,7 @@ async function terminalControlledListEntry(
     workspace: session.cwd,
     elapsed: session.elapsed,
     native_agent_session_id: nativeAgentIdentity?.sessionId,
+    native_agent_status_card_session_id: statusCardNativeThreadId,
     native_agent_process_uuid: nativeProcessUuid,
     native_agent_process_birth: nativeProcessBirth,
     native_agent_rollout: nativeAgentIdentity?.rollout,
@@ -3791,6 +3812,24 @@ function terminalFirstListProjection({
     const matchingSessions = relatedSessions.filter((session) =>
       managedSessionMatchesLiveTerminalEntry(session, terminal, storeDir)
     );
+    const conflictingBoundSessionClaims = relatedSessions.flatMap(
+      (session): Array<{
+        session: ManagedSessionState;
+        kind: Exclude<
+          ManagedBindingConflictKind,
+          "stale_process_incarnation"
+        >;
+      }> => {
+        const kind = managedBindingConflictKindForLiveTerminalEntry({
+          storeDir,
+          session,
+          terminal
+        });
+        return kind && kind !== "stale_process_incarnation"
+          ? [{ session, kind }]
+          : [];
+      }
+    );
     const unresolvedSessionClaims = relatedSessions.filter((session) =>
       ["transitioning", "quarantined"].includes(session.status) &&
       managedSessionClaimsLiveTerminalEntry(session, terminal)
@@ -3810,6 +3849,41 @@ function terminalFirstListProjection({
           ),
           recovery:
             "use only the lifecycle recovery action listed for this terminal"
+        }
+      : conflictingBoundSessionClaims.length === 1
+      ? {
+          kind: conflictingBoundSessionClaims[0].kind,
+          reason:
+            conflictingBoundSessionClaims[0].kind === "provisional_orphan"
+              ? "a failed raw attach left a bound Session without an authoritative native-thread identity"
+              : conflictingBoundSessionClaims[0].kind ===
+                    "live_external_thread_change"
+                ? "the live coding-agent thread changed outside AKK while its previous Session binding remained bound"
+                : "the live terminal no longer matches a bound managed Session and the process relationship is unverifiable",
+          session_ids: [
+            conflictingBoundSessionClaims[0].session.session_id
+          ],
+          binding_ids: [
+            conflictingBoundSessionClaims[0].session.binding?.binding_id ?? null
+          ],
+          session_revisions: [
+            conflictingBoundSessionClaims[0].session.revision ?? null
+          ],
+          recovery:
+            conflictingBoundSessionClaims[0].kind === "unverifiable"
+              ? "inspect the terminal and Session identity; AKK cannot safely reconcile an unverifiable binding"
+              : "use only the exact reconcile_binding action listed for this terminal"
+        }
+      : conflictingBoundSessionClaims.length > 1
+      ? {
+          kind: "ambiguous_bound_claims",
+          reason:
+            "multiple non-exact bound managed Sessions claim the same live terminal",
+          session_ids: conflictingBoundSessionClaims.map(({ session }) =>
+            session.session_id
+          ),
+          recovery:
+            "inspect Session state; AKK will not reconcile ambiguous claims"
         }
       : matchingSessions.length > 1
       ? {
@@ -3868,6 +3942,56 @@ function terminalFirstListProjection({
           authoritativeSession
         )
       : rawActions;
+    const soleBindingConflict = conflictingBoundSessionClaims.length === 1
+      ? conflictingBoundSessionClaims[0]
+      : undefined;
+    const conflictingSessionRevision = Number(
+      soleBindingConflict?.session.revision
+    );
+    const conflictingSessionTurns = soleBindingConflict
+      ? managedTurnsForSession(
+          storeDir,
+          soleBindingConflict.session.session_id
+        )
+      : [];
+    const expectedTerminalToken = stringValue(
+      terminal.lifecycle_binding_token
+    );
+    const reconcileBindingAction =
+      mutationsAllowed &&
+      discoveredOwnership.state === "none" &&
+      unresolvedSessionClaims.length === 0 &&
+      matchingSessions.length === 0 &&
+      soleBindingConflict &&
+      soleBindingConflict.kind !== "unverifiable" &&
+      Number.isSafeInteger(conflictingSessionRevision) &&
+      conflictingSessionRevision > 0 &&
+      expectedTerminalToken &&
+      terminal.activity_state === "idle" &&
+      !(isRecord(terminal.approval_state) &&
+        terminal.approval_state.blocked === true) &&
+      !conflictingSessionTurns.some((turn) =>
+        SESSION_SEND_BLOCKING_STATUSES.has(turn.status)
+      ) &&
+      !managedSessionHasUnresolvedNativeTransition(
+        storeDir,
+        soleBindingConflict.session
+      )
+        ? {
+            tool: "agent_knock_knock_reconcile_binding",
+            arguments: {
+              terminal_id: stringValue(terminal.id),
+              conflicting_session_id:
+                soleBindingConflict.session.session_id,
+              expected_session_revision: conflictingSessionRevision,
+              expected_binding_token: managedSessionBindingToken(
+                soleBindingConflict.session
+              ),
+              expected_terminal_token: expectedTerminalToken
+            },
+            requires_user_intent: true
+          }
+        : undefined;
     const terminalCanAcceptSend =
       ownership.state === "none" && isRecord(sessionAwareRawActions.send);
     if (
@@ -3996,7 +4120,12 @@ function terminalFirstListProjection({
     const availableActions = ownership.state === "current"
       ? currentTerminalActions(currentTurn)
       : ownership.state === "conflict"
-        ? safeTerminalActionsDuringConflict(sessionAwareRawActions)
+        ? {
+            ...safeTerminalActionsDuringConflict(sessionAwareRawActions),
+            ...(reconcileBindingAction
+              ? { reconcile_binding: reconcileBindingAction }
+              : {})
+          }
         : managedSessionId &&
             sessionBindingMatchesLiveTerminal &&
             isRecord(sessionAwareRawActions.send)
@@ -4155,6 +4284,17 @@ function managedSessionMatchesLiveTerminalEntry(
     return false;
   }
   const liveThreadId = stringValue(terminal.native_agent_session_id);
+  const statusCardThreadId = stringValue(
+    terminal.native_agent_status_card_session_id
+  );
+  if (
+    isExactNativeThreadId(binding.native_thread_id) &&
+    isExactNativeThreadId(statusCardThreadId) &&
+    binding.native_thread_id.toLowerCase() !==
+      statusCardThreadId.toLowerCase()
+  ) {
+    return false;
+  }
   if (!liveThreadId) {
     return Boolean(
       session.agent === "codex" &&
@@ -4231,15 +4371,157 @@ function managedSessionClaimsLiveTerminalEntry(
   return Boolean(
     binding &&
     session.agent === terminal.agent &&
-    binding.terminal_id === stringValue(terminal.id) &&
     binding.native_process.pid === Number(terminal.pid) &&
     terminalControlSelectorKey(binding.terminal_control) ===
-      terminalControlSelectorKey(liveControl) &&
-    matchesConfiguredWorkspace(
+      terminalControlSelectorKey(liveControl)
+  );
+}
+
+type ManagedBindingConflictKind =
+  | "stale_process_incarnation"
+  | "live_external_thread_change"
+  | "provisional_orphan"
+  | "unverifiable";
+
+function listedTerminalProcessIncarnation(
+  terminal: Record<string, any>
+): { processUuid?: string; processBirth?: string } {
+  const processUuid = stringValue(terminal.native_agent_process_uuid);
+  const processBirth = stringValue(terminal.native_agent_process_birth);
+  if (
+    terminal.agent !== "codex" ||
+    (processUuid && processBirth)
+  ) {
+    return { processUuid, processBirth };
+  }
+  const pid = Number(terminal.pid);
+  if (!Number.isSafeInteger(pid) || pid <= 1) {
+    return { processUuid, processBirth };
+  }
+  try {
+    const incarnation = codexProcessIncarnationForPid(pid);
+    return {
+      processUuid: processUuid ?? incarnation.processUuid,
+      processBirth: processBirth ?? incarnation.processBirth
+    };
+  } catch {
+    return { processUuid, processBirth };
+  }
+}
+
+function managedBindingConflictKindForLiveTerminalEntry({
+  storeDir,
+  session,
+  terminal
+}: {
+  storeDir: string;
+  session: ManagedSessionState;
+  terminal: Record<string, any>;
+}): ManagedBindingConflictKind | undefined {
+  const binding = session.binding;
+  if (
+    session.status !== "bound" ||
+    !binding ||
+    !managedSessionClaimsLiveTerminalEntry(session, terminal) ||
+    managedSessionMatchesLiveTerminalEntry(session, terminal, storeDir)
+  ) {
+    return undefined;
+  }
+  const livePid = Number(terminal.pid);
+  const incarnation = listedTerminalProcessIncarnation(terminal);
+  const relationship = processIncarnationRelationship({
+    binding,
+    livePid,
+    liveProcessUuid: incarnation.processUuid,
+    liveProcessBirth: incarnation.processBirth
+  });
+  if (relationship === "different") {
+    return "stale_process_incarnation";
+  }
+  if (
+    binding.terminal_id !== stringValue(terminal.id) ||
+    !matchesConfiguredWorkspace(
       session.workspace,
       terminal.workspace ?? terminal.cwd
     )
+  ) {
+    return "unverifiable";
+  }
+  const statusCardThreadId = stringValue(
+    terminal.native_agent_status_card_session_id
   );
+  const liveNativeThreadId = stringValue(
+    terminal.native_agent_session_id
+  );
+  if (
+    isExactNativeThreadId(binding.native_thread_id) &&
+    isExactNativeThreadId(statusCardThreadId) &&
+    binding.native_thread_id.toLowerCase() !==
+      statusCardThreadId.toLowerCase()
+  ) {
+    return relationship === "same" &&
+        isExactNativeThreadId(liveNativeThreadId) &&
+        liveNativeThreadId.toLowerCase() ===
+          statusCardThreadId.toLowerCase()
+      ? "live_external_thread_change"
+      : "unverifiable";
+  }
+  if (
+    session.lineage.created_by === "attach" &&
+    !session.last_transition_id &&
+    !binding.native_thread_id &&
+    !binding.native_process.rollout &&
+    managedTurnsForSession(storeDir, session.session_id).length === 0
+  ) {
+    return "provisional_orphan";
+  }
+  if (
+    relationship === "same" &&
+    isExactNativeThreadId(binding.native_thread_id) &&
+    isExactNativeThreadId(liveNativeThreadId) &&
+    binding.native_thread_id.toLowerCase() !==
+      liveNativeThreadId.toLowerCase()
+  ) {
+    return "live_external_thread_change";
+  }
+  return "unverifiable";
+}
+
+function managedSessionHasUnresolvedNativeTransition(
+  storeDir: string,
+  session: ManagedSessionState
+): boolean {
+  const root = nativeThreadTransitionsDir(storeDir);
+  if (!fs.existsSync(root)) {
+    return false;
+  }
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return true;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    let transition: NativeThreadTransition;
+    try {
+      transition = loadNativeThreadTransition(storeDir, entry.name);
+    } catch {
+      return true;
+    }
+    if (
+      transition.source_session_id !== session.session_id &&
+      transition.target_session_id !== session.session_id
+    ) {
+      continue;
+    }
+    if (!["committed", "aborted"].includes(transition.status)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function terminalKeyForManagedConversation(
@@ -4735,7 +5017,10 @@ async function listStateForTerminal(
       },
       activity_state: status.activity_state,
       activity_reason: status.activity_reason,
-      capability_limitation: status.capability_limitation
+      capability_limitation: status.capability_limitation,
+      // Internal projection evidence; terminalControlledListEntry selects all
+      // public fields explicitly and never exposes the pane excerpt itself.
+      screen_excerpt: status.screen.excerpt
     };
   } catch (error) {
     return {
@@ -4824,11 +5109,12 @@ function managedListApprovalState(
 
 function listActionContracts() {
   return {
-    version: 5,
+    version: 6,
     instructions: [
       "Treat terminals[] as the primary resource and use only actions present in available_actions.",
       "An existing managed session's ordinary send targets session_id and creates a new turn. A turn id is never an ordinary send target.",
       "Read-only native-thread listing targets an exact terminal_id. Native-thread new/resume mutations also use the listed expected_binding_token and never create a Turn.",
+      "A binding conflict may be detached only through its exact reconcile_binding action, which is snapshot-bound to the Session revision, binding, and live terminal identity and never adopts a replacement native thread.",
       "List resumable threads before resume; use only a complete native_thread_id and the action returned for that candidate.",
       "For first attach only, use a discovery selector explicitly named by the user or the selector prefilled by that unmanaged raw-terminal row's available send action; never infer, guess, or reuse one.",
       "Use respond only for an in-flight turn that is explicitly waiting for OpenClaw.",
@@ -4908,6 +5194,22 @@ function listActionContracts() {
         creates_turn: false,
         requires_user_intent: true,
         candidate_source: "list_resumable_threads"
+      },
+      reconcile_binding: {
+        tool: "agent_knock_knock_reconcile_binding",
+        target_argument: "terminal_id",
+        required: [
+          "terminal_id",
+          "conflicting_session_id",
+          "expected_session_revision",
+          "expected_binding_token",
+          "expected_terminal_token"
+        ],
+        creates_turn: false,
+        sends_terminal_input: false,
+        requires_user_intent: true,
+        effect:
+          "Detach one exactly listed conflicting Session binding without adopting the live replacement thread."
       },
       respond: {
         tool: "agent_knock_knock_respond",
@@ -5583,6 +5885,118 @@ function codexProcessIncarnationForPid(pid: number): {
     processBirth,
     evidence: "codex_process_birth"
   };
+}
+
+type ProcessIncarnationRelationship =
+  | "same"
+  | "different"
+  | "unverifiable";
+
+function processIncarnationRelationship({
+  binding,
+  livePid,
+  liveProcessUuid,
+  liveProcessBirth
+}: {
+  binding: ManagedTerminalBinding;
+  livePid: number;
+  liveProcessUuid?: string;
+  liveProcessBirth?: string;
+}): ProcessIncarnationRelationship {
+  if (binding.native_process.pid !== livePid) {
+    return "different";
+  }
+  const comparisons: boolean[] = [];
+  if (binding.native_process.process_uuid && liveProcessUuid) {
+    comparisons.push(
+      binding.native_process.process_uuid === liveProcessUuid
+    );
+  }
+  if (binding.native_process.process_birth && liveProcessBirth) {
+    comparisons.push(
+      binding.native_process.process_birth === liveProcessBirth
+    );
+  }
+  if (comparisons.length === 0) {
+    return "unverifiable";
+  }
+  if (comparisons.every(Boolean)) {
+    return "same";
+  }
+  if (comparisons.every((value) => !value)) {
+    return "different";
+  }
+  return "unverifiable";
+}
+
+function resolvedTerminalProcessIncarnation(
+  terminal: Pick<ResolvedTerminalConversation, "agent" | "pid">,
+  identity?: NativeAgentSessionIdentity
+): { processUuid?: string; processBirth?: string } {
+  if (
+    terminal.agent !== "codex" ||
+    (identity?.processUuid && identity.processBirth)
+  ) {
+    return {
+      processUuid: identity?.processUuid,
+      processBirth: identity?.processBirth
+    };
+  }
+  try {
+    const incarnation = codexProcessIncarnationForPid(terminal.pid);
+    return {
+      processUuid: identity?.processUuid ?? incarnation.processUuid,
+      processBirth: identity?.processBirth ?? incarnation.processBirth
+    };
+  } catch {
+    return {
+      processUuid: identity?.processUuid,
+      processBirth: identity?.processBirth
+    };
+  }
+}
+
+function managedSessionOwnerIsConclusivelyInactive({
+  session,
+  terminal,
+  identity
+}: {
+  session: ManagedSessionState;
+  terminal: Pick<ResolvedTerminalConversation, "agent" | "pid">;
+  identity?: NativeAgentSessionIdentity;
+}): boolean {
+  const binding = session.binding;
+  if (!binding) {
+    return false;
+  }
+  if (binding.native_process.pid !== terminal.pid) {
+    if (!isProcessAlive(binding.native_process.pid)) {
+      return true;
+    }
+    if (session.agent !== "codex") {
+      return false;
+    }
+    try {
+      const ownerIncarnation = codexProcessIncarnationForPid(
+        binding.native_process.pid
+      );
+      return processIncarnationRelationship({
+        binding,
+        livePid: binding.native_process.pid,
+        liveProcessUuid: ownerIncarnation.processUuid,
+        liveProcessBirth: ownerIncarnation.processBirth
+      }) === "different";
+    } catch {
+      return false;
+    }
+  }
+  const incarnation = resolvedTerminalProcessIncarnation(terminal, identity);
+  return processIncarnationRelationship({
+    binding,
+    livePid: terminal.pid,
+    liveProcessUuid: incarnation.processUuid,
+    liveProcessBirth: incarnation.processBirth
+  }) === "different";
 }
 
 function isCodexStatusCardEvidence(evidence: string): boolean {
@@ -6306,9 +6720,15 @@ function boundManagedSessionForTerminal({
   const conflicting = sessions.filter((session) =>
     session.status === "bound" &&
     session.binding &&
+    session.agent === terminal.agent &&
     terminalControlSelectorKey(session.binding.terminal_control) ===
       terminalControlSelectorKey(terminal.terminalControl) &&
     session.binding.native_process.pid === terminal.pid &&
+    !managedSessionOwnerIsConclusivelyInactive({
+      session,
+      terminal,
+      identity
+    }) &&
     !exact.includes(session)
   );
   if (conflicting.length > 0) {
@@ -6318,6 +6738,69 @@ function boundManagedSessionForTerminal({
     );
   }
   return exact[0];
+}
+
+function managedBindingConflictKindForResolvedTerminal({
+  storeDir,
+  session,
+  terminal,
+  identity
+}: {
+  storeDir: string;
+  session: ManagedSessionState;
+  terminal: ResolvedTerminalConversation;
+  identity?: NativeAgentSessionIdentity;
+}): ManagedBindingConflictKind | undefined {
+  const binding = session.binding;
+  if (
+    session.status !== "bound" ||
+    !binding ||
+    session.agent !== terminal.agent ||
+    binding.terminal_id !== terminal.conversationId ||
+    binding.native_process.pid !== terminal.pid ||
+    terminalControlSelectorKey(binding.terminal_control) !==
+      terminalControlSelectorKey(terminal.terminalControl) ||
+    !matchesConfiguredWorkspace(
+      session.workspace,
+      terminal.terminalControl.currentPath
+    ) ||
+    bindingMatchesLiveTerminal(session, terminal, identity, storeDir)
+  ) {
+    return undefined;
+  }
+  if (managedSessionOwnerIsConclusivelyInactive({
+    session,
+    terminal,
+    identity
+  })) {
+    return "stale_process_incarnation";
+  }
+  if (
+    session.lineage.created_by === "attach" &&
+    !session.last_transition_id &&
+    !binding.native_thread_id &&
+    !binding.native_process.rollout &&
+    managedTurnsForSession(storeDir, session.session_id).length === 0
+  ) {
+    return "provisional_orphan";
+  }
+  const incarnation = resolvedTerminalProcessIncarnation(terminal, identity);
+  const relationship = processIncarnationRelationship({
+    binding,
+    livePid: terminal.pid,
+    liveProcessUuid: incarnation.processUuid,
+    liveProcessBirth: incarnation.processBirth
+  });
+  if (
+    relationship === "same" &&
+    isExactNativeThreadId(binding.native_thread_id) &&
+    isExactNativeThreadId(identity?.sessionId) &&
+    binding.native_thread_id.toLowerCase() !==
+      identity.sessionId.toLowerCase()
+  ) {
+    return "live_external_thread_change";
+  }
+  return "unverifiable";
 }
 
 function soleBoundManagedSessionClaimForTerminal(
@@ -6338,7 +6821,11 @@ function soleBoundManagedSessionClaimForTerminal(
     matchesConfiguredWorkspace(
       session.workspace,
       terminal.terminalControl.currentPath
-    )
+    ) &&
+    !managedSessionOwnerIsConclusivelyInactive({
+      session,
+      terminal
+    })
   );
   if (claims.length > 1) {
     throw new Error(
@@ -6368,15 +6855,18 @@ function createBoundManagedSession({
   now?: Date;
 }): ManagedSessionState {
   const workspace = terminal.terminalControl.currentPath ?? process.cwd();
+  const codexIncarnation = terminal.agent === "codex" && !identity
+    ? codexProcessIncarnationForPid(terminal.pid)
+    : undefined;
   const binding = terminalBindingFrom({
     terminalId: terminal.conversationId,
     terminalControl: terminal.terminalControl,
     pid: terminal.pid,
     nativeThreadId,
-    processUuid: identity?.processUuid,
-    processBirth: identity?.processBirth,
+    processUuid: identity?.processUuid ?? codexIncarnation?.processUuid,
+    processBirth: identity?.processBirth ?? codexIncarnation?.processBirth,
     rollout: identity?.rollout,
-    evidence,
+    evidence: identity?.evidence ?? codexIncarnation?.evidence ?? evidence,
     generation,
     now
   });
@@ -6499,10 +6989,11 @@ async function reattachManagedSessionForNativeIdentity({
   const previousPid = existing.binding.native_process.pid;
   if (
     existing.status === "bound" &&
-    (
-      previousPid === terminal.pid ||
-      isProcessAlive(previousPid)
-    )
+    !managedSessionOwnerIsConclusivelyInactive({
+      session: existing,
+      terminal,
+      identity
+    })
   ) {
     throw new Error(
       `managed Session ${existing.session_id} is still bound to process ${previousPid}`
@@ -7047,7 +7538,11 @@ async function resumableThreadCandidates({
           managed.length === 1 &&
           managed[0].status === "bound" &&
           Boolean(managed[0].binding) &&
-          !isProcessAlive(managed[0].binding?.native_process.pid),
+          managedSessionOwnerIsConclusivelyInactive({
+            session: managed[0],
+            terminal,
+            identity: currentIdentity
+          }),
         managedSessionWorkspaceMatches:
           managed.length === 1
             ? path.resolve(managed[0].workspace) === workspace
@@ -8033,6 +8528,236 @@ async function runResumeThread(options) {
   });
 }
 
+async function runReconcileBinding(options: Record<string, any>) {
+  const initiallyResolved = await resolveLifecycleTerminal(options);
+  const storeDir = storeDirFromOptions(options);
+  const conflictingSessionId = required(
+    stringValue(
+      options.conflictingSession ?? options.conflictingSessionId
+    ),
+    "--conflicting-session is required"
+  );
+  const expectedRevisionValue = required(
+    stringValue(
+      options.expectedSessionRevision ?? options.sessionRevision
+    ),
+    "--expected-session-revision is required"
+  );
+  if (!/^[1-9][0-9]*$/u.test(expectedRevisionValue)) {
+    throw new Error(
+      "--expected-session-revision must be a positive integer"
+    );
+  }
+  const expectedSessionRevision = Number(expectedRevisionValue);
+  if (!Number.isSafeInteger(expectedSessionRevision)) {
+    throw new Error(
+      "--expected-session-revision must be a positive safe integer"
+    );
+  }
+  const expectedBindingToken = required(
+    stringValue(options.expectedBindingToken),
+    "--expected-binding-token is required"
+  );
+  const expectedTerminalToken = required(
+    stringValue(options.expectedTerminalToken),
+    "--expected-terminal-token is required"
+  );
+  const releaseTerminalLock = acquireFileLock(
+    terminalBridgeSendLockPath(
+      storeDir,
+      initiallyResolved.terminalControl
+    ),
+    { timeoutMs: 30000 }
+  );
+  try {
+    return await withStoreWriterLeaseAsync(storeDir, async () => {
+      const terminal = await resolveLifecycleTerminal(options);
+      if (
+        terminal.pid !== initiallyResolved.pid ||
+        terminal.conversationId !== initiallyResolved.conversationId ||
+        terminalControlSelectorKey(terminal.terminalControl) !==
+          terminalControlSelectorKey(initiallyResolved.terminalControl)
+      ) {
+        throw new Error(
+          "terminal identity changed while waiting to reconcile its binding; refresh AKK list"
+        );
+      }
+      await recoverLifecycleFenceBeforeMutation({ options, terminal });
+      const dispatchOwnership = terminalDispatchOwnership(
+        terminal.terminalControl
+      );
+      if (dispatchOwnership.state !== "none") {
+        throw new Error(
+          "the terminal acquired an unresolved dispatch after the binding conflict was listed; refresh AKK list"
+        );
+      }
+      const session = loadManagedSession(storeDir, conflictingSessionId);
+      if (
+        session.revision !== expectedSessionRevision ||
+        managedSessionBindingToken(session) !== expectedBindingToken
+      ) {
+        throw new Error(
+          "managed Session binding changed after it was listed; refresh AKK list"
+        );
+      }
+      const binding = session.binding;
+      if (
+        session.status !== "bound" ||
+        !binding ||
+        session.agent !== terminal.agent ||
+        binding.terminal_id !== terminal.conversationId ||
+        binding.native_process.pid !== terminal.pid ||
+        terminalControlSelectorKey(binding.terminal_control) !==
+          terminalControlSelectorKey(terminal.terminalControl) ||
+        !matchesConfiguredWorkspace(
+          session.workspace,
+          terminal.terminalControl.currentPath
+        )
+      ) {
+        throw new Error(
+          "the listed managed Session no longer claims this exact terminal"
+        );
+      }
+      const identity = await resolveCurrentNativeAgentSessionIdentity({
+        options,
+        agent: terminal.agent,
+        pid: terminal.pid,
+        cwd: terminal.terminalControl.currentPath
+      });
+      const terminalToken = lifecycleBindingToken({
+        terminal,
+        identity
+      });
+      if (terminalToken !== expectedTerminalToken) {
+        throw new Error(
+          "live terminal identity changed after the conflict was listed; refresh AKK list"
+        );
+      }
+      const bridge = createTerminalAgentBridge(options);
+      if (managedSessionHasUnresolvedNativeTransition(storeDir, session)) {
+        throw new Error(
+          `managed Session ${session.session_id} has an unresolved native-thread transition`
+        );
+      }
+      const blockers = managedTurnsForSession(
+        storeDir,
+        session.session_id
+      ).filter((turn) => SESSION_SEND_BLOCKING_STATUSES.has(turn.status));
+      if (blockers.length > 0) {
+        throw new Error(
+          `managed Session ${session.session_id} still has unresolved Turn ` +
+          `${turnIdForConversation(blockers[0])} (${blockers[0].status})`
+        );
+      }
+      const finalTerminal = await resolveLifecycleTerminal(options);
+      if (
+        finalTerminal.pid !== terminal.pid ||
+        finalTerminal.conversationId !== terminal.conversationId ||
+        terminalControlSelectorKey(finalTerminal.terminalControl) !==
+          terminalControlSelectorKey(terminal.terminalControl)
+      ) {
+        throw new Error(
+          "terminal identity changed during binding reconciliation; refresh AKK list"
+        );
+      }
+      const finalStatus = await bridge.status(
+        finalTerminal.agent,
+        finalTerminal.terminalControl,
+        {
+          runtime: terminalRuntimeForLiveIdentity({
+            terminal: finalTerminal,
+            physicalOnly: true
+          })
+        }
+      );
+      assertTerminalLifecycleReady({
+        options,
+        terminal: finalTerminal,
+        terminalStatus: finalStatus
+      });
+      const finalIdentity = await resolveCurrentNativeAgentSessionIdentity({
+        options,
+        agent: finalTerminal.agent,
+        pid: finalTerminal.pid,
+        cwd: finalTerminal.terminalControl.currentPath
+      });
+      if (
+        lifecycleBindingToken({
+          terminal: finalTerminal,
+          identity: finalIdentity
+        }) !== expectedTerminalToken
+      ) {
+        throw new Error(
+          "live terminal identity changed during binding reconciliation; refresh AKK list"
+        );
+      }
+      const finalSession = loadManagedSession(
+        storeDir,
+        conflictingSessionId
+      );
+      if (
+        finalSession.revision !== expectedSessionRevision ||
+        managedSessionBindingToken(finalSession) !== expectedBindingToken
+      ) {
+        throw new Error(
+          "managed Session binding changed during reconciliation; refresh AKK list"
+        );
+      }
+      const conflictKind = managedBindingConflictKindForResolvedTerminal({
+        storeDir,
+        session: finalSession,
+        terminal: finalTerminal,
+        identity: finalIdentity
+      });
+      if (![
+        "provisional_orphan",
+        "live_external_thread_change"
+      ].includes(String(conflictKind))) {
+        throw new Error(
+          conflictKind === "stale_process_incarnation"
+            ? "the stale process incarnation no longer requires explicit reconciliation; refresh AKK list"
+            : conflictKind === undefined
+              ? "the managed Session now exactly matches the live terminal; no reconciliation is needed"
+              : "the managed binding conflict is unverifiable and cannot be detached automatically"
+        );
+      }
+      const reconciledAt = new Date().toISOString();
+      const detached = saveManagedSession(storeDir, {
+        ...finalSession,
+        status: "detached",
+        detached_at: reconciledAt,
+        updated_at: reconciledAt
+      }, {
+        expectedRevision: expectedSessionRevision
+      });
+      runtimeLog("info", "managed_binding_reconciled", {
+        terminal_id: terminal.conversationId,
+        terminal_target: terminal.terminalControl.target,
+        session_id: detached.session_id,
+        binding_id: detached.binding?.binding_id,
+        previous_revision: expectedSessionRevision,
+        revision: detached.revision,
+        conflict_kind: conflictKind,
+        terminal_input_sent: false
+      });
+      printJson({
+        status: "reconciled",
+        outcome: "detached_conflicting_binding",
+        conflict_kind: conflictKind,
+        terminal_id: terminal.conversationId,
+        session_id: detached.session_id,
+        binding_id: detached.binding?.binding_id,
+        session_revision: detached.revision,
+        terminal_input_sent: false,
+        turn_created: false,
+        refresh_required: true
+      });
+    });
+  } finally {
+    releaseTerminalLock();
+  }
+}
+
 function assertResumeSnapshotMatchesTerminal(
   snapshot: NativeThreadResumeSnapshot,
   terminal: ResolvedTerminalConversation
@@ -8370,8 +9095,11 @@ async function runNativeThreadTransition(
             );
           }
           if (targetSession?.status === "bound") {
-            const stalePid = targetSession.binding?.native_process.pid;
-            if (!stalePid || isProcessAlive(stalePid)) {
+            if (!managedSessionOwnerIsConclusivelyInactive({
+              session: targetSession,
+              terminal,
+              identity: beforeIdentity
+            })) {
               throw new Error(
                 `target Session ${candidate.managed_session_id} is still bound to a live or unverifiable process`
               );
@@ -9693,6 +10421,7 @@ async function runSend(options) {
           storeDir: rawStoreDir
         });
       }
+      let pendingRawAttachSessionCreate: ManagedSessionState | undefined;
       if (!managedSession) {
         if (currentNativeIdentity) {
           await assertNativeThreadHasExclusiveOwnership({
@@ -9710,11 +10439,18 @@ async function runSend(options) {
           identity: currentNativeIdentity,
           lineage: { created_by: "attach" }
         });
-        managedSession = saveManagedSession(
-          rawStoreDir,
-          managedSession,
-          { expectedRevision: null }
-        );
+        if (
+          terminalConversation.agent === "codex" &&
+          !currentNativeIdentity
+        ) {
+          pendingRawAttachSessionCreate = managedSession;
+        } else {
+          managedSession = saveManagedSession(
+            rawStoreDir,
+            managedSession,
+            { expectedRevision: null }
+          );
+        }
       }
       const logicalNativeIdentity = logicalIdentityForManagedSession({
         storeDir: rawStoreDir,
@@ -9798,6 +10534,42 @@ async function runSend(options) {
           storeWriterLeaseHeld: true,
           recordMessageAfterSend: true,
           recordRawAttachmentAfterSend: reusableTurn === undefined,
+          onTerminalPreflightVerified: pendingRawAttachSessionCreate
+            ? () => {
+                const createdSession = saveManagedSession(
+                  rawStoreDir,
+                  pendingRawAttachSessionCreate as ManagedSessionState,
+                  { expectedRevision: null }
+                );
+                managedSession = createdSession;
+                pendingRawAttachSessionCreate = undefined;
+                return () => {
+                  const current = loadManagedSession(
+                    rawStoreDir,
+                    createdSession.session_id
+                  );
+                  if (
+                    current.status !== "bound" ||
+                    current.revision !== createdSession.revision ||
+                    managedSessionBindingToken(current) !==
+                      managedSessionBindingToken(createdSession)
+                  ) {
+                    throw new Error(
+                      `new raw-attach Session ${createdSession.session_id} changed before pre-transport rollback`
+                    );
+                  }
+                  const detachedAt = new Date().toISOString();
+                  managedSession = saveManagedSession(rawStoreDir, {
+                    ...current,
+                    status: "detached",
+                    detached_at: detachedAt,
+                    updated_at: detachedAt
+                  }, {
+                    expectedRevision: current.revision as number
+                  });
+                };
+              }
+            : undefined,
           allowedPreMaterializationIdentity,
           allowedAdditionalIdentities
         });
@@ -10929,6 +11701,8 @@ async function runTerminalControlSend({
   storeWriterLeaseHeld = false,
   recordMessageAfterSend = false,
   recordRawAttachmentAfterSend = false,
+  onTerminalPreflightVerified = undefined as
+    (() => (() => void) | void) | undefined,
   allowedPreMaterializationIdentity = undefined as
     CodexPreMaterializationIdentity | undefined,
   allowedAdditionalIdentities = [] as CodexPreMaterializationIdentity[],
@@ -10955,6 +11729,7 @@ async function runTerminalControlSend({
         storeWriterLeaseHeld,
         recordMessageAfterSend,
         recordRawAttachmentAfterSend,
+        onTerminalPreflightVerified,
         allowedPreMaterializationIdentity,
         allowedAdditionalIdentities,
         continuingTurnResponse
@@ -10997,6 +11772,7 @@ async function runTerminalControlSend({
         storeWriterLeaseHeld,
         recordMessageAfterSend,
         recordRawAttachmentAfterSend,
+        onTerminalPreflightVerified,
         allowedPreMaterializationIdentity,
         allowedAdditionalIdentities,
         continuingTurnResponse
@@ -11025,6 +11801,7 @@ async function runTerminalControlSend({
         storeWriterLeaseHeld: true,
         recordMessageAfterSend,
         recordRawAttachmentAfterSend,
+        onTerminalPreflightVerified,
         allowedPreMaterializationIdentity,
         allowedAdditionalIdentities,
         continuingTurnResponse
@@ -11344,6 +12121,30 @@ async function runTerminalControlSend({
       }`
     );
   }
+  // A newly discovered raw terminal may not have an authoritative Session
+  // yet. Commit that Session only after every pre-input terminal and native
+  // acceptance check has passed, but before the Turn or dispatch ledger can
+  // become durable. This prevents a failed virgin attach from leaving a
+  // zero-identity `bound` Session that fences every later control action.
+  let rollbackPreTransportAttach = onTerminalPreflightVerified?.();
+  const rollbackRawAttachBeforeTransport = (): boolean => {
+    if (!rollbackPreTransportAttach) {
+      return true;
+    }
+    const rollback = rollbackPreTransportAttach;
+    rollbackPreTransportAttach = undefined;
+    try {
+      rollback();
+      return true;
+    } catch (error) {
+      runtimeLog("error", "raw_attach_pre_transport_rollback_failed", {
+        conversation_id: conversation.conversation_id,
+        terminal_target: terminalControl.target,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return false;
+    }
+  };
   const bridgeConversation = bridge
     ? withTerminalBridgeState({
         conversation: nextConversation,
@@ -11368,33 +12169,50 @@ async function runTerminalControlSend({
     preparedAt: bridgeStartedAt
   });
 
-  saveTerminalBridgeDispatchLedger(terminalControl, {
-    ...terminalBindingLedgerFields(preparedConversation),
-    status: "prepared",
-    generation_id: message.id,
-    conversation_id: preparedConversation.conversation_id,
-    session_id: sessionIdForConversation(preparedConversation),
-    turn_id: turnIdForConversation(preparedConversation),
-    message_id: message.id,
-    message_type: message.type,
-    request_hash: terminalRequestHash,
-    prepared_at: bridgeStartedAt,
-    dispatcher_pid: process.pid,
-    state_path: statePath,
-    event_log_path: logPath,
-    callback_expected: Boolean(preparedConversation.gateway_method),
-    previous_generation_id:
-      stringValue(previousDispatchLedger?.generation_id) ??
-      stringValue(previousDispatchLedger?.message_id)
-  });
+  try {
+    saveTerminalBridgeDispatchLedger(terminalControl, {
+      ...terminalBindingLedgerFields(preparedConversation),
+      status: "prepared",
+      generation_id: message.id,
+      conversation_id: preparedConversation.conversation_id,
+      session_id: sessionIdForConversation(preparedConversation),
+      turn_id: turnIdForConversation(preparedConversation),
+      message_id: message.id,
+      message_type: message.type,
+      request_hash: terminalRequestHash,
+      prepared_at: bridgeStartedAt,
+      dispatcher_pid: process.pid,
+      state_path: statePath,
+      event_log_path: logPath,
+      callback_expected: Boolean(preparedConversation.gateway_method),
+      previous_generation_id:
+        stringValue(previousDispatchLedger?.generation_id) ??
+        stringValue(previousDispatchLedger?.message_id)
+    });
+  } catch (error) {
+    try {
+      restoreTerminalBridgeDispatchLedger({
+        terminalControl,
+        previousLedger: previousDispatchLedger,
+        reason: "prepared ledger persistence failed before tmux input"
+      });
+    } finally {
+      rollbackRawAttachBeforeTransport();
+    }
+    throw error;
+  }
   try {
     saveState(statePath, preparedConversation);
   } catch (error) {
-    restoreTerminalBridgeDispatchLedger({
-      terminalControl,
-      previousLedger: previousDispatchLedger,
-      reason: "prepared state persistence failed before tmux input"
-    });
+    try {
+      restoreTerminalBridgeDispatchLedger({
+        terminalControl,
+        previousLedger: previousDispatchLedger,
+        reason: "prepared state persistence failed before tmux input"
+      });
+    } finally {
+      rollbackRawAttachBeforeTransport();
+    }
     throw error;
   }
   let bridgeMonitor:
@@ -11474,6 +12292,9 @@ async function runTerminalControlSend({
           : String(ledgerError)
       });
     }
+    const rawAttachRolledBack = rollbackRawAttachBeforeTransport();
+    const durableAbortCanBeRetryable =
+      dispatchLedgerRestored && rawAttachRolledBack;
     const failureBase = recordRawAttachmentAfterSend
       ? {
           ...preparedConversation,
@@ -11499,7 +12320,7 @@ async function runTerminalControlSend({
       preparedAt: bridgeStartedAt,
       abortedAt,
       error: errorMessage,
-      safeToRetry: dispatchLedgerRestored
+      safeToRetry: durableAbortCanBeRetryable
     });
     let abortedStatePersisted = false;
     try {
@@ -11521,7 +12342,8 @@ async function runTerminalControlSend({
           : String(persistenceError)
       });
     }
-    const safeToRetry = dispatchLedgerRestored && abortedStatePersisted;
+    const safeToRetry =
+      durableAbortCanBeRetryable && abortedStatePersisted;
     try {
       appendEvent(logPath, {
         ts: abortedAt,
@@ -11562,7 +12384,8 @@ async function runTerminalControlSend({
       error: errorMessage,
       safe_to_retry: safeToRetry,
       dispatch_ledger_restored: dispatchLedgerRestored,
-      aborted_state_persisted: abortedStatePersisted
+      aborted_state_persisted: abortedStatePersisted,
+      raw_attach_rolled_back: rawAttachRolledBack
     });
     printJson({
       session_id: sessionIdForConversation(abortedConversation),
@@ -11583,6 +12406,8 @@ async function runTerminalControlSend({
         ? "AKK failed before touching tmux; this terminal submission was not sent and may be retried."
         : !dispatchLedgerRestored
           ? "AKK failed before tmux input but could not restore the terminal dispatch ledger; inspect and close the conversation before retrying."
+          : !rawAttachRolledBack
+            ? "AKK failed before tmux input but could not detach the provisional raw-attach Session; inspect its exact binding before retrying."
           : "AKK failed before tmux input but could not persist the aborted receipt; inspect the conversation before retrying.",
       openclaw_next_action: {
         action: safeToRetry ? "retry" : "inspect",
@@ -11595,6 +12420,8 @@ async function runTerminalControlSend({
           ? "The failure occurred before any tmux input."
           : !dispatchLedgerRestored
             ? "The terminal ledger could not be restored automatically."
+            : !rawAttachRolledBack
+              ? "The provisional raw-attach Session could not be detached automatically."
             : "The aborted receipt could not be made durable."
       }
     });
@@ -12017,6 +12844,151 @@ async function runTerminalControlSend({
       }
     }
   } catch (error) {
+    if (
+      !textInjectedAt &&
+      error instanceof TerminalInputNotStartedError
+    ) {
+      const abortedAt = new Date().toISOString();
+      const errorMessage = error.message;
+      let dispatchLedgerRestored = true;
+      try {
+        restoreTerminalBridgeDispatchLedger({
+          terminalControl,
+          previousLedger: previousDispatchLedger,
+          reason: "terminal transport was proved not to have started"
+        });
+      } catch (ledgerError) {
+        dispatchLedgerRestored = false;
+        runtimeLog("error", "terminal_dispatch_ledger_restore_failed", {
+          conversation_id: conversation.conversation_id,
+          terminal_target: terminalControl.target,
+          error: ledgerError instanceof Error
+            ? ledgerError.message
+            : String(ledgerError)
+        });
+      }
+      const rawAttachRolledBack = rollbackRawAttachBeforeTransport();
+      const durableAbortCanBeRetryable =
+        dispatchLedgerRestored && rawAttachRolledBack;
+      const failureBase = recordRawAttachmentAfterSend
+        ? {
+            ...preparedConversation,
+            status: "failed" as const,
+            failed_at: abortedAt,
+            failure_reason:
+              "terminal transport failed before terminal input"
+          }
+        : {
+            ...preparedConversation,
+            status: conversation.status,
+            ...(conversation.idle_since
+              ? { idle_since: conversation.idle_since }
+              : {})
+          };
+      const abortedConversation = withTerminalBridgeSubmission({
+        conversation: failureBase,
+        messageId: message.id,
+        messageType: message.type,
+        messageBody: String(message.body),
+        requestText: terminalPayload,
+        status: "aborted",
+        preparedAt: bridgeStartedAt,
+        abortedAt,
+        error: errorMessage,
+        safeToRetry: durableAbortCanBeRetryable
+      });
+      let abortedStatePersisted = false;
+      try {
+        saveState(statePath, abortedConversation);
+        abortedStatePersisted = true;
+      } catch (persistenceError) {
+        runtimeLog("error", "terminal_message_submit_aborted_persist_failed", {
+          conversation_id: abortedConversation.conversation_id,
+          terminal_target: terminalControl.target,
+          error: persistenceError instanceof Error
+            ? persistenceError.message
+            : String(persistenceError)
+        });
+      }
+      const safeToRetry =
+        durableAbortCanBeRetryable && abortedStatePersisted;
+      const reportedConversation = safeToRetry
+        ? abortedConversation
+        : withTerminalBridgeSubmission({
+            conversation: abortedConversation,
+            messageId: message.id,
+            messageType: message.type,
+            messageBody: String(message.body),
+            requestText: terminalPayload,
+            status: "aborted",
+            preparedAt: bridgeStartedAt,
+            abortedAt,
+            error: errorMessage,
+            safeToRetry: false
+          });
+      try {
+        appendEvent(logPath, {
+          ts: abortedAt,
+          conversation_id: abortedConversation.conversation_id,
+          event: "terminal_message_submit_aborted",
+          message_id: message.id,
+          executor,
+          terminal_control: terminalControl,
+          error: textSummary(errorMessage),
+          safe_to_retry: safeToRetry,
+          terminal_input_started: false
+        });
+      } catch (persistenceError) {
+        runtimeLog("error", "terminal_message_submit_aborted_event_failed", {
+          conversation_id: abortedConversation.conversation_id,
+          terminal_target: terminalControl.target,
+          error: persistenceError instanceof Error
+            ? persistenceError.message
+            : String(persistenceError)
+        });
+      }
+      runtimeLog("error", "terminal_message_submit_aborted", {
+        conversation_id: abortedConversation.conversation_id,
+        terminal_target: terminalControl.target,
+        error: errorMessage,
+        safe_to_retry: safeToRetry,
+        terminal_input_started: false,
+        dispatch_ledger_restored: dispatchLedgerRestored,
+        aborted_state_persisted: abortedStatePersisted,
+        raw_attach_rolled_back: rawAttachRolledBack
+      });
+      printJson({
+        session_id: sessionIdForConversation(reportedConversation),
+        turn_id: turnIdForConversation(reportedConversation),
+        conversation: reportedConversation,
+        message,
+        delivered: false,
+        status: "submission_aborted",
+        submission_outcome: "aborted",
+        background: true,
+        callback_expected: false,
+        terminal_control: terminalControl,
+        monitor_pid: bridgeMonitor?.pid ?? null,
+        executor,
+        safe_to_retry: safeToRetry,
+        do_not_retry: !safeToRetry,
+        reason: safeToRetry
+          ? "AKK proved that terminal input never started; this submission may be retried."
+          : "AKK proved terminal input never started but could not make every abort receipt and Session rollback durable; inspect before retrying.",
+        openclaw_next_action: {
+          action: safeToRetry ? "retry" : "inspect",
+          conversation_id: reportedConversation.conversation_id,
+          session_id: sessionIdForConversation(reportedConversation),
+          turn_id: turnIdForConversation(reportedConversation),
+          safe_to_retry: safeToRetry,
+          do_not_retry: !safeToRetry,
+          reason: safeToRetry
+            ? "The terminal transport failed before any input operation succeeded."
+            : "The pre-input failure could not be fully reconciled in durable state."
+        }
+      });
+      return;
+    }
     const uncertainAt = new Date().toISOString();
     const errorMessage = error instanceof Error ? error.message : String(error);
     const failureBase = stagedConversation;
@@ -23335,6 +24307,7 @@ function usage() {
   agent-knock-knock list-resumable-threads --terminal <exact-terminal-id> [--selection-scope <opaque-scope>]
   agent-knock-knock resume-thread --terminal <exact-terminal-id> --native-thread <uuid> --expected-binding-token <token> --candidate-token <token>
   agent-knock-knock resume-thread --terminal <exact-terminal-id> (--selection-handle <handle> | --selection-snapshot <id> (--selection-number <n> | --selection-short-id <@id>)) --selection-scope <opaque-scope>
+  agent-knock-knock reconcile-binding --terminal <exact-terminal-id> --conflicting-session <session-id> --expected-session-revision <n> --expected-binding-token <token> --expected-terminal-token <token>
   agent-knock-knock respond --turn <turn-id|selector> --message <text> [--conversation <selector>]
   agent-knock-knock approve [--turn <turn-id|selector>] [--conversation <selector>] --expected-approval-fingerprint <fingerprint>
   agent-knock-knock cancel [--turn <turn-id|selector>] [--conversation <selector>]

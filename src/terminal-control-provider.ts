@@ -32,6 +32,19 @@ export interface TerminalControlProvider {
   sendKeys(target: string, keys: readonly string[], options?: { socketPath?: string }): Promise<void>;
 }
 
+/**
+ * A provider-level failure proving that no terminal input operation succeeded.
+ * Unknown/time-out outcomes must use an ordinary Error instead.
+ */
+export class TerminalControlInputNotSentError extends Error {
+  readonly code = "AKK_TERMINAL_INPUT_NOT_SENT";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "TerminalControlInputNotSentError";
+  }
+}
+
 export interface CommandResult {
   status: number | null;
   stdout: string;
@@ -193,6 +206,15 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
           "-b",
           bufferName
         ]));
+        if (
+          pasteBuffer.status === null &&
+          !commandDefinitelyDidNotStart(pasteBuffer.error)
+        ) {
+          throw new Error(
+            pasteBuffer.stderr || pasteBuffer.error?.message ||
+            `tmux terminal paste outcome is uncertain for ${target}`
+          );
+        }
         lastResult = pasteBuffer;
         continue;
       }
@@ -200,10 +222,28 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
       if (result.status === 0) {
         return;
       }
+      if (
+        result.status === null &&
+        !commandDefinitelyDidNotStart(result.error)
+      ) {
+        // A timeout or signal after spawn may already have delivered input.
+        // Do not try another tmux executable and risk injecting it twice.
+        throw new Error(
+          result.stderr || result.error?.message ||
+          `tmux terminal input outcome is uncertain for ${target}`
+        );
+      }
       lastResult = result;
     }
-    throw new Error(lastResult?.stderr || lastResult?.error?.message || `tmux terminal paste failed for ${target}`);
+    const message = lastResult?.stderr || lastResult?.error?.message ||
+      `tmux terminal paste failed for ${target}`;
+    throw new TerminalControlInputNotSentError(message);
   }
+}
+
+function commandDefinitelyDidNotStart(error: Error | undefined): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === "ENOENT" || code === "EACCES" || code === "ENOTDIR";
 }
 
 export class StaticTerminalControlProvider implements TerminalControlProvider {

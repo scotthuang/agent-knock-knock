@@ -9,6 +9,15 @@ const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 const testRuntimeDir = fs.mkdtempSync(
   path.join(os.tmpdir(), "akk-delegate-cli-runtime-")
 );
+const delegateFakeBinDir = path.join(testRuntimeDir, "bin");
+fs.mkdirSync(delegateFakeBinDir, { recursive: true });
+fs.writeFileSync(path.join(delegateFakeBinDir, "ps"), `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args.includes("lstart=")) {
+  const pid = args[args.indexOf("-p") + 1] ?? "unknown";
+  process.stdout.write("fixture-process-birth-" + pid + "\\n");
+}
+`, { mode: 0o755 });
 process.env.AKK_RUNTIME_DIR = testRuntimeDir;
 process.on("exit", () => {
   fs.rmSync(testRuntimeDir, { recursive: true, force: true });
@@ -677,6 +686,7 @@ function runCli(command: string, args: string[]) {
     encoding: "utf8",
     env: {
       ...process.env,
+      PATH: `${delegateFakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
       AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "1",
       AKK_TEST_TERMINAL_ACCEPTANCE_OUTCOME: "accepted"
     }
