@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.11.3 - 2026-08-08
+
+### Fixed
+
+- Make virgin Codex raw-terminal attachment atomic by persisting its managed Session only after read-only pre-input checks pass, then CAS-detaching the provisional binding after every conclusively pre-input failure so a failed first send cannot strand a bound orphan.
+- Add exact snapshot-fenced `reconcile-binding` recovery for eligible provisional and same-process external-thread conflicts while keeping ambiguous identity, PID, Turn, transition, and dispatch cases fail-closed and suppressing control actions that are already known to fail.
+- Distinguish definite tmux no-input failures from uncertain submission outcomes so safe retries remain available without risking duplicate terminal injection.
+
 ## 0.11.2 - 2026-08-08
 
 ### Fixed
