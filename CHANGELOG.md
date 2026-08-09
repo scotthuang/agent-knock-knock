@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.11.5 - 2026-08-09
+
+### Added
+
+- Extend the closed `native_inspect(status)` action to exact Claude Code 2.1.218 with an adapter-owned `/status` plan, a separately measured 80 ms composer-stability boundary, bounded and redacted Status-panel parsing, and safe return to the original idle composer.
+
+### Security
+
+- Fence Claude inspection with a fresh snapshot token, the shared terminal lock, exact pane, PID, process birth, cwd, binding, unique `claude agents --json --all` Session identity, and exclusive active ownership before and across terminal input.
+- Keep ordinary `send` and `respond` slash-command rejection intact, issue at most one Enter and one Escape without blind retries, create no AKK lifecycle state, and leave `/usage`, `/cost`, `/stats`, and `/usage-credits` unavailable.
+
 ## 0.11.4 - 2026-08-09
 
 ### Added
