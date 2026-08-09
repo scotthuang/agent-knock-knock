@@ -46,6 +46,16 @@ const CODEX_NATIVE_STATUS_POPUP_BY_PROFILE: Readonly<Record<string, string>> = {
   "codex-tui-0.146.1":
     "  /status  show current session configuration and token usage"
 };
+const CLAUDE_NATIVE_STATUS_POPUP_BY_PROFILE: Readonly<
+  Record<string, readonly string[]>
+> = {
+  "claude-code-2.1.218-native-status": [
+    "/status Show Claude Code status including version, model, account, API connectivity, and tool statuses",
+    "/statusline Set up Claude Code's status line UI",
+    "/ide Manage IDE integrations and show status",
+    "/usage Show session cost, plan usage, and activity stats"
+  ]
+};
 const CODEX_LARGE_PASTE_CHAR_THRESHOLD = 1_000;
 
 /** A terminal send failed at a boundary that proves input never started. */
@@ -82,6 +92,17 @@ export class NativeInspectionSubmissionError extends Error {
     super(message, options);
     this.name = "NativeInspectionSubmissionError";
     this.doNotRetry = stage !== "not_started";
+  }
+}
+
+/** A verified modal could not be dismissed across one exact key attempt. */
+export class NativeInspectionDismissalError extends Error {
+  readonly code = "AKK_NATIVE_INSPECTION_DISMISSAL_FAILED";
+  readonly doNotRetry = true;
+
+  constructor(message: string, options: { cause?: unknown } = {}) {
+    super(message, options);
+    this.name = "NativeInspectionDismissalError";
   }
 }
 
@@ -208,7 +229,7 @@ export interface TerminalNativeInspectionMaterializationEvidence {
 }
 
 export interface TerminalNativeInspectionBeforeEnterContext {
-  agent: "codex";
+  agent: ExecutorKind;
   terminalControl: TerminalControlRef;
   plan: TerminalNativeInspectionPlan;
   preEnterScreenDigest: string;
@@ -229,15 +250,38 @@ export interface TerminalNativeInspectionOptions {
 
 export interface TerminalNativeInspectionResult {
   stage: "enter_dispatched";
-  agent: "codex";
+  agent: ExecutorKind;
   terminalControl: TerminalControlRef;
-  command: "/status";
+  command: string;
   behaviorProfile: string;
   preEnterScreenDigest: string;
   preEnterEvidenceInventory:
     readonly TerminalNativeInspectionEvidenceInventoryEntry[];
   materialization: TerminalNativeInspectionMaterializationEvidence;
   enterCount: 1;
+}
+
+export interface TerminalNativeInspectionBeforeDismissContext {
+  agent: ExecutorKind;
+  terminalControl: TerminalControlRef;
+  plan: TerminalNativeInspectionPlan;
+  evidenceFingerprint: string;
+}
+
+export interface TerminalNativeInspectionDismissalOptions {
+  runtime?: TerminalRuntimeIdentity;
+  scrollbackLines?: number;
+  beforeDismiss?: (
+    context: TerminalNativeInspectionBeforeDismissContext
+  ) => void | Promise<void>;
+}
+
+export interface TerminalNativeInspectionDismissalResult {
+  stage: "dismiss_dispatched";
+  agent: ExecutorKind;
+  terminalControl: TerminalControlRef;
+  keys: readonly string[];
+  dismissCount: 1;
 }
 
 export interface TerminalNativeInspectionObservationResult {
@@ -556,7 +600,7 @@ export class TerminalAgentBridge {
   ): Promise<TerminalNativeInspectionResult> {
     const adapter = this.registry.require(agent);
     try {
-      assertCodexStatusInspectionPlan(adapter, terminalControl, plan);
+      assertClosedStatusInspectionPlan(adapter, terminalControl, plan);
     } catch (error) {
       throw nativeInspectionSubmissionError("not_started", error);
     }
@@ -595,20 +639,20 @@ export class TerminalAgentBridge {
       materialization: TerminalNativeInspectionMaterializationEvidence;
     };
     try {
-      settled = await this.settleCodexNativeInspectionComposer(
+      settled = await this.settleNativeInspectionComposer(
         adapter,
         terminalControl,
         plan,
         options.runtime
       );
       await options.beforeEnter?.({
-        agent: "codex",
+        agent: adapter.agent,
         terminalControl: settled.terminalControl,
         plan,
         preEnterScreenDigest: settled.screenDigest,
         materialization: settled.materialization
       });
-      settled = await this.revalidateCodexNativeInspectionComposer(
+      settled = await this.revalidateNativeInspectionComposer(
         adapter,
         settled.terminalControl,
         plan,
@@ -633,9 +677,9 @@ export class TerminalAgentBridge {
 
     return {
       stage: "enter_dispatched",
-      agent: "codex",
+      agent: adapter.agent,
       terminalControl: settled.terminalControl,
-      command: "/status",
+      command: plan.command,
       behaviorProfile: plan.behaviorProfile,
       preEnterScreenDigest: settled.screenDigest,
       preEnterEvidenceInventory: settled.evidenceInventory,
@@ -664,14 +708,25 @@ export class TerminalAgentBridge {
       scrollbackLines: options.scrollbackLines
     });
     const screenDigest = nativeInspectionScreenFingerprint(captured.screen);
-    const observation = adapter.observeNativeInspection({
+    const adapterObservation = adapter.observeNativeInspection({
       operation: request.operation,
       previousScreenFingerprint: request.previousScreenFingerprint,
       preEnterEvidenceInventory: request.preEnterEvidenceInventory,
       expectedNativeThreadId: request.expectedNativeThreadId,
       expectedAgentVersion: request.expectedAgentVersion,
+      expectedCwd: request.expectedCwd,
       screen: captured.screen
     });
+    const observation =
+      adapter.agent === "claude" &&
+      options.runtime?.requireExactClaudeAgentRow === true &&
+      adapterObservation.status === "observed" &&
+      adapterObservation.evidence === "claude_status_panel"
+        ? {
+            ...adapterObservation,
+            evidence: "claude_status_panel+claude_agents_exact_pid"
+          }
+        : adapterObservation;
     return {
       terminalControl: captured.terminalControl,
       status: statusFromInspection(
@@ -685,7 +740,110 @@ export class TerminalAgentBridge {
     };
   }
 
-  private async settleCodexNativeInspectionComposer(
+  /**
+   * Dismiss one exact adapter-owned modal result after re-observing the same
+   * evidence under the terminal identity fence. There is exactly one key
+   * attempt and no automated retry across an uncertain dismissal boundary.
+   */
+  async dismissNativeInspection(
+    agent: ExecutorKind,
+    terminalControl: TerminalControlRef,
+    plan: TerminalNativeInspectionPlan,
+    request: TerminalNativeInspectionObservationRequest,
+    expectedEvidenceFingerprint: string,
+    options: TerminalNativeInspectionDismissalOptions = {}
+  ): Promise<TerminalNativeInspectionDismissalResult> {
+    const adapter = this.registry.require(agent);
+    try {
+      assertClosedStatusInspectionPlan(adapter, terminalControl, plan);
+      assertClosedNativeInspectionDismissal(plan);
+    } catch (error) {
+      throw new NativeInspectionDismissalError(
+        error instanceof Error ? error.message : String(error),
+        { cause: error }
+      );
+    }
+
+    const observeExactPanel = async (
+      control: TerminalControlRef
+    ): Promise<TerminalControlRef> => {
+      const captured = await this.captureInspection(adapter, control, {
+        runtime: options.runtime,
+        scrollbackLines: options.scrollbackLines
+      });
+      const observation = adapter.observeNativeInspection?.({
+        operation: request.operation,
+        previousScreenFingerprint: request.previousScreenFingerprint,
+        preEnterEvidenceInventory: request.preEnterEvidenceInventory,
+        expectedNativeThreadId: request.expectedNativeThreadId,
+        expectedAgentVersion: request.expectedAgentVersion,
+        expectedCwd: request.expectedCwd,
+        screen: captured.screen
+      });
+      if (
+        !observation ||
+        observation.status !== "observed" ||
+        observation.result?.kind !== "native_status" ||
+        observation.evidenceFingerprint !== expectedEvidenceFingerprint
+      ) {
+        throw new Error(
+          observation?.reason ??
+          "the exact fresh native status panel changed before dismissal"
+        );
+      }
+      const verified = await this.verifyTerminalIdentity(
+        adapter.agent,
+        captured.terminalControl,
+        options.runtime
+      );
+      if (!sameTerminalControlIdentity(captured.terminalControl, verified)) {
+        throw new Error(
+          "terminal control identity changed before native status dismissal"
+        );
+      }
+      return verified;
+    };
+
+    try {
+      let verified = await observeExactPanel(terminalControl);
+      await options.beforeDismiss?.({
+        agent: adapter.agent,
+        terminalControl: verified,
+        plan,
+        evidenceFingerprint: expectedEvidenceFingerprint
+      });
+      verified = await observeExactPanel(verified);
+      try {
+        await this.terminalProvider.sendKeys(
+          verified.target,
+          plan.expectedResult.dismissal!.keys,
+          { socketPath: verified.socketPath }
+        );
+      } catch (error) {
+        throw new NativeInspectionDismissalError(
+          "native status modal dismissal outcome is uncertain; do not retry automatically",
+          { cause: error }
+        );
+      }
+      return {
+        stage: "dismiss_dispatched",
+        agent: adapter.agent,
+        terminalControl: verified,
+        keys: plan.expectedResult.dismissal!.keys,
+        dismissCount: 1
+      };
+    } catch (error) {
+      if (error instanceof NativeInspectionDismissalError) {
+        throw error;
+      }
+      throw new NativeInspectionDismissalError(
+        error instanceof Error ? error.message : String(error),
+        { cause: error }
+      );
+    }
+  }
+
+  private async settleNativeInspectionComposer(
     adapter: TerminalAgentAdapter,
     terminalControl: TerminalControlRef,
     plan: TerminalNativeInspectionPlan,
@@ -709,7 +867,8 @@ export class TerminalAgentBridge {
         scrollbackLines: CODEX_MULTILINE_SETTLE_SCROLLBACK_LINES
       });
       assertNativeInspectionComposerSafe(captured.inspection);
-      const materialized = exactCodexNativeInspectionComposerCapture(
+      const materialized = exactNativeInspectionComposerCapture(
+        adapter.agent,
         captured.screen,
         plan
       );
@@ -737,7 +896,7 @@ export class TerminalAgentBridge {
             stableForMs,
             stableCaptures
           } satisfies TerminalNativeInspectionMaterializationEvidence;
-          return this.revalidateCodexNativeInspectionComposer(
+          return this.revalidateNativeInspectionComposer(
             adapter,
             captured.terminalControl,
             plan,
@@ -763,11 +922,11 @@ export class TerminalAgentBridge {
       ));
     }
     throw new Error(
-      "Codex /status composer did not become exact, idle, and stable before the bounded submit deadline"
+      `${adapter.displayName} /status composer did not become exact, idle, and stable before the bounded submit deadline`
     );
   }
 
-  private async revalidateCodexNativeInspectionComposer(
+  private async revalidateNativeInspectionComposer(
     adapter: TerminalAgentAdapter,
     terminalControl: TerminalControlRef,
     plan: TerminalNativeInspectionPlan,
@@ -785,7 +944,8 @@ export class TerminalAgentBridge {
       scrollbackLines: CODEX_MULTILINE_SETTLE_SCROLLBACK_LINES
     });
     assertNativeInspectionComposerSafe(captured.inspection);
-    const materialized = exactCodexNativeInspectionComposerCapture(
+    const materialized = exactNativeInspectionComposerCapture(
+      adapter.agent,
       captured.screen,
       plan
     );
@@ -795,7 +955,7 @@ export class TerminalAgentBridge {
       materialized.kind !== expected.kind
     ) {
       throw new Error(
-        "Codex /status composer changed after its stable pre-submit capture"
+        `${adapter.displayName} /status composer changed after its stable pre-submit capture`
       );
     }
     const baseline = adapter.observeNativeInspection?.({
@@ -809,7 +969,7 @@ export class TerminalAgentBridge {
     ) {
       throw new Error(
         baseline?.reason ??
-        "Codex /status pre-Enter evidence inventory was not proven"
+        `${adapter.displayName} /status pre-Enter evidence inventory was not proven`
       );
     }
     const verifiedImmediatelyBeforeEnter = await this.verifyTerminalIdentity(
@@ -824,7 +984,7 @@ export class TerminalAgentBridge {
       )
     ) {
       throw new Error(
-        "terminal control identity changed after the final Codex /status composer capture"
+        `terminal control identity changed after the final ${adapter.displayName} /status composer capture`
       );
     }
     return {
@@ -1596,20 +1756,34 @@ function nativeInspectionSubmissionError(
   );
 }
 
-function assertCodexStatusInspectionPlan(
+function assertClosedStatusInspectionPlan(
   adapter: TerminalAgentAdapter,
   terminalControl: TerminalControlRef,
   plan: TerminalNativeInspectionPlan
 ): void {
-  if (adapter.agent !== "codex") {
-    throw new Error("native /status inspection is currently supported only for Codex");
-  }
   if (!terminalControl.capabilities.includes("send_keys")) {
-    throw new Error("Codex terminal input is not supported");
+    throw new Error(`${adapter.displayName} terminal input is not supported`);
   }
   if (!terminalControl.capabilities.includes("screen_status")) {
-    throw new Error("Codex terminal screen inspection is not supported");
+    throw new Error(`${adapter.displayName} terminal screen inspection is not supported`);
   }
+  const codexProfile = adapter.agent === "codex" && [
+    "codex-tui-0.146.0",
+    "codex-tui-0.146.1"
+  ].includes(plan.behaviorProfile);
+  const claudeProfile = adapter.agent === "claude" &&
+    plan.behaviorProfile === "claude-code-2.1.218-native-status";
+  const exactPresentation = codexProfile
+    ? plan.expectedResult.presentation === "inline" &&
+      plan.expectedResult.dismissal === undefined &&
+      plan.composer.minimumStableMs >= CODEX_PASTE_ENTER_SETTLE_MS
+    : claudeProfile
+      ? plan.expectedResult.presentation === "modal" &&
+        plan.composer.minimumStableMs >= 80 &&
+        plan.expectedResult.dismissal?.expected === "idle_empty_composer" &&
+        JSON.stringify(plan.expectedResult.dismissal.keys) ===
+          JSON.stringify(["Escape"])
+      : false;
   if (
     plan.operation.kind !== "status" ||
     plan.command !== "/status" ||
@@ -1617,19 +1791,30 @@ function assertCodexStatusInspectionPlan(
     plan.requiresIdle !== true ||
     plan.composer.kind !== "exact" ||
     !Number.isFinite(plan.composer.minimumStableMs) ||
-    plan.composer.minimumStableMs < CODEX_PASTE_ENTER_SETTLE_MS ||
+    plan.composer.minimumStableMs < 0 ||
     plan.expectedResult.kind !== "native_status" ||
-    ![
-      "codex-tui-0.146.0",
-      "codex-tui-0.146.1"
-    ].includes(plan.behaviorProfile)
+    !exactPresentation
   ) {
     throw new Error("refusing a non-closed or unverified native inspection plan");
   }
 }
 
+function assertClosedNativeInspectionDismissal(
+  plan: TerminalNativeInspectionPlan
+): void {
+  if (
+    plan.expectedResult.presentation !== "modal" ||
+    plan.expectedResult.dismissal?.expected !== "idle_empty_composer" ||
+    JSON.stringify(plan.expectedResult.dismissal.keys) !==
+      JSON.stringify(["Escape"])
+  ) {
+    throw new Error("native inspection has no closed verified modal dismissal plan");
+  }
+}
+
 function assertNativeInspectionComposerSafe(
-  inspection: TerminalScreenInspection
+  inspection: TerminalScreenInspection,
+  displayName = "terminal agent"
 ): void {
   if (
     inspection.approval.blocked ||
@@ -1637,7 +1822,7 @@ function assertNativeInspectionComposerSafe(
     inspection.activity.state === "working"
   ) {
     throw new Error(
-      "Codex became busy or blocked while its /status composer was settling"
+      `${displayName} became busy or blocked while its /status composer was settling`
     );
   }
   // Codex's generic activity parser deliberately reports a non-empty slash
@@ -1645,6 +1830,19 @@ function assertNativeInspectionComposerSafe(
   // empty styled composer under the terminal lock; the exact-current composer
   // capture below is the stronger continuation proof after AKK injected only
   // the adapter-owned /status command.
+}
+
+function exactNativeInspectionComposerCapture(
+  agent: ExecutorKind,
+  screen: string,
+  plan: TerminalNativeInspectionPlan
+): {
+  digest: string;
+  kind: TerminalNativeInspectionMaterializationKind;
+} | undefined {
+  return agent === "codex"
+    ? exactCodexNativeInspectionComposerCapture(screen, plan)
+    : exactClaudeNativeInspectionComposerCapture(screen, plan);
 }
 
 function exactCodexNativeInspectionComposerCapture(
@@ -1699,6 +1897,117 @@ function exactCodexNativeInspectionComposerCapture(
     kind,
     digest: createHash("sha256").update(region.join("\n")).digest("hex")
   };
+}
+
+function exactClaudeNativeInspectionComposerCapture(
+  screen: string,
+  plan: TerminalNativeInspectionPlan
+): {
+  digest: string;
+  kind: TerminalNativeInspectionMaterializationKind;
+} | undefined {
+  const frame = exactClaudeNativeInspectionComposerFrame(screen);
+  if (!frame) {
+    return undefined;
+  }
+  const { lines, openIndex, closeIndex, composerRows, trailing } = frame;
+  if (
+    composerRows.length !== 1 ||
+    !/^\s*❯(?:\s|$)/u.test(composerRows[0]) ||
+    composerRows[0].replace(/^\s*❯\s?/u, "").trimEnd() !== plan.command
+  ) {
+    return undefined;
+  }
+  let kind: TerminalNativeInspectionMaterializationKind;
+  if (trailing.length === 0 || claudeNativeInspectionTrailingIsFooter(trailing)) {
+    kind = "exact_slash_composer";
+  } else {
+    const suggestions: string[] = [];
+    for (const line of trailing) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("/")) {
+        suggestions.push(trimmed.replace(/\s+/gu, " "));
+      } else if (suggestions.length > 0) {
+        suggestions[suggestions.length - 1] +=
+          ` ${trimmed.replace(/\s+/gu, " ")}`;
+      } else {
+        return undefined;
+      }
+    }
+    if (
+      JSON.stringify(suggestions) !== JSON.stringify(
+        CLAUDE_NATIVE_STATUS_POPUP_BY_PROFILE[plan.behaviorProfile]
+      )
+    ) {
+      return undefined;
+    }
+    kind = "exact_slash_popup";
+  }
+  return {
+    kind,
+    digest: createHash("sha256")
+      .update(lines.slice(openIndex, closeIndex + 1).concat(trailing).join("\n"))
+      .digest("hex")
+  };
+}
+
+/**
+ * Prove the exact idle input frame from the verified Claude Code 2.1.218
+ * profile. A loose or historical `❯` prompt is not enough to authorize even
+ * the initial literal `/status` injection.
+ */
+export function isExactClaudeNativeInspectionIdleComposer(
+  screen: string
+): boolean {
+  const frame = exactClaudeNativeInspectionComposerFrame(screen);
+  if (!frame) {
+    return false;
+  }
+  return (
+    frame.composerRows.length === 1 &&
+    /^\s*❯\s*$/u.test(frame.composerRows[0]) &&
+    (
+      frame.trailing.length === 0 ||
+      claudeNativeInspectionTrailingIsFooter(frame.trailing)
+    )
+  );
+}
+
+function exactClaudeNativeInspectionComposerFrame(screen: string): {
+  lines: string[];
+  openIndex: number;
+  closeIndex: number;
+  composerRows: string[];
+  trailing: string[];
+} | undefined {
+  const lines = screen.replace(/\r\n?/gu, "\n").replace(/\u00a0/gu, " ")
+    .split("\n");
+  const dividerIndexes = lines
+    .map((line, index) => /^\s*[─━]{8,}\s*$/u.test(line) ? index : -1)
+    .filter((index) => index >= 0);
+  if (dividerIndexes.length < 2) {
+    return undefined;
+  }
+  const closeIndex = dividerIndexes.at(-1)!;
+  const openIndex = dividerIndexes.at(-2)!;
+  return {
+    lines,
+    openIndex,
+    closeIndex,
+    composerRows: lines.slice(openIndex + 1, closeIndex)
+      .filter((line) => line.trim().length > 0),
+    trailing: lines.slice(closeIndex + 1)
+      .filter((line) => line.trim().length > 0)
+  };
+}
+
+function claudeNativeInspectionTrailingIsFooter(
+  lines: readonly string[]
+): boolean {
+  return lines.length <= 2 && lines.every((line) =>
+    /^\s*(?:[⏵⏴]{1,2}|\?)\s*.*(?:shift\+tab|accept edits|bypass permissions|for shortcuts|← for agents)/iu
+      .test(line)
+  );
 }
 
 function nativeInspectionScreenFingerprint(screen: string): string {

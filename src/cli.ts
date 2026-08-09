@@ -150,6 +150,7 @@ import {
   type TerminalProcessSource
 } from "./terminal-process-source.js";
 import {
+  isExactClaudeNativeInspectionIdleComposer,
   NativeInspectionSubmissionError,
   TerminalAgentBridge,
   TerminalInputNotStartedError,
@@ -972,7 +973,10 @@ function loadClaudeAgentRows(
       ...(Number.isSafeInteger(Number(row.startedAt)) && Number(row.startedAt) > 0
         ? { startedAt: Number(row.startedAt) }
         : {}),
-      ...(stringValue(row.status) ? { status: stringValue(row.status) } : {})
+      ...(stringValue(row.status) ? { status: stringValue(row.status) } : {}),
+      ...(stringValue(row.waitingFor)
+        ? { waitingFor: stringValue(row.waitingFor) }
+        : {})
     }];
   });
 }
@@ -1236,6 +1240,9 @@ function createTerminalAgentBridge(
         runtime?.nativeProcessBirth ||
         runtime?.nativeRollout ||
         runtime?.requireNativeProcessUuid ||
+        runtime?.requireExactClaudeAgentRow ||
+        runtime?.nativeProcessStartedAt ||
+        runtime?.exactClaudeAgentState ||
         runtime?.requireNativeRolloutIdentity ||
         runtime?.expectedNativeSessionId ||
         runtime?.expectedEmptyNativeSession ||
@@ -1267,6 +1274,48 @@ function createTerminalAgentBridge(
         agent,
         pid
       });
+      if (runtime?.requireExactClaudeAgentRow === true) {
+        if (
+          agent !== "claude" ||
+          !Number.isSafeInteger(runtime.nativeProcessStartedAt) ||
+          Number(runtime.nativeProcessStartedAt) <= 0 ||
+          !runtime.nativeSessionId
+        ) {
+          throw new Error(
+            `native ${agent} inspection has an incomplete exact process identity; ` +
+            "refresh list before controlling the terminal"
+          );
+        }
+        const agentRows = loadClaudeAgentRows(options, { required: true });
+        const observation = adapter.observeThreadLifecycle?.({
+          operation: { kind: "new_thread" },
+          phase: "before",
+          pid,
+          processStartedAt: runtime.nativeProcessStartedAt,
+          cwd: snapshot.cwd ?? pane.currentPath,
+          agentRows
+        });
+        const exactRows = agentRows.filter((row) => row.pid === pid);
+        const expectedState = runtime.exactClaudeAgentState ?? "idle";
+        const stateMatches = expectedState === "idle"
+          ? observation?.idle === true
+          : (
+              observation?.idle === false &&
+              exactRows.length === 1 &&
+              exactRows[0].status === "waiting" &&
+              exactRows[0].waitingFor === "dialog open"
+            );
+        if (
+          observation?.status !== "observed" ||
+          !stateMatches ||
+          observation.nativeThreadId !== runtime.nativeSessionId
+        ) {
+          throw new Error(
+            `native Claude agents identity, cwd, or idle state changed for process ${pid}; ` +
+            "refresh list before controlling the terminal"
+          );
+        }
+      }
       return {
         terminalControl: {
           ...terminalControl,
@@ -3771,11 +3820,20 @@ async function terminalControlledListEntry(
       native_inspect:
         nativeInspectionCapability.status === "supported" &&
         nativeInspectionCapability.statusInspection === true &&
-        session.agent === "codex" &&
-        codexComposerEmpty(terminalState.screen_excerpt) &&
+        nativeInspectionComposerEmpty(
+          session.agent,
+          terminalState.screen_excerpt
+        ) &&
         terminalControl.capabilities.includes("send_keys") &&
         terminalControl.capabilities.includes("screen_status") &&
-        codexLifecycleIncarnationAvailable &&
+        (
+          session.agent === "codex"
+            ? codexLifecycleIncarnationAvailable
+            : Boolean(
+                nativeAgentIdentity?.sessionId &&
+                nativeAgentIdentity.processUuid
+              )
+        ) &&
         orphanedDispatch === undefined &&
         !nativeInspectionHasBlockingTurn
     }
@@ -8194,10 +8252,23 @@ function nativeInspectionRuntime({
   terminal: ResolvedTerminalConversation;
   snapshot: Awaited<ReturnType<typeof currentLifecycleSnapshot>>;
 }): TerminalRuntimeIdentity {
-  if (terminal.agent !== "codex") {
-    throw new Error(
-      "native status inspection currently supports only Codex 0.146.0 and 0.146.1"
-    );
+  if (terminal.agent === "claude") {
+    const identity = snapshot.runtimeIdentity;
+    if (
+      !identity?.sessionId ||
+      !identity.processUuid ||
+      identity.sessionId !== snapshot.identity?.sessionId
+    ) {
+      throw new Error(
+        "Claude native status inspection requires one exact claude agents Session and process incarnation"
+      );
+    }
+    return {
+      ...terminalRuntimeForLiveIdentity({ terminal, identity }),
+      requireExactClaudeAgentRow: true,
+      nativeProcessStartedAt: identity.processStartedAt,
+      exactClaudeAgentState: "idle"
+    };
   }
   const exactRuntimeIdentity =
     snapshot.runtimeIdentity?.sessionId === snapshot.identity?.sessionId
@@ -8227,19 +8298,23 @@ function nativeInspectionRuntime({
 }
 
 function assertNativeInspectionSnapshotUnchanged({
+  options,
   expectedTerminal,
   actualTerminal,
   expectedBindingToken,
   expectedVersion,
   actualSnapshot,
-  stage
+  stage,
+  expectedClaudeState = "idle"
 }: {
+  options: Record<string, any>;
   expectedTerminal: ResolvedTerminalConversation;
   actualTerminal: ResolvedTerminalConversation;
   expectedBindingToken: string;
   expectedVersion?: string;
   actualSnapshot: Awaited<ReturnType<typeof currentLifecycleSnapshot>>;
   stage: string;
+  expectedClaudeState?: "idle" | "status_dialog";
 }): void {
   assertSameNativeInspectionTerminal(expectedTerminal, actualTerminal, stage);
   if (actualSnapshot.bindingToken !== expectedBindingToken) {
@@ -8264,6 +8339,103 @@ function assertNativeInspectionSnapshotUnchanged({
       "native status inspection became unsupported; refresh AKK list"
     );
   }
+  assertNativeInspectionAgentIdentity({
+    options,
+    terminal: actualTerminal,
+    snapshot: actualSnapshot,
+    stage,
+    expectedClaudeState
+  });
+}
+
+function assertNativeInspectionAgentIdentity({
+  options,
+  terminal,
+  snapshot,
+  stage,
+  expectedClaudeState = "idle"
+}: {
+  options: Record<string, any>;
+  terminal: ResolvedTerminalConversation;
+  snapshot: Awaited<ReturnType<typeof currentLifecycleSnapshot>>;
+  stage: string;
+  expectedClaudeState?: "idle" | "status_dialog";
+}): void {
+  if (terminal.agent !== "claude") {
+    return;
+  }
+  const identity = snapshot.runtimeIdentity;
+  if (
+    !identity?.sessionId ||
+    !identity.processUuid ||
+    !Number.isSafeInteger(identity.processStartedAt) ||
+    Number(identity.processStartedAt) <= 0
+  ) {
+    throw new Error(
+      `Claude process identity is incomplete ${stage}; refresh AKK list`
+    );
+  }
+  const agentRows = loadClaudeAgentRows(options, { required: true });
+  const observation = snapshot.adapter.observeThreadLifecycle?.({
+    operation: { kind: "new_thread" },
+    phase: "before",
+    pid: terminal.pid,
+    processStartedAt: identity.processStartedAt,
+    cwd: terminal.terminalControl.currentPath,
+    agentRows
+  });
+  const exactRows = agentRows.filter((row) => row.pid === terminal.pid);
+  const stateMatches = expectedClaudeState === "idle"
+    ? observation?.idle === true
+    : (
+        observation?.idle === false &&
+        exactRows.length === 1 &&
+        exactRows[0].status === "waiting" &&
+        exactRows[0].waitingFor === "dialog open"
+      );
+  if (
+    observation?.status !== "observed" ||
+    !stateMatches ||
+    observation.nativeThreadId !== identity.sessionId
+  ) {
+    throw new Error(
+      `Claude agents identity, cwd, or idle state changed ${stage}; refresh AKK list`
+    );
+  }
+}
+
+async function assertNativeInspectionExclusiveOwnership({
+  options,
+  terminal,
+  snapshot
+}: {
+  options: Record<string, any>;
+  terminal: ResolvedTerminalConversation;
+  snapshot: Awaited<ReturnType<typeof currentLifecycleSnapshot>>;
+}): Promise<void> {
+  // Claude's exact `claude agents` mapping makes global active ownership part
+  // of the 2.1.218 inspection profile. Keep the existing Codex #112 path
+  // unchanged: an unmanaged Codex pane may be inspected before a rollout
+  // identity exists, and its status card is the bounded identity evidence.
+  if (terminal.agent !== "claude") {
+    return;
+  }
+  const nativeThreadId = snapshot.identity?.sessionId ??
+    snapshot.session?.binding?.native_thread_id;
+  if (!isExactNativeThreadId(nativeThreadId)) {
+    throw new Error(
+      "native status inspection requires one exact current native Session identity"
+    );
+  }
+  await assertNativeThreadHasExclusiveOwnership({
+    options,
+    agent: terminal.agent,
+    currentPid: terminal.pid,
+    nativeThreadId,
+    storeDir: storeDirFromOptions(options),
+    terminalControl: terminal.terminalControl,
+    excludedManagedSessionId: snapshot.session?.session_id
+  });
 }
 
 async function runNativeInspect(options: Record<string, any>) {
@@ -8339,6 +8511,17 @@ async function runNativeInspect(options: Record<string, any>) {
         "the agent adapter did not produce the closed native status inspection plan"
       );
     }
+    assertNativeInspectionAgentIdentity({
+      options,
+      terminal,
+      snapshot,
+      stage: "before native status inspection"
+    });
+    await assertNativeInspectionExclusiveOwnership({
+      options,
+      terminal,
+      snapshot
+    });
     const runtime = nativeInspectionRuntime({ terminal, snapshot });
     const bridge = createTerminalAgentBridge(options);
     const initialStatus = await bridge.status(
@@ -8352,9 +8535,9 @@ async function runNativeInspect(options: Record<string, any>) {
       terminalStatus: initialStatus,
       session: snapshot.session
     });
-    await assertCodexComposerReadyForAutomatedInput({
+    await assertNativeInspectionComposerReadyForAutomatedInput({
       options,
-      terminalControl: terminal.terminalControl
+      terminal
     });
 
     let submission: Awaited<
@@ -8374,12 +8557,18 @@ async function runNativeInspect(options: Record<string, any>) {
               finalTerminal
             );
             assertNativeInspectionSnapshotUnchanged({
+              options,
               expectedTerminal: terminal,
               actualTerminal: finalTerminal,
               expectedBindingToken,
               expectedVersion: snapshot.version,
               actualSnapshot: finalSnapshot,
               stage: "immediately before native status submission"
+            });
+            await assertNativeInspectionExclusiveOwnership({
+              options,
+              terminal: finalTerminal,
+              snapshot: finalSnapshot
             });
             assertTerminalNativeInspectionReady({
               options,
@@ -8409,6 +8598,18 @@ async function runNativeInspect(options: Record<string, any>) {
       const expectedNativeThreadId =
         snapshot.session?.binding?.native_thread_id ??
         snapshot.identity?.sessionId;
+      const observationRequest = {
+        operation: plan.operation,
+        previousScreenFingerprint: submission.preEnterScreenDigest,
+        preEnterEvidenceInventory: submission.preEnterEvidenceInventory,
+        expectedNativeThreadId,
+        expectedAgentVersion: snapshot.version,
+        expectedCwd: terminal.terminalControl.currentPath
+      };
+      const postEnterRuntime: TerminalRuntimeIdentity =
+        plan.expectedResult.presentation === "modal"
+          ? { ...runtime, exactClaudeAgentState: "status_dialog" }
+          : runtime;
       let stableEvidenceFingerprint: string | undefined;
       let stableObservation: Awaited<
         ReturnType<TerminalAgentBridge["observeNativeInspection"]>
@@ -8418,19 +8619,20 @@ async function runNativeInspect(options: Record<string, any>) {
         const observed = await bridge.observeNativeInspection(
           terminal.agent,
           terminal.terminalControl,
-          {
-            operation: plan.operation,
-            previousScreenFingerprint: submission.preEnterScreenDigest,
-            preEnterEvidenceInventory: submission.preEnterEvidenceInventory,
-            expectedNativeThreadId,
-            expectedAgentVersion: snapshot.version
-          },
-          { runtime, scrollbackLines: 240 }
+          observationRequest,
+          { runtime: postEnterRuntime, scrollbackLines: 240 }
         );
         const observation = observed.observation;
         if (
           observed.status.reachable === true &&
-          observed.status.activity_state === "idle" &&
+          (
+            plan.expectedResult.presentation === "inline"
+              ? observed.status.activity_state === "idle"
+              : ![
+                  "working",
+                  "awaiting_approval"
+                ].includes(observed.status.activity_state)
+          ) &&
           observed.status.approval_state.blocked !== true &&
           observed.screenDigest !== submission.preEnterScreenDigest &&
           observation.status === "observed" &&
@@ -8460,21 +8662,106 @@ async function runNativeInspect(options: Record<string, any>) {
       }
       if (!stableObservation || stableCount < 2) {
         throw new Error(
-          "native status inspection Enter was dispatched exactly once, but a fresh exact idle status result was not proven; do not retry automatically"
+          "native status inspection Enter was dispatched exactly once, but a fresh exact status result was not proven; do not retry automatically"
         );
       }
+      let dismissal:
+        Awaited<ReturnType<TerminalAgentBridge["dismissNativeInspection"]>> |
+        undefined;
+      if (plan.expectedResult.presentation === "modal") {
+        if (!stableObservation.evidenceFingerprint) {
+          throw new Error(
+            "native status modal lacks exact dismissal evidence; do not retry automatically"
+          );
+        }
+        try {
+          dismissal = await bridge.dismissNativeInspection(
+            terminal.agent,
+            terminal.terminalControl,
+            plan,
+            observationRequest,
+            stableObservation.evidenceFingerprint,
+            {
+              runtime: postEnterRuntime,
+              scrollbackLines: 240,
+              beforeDismiss: async () => {
+                const dismissTerminal = await resolveLifecycleTerminal(options);
+                const dismissSnapshot = await currentLifecycleSnapshot(
+                  options,
+                  dismissTerminal
+                );
+                assertNativeInspectionSnapshotUnchanged({
+                  options,
+                  expectedTerminal: terminal,
+                  actualTerminal: dismissTerminal,
+                  expectedBindingToken,
+                  expectedVersion: snapshot.version,
+                  actualSnapshot: dismissSnapshot,
+                  stage: "immediately before native status dismissal",
+                  expectedClaudeState: "status_dialog"
+                });
+                await assertNativeInspectionExclusiveOwnership({
+                  options,
+                  terminal: dismissTerminal,
+                  snapshot: dismissSnapshot
+                });
+                assertTerminalNativeInspectionReady({
+                  options,
+                  terminal: dismissTerminal,
+                  session: dismissSnapshot.session
+                });
+              }
+            }
+          );
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          throw new Error(
+            "native status panel was proven but safe dismissal failed; " +
+            `do not retry automatically and dismiss it manually if still visible: ${detail}`
+          );
+        }
+        let restoredIdle = false;
+        for (let attempt = 0; attempt < 50; attempt += 1) {
+          const restored = await bridge.status(
+            terminal.agent,
+            terminal.terminalControl,
+            { runtime }
+          );
+          if (
+            restored.reachable === true &&
+            restored.activity_state === "idle" &&
+            restored.approval_state.blocked !== true &&
+            nativeInspectionComposerEmpty(
+              terminal.agent,
+              restored.screen.excerpt
+            )
+          ) {
+            restoredIdle = true;
+            break;
+          }
+          await new Promise<void>((resolve) => setTimeout(resolve, 100));
+        }
+        if (!restoredIdle) {
+          throw new Error(
+            "Claude Status panel dismissal was dispatched exactly once, but the original idle composer was not restored; do not retry automatically"
+          );
+        }
+      }
       const finalTerminal = await resolveLifecycleTerminal(options);
-      const finalSnapshot = await currentLifecycleSnapshot(
-        options,
-        finalTerminal
-      );
+      const finalSnapshot = await currentLifecycleSnapshot(options, finalTerminal);
       assertNativeInspectionSnapshotUnchanged({
+        options,
         expectedTerminal: terminal,
         actualTerminal: finalTerminal,
         expectedBindingToken,
         expectedVersion: snapshot.version,
         actualSnapshot: finalSnapshot,
         stage: "after native status inspection"
+      });
+      await assertNativeInspectionExclusiveOwnership({
+        options,
+        terminal: finalTerminal,
+        snapshot: finalSnapshot
       });
       const finalStatus = await bridge.status(
         finalTerminal.agent,
@@ -8487,9 +8774,9 @@ async function runNativeInspect(options: Record<string, any>) {
         terminalStatus: finalStatus,
         session: finalSnapshot.session
       });
-      await assertCodexComposerReadyForAutomatedInput({
+      await assertNativeInspectionComposerReadyForAutomatedInput({
         options,
-        terminalControl: finalTerminal.terminalControl
+        terminal: finalTerminal
       });
       printJson({
         status: "observed",
@@ -8505,6 +8792,15 @@ async function runNativeInspect(options: Record<string, any>) {
           enter_count: submission.enterCount,
           materialization: submission.materialization
         },
+        ...(dismissal
+          ? {
+              terminal_dismissal: {
+                keys: dismissal.keys,
+                dismiss_count: dismissal.dismissCount,
+                restored_idle: true
+              }
+            }
+          : {}),
         store_mutation: false,
         session_created: false,
         turn_created: false,
@@ -14605,6 +14901,19 @@ function assertNativeAgentIdentityForRuntime({
   ) {
     throw new Error(
       `native ${agent} process incarnation cannot be verified for process ${pid}; ` +
+      "refresh list before controlling the terminal"
+    );
+  }
+  if (
+    runtime?.nativeProcessStartedAt !== undefined &&
+    (
+      !Number.isSafeInteger(runtime.nativeProcessStartedAt) ||
+      Number(runtime.nativeProcessStartedAt) <= 0 ||
+      currentIdentity?.processStartedAt !== runtime.nativeProcessStartedAt
+    )
+  ) {
+    throw new Error(
+      `native ${agent} process start changed for process ${pid}; ` +
       "refresh list before controlling the terminal"
     );
   }
@@ -20753,6 +21062,43 @@ function codexComposerVisible(screen: string | undefined): boolean {
     .some((line) => /^[›»](?:\s|$)/u.test(line.trimEnd()));
 }
 
+function nativeInspectionComposerEmpty(
+  agent: ExecutorKind,
+  screen: string | undefined
+): boolean {
+  return agent === "codex"
+    ? codexComposerEmpty(screen)
+    : isExactClaudeNativeInspectionIdleComposer(String(screen ?? ""));
+}
+
+async function assertNativeInspectionComposerReadyForAutomatedInput({
+  options,
+  terminal
+}: {
+  options: Record<string, any>;
+  terminal: ResolvedTerminalConversation;
+}): Promise<void> {
+  if (terminal.agent === "codex") {
+    await assertCodexComposerReadyForAutomatedInput({
+      options,
+      terminalControl: terminal.terminalControl
+    });
+    return;
+  }
+  const screen = await createTerminalControlProvider(options).capture(
+    terminal.terminalControl.target,
+    {
+      scrollbackLines: 40,
+      socketPath: terminal.terminalControl.socketPath
+    }
+  );
+  if (!isExactClaudeNativeInspectionIdleComposer(screen)) {
+    throw new Error(
+      "Claude composer contains input or is not at the exact idle frame; refusing automated terminal input"
+    );
+  }
+}
+
 function codexComposerEmpty(screen: string | undefined): boolean {
   const composers = String(screen ?? "")
     .split(/\r?\n/u)
@@ -20843,15 +21189,21 @@ function codexStyledComposerEmpty(screen: string | undefined): boolean {
 }
 
 function claudeComposerVisible(screen: string | undefined): boolean {
-  return String(screen ?? "")
-    .split(/\r?\n/u)
+  const lines = String(screen ?? "").split(/\r?\n/u);
+  while (lines.length > 0 && lines.at(-1)?.trim() === "") {
+    lines.pop();
+  }
+  return lines
     .slice(-8)
     .some((line) => /^\s*❯(?:\s|$)/u.test(line));
 }
 
 function claudeComposerEmpty(screen: string | undefined): boolean {
-  const composers = String(screen ?? "")
-    .split(/\r?\n/u)
+  const lines = String(screen ?? "").split(/\r?\n/u);
+  while (lines.length > 0 && lines.at(-1)?.trim() === "") {
+    lines.pop();
+  }
+  const composers = lines
     .slice(-8)
     .filter((line) => /^\s*❯(?:\s|$)/u.test(line));
   return composers.length === 1 && /^\s*❯\s*$/u.test(composers[0]);

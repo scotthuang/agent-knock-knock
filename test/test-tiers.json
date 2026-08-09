@@ -29,6 +29,7 @@
     "test/transcript.test.ts"
   ],
   "integration": [
+    "test/claude-native-inspection-cli.test.ts",
     "test/codex-no-rollout-binding-cli.test.ts",
     "test/native-thread-lifecycle-recovery-cli.test.ts",
     "test/codex-sticky-rollout-lifecycle-cli.test.ts",

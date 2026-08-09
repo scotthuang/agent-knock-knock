@@ -155,7 +155,7 @@ const nativeInspectParameters = {
       type: "string",
       enum: ["status"],
       description:
-        "Closed adapter-owned inspection kind. Initially only exact Codex /status is supported; this is never an arbitrary native command string."
+        "Closed adapter-owned inspection kind. Exact Codex 0.146.0/0.146.1 and Claude Code 2.1.218 /status profiles are supported; this is never an arbitrary native command string."
     },
     expected_binding_token: {
       type: "string",
@@ -500,7 +500,7 @@ function createPlugin(
         default: "AKK is handling the request..."
       },
       agentPromptGuidance: [
-        "Use /akk <task> when exactly one eligible idle coding-agent tmux pane should receive new work. Use /akk codex: <task>, /akk claude: <task>, or another selector returned by /akk list to target an existing pane. Ordinary sends preserve native context. Use /akk threads, /akk new-thread or clear-thread, and /akk resume-thread only with an exact full terminal_id returned by /akk list; these switch native context without creating a Turn. Resume numbers and short IDs are bound to the last displayed snapshot, while previous is available only from the latest verified committed transition. For native Codex status, use only an advertised agent_knock_knock_native_inspect action; agent_knock_knock_status inspects AKK Turn state and does not execute /status. AKK never starts a coding-agent process."
+        "Use /akk <task> when exactly one eligible idle coding-agent tmux pane should receive new work. Use /akk codex: <task>, /akk claude: <task>, or another selector returned by /akk list to target an existing pane. Ordinary sends preserve native context. Use /akk threads, /akk new-thread or clear-thread, and /akk resume-thread only with an exact full terminal_id returned by /akk list; these switch native context without creating a Turn. Resume numbers and short IDs are bound to the last displayed snapshot, while previous is available only from the latest verified committed transition. For native Codex or Claude status, use only an advertised agent_knock_knock_native_inspect action; agent_knock_knock_status inspects AKK Turn state and does not execute /status. AKK never starts a coding-agent process."
       ],
       handler: async (ctx) => handleAkkCommand(
         api,
@@ -511,7 +511,7 @@ function createPlugin(
 
     registerCliTool(api, {
       name: "agent_knock_knock_list",
-      description: "List existing Codex and Claude Code tmux panes as the primary terminals[] resources. Each terminal may include managed.current_turn or managed.recent_turn; all=true also includes older managed.history and retained unavailable history. By default, unavailable_managed_turns contains attention-needed records whose pane is unavailable. Use only each row's available_actions and authoritative prefilled arguments: send targets a session and starts a new turn; respond targets the exact in-flight turn; native_inspect currently runs only a closed, version-scoped Codex inspection with the current terminal/binding token; read-only thread listing targets the exact terminal, while new/resume mutations also require the current binding token and create no Turn; reconcile_binding detaches only the exact listed conflict and requires explicit user intent; managed controls target the exact turn; a raw terminal row may prefill its own compatibility selector for status or recovery controls. Never construct identifiers or tokens. AKK revalidates every terminal side effect and never starts a coding-agent process.",
+      description: "List existing Codex and Claude Code tmux panes as the primary terminals[] resources. Each terminal may include managed.current_turn or managed.recent_turn; all=true also includes older managed.history and retained unavailable history. By default, unavailable_managed_turns contains attention-needed records whose pane is unavailable. Use only each row's available_actions and authoritative prefilled arguments: send targets a session and starts a new turn; respond targets the exact in-flight turn; native_inspect runs only a closed, exact-version Codex or Claude status profile with the current terminal/binding token; read-only thread listing targets the exact terminal, while new/resume mutations also require the current binding token and create no Turn; reconcile_binding detaches only the exact listed conflict and requires explicit user intent; managed controls target the exact turn; a raw terminal row may prefill its own compatibility selector for status or recovery controls. Never construct identifiers or tokens. AKK revalidates every terminal side effect and never starts a coding-agent process.",
       parameters: listParameters,
       buildArgs: (params) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
@@ -559,7 +559,7 @@ function createPlugin(
     registerCliTool(api, {
       name: "agent_knock_knock_native_inspect",
       description:
-        "Execute one closed, version-scoped Codex native inspection in an exact terminal without ordinary Turn delivery. Call only from that terminal row's current native_inspect action and preserve its exact terminal_id, inspection=status, and expected_binding_token. Initial support is Codex-only and limited to verified Codex 0.146.0/0.146.1 /status; arbitrary slash commands, Claude commands, /usage, /model, and /compact remain unavailable. Bare Codex /usage opens an interactive menu whose later Enter can select an account-side usage-limit reset. This creates no AKK Session, Turn, receipt, monitor, or callback. agent_knock_knock_status is different: it inspects AKK Turn state and the bounded current screen without executing native /status.",
+        "Execute one closed, exact-version native status inspection in an exact Codex or Claude Code terminal without ordinary Turn delivery. Call only from that terminal row's current native_inspect action and preserve its exact terminal_id, inspection=status, and expected_binding_token. Supported profiles are Codex 0.146.0/0.146.1 and Claude Code 2.1.218; Claude's exact Status panel is parsed and safely dismissed before success. Arbitrary slash commands, /usage, /cost, /stats, /usage-credits, /model, and /compact remain unavailable. Bare Codex /usage opens an interactive menu whose later Enter can select an account-side usage-limit reset. This creates no AKK Session, Turn, receipt, monitor, or callback. agent_knock_knock_status is different: it inspects AKK Turn state and the bounded current screen without executing native /status.",
       parameters: nativeInspectParameters,
       normalizeTurnIdentity: false,
       buildArgs: (params) => {

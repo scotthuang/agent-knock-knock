@@ -158,7 +158,10 @@ export function planCodexNativeInspection(
       kind: "exact",
       minimumStableMs: CODEX_NATIVE_INSPECTION_COMPOSER_STABLE_MS
     },
-    expectedResult: { kind: "native_status" }
+    expectedResult: {
+      kind: "native_status",
+      presentation: "inline"
+    }
   };
 }
 

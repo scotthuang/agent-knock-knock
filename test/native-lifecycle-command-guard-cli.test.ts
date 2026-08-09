@@ -120,6 +120,17 @@ for (const scenario of [
     command: "/continue"
   },
   {
+    name: "Claude usage inspection ordinary send",
+    args: [
+      "send",
+      "--session",
+      "session-does-not-exist",
+      "--message",
+      "/usage"
+    ],
+    command: "/usage"
+  },
+  {
     name: "future native slash command ordinary send",
     args: [
       "send",

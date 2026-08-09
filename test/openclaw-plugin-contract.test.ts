@@ -137,7 +137,7 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   assert.equal(contractedTools.length, 14);
   assert.match(
     manifest.description ?? "",
-    /Codex version-scoped native inspection/u
+    /exact-version native status inspection/u
   );
   assert.deepEqual(
     sorted(registeredCommands),
@@ -270,10 +270,11 @@ test("OpenClaw native inspection is a closed status-only terminal action", async
       : {};
     assert.match(String(terminalSchema.pattern ?? ""), /terminal:v/u);
     assert.match(inspectTool.description ?? "", /Codex 0\.146\.0\/0\.146\.1/u);
-    assert.match(inspectTool.description ?? "", /Codex-only/u);
+    assert.match(inspectTool.description ?? "", /Claude Code 2\.1\.218/u);
+    assert.match(inspectTool.description ?? "", /safely dismissed/u);
     assert.match(inspectTool.description ?? "", /creates no AKK Session, Turn/u);
     assert.match(inspectTool.description ?? "", /agent_knock_knock_status is different/u);
-    assert.match(inspectTool.description ?? "", /arbitrary slash commands/u);
+    assert.match(inspectTool.description ?? "", /arbitrary slash commands/iu);
     assert.match(inspectTool.description ?? "", /usage-limit reset/u);
 
     const result = await inspectTool.execute?.("native-status", {

@@ -7,6 +7,13 @@ import type {
   TerminalApprovalInspection,
   TerminalApprovalPolicyEvidence,
   TerminalDurableCompletionRequest,
+  TerminalNativeInspectionCapabilities,
+  TerminalNativeInspectionEvidenceInventoryEntry,
+  TerminalNativeInspectionField,
+  TerminalNativeInspectionObservation,
+  TerminalNativeInspectionObservationRequest,
+  TerminalNativeInspectionOperation,
+  TerminalNativeInspectionPlan,
   TerminalProcessSnapshot,
   TerminalRuntimeIdentity,
   TerminalScreenInspection,
@@ -30,6 +37,7 @@ export interface ClaudeAgentRow {
   sessionId?: string;
   startedAt?: number;
   status?: string;
+  waitingFor?: string;
 }
 
 export interface CreateClaudeTerminalAgentAdapterOptions {
@@ -145,6 +153,45 @@ const CLAUDE_AUTO_APPROVAL_COMMAND_LENGTH = 2000;
 const CLAUDE_NATIVE_VERSION_PATTERN = /^\d+\.\d+\.\d+$/u;
 const CLAUDE_LIFECYCLE_VERSION = "2.1.218";
 const CLAUDE_LIFECYCLE_PROFILE = "claude-code-2.1.218";
+const CLAUDE_NATIVE_INSPECTION_VERSION = "2.1.218";
+const CLAUDE_NATIVE_INSPECTION_PROFILE =
+  "claude-code-2.1.218-native-status";
+/**
+ * On the verified 2.1.218 TUI, the exact `/status` composer and its closed
+ * completion list remained byte-stable across an 80 ms capture interval and
+ * one subsequent Enter opened the Status panel. This is a Claude-local
+ * single-line profile; it deliberately does not reuse Codex's 121 ms burst
+ * paste boundary.
+ */
+export const CLAUDE_NATIVE_INSPECTION_COMPOSER_STABLE_MS = 80;
+const CLAUDE_STATUS_PANEL_HEADER =
+  /^\s*Settings\s+Status\s+Config\s+Usage\s+Stats\s*$/u;
+const CLAUDE_STATUS_PANEL_FOOTER = /^\s*Esc to cancel\s*$/u;
+const CLAUDE_STATUS_PANEL_DIVIDER = /^\s*[─━]{8,}\s*$/u;
+const CLAUDE_STATUS_PANEL_FIELD = /^\s{0,4}([^:]{1,64}):\s+(.{1,1024})\s*$/u;
+const CLAUDE_STATUS_PANEL_MAX_SCAN_LINES = 512;
+const CLAUDE_STATUS_PANEL_MAX_LINES = 48;
+const CLAUDE_STATUS_PANEL_MAX_REGION_LENGTH = 8_192;
+const CLAUDE_STATUS_PANEL_MAX_FIELDS = 24;
+const CLAUDE_STATUS_PANEL_MAX_FIELD_VALUE_LENGTH = 512;
+const CLAUDE_STATUS_PANEL_MAX_EXCERPT_LENGTH = 4_000;
+const CLAUDE_STATUS_PANEL_MAX_EVIDENCE_ENTRIES = 24;
+const CLAUDE_STATUS_PANEL_FIELDS = new Set([
+  "Version",
+  "Session name",
+  "Session ID",
+  "cwd",
+  "Auth token",
+  "Anthropic base URL",
+  "Model",
+  "MCP servers",
+  "Setting sources"
+]);
+const CLAUDE_STATUS_PANEL_SENSITIVE_FIELDS = new Set([
+  "Session name",
+  "Auth token"
+]);
+const NATIVE_INSPECTION_FINGERPRINT = /^sha256:[0-9a-f]{64}$/u;
 const ANSI_ESCAPE_PATTERN = /\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/gu;
 
 export function createClaudeTerminalAgentAdapter(
@@ -191,6 +238,9 @@ export function createClaudeTerminalAgentAdapter(
     probeThreadLifecycle: probeClaudeThreadLifecycle,
     planThreadLifecycle: planClaudeThreadLifecycle,
     observeThreadLifecycle: lifecycleObserver,
+    probeNativeInspection: probeClaudeNativeInspection,
+    planNativeInspection: planClaudeNativeInspection,
+    observeNativeInspection: observeClaudeNativeInspection,
     ...(durableCompletion
       ? {
           async detectDurableCompletion(request: TerminalDurableCompletionRequest) {
@@ -198,6 +248,226 @@ export function createClaudeTerminalAgentAdapter(
           }
         }
       : {})
+  };
+}
+
+export function probeClaudeNativeInspection(
+  agentVersion: string | undefined
+): TerminalNativeInspectionCapabilities {
+  if (!agentVersion) {
+    return {
+      status: "unknown",
+      statusInspection: false,
+      reason: "the running Claude Code version could not be verified"
+    };
+  }
+  const supported = agentVersion === CLAUDE_NATIVE_INSPECTION_VERSION;
+  return {
+    status: supported ? "supported" : "unsupported",
+    agentVersion,
+    behaviorProfile: supported
+      ? CLAUDE_NATIVE_INSPECTION_PROFILE
+      : undefined,
+    statusInspection: supported,
+    reason: supported
+      ? "Claude Code /status native inspection is supported by the verified version"
+      : "this exact Claude Code version has no AKK native inspection behavior profile"
+  };
+}
+
+export function planClaudeNativeInspection(
+  operation: TerminalNativeInspectionOperation,
+  capabilities: TerminalNativeInspectionCapabilities
+): TerminalNativeInspectionPlan {
+  if (
+    operation.kind !== "status" ||
+    capabilities.status !== "supported" ||
+    capabilities.statusInspection !== true ||
+    capabilities.agentVersion !== CLAUDE_NATIVE_INSPECTION_VERSION ||
+    capabilities.behaviorProfile !== CLAUDE_NATIVE_INSPECTION_PROFILE
+  ) {
+    throw new Error(capabilities.reason);
+  }
+  return {
+    operation,
+    behaviorProfile: CLAUDE_NATIVE_INSPECTION_PROFILE,
+    command: "/status",
+    effect: "read_only",
+    requiresIdle: true,
+    composer: {
+      kind: "exact",
+      minimumStableMs: CLAUDE_NATIVE_INSPECTION_COMPOSER_STABLE_MS
+    },
+    expectedResult: {
+      kind: "native_status",
+      presentation: "modal",
+      dismissal: {
+        keys: ["Escape"],
+        expected: "idle_empty_composer"
+      }
+    }
+  };
+}
+
+export function observeClaudeNativeInspection(
+  request: TerminalNativeInspectionObservationRequest
+): TerminalNativeInspectionObservation {
+  const rawScreen = request.screen ?? "";
+  const rawScreenFingerprint = fingerprintClaudeNativeInspection(rawScreen);
+  const screen = normalizeClaudeNativeInspectionScreen(rawScreen);
+  const screenFingerprint = fingerprintClaudeNativeInspection(screen);
+  const inventory = claudeStatusPanelEvidenceInventory(screen);
+  if (inventory.status === "ambiguous") {
+    return {
+      status: "ambiguous",
+      screenFingerprint,
+      evidenceInventory: inventory.entries,
+      reason: inventory.reason
+    };
+  }
+  const baselineError = validateClaudeStatusEvidenceInventory(
+    request.preEnterEvidenceInventory
+  );
+  if (baselineError) {
+    return {
+      status: "ambiguous",
+      screenFingerprint,
+      evidenceInventory: inventory.entries,
+      reason: baselineError
+    };
+  }
+  if (
+    request.previousScreenFingerprint !== undefined &&
+    (
+      request.previousScreenFingerprint === rawScreenFingerprint ||
+      request.previousScreenFingerprint === screenFingerprint
+    )
+  ) {
+    return {
+      status: "stale",
+      screenFingerprint,
+      evidenceInventory: inventory.entries,
+      reason: "the Claude screen did not change after the native inspection command"
+    };
+  }
+
+  const parsed = parseCurrentClaudeStatusPanel(screen);
+  if (parsed.status !== "observed") {
+    return {
+      status: parsed.status,
+      screenFingerprint,
+      evidenceInventory: inventory.entries,
+      reason: parsed.reason
+    };
+  }
+  const evidenceFingerprint = fingerprintClaudeNativeInspection(parsed.region);
+  if (request.preEnterEvidenceInventory !== undefined) {
+    const priorOccurrences = request.preEnterEvidenceInventory.find((entry) =>
+      entry.evidenceFingerprint === evidenceFingerprint
+    )?.occurrenceCount ?? 0;
+    const currentOccurrences = inventory.entries.find((entry) =>
+      entry.evidenceFingerprint === evidenceFingerprint
+    )?.occurrenceCount ?? 0;
+    if (currentOccurrences <= priorOccurrences) {
+      return {
+        status: "stale",
+        nativeThreadId: parsed.nativeThreadId,
+        observedAgentVersion: parsed.agentVersion,
+        evidence: "claude_status_panel",
+        evidenceFingerprint,
+        screenFingerprint,
+        evidenceInventory: inventory.entries,
+        reason:
+          "the Claude Status panel did not add fresh exact evidence after Enter"
+      };
+    }
+  }
+  if (parsed.agentVersion !== CLAUDE_NATIVE_INSPECTION_VERSION) {
+    return {
+      status: "mismatch",
+      nativeThreadId: parsed.nativeThreadId,
+      observedAgentVersion: parsed.agentVersion,
+      evidenceFingerprint,
+      screenFingerprint,
+      evidenceInventory: inventory.entries,
+      reason: `Claude /status reported unsupported version ${parsed.agentVersion}`
+    };
+  }
+  if (
+    request.expectedAgentVersion !== undefined &&
+    parsed.agentVersion !== request.expectedAgentVersion
+  ) {
+    return {
+      status: "mismatch",
+      nativeThreadId: parsed.nativeThreadId,
+      observedAgentVersion: parsed.agentVersion,
+      evidenceFingerprint,
+      screenFingerprint,
+      evidenceInventory: inventory.entries,
+      reason:
+        `Claude /status reported version ${parsed.agentVersion}, not the ` +
+        `verified running version ${request.expectedAgentVersion}`
+    };
+  }
+  if (!isExactNativeThreadId(request.expectedNativeThreadId)) {
+    return {
+      status: "mismatch",
+      nativeThreadId: parsed.nativeThreadId,
+      observedAgentVersion: parsed.agentVersion,
+      evidenceFingerprint,
+      screenFingerprint,
+      evidenceInventory: inventory.entries,
+      reason:
+        "Claude native status inspection requires an exact claude agents Session identity"
+    };
+  }
+  if (
+    parsed.nativeThreadId !== request.expectedNativeThreadId.toLowerCase()
+  ) {
+    return {
+      status: "mismatch",
+      nativeThreadId: parsed.nativeThreadId,
+      observedAgentVersion: parsed.agentVersion,
+      evidenceFingerprint,
+      screenFingerprint,
+      evidenceInventory: inventory.entries,
+      reason:
+        `Claude /status reported ${parsed.nativeThreadId}, not the exact ` +
+        `claude agents Session ${request.expectedNativeThreadId.toLowerCase()}`
+    };
+  }
+  if (
+    request.expectedCwd !== undefined &&
+    normalizeLifecyclePath(parsed.cwd) !==
+      normalizeLifecyclePath(request.expectedCwd)
+  ) {
+    return {
+      status: "mismatch",
+      nativeThreadId: parsed.nativeThreadId,
+      observedAgentVersion: parsed.agentVersion,
+      evidenceFingerprint,
+      screenFingerprint,
+      evidenceInventory: inventory.entries,
+      reason:
+        `Claude /status cwd ${parsed.cwd} does not match the verified pane cwd`
+    };
+  }
+
+  return {
+    status: "observed",
+    nativeThreadId: parsed.nativeThreadId,
+    observedAgentVersion: parsed.agentVersion,
+    evidence: "claude_status_panel",
+    evidenceFingerprint,
+    screenFingerprint,
+    evidenceInventory: inventory.entries,
+    result: {
+      kind: "native_status",
+      nativeThreadId: parsed.nativeThreadId,
+      agentVersion: parsed.agentVersion,
+      fields: parsed.fields,
+      excerpt: claudeNativeStatusExcerpt(parsed.fields)
+    }
   };
 }
 
@@ -400,6 +670,266 @@ export function observeClaudeThreadLifecycle(
         status: "mismatch",
         reason: `Claude resumed ${nativeThreadId}, not the requested native thread ${expected}`
       };
+}
+
+type ParsedClaudeStatusPanel =
+  | {
+      status: "observed";
+      region: string;
+      agentVersion: string;
+      nativeThreadId: string;
+      cwd: string;
+      fields: readonly TerminalNativeInspectionField[];
+    }
+  | {
+      status: "missing" | "ambiguous";
+      reason: string;
+    };
+
+function parseCurrentClaudeStatusPanel(
+  screen: string
+): ParsedClaudeStatusPanel {
+  const lines = screen.split("\n").slice(-CLAUDE_STATUS_PANEL_MAX_SCAN_LINES);
+  const headers = lines
+    .map((line, index) => CLAUDE_STATUS_PANEL_HEADER.test(line) ? index : -1)
+    .filter((index) => index >= 0);
+  if (headers.length === 0) {
+    return {
+      status: "missing",
+      reason: "no current Claude Settings Status panel is visible"
+    };
+  }
+  const headerIndex = headers.at(-1)!;
+  if (
+    headerIndex === 0 ||
+    !CLAUDE_STATUS_PANEL_DIVIDER.test(lines[headerIndex - 1])
+  ) {
+    return {
+      status: "ambiguous",
+      reason: "the Claude Status header is not anchored to its exact panel divider"
+    };
+  }
+  const footerIndexes = lines
+    .map((line, index) =>
+      index > headerIndex &&
+      index - headerIndex <= CLAUDE_STATUS_PANEL_MAX_LINES &&
+      CLAUDE_STATUS_PANEL_FOOTER.test(line)
+        ? index
+        : -1
+    )
+    .filter((index) => index >= 0);
+  if (footerIndexes.length !== 1) {
+    return {
+      status: "ambiguous",
+      reason: "the Claude Status panel is incomplete or has ambiguous dismissal markers"
+    };
+  }
+  const footerIndex = footerIndexes[0];
+  if (lines.slice(footerIndex + 1).some((line) => line.trim().length > 0)) {
+    return {
+      status: "missing",
+      reason: "the newest Claude Status panel is historical rather than current"
+    };
+  }
+  const regionLines = lines.slice(headerIndex, footerIndex + 1);
+  const region = regionLines.join("\n");
+  if (
+    regionLines.length > CLAUDE_STATUS_PANEL_MAX_LINES ||
+    region.length > CLAUDE_STATUS_PANEL_MAX_REGION_LENGTH
+  ) {
+    return {
+      status: "ambiguous",
+      reason: "the Claude Status panel exceeds the bounded inspection region"
+    };
+  }
+
+  const rawFields = new Map<string, string>();
+  for (const line of regionLines.slice(1, -1)) {
+    if (line.trim().length === 0) {
+      continue;
+    }
+    const match = CLAUDE_STATUS_PANEL_FIELD.exec(line);
+    if (!match) {
+      return {
+        status: "ambiguous",
+        reason: "the Claude Status panel contains an unprofiled non-field row"
+      };
+    }
+    const name = match[1].trim();
+    const value = match[2].trim();
+    if (!CLAUDE_STATUS_PANEL_FIELDS.has(name)) {
+      return {
+        status: "ambiguous",
+        reason: "the Claude Status panel contains an unprofiled field"
+      };
+    }
+    if (rawFields.has(name)) {
+      return {
+        status: "ambiguous",
+        reason: `the Claude Status panel repeats field ${name}`
+      };
+    }
+    rawFields.set(name, value);
+  }
+  if (rawFields.size === 0 || rawFields.size > CLAUDE_STATUS_PANEL_MAX_FIELDS) {
+    return {
+      status: "ambiguous",
+      reason: "the Claude Status panel has an invalid number of fields"
+    };
+  }
+  const agentVersion = rawFields.get("Version");
+  const nativeThreadId = rawFields.get("Session ID")?.toLowerCase();
+  const cwd = rawFields.get("cwd");
+  const model = rawFields.get("Model");
+  if (
+    !agentVersion ||
+    !isExactNativeThreadId(nativeThreadId) ||
+    !cwd ||
+    !path.isAbsolute(cwd) ||
+    !model
+  ) {
+    return {
+      status: "ambiguous",
+      reason:
+        "the Claude Status panel lacks exact Version, Session ID, cwd, or Model fields"
+    };
+  }
+  const fields = [...rawFields.entries()].map(([name, rawValue]) => ({
+    name,
+    value: redactClaudeNativeStatusField(name, rawValue)
+      .slice(0, CLAUDE_STATUS_PANEL_MAX_FIELD_VALUE_LENGTH)
+  }));
+  return {
+    status: "observed",
+    region,
+    agentVersion,
+    nativeThreadId,
+    cwd,
+    fields
+  };
+}
+
+function claudeStatusPanelEvidenceInventory(screen: string):
+  | {
+      status: "observed";
+      entries: readonly TerminalNativeInspectionEvidenceInventoryEntry[];
+    }
+  | {
+      status: "ambiguous";
+      entries: readonly TerminalNativeInspectionEvidenceInventoryEntry[];
+      reason: string;
+    } {
+  const lines = screen.split("\n").slice(-CLAUDE_STATUS_PANEL_MAX_SCAN_LINES);
+  const counts = new Map<string, number>();
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!CLAUDE_STATUS_PANEL_HEADER.test(lines[index])) {
+      continue;
+    }
+    if (
+      index === 0 ||
+      !CLAUDE_STATUS_PANEL_DIVIDER.test(lines[index - 1])
+    ) {
+      return {
+        status: "ambiguous",
+        entries: [],
+        reason: "a Claude Status marker is not anchored to its exact panel divider"
+      };
+    }
+    const footerIndex = lines.findIndex((line, candidateIndex) =>
+      candidateIndex > index &&
+      candidateIndex - index <= CLAUDE_STATUS_PANEL_MAX_LINES &&
+      CLAUDE_STATUS_PANEL_FOOTER.test(line)
+    );
+    if (footerIndex < 0) {
+      return {
+        status: "ambiguous",
+        entries: [],
+        reason: "a Claude Status panel marker has no bounded exact footer"
+      };
+    }
+    const region = lines.slice(index, footerIndex + 1).join("\n");
+    if (region.length > CLAUDE_STATUS_PANEL_MAX_REGION_LENGTH) {
+      return {
+        status: "ambiguous",
+        entries: [],
+        reason: "a Claude Status panel exceeds the bounded evidence region"
+      };
+    }
+    const fingerprint = fingerprintClaudeNativeInspection(region);
+    counts.set(fingerprint, (counts.get(fingerprint) ?? 0) + 1);
+    index = footerIndex;
+  }
+  const entries = [...counts.entries()].map(([
+    evidenceFingerprint,
+    occurrenceCount
+  ]) => ({ evidenceFingerprint, occurrenceCount }));
+  if (entries.length > CLAUDE_STATUS_PANEL_MAX_EVIDENCE_ENTRIES) {
+    return {
+      status: "ambiguous",
+      entries,
+      reason: "the Claude Status evidence inventory exceeds its bounded entry count"
+    };
+  }
+  return { status: "observed", entries };
+}
+
+function validateClaudeStatusEvidenceInventory(
+  inventory:
+    readonly TerminalNativeInspectionEvidenceInventoryEntry[] | undefined
+): string | undefined {
+  if (inventory === undefined) {
+    return undefined;
+  }
+  if (inventory.length > CLAUDE_STATUS_PANEL_MAX_EVIDENCE_ENTRIES) {
+    return "the pre-Enter Claude Status evidence inventory is over-bounded";
+  }
+  const seen = new Set<string>();
+  for (const entry of inventory) {
+    if (
+      !NATIVE_INSPECTION_FINGERPRINT.test(entry.evidenceFingerprint) ||
+      !Number.isSafeInteger(entry.occurrenceCount) ||
+      entry.occurrenceCount < 1 ||
+      seen.has(entry.evidenceFingerprint)
+    ) {
+      return "the pre-Enter Claude Status evidence inventory is malformed";
+    }
+    seen.add(entry.evidenceFingerprint);
+  }
+  return undefined;
+}
+
+function redactClaudeNativeStatusField(name: string, value: string): string {
+  if (
+    CLAUDE_STATUS_PANEL_SENSITIVE_FIELDS.has(name) ||
+    /(?:auth|account|email|api\s*key|token|credential|login|organization|user)/iu
+      .test(name)
+  ) {
+    return "[REDACTED]";
+  }
+  return redactString(value).replace(
+    /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/giu,
+    "[REDACTED EMAIL]"
+  );
+}
+
+function claudeNativeStatusExcerpt(
+  fields: readonly TerminalNativeInspectionField[]
+): string {
+  return [
+    "Claude Code native status",
+    ...fields.map((field) => `${field.name}: ${field.value}`)
+  ].join("\n").slice(0, CLAUDE_STATUS_PANEL_MAX_EXCERPT_LENGTH);
+}
+
+function normalizeClaudeNativeInspectionScreen(screen: string): string {
+  return screen
+    .replace(ANSI_ESCAPE_PATTERN, "")
+    .replace(/\r\n?/gu, "\n")
+    .replace(/\u00a0/gu, " ");
+}
+
+function fingerprintClaudeNativeInspection(value: string): string {
+  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
 
 function normalizeLifecyclePath(value: unknown): string | undefined {
