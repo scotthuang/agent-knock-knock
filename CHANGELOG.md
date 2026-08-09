@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.11.4 - 2026-08-09
+
+### Added
+
+- Add an adapter-owned, version-scoped native status inspection for Codex 0.146.0 and 0.146.1, exposed through a closed `native_inspect(status)` action that returns a bounded and redacted fresh `/status` result without creating a Session, Turn, receipt, monitor, callback, or Store state.
+
+### Security
+
+- Keep ordinary `send` and `respond` slash-command rejection intact while serializing native inspection with terminal mutations, revalidating the exact terminal, process, binding, version, idle composer, and ownership state, and dispatching at most one Enter only after the versioned 121 ms materialization boundary.
+- Fail closed after identity drift, ambiguous or stale status evidence, and uncertain submission outcomes without blind retries or a second Enter.
+
 ## 0.11.3 - 2026-08-08
 
 ### Fixed
