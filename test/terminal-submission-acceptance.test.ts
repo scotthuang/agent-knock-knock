@@ -604,7 +604,7 @@ function codexFixture(initialRecords: readonly unknown[] = []) {
       cwd: directory,
       originator: "codex-tui",
       source: "cli",
-      cli_version: "0.146.1"
+      cli_version: "0.147.0"
     }
   };
   fs.writeFileSync(

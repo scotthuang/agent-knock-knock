@@ -1008,12 +1008,12 @@ test("live-gate New accepts a persisted unmanaged Codex origin", () => {
 });
 
 test("native status inspection is snapshot-bound, settles the slash composer, and does not mutate the Store", () => {
-  const fixture = createNoRolloutFixture();
+  const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
   try {
     assert.equal(fs.existsSync(fixture.storeDir), false);
     const listed = listFixtureTerminal(fixture);
     assert.equal(listed.native_inspection.status, "supported");
-    assert.equal(listed.native_inspection.agentVersion, "0.146.0");
+    assert.equal(listed.native_inspection.agentVersion, "0.147.0");
     assert.deepEqual(
       listed.available_actions.native_inspect.arguments,
       {
@@ -1050,6 +1050,22 @@ test("native status inspection is snapshot-bound, settles the slash composer, an
 
     fs.writeFileSync(fixture.screenPath, [
       "Ready",
+      "\u001b[1m›\u001b[0m \u001b[2mImprove documentation in @filename\u001b[0m",
+      "  \u001b[38;2;246;226;183mgpt-5.6-sol high\u001b[2m\u001b[39m · \u001b[0m/workspace"
+    ].join("\n"));
+    const suggested = listFixtureTerminal(fixture);
+    assert.equal(suggested.activity_state, "idle");
+    assert.deepEqual(
+      suggested.available_actions.native_inspect.arguments,
+      {
+        terminal_id: fixture.terminalId,
+        inspection: "status",
+        expected_binding_token: suggested.lifecycle_binding_token
+      }
+    );
+
+    fs.writeFileSync(fixture.screenPath, [
+      "Ready",
       "› human draft",
       "gpt-5.6-sol high · /workspace"
     ].join("\n"));
@@ -1081,7 +1097,7 @@ test("native status inspection is snapshot-bound, settles the slash composer, an
     assert.equal(result.status, "observed");
     assert.equal(result.inspection, "status");
     assert.equal(result.agent, "codex");
-    assert.equal(result.agent_version, "0.146.0");
+    assert.equal(result.agent_version, "0.147.0");
     assert.equal(result.native_thread_id, NATIVE_THREAD_ID);
     assert.equal(result.terminal_submission.command, "/status");
     assert.equal(result.terminal_submission.enter_count, 1);
@@ -1115,6 +1131,35 @@ test("native status inspection is snapshot-bound, settles the slash composer, an
     );
     assert.deepEqual(listConversations(fixture.storeDir), []);
     assert.deepEqual(listManagedSessions(fixture.storeDir), []);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("Codex 0.146.0 native status inspection remains backward compatible", () => {
+  const fixture = createNoRolloutFixture({ codexVersion: "0.146.0" });
+  try {
+    const listed = listFixtureTerminal(fixture);
+    assert.equal(listed.native_inspection.status, "supported");
+    assert.equal(listed.native_inspection.agentVersion, "0.146.0");
+    const inspected = runCli([
+      "native-inspect",
+      "--terminal",
+      fixture.terminalId,
+      "--inspection",
+      "status",
+      "--expected-binding-token",
+      String(listed.lifecycle_binding_token),
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome
+    ], fixture.environment);
+    assert.equal(inspected.status, 0, inspected.stderr || inspected.stdout);
+    const result = JSON.parse(inspected.stdout);
+    assert.equal(result.agent_version, "0.146.0");
+    assert.equal(result.behavior_profile, "codex-tui-0.146.0");
+    assert.equal(result.terminal_submission.enter_count, 1);
   } finally {
     fixture.cleanup();
   }
@@ -1231,9 +1276,11 @@ interface NoRolloutFixture {
 
 function createNoRolloutFixture(
   {
+    codexVersion = "0.146.0",
     materializeRolloutOnProbe,
     persistedCandidate = false
   }: {
+    codexVersion?: "0.146.0" | "0.147.0";
     materializeRolloutOnProbe?: number;
     persistedCandidate?: boolean;
   } = {}
@@ -1260,7 +1307,7 @@ function createNoRolloutFixture(
     `rollout-2026-08-06T00-00-00-${NATIVE_THREAD_ID}.jsonl`
   );
   const executablePath =
-    "/opt/akk-test/releases/0.146.0-aarch64-apple-darwin/bin/codex";
+    `/opt/akk-test/releases/${codexVersion}-aarch64-apple-darwin/bin/codex`;
 
   fs.mkdirSync(fakeBinDir, { recursive: true });
   fs.mkdirSync(workspace, { recursive: true });
@@ -1275,7 +1322,7 @@ function createNoRolloutFixture(
       cwd: workspace,
       originator: "codex-tui",
       source: "cli",
-      cli_version: "0.146.0"
+      cli_version: codexVersion
     }
   })}\n`, { mode: 0o600 });
   if (persistedCandidate) {
@@ -1296,6 +1343,7 @@ function createNoRolloutFixture(
     pendingInputPath,
     materializedPath,
     processBirthPath,
+    codexVersion,
     target,
     panePid,
     workspace
@@ -1586,10 +1634,17 @@ function writeFakeTmux(options: {
   pendingInputPath: string;
   materializedPath: string;
   processBirthPath: string;
+  codexVersion: "0.146.0" | "0.147.0";
   target: string;
   panePid: number;
   workspace: string;
 }): void {
+  const statusPopup = options.codexVersion === "0.147.0"
+    ? "Ready\n› /status\n\n" +
+      "  /status      show current session configuration and token usage\n" +
+      "  /statusline  configure which items appear in the status line\n"
+    : "Ready\n› /status\n\n" +
+      "  /status  show current session configuration and token usage\n";
   const fakeTmux = path.join(options.fakeBinDir, "tmux");
   fs.writeFileSync(fakeTmux, `#!/usr/bin/env node
 const fs = require("node:fs");
@@ -1600,7 +1655,12 @@ if (args[0] === "list-panes") {
     `tmux-birth\t0\t0\t${options.panePid}\tcodex\t${options.workspace}\n`
   )});
 } else if (args[0] === "capture-pane") {
-  process.stdout.write(fs.readFileSync(${JSON.stringify(options.screenPath)}, "utf8"));
+  const screen = fs.readFileSync(${JSON.stringify(options.screenPath)}, "utf8");
+  process.stdout.write(
+    args.includes("-e")
+      ? screen
+      : screen.replace(/\\u001b\\[[0-9;]*m/g, "")
+  );
 } else if (args[0] === "send-keys" && args.includes("-l")) {
   if (
     process.env.AKK_TEST_TMUX_TEXT_FAILURE === "1" &&
@@ -1612,7 +1672,7 @@ if (args[0] === "list-panes") {
     fs.writeFileSync(${JSON.stringify(options.pendingInputPath)}, args.at(-1));
     if (args.at(-1) === "/status") {
       fs.writeFileSync(${JSON.stringify(options.screenPath)},
-        "Ready\\n› /status\\n\\n  /status  show current session configuration and token usage\\n");
+        ${JSON.stringify(statusPopup)});
       const driftedProcessBirth =
         process.env.AKK_TEST_NATIVE_INSPECT_PROCESS_BIRTH_AFTER_TEXT;
       if (driftedProcessBirth) {
@@ -1631,7 +1691,7 @@ if (args[0] === "list-panes") {
   if (pendingInput === "/status") {
     fs.writeFileSync(${JSON.stringify(options.screenPath)}, ${JSON.stringify(
       `/status\n╭──────────────────────────────────────────────────╮\n` +
-      `│ OpenAI Codex (v0.146.0)                       │\n` +
+      `│ OpenAI Codex (v${options.codexVersion})                       │\n` +
       `│ Session: ${NATIVE_THREAD_ID} │\n` +
       `│ Account: private@example.com                 │\n` +
       `╰──────────────────────────────────────────────────╯\n› `

@@ -20,6 +20,7 @@ const SESSION_ID = "11111111-1111-4111-8111-111111111111";
 const PID = 42421;
 const AGENT_STARTED_AT_MS = 1784870000000;
 const VERSION = "2.1.218";
+const CURRENT_VERSION = "2.1.226";
 const LEGACY_VERSION = "2.1.198";
 const STARTED_AT = "2026-07-24T02:00:00.000Z";
 const CAPTURED_AT = "2026-07-24T02:00:00.100Z";
@@ -90,8 +91,129 @@ test("Claude lifecycle candidates are root-interactive and carry a revalidated f
       claudeHome: fixture.claudeHome,
       agentVersion: "2.1.219"
     }),
-    /exact version 2\.1\.218/u
+    /supported exact versions: 2\.1\.218, 2\.1\.226/u
   );
+});
+
+test("Claude 2.1.226 revalidates a 2.1.218 historical session with a v2 token", (t) => {
+  const fixture = createFixture(t);
+  fixture.write(turnRecords({
+    request: "Historical 2.1.218 request",
+    assistantText: "Historical 2.1.218 answer",
+    version: VERSION
+  }));
+
+  const candidates = listClaudeThreadLifecycleCandidates({
+    cwd: fixture.workspace,
+    claudeHome: fixture.claudeHome,
+    agentVersion: CURRENT_VERSION
+  });
+  assert.equal(candidates.length, 1);
+  const candidate = candidates[0];
+  assert.equal(candidate.agentVersion, CURRENT_VERSION);
+  assert.equal(candidate.sourceAgentVersion, VERSION);
+  assert.equal(candidate.candidateToken.version, 2);
+  if (candidate.candidateToken.version !== 2) {
+    return;
+  }
+  assert.equal(candidate.candidateToken.agentVersion, CURRENT_VERSION);
+  assert.equal(candidate.candidateToken.sourceAgentVersion, VERSION);
+  assert.equal(
+    revalidateClaudeThreadLifecycleCandidate(candidate.candidateToken, {
+      cwd: fixture.workspace,
+      claudeHome: fixture.claudeHome,
+      agentVersion: CURRENT_VERSION
+    }).status,
+    "valid"
+  );
+  assert.equal(
+    revalidateClaudeThreadLifecycleCandidate({
+      ...candidate.candidateToken,
+      sourceAgentVersion: "2.1.217"
+    }, {
+      cwd: fixture.workspace,
+      claudeHome: fixture.claudeHome,
+      agentVersion: CURRENT_VERSION
+    }).status,
+    "unsafe"
+  );
+  assert.equal(
+    listClaudeThreadLifecycleCandidates({
+      cwd: fixture.workspace,
+      claudeHome: fixture.claudeHome,
+      agentVersion: VERSION
+    })[0].candidateToken.version,
+    1
+  );
+
+  const newer = createFixture(t, 226);
+  newer.write(turnRecords({
+    request: "Future source request",
+    assistantText: "Future source answer",
+    sessionId: newer.sessionId,
+    version: CURRENT_VERSION
+  }));
+  assert.deepEqual(
+    listClaudeThreadLifecycleCandidates({
+      cwd: newer.workspace,
+      claudeHome: newer.claudeHome,
+      agentVersion: VERSION
+    }),
+    []
+  );
+});
+
+test("Claude 2.1.226 transcript supports lifecycle, acceptance, completion, and approval evidence", (t) => {
+  const fixture = createFixture(t, 226);
+  const request = "Verify the exact current Claude transcript profile";
+  const anchor = fixture.capture();
+  fixture.write(turnRecords({
+    request,
+    assistantText: "Current Claude transcript accepted",
+    sessionId: fixture.sessionId,
+    version: CURRENT_VERSION
+  }));
+
+  const acceptance = fixture.detectAcceptance(anchor, request);
+  assert.equal(acceptance?.metadata?.claude_version, CURRENT_VERSION);
+  const completion = fixture.detect(anchor, request);
+  assert.equal(completion?.text, "Current Claude transcript accepted");
+  assert.equal(completion?.metadata?.claude_version, CURRENT_VERSION);
+
+  const sessions = listClaudeHistoricalSessions({
+    cwd: fixture.workspace,
+    claudeHome: fixture.claudeHome,
+    agentVersion: CURRENT_VERSION
+  });
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].claudeVersion, CURRENT_VERSION);
+  const candidate = listClaudeThreadLifecycleCandidates({
+    cwd: fixture.workspace,
+    claudeHome: fixture.claudeHome,
+    agentVersion: CURRENT_VERSION
+  })[0];
+  assert.equal(candidate.agentVersion, CURRENT_VERSION);
+  assert.equal(
+    revalidateClaudeThreadLifecycleCandidate(candidate.candidateToken, {
+      cwd: fixture.workspace,
+      claudeHome: fixture.claudeHome,
+      agentVersion: CURRENT_VERSION
+    }).status,
+    "valid"
+  );
+
+  const pending = createFixture(t, 227);
+  const pendingRequest = "Inspect the current Claude approval schema";
+  const pendingAnchor = pending.capture();
+  pending.write(pendingBashRecords({
+    request: pendingRequest,
+    command: "printf current-claude-profile",
+    sessionId: pending.sessionId,
+    version: CURRENT_VERSION
+  }));
+  const approval = pending.detectPending(pendingAnchor, pendingRequest);
+  assert.equal(approval?.claudeVersion, CURRENT_VERSION);
+  assert.equal(approval?.toolName, "Bash");
 });
 
 test("Claude lifecycle candidate discovery excludes sidechains, teams, daemons, and loops", (t) => {

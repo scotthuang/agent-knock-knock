@@ -26,9 +26,10 @@ import {
   type TerminalControlProvider
 } from "./terminal-control-provider.js";
 
-// Codex 0.146.x keeps Enter in paste/newline mode for 120ms after burst input.
-// Cross that boundary rather than landing on it, and also require observable
-// composer stability instead of treating this delay alone as acceptance.
+// Verified Codex profiles through 0.147.0 keep Enter in paste/newline mode for
+// 120ms after burst input. Cross that boundary rather than landing on it, and
+// also require observable composer stability instead of treating this delay
+// alone as acceptance.
 const CODEX_PASTE_ENTER_SETTLE_MS = 121;
 const CODEX_MULTILINE_SETTLE_POLL_MS = 30;
 const CODEX_MULTILINE_SETTLE_TIMEOUT_MS = 2_000;
@@ -37,19 +38,33 @@ const CODEX_MULTILINE_SETTLE_SCROLLBACK_LINES = 240;
 const CODEX_COMPOSER_MARKER = /^[›»](?:\s|$)/u;
 const CODEX_COMPOSER_FOOTER =
   /^(?:gpt-[\w.-]+(?:\s|$)|[-\w.]+ default ·)/u;
-// Codex 0.146.0 and 0.146.1 render the same verified slash-completion row.
-// Keep it closed per behavior profile so changed text cannot silently become
-// a newly authorized native command surface.
-const CODEX_NATIVE_STATUS_POPUP_BY_PROFILE: Readonly<Record<string, string>> = {
-  "codex-tui-0.146.0":
-    "  /status  show current session configuration and token usage",
-  "codex-tui-0.146.1":
+// Keep every exact slash-completion shape closed per behavior profile so a
+// version adding another matching command cannot silently become an authorized
+// native command surface.
+const CODEX_NATIVE_STATUS_POPUP_BY_PROFILE: Readonly<
+  Record<string, readonly string[]>
+> = {
+  "codex-tui-0.146.0": [
     "  /status  show current session configuration and token usage"
+  ],
+  "codex-tui-0.146.1": [
+    "  /status  show current session configuration and token usage"
+  ],
+  "codex-tui-0.147.0": [
+    "  /status      show current session configuration and token usage",
+    "  /statusline  configure which items appear in the status line"
+  ]
 };
 const CLAUDE_NATIVE_STATUS_POPUP_BY_PROFILE: Readonly<
   Record<string, readonly string[]>
 > = {
   "claude-code-2.1.218-native-status": [
+    "/status Show Claude Code status including version, model, account, API connectivity, and tool statuses",
+    "/statusline Set up Claude Code's status line UI",
+    "/ide Manage IDE integrations and show status",
+    "/usage Show session cost, plan usage, and activity stats"
+  ],
+  "claude-code-2.1.226-native-status": [
     "/status Show Claude Code status including version, model, account, API connectivity, and tool statuses",
     "/statusline Set up Claude Code's status line UI",
     "/ide Manage IDE integrations and show status",
@@ -856,12 +871,13 @@ export class TerminalAgentBridge {
     materialization: TerminalNativeInspectionMaterializationEvidence;
   }> {
     const startedAt = performance.now();
+    const settleTimeoutMs = plan.composer.maximumSettleMs;
     let stableDigest: string | undefined;
     let stableKind: TerminalNativeInspectionMaterializationKind | undefined;
     let stableSince: number | undefined;
     let stableCaptures = 0;
 
-    while (performance.now() - startedAt <= CODEX_MULTILINE_SETTLE_TIMEOUT_MS) {
+    while (performance.now() - startedAt <= settleTimeoutMs) {
       const captured = await this.captureInspection(adapter, terminalControl, {
         runtime,
         scrollbackLines: CODEX_MULTILINE_SETTLE_SCROLLBACK_LINES
@@ -912,7 +928,7 @@ export class TerminalAgentBridge {
       }
 
       const elapsed = performance.now() - startedAt;
-      const remaining = CODEX_MULTILINE_SETTLE_TIMEOUT_MS - elapsed;
+      const remaining = settleTimeoutMs - elapsed;
       if (remaining <= 0) {
         break;
       }
@@ -1767,19 +1783,26 @@ function assertClosedStatusInspectionPlan(
   if (!terminalControl.capabilities.includes("screen_status")) {
     throw new Error(`${adapter.displayName} terminal screen inspection is not supported`);
   }
-  const codexProfile = adapter.agent === "codex" && [
-    "codex-tui-0.146.0",
-    "codex-tui-0.146.1"
-  ].includes(plan.behaviorProfile);
+  const codexProfile = adapter.agent === "codex" &&
+    CODEX_NATIVE_STATUS_POPUP_BY_PROFILE[plan.behaviorProfile] !== undefined;
   const claudeProfile = adapter.agent === "claude" &&
-    plan.behaviorProfile === "claude-code-2.1.218-native-status";
+    CLAUDE_NATIVE_STATUS_POPUP_BY_PROFILE[plan.behaviorProfile] !== undefined;
+  const expectedSettle = codexProfile
+    ? { minimumStableMs: CODEX_PASTE_ENTER_SETTLE_MS, maximumSettleMs: 2_000 }
+    : plan.behaviorProfile === "claude-code-2.1.218-native-status"
+      ? { minimumStableMs: 80, maximumSettleMs: 2_000 }
+      : plan.behaviorProfile === "claude-code-2.1.226-native-status"
+        ? { minimumStableMs: 80, maximumSettleMs: 5_000 }
+        : undefined;
   const exactPresentation = codexProfile
     ? plan.expectedResult.presentation === "inline" &&
       plan.expectedResult.dismissal === undefined &&
-      plan.composer.minimumStableMs >= CODEX_PASTE_ENTER_SETTLE_MS
+      plan.composer.minimumStableMs === expectedSettle?.minimumStableMs &&
+      plan.composer.maximumSettleMs === expectedSettle.maximumSettleMs
     : claudeProfile
       ? plan.expectedResult.presentation === "modal" &&
-        plan.composer.minimumStableMs >= 80 &&
+        plan.composer.minimumStableMs === expectedSettle?.minimumStableMs &&
+        plan.composer.maximumSettleMs === expectedSettle.maximumSettleMs &&
         plan.expectedResult.dismissal?.expected === "idle_empty_composer" &&
         JSON.stringify(plan.expectedResult.dismissal.keys) ===
           JSON.stringify(["Escape"])
@@ -1792,6 +1815,8 @@ function assertClosedStatusInspectionPlan(
     plan.composer.kind !== "exact" ||
     !Number.isFinite(plan.composer.minimumStableMs) ||
     plan.composer.minimumStableMs < 0 ||
+    !Number.isFinite(plan.composer.maximumSettleMs) ||
+    plan.composer.maximumSettleMs < plan.composer.minimumStableMs ||
     plan.expectedResult.kind !== "native_status" ||
     !exactPresentation
   ) {
@@ -1885,9 +1910,8 @@ function exactCodexNativeInspectionComposerCapture(
   if (popupRows.length === 0) {
     kind = "exact_slash_composer";
   } else if (
-    popupRows.length === 1 &&
-    popupRows[0].trimEnd() ===
-      CODEX_NATIVE_STATUS_POPUP_BY_PROFILE[plan.behaviorProfile]
+    JSON.stringify(popupRows.map((line) => line.trimEnd())) ===
+      JSON.stringify(CODEX_NATIVE_STATUS_POPUP_BY_PROFILE[plan.behaviorProfile])
   ) {
     kind = "exact_slash_popup";
   } else {
@@ -1935,7 +1959,8 @@ function exactClaudeNativeInspectionComposerCapture(
       }
     }
     if (
-      JSON.stringify(suggestions) !== JSON.stringify(
+      !closedClaudeNativeStatusSuggestionsMatch(
+        suggestions,
         CLAUDE_NATIVE_STATUS_POPUP_BY_PROFILE[plan.behaviorProfile]
       )
     ) {
@@ -1952,7 +1977,39 @@ function exactClaudeNativeInspectionComposerCapture(
 }
 
 /**
- * Prove the exact idle input frame from the verified Claude Code 2.1.218
+ * Claude truncates a suggestion row with a Unicode ellipsis at narrow pane
+ * widths. Keep authorization closed by accepting only an exact ordered row or
+ * an explicit ellipsis whose preceding text is an exact, non-trivial prefix of
+ * that same profiled row. A caller still cannot introduce, omit, or reorder a
+ * slash command.
+ */
+function closedClaudeNativeStatusSuggestionsMatch(
+  observed: readonly string[],
+  expected: readonly string[] | undefined
+): boolean {
+  if (!expected || observed.length !== expected.length) {
+    return false;
+  }
+  return observed.every((row, index) => {
+    const exact = expected[index];
+    if (row === exact) {
+      return true;
+    }
+    if (!row.endsWith("…")) {
+      return false;
+    }
+    const prefix = row.slice(0, -1);
+    const commandEnd = exact.indexOf(" ");
+    return (
+      commandEnd > 0 &&
+      prefix.length >= commandEnd + 12 &&
+      exact.startsWith(prefix)
+    );
+  });
+}
+
+/**
+ * Prove the exact idle input frame from a verified Claude Code native-status
  * profile. A loose or historical `❯` prompt is not enough to authorize even
  * the initial literal `/status` injection.
  */

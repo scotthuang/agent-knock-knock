@@ -226,17 +226,17 @@ function terminalControl(adapter: TerminalAgentAdapter = createTestClaudeAdapter
   ]);
 }
 
-function codexStatusInspectionPlan() {
+function codexStatusInspectionPlan(version = "0.146.1") {
   return planCodexNativeInspection(
     { kind: "status" },
-    probeCodexNativeInspection("0.146.1")
+    probeCodexNativeInspection(version)
   );
 }
 
-function claudeStatusInspectionPlan() {
+function claudeStatusInspectionPlan(version = "2.1.218") {
   return planClaudeNativeInspection(
     { kind: "status" },
-    probeClaudeNativeInspection("2.1.218")
+    probeClaudeNativeInspection(version)
   );
 }
 
@@ -253,15 +253,33 @@ function claudeNativeComposerScreen(command = "/status"): string {
   ].join("\n");
 }
 
+function claudeNarrowNativeComposerScreen(command = "/status"): string {
+  return [
+    "────────────────────────────────────────────────────────────────────────────────",
+    `❯ ${command}`,
+    "────────────────────────────────────────────────────────────────────────────────",
+    "/status                       Show Claude Code status including version,",
+    "                              model, account, API connectivity, and tool st…",
+    "/statusline                   Set up Claude Code's status line UI",
+    "/ide                          Manage IDE integrations and show status",
+    "/usage                        Show session cost, plan usage, and activity",
+    "                              stats"
+  ].join("\n");
+}
+
 function claudeNativeStatusPanel(
-  nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0"
+  nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0",
+  version = "2.1.218"
 ): string {
   return [
     "────────────────────────────────────────────────",
     "  Settings  Status   Config   Usage   Stats",
     "",
-    "  Version:             2.1.218",
+    `  Version:             ${version}`,
     `  Session ID:          ${nativeThreadId}`,
+    ...(version === "2.1.226"
+      ? ["  Session kind:        interactive"]
+      : []),
     "  cwd:                 /repo",
     "  Auth token:          ANTHROPIC_AUTH_TOKEN",
     "",
@@ -2068,7 +2086,7 @@ test("native status inspection proves an exact stable composer before one Enter"
   );
 });
 
-test("Claude native status inspection uses its own stable composer and one modal dismissal", async () => {
+test("Claude 2.1.226 native status uses its own stable composer and one modal dismissal", async () => {
   const nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0";
   const idleScreen = [
     "────────────────────────────────────────────────",
@@ -2098,7 +2116,10 @@ test("Claude native status inspection uses its own stable composer and one modal
       await super.sendKeys(target, keys, options);
       if (keys.includes("C-m")) {
         this.enterDispatchedAt = performance.now();
-        this.setScreen(target, claudeNativeStatusPanel(nativeThreadId));
+        this.setScreen(
+          target,
+          claudeNativeStatusPanel(nativeThreadId, "2.1.226")
+        );
       } else if (keys.includes("Escape")) {
         this.setScreen(target, idleScreen);
       }
@@ -2117,7 +2138,7 @@ test("Claude native status inspection uses its own stable composer and one modal
       identityChecks += 1;
     }
   });
-  const plan = claudeStatusInspectionPlan();
+  const plan = claudeStatusInspectionPlan("2.1.226");
   const submission = await bridge.submitNativeInspection(
     "claude",
     terminalControl(adapter),
@@ -2137,7 +2158,7 @@ test("Claude native status inspection uses its own stable composer and one modal
     previousScreenFingerprint: submission.preEnterScreenDigest,
     preEnterEvidenceInventory: submission.preEnterEvidenceInventory,
     expectedNativeThreadId: nativeThreadId,
-    expectedAgentVersion: "2.1.218",
+    expectedAgentVersion: "2.1.226",
     expectedCwd: "/repo"
   };
   const observed = await bridge.observeNativeInspection(
@@ -2175,6 +2196,89 @@ test("Claude native status inspection uses its own stable composer and one modal
         socketPath: PANE.socketPath
       }
     ]
+  );
+});
+
+test("Claude 2.1.226 native status accepts its exact 80-column truncated popup", async () => {
+  const adapter = createClaudeTerminalAgentAdapter();
+  class NarrowClaudeProvider extends RecordingTerminalProvider {
+    override async sendText(
+      target: string,
+      text: string,
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      await super.sendText(target, text, options);
+      this.setScreen(target, claudeNarrowNativeComposerScreen(text));
+    }
+  }
+  const provider = new NarrowClaudeProvider([PANE]);
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([adapter]),
+    terminalProvider: provider,
+    async verifyIdentity() {}
+  });
+  const result = await bridge.submitNativeInspection(
+    "claude",
+    terminalControl(adapter),
+    claudeStatusInspectionPlan("2.1.226"),
+    { runtime: { pid: 110 } }
+  );
+  assert.equal(result.materialization.kind, "exact_slash_popup");
+  assert.equal(result.enterCount, 1);
+});
+
+test("Claude 2.1.226 native status rejects a non-prefix truncated popup", async () => {
+  const adapter = createClaudeTerminalAgentAdapter();
+  class DriftedNarrowClaudeProvider extends RecordingTerminalProvider {
+    private capturesAfterInjection = 0;
+
+    override async sendText(
+      target: string,
+      text: string,
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      await super.sendText(target, text, options);
+      this.setScreen(
+        target,
+        claudeNarrowNativeComposerScreen(text).replace("tool st…", "tool xx…")
+      );
+    }
+
+    override async capture(
+      target: string,
+      options: { scrollbackLines?: number; socketPath?: string } = {}
+    ): Promise<string> {
+      this.capturesAfterInjection += 1;
+      if (this.capturesAfterInjection >= 8) {
+        throw new Error("bounded test capture stop after rejecting popup");
+      }
+      return super.capture(target, options);
+    }
+  }
+  const provider = new DriftedNarrowClaudeProvider([PANE]);
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([adapter]),
+    terminalProvider: provider,
+    async verifyIdentity() {}
+  });
+  await assert.rejects(
+    bridge.submitNativeInspection(
+      "claude",
+      terminalControl(adapter),
+      claudeStatusInspectionPlan("2.1.226"),
+      { runtime: { pid: 110 } }
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof NativeInspectionSubmissionError);
+      assert.equal(error.stage, "text_injected");
+      return true;
+    }
+  );
+  assert.equal(
+    provider.operations.some((operation) =>
+      operation.kind === "keys" && operation.keys.includes("C-m")
+    ),
+    false
   );
 });
 
@@ -2392,6 +2496,10 @@ test("Claude native inspection rejects forged slash and dismissal plans before i
     { ...plan, command: "/usage" },
     {
       ...plan,
+      composer: { ...plan.composer, maximumSettleMs: 5_000 }
+    },
+    {
+      ...plan,
       expectedResult: {
         ...plan.expectedResult,
         dismissal: {
@@ -2471,6 +2579,121 @@ test("native status inspection accepts an exact current slash popup only at a pr
       operation.kind === "keys" && operation.keys.includes("C-m")
     ).length,
     1
+  );
+});
+
+test("Codex 0.147.0 native status requires its exact ordered two-row slash popup", async () => {
+  class CurrentPopupProvider extends RecordingTerminalProvider {
+    override async sendText(
+      target: string,
+      text: string,
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      await super.sendText(target, text, options);
+      this.setScreen(target, [
+        "Ready",
+        "› /status",
+        "",
+        "  /status      show current session configuration and token usage",
+        "  /statusline  configure which items appear in the status line"
+      ].join("\n"));
+    }
+  }
+
+  const idlePopupAdapter = {
+    ...codexTerminalAgentAdapter,
+    inspectScreen(options: Parameters<
+      typeof codexTerminalAgentAdapter.inspectScreen
+    >[0]) {
+      return {
+        ...codexTerminalAgentAdapter.inspectScreen(options),
+        activity: {
+          state: "idle" as const,
+          reason: "verified 0.147.0 slash popup is current and idle"
+        }
+      };
+    }
+  };
+  const provider = new CurrentPopupProvider([PANE]);
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([idlePopupAdapter]),
+    terminalProvider: provider,
+    async verifyIdentity() {}
+  });
+  const result = await bridge.submitNativeInspection(
+    "codex",
+    terminalControl(codexTerminalAgentAdapter),
+    codexStatusInspectionPlan("0.147.0"),
+    { runtime: { pid: 110 } }
+  );
+  assert.equal(result.materialization.kind, "exact_slash_popup");
+  assert.equal(result.enterCount, 1);
+});
+
+test("Codex 0.147.0 native status refuses an incomplete two-row popup", async () => {
+  class IncompleteCurrentPopupProvider extends RecordingTerminalProvider {
+    private capturesAfterInjection = 0;
+
+    override async sendText(
+      target: string,
+      text: string,
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      await super.sendText(target, text, options);
+      this.setScreen(target, [
+        "› /status",
+        "",
+        "  /status      show current session configuration and token usage"
+      ].join("\n"));
+    }
+
+    override async capture(
+      target: string,
+      options: { scrollbackLines?: number; socketPath?: string } = {}
+    ): Promise<string> {
+      this.capturesAfterInjection += 1;
+      if (this.capturesAfterInjection >= 8) {
+        throw new Error("bounded test capture stop after rejecting popup");
+      }
+      return super.capture(target, options);
+    }
+  }
+
+  const provider = new IncompleteCurrentPopupProvider([PANE]);
+  const idlePopupAdapter = {
+    ...codexTerminalAgentAdapter,
+    inspectScreen(options: Parameters<
+      typeof codexTerminalAgentAdapter.inspectScreen
+    >[0]) {
+      return {
+        ...codexTerminalAgentAdapter.inspectScreen(options),
+        activity: { state: "idle" as const, reason: "test-only idle" }
+      };
+    }
+  };
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([idlePopupAdapter]),
+    terminalProvider: provider,
+    async verifyIdentity() {}
+  });
+  await assert.rejects(
+    bridge.submitNativeInspection(
+      "codex",
+      terminalControl(codexTerminalAgentAdapter),
+      codexStatusInspectionPlan("0.147.0"),
+      { runtime: { pid: 110 } }
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof NativeInspectionSubmissionError);
+      assert.equal(error.stage, "text_injected");
+      return true;
+    }
+  );
+  assert.equal(
+    provider.operations.some((operation) =>
+      operation.kind === "keys" && operation.keys.includes("C-m")
+    ),
+    false
   );
 });
 

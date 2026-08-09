@@ -269,8 +269,14 @@ test("OpenClaw native inspection is a closed status-only terminal action", async
       ? properties.terminal_id
       : {};
     assert.match(String(terminalSchema.pattern ?? ""), /terminal:v/u);
-    assert.match(inspectTool.description ?? "", /Codex 0\.146\.0\/0\.146\.1/u);
-    assert.match(inspectTool.description ?? "", /Claude Code 2\.1\.218/u);
+    assert.match(
+      inspectTool.description ?? "",
+      /Codex 0\.146\.0\/0\.146\.1\/0\.147\.0/u
+    );
+    assert.match(
+      inspectTool.description ?? "",
+      /Claude Code 2\.1\.218\/2\.1\.226/u
+    );
     assert.match(inspectTool.description ?? "", /safely dismissed/u);
     assert.match(inspectTool.description ?? "", /creates no AKK Session, Turn/u);
     assert.match(inspectTool.description ?? "", /agent_knock_knock_status is different/u);
