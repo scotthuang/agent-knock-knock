@@ -155,7 +155,7 @@ const nativeInspectParameters = {
       type: "string",
       enum: ["status"],
       description:
-        "Closed adapter-owned inspection kind. Exact Codex 0.146.0/0.146.1 and Claude Code 2.1.218 /status profiles are supported; this is never an arbitrary native command string."
+        "Closed adapter-owned inspection kind. Exact Codex 0.146.0/0.146.1/0.147.0 and Claude Code 2.1.218/2.1.226 /status profiles are supported; this is never an arbitrary native command string."
     },
     expected_binding_token: {
       type: "string",
@@ -559,7 +559,7 @@ function createPlugin(
     registerCliTool(api, {
       name: "agent_knock_knock_native_inspect",
       description:
-        "Execute one closed, exact-version native status inspection in an exact Codex or Claude Code terminal without ordinary Turn delivery. Call only from that terminal row's current native_inspect action and preserve its exact terminal_id, inspection=status, and expected_binding_token. Supported profiles are Codex 0.146.0/0.146.1 and Claude Code 2.1.218; Claude's exact Status panel is parsed and safely dismissed before success. Arbitrary slash commands, /usage, /cost, /stats, /usage-credits, /model, and /compact remain unavailable. Bare Codex /usage opens an interactive menu whose later Enter can select an account-side usage-limit reset. This creates no AKK Session, Turn, receipt, monitor, or callback. agent_knock_knock_status is different: it inspects AKK Turn state and the bounded current screen without executing native /status.",
+        "Execute one closed, exact-version native status inspection in an exact Codex or Claude Code terminal without ordinary Turn delivery. Call only from that terminal row's current native_inspect action and preserve its exact terminal_id, inspection=status, and expected_binding_token. Supported profiles are Codex 0.146.0/0.146.1/0.147.0 and Claude Code 2.1.218/2.1.226; Claude's exact Status panel is parsed and safely dismissed before success. Arbitrary slash commands, /usage, /cost, /stats, /usage-credits, /model, and /compact remain unavailable. Bare Codex /usage opens an interactive menu whose later Enter can select an account-side usage-limit reset. This creates no AKK Session, Turn, receipt, monitor, or callback. agent_knock_knock_status is different: it inspects AKK Turn state and the bounded current screen without executing native /status.",
       parameters: nativeInspectParameters,
       normalizeTurnIdentity: false,
       buildArgs: (params) => {

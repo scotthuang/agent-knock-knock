@@ -327,6 +327,8 @@ export interface TerminalNativeInspectionPlan {
   composer: {
     kind: "exact";
     minimumStableMs: number;
+    /** Version-profiled upper bound for exact composer materialization. */
+    maximumSettleMs: number;
   };
   expectedResult: {
     kind: "native_status";

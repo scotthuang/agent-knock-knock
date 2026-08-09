@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
+import {
+  claudeLifecycleBehaviorProfile,
+  claudeLifecycleCompatibilityProfile,
+  claudeNativeInspectionBehaviorProfile,
+  profiledClaudeNativeStatusPanelFields
+} from "./claude-lifecycle-compatibility.js";
 import { redactString } from "./runtime-log.js";
 import type {
   ActiveTerminalProcess,
@@ -151,16 +157,11 @@ const CLAUDE_EXCERPT_LINES = 80;
 const CLAUDE_PERMISSION_DETAIL_LENGTH = 600;
 const CLAUDE_AUTO_APPROVAL_COMMAND_LENGTH = 2000;
 const CLAUDE_NATIVE_VERSION_PATTERN = /^\d+\.\d+\.\d+$/u;
-const CLAUDE_LIFECYCLE_VERSION = "2.1.218";
-const CLAUDE_LIFECYCLE_PROFILE = "claude-code-2.1.218";
-const CLAUDE_NATIVE_INSPECTION_VERSION = "2.1.218";
-const CLAUDE_NATIVE_INSPECTION_PROFILE =
-  "claude-code-2.1.218-native-status";
 /**
- * On the verified 2.1.218 TUI, the exact `/status` composer and its closed
- * completion list remained byte-stable across an 80 ms capture interval and
- * one subsequent Enter opened the Status panel. This is a Claude-local
- * single-line profile; it deliberately does not reuse Codex's 121 ms burst
+ * On each verified Claude TUI profile, the exact `/status` composer and its
+ * closed completion list remained byte-stable across an 80 ms capture interval
+ * and one subsequent Enter opened the Status panel. This is a Claude-local
+ * single-line boundary; it deliberately does not reuse Codex's 121 ms burst
  * paste boundary.
  */
 export const CLAUDE_NATIVE_INSPECTION_COMPOSER_STABLE_MS = 80;
@@ -176,17 +177,9 @@ const CLAUDE_STATUS_PANEL_MAX_FIELDS = 24;
 const CLAUDE_STATUS_PANEL_MAX_FIELD_VALUE_LENGTH = 512;
 const CLAUDE_STATUS_PANEL_MAX_EXCERPT_LENGTH = 4_000;
 const CLAUDE_STATUS_PANEL_MAX_EVIDENCE_ENTRIES = 24;
-const CLAUDE_STATUS_PANEL_FIELDS = new Set([
-  "Version",
-  "Session name",
-  "Session ID",
-  "cwd",
-  "Auth token",
-  "Anthropic base URL",
-  "Model",
-  "MCP servers",
-  "Setting sources"
-]);
+const PROFILED_CLAUDE_STATUS_PANEL_FIELDS = new Set(
+  profiledClaudeNativeStatusPanelFields()
+);
 const CLAUDE_STATUS_PANEL_SENSITIVE_FIELDS = new Set([
   "Session name",
   "Auth token"
@@ -261,13 +254,12 @@ export function probeClaudeNativeInspection(
       reason: "the running Claude Code version could not be verified"
     };
   }
-  const supported = agentVersion === CLAUDE_NATIVE_INSPECTION_VERSION;
+  const behaviorProfile = claudeNativeInspectionBehaviorProfile(agentVersion);
+  const supported = behaviorProfile !== undefined;
   return {
     status: supported ? "supported" : "unsupported",
     agentVersion,
-    behaviorProfile: supported
-      ? CLAUDE_NATIVE_INSPECTION_PROFILE
-      : undefined,
+    behaviorProfile,
     statusInspection: supported,
     reason: supported
       ? "Claude Code /status native inspection is supported by the verified version"
@@ -279,24 +271,28 @@ export function planClaudeNativeInspection(
   operation: TerminalNativeInspectionOperation,
   capabilities: TerminalNativeInspectionCapabilities
 ): TerminalNativeInspectionPlan {
+  const profile = claudeLifecycleCompatibilityProfile(
+    capabilities.agentVersion
+  );
   if (
     operation.kind !== "status" ||
     capabilities.status !== "supported" ||
     capabilities.statusInspection !== true ||
-    capabilities.agentVersion !== CLAUDE_NATIVE_INSPECTION_VERSION ||
-    capabilities.behaviorProfile !== CLAUDE_NATIVE_INSPECTION_PROFILE
+    !profile ||
+    capabilities.behaviorProfile !== profile.nativeInspectionBehaviorProfile
   ) {
     throw new Error(capabilities.reason);
   }
   return {
     operation,
-    behaviorProfile: CLAUDE_NATIVE_INSPECTION_PROFILE,
+    behaviorProfile: profile.nativeInspectionBehaviorProfile,
     command: "/status",
     effect: "read_only",
     requiresIdle: true,
     composer: {
       kind: "exact",
-      minimumStableMs: CLAUDE_NATIVE_INSPECTION_COMPOSER_STABLE_MS
+      minimumStableMs: profile.nativeInspectionComposerStableMs,
+      maximumSettleMs: profile.nativeInspectionComposerSettleTimeoutMs
     },
     expectedResult: {
       kind: "native_status",
@@ -382,7 +378,7 @@ export function observeClaudeNativeInspection(
       };
     }
   }
-  if (parsed.agentVersion !== CLAUDE_NATIVE_INSPECTION_VERSION) {
+  if (!claudeNativeInspectionBehaviorProfile(parsed.agentVersion)) {
     return {
       status: "mismatch",
       nativeThreadId: parsed.nativeThreadId,
@@ -482,11 +478,12 @@ export function probeClaudeThreadLifecycle(
       reason: "the running Claude Code version could not be verified"
     };
   }
-  const supported = agentVersion === CLAUDE_LIFECYCLE_VERSION;
+  const behaviorProfile = claudeLifecycleBehaviorProfile(agentVersion);
+  const supported = behaviorProfile !== undefined;
   return {
     status: supported ? "supported" : "unsupported",
     agentVersion,
-    behaviorProfile: supported ? CLAUDE_LIFECYCLE_PROFILE : undefined,
+    behaviorProfile,
     newThread: supported,
     resumeExact: supported,
     candidateDiscovery: supported,
@@ -500,10 +497,13 @@ export function planClaudeThreadLifecycle(
   operation: TerminalThreadLifecycleOperation,
   capabilities: TerminalThreadLifecycleCapabilities
 ): TerminalThreadLifecyclePlan {
+  const behaviorProfile = claudeLifecycleBehaviorProfile(
+    capabilities.agentVersion
+  );
   if (
     capabilities.status !== "supported" ||
-    capabilities.agentVersion !== CLAUDE_LIFECYCLE_VERSION ||
-    capabilities.behaviorProfile !== CLAUDE_LIFECYCLE_PROFILE
+    !behaviorProfile ||
+    capabilities.behaviorProfile !== behaviorProfile
   ) {
     throw new Error(capabilities.reason);
   }
@@ -513,7 +513,7 @@ export function planClaudeThreadLifecycle(
     }
     return {
       operation,
-      behaviorProfile: CLAUDE_LIFECYCLE_PROFILE,
+      behaviorProfile,
       steps: [{
         kind: "transition",
         command: "/clear",
@@ -532,7 +532,7 @@ export function planClaudeThreadLifecycle(
   }
   return {
     operation,
-    behaviorProfile: CLAUDE_LIFECYCLE_PROFILE,
+    behaviorProfile,
     steps: [{
       kind: "transition",
       command: `/resume ${operation.nativeThreadId}`,
@@ -757,7 +757,7 @@ function parseCurrentClaudeStatusPanel(
     }
     const name = match[1].trim();
     const value = match[2].trim();
-    if (!CLAUDE_STATUS_PANEL_FIELDS.has(name)) {
+    if (!PROFILED_CLAUDE_STATUS_PANEL_FIELDS.has(name)) {
       return {
         status: "ambiguous",
         reason: "the Claude Status panel contains an unprofiled field"
@@ -792,6 +792,30 @@ function parseCurrentClaudeStatusPanel(
       status: "ambiguous",
       reason:
         "the Claude Status panel lacks exact Version, Session ID, cwd, or Model fields"
+    };
+  }
+  const exactProfileFields = new Set(
+    claudeLifecycleCompatibilityProfile(agentVersion)
+      ?.nativeStatusPanelFields ?? []
+  );
+  const exactRequiredValues =
+    claudeLifecycleCompatibilityProfile(agentVersion)
+      ?.nativeStatusPanelRequiredValues ?? {};
+  if (
+    exactProfileFields.size > 0 &&
+    [...rawFields.keys()].some((name) => !exactProfileFields.has(name))
+  ) {
+    return {
+      status: "ambiguous",
+      reason: "the Claude Status panel fields do not match its exact version profile"
+    };
+  }
+  if (Object.entries(exactRequiredValues).some(
+    ([name, value]) => rawFields.get(name) !== value
+  )) {
+    return {
+      status: "ambiguous",
+      reason: "the Claude Status panel lacks an exact field value required by its version profile"
     };
   }
   const fields = [...rawFields.entries()].map(([name, rawValue]) => ({

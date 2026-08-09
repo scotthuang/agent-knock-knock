@@ -103,7 +103,7 @@ manifest entries; use these names directly rather than a shell wildcard:
 
 The mapping narrows feedback; it does not replace the full-suite requirement.
 Safety fences from #87, native lifecycle smoke tooling from #88, Store upgrade
-paths, Codex 0.146.0/0.146.1, OpenClaw boundaries, and verified Claude schemas
+paths, Codex 0.146.0/0.146.1/0.147.0, OpenClaw boundaries, and verified Claude schemas
 remain covered.
 
 ## Profiling

@@ -967,7 +967,7 @@ test("Codex lifecycle candidates require exact root metadata and revalidate the 
         ...request,
         agentVersion: "0.146.2"
       }),
-      /supported exact versions: 0\.146\.0, 0\.146\.1/u
+      /supported exact versions: 0\.146\.0, 0\.146\.1, 0\.147\.0/u
     );
 
     row.cli_version = "0.140.0";

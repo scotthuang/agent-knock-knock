@@ -73,40 +73,46 @@ test("classifies only direct interactive Claude CLI processes", () => {
   }
 });
 
-test("Claude 2.1.218 exposes one closed modal native status plan", () => {
-  const capability = probeClaudeNativeInspection("2.1.218");
-  assert.equal(capability.status, "supported");
-  assert.equal(capability.statusInspection, true);
-  assert.equal(
-    capability.behaviorProfile,
-    "claude-code-2.1.218-native-status"
-  );
-  assert.equal(CLAUDE_NATIVE_INSPECTION_COMPOSER_STABLE_MS, 80);
-  assert.deepEqual(
-    planClaudeNativeInspection({ kind: "status" }, capability),
-    {
-      operation: { kind: "status" },
-      behaviorProfile: "claude-code-2.1.218-native-status",
-      command: "/status",
-      effect: "read_only",
-      requiresIdle: true,
-      composer: { kind: "exact", minimumStableMs: 80 },
-      expectedResult: {
-        kind: "native_status",
-        presentation: "modal",
-        dismissal: {
-          keys: ["Escape"],
-          expected: "idle_empty_composer"
+test("verified Claude versions expose distinct closed modal native status plans", () => {
+  for (const version of ["2.1.218", "2.1.226"]) {
+    const capability = probeClaudeNativeInspection(version);
+    assert.equal(capability.status, "supported");
+    assert.equal(capability.statusInspection, true);
+    assert.equal(
+      capability.behaviorProfile,
+      `claude-code-${version}-native-status`
+    );
+    assert.equal(CLAUDE_NATIVE_INSPECTION_COMPOSER_STABLE_MS, 80);
+    assert.deepEqual(
+      planClaudeNativeInspection({ kind: "status" }, capability),
+      {
+        operation: { kind: "status" },
+        behaviorProfile: `claude-code-${version}-native-status`,
+        command: "/status",
+        effect: "read_only",
+        requiresIdle: true,
+        composer: {
+          kind: "exact",
+          minimumStableMs: 80,
+          maximumSettleMs: version === "2.1.226" ? 5_000 : 2_000
+        },
+        expectedResult: {
+          kind: "native_status",
+          presentation: "modal",
+          dismissal: {
+            keys: ["Escape"],
+            expected: "idle_empty_composer"
+          }
         }
       }
-    }
-  );
+    );
+  }
   assert.deepEqual(probeClaudeNativeInspection(undefined), {
     status: "unknown",
     statusInspection: false,
     reason: "the running Claude Code version could not be verified"
   });
-  for (const version of ["2.1.217", "2.1.219"]) {
+  for (const version of ["2.1.217", "2.1.219", "2.1.227"]) {
     const unsupported = probeClaudeNativeInspection(version);
     assert.equal(unsupported.status, "unsupported");
     assert.equal(unsupported.statusInspection, false);
@@ -197,6 +203,73 @@ test("Claude native inspection requires a fresh exact current Status panel", () 
       "mismatch"
     );
   }
+});
+
+test("Claude 2.1.226 status inspection accepts only its exact Session-kind panel", () => {
+  const nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0";
+  const screen = claudeStatusPanel(nativeThreadId, "2.1.226");
+  const observed = observeClaudeNativeInspection({
+    operation: { kind: "status" },
+    screen,
+    preEnterEvidenceInventory: [],
+    expectedNativeThreadId: nativeThreadId,
+    expectedAgentVersion: "2.1.226",
+    expectedCwd: "/repo"
+  });
+  assert.equal(observed.status, "observed");
+  assert.equal(observed.observedAgentVersion, "2.1.226");
+  assert.equal(
+    observed.result?.fields.find((field) => field.name === "Session kind")?.value,
+    "interactive"
+  );
+
+  const oldProfileWithNewField = claudeStatusPanel(
+    nativeThreadId,
+    "2.1.218"
+  ).replace(
+    "  cwd:",
+    "  Session kind:        interactive\n  cwd:"
+  );
+  assert.equal(
+    observeClaudeNativeInspection({
+      operation: { kind: "status" },
+      screen: oldProfileWithNewField,
+      expectedNativeThreadId: nativeThreadId,
+      expectedAgentVersion: "2.1.218",
+      expectedCwd: "/repo"
+    }).status,
+    "ambiguous"
+  );
+
+  const newProfileWithoutRequiredField = screen.replace(
+    "  Session kind:        interactive\n",
+    ""
+  );
+  assert.equal(
+    observeClaudeNativeInspection({
+      operation: { kind: "status" },
+      screen: newProfileWithoutRequiredField,
+      expectedNativeThreadId: nativeThreadId,
+      expectedAgentVersion: "2.1.226",
+      expectedCwd: "/repo"
+    }).status,
+    "ambiguous"
+  );
+
+  const newProfileWithWrongSessionKind = screen.replace(
+    "  Session kind:        interactive",
+    "  Session kind:        background"
+  );
+  assert.equal(
+    observeClaudeNativeInspection({
+      operation: { kind: "status" },
+      screen: newProfileWithWrongSessionKind,
+      expectedNativeThreadId: nativeThreadId,
+      expectedAgentVersion: "2.1.226",
+      expectedCwd: "/repo"
+    }).status,
+    "ambiguous"
+  );
 });
 
 test("Claude native status parser fails closed on stale, malformed, and historical panels", () => {
@@ -944,10 +1017,13 @@ test("Claude terminal capabilities expose durable completion only with a configu
   );
 });
 
-test("Claude 2.1.218 lifecycle plan is exact-version and UUID scoped", () => {
-  const capabilities = probeClaudeThreadLifecycle("2.1.218");
-  assert.equal(capabilities.status, "supported");
-  assert.equal(capabilities.behaviorProfile, "claude-code-2.1.218");
+test("verified Claude lifecycle plans are exact-version and UUID scoped", () => {
+  for (const version of ["2.1.218", "2.1.226"]) {
+    const profile = probeClaudeThreadLifecycle(version);
+    assert.equal(profile.status, "supported");
+    assert.equal(profile.behaviorProfile, `claude-code-${version}`);
+  }
+  const capabilities = probeClaudeThreadLifecycle("2.1.226");
   assert.equal(probeClaudeThreadLifecycle("2.1.219").status, "unsupported");
   assert.equal(probeClaudeThreadLifecycle(undefined).status, "unknown");
   assert.deepEqual(
@@ -1083,14 +1159,20 @@ function currentClaudePermissionScreen(
   ].join("\n");
 }
 
-function claudeStatusPanel(nativeThreadId: string): string {
+function claudeStatusPanel(
+  nativeThreadId: string,
+  version = "2.1.218"
+): string {
   return [
     "────────────────────────────────────────────────",
     "  Settings  Status   Config   Usage   Stats",
     "",
-    "  Version:             2.1.218",
+    `  Version:             ${version}`,
     "  Session name:        /rename to add a name",
     `  Session ID:          ${nativeThreadId}`,
+    ...(version === "2.1.226"
+      ? ["  Session kind:        interactive"]
+      : []),
     "  cwd:                 /repo",
     "  Auth token:          ANTHROPIC_AUTH_TOKEN",
     "  Anthropic base URL:  https://api.example.com/anthropic",

@@ -76,6 +76,7 @@ const CODEX_STATUS_EVIDENCE_MAX_OCCURRENCES = 64;
 const CODEX_STATUS_EVIDENCE_SCAN_MAX_LINES = 512;
 const CODEX_STATUS_EVIDENCE_FINGERPRINT = /^sha256:[0-9a-f]{64}$/u;
 export const CODEX_NATIVE_INSPECTION_COMPOSER_STABLE_MS = 121;
+export const CODEX_NATIVE_INSPECTION_COMPOSER_SETTLE_TIMEOUT_MS = 2_000;
 
 export function createCodexTerminalAgentAdapter(
   options: CreateCodexTerminalAgentAdapterOptions = {}
@@ -156,7 +157,8 @@ export function planCodexNativeInspection(
     requiresIdle: true,
     composer: {
       kind: "exact",
-      minimumStableMs: CODEX_NATIVE_INSPECTION_COMPOSER_STABLE_MS
+      minimumStableMs: CODEX_NATIVE_INSPECTION_COMPOSER_STABLE_MS,
+      maximumSettleMs: CODEX_NATIVE_INSPECTION_COMPOSER_SETTLE_TIMEOUT_MS
     },
     expectedResult: {
       kind: "native_status",

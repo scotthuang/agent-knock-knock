@@ -959,7 +959,7 @@ function seededClaudeRecoveryFixture(
   const sourceSessionId = "session-claude-source";
   const targetSessionId = "session-claude-target";
   const executablePath =
-    "/Users/test/.local/share/claude/versions/2.1.218";
+    "/Users/test/.local/share/claude/versions/2.1.226";
   fs.mkdirSync(fakeBinDir, { recursive: true });
   fs.mkdirSync(workspace, { recursive: true });
   fs.writeFileSync(currentIdPath, BEFORE_ID);
@@ -1023,7 +1023,7 @@ function seededClaudeRecoveryFixture(
     created_at: preparedAt.toISOString(),
     updated_at: preparedAt.toISOString()
   }, { expectedRevision: null });
-  const capabilities = probeClaudeThreadLifecycle("2.1.218");
+  const capabilities = probeClaudeThreadLifecycle("2.1.226");
   assert.equal(capabilities.status, "supported");
   const plan = planClaudeThreadLifecycle(
     { kind: "resume_thread", nativeThreadId: TARGET_ID },
@@ -1047,7 +1047,7 @@ function seededClaudeRecoveryFixture(
     before_process_uuid: processUuid,
     before_process_started_at: startedAt,
     before_binding: source.binding,
-    adapter_version: "2.1.218",
+    adapter_version: "2.1.226",
     command_fingerprint: nativeThreadCommandFingerprint(
       JSON.stringify(plan.steps)
     ),
@@ -1118,7 +1118,7 @@ function seededClaudeRecoveryFixture(
     terminal_id: terminalId,
     agent: "claude",
     workspace,
-    adapter_version: "2.1.218",
+    adapter_version: "2.1.226",
     command_fingerprint: transition.command_fingerprint,
     source_session_id: sourceSessionId,
     target_session_id: targetSessionId,
@@ -1391,7 +1391,7 @@ if (args[0] === "agents") {
         : [row]
   ));
 } else {
-  process.stdout.write("2.1.218\\n");
+  process.stdout.write("2.1.226\\n");
 }
 `, { mode: 0o755 });
 }

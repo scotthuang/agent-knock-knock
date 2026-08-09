@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
+  CODEX_NATIVE_INSPECTION_COMPOSER_SETTLE_TIMEOUT_MS,
   CODEX_NATIVE_INSPECTION_COMPOSER_STABLE_MS,
   createCodexTerminalAgentAdapter,
   codexTerminalAgentAdapter,
@@ -395,19 +396,13 @@ test("adapter capabilities advertise semantic terminal behavior explicitly", () 
 });
 
 test("verified Codex lifecycle profiles use closed status-clear-status steps", () => {
-  const legacyCapabilities = probeCodexThreadLifecycle("0.146.0");
-  assert.equal(legacyCapabilities.status, "supported");
-  assert.equal(
-    legacyCapabilities.behaviorProfile,
-    "codex-tui-0.146.0"
-  );
+  for (const version of ["0.146.0", "0.146.1", "0.147.0"]) {
+    const profile = probeCodexThreadLifecycle(version);
+    assert.equal(profile.status, "supported");
+    assert.equal(profile.behaviorProfile, `codex-tui-${version}`);
+  }
 
-  const capabilities = probeCodexThreadLifecycle("0.146.1");
-  assert.equal(capabilities.status, "supported");
-  assert.equal(
-    capabilities.behaviorProfile,
-    "codex-tui-0.146.1"
-  );
+  const capabilities = probeCodexThreadLifecycle("0.147.0");
   assert.equal(probeCodexThreadLifecycle("0.146.2").status, "unsupported");
   assert.equal(probeCodexThreadLifecycle(undefined).status, "unknown");
 
@@ -458,7 +453,7 @@ test("verified Codex lifecycle profiles use closed status-clear-status steps", (
 });
 
 test("verified Codex native inspection profiles expose one closed read-only status plan", () => {
-  for (const version of ["0.146.0", "0.146.1"]) {
+  for (const version of ["0.146.0", "0.146.1", "0.147.0"]) {
     const capabilities = probeCodexNativeInspection(version);
     assert.equal(capabilities.status, "supported");
     assert.equal(capabilities.statusInspection, true);
@@ -473,7 +468,8 @@ test("verified Codex native inspection profiles expose one closed read-only stat
         requiresIdle: true,
         composer: {
           kind: "exact",
-          minimumStableMs: CODEX_NATIVE_INSPECTION_COMPOSER_STABLE_MS
+          minimumStableMs: CODEX_NATIVE_INSPECTION_COMPOSER_STABLE_MS,
+          maximumSettleMs: CODEX_NATIVE_INSPECTION_COMPOSER_SETTLE_TIMEOUT_MS
         },
         expectedResult: {
           kind: "native_status",
@@ -497,7 +493,7 @@ test("verified Codex native inspection profiles expose one closed read-only stat
     /no AKK native inspection behavior profile/u
   );
   assert.equal(
-    claudeTerminalAgentAdapter.probeNativeInspection?.("2.1.218").status,
+    claudeTerminalAgentAdapter.probeNativeInspection?.("2.1.226").status,
     "supported"
   );
 });

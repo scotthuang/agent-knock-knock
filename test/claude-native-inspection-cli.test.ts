@@ -18,7 +18,8 @@ import {
 import { ensureStoreWritable, listConversations } from "../src/store.js";
 import type { TerminalControlRef } from "../src/terminal-agent-adapter.js";
 
-test("Claude native status inspection is snapshot-bound, modal-safe, and Store immutable", () => {
+for (const claudeVersion of ["2.1.218", "2.1.226"] as const) {
+  test(`Claude ${claudeVersion} native status inspection is snapshot-bound, modal-safe, and Store immutable`, () => {
   const tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-claude-native-inspect-")
   );
@@ -36,7 +37,11 @@ test("Claude native status inspection is snapshot-bound, modal-safe, and Store i
   const terminalId = `terminal:v2:tmux:claude:${target}:${claudePid}`;
   const initialScreen = claudeIdleScreen();
   const composerScreen = claudeSlashComposerScreen();
-  const panelScreen = claudeStatusPanel(nativeThreadId, workspace);
+  const panelScreen = claudeStatusPanel(
+    nativeThreadId,
+    workspace,
+    claudeVersion
+  );
   const terminalControl: TerminalControlRef = {
     kind: "tmux",
     target,
@@ -44,7 +49,7 @@ test("Claude native status inspection is snapshot-bound, modal-safe, and Store i
     window: 0,
     pane: 0,
     panePid,
-    currentCommand: "2.1.218",
+    currentCommand: claudeVersion,
     currentPath: workspace,
     capabilities: [
       "screen_status",
@@ -70,7 +75,8 @@ test("Claude native status inspection is snapshot-bound, modal-safe, and Store i
       agentsPath,
       workspace,
       panePid,
-      claudePid
+      claudePid,
+      claudeVersion
     });
 
     ensureStoreWritable(storeDir);
@@ -103,7 +109,7 @@ test("Claude native status inspection is snapshot-bound, modal-safe, and Store i
       "--workspace",
       workspace,
       "--agent-versions-json",
-      JSON.stringify({ [claudePid]: "2.1.218" })
+      JSON.stringify({ [claudePid]: claudeVersion })
     ];
     const environment = {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
@@ -116,10 +122,10 @@ test("Claude native status inspection is snapshot-bound, modal-safe, and Store i
     );
     assert.ok(row, listed.stdout);
     assert.equal(row.native_inspection.status, "supported");
-    assert.equal(row.native_inspection.agentVersion, "2.1.218");
+    assert.equal(row.native_inspection.agentVersion, claudeVersion);
     assert.equal(
       row.native_inspection.behaviorProfile,
-      "claude-code-2.1.218-native-status"
+      `claude-code-${claudeVersion}-native-status`
     );
     assert.equal(row.lifecycle_binding_token, expectedBindingToken);
     assert.equal(
@@ -176,8 +182,8 @@ test("Claude native status inspection is snapshot-bound, modal-safe, and Store i
     }
 
     const unsupportedArgs = commonArgs.map((argument) =>
-      argument === JSON.stringify({ [claudePid]: "2.1.218" })
-        ? JSON.stringify({ [claudePid]: "2.1.219" })
+      argument === JSON.stringify({ [claudePid]: claudeVersion })
+        ? JSON.stringify({ [claudePid]: "2.1.227" })
         : argument
     );
     fs.writeFileSync(screenPath, initialScreen);
@@ -238,10 +244,10 @@ test("Claude native status inspection is snapshot-bound, modal-safe, and Store i
     const result = JSON.parse(inspected.stdout);
     assert.equal(result.status, "observed");
     assert.equal(result.agent, "claude");
-    assert.equal(result.agent_version, "2.1.218");
+    assert.equal(result.agent_version, claudeVersion);
     assert.equal(
       result.behavior_profile,
-      "claude-code-2.1.218-native-status"
+      `claude-code-${claudeVersion}-native-status`
     );
     assert.equal(result.native_thread_id, nativeThreadId);
     assert.equal(result.terminal_submission.command, "/status");
@@ -281,7 +287,8 @@ test("Claude native status inspection is snapshot-bound, modal-safe, and Store i
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
-});
+  });
+}
 
 function claudeIdleScreen(): string {
   return [
@@ -305,13 +312,20 @@ function claudeSlashComposerScreen(): string {
   ].join("\n");
 }
 
-function claudeStatusPanel(nativeThreadId: string, cwd: string): string {
+function claudeStatusPanel(
+  nativeThreadId: string,
+  cwd: string,
+  version: string
+): string {
   return [
     "────────────────────────────────────────────────",
     "  Settings  Status   Config   Usage   Stats",
     "",
-    "  Version:             2.1.218",
+    `  Version:             ${version}`,
     `  Session ID:          ${nativeThreadId}`,
+    ...(version === "2.1.226"
+      ? ["  Session kind:        interactive"]
+      : []),
     `  cwd:                 ${cwd}`,
     "  Auth token:          ANTHROPIC_AUTH_TOKEN",
     "  Anthropic base URL:  https://api.example.com/anthropic",
@@ -364,6 +378,7 @@ function writeFastClaudeRuntime(options: {
   workspace: string;
   panePid: number;
   claudePid: number;
+  claudeVersion: string;
 }): void {
   const tmux = path.join(options.fakeBinDir, "tmux");
   fs.writeFileSync(tmux, `#!/bin/sh
@@ -373,7 +388,7 @@ for argument in "$@"; do last="$argument"; done
 printf '%s\\t%s\\n' "$command_name" "$last" >> ${shellQuote(options.callsPath)}
 case "$command_name" in
   list-panes)
-    printf '%s\\n' ${shellQuote(`claude-native\t0\t0\t${options.panePid}\t2.1.218\t${options.workspace}`)}
+    printf '%s\\n' ${shellQuote(`claude-native\t0\t0\t${options.panePid}\t${options.claudeVersion}\t${options.workspace}`)}
     ;;
   capture-pane)
     cat ${shellQuote(options.screenPath)}

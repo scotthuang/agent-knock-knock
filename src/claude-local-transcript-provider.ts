@@ -3,6 +3,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { ClaudeAgentRow } from "./claude-terminal-agent-adapter.js";
+import {
+  claudeLifecycleBehaviorProfile,
+  claudeLifecycleSourceVersionSupported,
+  DEFAULT_CLAUDE_LIFECYCLE_VERSION,
+  supportedClaudeLifecycleVersions
+} from "./claude-lifecycle-compatibility.js";
 import { redactString } from "./runtime-log.js";
 import type {
   TerminalCompletionEvidence,
@@ -28,7 +34,6 @@ const CLAUDE_TRANSCRIPT_VERSION_PATTERN =
 const NO_FOLLOW_FLAG = typeof fs.constants.O_NOFOLLOW === "number"
   ? fs.constants.O_NOFOLLOW
   : 0;
-const CLAUDE_LIFECYCLE_VERSION = "2.1.218";
 const CLAUDE_HISTORICAL_METADATA_MAX_BYTES = 1024 * 1024;
 
 export interface ClaudeTranscriptAnchor {
@@ -138,10 +143,11 @@ export function listClaudeHistoricalSessions(options: {
   }
   const cwd = path.resolve(options.cwd);
   const claudeHome = path.resolve(options.claudeHome ?? defaultClaudeHome());
-  const agentVersion = options.agentVersion ?? CLAUDE_LIFECYCLE_VERSION;
-  if (agentVersion !== CLAUDE_LIFECYCLE_VERSION) {
+  const agentVersion = options.agentVersion ?? DEFAULT_CLAUDE_LIFECYCLE_VERSION;
+  if (!claudeLifecycleBehaviorProfile(agentVersion)) {
     throw new Error(
-      `Claude lifecycle candidates require exact version ${CLAUDE_LIFECYCLE_VERSION}`
+      "Claude lifecycle candidates require one of the supported exact versions: " +
+      supportedClaudeLifecycleVersions().join(", ")
     );
   }
   const projectsRoot = projectsRootPath(claudeHome);
@@ -194,7 +200,8 @@ export function listClaudeThreadLifecycleCandidates(options: {
     source: "claude_transcript",
     rootInteractive: true,
     fileToken: session.fileToken,
-    agentVersion: session.claudeVersion,
+    agentVersion: options.agentVersion,
+    sourceAgentVersion: session.claudeVersion,
     updatedAtMs: session.updatedAtMs,
     metadataFingerprint: session.metadataFingerprint,
     candidateToken: session.candidateToken
@@ -231,15 +238,19 @@ export function revalidateClaudeThreadLifecycleCandidate(
       : candidate;
     if (
       token.schema !== "agent-knock-knock/thread-candidate-token" ||
-      token.version !== 1 ||
+      ![1, 2].includes(token.version) ||
       token.agent !== "claude" ||
       token.source !== "claude_transcript" ||
       token.agentVersion !== options.agentVersion ||
+      !claudeLifecycleSourceVersionSupported(
+        options.agentVersion,
+        claudeCandidateSourceAgentVersion(token)
+      ) ||
       !path.isAbsolute(options.cwd) ||
       !path.isAbsolute(token.cwd) ||
       path.resolve(token.cwd) !== path.resolve(options.cwd) ||
       !CLAUDE_SESSION_ID_PATTERN.test(token.nativeThreadId) ||
-      options.agentVersion !== CLAUDE_LIFECYCLE_VERSION
+      !claudeLifecycleBehaviorProfile(options.agentVersion)
     ) {
       return {
         status: "unsafe",
@@ -266,14 +277,18 @@ export function revalidateClaudeThreadLifecycleCandidate(
       source: "claude_transcript",
       rootInteractive: true,
       fileToken: summary.fileToken,
-      agentVersion: summary.claudeVersion,
+      agentVersion: options.agentVersion,
+      sourceAgentVersion: summary.claudeVersion,
       updatedAtMs: summary.updatedAtMs,
       metadataFingerprint: summary.metadataFingerprint,
       candidateToken: summary.candidateToken
     };
     if (
       !sameClaudeThreadFileToken(token.fileToken, current.fileToken) ||
-      token.metadataFingerprint !== current.metadataFingerprint
+      token.metadataFingerprint !== current.metadataFingerprint ||
+      token.version !== current.candidateToken.version ||
+      claudeCandidateSourceAgentVersion(token) !==
+        claudeCandidateSourceAgentVersion(current.candidateToken)
     ) {
       return {
         status: "changed",
@@ -310,7 +325,7 @@ function inspectClaudeHistoricalSession({
   if (
     !isRealDirectory(projectsRoot) ||
     !CLAUDE_SESSION_ID_PATTERN.test(sessionId) ||
-    agentVersion !== CLAUDE_LIFECYCLE_VERSION
+    !claudeLifecycleBehaviorProfile(agentVersion)
   ) {
     return undefined;
   }
@@ -339,7 +354,10 @@ function inspectClaudeHistoricalSession({
       metadata.sessionId !== sessionId ||
       !path.isAbsolute(metadata.cwd) ||
       normalizePath(metadata.cwd) !== normalizePath(cwd) ||
-      metadata.version !== agentVersion ||
+      !claudeLifecycleSourceVersionSupported(
+        agentVersion,
+        metadata.version
+      ) ||
       metadata.isSidechain !== false ||
       metadata.entrypoint !== "cli" ||
       metadata.agentId !== undefined ||
@@ -377,17 +395,28 @@ function inspectClaudeHistoricalSession({
         transcriptPath
       }))
       .digest("hex");
-    const candidateToken: TerminalThreadLifecycleCandidateToken = {
-      schema: "agent-knock-knock/thread-candidate-token",
-      version: 1,
+    const tokenFields = {
       agent: "claude",
       nativeThreadId: sessionId,
       cwd: path.resolve(cwd),
       source: "claude_transcript",
-      agentVersion: metadata.version,
+      agentVersion,
       fileToken,
       metadataFingerprint
-    };
+    } as const;
+    const candidateToken: TerminalThreadLifecycleCandidateToken =
+      metadata.version === agentVersion
+        ? {
+            schema: "agent-knock-knock/thread-candidate-token",
+            version: 1,
+            ...tokenFields
+          }
+        : {
+            schema: "agent-knock-knock/thread-candidate-token",
+            version: 2,
+            ...tokenFields,
+            sourceAgentVersion: metadata.version
+          };
     return {
       id: sessionId,
       cwd: path.resolve(cwd),
@@ -402,6 +431,12 @@ function inspectClaudeHistoricalSession({
   } finally {
     fs.closeSync(opened.fd);
   }
+}
+
+function claudeCandidateSourceAgentVersion(
+  token: TerminalThreadLifecycleCandidateToken
+): string {
+  return token.version === 2 ? token.sourceAgentVersion : token.agentVersion;
 }
 
 function readClaudeHistoricalMetadata(
@@ -468,8 +503,8 @@ function readClaudeHistoricalMetadata(
       nonEmptyString(parsed.teamName) !== undefined ||
       nonEmptyString(parsed.sessionKind) !== undefined;
     if (!hasIdentityMetadata) {
-      // Claude 2.1.218 can prepend mode/permission-mode records carrying only
-      // sessionId. Continue to the first full root transcript record.
+      // Verified Claude transcript profiles can prepend mode/permission-mode
+      // records carrying only sessionId. Continue to the first full root row.
       continue;
     }
     if (!cwd || !version || !entrypoint || typeof parsed.isSidechain !== "boolean") {

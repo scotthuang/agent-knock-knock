@@ -3753,6 +3753,35 @@ async function terminalControlledListEntry(
       terminalControlSelectorKey(terminalControl) &&
     SESSION_SEND_BLOCKING_STATUSES.has(turn.status)
   );
+  let nativeInspectionComposerReady = nativeInspectionComposerEmpty(
+    session.agent,
+    terminalState.screen_excerpt
+  );
+  if (
+    session.agent === "codex" &&
+    terminalState.activity_state === "idle" &&
+    terminalState.approval_state.blocked !== true &&
+    nativeInspectionCapability.status === "supported" &&
+    nativeInspectionCapability.statusInspection === true &&
+    terminalControl.capabilities.includes("send_keys") &&
+    terminalControl.capabilities.includes("screen_status")
+  ) {
+    try {
+      const styledScreen = await createTerminalControlProvider(options).capture(
+        terminalControl.target,
+        {
+          scrollbackLines: 40,
+          socketPath: terminalControl.socketPath,
+          preserveEscapes: true
+        }
+      );
+      nativeInspectionComposerReady = codexStyledComposerEmpty(styledScreen);
+    } catch {
+      // Advertising an input action is optional. The action itself repeats the
+      // same styled composer proof under the terminal lock before any input.
+      nativeInspectionComposerReady = false;
+    }
+  }
   const entry = {
     id: bridge.terminalConversationId(session),
     short_ref: sessionShortRef(bridge.terminalConversationId(session)),
@@ -3820,10 +3849,7 @@ async function terminalControlledListEntry(
       native_inspect:
         nativeInspectionCapability.status === "supported" &&
         nativeInspectionCapability.statusInspection === true &&
-        nativeInspectionComposerEmpty(
-          session.agent,
-          terminalState.screen_excerpt
-        ) &&
+        nativeInspectionComposerReady &&
         terminalControl.capabilities.includes("send_keys") &&
         terminalControl.capabilities.includes("screen_status") &&
         (
@@ -8414,7 +8440,7 @@ async function assertNativeInspectionExclusiveOwnership({
   snapshot: Awaited<ReturnType<typeof currentLifecycleSnapshot>>;
 }): Promise<void> {
   // Claude's exact `claude agents` mapping makes global active ownership part
-  // of the 2.1.218 inspection profile. Keep the existing Codex #112 path
+  // of the supported exact Claude inspection profiles. Keep the existing Codex #112 path
   // unchanged: an unmanaged Codex pane may be inspected before a rollout
   // identity exists, and its status card is the bounded identity evidence.
   if (terminal.agent !== "claude") {
