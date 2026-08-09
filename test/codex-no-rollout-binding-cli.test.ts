@@ -1007,6 +1007,210 @@ test("live-gate New accepts a persisted unmanaged Codex origin", () => {
   }
 });
 
+test("native status inspection is snapshot-bound, settles the slash composer, and does not mutate the Store", () => {
+  const fixture = createNoRolloutFixture();
+  try {
+    assert.equal(fs.existsSync(fixture.storeDir), false);
+    const listed = listFixtureTerminal(fixture);
+    assert.equal(listed.native_inspection.status, "supported");
+    assert.equal(listed.native_inspection.agentVersion, "0.146.0");
+    assert.deepEqual(
+      listed.available_actions.native_inspect.arguments,
+      {
+        terminal_id: fixture.terminalId,
+        inspection: "status",
+        expected_binding_token: listed.lifecycle_binding_token
+      }
+    );
+    const nativeInspectArguments = (token: string) => [
+      "native-inspect",
+      "--terminal",
+      fixture.terminalId,
+      "--inspection",
+      "status",
+      "--expected-binding-token",
+      token,
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome
+    ];
+
+    const stale = runCli(
+      nativeInspectArguments("stale-binding-token"),
+      fixture.environment
+    );
+    assert.equal(stale.status, 1, stale.stdout);
+    assert.match(stale.stderr, /binding changed after it was listed/u);
+    assert.equal(
+      readTmuxCalls(fixture.tmuxCallsPath)
+        .some((call) => call.args[0] === "send-keys"),
+      false
+    );
+
+    fs.writeFileSync(fixture.screenPath, [
+      "Ready",
+      "› human draft",
+      "gpt-5.6-sol high · /workspace"
+    ].join("\n"));
+    const drafted = listFixtureTerminal(fixture);
+    assert.equal(drafted.activity_state, "idle");
+    assert.equal(drafted.available_actions.native_inspect, undefined);
+    const nonempty = runCli(
+      nativeInspectArguments(listed.lifecycle_binding_token),
+      fixture.environment
+    );
+    assert.equal(nonempty.status, 1, nonempty.stdout);
+    assert.match(
+      nonempty.stderr,
+      /not at a verified idle prompt|composer contains non-placeholder input/u
+    );
+    assert.equal(
+      readTmuxCalls(fixture.tmuxCallsPath)
+        .some((call) => call.args[0] === "send-keys"),
+      false
+    );
+
+    fs.writeFileSync(fixture.screenPath, "Ready\n› ");
+    const inspected = runCli(
+      nativeInspectArguments(listed.lifecycle_binding_token),
+      fixture.environment
+    );
+    assert.equal(inspected.status, 0, inspected.stderr || inspected.stdout);
+    const result = JSON.parse(inspected.stdout);
+    assert.equal(result.status, "observed");
+    assert.equal(result.inspection, "status");
+    assert.equal(result.agent, "codex");
+    assert.equal(result.agent_version, "0.146.0");
+    assert.equal(result.native_thread_id, NATIVE_THREAD_ID);
+    assert.equal(result.terminal_submission.command, "/status");
+    assert.equal(result.terminal_submission.enter_count, 1);
+    assert.equal(result.store_mutation, false);
+    assert.equal(result.session_created, false);
+    assert.equal(result.turn_created, false);
+    assert.equal(result.receipt_created, false);
+    assert.equal(result.monitor_created, false);
+    assert.equal(result.callback_created, false);
+    assert.equal(
+      result.native_status.fields.find(
+        (field: Record<string, unknown>) => field.name === "Account"
+      )?.value,
+      "[REDACTED]"
+    );
+
+    const sends = readTmuxCalls(fixture.tmuxCallsPath)
+      .filter((call) => call.args[0] === "send-keys");
+    assert.deepEqual(sends.map((call) => call.args), [
+      ["send-keys", "-t", fixture.target, "-l", "/status"],
+      ["send-keys", "-t", fixture.target, "C-m"]
+    ]);
+    assert.ok(
+      Number(sends[1].at) - Number(sends[0].at) >= 121,
+      "the only Enter must be dispatched after the Codex suppression boundary"
+    );
+    assert.equal(
+      fs.existsSync(fixture.storeDir),
+      false,
+      "native inspection must not initialize or mutate the AKK Store"
+    );
+    assert.deepEqual(listConversations(fixture.storeDir), []);
+    assert.deepEqual(listManagedSessions(fixture.storeDir), []);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("native status inspection sends no Enter after post-injection process drift", () => {
+  const fixture = createNoRolloutFixture();
+  try {
+    const listed = listFixtureTerminal(fixture);
+    const inspected = runCli([
+      "native-inspect",
+      "--terminal",
+      fixture.terminalId,
+      "--inspection",
+      "status",
+      "--expected-binding-token",
+      String(listed.lifecycle_binding_token),
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome
+    ], {
+      ...fixture.environment,
+      AKK_TEST_NATIVE_INSPECT_PROCESS_BIRTH_AFTER_TEXT: STALE_PROCESS_BIRTH
+    });
+
+    assert.equal(inspected.status, 1, inspected.stdout);
+    assert.match(
+      inspected.stderr,
+      /did not cross a proven completion boundary; do not retry automatically/u
+    );
+    const sends = readTmuxCalls(fixture.tmuxCallsPath)
+      .filter((call) => call.args[0] === "send-keys");
+    assert.deepEqual(sends.map((call) => call.args), [
+      ["send-keys", "-t", fixture.target, "-l", "/status"]
+    ]);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("native status inspection is withheld and rejects a cached action while managed work is unresolved", () => {
+  for (const blocker of ["turn", "transition"] as const) {
+    const fixture = createNoRolloutFixture();
+    try {
+      fs.writeFileSync(fixture.materializedPath, "ready");
+      const session = persistStatusCardSession(fixture, LIVE_PROCESS_BIRTH);
+      const listed = listFixtureTerminal(fixture);
+      const advertised = listed.available_actions.native_inspect;
+      assert.ok(advertised, blocker);
+
+      if (blocker === "turn") {
+        persistBlockingTurn(fixture, session);
+      } else {
+        persistUnresolvedTransition(fixture, session);
+      }
+
+      const blocked = listFixtureTerminal(fixture);
+      assert.equal(
+        blocked.available_actions.native_inspect,
+        undefined,
+        blocker
+      );
+      const rejected = runCli([
+        "native-inspect",
+        "--terminal",
+        fixture.terminalId,
+        "--inspection",
+        "status",
+        "--expected-binding-token",
+        String(advertised.arguments.expected_binding_token),
+        "--store-dir",
+        fixture.storeDir,
+        "--codex-home",
+        fixture.codexHome
+      ], fixture.environment);
+      assert.equal(rejected.status, 1, `${blocker}: ${rejected.stdout}`);
+      assert.match(
+        rejected.stderr,
+        blocker === "turn"
+          ? /still has unresolved Turn/u
+          : /has an unresolved native-thread transition/u,
+        blocker
+      );
+      assert.equal(
+        readTmuxCalls(fixture.tmuxCallsPath)
+          .some((call) => call.args[0] === "send-keys"),
+        false,
+        blocker
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  }
+});
+
 interface NoRolloutFixture {
   tempDir: string;
   storeDir: string;
@@ -1091,6 +1295,7 @@ function createNoRolloutFixture(
     screenPath,
     pendingInputPath,
     materializedPath,
+    processBirthPath,
     target,
     panePid,
     workspace
@@ -1274,6 +1479,13 @@ function persistBlockingTurn(
   saveState(paths.statePath, {
     ...base,
     status: "waiting_for_agent",
+    native_session_takeover: {
+      terminal_bridge: true,
+      terminal_bridge_message_id: `message-${base.conversation_id}`,
+      terminal_bridge_started_at: now.toISOString(),
+      terminal_agent_session_id: NATIVE_THREAD_ID,
+      terminal_control: fixture.terminalControl
+    },
     store_dir: paths.storeDir,
     conversation_dir: paths.conversationDir,
     event_log_path: paths.logPath,
@@ -1300,9 +1512,13 @@ function persistUnresolvedTransition(
     source_expected_revision: session.revision,
     target_session_id: "session-reconcile-transition-target",
     target_expected_revision: null,
-    before_native_thread_id: EXTERNAL_THREAD_ID,
-    before_process_uuid: processUuid(fixture.codexPid, LIVE_PROCESS_BIRTH),
-    before_process_birth: LIVE_PROCESS_BIRTH,
+    before_native_thread_id:
+      session.binding?.native_thread_id ?? EXTERNAL_THREAD_ID,
+    before_process_uuid:
+      session.binding?.native_process.process_uuid ??
+      processUuid(fixture.codexPid, LIVE_PROCESS_BIRTH),
+    before_process_birth:
+      session.binding?.native_process.process_birth ?? LIVE_PROCESS_BIRTH,
     before_binding: session.binding,
     adapter_version: "0.146.1",
     command_fingerprint: createHash("sha256")
@@ -1369,6 +1585,7 @@ function writeFakeTmux(options: {
   screenPath: string;
   pendingInputPath: string;
   materializedPath: string;
+  processBirthPath: string;
   target: string;
   panePid: number;
   workspace: string;
@@ -1377,7 +1594,7 @@ function writeFakeTmux(options: {
   fs.writeFileSync(fakeTmux, `#!/usr/bin/env node
 const fs = require("node:fs");
 const args = process.argv.slice(2);
-fs.appendFileSync(${JSON.stringify(options.callsPath)}, JSON.stringify({ args }) + "\\n");
+fs.appendFileSync(${JSON.stringify(options.callsPath)}, JSON.stringify({ args, at: Date.now() }) + "\\n");
 if (args[0] === "list-panes") {
   process.stdout.write(${JSON.stringify(
     `tmux-birth\t0\t0\t${options.panePid}\tcodex\t${options.workspace}\n`
@@ -1393,6 +1610,18 @@ if (args[0] === "list-panes") {
     process.exitCode = 1;
   } else {
     fs.writeFileSync(${JSON.stringify(options.pendingInputPath)}, args.at(-1));
+    if (args.at(-1) === "/status") {
+      fs.writeFileSync(${JSON.stringify(options.screenPath)},
+        "Ready\\n› /status\\n\\n  /status  show current session configuration and token usage\\n");
+      const driftedProcessBirth =
+        process.env.AKK_TEST_NATIVE_INSPECT_PROCESS_BIRTH_AFTER_TEXT;
+      if (driftedProcessBirth) {
+        fs.writeFileSync(
+          ${JSON.stringify(options.processBirthPath)},
+          driftedProcessBirth
+        );
+      }
+    }
   }
 } else if (args[0] === "send-keys" && args.at(-1) === "C-m") {
   const pendingInput = fs.existsSync(${JSON.stringify(options.pendingInputPath)})
@@ -1401,7 +1630,11 @@ if (args[0] === "list-panes") {
   fs.writeFileSync(${JSON.stringify(options.pendingInputPath)}, "");
   if (pendingInput === "/status") {
     fs.writeFileSync(${JSON.stringify(options.screenPath)}, ${JSON.stringify(
-      `/status\nSession: ${NATIVE_THREAD_ID}\n› `
+      `/status\n╭──────────────────────────────────────────────────╮\n` +
+      `│ OpenAI Codex (v0.146.0)                       │\n` +
+      `│ Session: ${NATIVE_THREAD_ID} │\n` +
+      `│ Account: private@example.com                 │\n` +
+      `╰──────────────────────────────────────────────────╯\n› `
     )});
   } else {
     fs.writeFileSync(${JSON.stringify(options.materializedPath)}, "ready");
@@ -1526,7 +1759,9 @@ process.stdin.resume();
 `, { mode: 0o755 });
 }
 
-function readTmuxCalls(filePath: string): Array<{ args: string[] }> {
+function readTmuxCalls(
+  filePath: string
+): Array<{ args: string[]; at?: number }> {
   if (!fs.existsSync(filePath)) {
     return [];
   }

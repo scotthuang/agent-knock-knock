@@ -157,6 +157,8 @@ for (const scenario of [
           "u"
         )
       );
+      assert.match(result.stderr, /advertised dedicated native action/u);
+      assert.doesNotMatch(result.stderr, /or status action/u);
       assert.equal(
         fs.existsSync(storeDir),
         false,

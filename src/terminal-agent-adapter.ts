@@ -289,6 +289,103 @@ export interface TerminalThreadLifecycleObserver {
   ): TerminalThreadLifecycleObservation;
 }
 
+/**
+ * A closed, adapter-owned native inspection operation.
+ *
+ * Callers select a semantic inspection kind; they never supply the native
+ * slash command that implements it.
+ */
+export type TerminalNativeInspectionOperation = { kind: "status" };
+
+export interface TerminalNativeInspectionCapabilities {
+  status: "supported" | "unsupported" | "unknown";
+  agentVersion?: string;
+  /** Exact, version-scoped behavior profile selected by the adapter. */
+  behaviorProfile?: string;
+  statusInspection: boolean;
+  reason: string;
+}
+
+export interface TerminalNativeInspectionPlan {
+  operation: TerminalNativeInspectionOperation;
+  /** Exact adapter behavior profile that authorized this command. */
+  behaviorProfile: string;
+  /** Closed adapter-owned command. Callers must not substitute arbitrary input. */
+  command: string;
+  effect: "read_only";
+  requiresIdle: true;
+  /** Exact composer materialization required before the one Enter dispatch. */
+  composer: {
+    kind: "exact";
+    minimumStableMs: number;
+  };
+  expectedResult: { kind: "native_status" };
+}
+
+export interface TerminalNativeInspectionField {
+  name: string;
+  value: string;
+}
+
+export interface TerminalNativeStatusInspectionResult {
+  kind: "native_status";
+  nativeThreadId: string;
+  /** Agent version rendered by the native status surface itself. */
+  agentVersion: string;
+  /** Bounded, redacted fields parsed from the native status surface. */
+  fields: readonly TerminalNativeInspectionField[];
+  /** Bounded, redacted display summary. Never raw terminal scrollback. */
+  excerpt: string;
+}
+
+/**
+ * Bounded pre/post inventory for exact native inspection result evidence.
+ * Counts let a byte-identical newly rendered card remain distinguishable from
+ * a pre-existing card without exposing its terminal contents.
+ */
+export interface TerminalNativeInspectionEvidenceInventoryEntry {
+  evidenceFingerprint: string;
+  occurrenceCount: number;
+}
+
+export interface TerminalNativeInspectionObservationRequest {
+  operation: TerminalNativeInspectionOperation;
+  screen?: string;
+  /**
+   * Fingerprint of the exact screen observed immediately before Enter.
+   * Supplying it makes unchanged output fail closed as stale.
+   */
+  previousScreenFingerprint?: string;
+  /**
+   * Complete exact result evidence visible immediately before Enter. A post
+   * result is fresh only when its fingerprint occurrence strictly increases.
+   */
+  preEnterEvidenceInventory?: readonly TerminalNativeInspectionEvidenceInventoryEntry[];
+  /** Optional exact binding identity that the status surface must confirm. */
+  expectedNativeThreadId?: string;
+  /** Optional exact running version that the status surface must confirm. */
+  expectedAgentVersion?: string;
+}
+
+export interface TerminalNativeInspectionObservation {
+  status: "observed" | "missing" | "ambiguous" | "stale" | "mismatch";
+  nativeThreadId?: string;
+  observedAgentVersion?: string;
+  evidence?: string;
+  /** Fingerprint of the bounded native result region. */
+  evidenceFingerprint?: string;
+  /** Fingerprint callers can bind to a later fresh observation. */
+  screenFingerprint: string;
+  /** Bounded hashes/counts only; never raw native result text. */
+  evidenceInventory?: readonly TerminalNativeInspectionEvidenceInventoryEntry[];
+  result?: TerminalNativeStatusInspectionResult;
+  reason?: string;
+}
+
+export interface TerminalNativeInspectionObserver {
+  (request: TerminalNativeInspectionObservationRequest): TerminalNativeInspectionObservation;
+}
+
 export interface TerminalThreadFileToken {
   path: string;
   device: string;
@@ -394,6 +491,14 @@ export interface TerminalAgentAdapter<ProcessKind extends string = string> {
     capabilities: TerminalThreadLifecycleCapabilities
   ): TerminalThreadLifecyclePlan;
   observeThreadLifecycle?: TerminalThreadLifecycleObserver;
+  probeNativeInspection?(
+    agentVersion: string | undefined
+  ): TerminalNativeInspectionCapabilities;
+  planNativeInspection?(
+    operation: TerminalNativeInspectionOperation,
+    capabilities: TerminalNativeInspectionCapabilities
+  ): TerminalNativeInspectionPlan;
+  observeNativeInspection?: TerminalNativeInspectionObserver;
   listThreadLifecycleCandidates?(
     request: TerminalThreadLifecycleCandidateRequest
   ): Promise<readonly TerminalThreadLifecycleCandidate[]>;
@@ -434,6 +539,16 @@ export class TerminalAgentAdapterRegistry {
     if (lifecycleMethodCount !== 0 && lifecycleMethodCount !== 3) {
       throw new Error(
         `terminal agent adapter ${adapter.agent} must implement lifecycle probe, plan, and observer methods together`
+      );
+    }
+    const nativeInspectionMethodCount = [
+      adapter.probeNativeInspection,
+      adapter.planNativeInspection,
+      adapter.observeNativeInspection
+    ].filter((method) => method !== undefined).length;
+    if (nativeInspectionMethodCount !== 0 && nativeInspectionMethodCount !== 3) {
+      throw new Error(
+        `terminal agent adapter ${adapter.agent} must implement native inspection probe, plan, and observer methods together`
       );
     }
     if (

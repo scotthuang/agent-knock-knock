@@ -2,13 +2,17 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
+  CODEX_NATIVE_INSPECTION_COMPOSER_STABLE_MS,
   createCodexTerminalAgentAdapter,
   codexTerminalAgentAdapter,
   detectCodexApprovalPrompt,
   detectCodexDurableCompletion,
   inspectCodexScreen,
+  observeCodexNativeInspection,
   observeCodexThreadLifecycle,
+  planCodexNativeInspection,
   planCodexThreadLifecycle,
+  probeCodexNativeInspection,
   probeCodexThreadLifecycle
 } from "../src/codex-terminal-agent-adapter.js";
 import { claudeTerminalAgentAdapter } from "../src/claude-terminal-agent-adapter.js";
@@ -121,6 +125,23 @@ test("default registry exposes Codex and Claude and rejects unsupported terminal
   assert.throws(
     () => terminalAgentAdapterFor(UNKNOWN_AGENT),
     /terminal agent adapter is not registered for unknown-agent/
+  );
+});
+
+test("registry requires native inspection probe, plan, and observer methods together", () => {
+  assert.throws(
+    () => createTerminalAgentAdapterRegistry([{
+      ...claudeTerminalAgentAdapter,
+      probeNativeInspection(agentVersion) {
+        return {
+          status: agentVersion ? "unsupported" : "unknown",
+          agentVersion,
+          statusInspection: false,
+          reason: "test-only partial implementation"
+        };
+      }
+    }]),
+    /must implement native inspection probe, plan, and observer methods together/u
   );
 });
 
@@ -428,6 +449,288 @@ test("verified Codex lifecycle profiles use closed status-clear-status steps", (
       capabilities
     ),
     /complete native thread UUID/u
+  );
+});
+
+test("verified Codex native inspection profiles expose one closed read-only status plan", () => {
+  for (const version of ["0.146.0", "0.146.1"]) {
+    const capabilities = probeCodexNativeInspection(version);
+    assert.equal(capabilities.status, "supported");
+    assert.equal(capabilities.statusInspection, true);
+    assert.equal(capabilities.behaviorProfile, `codex-tui-${version}`);
+    assert.deepEqual(
+      planCodexNativeInspection({ kind: "status" }, capabilities),
+      {
+        operation: { kind: "status" },
+        behaviorProfile: `codex-tui-${version}`,
+        command: "/status",
+        effect: "read_only",
+        requiresIdle: true,
+        composer: {
+          kind: "exact",
+          minimumStableMs: CODEX_NATIVE_INSPECTION_COMPOSER_STABLE_MS
+        },
+        expectedResult: { kind: "native_status" }
+      }
+    );
+  }
+
+  assert.equal(CODEX_NATIVE_INSPECTION_COMPOSER_STABLE_MS, 121);
+  assert.deepEqual(probeCodexNativeInspection(undefined), {
+    status: "unknown",
+    statusInspection: false,
+    reason: "the running Codex version could not be verified"
+  });
+  const unsupported = probeCodexNativeInspection("0.146.2");
+  assert.equal(unsupported.status, "unsupported");
+  assert.equal(unsupported.statusInspection, false);
+  assert.throws(
+    () => planCodexNativeInspection({ kind: "status" }, unsupported),
+    /no AKK native inspection behavior profile/u
+  );
+  assert.equal(claudeTerminalAgentAdapter.probeNativeInspection, undefined);
+});
+
+test("Codex native inspection observer requires the newest fresh exact status card", () => {
+  const nativeThreadId = "22222222-2222-4222-8222-222222222222";
+  const before = observeCodexNativeInspection({
+    operation: { kind: "status" },
+    screen: "› /status"
+  });
+  assert.equal(before.status, "missing");
+
+  const screen = [
+    "› /status",
+    "",
+    "╭────────────────────────────────────────────────────────────╮",
+    "│  >_ OpenAI Codex (v0.146.1)                               │",
+    "│                                                          │",
+    "│  Model:                 gpt-5.6-sol high                  │",
+    "│  Directory:             /repo                            │",
+    "│  Account:               owner@example.com (Pro)          │",
+    `│  Session:               ${nativeThreadId}     │`,
+    "│  Weekly limit:          sk-supersecret123456789 left     │",
+    "╰────────────────────────────────────────────────────────────╯",
+    "",
+    "› "
+  ].join("\n");
+  const observed = observeCodexNativeInspection({
+    operation: { kind: "status" },
+    screen,
+    previousScreenFingerprint: before.screenFingerprint,
+    expectedNativeThreadId: nativeThreadId.toUpperCase(),
+    expectedAgentVersion: "0.146.1"
+  });
+  assert.equal(observed.status, "observed");
+  assert.equal(observed.nativeThreadId, nativeThreadId);
+  assert.equal(observed.observedAgentVersion, "0.146.1");
+  assert.equal(observed.evidence, "codex_status_card");
+  assert.match(observed.evidenceFingerprint ?? "", /^sha256:[0-9a-f]{64}$/u);
+  assert.deepEqual(observed.result?.fields, [
+    { name: "Model", value: "gpt-5.6-sol high" },
+    { name: "Directory", value: "/repo" },
+    { name: "Account", value: "[REDACTED]" },
+    { name: "Session", value: nativeThreadId },
+    { name: "Weekly limit", value: "sk-[REDACTED] left" }
+  ]);
+  assert.doesNotMatch(observed.result?.excerpt ?? "", /owner@example\.com|supersecret/u);
+  assert.ok((observed.result?.excerpt.length ?? Infinity) <= 4_000);
+
+  assert.equal(
+    observeCodexNativeInspection({
+      operation: { kind: "status" },
+      screen,
+      previousScreenFingerprint: observed.screenFingerprint
+    }).status,
+    "stale"
+  );
+  assert.equal(
+    observeCodexNativeInspection({
+      operation: { kind: "status" },
+      screen: `${screen}\n/usage daily`
+    }).status,
+    "missing"
+  );
+  assert.equal(
+    observeCodexNativeInspection({
+      operation: { kind: "status" },
+      screen,
+      expectedAgentVersion: "0.146.0"
+    }).status,
+    "mismatch"
+  );
+  assert.equal(
+    observeCodexNativeInspection({
+      operation: { kind: "status" },
+      screen,
+      expectedNativeThreadId: "11111111-1111-4111-8111-111111111111"
+    }).status,
+    "mismatch"
+  );
+});
+
+test("Codex native inspection requires a new status-card evidence occurrence", () => {
+  const nativeThreadId = "22222222-2222-4222-8222-222222222222";
+  const card = [
+    "/status",
+    "╭────────────────────────────────────────────────────────────╮",
+    "│  >_ OpenAI Codex (v0.146.1)                               │",
+    `│  Session:               ${nativeThreadId}     │`,
+    "╰────────────────────────────────────────────────────────────╯"
+  ].join("\n");
+  const preEnterScreen = [card, "", "› /status"].join("\n");
+  const before = observeCodexNativeInspection({
+    operation: { kind: "status" },
+    screen: preEnterScreen
+  });
+  assert.equal(before.status, "missing");
+  assert.equal(before.evidenceInventory?.length, 1);
+  assert.equal(before.evidenceInventory?.[0].occurrenceCount, 1);
+
+  const oldCardOnly = observeCodexNativeInspection({
+    operation: { kind: "status" },
+    screen: `${card}\n\n› `,
+    previousScreenFingerprint: before.screenFingerprint,
+    preEnterEvidenceInventory: before.evidenceInventory
+  });
+  assert.equal(oldCardOnly.status, "stale");
+  assert.match(oldCardOnly.reason ?? "", /did not add a fresh exact evidence occurrence/u);
+
+  const identicalNewCard = observeCodexNativeInspection({
+    operation: { kind: "status" },
+    screen: `${card}\n\n${card}\n\n› `,
+    previousScreenFingerprint: before.screenFingerprint,
+    preEnterEvidenceInventory: before.evidenceInventory,
+    expectedNativeThreadId: nativeThreadId,
+    expectedAgentVersion: "0.146.1"
+  });
+  assert.equal(identicalNewCard.status, "observed");
+  assert.equal(identicalNewCard.evidenceInventory?.length, 1);
+  assert.equal(identicalNewCard.evidenceInventory?.[0].occurrenceCount, 2);
+
+  const rolledOldCardAway = observeCodexNativeInspection({
+    operation: { kind: "status" },
+    screen: `${card}\n\n› `,
+    previousScreenFingerprint: before.screenFingerprint,
+    preEnterEvidenceInventory: before.evidenceInventory
+  });
+  assert.equal(rolledOldCardAway.status, "stale");
+});
+
+test("Codex native inspection rejects malformed and over-bounded evidence inventories", () => {
+  const nativeThreadId = "22222222-2222-4222-8222-222222222222";
+  const card = (id: string = nativeThreadId) => [
+    "/status",
+    "╭────────────────────────────────────────────────────────────╮",
+    "│  >_ OpenAI Codex (v0.146.1)                               │",
+    `│  Session:               ${id}     │`,
+    "╰────────────────────────────────────────────────────────────╯"
+  ].join("\n");
+  const screen = `${card()}\n\n› `;
+  for (const preEnterEvidenceInventory of [
+    [{ evidenceFingerprint: "not-a-hash", occurrenceCount: 1 }],
+    [{
+      evidenceFingerprint: `sha256:${"a".repeat(64)}`,
+      occurrenceCount: 65
+    }],
+    [
+      {
+        evidenceFingerprint: `sha256:${"b".repeat(64)}`,
+        occurrenceCount: 1
+      },
+      {
+        evidenceFingerprint: `sha256:${"b".repeat(64)}`,
+        occurrenceCount: 2
+      }
+    ]
+  ]) {
+    assert.equal(
+      observeCodexNativeInspection({
+        operation: { kind: "status" },
+        screen,
+        preEnterEvidenceInventory
+      }).status,
+      "ambiguous"
+    );
+  }
+
+  const tooManyDistinctCards = Array.from({ length: 33 }, (_, index) => {
+    const suffix = index.toString(16).padStart(12, "0");
+    return card(`22222222-2222-4222-8222-${suffix}`);
+  }).join("\n");
+  const overBounded = observeCodexNativeInspection({
+    operation: { kind: "status" },
+    screen: tooManyDistinctCards
+  });
+  assert.equal(overBounded.status, "ambiguous");
+  assert.match(overBounded.reason ?? "", /bounded distinct-card count/u);
+});
+
+test("Codex native status parsing fails closed on ambiguous, malformed, and unsupported cards", () => {
+  const nativeThreadId = "22222222-2222-4222-8222-222222222222";
+  const card = (body: readonly string[], version = "0.146.1") => [
+    "/status",
+    "╭──────────────────────────────────────────────╮",
+    `│ >_ OpenAI Codex (v${version})                │`,
+    ...body,
+    "╰──────────────────────────────────────────────╯"
+  ].join("\n");
+
+  assert.equal(
+    observeCodexNativeInspection({
+      operation: { kind: "status" },
+      screen: card([
+        `│ Session: ${nativeThreadId} │`,
+        `│ Session: ${nativeThreadId} │`
+      ])
+    }).status,
+    "ambiguous"
+  );
+  assert.equal(
+    observeCodexNativeInspection({
+      operation: { kind: "status" },
+      screen: card(["│ Model: gpt-5.6-sol │"])
+    }).status,
+    "missing"
+  );
+  assert.equal(
+    observeCodexNativeInspection({
+      operation: { kind: "status" },
+      screen: card([`│ Session: ${nativeThreadId} │`], "0.146.2")
+    }).status,
+    "mismatch"
+  );
+  assert.equal(
+    observeCodexNativeInspection({
+      operation: { kind: "status" },
+      screen: `/status\nSession: ${nativeThreadId}`
+    }).status,
+    "missing"
+  );
+
+  const bounded = observeCodexNativeInspection({
+    operation: { kind: "status" },
+    screen: card([
+      `│ Detail: ${"x".repeat(1_000)} │`,
+      `│ Session: ${nativeThreadId} │`
+    ])
+  });
+  assert.equal(bounded.status, "observed");
+  assert.equal(
+    bounded.result?.fields.find((field) => field.name === "Detail")?.value.length,
+    512
+  );
+  assert.ok((bounded.result?.excerpt.length ?? Infinity) <= 4_000);
+
+  assert.equal(
+    observeCodexNativeInspection({
+      operation: { kind: "status" },
+      screen: card([
+        `│ Detail: ${"x".repeat(8_192)} │`,
+        `│ Session: ${nativeThreadId} │`
+      ])
+    }).status,
+    "ambiguous"
   );
 });
 

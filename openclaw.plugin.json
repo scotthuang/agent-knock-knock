@@ -1,7 +1,7 @@
 {
   "id": "agent-knock-knock",
   "name": "Agent Knock Knock",
-  "description": "Control local Codex and Claude Code through shared tmux terminals, with native-thread lifecycle controls, live monitoring, approvals, and human takeover.",
+  "description": "Control local Codex and Claude Code through shared tmux terminals, with Codex version-scoped native inspection, native-thread lifecycle controls, live monitoring, approvals, and human takeover.",
   "icon": "https://raw.githubusercontent.com/scotthuang/agent-knock-knock/main/docs/assets/agent-knock-knock-icon.png",
   "activation": {
     "onStartup": true,
@@ -17,6 +17,7 @@
     "tools": [
       "agent_knock_knock_list",
       "agent_knock_knock_list_resumable_threads",
+      "agent_knock_knock_native_inspect",
       "agent_knock_knock_new_thread",
       "agent_knock_knock_reconcile_binding",
       "agent_knock_knock_resume_thread",
@@ -35,6 +36,9 @@
       "optional": true
     },
     "agent_knock_knock_list_resumable_threads": {
+      "optional": true
+    },
+    "agent_knock_knock_native_inspect": {
       "optional": true
     },
     "agent_knock_knock_new_thread": {

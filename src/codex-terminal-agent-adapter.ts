@@ -11,6 +11,13 @@ import type {
   TerminalApprovalInspection,
   TerminalCompletionEvidence,
   TerminalDurableCompletionRequest,
+  TerminalNativeInspectionCapabilities,
+  TerminalNativeInspectionEvidenceInventoryEntry,
+  TerminalNativeInspectionField,
+  TerminalNativeInspectionObservation,
+  TerminalNativeInspectionObservationRequest,
+  TerminalNativeInspectionOperation,
+  TerminalNativeInspectionPlan,
   TerminalScreenInspection,
   TerminalScreenInspectionOptions,
   TerminalThreadLifecycleCapabilities,
@@ -54,6 +61,21 @@ const CODEX_FOOTER_LINE =
   /^(?:gpt-[\w.-]+(?:\s|$)|[-\w.]+ default ·)/u;
 const CODEX_SESSION_STATUS_PATTERN =
   /\bSession:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/giu;
+const CODEX_STATUS_HEADER_PATTERN =
+  /\bOpenAI Codex \(v([0-9]+\.[0-9]+\.[0-9]+(?:[-+][^)\s]+)?)\)/u;
+const CODEX_STATUS_TOP_BORDER = /^\s*╭[─-]+╮\s*$/u;
+const CODEX_STATUS_BOTTOM_BORDER = /^\s*╰[─-]+╯\s*$/u;
+const CODEX_STATUS_FIELD = /^\s*│\s*([^:│]{1,64}):\s+(.+?)\s*│\s*$/u;
+const CODEX_STATUS_MAX_LINES = 64;
+const CODEX_STATUS_MAX_REGION_LENGTH = 8_192;
+const CODEX_STATUS_MAX_FIELDS = 24;
+const CODEX_STATUS_MAX_FIELD_VALUE_LENGTH = 512;
+const CODEX_STATUS_MAX_EXCERPT_LENGTH = 4_000;
+const CODEX_STATUS_EVIDENCE_INVENTORY_MAX_ENTRIES = 32;
+const CODEX_STATUS_EVIDENCE_MAX_OCCURRENCES = 64;
+const CODEX_STATUS_EVIDENCE_SCAN_MAX_LINES = 512;
+const CODEX_STATUS_EVIDENCE_FINGERPRINT = /^sha256:[0-9a-f]{64}$/u;
+export const CODEX_NATIVE_INSPECTION_COMPOSER_STABLE_MS = 121;
 
 export function createCodexTerminalAgentAdapter(
   options: CreateCodexTerminalAgentAdapterOptions = {}
@@ -78,9 +100,190 @@ export function createCodexTerminalAgentAdapter(
     probeThreadLifecycle: probeCodexThreadLifecycle,
     planThreadLifecycle: planCodexThreadLifecycle,
     observeThreadLifecycle: observeCodexThreadLifecycle,
+    probeNativeInspection: probeCodexNativeInspection,
+    planNativeInspection: planCodexNativeInspection,
+    observeNativeInspection: observeCodexNativeInspection,
     detectDurableCompletion: options.detectDurableCompletion ?? (async (request) =>
       detectCodexDurableCompletion(request))
   };
+}
+
+export function probeCodexNativeInspection(
+  agentVersion: string | undefined
+): TerminalNativeInspectionCapabilities {
+  if (!agentVersion) {
+    return {
+      status: "unknown",
+      statusInspection: false,
+      reason: "the running Codex version could not be verified"
+    };
+  }
+  const behaviorProfile = codexLifecycleBehaviorProfile(agentVersion);
+  const supported = behaviorProfile !== undefined;
+  return {
+    status: supported ? "supported" : "unsupported",
+    agentVersion,
+    behaviorProfile,
+    statusInspection: supported,
+    reason: supported
+      ? "Codex /status native inspection is supported by the verified version"
+      : "this exact Codex version has no AKK native inspection behavior profile"
+  };
+}
+
+export function planCodexNativeInspection(
+  operation: TerminalNativeInspectionOperation,
+  capabilities: TerminalNativeInspectionCapabilities
+): TerminalNativeInspectionPlan {
+  const behaviorProfile = codexLifecycleBehaviorProfile(
+    capabilities.agentVersion
+  );
+  if (
+    operation.kind !== "status" ||
+    capabilities.status !== "supported" ||
+    !capabilities.statusInspection ||
+    !capabilities.agentVersion ||
+    !behaviorProfile ||
+    capabilities.behaviorProfile !== behaviorProfile
+  ) {
+    throw new Error(capabilities.reason);
+  }
+  return {
+    operation,
+    behaviorProfile,
+    command: "/status",
+    effect: "read_only",
+    requiresIdle: true,
+    composer: {
+      kind: "exact",
+      minimumStableMs: CODEX_NATIVE_INSPECTION_COMPOSER_STABLE_MS
+    },
+    expectedResult: { kind: "native_status" }
+  };
+}
+
+export function observeCodexNativeInspection(
+  request: TerminalNativeInspectionObservationRequest
+): TerminalNativeInspectionObservation {
+  const screen = request.screen ?? "";
+  const screenFingerprint = fingerprintCodexNativeInspection(screen);
+  const evidenceInventory = codexStatusEvidenceInventory(screen);
+  if (evidenceInventory.status === "ambiguous") {
+    return {
+      status: "ambiguous",
+      screenFingerprint,
+      reason: evidenceInventory.reason
+    };
+  }
+  const baselineError = validateCodexStatusEvidenceInventory(
+    request.preEnterEvidenceInventory
+  );
+  if (baselineError) {
+    return {
+      status: "ambiguous",
+      screenFingerprint,
+      evidenceInventory: evidenceInventory.entries,
+      reason: baselineError
+    };
+  }
+  if (
+    request.previousScreenFingerprint !== undefined &&
+    request.previousScreenFingerprint === screenFingerprint
+  ) {
+    return {
+      status: "stale",
+      screenFingerprint,
+      evidenceInventory: evidenceInventory.entries,
+      reason: "the Codex screen did not change after the native inspection command"
+    };
+  }
+
+  const parsed = parseNewestCodexStatusCard(screen);
+  if (parsed.status !== "observed") {
+    return {
+      status: parsed.status,
+      screenFingerprint,
+      evidenceInventory: evidenceInventory.entries,
+      reason: parsed.reason
+    };
+  }
+
+  const nativeThreadId = parsed.nativeThreadId;
+  const observedAgentVersion = parsed.agentVersion;
+  const evidenceFingerprint = fingerprintCodexNativeInspection(parsed.region);
+  const result = {
+    kind: "native_status" as const,
+    nativeThreadId,
+    agentVersion: observedAgentVersion,
+    fields: parsed.fields,
+    excerpt: codexNativeStatusExcerpt(observedAgentVersion, parsed.fields)
+  };
+  const observed = {
+    status: "observed" as const,
+    nativeThreadId,
+    observedAgentVersion,
+    evidence: "codex_status_card",
+    evidenceFingerprint,
+    screenFingerprint,
+    evidenceInventory: evidenceInventory.entries,
+    result
+  };
+
+  if (request.preEnterEvidenceInventory !== undefined) {
+    const priorOccurrences = request.preEnterEvidenceInventory.find((entry) =>
+      entry.evidenceFingerprint === evidenceFingerprint
+    )?.occurrenceCount ?? 0;
+    const currentOccurrences = evidenceInventory.entries.find((entry) =>
+      entry.evidenceFingerprint === evidenceFingerprint
+    )?.occurrenceCount ?? 0;
+    if (currentOccurrences <= priorOccurrences) {
+      return {
+        ...observed,
+        status: "stale",
+        reason:
+          "the newest Codex /status card did not add a fresh exact evidence occurrence after Enter"
+      };
+    }
+  }
+
+  if (!codexLifecycleBehaviorProfile(observedAgentVersion)) {
+    return {
+      ...observed,
+      status: "mismatch",
+      reason: `Codex /status reported unsupported version ${observedAgentVersion}`
+    };
+  }
+  if (
+    request.expectedAgentVersion !== undefined &&
+    observedAgentVersion !== request.expectedAgentVersion
+  ) {
+    return {
+      ...observed,
+      status: "mismatch",
+      reason: `Codex /status reported version ${observedAgentVersion}, not the verified running version ${request.expectedAgentVersion}`
+    };
+  }
+  if (
+    request.expectedNativeThreadId !== undefined &&
+    !isExactNativeThreadId(request.expectedNativeThreadId)
+  ) {
+    return {
+      ...observed,
+      status: "mismatch",
+      reason: "Codex native status inspection requires a complete expected Session UUID"
+    };
+  }
+  if (
+    request.expectedNativeThreadId !== undefined &&
+    nativeThreadId !== request.expectedNativeThreadId.toLowerCase()
+  ) {
+    return {
+      ...observed,
+      status: "mismatch",
+      reason: `Codex /status reported ${nativeThreadId}, not the expected native thread ${request.expectedNativeThreadId.toLowerCase()}`
+    };
+  }
+  return observed;
 }
 
 export function probeCodexThreadLifecycle(
@@ -270,7 +473,263 @@ export function observeCodexThreadLifecycle(
         ...observed,
         status: "mismatch",
         reason: `Codex resumed ${nativeThreadId}, not the requested native thread ${expected}`
+    };
+}
+
+type ParsedCodexStatusCard =
+  | {
+      status: "observed";
+      region: string;
+      nativeThreadId: string;
+      agentVersion: string;
+      fields: readonly TerminalNativeInspectionField[];
+    }
+  | {
+      status: "missing" | "ambiguous";
+      reason: string;
+    };
+
+function parseNewestCodexStatusCard(screen: string): ParsedCodexStatusCard {
+  const lines = screen.split(/\r?\n/u);
+  let commandIndex = -1;
+  let command: string | undefined;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const candidate = codexNativeCommandLine(lines[index]);
+    if (candidate !== undefined) {
+      commandIndex = index;
+      command = candidate;
+      break;
+    }
+  }
+  if (commandIndex < 0 || command !== "/status") {
+    return {
+      status: "missing",
+      reason: commandIndex < 0
+        ? "Codex /status command is not visible in the observed screen"
+        : "the newest Codex native command is not /status"
+    };
+  }
+
+  return parseCodexStatusCardAfterCommand(lines, commandIndex);
+}
+
+function parseCodexStatusCardAfterCommand(
+  lines: readonly string[],
+  commandIndex: number
+): ParsedCodexStatusCard {
+  let topBorderIndex = commandIndex + 1;
+  while (topBorderIndex < lines.length && !lines[topBorderIndex].trim()) {
+    topBorderIndex += 1;
+  }
+  if (
+    topBorderIndex >= lines.length ||
+    !CODEX_STATUS_TOP_BORDER.test(lines[topBorderIndex])
+  ) {
+    return {
+      status: "missing",
+      reason: "the newest Codex /status command has no complete status-card opening border"
+    };
+  }
+
+  const lineLimit = Math.min(
+    lines.length,
+    topBorderIndex + CODEX_STATUS_MAX_LINES
+  );
+  let bottomBorderIndex = -1;
+  for (let index = topBorderIndex + 1; index < lineLimit; index += 1) {
+    if (CODEX_STATUS_BOTTOM_BORDER.test(lines[index])) {
+      bottomBorderIndex = index;
+      break;
+    }
+  }
+  if (bottomBorderIndex < 0) {
+    return {
+      status: "missing",
+      reason: "the newest Codex /status card is incomplete or exceeds the bounded parser window"
+    };
+  }
+
+  const region = lines.slice(topBorderIndex, bottomBorderIndex + 1).join("\n");
+  if (region.length > CODEX_STATUS_MAX_REGION_LENGTH) {
+    return {
+      status: "ambiguous",
+      reason: "the newest Codex /status card exceeds the bounded inspection size"
+    };
+  }
+
+  const versionMatches = [...region.matchAll(new RegExp(CODEX_STATUS_HEADER_PATTERN, "gu"))];
+  if (versionMatches.length === 0) {
+    return {
+      status: "missing",
+      reason: "the newest Codex /status card has no exact version header"
+    };
+  }
+  if (versionMatches.length !== 1) {
+    return {
+      status: "ambiguous",
+      reason: "the newest Codex /status card contains multiple version headers"
+    };
+  }
+
+  const sessionMatches = [...region.matchAll(CODEX_SESSION_STATUS_PATTERN)];
+  if (sessionMatches.length === 0) {
+    return {
+      status: "missing",
+      reason: "the newest Codex /status card did not expose a complete Session UUID"
+    };
+  }
+  if (sessionMatches.length !== 1) {
+    return {
+      status: "ambiguous",
+      reason: "the newest Codex /status card contains multiple Session UUID fields"
+    };
+  }
+
+  const fields: TerminalNativeInspectionField[] = [];
+  for (const line of lines.slice(topBorderIndex + 1, bottomBorderIndex)) {
+    const match = CODEX_STATUS_FIELD.exec(line);
+    if (!match) {
+      continue;
+    }
+    if (fields.length >= CODEX_STATUS_MAX_FIELDS) {
+      return {
+        status: "ambiguous",
+        reason: "the newest Codex /status card contains too many structured fields"
       };
+    }
+    const name = redactCodexNativeStatusText(match[1].trim()).slice(0, 64);
+    const value = /^account$/iu.test(name)
+      ? "[REDACTED]"
+      : redactCodexNativeStatusText(match[2].trim())
+        .slice(0, CODEX_STATUS_MAX_FIELD_VALUE_LENGTH);
+    fields.push({ name, value });
+  }
+
+  return {
+    status: "observed",
+    region,
+    nativeThreadId: sessionMatches[0][1].toLowerCase(),
+    agentVersion: versionMatches[0][1],
+    fields
+  };
+}
+
+type CodexStatusEvidenceInventory =
+  | {
+      status: "ok";
+      entries: readonly TerminalNativeInspectionEvidenceInventoryEntry[];
+    }
+  | {
+      status: "ambiguous";
+      reason: string;
+    };
+
+function codexStatusEvidenceInventory(
+  screen: string
+): CodexStatusEvidenceInventory {
+  const allLines = screen.split(/\r?\n/u);
+  const lines = allLines.slice(-CODEX_STATUS_EVIDENCE_SCAN_MAX_LINES);
+  const counts = new Map<string, number>();
+  for (let index = 0; index < lines.length; index += 1) {
+    if (codexNativeCommandLine(lines[index]) !== "/status") {
+      continue;
+    }
+    const parsed = parseCodexStatusCardAfterCommand(lines, index);
+    if (parsed.status !== "observed") {
+      continue;
+    }
+    const evidenceFingerprint = fingerprintCodexNativeInspection(parsed.region);
+    const occurrenceCount = (counts.get(evidenceFingerprint) ?? 0) + 1;
+    if (occurrenceCount > CODEX_STATUS_EVIDENCE_MAX_OCCURRENCES) {
+      return {
+        status: "ambiguous",
+        reason:
+          "the Codex status evidence inventory exceeds its bounded occurrence count"
+      };
+    }
+    counts.set(evidenceFingerprint, occurrenceCount);
+    if (counts.size > CODEX_STATUS_EVIDENCE_INVENTORY_MAX_ENTRIES) {
+      return {
+        status: "ambiguous",
+        reason:
+          "the Codex status evidence inventory exceeds its bounded distinct-card count"
+      };
+    }
+  }
+  return {
+    status: "ok",
+    entries: [...counts.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([evidenceFingerprint, occurrenceCount]) => ({
+        evidenceFingerprint,
+        occurrenceCount
+      }))
+  };
+}
+
+function validateCodexStatusEvidenceInventory(
+  inventory:
+    readonly TerminalNativeInspectionEvidenceInventoryEntry[] | undefined
+): string | undefined {
+  if (inventory === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(inventory)) {
+    return "the pre-Enter Codex status evidence inventory must be an array";
+  }
+  if (inventory.length > CODEX_STATUS_EVIDENCE_INVENTORY_MAX_ENTRIES) {
+    return "the pre-Enter Codex status evidence inventory has too many entries";
+  }
+  const fingerprints = new Set<string>();
+  for (const entry of inventory) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return "the pre-Enter Codex status evidence inventory is malformed or ambiguous";
+    }
+    if (
+      typeof entry.evidenceFingerprint !== "string" ||
+      !CODEX_STATUS_EVIDENCE_FINGERPRINT.test(entry.evidenceFingerprint) ||
+      typeof entry.occurrenceCount !== "number" ||
+      !Number.isSafeInteger(entry.occurrenceCount) ||
+      entry.occurrenceCount <= 0 ||
+      entry.occurrenceCount > CODEX_STATUS_EVIDENCE_MAX_OCCURRENCES ||
+      fingerprints.has(entry.evidenceFingerprint)
+    ) {
+      return "the pre-Enter Codex status evidence inventory is malformed or ambiguous";
+    }
+    fingerprints.add(entry.evidenceFingerprint);
+  }
+  return undefined;
+}
+
+function codexNativeCommandLine(line: string): string | undefined {
+  const normalized = line
+    .trim()
+    .replace(/^[›»]\s*/u, "")
+    .trim();
+  return /^\/[a-z][a-z0-9_-]*(?:\s|$)/iu.test(normalized)
+    ? normalized
+    : undefined;
+}
+
+function fingerprintCodexNativeInspection(value: string): string {
+  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+
+function redactCodexNativeStatusText(value: string): string {
+  return redactString(value).replace(
+    /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/giu,
+    "[REDACTED EMAIL]"
+  );
+}
+
+function codexNativeStatusExcerpt(
+  agentVersion: string,
+  fields: readonly TerminalNativeInspectionField[]
+): string {
+  return [
+    `OpenAI Codex v${agentVersion}`,
+    ...fields.map((field) => `${field.name}: ${field.value}`)
+  ].join("\n").slice(0, CODEX_STATUS_MAX_EXCERPT_LENGTH);
 }
 
 function newestCodexStatusRegion(screen: string): string | undefined {

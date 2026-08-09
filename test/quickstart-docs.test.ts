@@ -168,7 +168,7 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
     assert.match(document, /`expected_binding_token`/u);
     assert.match(document, /`native_thread_id`/u);
     assert.match(document, /`candidate_token`/u);
-    assert.match(document, /v6 `action_contracts`/u);
+    assert.match(document, /v7 `action_contracts`/u);
     assert.match(document, /creates no (?:AKK )?Turn/u);
     assert.match(document, /previous/u);
     assert.match(document, /snapshot/ui);

@@ -28,8 +28,10 @@ test("OpenClaw contract removes the top-level workspace and keeps rule-scoped ap
   assert.equal(manifest.toolMetadata.agent_knock_knock_renew.optional, true);
   assert.equal(manifest.contracts.tools.includes("agent_knock_knock_respond"), true);
   assert.equal(manifest.toolMetadata.agent_knock_knock_respond.optional, true);
+  assert.equal(manifest.contracts.tools.length, 14);
   for (const lifecycleTool of [
     "agent_knock_knock_list_resumable_threads",
+    "agent_knock_knock_native_inspect",
     "agent_knock_knock_new_thread",
     "agent_knock_knock_reconcile_binding",
     "agent_knock_knock_resume_thread"
@@ -49,6 +51,7 @@ test("OpenClaw contract removes the top-level workspace and keeps rule-scoped ap
   assert.match(pluginSource, /name: "agent_knock_knock_new_thread"/u);
   assert.match(pluginSource, /name: "agent_knock_knock_reconcile_binding"/u);
   assert.match(pluginSource, /name: "agent_knock_knock_list_resumable_threads"/u);
+  assert.match(pluginSource, /name: "agent_knock_knock_native_inspect"/u);
   assert.match(pluginSource, /name: "agent_knock_knock_resume_thread"/u);
   assert.match(
     pluginSource,
@@ -62,6 +65,10 @@ test("OpenClaw contract removes the top-level workspace and keeps rule-scoped ap
   assert.match(
     fs.readFileSync(skillSource, "utf8"),
     /agent_knock_knock_list_resumable_threads/u
+  );
+  assert.match(
+    fs.readFileSync(skillSource, "utf8"),
+    /agent_knock_knock_native_inspect/u
   );
 });
 

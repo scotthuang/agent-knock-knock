@@ -12,6 +12,7 @@ import plugin, {
 } from "../src/openclaw-plugin.js";
 
 type Manifest = {
+  description?: string;
   activation?: {
     onCommands?: string[];
   };
@@ -133,6 +134,11 @@ test("OpenClaw runtime registrations match the published manifest", () => {
 
   assert.deepEqual(sorted(registeredTools), sorted(contractedTools));
   assert.deepEqual(sorted(metadataTools), sorted(contractedTools));
+  assert.equal(contractedTools.length, 14);
+  assert.match(
+    manifest.description ?? "",
+    /Codex version-scoped native inspection/u
+  );
   assert.deepEqual(
     sorted(registeredCommands),
     sorted(activatedCommands)
@@ -162,6 +168,10 @@ test("OpenClaw runtime registrations match the published manifest", () => {
     contractedTools.includes("agent_knock_knock_list_resumable_threads"),
     true
   );
+  assert.equal(
+    contractedTools.includes("agent_knock_knock_native_inspect"),
+    true
+  );
   assert.equal(contractedTools.includes("agent_knock_knock_new_thread"), true);
   assert.equal(
     contractedTools.includes("agent_knock_knock_reconcile_binding"),
@@ -185,6 +195,129 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   ).configSchema?.properties ?? {};
   assert.equal("defaultAgent" in configProperties, false);
   assert.equal("workspace" in configProperties, false);
+});
+
+test("OpenClaw native inspection is a closed status-only terminal action", async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-plugin-native-inspect-")
+  );
+  const fakeCli = path.join(tempDir, "native-inspect.cjs");
+  const callsPath = path.join(tempDir, "calls.ndjson");
+  const terminalId = "terminal:v2:tmux:codex:work:0.0:1234";
+  const tools = new Map<string, ToolDefinition>();
+
+  try {
+    fs.writeFileSync(
+      fakeCli,
+      [
+        `const fs = require("node:fs");`,
+        `const args = process.argv.slice(2);`,
+        `fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(args) + "\\n");`,
+        `process.stdout.write(JSON.stringify({`,
+        `  status: "observed", inspection: "status", agent: "codex",`,
+        `  agent_version: "0.146.1", terminal_id: ${JSON.stringify(terminalId)},`,
+        `  turn_created: false, session_created: false`,
+        `}));`
+      ].join("\n"),
+      "utf8"
+    );
+
+    (
+      createOpenClawPluginForTest(fakeCli) as unknown as {
+        register(api: Record<string, any>): void;
+      }
+    ).register({
+      pluginConfig: {
+        storeDir: "/private/akk-store",
+        codexHome: "/private/custom-codex"
+      },
+      logger: { info() {}, warn() {} },
+      registerGatewayMethod() {},
+      registerService() {},
+      registerCommand() {},
+      registerTool(
+        tool: ToolDefinition | ToolFactory,
+        options?: { name?: string }
+      ) {
+        const definition = typeof tool === "function" ? tool({}) : tool;
+        if (options?.name) {
+          tools.set(options.name, definition);
+        }
+      }
+    });
+
+    const inspectTool = tools.get("agent_knock_knock_native_inspect");
+    assert.ok(inspectTool);
+    assert.deepEqual(inspectTool.parameters?.required, [
+      "terminal_id",
+      "inspection",
+      "expected_binding_token"
+    ]);
+    assert.equal(inspectTool.parameters?.additionalProperties, false);
+    const properties = inspectTool.parameters?.properties ?? {};
+    assert.deepEqual(sorted(Object.keys(properties)), [
+      "expected_binding_token",
+      "inspection",
+      "terminal_id"
+    ]);
+    assert.equal(Object.hasOwn(properties, "command"), false);
+    const inspectionSchema = isRecord(properties.inspection)
+      ? properties.inspection
+      : {};
+    assert.deepEqual(inspectionSchema.enum, ["status"]);
+    const terminalSchema = isRecord(properties.terminal_id)
+      ? properties.terminal_id
+      : {};
+    assert.match(String(terminalSchema.pattern ?? ""), /terminal:v/u);
+    assert.match(inspectTool.description ?? "", /Codex 0\.146\.0\/0\.146\.1/u);
+    assert.match(inspectTool.description ?? "", /Codex-only/u);
+    assert.match(inspectTool.description ?? "", /creates no AKK Session, Turn/u);
+    assert.match(inspectTool.description ?? "", /agent_knock_knock_status is different/u);
+    assert.match(inspectTool.description ?? "", /arbitrary slash commands/u);
+    assert.match(inspectTool.description ?? "", /usage-limit reset/u);
+
+    const result = await inspectTool.execute?.("native-status", {
+      terminal_id: terminalId,
+      inspection: "status",
+      expected_binding_token: "fresh-inspection-token"
+    });
+    assert.equal(result?.details?.status, "observed");
+    assert.equal(result?.details?.turn_created, false);
+    assert.deepEqual(
+      JSON.parse(fs.readFileSync(callsPath, "utf8").trim()),
+      [
+        "native-inspect",
+        "--terminal",
+        terminalId,
+        "--inspection",
+        "status",
+        "--expected-binding-token",
+        "fresh-inspection-token",
+        "--store-dir",
+        "/private/akk-store",
+        "--codex-home",
+        "/private/custom-codex"
+      ]
+    );
+
+    await assert.rejects(
+      () => inspectTool.execute!("unsupported-inspection", {
+        terminal_id: terminalId,
+        inspection: "usage",
+        expected_binding_token: "fresh-inspection-token"
+      }),
+      /inspection must be status/u
+    );
+    await assert.rejects(
+      () => inspectTool.execute!("missing-inspection-token", {
+        terminal_id: terminalId,
+        inspection: "status"
+      }),
+      /expected_binding_token is required/u
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("OpenClaw native-thread tools keep explicit CAS while slash commands refresh it internally", async () => {
