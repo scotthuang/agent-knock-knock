@@ -129,9 +129,14 @@ test("default registry exposes Codex and Claude and rejects unsupported terminal
 });
 
 test("registry requires native inspection probe, plan, and observer methods together", () => {
+  const {
+    planNativeInspection: _planNativeInspection,
+    observeNativeInspection: _observeNativeInspection,
+    ...partialClaudeAdapter
+  } = claudeTerminalAgentAdapter;
   assert.throws(
     () => createTerminalAgentAdapterRegistry([{
-      ...claudeTerminalAgentAdapter,
+      ...partialClaudeAdapter,
       probeNativeInspection(agentVersion) {
         return {
           status: agentVersion ? "unsupported" : "unknown",
@@ -470,7 +475,10 @@ test("verified Codex native inspection profiles expose one closed read-only stat
           kind: "exact",
           minimumStableMs: CODEX_NATIVE_INSPECTION_COMPOSER_STABLE_MS
         },
-        expectedResult: { kind: "native_status" }
+        expectedResult: {
+          kind: "native_status",
+          presentation: "inline"
+        }
       }
     );
   }
@@ -488,7 +496,10 @@ test("verified Codex native inspection profiles expose one closed read-only stat
     () => planCodexNativeInspection({ kind: "status" }, unsupported),
     /no AKK native inspection behavior profile/u
   );
-  assert.equal(claudeTerminalAgentAdapter.probeNativeInspection, undefined);
+  assert.equal(
+    claudeTerminalAgentAdapter.probeNativeInspection?.("2.1.218").status,
+    "supported"
+  );
 });
 
 test("Codex native inspection observer requires the newest fresh exact status card", () => {

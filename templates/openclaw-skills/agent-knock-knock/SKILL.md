@@ -43,7 +43,7 @@ Natural-language forms:
 - `AKK Codex: <task>`: call `agent_knock_knock_send` with `request=<task>` and `selector="codex"`.
 - `AKK Claude: <task>`: call `agent_knock_knock_send` with `request=<task>` and `selector="claude"`.
 - Requests to list AKK or local coding-agent work: call `agent_knock_knock_list`.
-- Requests for the coding agent's native Codex status card: first call `agent_knock_knock_list`, then call `agent_knock_knock_native_inspect` only when the exact terminal row advertises `native_inspect`. Preserve its complete `terminal_id`, `inspection="status"`, and `expected_binding_token`; do not substitute AKK Turn status or ordinary send.
+- Requests for the coding agent's native Codex status card or Claude Status panel: first call `agent_knock_knock_list`, then call `agent_knock_knock_native_inspect` only when the exact terminal row advertises `native_inspect`. Preserve its complete `terminal_id`, `inspection="status"`, and `expected_binding_token`; do not substitute AKK Turn status or ordinary send.
 - Requests to list resumable native threads for an exact terminal: call `agent_knock_knock_list_resumable_threads` with the terminal row's prefilled `terminal_id`.
 - Explicit requests to start a new thread or clear context: call `agent_knock_knock_new_thread` only from an advertised `new_thread` action, preserving its exact `terminal_id` and `expected_binding_token`.
 - Explicit requests to recover a listed binding conflict: call `agent_knock_knock_reconcile_binding` only from that terminal row's advertised `reconcile_binding` action, preserving its exact terminal, Session revision, binding token, and terminal token. This detaches the stale/conflicting binding without adopting the live thread; refresh the list before any later control.
@@ -76,7 +76,7 @@ Do not treat ordinary send as native clear, new-session, fork, branch, side thre
 For native status inspection:
 
 1. Use only a current `available_actions.native_inspect` entry. Its structured arguments are authoritative and complete; never construct or reuse them.
-2. Initial support is Codex-only: exact Codex 0.146.0/0.146.1 `inspection="status"`. The tool does not accept `/status` text or any arbitrary command string. Claude native commands, `/usage`, `/model`, `/compact`, and unsupported versions remain unavailable. Never automate bare Codex `/usage`: it opens an interactive menu whose later Enter can select an account-side usage-limit reset.
+2. Supported exact profiles are Codex 0.146.0/0.146.1 and Claude Code 2.1.218 `inspection="status"`. Claude success includes parsing and safely dismissing the newly opened Status panel. The tool does not accept `/status` text or any arbitrary command string. `/usage`, `/cost`, `/stats`, `/usage-credits`, `/model`, `/compact`, and unsupported versions remain unavailable. Never automate bare Codex `/usage`: it opens an interactive menu whose later Enter can select an account-side usage-limit reset.
 3. Treat this as terminal input even though the native command is read-only. AKK requires an idle empty composer, fresh binding token, exact PID/process/pane/cwd/version identity, and no conflicting Turn, transition, dispatch, approval, or owner.
 4. The result is valid only when AKK proves one fresh bounded native status result and the pane returns to idle. On an uncertain or unproven submission, do not retry, send Enter, clear the composer, or fall back to raw tmux.
 5. Native inspection creates no AKK Session, Turn, receipt, monitor, callback, or response round.
@@ -124,7 +124,7 @@ After an asynchronous send operation is accepted, end the OpenClaw turn. Wait fo
 
 ## Status
 
-For managed terminal entries, `agent_knock_knock_status` captures AKK Turn state plus a bounded terminal screen and returns `terminal_screen`. It does not actively execute native Codex `/status`. Use `agent_knock_knock_native_inspect` only for a terminal row's advertised, version-scoped native status action. Do not inspect the pane with raw tmux or shell commands unless the relevant AKK inspection is unavailable or fails.
+For managed terminal entries, `agent_knock_knock_status` captures AKK Turn state plus a bounded terminal screen and returns `terminal_screen`. It does not actively execute the coding agent's native `/status`. Use `agent_knock_knock_native_inspect` only for a terminal row's advertised, version-scoped native status action. Do not inspect the pane with raw tmux or shell commands unless the relevant AKK inspection is unavailable or fails.
 
 ## Cancellation and Recovery
 

@@ -139,6 +139,15 @@ export interface TerminalRuntimeIdentity {
    */
   requireNativeProcessUuid?: boolean;
   /**
+   * Native inspection of Claude requires the same unique interactive
+   * `claude agents --json --all` row to remain idle at every bridge identity
+   * fence. The process-incarnation timestamp is part of that exact row.
+   */
+  requireExactClaudeAgentRow?: boolean;
+  nativeProcessStartedAt?: number;
+  /** Exact Claude agents state permitted at this bridge phase. */
+  exactClaudeAgentState?: "idle" | "status_dialog";
+  /**
    * Current Codex turns require the exact open root rollout descriptor and
    * process-birth evidence. A session id by itself is not an incarnation
    * fence and cannot authorize terminal side effects.
@@ -319,7 +328,16 @@ export interface TerminalNativeInspectionPlan {
     kind: "exact";
     minimumStableMs: number;
   };
-  expectedResult: { kind: "native_status" };
+  expectedResult: {
+    kind: "native_status";
+    /** Inline cards remain at the prompt; modal panels must be dismissed. */
+    presentation: "inline" | "modal";
+    /** Closed adapter-owned dismissal sequence for a verified modal result. */
+    dismissal?: {
+      keys: readonly string[];
+      expected: "idle_empty_composer";
+    };
+  };
 }
 
 export interface TerminalNativeInspectionField {
@@ -365,6 +383,8 @@ export interface TerminalNativeInspectionObservationRequest {
   expectedNativeThreadId?: string;
   /** Optional exact running version that the status surface must confirm. */
   expectedAgentVersion?: string;
+  /** Optional exact working directory that the status surface must confirm. */
+  expectedCwd?: string;
 }
 
 export interface TerminalNativeInspectionObservation {

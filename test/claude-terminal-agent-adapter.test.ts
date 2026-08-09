@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
+  CLAUDE_NATIVE_INSPECTION_COMPOSER_STABLE_MS,
   claudeTerminalAgentAdapter,
   claudePermissionCommandForApproval,
   classifyClaudeProcess,
@@ -9,8 +10,11 @@ import {
   detectClaudeApprovalPrompt,
   extractClaudeSessionId,
   inspectClaudeScreen,
+  observeClaudeNativeInspection,
   observeClaudeThreadLifecycle,
+  planClaudeNativeInspection,
   planClaudeThreadLifecycle,
+  probeClaudeNativeInspection,
   probeClaudeThreadLifecycle
 } from "../src/claude-terminal-agent-adapter.js";
 import { terminalControlCapabilitiesForAdapter } from "../src/terminal-agent-adapter.js";
@@ -66,6 +70,184 @@ test("classifies only direct interactive Claude CLI processes", () => {
     "uvx minimax-coding-plan-mcp -y"
   ]) {
     assert.equal(classifyClaudeProcess({ pid: 99, command }), undefined, command);
+  }
+});
+
+test("Claude 2.1.218 exposes one closed modal native status plan", () => {
+  const capability = probeClaudeNativeInspection("2.1.218");
+  assert.equal(capability.status, "supported");
+  assert.equal(capability.statusInspection, true);
+  assert.equal(
+    capability.behaviorProfile,
+    "claude-code-2.1.218-native-status"
+  );
+  assert.equal(CLAUDE_NATIVE_INSPECTION_COMPOSER_STABLE_MS, 80);
+  assert.deepEqual(
+    planClaudeNativeInspection({ kind: "status" }, capability),
+    {
+      operation: { kind: "status" },
+      behaviorProfile: "claude-code-2.1.218-native-status",
+      command: "/status",
+      effect: "read_only",
+      requiresIdle: true,
+      composer: { kind: "exact", minimumStableMs: 80 },
+      expectedResult: {
+        kind: "native_status",
+        presentation: "modal",
+        dismissal: {
+          keys: ["Escape"],
+          expected: "idle_empty_composer"
+        }
+      }
+    }
+  );
+  assert.deepEqual(probeClaudeNativeInspection(undefined), {
+    status: "unknown",
+    statusInspection: false,
+    reason: "the running Claude Code version could not be verified"
+  });
+  for (const version of ["2.1.217", "2.1.219"]) {
+    const unsupported = probeClaudeNativeInspection(version);
+    assert.equal(unsupported.status, "unsupported");
+    assert.equal(unsupported.statusInspection, false);
+    assert.throws(
+      () => planClaudeNativeInspection({ kind: "status" }, unsupported),
+      /no AKK native inspection behavior profile/u
+    );
+  }
+});
+
+test("Claude native inspection requires a fresh exact current Status panel", () => {
+  const nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0";
+  const before = observeClaudeNativeInspection({
+    operation: { kind: "status" },
+    screen: "────────────────\n❯ /status\n────────────────"
+  });
+  assert.equal(before.status, "missing");
+  assert.deepEqual(before.evidenceInventory, []);
+
+  const screen = claudeStatusPanel(nativeThreadId);
+  const observed = observeClaudeNativeInspection({
+    operation: { kind: "status" },
+    screen,
+    previousScreenFingerprint: before.screenFingerprint,
+    preEnterEvidenceInventory: before.evidenceInventory,
+    expectedNativeThreadId: nativeThreadId,
+    expectedAgentVersion: "2.1.218",
+    expectedCwd: "/repo"
+  });
+  assert.equal(observed.status, "observed");
+  assert.equal(observed.nativeThreadId, nativeThreadId);
+  assert.equal(observed.observedAgentVersion, "2.1.218");
+  assert.equal(
+    observed.evidence,
+    "claude_status_panel"
+  );
+  assert.equal(observed.result?.kind, "native_status");
+  assert.match(observed.result?.excerpt ?? "", /Version: 2\.1\.218/u);
+  assert.doesNotMatch(observed.result?.excerpt ?? "", /ANTHROPIC_AUTH_TOKEN/u);
+  assert.equal(
+    observed.result?.fields.find((field) => field.name === "Auth token")?.value,
+    "[REDACTED]"
+  );
+  assert.equal(
+    observed.result?.fields.find((field) => field.name === "Session name")?.value,
+    "[REDACTED]"
+  );
+
+  const stale = observeClaudeNativeInspection({
+    operation: { kind: "status" },
+    screen,
+    preEnterEvidenceInventory: observed.evidenceInventory,
+    expectedNativeThreadId: nativeThreadId,
+    expectedAgentVersion: "2.1.218",
+    expectedCwd: "/repo"
+  });
+  assert.equal(stale.status, "stale");
+
+  const malformedBaseline = observeClaudeNativeInspection({
+    operation: { kind: "status" },
+    screen,
+    preEnterEvidenceInventory: [{
+      evidenceFingerprint: "not-a-sha256-fingerprint",
+      occurrenceCount: 0
+    }],
+    expectedNativeThreadId: nativeThreadId,
+    expectedAgentVersion: "2.1.218",
+    expectedCwd: "/repo"
+  });
+  assert.equal(malformedBaseline.status, "ambiguous");
+  assert.match(malformedBaseline.reason ?? "", /inventory is malformed/u);
+
+  const mismatches = [
+    { expectedNativeThreadId: "11111111-1111-4111-8111-111111111111" },
+    { expectedAgentVersion: "2.1.217" },
+    { expectedCwd: "/elsewhere" }
+  ];
+  for (const mismatch of mismatches) {
+    assert.equal(
+      observeClaudeNativeInspection({
+        operation: { kind: "status" },
+        screen,
+        expectedNativeThreadId: nativeThreadId,
+        expectedAgentVersion: "2.1.218",
+        expectedCwd: "/repo",
+        ...mismatch
+      }).status,
+      "mismatch"
+    );
+  }
+});
+
+test("Claude native status parser fails closed on stale, malformed, and historical panels", () => {
+  const nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0";
+  for (const [label, screen, expected] of [
+    [
+      "incomplete",
+      claudeStatusPanel(nativeThreadId).replace("  Esc to cancel", ""),
+      "ambiguous"
+    ],
+    [
+      "unanchored",
+      claudeStatusPanel(nativeThreadId).replace(
+        "────────────────────────────────────────────────",
+        "not a divider"
+      ),
+      "ambiguous"
+    ],
+    [
+      "historical",
+      `${claudeStatusPanel(nativeThreadId)}\n❯ `,
+      "missing"
+    ],
+    [
+      "unknown row",
+      claudeStatusPanel(nativeThreadId).replace(
+        "\n  Model:",
+        "\n  unprofiled row\n  Model:"
+      ),
+      "ambiguous"
+    ],
+    [
+      "unknown identity field",
+      claudeStatusPanel(nativeThreadId).replace(
+        "\n  Model:",
+        "\n  User:                alice@example.com\n  Model:"
+      ),
+      "ambiguous"
+    ]
+  ] as const) {
+    assert.equal(
+      observeClaudeNativeInspection({
+        operation: { kind: "status" },
+        screen,
+        expectedNativeThreadId: nativeThreadId,
+        expectedAgentVersion: "2.1.218",
+        expectedCwd: "/repo"
+      }).status,
+      expected,
+      label
+    );
   }
 });
 
@@ -898,5 +1080,25 @@ function currentClaudePermissionScreen(
     "  3. No",
     "",
     "Esc to cancel · Tab to amend · ctrl+e to explain"
+  ].join("\n");
+}
+
+function claudeStatusPanel(nativeThreadId: string): string {
+  return [
+    "────────────────────────────────────────────────",
+    "  Settings  Status   Config   Usage   Stats",
+    "",
+    "  Version:             2.1.218",
+    "  Session name:        /rename to add a name",
+    `  Session ID:          ${nativeThreadId}`,
+    "  cwd:                 /repo",
+    "  Auth token:          ANTHROPIC_AUTH_TOKEN",
+    "  Anthropic base URL:  https://api.example.com/anthropic",
+    "",
+    "  Model:               claude-sonnet",
+    "  MCP servers:         1 failed · /mcp",
+    "  Setting sources:     User settings, Project local settings",
+    "",
+    "  Esc to cancel"
   ].join("\n");
 }
