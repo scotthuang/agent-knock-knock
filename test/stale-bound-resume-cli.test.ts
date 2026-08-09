@@ -244,8 +244,9 @@ test("resume lists a conclusively dead bound Session read-only, then CAS-detache
     assert.match(wrongScope.stderr, /another terminal or OpenClaw session/u);
 
     const expiredSnapshot = JSON.parse(originalSnapshot);
-    expiredSnapshot.created_at = new Date(Date.now() - 600_000).toISOString();
-    expiredSnapshot.expires_at = new Date(Date.now() - 300_000).toISOString();
+    const expiredAt = Date.now();
+    expiredSnapshot.created_at = new Date(expiredAt - 600_000).toISOString();
+    expiredSnapshot.expires_at = new Date(expiredAt - 300_000).toISOString();
     fs.writeFileSync(
       snapshotPath,
       `${JSON.stringify(expiredSnapshot, null, 2)}\n`,
