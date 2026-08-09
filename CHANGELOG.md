@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.11.6 - 2026-08-10
+
+### Added
+
+- Add exact lifecycle and native `/status` behavior profiles for Codex 0.147.0 and Claude Code 2.1.226 while preserving Codex 0.146.0/0.146.1 and Claude Code 2.1.218 support.
+- Let Claude Code 2.1.226 discover and exactly resume same-workspace 2.1.218 history through source-version-bound v2 candidate tokens and the existing full UUID, ownership, binding, and identity fences.
+
+### Fixed
+
+- Match Codex 0.147.0's exact ordered two-row `/status` completion surface and Claude Code 2.1.226's `Session kind: interactive` Status panel.
+- Keep Claude native inspection closed and reliable across narrow panes by accepting only exact profiled rows or their explicit Unicode-ellipsis prefixes, with a version-owned bounded settle deadline before the single Enter dispatch.
+
 ## 0.11.5 - 2026-08-09
 
 ### Added
