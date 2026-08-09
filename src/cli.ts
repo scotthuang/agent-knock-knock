@@ -150,6 +150,7 @@ import {
   type TerminalProcessSource
 } from "./terminal-process-source.js";
 import {
+  NativeInspectionSubmissionError,
   TerminalAgentBridge,
   TerminalInputNotStartedError,
   type ResolvedTerminalConversation
@@ -449,6 +450,8 @@ async function runCommand(commandName, options) {
     await runNewThread(options);
   } else if (commandName === "list-resumable-threads" || commandName === "threads") {
     await runListResumableThreads(options);
+  } else if (commandName === "native-inspect" || commandName === "native-status") {
+    await runNativeInspect(options);
   } else if (commandName === "resume-thread") {
     await runResumeThread(options);
   } else if (commandName === "reconcile-binding") {
@@ -3672,6 +3675,13 @@ async function terminalControlledListEntry(
       resumeExact: false,
       reason: "native thread lifecycle is unavailable"
     };
+  const nativeInspectionCapability = bridge.registry.require(session.agent)
+    .probeNativeInspection?.(agentVersion) ?? {
+      status: "unsupported" as const,
+      agentVersion,
+      statusInspection: false,
+      reason: "native inspection is unavailable"
+    };
   const lifecycleBindingToken = unmanagedTerminalBindingToken({
     terminalId: bridge.terminalConversationId(session),
     terminalControl,
@@ -3686,6 +3696,14 @@ async function terminalControlledListEntry(
   const codexLifecycleIncarnationAvailable =
     session.agent !== "codex" ||
     Boolean(nativeProcessUuid && nativeProcessBirth);
+  const nativeInspectionHasBlockingTurn = listConversations(
+    storeDirFromOptions(options)
+  ).some((turn) =>
+    isDiscoverableTmuxConversation(turn) &&
+    terminalKeyForManagedConversation(turn) ===
+      terminalControlSelectorKey(terminalControl) &&
+    SESSION_SEND_BLOCKING_STATUSES.has(turn.status)
+  );
   const entry = {
     id: bridge.terminalConversationId(session),
     short_ref: sessionShortRef(bridge.terminalConversationId(session)),
@@ -3706,6 +3724,7 @@ async function terminalControlledListEntry(
     native_agent_identity_evidence: nativeProcessEvidence,
     agent_version: agentVersion,
     native_thread_lifecycle: lifecycleCapability,
+    native_inspection: nativeInspectionCapability,
     lifecycle_binding_token: lifecycleBindingToken,
     confidence: session.confidence,
     reason: session.reason,
@@ -3748,7 +3767,17 @@ async function terminalControlledListEntry(
       list_resumable_threads:
         lifecycleCapability.status === "supported" &&
         lifecycleCapability.resumeExact === true &&
-        codexLifecycleIncarnationAvailable
+        codexLifecycleIncarnationAvailable,
+      native_inspect:
+        nativeInspectionCapability.status === "supported" &&
+        nativeInspectionCapability.statusInspection === true &&
+        session.agent === "codex" &&
+        codexComposerEmpty(terminalState.screen_excerpt) &&
+        terminalControl.capabilities.includes("send_keys") &&
+        terminalControl.capabilities.includes("screen_status") &&
+        codexLifecycleIncarnationAvailable &&
+        orphanedDispatch === undefined &&
+        !nativeInspectionHasBlockingTurn
     }
   };
   const availableActions = availableListActions(entry);
@@ -3936,12 +3965,24 @@ function terminalFirstListProjection({
     const rawActions = mutationsAllowed
       ? discoveredRawActions
       : readOnlyListActions(discoveredRawActions);
-    const sessionAwareRawActions = authoritativeSession
+    const bindingAwareRawActions = authoritativeSession
       ? actionsForManagedSessionBinding(
           rawActions,
           authoritativeSession
         )
       : rawActions;
+    const sessionAwareRawActions =
+      authoritativeSession &&
+        managedSessionHasUnresolvedNativeTransition(
+          storeDir,
+          authoritativeSession
+        )
+        ? Object.fromEntries(
+            Object.entries(bindingAwareRawActions).filter(
+              ([actionName]) => actionName !== "native_inspect"
+            )
+          )
+        : bindingAwareRawActions;
     const soleBindingConflict = conflictingBoundSessionClaims.length === 1
       ? conflictingBoundSessionClaims[0]
       : undefined;
@@ -4780,7 +4821,7 @@ function actionsForManagedSessionBinding(
 ): Record<string, any> {
   const token = managedSessionBindingToken(session);
   const next = { ...actions };
-  for (const actionName of ["new_thread", "resume_thread"]) {
+  for (const actionName of ["new_thread", "resume_thread", "native_inspect"]) {
     const action = isRecord(next[actionName]) ? next[actionName] : undefined;
     if (!action) {
       continue;
@@ -5109,11 +5150,12 @@ function managedListApprovalState(
 
 function listActionContracts() {
   return {
-    version: 6,
+    version: 7,
     instructions: [
       "Treat terminals[] as the primary resource and use only actions present in available_actions.",
       "An existing managed session's ordinary send targets session_id and creates a new turn. A turn id is never an ordinary send target.",
       "Read-only native-thread listing targets an exact terminal_id. Native-thread new/resume mutations also use the listed expected_binding_token and never create a Turn.",
+      "Native inspection is a separate terminal action: use only its closed inspection enum and current exact terminal_id/token; AKK status does not execute a native slash command.",
       "A binding conflict may be detached only through its exact reconcile_binding action, which is snapshot-bound to the Session revision, binding, and live terminal identity and never adopts a replacement native thread.",
       "List resumable threads before resume; use only a complete native_thread_id and the action returned for that candidate.",
       "For first attach only, use a discovery selector explicitly named by the user or the selector prefilled by that unmanaged raw-terminal row's available send action; never infer, guess, or reuse one.",
@@ -5181,6 +5223,17 @@ function listActionContracts() {
         target_argument: "terminal_id",
         required: ["terminal_id"],
         side_effect_free: true
+      },
+      native_inspect: {
+        tool: "agent_knock_knock_native_inspect",
+        target_argument: "terminal_id",
+        required: ["terminal_id", "inspection", "expected_binding_token"],
+        supported_inspections: ["status"],
+        creates_turn: false,
+        creates_session: false,
+        mutates_store: false,
+        sends_terminal_input: true,
+        candidate_source: "terminals[].available_actions.native_inspect"
       },
       resume_thread: {
         tool: "agent_knock_knock_resume_thread",
@@ -5353,6 +5406,22 @@ function availableListActions(
     actions.list_resumable_threads = {
       tool: "agent_knock_knock_list_resumable_threads",
       arguments: { terminal_id: id }
+    };
+  }
+  if (
+    terminalControlled &&
+    commands.native_inspect === true &&
+    entry.activity_state === "idle" &&
+    approvalState.blocked !== true &&
+    lifecycleBindingToken
+  ) {
+    actions.native_inspect = {
+      tool: "agent_knock_knock_native_inspect",
+      arguments: {
+        terminal_id: id,
+        inspection: "status",
+        expected_binding_token: lifecycleBindingToken
+      }
     };
   }
 
@@ -8026,6 +8095,436 @@ async function runListResumableThreads(options) {
         : {}
     }))
   });
+}
+
+function assertSameNativeInspectionTerminal(
+  expected: ResolvedTerminalConversation,
+  actual: ResolvedTerminalConversation,
+  stage: string
+): void {
+  const expectedPath = expected.terminalControl.currentPath;
+  const actualPath = actual.terminalControl.currentPath;
+  if (
+    actual.conversationId !== expected.conversationId ||
+    actual.agent !== expected.agent ||
+    actual.pid !== expected.pid ||
+    terminalControlSelectorKey(actual.terminalControl) !==
+      terminalControlSelectorKey(expected.terminalControl) ||
+    !expectedPath ||
+    !actualPath ||
+    path.resolve(actualPath) !== path.resolve(expectedPath)
+  ) {
+    throw new Error(
+      `terminal identity, pane, or cwd changed ${stage}; refresh AKK list`
+    );
+  }
+}
+
+function assertTerminalNativeInspectionReady({
+  options,
+  terminal,
+  terminalStatus,
+  session
+}: {
+  options: Record<string, any>;
+  terminal: ResolvedTerminalConversation;
+  terminalStatus?: Awaited<ReturnType<TerminalAgentBridge["status"]>>;
+  session?: ManagedSessionState;
+}): void {
+  if (
+    terminalStatus &&
+    (
+      terminalStatus.reachable !== true ||
+      terminalStatus.activity_state !== "idle" ||
+      terminalStatus.approval_state.blocked === true
+    )
+  ) {
+    throw new Error(
+      `terminal ${terminal.terminalControl.target} is not at a verified idle prompt ` +
+      `(${terminalStatus.activity_state}: ${terminalStatus.activity_reason})`
+    );
+  }
+  const blocker = listConversations(storeDirFromOptions(options))
+    .filter(isDiscoverableTmuxConversation)
+    .find((turn) =>
+      terminalKeyForManagedConversation(turn) ===
+        terminalControlSelectorKey(terminal.terminalControl) &&
+      SESSION_SEND_BLOCKING_STATUSES.has(turn.status)
+    );
+  if (blocker) {
+    throw new Error(
+      `terminal ${terminal.terminalControl.target} still has unresolved Turn ` +
+      `${turnIdForConversation(blocker)} (${blocker.status})`
+    );
+  }
+  if (
+    session &&
+    managedSessionHasUnresolvedNativeTransition(
+      storeDirFromOptions(options),
+      session
+    )
+  ) {
+    throw new Error(
+      `managed Session ${session.session_id} has an unresolved native-thread transition`
+    );
+  }
+  const ownership = terminalDispatchOwnership(terminal.terminalControl);
+  if (ownership.state !== "none") {
+    throw new Error(
+      `terminal ${terminal.terminalControl.target} has unresolved dispatch ` +
+      "ownership; resolve it before native inspection"
+    );
+  }
+  const orphaned = orphanedTerminalDispatchForRecovery(
+    terminal.terminalControl
+  );
+  if (orphaned) {
+    throw new Error(
+      `terminal ${terminal.terminalControl.target} has unresolved ` +
+      `${String(orphaned.kind ?? "terminal")} input ` +
+      `(${String(orphaned.status ?? "unknown")})`
+    );
+  }
+}
+
+function nativeInspectionRuntime({
+  terminal,
+  snapshot
+}: {
+  terminal: ResolvedTerminalConversation;
+  snapshot: Awaited<ReturnType<typeof currentLifecycleSnapshot>>;
+}): TerminalRuntimeIdentity {
+  if (terminal.agent !== "codex") {
+    throw new Error(
+      "native status inspection currently supports only Codex 0.146.0 and 0.146.1"
+    );
+  }
+  const exactRuntimeIdentity =
+    snapshot.runtimeIdentity?.sessionId === snapshot.identity?.sessionId
+      ? snapshot.runtimeIdentity
+      : undefined;
+  const runtime = exactRuntimeIdentity
+    ? terminalRuntimeForLiveIdentity({
+        terminal,
+        identity: exactRuntimeIdentity
+      })
+    : {
+        ...terminalRuntimeForLiveIdentity({
+          terminal,
+          expectedEmptyNativeSession: true
+        }),
+        ...(snapshot.identity?.processUuid
+          ? { nativeProcessUuid: snapshot.identity.processUuid }
+          : {}),
+        ...(snapshot.identity?.processBirth
+          ? { nativeProcessBirth: snapshot.identity.processBirth }
+          : {}),
+        ...(snapshot.identity?.sessionId
+          ? { expectedNativeSessionId: snapshot.identity.sessionId }
+          : {})
+      };
+  return withCodexCompanionFences(runtime, snapshot.codexCompanions);
+}
+
+function assertNativeInspectionSnapshotUnchanged({
+  expectedTerminal,
+  actualTerminal,
+  expectedBindingToken,
+  expectedVersion,
+  actualSnapshot,
+  stage
+}: {
+  expectedTerminal: ResolvedTerminalConversation;
+  actualTerminal: ResolvedTerminalConversation;
+  expectedBindingToken: string;
+  expectedVersion?: string;
+  actualSnapshot: Awaited<ReturnType<typeof currentLifecycleSnapshot>>;
+  stage: string;
+}): void {
+  assertSameNativeInspectionTerminal(expectedTerminal, actualTerminal, stage);
+  if (actualSnapshot.bindingToken !== expectedBindingToken) {
+    throw new Error(
+      `terminal binding changed ${stage}; refresh AKK list`
+    );
+  }
+  if (actualSnapshot.version !== expectedVersion) {
+    throw new Error(
+      `coding-agent version changed ${stage}; refresh AKK list`
+    );
+  }
+  const capability = actualSnapshot.adapter.probeNativeInspection?.(
+    actualSnapshot.version
+  );
+  if (
+    capability?.status !== "supported" ||
+    capability.statusInspection !== true
+  ) {
+    throw new Error(
+      capability?.reason ??
+      "native status inspection became unsupported; refresh AKK list"
+    );
+  }
+}
+
+async function runNativeInspect(options: Record<string, any>) {
+  const inspection = required(
+    stringValue(options.inspection),
+    "--inspection is required"
+  );
+  if (inspection !== "status") {
+    throw new Error(
+      "--inspection must be the closed value status; arbitrary native slash commands are not accepted"
+    );
+  }
+  if (options.command !== undefined || options.message !== undefined) {
+    throw new Error(
+      "native inspection does not accept a command or message payload"
+    );
+  }
+  const expectedBindingToken = required(
+    stringValue(options.expectedBindingToken),
+    "--expected-binding-token is required"
+  );
+  const storeDir = storeDirFromOptions(options);
+  const store = inspectStoreCompatibility(storeDir);
+  if (store.writable !== true) {
+    throw new Error(
+      "native inspection requires a compatible AKK Store so binding authority can be verified"
+    );
+  }
+  const initiallyResolved = await resolveLifecycleTerminal(options);
+  const releaseTerminalLock = acquireFileLock(
+    terminalBridgeSendLockPath(
+      storeDir,
+      initiallyResolved.terminalControl
+    ),
+    { timeoutMs: 30000 }
+  );
+  try {
+    const terminal = await resolveLifecycleTerminal(options);
+    assertSameNativeInspectionTerminal(
+      initiallyResolved,
+      terminal,
+      "while waiting for native-inspection control"
+    );
+    const snapshot = await currentLifecycleSnapshot(options, terminal);
+    if (snapshot.bindingToken !== expectedBindingToken) {
+      throw new Error(
+        "terminal binding changed after it was listed; refresh AKK list and retry"
+      );
+    }
+    const capability = snapshot.adapter.probeNativeInspection?.(
+      snapshot.version
+    );
+    if (
+      capability?.status !== "supported" ||
+      capability.statusInspection !== true
+    ) {
+      throw new Error(
+        capability?.reason ??
+        "native status inspection is unavailable for this agent version"
+      );
+    }
+    const plan = snapshot.adapter.planNativeInspection?.(
+      { kind: "status" },
+      capability
+    );
+    if (
+      !plan ||
+      plan.operation.kind !== "status" ||
+      plan.command !== "/status" ||
+      plan.effect !== "read_only"
+    ) {
+      throw new Error(
+        "the agent adapter did not produce the closed native status inspection plan"
+      );
+    }
+    const runtime = nativeInspectionRuntime({ terminal, snapshot });
+    const bridge = createTerminalAgentBridge(options);
+    const initialStatus = await bridge.status(
+      terminal.agent,
+      terminal.terminalControl,
+      { runtime }
+    );
+    assertTerminalNativeInspectionReady({
+      options,
+      terminal,
+      terminalStatus: initialStatus,
+      session: snapshot.session
+    });
+    await assertCodexComposerReadyForAutomatedInput({
+      options,
+      terminalControl: terminal.terminalControl
+    });
+
+    let submission: Awaited<
+      ReturnType<TerminalAgentBridge["submitNativeInspection"]>
+    >;
+    try {
+      submission = await bridge.submitNativeInspection(
+        terminal.agent,
+        terminal.terminalControl,
+        plan,
+        {
+          runtime,
+          beforeEnter: async () => {
+            const finalTerminal = await resolveLifecycleTerminal(options);
+            const finalSnapshot = await currentLifecycleSnapshot(
+              options,
+              finalTerminal
+            );
+            assertNativeInspectionSnapshotUnchanged({
+              expectedTerminal: terminal,
+              actualTerminal: finalTerminal,
+              expectedBindingToken,
+              expectedVersion: snapshot.version,
+              actualSnapshot: finalSnapshot,
+              stage: "immediately before native status submission"
+            });
+            assertTerminalNativeInspectionReady({
+              options,
+              terminal: finalTerminal,
+              session: finalSnapshot.session
+            });
+          }
+        }
+      );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      if (
+        error instanceof NativeInspectionSubmissionError &&
+        error.doNotRetry !== true
+      ) {
+        throw new Error(
+          `native status inspection did not start; refresh AKK list and retry if still desired: ${detail}`
+        );
+      }
+      throw new Error(
+        "native status inspection did not cross a proven completion boundary; " +
+        `do not retry automatically: ${detail}`
+      );
+    }
+
+    try {
+      const expectedNativeThreadId =
+        snapshot.session?.binding?.native_thread_id ??
+        snapshot.identity?.sessionId;
+      let stableEvidenceFingerprint: string | undefined;
+      let stableObservation: Awaited<
+        ReturnType<TerminalAgentBridge["observeNativeInspection"]>
+      >["observation"] | undefined;
+      let stableCount = 0;
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        const observed = await bridge.observeNativeInspection(
+          terminal.agent,
+          terminal.terminalControl,
+          {
+            operation: plan.operation,
+            previousScreenFingerprint: submission.preEnterScreenDigest,
+            preEnterEvidenceInventory: submission.preEnterEvidenceInventory,
+            expectedNativeThreadId,
+            expectedAgentVersion: snapshot.version
+          },
+          { runtime, scrollbackLines: 240 }
+        );
+        const observation = observed.observation;
+        if (
+          observed.status.reachable === true &&
+          observed.status.activity_state === "idle" &&
+          observed.status.approval_state.blocked !== true &&
+          observed.screenDigest !== submission.preEnterScreenDigest &&
+          observation.status === "observed" &&
+          observation.result?.kind === "native_status" &&
+          isExactNativeThreadId(observation.nativeThreadId) &&
+          observation.evidenceFingerprint
+        ) {
+          if (
+            stableEvidenceFingerprint === observation.evidenceFingerprint
+          ) {
+            stableCount += 1;
+          } else {
+            stableEvidenceFingerprint = observation.evidenceFingerprint;
+            stableObservation = observation;
+            stableCount = 1;
+          }
+          if (stableCount >= 2) {
+            stableObservation = observation;
+            break;
+          }
+        } else {
+          stableEvidenceFingerprint = undefined;
+          stableObservation = undefined;
+          stableCount = 0;
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      }
+      if (!stableObservation || stableCount < 2) {
+        throw new Error(
+          "native status inspection Enter was dispatched exactly once, but a fresh exact idle status result was not proven; do not retry automatically"
+        );
+      }
+      const finalTerminal = await resolveLifecycleTerminal(options);
+      const finalSnapshot = await currentLifecycleSnapshot(
+        options,
+        finalTerminal
+      );
+      assertNativeInspectionSnapshotUnchanged({
+        expectedTerminal: terminal,
+        actualTerminal: finalTerminal,
+        expectedBindingToken,
+        expectedVersion: snapshot.version,
+        actualSnapshot: finalSnapshot,
+        stage: "after native status inspection"
+      });
+      const finalStatus = await bridge.status(
+        finalTerminal.agent,
+        finalTerminal.terminalControl,
+        { runtime }
+      );
+      assertTerminalNativeInspectionReady({
+        options,
+        terminal: finalTerminal,
+        terminalStatus: finalStatus,
+        session: finalSnapshot.session
+      });
+      await assertCodexComposerReadyForAutomatedInput({
+        options,
+        terminalControl: finalTerminal.terminalControl
+      });
+      printJson({
+        status: "observed",
+        inspection: "status",
+        terminal_id: terminal.conversationId,
+        agent: terminal.agent,
+        agent_version: snapshot.version,
+        behavior_profile: plan.behaviorProfile,
+        native_thread_id: stableObservation.nativeThreadId,
+        native_status: stableObservation.result,
+        terminal_submission: {
+          command: plan.command,
+          enter_count: submission.enterCount,
+          materialization: submission.materialization
+        },
+        store_mutation: false,
+        session_created: false,
+        turn_created: false,
+        receipt_created: false,
+        monitor_created: false,
+        callback_created: false
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      if (/do not retry automatically/iu.test(detail)) {
+        throw error;
+      }
+      throw new Error(
+        "native status inspection Enter was dispatched exactly once, but its " +
+        `postcondition became uncertain; do not retry automatically: ${detail}`
+      );
+    }
+  } finally {
+    releaseTerminalLock();
+  }
 }
 
 function previousCommittedResumeCandidate({
@@ -13787,8 +14286,8 @@ function assertOrdinaryTerminalPayloadDoesNotInvokeNativeLifecycle(
   }
   throw new Error(
     `ordinary send/respond cannot invoke native slash command /${reserved[1].toLowerCase()}; ` +
-    "use the advertised new-thread, resume-thread, or status action, or enter " +
-    "an unsupported native command manually in tmux"
+    "use an advertised dedicated native action when one exists, or enter " +
+    "the unsupported native command manually in tmux"
   );
 }
 
@@ -24305,6 +24804,7 @@ function usage() {
   agent-knock-knock new-thread --terminal <exact-terminal-id> --expected-binding-token <token>
   agent-knock-knock clear-thread --terminal <exact-terminal-id> --expected-binding-token <token>
   agent-knock-knock list-resumable-threads --terminal <exact-terminal-id> [--selection-scope <opaque-scope>]
+  agent-knock-knock native-inspect --terminal <exact-terminal-id> --inspection status --expected-binding-token <token>
   agent-knock-knock resume-thread --terminal <exact-terminal-id> --native-thread <uuid> --expected-binding-token <token> --candidate-token <token>
   agent-knock-knock resume-thread --terminal <exact-terminal-id> (--selection-handle <handle> | --selection-snapshot <id> (--selection-number <n> | --selection-short-id <@id>)) --selection-scope <opaque-scope>
   agent-knock-knock reconcile-binding --terminal <exact-terminal-id> --conflicting-session <session-id> --expected-session-revision <n> --expected-binding-token <token> --expected-terminal-token <token>

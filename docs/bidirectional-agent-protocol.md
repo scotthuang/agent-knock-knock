@@ -59,6 +59,16 @@ The lifecycle operation is serialized against send, approval, monitor, cancellat
 
 The next ordinary send targets the resulting `session_id` and creates its first new `turn_id`. A callback, monitor, approval, receipt, or recovery action bound to an earlier Session, native identity, terminal incarnation, or binding generation cannot mutate the newly active context.
 
+## Native Status Inspection
+
+`agent_knock_knock_status` is an AKK Turn/screen inspection. It does not execute a coding-agent slash command. Native inspection is a separate terminal action advertised only when the exact adapter/version, terminal identity, binding token, idle composer, and ownership state are currently safe.
+
+The initial `agent_knock_knock_native_inspect` contract accepts exactly three fields: the full `terminal_id`, `inspection="status"`, and the action's fresh `expected_binding_token`. The adapter owns the closed command; callers cannot supply a command string. Native inspection is Codex-only initially, supporting verified Codex 0.146.0 and 0.146.1 `/status` behavior. Claude commands, `/usage`, `/model`, `/compact`, and unsupported versions remain unavailable. Bare Codex `/usage` opens an interactive menu whose later Enter can select an account-side usage-limit reset, so it must not be treated as a read-only inspection.
+
+Native inspection is serialized against send, lifecycle transition, approval, cancellation, monitoring terminal access, and recovery. It verifies the exact slash composer beyond the versioned Enter-suppression window, sends at most one Enter, proves one fresh bounded/redacted status result, and requires an idle postcondition. It creates no Session, Turn, dispatch receipt, monitor, callback, or response-round state. Any stale token, non-empty composer, identity/version drift, unresolved Turn/transition/dispatch, unproven Enter, or ambiguous result fails closed without a blind second Enter.
+
+Ordinary `send` and `respond` continue to reject every first-line native slash command. Native inspection is a narrow capability boundary, not a slash-command allowlist.
+
 ## Message Types
 
 | Type | Purpose |

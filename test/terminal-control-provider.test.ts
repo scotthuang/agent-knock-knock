@@ -451,3 +451,69 @@ test("tmux provider stops after an uncertain input attempt", async () => {
   );
   assert.deepEqual(calls, ["tmux"]);
 });
+
+test("tmux provider never retries an uncertain key dispatch", async () => {
+  const calls: string[] = [];
+  const provider = new TmuxTerminalControlProvider({
+    socketPaths: [],
+    commands: ["tmux", "/fallback/tmux"],
+    runCommand(command) {
+      calls.push(command);
+      return {
+        status: null,
+        stdout: "",
+        stderr: "",
+        error: Object.assign(new Error("key dispatch timed out"), {
+          code: "ETIMEDOUT"
+        })
+      };
+    }
+  });
+
+  await assert.rejects(
+    provider.sendKeys("codex-work:0.0", ["C-m"]),
+    /key dispatch timed out/u
+  );
+  assert.deepEqual(calls, ["tmux"]);
+});
+
+test("tmux provider does not retry keys after tmux starts and rejects them", async () => {
+  const calls: string[] = [];
+  const provider = new TmuxTerminalControlProvider({
+    socketPaths: [],
+    commands: ["tmux", "/fallback/tmux"],
+    runCommand(command) {
+      calls.push(command);
+      return { status: 1, stdout: "", stderr: "no pane" };
+    }
+  });
+
+  await assert.rejects(
+    provider.sendKeys("codex-work:0.0", ["C-m"]),
+    TerminalControlInputNotSentError
+  );
+  assert.deepEqual(calls, ["tmux"]);
+});
+
+test("tmux provider may retry keys only when the executable never started", async () => {
+  const calls: string[] = [];
+  const provider = new TmuxTerminalControlProvider({
+    socketPaths: [],
+    commands: ["tmux", "/working/tmux"],
+    runCommand(command) {
+      calls.push(command);
+      if (command === "tmux") {
+        return {
+          status: null,
+          stdout: "",
+          stderr: "",
+          error: Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" })
+        };
+      }
+      return { status: 0, stdout: "", stderr: "" };
+    }
+  });
+
+  await provider.sendKeys("codex-work:0.0", ["C-m"]);
+  assert.deepEqual(calls, ["tmux", "/working/tmux"]);
+});

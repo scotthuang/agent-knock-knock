@@ -11,6 +11,10 @@ import {
   type TerminalCompletionEvidence,
   type TerminalControlRef,
   type TerminalDurableCompletionRequest,
+  type TerminalNativeInspectionEvidenceInventoryEntry,
+  type TerminalNativeInspectionObservation,
+  type TerminalNativeInspectionObservationRequest,
+  type TerminalNativeInspectionPlan,
   type TerminalProcessSnapshot,
   type TerminalRuntimeIdentity,
   type TerminalScreenInspection
@@ -33,6 +37,15 @@ const CODEX_MULTILINE_SETTLE_SCROLLBACK_LINES = 240;
 const CODEX_COMPOSER_MARKER = /^[›»](?:\s|$)/u;
 const CODEX_COMPOSER_FOOTER =
   /^(?:gpt-[\w.-]+(?:\s|$)|[-\w.]+ default ·)/u;
+// Codex 0.146.0 and 0.146.1 render the same verified slash-completion row.
+// Keep it closed per behavior profile so changed text cannot silently become
+// a newly authorized native command surface.
+const CODEX_NATIVE_STATUS_POPUP_BY_PROFILE: Readonly<Record<string, string>> = {
+  "codex-tui-0.146.0":
+    "  /status  show current session configuration and token usage",
+  "codex-tui-0.146.1":
+    "  /status  show current session configuration and token usage"
+};
 const CODEX_LARGE_PASTE_CHAR_THRESHOLD = 1_000;
 
 /** A terminal send failed at a boundary that proves input never started. */
@@ -42,6 +55,33 @@ export class TerminalInputNotStartedError extends Error {
   constructor(message: string, options: { cause?: unknown } = {}) {
     super(message, options);
     this.name = "TerminalInputNotStartedError";
+  }
+}
+
+export type NativeInspectionSubmissionStage =
+  | "not_started"
+  | "text_injected"
+  | "enter_uncertain";
+
+/**
+ * A fail-closed native-inspection submission result.
+ *
+ * Only `not_started` proves that a caller may safely retry. Once text has
+ * reached the composer, or Enter has been attempted, automated retries could
+ * duplicate input or execute a different command after terminal drift.
+ */
+export class NativeInspectionSubmissionError extends Error {
+  readonly code = "AKK_NATIVE_INSPECTION_SUBMISSION_FAILED";
+  readonly doNotRetry: boolean;
+
+  constructor(
+    readonly stage: NativeInspectionSubmissionStage,
+    message: string,
+    options: { cause?: unknown } = {}
+  ) {
+    super(message, options);
+    this.name = "NativeInspectionSubmissionError";
+    this.doNotRetry = stage !== "not_started";
   }
 }
 
@@ -154,6 +194,58 @@ export interface TerminalSendResult {
   agent: ExecutorKind;
   terminalControl: TerminalControlRef;
   multiline: boolean;
+}
+
+export type TerminalNativeInspectionMaterializationKind =
+  | "exact_slash_composer"
+  | "exact_slash_popup";
+
+export interface TerminalNativeInspectionMaterializationEvidence {
+  kind: TerminalNativeInspectionMaterializationKind;
+  digest: string;
+  stableForMs: number;
+  stableCaptures: number;
+}
+
+export interface TerminalNativeInspectionBeforeEnterContext {
+  agent: "codex";
+  terminalControl: TerminalControlRef;
+  plan: TerminalNativeInspectionPlan;
+  preEnterScreenDigest: string;
+  materialization: TerminalNativeInspectionMaterializationEvidence;
+}
+
+export interface TerminalNativeInspectionOptions {
+  runtime?: TerminalRuntimeIdentity;
+  /**
+   * Gives the CLI one final in-lock authorization point for its Store binding
+   * and action-token fences. The bridge recaptures the exact composer and
+   * revalidates terminal identity again after this hook before pressing Enter.
+   */
+  beforeEnter?: (
+    context: TerminalNativeInspectionBeforeEnterContext
+  ) => void | Promise<void>;
+}
+
+export interface TerminalNativeInspectionResult {
+  stage: "enter_dispatched";
+  agent: "codex";
+  terminalControl: TerminalControlRef;
+  command: "/status";
+  behaviorProfile: string;
+  preEnterScreenDigest: string;
+  preEnterEvidenceInventory:
+    readonly TerminalNativeInspectionEvidenceInventoryEntry[];
+  materialization: TerminalNativeInspectionMaterializationEvidence;
+  enterCount: 1;
+}
+
+export interface TerminalNativeInspectionObservationResult {
+  terminalControl: TerminalControlRef;
+  status: TerminalBridgeStatus;
+  /** Same raw-screen fingerprint format used by adapter stale checks. */
+  screenDigest: string;
+  observation: TerminalNativeInspectionObservation;
 }
 
 export interface TerminalApprovalAuthorizationContext {
@@ -446,6 +538,300 @@ export class TerminalAgentBridge {
       agent: adapter.agent,
       terminalControl: verifiedForEnter,
       multiline
+    };
+  }
+
+  /**
+   * Submit one closed, adapter-owned native inspection command.
+   *
+   * This intentionally does not use `send()`: native slash commands need a
+   * stricter composer proof, and failures after text injection must leave the
+   * draft untouched instead of issuing the legacy best-effort C-u cleanup.
+   */
+  async submitNativeInspection(
+    agent: ExecutorKind,
+    terminalControl: TerminalControlRef,
+    plan: TerminalNativeInspectionPlan,
+    options: TerminalNativeInspectionOptions = {}
+  ): Promise<TerminalNativeInspectionResult> {
+    const adapter = this.registry.require(agent);
+    try {
+      assertCodexStatusInspectionPlan(adapter, terminalControl, plan);
+    } catch (error) {
+      throw nativeInspectionSubmissionError("not_started", error);
+    }
+
+    let verifiedForText: TerminalControlRef;
+    try {
+      verifiedForText = await this.verifyTerminalIdentity(
+        adapter.agent,
+        terminalControl,
+        options.runtime
+      );
+    } catch (error) {
+      throw nativeInspectionSubmissionError("not_started", error);
+    }
+
+    try {
+      await this.terminalProvider.sendText(
+        verifiedForText.target,
+        plan.command,
+        { socketPath: verifiedForText.socketPath }
+      );
+    } catch (error) {
+      if (error instanceof TerminalControlInputNotSentError) {
+        throw nativeInspectionSubmissionError("not_started", error);
+      }
+      // The transport cannot prove whether an untyped failure happened before
+      // or after tmux accepted the literal input. Fail closed as injected.
+      throw nativeInspectionSubmissionError("text_injected", error);
+    }
+
+    let settled: {
+      terminalControl: TerminalControlRef;
+      screenDigest: string;
+      evidenceInventory:
+        readonly TerminalNativeInspectionEvidenceInventoryEntry[];
+      materialization: TerminalNativeInspectionMaterializationEvidence;
+    };
+    try {
+      settled = await this.settleCodexNativeInspectionComposer(
+        adapter,
+        terminalControl,
+        plan,
+        options.runtime
+      );
+      await options.beforeEnter?.({
+        agent: "codex",
+        terminalControl: settled.terminalControl,
+        plan,
+        preEnterScreenDigest: settled.screenDigest,
+        materialization: settled.materialization
+      });
+      settled = await this.revalidateCodexNativeInspectionComposer(
+        adapter,
+        settled.terminalControl,
+        plan,
+        settled.materialization,
+        options.runtime
+      );
+    } catch (error) {
+      throw nativeInspectionSubmissionError("text_injected", error);
+    }
+
+    try {
+      // Exactly one Enter attempt. Any error is submission-uncertain and must
+      // never trigger a fallback executable or a blind second Enter.
+      await this.terminalProvider.sendKeys(
+        settled.terminalControl.target,
+        ["C-m"],
+        { socketPath: settled.terminalControl.socketPath }
+      );
+    } catch (error) {
+      throw nativeInspectionSubmissionError("enter_uncertain", error);
+    }
+
+    return {
+      stage: "enter_dispatched",
+      agent: "codex",
+      terminalControl: settled.terminalControl,
+      command: "/status",
+      behaviorProfile: plan.behaviorProfile,
+      preEnterScreenDigest: settled.screenDigest,
+      preEnterEvidenceInventory: settled.evidenceInventory,
+      materialization: settled.materialization,
+      enterCount: 1
+    };
+  }
+
+  async observeNativeInspection(
+    agent: ExecutorKind,
+    terminalControl: TerminalControlRef,
+    request: TerminalNativeInspectionObservationRequest,
+    options: {
+      runtime?: TerminalRuntimeIdentity;
+      scrollbackLines?: number;
+    } = {}
+  ): Promise<TerminalNativeInspectionObservationResult> {
+    const adapter = this.registry.require(agent);
+    if (!adapter.observeNativeInspection) {
+      throw new Error(
+        `${adapter.displayName} native inspection observation is not supported`
+      );
+    }
+    const captured = await this.captureInspection(adapter, terminalControl, {
+      runtime: options.runtime,
+      scrollbackLines: options.scrollbackLines
+    });
+    const screenDigest = nativeInspectionScreenFingerprint(captured.screen);
+    const observation = adapter.observeNativeInspection({
+      operation: request.operation,
+      previousScreenFingerprint: request.previousScreenFingerprint,
+      preEnterEvidenceInventory: request.preEnterEvidenceInventory,
+      expectedNativeThreadId: request.expectedNativeThreadId,
+      expectedAgentVersion: request.expectedAgentVersion,
+      screen: captured.screen
+    });
+    return {
+      terminalControl: captured.terminalControl,
+      status: statusFromInspection(
+        adapter,
+        captured.terminalControl,
+        captured.inspection,
+        { screen: captured.screen, runtime: options.runtime }
+      ),
+      screenDigest,
+      observation
+    };
+  }
+
+  private async settleCodexNativeInspectionComposer(
+    adapter: TerminalAgentAdapter,
+    terminalControl: TerminalControlRef,
+    plan: TerminalNativeInspectionPlan,
+    runtime?: TerminalRuntimeIdentity
+  ): Promise<{
+    terminalControl: TerminalControlRef;
+    screenDigest: string;
+    evidenceInventory:
+      readonly TerminalNativeInspectionEvidenceInventoryEntry[];
+    materialization: TerminalNativeInspectionMaterializationEvidence;
+  }> {
+    const startedAt = performance.now();
+    let stableDigest: string | undefined;
+    let stableKind: TerminalNativeInspectionMaterializationKind | undefined;
+    let stableSince: number | undefined;
+    let stableCaptures = 0;
+
+    while (performance.now() - startedAt <= CODEX_MULTILINE_SETTLE_TIMEOUT_MS) {
+      const captured = await this.captureInspection(adapter, terminalControl, {
+        runtime,
+        scrollbackLines: CODEX_MULTILINE_SETTLE_SCROLLBACK_LINES
+      });
+      assertNativeInspectionComposerSafe(captured.inspection);
+      const materialized = exactCodexNativeInspectionComposerCapture(
+        captured.screen,
+        plan
+      );
+      const now = performance.now();
+      if (materialized) {
+        if (
+          materialized.digest === stableDigest &&
+          materialized.kind === stableKind
+        ) {
+          stableCaptures += 1;
+        } else {
+          stableDigest = materialized.digest;
+          stableKind = materialized.kind;
+          stableSince = now;
+          stableCaptures = 1;
+        }
+        const stableForMs = stableSince === undefined ? 0 : now - stableSince;
+        if (
+          stableCaptures >= CODEX_MULTILINE_STABLE_CAPTURES &&
+          stableForMs >= plan.composer.minimumStableMs
+        ) {
+          const evidence = {
+            kind: materialized.kind,
+            digest: materialized.digest,
+            stableForMs,
+            stableCaptures
+          } satisfies TerminalNativeInspectionMaterializationEvidence;
+          return this.revalidateCodexNativeInspectionComposer(
+            adapter,
+            captured.terminalControl,
+            plan,
+            evidence,
+            runtime
+          );
+        }
+      } else {
+        stableDigest = undefined;
+        stableKind = undefined;
+        stableSince = undefined;
+        stableCaptures = 0;
+      }
+
+      const elapsed = performance.now() - startedAt;
+      const remaining = CODEX_MULTILINE_SETTLE_TIMEOUT_MS - elapsed;
+      if (remaining <= 0) {
+        break;
+      }
+      await terminalSettleDelay(Math.min(
+        CODEX_MULTILINE_SETTLE_POLL_MS,
+        remaining
+      ));
+    }
+    throw new Error(
+      "Codex /status composer did not become exact, idle, and stable before the bounded submit deadline"
+    );
+  }
+
+  private async revalidateCodexNativeInspectionComposer(
+    adapter: TerminalAgentAdapter,
+    terminalControl: TerminalControlRef,
+    plan: TerminalNativeInspectionPlan,
+    expected: TerminalNativeInspectionMaterializationEvidence,
+    runtime?: TerminalRuntimeIdentity
+  ): Promise<{
+    terminalControl: TerminalControlRef;
+    screenDigest: string;
+    evidenceInventory:
+      readonly TerminalNativeInspectionEvidenceInventoryEntry[];
+    materialization: TerminalNativeInspectionMaterializationEvidence;
+  }> {
+    const captured = await this.captureInspection(adapter, terminalControl, {
+      runtime,
+      scrollbackLines: CODEX_MULTILINE_SETTLE_SCROLLBACK_LINES
+    });
+    assertNativeInspectionComposerSafe(captured.inspection);
+    const materialized = exactCodexNativeInspectionComposerCapture(
+      captured.screen,
+      plan
+    );
+    if (
+      !materialized ||
+      materialized.digest !== expected.digest ||
+      materialized.kind !== expected.kind
+    ) {
+      throw new Error(
+        "Codex /status composer changed after its stable pre-submit capture"
+      );
+    }
+    const baseline = adapter.observeNativeInspection?.({
+      operation: plan.operation,
+      screen: captured.screen
+    });
+    if (
+      !baseline ||
+      baseline.status === "ambiguous" ||
+      !Array.isArray(baseline.evidenceInventory)
+    ) {
+      throw new Error(
+        baseline?.reason ??
+        "Codex /status pre-Enter evidence inventory was not proven"
+      );
+    }
+    const verifiedImmediatelyBeforeEnter = await this.verifyTerminalIdentity(
+      adapter.agent,
+      captured.terminalControl,
+      runtime
+    );
+    if (
+      !sameTerminalControlIdentity(
+        captured.terminalControl,
+        verifiedImmediatelyBeforeEnter
+      )
+    ) {
+      throw new Error(
+        "terminal control identity changed after the final Codex /status composer capture"
+      );
+    }
+    return {
+      terminalControl: verifiedImmediatelyBeforeEnter,
+      screenDigest: nativeInspectionScreenFingerprint(captured.screen),
+      evidenceInventory: baseline.evidenceInventory,
+      materialization: expected
     };
   }
 
@@ -1184,6 +1570,139 @@ export class TerminalAgentBridge {
     });
     return result?.terminalControl ?? terminalControl;
   }
+}
+
+function nativeInspectionSubmissionError(
+  stage: NativeInspectionSubmissionStage,
+  error: unknown
+): NativeInspectionSubmissionError {
+  if (error instanceof NativeInspectionSubmissionError) {
+    const stageRank: Record<NativeInspectionSubmissionStage, number> = {
+      not_started: 0,
+      text_injected: 1,
+      enter_uncertain: 2
+    };
+    if (stageRank[error.stage] >= stageRank[stage]) {
+      return error;
+    }
+    return new NativeInspectionSubmissionError(stage, error.message, {
+      cause: error
+    });
+  }
+  return new NativeInspectionSubmissionError(
+    stage,
+    error instanceof Error ? error.message : String(error),
+    { cause: error }
+  );
+}
+
+function assertCodexStatusInspectionPlan(
+  adapter: TerminalAgentAdapter,
+  terminalControl: TerminalControlRef,
+  plan: TerminalNativeInspectionPlan
+): void {
+  if (adapter.agent !== "codex") {
+    throw new Error("native /status inspection is currently supported only for Codex");
+  }
+  if (!terminalControl.capabilities.includes("send_keys")) {
+    throw new Error("Codex terminal input is not supported");
+  }
+  if (!terminalControl.capabilities.includes("screen_status")) {
+    throw new Error("Codex terminal screen inspection is not supported");
+  }
+  if (
+    plan.operation.kind !== "status" ||
+    plan.command !== "/status" ||
+    plan.effect !== "read_only" ||
+    plan.requiresIdle !== true ||
+    plan.composer.kind !== "exact" ||
+    !Number.isFinite(plan.composer.minimumStableMs) ||
+    plan.composer.minimumStableMs < CODEX_PASTE_ENTER_SETTLE_MS ||
+    plan.expectedResult.kind !== "native_status" ||
+    ![
+      "codex-tui-0.146.0",
+      "codex-tui-0.146.1"
+    ].includes(plan.behaviorProfile)
+  ) {
+    throw new Error("refusing a non-closed or unverified native inspection plan");
+  }
+}
+
+function assertNativeInspectionComposerSafe(
+  inspection: TerminalScreenInspection
+): void {
+  if (
+    inspection.approval.blocked ||
+    inspection.activity.state === "awaiting_approval" ||
+    inspection.activity.state === "working"
+  ) {
+    throw new Error(
+      "Codex became busy or blocked while its /status composer was settling"
+    );
+  }
+  // Codex's generic activity parser deliberately reports a non-empty slash
+  // composer as unknown. At this stage the caller has already proved an idle,
+  // empty styled composer under the terminal lock; the exact-current composer
+  // capture below is the stronger continuation proof after AKK injected only
+  // the adapter-owned /status command.
+}
+
+function exactCodexNativeInspectionComposerCapture(
+  screen: string,
+  plan: TerminalNativeInspectionPlan
+): {
+  digest: string;
+  kind: TerminalNativeInspectionMaterializationKind;
+} | undefined {
+  const lines = screen.replace(/\r\n?/gu, "\n").split("\n");
+  let currentComposerIndex = -1;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (CODEX_COMPOSER_MARKER.test(lines[index])) {
+      currentComposerIndex = index;
+      break;
+    }
+  }
+  if (currentComposerIndex < 0) {
+    return undefined;
+  }
+  const composerText = lines[currentComposerIndex]
+    .replace(/^[›»]\s?/u, "")
+    .trimEnd();
+  if (composerText !== plan.command) {
+    return undefined;
+  }
+  const footerIndex = lines.findIndex((line, candidateIndex) =>
+    candidateIndex > currentComposerIndex &&
+    CODEX_COMPOSER_FOOTER.test(line.trim())
+  );
+  const region = lines.slice(
+    currentComposerIndex,
+    footerIndex < 0 ? lines.length : footerIndex
+  );
+  while (region.length > 1 && region.at(-1)?.trim() === "") {
+    region.pop();
+  }
+  const popupRows = region.slice(1).filter((line) => line.trim().length > 0);
+  let kind: TerminalNativeInspectionMaterializationKind;
+  if (popupRows.length === 0) {
+    kind = "exact_slash_composer";
+  } else if (
+    popupRows.length === 1 &&
+    popupRows[0].trimEnd() ===
+      CODEX_NATIVE_STATUS_POPUP_BY_PROFILE[plan.behaviorProfile]
+  ) {
+    kind = "exact_slash_popup";
+  } else {
+    return undefined;
+  }
+  return {
+    kind,
+    digest: createHash("sha256").update(region.join("\n")).digest("hex")
+  };
+}
+
+function nativeInspectionScreenFingerprint(screen: string): string {
+  return `sha256:${createHash("sha256").update(screen).digest("hex")}`;
 }
 
 function exactCodexComposerCapture(

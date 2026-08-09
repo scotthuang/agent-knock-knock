@@ -168,9 +168,28 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
       if (result.status === 0) {
         return;
       }
+      if (result.status !== null) {
+        // The tmux process ran. Even a non-zero response is not a safe reason
+        // to invoke a second executable for an irreversible key such as Enter.
+        throw new TerminalControlInputNotSentError(
+          result.stderr || result.error?.message ||
+          `tmux send-keys failed for ${target}`
+        );
+      }
+      if (!commandDefinitelyDidNotStart(result.error)) {
+        // A timeout or signal after spawn may already have delivered the key.
+        // Retrying here could turn one requested Enter into two submissions.
+        throw new Error(
+          result.stderr || result.error?.message ||
+          `tmux send-keys outcome is uncertain for ${target}`
+        );
+      }
       lastResult = result;
     }
-    throw new Error(lastResult?.stderr || lastResult?.error?.message || `tmux send-keys failed for ${target}`);
+    throw new TerminalControlInputNotSentError(
+      lastResult?.stderr || lastResult?.error?.message ||
+      `tmux send-keys failed for ${target}`
+    );
   }
 
   async sendText(target: string, text: string, options: { socketPath?: string } = {}): Promise<void> {
