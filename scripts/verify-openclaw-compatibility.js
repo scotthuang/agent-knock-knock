@@ -495,7 +495,19 @@ async function verifyFullHost({
     readOnlyList.terminals[0]?.terminal_control?.target,
     "akk-compat:0.0"
   );
-  assert.equal(readOnlyList.terminal_scan?.diagnostics?.provider, "static");
+  assert.equal(readOnlyList.terminal_scan?.diagnostics?.provider, "registry");
+  assert.deepEqual(
+    readOnlyList.terminal_scan?.diagnostics?.providerKinds,
+    ["tmux"]
+  );
+  assert.equal(
+    readOnlyList.terminal_scan?.diagnostics?.providers?.tmux?.provider,
+    "static"
+  );
+  assert.deepEqual(
+    readOnlyList.terminal_scan?.diagnostics?.discoveryErrors,
+    {}
+  );
 
   const gateway = startGateway({
     env,
