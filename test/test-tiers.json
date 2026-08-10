@@ -1,10 +1,13 @@
 {
   "fast": [
+    "test/affected-test-selection.test.ts",
     "test/approval-policy.test.ts",
     "test/claude-local-transcript-provider.test.ts",
     "test/claude-terminal-agent-adapter.test.ts",
+    "test/cli-core.test.ts",
     "test/codex-local-session-provider.test.ts",
     "test/codex-session-provider.test.ts",
+    "test/codex-sticky-rollout-lifecycle-core.test.ts",
     "test/doctor-capabilities.test.ts",
     "test/executors.test.ts",
     "test/live-lifecycle-evidence.test.ts",
@@ -54,6 +57,7 @@
     "test/store.test.ts",
     "test/openclaw-plugin-contract.test.ts",
     "test/native-thread-ownership-cli.test.ts",
+    "test/cli-core-import.test.ts",
     "test/cli-ux.test.ts",
     "test/codex-store-adapter.test.ts",
     "test/management-cli.test.ts",

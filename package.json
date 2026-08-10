@@ -76,6 +76,7 @@
     "test:fast": "npm run build && node scripts/run-test-tier.js fast",
     "test:integration": "npm run build && node scripts/run-test-tier.js integration",
     "test:full": "npm run build && node scripts/run-test-tier.js full",
+    "test:affected": "npm run build && node scripts/run-affected-tests.js",
     "test:profile": "npm run build && node scripts/profile-test-tier.js",
     "test:release": "node scripts/run-release-tests.js",
     "test:release:live": "node scripts/run-release-tests.js --live",
