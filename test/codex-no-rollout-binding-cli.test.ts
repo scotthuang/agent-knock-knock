@@ -54,6 +54,7 @@ const STALE_PROCESS_BIRTH = "Wed Aug  5 10:00:00 2026";
 const NATIVE_THREAD_ID = "11111111-1111-4111-8111-111111111111";
 const EXTERNAL_THREAD_ID = "22222222-2222-4222-8222-222222222222";
 const SECOND_EXTERNAL_THREAD_ID = "33333333-3333-4333-8333-333333333333";
+const FIRST_NATIVE_TURN_ID = "44444444-4444-4444-8444-444444444444";
 
 test("virgin raw Codex attach atomically refines the Session and Turn binding after send", async () => {
   const fixture = createNoRolloutFixture();
@@ -141,106 +142,404 @@ test("virgin raw Codex attach atomically refines the Session and Turn binding af
   }
 });
 
-test("production-mode virgin Codex preflight failure leaves no bound attach orphan", async () => {
-  const fixture = createNoRolloutFixture({ persistedCandidate: true });
+test("production-mode virgin Codex first send creates and binds its exact rollout", async () => {
+  const fixture = createNoRolloutFixture({ rolloutInitiallyAbsent: true });
   const environment = {
     ...fixture.environment,
     AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
   };
-  const sendArguments = (message: string) => [
-    "send",
-    "--conversation",
-    fixture.terminalId,
-    "--message",
-    message,
-    "--background",
-    "--store-dir",
-    fixture.storeDir,
-    "--codex-home",
-    fixture.codexHome,
-    "--openclaw-bin",
-    "/usr/bin/true",
-    "--disable-terminal-bridge-monitor"
-  ];
   try {
-    const first = await runCli(
-      sendArguments("This production preflight must not reach Codex."),
-      environment
-    );
-    assert.equal(first.status, 1, first.stdout);
-    assert.match(
-      first.stderr,
-      /Codex native acceptance anchor requires an exact thread and process incarnation/u
-    );
-    assert.doesNotMatch(first.stderr, /changed native thread outside AKK/u);
-    assert.deepEqual(listManagedSessions(fixture.storeDir), []);
-    assert.deepEqual(listConversations(fixture.storeDir), []);
-    assert.equal(
-      readTmuxCalls(fixture.tmuxCallsPath)
-        .some((call) => call.args[0] === "send-keys"),
-      false,
-      "a rejected production preflight must not inject task text or Enter"
-    );
-
-    const second = await runCli(
-      sendArguments("A clean retry must reach the same safe preflight."),
-      environment
-    );
-    assert.equal(second.status, 1, second.stdout);
-    assert.match(
-      second.stderr,
-      /Codex native acceptance anchor requires an exact thread and process incarnation/u
-    );
-    assert.doesNotMatch(second.stderr, /changed native thread outside AKK/u);
-    assert.deepEqual(listManagedSessions(fixture.storeDir), []);
-    assert.deepEqual(listConversations(fixture.storeDir), []);
-    assert.equal(
-      readTmuxCalls(fixture.tmuxCallsPath)
-        .some((call) => call.args[0] === "send-keys"),
-      false,
-      "a retry after the rejected attach must not be poisoned or dispatched"
-    );
-
-    const listed = await runCli([
-      "list",
+    assert.equal(fs.existsSync(path.dirname(fixture.rolloutPath)), false);
+    const result = await runCli([
+      "send",
+      "--conversation",
+      fixture.terminalId,
+      "--message",
+      "Open the first real Codex thread.",
+      "--background",
       "--store-dir",
       fixture.storeDir,
       "--codex-home",
       fixture.codexHome,
-      "--no-approval-scan"
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor"
     ], environment);
-    assert.equal(listed.status, 0, listed.stderr || listed.stdout);
-    const listedTerminal = JSON.parse(listed.stdout).terminals[0];
-    assert.equal(listedTerminal.id, fixture.terminalId);
-    assert.equal(listedTerminal.management_state, "unmanaged");
-    assert.deepEqual(
-      listedTerminal.available_actions.list_resumable_threads.arguments,
-      { terminal_id: fixture.terminalId }
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const output = JSON.parse(result.stdout);
+    const persistedTurn = listConversations(fixture.storeDir)[0];
+    const persistedAnchor = (persistedTurn.native_session_takeover as
+      Record<string, any>).codex_rollout_acceptance_anchor;
+    const rolloutHeader = JSON.parse(
+      fs.readFileSync(fixture.rolloutPath, "utf8").split("\n")[0]
     );
-    assert.equal(listedTerminal.available_actions.reconcile_binding, undefined);
+    assert.ok(
+      Date.parse(rolloutHeader.timestamp) >=
+        Date.parse(persistedAnchor.captured_at),
+      JSON.stringify({ rolloutHeader, persistedAnchor }, null, 2)
+    );
+    assert.equal(output.delivered, true, result.stdout);
+    assert.equal(output.delivery_receipt, "agent_accepted");
+    assert.equal(output.conversation.native_thread_id, NATIVE_THREAD_ID);
+    const takeover = output.conversation.native_session_takeover;
+    assert.equal(takeover.terminal_agent_session_id, NATIVE_THREAD_ID);
+    assert.equal(persistedAnchor.version, 2);
+    assert.equal(
+      persistedAnchor.native_thread_binding,
+      "post_submission"
+    );
+    assert.equal(
+      "native_thread_id" in persistedAnchor,
+      false
+    );
+    assert.equal(
+      persistedAnchor.process_birth,
+      LIVE_PROCESS_BIRTH
+    );
+    assert.equal(
+      takeover.terminal_bridge_submission.acceptance_evidence.nativeThreadId,
+      NATIVE_THREAD_ID
+    );
+    assert.equal(fs.existsSync(fixture.rolloutPath), true);
 
-    const resumable = await runCli([
-      "list-resumable-threads",
-      "--terminal",
+    const sessions = listManagedSessions(fixture.storeDir);
+    assert.equal(sessions.length, 1);
+    assert.equal(sessions[0].status, "bound");
+    assert.equal(sessions[0].binding?.native_thread_id, NATIVE_THREAD_ID);
+    assert.equal(
+      sessions[0].binding?.native_process.process_birth,
+      LIVE_PROCESS_BIRTH
+    );
+    const turns = listConversations(fixture.storeDir);
+    assert.equal(turns.length, 1);
+    assert.equal(turns[0].native_thread_id, NATIVE_THREAD_ID);
+
+    const taskSends = readTmuxCalls(fixture.tmuxCallsPath).filter((call) =>
+      call.args[0] === "send-keys" &&
+      (
+        call.args.includes("-l") ||
+        call.args.at(-1) === "C-m"
+      )
+    );
+    assert.deepEqual(taskSends.map((call) => call.args), [
+      [
+        "send-keys",
+        "-t",
+        fixture.target,
+        "-l",
+        "Open the first real Codex thread."
+      ],
+      ["send-keys", "-t", fixture.target, "C-m"]
+    ]);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("virgin Codex binding recovery closes both post-Enter crash windows without replay", async () => {
+  const crashPoints = [
+    {
+      env: "AKK_TEST_EXIT_AFTER_VIRGIN_ENTER_DISPATCHED",
+      expectedSessionThread: undefined
+    },
+    {
+      env: "AKK_TEST_EXIT_AFTER_VIRGIN_SESSION_BINDING",
+      expectedSessionThread: NATIVE_THREAD_ID
+    }
+  ] as const;
+
+  for (const crashPoint of crashPoints) {
+    const fixture = createNoRolloutFixture({ rolloutInitiallyAbsent: true });
+    const environment = {
+      ...fixture.environment,
+      AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0",
+      [crashPoint.env]: "1"
+    };
+    try {
+      const crashed = runCliSubprocess([
+        "send",
+        "--conversation",
+        fixture.terminalId,
+        "--message",
+        `Recover exactly once after ${crashPoint.env}.`,
+        "--background",
+        "--store-dir",
+        fixture.storeDir,
+        "--codex-home",
+        fixture.codexHome,
+        "--openclaw-bin",
+        "/usr/bin/true",
+        "--disable-terminal-bridge-monitor"
+      ], environment);
+      assert.equal(crashed.status, 86, crashed.stderr || crashed.stdout);
+
+      const beforeTurn = listConversations(fixture.storeDir)[0];
+      const beforeSession = listManagedSessions(fixture.storeDir)[0];
+      assert.ok(beforeTurn);
+      assert.ok(beforeSession);
+      assert.equal(beforeTurn.native_thread_id, undefined);
+      assert.equal(
+        (beforeTurn.native_session_takeover as Record<string, any>)
+          .terminal_bridge_submission?.status,
+        "enter_dispatched"
+      );
+      assert.equal(
+        beforeSession.binding?.native_thread_id,
+        crashPoint.expectedSessionThread
+      );
+      assert.equal(
+        readTmuxCalls(fixture.tmuxCallsPath)
+          .filter((call) => call.args.at(-1) === "C-m").length,
+        1
+      );
+
+      const reconcileArgs = [
+        "reconcile-monitors",
+        "--store-dir",
+        fixture.storeDir,
+        "--codex-home",
+        fixture.codexHome,
+        "--terminal-monitors-only"
+      ];
+      const recovered = runCliSubprocess(reconcileArgs, fixture.environment);
+      assert.equal(recovered.status, 0, recovered.stderr || recovered.stdout);
+
+      const afterTurn = listConversations(fixture.storeDir)[0];
+      const afterSession = loadManagedSession(
+        fixture.storeDir,
+        beforeSession.session_id
+      );
+      assert.equal(
+        afterTurn.native_thread_id,
+        NATIVE_THREAD_ID,
+        `${crashPoint.env}: ${recovered.stdout || recovered.stderr}`
+      );
+      assert.equal(
+        (afterTurn.native_session_takeover as Record<string, any>)
+          .terminal_agent_session_id,
+        NATIVE_THREAD_ID
+      );
+      assert.equal(
+        (afterTurn.native_session_takeover as Record<string, any>)
+          .terminal_bridge_submission?.status,
+        "enter_dispatched",
+        "binding repair must not forge an acceptance receipt"
+      );
+      assert.equal(afterSession.status, "bound");
+      assert.equal(afterSession.binding?.native_thread_id, NATIVE_THREAD_ID);
+      assert.equal(
+        afterSession.binding?.binding_id,
+        afterTurn.terminal_binding_id
+      );
+      assert.equal(
+        afterSession.binding?.generation,
+        afterTurn.terminal_binding_generation
+      );
+      assert.equal(
+        afterSession.binding?.native_process.process_birth,
+        LIVE_PROCESS_BIRTH
+      );
+      assert.equal(
+        fs.realpathSync(
+          afterSession.binding?.native_process.rollout?.path as string
+        ),
+        fs.realpathSync(fixture.rolloutPath)
+      );
+
+      const callsAfterRecovery = readTmuxCalls(fixture.tmuxCallsPath);
+      assert.equal(
+        callsAfterRecovery.filter((call) => call.args.at(-1) === "C-m").length,
+        1,
+        "recovery must never replay Enter"
+      );
+      assert.equal(
+        callsAfterRecovery.filter((call) =>
+          call.args.includes(`Recover exactly once after ${crashPoint.env}.`)
+        ).length,
+        1,
+        "recovery must never replay task text"
+      );
+
+      const recoveredAgain = runCliSubprocess(
+        reconcileArgs,
+        fixture.environment
+      );
+      assert.equal(
+        recoveredAgain.status,
+        0,
+        recoveredAgain.stderr || recoveredAgain.stdout
+      );
+      assert.equal(
+        readTmuxCalls(fixture.tmuxCallsPath)
+          .filter((call) => call.args.at(-1) === "C-m").length,
+        1,
+        "idempotent reconciliation must not replay Enter"
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  }
+});
+
+test("monitor binds a virgin Codex before accepting evidence that lands between probes", async () => {
+  const fixture = createNoRolloutFixture({ rolloutInitiallyAbsent: true });
+  const request = "Recover an acceptance record that lands between probes.";
+  try {
+    const crashed = runCliSubprocess([
+      "send",
+      "--conversation",
       fixture.terminalId,
+      "--message",
+      request,
+      "--background",
       "--store-dir",
       fixture.storeDir,
       "--codex-home",
-      fixture.codexHome
-    ], environment);
-    assert.equal(resumable.status, 0, resumable.stderr || resumable.stdout);
-    const resumableOutput = JSON.parse(resumable.stdout);
-    assert.equal(resumableOutput.terminal_id, fixture.terminalId);
-    assert.equal(
-      resumableOutput.threads.some(
-        (entry: Record<string, unknown>) =>
-          entry.native_thread_id === NATIVE_THREAD_ID
-      ),
-      true,
-      resumable.stdout
+      fixture.codexHome,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor"
+    ], {
+      ...fixture.environment,
+      AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0",
+      AKK_TEST_EXIT_AFTER_VIRGIN_ENTER_DISPATCHED: "1"
+    });
+    assert.equal(crashed.status, 86, crashed.stderr || crashed.stdout);
+
+    const crashedTurn = listConversations(fixture.storeDir)[0];
+    assert.ok(crashedTurn);
+    const statePath = String(crashedTurn.state_path ?? "");
+    const eventLogPath = String(crashedTurn.event_log_path ?? "");
+    assert.ok(statePath);
+    assert.ok(eventLogPath);
+    const takeover = crashedTurn.native_session_takeover as Record<string, any>;
+    const header = fs.readFileSync(fixture.rolloutPath, "utf8").split("\n")[0];
+    fs.writeFileSync(fixture.rolloutPath, `${header}\n`, { mode: 0o600 });
+    fs.writeFileSync(fixture.rolloutProbeCountPath, "0");
+    fixture.appendAcceptanceOnProbe = 2;
+    fixture.deferredAcceptanceRequest = request;
+    fs.writeFileSync(fixture.screenPath, "Working\n");
+
+    const monitored = await runCli([
+      "monitor",
+      "--terminal-bridge",
+      "--state",
+      statePath,
+      "--log",
+      eventLogPath,
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome,
+      "--poll-interval-ms",
+      "20",
+      "--agent-timeout-minutes",
+      "1",
+      "--agent-hard-timeout-minutes",
+      "2"
+    ], {
+      ...fixture.environment,
+      AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
+    });
+    assert.equal(monitored.status, 1, monitored.stdout);
+    assert.match(
+      monitored.stderr,
+      /callback delivery requires a configured OpenClaw gateway method/u
     );
-    assert.deepEqual(listManagedSessions(fixture.storeDir), []);
-    assert.deepEqual(listConversations(fixture.storeDir), []);
+
+    const finalTurn = listConversations(fixture.storeDir)[0];
+    const finalSession = loadManagedSession(
+      fixture.storeDir,
+      finalTurn.session_id
+    );
+    const finalTakeover = finalTurn.native_session_takeover as Record<string, any>;
+    assert.equal(finalTurn.native_thread_id, NATIVE_THREAD_ID);
+    assert.equal(finalSession.binding?.native_thread_id, NATIVE_THREAD_ID);
+    assert.equal(
+      finalTakeover.terminal_bridge_submission?.status,
+      "agent_accepted"
+    );
+    assert.equal(
+      finalTakeover.terminal_bridge_submission?.acceptance_evidence
+        ?.nativeThreadId,
+      NATIVE_THREAD_ID
+    );
+    assert.ok(
+      Number(fs.readFileSync(fixture.rolloutProbeCountPath, "utf8")) >= 3,
+      "the test must exercise pending recovery, acceptance, then exact rebind"
+    );
+    const recoveryEvents = fs.readFileSync(
+      eventLogPath,
+      "utf8"
+    )
+      .trim()
+      .split(/\r?\n/u)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+      .filter((event) =>
+        event.event === "virgin_codex_post_submission_binding_recovered"
+      );
+    assert.equal(recoveryEvents.length, 1);
+    assert.equal(
+      readTmuxCalls(fixture.tmuxCallsPath)
+        .filter((call) => call.args.at(-1) === "C-m").length,
+      1,
+      "the monitor race repair must never replay Enter"
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("virgin Codex process drift after Enter quarantines the provisional binding", async () => {
+  const fixture = createNoRolloutFixture({ rolloutInitiallyAbsent: true });
+  try {
+    const result = await runCli([
+      "send",
+      "--conversation",
+      fixture.terminalId,
+      "--message",
+      "This task must stay pinned to the original Codex process.",
+      "--background",
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor"
+    ], {
+      ...fixture.environment,
+      AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0",
+      AKK_TEST_PROCESS_BIRTH_AFTER_ENTER: STALE_PROCESS_BIRTH
+    });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const output = JSON.parse(result.stdout);
+    assert.equal(output.delivered, false);
+    assert.equal(output.status, "submission_uncertain");
+    assert.equal(output.do_not_retry, true);
+    assert.match(output.reason, /process incarnation changed/u);
+    const sessions = listManagedSessions(fixture.storeDir);
+    assert.equal(sessions.length, 1);
+    assert.equal(sessions[0].status, "quarantined");
+    assert.equal(sessions[0].binding?.native_thread_id, undefined);
+    assert.equal(
+      sessions[0].binding?.native_process.process_birth,
+      LIVE_PROCESS_BIRTH
+    );
+    const turns = listConversations(fixture.storeDir);
+    assert.equal(turns.length, 1);
+    const takeover = turns[0].native_session_takeover as Record<string, any>;
+    assert.equal(
+      takeover.terminal_bridge_submission?.status,
+      "uncertain"
+    );
+    assert.equal(
+      readTmuxCalls(fixture.tmuxCallsPath)
+        .filter((call) => call.args.at(-1) === "C-m").length,
+      1,
+      "an uncertain first submission must never retry Enter"
+    );
   } finally {
     fixture.cleanup();
   }
@@ -394,19 +693,20 @@ test("a proved tmux text-dispatch failure also detaches the virgin Session", asy
   }
 });
 
-test("native New and Resume remain reachable after rejected virgin attaches", async () => {
+test("native New and Resume remain reachable after draft-blocked virgin attaches", async () => {
   const fixture = createNoRolloutFixture({ persistedCandidate: true });
   const productionEnvironment = {
     ...fixture.environment,
     AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
   };
   try {
+    fs.writeFileSync(fixture.screenPath, "Ready\n› existing operator draft");
     const rejected = await runCli([
       "send",
       "--conversation",
       fixture.terminalId,
       "--message",
-      "Rejected before resume.",
+      "Blocked by the operator draft before resume.",
       "--background",
       "--store-dir",
       fixture.storeDir,
@@ -417,7 +717,12 @@ test("native New and Resume remain reachable after rejected virgin attaches", as
       "--disable-terminal-bridge-monitor"
     ], productionEnvironment);
     assert.equal(rejected.status, 1, rejected.stdout);
+    assert.match(
+      rejected.stderr,
+      /terminal is unknown, not idle|composer contains non-placeholder input/u
+    );
     assert.deepEqual(listManagedSessions(fixture.storeDir), []);
+    fs.writeFileSync(fixture.screenPath, "Ready\n› ");
 
     const terminal = await listFixtureTerminal({
       ...fixture,
@@ -470,12 +775,16 @@ test("native New and Resume remain reachable after rejected virgin attaches", as
     AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
   };
   try {
+    fs.writeFileSync(
+      newFixture.screenPath,
+      "Ready\n› another existing operator draft"
+    );
     const rejected = await runCli([
       "send",
       "--conversation",
       newFixture.terminalId,
       "--message",
-      "Rejected before new.",
+      "Blocked by the operator draft before new.",
       "--background",
       "--store-dir",
       newFixture.storeDir,
@@ -486,7 +795,12 @@ test("native New and Resume remain reachable after rejected virgin attaches", as
       "--disable-terminal-bridge-monitor"
     ], newEnvironment);
     assert.equal(rejected.status, 1, rejected.stdout);
+    assert.match(
+      rejected.stderr,
+      /terminal is unknown, not idle|composer contains non-placeholder input/u
+    );
     assert.deepEqual(listManagedSessions(newFixture.storeDir), []);
+    fs.writeFileSync(newFixture.screenPath, "Ready\n› ");
 
     const terminal = await listFixtureTerminal({
       ...newFixture,
@@ -1330,7 +1644,10 @@ interface NoRolloutFixture {
   codexPid: number;
   codexVersion: "0.146.0" | "0.147.0";
   persistedCandidate: boolean;
+  rolloutInitiallyAbsent: boolean;
   materializeRolloutOnProbe?: number;
+  appendAcceptanceOnProbe?: number;
+  deferredAcceptanceRequest?: string;
   activeNativeThreadId: string;
   activeRolloutPath: string;
   environment: NodeJS.ProcessEnv;
@@ -1341,11 +1658,13 @@ function createNoRolloutFixture(
   {
     codexVersion = "0.146.0",
     materializeRolloutOnProbe,
-    persistedCandidate = false
+    persistedCandidate = false,
+    rolloutInitiallyAbsent = false
   }: {
     codexVersion?: "0.146.0" | "0.147.0";
     materializeRolloutOnProbe?: number;
     persistedCandidate?: boolean;
+    rolloutInitiallyAbsent?: boolean;
   } = {}
 ): NoRolloutFixture {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-birth-"));
@@ -1374,20 +1693,25 @@ function createNoRolloutFixture(
 
   fs.mkdirSync(fakeBinDir, { recursive: true });
   fs.mkdirSync(workspace, { recursive: true });
-  fs.mkdirSync(sessionsDir, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(
+    rolloutInitiallyAbsent ? codexHome : sessionsDir,
+    { recursive: true, mode: 0o700 }
+  );
   fs.writeFileSync(screenPath, "Ready\n› ");
   fs.writeFileSync(processBirthPath, LIVE_PROCESS_BIRTH);
-  fs.writeFileSync(rolloutPath, `${JSON.stringify({
-    timestamp: "2026-08-06T00:00:00.000Z",
-    type: "session_meta",
-    payload: {
-      id: NATIVE_THREAD_ID,
-      cwd: workspace,
-      originator: "codex-tui",
-      source: "cli",
-      cli_version: codexVersion
-    }
-  })}\n`, { mode: 0o600 });
+  if (!rolloutInitiallyAbsent) {
+    fs.writeFileSync(rolloutPath, `${JSON.stringify({
+      timestamp: "2026-08-06T00:00:00.000Z",
+      type: "session_meta",
+      payload: {
+        id: NATIVE_THREAD_ID,
+        cwd: workspace,
+        originator: "codex-tui",
+        source: "cli",
+        cli_version: codexVersion
+      }
+    })}\n`, { mode: 0o600 });
+  }
   if (persistedCandidate) {
     fs.writeFileSync(path.join(codexHome, "state_1.sqlite"), "", {
       mode: 0o600
@@ -1406,6 +1730,7 @@ function createNoRolloutFixture(
     pendingInputPath,
     materializedPath,
     processBirthPath,
+    rolloutPath,
     codexVersion,
     target,
     panePid,
@@ -1458,6 +1783,7 @@ function createNoRolloutFixture(
     codexPid,
     codexVersion,
     persistedCandidate,
+    rolloutInitiallyAbsent,
     materializeRolloutOnProbe,
     activeNativeThreadId: NATIVE_THREAD_ID,
     activeRolloutPath: rolloutPath,
@@ -1844,6 +2170,36 @@ function createFixtureCodexAdapter(
       if (!fs.existsSync(fixture.materializedPath)) {
         return undefined;
       }
+      if (
+        fixture.appendAcceptanceOnProbe === nextProbeCount &&
+        fixture.deferredAcceptanceRequest
+      ) {
+        appendNativeAcceptance(
+          fixture.activeRolloutPath,
+          fixture.deferredAcceptanceRequest,
+          FIRST_NATIVE_TURN_ID,
+          {
+            nativeThreadId: fixture.activeNativeThreadId,
+            workspace: String(fixture.terminalControl.currentPath),
+            codexVersion: fixture.codexVersion,
+            timestamp: new Date().toISOString()
+          }
+        );
+        fs.appendFileSync(
+          fixture.activeRolloutPath,
+          `${JSON.stringify({
+            timestamp: "2026-08-06T00:00:02.000Z",
+            type: "event_msg",
+            payload: {
+              type: "task_complete",
+              turn_id: FIRST_NATIVE_TURN_ID,
+              last_agent_message: "Recovered exact result"
+            }
+          })}\n`
+        );
+        fs.writeFileSync(fixture.screenPath, "Recovered exact result\n› ");
+        fixture.appendAcceptanceOnProbe = undefined;
+      }
       const processBirth = fs.readFileSync(
         fixture.processBirthPath,
         "utf8"
@@ -2037,7 +2393,24 @@ function runInProcessTmux(
         `New Codex thread ${EXTERNAL_THREAD_ID}\n› `
       );
     } else {
+      if (env.AKK_TEST_PROCESS_BIRTH_AFTER_ENTER) {
+        fs.writeFileSync(
+          fixture.processBirthPath,
+          env.AKK_TEST_PROCESS_BIRTH_AFTER_ENTER
+        );
+      }
       fs.writeFileSync(fixture.materializedPath, "ready");
+      appendNativeAcceptance(
+        fixture.activeRolloutPath,
+        pendingInput,
+        FIRST_NATIVE_TURN_ID,
+        {
+          nativeThreadId: fixture.activeNativeThreadId,
+          workspace: String(fixture.terminalControl.currentPath),
+          codexVersion: fixture.codexVersion,
+          timestamp: new Date(nowMs).toISOString()
+        }
+      );
       fs.writeFileSync(fixture.screenPath, "Working\n");
     }
     return successfulCommand();
@@ -2060,6 +2433,7 @@ function writeFakeTmux(options: {
   pendingInputPath: string;
   materializedPath: string;
   processBirthPath: string;
+  rolloutPath: string;
   codexVersion: "0.146.0" | "0.147.0";
   target: string;
   panePid: number;
@@ -2123,7 +2497,55 @@ if (args[0] === "list-panes") {
       `╰──────────────────────────────────────────────────╯\n› `
     )});
   } else {
+    if (process.env.AKK_TEST_PROCESS_BIRTH_AFTER_ENTER) {
+      fs.writeFileSync(
+        ${JSON.stringify(options.processBirthPath)},
+        process.env.AKK_TEST_PROCESS_BIRTH_AFTER_ENTER
+      );
+    }
     fs.writeFileSync(${JSON.stringify(options.materializedPath)}, "ready");
+    const rolloutPath = ${JSON.stringify(options.rolloutPath)};
+    if (rolloutPath && pendingInput) {
+      const turnId = ${JSON.stringify(FIRST_NATIVE_TURN_ID)};
+      if (!fs.existsSync(rolloutPath)) {
+        fs.mkdirSync(require("node:path").dirname(rolloutPath), {
+          recursive: true,
+          mode: 0o700
+        });
+        fs.writeFileSync(rolloutPath, JSON.stringify({
+          timestamp: new Date().toISOString(),
+          type: "session_meta",
+          payload: {
+            id: ${JSON.stringify(NATIVE_THREAD_ID)},
+            cwd: ${JSON.stringify(options.workspace)},
+            originator: "codex-tui",
+            source: "cli",
+            cli_version: ${JSON.stringify(options.codexVersion)}
+          }
+        }) + "\\n", { mode: 0o600 });
+      }
+      const records = [
+        {
+          timestamp: "2026-08-06T00:00:01.000Z",
+          type: "event_msg",
+          payload: { type: "task_started", turn_id: turnId }
+        },
+        {
+          timestamp: "2026-08-06T00:00:01.010Z",
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: pendingInput }],
+            internal_chat_message_metadata_passthrough: { turn_id: turnId }
+          }
+        }
+      ];
+      fs.appendFileSync(
+        rolloutPath,
+        records.map((record) => JSON.stringify(record)).join("\\n") + "\\n"
+      );
+    }
     fs.writeFileSync(${JSON.stringify(options.screenPath)}, "Working\\n");
   }
 }
@@ -2256,4 +2678,55 @@ function readTmuxCalls(
     .split(/\r?\n/u)
     .filter(Boolean)
     .map((line) => JSON.parse(line));
+}
+
+function appendNativeAcceptance(
+  rolloutPath: string,
+  request: string,
+  turnId: string,
+  metadata: {
+    nativeThreadId: string;
+    workspace: string;
+    codexVersion: string;
+    timestamp: string;
+  }
+): void {
+  if (!request) {
+    return;
+  }
+  if (!fs.existsSync(rolloutPath)) {
+    fs.mkdirSync(path.dirname(rolloutPath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(rolloutPath, `${JSON.stringify({
+      timestamp: metadata.timestamp,
+      type: "session_meta",
+      payload: {
+        id: metadata.nativeThreadId,
+        cwd: metadata.workspace,
+        originator: "codex-tui",
+        source: "cli",
+        cli_version: metadata.codexVersion
+      }
+    })}\n`, { mode: 0o600 });
+  }
+  const records = [
+    {
+      timestamp: "2026-08-06T00:00:01.000Z",
+      type: "event_msg",
+      payload: { type: "task_started", turn_id: turnId }
+    },
+    {
+      timestamp: "2026-08-06T00:00:01.010Z",
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: request }],
+        internal_chat_message_metadata_passthrough: { turn_id: turnId }
+      }
+    }
+  ];
+  fs.appendFileSync(
+    rolloutPath,
+    `${records.map((record) => JSON.stringify(record)).join("\n")}\n`
+  );
 }

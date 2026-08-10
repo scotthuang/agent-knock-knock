@@ -211,6 +211,15 @@ test("parseTmuxListPanes preserves stable tmux socket and pane identities", asyn
   });
 });
 
+test("parseTmuxListPanes rejects a truncated seven-field tab record", () => {
+  const panes = parseTmuxListPanes(
+    "codex-work\t0\t2\t36017\tnode\t/Users/me/github/codex\t/private/tmp/tmux-501/default\n",
+    "/private/tmp/tmux-501/default"
+  );
+
+  assert.deepEqual(panes, []);
+});
+
 test("parseTmuxListPanes falls back to whitespace-delimited output", () => {
   const panes = parseTmuxListPanes("codex-work 0 0 36017 node /Users/me/github/codex\n");
 
@@ -218,6 +227,43 @@ test("parseTmuxListPanes falls back to whitespace-delimited output", () => {
   assert.equal(panes[0].target, "codex-work:0.0");
   assert.equal(panes[0].panePid, 36017);
   assert.equal(panes[0].currentPath, "/Users/me/github/codex");
+});
+
+test("parseTmuxListPanes safely parses extended whitespace output with path separators in both fields", () => {
+  const socketPath = "/private/tmp/tmux user_501/default_socket";
+  const panes = parseTmuxListPanes(
+    `codex-work 0 2 36017 node /Users/me/github/agent knock_knock ${socketPath} %7\n`,
+    socketPath
+  );
+
+  assert.equal(panes.length, 1);
+  assert.equal(panes[0].target, "codex-work:0.2");
+  assert.equal(panes[0].currentPath, "/Users/me/github/agent knock_knock");
+  assert.equal(panes[0].socketPath, socketPath);
+  assert.equal(panes[0].serverSocketPath, socketPath);
+  assert.equal(panes[0].paneId, "%7");
+});
+
+test("parseTmuxListPanes accepts repeated whitespace only at an exact extended boundary", () => {
+  const socketPath = "/private/tmp/tmux user_501/default_socket";
+  const panes = parseTmuxListPanes(
+    `codex-work   0  2    36017 node   /Users/me/github/agent knock_knock     ${socketPath}   %7\n`,
+    socketPath
+  );
+
+  assert.equal(panes.length, 1);
+  assert.equal(panes[0].currentPath, "/Users/me/github/agent knock_knock");
+  assert.equal(panes[0].serverSocketPath, socketPath);
+  assert.equal(panes[0].paneId, "%7");
+});
+
+test("parseTmuxListPanes rejects extended whitespace output with a mismatched socket hint", () => {
+  const panes = parseTmuxListPanes(
+    "codex-work 0 2 36017 node /Users/me/github/agent knock_knock /private/tmp/tmux user_501/default_socket %7\n",
+    "/private/tmp/tmux-501/other"
+  );
+
+  assert.deepEqual(panes, []);
 });
 
 test("parseTmuxListPanes falls back to underscore-delimited output", () => {
@@ -228,6 +274,47 @@ test("parseTmuxListPanes falls back to underscore-delimited output", () => {
   assert.equal(panes[0].panePid, 36017);
   assert.equal(panes[0].currentCommand, "node");
   assert.equal(panes[0].currentPath, "/Users/me/github/codex");
+});
+
+test("parseTmuxListPanes safely parses extended underscore output with an exact socket hint", () => {
+  const socketPath = "/private/tmp/tmux-501/default";
+  const panes = parseTmuxListPanes(
+    "workspace_0_1_4584_codex_/Users/scotthuang/github/agent-knock-knock_/private/tmp/tmux-501/default_%3\n",
+    socketPath
+  );
+
+  assert.equal(panes.length, 1);
+  assert.equal(panes[0].target, "workspace:0.1");
+  assert.equal(panes[0].panePid, 4584);
+  assert.equal(panes[0].currentCommand, "codex");
+  assert.equal(panes[0].currentPath, "/Users/scotthuang/github/agent-knock-knock");
+  assert.equal(panes[0].socketPath, socketPath);
+  assert.equal(panes[0].serverSocketPath, socketPath);
+  assert.equal(panes[0].paneId, "%3");
+});
+
+test("parseTmuxListPanes preserves underscores on both sides of the exact socket boundary", () => {
+  const socketPath = "/private/tmp/tmux_501/default_socket";
+  const panes = parseTmuxListPanes(
+    `workspace_0_1_4584_codex_/Users/scotthuang/github/agent_knock_knock_${socketPath}_%3\n`,
+    socketPath
+  );
+
+  assert.equal(panes.length, 1);
+  assert.equal(
+    panes[0].currentPath,
+    "/Users/scotthuang/github/agent_knock_knock"
+  );
+  assert.equal(panes[0].serverSocketPath, socketPath);
+  assert.equal(panes[0].paneId, "%3");
+});
+
+test("parseTmuxListPanes rejects extended-looking underscore output without an exact socket hint", () => {
+  const panes = parseTmuxListPanes(
+    "workspace_0_1_4584_codex_/Users/scotthuang/github/agent-knock-knock_/private/tmp/tmux-501/default_%3\n"
+  );
+
+  assert.deepEqual(panes, []);
 });
 
 test("enrichActiveProcessesWithTerminalControl attaches tmux metadata by pid ancestry", async () => {

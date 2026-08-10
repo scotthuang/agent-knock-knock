@@ -13407,29 +13407,28 @@ async function runTerminalControlSend({
       runtime: preSendRuntime
     });
     assertSafeTerminalSend(executor.kind, status);
-    if (
-      executor.kind === "codex" &&
-      (pendingManagedNativeBinding || allowedPreMaterializationIdentity)
-    ) {
-      const expectedForegroundId = stringValue(
-        sendTakeover?.terminal_agent_expected_session_id
-      );
-      const foreground = createRuntimeTerminalAgentRegistry(options)
-        .require("codex")
-        .observeThreadLifecycle?.({
-          operation: { kind: "new_thread" },
-          phase: "before",
-          screen: status.screen.excerpt ?? ""
-        });
-      if (
-        !expectedForegroundId ||
-        foreground?.status !== "observed" ||
-        foreground.nativeThreadId !== expectedForegroundId
-      ) {
-        throw new Error(
-          "Codex foreground thread changed after the managed /status proof; " +
-          "refresh list before sending"
+    if (executor.kind === "codex" && needsPostSendNativeBinding) {
+      if (pendingManagedNativeBinding || allowedPreMaterializationIdentity) {
+        const expectedForegroundId = stringValue(
+          sendTakeover?.terminal_agent_expected_session_id
         );
+        const foreground = createRuntimeTerminalAgentRegistry(options)
+          .require("codex")
+          .observeThreadLifecycle?.({
+            operation: { kind: "new_thread" },
+            phase: "before",
+            screen: status.screen.excerpt ?? ""
+          });
+        if (
+          !expectedForegroundId ||
+          foreground?.status !== "observed" ||
+          foreground.nativeThreadId !== expectedForegroundId
+        ) {
+          throw new Error(
+            "Codex foreground thread changed after the managed /status proof; " +
+            "refresh list before sending"
+          );
+        }
       }
       await assertCodexComposerReadyForAutomatedInput({
         options,
@@ -13444,6 +13443,12 @@ async function runTerminalControlSend({
           options,
           currentIdentity: currentNativeIdentity,
           expectedNativeThreadId: expectedManagedNativeThreadId,
+          boundProcessUuid: stringValue(
+            sendTakeover?.terminal_agent_process_uuid
+          ),
+          boundProcessBirth: stringValue(
+            sendTakeover?.terminal_agent_process_birth
+          ),
           allowedPreMaterializationIdentity,
           needsPostSendNativeBinding
         });
@@ -13856,6 +13861,12 @@ async function runTerminalControlSend({
     if (!enterDispatchedAt) {
       throw new Error("terminal bridge returned without an enter_dispatched receipt");
     }
+    if (
+      codexRolloutAcceptanceAnchor?.version === 2 &&
+      cliEnv().AKK_TEST_EXIT_AFTER_VIRGIN_ENTER_DISPATCHED === "1"
+    ) {
+      cliExit(86);
+    }
     let submittedBase = stagedConversation;
     if (needsPostSendNativeBinding) {
       let boundIdentity: NativeAgentSessionIdentity | undefined;
@@ -13878,6 +13889,20 @@ async function runTerminalControlSend({
       }
       if (boundIdentity) {
         try {
+          if (
+            codexRolloutAcceptanceAnchor &&
+            (
+              boundIdentity.processUuid !==
+                codexRolloutAcceptanceAnchor.process_uuid ||
+              boundIdentity.processBirth !==
+                codexRolloutAcceptanceAnchor.process_birth
+            )
+          ) {
+            throw new Error(
+              "Codex process incarnation changed while its native " +
+              "thread materialized"
+            );
+          }
           const expectedNativeThreadId = stringValue(
             sendTakeover?.terminal_agent_expected_session_id
           );
@@ -13917,6 +13942,12 @@ async function runTerminalControlSend({
             terminalControl,
             identity: boundIdentity
           });
+          if (
+            codexRolloutAcceptanceAnchor?.version === 2 &&
+            cliEnv().AKK_TEST_EXIT_AFTER_VIRGIN_SESSION_BINDING === "1"
+          ) {
+            cliExit(86);
+          }
           // A virgin terminal Turn and its Session start with the same
           // provisional binding id/generation before Codex has materialized a
           // native thread.  Persist the observed identity as a monotonic
@@ -14632,12 +14663,16 @@ function captureCodexAcceptanceAnchorForSend({
   options,
   currentIdentity,
   expectedNativeThreadId,
+  boundProcessUuid,
+  boundProcessBirth,
   allowedPreMaterializationIdentity,
   needsPostSendNativeBinding
 }: {
   options: Record<string, any>;
   currentIdentity?: NativeAgentSessionIdentity;
   expectedNativeThreadId?: string;
+  boundProcessUuid?: string;
+  boundProcessBirth?: string;
   allowedPreMaterializationIdentity?: CodexPreMaterializationIdentity;
   needsPostSendNativeBinding: boolean;
 }): CodexRolloutAcceptanceAnchor | undefined {
@@ -14648,27 +14683,353 @@ function captureCodexAcceptanceAnchorForSend({
     ? expectedNativeThreadId
     : currentIdentity?.sessionId;
   const processUuid = currentIdentity?.processUuid ??
-    allowedPreMaterializationIdentity?.processUuid;
+    allowedPreMaterializationIdentity?.processUuid ??
+    boundProcessUuid;
   const processBirth = currentIdentity?.processBirth ??
-    allowedPreMaterializationIdentity?.processBirth;
-  if (!nativeThreadId || !processUuid || !processBirth) {
+    allowedPreMaterializationIdentity?.processBirth ??
+    boundProcessBirth;
+  if (!processUuid || !processBirth) {
     throw new Error(
-      "Codex native acceptance anchor requires an exact thread and process incarnation"
+      "Codex native acceptance anchor requires an exact process incarnation"
     );
   }
-  const base = { nativeThreadId, processUuid, processBirth };
+  if (!nativeThreadId && !needsPostSendNativeBinding) {
+    throw new Error(
+      "Codex native acceptance anchor requires an exact thread"
+    );
+  }
   if (!needsPostSendNativeBinding && currentIdentity?.rollout) {
     return captureCodexRolloutAcceptanceAnchor({
-      ...base,
+      nativeThreadId: nativeThreadId as string,
+      processUuid,
+      processBirth,
+      now: cliNow(),
       mode: "existing",
       rollout: currentIdentity.rollout
     });
   }
-  return captureCodexRolloutAcceptanceAnchor({
-    ...base,
-    mode: "pre_materialization",
-    expectedEmptyNativeSession: true
-  });
+  return nativeThreadId
+    ? captureCodexRolloutAcceptanceAnchor({
+        nativeThreadId,
+        processUuid,
+        processBirth,
+        now: cliNow(),
+        mode: "pre_materialization",
+        expectedEmptyNativeSession: true
+      })
+    : captureCodexRolloutAcceptanceAnchor({
+        processUuid,
+        processBirth,
+        now: cliNow(),
+        mode: "pre_materialization",
+        expectedEmptyNativeSession: true
+      });
+}
+
+type VirginCodexBindingRecovery = {
+  conversation: Conversation;
+  state: "not_applicable" | "already_bound" | "pending" | "recovered";
+};
+
+function exactNativeRolloutMatches(
+  left: unknown,
+  right: NativeAgentSessionIdentity["rollout"]
+): boolean {
+  return Boolean(
+    isCompleteNativeRollout(left) &&
+    right &&
+    left.fd === right.fd &&
+    left.device === right.device &&
+    left.inode === right.inode &&
+    left.path === right.path
+  );
+}
+
+/**
+ * Finish the one monotonic binding transaction that a process crash may split
+ * after a virgin Codex Turn has durably dispatched Enter.  This is deliberately
+ * scoped to the v2 post-submission anchor: legacy/v1 Turns retain their normal
+ * binding fences and never gain a new recovery path.
+ */
+async function recoverVirginCodexPostSubmissionBinding({
+  options,
+  conversation,
+  statePath,
+  logPath,
+  terminalLockHeld = false
+}: {
+  options: Record<string, any>;
+  conversation: Conversation;
+  statePath: string;
+  logPath: string;
+  terminalLockHeld?: boolean;
+}): Promise<VirginCodexBindingRecovery> {
+  const initialTakeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const initialAnchor = isRecord(
+    initialTakeover?.codex_rollout_acceptance_anchor
+  )
+    ? initialTakeover.codex_rollout_acceptance_anchor
+    : undefined;
+  const initialSubmission = terminalBridgeSubmission(conversation);
+  const initialTerminalControl = terminalControlFromTakeover(initialTakeover);
+  if (
+    executorForConversation(conversation).kind !== "codex" ||
+    initialAnchor?.version !== 2 ||
+    initialAnchor?.native_thread_binding !== "post_submission" ||
+    !initialTerminalControl ||
+    !["enter_dispatched", "agent_accepted"].includes(
+      String(initialSubmission?.status ?? "")
+    )
+  ) {
+    return { conversation, state: "not_applicable" };
+  }
+
+  const storeDir = pathsForConversationDir(path.dirname(statePath)).storeDir;
+  const releaseTerminalLock = terminalLockHeld
+    ? () => {}
+    : acquireTerminalBridgeSendLock(
+        storeDir,
+        initialTerminalControl,
+        { timeoutMs: 30000 }
+      );
+  try {
+    return await withStoreWriterLeaseAsync(storeDir, async () => {
+      const releaseStateLock = acquireFileLock(`${statePath}.lock`);
+      try {
+        const current = loadState(statePath);
+        const takeover = isRecord(current.native_session_takeover)
+          ? current.native_session_takeover
+          : undefined;
+        const anchor = isRecord(takeover?.codex_rollout_acceptance_anchor)
+          ? takeover.codex_rollout_acceptance_anchor
+          : undefined;
+        const submission = terminalBridgeSubmission(current);
+        const terminalControl = terminalControlFromTakeover(takeover);
+        const messageId = stringValue(submission?.message_id);
+        const requestHash = stringValue(takeover?.terminal_bridge_request_hash);
+        const requestText = String(
+          takeover?.terminal_bridge_request_text ?? current.user_request ?? ""
+        );
+        if (
+          executorForConversation(current).kind !== "codex" ||
+          anchor?.version !== 2 ||
+          anchor?.native_thread_binding !== "post_submission" ||
+          !terminalControl ||
+          !terminalControlsShareIncarnation(
+            terminalControl,
+            initialTerminalControl
+          ) ||
+          !messageId ||
+          messageId !== stringValue(takeover?.terminal_bridge_message_id) ||
+          !["enter_dispatched", "agent_accepted"].includes(
+            String(submission?.status ?? "")
+          ) ||
+          !requestHash ||
+          requestHash !== terminalBridgeRequestFingerprint(requestText)
+        ) {
+          return { conversation: current, state: "not_applicable" };
+        }
+
+        const bindingId = stringValue(current.terminal_binding_id);
+        const bindingGeneration = Number(current.terminal_binding_generation);
+        const session = loadManagedSession(
+          storeDir,
+          sessionIdForConversation(current)
+        );
+        const binding = session.binding;
+        const pid = Number(takeover?.terminal_agent_pid);
+        if (
+          !bindingId ||
+          !Number.isSafeInteger(bindingGeneration) ||
+          !Number.isSafeInteger(pid) ||
+          pid <= 1 ||
+          session.agent !== "codex" ||
+          session.status !== "bound" ||
+          !binding ||
+          binding.binding_id !== bindingId ||
+          binding.generation !== bindingGeneration ||
+          binding.native_process.pid !== pid ||
+          !terminalControlsShareIncarnation(
+            binding.terminal_control,
+            terminalControl
+          )
+        ) {
+          throw new Error(
+            "virgin Codex post-submission binding changed before recovery"
+          );
+        }
+
+        const anchorProcessUuid = stringValue(anchor.process_uuid);
+        const anchorProcessBirth = stringValue(anchor.process_birth);
+        const turnProcessUuid = stringValue(
+          takeover?.terminal_agent_process_uuid
+        );
+        const turnProcessBirth = stringValue(
+          takeover?.terminal_agent_process_birth
+        );
+        if (
+          !anchorProcessUuid ||
+          !anchorProcessBirth ||
+          turnProcessUuid !== anchorProcessUuid ||
+          turnProcessBirth !== anchorProcessBirth ||
+          binding.native_process.process_uuid !== anchorProcessUuid ||
+          binding.native_process.process_birth !== anchorProcessBirth
+        ) {
+          throw new Error(
+            "virgin Codex process incarnation changed before binding recovery"
+          );
+        }
+
+        const turnNativeThreadId = stringValue(current.native_thread_id) ??
+          stringValue(takeover?.terminal_agent_session_id);
+        const sessionNativeThreadId = binding.native_thread_id;
+        if (
+          turnNativeThreadId &&
+          sessionNativeThreadId &&
+          turnNativeThreadId !== sessionNativeThreadId
+        ) {
+          throw new Error(
+            "virgin Codex Session and Turn disagree before binding recovery"
+          );
+        }
+        if (turnNativeThreadId && !isCompleteNativeRollout(
+          takeover?.terminal_agent_rollout
+        )) {
+          throw new Error(
+            "virgin Codex Turn has a partial recovered native identity"
+          );
+        }
+        if (sessionNativeThreadId && !binding.native_process.rollout) {
+          throw new Error(
+            "virgin Codex Session has a partial recovered native identity"
+          );
+        }
+        if (turnNativeThreadId && sessionNativeThreadId) {
+          assertTurnBindingCurrent(current, "recover virgin Codex binding for");
+          return { conversation: current, state: "already_bound" };
+        }
+
+        const preferredSessionId = turnNativeThreadId ?? sessionNativeThreadId;
+        const identity = await resolveCurrentNativeAgentSessionIdentity({
+          options,
+          agent: "codex",
+          pid,
+          cwd: terminalControl.currentPath,
+          preferredSessionId
+        });
+        if (!identity) {
+          return { conversation: current, state: "pending" };
+        }
+        if (
+          !isExactNativeThreadId(identity.sessionId) ||
+          identity.processUuid !== anchorProcessUuid ||
+          identity.processBirth !== anchorProcessBirth ||
+          !isCompleteNativeRollout(identity.rollout) ||
+          (preferredSessionId && identity.sessionId !== preferredSessionId) ||
+          (turnNativeThreadId &&
+            !exactNativeRolloutMatches(
+              takeover?.terminal_agent_rollout,
+              identity.rollout
+            )) ||
+          (sessionNativeThreadId &&
+            !exactNativeRolloutMatches(
+              binding.native_process.rollout,
+              identity.rollout
+            ))
+        ) {
+          throw new Error(
+            "virgin Codex native identity changed before binding recovery"
+          );
+        }
+        // When neither side was committed, only the exact native acceptance
+        // record may tell us that this newly materialized UUID belongs to the
+        // dispatched request. If either side was already committed before the
+        // crash, that durable CAS plus a fresh exact identity is sufficient to
+        // finish the other side while acceptance is still being written.
+        if (!turnNativeThreadId && !sessionNativeThreadId) {
+          const acceptance = detectCodexRolloutAcceptance({
+            anchor: anchor as unknown as CodexRolloutAcceptanceAnchor,
+            currentIdentity: identity,
+            requestHash
+          });
+          if (!acceptance) {
+            return { conversation: current, state: "pending" };
+          }
+        }
+
+        await assertNativeThreadHasExclusiveOwnership({
+          options,
+          agent: "codex",
+          currentPid: pid,
+          nativeThreadId: identity.sessionId,
+          storeDir,
+          terminalControl,
+          excludedManagedSessionId: session.session_id
+        });
+        if (!sessionNativeThreadId) {
+          const persistedSession = persistManagedSessionNativeIdentity({
+            conversation: current,
+            terminalControl,
+            identity
+          });
+          if (
+            persistedSession?.binding?.native_thread_id !==
+              identity.sessionId ||
+            persistedSession.binding.native_process.process_uuid !==
+              identity.processUuid ||
+            persistedSession.binding.native_process.process_birth !==
+              identity.processBirth ||
+            !exactNativeRolloutMatches(
+              persistedSession.binding.native_process.rollout,
+              identity.rollout
+            )
+          ) {
+            throw new Error(
+              "virgin Codex Session identity was not durably committed during recovery"
+            );
+          }
+        }
+        const recoveredAt = cliNow().toISOString();
+        const recoveredConversation = turnNativeThreadId
+          ? current
+          : {
+              ...withNativeAgentSessionIdentity(current, identity),
+              updated_at: recoveredAt
+            };
+        if (!turnNativeThreadId) {
+          saveState(statePath, recoveredConversation);
+        }
+        assertNativeAgentIdentityForTurn({
+          conversation: recoveredConversation,
+          currentIdentity: identity,
+          operation: "recover virgin Codex binding for"
+        });
+        try {
+          appendEvent(logPath, {
+            ts: recoveredAt,
+            conversation_id: recoveredConversation.conversation_id,
+            event: "virgin_codex_post_submission_binding_recovered",
+            message_id: messageId,
+            native_thread_id: identity.sessionId,
+            terminal_control: terminalControl
+          });
+        } catch (error) {
+          runtimeLog("warn", "virgin_codex_binding_recovery_event_failed", {
+            conversation_id: recoveredConversation.conversation_id,
+            terminal_target: terminalControl.target,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+        return { conversation: recoveredConversation, state: "recovered" };
+      } finally {
+        releaseStateLock();
+      }
+    });
+  } finally {
+    releaseTerminalLock();
+  }
 }
 
 async function detectTerminalSubmissionAcceptance({
@@ -14853,12 +15214,67 @@ async function reconcileTerminalAcceptanceInMonitor({
   | { outcome: "pending" }
   | { outcome: "not_accepted"; conversation: Conversation }
 > {
-  const evidence = await detectTerminalSubmissionAcceptance({
+  let bindingRecovery = await recoverVirginCodexPostSubmissionBinding({
+    options,
+    conversation,
+    statePath,
+    logPath,
+    terminalLockHeld: true
+  });
+  conversation = bindingRecovery.conversation;
+  let evidence = await detectTerminalSubmissionAcceptance({
     options,
     executor: executor.kind,
     conversation,
     terminalControl
   });
+  const recoveredAnchor = isRecord(conversation.native_session_takeover) &&
+    isRecord(
+      conversation.native_session_takeover.codex_rollout_acceptance_anchor
+    )
+    ? conversation.native_session_takeover.codex_rollout_acceptance_anchor
+    : undefined;
+  if (
+    evidence &&
+    recoveredAnchor?.version === 2 &&
+    bindingRecovery.state === "not_applicable"
+  ) {
+    throw new Error(
+      "virgin Codex acceptance appeared without a recoverable Session/Turn binding"
+    );
+  }
+  if (
+    evidence &&
+    recoveredAnchor?.version === 2 &&
+    bindingRecovery.state === "pending"
+  ) {
+    // The session_meta and exact user record can land between the first
+    // recovery probe and this acceptance probe. Never persist agent_accepted
+    // until the same evidence has also closed the Session/Turn binding CAS.
+    bindingRecovery = await recoverVirginCodexPostSubmissionBinding({
+      options,
+      conversation,
+      statePath,
+      logPath,
+      terminalLockHeld: true
+    });
+    if (
+      bindingRecovery.state !== "recovered" &&
+      bindingRecovery.state !== "already_bound"
+    ) {
+      return { outcome: "pending" };
+    }
+    conversation = bindingRecovery.conversation;
+    evidence = await detectTerminalSubmissionAcceptance({
+      options,
+      executor: executor.kind,
+      conversation,
+      terminalControl
+    });
+    if (!evidence) {
+      return { outcome: "pending" };
+    }
+  }
   const submission = terminalBridgeSubmission(conversation);
   const nativeTakeover = isRecord(conversation.native_session_takeover)
     ? conversation.native_session_takeover
@@ -16524,12 +16940,20 @@ async function reconcileMonitors(
         continue;
       }
 
-      const initialConversation = await migrateLegacyTerminalAgentIdentity({
+      let initialConversation = await migrateLegacyTerminalAgentIdentity({
         conversation: loadState(statePath),
         statePath,
         logPath,
         options
       });
+      initialConversation = (
+        await recoverVirginCodexPostSubmissionBinding({
+          options,
+          conversation: initialConversation,
+          statePath,
+          logPath
+        })
+      ).conversation;
       assertTurnBindingCurrent(initialConversation, "reconcile monitor for");
       const initialEligibility = terminalBridgeReconciliationEligibility(initialConversation);
       if (!initialEligibility.eligible) {

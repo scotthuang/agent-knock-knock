@@ -813,7 +813,7 @@ export function parseTmuxListPanes(output: string, socketPath?: string): Termina
     if (line.trim().length === 0) {
       continue;
     }
-    const parsed = parseTmuxPaneLine(line);
+    const parsed = parseTmuxPaneLine(line, socketPath);
     if (!parsed) {
       continue;
     }
@@ -827,7 +827,10 @@ export function parseTmuxListPanes(output: string, socketPath?: string): Termina
   return panes;
 }
 
-function parseTmuxPaneLine(line: string): Omit<TerminalPane, "kind" | "target" | "socketPath"> | undefined {
+function parseTmuxPaneLine(
+  line: string,
+  socketPath?: string
+): Omit<TerminalPane, "kind" | "target" | "socketPath"> | undefined {
   const tabFields = line.split("\t");
   const fields = tabFields.length >= 8
     ? [
@@ -840,16 +843,12 @@ function parseTmuxPaneLine(line: string): Omit<TerminalPane, "kind" | "target" |
         tabFields.at(-2) ?? "",
         tabFields.at(-1) ?? ""
       ]
-    : tabFields.length >= 6
-      ? [
-          tabFields[0],
-          tabFields[1],
-          tabFields[2],
-          tabFields[3],
-          tabFields[4],
-          tabFields.slice(5).join("\t")
-        ]
-      : parseWhitespaceTmuxPaneLine(line) ?? parseUnderscoreTmuxPaneLine(line);
+    : tabFields.length === 6
+      ? tabFields
+      : tabFields.length > 1
+        ? undefined
+        : parseWhitespaceTmuxPaneLine(line, socketPath) ??
+          parseUnderscoreTmuxPaneLine(line, socketPath);
   if (!fields) {
     return undefined;
   }
@@ -882,13 +881,69 @@ function parseTmuxPaneLine(line: string): Omit<TerminalPane, "kind" | "target" |
   };
 }
 
-function parseWhitespaceTmuxPaneLine(line: string): string[] | undefined {
-  const match = /^(\S+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/u.exec(line.trim());
+function parseWhitespaceTmuxPaneLine(line: string, socketPath?: string): string[] | undefined {
+  const trimmed = line.trim();
+  const paneIdMatch = /\s+(%\d+)$/u.exec(trimmed);
+  if (paneIdMatch) {
+    // As with underscore-collapsed output below, an eight-field whitespace
+    // line is ambiguous unless it ends in the exact socket used by this
+    // query. Paths on either side of that boundary may contain whitespace.
+    if (!socketPath) {
+      return undefined;
+    }
+    const paneId = paneIdMatch[1];
+    const beforePane = trimmed.slice(0, paneIdMatch.index).trimEnd();
+    if (!beforePane.endsWith(socketPath)) {
+      return undefined;
+    }
+    const socketStart = beforePane.length - socketPath.length;
+    if (
+      socketStart < 1 ||
+      !/\s/u.test(beforePane[socketStart - 1])
+    ) {
+      return undefined;
+    }
+    const legacyFields = parseLegacyWhitespaceTmuxPaneLine(
+      beforePane.slice(0, socketStart).trimEnd()
+    );
+    return legacyFields ? [...legacyFields, socketPath, paneId] : undefined;
+  }
+  return parseLegacyWhitespaceTmuxPaneLine(trimmed);
+}
+
+function parseLegacyWhitespaceTmuxPaneLine(line: string): string[] | undefined {
+  const match = /^(\S+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/u.exec(line);
   return match ? match.slice(1) : undefined;
 }
 
-function parseUnderscoreTmuxPaneLine(line: string): string[] | undefined {
-  const match = /^(.+)_(\d+)_(\d+)_(\d+)_([^_]+)_(.+?)\s*$/u.exec(line.trim());
+function parseUnderscoreTmuxPaneLine(line: string, socketPath?: string): string[] | undefined {
+  const trimmed = line.trim();
+  const paneIdMatch = /_(%\d+)$/u.exec(trimmed);
+  if (paneIdMatch) {
+    // Some command runners collapse tmux's tab-delimited output into
+    // underscores. The current eight-field format is only unambiguous when
+    // the exact socket used for this query is known: both pane_current_path
+    // and socket_path may themselves contain underscores. Never fall back to
+    // the legacy six-field parser for an extended-looking line, because that
+    // would silently append the socket and pane ID to the working directory.
+    if (!socketPath) {
+      return undefined;
+    }
+    const paneId = paneIdMatch[1];
+    const suffix = `_${socketPath}_${paneId}`;
+    if (!trimmed.endsWith(suffix)) {
+      return undefined;
+    }
+    const legacyFields = parseLegacyUnderscoreTmuxPaneLine(
+      trimmed.slice(0, -suffix.length)
+    );
+    return legacyFields ? [...legacyFields, socketPath, paneId] : undefined;
+  }
+  return parseLegacyUnderscoreTmuxPaneLine(trimmed);
+}
+
+function parseLegacyUnderscoreTmuxPaneLine(line: string): string[] | undefined {
+  const match = /^(.+)_(\d+)_(\d+)_(\d+)_([^_]+)_(.+?)\s*$/u.exec(line);
   return match ? match.slice(1) : undefined;
 }
 
