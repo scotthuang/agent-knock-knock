@@ -116,6 +116,7 @@ export class TerminalControlProviderRegistry {
 
 class RegistryTerminalControlProvider implements TerminalControlProvider {
   readonly kind = "registry";
+  private readonly discoveryErrors = new Map<string, string>();
 
   constructor(
     private readonly registeredProviders: () => TerminalControlProvider[]
@@ -137,25 +138,45 @@ class RegistryTerminalControlProvider implements TerminalControlProvider {
 
   async diagnostics(): Promise<Record<string, unknown>> {
     const providers = this.registeredProviders();
-    const diagnostics = await Promise.all(providers.map(async (provider) => [
-      provider.kind,
-      await provider.diagnostics()
-    ] as const));
+    const diagnostics = await Promise.all(providers.map(async (provider) => {
+      try {
+        return [provider.kind, await provider.diagnostics()] as const;
+      } catch (error) {
+        return [provider.kind, {
+          provider: provider.kind,
+          status: "error",
+          error: terminalProviderErrorMessage(error)
+        }] as const;
+      }
+    }));
     return {
       provider: this.kind,
       providerKinds: providers.map((provider) => provider.kind),
-      providers: Object.fromEntries(diagnostics)
+      providers: Object.fromEntries(diagnostics),
+      discoveryErrors: Object.fromEntries(this.discoveryErrors)
     };
   }
 
   async listTerminals(): Promise<TerminalEndpointRef[]> {
     const batches = await Promise.all(
       this.registeredProviders().map(async (provider) => {
-        const terminals = await provider.listTerminals();
-        for (const terminal of terminals) {
-          assertEndpointKind(terminal, provider.kind);
+        try {
+          const terminals = await provider.listTerminals();
+          for (const terminal of terminals) {
+            assertEndpointKind(terminal, provider.kind);
+          }
+          this.discoveryErrors.delete(provider.kind);
+          return terminals;
+        } catch (error) {
+          // A provider that cannot prove its own endpoints must contribute no
+          // candidates, but it must not make a different healthy transport
+          // disappear. Keep the last failure visible through diagnostics.
+          this.discoveryErrors.set(
+            provider.kind,
+            terminalProviderErrorMessage(error)
+          );
+          return [];
         }
-        return terminals;
       })
     );
     return batches.flat();
@@ -237,6 +258,10 @@ class RegistryTerminalControlProvider implements TerminalControlProvider {
     }
     return provider;
   }
+}
+
+function terminalProviderErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function intersectRegisteredCapabilities<T extends string>(

@@ -129,6 +129,27 @@ class RecordingTerminalControlProvider implements TerminalControlProvider {
   }
 }
 
+class FailingDiscoveryTerminalControlProvider extends RecordingTerminalControlProvider {
+  failDiscovery = true;
+  failDiagnostics = true;
+
+  override async diagnostics(): Promise<Record<string, unknown>> {
+    this.calls.push("diagnostics");
+    if (this.failDiagnostics) {
+      throw new Error(`${this.kind} diagnostics failed`);
+    }
+    return { kind: this.kind };
+  }
+
+  override async listTerminals(): Promise<TerminalEndpointRef[]> {
+    this.calls.push("listTerminals");
+    if (this.failDiscovery) {
+      throw new Error(`${this.kind} discovery failed`);
+    }
+    return [this.terminal];
+  }
+}
+
 async function terminalEndpoint(
   target: string,
   canonicalSocketPath?: string,
@@ -530,6 +551,51 @@ test("terminal provider registry facade aggregates and dispatches by provider ki
   assert.throws(
     () => provider.toControlRef(unknown.terminal),
     /not registered for unknown/u
+  );
+});
+
+test("terminal provider registry isolates discovery failures by provider", async () => {
+  const tmux = new RecordingTerminalControlProvider(
+    "tmux",
+    ["screen_status", "send_keys"],
+    ["screen_capture", "text_delivery", "key_delivery"]
+  );
+  const herdr = new FailingDiscoveryTerminalControlProvider(
+    "herdr",
+    ["screen_status", "send_keys"],
+    ["screen_capture", "text_delivery", "key_delivery"]
+  );
+  const provider = createTerminalControlProviderRegistry([
+    tmux,
+    herdr
+  ]).asProvider();
+
+  assert.deepEqual(await provider.listTerminals(), [tmux.terminal]);
+  assert.deepEqual(await provider.diagnostics(), {
+    provider: "registry",
+    providerKinds: ["tmux", "herdr"],
+    providers: {
+      tmux: { kind: "tmux" },
+      herdr: {
+        provider: "herdr",
+        status: "error",
+        error: "herdr diagnostics failed"
+      }
+    },
+    discoveryErrors: {
+      herdr: "herdr discovery failed"
+    }
+  });
+
+  herdr.failDiscovery = false;
+  herdr.failDiagnostics = false;
+  assert.deepEqual(await provider.listTerminals(), [
+    tmux.terminal,
+    herdr.terminal
+  ]);
+  assert.deepEqual(
+    (await provider.diagnostics()).discoveryErrors,
+    {}
   );
 });
 
