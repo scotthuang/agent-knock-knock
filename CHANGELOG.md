@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.12.1 - 2026-08-11
+
+### Fixed
+
+- Allow a genuinely virgin Codex TUI to accept its first AKK send by pinning the exact process incarnation before input, then atomically refining the Session and Turn to the newly materialized native UUID, rollout, and request evidence after the single Enter.
+- Recover both post-Enter virgin-binding crash windows without replaying terminal text or Enter, while preserving the existing ownership, binding-generation, process, pane, cwd, rollout, and request-hash fences.
+- Preserve tmux `pane_current_path` when extended eight-field pane output is collapsed to whitespace or underscores, rejecting ambiguous or truncated records instead of appending the server socket and pane ID to the workspace.
+- Preserve Codex composer ANSI styling through Herdr's visible screen buffer so an empty dim placeholder is not mistaken for authored draft text, while leaving ordinary monitor and status reads on Herdr's agent-aware detection buffer.
+
 ## 0.12.0 - 2026-08-10
 
 ### Added
