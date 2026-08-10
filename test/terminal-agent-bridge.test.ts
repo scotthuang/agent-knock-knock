@@ -22,13 +22,21 @@ import {
 import {
   NativeInspectionDismissalError,
   NativeInspectionSubmissionError,
-  TerminalAgentBridge
+  TerminalAgentBridge,
+  TerminalInputNotStartedError,
+  terminalApprovalFingerprint
 } from "../src/terminal-agent-bridge.js";
 import {
   terminalRefFromPane,
+  StaticTerminalControlProvider,
   type TerminalControlProvider,
   type TerminalPane
 } from "../src/terminal-control-provider.js";
+import type {
+  TerminalControlRef,
+  TerminalEndpointRef,
+  TerminalProviderCapability
+} from "../src/terminal-control-ref.js";
 
 const PANE: TerminalPane = {
   kind: "tmux",
@@ -64,50 +72,84 @@ type ProviderOperation =
   | { kind: "text"; target: string; text: string; socketPath?: string }
   | { kind: "keys"; target: string; keys: string[]; socketPath?: string };
 
-class RecordingTerminalProvider implements TerminalControlProvider {
+class RecordingTerminalProvider extends StaticTerminalControlProvider {
   readonly operations: ProviderOperation[] = [];
-  private readonly screens = new Map<string, string>();
+  private readonly recordingScreens = new Map<string, string>();
 
   constructor(
-    private readonly panes: TerminalPane[] = [PANE],
+    panes: TerminalPane[] = [PANE],
     screens: Record<string, string> = {}
   ) {
+    super({ panes, screens });
     for (const [target, screen] of Object.entries(screens)) {
-      this.screens.set(target, screen);
+      this.recordingScreens.set(target, screen);
     }
   }
 
-  setScreen(target: string, screen: string): void {
-    this.screens.set(target, screen);
+  setScreen(target: TerminalEndpointRef | string, screen: string): void {
+    this.recordingScreens.set(providerTarget(target).target, screen);
   }
 
-  async listPanes(): Promise<TerminalPane[]> {
-    return this.panes;
-  }
-
-  async capture(
-    target: string,
-    options: { scrollbackLines?: number; socketPath?: string } = {}
+  override async capture(
+    terminal: TerminalEndpointRef | string,
+    options: {
+      scrollbackLines?: number;
+      socketPath?: string;
+      preserveEscapes?: boolean;
+    } = {}
   ): Promise<string> {
-    this.operations.push({ kind: "capture", target, socketPath: options.socketPath });
-    return this.screens.get(target) ?? "";
+    const { target, socketPath } = providerTarget(terminal, options.socketPath);
+    this.operations.push({ kind: "capture", target, socketPath });
+    return this.recordingScreens.get(target) ?? "";
   }
 
-  async sendText(
-    target: string,
+  override async sendText(
+    terminal: TerminalEndpointRef | string,
     text: string,
     options: { socketPath?: string } = {}
   ): Promise<void> {
-    this.operations.push({ kind: "text", target, text, socketPath: options.socketPath });
+    const { target, socketPath } = providerTarget(terminal, options.socketPath);
+    this.operations.push({ kind: "text", target, text, socketPath });
   }
 
-  async sendKeys(
-    target: string,
+  override async sendKeys(
+    terminal: TerminalEndpointRef | string,
     keys: readonly string[],
     options: { socketPath?: string } = {}
   ): Promise<void> {
-    this.operations.push({ kind: "keys", target, keys: [...keys], socketPath: options.socketPath });
+    const { target, socketPath } = providerTarget(terminal, options.socketPath);
+    this.operations.push({ kind: "keys", target, keys: [...keys], socketPath });
   }
+}
+
+class CapabilityLimitedTerminalProvider extends RecordingTerminalProvider {
+  override readonly providerCapabilities: readonly TerminalProviderCapability[];
+
+  constructor(
+    providerCapabilities: readonly TerminalProviderCapability[],
+    panes: TerminalPane[] = [PANE],
+    screens: Record<string, string> = {}
+  ) {
+    super(panes, screens);
+    this.providerCapabilities = [...providerCapabilities];
+  }
+}
+
+function providerTarget(
+  terminal: TerminalEndpointRef | string,
+  legacySocketPath?: string
+): { target: string; socketPath?: string } {
+  if (typeof terminal === "string") {
+    return { target: terminal, socketPath: legacySocketPath };
+  }
+  const providerRef = terminal.providerRef as Partial<TerminalControlRef>;
+  if (providerRef.kind !== "tmux" || !providerRef.target) {
+    throw new Error("test provider expected a tmux terminal endpoint");
+  }
+  return {
+    target: providerRef.target,
+    socketPath: providerRef.socketPath
+  };
 }
 
 class TimelineTerminalProvider extends RecordingTerminalProvider {
@@ -120,7 +162,7 @@ class TimelineTerminalProvider extends RecordingTerminalProvider {
   }
 
   override async capture(
-    target: string,
+    target: TerminalEndpointRef | string,
     options: { scrollbackLines?: number; socketPath?: string } = {}
   ): Promise<string> {
     this.timeline.push("capture");
@@ -128,13 +170,60 @@ class TimelineTerminalProvider extends RecordingTerminalProvider {
   }
 
   override async sendKeys(
-    target: string,
+    target: TerminalEndpointRef | string,
     keys: readonly string[],
     options: { socketPath?: string } = {}
   ): Promise<void> {
     this.timeline.push(`sendKeys:${keys.join(",")}`);
     return super.sendKeys(target, keys, options);
   }
+}
+
+class SequencedResolutionProvider extends RecordingTerminalProvider {
+  resolveCount = 0;
+
+  constructor(private readonly resolutions: readonly TerminalEndpointRef[]) {
+    super([]);
+    if (resolutions.length === 0) {
+      throw new Error("sequenced provider requires at least one resolution");
+    }
+  }
+
+  override async resolve(
+    _terminal: TerminalEndpointRef
+  ): Promise<TerminalEndpointRef> {
+    const resolved = this.resolutions[
+      Math.min(this.resolveCount, this.resolutions.length - 1)
+    ];
+    this.resolveCount += 1;
+    return resolved;
+  }
+}
+
+async function endpointForPane(pane: TerminalPane): Promise<TerminalEndpointRef> {
+  const endpoints = await new StaticTerminalControlProvider({
+    panes: [pane]
+  }).listTerminals();
+  assert.equal(endpoints.length, 1);
+  return endpoints[0];
+}
+
+function stablePane(
+  target: string,
+  overrides: Partial<TerminalPane> = {}
+): TerminalPane {
+  const [session = target, route = "0.0"] = target.split(":", 2);
+  const [windowText = "0", paneText = "0"] = route.split(".", 2);
+  return {
+    ...PANE,
+    target,
+    session,
+    window: Number.parseInt(windowText, 10),
+    pane: Number.parseInt(paneText, 10),
+    serverSocketPath: "/tmp/stable-tmux-server.sock",
+    paneId: "%42",
+    ...overrides
+  };
 }
 
 function createTestClaudeAdapter(options: {
@@ -409,7 +498,7 @@ test("Codex multiline send crosses the paste window and requires a stable exact 
     enterDispatchedAt?: number;
 
     override async sendText(
-      target: string,
+      target: TerminalEndpointRef | string,
       text: string,
       options: { socketPath?: string } = {}
     ): Promise<void> {
@@ -424,7 +513,7 @@ test("Codex multiline send crosses the paste window and requires a stable exact 
     }
 
     override async sendKeys(
-      target: string,
+      target: TerminalEndpointRef | string,
       keys: readonly string[],
       options: { socketPath?: string } = {}
     ): Promise<void> {
@@ -491,7 +580,7 @@ test("Codex multiline send proves an exact draft across visual composer wraps", 
     suppressedEnterCount = 0;
 
     override async sendText(
-      target: string,
+      target: TerminalEndpointRef | string,
       text: string,
       options: { socketPath?: string } = {}
     ): Promise<void> {
@@ -513,7 +602,7 @@ test("Codex multiline send proves an exact draft across visual composer wraps", 
     }
 
     override async sendKeys(
-      target: string,
+      target: TerminalEndpointRef | string,
       keys: readonly string[],
       options: { socketPath?: string } = {}
     ): Promise<void> {
@@ -574,7 +663,7 @@ test("Codex multiline send rejects mutated content across visual composer wraps"
   ].join("\n");
   class MutatedWrappedComposerProvider extends RecordingTerminalProvider {
     override async sendText(
-      target: string,
+      target: TerminalEndpointRef | string,
       text: string,
       options: { socketPath?: string } = {}
     ): Promise<void> {
@@ -619,7 +708,7 @@ test("Codex multiline settle starts only after the exact composer materializes",
     enterDispatchedAt?: number;
 
     override async sendText(
-      target: string,
+      target: TerminalEndpointRef | string,
       text: string,
       options: { socketPath?: string } = {}
     ): Promise<void> {
@@ -636,7 +725,7 @@ test("Codex multiline settle starts only after the exact composer materializes",
     }
 
     override async sendKeys(
-      target: string,
+      target: TerminalEndpointRef | string,
       keys: readonly string[],
       options: { socketPath?: string } = {}
     ): Promise<void> {
@@ -678,7 +767,7 @@ test("unchanged multilingual multiline composer after one Enter is proven not ac
   const request = "第一行：保留精确内容\nSecond line with  two spaces.";
   class UnchangedComposerProvider extends RecordingTerminalProvider {
     override async sendText(
-      target: string,
+      target: TerminalEndpointRef | string,
       text: string,
       options: { socketPath?: string } = {}
     ): Promise<void> {
@@ -793,7 +882,7 @@ test("Codex multiline send fails closed when the stable composer drifts before E
     drifted = false;
 
     override async sendText(
-      target: string,
+      target: TerminalEndpointRef | string,
       text: string,
       options: { socketPath?: string } = {}
     ): Promise<void> {
@@ -807,7 +896,7 @@ test("Codex multiline send fails closed when the stable composer drifts before E
     }
 
     override async capture(
-      target: string,
+      target: TerminalEndpointRef | string,
       options: { scrollbackLines?: number; socketPath?: string } = {}
     ): Promise<string> {
       const screen = await super.capture(target, options);
@@ -917,6 +1006,45 @@ test("bridge preserves ordered approval and cancellation key sequences", async (
       { kind: "keys", target: PANE.target, keys: ["Down", "C-m"], socketPath: PANE.socketPath },
       { kind: "keys", target: PANE.target, keys: ["Escape", "C-c"], socketPath: PANE.socketPath }
     ]
+  );
+});
+
+test("approval accepts an exact pending v0.11.x legacy fingerprint after endpoint discovery", async () => {
+  const adapter = createTestClaudeAdapter();
+  const screen = "approval:npm test";
+  const provider = new RecordingTerminalProvider([PANE], {
+    [PANE.target]: screen
+  });
+  const control = terminalControl(adapter);
+  const inspection = adapter.inspectScreen({ screen });
+  const legacyFingerprint = terminalApprovalFingerprint(
+    "claude",
+    control,
+    inspection,
+    { screen }
+  );
+  assert.ok(legacyFingerprint);
+  assert.equal(
+    legacyFingerprint,
+    "f4067af68ce36e706d4480df477075dd285fd44b3e63ccfc0e171434a7c6510b"
+  );
+
+  const approval = await createBridge(adapter, provider).approve(
+    "claude",
+    control,
+    { expectedFingerprint: legacyFingerprint }
+  );
+
+  assert.equal(approval.approved, true);
+  assert.equal(approval.fingerprint, legacyFingerprint);
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind === "keys"),
+    [{
+      kind: "keys",
+      target: PANE.target,
+      keys: ["Down", "C-m"],
+      socketPath: PANE.socketPath
+    }]
   );
 });
 
@@ -1529,7 +1657,7 @@ test("hookless Claude rejects a changed terminal ref from the final identity che
       runtime: MANAGED_CLAUDE_RUNTIME,
       beforeKeyDispatch: () => undefined
     }),
-    /terminal control identity changed after the final approval capture/u
+    /terminal control identity changed/u
   );
   assert.equal(verificationCalls, 6);
   assert.deepEqual(
@@ -1931,7 +2059,67 @@ test("send requires both a registered agent and send_keys capability", async () 
   );
   await assert.rejects(
     () => bridge.send("claude", { ...control, capabilities: [] }, "do work"),
-    /terminal input is not supported/
+    (error: unknown) => {
+      assert.ok(error instanceof TerminalInputNotStartedError);
+      assert.match(error.message, /terminal:send_keys/u);
+      return true;
+    }
+  );
+  assert.deepEqual(provider.operations, []);
+});
+
+test("send preflights compound transport capabilities before terminal input", async () => {
+  const adapter = createTestClaudeAdapter();
+  const pane = stablePane("claude-capabilities:1.2");
+  const provider = new CapabilityLimitedTerminalProvider(
+    ["stable_resource_resolution", "text_delivery"],
+    [pane]
+  );
+  const [endpoint] = await provider.listTerminals();
+  assert.ok(endpoint);
+  const control = provider.toControlRef(endpoint, ["send_keys"]);
+
+  await assert.rejects(
+    createBridge(adapter, provider).send("claude", control, "do work"),
+    (error: unknown) => {
+      assert.ok(error instanceof TerminalInputNotStartedError);
+      assert.equal(error.code, "AKK_TERMINAL_INPUT_NOT_STARTED");
+      assert.match(error.message, /provider:key_delivery/u);
+      return true;
+    }
+  );
+  assert.deepEqual(provider.operations, []);
+});
+
+test("approval preflights capture and key capabilities before observation or reservation", async () => {
+  const adapter = createTestClaudeAdapter();
+  const pane = stablePane("claude-approval-capabilities:1.2");
+  const provider = new CapabilityLimitedTerminalProvider(
+    ["stable_resource_resolution", "screen_capture"],
+    [pane],
+    { [pane.target]: "approval:npm test" }
+  );
+  const [endpoint] = await provider.listTerminals();
+  assert.ok(endpoint);
+  const control = provider.toControlRef(endpoint, [
+    "screen_status",
+    "send_keys",
+    "terminal_approval"
+  ]);
+
+  await assert.rejects(
+    createBridge(adapter, provider).approve("claude", control, {
+      expectedFingerprint: "caller-supplied-fingerprint"
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(
+        (error as Error & { code?: string }).code,
+        "AKK_TERMINAL_INPUT_NOT_SENT"
+      );
+      assert.match(error.message, /provider:key_delivery/u);
+      return true;
+    }
   );
   assert.deepEqual(provider.operations, []);
 });
@@ -1962,7 +2150,7 @@ test("stale terminal identity is rejected before any tmux input", async () => {
   assert.deepEqual(provider.operations, []);
 });
 
-test("send clears pasted text and never submits it when the second identity check fails", async () => {
+test("send leaves injected text untouched and never submits after identity failure", async () => {
   const adapter = createTestClaudeAdapter();
   const provider = new RecordingTerminalProvider([PANE]);
   let checks = 0;
@@ -1989,12 +2177,6 @@ test("send clears pasted text and never submits it when the second identity chec
       target: PANE.target,
       text: "do work",
       socketPath: PANE.socketPath
-    },
-    {
-      kind: "keys",
-      target: PANE.target,
-      keys: ["C-u"],
-      socketPath: PANE.socketPath
     }
   ]);
   assert.equal(
@@ -2003,6 +2185,201 @@ test("send clears pasted text and never submits it when the second identity chec
     ),
     false
   );
+});
+
+test("send resolves a stable endpoint again for text and Enter routes", async () => {
+  const adapter = createTestClaudeAdapter();
+  const initialEndpoint = await endpointForPane(
+    stablePane("claude-original:1.2")
+  );
+  const textEndpoint = await endpointForPane(
+    stablePane("claude-renamed:3.4")
+  );
+  const enterEndpoint = await endpointForPane(
+    stablePane("claude-final:5.6")
+  );
+  const provider = new SequencedResolutionProvider([
+    textEndpoint,
+    enterEndpoint
+  ]);
+  const bridge = createBridge(adapter, provider);
+  const control = provider.toControlRef(
+    initialEndpoint,
+    terminalControl(adapter).capabilities
+  );
+  const stages: string[] = [];
+
+  const result = await bridge.send("claude", control, "do work", {
+    onTransportStage(event) {
+      stages.push(event.stage);
+    }
+  });
+
+  assert.equal(result.stage, "enter_dispatched");
+  assert.equal(provider.resolveCount, 2);
+  assert.deepEqual(stages, ["text_injected", "enter_dispatched"]);
+  assert.deepEqual(provider.operations, [
+    {
+      kind: "text",
+      target: "claude-renamed:3.4",
+      text: "do work",
+      socketPath: PANE.socketPath
+    },
+    {
+      kind: "keys",
+      target: "claude-final:5.6",
+      keys: ["C-m"],
+      socketPath: PANE.socketPath
+    }
+  ]);
+});
+
+test("send preserves not-started and post-injection uncertainty across endpoint drift", async (t) => {
+  const adapter = createTestClaudeAdapter();
+  const initialEndpoint = await endpointForPane(
+    stablePane("claude-original:1.2")
+  );
+  const freshTextEndpoint = await endpointForPane(
+    stablePane("claude-renamed:3.4")
+  );
+  const driftCases = [
+    {
+      label: "stable resource identity",
+      endpoint: await endpointForPane(
+        stablePane("claude-drifted:5.6", { paneId: "%99" })
+      )
+    },
+    {
+      label: "process anchor",
+      endpoint: await endpointForPane(
+        stablePane("claude-drifted:5.6", { panePid: PANE.panePid + 1 })
+      )
+    }
+  ];
+
+  for (const drift of driftCases) {
+    await t.test(`${drift.label} drift before text is proven not started`, async () => {
+      const provider = new SequencedResolutionProvider([drift.endpoint]);
+      const bridge = createBridge(adapter, provider);
+      const control = provider.toControlRef(
+        initialEndpoint,
+        terminalControl(adapter).capabilities
+      );
+
+      await assert.rejects(
+        bridge.send("claude", control, "do work"),
+        (error: unknown) => {
+          assert.ok(error instanceof TerminalInputNotStartedError);
+          assert.equal(error.code, "AKK_TERMINAL_INPUT_NOT_STARTED");
+          assert.match(
+            error.message,
+            /stable resource or process anchor changed/u
+          );
+          return true;
+        }
+      );
+      assert.equal(provider.resolveCount, 1);
+      assert.deepEqual(provider.operations, []);
+    });
+
+    await t.test(`${drift.label} drift after text never presses Enter`, async () => {
+      const provider = new SequencedResolutionProvider([
+        freshTextEndpoint,
+        drift.endpoint
+      ]);
+      const bridge = createBridge(adapter, provider);
+      const control = provider.toControlRef(
+        initialEndpoint,
+        terminalControl(adapter).capabilities
+      );
+      const stages: string[] = [];
+
+      await assert.rejects(
+        bridge.send("claude", control, "do work", {
+          onTransportStage(event) {
+            stages.push(event.stage);
+          }
+        }),
+        (error: unknown) => {
+          assert.ok(error instanceof Error);
+          assert.equal(error instanceof TerminalInputNotStartedError, false);
+          assert.match(
+            error.message,
+            /stable resource or process anchor changed/u
+          );
+          return true;
+        }
+      );
+      assert.equal(provider.resolveCount, 2);
+      assert.deepEqual(stages, ["text_injected"]);
+      assert.deepEqual(provider.operations, [{
+        kind: "text",
+        target: "claude-renamed:3.4",
+        text: "do work",
+        socketPath: PANE.socketPath
+      }]);
+    });
+  }
+});
+
+test("native inspection preflights every transport capability before terminal input", async (t) => {
+  const pane = stablePane("codex-capabilities:1.2");
+  const cases: Array<{
+    label: string;
+    providerCapabilities: readonly TerminalProviderCapability[];
+    missing: TerminalProviderCapability;
+  }> = [
+    {
+      label: "key delivery",
+      providerCapabilities: [
+        "stable_resource_resolution",
+        "screen_capture",
+        "text_delivery"
+      ],
+      missing: "key_delivery"
+    },
+    {
+      label: "screen capture",
+      providerCapabilities: [
+        "stable_resource_resolution",
+        "text_delivery",
+        "key_delivery"
+      ],
+      missing: "screen_capture"
+    }
+  ];
+
+  for (const testCase of cases) {
+    await t.test(`missing ${testCase.label}`, async () => {
+      const provider = new CapabilityLimitedTerminalProvider(
+        testCase.providerCapabilities,
+        [pane]
+      );
+      const [endpoint] = await provider.listTerminals();
+      assert.ok(endpoint);
+      const control = provider.toControlRef(endpoint, [
+        "send_keys",
+        "screen_status"
+      ]);
+
+      await assert.rejects(
+        createBridge(codexTerminalAgentAdapter, provider)
+          .submitNativeInspection(
+            "codex",
+            control,
+            codexStatusInspectionPlan()
+          ),
+        (error: unknown) => {
+          assert.ok(error instanceof NativeInspectionSubmissionError);
+          assert.equal(error.stage, "not_started");
+          assert.equal(error.doNotRetry, false);
+          assert.match(error.message, new RegExp(`provider:${testCase.missing}`, "u"));
+          return true;
+        }
+      );
+      assert.deepEqual(provider.operations, []);
+    });
+  }
 });
 
 test("native status inspection proves an exact stable composer before one Enter", async () => {
@@ -2017,7 +2394,7 @@ test("native status inspection proves an exact stable composer before one Enter"
     enterDispatchedAt?: number;
 
     override async sendText(
-      target: string,
+      target: TerminalEndpointRef | string,
       text: string,
       options: { socketPath?: string } = {}
     ): Promise<void> {
@@ -2027,7 +2404,7 @@ test("native status inspection proves an exact stable composer before one Enter"
     }
 
     override async sendKeys(
-      target: string,
+      target: TerminalEndpointRef | string,
       keys: readonly string[],
       options: { socketPath?: string } = {}
     ): Promise<void> {
@@ -2099,7 +2476,7 @@ test("Claude 2.1.226 native status uses its own stable composer and one modal di
     enterDispatchedAt?: number;
 
     override async sendText(
-      target: string,
+      target: TerminalEndpointRef | string,
       text: string,
       options: { socketPath?: string } = {}
     ): Promise<void> {
@@ -2109,7 +2486,7 @@ test("Claude 2.1.226 native status uses its own stable composer and one modal di
     }
 
     override async sendKeys(
-      target: string,
+      target: TerminalEndpointRef | string,
       keys: readonly string[],
       options: { socketPath?: string } = {}
     ): Promise<void> {
@@ -2203,7 +2580,7 @@ test("Claude 2.1.226 native status accepts its exact 80-column truncated popup",
   const adapter = createClaudeTerminalAgentAdapter();
   class NarrowClaudeProvider extends RecordingTerminalProvider {
     override async sendText(
-      target: string,
+      target: TerminalEndpointRef | string,
       text: string,
       options: { socketPath?: string } = {}
     ): Promise<void> {
@@ -2233,7 +2610,7 @@ test("Claude 2.1.226 native status rejects a non-prefix truncated popup", async 
     private capturesAfterInjection = 0;
 
     override async sendText(
-      target: string,
+      target: TerminalEndpointRef | string,
       text: string,
       options: { socketPath?: string } = {}
     ): Promise<void> {
@@ -2245,7 +2622,7 @@ test("Claude 2.1.226 native status rejects a non-prefix truncated popup", async 
     }
 
     override async capture(
-      target: string,
+      target: TerminalEndpointRef | string,
       options: { scrollbackLines?: number; socketPath?: string } = {}
     ): Promise<string> {
       this.capturesAfterInjection += 1;
@@ -2340,7 +2717,7 @@ test("Claude native inspection sends no Enter after post-injection identity drif
     injected = false;
 
     override async sendText(
-      target: string,
+      target: TerminalEndpointRef | string,
       text: string,
       options: { socketPath?: string } = {}
     ): Promise<void> {
@@ -2386,7 +2763,7 @@ test("Claude modal dismissal attempts Escape once and never retries an uncertain
     escapeAttempts = 0;
 
     override async sendKeys(
-      _target: string,
+      _target: TerminalEndpointRef | string,
       keys: readonly string[]
     ): Promise<void> {
       if (keys.includes("Escape")) {
@@ -2442,7 +2819,7 @@ test("Claude native inspection attempts Enter once and never retries an uncertai
     enterAttempts = 0;
 
     override async sendText(
-      target: string,
+      target: TerminalEndpointRef | string,
       text: string,
       options: { socketPath?: string } = {}
     ): Promise<void> {
@@ -2451,7 +2828,7 @@ test("Claude native inspection attempts Enter once and never retries an uncertai
     }
 
     override async sendKeys(
-      _target: string,
+      _target: TerminalEndpointRef | string,
       keys: readonly string[]
     ): Promise<void> {
       if (keys.includes("C-m")) {
@@ -2531,7 +2908,7 @@ test("Claude native inspection rejects forged slash and dismissal plans before i
 test("native status inspection accepts an exact current slash popup only at a proven idle prompt", async () => {
   class SlashPopupProvider extends RecordingTerminalProvider {
     override async sendText(
-      target: string,
+      target: TerminalEndpointRef | string,
       text: string,
       options: { socketPath?: string } = {}
     ): Promise<void> {
@@ -2585,7 +2962,7 @@ test("native status inspection accepts an exact current slash popup only at a pr
 test("Codex 0.147.0 native status requires its exact ordered two-row slash popup", async () => {
   class CurrentPopupProvider extends RecordingTerminalProvider {
     override async sendText(
-      target: string,
+      target: TerminalEndpointRef | string,
       text: string,
       options: { socketPath?: string } = {}
     ): Promise<void> {
@@ -2635,7 +3012,7 @@ test("Codex 0.147.0 native status refuses an incomplete two-row popup", async ()
     private capturesAfterInjection = 0;
 
     override async sendText(
-      target: string,
+      target: TerminalEndpointRef | string,
       text: string,
       options: { socketPath?: string } = {}
     ): Promise<void> {
@@ -2648,7 +3025,7 @@ test("Codex 0.147.0 native status refuses an incomplete two-row popup", async ()
     }
 
     override async capture(
-      target: string,
+      target: TerminalEndpointRef | string,
       options: { scrollbackLines?: number; socketPath?: string } = {}
     ): Promise<string> {
       this.capturesAfterInjection += 1;
@@ -2702,7 +3079,7 @@ test("native status inspection rejects an unprofiled slash popup description bef
     private capturesAfterInjection = 0;
 
     override async sendText(
-      target: string,
+      target: TerminalEndpointRef | string,
       text: string,
       options: { socketPath?: string } = {}
     ): Promise<void> {
@@ -2715,7 +3092,7 @@ test("native status inspection rejects an unprofiled slash popup description bef
     }
 
     override async capture(
-      target: string,
+      target: TerminalEndpointRef | string,
       options: { scrollbackLines?: number; socketPath?: string } = {}
     ): Promise<string> {
       this.capturesAfterInjection += 1;
@@ -2771,7 +3148,7 @@ test("native status inspection ignores historical /status when the current compo
     private capturesAfterInjection = 0;
 
     override async sendText(
-      target: string,
+      target: TerminalEndpointRef | string,
       text: string,
       options: { socketPath?: string } = {}
     ): Promise<void> {
@@ -2786,7 +3163,7 @@ test("native status inspection ignores historical /status when the current compo
     }
 
     override async capture(
-      target: string,
+      target: TerminalEndpointRef | string,
       options: { scrollbackLines?: number; socketPath?: string } = {}
     ): Promise<string> {
       this.capturesAfterInjection += 1;
@@ -2831,7 +3208,7 @@ test("native status inspection rejects working composer activity", async () => {
   ].join("\n")]) {
     class NonIdleProvider extends RecordingTerminalProvider {
       override async sendText(
-        target: string,
+        target: TerminalEndpointRef | string,
         text: string,
         options: { socketPath?: string } = {}
       ): Promise<void> {
@@ -2871,7 +3248,7 @@ test("native status inspection rejects working composer activity", async () => {
 test("native inspection error stages cannot regress after text injection", async () => {
   class NativeStatusProvider extends RecordingTerminalProvider {
     override async sendText(
-      target: string,
+      target: TerminalEndpointRef | string,
       text: string,
       options: { socketPath?: string } = {}
     ): Promise<void> {
@@ -2934,7 +3311,7 @@ test("native status inspection requires an unambiguous bounded pre-Enter evidenc
   ]) {
     class NativeStatusProvider extends RecordingTerminalProvider {
       override async sendText(
-        target: string,
+        target: TerminalEndpointRef | string,
         text: string,
         options: { socketPath?: string } = {}
       ): Promise<void> {
@@ -3010,7 +3387,7 @@ test("native status inspection rejects a caller-forged plan before terminal inpu
 test("native status inspection leaves injected text untouched when the final popup drifts", async () => {
   class SlashPopupProvider extends RecordingTerminalProvider {
     override async sendText(
-      target: string,
+      target: TerminalEndpointRef | string,
       text: string,
       options: { socketPath?: string } = {}
     ): Promise<void> {
@@ -3063,7 +3440,7 @@ test("native status inspection marks any failed Enter attempt uncertain and neve
     enterAttempts = 0;
 
     override async sendText(
-      target: string,
+      target: TerminalEndpointRef | string,
       text: string,
       options: { socketPath?: string } = {}
     ): Promise<void> {

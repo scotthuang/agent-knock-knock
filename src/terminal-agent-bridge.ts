@@ -9,6 +9,7 @@ import {
   type TerminalAgentAdapterCapabilities,
   type TerminalAgentAdapterRegistry,
   type TerminalCompletionEvidence,
+  type TerminalControlCapability,
   type TerminalControlRef,
   type TerminalDurableCompletionRequest,
   type TerminalNativeInspectionEvidenceInventoryEntry,
@@ -22,9 +23,16 @@ import {
 import {
   enrichActiveProcessesWithTerminalControl,
   TerminalControlInputNotSentError,
-  terminalRefFromPane,
   type TerminalControlProvider
 } from "./terminal-control-provider.js";
+import {
+  hasCanonicalTerminalEndpoint,
+  sameTerminalControlIncarnation,
+  terminalEndpointFromControlRef,
+  terminalEndpointIdentityKey,
+  type TerminalEndpointRef,
+  type TerminalProviderCapability
+} from "./terminal-control-ref.js";
 
 // Verified Codex profiles through 0.147.0 keep Enter in paste/newline mode for
 // 120ms after burst input. Cross that boundary rather than landing on it, and
@@ -122,7 +130,7 @@ export class NativeInspectionDismissalError extends Error {
 }
 
 export interface TerminalBridgeStatus {
-  provider: "tmux";
+  provider: string;
   target: string;
   agent: ExecutorKind;
   reachable: boolean;
@@ -407,11 +415,43 @@ export class TerminalAgentBridge {
       throw new Error(`process ${process.pid} is not terminal-controlled`);
     }
     this.registry.require(process.agent);
+    const terminal = this.terminalProvider.endpoint(process.terminalControl);
     return formatTerminalConversationId({
       agent: process.agent,
-      target: process.terminalControl.target,
+      target: terminal.route.label,
       pid: process.pid
     });
+  }
+
+  /**
+   * Resolve a persisted control reference by stable endpoint identity. This is
+   * the managed-Session path: its route-shaped v2 terminal id is only a
+   * compatibility alias and may be stale after an explicit provider refresh.
+   */
+  async resolveStoredTerminal(
+    agent: ExecutorKind,
+    pid: number,
+    terminalControl: TerminalControlRef,
+    runtime: TerminalRuntimeIdentity = { pid }
+  ): Promise<ResolvedTerminalConversation> {
+    const adapter = this.registry.require(agent);
+    const freshControl = await this.verifyTerminalIdentity(
+      agent,
+      terminalControl,
+      { ...runtime, pid }
+    );
+    return {
+      conversationId: this.terminalConversationId({
+        agent,
+        pid,
+        terminalControl: freshControl
+      }),
+      agent,
+      pid,
+      legacy: false,
+      adapter,
+      terminalControl: freshControl
+    };
   }
 
   async resolveConversationId(conversationId: string | undefined): Promise<ResolvedTerminalConversation | undefined> {
@@ -420,14 +460,15 @@ export class TerminalAgentBridge {
       return undefined;
     }
     const adapter = this.registry.require(parsed.agent);
-    const panes = await this.terminalProvider.listPanes();
-    const candidates = panes.filter(
-      (candidate) => candidate.kind === parsed.kind && candidate.target === parsed.target
+    const terminals = await this.terminalProvider.listTerminals();
+    const candidates = terminals.filter(
+      (candidate) => candidate.identity.providerKind === parsed.kind &&
+        candidate.route.label === parsed.target
     );
     const verified = this.verifyIdentity
-      ? (await Promise.all(candidates.map(async (pane) => {
-          const terminalControl = terminalRefFromPane(
-            pane,
+      ? (await Promise.all(candidates.map(async (terminal) => {
+          const terminalControl = this.terminalProvider.toControlRef(
+            terminal,
             terminalControlCapabilitiesForAdapter(adapter)
           );
           try {
@@ -436,18 +477,18 @@ export class TerminalAgentBridge {
               terminalControl,
               { pid: parsed.pid }
             );
-            return { pane, terminalControl: verifiedTerminalControl };
+            return { terminal, terminalControl: verifiedTerminalControl };
           } catch {
             return undefined;
           }
         }))).filter((candidate): candidate is {
-          pane: (typeof candidates)[number];
+          terminal: (typeof candidates)[number];
           terminalControl: TerminalControlRef;
         } => candidate !== undefined)
-      : candidates.slice(0, 1).map((pane) => ({
-          pane,
-          terminalControl: terminalRefFromPane(
-            pane,
+      : candidates.slice(0, 1).map((terminal) => ({
+          terminal,
+          terminalControl: this.terminalProvider.toControlRef(
+            terminal,
             terminalControlCapabilitiesForAdapter(adapter)
           )
         }));
@@ -513,16 +554,36 @@ export class TerminalAgentBridge {
     options: TerminalSendOptions = {}
   ): Promise<TerminalSendResult> {
     const adapter = this.registry.require(agent);
-    if (!terminalControl.capabilities.includes("send_keys")) {
+    const multiline = /[\r\n]/u.test(text.trimEnd());
+    try {
+      assertTerminalMutationCapabilities({
+        provider: this.terminalProvider,
+        terminal: this.terminalProvider.endpoint(terminalControl),
+        semantic: [
+          "send_keys",
+          ...(adapter.agent === "codex" && multiline
+            ? ["screen_status" as const]
+            : [])
+        ],
+        transport: [
+          "stable_resource_resolution",
+          "text_delivery",
+          "key_delivery",
+          ...(adapter.agent === "codex" && multiline
+            ? ["screen_capture" as const]
+            : [])
+        ]
+      });
+    } catch (error) {
       throw new TerminalInputNotStartedError(
-        `${adapter.displayName} terminal input is not supported`
+        error instanceof Error ? error.message : String(error),
+        { cause: error }
       );
     }
     const normalized = text.trimEnd();
     if (!normalized) {
       throw new TerminalInputNotStartedError("terminal message is empty");
     }
-    const multiline = /[\r\n]/u.test(normalized);
     let verifiedForText: TerminalControlRef;
     try {
       verifiedForText = await this.verifyTerminalIdentity(
@@ -537,9 +598,15 @@ export class TerminalAgentBridge {
       );
     }
     try {
-      await this.terminalProvider.sendText(verifiedForText.target, normalized, {
-        socketPath: verifiedForText.socketPath
-      });
+      if (!verifiedForText.capabilities.includes("send_keys")) {
+        throw new TerminalControlInputNotSentError(
+          `${adapter.displayName} terminal input capability changed before injection`
+        );
+      }
+      await this.terminalProvider.sendText(
+        this.terminalProvider.endpoint(verifiedForText),
+        normalized
+      );
     } catch (error) {
       if (error instanceof TerminalControlInputNotSentError) {
         throw new TerminalInputNotStartedError(error.message, {
@@ -555,8 +622,9 @@ export class TerminalAgentBridge {
       multiline
     });
     // Text and Enter are separate tmux operations. Revalidate between them and
-    // never submit after identity or composer drift. The legacy single-line
-    // path retains its best-effort pre-submit cleanup behavior.
+    // never submit after identity or composer drift. A failed revalidation
+    // leaves the injected draft untouched because cleanup is also terminal
+    // input and cannot safely use a stale route.
     let verifiedForEnter: TerminalControlRef;
     if (adapter.agent === "codex" && multiline) {
       verifiedForEnter = await this.settleCodexMultilineComposer(
@@ -573,19 +641,13 @@ export class TerminalAgentBridge {
           options.runtime
         );
       } catch (error) {
-        try {
-          await this.terminalProvider.sendKeys(verifiedForText.target, ["C-u"], {
-            socketPath: verifiedForText.socketPath
-          });
-        } catch {
-          // Best effort only: preserving the identity failure is more important than cleanup.
-        }
         throw error;
       }
     }
-    await this.terminalProvider.sendKeys(verifiedForEnter.target, ["C-m"], {
-      socketPath: verifiedForEnter.socketPath
-    });
+    await this.terminalProvider.sendKeys(
+      this.terminalProvider.endpoint(verifiedForEnter),
+      ["C-m"]
+    );
     await options.onTransportStage?.({
       stage: "enter_dispatched",
       agent: adapter.agent,
@@ -616,6 +678,17 @@ export class TerminalAgentBridge {
     const adapter = this.registry.require(agent);
     try {
       assertClosedStatusInspectionPlan(adapter, terminalControl, plan);
+      assertTerminalMutationCapabilities({
+        provider: this.terminalProvider,
+        terminal: this.terminalProvider.endpoint(terminalControl),
+        semantic: ["send_keys", "screen_status"],
+        transport: [
+          "stable_resource_resolution",
+          "screen_capture",
+          "text_delivery",
+          "key_delivery"
+        ]
+      });
     } catch (error) {
       throw nativeInspectionSubmissionError("not_started", error);
     }
@@ -632,10 +705,14 @@ export class TerminalAgentBridge {
     }
 
     try {
+      if (!verifiedForText.capabilities.includes("send_keys")) {
+        throw new TerminalControlInputNotSentError(
+          `${adapter.displayName} native inspection input capability changed`
+        );
+      }
       await this.terminalProvider.sendText(
-        verifiedForText.target,
-        plan.command,
-        { socketPath: verifiedForText.socketPath }
+        this.terminalProvider.endpoint(verifiedForText),
+        plan.command
       );
     } catch (error) {
       if (error instanceof TerminalControlInputNotSentError) {
@@ -682,9 +759,8 @@ export class TerminalAgentBridge {
       // Exactly one Enter attempt. Any error is submission-uncertain and must
       // never trigger a fallback executable or a blind second Enter.
       await this.terminalProvider.sendKeys(
-        settled.terminalControl.target,
-        ["C-m"],
-        { socketPath: settled.terminalControl.socketPath }
+        this.terminalProvider.endpoint(settled.terminalControl),
+        ["C-m"]
       );
     } catch (error) {
       throw nativeInspectionSubmissionError("enter_uncertain", error);
@@ -830,9 +906,8 @@ export class TerminalAgentBridge {
       verified = await observeExactPanel(verified);
       try {
         await this.terminalProvider.sendKeys(
-          verified.target,
-          plan.expectedResult.dismissal!.keys,
-          { socketPath: verified.socketPath }
+          this.terminalProvider.endpoint(verified),
+          plan.expectedResult.dismissal!.keys
         );
       } catch (error) {
         throw new NativeInspectionDismissalError(
@@ -1188,17 +1263,21 @@ export class TerminalAgentBridge {
     options: { runtime?: TerminalRuntimeIdentity } = {}
   ): Promise<void> {
     const adapter = this.registry.require(agent);
-    if (!terminalControl.capabilities.includes("send_keys")) {
-      throw new Error(`${adapter.displayName} terminal input is not supported`);
-    }
+    assertTerminalMutationCapabilities({
+      provider: this.terminalProvider,
+      terminal: this.terminalProvider.endpoint(terminalControl),
+      semantic: ["send_keys"],
+      transport: ["stable_resource_resolution", "key_delivery"]
+    });
     const verified = await this.verifyTerminalIdentity(
       adapter.agent,
       terminalControl,
       options.runtime
     );
-    await this.terminalProvider.sendKeys(verified.target, ["C-u"], {
-      socketPath: verified.socketPath
-    });
+    await this.terminalProvider.sendKeys(
+      this.terminalProvider.endpoint(verified),
+      ["C-u"]
+    );
   }
 
   async cancel(
@@ -1239,14 +1318,21 @@ export class TerminalAgentBridge {
         reason: `${adapter.displayName} terminal cancellation is not supported`
       };
     }
+    assertTerminalMutationCapabilities({
+      provider: this.terminalProvider,
+      terminal: this.terminalProvider.endpoint(terminalControl),
+      semantic: ["terminal_cancel", "send_keys"],
+      transport: ["stable_resource_resolution", "key_delivery"]
+    });
     const verifiedForCancel = await this.verifyTerminalIdentity(
       adapter.agent,
       terminalControl,
       options.runtime
     );
-    await this.terminalProvider.sendKeys(verifiedForCancel.target, adapter.cancelKeys, {
-      socketPath: verifiedForCancel.socketPath
-    });
+    await this.terminalProvider.sendKeys(
+      this.terminalProvider.endpoint(verifiedForCancel),
+      adapter.cancelKeys
+    );
     return {
       cancelRequested: true,
       key: adapter.cancelKeys.length === 1 ? adapter.cancelKeys[0] : undefined,
@@ -1287,6 +1373,16 @@ export class TerminalAgentBridge {
         reason: `${adapter.displayName} terminal approval is not supported`
       };
     }
+    assertTerminalMutationCapabilities({
+      provider: this.terminalProvider,
+      terminal: this.terminalProvider.endpoint(terminalControl),
+      semantic: ["screen_status", "terminal_approval", "send_keys"],
+      transport: [
+        "stable_resource_resolution",
+        "screen_capture",
+        "key_delivery"
+      ]
+    });
     const captured = await this.captureInspection(adapter, terminalControl, options);
     const { inspection } = captured;
     const activeTerminalControl = captured.terminalControl;
@@ -1334,7 +1430,7 @@ export class TerminalAgentBridge {
         screenExcerpt: inspection.screenExcerpt
       };
     }
-    const fingerprint = terminalApprovalFingerprint(
+    const canonicalFingerprint = terminalApprovalFingerprint(
       adapter.agent,
       activeTerminalControl,
       inspection,
@@ -1343,6 +1439,27 @@ export class TerminalAgentBridge {
         runtime: options.runtime
       }
     );
+    const legacyFingerprint = hasCanonicalTerminalEndpoint(terminalControl)
+      ? undefined
+      : terminalApprovalFingerprint(
+          adapter.agent,
+          terminalControl,
+          inspection,
+          {
+            screen: captured.screen,
+            runtime: options.runtime
+          }
+        );
+    const useLegacyFingerprint = Boolean(
+      options.expectedFingerprint &&
+      options.expectedFingerprint === legacyFingerprint
+    );
+    const fingerprintControl = useLegacyFingerprint
+      ? terminalControl
+      : activeTerminalControl;
+    const fingerprint = useLegacyFingerprint
+      ? legacyFingerprint
+      : canonicalFingerprint;
     if (
       adapter.agent === "claude" &&
       decisionMode === "keys" &&
@@ -1437,7 +1554,7 @@ export class TerminalAgentBridge {
     const recapturedDecisionMode = recapturedInspection.approval.action.mode ?? "keys";
     const recapturedFingerprint = terminalApprovalFingerprint(
       adapter.agent,
-      recaptured.terminalControl,
+      fingerprintControl,
       recapturedInspection,
       {
         screen: recaptured.screen,
@@ -1534,7 +1651,7 @@ export class TerminalAgentBridge {
         afterReservationInspection.approval.action.mode ?? "keys";
       const afterReservationFingerprint = terminalApprovalFingerprint(
         adapter.agent,
-        afterReservation.terminalControl,
+        fingerprintControl,
         afterReservationInspection,
         {
           screen: afterReservation.screen,
@@ -1593,9 +1710,8 @@ export class TerminalAgentBridge {
       );
     }
     await this.terminalProvider.sendKeys(
-      verifiedImmediatelyBeforeSend.target,
-      dispatchApproval.action.keys,
-      { socketPath: verifiedImmediatelyBeforeSend.socketPath }
+      this.terminalProvider.endpoint(verifiedImmediatelyBeforeSend),
+      dispatchApproval.action.keys
     );
     return {
       approved: true,
@@ -1707,10 +1823,10 @@ export class TerminalAgentBridge {
       terminalControl,
       options.runtime
     );
-    const screen = await this.terminalProvider.capture(verifiedTerminalControl.target, {
-      scrollbackLines: options.scrollbackLines ?? 120,
-      socketPath: verifiedTerminalControl.socketPath
-    });
+    const screen = await this.terminalProvider.capture(
+      this.terminalProvider.endpoint(verifiedTerminalControl),
+      { scrollbackLines: options.scrollbackLines ?? 120 }
+    );
     return {
       terminalControl: verifiedTerminalControl,
       screen,
@@ -1730,22 +1846,76 @@ export class TerminalAgentBridge {
     terminalControl: TerminalControlRef,
     runtime?: TerminalRuntimeIdentity
   ): Promise<TerminalControlRef> {
-    if (!this.verifyIdentity) {
-      return terminalControl;
+    let verifiedControl = terminalControl;
+    if (this.verifyIdentity) {
+      if (!Number.isInteger(runtime?.pid) || Number(runtime?.pid) <= 0) {
+        throw new Error(
+          `refusing terminal access for ${agent}:${terminalControl.target} without an exact agent pid; reattach this legacy tmux session before controlling it`
+        );
+      }
+      const result = await this.verifyIdentity({
+        agent,
+        pid: Number(runtime?.pid),
+        terminalControl,
+        runtime
+      });
+      verifiedControl = result?.terminalControl ?? terminalControl;
+      if (!sameTerminalControlIncarnation(terminalControl, verifiedControl)) {
+        throw new Error(
+          "terminal control identity changed during identity verification"
+        );
+      }
     }
-    if (!Number.isInteger(runtime?.pid) || Number(runtime?.pid) <= 0) {
+
+    const verifiedEndpoint = this.terminalProvider.endpoint(verifiedControl);
+    const resolvedEndpoint = await this.terminalProvider.resolve(
+      verifiedEndpoint
+    );
+    if (
+      hasCanonicalTerminalEndpoint(verifiedControl) &&
+      !sameTerminalControlIncarnation(verifiedEndpoint, resolvedEndpoint)
+    ) {
       throw new Error(
-        `refusing terminal access for ${agent}:${terminalControl.target} without an exact agent pid; reattach this legacy tmux session before controlling it`
+        "terminal stable resource or process anchor changed during fresh resolution"
       );
     }
-    const result = await this.verifyIdentity({
-      agent,
-      pid: Number(runtime?.pid),
-      terminalControl,
-      runtime
-    });
-    return result?.terminalControl ?? terminalControl;
+    return this.terminalProvider.toControlRef(
+      resolvedEndpoint,
+      verifiedControl.capabilities
+    );
   }
+}
+
+function assertTerminalMutationCapabilities({
+  provider,
+  terminal,
+  semantic,
+  transport
+}: {
+  provider: TerminalControlProvider;
+  terminal: TerminalEndpointRef;
+  semantic: readonly TerminalControlCapability[];
+  transport: readonly TerminalProviderCapability[];
+}): void {
+  const missingSemantic = semantic.filter((capability) =>
+    !provider.supportedCapabilities.includes(capability) ||
+    !terminal.capabilities.includes(capability)
+  );
+  const missingTransport = transport.filter((capability) =>
+    !provider.providerCapabilities.includes(capability)
+  );
+  if (missingSemantic.length === 0 && missingTransport.length === 0) {
+    return;
+  }
+  const missing = [
+    ...missingSemantic.map((value) => `terminal:${value}`),
+    ...missingTransport.map((value) => `provider:${value}`)
+  ];
+  throw new TerminalControlInputNotSentError(
+    `terminal action capability preflight failed for ` +
+    `${terminal.identity.providerKind}:${terminal.route.label}: ` +
+    missing.join(", ")
+  );
 }
 
 function nativeInspectionSubmissionError(
@@ -2258,13 +2428,7 @@ function sameTerminalControlIdentity(
   left: TerminalControlRef,
   right: TerminalControlRef
 ): boolean {
-  return left.kind === right.kind &&
-    left.target === right.target &&
-    left.socketPath === right.socketPath &&
-    left.session === right.session &&
-    left.window === right.window &&
-    left.pane === right.pane &&
-    left.panePid === right.panePid;
+  return sameTerminalControlIncarnation(left, right);
 }
 
 export function terminalApprovalFingerprint(
@@ -2283,18 +2447,28 @@ export function terminalApprovalFingerprint(
   const rawScreenDigest = decisionMode === "keys" && options.screen !== undefined
     ? createHash("sha256").update(options.screen).digest("hex")
     : undefined;
-  return createHash("sha256")
-    .update(JSON.stringify({
-      agent,
-      provider: "tmux",
-      terminal: {
+  const terminal = terminalEndpointFromControlRef(terminalControl);
+  // A pending v0.11.x approval may outlive an upgrade. Preserve its exact
+  // fingerprint until the persisted control record has canonical endpoint
+  // evidence; new records bind the fingerprint to stable endpoint identity.
+  const terminalFingerprint = hasCanonicalTerminalEndpoint(terminalControl)
+    ? {
+        identity: terminalEndpointIdentityKey(terminal),
+        process_anchor_pid: terminal.processAnchorPid
+      }
+    : {
         target: terminalControl.target,
         socket_path: terminalControl.socketPath,
         session: terminalControl.session,
         window: terminalControl.window,
         pane: terminalControl.pane,
         pane_pid: terminalControl.panePid
-      },
+      };
+  return createHash("sha256")
+    .update(JSON.stringify({
+      agent,
+      provider: terminal.identity.providerKind,
+      terminal: terminalFingerprint,
       runtime: {
         pid: options.runtime?.pid,
         session_id: options.runtime?.sessionId,

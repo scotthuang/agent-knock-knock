@@ -3,9 +3,13 @@ import assert from "node:assert/strict";
 import {
   assertManagedSessionState,
   assertNativeThreadTransition,
+  legacyManagedSessionBindingToken,
+  legacyUnmanagedTerminalBindingToken,
+  managedSessionBindingToken,
   managedSessionStorageKey,
   nativeThreadCommandFingerprint,
   terminalBindingFrom,
+  unmanagedTerminalBindingToken,
   type ManagedSessionState,
   type NativeThreadTransition
 } from "../src/managed-session.js";
@@ -66,6 +70,71 @@ test("managed Session storage keys are deterministic SHA-256 of arbitrary ids", 
     key,
     "ac1e5a4c2d95fb08be0b58dff731cd34a8081464bbd27fb325288e0a2323f40c"
   );
+});
+
+test("v0.11.6 managed and unmanaged binding tokens remain bit-for-bit stable", () => {
+  const rollout = {
+    fd: "11",
+    device: "16777234",
+    inode: "987654321",
+    path: "/Users/example/.codex/sessions/2026/08/10/rollout-legacy.jsonl"
+  };
+  const terminalControl = {
+    kind: "tmux" as const,
+    target: "legacy:0.1",
+    socketPath: "/private/tmp/tmux-501/default",
+    session: "legacy",
+    window: 0,
+    pane: 1,
+    panePid: 2345,
+    currentCommand: "codex",
+    currentPath: "/Users/example/project",
+    capabilities: [
+      "screen_status" as const,
+      "send_keys" as const,
+      "durable_completion" as const
+    ]
+  };
+  const managed = {
+    session_id: "session-20260810T010203-legacy01",
+    status: "bound" as const,
+    binding: {
+      binding_id: "binding-11111111-2222-4333-8444-555555555555",
+      generation: 7,
+      terminal_id: "terminal:v2:tmux:codex:legacy:0.1:2345",
+      terminal_control: terminalControl,
+      native_thread_id: "11111111-2222-4333-8444-555555555555",
+      native_process: {
+        pid: 3456,
+        process_uuid: "codex-pid:3456:birth:98765",
+        process_birth: "98765",
+        rollout,
+        evidence: "codex_rollout_fd"
+      },
+      bound_at: "2026-08-10T01:02:03.000Z",
+      last_verified_at: "2026-08-10T01:02:04.000Z"
+    }
+  } satisfies Pick<ManagedSessionState, "session_id" | "status" | "binding">;
+  const unmanaged = {
+    terminalId: managed.binding.terminal_id,
+    terminalControl,
+    agent: "codex" as const,
+    pid: managed.binding.native_process.pid,
+    workspace: "/Users/example/project",
+    nativeThreadId: managed.binding.native_thread_id,
+    processUuid: managed.binding.native_process.process_uuid,
+    processBirth: managed.binding.native_process.process_birth,
+    rollout
+  };
+
+  const expectedManaged =
+    "6be676d249acf8271f5228f6e372498c3efeb01a9aa959217ff1eaf09d72ed9c";
+  const expectedUnmanaged =
+    "23a42e69ada94dd5ba890ba208752d58b47e17b2b58582fd23091384042e0417";
+  assert.equal(legacyManagedSessionBindingToken(managed), expectedManaged);
+  assert.equal(managedSessionBindingToken(managed), expectedManaged);
+  assert.equal(legacyUnmanagedTerminalBindingToken(unmanaged), expectedUnmanaged);
+  assert.equal(unmanagedTerminalBindingToken(unmanaged), expectedUnmanaged);
 });
 
 test("managed Session validation is strict throughout nested binding state", () => {

@@ -90,6 +90,8 @@ import {
   createManagedSessionId,
   createNativeThreadTransitionId,
   isExactNativeThreadId,
+  legacyManagedSessionBindingToken,
+  legacyUnmanagedTerminalBindingToken,
   managedSessionBindingToken,
   nativeThreadCommandFingerprint,
   terminalBindingFrom,
@@ -127,10 +129,11 @@ import {
   tryLoadManagedSession
 } from "./session-store.js";
 import {
+  createTerminalControlProviderRegistry as createProviderRegistry,
   StaticTerminalControlProvider,
   TmuxTerminalControlProvider,
-  terminalPaneContainsProcess,
-  type TerminalControlProvider
+  type TerminalControlProvider,
+  type TerminalControlProviderRegistry
 } from "./terminal-control-provider.js";
 import {
   parseTerminalConversationId,
@@ -142,6 +145,20 @@ import {
   type TerminalRuntimeIdentity,
   type TerminalThreadLifecycleCandidateToken
 } from "./terminal-agent-adapter.js";
+import {
+  associateTerminalEndpointEvidence,
+  hasCanonicalTerminalEndpoint,
+  sameTerminalControlEvidenceIncarnation,
+  sameTerminalControlIncarnation,
+  terminalControlEvidence,
+  terminalControlEvidenceMatches,
+  terminalEndpointFromControlRef,
+  terminalEndpointIdentityFromEvidence,
+  terminalEndpointIdentityKey,
+  terminalLegacyRuntimeRoute,
+  sameTerminalEndpointIdentity,
+  type TerminalControlEvidence
+} from "./terminal-control-ref.js";
 import { createProductionTerminalAgentRegistry } from "./terminal-agent-registry.js";
 import {
   parseProcessElapsedSeconds,
@@ -874,15 +891,29 @@ async function listActiveSessionsWithTerminalControl(
   );
 }
 
-function createTerminalControlProvider(options): TerminalControlProvider {
-  if (options.terminalsJson || options.terminalScreensJson || options.processesJson) {
-    return new StaticTerminalControlProvider({
-      panes: options.terminalsJson ? parseJsonOption(options.terminalsJson, "--terminals-json") : [],
-      screens: options.terminalScreensJson ? parseJsonOption(options.terminalScreensJson, "--terminal-screens-json") : {}
-    });
-  }
+function createRuntimeTerminalControlProviderRegistry(
+  options
+): TerminalControlProviderRegistry {
+  return createProviderRegistry([
+    options.terminalsJson || options.terminalScreensJson || options.processesJson
+      ? new StaticTerminalControlProvider({
+          panes: options.terminalsJson
+            ? parseJsonOption(options.terminalsJson, "--terminals-json")
+            : [],
+          screens: options.terminalScreensJson
+            ? parseJsonOption(options.terminalScreensJson, "--terminal-screens-json")
+            : {}
+        })
+      : new TmuxTerminalControlProvider()
+  ]);
+}
 
-  return new TmuxTerminalControlProvider();
+function createTerminalControlProvider(
+  options,
+  registry: TerminalControlProviderRegistry =
+    createRuntimeTerminalControlProviderRegistry(options)
+): TerminalControlProvider {
+  return registry.require("tmux");
 }
 
 function createTerminalProcessSource(options): TerminalProcessSource {
@@ -1193,8 +1224,11 @@ function createTerminalAgentBridge(
     terminalProvider,
     async verifyIdentity({ agent, pid, terminalControl, runtime }) {
       const adapter = registry.require(agent);
+      const requestedTerminal = terminalProvider.endpoint(terminalControl);
+      const resolvedTerminal = await terminalProvider.resolve(requestedTerminal);
       const expectedWorkspace =
-        options.workspace ?? terminalControl.currentPath;
+        options.workspace ?? resolvedTerminal.route.currentPath ??
+        terminalControl.currentPath;
       if (!expectedWorkspace) {
         throw new Error(
           `refusing terminal access to ${terminalControl.target}; its workspace is unavailable`
@@ -1213,13 +1247,11 @@ function createTerminalAgentBridge(
           `terminal conversation agent ${agent} with pid ${pid} is no longer active`
         );
       }
-      const panes = await terminalProvider.listPanes();
-      const pane = panes.find((candidate) =>
-        candidate.kind === terminalControl.kind &&
-        candidate.target === terminalControl.target &&
-        candidate.panePid === terminalControl.panePid
-      );
-      if (!pane || !terminalPaneContainsProcess(snapshot, pane, snapshots)) {
+      if (!terminalProvider.containsProcess(
+        resolvedTerminal,
+        snapshot,
+        snapshots
+      )) {
         throw new Error(
           `terminal conversation agent ${agent} with pid ${pid} no longer belongs to pane ${terminalControl.target}`
         );
@@ -1231,8 +1263,8 @@ function createTerminalAgentBridge(
       );
       assertConfiguredWorkspace(
         expectedWorkspace,
-        pane.currentPath,
-        `terminal access to ${terminalControl.target} by tmux pane`
+        resolvedTerminal.route.currentPath,
+        `terminal access to ${terminalControl.target} by terminal endpoint`
       );
       const requiresNativeIdentity = Boolean(
         runtime?.nativeSessionId ||
@@ -1254,7 +1286,7 @@ function createTerminalAgentBridge(
             options,
             agent,
             pid,
-            cwd: snapshot.cwd ?? pane.currentPath,
+            cwd: snapshot.cwd ?? resolvedTerminal.route.currentPath,
             preferredSessionId:
               runtime?.allowedPreMaterializationNativeIdentity &&
                 (runtime.expectedNativeSessionId ?? runtime.nativeSessionId) &&
@@ -1292,7 +1324,7 @@ function createTerminalAgentBridge(
           phase: "before",
           pid,
           processStartedAt: runtime.nativeProcessStartedAt,
-          cwd: snapshot.cwd ?? pane.currentPath,
+          cwd: snapshot.cwd ?? resolvedTerminal.route.currentPath,
           agentRows
         });
         const exactRows = agentRows.filter((row) => row.pid === pid);
@@ -1317,13 +1349,10 @@ function createTerminalAgentBridge(
         }
       }
       return {
-        terminalControl: {
-          ...terminalControl,
-          socketPath: pane.socketPath,
-          panePid: pane.panePid,
-          currentCommand: pane.currentCommand,
-          currentPath: pane.currentPath
-        }
+        terminalControl: terminalProvider.toControlRef(
+          resolvedTerminal,
+          terminalControl.capabilities
+        )
       };
     }
   });
@@ -1348,7 +1377,7 @@ function terminalControlFromTakeover(nativeTakeover): TerminalControlRef | undef
   const storedCapabilities = Array.isArray(terminalControl.capabilities)
     ? terminalControl.capabilities.filter(isTerminalControlCapability)
     : [];
-  return {
+  const control: TerminalControlRef = {
     kind: "tmux",
     target,
     session,
@@ -1370,6 +1399,74 @@ function terminalControlFromTakeover(nativeTakeover): TerminalControlRef | undef
           "terminal_cancel"
         ]
   };
+  const endpointEvidence = nativeTakeover["terminal_endpoint"];
+  if (endpointEvidence !== undefined) {
+    try {
+      associateTerminalEndpointEvidence(control, endpointEvidence);
+    } catch {
+      return undefined;
+    }
+  }
+  return control;
+}
+
+function terminalEndpointTakeoverFields(
+  terminalControl: TerminalControlRef
+): { terminal_control: TerminalControlRef; terminal_endpoint?: TerminalControlEvidence } {
+  return {
+    terminal_control: terminalControl,
+    ...(hasCanonicalTerminalEndpoint(terminalControl)
+      ? { terminal_endpoint: terminalControlEvidence(terminalControl) }
+      : {})
+  };
+}
+
+/**
+ * Add canonical endpoint evidence to a verified v0.11.x Turn without changing
+ * its public route-shaped terminal id or provider-owned control payload.
+ * Callers must already hold the terminal, Store-writer, and Turn state locks.
+ */
+function refineTerminalTurnEndpoint({
+  conversation,
+  statePath,
+  terminalControl
+}: {
+  conversation: Conversation;
+  statePath: string;
+  terminalControl: TerminalControlRef;
+}): Conversation {
+  const takeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const storedControl = terminalControlFromTakeover(takeover);
+  if (
+    !takeover ||
+    !storedControl ||
+    takeover.terminal_endpoint !== undefined ||
+    !hasCanonicalTerminalEndpoint(terminalControl)
+  ) {
+    return conversation;
+  }
+  if (!terminalControlsShareIncarnation(storedControl, terminalControl)) {
+    throw new Error(
+      `cannot refine Turn ${turnIdForConversation(conversation)} terminal ` +
+      "endpoint after its terminal incarnation changed"
+    );
+  }
+  const terminalEndpoint = terminalControlEvidence(terminalControl);
+  // Validate that the additive evidence agrees with the exact legacy route
+  // before making it durable. This also restores the in-memory association on
+  // the old provider-owned control object.
+  associateTerminalEndpointEvidence(storedControl, terminalEndpoint);
+  const refined: Conversation = {
+    ...conversation,
+    native_session_takeover: {
+      ...takeover,
+      terminal_endpoint: terminalEndpoint
+    }
+  };
+  saveState(statePath, refined);
+  return refined;
 }
 
 function terminalRuntimeIdentityForConversation(
@@ -1455,8 +1552,7 @@ function terminalRuntimeIdentityForConversation(
     binding.generation !== Number(conversation.terminal_binding_generation) ||
     binding.native_thread_id !== expectedThreadId ||
     binding.native_process.pid !== runtime.pid ||
-    terminalControlSelectorKey(binding.terminal_control) !==
-      terminalControlSelectorKey(terminalControl)
+    !terminalControlsShareIncarnation(binding.terminal_control, terminalControl)
   ) {
     return runtime;
   }
@@ -1530,15 +1626,10 @@ async function migrateLegacyTerminalAgentIdentity({
       (snapshot) => adapter.classifyProcess(snapshot) !== undefined,
       { includeAncestors: true }
     );
-    const panes = await createTerminalControlProvider(options).listPanes();
-    const matchingPanes = panes.filter((pane) =>
-      pane.kind === terminalControl.kind &&
-      pane.target === terminalControl.target &&
-      pane.panePid === terminalControl.panePid
+    const terminalProvider = createTerminalControlProvider(options);
+    const resolvedTerminal = await terminalProvider.resolve(
+      terminalProvider.endpoint(terminalControl)
     );
-    if (matchingPanes.length !== 1) {
-      return conversation;
-    }
 
     const candidates = snapshots.flatMap((snapshot): ActiveTerminalProcess[] => {
       const classified = adapter.classifyProcess(snapshot);
@@ -1546,7 +1637,7 @@ async function migrateLegacyTerminalAgentIdentity({
     });
     const matches = candidates.filter((candidate) =>
       candidate.sessionId === nativeSessionId &&
-      terminalPaneContainsProcess(candidate, matchingPanes[0], snapshots)
+      terminalProvider.containsProcess(resolvedTerminal, candidate, snapshots)
     );
     if (matches.length !== 1) {
       return conversation;
@@ -1582,9 +1673,7 @@ async function migrateLegacyTerminalAgentIdentity({
     }
     if (
       currentTakeover.native_session_id !== nativeSessionId ||
-      currentControl.target !== terminalControl.target ||
-      currentControl.socketPath !== terminalControl.socketPath ||
-      currentControl.panePid !== terminalControl.panePid
+      !terminalControlsShareIncarnation(currentControl, terminalControl)
     ) {
       return current;
     }
@@ -1681,10 +1770,8 @@ function assertSafeAbortedTerminalRetryBinding({
     !Number.isSafeInteger(ownerAgentPid) ||
     binding.native_process.pid !== ownerAgentPid ||
     !ownerControl ||
-    terminalControlSelectorKey(ownerControl) !==
-      terminalControlSelectorKey(terminalControl) ||
-    terminalControlSelectorKey(binding.terminal_control) !==
-      terminalControlSelectorKey(terminalControl)
+    !terminalControlsShareIncarnation(ownerControl, terminalControl) ||
+    !terminalControlsShareIncarnation(binding.terminal_control, terminalControl)
   ) {
     throw new Error(
       `terminal idempotency key ${messageId} belongs to a safe-aborted Turn ` +
@@ -1784,8 +1871,7 @@ function stableDelegateTerminalRoute({
       receipt,
       conversationId,
       workspace: ownerWorkspace,
-      terminalKey: terminalControlSelectorKey(terminalControl),
-      panePid: terminalControl.panePid
+      terminalControl
     };
   });
   const authoritative = routed.filter(({ receipt }) =>
@@ -1796,10 +1882,17 @@ function stableDelegateTerminalRoute({
       `terminal idempotency key ${messageId} has multiple durable delegate receipts`
     );
   }
-  const terminalKeys = new Set(routed.map((entry) =>
-    `${entry.conversationId}\0${entry.terminalKey}\0${entry.panePid}`
-  ));
-  if (terminalKeys.size !== 1) {
+  const firstRoute = routed[0];
+  if (
+    !firstRoute ||
+    routed.some((entry) =>
+      entry.conversationId !== firstRoute.conversationId ||
+      !terminalControlsShareIncarnation(
+        entry.terminalControl,
+        firstRoute.terminalControl
+      )
+    )
+  ) {
     throw new Error(
       `terminal idempotency key ${messageId} has conflicting terminal routes`
     );
@@ -2403,7 +2496,11 @@ function withTerminalBridgeSubmission({
       stringValue(nativeTakeover.terminal_agent_expected_session_id),
     terminal_target: storedControl?.target,
     terminal_socket_path: storedControl?.socketPath ?? null,
-    terminal_pane_pid: storedControl?.panePid
+    terminal_pane_pid: storedControl?.panePid,
+    terminal_endpoint:
+      storedControl && hasCanonicalTerminalEndpoint(storedControl)
+        ? terminalControlEvidence(storedControl)
+        : previousReceipt?.terminal_endpoint
   };
   const immutableReceiptFields = Object.fromEntries(
     Object.entries(candidateImmutableReceiptFields).map(([key, value]) => [
@@ -2418,7 +2515,7 @@ function withTerminalBridgeSubmission({
       if (
         previousReceipt[key] !== undefined &&
         value !== undefined &&
-        String(previousReceipt[key]) !== String(value)
+        canonicalJson(previousReceipt[key]) !== canonicalJson(value)
       ) {
         throw new Error(
           `terminal submission receipt ${messageId} changed immutable ${key}`
@@ -2544,17 +2641,11 @@ function replayExactActiveTerminalSubmission({
     );
   }
   const ledgerReceipt = ledgerReceiptMatches[0];
-  const loadedLedgerControl = isRecord(loadedLedger?.terminal_control)
-    ? loadedLedger.terminal_control
-    : undefined;
   const loadedLedgerMessageId = stringValue(loadedLedger?.message_id);
   const loadedLedgerStoreDir = stringValue(loadedLedger?.store_dir);
   const loadedLedgerStatePath = stringValue(loadedLedger?.state_path);
   const loadedLedgerOwner = loadedLedger && loadedLedgerMessageId === messageId
     ? loadTerminalDispatchLedgerOwner(loadedLedger)
-    : undefined;
-  const ledgerReceiptControl = isRecord(ledgerReceipt?.terminal_control)
-    ? ledgerReceipt.terminal_control
     : undefined;
   const expectedMessageBodyHash = createHash("sha256")
     .update(requestText)
@@ -2563,10 +2654,7 @@ function replayExactActiveTerminalSubmission({
     ledgerReceipt &&
     !(ledgerReceipt.status === "aborted" && ledgerReceipt.safe_to_retry === true) &&
     (
-      stringValue(ledgerReceiptControl?.target) !== terminalControl.target ||
-      (stringValue(ledgerReceiptControl?.socket_path) ?? undefined) !==
-        terminalControl.socketPath ||
-      Number(ledgerReceiptControl?.pane_pid) !== Number(terminalControl.panePid) ||
+      !terminalDispatchRecordMatchesControl(ledgerReceipt, terminalControl) ||
       (stringValue(ledgerReceipt.store_dir) !== undefined &&
         path.resolve(String(ledgerReceipt.store_dir)) !==
           path.resolve(expectedStoreDir)) ||
@@ -2597,10 +2685,7 @@ function replayExactActiveTerminalSubmission({
     loadedLedger &&
     loadedLedgerMessageId === messageId &&
     (
-      stringValue(loadedLedgerControl?.target) !== terminalControl.target ||
-      (stringValue(loadedLedgerControl?.socket_path) ?? undefined) !==
-        terminalControl.socketPath ||
-      Number(loadedLedgerControl?.pane_pid) !== Number(terminalControl.panePid) ||
+      !terminalDispatchRecordMatchesControl(loadedLedger, terminalControl) ||
       (loadedLedgerStoreDir !== undefined &&
         path.resolve(loadedLedgerStoreDir) !== path.resolve(expectedStoreDir)) ||
       (expectedSessionId && stringValue(loadedLedger.session_id) !== undefined &&
@@ -2665,18 +2750,12 @@ function replayExactActiveTerminalSubmission({
     terminalControl,
     incarnationLedger
   );
-  const ledgerControl = isRecord(ledger?.terminal_control)
-    ? ledger.terminal_control
-    : undefined;
   if (
     !ledger ||
     !["submitted", "enter_dispatched", "agent_accepted"].includes(
       String(ledger.status)
     ) ||
-    stringValue(ledgerControl?.target) !== terminalControl.target ||
-    (stringValue(ledgerControl?.socket_path) ?? undefined) !==
-      terminalControl.socketPath ||
-    Number(ledgerControl?.pane_pid) !== Number(terminalControl.panePid) ||
+    !terminalDispatchRecordMatchesControl(ledger, terminalControl) ||
     stringValue(ledger.message_id) !== messageId ||
     (
       stringValue(ledger.message_type) !== undefined &&
@@ -2875,14 +2954,20 @@ function validateStoredTerminalSubmissionMatch({
     turnIdForConversation(owner);
   const receiptOpenClawSession = stringValue(receipt.openclaw_session) ??
     owner.openclaw_session;
-  const receiptTarget = stringValue(receipt.terminal_target) ??
-    storedControl?.target;
-  const receiptSocketPath = receipt.terminal_socket_path === null
-    ? undefined
-    : stringValue(receipt.terminal_socket_path) ?? storedControl?.socketPath;
-  const receiptPanePid = Number(
-    receipt.terminal_pane_pid ?? storedControl?.panePid
-  );
+  const receiptTerminalEvidence = receipt.terminal_endpoint !== undefined
+    ? receipt.terminal_endpoint
+    : {
+        kind: "tmux",
+        target: stringValue(receipt.terminal_target) ?? storedControl?.target,
+        socket_path: receipt.terminal_socket_path === null
+          ? null
+          : stringValue(receipt.terminal_socket_path) ??
+            storedControl?.socketPath ??
+            null,
+        pane_pid: Number(
+          receipt.terminal_pane_pid ?? storedControl?.panePid
+        )
+      };
   const requestedOpenClawSession = stringValue(options.openclawSession);
   if (
     !ownerStoreDir ||
@@ -2890,9 +2975,11 @@ function validateStoredTerminalSubmissionMatch({
     path.resolve(ownerStoreDir) !== path.resolve(expectedStoreDir) ||
     path.resolve(receiptStoreDir) !== path.resolve(expectedStoreDir) ||
     !storedControl ||
-    receiptTarget !== terminalControl.target ||
-    receiptSocketPath !== terminalControl.socketPath ||
-    receiptPanePid !== Number(terminalControl.panePid) ||
+    !terminalControlsShareIncarnation(storedControl, terminalControl) ||
+    !terminalControlEvidenceMatches(
+      receiptTerminalEvidence,
+      terminalControl
+    ) ||
     receiptSessionId !== sessionIdForConversation(owner) ||
     receiptTurnId !== turnIdForConversation(owner) ||
     (expectedSessionId && receiptSessionId !== expectedSessionId) ||
@@ -3227,11 +3314,7 @@ function assertNoUnresolvedTerminalBridgeSubmission(
   currentConversationId: string,
   requestText: string
 ): void {
-  const targetKey = terminalControlSelectorKey(terminalControl);
   const requestHash = terminalBridgeRequestFingerprint(requestText);
-  if (!targetKey) {
-    return;
-  }
   for (const candidate of listConversations(storeDir)) {
     const submission = terminalBridgeSubmission(candidate);
     if (
@@ -3260,9 +3343,10 @@ function assertNoUnresolvedTerminalBridgeSubmission(
       ? candidate.native_session_takeover
       : undefined;
     if (
-      terminalControlSelectorKey(
-        terminalControlFromTakeover(nativeTakeover)
-      ) === targetKey
+      terminalControlsShareIncarnation(
+        terminalControlFromTakeover(nativeTakeover),
+        terminalControl
+      )
     ) {
       throw new Error(
         `terminal ${terminalControl.target} has a conflicting ${String(submission.status)} ` +
@@ -3284,10 +3368,6 @@ function stallOtherTerminalBridgeConversationsForUncertainDispatch({
   currentConversationId: string;
   uncertainMessageId: string;
 }): string[] {
-  const targetKey = terminalControlSelectorKey(terminalControl);
-  if (!targetKey) {
-    return [];
-  }
   const stalledConversationIds: string[] = [];
   for (const listed of listConversations(storeDir)) {
     if (
@@ -3301,9 +3381,10 @@ function stallOtherTerminalBridgeConversationsForUncertainDispatch({
       : undefined;
     if (
       listedTakeover?.terminal_bridge !== true ||
-      terminalControlSelectorKey(
-        terminalControlFromTakeover(listedTakeover)
-      ) !== targetKey
+      !terminalControlsShareIncarnation(
+        terminalControlFromTakeover(listedTakeover),
+        terminalControl
+      )
     ) {
       continue;
     }
@@ -3320,9 +3401,10 @@ function stallOtherTerminalBridgeConversationsForUncertainDispatch({
       if (
         !isActiveStatus(current.status) ||
         currentTakeover?.terminal_bridge !== true ||
-        terminalControlSelectorKey(
-          terminalControlFromTakeover(currentTakeover)
-        ) !== targetKey
+        !terminalControlsShareIncarnation(
+          terminalControlFromTakeover(currentTakeover),
+          terminalControl
+        )
       ) {
         continue;
       }
@@ -3554,13 +3636,7 @@ async function buildTerminalListGroup({ options, agentFilter, statusFilter }) {
 }
 
 async function terminalControlDiagnostics(provider: TerminalControlProvider) {
-  if (provider instanceof TmuxTerminalControlProvider) {
-    return provider.diagnose();
-  }
-  return {
-    provider: "static",
-    paneCount: (await provider.listPanes()).length
-  };
+  return provider.diagnostics();
 }
 
 function managedTurnListEntry(
@@ -3749,8 +3825,10 @@ async function terminalControlledListEntry(
     storeDirFromOptions(options)
   ).some((turn) =>
     isDiscoverableTmuxConversation(turn) &&
-    terminalKeyForManagedConversation(turn) ===
-      terminalControlSelectorKey(terminalControl) &&
+    terminalControlsShareIncarnation(
+      terminalControlForManagedConversation(turn),
+      terminalControl
+    ) &&
     SESSION_SEND_BLOCKING_STATUSES.has(turn.status)
   );
   let nativeInspectionComposerReady = nativeInspectionComposerEmpty(
@@ -3767,13 +3845,13 @@ async function terminalControlledListEntry(
     terminalControl.capabilities.includes("screen_status")
   ) {
     try {
-      const styledScreen = await createTerminalControlProvider(options).capture(
-        terminalControl.target,
-        {
-          scrollbackLines: 40,
-          socketPath: terminalControl.socketPath,
-          preserveEscapes: true
-        }
+      const provider = createTerminalControlProvider(options);
+      const resolvedTerminal = await provider.resolve(
+        provider.endpoint(terminalControl)
+      );
+      const styledScreen = await provider.capture(
+        resolvedTerminal,
+        { scrollbackLines: 40, preserveEscapes: true }
       );
       nativeInspectionComposerReady = codexStyledComposerEmpty(styledScreen);
     } catch {
@@ -3898,29 +3976,40 @@ function terminalFirstListProjection({
   terminals: Record<string, any>[];
   unavailableManagedTurns: Record<string, any>[];
 } {
-  const allByTerminal = managedConversationsByTerminal(allConversations);
-  const displayedByTerminal = managedConversationsByTerminal(
-    displayedConversations
-  );
-  const sessionsByTerminal = managedSessionsByTerminal(managedSessions);
-  const discoveredTerminalKeys = new Set<string>();
+  const discoveredTerminalControls = terminals.flatMap((terminal) => {
+    const control = isRecord(terminal.terminal_control)
+      ? terminal.terminal_control as unknown as TerminalControlRef
+      : undefined;
+    return control ? [control] : [];
+  });
 
   const projectedTerminals = terminals.map((terminal) => {
     const terminalControl = isRecord(terminal.terminal_control)
       ? terminal.terminal_control as unknown as TerminalControlRef
       : undefined;
-    const terminalKey = terminalControlSelectorKey(terminalControl);
-    if (terminalKey) {
-      discoveredTerminalKeys.add(terminalKey);
-    }
-    const allRelated = terminalKey
-      ? [...(allByTerminal.get(terminalKey) ?? [])]
+    const allRelated = terminalControl
+      ? allConversations.filter((conversation) =>
+          terminalControlsShareIncarnation(
+            terminalControlForManagedConversation(conversation),
+            terminalControl
+          )
+        )
       : [];
-    const displayedRelated = terminalKey
-      ? [...(displayedByTerminal.get(terminalKey) ?? [])]
+    const displayedRelated = terminalControl
+      ? displayedConversations.filter((conversation) =>
+          terminalControlsShareIncarnation(
+            terminalControlForManagedConversation(conversation),
+            terminalControl
+          )
+        )
       : [];
-    const relatedSessions = terminalKey
-      ? [...(sessionsByTerminal.get(terminalKey) ?? [])]
+    const relatedSessions = terminalControl
+      ? managedSessions.filter((session) =>
+          terminalControlsShareIncarnation(
+            session.binding?.terminal_control,
+            terminalControl
+          )
+        )
       : [];
     const matchingSessions = relatedSessions.filter((session) =>
       managedSessionMatchesLiveTerminalEntry(session, terminal, storeDir)
@@ -4300,8 +4389,10 @@ function terminalFirstListProjection({
 
   const unavailableManagedTurns = displayedConversations
     .filter((conversation) => {
-      const terminalKey = terminalKeyForManagedConversation(conversation);
-      if (terminalKey && discoveredTerminalKeys.has(terminalKey)) {
+      const managedControl = terminalControlForManagedConversation(conversation);
+      if (discoveredTerminalControls.some((control) =>
+        terminalControlsShareIncarnation(managedControl, control)
+      )) {
         return false;
       }
       return (
@@ -4349,41 +4440,6 @@ function terminalFirstListProjection({
   };
 }
 
-function managedConversationsByTerminal(
-  conversations: Conversation[]
-): Map<string, Conversation[]> {
-  const groups = new Map<string, Conversation[]>();
-  for (const conversation of conversations) {
-    const key = terminalKeyForManagedConversation(conversation);
-    if (!key) {
-      continue;
-    }
-    const group = groups.get(key) ?? [];
-    group.push(conversation);
-    groups.set(key, group);
-  }
-  return groups;
-}
-
-function managedSessionsByTerminal(
-  sessions: ManagedSessionState[]
-): Map<string, ManagedSessionState[]> {
-  const groups = new Map<string, ManagedSessionState[]>();
-  for (const session of sessions) {
-    if (!session.binding) {
-      continue;
-    }
-    const key = terminalControlSelectorKey(session.binding.terminal_control);
-    if (!key) {
-      continue;
-    }
-    const group = groups.get(key) ?? [];
-    group.push(session);
-    groups.set(key, group);
-  }
-  return groups;
-}
-
 function managedSessionMatchesLiveTerminalEntry(
   session: ManagedSessionState,
   terminal: Record<string, any>,
@@ -4397,10 +4453,13 @@ function managedSessionMatchesLiveTerminalEntry(
     session.status !== "bound" ||
     !binding ||
     session.agent !== terminal.agent ||
-    binding.terminal_id !== stringValue(terminal.id) ||
     binding.native_process.pid !== Number(terminal.pid) ||
-    terminalControlSelectorKey(binding.terminal_control) !==
-      terminalControlSelectorKey(liveControl) ||
+    !terminalControlAliasMatches(
+      binding.terminal_id,
+      binding.terminal_control,
+      terminal.id,
+      liveControl
+    ) ||
     !matchesConfiguredWorkspace(
       session.workspace,
       terminal.workspace ?? terminal.cwd
@@ -4497,8 +4556,7 @@ function managedSessionClaimsLiveTerminalEntry(
     binding &&
     session.agent === terminal.agent &&
     binding.native_process.pid === Number(terminal.pid) &&
-    terminalControlSelectorKey(binding.terminal_control) ===
-      terminalControlSelectorKey(liveControl)
+    terminalControlsShareIncarnation(binding.terminal_control, liveControl)
   );
 }
 
@@ -4564,7 +4622,14 @@ function managedBindingConflictKindForLiveTerminalEntry({
     return "stale_process_incarnation";
   }
   if (
-    binding.terminal_id !== stringValue(terminal.id) ||
+    !terminalControlAliasMatches(
+      binding.terminal_id,
+      binding.terminal_control,
+      terminal.id,
+      isRecord(terminal.terminal_control)
+        ? terminal.terminal_control
+        : undefined
+    ) ||
     !matchesConfiguredWorkspace(
       session.workspace,
       terminal.workspace ?? terminal.cwd
@@ -4649,15 +4714,13 @@ function managedSessionHasUnresolvedNativeTransition(
   return false;
 }
 
-function terminalKeyForManagedConversation(
+function terminalControlForManagedConversation(
   conversation: Conversation
-): string | undefined {
-  return terminalControlSelectorKey(
-    terminalControlFromTakeover(
-      isRecord(conversation.native_session_takeover)
-        ? conversation.native_session_takeover
-        : undefined
-    )
+): TerminalControlRef | undefined {
+  return terminalControlFromTakeover(
+    isRecord(conversation.native_session_takeover)
+      ? conversation.native_session_takeover
+      : undefined
   );
 }
 
@@ -4716,17 +4779,11 @@ function terminalDispatchOwnership(
   if (!ledger || ledger.status === "resolved") {
     return { state: "none" };
   }
-  const ledgerControl = isRecord(ledger.terminal_control)
-    ? ledger.terminal_control
-    : undefined;
-  const ledgerPanePid = Number(ledgerControl?.pane_pid);
-  const currentPanePid = Number(terminalControl.panePid);
   if (
-    Number.isSafeInteger(ledgerPanePid) &&
-    ledgerPanePid > 0 &&
-    Number.isSafeInteger(currentPanePid) &&
-    currentPanePid > 0 &&
-    ledgerPanePid !== currentPanePid
+    terminalDispatchRecordMatchesControl(ledger, terminalControl, {
+      requireProcessAnchor: false
+    }) &&
+    !terminalDispatchRecordMatchesControl(ledger, terminalControl)
   ) {
     return { state: "none" };
   }
@@ -4752,9 +4809,8 @@ function terminalDispatchOwnership(
   if (TERMINAL_DISPATCH_RELEASE_STATUSES.has(owner.status)) {
     return { state: "none" };
   }
-  const ownerTerminalKey = terminalKeyForManagedConversation(owner);
-  const currentTerminalKey = terminalControlSelectorKey(terminalControl);
-  if (!ownerTerminalKey || ownerTerminalKey !== currentTerminalKey) {
+  const ownerTerminalControl = terminalControlForManagedConversation(owner);
+  if (!terminalControlsShareIncarnation(ownerTerminalControl, terminalControl)) {
     return {
       state: "conflict",
       conflict: terminalDispatchConflict(
@@ -4995,9 +5051,13 @@ function managedTurnMatchesLiveTerminal(
     !Number.isSafeInteger(livePid) ||
     livePid <= 1 ||
     storedPid !== livePid ||
-    stringValue(takeover?.native_session_id) !== stringValue(terminal.id) ||
-    terminalControlSelectorKey(storedControl) !==
-      terminalControlSelectorKey(liveControl)
+    !terminalControlAliasMatches(
+      stringValue(takeover?.native_session_id),
+      storedControl,
+      stringValue(terminal.id),
+      liveControl
+    ) ||
+    !terminalControlsShareIncarnation(storedControl, liveControl)
   ) {
     return false;
   }
@@ -5166,18 +5226,25 @@ function rootActiveProcesses(processes: ActiveTerminalProcess[]): ActiveTerminal
   const roots = processes.filter((process) =>
     !process.ppid || !pids.has(`${process.agent}:${process.ppid}`)
   );
-  const seenTerminalTargets = new Set<string>();
+  const seenTerminalIncarnations = new Set<string>();
   return roots.filter((process) => {
-    const terminalTarget = process.terminalControl?.target
-      ? `${process.agent}:${process.terminalControl.target}:${process.terminalControl.panePid}`
+    const endpoint = process.terminalControl
+      ? terminalEndpointFromControlRef(process.terminalControl)
       : undefined;
-    if (!terminalTarget) {
+    const terminalIncarnation = endpoint
+      ? JSON.stringify({
+          agent: process.agent,
+          identity: terminalEndpointIdentityKey(endpoint),
+          process_anchor_pid: endpoint.processAnchorPid ?? null
+        })
+      : undefined;
+    if (!terminalIncarnation) {
       return true;
     }
-    if (seenTerminalTargets.has(terminalTarget)) {
+    if (seenTerminalIncarnations.has(terminalIncarnation)) {
       return false;
     }
-    seenTerminalTargets.add(terminalTarget);
+    seenTerminalIncarnations.add(terminalIncarnation);
     return true;
   });
 }
@@ -5932,16 +5999,58 @@ function terminalControlSelectorKey(value: unknown): string | undefined {
   if (!isRecord(value)) {
     return undefined;
   }
-  const target = stringValue(value.target);
-  const panePid = Number(value.panePid);
-  if (!target || !Number.isSafeInteger(panePid) || panePid <= 1) {
+  let endpoint: ReturnType<typeof terminalEndpointFromControlRef>;
+  try {
+    endpoint = terminalEndpointFromControlRef(
+      value as unknown as TerminalControlRef
+    );
+  } catch {
+    return undefined;
+  }
+  const processAnchorPid = Number(endpoint.processAnchorPid);
+  if (!Number.isSafeInteger(processAnchorPid) || processAnchorPid <= 1) {
     return undefined;
   }
   return JSON.stringify({
-    target,
-    pane_pid: panePid,
-    socket_path: stringValue(value.socketPath) ?? null
+    identity: terminalEndpointIdentityKey(endpoint),
+    process_anchor_pid: processAnchorPid
   });
+}
+
+function terminalControlsShareIncarnation(
+  left: unknown,
+  right: unknown
+): boolean {
+  if (!terminalControlSelectorKey(left) || !terminalControlSelectorKey(right)) {
+    return false;
+  }
+  return sameTerminalControlIncarnation(
+    left as TerminalControlRef,
+    right as TerminalControlRef
+  );
+}
+
+/**
+ * `terminal:v2` is a route-shaped compatibility alias, not terminal
+ * ownership. Once both sides carry canonical endpoint evidence, a route
+ * rename must not detach or duplicate the stable resource. Legacy records
+ * continue to require the exact historical alias and route tuple.
+ */
+function terminalControlAliasMatches(
+  storedTerminalId: unknown,
+  storedControl: unknown,
+  currentTerminalId: unknown,
+  currentControl: unknown
+): boolean {
+  if (!terminalControlsShareIncarnation(storedControl, currentControl)) {
+    return false;
+  }
+  const stored = storedControl as TerminalControlRef;
+  const current = currentControl as TerminalControlRef;
+  return (
+    hasCanonicalTerminalEndpoint(stored) &&
+    hasCanonicalTerminalEndpoint(current)
+  ) || stringValue(storedTerminalId) === stringValue(currentTerminalId);
 }
 
 function sessionEntryRecency(entry, observedAtMs: number): { updatedAtMs?: number } {
@@ -6367,14 +6476,17 @@ function codexAllowedCompanionSetForManagedSession({
         candidate.agent !== "codex" ||
         candidate.status !== "detached" ||
         !candidateBinding?.native_thread_id ||
-        candidateBinding.terminal_id !== binding.terminal_id ||
         candidateBinding.native_process.pid !== binding.native_process.pid ||
         candidateBinding.native_process.process_uuid !==
           binding.native_process.process_uuid ||
         candidateBinding.native_process.process_birth !==
           binding.native_process.process_birth ||
-        terminalControlSelectorKey(candidateBinding.terminal_control) !==
-          terminalControlSelectorKey(binding.terminal_control) ||
+        !terminalControlAliasMatches(
+          candidateBinding.terminal_id,
+          candidateBinding.terminal_control,
+          binding.terminal_id,
+          binding.terminal_control
+        ) ||
         path.resolve(candidate.workspace) !== path.resolve(session.workspace) ||
         !candidateBinding.native_process.process_uuid ||
         !candidateBinding.native_process.process_birth ||
@@ -6503,8 +6615,13 @@ function codexKnownRootSetForLifecycleTransition({
     after?.native_thread_id &&
     after.native_process.process_uuid &&
     after.native_process.process_birth &&
-    after.terminal_id === terminal.conversationId &&
     after.native_process.pid === terminal.pid &&
+    terminalControlAliasMatches(
+      after.terminal_id,
+      after.terminal_control,
+      terminal.conversationId,
+      terminal.terminalControl
+    ) &&
     after.native_process.process_uuid === transition.before_process_uuid &&
     after.native_process.process_birth === transition.before_process_birth &&
     isCompleteNativeRollout(after.native_process.rollout)
@@ -6524,12 +6641,15 @@ function codexKnownRootSetForLifecycleTransition({
       !binding?.native_thread_id ||
       !binding.native_process.process_uuid ||
       !binding.native_process.process_birth ||
-      binding.terminal_id !== terminal.conversationId ||
       binding.native_process.pid !== terminal.pid ||
       binding.native_process.process_uuid !== transition.before_process_uuid ||
       binding.native_process.process_birth !== transition.before_process_birth ||
-      terminalControlSelectorKey(binding.terminal_control) !==
-        terminalControlSelectorKey(terminal.terminalControl) ||
+      !terminalControlAliasMatches(
+        binding.terminal_id,
+        binding.terminal_control,
+        terminal.conversationId,
+        terminal.terminalControl
+      ) ||
       !matchesConfiguredWorkspace(
         transition.workspace,
         session.workspace
@@ -6627,13 +6747,13 @@ async function assertCodexComposerReadyForAutomatedInput({
   options: Record<string, any>;
   terminalControl: TerminalControlRef;
 }): Promise<void> {
-  const styledScreen = await createTerminalControlProvider(options).capture(
-    terminalControl.target,
-    {
-      scrollbackLines: 40,
-      socketPath: terminalControl.socketPath,
-      preserveEscapes: true
-    }
+  const provider = createTerminalControlProvider(options);
+  const resolvedTerminal = await provider.resolve(
+    provider.endpoint(terminalControl)
+  );
+  const styledScreen = await provider.capture(
+    resolvedTerminal,
+    { scrollbackLines: 40, preserveEscapes: true }
   );
   if (!codexStyledComposerEmpty(styledScreen)) {
     throw new Error(
@@ -6778,10 +6898,13 @@ function bindingMatchesLiveTerminal(
   }
   if (
     session.agent !== terminal.agent ||
-    binding.terminal_id !== terminal.conversationId ||
     binding.native_process.pid !== terminal.pid ||
-    terminalControlSelectorKey(binding.terminal_control) !==
-      terminalControlSelectorKey(terminal.terminalControl) ||
+    !terminalControlAliasMatches(
+      binding.terminal_id,
+      binding.terminal_control,
+      terminal.conversationId,
+      terminal.terminalControl
+    ) ||
     !matchesConfiguredWorkspace(
       session.workspace,
       terminal.terminalControl.currentPath
@@ -6848,9 +6971,12 @@ function boundManagedSessionForTerminal({
     ["transitioning", "quarantined"].includes(session.status) &&
     session.binding &&
     session.agent === terminal.agent &&
-    session.binding.terminal_id === terminal.conversationId &&
-    terminalControlSelectorKey(session.binding.terminal_control) ===
-      terminalControlSelectorKey(terminal.terminalControl)
+    terminalControlAliasMatches(
+      session.binding.terminal_id,
+      session.binding.terminal_control,
+      terminal.conversationId,
+      terminal.terminalControl
+    )
   );
   if (unresolved.length > 0) {
     throw new Error(
@@ -6874,8 +7000,10 @@ function boundManagedSessionForTerminal({
     session.status === "bound" &&
     session.binding &&
     session.agent === terminal.agent &&
-    terminalControlSelectorKey(session.binding.terminal_control) ===
-      terminalControlSelectorKey(terminal.terminalControl) &&
+    terminalControlsShareIncarnation(
+      session.binding.terminal_control,
+      terminal.terminalControl
+    ) &&
     session.binding.native_process.pid === terminal.pid &&
     !managedSessionOwnerIsConclusivelyInactive({
       session,
@@ -6909,10 +7037,13 @@ function managedBindingConflictKindForResolvedTerminal({
     session.status !== "bound" ||
     !binding ||
     session.agent !== terminal.agent ||
-    binding.terminal_id !== terminal.conversationId ||
     binding.native_process.pid !== terminal.pid ||
-    terminalControlSelectorKey(binding.terminal_control) !==
-      terminalControlSelectorKey(terminal.terminalControl) ||
+    !terminalControlAliasMatches(
+      binding.terminal_id,
+      binding.terminal_control,
+      terminal.conversationId,
+      terminal.terminalControl
+    ) ||
     !matchesConfiguredWorkspace(
       session.workspace,
       terminal.terminalControl.currentPath
@@ -6967,10 +7098,13 @@ function soleBoundManagedSessionClaimForTerminal(
     session.status === "bound" &&
     session.binding &&
     session.agent === terminal.agent &&
-    session.binding.terminal_id === terminal.conversationId &&
     session.binding.native_process.pid === terminal.pid &&
-    terminalControlSelectorKey(session.binding.terminal_control) ===
-      terminalControlSelectorKey(terminal.terminalControl) &&
+    terminalControlAliasMatches(
+      session.binding.terminal_id,
+      session.binding.terminal_control,
+      terminal.conversationId,
+      terminal.terminalControl
+    ) &&
     matchesConfiguredWorkspace(
       session.workspace,
       terminal.terminalControl.currentPath
@@ -7205,6 +7339,42 @@ function lifecycleBindingToken({
   });
 }
 
+function managedSessionBindingTokens(session: ManagedSessionState): string[] {
+  return [...new Set([
+    managedSessionBindingToken(session),
+    legacyManagedSessionBindingToken(session)
+  ])];
+}
+
+function lifecycleBindingTokens({
+  session,
+  terminal,
+  identity
+}: {
+  session?: ManagedSessionState;
+  terminal: ResolvedTerminalConversation;
+  identity?: NativeAgentSessionIdentity;
+}): string[] {
+  const current = lifecycleBindingToken({ session, terminal, identity });
+  const codexIncarnation = terminal.agent === "codex" && !identity
+    ? codexProcessIncarnationForPid(terminal.pid)
+    : undefined;
+  const legacy = session
+    ? legacyManagedSessionBindingToken(session)
+    : legacyUnmanagedTerminalBindingToken({
+        terminalId: terminal.conversationId,
+        terminalControl: terminal.terminalControl,
+        agent: terminal.agent,
+        pid: terminal.pid,
+        workspace: terminal.terminalControl.currentPath ?? process.cwd(),
+        nativeThreadId: identity?.sessionId,
+        processUuid: identity?.processUuid ?? codexIncarnation?.processUuid,
+        processBirth: identity?.processBirth ?? codexIncarnation?.processBirth,
+        rollout: identity?.rollout
+      });
+  return [...new Set([current, legacy])];
+}
+
 function agentVersionForRunningProcess(
   agent: ExecutorKind,
   pid: number,
@@ -7267,8 +7437,10 @@ function assertTerminalLifecycleReady({
   const blockers = listConversations(storeDirFromOptions(options))
     .filter(isDiscoverableTmuxConversation)
     .filter((turn) =>
-      terminalKeyForManagedConversation(turn) ===
-        terminalControlSelectorKey(terminal.terminalControl) &&
+      terminalControlsShareIncarnation(
+        terminalControlForManagedConversation(turn),
+        terminal.terminalControl
+      ) &&
       SESSION_SEND_BLOCKING_STATUSES.has(turn.status)
     );
   if (blockers.length > 0) {
@@ -7579,10 +7751,13 @@ async function assertLifecycleTargetHasExclusiveOwnership({
     !afterBinding ||
     !nativeThreadId ||
     !isExactNativeThreadId(nativeThreadId) ||
-    afterBinding.terminal_id !== terminal.conversationId ||
     afterBinding.native_process.pid !== terminal.pid ||
-    terminalControlSelectorKey(afterBinding.terminal_control) !==
-      terminalControlSelectorKey(terminal.terminalControl)
+    !terminalControlAliasMatches(
+      afterBinding.terminal_id,
+      afterBinding.terminal_control,
+      terminal.conversationId,
+      terminal.terminalControl
+    )
   ) {
     throw new Error(
       "cannot exclude the current lifecycle process without an exact after_binding"
@@ -8006,7 +8181,7 @@ async function currentLifecycleSnapshot(
     allowedCompanionIdentity: claimedCodexCompanions.primary,
     allowedAdditionalIdentities: claimedCodexCompanions.additional
   });
-  const session = materialize
+  let session = materialize
     ? materializeCurrentManagedSession({
         options,
         terminal,
@@ -8017,13 +8192,26 @@ async function currentLifecycleSnapshot(
         terminal,
         identity: observedIdentity
       });
-  const identity = session
+  let identity = session
     ? logicalIdentityForManagedSession({
         storeDir,
         session,
         observedIdentity
       })
     : observedIdentity;
+  if (materialize && session) {
+    session = refineManagedSessionNativeIdentity({
+      storeDir,
+      session,
+      terminalControl: terminal.terminalControl,
+      identity
+    });
+    identity = logicalIdentityForManagedSession({
+      storeDir,
+      session,
+      observedIdentity
+    });
+  }
   const codexCompanions = terminal.agent === "codex" && session
     ? codexAllowedCompanionSetForManagedSession({ storeDir, session })
     : claimedCodexCompanions;
@@ -8052,6 +8240,7 @@ async function currentLifecycleSnapshot(
     resumeExact: false,
     reason: `${adapter.displayName} has no native-thread lifecycle adapter`
   };
+  const bindingTokens = lifecycleBindingTokens({ session, terminal, identity });
   return {
     identity,
     runtimeIdentity: observedIdentity,
@@ -8060,7 +8249,8 @@ async function currentLifecycleSnapshot(
     version,
     adapter,
     capabilities,
-    bindingToken: lifecycleBindingToken({ session, terminal, identity })
+    bindingToken: bindingTokens[0],
+    bindingTokens
   };
 }
 
@@ -8189,11 +8379,14 @@ function assertSameNativeInspectionTerminal(
   const expectedPath = expected.terminalControl.currentPath;
   const actualPath = actual.terminalControl.currentPath;
   if (
-    actual.conversationId !== expected.conversationId ||
     actual.agent !== expected.agent ||
     actual.pid !== expected.pid ||
-    terminalControlSelectorKey(actual.terminalControl) !==
-      terminalControlSelectorKey(expected.terminalControl) ||
+    !terminalControlAliasMatches(
+      expected.conversationId,
+      expected.terminalControl,
+      actual.conversationId,
+      actual.terminalControl
+    ) ||
     !expectedPath ||
     !actualPath ||
     path.resolve(actualPath) !== path.resolve(expectedPath)
@@ -8231,8 +8424,10 @@ function assertTerminalNativeInspectionReady({
   const blocker = listConversations(storeDirFromOptions(options))
     .filter(isDiscoverableTmuxConversation)
     .find((turn) =>
-      terminalKeyForManagedConversation(turn) ===
-        terminalControlSelectorKey(terminal.terminalControl) &&
+      terminalControlsShareIncarnation(
+        terminalControlForManagedConversation(turn),
+        terminal.terminalControl
+      ) &&
       SESSION_SEND_BLOCKING_STATUSES.has(turn.status)
     );
   if (blocker) {
@@ -8343,7 +8538,7 @@ function assertNativeInspectionSnapshotUnchanged({
   expectedClaudeState?: "idle" | "status_dialog";
 }): void {
   assertSameNativeInspectionTerminal(expectedTerminal, actualTerminal, stage);
-  if (actualSnapshot.bindingToken !== expectedBindingToken) {
+  if (!actualSnapshot.bindingTokens.includes(expectedBindingToken)) {
     throw new Error(
       `terminal binding changed ${stage}; refresh AKK list`
     );
@@ -8491,22 +8686,26 @@ async function runNativeInspect(options: Record<string, any>) {
     );
   }
   const initiallyResolved = await resolveLifecycleTerminal(options);
-  const releaseTerminalLock = acquireFileLock(
-    terminalBridgeSendLockPath(
-      storeDir,
-      initiallyResolved.terminalControl
-    ),
+  const bridge = createTerminalAgentBridge(options);
+  const releaseTerminalLock = acquireTerminalBridgeSendLock(
+    storeDir,
+    initiallyResolved.terminalControl,
     { timeoutMs: 30000 }
   );
   try {
-    const terminal = await resolveLifecycleTerminal(options);
+    const terminal = await bridge.resolveStoredTerminal(
+      initiallyResolved.agent,
+      initiallyResolved.pid,
+      initiallyResolved.terminalControl,
+      { pid: initiallyResolved.pid }
+    );
     assertSameNativeInspectionTerminal(
       initiallyResolved,
       terminal,
       "while waiting for native-inspection control"
     );
     const snapshot = await currentLifecycleSnapshot(options, terminal);
-    if (snapshot.bindingToken !== expectedBindingToken) {
+    if (!snapshot.bindingTokens.includes(expectedBindingToken)) {
       throw new Error(
         "terminal binding changed after it was listed; refresh AKK list and retry"
       );
@@ -8549,7 +8748,6 @@ async function runNativeInspect(options: Record<string, any>) {
       snapshot
     });
     const runtime = nativeInspectionRuntime({ terminal, snapshot });
-    const bridge = createTerminalAgentBridge(options);
     const initialStatus = await bridge.status(
       terminal.agent,
       terminal.terminalControl,
@@ -8577,7 +8775,12 @@ async function runNativeInspect(options: Record<string, any>) {
         {
           runtime,
           beforeEnter: async () => {
-            const finalTerminal = await resolveLifecycleTerminal(options);
+            const finalTerminal = await bridge.resolveStoredTerminal(
+              terminal.agent,
+              terminal.pid,
+              terminal.terminalControl,
+              runtime
+            );
             const finalSnapshot = await currentLifecycleSnapshot(
               options,
               finalTerminal
@@ -8711,7 +8914,12 @@ async function runNativeInspect(options: Record<string, any>) {
               runtime: postEnterRuntime,
               scrollbackLines: 240,
               beforeDismiss: async () => {
-                const dismissTerminal = await resolveLifecycleTerminal(options);
+                const dismissTerminal = await bridge.resolveStoredTerminal(
+                  terminal.agent,
+                  terminal.pid,
+                  terminal.terminalControl,
+                  postEnterRuntime
+                );
                 const dismissSnapshot = await currentLifecycleSnapshot(
                   options,
                   dismissTerminal
@@ -8773,7 +8981,12 @@ async function runNativeInspect(options: Record<string, any>) {
           );
         }
       }
-      const finalTerminal = await resolveLifecycleTerminal(options);
+      const finalTerminal = await bridge.resolveStoredTerminal(
+        terminal.agent,
+        terminal.pid,
+        terminal.terminalControl,
+        runtime
+      );
       const finalSnapshot = await currentLifecycleSnapshot(options, finalTerminal);
       assertNativeInspectionSnapshotUnchanged({
         options,
@@ -9383,11 +9596,9 @@ async function runReconcileBinding(options: Record<string, any>) {
     stringValue(options.expectedTerminalToken),
     "--expected-terminal-token is required"
   );
-  const releaseTerminalLock = acquireFileLock(
-    terminalBridgeSendLockPath(
-      storeDir,
-      initiallyResolved.terminalControl
-    ),
+  const releaseTerminalLock = acquireTerminalBridgeSendLock(
+    storeDir,
+    initiallyResolved.terminalControl,
     { timeoutMs: 30000 }
   );
   try {
@@ -9396,8 +9607,10 @@ async function runReconcileBinding(options: Record<string, any>) {
       if (
         terminal.pid !== initiallyResolved.pid ||
         terminal.conversationId !== initiallyResolved.conversationId ||
-        terminalControlSelectorKey(terminal.terminalControl) !==
-          terminalControlSelectorKey(initiallyResolved.terminalControl)
+        !terminalControlsShareIncarnation(
+          terminal.terminalControl,
+          initiallyResolved.terminalControl
+        )
       ) {
         throw new Error(
           "terminal identity changed while waiting to reconcile its binding; refresh AKK list"
@@ -9415,7 +9628,7 @@ async function runReconcileBinding(options: Record<string, any>) {
       const session = loadManagedSession(storeDir, conflictingSessionId);
       if (
         session.revision !== expectedSessionRevision ||
-        managedSessionBindingToken(session) !== expectedBindingToken
+        !managedSessionBindingTokens(session).includes(expectedBindingToken)
       ) {
         throw new Error(
           "managed Session binding changed after it was listed; refresh AKK list"
@@ -9426,10 +9639,13 @@ async function runReconcileBinding(options: Record<string, any>) {
         session.status !== "bound" ||
         !binding ||
         session.agent !== terminal.agent ||
-        binding.terminal_id !== terminal.conversationId ||
         binding.native_process.pid !== terminal.pid ||
-        terminalControlSelectorKey(binding.terminal_control) !==
-          terminalControlSelectorKey(terminal.terminalControl) ||
+        !terminalControlAliasMatches(
+          binding.terminal_id,
+          binding.terminal_control,
+          terminal.conversationId,
+          terminal.terminalControl
+        ) ||
         !matchesConfiguredWorkspace(
           session.workspace,
           terminal.terminalControl.currentPath
@@ -9445,11 +9661,11 @@ async function runReconcileBinding(options: Record<string, any>) {
         pid: terminal.pid,
         cwd: terminal.terminalControl.currentPath
       });
-      const terminalToken = lifecycleBindingToken({
+      const terminalTokens = lifecycleBindingTokens({
         terminal,
         identity
       });
-      if (terminalToken !== expectedTerminalToken) {
+      if (!terminalTokens.includes(expectedTerminalToken)) {
         throw new Error(
           "live terminal identity changed after the conflict was listed; refresh AKK list"
         );
@@ -9474,8 +9690,10 @@ async function runReconcileBinding(options: Record<string, any>) {
       if (
         finalTerminal.pid !== terminal.pid ||
         finalTerminal.conversationId !== terminal.conversationId ||
-        terminalControlSelectorKey(finalTerminal.terminalControl) !==
-          terminalControlSelectorKey(terminal.terminalControl)
+        !terminalControlsShareIncarnation(
+          finalTerminal.terminalControl,
+          terminal.terminalControl
+        )
       ) {
         throw new Error(
           "terminal identity changed during binding reconciliation; refresh AKK list"
@@ -9503,10 +9721,10 @@ async function runReconcileBinding(options: Record<string, any>) {
         cwd: finalTerminal.terminalControl.currentPath
       });
       if (
-        lifecycleBindingToken({
+        !lifecycleBindingTokens({
           terminal: finalTerminal,
           identity: finalIdentity
-        }) !== expectedTerminalToken
+        }).includes(expectedTerminalToken)
       ) {
         throw new Error(
           "live terminal identity changed during binding reconciliation; refresh AKK list"
@@ -9518,7 +9736,7 @@ async function runReconcileBinding(options: Record<string, any>) {
       );
       if (
         finalSession.revision !== expectedSessionRevision ||
-        managedSessionBindingToken(finalSession) !== expectedBindingToken
+        !managedSessionBindingTokens(finalSession).includes(expectedBindingToken)
       ) {
         throw new Error(
           "managed Session binding changed during reconciliation; refresh AKK list"
@@ -9586,13 +9804,23 @@ function assertResumeSnapshotMatchesTerminal(
   const workspace = path.resolve(
     terminal.terminalControl.currentPath ?? process.cwd()
   );
+  const terminalMatches = snapshot.version === 2
+    ? terminalControlEvidenceMatches(
+        snapshot.terminal_endpoint,
+        terminal.terminalControl
+      )
+    : terminalControlEvidenceMatches(
+        snapshot.terminal_control,
+        terminal.terminalControl
+      );
   if (
-    snapshot.terminal_id !== terminal.conversationId ||
+    (
+      snapshot.version === 1 &&
+      snapshot.terminal_id !== terminal.conversationId
+    ) ||
     snapshot.agent !== terminal.agent ||
     path.resolve(snapshot.workspace) !== workspace ||
-    snapshot.terminal_control.target !== terminal.terminalControl.target ||
-    snapshot.terminal_control.socket_path !== terminal.terminalControl.socketPath ||
-    snapshot.terminal_control.pane_pid !== terminal.terminalControl.panePid
+    !terminalMatches
   ) {
     throw new Error(
       "resume selection terminal, process, or workspace changed; run /akk threads again"
@@ -9653,8 +9881,9 @@ async function runNativeThreadTransition(
 ) {
   const initiallyResolved = await resolveLifecycleTerminal(options);
   const storeDir = storeDirFromOptions(options);
-  const releaseTerminalLock = acquireFileLock(
-    terminalBridgeSendLockPath(storeDir, initiallyResolved.terminalControl),
+  const releaseTerminalLock = acquireTerminalBridgeSendLock(
+    storeDir,
+    initiallyResolved.terminalControl,
     { timeoutMs: 30000 }
   );
   try {
@@ -9662,8 +9891,10 @@ async function runNativeThreadTransition(
       const terminal = await resolveLifecycleTerminal(options);
       if (
         terminal.pid !== initiallyResolved.pid ||
-        terminalControlSelectorKey(terminal.terminalControl) !==
-          terminalControlSelectorKey(initiallyResolved.terminalControl)
+        !terminalControlsShareIncarnation(
+          terminal.terminalControl,
+          initiallyResolved.terminalControl
+        )
       ) {
         throw new Error(
           "terminal identity changed while waiting for lifecycle control; refresh list"
@@ -9690,7 +9921,7 @@ async function runNativeThreadTransition(
         stringValue(options.expectedBindingToken),
         "--expected-binding-token is required"
       );
-      if (expectedToken !== snapshot.bindingToken) {
+      if (!snapshot.bindingTokens.includes(expectedToken)) {
         throw new Error(
           "terminal binding changed after it was listed; refresh AKK list and retry"
         );
@@ -10123,20 +10354,33 @@ async function runNativeThreadTransition(
           // Candidate discovery and ownership revalidation can take long
           // enough for a human to start typing after the /status probe. Keep
           // this check immediately adjacent to the terminal mutation.
-          await assertCodexComposerReadyForAutomatedInput({
-            options,
-            terminalControl: terminal.terminalControl
-          });
+          try {
+            await assertCodexComposerReadyForAutomatedInput({
+              options,
+              terminalControl: terminal.terminalControl
+            });
+          } catch (error) {
+            throw new TerminalInputNotStartedError(
+              error instanceof Error ? error.message : String(error),
+              { cause: error }
+            );
+          }
         }
         if (operation.kind === "resume_thread" && operation.selectionSnapshot) {
           assertResumeSnapshotNotExpired(operation.selectionSnapshot);
         }
-        inputStarted = true;
         await bridge.send(
           terminal.agent,
           terminal.terminalControl,
           transitionStep.command,
-          { runtime: beforeRuntime }
+          {
+            runtime: beforeRuntime,
+            onTransportStage(event) {
+              if (event.stage === "text_injected") {
+                inputStarted = true;
+              }
+            }
+          }
         );
         const submittedAt = new Date().toISOString();
         transition = {
@@ -10357,7 +10601,10 @@ async function runNativeThreadTransition(
           });
           return;
         }
-        if (!inputStarted) {
+        if (
+          !inputStarted &&
+          error instanceof TerminalInputNotStartedError
+        ) {
           transition = {
             ...durableTransition,
             status: "aborted",
@@ -10660,10 +10907,18 @@ function terminalBridgeApprovalFingerprint({ terminalControl, terminalStatus }) 
   if (adapterFingerprint) {
     return adapterFingerprint;
   }
+  const endpoint = terminalEndpointFromControlRef(terminalControl);
+  const processAnchorPid = Number(endpoint.processAnchorPid);
+  if (!Number.isSafeInteger(processAnchorPid) || processAnchorPid <= 1) {
+    throw new Error(
+      "terminal approval fingerprint requires a stable process anchor"
+    );
+  }
   const screen = isRecord(terminalStatus?.screen) ? terminalStatus.screen : {};
   return createHash("sha256")
     .update(JSON.stringify({
-      target: terminalControl.target,
+      terminal_identity: terminalEndpointIdentityKey(endpoint),
+      process_anchor_pid: processAnchorPid,
       keys: approval.keys ?? (approval.key ? [approval.key] : undefined),
       label: approval.label,
       prompt_kind: approval.prompt_kind,
@@ -10814,10 +11069,10 @@ function recordTerminalBridgeApprovalNotification({
       stringValue(currentNativeTakeover.terminal_bridge_message_id) !==
         expectedConversation.messageId ||
       !currentTerminalControl ||
-      currentTerminalControl.kind !== terminalControl.kind ||
-      currentTerminalControl.target !== terminalControl.target ||
-      currentTerminalControl.socketPath !== terminalControl.socketPath ||
-      currentTerminalControl.panePid !== terminalControl.panePid
+      !terminalControlsShareIncarnation(
+        currentTerminalControl,
+        terminalControl
+      )
     ) {
       return {
         conversation,
@@ -11181,11 +11436,9 @@ async function runSend(options) {
       );
     }
     const rawStoreDir = storeDirFromOptions(options);
-    const releaseTerminalLock = acquireFileLock(
-      terminalBridgeSendLockPath(
-        rawStoreDir,
-        terminalConversation.terminalControl
-      ),
+    const releaseTerminalLock = acquireTerminalBridgeSendLock(
+      rawStoreDir,
+      terminalConversation.terminalControl,
       { timeoutMs: 30000 }
     );
     try {
@@ -11444,18 +11697,32 @@ async function runSend(options) {
       `managed Session ${sessionId} has no authoritative terminal binding`
     );
   }
-  const resolvedTerminal = await createTerminalAgentBridge(options)
-    .resolveConversationId(rawTerminalId);
+  const storedTerminalControl = initialSession?.binding?.terminal_control ??
+    terminalControlFromTakeover(legacyTakeover);
+  const storedAgent = initialSession?.agent ??
+    (legacyBindingTurn
+      ? executorForConversation(legacyBindingTurn).kind
+      : undefined);
+  const storedPid = initialSession?.binding?.native_process.pid ??
+    Number(legacyTakeover?.terminal_agent_pid);
+  const terminalBridge = createTerminalAgentBridge(options);
+  const resolvedTerminal = storedTerminalControl && storedAgent &&
+    Number.isSafeInteger(storedPid) && storedPid > 1
+    ? await terminalBridge.resolveStoredTerminal(
+        storedAgent,
+        storedPid,
+        storedTerminalControl,
+        { pid: storedPid }
+      )
+    : await terminalBridge.resolveConversationId(rawTerminalId);
   if (!resolvedTerminal) {
     throw new Error(
       `session ${sessionId} is not attached to a live tmux terminal`
     );
   }
-  const releaseTerminalLock = acquireFileLock(
-    terminalBridgeSendLockPath(
-      storeDir,
-      resolvedTerminal.terminalControl
-    ),
+  const releaseTerminalLock = acquireTerminalBridgeSendLock(
+    storeDir,
+    resolvedTerminal.terminalControl,
     { timeoutMs: 30000 }
   );
   try {
@@ -11649,14 +11916,26 @@ async function runTurnResponse({ options, messageBody }) {
       `turn ${turnIdForConversation(initialConversation)} is not attached to a live tmux terminal`
     );
   }
-  const liveTerminal = await createTerminalAgentBridge(options)
-    .resolveConversationId(nativeTerminalId);
+  const storedPid = Number(nativeTakeover?.terminal_agent_pid);
+  const storedAgent = executorForConversation(initialConversation).kind;
+  const liveTerminal = Number.isSafeInteger(storedPid) && storedPid > 1
+    ? await createTerminalAgentBridge(options).resolveStoredTerminal(
+        storedAgent,
+        storedPid,
+        storedTerminalControl,
+        terminalRuntimeIdentityForConversation(
+          initialConversation,
+          storedTerminalControl
+        )
+      )
+    : undefined;
   if (
     !liveTerminal ||
     liveTerminal.agent !== executorForConversation(initialConversation).kind ||
-    liveTerminal.terminalControl.target !== storedTerminalControl.target ||
-    liveTerminal.terminalControl.socketPath !== storedTerminalControl.socketPath ||
-    liveTerminal.terminalControl.panePid !== storedTerminalControl.panePid
+    !terminalControlsShareIncarnation(
+      liveTerminal.terminalControl,
+      storedTerminalControl
+    )
   ) {
     throw new Error(
       `turn ${turnIdForConversation(initialConversation)} is not attached to its expected live tmux terminal`
@@ -11666,8 +11945,9 @@ async function runTurnResponse({ options, messageBody }) {
   const responseStoreDir = pathsForConversationDir(
     path.dirname(statePath)
   ).storeDir;
-  const releaseTerminalLock = acquireFileLock(
-    terminalBridgeSendLockPath(responseStoreDir, terminalControl),
+  const releaseTerminalLock = acquireTerminalBridgeSendLock(
+    responseStoreDir,
+    terminalControl,
     { timeoutMs: 30000 }
   );
   try {
@@ -11677,8 +11957,8 @@ async function runTurnResponse({ options, messageBody }) {
       await migrateLegacyTerminalAgentIdentity({ ...loaded, options });
       const releaseStateLock = acquireFileLock(`${statePath}.lock`);
       try {
-        const lockedConversation = loadState(statePath);
-        const lockedTakeover = isRecord(
+        let lockedConversation = loadState(statePath);
+        let lockedTakeover = isRecord(
           lockedConversation.native_session_takeover
         )
           ? lockedConversation.native_session_takeover
@@ -11688,9 +11968,7 @@ async function runTurnResponse({ options, messageBody }) {
           stringValue(lockedTakeover?.native_session_id) !== nativeTerminalId ||
           executorForConversation(lockedConversation).kind !== liveTerminal.agent ||
           !lockedControl ||
-          lockedControl.target !== terminalControl.target ||
-          lockedControl.socketPath !== terminalControl.socketPath ||
-          lockedControl.panePid !== terminalControl.panePid
+          !terminalControlsShareIncarnation(lockedControl, terminalControl)
         ) {
           throw new Error(
             "terminal control changed while waiting to respond; refresh status and retry"
@@ -11705,6 +11983,14 @@ async function runTurnResponse({ options, messageBody }) {
             "different OpenClaw session; no terminal input was sent"
           );
         }
+        lockedConversation = refineTerminalTurnEndpoint({
+          conversation: lockedConversation,
+          statePath,
+          terminalControl
+        });
+        lockedTakeover = isRecord(lockedConversation.native_session_takeover)
+          ? lockedConversation.native_session_takeover
+          : undefined;
         if (replayExactActiveTerminalSubmission({
           options,
           terminalControl,
@@ -11737,7 +12023,7 @@ async function runTurnResponse({ options, messageBody }) {
           ? prepared.conversation.native_session_takeover
           : undefined;
         const terminalAgentPid = Number(preparedTakeover?.terminal_agent_pid);
-        const responseManagedSession = tryLoadManagedSession(
+        let responseManagedSession = tryLoadManagedSession(
           responseStoreDir,
           sessionIdForConversation(prepared.conversation)
         );
@@ -11766,14 +12052,28 @@ async function runTurnResponse({ options, messageBody }) {
           currentIdentity: currentNativeIdentity,
           operation: "respond to"
         });
+        if (responseManagedSession) {
+          const logicalResponseIdentity = logicalIdentityForManagedSession({
+            storeDir: responseStoreDir,
+            session: responseManagedSession,
+            observedIdentity: currentNativeIdentity
+          });
+          responseManagedSession = refineManagedSessionNativeIdentity({
+            storeDir: responseStoreDir,
+            session: responseManagedSession,
+            terminalControl,
+            identity: logicalResponseIdentity
+          });
+        }
         const currentTerminalControl = terminalControlFromTakeover(
           prepared.nativeTakeoverForSend
         );
         if (
           !currentTerminalControl ||
-          currentTerminalControl.target !== terminalControl.target ||
-          currentTerminalControl.socketPath !== terminalControl.socketPath ||
-          currentTerminalControl.panePid !== terminalControl.panePid
+          !terminalControlsShareIncarnation(
+            currentTerminalControl,
+            terminalControl
+          )
         ) {
           throw new Error(
             "terminal control changed while waiting to respond; refresh status and retry"
@@ -12014,8 +12314,9 @@ async function runApprove(options) {
         : {})
     };
   };
-  const releaseTerminalLock = acquireFileLock(
-    terminalBridgeSendLockPath(storeDirFromOptions(options), terminalControl),
+  const releaseTerminalLock = acquireTerminalBridgeSendLock(
+    storeDirFromOptions(options),
+    terminalControl,
     { timeoutMs: 30000 }
   );
   let terminalLockReleased = false;
@@ -12053,8 +12354,8 @@ async function runApprove(options) {
     if (
       currentConversation.status !== conversation.status ||
       currentTakeover?.terminal_bridge_message_id !== nativeTakeover?.terminal_bridge_message_id ||
-      currentControl?.target !== terminalControl.target ||
-      currentControl?.socketPath !== terminalControl.socketPath ||
+      !currentControl ||
+      !terminalControlsShareIncarnation(currentControl, terminalControl) ||
       (
         claudeScreenApproval &&
         currentApproval?.fingerprint !== monitoredApproval?.fingerprint
@@ -12213,8 +12514,10 @@ async function runApprove(options) {
                 latestNotifiedAt === undefined ||
                 Date.now() - latestNotifiedAt > CLAUDE_SCREEN_APPROVAL_TTL_MS ||
                 expectedFingerprint !== fingerprint ||
-                latestControl?.target !== dispatchControl.target ||
-                latestControl?.socketPath !== dispatchControl.socketPath ||
+                !terminalControlsShareIncarnation(
+                  latestControl,
+                  dispatchControl
+                ) ||
                 (
                   autoApproved &&
                   (
@@ -12441,8 +12744,9 @@ async function runApprove(options) {
 }
 
 async function runTerminalConversationApprove({ options, conversationId, agent, terminalControl, pid }) {
-  const releaseTerminalLock = acquireFileLock(
-    terminalBridgeSendLockPath(storeDirFromOptions(options), terminalControl),
+  const releaseTerminalLock = acquireTerminalBridgeSendLock(
+    storeDirFromOptions(options),
+    terminalControl,
     { timeoutMs: 30000 }
   );
   try {
@@ -12531,8 +12835,9 @@ async function runTerminalControlSend({
 }) {
   const bridge = terminalBridgeEnabled(conversation);
   if (!terminalSendLockHeld) {
-    const releaseTerminalLock = acquireFileLock(
-      terminalBridgeSendLockPath(storeDirFromOptions(options), terminalControl),
+    const releaseTerminalLock = acquireTerminalBridgeSendLock(
+      storeDirFromOptions(options),
+      terminalControl,
       { timeoutMs: 30000 }
     );
     try {
@@ -12572,8 +12877,7 @@ async function runTerminalControlSend({
         currentConversation.updated_at !== nextConversation.updated_at ||
         currentConversation.status !== nextConversation.status ||
         currentConversation.response_rounds_used !== nextConversation.response_rounds_used ||
-        currentControl?.target !== terminalControl.target ||
-        currentControl?.socketPath !== terminalControl.socketPath
+        !terminalControlsShareIncarnation(currentControl, terminalControl)
       ) {
         throw new Error(
           "conversation changed while waiting to send to the terminal; refresh status and retry"
@@ -15113,9 +15417,13 @@ function migratedTerminalTurnMatchesSessionBinding({
     session.agent !== agent ||
     path.resolve(session.workspace) !== path.resolve(conversation.workspace) ||
     !terminalId ||
-    binding.terminal_id !== terminalId ||
-    terminalControlSelectorKey(binding.terminal_control) !==
-      terminalControlSelectorKey(terminalControl) ||
+    !terminalControlAliasMatches(
+      terminalId,
+      terminalControl,
+      binding.terminal_id,
+      binding.terminal_control
+    ) ||
+    !terminalControlsShareIncarnation(binding.terminal_control, terminalControl) ||
     !Number.isSafeInteger(pid) ||
     binding.native_process.pid !== pid ||
     !turnNativeThreadId ||
@@ -15241,31 +15549,35 @@ function refineManagedSessionNativeIdentity({
   identity?: NativeAgentSessionIdentity;
 }): ManagedSessionState {
   const binding = session.binding;
-  if (!identity || session.status !== "bound" || !binding) {
+  if (session.status !== "bound" || !binding) {
     return session;
   }
   if (
-    terminalControlSelectorKey(binding.terminal_control) !==
-      terminalControlSelectorKey(terminalControl) ||
-    (binding.native_thread_id &&
+    !terminalControlsShareIncarnation(binding.terminal_control, terminalControl) ||
+    (identity && binding.native_thread_id &&
       binding.native_thread_id !== identity.sessionId)
   ) {
     throw new Error(
       `managed Session ${session.session_id} changed native identity before send`
     );
   }
-  const refinedNativeThreadId = binding.native_thread_id ?? identity.sessionId;
+  const refinedNativeThreadId = binding.native_thread_id ?? identity?.sessionId;
   const refinedProcessUuid =
-    binding.native_process.process_uuid ?? identity.processUuid;
+    binding.native_process.process_uuid ?? identity?.processUuid;
   const refinedProcessBirth =
-    binding.native_process.process_birth ?? identity.processBirth;
-  const refinedRollout = binding.native_process.rollout ?? identity.rollout;
+    binding.native_process.process_birth ?? identity?.processBirth;
+  const refinedRollout = binding.native_process.rollout ?? identity?.rollout;
+  const refinedTerminalEndpoint = binding.terminal_endpoint ??
+    (hasCanonicalTerminalEndpoint(terminalControl)
+      ? terminalControlEvidence(terminalControl)
+      : undefined);
   const changed =
     refinedNativeThreadId !== binding.native_thread_id ||
     refinedProcessUuid !== binding.native_process.process_uuid ||
     refinedProcessBirth !== binding.native_process.process_birth ||
     JSON.stringify(refinedRollout) !==
-      JSON.stringify(binding.native_process.rollout);
+      JSON.stringify(binding.native_process.rollout) ||
+    refinedTerminalEndpoint !== binding.terminal_endpoint;
   if (!changed) {
     return session;
   }
@@ -15274,13 +15586,16 @@ function refineManagedSessionNativeIdentity({
     ...session,
     binding: {
       ...binding,
+      ...(refinedTerminalEndpoint
+        ? { terminal_endpoint: refinedTerminalEndpoint }
+        : {}),
       native_thread_id: refinedNativeThreadId,
       native_process: {
         ...binding.native_process,
         process_uuid: refinedProcessUuid,
         process_birth: refinedProcessBirth,
         rollout: refinedRollout,
-        evidence: identity.evidence
+        evidence: identity?.evidence ?? binding.native_process.evidence
       },
       last_verified_at: now
     },
@@ -15313,8 +15628,10 @@ function persistManagedSessionNativeIdentity({
     !current.binding ||
     current.binding.binding_id !== bindingId ||
     current.binding.generation !== bindingGeneration ||
-    terminalControlSelectorKey(current.binding.terminal_control) !==
-      terminalControlSelectorKey(terminalControl)
+    !terminalControlsShareIncarnation(
+      current.binding.terminal_control,
+      terminalControl
+    )
   ) {
     throw new Error(
       `managed Session ${sessionId} binding changed before native identity commit`
@@ -15559,12 +15876,13 @@ function managedTurnMatchesResolvedTerminal(
     currentTerminalIdentity &&
     executorForConversation(conversation).kind === terminalConversation.agent &&
     storedTerminalIdentity.agent === currentTerminalIdentity.agent &&
-    storedTerminalIdentity.target === currentTerminalIdentity.target &&
     storedTerminalIdentity.pid === currentTerminalIdentity.pid &&
     Number(takeover?.terminal_agent_pid) === terminalConversation.pid &&
     nativeAgentIdentityMatchesTurn(conversation, currentNativeIdentity) &&
-    terminalControlSelectorKey(storedControl) ===
-      terminalControlSelectorKey(terminalConversation.terminalControl) &&
+    terminalControlsShareIncarnation(
+      storedControl,
+      terminalConversation.terminalControl
+    ) &&
     matchesConfiguredWorkspace(
       conversation.workspace,
       terminalConversation.terminalControl.currentPath
@@ -15662,7 +15980,7 @@ function createManagedTerminalTurn({
       takeover_match_kind: previousTurn
         ? "managed_session_send"
         : "raw_terminal_send",
-      terminal_control: terminalControl,
+      ...terminalEndpointTakeoverFields(terminalControl),
       needs_bootstrap: false,
       terminal_bridge: true
     }
@@ -15738,12 +16056,10 @@ async function runRenew(options) {
     throw new Error(`cannot renew ${conversation.conversation_id}; conversation is not a terminal bridge task`);
   }
 
-  const panes = await createTerminalControlProvider(options).listPanes();
-  const terminalExists = panes.some((pane) =>
-    pane.target === terminalControl.target &&
-    (terminalControl.socketPath === undefined || pane.socketPath === terminalControl.socketPath)
-  );
-  if (!terminalExists) {
+  const terminalProvider = createTerminalControlProvider(options);
+  try {
+    await terminalProvider.resolve(terminalProvider.endpoint(terminalControl));
+  } catch {
     throw new Error(`cannot renew ${conversation.conversation_id}; terminal ${terminalControl.target} is no longer available`);
   }
 
@@ -15772,9 +16088,7 @@ async function runRenew(options) {
     }
     if (
       current.conversation_id !== conversation.conversation_id ||
-      currentControl.target !== terminalControl.target ||
-      currentControl.socketPath !== terminalControl.socketPath ||
-      currentControl.panePid !== terminalControl.panePid ||
+      !terminalControlsShareIncarnation(currentControl, terminalControl) ||
       stringValue(currentTakeover.terminal_bridge_message_id) !== expectedMessageId ||
       stringValue(currentTakeover.terminal_bridge_started_at) !== expectedStartedAt
     ) {
@@ -16574,8 +16888,9 @@ async function runCancel(options) {
 }
 
 async function runTerminalConversationCancel({ options, conversationId, agent, terminalControl, pid }) {
-  const releaseTerminalLock = acquireFileLock(
-    terminalBridgeSendLockPath(storeDirFromOptions(options), terminalControl),
+  const releaseTerminalLock = acquireTerminalBridgeSendLock(
+    storeDirFromOptions(options),
+    terminalControl,
     { timeoutMs: 30000 }
   );
   try {
@@ -16616,8 +16931,9 @@ async function runTerminalConversationCancel({ options, conversationId, agent, t
 }
 
 async function runTerminalControlCancel({ options, statePath, logPath, agent, terminalControl }) {
-  const releaseTerminalLock = acquireFileLock(
-    terminalBridgeSendLockPath(storeDirFromOptions(options), terminalControl),
+  const releaseTerminalLock = acquireTerminalBridgeSendLock(
+    storeDirFromOptions(options),
+    terminalControl,
     { timeoutMs: 30000 }
   );
   let releaseStateLock: (() => void) | undefined;
@@ -16639,8 +16955,7 @@ async function runTerminalControlCancel({ options, statePath, logPath, agent, te
     const currentControl = terminalControlFromTakeover(currentTakeover);
     if (
       !currentControl ||
-      currentControl.target !== terminalControl.target ||
-      currentControl.socketPath !== terminalControl.socketPath
+      !terminalControlsShareIncarnation(currentControl, terminalControl)
     ) {
       throw new Error(
         "terminal control changed while waiting to cancel; refresh status and retry"
@@ -16734,8 +17049,9 @@ async function runClose(options) {
     : undefined;
   const terminalControl = terminalControlFromTakeover(nativeTakeover);
   const releaseTerminalLock = terminalControl
-    ? acquireFileLock(
-        terminalBridgeSendLockPath(storeDirFromOptions(options), terminalControl),
+    ? acquireTerminalBridgeSendLock(
+        storeDirFromOptions(options),
+        terminalControl,
         { timeoutMs: 30000 }
       )
     : () => {};
@@ -16818,11 +17134,9 @@ async function runTerminalDispatchClose({
 }): Promise<void> {
   const terminalControl = terminalConversation.terminalControl;
   const storeDir = storeDirFromOptions(options);
-  const releaseTerminalLock = acquireFileLock(
-    terminalBridgeSendLockPath(
-      storeDir,
-      terminalControl
-    ),
+  const releaseTerminalLock = acquireTerminalBridgeSendLock(
+    storeDir,
+    terminalControl,
     { timeoutMs: 30000 }
   );
   try {
@@ -17608,11 +17922,9 @@ async function runTerminalBridgeMonitorWithLock(
           return;
         }
 
-        const releaseTerminalLock = acquireFileLock(
-          terminalBridgeSendLockPath(
-            storeDirFromOptions(options),
-            terminalControl
-          ),
+        const releaseTerminalLock = acquireTerminalBridgeSendLock(
+          storeDirFromOptions(options),
+          terminalControl,
           { timeoutMs: 30000 }
         );
         try {
@@ -17680,11 +17992,9 @@ async function runTerminalBridgeMonitorWithLock(
           continue;
         }
 
-        const releaseTerminalLock = acquireFileLock(
-          terminalBridgeSendLockPath(
-            storeDirFromOptions(options),
-            terminalControl
-          ),
+        const releaseTerminalLock = acquireTerminalBridgeSendLock(
+          storeDirFromOptions(options),
+          terminalControl,
           { timeoutMs: 30000 }
         );
         try {
@@ -18007,11 +18317,9 @@ async function runTerminalBridgeMonitorWithLock(
     let poll;
     const expectedUpdatedAt = conversation.updated_at;
     const expectedStatus = conversation.status;
-    const releaseTerminalPollLock = acquireFileLock(
-      terminalBridgeSendLockPath(
-        storeDirFromOptions(options),
-        terminalControl
-      ),
+    const releaseTerminalPollLock = acquireTerminalBridgeSendLock(
+      storeDirFromOptions(options),
+      terminalControl,
       { timeoutMs: 30000 }
     );
     try {
@@ -18098,8 +18406,7 @@ async function runTerminalBridgeMonitorWithLock(
         stringValue(lockedTakeover?.terminal_bridge_message_id) !==
           currentMessageId ||
         !lockedControl ||
-        terminalControlSelectorKey(lockedControl) !==
-          terminalControlSelectorKey(terminalControl)
+        !terminalControlsShareIncarnation(lockedControl, terminalControl)
       ) {
         conversation = lockedConversation;
         continue;
@@ -18886,6 +19193,50 @@ function terminalBridgeSendLockPath(_storeDir: string, terminalControl): string 
   return path.join(lockDir, `terminal-bridge-send-${terminalKey}.lock`);
 }
 
+function legacyTerminalBridgeSendLockPath(
+  _storeDir: string,
+  terminalControl: TerminalControlRef
+): string {
+  const lockDir = terminalBridgeRuntimeLockDir();
+  ensureDir(lockDir);
+  return path.join(
+    lockDir,
+    `terminal-bridge-send-${legacyTerminalBridgeRuntimeKey(terminalControl)}.lock`
+  );
+}
+
+function acquireTerminalBridgeSendLock(
+  storeDir: string,
+  terminalControl: TerminalControlRef,
+  options: { timeoutMs?: number; retryMs?: number } = {}
+): () => void {
+  const lockPaths = [...new Set([
+    terminalBridgeSendLockPath(storeDir, terminalControl),
+    legacyTerminalBridgeSendLockPath(storeDir, terminalControl)
+  ])].sort();
+  const releases: Array<() => void> = [];
+  try {
+    for (const lockPath of lockPaths) {
+      releases.push(acquireFileLock(lockPath, options));
+    }
+  } catch (error) {
+    for (const release of releases.reverse()) {
+      release();
+    }
+    throw error;
+  }
+  let released = false;
+  return () => {
+    if (released) {
+      return;
+    }
+    released = true;
+    for (const release of [...releases].reverse()) {
+      release();
+    }
+  };
+}
+
 function terminalBridgeRuntimeLockDir(): string {
   return path.join(
     terminalBridgeRuntimeDir(),
@@ -18901,33 +19252,64 @@ function terminalBridgeRuntimeDir(): string {
 }
 
 function terminalBridgeRuntimeKey(terminalControl): string {
+  if (hasCanonicalTerminalEndpoint(terminalControl as TerminalControlRef)) {
+    return createHash("sha256")
+      .update(terminalEndpointIdentityKey(terminalControl as TerminalControlRef))
+      .digest("hex")
+      .slice(0, 20);
+  }
+  return legacyTerminalBridgeRuntimeKey(terminalControl as TerminalControlRef);
+}
+
+function legacyTerminalBridgeRuntimeKey(
+  terminalControl: TerminalControlRef
+): string {
   return createHash("sha256")
-    .update(JSON.stringify({
-      target: terminalControl.target,
-      socket_path: terminalControl.socketPath ?? null
-    }))
+    .update(JSON.stringify(terminalLegacyRuntimeRoute(terminalControl)))
     .digest("hex")
     .slice(0, 20);
 }
 
-function terminalBridgeDispatchLedgerPath(terminalControl): string {
+function terminalBridgeDispatchLedgerPath(
+  terminalControl: TerminalControlRef,
+  options: { legacy?: boolean } = {}
+): string {
   const ledgerDir = path.join(
     terminalBridgeRuntimeDir(),
     "terminal-dispatch"
   );
   return path.join(
     ledgerDir,
-    `terminal-dispatch-${terminalBridgeRuntimeKey(terminalControl)}.json`
+    `terminal-dispatch-${options.legacy
+      ? legacyTerminalBridgeRuntimeKey(terminalControl)
+      : terminalBridgeRuntimeKey(terminalControl)}.json`
   );
 }
 
+function terminalBridgeDispatchLedgerPaths(
+  terminalControl: TerminalControlRef
+): string[] {
+  return [...new Set([
+    terminalBridgeDispatchLedgerPath(terminalControl),
+    terminalBridgeDispatchLedgerPath(terminalControl, { legacy: true })
+  ])];
+}
+
 function loadTerminalBridgeDispatchLedger(
-  terminalControl
+  terminalControl: TerminalControlRef
 ): Record<string, any> | undefined {
-  const ledgerPath = terminalBridgeDispatchLedgerPath(terminalControl);
-  if (!fs.existsSync(ledgerPath)) {
+  const ledgerPaths = terminalBridgeDispatchLedgerPaths(terminalControl)
+    .filter((candidate) => fs.existsSync(candidate));
+  if (ledgerPaths.length === 0) {
     return undefined;
   }
+  if (ledgerPaths.length > 1) {
+    throw new Error(
+      `terminal dispatch ledger has conflicting canonical and legacy owners: ` +
+      ledgerPaths.join(", ")
+    );
+  }
+  const ledgerPath = ledgerPaths[0];
   const stat = fs.lstatSync(ledgerPath);
   if (stat.isSymbolicLink() || !stat.isFile()) {
     throw new Error(`terminal dispatch ledger is not a regular file: ${ledgerPath}`);
@@ -18935,12 +19317,68 @@ function loadTerminalBridgeDispatchLedger(
   const parsed = JSON.parse(fs.readFileSync(ledgerPath, "utf8"));
   if (
     !isRecord(parsed) ||
-    parsed.version !== 1 ||
-    stringValue(parsed.terminal_key) !== terminalBridgeRuntimeKey(terminalControl)
+    !(parsed.version === 1 || parsed.version === 2)
   ) {
     throw new Error(`terminal dispatch ledger is invalid: ${ledgerPath}`);
   }
+  if (parsed.version === 1) {
+    const control = isRecord(parsed.terminal_control)
+      ? parsed.terminal_control
+      : undefined;
+    if (
+      stringValue(parsed.terminal_key) !==
+        legacyTerminalBridgeRuntimeKey(terminalControl) ||
+      stringValue(control?.target) !== terminalControl.target ||
+      (stringValue(control?.socket_path) ?? undefined) !==
+        terminalControl.socketPath
+    ) {
+      throw new Error(`terminal dispatch ledger is invalid: ${ledgerPath}`);
+    }
+  } else {
+    const identity = terminalEndpointIdentityFromEvidence(
+      parsed.terminal_endpoint
+    );
+    if (
+      !identity ||
+      stringValue(parsed.terminal_key) !==
+        terminalBridgeRuntimeKey(terminalControl) ||
+      !sameTerminalEndpointIdentity(identity, terminalControl)
+    ) {
+      throw new Error(`terminal dispatch ledger is invalid: ${ledgerPath}`);
+    }
+  }
   return parsed;
+}
+
+function terminalDispatchRecordMatchesControl(
+  record: Record<string, any> | undefined,
+  terminalControl: TerminalControlRef,
+  options: {
+    requireCurrentRoute?: boolean;
+    requireProcessAnchor?: boolean;
+  } = {}
+): boolean {
+  if (!record) {
+    return false;
+  }
+  const evidence = record.terminal_endpoint !== undefined
+    ? record.terminal_endpoint
+    : record.terminal_control;
+  return terminalControlEvidenceMatches(evidence, terminalControl, options);
+}
+
+function terminalDispatchRecordProcessAnchor(
+  record: Record<string, any>
+): number | undefined {
+  const evidence = isRecord(record.terminal_endpoint)
+    ? record.terminal_endpoint
+    : isRecord(record.terminal_control)
+      ? record.terminal_control
+      : undefined;
+  const panePid = Number(
+    evidence?.process_anchor_pid ?? evidence?.pane_pid ?? evidence?.panePid
+  );
+  return Number.isSafeInteger(panePid) && panePid > 0 ? panePid : undefined;
 }
 
 function assertTerminalNativeThreadStoreAuthority({
@@ -18959,13 +19397,10 @@ function assertTerminalNativeThreadStoreAuthority({
   if (!ledger) {
     return;
   }
-  const ledgerControl = isRecord(ledger.terminal_control)
-    ? ledger.terminal_control
-    : undefined;
   if (
-    stringValue(ledgerControl?.target) !== terminalControl.target ||
-    (stringValue(ledgerControl?.socket_path) ?? undefined) !==
-      terminalControl.socketPath
+    !terminalDispatchRecordMatchesControl(ledger, terminalControl, {
+      requireProcessAnchor: false
+    })
   ) {
     throw new Error(
       `terminal ${terminalControl.target} dispatch ledger selector is invalid`
@@ -19020,11 +19455,6 @@ function orphanedTerminalDispatchForRecovery(
     const recoveryIdentity = lifecycle
       ? stringValue(ledger?.transition_id)
       : stringValue(ledger?.message_id);
-    const ledgerControl = isRecord(ledger?.terminal_control)
-      ? ledger.terminal_control
-      : undefined;
-    const ledgerPanePid = Number(ledgerControl?.pane_pid);
-    const currentPanePid = Number(terminalControl.panePid);
     if (
       !ledger ||
       ![
@@ -19042,11 +19472,10 @@ function orphanedTerminalDispatchForRecovery(
       !recoveryIdentity ||
       (
         !lifecycle &&
-        Number.isSafeInteger(ledgerPanePid) &&
-        ledgerPanePid > 0 &&
-        Number.isSafeInteger(currentPanePid) &&
-        currentPanePid > 0 &&
-        ledgerPanePid !== currentPanePid
+        terminalDispatchRecordMatchesControl(ledger, terminalControl, {
+          requireProcessAnchor: false
+        }) &&
+        !terminalDispatchRecordMatchesControl(ledger, terminalControl)
       ) ||
       (!lifecycle && loadTerminalDispatchLedgerOwner(ledger))
     ) {
@@ -19278,14 +19707,14 @@ function mergeTerminalLedgerReceipt(
   const nextControl = isRecord(next.terminal_control)
     ? next.terminal_control
     : undefined;
+  const previousEvidence = previous.terminal_endpoint ?? previousControl;
+  const nextEvidence = next.terminal_endpoint ?? nextControl;
   if (
-    previousControl &&
-    nextControl &&
-    (
-      stringValue(previousControl.target) !== stringValue(nextControl.target) ||
-      (stringValue(previousControl.socket_path) ?? undefined) !==
-        (stringValue(nextControl.socket_path) ?? undefined) ||
-      Number(previousControl.pane_pid) !== Number(nextControl.pane_pid)
+    previousEvidence !== undefined &&
+    nextEvidence !== undefined &&
+    !sameTerminalControlEvidenceIncarnation(
+      previousEvidence,
+      nextEvidence
     )
   ) {
     throw new Error(
@@ -19320,21 +19749,51 @@ function mergeTerminalLedgerReceipt(
   if (!merged.terminal_control && previousControl) {
     merged.terminal_control = previousControl;
   }
+  if (!merged.terminal_endpoint && previous.terminal_endpoint) {
+    merged.terminal_endpoint = previous.terminal_endpoint;
+  }
   return merged;
 }
 
 function saveTerminalBridgeDispatchLedger(
-  terminalControl,
+  terminalControl: TerminalControlRef,
   ledger: Record<string, unknown>
 ): void {
-  const ledgerPath = terminalBridgeDispatchLedgerPath(terminalControl);
+  const previousLedger = loadTerminalBridgeDispatchLedger(terminalControl);
+  const existingPaths = terminalBridgeDispatchLedgerPaths(terminalControl)
+    .filter((candidate) => fs.existsSync(candidate));
+  let ledgerPath = existingPaths[0] ??
+    terminalBridgeDispatchLedgerPath(terminalControl);
+  const canonicalLedgerPath = terminalBridgeDispatchLedgerPath(terminalControl);
+  const legacyLedgerPath = terminalBridgeDispatchLedgerPath(
+    terminalControl,
+    { legacy: true }
+  );
+  ensureDir(path.dirname(canonicalLedgerPath));
+  if (
+    hasCanonicalTerminalEndpoint(terminalControl) &&
+    ledgerPath === legacyLedgerPath &&
+    legacyLedgerPath !== canonicalLedgerPath
+  ) {
+    // Promote a validated v0.11.x route-keyed ledger before writing the next
+    // generation. rename() removes the duplicate-owner window: after a crash,
+    // the canonical path may still contain v1 JSON, which the compatibility
+    // reader accepts and a later writer can finish upgrading to v2.
+    if (fs.existsSync(canonicalLedgerPath)) {
+      throw new Error(
+        `terminal dispatch ledger has conflicting canonical and legacy owners: ` +
+        `${canonicalLedgerPath}, ${legacyLedgerPath}`
+      );
+    }
+    fs.renameSync(legacyLedgerPath, canonicalLedgerPath);
+    fsyncTerminalBridgeDirectory(path.dirname(canonicalLedgerPath));
+    ledgerPath = canonicalLedgerPath;
+  }
+  const preserveLegacyFormat = !hasCanonicalTerminalEndpoint(terminalControl);
   ensureDir(path.dirname(ledgerPath));
   if (fs.existsSync(ledgerPath) && fs.lstatSync(ledgerPath).isSymbolicLink()) {
     throw new Error(`terminal dispatch ledger is a symlink: ${ledgerPath}`);
   }
-  const previousLedger = fs.existsSync(ledgerPath)
-    ? loadTerminalBridgeDispatchLedger(terminalControl)
-    : undefined;
   let baseReceiptHistory = terminalLedgerReceiptHistory(previousLedger);
   for (const incomingReceipt of terminalLedgerReceiptHistory(
     ledger as Record<string, any>
@@ -19354,19 +19813,28 @@ function saveTerminalBridgeDispatchLedger(
   }
   const {
     terminal_submission_receipts: _incomingReceiptHistory,
+    terminal_endpoint: incomingTerminalEndpoint,
     ...ledgerWithoutReceiptHistory
   } = ledger;
   const nextWithoutHistory = {
     ...ledgerWithoutReceiptHistory,
-    version: 1,
-    terminal_key: terminalBridgeRuntimeKey(terminalControl),
+    version:
+      hasCanonicalTerminalEndpoint(terminalControl) && !preserveLegacyFormat
+        ? 2
+        : 1,
+    terminal_key: preserveLegacyFormat
+      ? legacyTerminalBridgeRuntimeKey(terminalControl)
+      : terminalBridgeRuntimeKey(terminalControl),
     terminal_control: {
       kind: "tmux",
       target: terminalControl.target,
       socket_path: terminalControl.socketPath ?? null,
       pane_pid: terminalControl.panePid ?? null,
       current_path: terminalControl.currentPath ?? null
-    }
+    },
+    ...(hasCanonicalTerminalEndpoint(terminalControl) && !preserveLegacyFormat
+      ? { terminal_endpoint: terminalControlEvidence(terminalControl) }
+      : {})
   };
   // The top-level ledger follows the current tmux pane incarnation, while an
   // append-only receipt must retain the pane that actually accepted its
@@ -19376,10 +19844,19 @@ function saveTerminalBridgeDispatchLedger(
   const receiptCandidateLedger = isRecord(
     ledgerWithoutReceiptHistory.terminal_control
   )
-    ? {
-        ...nextWithoutHistory,
-        terminal_control: ledgerWithoutReceiptHistory.terminal_control
-      }
+    ? (() => {
+        const {
+          terminal_endpoint: _derivedTerminalEndpoint,
+          ...nextWithoutDerivedTerminalEndpoint
+        } = nextWithoutHistory;
+        return {
+          ...nextWithoutDerivedTerminalEndpoint,
+          terminal_control: ledgerWithoutReceiptHistory.terminal_control,
+          ...(incomingTerminalEndpoint && !preserveLegacyFormat
+            ? { terminal_endpoint: incomingTerminalEndpoint }
+            : {})
+        };
+      })()
     : nextWithoutHistory;
   const nextCandidate = terminalLedgerReceiptCandidate(
     receiptCandidateLedger
@@ -19477,26 +19954,25 @@ function resolveTerminalDispatchLedgerPaneIncarnation(
     // released by the generic Turn-ledger cleanup path.
     return ledger;
   }
-  const ledgerControl = isRecord(ledger.terminal_control)
-    ? ledger.terminal_control
-    : undefined;
-  const ledgerPanePid = Number(ledgerControl?.pane_pid);
-  const currentPanePid = Number(terminalControl.panePid);
   if (
-    !Number.isSafeInteger(ledgerPanePid) ||
-    ledgerPanePid <= 0 ||
-    !Number.isSafeInteger(currentPanePid) ||
-    currentPanePid <= 0 ||
-    ledgerPanePid === currentPanePid
+    !terminalDispatchRecordMatchesControl(ledger, terminalControl, {
+      requireProcessAnchor: false
+    }) ||
+    terminalDispatchRecordMatchesControl(ledger, terminalControl)
   ) {
     return ledger;
   }
+  const ledgerProcessAnchor = terminalDispatchRecordProcessAnchor(ledger);
+  const currentProcessAnchor = terminalEndpointFromControlRef(
+    terminalControl
+  ).processAnchorPid;
   saveTerminalBridgeDispatchLedger(terminalControl, {
     ...ledger,
     status: "resolved",
     resolved_at: new Date().toISOString(),
     reason:
-      `tmux pane incarnation changed from pid ${ledgerPanePid} to ${currentPanePid}`
+      "terminal process incarnation changed from anchor " +
+      `${ledgerProcessAnchor} to ${currentProcessAnchor ?? "unknown"}`
   });
   return loadTerminalBridgeDispatchLedger(terminalControl);
 }
@@ -19660,8 +20136,7 @@ function reconcilePreparedTerminalDispatchLedger(
     conversation.conversation_id !==
       stringValue(ledger.conversation_id) ||
     !storedControl ||
-    terminalBridgeRuntimeKey(storedControl) !==
-      terminalBridgeRuntimeKey(terminalControl)
+    !sameTerminalControlIncarnation(storedControl, terminalControl)
   ) {
     return ledger;
   }
@@ -19810,8 +20285,7 @@ function reconcileLaggingTerminalDispatchLedger(
     stringValue(nativeTakeover?.terminal_bridge_message_id) !== messageId ||
     stringValue(submission?.message_id) !== messageId ||
     !storedControl ||
-    terminalBridgeRuntimeKey(storedControl) !==
-      terminalBridgeRuntimeKey(terminalControl)
+    !sameTerminalControlIncarnation(storedControl, terminalControl)
   ) {
     return ledger;
   }
@@ -20345,18 +20819,26 @@ function assertLifecycleLedgerMatchesTransition({
     stringValue(ledger.adapter_version) !== transition.adapter_version ||
     stringValue(ledger.command_fingerprint) !== transition.command_fingerprint ||
     path.resolve(storeDir) !== path.resolve(storeDirFromOptions(options)) ||
-    terminal.conversationId !== transition.terminal_id ||
     terminal.agent !== transition.agent ||
-    Number(ledgerControl?.pane_pid) !== terminal.terminalControl.panePid ||
-    stringValue(ledgerControl?.target) !== terminal.terminalControl.target ||
-    (stringValue(ledgerControl?.socket_path) ?? undefined) !==
-      terminal.terminalControl.socketPath ||
+    !terminalDispatchRecordMatchesControl(
+      ledger,
+      terminal.terminalControl
+    ) ||
     terminal.pid !== transition.before_binding?.native_process.pid &&
       transition.before_binding !== undefined ||
-    terminalControlSelectorKey(terminal.terminalControl) !==
-      terminalControlSelectorKey(
-        transition.before_binding?.terminal_control ?? terminal.terminalControl
-      ) ||
+    !terminalControlsShareIncarnation(
+      terminal.terminalControl,
+      transition.before_binding?.terminal_control ?? terminal.terminalControl
+    ) ||
+    (
+      transition.before_binding !== undefined &&
+      !terminalControlAliasMatches(
+        transition.terminal_id,
+        transition.before_binding.terminal_control,
+        terminal.conversationId,
+        terminal.terminalControl
+      )
+    ) ||
     !matchesConfiguredWorkspace(
       transition.workspace,
       terminal.terminalControl.currentPath
@@ -20406,10 +20888,13 @@ async function verifyRecoveredLifecycleAfterBinding({
   if (
     !binding ||
     !binding.native_thread_id ||
-    binding.terminal_id !== terminal.conversationId ||
     binding.native_process.pid !== terminal.pid ||
-    terminalControlSelectorKey(binding.terminal_control) !==
-      terminalControlSelectorKey(terminal.terminalControl)
+    !terminalControlAliasMatches(
+      binding.terminal_id,
+      binding.terminal_control,
+      terminal.conversationId,
+      terminal.terminalControl
+    )
   ) {
     throw new Error("verified after_binding no longer matches the terminal or pid");
   }
@@ -21111,12 +21596,13 @@ async function assertNativeInspectionComposerReadyForAutomatedInput({
     });
     return;
   }
-  const screen = await createTerminalControlProvider(options).capture(
-    terminal.terminalControl.target,
-    {
-      scrollbackLines: 40,
-      socketPath: terminal.terminalControl.socketPath
-    }
+  const provider = createTerminalControlProvider(options);
+  const resolvedTerminal = await provider.resolve(
+    provider.endpoint(terminal.terminalControl)
+  );
+  const screen = await provider.capture(
+    resolvedTerminal,
+    { scrollbackLines: 40 }
   );
   if (!isExactClaudeNativeInspectionIdleComposer(screen)) {
     throw new Error(
@@ -21690,11 +22176,9 @@ function prepareTerminalBridgeCompletionCallback({
     });
     claim.release();
     claimReleased = true;
-    const releaseTerminalLock = acquireFileLock(
-      terminalBridgeSendLockPath(
-        storeDirFromOptions(options),
-        terminalControl
-      ),
+    const releaseTerminalLock = acquireTerminalBridgeSendLock(
+      storeDirFromOptions(options),
+      terminalControl,
       { timeoutMs: 30000 }
     );
     try {

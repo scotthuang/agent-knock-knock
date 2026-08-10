@@ -8,9 +8,14 @@ import {
   runAgentCli
 } from "./agent-cli-fixtures.js";
 import {
+  legacyManagedSessionBindingToken,
   managedSessionBindingToken,
   terminalBindingFrom
 } from "../src/managed-session.js";
+import {
+  createTerminalEndpointRef,
+  tmuxTerminalRouteKey
+} from "../src/terminal-control-ref.js";
 import {
   listManagedSessions,
   saveManagedSession
@@ -59,6 +64,23 @@ for (const claudeVersion of ["2.1.218", "2.1.226"] as const) {
       "terminal_cancel"
     ]
   };
+  const endpointKey = "default-server-route";
+  createTerminalEndpointRef({
+    identity: {
+      providerKind: "tmux",
+      endpointKey,
+      resourceKey: "pane-id:%1"
+    },
+    route: {
+      routeKey: tmuxTerminalRouteKey(endpointKey, target),
+      label: target,
+      currentCommand: claudeVersion,
+      currentPath: workspace
+    },
+    processAnchorPid: panePid,
+    capabilities: terminalControl.capabilities,
+    providerRef: terminalControl
+  });
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
@@ -103,6 +125,8 @@ for (const claudeVersion of ["2.1.218", "2.1.226"] as const) {
       updated_at: now.toISOString()
     }, { expectedRevision: null });
     const expectedBindingToken = managedSessionBindingToken(session);
+    const legacyBindingToken = legacyManagedSessionBindingToken(session);
+    assert.notEqual(expectedBindingToken, legacyBindingToken);
     const commonArgs = [
       "--store-dir",
       storeDir,
@@ -228,7 +252,7 @@ for (const claudeVersion of ["2.1.218", "2.1.226"] as const) {
     assert.match(activeElsewhere.stderr, /already active in another claude process/u);
     assert.deepEqual(terminalInputCalls(callsPath), []);
 
-    const inspected = runAgentCli(nativeInspectArgs(expectedBindingToken), {
+    const inspected = runAgentCli(nativeInspectArgs(legacyBindingToken), {
       ...environment,
       AKK_TEST_TMUX_COMPOSER_AFTER_LITERAL: composerScreen,
       AKK_TEST_TMUX_COMPOSER_AFTER_ENTER: panelScreen,
@@ -388,7 +412,7 @@ for argument in "$@"; do last="$argument"; done
 printf '%s\\t%s\\n' "$command_name" "$last" >> ${shellQuote(options.callsPath)}
 case "$command_name" in
   list-panes)
-    printf '%s\\n' ${shellQuote(`claude-native\t0\t0\t${options.panePid}\t${options.claudeVersion}\t${options.workspace}`)}
+    printf '%s\\n' ${shellQuote(`claude-native\t0\t0\t${options.panePid}\t${options.claudeVersion}\t${options.workspace}\t\t%1`)}
     ;;
   capture-pane)
     cat ${shellQuote(options.screenPath)}

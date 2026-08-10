@@ -1,4 +1,13 @@
 import { isExecutorKind, type ExecutorKind } from "./executors.js";
+import type {
+  TerminalControlCapability,
+  TerminalControlRef
+} from "./terminal-control-ref.js";
+
+export type {
+  TerminalControlCapability,
+  TerminalControlRef
+} from "./terminal-control-ref.js";
 
 export type DiscoveryConfidence = "high" | "medium" | "low";
 
@@ -8,27 +17,6 @@ export interface TerminalProcessSnapshot {
   command: string;
   cwd?: string;
   elapsed?: string;
-}
-
-export type TerminalControlCapability =
-  | "screen_status"
-  | "send_keys"
-  | "terminal_approval"
-  | "screen_completion"
-  | "durable_completion"
-  | "terminal_cancel";
-
-export interface TerminalControlRef {
-  kind: "tmux";
-  target: string;
-  socketPath?: string;
-  session: string;
-  window: number;
-  pane: number;
-  panePid: number;
-  currentCommand?: string;
-  currentPath?: string;
-  capabilities: TerminalControlCapability[];
 }
 
 export interface ActiveTerminalProcess<ProcessKind extends string = string> extends TerminalProcessSnapshot {

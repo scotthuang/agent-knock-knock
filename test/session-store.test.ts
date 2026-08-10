@@ -23,6 +23,7 @@ import {
   tryLoadManagedSession
 } from "../src/session-store.js";
 import { ensureStoreWritable } from "../src/store.js";
+import { tmuxTerminalRouteKey } from "../src/terminal-control-ref.js";
 
 const NATIVE_THREAD_ID = "00000000-0000-4000-8000-000000000201";
 const AFTER_NATIVE_THREAD_ID = "00000000-0000-4000-8000-000000000202";
@@ -330,6 +331,54 @@ test("a provisional binding may only gain native identity evidence in place", ()
     );
     assert.deepEqual(refined.binding?.native_process.rollout, rollout);
 
+    const terminalEndpoint = {
+      schema: "agent-knock-knock/terminal-endpoint" as const,
+      version: 1 as const,
+      kind: "tmux",
+      endpoint_key: "default-server-route",
+      resource_key: "pane-id:%1",
+      route_key: tmuxTerminalRouteKey(
+        "default-server-route",
+        "akk:0.0"
+      ),
+      process_anchor_pid: 100,
+      target: "akk:0.0",
+      socket_path: null,
+      pane_pid: 100,
+      server_socket_path: null,
+      pane_id: "%1",
+      current_path: "/workspace/project"
+    };
+    const endpointRefined = saveManagedSession(storeDir, {
+      ...refined,
+      binding: {
+        ...refined.binding!,
+        terminal_endpoint: terminalEndpoint
+      },
+      updated_at: "2026-08-06T02:01:30.000Z"
+    }, { expectedRevision: 2 });
+    assert.equal(endpointRefined.revision, 3);
+    assert.deepEqual(
+      endpointRefined.binding?.terminal_endpoint,
+      terminalEndpoint
+    );
+
+    for (const terminalEndpointMutation of [
+      undefined,
+      { ...terminalEndpoint, resource_key: "pane-id:%2", pane_id: "%2" }
+    ]) {
+      assert.throws(
+        () => saveManagedSession(storeDir, {
+          ...endpointRefined,
+          binding: {
+            ...endpointRefined.binding!,
+            terminal_endpoint: terminalEndpointMutation
+          }
+        }, { expectedRevision: 3 }),
+        /cannot replace verified binding terminal_endpoint/u
+      );
+    }
+
     const forbiddenMutations: Array<[string, ManagedSessionState]> = [
       ["native thread", {
         ...refined,
@@ -395,12 +444,19 @@ test("a provisional binding may only gain native identity evidence in place", ()
     ];
     for (const [label, mutation] of forbiddenMutations) {
       assert.throws(
-        () => saveManagedSession(storeDir, mutation, { expectedRevision: 2 }),
+        () => saveManagedSession(storeDir, {
+          ...mutation,
+          revision: endpointRefined.revision,
+          binding: {
+            ...mutation.binding!,
+            terminal_endpoint: terminalEndpoint
+          }
+        }, { expectedRevision: 3 }),
         /cannot (?:replace verified binding|mutate an existing binding identity)/u,
         `${label} must not be mutable within one binding generation`
       );
     }
-    assert.equal(loadManagedSession(storeDir, refined.session_id).revision, 2);
+    assert.equal(loadManagedSession(storeDir, refined.session_id).revision, 3);
   } finally {
     fs.rmSync(sandbox, { recursive: true, force: true });
   }

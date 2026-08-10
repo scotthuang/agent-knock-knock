@@ -888,9 +888,12 @@ function seededCodexRecoveryFixture(
     setResolverError: () => fs.writeFileSync(resolverErrorRequestPath, "1"),
     setSecondOwner: (id: string) => fs.writeFileSync(secondOwnerIdPath, id),
     patchLedger(patch: Record<string, unknown>) {
-      const current = JSON.parse(fs.readFileSync(ledgerPath, "utf8"));
+      const currentLedgerPath = currentTerminalDispatchLedgerPath(runtimeDir);
+      const current = JSON.parse(
+        fs.readFileSync(currentLedgerPath, "utf8")
+      );
       fs.writeFileSync(
-        ledgerPath,
+        currentLedgerPath,
         `${JSON.stringify({ ...current, ...patch })}\n`,
         { mode: 0o600 }
       );
@@ -934,6 +937,18 @@ function seededCodexRecoveryFixture(
     }, null, 2),
     cleanup: () => fs.rmSync(root, { recursive: true, force: true })
   };
+}
+
+function currentTerminalDispatchLedgerPath(runtimeDir: string): string {
+  const ledgerDir = path.join(runtimeDir, "terminal-dispatch");
+  const ledgers = fs.readdirSync(ledgerDir)
+    .filter((name) => /^terminal-dispatch-[0-9a-f]{20}\.json$/u.test(name));
+  assert.equal(
+    ledgers.length,
+    1,
+    `expected one current terminal dispatch ledger, found ${ledgers.join(", ")}`
+  );
+  return path.join(ledgerDir, ledgers[0]);
 }
 
 function seededClaudeRecoveryFixture(

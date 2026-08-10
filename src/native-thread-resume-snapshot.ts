@@ -8,11 +8,20 @@ import {
   type NativeThreadCandidate,
   type NativeThreadTransition
 } from "./managed-session.js";
+import {
+  associateTerminalEndpointEvidence,
+  hasCanonicalTerminalEndpoint,
+  sameTerminalControlIncarnation,
+  terminalControlEvidence,
+  type TerminalControlEvidence,
+  type TerminalControlRef
+} from "./terminal-control-ref.js";
 
 export const NATIVE_THREAD_RESUME_SNAPSHOT_TTL_MS = 5 * 60 * 1000;
 export const NATIVE_THREAD_RESUME_SNAPSHOT_SCHEMA =
   "agent-knock-knock/native-thread-resume-snapshot";
-export const NATIVE_THREAD_RESUME_SNAPSHOT_VERSION = 1;
+export const NATIVE_THREAD_RESUME_SNAPSHOT_VERSION = 2;
+export const LEGACY_NATIVE_THREAD_RESUME_SNAPSHOT_VERSION = 1;
 
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
@@ -33,7 +42,9 @@ export interface NativeThreadResumeSnapshotRow {
 
 export interface NativeThreadResumeSnapshot {
   schema: typeof NATIVE_THREAD_RESUME_SNAPSHOT_SCHEMA;
-  version: typeof NATIVE_THREAD_RESUME_SNAPSHOT_VERSION;
+  version:
+    | typeof LEGACY_NATIVE_THREAD_RESUME_SNAPSHOT_VERSION
+    | typeof NATIVE_THREAD_RESUME_SNAPSHOT_VERSION;
   snapshot_id: string;
   store_key: string;
   selection_scope: string;
@@ -47,6 +58,7 @@ export interface NativeThreadResumeSnapshot {
     socket_path?: string;
     pane_pid?: number;
   };
+  terminal_endpoint?: TerminalControlEvidence;
   current_session_id?: string;
   current_native_thread_id?: string;
   expected_binding_token: string;
@@ -184,11 +196,17 @@ export function verifiedPreviousResumeCandidate({
     transition.transition_id !== currentSession.last_transition_id ||
     transition.status !== "committed" ||
     transition.target_session_id !== currentSession.session_id ||
-    transition.terminal_id !== terminalId ||
+    !after ||
+    (
+      transition.terminal_id !== terminalId &&
+      !(
+        hasCanonicalTerminalEndpoint(after.terminal_control) &&
+        hasCanonicalTerminalEndpoint(binding.terminal_control)
+      )
+    ) ||
     transition.agent !== agent ||
     path.resolve(transition.workspace) !== path.resolve(workspace) ||
     path.resolve(currentSession.workspace) !== path.resolve(workspace) ||
-    !after ||
     !lifecycleAfterBindingMatchesCurrent(after, binding)
   ) {
     return undefined;
@@ -231,10 +249,17 @@ export function lifecycleAfterBindingMatchesCurrent(
   return (
     after.binding_id === current.binding_id &&
     after.generation === current.generation &&
-    after.terminal_id === current.terminal_id &&
-    terminalControlKey(after.terminal_control) ===
-      terminalControlKey(current.terminal_control) &&
-    after.terminal_control.panePid === current.terminal_control.panePid &&
+    (
+      after.terminal_id === current.terminal_id ||
+      (
+        hasCanonicalTerminalEndpoint(after.terminal_control) &&
+        hasCanonicalTerminalEndpoint(current.terminal_control)
+      )
+    ) &&
+    sameTerminalControlIncarnation(
+      after.terminal_control,
+      current.terminal_control
+    ) &&
     after.native_thread_id?.toLowerCase() ===
       current.native_thread_id?.toLowerCase() &&
     afterProcess.pid === currentProcess.pid &&
@@ -296,9 +321,14 @@ export function createNativeThreadResumeSnapshot({
   const ordered = sortNativeThreadCandidates(candidates);
   const snapshotId = `rs_${randomBytes(16).toString("base64url")}`;
   const rows = canonicalNativeThreadResumeSnapshotRows(snapshotId, ordered);
+  const canonicalTerminalControl = isCompleteTerminalControlRef(
+    terminalControl
+  ) && hasCanonicalTerminalEndpoint(terminalControl);
   return {
     schema: NATIVE_THREAD_RESUME_SNAPSHOT_SCHEMA,
-    version: NATIVE_THREAD_RESUME_SNAPSHOT_VERSION,
+    version: canonicalTerminalControl
+      ? NATIVE_THREAD_RESUME_SNAPSHOT_VERSION
+      : LEGACY_NATIVE_THREAD_RESUME_SNAPSHOT_VERSION,
     snapshot_id: snapshotId,
     store_key: resumeSnapshotStoreKey(storeDir),
     selection_scope: selectionScope,
@@ -312,6 +342,9 @@ export function createNativeThreadResumeSnapshot({
       socket_path: terminalControl.socketPath,
       pane_pid: terminalControl.panePid
     },
+    ...(canonicalTerminalControl
+      ? { terminal_endpoint: terminalControlEvidence(terminalControl) }
+      : {}),
     current_session_id: currentSessionId,
     current_native_thread_id: currentNativeThreadId,
     expected_binding_token: expectedBindingToken,
@@ -459,7 +492,10 @@ export function resolveNativeThreadResumeSelection({
     now
   );
   if (
-    snapshot.terminal_id !== terminalId ||
+    (
+      snapshot.version === LEGACY_NATIVE_THREAD_RESUME_SNAPSHOT_VERSION &&
+      snapshot.terminal_id !== terminalId
+    ) ||
     snapshot.selection_scope !== selectionScope
   ) {
     throw new Error(
@@ -531,7 +567,10 @@ function assertNativeThreadResumeSnapshot(
   if (
     !isRecord(value) ||
     value.schema !== NATIVE_THREAD_RESUME_SNAPSHOT_SCHEMA ||
-    value.version !== NATIVE_THREAD_RESUME_SNAPSHOT_VERSION ||
+    !(
+      value.version === LEGACY_NATIVE_THREAD_RESUME_SNAPSHOT_VERSION ||
+      value.version === NATIVE_THREAD_RESUME_SNAPSHOT_VERSION
+    ) ||
     typeof value.snapshot_id !== "string" ||
     !SNAPSHOT_ID_PATTERN.test(value.snapshot_id) ||
     (
@@ -556,6 +595,24 @@ function assertNativeThreadResumeSnapshot(
     !Array.isArray(value.rows)
   ) {
     throw new Error("resume selection snapshot is malformed");
+  }
+  if (
+    value.version === NATIVE_THREAD_RESUME_SNAPSHOT_VERSION &&
+    (
+      !isRecord(value.terminal_endpoint) ||
+      !snapshotEndpointMatches(
+        value.terminal_control,
+        value.terminal_endpoint
+      )
+    )
+  ) {
+    throw new Error("resume selection snapshot endpoint identity is malformed");
+  }
+  if (
+    value.version === LEGACY_NATIVE_THREAD_RESUME_SNAPSHOT_VERSION &&
+    value.terminal_endpoint !== undefined
+  ) {
+    throw new Error("legacy resume selection snapshot has unexpected endpoint identity");
   }
   const numbers = new Set<number>();
   const shortIds = new Set<string>();
@@ -675,14 +732,49 @@ function stableStringify(value: unknown): string {
   return JSON.stringify(value);
 }
 
-function terminalControlKey(value: {
-  target: string;
-  socketPath?: string;
-}): string {
-  return JSON.stringify({
-    target: value.target,
-    socket_path: value.socketPath ?? null
-  });
+function snapshotTerminalControl(value: Record<string, any>): TerminalControlRef {
+  const target = String(value.target ?? "");
+  const [session = target, route = "0.0"] = target.split(":", 2);
+  const [windowText = "0", paneText = "0"] = route.split(".", 2);
+  return {
+    kind: "tmux",
+    target,
+    socketPath: nonEmptyString(value.socket_path)
+      ? value.socket_path
+      : undefined,
+    session,
+    window: Number.parseInt(windowText, 10) || 0,
+    pane: Number.parseInt(paneText, 10) || 0,
+    panePid: Number(value.pane_pid),
+    capabilities: []
+  };
+}
+
+function isCompleteTerminalControlRef(
+  value: { target: string; socketPath?: string; panePid?: number }
+): value is TerminalControlRef {
+  const candidate = value as Partial<TerminalControlRef>;
+  return candidate.kind === "tmux" &&
+    typeof candidate.session === "string" &&
+    Number.isSafeInteger(candidate.window) &&
+    Number.isSafeInteger(candidate.pane) &&
+    Number.isSafeInteger(candidate.panePid) &&
+    Array.isArray(candidate.capabilities);
+}
+
+function snapshotEndpointMatches(
+  terminalControl: Record<string, any>,
+  terminalEndpoint: unknown
+): boolean {
+  try {
+    associateTerminalEndpointEvidence(
+      snapshotTerminalControl(terminalControl),
+      terminalEndpoint
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, any> {
