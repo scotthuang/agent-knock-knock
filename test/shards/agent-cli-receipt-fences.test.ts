@@ -236,7 +236,7 @@ test("a recreated tmux pane does not replay the prior incarnation receipt", () =
     assert.notEqual(second.status, 0);
     assert.match(
       second.stderr,
-      /prior tmux pane incarnation|durable terminal receipt|does not match its original Store, Session, Turn, OpenClaw session, or tmux pane binding/u
+      /prior tmux pane incarnation|durable terminal receipt|does not match its original Store, Session, Turn, OpenClaw session, or terminal binding/u
     );
     assert.equal(
       readJsonLines(tmuxCallsPath)

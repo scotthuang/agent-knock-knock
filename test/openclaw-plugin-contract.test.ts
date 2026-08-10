@@ -1954,6 +1954,7 @@ test("bundled OpenClaw skills exist and are included in the npm artifact", () =>
   }
   for (const documentationPath of [
     "README.md",
+    "docs/quickstart-herdr.md",
     "docs/quickstart-tmux.md"
   ]) {
     assert.equal(

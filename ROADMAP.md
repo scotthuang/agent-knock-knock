@@ -1,6 +1,6 @@
 # Roadmap
 
-Agent Knock Knock is a local tmux terminal handoff bridge for OpenClaw, Codex, Claude Code, and humans.
+Agent Knock Knock is a local terminal handoff bridge for OpenClaw, Codex, Claude Code, and humans. tmux and Herdr are terminal providers behind the same conservative control boundary.
 
 OpenClaw remains the remote control and orchestration surface. AKK keeps each coding-agent context in a visible terminal and records each dispatch as a Turn, so a human can inspect it, take over directly, and hand it back without creating a second hidden session.
 
@@ -8,7 +8,7 @@ The priority order is intentional: reliability and transparency come before addi
 
 ## Priority 1: Terminal Reliability
 
-- Keep terminal monitors bound to the exact tmux pane, process, workspace, AKK Session, Turn, message, and lease.
+- Keep terminal monitors bound to the exact provider resource, route, process, workspace, AKK Session, Turn, message, and lease.
 - Reconcile safe monitors after Gateway restarts without duplicating callbacks.
 - Make completion, approval, cancellation, timeout, and callback failures consistently actionable.
 - Keep uncertain or unsupported terminal states visible and fail closed.
@@ -18,7 +18,7 @@ The priority order is intentional: reliability and transparency come before addi
 
 - Make it obvious whether OpenClaw, the coding agent, or the human currently owns the next action.
 - Improve phone-friendly Session/Turn summaries, short references, and later-request selection.
-- Keep direct human takeover and hand-back seamless in the same tmux pane.
+- Keep direct human takeover and hand-back seamless in the same terminal pane.
 - Make interrupt, status, renew, close, and callback retry behavior predictable.
 
 ## Priority 3: Approval Safety
@@ -34,12 +34,12 @@ The priority order is intentional: reliability and transparency come before addi
 - Maintain registry-backed Codex and Claude Code terminal adapters.
 - Treat agent-local transcripts and session stores as best-effort compatibility inputs, not stable vendor APIs.
 - Detect schema and process changes conservatively and expose useful diagnostics.
-- Add another coding agent only after it has a verified tmux adapter with safe input, interrupt, approval, and completion behavior.
+- Add another coding agent only after it has a verified terminal adapter with safe input, interrupt, approval, and completion behavior.
 
 ## Priority 5: Session Visibility
 
 - Improve `AKK list`, status, and description with last activity, callback state, terminal target, and bounded context.
-- Keep unmanaged local sessions clearly separated from controllable tmux entries.
+- Keep unmanaged local sessions clearly separated from controllable terminal-provider entries.
 - Make every control action resolve an exact terminal identity and fail on ambiguity.
 
 ## Priority 6: OpenClaw Collaboration

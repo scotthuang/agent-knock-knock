@@ -116,7 +116,7 @@ const listParameters = {
     },
     terminalDebug: {
       type: "boolean",
-      description: "When true, include tmux terminal discovery diagnostics for debugging Gateway environment issues."
+      description: "When true, include terminal-provider discovery diagnostics for debugging Gateway environment issues."
     },
     idleTimeoutMinutes: {
       type: "number"
@@ -456,7 +456,7 @@ function createPlugin(
   id: "agent-knock-knock",
   name: "Agent Knock Knock",
   description:
-    "Agent Knock Knock (AKK/akk) lets OpenClaw operate local Codex and Claude Code through shared tmux terminals, with visible monitoring, approvals, callbacks, cancellation, and seamless human takeover.",
+    "Agent Knock Knock (AKK/akk) lets OpenClaw operate local Codex and Claude Code through shared tmux or Herdr terminals, with visible monitoring, approvals, callbacks, cancellation, and seamless human takeover.",
   register(api) {
     relayPathByApi.set(api, relayPath);
     api.registerGatewayMethod(
@@ -493,14 +493,14 @@ function createPlugin(
 
     api.registerCommand?.({
       name: "akk",
-      description: "Send coding work through existing Codex or Claude Code tmux terminals, inspect managed turns, and explicitly start, clear, list, or resume native threads.",
+      description: "Send coding work through existing Codex or Claude Code shared terminals, inspect managed turns, and explicitly start, clear, list, or resume native threads.",
       acceptsArgs: true,
       requireAuth: true,
       nativeProgressMessages: {
         default: "AKK is handling the request..."
       },
       agentPromptGuidance: [
-        "Use /akk <task> when exactly one eligible idle coding-agent tmux pane should receive new work. Use /akk codex: <task>, /akk claude: <task>, or another selector returned by /akk list to target an existing pane. Ordinary sends preserve native context. Use /akk threads, /akk new-thread or clear-thread, and /akk resume-thread only with an exact full terminal_id returned by /akk list; these switch native context without creating a Turn. Resume numbers and short IDs are bound to the last displayed snapshot, while previous is available only from the latest verified committed transition. For native Codex or Claude status, use only an advertised agent_knock_knock_native_inspect action; agent_knock_knock_status inspects AKK Turn state and does not execute /status. AKK never starts a coding-agent process."
+        "Use /akk <task> when exactly one eligible idle coding-agent terminal pane should receive new work. Use /akk codex: <task>, /akk claude: <task>, or another selector returned by /akk list to target an existing pane. Ordinary sends preserve native context. Use /akk threads, /akk new-thread or clear-thread, and /akk resume-thread only with an exact full terminal_id returned by /akk list; these switch native context without creating a Turn. Resume numbers and short IDs are bound to the last displayed snapshot, while previous is available only from the latest verified committed transition. For native Codex or Claude status, use only an advertised agent_knock_knock_native_inspect action; agent_knock_knock_status inspects AKK Turn state and does not execute /status. AKK never starts a coding-agent process."
       ],
       handler: async (ctx) => handleAkkCommand(
         api,
@@ -511,7 +511,7 @@ function createPlugin(
 
     registerCliTool(api, {
       name: "agent_knock_knock_list",
-      description: "List existing Codex and Claude Code tmux panes as the primary terminals[] resources. Each terminal may include managed.current_turn or managed.recent_turn; all=true also includes older managed.history and retained unavailable history. By default, unavailable_managed_turns contains attention-needed records whose pane is unavailable. Use only each row's available_actions and authoritative prefilled arguments: send targets a session and starts a new turn; respond targets the exact in-flight turn; native_inspect runs only a closed, exact-version Codex or Claude status profile with the current terminal/binding token; read-only thread listing targets the exact terminal, while new/resume mutations also require the current binding token and create no Turn; reconcile_binding detaches only the exact listed conflict and requires explicit user intent; managed controls target the exact turn; a raw terminal row may prefill its own compatibility selector for status or recovery controls. Never construct identifiers or tokens. AKK revalidates every terminal side effect and never starts a coding-agent process.",
+      description: "List existing Codex and Claude Code tmux or Herdr panes as the primary terminals[] resources. Each terminal may include managed.current_turn or managed.recent_turn; all=true also includes older managed.history and retained unavailable history. By default, unavailable_managed_turns contains attention-needed records whose pane is unavailable. Use only each row's available_actions and authoritative prefilled arguments: send targets a session and starts a new turn; respond targets the exact in-flight turn; native_inspect runs only a closed, exact-version Codex or Claude status profile with the current terminal/binding token; read-only thread listing targets the exact terminal, while new/resume mutations also require the current binding token and create no Turn; reconcile_binding detaches only the exact listed conflict and requires explicit user intent; managed controls target the exact turn; a raw terminal row may prefill its own compatibility selector for status or recovery controls. Never construct identifiers or tokens. AKK revalidates every terminal side effect and never starts a coding-agent process.",
       parameters: listParameters,
       buildArgs: (params) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
@@ -589,7 +589,7 @@ function createPlugin(
     registerCliTool(api, {
       name: "agent_knock_knock_new_thread",
       description:
-        "Start and verify a clean native coding-agent thread in the same exact tmux terminal. Call only from a current available new_thread action, using its exact terminal_id and expected_binding_token, or immediately after agent_knock_knock_list_resumable_threads using that result's token. Never send /clear as ordinary task text. This lifecycle transition creates a new AKK Session but no Turn; use ordinary send afterward.",
+        "Start and verify a clean native coding-agent thread in the same exact terminal. Call only from a current available new_thread action, using its exact terminal_id and expected_binding_token, or immediately after agent_knock_knock_list_resumable_threads using that result's token. Never send /clear as ordinary task text. This lifecycle transition creates a new AKK Session but no Turn; use ordinary send afterward.",
       parameters: newThreadParameters,
       normalizeTurnIdentity: false,
       isErrorResult: (result) => !isAkkThreadTransitionSuccess(result),
@@ -656,7 +656,7 @@ function createPlugin(
     registerCliTool(api, {
       name: "agent_knock_knock_resume_thread",
       description:
-        "Resume one exact verified historical native thread in the same tmux terminal. First call agent_knock_knock_list_resumable_threads, then pass its exact terminal_id and expected_binding_token plus one complete native_thread_id whose row says resumable=true and that same row's candidate_token. Never guess, truncate, or reuse IDs or tokens, and never send a resume slash command as ordinary task text. This creates or reactivates an AKK Session but creates no Turn.",
+        "Resume one exact verified historical native thread in the same terminal. First call agent_knock_knock_list_resumable_threads, then pass its exact terminal_id and expected_binding_token plus one complete native_thread_id whose row says resumable=true and that same row's candidate_token. Never guess, truncate, or reuse IDs or tokens, and never send a resume slash command as ordinary task text. This creates or reactivates an AKK Session but creates no Turn.",
       parameters: resumeThreadParameters,
       normalizeTurnIdentity: false,
       isErrorResult: (result) => !isAkkThreadTransitionSuccess(result),
@@ -812,7 +812,7 @@ function createPlugin(
 
     registerCliTool(api, {
       name: "agent_knock_knock_cancel",
-      description: "Interrupt one exact AKK turn_id, or use only an unmanaged raw terminal row's own prefilled cancel action. Claude sends Escape; Codex uses its declared interrupt key. The shared tmux pane remains open for human takeover.",
+      description: "Interrupt one exact AKK turn_id, or use only an unmanaged raw terminal row's own prefilled cancel action. Claude sends Escape; Codex uses its declared interrupt key. The shared terminal pane remains open for human takeover.",
       parameters: cancelParameters,
       buildArgs: (params) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
@@ -827,7 +827,7 @@ function createPlugin(
     registerCliTool(api, {
       name: "agent_knock_knock_close",
       description:
-        "Close an AKK-managed turn record without terminating the shared tmux pane. For a list-prefilled raw-terminal recovery, the user must explicitly request it and provide the exact expected_message_id or expected_transition_id reported by that AKK list entry.",
+        "Close an AKK-managed turn record without terminating the shared terminal pane. For a list-prefilled raw-terminal recovery, the user must explicitly request it and provide the exact expected_message_id or expected_transition_id reported by that AKK list entry.",
       parameters: closeParameters,
       isErrorResult: isBlockedTerminalDispatchResult,
       buildArgs: (params) => {
@@ -1286,7 +1286,7 @@ function formatDelegateCommandResult(result) {
       `AKK could not prove whether ${agent} received the terminal task.`,
       `session: ${sessionId}`,
       `turn: ${turnId}`,
-      "next: do not retry automatically; inspect AKK status and the named tmux pane."
+      "next: do not retry automatically; inspect AKK status and the named terminal pane."
     ].join("\n");
   }
   if (result.status === "submission_aborted") {
@@ -1297,8 +1297,8 @@ function formatDelegateCommandResult(result) {
       `session: ${sessionId}`,
       `turn: ${turnId}`,
       safeToRetry
-        ? "next: no tmux input was sent and the aborted receipt is durable, so this request may be retried."
-        : "next: do not retry automatically; AKK could not prove a durable safe abort, so inspect this Turn and its tmux dispatch ledger."
+        ? "next: no terminal input was sent and the aborted receipt is durable, so this request may be retried."
+        : "next: do not retry automatically; AKK could not prove a durable safe abort, so inspect this Turn and its terminal dispatch ledger."
     ].join("\n");
   }
   if (result.status === "submission_pending_acceptance") {
@@ -1306,7 +1306,7 @@ function formatDelegateCommandResult(result) {
       `AKK dispatched terminal input to ${agent}, but native acceptance is still pending.`,
       `session: ${sessionId}`,
       `turn: ${turnId}`,
-      "next: do not retry or report success; wait for acceptance or inspect the shared tmux pane."
+      "next: do not retry or report success; wait for acceptance or inspect the shared terminal pane."
     ].join("\n");
   }
   if (result.status === "submission_not_accepted") {
@@ -1314,7 +1314,7 @@ function formatDelegateCommandResult(result) {
       `AKK proved that ${agent} did not accept the terminal draft.`,
       `session: ${sessionId}`,
       `turn: ${turnId}`,
-      "next: do not retry automatically; inspect the exact draft in the shared tmux pane."
+      "next: do not retry automatically; inspect the exact draft in the shared terminal pane."
     ].join("\n");
   }
   return [
@@ -1397,6 +1397,7 @@ function formatStatusCommandResult(result) {
 function formatDoctorCommandResult(result) {
   const capabilities = isRecord(result.capabilities) ? result.capabilities : {};
   const tmux = isRecord(capabilities.tmux) ? capabilities.tmux : {};
+  const herdr = isRecord(capabilities.herdr) ? capabilities.herdr : {};
   const openclaw = isRecord(result.openclaw) ? result.openclaw : {};
   const checks = Array.isArray(openclaw.checks) ? openclaw.checks : [];
   const failures = checks
@@ -1415,6 +1416,7 @@ function formatDoctorCommandResult(result) {
   return [
     `AKK doctor: ${result.ok === true ? "ready" : "needs attention"}`,
     `tmux: ${tmux.status ?? "unknown"}`,
+    `Herdr: ${herdr.status ?? "unknown"}`,
     `OpenClaw package: ${openclaw.package_ready === true ? "ready" : "not ready"}`,
     `Gateway: ${openclaw.gateway_ready === true ? "healthy" : "unavailable"}`,
     ...(failures.length > 0 ? [`check: ${failures.join(", ")}`] : []),
@@ -1458,7 +1460,7 @@ function formatSendCommandResult(result) {
       `session: ${sessionId}`,
       `turn: ${turnId}`,
       `status: ${status}`,
-      "next: do not retry or continue automatically; inspect the shared tmux pane and close this Turn before sending more work."
+      "next: do not retry or continue automatically; inspect the shared terminal pane and close this Turn before sending more work."
     ].join("\n");
   }
   if (result.submission_outcome === "uncertain") {
@@ -1467,14 +1469,14 @@ function formatSendCommandResult(result) {
       `session: ${sessionId}`,
       `turn: ${turnId}`,
       `status: ${result.status ?? status}`,
-      "next: do not retry automatically; inspect AKK status and the named tmux pane."
+      "next: do not retry automatically; inspect AKK status and the named terminal pane."
     ].join("\n");
   }
   if (result.submission_outcome === "aborted") {
     const safeToRetry =
       result.safe_to_retry === true && result.do_not_retry !== true;
     return [
-      "AKK terminal submission was aborted before tmux input.",
+      "AKK terminal submission was aborted before terminal input.",
       `session: ${sessionId}`,
       `turn: ${turnId}`,
       `status: ${result.status ?? status}`,
@@ -1489,7 +1491,7 @@ function formatSendCommandResult(result) {
       `session: ${sessionId}`,
       `turn: ${turnId}`,
       `status: ${result.status ?? status}`,
-      "next: do not retry or report success; wait for acceptance or inspect the shared tmux pane."
+      "next: do not retry or report success; wait for acceptance or inspect the shared terminal pane."
     ].join("\n");
   }
   if (result.submission_outcome === "not_accepted") {
@@ -1498,7 +1500,7 @@ function formatSendCommandResult(result) {
       `session: ${sessionId}`,
       `turn: ${turnId}`,
       `status: ${result.status ?? status}`,
-      "next: do not retry automatically; inspect the exact draft in the shared tmux pane."
+      "next: do not retry automatically; inspect the exact draft in the shared terminal pane."
     ].join("\n");
   }
   if (
@@ -1510,7 +1512,7 @@ function formatSendCommandResult(result) {
       `session: ${sessionId}`,
       `turn: ${turnId}`,
       `status: ${result.status ?? status}`,
-      "next: do not retry or report success; inspect the exact Turn receipt and shared tmux pane."
+      "next: do not retry or report success; inspect the exact Turn receipt and shared terminal pane."
     ].join("\n");
   }
   const lines = [
@@ -1580,7 +1582,7 @@ function formatCloseCommandResult(result) {
         : [
             `previous turn: ${result.owner_turn_id ?? result.owner_conversation_id ?? "unknown"}`
           ]),
-      "The coding agent and tmux pane remain open."
+      "The coding agent and terminal pane remain open."
     ].join("\n");
   }
   const conversation = result.conversation ?? {};
@@ -1988,7 +1990,7 @@ async function runDelegate(api, params, toolContext) {
           reason: parsed.reason,
           openclaw_next_action: parsed.openclaw_next_action,
           note:
-            "AKK could not prove whether tmux accepted Enter. Do not retry automatically; inspect the exact AKK Turn record and shared terminal."
+            "AKK could not prove whether the terminal accepted Enter. Do not retry automatically; inspect the exact AKK Turn record and shared terminal."
         }
       : submissionAborted
         ? parsed.safe_to_retry === true && parsed.do_not_retry !== true
@@ -1999,7 +2001,7 @@ async function runDelegate(api, params, toolContext) {
               reason: parsed.reason,
               openclaw_next_action: parsed.openclaw_next_action,
               note:
-                "AKK stopped before sending tmux input and durably proved a safe abort. The request may be retried."
+                "AKK stopped before sending terminal input and durably proved a safe abort. The request may be retried."
             }
           : {
               submission_outcome: "aborted",
@@ -2032,14 +2034,14 @@ async function runDelegate(api, params, toolContext) {
           openclaw_next_action: {
             action: "yield",
             reason:
-              "The coding agent is working in the shared tmux terminal. End this OpenClaw turn now and wait for an Agent Knock Knock callback.",
+              "The coding agent is working in the shared terminal. End this OpenClaw turn now and wait for an Agent Knock Knock callback.",
             do_not:
               "Do not poll terminal internals while waiting. Further communication must use Agent Knock Knock tools so the same shared terminal remains authoritative.",
             expected_callback:
               "The callback will be injected and scheduled into this OpenClaw session by the agent-knock-knock.callback Gateway method."
           },
           note:
-            "The task was sent to the shared tmux terminal. OpenClaw should yield now and wait for the scheduled callback turn."
+            "The task was sent to the shared terminal. OpenClaw should yield now and wait for the scheduled callback turn."
         })
   };
 }
@@ -2627,7 +2629,7 @@ function formatDoneShortcuts(sessionId, turnId) {
     "- `AKK list` lists live shared terminals with their current or recent managed turns.",
     `- Use \`agent_knock_knock_send\` with \`session_id: ${JSON.stringify(sessionId)}\` to start a later turn in the same coding-agent context.`,
     `- Use \`agent_knock_knock_status\` with \`turn_id: ${JSON.stringify(turnId)}\` to inspect this exact turn.`,
-    "- AKK never starts or closes the coding agent or tmux pane."
+    "- AKK never starts or closes the coding agent or terminal pane."
   ].join("\n");
 }
 

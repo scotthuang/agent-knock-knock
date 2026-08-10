@@ -102,6 +102,7 @@ test("unknown paths and shared CLI, Store, protocol, terminal identity, or lifec
     "src/store.ts",
     "src/protocol.ts",
     "src/claude-local-transcript-provider.ts",
+    "src/herdr-terminal-control-provider.ts",
     "src/terminal-control-provider.ts",
     "src/native-thread-lifecycle-policy.ts"
   ]) {

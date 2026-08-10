@@ -11,7 +11,7 @@ import {
 } from "../src/doctor-capabilities.js";
 
 function checks(available: string[]) {
-  return ["node", "openclaw", "tmux", "codex", "claude"]
+  return ["node", "openclaw", "tmux", "herdr", "codex", "claude"]
     .map((command) => ({
       command,
       available: available.includes(command),
@@ -29,8 +29,56 @@ test("doctor accepts a tmux installation with either supported coding agent", ()
   assert.equal(result.tmux.available, true);
   assert.equal(result.tmux.status, "ready");
   assert.deepEqual(result.tmux.agents, ["claude"]);
+  assert.deepEqual(result.available_transports, ["tmux"]);
   assert.equal(result.mode, "tmux");
   assert.equal(result.readiness, "ready");
+});
+
+test("doctor accepts exact Herdr 0.8.0 as the only terminal transport", () => {
+  const result = evaluateDoctorCapabilities([
+    { command: "node", available: true, version_supported: true },
+    { command: "openclaw", available: true, status: "ok" },
+    { command: "tmux", available: false, status: "not_found" },
+    {
+      command: "herdr",
+      available: true,
+      status: "ok",
+      version_supported: true
+    },
+    { command: "codex", available: true, status: "ok" }
+  ]);
+
+  assert.equal(result.coreOk, true);
+  assert.equal(result.transportOk, true);
+  assert.equal(result.tmux.available, false);
+  assert.equal(result.herdr.available, true);
+  assert.equal(result.herdr.version_supported, true);
+  assert.deepEqual(result.herdr.missing, []);
+  assert.deepEqual(result.available_transports, ["herdr"]);
+  assert.equal(result.mode, "tmux");
+  assert.equal(result.readiness, "ready");
+});
+
+test("doctor fails closed for a non-exact Herdr version", () => {
+  const result = evaluateDoctorCapabilities([
+    { command: "node", available: true, version_supported: true },
+    { command: "openclaw", available: true, status: "ok" },
+    {
+      command: "herdr",
+      available: true,
+      status: "ok",
+      version_supported: false
+    },
+    { command: "claude", available: true, status: "ok" }
+  ]);
+
+  assert.equal(result.transportOk, false);
+  assert.equal(result.herdr.available, false);
+  assert.equal(result.herdr.version_supported, false);
+  assert.equal(result.herdr.status, "partially_ready");
+  assert.deepEqual(result.herdr.missing, ["herdr 0.8.0"]);
+  assert.deepEqual(result.available_transports, []);
+  assert.equal(result.readiness, "partially_ready");
 });
 
 test("doctor rejects missing tmux or a missing supported coding agent", () => {
@@ -94,6 +142,7 @@ test("real probes accept supported version output without invoking a shell", () 
     const versions = {
       openclaw: "OpenClaw 2026.7.1-2",
       tmux: "tmux 3.5a",
+      herdr: "herdr 0.8.0",
       codex: "codex-cli 0.107.0",
       claude: "2.1.15 (Claude Code)"
     };
@@ -120,19 +169,24 @@ process.stdout.write(${JSON.stringify(versions[command])});
     assert.equal(probes.every((probe) => probe.status === "ok"), true);
     assert.deepEqual(
       probes.map((probe) => probe.version),
-      ["2026.7.1-2", "3.5a", "0.107.0", "2.1.15"]
+      ["2026.7.1-2", "3.5a", "0.8.0", "0.107.0", "2.1.15"]
     );
     assert.equal(probes.every((probe) => probe.available), true);
+    assert.equal(
+      probes.find((probe) => probe.command === "herdr")?.version_supported,
+      true
+    );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
 
-test("doctor probes only tmux and its supported coding agents", () => {
+test("doctor probes both terminal transports and their supported coding agents", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-doctor-tmux-probes-"));
   const executables = {
     openclaw: writeFakeExecutable(tempDir, "openclaw", `process.stdout.write("2026.7.1-2");`),
     tmux: writeFakeExecutable(tempDir, "tmux", `process.stdout.write("tmux 3.5a");`),
+    herdr: writeFakeExecutable(tempDir, "herdr", `process.stdout.write("herdr 0.8.0");`),
     codex: writeFakeExecutable(tempDir, "codex", `process.stdout.write("0.107.0");`),
     claude: writeFakeExecutable(tempDir, "claude", `process.stdout.write("2.1.218");`)
   };
@@ -141,9 +195,41 @@ test("doctor probes only tmux and its supported coding agents", () => {
     const probes = runDoctorCapabilityProbes({ executables });
     assert.deepEqual(
       probes.map((probe) => probe.command),
-      ["openclaw", "tmux", "codex", "claude"]
+      ["openclaw", "tmux", "herdr", "codex", "claude"]
     );
     assert.equal(probes.every((probe) => probe.status === "ok"), true);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("Herdr probe marks only exact 0.8.0 as version supported", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-doctor-herdr-version-"));
+  try {
+    const exact = probeDoctorCommand("herdr", {
+      executables: {
+        herdr: writeFakeExecutable(
+          tempDir,
+          "herdr-exact",
+          `process.stdout.write("herdr 0.8.0");`
+        )
+      }
+    });
+    const newer = probeDoctorCommand("herdr", {
+      executables: {
+        herdr: writeFakeExecutable(
+          tempDir,
+          "herdr-newer",
+          `process.stdout.write("herdr 0.8.1");`
+        )
+      }
+    });
+
+    assert.equal(exact.status, "ok");
+    assert.equal(exact.version_supported, true);
+    assert.equal(newer.status, "ok");
+    assert.equal(newer.available, true);
+    assert.equal(newer.version_supported, false);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -185,6 +271,7 @@ exit 9`
       executables: {
         openclaw: path.join(tempDir, "missing-openclaw"),
         tmux: notExecutable,
+        herdr: path.join(tempDir, "missing-herdr"),
         codex: working,
         claude: malformed
       }
@@ -200,6 +287,7 @@ exit 9`
 
     assert.equal(byCommand.get("openclaw")?.status, "not_found");
     assert.equal(byCommand.get("tmux")?.status, "not_executable");
+    assert.equal(byCommand.get("herdr")?.status, "not_found");
     assert.equal(byCommand.get("codex")?.status, "ok");
     assert.equal(timeoutProbe.status, "timeout");
     assert.equal(versionFailedProbe.status, "version_failed");

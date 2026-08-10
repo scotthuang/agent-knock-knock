@@ -425,7 +425,8 @@ export class TerminalAgentBridge {
     return formatTerminalConversationId({
       agent: process.agent,
       target: terminal.route.label,
-      pid: process.pid
+      pid: process.pid,
+      kind: terminal.identity.providerKind as "tmux" | "herdr"
     });
   }
 
@@ -2462,14 +2463,17 @@ export function terminalApprovalFingerprint(
         identity: terminalEndpointIdentityKey(terminal),
         process_anchor_pid: terminal.processAnchorPid
       }
-    : {
+    : terminalControl.kind === "tmux" ? {
         target: terminalControl.target,
         socket_path: terminalControl.socketPath,
         session: terminalControl.session,
         window: terminalControl.window,
         pane: terminalControl.pane,
         pane_pid: terminalControl.panePid
-      };
+      } : undefined;
+  if (!terminalFingerprint) {
+    return undefined;
+  }
   return createHash("sha256")
     .update(JSON.stringify({
       agent,

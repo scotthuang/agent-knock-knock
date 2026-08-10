@@ -13,13 +13,36 @@ import {
   terminalEndpointIdentityFromEvidence,
   terminalEndpointIdentityKey,
   tmuxTerminalRouteKey,
+  type HerdrTerminalControlRef,
   type TerminalControlRef,
-  type TerminalEndpointRef
+  type TerminalEndpointRef,
+  type TmuxTerminalControlRef
 } from "../src/terminal-control-ref.js";
 
+function herdrControl(
+  overrides: Partial<HerdrTerminalControlRef> = {}
+): HerdrTerminalControlRef {
+  return {
+    kind: "herdr",
+    target: "default:w1:p1",
+    socketPath: "/Users/me/.config/herdr/herdr.sock",
+    session: "default",
+    sessionDir: "/Users/me/.config/herdr",
+    workspaceId: "w1",
+    tabId: "w1:t1",
+    paneId: "w1:p1",
+    terminalId: "term_0123456789abcd",
+    panePid: 5_196,
+    currentCommand: "claude",
+    currentPath: "/repo",
+    capabilities: ["screen_status", "send_keys"],
+    ...overrides
+  };
+}
+
 function tmuxControl(
-  overrides: Partial<TerminalControlRef> = {}
-): TerminalControlRef {
+  overrides: Partial<TmuxTerminalControlRef> = {}
+): TmuxTerminalControlRef {
   return {
     kind: "tmux",
     target: "work:0.0",
@@ -175,6 +198,68 @@ test("canonical endpoint evidence survives JSON round-trip and restores a contro
     }),
     true
   );
+});
+
+test("Herdr control refs carry intrinsic canonical identity across JSON round-trips", () => {
+  const original = herdrControl();
+  const evidence = JSON.parse(JSON.stringify(terminalControlEvidence(original)));
+  const restored = JSON.parse(JSON.stringify(original)) as HerdrTerminalControlRef;
+
+  assert.equal(hasCanonicalTerminalEndpoint(original), true);
+  assert.equal(hasCanonicalTerminalEndpoint(restored), true);
+  assert.deepEqual(terminalEndpointFromControlRef(restored).identity, {
+    providerKind: "herdr",
+    endpointKey: "socket:/Users/me/.config/herdr/herdr.sock",
+    resourceKey: "terminal-id:term_0123456789abcd"
+  });
+  assert.deepEqual(
+    terminalEndpointIdentityFromEvidence(evidence),
+    terminalEndpointFromControlRef(original).identity
+  );
+  assert.equal(
+    terminalControlEvidenceMatches(evidence, restored, {
+      requireCurrentRoute: true,
+      requireProcessAnchor: true
+    }),
+    true
+  );
+  assert.doesNotThrow(() => associateTerminalEndpointEvidence(restored, evidence));
+});
+
+test("Herdr stable identity survives pane moves while route and incarnation fences remain exact", () => {
+  const before = herdrControl();
+  const moved = herdrControl({
+    target: "default:w2:p7",
+    workspaceId: "w2",
+    tabId: "w2:t3",
+    paneId: "w2:p7"
+  });
+  const restarted = herdrControl({ panePid: 9_999 });
+  const otherServer = herdrControl({
+    socketPath: "/Users/me/.config/herdr/sessions/other/herdr.sock"
+  });
+
+  assert.equal(sameTerminalEndpointIdentity(before, moved), true);
+  assert.equal(sameTerminalControlRoute(before, moved), false);
+  assert.equal(sameTerminalControlIncarnation(before, moved), true);
+  assert.equal(sameTerminalEndpointIdentity(before, restarted), true);
+  assert.equal(sameTerminalControlIncarnation(before, restarted), false);
+  assert.equal(sameTerminalEndpointIdentity(before, otherServer), false);
+});
+
+test("Herdr endpoint evidence rejects route, resource, and process-anchor tampering", () => {
+  const control = herdrControl();
+  const evidence = terminalControlEvidence(control);
+  for (const tampered of [
+    { ...evidence, terminal_id: "term_other" },
+    { ...evidence, pane_id: "w1:p9" },
+    { ...evidence, process_anchor_pid: 9_999 }
+  ]) {
+    assert.equal(terminalControlEvidenceMatches(tampered, control, {
+      requireCurrentRoute: true,
+      requireProcessAnchor: true
+    }), false);
+  }
 });
 
 test("legacy refs fall back to the exact target, socket, and pane PID tuple", () => {

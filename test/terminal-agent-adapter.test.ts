@@ -55,6 +55,31 @@ test("agent-aware terminal conversation ids round-trip and legacy ids remain Cod
   });
 });
 
+test("Herdr terminal conversation ids round-trip without weakening tmux compatibility", () => {
+  const id = formatTerminalConversationId({
+    kind: "herdr",
+    agent: "codex",
+    target: "default:w1:p2",
+    pid: 6_984
+  });
+
+  assert.equal(id, "terminal:v2:herdr:codex:default:w1:p2:6984");
+  assert.deepEqual(parseTerminalConversationId(id), {
+    conversationId: id,
+    kind: "herdr",
+    agent: "codex",
+    target: "default:w1:p2",
+    pid: 6_984,
+    legacy: false
+  });
+  assert.equal(
+    parseTerminalConversationId(
+      "terminal:v2:unknown:codex:default:w1:p2:6984"
+    ),
+    undefined
+  );
+});
+
 test("legacy target named codex is not confused with an agent marker", () => {
   const legacy = "terminal:tmux:codex:0.1:333";
   const parsed = parseTerminalConversationId(legacy);

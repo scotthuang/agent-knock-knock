@@ -300,6 +300,76 @@ test("v2 snapshots persist canonical endpoint identity and process anchor", () =
   }
 });
 
+test("v2 snapshots round-trip Herdr stable identity and current pane route", () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-resume-snapshot-herdr-")
+  );
+  const runtimeDir = path.join(tempDir, "runtime");
+  const now = new Date("2026-08-10T03:00:00.000Z");
+  const terminalControl: TerminalControlRef = {
+    kind: "herdr",
+    target: "default:w1:p2",
+    socketPath: "/Users/me/.config/herdr/herdr.sock",
+    session: "default",
+    sessionDir: "/Users/me/.config/herdr",
+    workspaceId: "w1",
+    tabId: "w1:t1",
+    paneId: "w1:p2",
+    terminalId: "term_658aefacc86a72",
+    panePid: 6_646,
+    currentCommand: "codex --yolo",
+    currentPath: workspace,
+    capabilities: ["screen_status", "send_keys"]
+  };
+  try {
+    const snapshot = createNativeThreadResumeSnapshot({
+      storeDir,
+      selectionScope,
+      terminalId: "terminal:v2:herdr:codex:default:w1:p2:6984",
+      agent: "codex",
+      workspace,
+      terminalControl,
+      expectedBindingToken: "binding-token-herdr",
+      terminalActionFingerprint: "a".repeat(64),
+      candidates: [candidate("11111111-1111-4111-8111-111111111111", 200)],
+      now
+    });
+
+    assert.equal(snapshot.version, 2);
+    assert.deepEqual(snapshot.terminal_control, {
+      target: "default:w1:p2",
+      socket_path: "/Users/me/.config/herdr/herdr.sock",
+      pane_pid: 6_646,
+      kind: "herdr",
+      session: "default",
+      session_dir: "/Users/me/.config/herdr",
+      workspace_id: "w1",
+      tab_id: "w1:t1",
+      pane_id: "w1:p2",
+      terminal_id: "term_658aefacc86a72"
+    });
+    saveNativeThreadResumeSnapshot(runtimeDir, storeDir, snapshot, now);
+    assert.deepEqual(
+      loadNativeThreadResumeSnapshot(
+        runtimeDir,
+        storeDir,
+        snapshot.snapshot_id,
+        new Date(now.getTime() + 1)
+      ).terminal_endpoint,
+      snapshot.terminal_endpoint
+    );
+
+    const tampered = structuredClone(snapshot);
+    tampered.terminal_control.pane_id = "w1:p9";
+    assert.throws(
+      () => saveNativeThreadResumeSnapshot(runtimeDir, storeDir, tampered, now),
+      /endpoint identity is malformed/u
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("raw v1 snapshots remain readable while ambiguous version encodings fail closed", () => {
   const tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-resume-snapshot-v1-")

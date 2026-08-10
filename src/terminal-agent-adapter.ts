@@ -621,7 +621,7 @@ export function terminalControlCapabilitiesForAdapter(
 
 export interface TerminalConversationIdentity {
   conversationId: string;
-  kind: "tmux";
+  kind: "tmux" | "herdr";
   agent: ExecutorKind;
   target: string;
   pid: number;
@@ -631,30 +631,36 @@ export interface TerminalConversationIdentity {
 export function formatTerminalConversationId({
   agent,
   target,
-  pid
+  pid,
+  kind = "tmux"
 }: {
   agent: ExecutorKind;
   target: string;
   pid: number;
+  kind?: "tmux" | "herdr";
 }): string {
   if (!isExecutorKind(agent)) {
     throw new Error(`unsupported terminal agent: ${String(agent || "<empty>")}`);
   }
+  if (!(kind === "tmux" || kind === "herdr")) {
+    throw new Error(`unsupported terminal provider: ${String(kind || "<empty>")}`);
+  }
   assertTerminalIdentityParts(target, pid);
-  return `terminal:v2:tmux:${agent}:${target}:${pid}`;
+  return `terminal:v2:${kind}:${agent}:${target}:${pid}`;
 }
 
 export function parseTerminalConversationId(
   conversationId: string | undefined
 ): TerminalConversationIdentity | undefined {
-  const agentAwarePrefix = "terminal:v2:tmux:";
   const legacyPrefix = "terminal:tmux:";
-  if (!conversationId?.startsWith(agentAwarePrefix) && !conversationId?.startsWith(legacyPrefix)) {
+  const match = /^terminal:v2:(tmux|herdr):/u.exec(conversationId ?? "");
+  if (!conversationId || (!match && !conversationId.startsWith(legacyPrefix))) {
     return undefined;
   }
 
   const legacy = conversationId.startsWith(legacyPrefix);
-  const prefix = legacy ? legacyPrefix : agentAwarePrefix;
+  const kind = legacy ? "tmux" : match?.[1] as "tmux" | "herdr";
+  const prefix = legacy ? legacyPrefix : `terminal:v2:${kind}:`;
   const rest = conversationId.slice(prefix.length);
   const pidSeparator = rest.lastIndexOf(":");
   if (pidSeparator <= 0 || pidSeparator === rest.length - 1) {
@@ -679,7 +685,7 @@ export function parseTerminalConversationId(
 
   return {
     conversationId,
-    kind: "tmux",
+    kind,
     agent,
     target,
     pid,

@@ -24,17 +24,33 @@ export type TerminalProviderCapability =
   | "process_inspection"
   | "stable_resource_resolution";
 
-export interface TmuxTerminalControlRef {
-  kind: "tmux";
+interface TerminalControlRefBase {
   target: string;
   socketPath?: string;
   session: string;
-  window: number;
-  pane: number;
   panePid: number;
   currentCommand?: string;
   currentPath?: string;
   capabilities: TerminalControlCapability[];
+}
+
+export interface TmuxTerminalControlRef extends TerminalControlRefBase {
+  kind: "tmux";
+  window: number;
+  pane: number;
+}
+
+/** Persisted routing and identity owned by a Herdr server session. */
+export interface HerdrTerminalControlRef extends TerminalControlRefBase {
+  kind: "herdr";
+  /** Canonical Herdr session directory, when reported by session discovery. */
+  sessionDir?: string;
+  workspaceId: string;
+  tabId: string;
+  /** Current public route. A cross-workspace move may replace this value. */
+  paneId: string;
+  /** Stable resource identity for the lifetime of the underlying PTY. */
+  terminalId: string;
 }
 
 /**
@@ -42,7 +58,9 @@ export interface TmuxTerminalControlRef {
  * New providers add a member here; generic callers consume
  * TerminalEndpointRef instead of narrowing this union themselves.
  */
-export type TerminalControlRef = TmuxTerminalControlRef;
+export type TerminalControlRef =
+  | TmuxTerminalControlRef
+  | HerdrTerminalControlRef;
 
 export interface TerminalEndpointIdentity {
   providerKind: string;
@@ -90,6 +108,11 @@ export interface TerminalControlEvidence {
   pane_pid?: number | null;
   server_socket_path?: string | null;
   pane_id?: string | null;
+  session_name?: string | null;
+  session_dir?: string | null;
+  workspace_id?: string | null;
+  tab_id?: string | null;
+  terminal_id?: string | null;
   current_path?: string | null;
 }
 
@@ -153,13 +176,48 @@ export function terminalEndpointFromControlRef(
         providerRef: terminalControl
       };
     }
+    case "herdr": {
+      assertHerdrControlIdentity(terminalControl);
+      const endpointKey = `socket:${terminalControl.socketPath}`;
+      return {
+        identity: {
+          providerKind: "herdr",
+          endpointKey,
+          resourceKey: `terminal-id:${terminalControl.terminalId}`
+        },
+        route: {
+          routeKey: herdrTerminalRouteKey(
+            endpointKey,
+            terminalControl.session,
+            terminalControl.paneId
+          ),
+          label: terminalControl.target,
+          currentCommand: terminalControl.currentCommand,
+          currentPath: terminalControl.currentPath
+        },
+        processAnchorPid: terminalControl.panePid,
+        capabilities: [...terminalControl.capabilities],
+        providerRef: terminalControl
+      };
+    }
   }
 }
 
 export function hasCanonicalTerminalEndpoint(
   terminalControl: TerminalControlRef
 ): boolean {
-  return associatedEndpoints.has(terminalControl);
+  if (associatedEndpoints.has(terminalControl)) {
+    return true;
+  }
+  if (terminalControl.kind !== "herdr") {
+    return false;
+  }
+  try {
+    terminalEndpointFromControlRef(terminalControl);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function terminalEndpointIdentityKey(
@@ -254,6 +312,27 @@ export function terminalControlEvidence(
           : null,
         current_path: terminalControl.currentPath ?? null
       };
+    case "herdr":
+      return {
+        schema: "agent-knock-knock/terminal-endpoint",
+        version: 1,
+        kind: endpoint.identity.providerKind,
+        endpoint_key: endpoint.identity.endpointKey,
+        resource_key: endpoint.identity.resourceKey,
+        route_key: endpoint.route.routeKey,
+        process_anchor_pid: endpoint.processAnchorPid ?? null,
+        target: terminalControl.target,
+        socket_path: terminalControl.socketPath ?? null,
+        pane_pid: terminalControl.panePid,
+        server_socket_path: terminalControl.socketPath ?? null,
+        pane_id: terminalControl.paneId,
+        session_name: terminalControl.session,
+        session_dir: terminalControl.sessionDir ?? null,
+        workspace_id: terminalControl.workspaceId,
+        tab_id: terminalControl.tabId,
+        terminal_id: terminalControl.terminalId,
+        current_path: terminalControl.currentPath ?? null
+      };
   }
 }
 
@@ -284,6 +363,21 @@ export function terminalEndpointIdentityFromEvidence(
       ) {
         return undefined;
       }
+    } else if (providerKind === "herdr") {
+      const herdr = herdrIdentityFromEvidence(value);
+      if (
+        !herdr ||
+        herdr.identity.endpointKey !== endpointKey ||
+        herdr.identity.resourceKey !== resourceKey ||
+        (
+          nonEmptyString(value.route_key) !== undefined &&
+          nonEmptyString(value.route_key) !== herdr.routeKey
+        )
+      ) {
+        return undefined;
+      }
+    } else {
+      return undefined;
     }
     return { providerKind, endpointKey, resourceKey };
   }
@@ -301,8 +395,10 @@ export function terminalRouteKeyFromEvidence(value: unknown): string | undefined
   }
   const canonical = nonEmptyString(value.route_key);
   if (canonical) {
-    const legacy = tmuxIdentityFromEvidence(value);
-    if ((value.kind === "tmux" || legacy) && legacy?.routeKey !== canonical) {
+    const derived = value.kind === "herdr"
+      ? herdrIdentityFromEvidence(value)
+      : tmuxIdentityFromEvidence(value);
+    if (derived?.routeKey !== canonical) {
       return undefined;
     }
     return canonical;
@@ -408,6 +504,35 @@ export function associateTerminalEndpointEvidence(
   }
   const identity = terminalEndpointIdentityFromEvidence(evidence);
   const routeKey = terminalRouteKeyFromEvidence(evidence);
+  if (terminalControl.kind === "herdr") {
+    const endpoint = terminalEndpointFromControlRef(terminalControl);
+    if (
+      !identity ||
+      !routeKey ||
+      !sameTerminalEndpointIdentity(identity, endpoint) ||
+      routeKey !== endpoint.route.routeKey ||
+      positiveInteger(evidence.process_anchor_pid ?? evidence.pane_pid) !==
+        endpoint.processAnchorPid
+    ) {
+      throw new Error(
+        "terminal endpoint evidence conflicts with its Herdr control reference"
+      );
+    }
+    createTerminalEndpointRef({
+      identity,
+      route: {
+        routeKey,
+        label: terminalControl.target,
+        currentCommand: terminalControl.currentCommand,
+        currentPath: nonEmptyString(evidence.current_path) ??
+          terminalControl.currentPath
+      },
+      processAnchorPid: endpoint.processAnchorPid,
+      capabilities: terminalControl.capabilities,
+      providerRef: terminalControl
+    });
+    return terminalControl;
+  }
   const legacy = legacyTerminalEvidence(evidence);
   if (
     !identity ||
@@ -441,13 +566,13 @@ export function associateTerminalEndpointEvidence(
 export function terminalLegacyControlEvidence(
   terminalControl: TerminalControlRef
 ): {
-  kind: "tmux";
+  kind: TerminalControlRef["kind"];
   target: string;
   socket_path: string | null;
   pane_pid: number;
 } {
   return {
-    kind: "tmux",
+    kind: terminalControl.kind,
     target: terminalControl.target,
     socket_path: terminalControl.socketPath ?? null,
     pane_pid: terminalControl.panePid
@@ -457,7 +582,14 @@ export function terminalLegacyControlEvidence(
 /** Exact legacy runtime route serialized by v0.11.x ledgers and locks. */
 export function terminalLegacyRuntimeRoute(
   terminalControl: TerminalControlRef
-): { target: string; socket_path: string | null } {
+): { target: string; socket_path: string | null; kind?: "herdr" } {
+  if (terminalControl.kind === "herdr") {
+    return {
+      kind: "herdr",
+      target: terminalControl.target,
+      socket_path: terminalControl.socketPath ?? null
+    };
+  }
   return {
     target: terminalControl.target,
     socket_path: terminalControl.socketPath ?? null
@@ -496,6 +628,19 @@ export function tmuxTerminalRouteKey(
   });
 }
 
+export function herdrTerminalRouteKey(
+  endpointKey: string,
+  session: string,
+  paneId: string
+): string {
+  return JSON.stringify({
+    provider_kind: "herdr",
+    endpoint_key: endpointKey,
+    session,
+    pane_id: paneId
+  });
+}
+
 function tmuxIdentityFromEvidence(value: Record<string, any>): {
   identity: TerminalEndpointIdentity;
   routeKey: string;
@@ -530,6 +675,39 @@ function tmuxIdentityFromEvidence(value: Record<string, any>): {
         : `legacy:${routeKey}:pane-pid:${panePid}`
     },
     routeKey
+  };
+}
+
+function herdrIdentityFromEvidence(value: Record<string, any>): {
+  identity: TerminalEndpointIdentity;
+  routeKey: string;
+} | undefined {
+  const socketPath = nonEmptyString(
+    value.server_socket_path ?? value.socket_path ?? value.socketPath
+  );
+  const session = nonEmptyString(value.session_name ?? value.session);
+  const paneId = nonEmptyString(value.pane_id ?? value.paneId);
+  const terminalId = nonEmptyString(value.terminal_id ?? value.terminalId);
+  const panePid = positiveInteger(value.pane_pid ?? value.panePid);
+  const processAnchorPid = positiveInteger(value.process_anchor_pid);
+  if (
+    !socketPath ||
+    !session ||
+    !paneId ||
+    !terminalId ||
+    panePid === undefined ||
+    (processAnchorPid !== undefined && processAnchorPid !== panePid)
+  ) {
+    return undefined;
+  }
+  const endpointKey = `socket:${socketPath}`;
+  return {
+    identity: {
+      providerKind: "herdr",
+      endpointKey,
+      resourceKey: `terminal-id:${terminalId}`
+    },
+    routeKey: herdrTerminalRouteKey(endpointKey, session, paneId)
   };
 }
 
@@ -595,6 +773,25 @@ function assertTmuxControlIdentity(value: TmuxTerminalControlRef): void {
     value.panePid <= 0
   ) {
     throw new Error("tmux terminal control requires a target and positive pane PID");
+  }
+}
+
+function assertHerdrControlIdentity(value: HerdrTerminalControlRef): void {
+  if (
+    !value.target ||
+    !value.socketPath ||
+    !value.session ||
+    !value.workspaceId ||
+    !value.tabId ||
+    !value.paneId ||
+    !value.terminalId ||
+    !Number.isSafeInteger(value.panePid) ||
+    value.panePid <= 0
+  ) {
+    throw new Error(
+      "Herdr terminal control requires a session socket, stable terminal ID, " +
+      "current pane route, and positive shell PID"
+    );
   }
 }
 

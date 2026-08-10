@@ -525,7 +525,7 @@ test("raw terminal send requires managed background mode while cancel remains di
     });
 
     assert.notEqual(sent.status, 0);
-    assert.match(sent.stderr, /raw tmux terminal sends require --background/u);
+    assert.match(sent.stderr, /raw terminal sends require --background/u);
     assert.equal(
       readJsonLines(tmuxCallsPath).some((call) => call.args[0] === "send-keys"),
       false

@@ -7,6 +7,7 @@ export type DoctorReadiness = "ready" | "partially_ready" | "not_ready";
 export type DoctorProbeCommand =
   | "openclaw"
   | "tmux"
+  | "herdr"
   | "codex"
   | "claude";
 
@@ -63,13 +64,23 @@ interface DoctorTmuxCapability extends DoctorModeCapability {
   recommended: true;
 }
 
+interface DoctorHerdrCapability extends DoctorModeCapability {
+  version_supported: boolean;
+  required_version: typeof DOCTOR_SUPPORTED_HERDR_VERSION;
+}
+
 export interface DoctorCapabilitySummary {
   coreOk: boolean;
   transportOk: boolean;
+  available_transports: Array<"tmux" | "herdr">;
+  /** Retained for compatibility with existing doctor consumers. */
   mode: DoctorMode;
   readiness: DoctorReadiness;
   tmux: DoctorTmuxCapability;
+  herdr: DoctorHerdrCapability;
 }
+
+export const DOCTOR_SUPPORTED_HERDR_VERSION = "0.8.0" as const;
 
 const DEFAULT_PROBE_TIMEOUT_MS = 3_000;
 const MAX_PROBE_TIMEOUT_MS = 30_000;
@@ -79,6 +90,7 @@ const MAX_REPORTED_OUTPUT_CHARS = 2_000;
 const PROBE_ARGUMENTS: Readonly<Record<DoctorProbeCommand, readonly string[]>> = {
   openclaw: ["--version"],
   tmux: ["-V"],
+  herdr: ["--version"],
   codex: ["--version"],
   claude: ["--version"]
 };
@@ -86,6 +98,7 @@ const PROBE_ARGUMENTS: Readonly<Record<DoctorProbeCommand, readonly string[]>> =
 const DEFAULT_PROBE_EXECUTABLES: Readonly<Record<DoctorProbeCommand, string>> = {
   openclaw: "openclaw",
   tmux: "tmux",
+  herdr: "herdr",
   codex: "codex",
   claude: "claude"
 };
@@ -190,7 +203,7 @@ export function probeDoctorCommand(
 }
 
 /**
- * Probe every external command used by the tmux execution mode.
+ * Probe every external command used by the supported terminal transports.
  */
 export function runDoctorCapabilityProbes(
   options: DoctorProbeOptions = {}
@@ -216,27 +229,61 @@ export function evaluateDoctorCapabilities(
   ];
   const availableAgents = ["codex", "claude"]
     .filter((agent) => isUsable(checkByCommand.get(agent)));
+  const agentsOk = availableAgents.length > 0;
   const tmuxTransportOk = isUsable(checkByCommand.get("tmux"));
+  const herdrCheck = checkByCommand.get("herdr");
+  const herdrExecutableOk = isUsable(herdrCheck);
+  const herdrVersionSupported =
+    herdrExecutableOk && herdrCheck?.version_supported === true;
 
   const tmux = {
-    available: tmuxTransportOk && availableAgents.length > 0,
-    status: readinessFromParts([coreOk, tmuxTransportOk, availableAgents.length > 0]),
+    available: tmuxTransportOk && agentsOk,
+    status: readinessFromParts([coreOk, tmuxTransportOk, agentsOk]),
     recommended: true as const,
     agents: availableAgents,
     requires: ["node", "openclaw", "tmux", "codex or claude"],
     missing: [
       ...missingCore,
       ...(!tmuxTransportOk ? ["tmux"] : []),
-      ...(availableAgents.length === 0 ? ["codex or claude"] : [])
+      ...(!agentsOk ? ["codex or claude"] : [])
     ]
   };
+  const herdr = {
+    available: herdrVersionSupported && agentsOk,
+    status: readinessFromParts([coreOk, herdrVersionSupported, agentsOk]),
+    version_supported: herdrVersionSupported,
+    required_version: DOCTOR_SUPPORTED_HERDR_VERSION,
+    agents: availableAgents,
+    requires: [
+      "node",
+      "openclaw",
+      `herdr ${DOCTOR_SUPPORTED_HERDR_VERSION}`,
+      "codex or claude"
+    ],
+    missing: [
+      ...missingCore,
+      ...(!herdrExecutableOk
+        ? ["herdr"]
+        : !herdrVersionSupported
+          ? [`herdr ${DOCTOR_SUPPORTED_HERDR_VERSION}`]
+          : []),
+      ...(!agentsOk ? ["codex or claude"] : [])
+    ]
+  };
+  const availableTransports: Array<"tmux" | "herdr"> = [
+    ...(tmuxTransportOk ? ["tmux" as const] : []),
+    ...(herdrVersionSupported ? ["herdr" as const] : [])
+  ];
+  const anyTransportOk = availableTransports.length > 0;
 
   return {
     coreOk,
-    transportOk: tmux.available,
+    transportOk: anyTransportOk && agentsOk,
+    available_transports: availableTransports,
     mode: "tmux",
-    readiness: tmux.status,
-    tmux
+    readiness: readinessFromParts([coreOk, anyTransportOk, agentsOk]),
+    tmux,
+    herdr
   };
 }
 
@@ -269,6 +316,12 @@ function buildProbeResult({
     args,
     status,
     available: status === "ok",
+    ...(command === "herdr"
+      ? {
+          version_supported:
+            status === "ok" && version === DOCTOR_SUPPORTED_HERDR_VERSION
+        }
+      : {}),
     found: status !== "not_found",
     executable_ok: !["not_found", "not_executable"].includes(status),
     duration_ms: durationMs,

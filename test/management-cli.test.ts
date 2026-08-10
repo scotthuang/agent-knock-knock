@@ -310,8 +310,19 @@ test("list exposes physical tmux terminals with the terminal-first action contra
         currentPath: tmuxWorkspace
       }])
     ]);
-    assert.equal(debugListed.terminal_scan.diagnostics.provider, "static");
-    assert.equal(debugListed.terminal_scan.diagnostics.paneCount, 1);
+    assert.equal(debugListed.terminal_scan.diagnostics.provider, "registry");
+    assert.deepEqual(
+      debugListed.terminal_scan.diagnostics.providerKinds,
+      ["tmux"]
+    );
+    assert.equal(
+      debugListed.terminal_scan.diagnostics.providers.tmux.provider,
+      "static"
+    );
+    assert.equal(
+      debugListed.terminal_scan.diagnostics.providers.tmux.paneCount,
+      1
+    );
 
     const managedOnly = runCli([
       "list",
