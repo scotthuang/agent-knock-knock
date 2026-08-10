@@ -18,6 +18,7 @@ import {
   planClaudeThreadLifecycle,
   probeClaudeThreadLifecycle
 } from "../src/claude-terminal-agent-adapter.js";
+import type { CodexLocalSessionAdapter } from "../src/codex-local-session-provider.js";
 import {
   listManagedSessions,
   loadNativeThreadTransition,
@@ -25,18 +26,30 @@ import {
   saveNativeThreadTransition
 } from "../src/session-store.js";
 import { ensureStoreWritable, listConversations } from "../src/store.js";
-import type { TerminalControlRef } from "../src/terminal-agent-adapter.js";
+import type {
+  TerminalControlRef,
+  TerminalProcessSnapshot
+} from "../src/terminal-agent-adapter.js";
+import {
+  MutableRecordingTerminalProvider,
+  MutableTerminalProcessSource,
+  runInProcessCli,
+  terminalCliDependencies,
+  type InProcessCliResult
+} from "./in-process-cli-fixtures.js";
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 const BEFORE_ID = "11111111-1111-4111-8111-111111111111";
 const TARGET_ID = "22222222-2222-4222-8222-222222222222";
 const THIRD_ID = "33333333-3333-4333-8333-333333333333";
 
-test("manual recovery clears a dispatching composer and rolls exact-before back without replay", () => {
-  const fixture = seededCodexRecoveryFixture("dispatching");
+test("black-box Codex recovery clears a dispatching composer and rolls exact-before back without replay", async () => {
+  const fixture = seededCodexRecoveryFixture("dispatching", {
+    execution: "black-box"
+  });
   try {
     fixture.setCurrentIdentity(BEFORE_ID, `/resume ${TARGET_ID}`);
-    const automaticallyBlocked = fixture.run([
+    const automaticallyBlocked = await fixture.run([
       "send",
       "--session",
       fixture.terminalId,
@@ -56,7 +69,7 @@ test("manual recovery clears a dispatching composer and rolls exact-before back 
       keys.includes("C-u")
     ), false);
 
-    const recovered = fixture.close();
+    const recovered = await fixture.close();
     assert.equal(recovered.status, 0, fixture.debug(recovered));
     assert.equal(
       JSON.parse(recovered.stdout).terminal_dispatch_resolved,
@@ -81,13 +94,13 @@ test("manual recovery clears a dispatching composer and rolls exact-before back 
   }
 });
 
-test("manual recovery rolls a submitted exact resume target forward without replay", () => {
+test("manual recovery rolls a submitted exact resume target forward without replay", async () => {
   const fixture = seededCodexRecoveryFixture("submitted", {
     dispatcherPid: process.pid
   });
   try {
     fixture.setCurrentIdentity(TARGET_ID);
-    const recovered = fixture.close();
+    const recovered = await fixture.close();
     assert.equal(recovered.status, 0, fixture.debug(recovered));
     assert.equal(JSON.parse(recovered.stdout).terminal_dispatch_resolved, true);
     const transition = loadNativeThreadTransition(
@@ -110,12 +123,12 @@ test("manual recovery rolls a submitted exact resume target forward without repl
   }
 });
 
-test("manual exact-after recovery fails closed when another Codex pid owns the target", () => {
+test("manual exact-after recovery fails closed when another Codex pid owns the target", async () => {
   const fixture = seededCodexRecoveryFixture("submitted");
   try {
     fixture.setCurrentIdentity(TARGET_ID);
     fixture.setSecondOwner(TARGET_ID);
-    const blocked = fixture.close();
+    const blocked = await fixture.close();
     assert.equal(blocked.status, 0, fixture.debug(blocked));
     assert.equal(JSON.parse(blocked.stdout).terminal_dispatch_resolved, false);
     assert.equal(
@@ -130,12 +143,12 @@ test("manual exact-after recovery fails closed when another Codex pid owns the t
   }
 });
 
-test("manual exact-before rollback fails closed when another Codex pid owns the source thread", () => {
+test("manual exact-before rollback fails closed when another Codex pid owns the source thread", async () => {
   const fixture = seededCodexRecoveryFixture("dispatching");
   try {
     fixture.setCurrentIdentity(BEFORE_ID, `/resume ${TARGET_ID}`);
     fixture.setSecondOwner(BEFORE_ID);
-    const blocked = fixture.close();
+    const blocked = await fixture.close();
     assert.equal(blocked.status, 0, fixture.debug(blocked));
     assert.equal(JSON.parse(blocked.stdout).terminal_dispatch_resolved, false);
     assert.equal(
@@ -148,12 +161,12 @@ test("manual exact-before rollback fails closed when another Codex pid owns the 
   }
 });
 
-test("target CAS failure never partially detaches the lifecycle source", () => {
+test("target CAS failure never partially detaches the lifecycle source", async () => {
   const fixture = seededCodexRecoveryFixture("verified");
   try {
     fixture.setCurrentIdentity(TARGET_ID);
     fixture.injectTargetConflict();
-    const blocked = fixture.close();
+    const blocked = await fixture.close();
     assert.equal(blocked.status, 0, fixture.debug(blocked));
     assert.equal(JSON.parse(blocked.stdout).terminal_dispatch_resolved, false);
     assert.equal(
@@ -172,12 +185,12 @@ test("target CAS failure never partially detaches the lifecycle source", () => {
   }
 });
 
-test("manual recovery refuses to probe or submit when C-u does not empty the composer", () => {
+test("manual recovery refuses to probe or submit when C-u does not empty the composer", async () => {
   const fixture = seededCodexRecoveryFixture("dispatching");
   try {
     fixture.setCurrentIdentity(BEFORE_ID, `/resume ${TARGET_ID}`);
     fixture.setClearLineNoop();
-    const blocked = fixture.close();
+    const blocked = await fixture.close();
     assert.equal(blocked.status, 0, fixture.debug(blocked));
     assert.equal(JSON.parse(blocked.stdout).terminal_dispatch_resolved, false);
     assert.equal(
@@ -198,11 +211,11 @@ test("manual recovery refuses to probe or submit when C-u does not empty the com
   }
 });
 
-test("manual submitted recovery never probes /status over a non-empty Codex composer", () => {
+test("manual submitted recovery never probes /status over a non-empty Codex composer", async () => {
   const fixture = seededCodexRecoveryFixture("submitted");
   try {
     fixture.setCurrentIdentity(TARGET_ID, "preserve this operator draft");
-    const blocked = fixture.close();
+    const blocked = await fixture.close();
     assert.equal(blocked.status, 0, fixture.debug(blocked));
     assert.equal(JSON.parse(blocked.stdout).terminal_dispatch_resolved, false);
     assert.notEqual(
@@ -219,13 +232,13 @@ test("manual submitted recovery never probes /status over a non-empty Codex comp
   }
 });
 
-test("manual dispatching recovery rolls a status-only recorded-before identity back", () => {
+test("manual dispatching recovery rolls a status-only recorded-before identity back", async () => {
   const fixture = seededCodexRecoveryFixture("dispatching", {
     beforeRollout: false
   });
   try {
     fixture.setCurrentIdentity(BEFORE_ID, `/resume ${TARGET_ID}`);
-    const recovered = fixture.close();
+    const recovered = await fixture.close();
     assert.equal(recovered.status, 0, fixture.debug(recovered));
     assert.equal(
       JSON.parse(recovered.stdout).terminal_dispatch_resolved,
@@ -253,13 +266,13 @@ test("manual dispatching recovery rolls a status-only recorded-before identity b
   }
 });
 
-test("verified recovery refuses to roll forward when the resume candidate inode changed", () => {
+test("verified recovery refuses to roll forward when the resume candidate inode changed", async () => {
   const fixture = seededCodexRecoveryFixture("verified", {
     targetCandidateInodeMismatch: true
   });
   try {
     fixture.setCurrentIdentity(TARGET_ID);
-    const blocked = fixture.close();
+    const blocked = await fixture.close();
     assert.equal(blocked.status, 0, fixture.debug(blocked));
     assert.equal(JSON.parse(blocked.stdout).terminal_dispatch_resolved, false);
     assert.equal(
@@ -279,7 +292,7 @@ test("verified recovery refuses to roll forward when the resume candidate inode 
   }
 });
 
-test("manual recovery keeps a submitted third identity quarantined and blocked", () => {
+test("manual recovery keeps a submitted third identity quarantined and blocked", async () => {
   const fixture = seededCodexRecoveryFixture("submitted");
   try {
     fixture.setCurrentIdentity(THIRD_ID);
@@ -296,7 +309,7 @@ test("manual recovery keeps a submitted third identity quarantined and blocked",
       }
     ]) {
       fixture.patchLedger(ledgerPatch);
-      const integrityBlocked = fixture.close();
+      const integrityBlocked = await fixture.close();
       assert.equal(
         integrityBlocked.status,
         0,
@@ -315,7 +328,7 @@ test("manual recovery keeps a submitted third identity quarantined and blocked",
       );
     }
     fixture.patchLedger({ status: "submitted" });
-    const recovered = fixture.close();
+    const recovered = await fixture.close();
     assert.equal(recovered.status, 0, fixture.debug(recovered));
     const result = JSON.parse(recovered.stdout);
     assert.equal(result.terminal_dispatch_resolved, false);
@@ -333,11 +346,11 @@ test("manual recovery keeps a submitted third identity quarantined and blocked",
   }
 });
 
-test("verified mismatch stays blocked and later exact-after evidence commits the same transition", () => {
+test("verified mismatch stays blocked and later exact-after evidence commits the same transition", async () => {
   const fixture = seededCodexRecoveryFixture("verified");
   try {
     fixture.setCurrentIdentity(THIRD_ID);
-    const blocked = fixture.close();
+    const blocked = await fixture.close();
     assert.equal(blocked.status, 0, blocked.stderr);
     assert.equal(JSON.parse(blocked.stdout).terminal_dispatch_resolved, false);
     assert.equal(
@@ -347,7 +360,7 @@ test("verified mismatch stays blocked and later exact-after evidence commits the
     assert.equal(fixture.source().status, "quarantined");
 
     fixture.setCurrentIdentity(TARGET_ID);
-    const recovered = fixture.close();
+    const recovered = await fixture.close();
     assert.equal(recovered.status, 0, recovered.stderr);
     assert.equal(
       JSON.parse(recovered.stdout).terminal_dispatch_resolved,
@@ -365,11 +378,11 @@ test("verified mismatch stays blocked and later exact-after evidence commits the
   }
 });
 
-test("raw terminal send directly rolls a verified crash forward before one Session Turn", () => {
+test("raw terminal send directly rolls a verified crash forward before one Session Turn", async () => {
   const fixture = seededCodexRecoveryFixture("verified");
   try {
     fixture.setCurrentIdentity(TARGET_ID);
-    const sent = fixture.run([
+    const sent = await fixture.run([
       "send",
       "--session",
       fixture.terminalId,
@@ -398,14 +411,14 @@ test("raw terminal send directly rolls a verified crash forward before one Sessi
   }
 });
 
-test("verified no-rollout recovery rejects a stale Codex status screen", () => {
+test("verified no-rollout recovery rejects a stale Codex status screen", async () => {
   const fixture = seededCodexRecoveryFixture("verified", {
     verifiedAfterRollout: false
   });
   try {
     fixture.setCurrentIdentity(TARGET_ID);
     fixture.setStatusProbeNoop();
-    const blocked = fixture.close();
+    const blocked = await fixture.close();
     assert.equal(blocked.status, 0, fixture.debug(blocked));
     assert.equal(JSON.parse(blocked.stdout).terminal_dispatch_resolved, false);
     assert.equal(
@@ -420,12 +433,12 @@ test("verified no-rollout recovery rejects a stale Codex status screen", () => {
   }
 });
 
-test("verified rollout recovery fails closed on a Codex resolver error", () => {
+test("verified rollout recovery fails closed on a Codex resolver error", async () => {
   const fixture = seededCodexRecoveryFixture("verified");
   try {
     fixture.setCurrentIdentity(TARGET_ID);
     fixture.setResolverError();
-    const blocked = fixture.close();
+    const blocked = await fixture.close();
     assert.equal(blocked.status, 0, fixture.debug(blocked));
     assert.equal(JSON.parse(blocked.stdout).terminal_dispatch_resolved, false);
     assert.equal(
@@ -439,11 +452,11 @@ test("verified rollout recovery fails closed on a Codex resolver error", () => {
   }
 });
 
-test("Claude manual recovery rolls exact-before back without lifecycle replay", () => {
+test("Claude manual recovery rolls exact-before back without lifecycle replay", async () => {
   const fixture = seededClaudeRecoveryFixture();
   try {
     fixture.setCurrentIdentity(BEFORE_ID);
-    const recovered = fixture.close();
+    const recovered = await fixture.close();
     assert.equal(recovered.status, 0, fixture.debug(recovered));
     assert.equal(JSON.parse(recovered.stdout).terminal_dispatch_resolved, true);
     const transition = loadNativeThreadTransition(
@@ -459,11 +472,11 @@ test("Claude manual recovery rolls exact-before back without lifecycle replay", 
   }
 });
 
-test("Claude manual recovery rolls an exact submitted resume target forward", () => {
-  const fixture = seededClaudeRecoveryFixture();
+test("black-box Claude recovery rolls an exact submitted resume target forward", async () => {
+  const fixture = seededClaudeRecoveryFixture({ execution: "black-box" });
   try {
     fixture.setCurrentIdentity(TARGET_ID);
-    const recovered = fixture.close();
+    const recovered = await fixture.close();
     assert.equal(recovered.status, 0, fixture.debug(recovered));
     assert.equal(
       JSON.parse(recovered.stdout).terminal_dispatch_resolved,
@@ -489,11 +502,11 @@ test("Claude manual recovery rolls an exact submitted resume target forward", ()
   }
 });
 
-test("Claude manual recovery keeps a third exact identity blocked", () => {
+test("Claude manual recovery keeps a third exact identity blocked", async () => {
   const fixture = seededClaudeRecoveryFixture();
   try {
     fixture.setCurrentIdentity(THIRD_ID);
-    const blocked = fixture.close();
+    const blocked = await fixture.close();
     assert.equal(blocked.status, 0, fixture.debug(blocked));
     assert.equal(JSON.parse(blocked.stdout).terminal_dispatch_resolved, false);
     assert.equal(
@@ -507,12 +520,12 @@ test("Claude manual recovery keeps a third exact identity blocked", () => {
   }
 });
 
-test("Claude verified recovery fails closed on ambiguous exact-PID agents rows", () => {
+test("Claude verified recovery fails closed on ambiguous exact-PID agents rows", async () => {
   const fixture = seededClaudeRecoveryFixture({ verified: true });
   try {
     fixture.setCurrentIdentity(TARGET_ID);
     fixture.setAgentsAmbiguous();
-    const blocked = fixture.close();
+    const blocked = await fixture.close();
     assert.equal(blocked.status, 0, fixture.debug(blocked));
     assert.equal(JSON.parse(blocked.stdout).terminal_dispatch_resolved, false);
     assert.equal(
@@ -525,12 +538,12 @@ test("Claude verified recovery fails closed on ambiguous exact-PID agents rows",
   }
 });
 
-test("Claude verified recovery fails closed when another pid owns the target", () => {
+test("Claude verified recovery fails closed when another pid owns the target", async () => {
   const fixture = seededClaudeRecoveryFixture({ verified: true });
   try {
     fixture.setCurrentIdentity(TARGET_ID);
     fixture.setSecondOwner(TARGET_ID);
-    const blocked = fixture.close();
+    const blocked = await fixture.close();
     assert.equal(blocked.status, 0, fixture.debug(blocked));
     assert.equal(JSON.parse(blocked.stdout).terminal_dispatch_resolved, false);
     assert.equal(
@@ -547,6 +560,7 @@ test("Claude verified recovery fails closed when another pid owns the target", (
 function seededCodexRecoveryFixture(
   status: "dispatching" | "submitted" | "verified",
   options: {
+    execution?: "in-process" | "black-box";
     verifiedAfterRollout?: boolean;
     dispatcherPid?: number;
     beforeRollout?: boolean;
@@ -659,6 +673,82 @@ function seededCodexRecoveryFixture(
       "terminal_cancel"
     ]
   };
+  const processSnapshots = (): TerminalProcessSnapshot[] => [
+    {
+      pid: panePid,
+      ppid: 1,
+      elapsed: "00:10",
+      command: "zsh",
+      cwd: workspace
+    },
+    {
+      pid: codexPid,
+      ppid: panePid,
+      elapsed: "00:09",
+      command: executablePath,
+      cwd: workspace
+    },
+    ...(fs.existsSync(secondOwnerIdPath)
+      ? [{
+          pid: secondCodexPid,
+          ppid: 1,
+          elapsed: "00:08",
+          command: executablePath,
+          cwd: workspace
+        }]
+      : [])
+  ];
+  const processSource = new MutableTerminalProcessSource(processSnapshots());
+  const terminalProvider = new MutableRecordingTerminalProvider({
+    panes: [{
+      kind: "tmux",
+      target,
+      session: "recovery-fixture",
+      window: 0,
+      pane: 0,
+      panePid,
+      currentCommand: "codex",
+      currentPath: workspace
+    }],
+    screens: { [target]: fs.readFileSync(screenPath, "utf8") },
+    hooks: {
+      capture(_operation, provider) {
+        if (fs.existsSync(resolverErrorRequestPath)) {
+          fs.writeFileSync(resolverErrorArmedPath, "1");
+        }
+        const screen = fs.readFileSync(screenPath, "utf8");
+        provider.setScreen(target, screen);
+        return screen;
+      },
+      sendText(operation, provider) {
+        if (operation.text === "/status") {
+          if (fs.existsSync(statusNoopPath)) {
+            return;
+          }
+          const count = fs.existsSync(probeCountPath)
+            ? Number(fs.readFileSync(probeCountPath, "utf8")) + 1
+            : 1;
+          fs.writeFileSync(probeCountPath, String(count));
+          const id = fs.readFileSync(currentIdPath, "utf8").trim();
+          const screen = `/status\nprobe-${count}\nSession: ${id}\n› `;
+          fs.writeFileSync(screenPath, screen);
+          provider.setScreen(target, screen);
+          return;
+        }
+        fs.writeFileSync(screenPath, "Working\n");
+        provider.setScreen(target, "Working\n");
+      },
+      sendKeys(operation, provider) {
+        if (
+          operation.keys.includes("C-u") &&
+          !fs.existsSync(clearNoopPath)
+        ) {
+          fs.writeFileSync(screenPath, "Ready\n› ");
+          provider.setScreen(target, "Ready\n› ");
+        }
+      }
+    }
+  });
   const rollout = (id: string) => {
     const rolloutPath = fs.realpathSync(rolloutPaths[id]);
     const stat = fs.statSync(rolloutPath);
@@ -838,18 +928,84 @@ function seededCodexRecoveryFixture(
     AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "1",
     AKK_TEST_TERMINAL_ACCEPTANCE_OUTCOME: "accepted"
   };
-  const run = (args: string[]) => spawnSync(
-    process.execPath,
-    [
-      binPath,
-      ...args,
-      "--store-dir",
-      storeDir,
-      "--codex-home",
-      codexHome
-    ],
-    { encoding: "utf8", env, timeout: 30_000 }
-  );
+  const codexAdapter: CodexLocalSessionAdapter = {
+    async listThreadRows() {
+      return [];
+    },
+    async readRollout(rolloutPath) {
+      return fs.existsSync(rolloutPath)
+        ? fs.readFileSync(rolloutPath, "utf8")
+        : undefined;
+    },
+    async listProcessSnapshots() {
+      return processSource.listProcessSnapshots();
+    },
+    async resolveActiveSessionIdentityForPid(pid) {
+      if (pid === codexPid && fs.existsSync(resolverErrorArmedPath)) {
+        throw new Error("resolver fixture failure");
+      }
+      const selectedId = pid === secondCodexPid
+        ? fs.existsSync(secondOwnerIdPath)
+          ? fs.readFileSync(secondOwnerIdPath, "utf8").trim()
+          : undefined
+        : pid === codexPid
+          ? fs.readFileSync(currentIdPath, "utf8").trim()
+          : undefined;
+      if (!selectedId) {
+        return undefined;
+      }
+      const selectedRolloutPath = openRolloutPaths[selectedId];
+      if (!selectedRolloutPath || !fs.existsSync(selectedRolloutPath)) {
+        return undefined;
+      }
+      const realPath = fs.realpathSync(selectedRolloutPath);
+      const stat = fs.statSync(realPath);
+      const birth = pid === secondCodexPid
+        ? secondProcessBirth
+        : processBirth;
+      return {
+        sessionId: selectedId,
+        processUuid: `codex-pid:${pid}:birth:${birth}`,
+        processBirth: birth,
+        rollout: {
+          fd: "12u",
+          device: String(stat.dev),
+          inode: String(stat.ino),
+          path: realPath
+        },
+        evidence: "codex_rollout_fd"
+      };
+    }
+  };
+  const dependencies = terminalCliDependencies({
+    terminalProvider,
+    processSource,
+    env,
+    overrides: {
+      codexLocalSessionAdapter: codexAdapter,
+      agentVersionForRunningProcess: () => "0.146.0",
+      codexProcessBirthForPid(pid) {
+        return pid === secondCodexPid ? secondProcessBirth : processBirth;
+      }
+    }
+  });
+  const commandArguments = (args: string[]) => [
+    ...args,
+    "--store-dir",
+    storeDir,
+    "--codex-home",
+    codexHome
+  ];
+  const run = async (args: string[]) => {
+    if (options.execution === "black-box") {
+      return spawnSync(
+        process.execPath,
+        [binPath, ...commandArguments(args)],
+        { encoding: "utf8", env, timeout: 30_000 }
+      );
+    }
+    return runInProcessCli(commandArguments(args), dependencies);
+  };
   return {
     root,
     storeDir,
@@ -878,15 +1034,22 @@ function seededCodexRecoveryFixture(
     source: () => listManagedSessions(storeDir).find((session) =>
       session.session_id === sourceSessionId
     )!,
-    literalInputs: () => readCalls(callsPath)
-      .filter((args) => args[0] === "send-keys" && args.includes("-l"))
-      .map((args) => args.at(-1) as string),
-    keyDispatches: () => readCalls(callsPath)
-      .filter((args) => args[0] === "send-keys" && !args.includes("-l")),
+    literalInputs: () => options.execution === "black-box"
+      ? readCalls(callsPath)
+          .filter((args) => args[0] === "send-keys" && args.includes("-l"))
+          .map((args) => args.at(-1) as string)
+      : terminalProvider.literalInputs(),
+    keyDispatches: () => options.execution === "black-box"
+      ? readCalls(callsPath)
+          .filter((args) => args[0] === "send-keys" && !args.includes("-l"))
+      : terminalProvider.keyDispatches(),
     setClearLineNoop: () => fs.writeFileSync(clearNoopPath, "1"),
     setStatusProbeNoop: () => fs.writeFileSync(statusNoopPath, "1"),
     setResolverError: () => fs.writeFileSync(resolverErrorRequestPath, "1"),
-    setSecondOwner: (id: string) => fs.writeFileSync(secondOwnerIdPath, id),
+    setSecondOwner(id: string) {
+      fs.writeFileSync(secondOwnerIdPath, id);
+      processSource.setSnapshots(processSnapshots());
+    },
     patchLedger(patch: Record<string, unknown>) {
       const currentLedgerPath = currentTerminalDispatchLedgerPath(runtimeDir);
       const current = JSON.parse(
@@ -926,13 +1089,15 @@ function seededCodexRecoveryFixture(
         updated_at: "2026-08-06T03:00:02.500Z"
       }, { expectedRevision: null });
     },
-    debug: (result: ReturnType<typeof spawnSync>) => JSON.stringify({
+    debug: (result: InProcessCliResult | ReturnType<typeof spawnSync>) => JSON.stringify({
       status: result.status,
-      signal: result.signal,
+      signal: "signal" in result ? result.signal : undefined,
       error: result.error?.message,
       stdout: result.stdout,
       stderr: result.stderr,
-      calls: readCalls(callsPath),
+      calls: options.execution === "black-box"
+        ? readCalls(callsPath)
+        : terminalProvider.operations,
       screen: fs.readFileSync(screenPath, "utf8")
     }, null, 2),
     cleanup: () => fs.rmSync(root, { recursive: true, force: true })
@@ -952,7 +1117,10 @@ function currentTerminalDispatchLedgerPath(runtimeDir: string): string {
 }
 
 function seededClaudeRecoveryFixture(
-  options: { verified?: boolean } = {}
+  options: {
+    execution?: "in-process" | "black-box";
+    verified?: boolean;
+  } = {}
 ) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-recovery-"));
   const fakeBinDir = path.join(root, "bin");
@@ -1015,6 +1183,48 @@ function seededClaudeRecoveryFixture(
       "terminal_cancel"
     ]
   };
+  const processSource = new MutableTerminalProcessSource([
+    {
+      pid: panePid,
+      ppid: 1,
+      elapsed: "00:10",
+      command: "zsh",
+      cwd: workspace
+    },
+    {
+      pid: claudePid,
+      ppid: panePid,
+      elapsed: "00:09",
+      command: executablePath,
+      cwd: workspace
+    }
+  ]);
+  const terminalProvider = new MutableRecordingTerminalProvider({
+    panes: [{
+      kind: "tmux",
+      target,
+      session: "claude-recovery",
+      window: 0,
+      pane: 0,
+      panePid,
+      currentCommand: "claude",
+      currentPath: workspace
+    }],
+    screens: { [target]: fs.readFileSync(screenPath, "utf8") },
+    hooks: {
+      capture(_operation, provider) {
+        const screen = fs.readFileSync(screenPath, "utf8");
+        provider.setScreen(target, screen);
+        return screen;
+      },
+      sendKeys(operation, provider) {
+        if (operation.keys.includes("C-u")) {
+          fs.writeFileSync(screenPath, "Ready\n❯ ");
+          provider.setScreen(target, "Ready\n❯ ");
+        }
+      }
+    }
+  });
   ensureStoreWritable(storeDir);
   const preparedAt = new Date("2026-08-06T04:00:00.000Z");
   const source = saveManagedSession(storeDir, {
@@ -1153,11 +1363,53 @@ function seededClaudeRecoveryFixture(
     PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
     AKK_RUNTIME_DIR: runtimeDir
   };
-  const run = (args: string[]) => spawnSync(
-    process.execPath,
-    [binPath, ...args, "--store-dir", storeDir],
-    { encoding: "utf8", env, timeout: 30_000 }
-  );
+  const claudeRows = () => {
+    const sessionId = fs.readFileSync(currentIdPath, "utf8").trim();
+    const row = {
+      pid: claudePid,
+      cwd: workspace,
+      kind: "interactive",
+      sessionId,
+      startedAt,
+      status: "idle"
+    };
+    if (fs.existsSync(agentsAmbiguousPath)) {
+      return [row, { ...row }];
+    }
+    if (fs.existsSync(secondOwnerIdPath)) {
+      return [row, {
+        ...row,
+        pid: claudePid + 1,
+        sessionId: fs.readFileSync(secondOwnerIdPath, "utf8").trim(),
+        startedAt: startedAt + 1
+      }];
+    }
+    return [row];
+  };
+  const dependencies = terminalCliDependencies({
+    terminalProvider,
+    processSource,
+    env,
+    overrides: {
+      loadClaudeAgentRows: () => claudeRows(),
+      agentVersionForRunningProcess: () => "2.1.226"
+    }
+  });
+  const commandArguments = (args: string[]) => [
+    ...args,
+    "--store-dir",
+    storeDir
+  ];
+  const run = async (args: string[]) => {
+    if (options.execution === "black-box") {
+      return spawnSync(
+        process.execPath,
+        [binPath, ...commandArguments(args)],
+        { encoding: "utf8", env, timeout: 30_000 }
+      );
+    }
+    return runInProcessCli(commandArguments(args), dependencies);
+  };
   return {
     storeDir,
     terminalId,
@@ -1180,18 +1432,22 @@ function seededClaudeRecoveryFixture(
     source: () => listManagedSessions(storeDir).find((session) =>
       session.session_id === sourceSessionId
     )!,
-    literalInputs: () => readCalls(callsPath)
-      .filter((args) => args[0] === "send-keys" && args.includes("-l"))
-      .map((args) => args.at(-1) as string),
+    literalInputs: () => options.execution === "black-box"
+      ? readCalls(callsPath)
+          .filter((args) => args[0] === "send-keys" && args.includes("-l"))
+          .map((args) => args.at(-1) as string)
+      : terminalProvider.literalInputs(),
     setAgentsAmbiguous: () => fs.writeFileSync(agentsAmbiguousPath, "1"),
     setSecondOwner: (id: string) => fs.writeFileSync(secondOwnerIdPath, id),
-    debug: (result: ReturnType<typeof spawnSync>) => JSON.stringify({
+    debug: (result: InProcessCliResult | ReturnType<typeof spawnSync>) => JSON.stringify({
       status: result.status,
-      signal: result.signal,
+      signal: "signal" in result ? result.signal : undefined,
       error: result.error?.message,
       stdout: result.stdout,
       stderr: result.stderr,
-      calls: readCalls(callsPath),
+      calls: options.execution === "black-box"
+        ? readCalls(callsPath)
+        : terminalProvider.operations,
       screen: fs.readFileSync(screenPath, "utf8"),
       currentId: fs.readFileSync(currentIdPath, "utf8")
     }, null, 2),

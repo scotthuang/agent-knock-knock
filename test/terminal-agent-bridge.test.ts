@@ -2463,6 +2463,61 @@ test("native status inspection proves an exact stable composer before one Enter"
   );
 });
 
+test("native status inspection can settle against an injected monotonic clock", async () => {
+  const composerScreen = [
+    "Ready",
+    "› /status",
+    "",
+    "gpt-5.6-sol high · /repo"
+  ].join("\n");
+  class VirtualClockNativeStatusProvider extends RecordingTerminalProvider {
+    override async sendText(
+      target: TerminalEndpointRef | string,
+      text: string,
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      await super.sendText(target, text, options);
+      this.setScreen(target, composerScreen);
+    }
+  }
+
+  let nowMs = 0;
+  const sleeps: number[] = [];
+  const provider = new VirtualClockNativeStatusProvider([PANE]);
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+    terminalProvider: provider,
+    async verifyIdentity() {},
+    nowMs: () => nowMs,
+    async sleep(milliseconds) {
+      sleeps.push(milliseconds);
+      nowMs += milliseconds;
+    }
+  });
+
+  const result = await bridge.submitNativeInspection(
+    "codex",
+    terminalControl(codexTerminalAgentAdapter),
+    codexStatusInspectionPlan(),
+    { runtime: { pid: 110 } }
+  );
+
+  assert.equal(result.stage, "enter_dispatched");
+  assert.equal(result.enterCount, 1);
+  assert.ok(result.materialization.stableForMs >= 121);
+  assert.ok(sleeps.length >= 1);
+  assert.ok(nowMs >= 121);
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind === "keys"),
+    [{
+      kind: "keys",
+      target: PANE.target,
+      keys: ["C-m"],
+      socketPath: PANE.socketPath
+    }]
+  );
+});
+
 test("Claude 2.1.226 native status uses its own stable composer and one modal dismissal", async () => {
   const nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0";
   const idleScreen = [

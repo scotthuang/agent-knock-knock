@@ -348,15 +348,21 @@ export class TerminalAgentBridge {
   readonly registry: TerminalAgentAdapterRegistry;
   readonly terminalProvider: TerminalControlProvider;
   private readonly verifyIdentity?: TerminalIdentityVerifier;
+  private readonly nowMs: () => number;
+  private readonly sleep: (milliseconds: number) => Promise<void>;
 
   constructor(options: {
     registry: TerminalAgentAdapterRegistry;
     terminalProvider: TerminalControlProvider;
     verifyIdentity?: TerminalIdentityVerifier;
+    nowMs?: () => number;
+    sleep?: (milliseconds: number) => Promise<void>;
   }) {
     this.registry = options.registry;
     this.terminalProvider = options.terminalProvider;
     this.verifyIdentity = options.verifyIdentity;
+    this.nowMs = options.nowMs ?? (() => performance.now());
+    this.sleep = options.sleep ?? terminalSettleDelay;
   }
 
   adapterFor(agent: ExecutorKind | string): TerminalAgentAdapter {
@@ -945,14 +951,14 @@ export class TerminalAgentBridge {
       readonly TerminalNativeInspectionEvidenceInventoryEntry[];
     materialization: TerminalNativeInspectionMaterializationEvidence;
   }> {
-    const startedAt = performance.now();
+    const startedAt = this.nowMs();
     const settleTimeoutMs = plan.composer.maximumSettleMs;
     let stableDigest: string | undefined;
     let stableKind: TerminalNativeInspectionMaterializationKind | undefined;
     let stableSince: number | undefined;
     let stableCaptures = 0;
 
-    while (performance.now() - startedAt <= settleTimeoutMs) {
+    while (this.nowMs() - startedAt <= settleTimeoutMs) {
       const captured = await this.captureInspection(adapter, terminalControl, {
         runtime,
         scrollbackLines: CODEX_MULTILINE_SETTLE_SCROLLBACK_LINES
@@ -963,7 +969,7 @@ export class TerminalAgentBridge {
         captured.screen,
         plan
       );
-      const now = performance.now();
+      const now = this.nowMs();
       if (materialized) {
         if (
           materialized.digest === stableDigest &&
@@ -1002,12 +1008,12 @@ export class TerminalAgentBridge {
         stableCaptures = 0;
       }
 
-      const elapsed = performance.now() - startedAt;
+      const elapsed = this.nowMs() - startedAt;
       const remaining = settleTimeoutMs - elapsed;
       if (remaining <= 0) {
         break;
       }
-      await terminalSettleDelay(Math.min(
+      await this.sleep(Math.min(
         CODEX_MULTILINE_SETTLE_POLL_MS,
         remaining
       ));
@@ -1092,12 +1098,12 @@ export class TerminalAgentBridge {
     expectedText: string,
     runtime?: TerminalRuntimeIdentity
   ): Promise<TerminalControlRef> {
-    const startedAt = performance.now();
+    const startedAt = this.nowMs();
     let stableDigest: string | undefined;
     let stableSince: number | undefined;
     let stableCaptures = 0;
 
-    while (performance.now() - startedAt <= CODEX_MULTILINE_SETTLE_TIMEOUT_MS) {
+    while (this.nowMs() - startedAt <= CODEX_MULTILINE_SETTLE_TIMEOUT_MS) {
       const captured = await this.captureInspection(adapter, terminalControl, {
         runtime,
         scrollbackLines: CODEX_MULTILINE_SETTLE_SCROLLBACK_LINES
@@ -1123,13 +1129,13 @@ export class TerminalAgentBridge {
           stableCaptures += 1;
         } else {
           stableDigest = composer.digest;
-          stableSince = performance.now();
+          stableSince = this.nowMs();
           stableCaptures = 1;
         }
         if (
           stableCaptures >= CODEX_MULTILINE_STABLE_CAPTURES &&
           stableSince !== undefined &&
-          performance.now() - stableSince >= CODEX_PASTE_ENTER_SETTLE_MS
+          this.nowMs() - stableSince >= CODEX_PASTE_ENTER_SETTLE_MS
         ) {
           const finalCapture = await this.captureInspection(
             adapter,
@@ -1182,8 +1188,8 @@ export class TerminalAgentBridge {
       }
 
       const remainingSuppressionMs = CODEX_PASTE_ENTER_SETTLE_MS -
-        (stableSince === undefined ? 0 : performance.now() - stableSince);
-      await terminalSettleDelay(Math.max(
+        (stableSince === undefined ? 0 : this.nowMs() - stableSince);
+      await this.sleep(Math.max(
         1,
         Math.min(
           CODEX_MULTILINE_SETTLE_POLL_MS,
@@ -1237,7 +1243,7 @@ export class TerminalAgentBridge {
     if (!first.draft) {
       return false;
     }
-    await terminalSettleDelay(CODEX_MULTILINE_SETTLE_POLL_MS);
+    await this.sleep(CODEX_MULTILINE_SETTLE_POLL_MS);
     const second = await captureExactDraft(first.captured.terminalControl);
     if (
       !sameTerminalControlIdentity(

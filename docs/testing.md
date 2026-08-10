@@ -12,6 +12,7 @@ duplicated, or unclassified.
 | --- | --- | --- |
 | `npm run test:fast` | Deterministic unit/component tests without test-level child processes | Every development loop |
 | `npm run test:integration` | CLI subprocess, monitor, SQLite, Store locking, lifecycle, installer, and compatibility fixtures | For the changed subsystem |
+| `npm run test:affected` | Complete fast tier plus mapped integration tests; unknown or shared-core changes run the full tier | Local branch and worktree feedback |
 | `npm run test:full` | The exact union of fast and integration tests | Before every PR merge and release |
 | `npm test` | Compatibility alias for `test:full` | Existing automation and maintainer habits |
 | `npm run test:release` | Full suite, isolated OpenClaw compatibility matrix, ClawHub runtime validation, and ClawHub publish dry-run | Release-relevant changes |
@@ -48,6 +49,28 @@ timeouts worse on the maintainer machine. Override it with
 child processes a shared bytecode cache under the operating-system temporary
 directory. Override `NODE_COMPILE_CACHE` when profiling a particular cache, or
 point it at a new `mktemp -d` directory for a cold-cache comparison.
+
+## Affected tests
+
+`test:affected` builds once, reads changed and untracked paths without shell
+globs, and always runs the complete fast tier. By default it compares `HEAD`
+with the current index and worktree. Supply an explicit base to include branch
+commits as well as staged, unstaged, and untracked changes:
+
+```bash
+npm run test:affected
+npm run test:affected -- --base origin/main
+```
+
+Known source subsystems map to exact integration-tier manifest entries. A
+changed integration test selects itself, while a changed fast test or
+documentation file needs no additional integration worker. Selection is
+fail-closed: an unreadable Git diff, a stale mapping, an unknown path, or a
+shared CLI dispatch, Store/protocol, terminal-identity, or lifecycle-safety
+path selects `test:full`.
+
+This command narrows local feedback only. It does not replace `npm test` for a
+merge, release, or final verification.
 
 ## Targeted integration map
 
@@ -145,3 +168,8 @@ See [the complete #108 performance report](test-performance-issue-108.md) for
 the before/after critical paths and why the remaining real-process gates make a
 stable 180-second full suite unattainable without the next handler/provider
 injection refactor.
+
+Issue #120 completed that next handler/provider-injection phase for the three
+largest lifecycle families. See
+[the #120 performance report](test-performance-issue-120.md) for the in-process
+semantic inventory, retained black-box contracts, and final three-run profile.
