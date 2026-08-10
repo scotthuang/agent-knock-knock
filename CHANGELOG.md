@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.11.7 - 2026-08-10
+
+### Changed
+
+- Establish a provider-neutral terminal-control boundary that separates stable endpoint/resource identity, mutable delivery routes, and process-incarnation evidence while preserving the existing tmux CLI, OpenClaw tools, and agent lifecycle behavior.
+- Route terminal discovery, capture, text injection, and key delivery through an injectable provider registry with fresh resource resolution and explicit transport capabilities.
+- Derive binding tokens, terminal locks, dispatch ledgers, receipts, approval fingerprints, and Resume snapshots from one canonical endpoint identity, while monotonically refining existing v0.11.x records and atomically promoting legacy ledgers without duplicate owners.
+
+### Security
+
+- Fail closed when provider identity, process anchors, or required capabilities cannot be revalidated, and preserve the distinction between input proven not sent and a potentially submitted uncertain outcome without blind retries.
+- Use stable tmux server/socket and pane identities for namespace isolation and route-renaming safety while retaining exact legacy binding-token and approval-fingerprint compatibility boundaries.
+
 ## 0.11.6 - 2026-08-10
 
 ### Added
