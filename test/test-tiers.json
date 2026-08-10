@@ -22,6 +22,7 @@
     "test/session-store.test.ts",
     "test/terminal-agent-adapter.test.ts",
     "test/terminal-agent-bridge.test.ts",
+    "test/terminal-control-ref.test.ts",
     "test/terminal-control-provider.test.ts",
     "test/terminal-process-source.test.ts",
     "test/terminal-submission-acceptance.test.ts",

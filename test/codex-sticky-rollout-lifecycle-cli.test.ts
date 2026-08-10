@@ -1,6 +1,5 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -344,15 +343,10 @@ test("Codex new-thread does not attach a sticky before-thread rollout to the new
       boundTarget?.binding?.binding_id
     );
 
-    const ledgerKey = createHash("sha256")
-      .update(JSON.stringify({ target, socket_path: null }))
-      .digest("hex")
-      .slice(0, 20);
-    const ledger = JSON.parse(fs.readFileSync(path.join(
-      runtimeDir,
-      "terminal-dispatch",
-      `terminal-dispatch-${ledgerKey}.json`
-    ), "utf8"));
+    const ledger = JSON.parse(fs.readFileSync(
+      currentTerminalDispatchLedgerPath(runtimeDir),
+      "utf8"
+    ));
     assert.equal(ledger.status, "resolved");
     assert.equal(ledger.target_native_thread_id, afterNativeThreadId);
     assert.equal(ledger.before_process_rollout, undefined);
@@ -1160,6 +1154,18 @@ function runCli(args: string[], env: NodeJS.ProcessEnv) {
     env,
     timeout: 30_000
   });
+}
+
+function currentTerminalDispatchLedgerPath(runtimeDir: string): string {
+  const ledgerDir = path.join(runtimeDir, "terminal-dispatch");
+  const ledgers = fs.readdirSync(ledgerDir)
+    .filter((name) => /^terminal-dispatch-[0-9a-f]{20}\.json$/u.test(name));
+  assert.equal(
+    ledgers.length,
+    1,
+    `expected one current terminal dispatch ledger, found ${ledgers.join(", ")}`
+  );
+  return path.join(ledgerDir, ledgers[0]);
 }
 
 function writeFakeTmux(options: {

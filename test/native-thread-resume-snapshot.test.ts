@@ -1,11 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
   collisionSafeNativeThreadShortIds,
   createNativeThreadResumeSnapshot,
+  loadNativeThreadResumeSnapshot,
   nativeThreadCandidateSnapshotFingerprint,
   nativeThreadResumeSnapshotRowsMatchCandidates,
   resolveNativeThreadResumeSelection,
@@ -19,6 +21,11 @@ import type {
   NativeThreadCandidate,
   NativeThreadTransition
 } from "../src/managed-session.js";
+import {
+  createTerminalEndpointRef,
+  tmuxTerminalRouteKey,
+  type TerminalControlRef
+} from "../src/terminal-control-ref.js";
 
 const terminalId = "terminal:v2:tmux:codex:work:0.0:1234";
 const workspace = "/private/work";
@@ -201,6 +208,200 @@ test("number, short id, and opaque handle resolve only inside one exact snapshot
         now
       }),
       /from the future/u
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("v2 snapshots persist canonical endpoint identity and process anchor", () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-resume-snapshot-v2-")
+  );
+  const runtimeDir = path.join(tempDir, "runtime");
+  const now = new Date("2026-08-07T03:00:00.000Z");
+  const socketPath = "/private/tmp/tmux-501/default";
+  const endpointKey = `socket:${socketPath}`;
+  const terminalControl: TerminalControlRef = {
+    kind: "tmux",
+    target: "work:0.0",
+    socketPath,
+    session: "work",
+    window: 0,
+    pane: 0,
+    panePid: 1234,
+    currentCommand: "codex",
+    currentPath: workspace,
+    capabilities: ["screen_status", "send_keys"]
+  };
+  const routeKey = tmuxTerminalRouteKey(
+    endpointKey,
+    terminalControl.target,
+    socketPath
+  );
+  createTerminalEndpointRef({
+    identity: {
+      providerKind: "tmux",
+      endpointKey,
+      resourceKey: "pane-id:%42"
+    },
+    route: {
+      routeKey,
+      label: terminalControl.target,
+      currentCommand: terminalControl.currentCommand,
+      currentPath: terminalControl.currentPath
+    },
+    processAnchorPid: terminalControl.panePid,
+    capabilities: terminalControl.capabilities,
+    providerRef: terminalControl
+  });
+  try {
+    const snapshot = createNativeThreadResumeSnapshot({
+      storeDir,
+      selectionScope,
+      terminalId,
+      agent: "codex",
+      workspace,
+      terminalControl,
+      expectedBindingToken: "binding-token-v2",
+      terminalActionFingerprint: "a".repeat(64),
+      candidates: [candidate("11111111-1111-4111-8111-111111111111", 200)],
+      now
+    });
+    const expectedEndpoint = {
+      schema: "agent-knock-knock/terminal-endpoint",
+      version: 1,
+      kind: "tmux",
+      endpoint_key: endpointKey,
+      resource_key: "pane-id:%42",
+      route_key: routeKey,
+      process_anchor_pid: 1234,
+      target: "work:0.0",
+      socket_path: socketPath,
+      pane_pid: 1234,
+      server_socket_path: socketPath,
+      pane_id: "%42",
+      current_path: workspace
+    };
+
+    assert.equal(snapshot.version, 2);
+    assert.deepEqual(snapshot.terminal_endpoint, expectedEndpoint);
+    saveNativeThreadResumeSnapshot(runtimeDir, storeDir, snapshot, now);
+    const loaded = loadNativeThreadResumeSnapshot(
+      runtimeDir,
+      storeDir,
+      snapshot.snapshot_id,
+      new Date(now.getTime() + 1)
+    );
+    assert.equal(loaded.version, 2);
+    assert.deepEqual(loaded.terminal_endpoint, expectedEndpoint);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("raw v1 snapshots remain readable while ambiguous version encodings fail closed", () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-resume-snapshot-v1-")
+  );
+  const runtimeDir = path.join(tempDir, "runtime");
+  const snapshotId = "rs_AAAAAAAAAAAAAAAAAAAAAA";
+  const storeKey = createHash("sha256")
+    .update(path.resolve(storeDir))
+    .digest("hex")
+    .slice(0, 20);
+  const snapshotPath = path.join(
+    runtimeDir,
+    "resume-snapshots",
+    storeKey,
+    `${snapshotId}.json`
+  );
+  const rawV1Snapshot = {
+    schema: "agent-knock-knock/native-thread-resume-snapshot",
+    version: 1,
+    snapshot_id: snapshotId,
+    store_key: storeKey,
+    selection_scope: selectionScope,
+    created_at: "2026-08-07T03:00:00.000Z",
+    expires_at: "2026-08-07T03:05:00.000Z",
+    terminal_id: terminalId,
+    agent: "codex",
+    workspace,
+    terminal_control: {
+      target: "work:0.0",
+      socket_path: "/private/tmp/tmux-501/default",
+      pane_pid: 1234
+    },
+    expected_binding_token: "legacy-binding-token",
+    terminal_action_fingerprint: "a".repeat(64),
+    candidate_snapshot_fingerprint: "b".repeat(64),
+    rows: [{
+      selection_number: 1,
+      short_id: "@11111111",
+      selection_handle: `${snapshotId}:1`,
+      native_thread_id: "11111111-1111-4111-8111-111111111111",
+      candidate_token: "legacy-candidate-token",
+      resumable: true
+    }]
+  };
+  const writeRaw = (value: unknown): void => {
+    fs.mkdirSync(path.dirname(snapshotPath), { recursive: true });
+    fs.writeFileSync(snapshotPath, `${JSON.stringify(value, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600
+    });
+  };
+  try {
+    writeRaw(rawV1Snapshot);
+    assert.deepEqual(
+      loadNativeThreadResumeSnapshot(
+        runtimeDir,
+        storeDir,
+        snapshotId,
+        new Date("2026-08-07T03:00:01.000Z")
+      ),
+      rawV1Snapshot
+    );
+
+    writeRaw({ ...rawV1Snapshot, version: "2" });
+    assert.throws(
+      () => loadNativeThreadResumeSnapshot(
+        runtimeDir,
+        storeDir,
+        snapshotId,
+        new Date("2026-08-07T03:00:01.000Z")
+      ),
+      /snapshot is malformed/u
+    );
+
+    writeRaw({
+      ...rawV1Snapshot,
+      terminal_endpoint: {
+        kind: "tmux",
+        endpoint_key: "socket:/private/tmp/tmux-501/default",
+        resource_key: "pane-id:%42",
+        route_key: tmuxTerminalRouteKey(
+          "socket:/private/tmp/tmux-501/default",
+          "work:0.0",
+          "/private/tmp/tmux-501/default"
+        ),
+        process_anchor_pid: 1234,
+        target: "work:0.0",
+        socket_path: "/private/tmp/tmux-501/default",
+        pane_pid: 1234,
+        server_socket_path: "/private/tmp/tmux-501/default",
+        pane_id: "%42",
+        current_path: workspace
+      }
+    });
+    assert.throws(
+      () => loadNativeThreadResumeSnapshot(
+        runtimeDir,
+        storeDir,
+        snapshotId,
+        new Date("2026-08-07T03:00:01.000Z")
+      ),
+      /unexpected endpoint identity/u
     );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });

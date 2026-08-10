@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   applyMessageToConversation,
   createConversation,
@@ -20,7 +21,10 @@ import {
 import {
   managedSessionStatesFromConversations
 } from "../src/managed-session.js";
-import { saveManagedSession } from "../src/session-store.js";
+import {
+  pathsForManagedSession,
+  saveManagedSession
+} from "../src/session-store.js";
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 const testRuntimeDir = fs.mkdtempSync(
@@ -751,6 +755,174 @@ test("CLI keeps an owned terminal visible and routes its canonical actions to th
   }
 });
 
+test("a canonical managed owner survives a tmux route rename without rebinding", () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-selector-cli-managed-route-rename-")
+  );
+  const storeDir = path.join(tempDir, "conversations");
+  const workspace = path.join(tempDir, "workspace");
+  const originalTarget = "codex-before-rename:0.0";
+  const renamedTarget = "codex-after-rename:4.2";
+  const serverSocketPath = path.join(tempDir, "tmux-server.sock");
+  const paneId = "%42";
+  const codexPid = 2422;
+  const originalRuntimeArgs = codexTerminalStaticArgs({
+    workspace,
+    terminalTarget: originalTarget,
+    codexPid,
+    screen: "› Ready for the next task\n\ngpt-5.6-sol high · /repo",
+    serverSocketPath,
+    paneId
+  });
+
+  try {
+    fs.mkdirSync(workspace, { recursive: true });
+    const sent = runCli([
+      "send",
+      "--conversation",
+      `terminal:v2:tmux:codex:${originalTarget}:${codexPid}`,
+      "--message",
+      "Keep ownership across a route rename",
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      "agent:test:route-rename",
+      "--openclaw-session",
+      "agent:test:route-rename",
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor",
+      ...originalRuntimeArgs
+    ]);
+    const managedId = sent.conversation.conversation_id;
+    const persistedEndpoint =
+      sent.conversation.native_session_takeover.terminal_endpoint;
+    assert.equal(persistedEndpoint.pane_id, paneId);
+    assert.equal(persistedEndpoint.server_socket_path, serverSocketPath);
+
+    // Simulate a v0.11.x Turn, Session, and resolved dispatch ledger. The next
+    // verified response must refine both Store records and promote the ledger
+    // before a later route rename can hide its owner fence.
+    const statePath = String(sent.conversation.state_path);
+    const legacyTurn = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    delete legacyTurn.native_session_takeover.terminal_endpoint;
+    legacyTurn.status = "waiting_for_openclaw";
+    saveState(statePath, legacyTurn);
+
+    const sessionId = String(sent.conversation.session_id);
+    const sessionPath = pathsForManagedSession(sessionId, storeDir).statePath;
+    const legacySession = JSON.parse(fs.readFileSync(sessionPath, "utf8"));
+    delete legacySession.binding.terminal_endpoint;
+    fs.writeFileSync(sessionPath, `${JSON.stringify(legacySession, null, 2)}\n`);
+
+    const canonicalLedgerKey = createHash("sha256")
+      .update(JSON.stringify({
+        version: 1,
+        provider_kind: persistedEndpoint.kind,
+        endpoint_key: persistedEndpoint.endpoint_key,
+        resource_key: persistedEndpoint.resource_key
+      }))
+      .digest("hex")
+      .slice(0, 20);
+    const legacyLedgerKey = createHash("sha256")
+      .update(JSON.stringify({ target: originalTarget, socket_path: null }))
+      .digest("hex")
+      .slice(0, 20);
+    const ledgerDir = path.join(testRuntimeDir, "terminal-dispatch");
+    const canonicalLedgerPath = path.join(
+      ledgerDir,
+      `terminal-dispatch-${canonicalLedgerKey}.json`
+    );
+    const legacyLedgerPath = path.join(
+      ledgerDir,
+      `terminal-dispatch-${legacyLedgerKey}.json`
+    );
+    const legacyLedger = JSON.parse(
+      fs.readFileSync(canonicalLedgerPath, "utf8")
+    );
+    legacyLedger.version = 1;
+    legacyLedger.terminal_key = legacyLedgerKey;
+    delete legacyLedger.terminal_endpoint;
+    for (const receipt of legacyLedger.terminal_submission_receipts ?? []) {
+      delete receipt.terminal_endpoint;
+    }
+    fs.renameSync(canonicalLedgerPath, legacyLedgerPath);
+    fs.writeFileSync(
+      legacyLedgerPath,
+      `${JSON.stringify(legacyLedger, null, 2)}\n`
+    );
+
+    const responded = runCli([
+      "respond",
+      "--turn",
+      managedId,
+      "--message",
+      "Refine the legacy endpoint before continuing",
+      "--store-dir",
+      storeDir,
+      "--disable-terminal-bridge-monitor",
+      ...originalRuntimeArgs
+    ]);
+    assert.equal(responded.conversation.status, "waiting_for_agent");
+    const refinedTurn = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    const refinedSession = JSON.parse(fs.readFileSync(sessionPath, "utf8"));
+    assert.equal(refinedTurn.native_session_takeover.terminal_endpoint.pane_id, paneId);
+    assert.equal(refinedSession.binding.terminal_endpoint.pane_id, paneId);
+    assert.equal(fs.existsSync(legacyLedgerPath), false);
+    assert.equal(fs.existsSync(canonicalLedgerPath), true);
+    assert.equal(
+      JSON.parse(fs.readFileSync(canonicalLedgerPath, "utf8")).version,
+      2
+    );
+
+    const renamedRuntimeArgs = codexTerminalStaticArgs({
+      workspace,
+      terminalTarget: renamedTarget,
+      codexPid,
+      screen: "› Ready for the next task\n\ngpt-5.6-sol high · /repo",
+      serverSocketPath,
+      paneId
+    });
+    const listed = runCli([
+      "list",
+      "--store-dir",
+      storeDir,
+      ...renamedRuntimeArgs
+    ]);
+
+    assert.equal(listed.terminals.length, 1);
+    assert.equal(listed.unavailable_managed_turns.length, 0);
+    const terminal = listed.terminals[0];
+    assert.equal(terminal.id, `terminal:v2:tmux:codex:${renamedTarget}:${codexPid}`);
+    assert.equal(terminal.management_state, "managed");
+    assert.equal(terminal.managed.current_turn.id, managedId);
+    assert.equal(terminal.management_conflict, undefined);
+    assert.deepEqual(
+      terminal.available_actions.status.arguments,
+      { turn_id: managedId }
+    );
+
+    const status = runCli([
+      "status",
+      "--conversation",
+      "only",
+      "--store-dir",
+      storeDir,
+      ...renamedRuntimeArgs
+    ]);
+    assert.equal(status.summary.conversation_id, managedId);
+    assert.equal(status.terminal_status.target, renamedTarget);
+
+    assert.equal(terminal.managed.turn_count, 1);
+    assert.equal(terminal.managed.hidden_turn_count, 0);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("a cross-store terminal owner is visible but never advertised as locally actionable", () => {
   const tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-selector-cli-cross-store-owner-")
@@ -1219,6 +1391,8 @@ function codexTerminalStaticArgs(options: {
   terminalTarget: string;
   codexPid: number;
   screen: string;
+  serverSocketPath?: string;
+  paneId?: string;
 }): string[] {
   const nativeIdentity = codexNativeIdentityFixture(options);
   return [
@@ -1231,7 +1405,10 @@ function codexTerminalStaticArgs(options: {
       cwd: options.workspace
     }]),
     "--terminals-json",
-    JSON.stringify([terminalPane(options.terminalTarget, options.workspace)]),
+    JSON.stringify([terminalPane(options.terminalTarget, options.workspace, {
+      serverSocketPath: options.serverSocketPath,
+      paneId: options.paneId
+    })]),
     "--terminal-screens-json",
     JSON.stringify({ [options.terminalTarget]: options.screen }),
     "--codex-active-session-identities-json",
@@ -1296,7 +1473,11 @@ function claudeTerminalStaticArgs(options: {
   ];
 }
 
-function terminalPane(target: string, workspace: string) {
+function terminalPane(
+  target: string,
+  workspace: string,
+  stableIdentity: { serverSocketPath?: string; paneId?: string } = {}
+) {
   const match = /^([^:]+):(\d+)\.(\d+)$/u.exec(target);
   assert.ok(match, `invalid test terminal target: ${target}`);
   return {
@@ -1307,7 +1488,11 @@ function terminalPane(target: string, workspace: string) {
     pane: Number(match[3]),
     panePid: 999,
     currentCommand: "node",
-    currentPath: workspace
+    currentPath: workspace,
+    ...(stableIdentity.serverSocketPath
+      ? { serverSocketPath: stableIdentity.serverSocketPath }
+      : {}),
+    ...(stableIdentity.paneId ? { paneId: stableIdentity.paneId } : {})
   };
 }
 

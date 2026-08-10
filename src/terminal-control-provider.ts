@@ -4,15 +4,27 @@ import fs from "node:fs";
 import path from "node:path";
 import type {
   ActiveTerminalProcess,
-  TerminalControlCapability,
-  TerminalControlRef,
   TerminalProcessSnapshot
 } from "./terminal-agent-adapter.js";
+import {
+  createTerminalEndpointRef,
+  sameTerminalEndpointIdentity,
+  terminalControlWithCapabilities,
+  terminalEndpointFromControlRef,
+  tmuxTerminalRouteKey,
+  type TerminalControlCapability,
+  type TerminalControlRef,
+  type TerminalEndpointRef,
+  type TerminalProviderCapability,
+  type TmuxTerminalControlRef
+} from "./terminal-control-ref.js";
 
 export interface TerminalPane {
   kind: "tmux";
   target: string;
   socketPath?: string;
+  serverSocketPath?: string;
+  paneId?: string;
   session: string;
   window: number;
   pane: number;
@@ -22,14 +34,75 @@ export interface TerminalPane {
 }
 
 export interface TerminalControlProvider {
-  listPanes(): Promise<TerminalPane[]>;
-  capture(target: string, options?: {
+  readonly kind: string;
+  readonly supportedCapabilities: readonly TerminalControlCapability[];
+  readonly providerCapabilities: readonly TerminalProviderCapability[];
+  diagnostics(): Promise<Record<string, unknown>>;
+  listTerminals(): Promise<TerminalEndpointRef[]>;
+  endpoint(terminalControl: TerminalControlRef): TerminalEndpointRef;
+  toControlRef(
+    terminal: TerminalEndpointRef,
+    capabilities?: readonly TerminalControlCapability[]
+  ): TerminalControlRef;
+  resolve(terminal: TerminalEndpointRef): Promise<TerminalEndpointRef>;
+  containsProcess(
+    terminal: TerminalEndpointRef,
+    process: Pick<TerminalProcessSnapshot, "pid" | "ppid">,
+    processes: readonly Pick<TerminalProcessSnapshot, "pid" | "ppid">[]
+  ): boolean;
+  capture(terminal: TerminalEndpointRef, options?: {
     scrollbackLines?: number;
-    socketPath?: string;
     preserveEscapes?: boolean;
   }): Promise<string>;
-  sendText(target: string, text: string, options?: { socketPath?: string }): Promise<void>;
-  sendKeys(target: string, keys: readonly string[], options?: { socketPath?: string }): Promise<void>;
+  sendText(terminal: TerminalEndpointRef, text: string): Promise<void>;
+  sendKeys(terminal: TerminalEndpointRef, keys: readonly string[]): Promise<void>;
+}
+
+export class TerminalControlProviderRegistry {
+  private readonly providers = new Map<string, TerminalControlProvider>();
+
+  constructor(providers: readonly TerminalControlProvider[] = []) {
+    for (const provider of providers) {
+      this.register(provider);
+    }
+  }
+
+  register(provider: TerminalControlProvider): this {
+    if (!provider.kind.trim()) {
+      throw new Error("terminal control provider kind is required");
+    }
+    if (this.providers.has(provider.kind)) {
+      throw new Error(
+        `terminal control provider is already registered for ${provider.kind}`
+      );
+    }
+    this.providers.set(provider.kind, provider);
+    return this;
+  }
+
+  get(kind: string): TerminalControlProvider | undefined {
+    return this.providers.get(kind);
+  }
+
+  require(kind: string): TerminalControlProvider {
+    const provider = this.get(kind);
+    if (!provider) {
+      throw new Error(
+        `terminal control provider is not registered for ${kind || "<empty>"}`
+      );
+    }
+    return provider;
+  }
+
+  list(): TerminalControlProvider[] {
+    return [...this.providers.values()];
+  }
+}
+
+export function createTerminalControlProviderRegistry(
+  providers: readonly TerminalControlProvider[] = []
+): TerminalControlProviderRegistry {
+  return new TerminalControlProviderRegistry(providers);
 }
 
 /**
@@ -70,6 +143,23 @@ export interface TmuxTerminalControlDiagnostics {
 }
 
 export class TmuxTerminalControlProvider implements TerminalControlProvider {
+  readonly kind = "tmux";
+  readonly supportedCapabilities: readonly TerminalControlCapability[] = [
+    "screen_status",
+    "send_keys",
+    "terminal_approval",
+    "screen_completion",
+    "durable_completion",
+    "terminal_cancel"
+  ];
+  readonly providerCapabilities: readonly TerminalProviderCapability[] = [
+    "screen_capture",
+    "ansi_capture",
+    "text_delivery",
+    "key_delivery",
+    "process_inspection",
+    "stable_resource_resolution"
+  ];
   private readonly runCommand: (command: string, args: string[]) => CommandResult;
   private readonly socketPaths: string[];
   private readonly commands: string[];
@@ -88,6 +178,76 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
     return (await this.diagnose()).panes;
   }
 
+  async listTerminals(): Promise<TerminalEndpointRef[]> {
+    return (await this.listPanes()).map((pane) =>
+      tmuxEndpointFromPane(pane, this.supportedCapabilities)
+    );
+  }
+
+  endpoint(terminalControl: TerminalControlRef): TerminalEndpointRef {
+    if (terminalControl.kind !== this.kind) {
+      throw new Error(
+        `terminal control provider ${this.kind} cannot resolve ${terminalControl.kind}`
+      );
+    }
+    return terminalEndpointFromControlRef(terminalControl);
+  }
+
+  toControlRef(
+    terminal: TerminalEndpointRef,
+    capabilities: readonly TerminalControlCapability[] = terminal.capabilities
+  ): TerminalControlRef {
+    const control = tmuxControlFromEndpoint(terminal);
+    return terminalControlWithCapabilities(
+      control,
+      intersectCapabilities(capabilities, this.supportedCapabilities)
+    );
+  }
+
+  async resolve(terminal: TerminalEndpointRef): Promise<TerminalEndpointRef> {
+    assertProviderCapability(
+      this.kind,
+      this.providerCapabilities,
+      "stable_resource_resolution"
+    );
+    assertEndpointKind(terminal, this.kind);
+    const matches = (await this.listTerminals()).filter((candidate) =>
+      sameTerminalEndpointIdentity(candidate, terminal) ||
+      legacyTmuxEndpointMatches(candidate, terminal)
+    );
+    if (matches.length !== 1) {
+      throw new Error(
+        matches.length === 0
+          ? `terminal resource ${terminal.route.label} is no longer available`
+          : `terminal resource ${terminal.route.label} is ambiguous`
+      );
+    }
+    return endpointWithCapabilities(
+      matches[0],
+      intersectCapabilities(
+        terminal.capabilities,
+        this.supportedCapabilities
+      )
+    );
+  }
+
+  containsProcess(
+    terminal: TerminalEndpointRef,
+    process: Pick<TerminalProcessSnapshot, "pid" | "ppid">,
+    processes: readonly Pick<TerminalProcessSnapshot, "pid" | "ppid">[]
+  ): boolean {
+    assertProviderCapability(
+      this.kind,
+      this.providerCapabilities,
+      "process_inspection"
+    );
+    return terminalPaneContainsProcess(
+      process,
+      tmuxPaneFromEndpoint(terminal),
+      processes
+    );
+  }
+
   async diagnose(): Promise<TmuxTerminalControlDiagnostics> {
     const panes: TerminalPane[] = [];
     const diagnosticAttempts: TmuxTerminalControlDiagnostics["attempts"] = [];
@@ -99,7 +259,7 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
           "list-panes",
           "-a",
           "-F",
-          "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}"
+          "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}\t#{socket_path}\t#{pane_id}"
         ]));
         const parsedPanes = result.status === 0 ? parseTmuxListPanes(result.stdout, socketPath) : [];
         diagnosticAttempts.push({
@@ -116,9 +276,12 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
           continue;
         }
         for (const pane of parsedPanes) {
-          // A default-server query and its discovered socket path can describe the
-          // same pane. The pane PID is system-unique, so keep only the first route.
-          const key = `${pane.target}\t${pane.panePid}`;
+          // A default-server query and its discovered socket path can describe
+          // the same pane. Prefer tmux's server-scoped stable pane identity; the
+          // complete legacy route+PID tuple is the safe fallback for old tmux.
+          const key = pane.serverSocketPath && pane.paneId
+            ? `${pane.serverSocketPath}\t${pane.paneId}`
+            : `${pane.target}\t${pane.panePid}`;
           if (seenTargets.has(key)) {
             continue;
           }
@@ -136,15 +299,29 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
     };
   }
 
-  async capture(target: string, options: {
+  async diagnostics(): Promise<Record<string, unknown>> {
+    return this.diagnose() as unknown as Record<string, unknown>;
+  }
+
+  async capture(terminal: TerminalEndpointRef, options: {
     scrollbackLines?: number;
-    socketPath?: string;
     preserveEscapes?: boolean;
   } = {}): Promise<string> {
+    assertTerminalCapability(
+      terminal,
+      "screen_status",
+      this.supportedCapabilities
+    );
+    assertProviderCapability(
+      this.kind,
+      this.providerCapabilities,
+      options.preserveEscapes ? "ansi_capture" : "screen_capture"
+    );
+    const { target, socketPath } = tmuxIoRoute(terminal);
     const scrollbackLines = Math.max(0, Math.floor(options.scrollbackLines ?? 200));
     let lastResult: CommandResult | undefined;
     for (const command of this.commands) {
-      const result = this.runCommand(command, tmuxArgs(options.socketPath, [
+      const result = this.runCommand(command, tmuxArgs(socketPath, [
         "capture-pane",
         ...(options.preserveEscapes ? ["-e"] : []),
         "-t",
@@ -161,10 +338,24 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
     throw new Error(lastResult?.stderr || lastResult?.error?.message || `tmux capture-pane failed for ${target}`);
   }
 
-  async sendKeys(target: string, keys: readonly string[], options: { socketPath?: string } = {}): Promise<void> {
+  async sendKeys(
+    terminal: TerminalEndpointRef,
+    keys: readonly string[]
+  ): Promise<void> {
+    assertTerminalCapability(
+      terminal,
+      "send_keys",
+      this.supportedCapabilities
+    );
+    assertInputProviderCapability(
+      this.kind,
+      this.providerCapabilities,
+      "key_delivery"
+    );
+    const { target, socketPath } = tmuxIoRoute(terminal);
     let lastResult: CommandResult | undefined;
     for (const command of this.commands) {
-      const result = this.runCommand(command, tmuxArgs(options.socketPath, ["send-keys", "-t", target, ...keys]));
+      const result = this.runCommand(command, tmuxArgs(socketPath, ["send-keys", "-t", target, ...keys]));
       if (result.status === 0) {
         return;
       }
@@ -192,12 +383,26 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
     );
   }
 
-  async sendText(target: string, text: string, options: { socketPath?: string } = {}): Promise<void> {
+  async sendText(
+    terminal: TerminalEndpointRef,
+    text: string
+  ): Promise<void> {
+    assertTerminalCapability(
+      terminal,
+      "send_keys",
+      this.supportedCapabilities
+    );
+    assertInputProviderCapability(
+      this.kind,
+      this.providerCapabilities,
+      "text_delivery"
+    );
+    const { target, socketPath } = tmuxIoRoute(terminal);
     let lastResult: CommandResult | undefined;
     for (const command of this.commands) {
       if (/[\r\n]/u.test(text)) {
         const bufferName = `akk-${process.pid}-${randomUUID()}`;
-        const setBuffer = this.runCommand(command, tmuxArgs(options.socketPath, [
+        const setBuffer = this.runCommand(command, tmuxArgs(socketPath, [
           "set-buffer",
           "-b",
           bufferName,
@@ -208,7 +413,7 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
           lastResult = setBuffer;
           continue;
         }
-        const pasteBuffer = this.runCommand(command, tmuxArgs(options.socketPath, [
+        const pasteBuffer = this.runCommand(command, tmuxArgs(socketPath, [
           "paste-buffer",
           "-p",
           "-d",
@@ -220,13 +425,13 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
         if (pasteBuffer.status === 0) {
           return;
         }
-        this.runCommand(command, tmuxArgs(options.socketPath, [
+        this.runCommand(command, tmuxArgs(socketPath, [
           "delete-buffer",
           "-b",
           bufferName
         ]));
         if (
-          pasteBuffer.status === null &&
+          pasteBuffer.status !== null ||
           !commandDefinitelyDidNotStart(pasteBuffer.error)
         ) {
           throw new Error(
@@ -237,7 +442,7 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
         lastResult = pasteBuffer;
         continue;
       }
-      const result = this.runCommand(command, tmuxArgs(options.socketPath, ["send-keys", "-t", target, "-l", text]));
+      const result = this.runCommand(command, tmuxArgs(socketPath, ["send-keys", "-t", target, "-l", text]));
       if (result.status === 0) {
         return;
       }
@@ -266,6 +471,23 @@ function commandDefinitelyDidNotStart(error: Error | undefined): boolean {
 }
 
 export class StaticTerminalControlProvider implements TerminalControlProvider {
+  readonly kind = "tmux";
+  readonly supportedCapabilities: readonly TerminalControlCapability[] = [
+    "screen_status",
+    "send_keys",
+    "terminal_approval",
+    "screen_completion",
+    "durable_completion",
+    "terminal_cancel"
+  ];
+  readonly providerCapabilities: readonly TerminalProviderCapability[] = [
+    "screen_capture",
+    "ansi_capture",
+    "text_delivery",
+    "key_delivery",
+    "process_inspection",
+    "stable_resource_resolution"
+  ];
   private readonly panes: TerminalPane[];
   private readonly screens: Map<string, string>;
   readonly sentKeys: { target: string; keys: string[] }[] = [];
@@ -279,15 +501,130 @@ export class StaticTerminalControlProvider implements TerminalControlProvider {
     return this.panes;
   }
 
-  async capture(target: string): Promise<string> {
+  async diagnostics(): Promise<Record<string, unknown>> {
+    return {
+      provider: "static",
+      paneCount: (await this.listTerminals()).length
+    };
+  }
+
+  async listTerminals(): Promise<TerminalEndpointRef[]> {
+    return this.panes.map((pane) =>
+      tmuxEndpointFromPane(pane, this.supportedCapabilities)
+    );
+  }
+
+  endpoint(terminalControl: TerminalControlRef): TerminalEndpointRef {
+    if (terminalControl.kind !== this.kind) {
+      throw new Error(
+        `terminal control provider ${this.kind} cannot resolve ${terminalControl.kind}`
+      );
+    }
+    return terminalEndpointFromControlRef(terminalControl);
+  }
+
+  toControlRef(
+    terminal: TerminalEndpointRef,
+    capabilities: readonly TerminalControlCapability[] = terminal.capabilities
+  ): TerminalControlRef {
+    return terminalControlWithCapabilities(
+      tmuxControlFromEndpoint(terminal),
+      intersectCapabilities(capabilities, this.supportedCapabilities)
+    );
+  }
+
+  async resolve(terminal: TerminalEndpointRef): Promise<TerminalEndpointRef> {
+    assertProviderCapability(
+      this.kind,
+      this.providerCapabilities,
+      "stable_resource_resolution"
+    );
+    assertEndpointKind(terminal, this.kind);
+    const matches = (await this.listTerminals()).filter((candidate) =>
+      sameTerminalEndpointIdentity(candidate, terminal) ||
+      legacyTmuxEndpointMatches(candidate, terminal)
+    );
+    if (matches.length !== 1) {
+      throw new Error(
+        matches.length === 0
+          ? `terminal resource ${terminal.route.label} is no longer available`
+          : `terminal resource ${terminal.route.label} is ambiguous`
+      );
+    }
+    return endpointWithCapabilities(
+      matches[0],
+      intersectCapabilities(
+        terminal.capabilities,
+        this.supportedCapabilities
+      )
+    );
+  }
+
+  containsProcess(
+    terminal: TerminalEndpointRef,
+    process: Pick<TerminalProcessSnapshot, "pid" | "ppid">,
+    processes: readonly Pick<TerminalProcessSnapshot, "pid" | "ppid">[]
+  ): boolean {
+    assertProviderCapability(
+      this.kind,
+      this.providerCapabilities,
+      "process_inspection"
+    );
+    return terminalPaneContainsProcess(
+      process,
+      tmuxPaneFromEndpoint(terminal),
+      processes
+    );
+  }
+
+  async capture(terminal: TerminalEndpointRef): Promise<string> {
+    assertTerminalCapability(
+      terminal,
+      "screen_status",
+      this.supportedCapabilities
+    );
+    assertProviderCapability(
+      this.kind,
+      this.providerCapabilities,
+      "screen_capture"
+    );
+    const { target } = tmuxControlFromEndpoint(terminal);
     return this.screens.get(target) ?? "";
   }
 
-  async sendText(target: string, text: string): Promise<void> {
+  async sendText(
+    terminal: TerminalEndpointRef,
+    text: string
+  ): Promise<void> {
+    assertTerminalCapability(
+      terminal,
+      "send_keys",
+      this.supportedCapabilities
+    );
+    assertInputProviderCapability(
+      this.kind,
+      this.providerCapabilities,
+      "text_delivery"
+    );
+    const { target } = tmuxControlFromEndpoint(terminal);
     this.sentKeys.push({ target, keys: ["-l", text] });
   }
 
-  async sendKeys(target: string, keys: readonly string[]): Promise<void> {
+  async sendKeys(
+    terminal: TerminalEndpointRef,
+    keys: readonly string[]
+  ): Promise<void> {
+    assertTerminalCapability(
+      terminal,
+      "send_keys",
+      this.supportedCapabilities
+    );
+    assertInputProviderCapability(
+      this.kind,
+      this.providerCapabilities,
+      "key_delivery"
+    );
+    const { target } = tmuxControlFromEndpoint(terminal);
     this.sentKeys.push({ target, keys: [...keys] });
   }
 }
@@ -314,21 +651,41 @@ export function parseTmuxListPanes(output: string, socketPath?: string): Termina
 
 function parseTmuxPaneLine(line: string): Omit<TerminalPane, "kind" | "target" | "socketPath"> | undefined {
   const tabFields = line.split("\t");
-  const fields = tabFields.length >= 6
+  const fields = tabFields.length >= 8
     ? [
         tabFields[0],
         tabFields[1],
         tabFields[2],
         tabFields[3],
         tabFields[4],
-        tabFields.slice(5).join("\t")
+        tabFields.slice(5, -2).join("\t"),
+        tabFields.at(-2) ?? "",
+        tabFields.at(-1) ?? ""
       ]
-    : parseWhitespaceTmuxPaneLine(line) ?? parseUnderscoreTmuxPaneLine(line);
+    : tabFields.length >= 6
+      ? [
+          tabFields[0],
+          tabFields[1],
+          tabFields[2],
+          tabFields[3],
+          tabFields[4],
+          tabFields.slice(5).join("\t")
+        ]
+      : parseWhitespaceTmuxPaneLine(line) ?? parseUnderscoreTmuxPaneLine(line);
   if (!fields) {
     return undefined;
   }
 
-  const [session, windowIndex, paneIndex, panePid, currentCommand, currentPath] = fields;
+  const [
+    session,
+    windowIndex,
+    paneIndex,
+    panePid,
+    currentCommand,
+    currentPath,
+    serverSocketPath,
+    paneId
+  ] = fields;
   const window = Number(windowIndex);
   const pane = Number(paneIndex);
   const parsedPanePid = Number(panePid);
@@ -341,7 +698,9 @@ function parseTmuxPaneLine(line: string): Omit<TerminalPane, "kind" | "target" |
     pane,
     panePid: parsedPanePid,
     currentCommand: currentCommand || undefined,
-    currentPath: currentPath || undefined
+    currentPath: currentPath || undefined,
+    serverSocketPath: serverSocketPath || undefined,
+    paneId: paneId || undefined
   };
 }
 
@@ -363,33 +722,228 @@ export async function enrichActiveProcessesWithTerminalControl<T extends ActiveT
     processTree?: readonly TerminalProcessSnapshot[];
   } = {}
 ): Promise<T[]> {
-  const panes = await provider.listPanes();
-  if (panes.length === 0) {
+  const terminals = await provider.listTerminals();
+  if (terminals.length === 0) {
     return processes;
   }
 
-  const matches = new Map<number, TerminalPane>();
+  const matches = new Map<number, TerminalEndpointRef>();
   const processTree = options.processTree ?? processes;
   for (const process of processes) {
-    const pane = panes.find((candidate) =>
-      terminalPaneContainsProcess(process, candidate, processTree)
+    const terminal = terminals.find((candidate) =>
+      provider.containsProcess(candidate, process, processTree)
     );
-    if (!pane) {
+    if (!terminal) {
       continue;
     }
-    matches.set(process.pid, pane);
+    matches.set(process.pid, terminal);
   }
 
   return processes.map((process) => {
-    const pane = matches.get(process.pid);
-    if (!pane) {
+    const terminal = matches.get(process.pid);
+    if (!terminal) {
       return process;
     }
     return {
       ...process,
-      terminalControl: terminalRefFromPane(pane, options.capabilities)
+      terminalControl: provider.toControlRef(
+        terminal,
+        options.capabilities ?? ["screen_status", "send_keys"]
+      )
     } as T;
   });
+}
+
+function assertEndpointKind(terminal: TerminalEndpointRef, kind: string): void {
+  if (terminal.identity.providerKind !== kind) {
+    throw new Error(
+      `terminal control provider ${kind} cannot resolve ` +
+      `${terminal.identity.providerKind}`
+    );
+  }
+}
+
+function assertTerminalCapability(
+  terminal: TerminalEndpointRef,
+  capability: TerminalControlCapability,
+  supportedCapabilities: readonly TerminalControlCapability[]
+): void {
+  if (
+    !supportedCapabilities.includes(capability) ||
+    !terminal.capabilities.includes(capability)
+  ) {
+    throw new Error(
+      `terminal control capability ${capability} is not available for ` +
+      `${terminal.identity.providerKind}:${terminal.route.label}`
+    );
+  }
+}
+
+function assertProviderCapability(
+  kind: string,
+  supported: readonly TerminalProviderCapability[],
+  capability: TerminalProviderCapability
+): void {
+  if (!supported.includes(capability)) {
+    throw new Error(
+      `terminal control provider ${kind} does not support ${capability}`
+    );
+  }
+}
+
+function assertInputProviderCapability(
+  kind: string,
+  supported: readonly TerminalProviderCapability[],
+  capability: "text_delivery" | "key_delivery"
+): void {
+  if (!supported.includes(capability)) {
+    throw new TerminalControlInputNotSentError(
+      `terminal control provider ${kind} does not support ${capability}`
+    );
+  }
+}
+
+function intersectCapabilities(
+  requested: readonly TerminalControlCapability[],
+  supported: readonly TerminalControlCapability[]
+): TerminalControlCapability[] {
+  const supportedSet = new Set(supported);
+  return [...new Set(requested)].filter((capability) =>
+    supportedSet.has(capability)
+  );
+}
+
+function endpointWithCapabilities(
+  terminal: TerminalEndpointRef,
+  capabilities: readonly TerminalControlCapability[]
+): TerminalEndpointRef {
+  const providerRef = terminalControlWithCapabilities(
+    tmuxControlFromEndpoint(terminal),
+    capabilities
+  );
+  return createTerminalEndpointRef({
+    identity: terminal.identity,
+    route: terminal.route,
+    processAnchorPid: terminal.processAnchorPid,
+    capabilities,
+    providerRef
+  });
+}
+
+function tmuxEndpointFromPane(
+  pane: TerminalPane,
+  capabilities: readonly TerminalControlCapability[]
+): TerminalEndpointRef {
+  const providerRef = terminalRefFromPane(pane, capabilities);
+  const legacy = terminalEndpointFromControlRef(providerRef);
+  const endpointKey = pane.serverSocketPath
+    ? `socket:${pane.serverSocketPath}`
+    : legacy.identity.endpointKey;
+  const resourceKey = pane.paneId
+    ? `pane-id:${pane.paneId}`
+    : legacy.identity.resourceKey;
+  return createTerminalEndpointRef({
+    identity: {
+      providerKind: "tmux",
+      endpointKey,
+      resourceKey
+    },
+    route: {
+      routeKey: tmuxTerminalRouteKey(
+        endpointKey,
+        pane.target,
+        pane.socketPath
+      ),
+      label: pane.target,
+      currentCommand: pane.currentCommand,
+      currentPath: pane.currentPath
+    },
+    processAnchorPid: pane.panePid,
+    capabilities,
+    providerRef
+  });
+}
+
+function legacyTmuxEndpointMatches(
+  candidate: TerminalEndpointRef,
+  requested: TerminalEndpointRef
+): boolean {
+  if (!requested.identity.resourceKey.startsWith("legacy:")) {
+    return false;
+  }
+  const candidateControl = tmuxControlFromEndpoint(candidate);
+  const requestedControl = tmuxControlFromEndpoint(requested);
+  if (
+    candidateControl.target !== requestedControl.target ||
+    candidateControl.panePid !== requestedControl.panePid
+  ) {
+    return false;
+  }
+  if (!requestedControl.socketPath) {
+    return true;
+  }
+  return candidateControl.socketPath === requestedControl.socketPath ||
+    candidate.identity.endpointKey === `socket:${requestedControl.socketPath}`;
+}
+
+function tmuxControlFromEndpoint(
+  terminal: TerminalEndpointRef
+): TmuxTerminalControlRef {
+  assertEndpointKind(terminal, "tmux");
+  const control = terminal.providerRef;
+  if (!isTmuxTerminalControlRef(control)) {
+    throw new Error("tmux terminal endpoint has an invalid provider reference");
+  }
+  return control;
+}
+
+function tmuxIoRoute(
+  terminal: TerminalEndpointRef
+): { target: string; socketPath?: string } {
+  const control = tmuxControlFromEndpoint(terminal);
+  const stablePaneId = terminal.identity.resourceKey.startsWith("pane-id:")
+    ? terminal.identity.resourceKey.slice("pane-id:".length)
+    : undefined;
+  const stableSocketPath = terminal.identity.endpointKey.startsWith("socket:")
+    ? terminal.identity.endpointKey.slice("socket:".length)
+    : undefined;
+  return {
+    // tmux's `%pane_id` remains valid across session/window/pane renames and
+    // cannot be confused with a newly reused human selector.
+    target: stablePaneId || control.target,
+    socketPath: stableSocketPath || control.socketPath
+  };
+}
+
+function isTmuxTerminalControlRef(
+  value: unknown
+): value is TmuxTerminalControlRef {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const control = value as Partial<TmuxTerminalControlRef>;
+  return control.kind === "tmux" &&
+    typeof control.target === "string" &&
+    typeof control.session === "string" &&
+    Number.isInteger(control.window) &&
+    Number.isInteger(control.pane) &&
+    Number.isInteger(control.panePid) &&
+    Array.isArray(control.capabilities);
+}
+
+function tmuxPaneFromEndpoint(terminal: TerminalEndpointRef): TerminalPane {
+  const control = tmuxControlFromEndpoint(terminal);
+  return {
+    kind: "tmux",
+    target: control.target,
+    socketPath: control.socketPath,
+    session: control.session,
+    window: control.window,
+    pane: control.pane,
+    panePid: control.panePid,
+    currentCommand: control.currentCommand,
+    currentPath: control.currentPath
+  };
 }
 
 export function terminalRefFromPane(

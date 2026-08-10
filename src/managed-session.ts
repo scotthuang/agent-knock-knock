@@ -5,6 +5,16 @@ import type {
   TerminalControlCapability,
   TerminalControlRef
 } from "./terminal-agent-adapter.js";
+import {
+  associateTerminalEndpointEvidence,
+  hasCanonicalTerminalEndpoint,
+  terminalControlEvidence,
+  terminalEndpointIdentityFromEvidence,
+  terminalEndpointIdentityKey,
+  terminalRouteKeyFromEvidence,
+  sameTerminalControlIncarnation,
+  type TerminalControlEvidence
+} from "./terminal-control-ref.js";
 
 export const MANAGED_SESSION_SCHEMA = "agent-knock-knock/session" as const;
 export const MANAGED_SESSION_VERSION = 1 as const;
@@ -36,6 +46,8 @@ export interface ManagedTerminalBinding {
   generation: number;
   terminal_id: string;
   terminal_control: TerminalControlRef;
+  /** Additive provider-neutral identity evidence for newer writers. */
+  terminal_endpoint?: TerminalControlEvidence;
   native_thread_id?: string;
   native_process: NativeProcessIdentity;
   bound_at: string;
@@ -163,6 +175,38 @@ export function managedSessionStorageKey(sessionId: string): string {
 export function managedSessionBindingToken(
   state: Pick<ManagedSessionState, "session_id" | "status" | "binding">
 ): string {
+  if (state.binding?.terminal_endpoint) {
+    const identity = terminalEndpointIdentityFromEvidence(
+      state.binding.terminal_endpoint
+    );
+    if (!identity) {
+      throw new Error("managed terminal binding endpoint identity is invalid");
+    }
+    return createHash("sha256")
+      .update(JSON.stringify({
+        version: 2,
+        session_id: state.session_id,
+        status: state.status,
+        binding_id: state.binding.binding_id,
+        binding_generation: state.binding.generation,
+        terminal_id: state.binding.terminal_id,
+        terminal_identity: terminalEndpointIdentityKey(identity),
+        terminal_process_anchor_pid:
+          state.binding.terminal_endpoint.process_anchor_pid,
+        agent_pid: state.binding.native_process.pid,
+        process_uuid: state.binding.native_process.process_uuid ?? null,
+        process_birth: state.binding.native_process.process_birth ?? null,
+        rollout: state.binding.native_process.rollout ?? null,
+        native_thread_id: state.binding.native_thread_id ?? null
+      }))
+      .digest("hex");
+  }
+  return legacyManagedSessionBindingToken(state);
+}
+
+export function legacyManagedSessionBindingToken(
+  state: Pick<ManagedSessionState, "session_id" | "status" | "binding">
+): string {
   return createHash("sha256")
     .update(JSON.stringify({
       session_id: state.session_id,
@@ -183,6 +227,41 @@ export function managedSessionBindingToken(
 }
 
 export function unmanagedTerminalBindingToken(value: {
+  terminalId: string;
+  terminalControl: TerminalControlRef;
+  agent: ExecutorKind;
+  pid: number;
+  workspace: string;
+  nativeThreadId?: string;
+  processUuid?: string;
+  processBirth?: string;
+  rollout?: NativeProcessIdentity["rollout"];
+}): string {
+  if (hasCanonicalTerminalEndpoint(value.terminalControl)) {
+    const evidence = terminalControlEvidence(value.terminalControl);
+    return createHash("sha256")
+      .update(JSON.stringify({
+        version: 2,
+        state: "unmanaged",
+        terminal_id: value.terminalId,
+        terminal_identity: terminalEndpointIdentityKey(
+          terminalEndpointIdentityFromEvidence(evidence)!
+        ),
+        terminal_process_anchor_pid: evidence.process_anchor_pid,
+        agent: value.agent,
+        agent_pid: value.pid,
+        workspace: value.workspace,
+        native_thread_id: value.nativeThreadId ?? null,
+        process_uuid: value.processUuid ?? null,
+        process_birth: value.processBirth ?? null,
+        rollout: value.rollout ?? null
+      }))
+      .digest("hex");
+  }
+  return legacyUnmanagedTerminalBindingToken(value);
+}
+
+export function legacyUnmanagedTerminalBindingToken(value: {
   terminalId: string;
   terminalControl: TerminalControlRef;
   agent: ExecutorKind;
@@ -229,6 +308,9 @@ export function terminalBindingFrom(value: {
     generation: value.generation,
     terminal_id: value.terminalId,
     terminal_control: value.terminalControl,
+    ...(hasCanonicalTerminalEndpoint(value.terminalControl)
+      ? { terminal_endpoint: terminalControlEvidence(value.terminalControl) }
+      : {}),
     native_thread_id: value.nativeThreadId,
     native_process: {
       pid: value.pid,
@@ -649,7 +731,10 @@ function assertNativeThreadTransitionBindingConsistency(
   const before = transition.before_binding;
   if (before) {
     if (
-      before.terminal_id !== transition.terminal_id ||
+      (
+        before.terminal_id !== transition.terminal_id &&
+        !hasCanonicalTerminalEndpoint(before.terminal_control)
+      ) ||
       before.native_thread_id?.toLowerCase() !==
         transition.before_native_thread_id.toLowerCase() ||
       before.native_process.process_uuid !== transition.before_process_uuid ||
@@ -673,7 +758,10 @@ function assertNativeThreadTransitionBindingConsistency(
     );
   }
   if (
-    after.terminal_id !== transition.terminal_id ||
+    (
+      after.terminal_id !== transition.terminal_id &&
+      !hasCanonicalTerminalEndpoint(after.terminal_control)
+    ) ||
     !after.native_thread_id ||
     after.native_process.process_uuid !== transition.before_process_uuid ||
     after.native_process.process_birth !== transition.before_process_birth
@@ -685,8 +773,10 @@ function assertNativeThreadTransitionBindingConsistency(
   if (
     before &&
     (
-      JSON.stringify(after.terminal_control) !==
-        JSON.stringify(before.terminal_control) ||
+      !sameTerminalControlIncarnation(
+        after.terminal_control,
+        before.terminal_control
+      ) ||
       after.native_process.pid !== before.native_process.pid
     )
   ) {
@@ -850,6 +940,16 @@ function migratedBindingCandidate(
   } catch {
     return undefined;
   }
+  const terminalEndpoint = isRecord(takeover.terminal_endpoint)
+    ? takeover.terminal_endpoint as TerminalControlEvidence
+    : undefined;
+  if (terminalEndpoint) {
+    try {
+      associateTerminalEndpointEvidence(terminalControl, terminalEndpoint);
+    } catch {
+      return undefined;
+    }
+  }
   const terminalId = optionalNonEmptyString(takeover.native_session_id);
   const pid = positiveInteger(takeover.terminal_agent_pid);
   if (!terminalId || pid === undefined) {
@@ -894,6 +994,7 @@ function migratedBindingCandidate(
     agent,
     terminal_id: terminalId,
     terminal_control: terminalControl,
+    ...(terminalEndpoint ? { terminal_endpoint: terminalEndpoint } : {}),
     native_thread_id: nativeThreadId ?? null,
     pid,
     process_uuid: processUuid ?? null,
@@ -913,6 +1014,7 @@ function migratedBindingCandidate(
     generation,
     terminal_id: terminalId,
     terminal_control: terminalControl,
+    ...(terminalEndpoint ? { terminal_endpoint: terminalEndpoint } : {}),
     native_thread_id: nativeThreadId,
     native_process: {
       pid,
@@ -1041,6 +1143,7 @@ function assertManagedTerminalBinding(
     "generation",
     "terminal_id",
     "terminal_control",
+    "terminal_endpoint",
     "native_thread_id",
     "native_process",
     "bound_at",
@@ -1052,6 +1155,16 @@ function assertManagedTerminalBinding(
   }
   assertNonEmptyString(value.terminal_id, `${label} terminal_id`);
   assertTerminalControlRef(value.terminal_control, `${label} terminal_control`);
+  if (value.terminal_endpoint !== undefined) {
+    assertTerminalEndpointEvidence(
+      value.terminal_endpoint,
+      `${label} terminal_endpoint`
+    );
+    associateTerminalEndpointEvidence(
+      value.terminal_control as TerminalControlRef,
+      value.terminal_endpoint
+    );
+  }
   if (value.native_thread_id !== undefined) {
     // Persist the exact opaque id reported by the adapter. Current Codex and
     // Claude lifecycle selectors are UUIDs, but a Session binding must not
@@ -1061,6 +1174,39 @@ function assertManagedTerminalBinding(
   assertNativeProcessIdentity(value.native_process, `${label} native_process`);
   assertTimestamp(value.bound_at, `${label} bound_at`);
   assertTimestamp(value.last_verified_at, `${label} last_verified_at`);
+}
+
+function assertTerminalEndpointEvidence(value: unknown, label: string): void {
+  if (!isRecord(value)) {
+    throw new Error(`${label} must be an object`);
+  }
+  assertOnlyKeys(value, [
+    "schema",
+    "version",
+    "kind",
+    "endpoint_key",
+    "resource_key",
+    "route_key",
+    "process_anchor_pid",
+    "target",
+    "socket_path",
+    "pane_pid",
+    "server_socket_path",
+    "pane_id",
+    "current_path"
+  ], label);
+  if (
+    value.schema !== "agent-knock-knock/terminal-endpoint" ||
+    value.version !== 1
+  ) {
+    throw new Error(`${label} has an unsupported identity evidence version`);
+  }
+  if (!terminalEndpointIdentityFromEvidence(value)) {
+    throw new Error(`${label} has invalid or inconsistent identity evidence`);
+  }
+  if (!terminalRouteKeyFromEvidence(value)) {
+    throw new Error(`${label} has inconsistent route evidence`);
+  }
 }
 
 function assertNativeProcessIdentity(value: unknown, label: string): void {

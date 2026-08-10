@@ -234,7 +234,10 @@ test("a recreated tmux pane does not replay the prior incarnation receipt", () =
     );
     const second = send(44489, firstStoreDir);
     assert.notEqual(second.status, 0);
-    assert.match(second.stderr, /prior tmux pane incarnation|durable terminal receipt/u);
+    assert.match(
+      second.stderr,
+      /prior tmux pane incarnation|durable terminal receipt|does not match its original Store, Session, Turn, OpenClaw session, or tmux pane binding/u
+    );
     assert.equal(
       readJsonLines(tmuxCallsPath)
         .filter((call) =>

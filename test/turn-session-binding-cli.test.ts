@@ -14,6 +14,11 @@ import {
   terminalBindingFrom,
   type ManagedSessionStatus
 } from "../src/managed-session.js";
+import {
+  createTerminalEndpointRef,
+  terminalControlEvidence,
+  tmuxTerminalRouteKey
+} from "../src/terminal-control-ref.js";
 import { saveManagedSession } from "../src/session-store.js";
 import {
   pathsForConversation,
@@ -97,6 +102,21 @@ test("an exact protocol-2 terminal Turn is materialized before its callback", ()
   }
 });
 
+test("a migrated canonical Turn remains authorized after a tmux route rename", () => {
+  const fixture = createCallbackTurnFixture({
+    terminal: true,
+    sessionStatus: "bound",
+    bindingRouteRename: true
+  });
+  try {
+    const result = runCallback(fixture.conversation);
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.equal(JSON.parse(result.stdout).conversation.status, "idle");
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("a non-terminal delegated Turn keeps callback compatibility without Session state", () => {
   const fixture = createCallbackTurnFixture({ terminal: false });
   try {
@@ -112,12 +132,14 @@ function createCallbackTurnFixture({
   terminal,
   sessionStatus,
   predecessorStore = false,
-  bindingProcessUuid = processUuid
+  bindingProcessUuid = processUuid,
+  bindingRouteRename = false
 }: {
   terminal: boolean;
   sessionStatus?: ManagedSessionStatus;
   predecessorStore?: boolean;
   bindingProcessUuid?: string;
+  bindingRouteRename?: boolean;
 }): {
   root: string;
   conversation: Conversation;
@@ -146,6 +168,26 @@ function createCallbackTurnFixture({
       "terminal_cancel"
     ]
   };
+  const endpointKey = `socket:${path.join(root, "tmux-server.sock")}`;
+  const resourceKey = "pane-id:%42";
+  if (bindingRouteRename) {
+    createTerminalEndpointRef({
+      identity: { providerKind: "tmux", endpointKey, resourceKey },
+      route: {
+        routeKey: tmuxTerminalRouteKey(
+          endpointKey,
+          terminalControl.target,
+          terminalControl.socketPath
+        ),
+        label: terminalControl.target,
+        currentCommand: terminalControl.currentCommand,
+        currentPath: terminalControl.currentPath
+      },
+      processAnchorPid: terminalControl.panePid,
+      capabilities: terminalControl.capabilities,
+      providerRef: terminalControl
+    });
+  }
   const terminalId =
     `terminal:v2:tmux:codex:${terminalControl.target}:42001`;
   const created = createConversation({
@@ -179,6 +221,9 @@ function createCallbackTurnFixture({
             source_cwd: workspace,
             strategy: "terminal_control",
             terminal_control: terminalControl,
+            ...(bindingRouteRename
+              ? { terminal_endpoint: terminalControlEvidence(terminalControl) }
+              : {}),
             terminal_bridge: true
           }
         }
@@ -202,9 +247,39 @@ function createCallbackTurnFixture({
 
   if (terminal && sessionStatus) {
     const now = new Date();
+    const bindingTerminalControl: TerminalControlRef = bindingRouteRename
+      ? {
+          ...terminalControl,
+          target: "akk-binding-renamed:4.2",
+          session: "akk-binding-renamed",
+          window: 4,
+          pane: 2
+        }
+      : terminalControl;
+    if (bindingRouteRename) {
+      createTerminalEndpointRef({
+        identity: { providerKind: "tmux", endpointKey, resourceKey },
+        route: {
+          routeKey: tmuxTerminalRouteKey(
+            endpointKey,
+            bindingTerminalControl.target,
+            bindingTerminalControl.socketPath
+          ),
+          label: bindingTerminalControl.target,
+          currentCommand: bindingTerminalControl.currentCommand,
+          currentPath: bindingTerminalControl.currentPath
+        },
+        processAnchorPid: bindingTerminalControl.panePid,
+        capabilities: bindingTerminalControl.capabilities,
+        providerRef: bindingTerminalControl
+      });
+    }
+    const bindingTerminalId = bindingRouteRename
+      ? `terminal:v2:tmux:codex:${bindingTerminalControl.target}:42001`
+      : terminalId;
     const binding = terminalBindingFrom({
-      terminalId,
-      terminalControl,
+      terminalId: bindingTerminalId,
+      terminalControl: bindingTerminalControl,
       pid: 42001,
       nativeThreadId,
       processUuid: bindingProcessUuid,

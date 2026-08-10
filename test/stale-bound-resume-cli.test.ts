@@ -266,14 +266,14 @@ test("resume lists a conclusively dead bound Session read-only, then CAS-detache
     assert.match(expired.stderr, /snapshot expired/u);
     fs.writeFileSync(snapshotPath, originalSnapshot, "utf8");
 
+    const differentPaneSnapshot = JSON.parse(originalSnapshot);
+    differentPaneSnapshot.terminal_control.pane_pid = panePid + 1;
+    differentPaneSnapshot.terminal_endpoint.process_anchor_pid = panePid + 1;
+    differentPaneSnapshot.terminal_endpoint.pane_pid = panePid + 1;
+    differentPaneSnapshot.terminal_endpoint.resource_key =
+      `legacy:${differentPaneSnapshot.terminal_endpoint.route_key}:pane-pid:${panePid + 1}`;
     for (const changedSnapshot of [
-      {
-        ...JSON.parse(originalSnapshot),
-        terminal_control: {
-          ...JSON.parse(originalSnapshot).terminal_control,
-          pane_pid: panePid + 1
-        }
-      },
+      differentPaneSnapshot,
       {
         ...JSON.parse(originalSnapshot),
         workspace: path.join(root, "different-workspace")
@@ -459,7 +459,29 @@ test("resume lists a conclusively dead bound Session read-only, then CAS-detache
       entry.session_id === staleTarget.session_id
     );
     assert.equal(sourceAfterCrash?.status, "bound");
-    assert.equal(fs.readFileSync(sourceStatePath, "utf8"), sourceBeforeList);
+    // The first exclusive lifecycle mutation is also the compatibility
+    // upgrade point for a legacy binding. It may persist the freshly resolved
+    // canonical endpoint, but must not change the logical owner/generation.
+    assert.equal(
+      sourceAfterCrash?.revision,
+      (source.revision as number) + 1
+    );
+    assert.equal(
+      sourceAfterCrash?.binding?.binding_id,
+      source.binding?.binding_id
+    );
+    assert.equal(
+      sourceAfterCrash?.binding?.generation,
+      source.binding?.generation
+    );
+    assert.equal(
+      sourceAfterCrash?.binding?.native_thread_id,
+      source.binding?.native_thread_id
+    );
+    assert.equal(
+      sourceAfterCrash?.binding?.terminal_endpoint?.kind,
+      "tmux"
+    );
     assert.equal(targetAfterCrash?.status, "detached");
     assert.equal(
       targetAfterCrash?.revision,

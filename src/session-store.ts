@@ -582,6 +582,15 @@ function assertBindingIdentityRefinement(
       `managed Session ${sessionId} cannot mutate an existing binding identity`
     );
   }
+  if (
+    before.terminal_endpoint !== undefined &&
+    JSON.stringify(before.terminal_endpoint) !==
+      JSON.stringify(after.terminal_endpoint)
+  ) {
+    throw new Error(
+      `managed Session ${sessionId} cannot replace verified binding terminal_endpoint`
+    );
+  }
   for (const [label, oldValue, newValue] of [
     ["native_thread_id", before.native_thread_id, after.native_thread_id],
     ["process_uuid", before.native_process.process_uuid, after.native_process.process_uuid],

@@ -211,15 +211,25 @@ test("verified lifecycle target conflict preserves source and later rolls forwar
     assert.equal(listConversations(storeDir).length, 0);
     assert.equal(listManagedSessions(storeDir).length, 1);
     assert.equal(listManagedSessions(storeDir)[0].status, "bound");
+    const preparedLedgerPath = currentTerminalDispatchLedgerPath(runtimeDir);
     const preparedLedger = JSON.parse(
-      fs.readFileSync(malformedLedgerPath, "utf8")
+      fs.readFileSync(preparedLedgerPath, "utf8")
     );
-    fs.writeFileSync(malformedLedgerPath, `${JSON.stringify({
+    fs.writeFileSync(preparedLedgerPath, `${JSON.stringify({
       ...preparedLedger,
       terminal_control: {
         ...preparedLedger.terminal_control,
         pane_pid: panePid + 999
-      }
+      },
+      ...(preparedLedger.terminal_endpoint
+        ? {
+            terminal_endpoint: {
+              ...preparedLedger.terminal_endpoint,
+              process_anchor_pid: panePid + 999,
+              pane_pid: panePid + 999
+            }
+          }
+        : {})
     })}\n`, { mode: 0o600 });
     const recoveryList = runCli([
       "list",
@@ -244,7 +254,7 @@ test("verified lifecycle target conflict preserves source and later rolls forwar
     assert.match(preparedTransitionId, /^transition-/u);
     assert.equal(recoveryArguments.expected_message_id, undefined);
     fs.writeFileSync(
-      malformedLedgerPath,
+      preparedLedgerPath,
       `${JSON.stringify(preparedLedger)}\n`,
       { mode: 0o600 }
     );
@@ -453,6 +463,18 @@ function runCli(args: string[], env: NodeJS.ProcessEnv) {
   });
 }
 
+function currentTerminalDispatchLedgerPath(runtimeDir: string): string {
+  const ledgerDir = path.join(runtimeDir, "terminal-dispatch");
+  const ledgers = fs.readdirSync(ledgerDir)
+    .filter((name) => /^terminal-dispatch-[0-9a-f]{20}\.json$/u.test(name));
+  assert.equal(
+    ledgers.length,
+    1,
+    `expected one current terminal dispatch ledger, found ${ledgers.join(", ")}`
+  );
+  return path.join(ledgerDir, ledgers[0]);
+}
+
 function writeLifecycleFakeTmux(options: {
   fakeBinDir: string;
   callsPath: string;
@@ -472,7 +494,7 @@ const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(options.callsPath)}, JSON.stringify({ args }) + "\\n");
 if (args[0] === "list-panes") {
   process.stdout.write(${JSON.stringify(
-    `tmux-test-fixture\t0\t0\t${options.panePid}\tcodex\t${options.workspace}\n`
+    `tmux-test-fixture\t0\t0\t${options.panePid}\tcodex\t${options.workspace}\t\t%42\n`
   )});
   process.exit(0);
 }

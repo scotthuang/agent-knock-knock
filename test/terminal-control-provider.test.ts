@@ -7,11 +7,46 @@ import {
   StaticTerminalControlProvider,
   TerminalControlInputNotSentError,
   TmuxTerminalControlProvider,
+  createTerminalControlProviderRegistry,
   discoverTmuxSocketPaths,
   enrichActiveProcessesWithTerminalControl,
   parseTmuxListPanes
 } from "../src/terminal-control-provider.js";
+import {
+  sameTerminalEndpointIdentity,
+  type TerminalEndpointRef
+} from "../src/terminal-control-ref.js";
 import type { ActiveCodexProcess } from "../src/codex-session-provider.js";
+
+async function terminalEndpoint(
+  target: string,
+  canonicalSocketPath?: string,
+  options: {
+    legacySocketPath?: string;
+    paneId?: string;
+  } = {}
+): Promise<TerminalEndpointRef> {
+  const separator = target.lastIndexOf(":");
+  const session = separator >= 0 ? target.slice(0, separator) : target;
+  const route = separator >= 0 ? target.slice(separator + 1) : "0.0";
+  const [windowText = "0", paneText = "0"] = route.split(".", 2);
+  const provider = new StaticTerminalControlProvider({
+    panes: [{
+      kind: "tmux",
+      target,
+      socketPath: options.legacySocketPath ?? canonicalSocketPath,
+      serverSocketPath: canonicalSocketPath,
+      paneId: options.paneId ?? "%test",
+      session,
+      window: Number.parseInt(windowText, 10),
+      pane: Number.parseInt(paneText, 10),
+      panePid: 36_017
+    }]
+  });
+  const [terminal] = await provider.listTerminals();
+  assert.ok(terminal);
+  return terminal;
+}
 
 test("parseTmuxListPanes parses stable tmux targets", () => {
   const panes = parseTmuxListPanes([
@@ -22,6 +57,26 @@ test("parseTmuxListPanes parses stable tmux targets", () => {
   assert.deepEqual(panes.map((pane) => pane.target), ["codex-work:0.0", "codex-work:1.2"]);
   assert.equal(panes[0].panePid, 36017);
   assert.equal(panes[0].currentCommand, "node");
+});
+
+test("parseTmuxListPanes preserves stable tmux socket and pane identities", async () => {
+  const panes = parseTmuxListPanes([
+    "codex-work\t0\t2\t36017\tnode\t/Users/me/github/codex\t/private/tmp/tmux-501/default\t%7"
+  ].join("\n"), "/private/tmp/tmux-501/default");
+
+  assert.equal(panes.length, 1);
+  assert.equal(panes[0].socketPath, "/private/tmp/tmux-501/default");
+  assert.equal(panes[0].serverSocketPath, "/private/tmp/tmux-501/default");
+  assert.equal(panes[0].paneId, "%7");
+  assert.equal(panes[0].target, "codex-work:0.2");
+
+  const [terminal] = await new StaticTerminalControlProvider({ panes })
+    .listTerminals();
+  assert.deepEqual(terminal.identity, {
+    providerKind: "tmux",
+    endpointKey: "socket:/private/tmp/tmux-501/default",
+    resourceKey: "pane-id:%7"
+  });
 });
 
 test("parseTmuxListPanes falls back to whitespace-delimited output", () => {
@@ -279,6 +334,105 @@ test("tmux provider deduplicates a default server also found by socket path", as
   assert.equal(panes[0].socketPath, undefined);
 });
 
+test("terminal provider registry rejects duplicate and unknown provider kinds", () => {
+  const provider = new StaticTerminalControlProvider();
+  const registry = createTerminalControlProviderRegistry([provider]);
+
+  assert.equal(registry.require("tmux"), provider);
+  assert.throws(
+    () => registry.register(new StaticTerminalControlProvider()),
+    /already registered for tmux/u
+  );
+  assert.throws(
+    () => registry.require("unknown"),
+    /not registered for unknown/u
+  );
+});
+
+test("terminal resolve refreshes the route without changing stable resource identity", async () => {
+  const stableServerSocketPath = "/private/tmp/tmux-501/default";
+  const originalProvider = new StaticTerminalControlProvider({
+    panes: [{
+      kind: "tmux",
+      target: "codex-work:0.0",
+      serverSocketPath: stableServerSocketPath,
+      paneId: "%7",
+      session: "codex-work",
+      window: 0,
+      pane: 0,
+      panePid: 36017,
+      currentPath: "/repo/old"
+    }]
+  });
+  const refreshedProvider = new StaticTerminalControlProvider({
+    panes: [{
+      kind: "tmux",
+      target: "renamed-work:1.2",
+      socketPath: stableServerSocketPath,
+      serverSocketPath: stableServerSocketPath,
+      paneId: "%7",
+      session: "renamed-work",
+      window: 1,
+      pane: 2,
+      panePid: 36017,
+      currentPath: "/repo/new"
+    }]
+  });
+  const [original] = await originalProvider.listTerminals();
+
+  const refreshed = await refreshedProvider.resolve(original);
+  const refreshedControl = refreshedProvider.toControlRef(refreshed);
+
+  assert.equal(sameTerminalEndpointIdentity(refreshed, original), true);
+  assert.deepEqual(refreshed.identity, original.identity);
+  assert.notEqual(refreshed.route.routeKey, original.route.routeKey);
+  assert.equal(refreshed.route.label, "renamed-work:1.2");
+  assert.equal(refreshed.route.currentPath, "/repo/new");
+  assert.equal(refreshed.processAnchorPid, original.processAnchorPid);
+  assert.equal(refreshedControl.target, "renamed-work:1.2");
+  assert.equal(refreshedControl.socketPath, stableServerSocketPath);
+});
+
+test("tmux provider fails closed before command invocation without transport capability", async () => {
+  const calls: string[][] = [];
+  const provider = new TmuxTerminalControlProvider({
+    socketPaths: [],
+    commands: ["tmux"],
+    runCommand(_command, args) {
+      calls.push(args);
+      return { status: 0, stdout: "", stderr: "" };
+    }
+  });
+  Object.defineProperty(provider, "providerCapabilities", {
+    value: provider.providerCapabilities.filter((capability) =>
+      capability !== "text_delivery"
+    )
+  });
+  const endpointProvider = new StaticTerminalControlProvider({
+    panes: [{
+      kind: "tmux",
+      target: "codex-work:0.0",
+      serverSocketPath: "/private/tmp/tmux-501/default",
+      paneId: "%7",
+      session: "codex-work",
+      window: 0,
+      pane: 0,
+      panePid: 36017
+    }]
+  });
+  const [terminal] = await endpointProvider.listTerminals();
+
+  await assert.rejects(
+    provider.sendText(terminal, "hello"),
+    (error: unknown) => {
+      assert.ok(error instanceof TerminalControlInputNotSentError);
+      assert.match(error.message, /does not support text_delivery/u);
+      return true;
+    }
+  );
+  assert.deepEqual(calls, []);
+});
+
 test("tmux provider falls back to absolute tmux command paths", async () => {
   const calls: { command: string; args: string[] }[] = [];
   const provider = new TmuxTerminalControlProvider({
@@ -330,8 +484,17 @@ test("discovers tmux default sockets across uid directories", () => {
   }
 });
 
-test("tmux provider uses socket path for capture and sends", async () => {
+test("tmux provider uses canonical socket and pane identity for capture and sends", async () => {
   const calls: string[][] = [];
+  const canonicalSocketPath = "/private/tmp/tmux-501/canonical";
+  const terminal = await terminalEndpoint(
+    "codex-work:0.0",
+    canonicalSocketPath,
+    {
+      legacySocketPath: "/private/tmp/tmux-501/stale-route",
+      paneId: "%42"
+    }
+  );
   const provider = new TmuxTerminalControlProvider({
     socketPaths: [],
     runCommand(_command, args) {
@@ -344,26 +507,39 @@ test("tmux provider uses socket path for capture and sends", async () => {
     }
   });
 
-  assert.equal(await provider.capture("codex-work:0.0", {
-    scrollbackLines: 10,
-    socketPath: "/private/tmp/tmux-501/default"
+  assert.equal(await provider.capture(terminal, {
+    scrollbackLines: 10
   }), "screen");
-  await provider.sendText("codex-work:0.0", "hello", {
-    socketPath: "/private/tmp/tmux-501/default"
-  });
-  await provider.sendKeys("codex-work:0.0", ["Enter"], {
-    socketPath: "/private/tmp/tmux-501/default"
-  });
+  await provider.sendText(terminal, "hello");
+  await provider.sendKeys(terminal, ["Enter"]);
 
-  assert.deepEqual(calls.map((args) => args.slice(0, 4)), [
-    ["-S", "/private/tmp/tmux-501/default", "capture-pane", "-t"],
-    ["-S", "/private/tmp/tmux-501/default", "send-keys", "-t"],
-    ["-S", "/private/tmp/tmux-501/default", "send-keys", "-t"]
+  assert.deepEqual(calls, [
+    [
+      "-S",
+      canonicalSocketPath,
+      "capture-pane",
+      "-t",
+      "%42",
+      "-p",
+      "-S",
+      "-10"
+    ],
+    ["-S", canonicalSocketPath, "send-keys", "-t", "%42", "-l", "hello"],
+    ["-S", canonicalSocketPath, "send-keys", "-t", "%42", "Enter"]
   ]);
 });
 
-test("tmux provider uses bracketed paste for multiline text", async () => {
+test("tmux provider uses canonical socket and pane identity for multiline paste", async () => {
   const calls: string[][] = [];
+  const canonicalSocketPath = "/private/tmp/tmux-501/canonical";
+  const terminal = await terminalEndpoint(
+    "claude-work:0.0",
+    canonicalSocketPath,
+    {
+      legacySocketPath: "/private/tmp/tmux-501/stale-route",
+      paneId: "%43"
+    }
+  );
   const provider = new TmuxTerminalControlProvider({
     socketPaths: [],
     commands: ["tmux"],
@@ -377,15 +553,13 @@ test("tmux provider uses bracketed paste for multiline text", async () => {
     }
   });
 
-  await provider.sendText("claude-work:0.0", "first line\nsecond line", {
-    socketPath: "/private/tmp/tmux-501/default"
-  });
+  await provider.sendText(terminal, "first line\nsecond line");
 
   assert.equal(calls.length, 2);
   assert.match(calls[0][4], /^akk-\d+-[0-9a-f-]+$/u);
   assert.deepEqual(calls[0].slice(0, 5), [
     "-S",
-    "/private/tmp/tmux-501/default",
+    canonicalSocketPath,
     "set-buffer",
     "-b",
     calls[0][4]
@@ -393,20 +567,76 @@ test("tmux provider uses bracketed paste for multiline text", async () => {
   assert.deepEqual(calls[0].slice(5), ["--", "first line\nsecond line"]);
   assert.deepEqual(calls[1], [
     "-S",
-    "/private/tmp/tmux-501/default",
+    canonicalSocketPath,
     "paste-buffer",
     "-p",
     "-d",
     "-b",
     calls[0][4],
     "-t",
-    "claude-work:0.0"
+    "%43"
   ]);
   assert.equal(calls.some((args) => args.includes("send-keys")), false);
 });
 
+test("tmux provider treats a started multiline paste rejection as uncertain without retry", async () => {
+  const calls: { command: string; args: string[] }[] = [];
+  const canonicalSocketPath = "/private/tmp/tmux-501/canonical";
+  const terminal = await terminalEndpoint(
+    "claude-work:0.0",
+    canonicalSocketPath,
+    {
+      legacySocketPath: "/private/tmp/tmux-501/stale-route",
+      paneId: "%44"
+    }
+  );
+  const provider = new TmuxTerminalControlProvider({
+    socketPaths: [],
+    commands: ["tmux", "/fallback/tmux"],
+    runCommand(command, args) {
+      calls.push({ command, args });
+      if (args.includes("paste-buffer")) {
+        return {
+          status: 1,
+          stdout: "",
+          stderr: "paste rejected after start"
+        };
+      }
+      return { status: 0, stdout: "", stderr: "" };
+    }
+  });
+
+  await assert.rejects(
+    provider.sendText(terminal, "first line\nsecond line"),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error instanceof TerminalControlInputNotSentError, false);
+      assert.match(error.message, /paste rejected after start/u);
+      return true;
+    }
+  );
+
+  assert.deepEqual(calls.map(({ command }) => command), ["tmux", "tmux", "tmux"]);
+  assert.deepEqual(calls.map(({ args }) => args[2]), [
+    "set-buffer",
+    "paste-buffer",
+    "delete-buffer"
+  ]);
+  assert.deepEqual(calls[2].args, [
+    "-S",
+    canonicalSocketPath,
+    "delete-buffer",
+    "-b",
+    calls[0].args[4]
+  ]);
+  assert.equal(calls.some(({ command }) => command === "/fallback/tmux"), false);
+  assert.equal(calls[1].args.at(-1), "%44");
+  assert.equal(calls.every(({ args }) => args[1] === canonicalSocketPath), true);
+});
+
 test("tmux provider proves no input when commands reject or cannot start", async () => {
   const calls: string[] = [];
+  const terminal = await terminalEndpoint("codex-work:0.0");
   const provider = new TmuxTerminalControlProvider({
     socketPaths: [],
     commands: ["tmux", "/missing/tmux"],
@@ -423,7 +653,7 @@ test("tmux provider proves no input when commands reject or cannot start", async
   });
 
   await assert.rejects(
-    provider.sendText("codex-work:0.0", "hello"),
+    provider.sendText(terminal, "hello"),
     TerminalControlInputNotSentError
   );
   assert.deepEqual(calls, ["tmux", "/missing/tmux"]);
@@ -431,6 +661,7 @@ test("tmux provider proves no input when commands reject or cannot start", async
 
 test("tmux provider stops after an uncertain input attempt", async () => {
   const calls: string[] = [];
+  const terminal = await terminalEndpoint("codex-work:0.0");
   const provider = new TmuxTerminalControlProvider({
     socketPaths: [],
     commands: ["tmux", "/fallback/tmux"],
@@ -446,14 +677,20 @@ test("tmux provider stops after an uncertain input attempt", async () => {
   });
 
   await assert.rejects(
-    provider.sendText("codex-work:0.0", "hello"),
-    /timed out/u
+    provider.sendText(terminal, "hello"),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error instanceof TerminalControlInputNotSentError, false);
+      assert.match(error.message, /timed out/u);
+      return true;
+    }
   );
   assert.deepEqual(calls, ["tmux"]);
 });
 
 test("tmux provider never retries an uncertain key dispatch", async () => {
   const calls: string[] = [];
+  const terminal = await terminalEndpoint("codex-work:0.0");
   const provider = new TmuxTerminalControlProvider({
     socketPaths: [],
     commands: ["tmux", "/fallback/tmux"],
@@ -471,14 +708,20 @@ test("tmux provider never retries an uncertain key dispatch", async () => {
   });
 
   await assert.rejects(
-    provider.sendKeys("codex-work:0.0", ["C-m"]),
-    /key dispatch timed out/u
+    provider.sendKeys(terminal, ["C-m"]),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error instanceof TerminalControlInputNotSentError, false);
+      assert.match(error.message, /key dispatch timed out/u);
+      return true;
+    }
   );
   assert.deepEqual(calls, ["tmux"]);
 });
 
 test("tmux provider does not retry keys after tmux starts and rejects them", async () => {
   const calls: string[] = [];
+  const terminal = await terminalEndpoint("codex-work:0.0");
   const provider = new TmuxTerminalControlProvider({
     socketPaths: [],
     commands: ["tmux", "/fallback/tmux"],
@@ -489,7 +732,7 @@ test("tmux provider does not retry keys after tmux starts and rejects them", asy
   });
 
   await assert.rejects(
-    provider.sendKeys("codex-work:0.0", ["C-m"]),
+    provider.sendKeys(terminal, ["C-m"]),
     TerminalControlInputNotSentError
   );
   assert.deepEqual(calls, ["tmux"]);
@@ -497,6 +740,7 @@ test("tmux provider does not retry keys after tmux starts and rejects them", asy
 
 test("tmux provider may retry keys only when the executable never started", async () => {
   const calls: string[] = [];
+  const terminal = await terminalEndpoint("codex-work:0.0");
   const provider = new TmuxTerminalControlProvider({
     socketPaths: [],
     commands: ["tmux", "/working/tmux"],
@@ -514,6 +758,6 @@ test("tmux provider may retry keys only when the executable never started", asyn
     }
   });
 
-  await provider.sendKeys("codex-work:0.0", ["C-m"]);
+  await provider.sendKeys(terminal, ["C-m"]);
   assert.deepEqual(calls, ["tmux", "/working/tmux"]);
 });
