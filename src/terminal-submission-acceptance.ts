@@ -23,20 +23,47 @@ export interface CodexRolloutIdentity {
   path: string;
 }
 
-export interface CodexRolloutAcceptanceAnchor {
+interface CodexRolloutAcceptanceAnchorBase {
   schema: "agent-knock-knock/codex-rollout-acceptance-anchor";
-  version: 1;
-  native_thread_id: string;
   process_uuid: string;
   process_birth: string;
   captured_at: string;
-  mode: "existing" | "pre_materialization";
   file_existed: boolean;
   offset_bytes: number;
-  rollout?: CodexRolloutIdentity;
-  expected_empty_native_session?: true;
   anchor_fingerprint: string;
 }
+
+export interface CodexBoundRolloutAcceptanceAnchor
+  extends CodexRolloutAcceptanceAnchorBase {
+  version: 1;
+  native_thread_id: string;
+  mode: "existing" | "pre_materialization";
+  rollout?: CodexRolloutIdentity;
+  expected_empty_native_session?: true;
+}
+
+/**
+ * A process-bound anchor for a genuinely virgin Codex TUI. Codex does not
+ * assign a native thread UUID or open a rollout until its first prompt is
+ * submitted, so the UUID cannot safely be named before transport. The exact
+ * process incarnation is still pinned here; acceptance must additionally
+ * prove the newly materialized UUID, rollout, and request hash.
+ */
+export interface CodexVirginRolloutAcceptanceAnchor
+  extends CodexRolloutAcceptanceAnchorBase {
+  version: 2;
+  mode: "pre_materialization";
+  native_thread_id?: never;
+  native_thread_binding: "post_submission";
+  file_existed: false;
+  offset_bytes: 0;
+  rollout?: never;
+  expected_empty_native_session: true;
+}
+
+export type CodexRolloutAcceptanceAnchor =
+  | CodexBoundRolloutAcceptanceAnchor
+  | CodexVirginRolloutAcceptanceAnchor;
 
 export interface CodexRolloutAcceptanceIdentity {
   sessionId: string;
@@ -233,22 +260,56 @@ const NO_FOLLOW_FLAG = typeof fs.constants.O_NOFOLLOW === "number"
   : 0;
 
 type CaptureCodexRolloutAcceptanceAnchorOptions = {
-  nativeThreadId: string;
   processUuid: string;
   processBirth: string;
   now?: Date;
 } & (
-  | { mode: "existing"; rollout: CodexRolloutIdentity }
-  | { mode: "pre_materialization"; expectedEmptyNativeSession: true }
+  | {
+      nativeThreadId: string;
+      mode: "existing";
+      rollout: CodexRolloutIdentity;
+    }
+  | {
+      nativeThreadId: string;
+      mode: "pre_materialization";
+      expectedEmptyNativeSession: true;
+    }
+  | {
+      nativeThreadId?: undefined;
+      mode: "pre_materialization";
+      expectedEmptyNativeSession: true;
+    }
 );
 
 export function captureCodexRolloutAcceptanceAnchor(
   options: CaptureCodexRolloutAcceptanceAnchorOptions
 ): CodexRolloutAcceptanceAnchor {
-  const nativeThreadId = exactNativeThreadId(options.nativeThreadId);
   const processUuid = requiredString(options.processUuid, "Codex process UUID");
   const processBirth = requiredString(options.processBirth, "Codex process birth");
   const capturedAt = (options.now ?? new Date()).toISOString();
+  if (
+    options.mode === "pre_materialization" &&
+    options.nativeThreadId === undefined
+  ) {
+    const virginBase = {
+      schema: "agent-knock-knock/codex-rollout-acceptance-anchor" as const,
+      version: 2 as const,
+      process_uuid: processUuid,
+      process_birth: processBirth,
+      captured_at: capturedAt,
+      mode: "pre_materialization" as const,
+      native_thread_binding: "post_submission" as const,
+      file_existed: false as const,
+      offset_bytes: 0 as const,
+      expected_empty_native_session: true as const
+    };
+    return {
+      ...virginBase,
+      anchor_fingerprint: fingerprint(virginBase)
+    };
+  }
+
+  const nativeThreadId = exactNativeThreadId(options.nativeThreadId);
   const base = {
     schema: "agent-knock-knock/codex-rollout-acceptance-anchor" as const,
     version: 1 as const,
@@ -310,8 +371,12 @@ export function detectCodexRolloutAcceptance(options: {
   const anchor = validateCodexRolloutAcceptanceAnchor(options.anchor);
   const requestHash = sha256Value(options.requestHash, "terminal request hash");
   const current = options.currentIdentity;
+  const currentNativeThreadId = exactNativeThreadId(current.sessionId);
+  const expectedNativeThreadId = anchor.version === 1
+    ? anchor.native_thread_id
+    : currentNativeThreadId;
   if (
-    exactNativeThreadId(current.sessionId) !== anchor.native_thread_id ||
+    currentNativeThreadId !== expectedNativeThreadId ||
     current.processUuid !== anchor.process_uuid ||
     current.processBirth !== anchor.process_birth
   ) {
@@ -360,8 +425,16 @@ export function detectCodexRolloutAcceptance(options: {
     if (!sameStableFile(before, after)) {
       return undefined;
     }
+    const suffix = buffer.toString("utf8");
+    if (anchor.version === 2) {
+      assertVirginRolloutHeader({
+        text: suffix,
+        nativeThreadId: expectedNativeThreadId,
+        capturedAt: anchor.captured_at
+      });
+    }
     const accepted = acceptedCodexTurnFromSuffix(
-      buffer.toString("utf8"),
+      suffix,
       requestHash
     );
     if (!accepted) {
@@ -370,7 +443,7 @@ export function detectCodexRolloutAcceptance(options: {
     const evidenceBase = {
       source: "codex_rollout" as const,
       kind: "native_user_turn" as const,
-      nativeThreadId: anchor.native_thread_id,
+      nativeThreadId: expectedNativeThreadId,
       requestHash,
       acceptanceId: accepted.turnId,
       acceptedAt: accepted.userTimestamp ?? accepted.startedAt,
@@ -411,21 +484,27 @@ export function detectCodexBoundRolloutCompletion(options: {
     return codexCompletionFailure("invalid_anchor", error);
   }
 
-  const baseDiagnostics: Omit<CodexBoundRolloutCompletionDiagnostics, "code"> = {
+  const initialDiagnostics: Omit<
+    CodexBoundRolloutCompletionDiagnostics,
+    "code"
+  > = {
     detector: "codex_exact_bound_rollout",
-    native_thread_id: anchor.native_thread_id,
     anchor_fingerprint: anchor.anchor_fingerprint,
     scan_start_offset_bytes: anchor.offset_bytes
   };
   let requestHash: string;
   let acceptance: TerminalSubmissionAcceptanceEvidence;
+  let expectedNativeThreadId: string;
   try {
     requestHash = sha256Value(options.requestHash, "terminal request hash");
+    expectedNativeThreadId = anchor.version === 1
+      ? anchor.native_thread_id
+      : exactNativeThreadId(options.acceptanceEvidence.nativeThreadId);
     acceptance = validateTerminalSubmissionAcceptanceEvidence(
       options.acceptanceEvidence,
       {
         source: "codex_rollout",
-        nativeThreadId: anchor.native_thread_id,
+        nativeThreadId: expectedNativeThreadId,
         requestHash
       }
     );
@@ -433,9 +512,13 @@ export function detectCodexBoundRolloutCompletion(options: {
     return codexCompletionFailure(
       "invalid_acceptance_evidence",
       error,
-      baseDiagnostics
+      initialDiagnostics
     );
   }
+  const baseDiagnostics = {
+    ...initialDiagnostics,
+    native_thread_id: expectedNativeThreadId
+  };
 
   let acceptanceId: string;
   try {
@@ -504,7 +587,7 @@ export function detectCodexBoundRolloutCompletion(options: {
   const current = options.currentIdentity;
   try {
     if (
-      exactNativeThreadId(current.sessionId) !== anchor.native_thread_id ||
+      exactNativeThreadId(current.sessionId) !== expectedNativeThreadId ||
       requiredString(current.processUuid, "Codex process UUID") !==
         anchor.process_uuid ||
       requiredString(current.processBirth, "Codex process birth") !==
@@ -677,7 +760,7 @@ export function detectCodexBoundRolloutCompletion(options: {
       metadata: {
         match: "bound_rollout_task_complete",
         turn_id: acceptanceId,
-        native_thread_id: anchor.native_thread_id,
+        native_thread_id: expectedNativeThreadId,
         anchor_fingerprint: anchor.anchor_fingerprint,
         rollout_identity_fingerprint:
           rolloutDiagnostics.rollout_identity_fingerprint,
@@ -971,13 +1054,53 @@ function exactCodexUserResponseText(content: unknown): string | undefined {
     : undefined;
 }
 
+function assertVirginRolloutHeader(options: {
+  text: string;
+  nativeThreadId: string;
+  capturedAt: string;
+}): void {
+  const firstLine = options.text.split("\n").find((line) => line.trim() !== "");
+  if (!firstLine) {
+    throw new Error("virgin Codex rollout has no session metadata");
+  }
+  let record: unknown;
+  try {
+    record = JSON.parse(firstLine);
+  } catch {
+    throw new Error("virgin Codex rollout starts with invalid session metadata");
+  }
+  const payload = isRecord(record) && record.type === "session_meta" &&
+    isRecord(record.payload)
+    ? record.payload
+    : undefined;
+  if (
+    !payload ||
+    exactNativeThreadId(String(payload.id ?? "")) !== options.nativeThreadId ||
+    payload.originator !== "codex-tui" ||
+    payload.source !== "cli"
+  ) {
+    throw new Error(
+      "virgin Codex rollout metadata does not identify the newly materialized CLI thread"
+    );
+  }
+  const materializedAt = isRecord(record) ? record.timestamp : undefined;
+  if (
+    !validTimestamp(materializedAt) ||
+    Date.parse(String(materializedAt)) < Date.parse(options.capturedAt)
+  ) {
+    throw new Error(
+      "virgin Codex rollout predates its terminal submission anchor"
+    );
+  }
+}
+
 function validateCodexRolloutAcceptanceAnchor(
   value: CodexRolloutAcceptanceAnchor
 ): CodexRolloutAcceptanceAnchor {
   if (
     !isRecord(value) ||
     value.schema !== "agent-knock-knock/codex-rollout-acceptance-anchor" ||
-    value.version !== 1 ||
+    (value.version !== 1 && value.version !== 2) ||
     !["existing", "pre_materialization"].includes(String(value.mode)) ||
     !Number.isSafeInteger(value.offset_bytes) ||
     value.offset_bytes < 0 ||
@@ -985,7 +1108,18 @@ function validateCodexRolloutAcceptanceAnchor(
   ) {
     throw new Error("Codex rollout acceptance anchor is invalid");
   }
-  exactNativeThreadId(value.native_thread_id);
+  if (value.version === 1) {
+    exactNativeThreadId(value.native_thread_id);
+    if ("native_thread_binding" in value) {
+      throw new Error("bound Codex acceptance anchor has deferred binding state");
+    }
+  } else if (
+    value.mode !== "pre_materialization" ||
+    value.native_thread_binding !== "post_submission" ||
+    "native_thread_id" in value
+  ) {
+    throw new Error("virgin Codex acceptance anchor is inconsistent");
+  }
   requiredString(value.process_uuid, "Codex process UUID");
   requiredString(value.process_birth, "Codex process birth");
   if (!validTimestamp(value.captured_at)) {
@@ -996,20 +1130,21 @@ function validateCodexRolloutAcceptanceAnchor(
   if (fingerprint(base) !== value.anchor_fingerprint) {
     throw new Error("Codex rollout acceptance anchor fingerprint does not match");
   }
+  const rollout = "rollout" in value ? value.rollout : undefined;
   if (
     value.file_existed !== (value.mode === "existing") ||
-    value.file_existed !== Boolean(value.rollout)
+    value.file_existed !== Boolean(rollout)
   ) {
     throw new Error("Codex rollout acceptance anchor file state is inconsistent");
   }
-  if (value.mode === "existing" && value.rollout) {
-    normalizedRolloutIdentity(value.rollout);
+  if (value.mode === "existing" && rollout) {
+    normalizedRolloutIdentity(rollout);
     if (value.expected_empty_native_session !== undefined) {
       throw new Error("existing Codex acceptance anchor has pre-materialization state");
     }
   } else if (
     value.offset_bytes !== 0 ||
-    value.rollout !== undefined ||
+    rollout !== undefined ||
     value.expected_empty_native_session !== true
   ) {
     throw new Error("Codex pre-materialization acceptance anchor is inconsistent");

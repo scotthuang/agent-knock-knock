@@ -291,6 +291,134 @@ test("a pre-materialization Codex anchor accepts only the exact newly opened rol
   }
 });
 
+test("a virgin Codex anchor binds the first exact rollout only after submission", () => {
+  const fixture = codexFixture();
+  try {
+    const processUuid = "codex-virgin-process";
+    const processBirth = "codex-virgin-birth";
+    const anchor = captureCodexRolloutAcceptanceAnchor({
+      processUuid,
+      processBirth,
+      mode: "pre_materialization",
+      expectedEmptyNativeSession: true,
+      now: new Date("2026-08-07T00:59:58.000Z")
+    });
+    assert.equal(anchor.version, 2);
+    assert.equal("native_thread_id" in anchor, false);
+    // Codex may allocate its in-memory SessionMeta when the TUI starts, long
+    // before it persists the first rollout. The authoritative freshness proof
+    // is the outer rollout-item timestamp, not payload.timestamp.
+    assert.ok(
+      Date.parse("2026-08-07T00:00:00.000Z") <
+        Date.parse(anchor.captured_at)
+    );
+    appendRecords(fixture.path, acceptedTurnRecords(REQUEST, 70));
+
+    const evidence = detectCodexRolloutAcceptance({
+      anchor,
+      currentIdentity: {
+        sessionId: SESSION_ID,
+        processUuid,
+        processBirth,
+        rollout: fixture.identity
+      },
+      requestHash: REQUEST_HASH
+    });
+    assert.ok(evidence);
+    assert.equal(evidence.nativeThreadId, SESSION_ID);
+    assert.equal(evidence.anchorFingerprint, anchor.anchor_fingerprint);
+
+    appendRecords(fixture.path, [taskCompleteRecord(70, "Virgin exact result")]);
+    const completion = detectCodexBoundRolloutCompletion({
+      anchor,
+      acceptanceEvidence: evidence,
+      currentIdentity: {
+        sessionId: SESSION_ID,
+        processUuid,
+        processBirth,
+        rollout: fixture.identity
+      },
+      requestHash: REQUEST_HASH
+    });
+    assert.equal(completion.status, "completed");
+    if (completion.status === "completed") {
+      assert.equal(completion.completion.metadata?.native_thread_id, SESSION_ID);
+    }
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("a virgin Codex anchor rejects process drift and a forged pre-bound UUID", () => {
+  const fixture = codexFixture();
+  try {
+    const anchor = captureCodexRolloutAcceptanceAnchor({
+      processUuid: "codex-virgin-process",
+      processBirth: "codex-virgin-birth",
+      mode: "pre_materialization",
+      expectedEmptyNativeSession: true
+    });
+    appendRecords(fixture.path, acceptedTurnRecords(REQUEST, 71));
+    assert.throws(() => detectCodexRolloutAcceptance({
+      anchor,
+      currentIdentity: {
+        sessionId: SESSION_ID,
+        processUuid: "codex-virgin-process",
+        processBirth: "codex-virgin-birth",
+        rollout: fixture.identity
+      },
+      requestHash: REQUEST_HASH
+    }), /rollout predates its terminal submission anchor/u);
+    assert.throws(() => detectCodexRolloutAcceptance({
+      anchor,
+      currentIdentity: {
+        sessionId: SESSION_ID,
+        processUuid: "codex-reused-process",
+        processBirth: "codex-reused-birth",
+        rollout: fixture.identity
+      },
+      requestHash: REQUEST_HASH
+    }), /identity changed/u);
+
+    assert.throws(() => detectCodexRolloutAcceptance({
+      anchor: {
+        ...anchor,
+        native_thread_id: SESSION_ID
+      } as never,
+      currentIdentity: {
+        sessionId: SESSION_ID,
+        processUuid: "codex-virgin-process",
+        processBirth: "codex-virgin-birth",
+        rollout: fixture.identity
+      },
+      requestHash: REQUEST_HASH
+    }), /fingerprint does not match|virgin Codex acceptance anchor is inconsistent/u);
+
+    const { anchor_fingerprint: _fingerprint, ...stringVersionBase } = {
+      ...anchor,
+      version: "2"
+    };
+    const stringVersionAnchor = {
+      ...stringVersionBase,
+      anchor_fingerprint: createHash("sha256")
+        .update(JSON.stringify(stringVersionBase))
+        .digest("hex")
+    };
+    assert.throws(() => detectCodexRolloutAcceptance({
+      anchor: stringVersionAnchor as never,
+      currentIdentity: {
+        sessionId: SESSION_ID,
+        processUuid: "codex-virgin-process",
+        processBirth: "codex-virgin-birth",
+        rollout: fixture.identity
+      },
+      requestHash: REQUEST_HASH
+    }), /acceptance anchor is invalid/u);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test("Codex acceptance permits read-only public rollout data but rejects externally writable data", () => {
   const publicFixture = codexFixture();
   try {
@@ -601,6 +729,7 @@ function codexFixture(initialRecords: readonly unknown[] = []) {
     type: "session_meta",
     payload: {
       id: SESSION_ID,
+      timestamp: "2026-08-07T00:00:00.000Z",
       cwd: directory,
       originator: "codex-tui",
       source: "cli",
