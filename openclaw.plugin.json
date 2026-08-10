@@ -1,7 +1,7 @@
 {
   "id": "agent-knock-knock",
   "name": "Agent Knock Knock",
-  "description": "Control local Codex and Claude Code through shared tmux terminals, with exact-version native status inspection, native-thread lifecycle controls, live monitoring, approvals, and human takeover.",
+  "description": "Control local Codex and Claude Code through shared tmux or Herdr terminals, with exact-version native status inspection, native-thread lifecycle controls, live monitoring, approvals, and human takeover.",
   "icon": "https://raw.githubusercontent.com/scotthuang/agent-knock-knock/main/docs/assets/agent-knock-knock-icon.png",
   "activation": {
     "onStartup": true,
@@ -92,7 +92,7 @@
       },
       "codexHome": {
         "type": "string",
-        "description": "Optional CODEX_HOME path used to correlate Codex session metadata with eligible tmux terminals."
+        "description": "Optional CODEX_HOME path used to correlate Codex session metadata with eligible terminal panes."
       },
       "idleTimeoutMinutes": {
         "type": "number",

@@ -10,13 +10,145 @@ import {
   createTerminalControlProviderRegistry,
   discoverTmuxSocketPaths,
   enrichActiveProcessesWithTerminalControl,
-  parseTmuxListPanes
+  parseTmuxListPanes,
+  type TerminalControlProvider
 } from "../src/terminal-control-provider.js";
 import {
+  createTerminalEndpointRef,
   sameTerminalEndpointIdentity,
+  type TerminalControlCapability,
+  type TerminalControlRef,
+  type TerminalProviderCapability,
   type TerminalEndpointRef
 } from "../src/terminal-control-ref.js";
 import type { ActiveCodexProcess } from "../src/codex-session-provider.js";
+
+class RecordingTerminalControlProvider implements TerminalControlProvider {
+  readonly calls: string[] = [];
+  readonly control: TerminalControlRef;
+  readonly terminal: TerminalEndpointRef;
+
+  constructor(
+    readonly kind: string,
+    readonly supportedCapabilities: readonly TerminalControlCapability[],
+    readonly providerCapabilities: readonly TerminalProviderCapability[],
+    options: {
+      label?: string;
+      processAnchorPid?: number;
+    } = {}
+  ) {
+    const label = options.label ?? `${kind}:0.0`;
+    this.control = {
+      kind,
+      target: label,
+      session: `${kind}-session`,
+      panePid: options.processAnchorPid ?? 100,
+      capabilities: [...supportedCapabilities]
+    } as unknown as TerminalControlRef;
+    this.terminal = createTerminalEndpointRef({
+      identity: {
+        providerKind: kind,
+        endpointKey: `endpoint:${kind}`,
+        resourceKey: `resource:${kind}`
+      },
+      route: {
+        routeKey: `route:${kind}`,
+        label
+      },
+      processAnchorPid: options.processAnchorPid ?? 100,
+      capabilities: supportedCapabilities,
+      providerRef: this.control
+    });
+  }
+
+  async diagnostics(): Promise<Record<string, unknown>> {
+    this.calls.push("diagnostics");
+    return { kind: this.kind };
+  }
+
+  async listTerminals(): Promise<TerminalEndpointRef[]> {
+    this.calls.push("listTerminals");
+    return [this.terminal];
+  }
+
+  endpoint(terminalControl: TerminalControlRef): TerminalEndpointRef {
+    this.calls.push("endpoint");
+    assert.equal(terminalControl.kind, this.kind);
+    return this.terminal;
+  }
+
+  toControlRef(
+    terminal: TerminalEndpointRef,
+    capabilities: readonly TerminalControlCapability[] = terminal.capabilities
+  ): TerminalControlRef {
+    this.calls.push("toControlRef");
+    assert.equal(terminal.identity.providerKind, this.kind);
+    return {
+      ...this.control,
+      capabilities: [...capabilities]
+    } as TerminalControlRef;
+  }
+
+  async resolve(terminal: TerminalEndpointRef): Promise<TerminalEndpointRef> {
+    this.calls.push("resolve");
+    assert.equal(terminal.identity.providerKind, this.kind);
+    return this.terminal;
+  }
+
+  containsProcess(
+    terminal: TerminalEndpointRef,
+    process: { pid: number; ppid: number },
+    _processes: readonly { pid: number; ppid: number }[]
+  ): boolean {
+    this.calls.push("containsProcess");
+    assert.equal(terminal.identity.providerKind, this.kind);
+    return process.pid === terminal.processAnchorPid ||
+      process.ppid === terminal.processAnchorPid;
+  }
+
+  async capture(
+    terminal: TerminalEndpointRef,
+    options: { scrollbackLines?: number; preserveEscapes?: boolean } = {}
+  ): Promise<string> {
+    this.calls.push(`capture:${options.scrollbackLines ?? "default"}`);
+    assert.equal(terminal.identity.providerKind, this.kind);
+    return `${this.kind}:screen`;
+  }
+
+  async sendText(terminal: TerminalEndpointRef, text: string): Promise<void> {
+    this.calls.push(`sendText:${text}`);
+    assert.equal(terminal.identity.providerKind, this.kind);
+  }
+
+  async sendKeys(
+    terminal: TerminalEndpointRef,
+    keys: readonly string[]
+  ): Promise<void> {
+    this.calls.push(`sendKeys:${keys.join(",")}`);
+    assert.equal(terminal.identity.providerKind, this.kind);
+  }
+}
+
+class FailingDiscoveryTerminalControlProvider extends RecordingTerminalControlProvider {
+  failDiscovery = true;
+  failDiagnostics = true;
+
+  override async diagnostics(): Promise<Record<string, unknown>> {
+    this.calls.push("diagnostics");
+    if (this.failDiagnostics) {
+      throw new Error(`${this.kind} diagnostics failed`);
+    }
+    return { kind: this.kind };
+  }
+
+  override async listTerminals(): Promise<TerminalEndpointRef[]> {
+    this.calls.push("listTerminals");
+    if (this.failDiscovery) {
+      throw new Error(`${this.kind} discovery failed`);
+    }
+    return [this.terminal];
+  }
+}
 
 async function terminalEndpoint(
   target: string,
@@ -347,6 +479,162 @@ test("terminal provider registry rejects duplicate and unknown provider kinds", 
     () => registry.require("unknown"),
     /not registered for unknown/u
   );
+});
+
+test("terminal provider registry facade aggregates and dispatches by provider kind", async () => {
+  const alpha = new RecordingTerminalControlProvider(
+    "alpha",
+    ["screen_status", "send_keys", "terminal_cancel"],
+    ["screen_capture", "text_delivery", "key_delivery"]
+  );
+  const beta = new RecordingTerminalControlProvider(
+    "beta",
+    ["screen_status", "terminal_approval"],
+    ["screen_capture", "ansi_capture", "key_delivery"]
+  );
+  const registry = createTerminalControlProviderRegistry([alpha]);
+  const provider = registry.asProvider();
+
+  assert.equal(registry.asProvider(), provider);
+  assert.deepEqual(provider.supportedCapabilities, [
+    "screen_status",
+    "send_keys",
+    "terminal_cancel"
+  ]);
+  registry.register(beta);
+  assert.deepEqual(provider.supportedCapabilities, ["screen_status"]);
+  assert.deepEqual(provider.providerCapabilities, [
+    "screen_capture",
+    "key_delivery"
+  ]);
+
+  assert.deepEqual(await provider.listTerminals(), [
+    alpha.terminal,
+    beta.terminal
+  ]);
+  assert.equal(provider.endpoint(alpha.control), alpha.terminal);
+  assert.equal(
+    provider.toControlRef(beta.terminal, ["screen_status"]).kind,
+    "beta"
+  );
+  assert.equal(await provider.resolve(beta.terminal), beta.terminal);
+  assert.equal(
+    provider.containsProcess(alpha.terminal, { pid: 101, ppid: 100 }, []),
+    true
+  );
+  assert.equal(
+    await provider.capture(beta.terminal, { scrollbackLines: 12 }),
+    "beta:screen"
+  );
+  await provider.sendText(alpha.terminal, "hello");
+  await provider.sendKeys(beta.terminal, ["C-m"]);
+
+  assert.deepEqual(alpha.calls, [
+    "listTerminals",
+    "endpoint",
+    "containsProcess",
+    "sendText:hello"
+  ]);
+  assert.deepEqual(beta.calls, [
+    "listTerminals",
+    "toControlRef",
+    "resolve",
+    "capture:12",
+    "sendKeys:C-m"
+  ]);
+
+  const unknown = new RecordingTerminalControlProvider(
+    "unknown",
+    ["screen_status"],
+    ["screen_capture"]
+  );
+  assert.throws(
+    () => provider.toControlRef(unknown.terminal),
+    /not registered for unknown/u
+  );
+});
+
+test("terminal provider registry isolates discovery failures by provider", async () => {
+  const tmux = new RecordingTerminalControlProvider(
+    "tmux",
+    ["screen_status", "send_keys"],
+    ["screen_capture", "text_delivery", "key_delivery"]
+  );
+  const herdr = new FailingDiscoveryTerminalControlProvider(
+    "herdr",
+    ["screen_status", "send_keys"],
+    ["screen_capture", "text_delivery", "key_delivery"]
+  );
+  const provider = createTerminalControlProviderRegistry([
+    tmux,
+    herdr
+  ]).asProvider();
+
+  assert.deepEqual(await provider.listTerminals(), [tmux.terminal]);
+  assert.deepEqual(await provider.diagnostics(), {
+    provider: "registry",
+    providerKinds: ["tmux", "herdr"],
+    providers: {
+      tmux: { kind: "tmux" },
+      herdr: {
+        provider: "herdr",
+        status: "error",
+        error: "herdr diagnostics failed"
+      }
+    },
+    discoveryErrors: {
+      herdr: "herdr discovery failed"
+    }
+  });
+
+  herdr.failDiscovery = false;
+  herdr.failDiagnostics = false;
+  assert.deepEqual(await provider.listTerminals(), [
+    tmux.terminal,
+    herdr.terminal
+  ]);
+  assert.deepEqual(
+    (await provider.diagnostics()).discoveryErrors,
+    {}
+  );
+});
+
+test("terminal enrichment fails closed when providers contain the same process", async () => {
+  const process: ActiveCodexProcess = {
+    agent: "codex",
+    pid: 101,
+    ppid: 100,
+    command: "codex",
+    cwd: "/repo",
+    kind: "codex_cli",
+    confidence: "high",
+    reason: "test"
+  };
+  const alpha = new RecordingTerminalControlProvider(
+    "alpha",
+    ["screen_status", "send_keys"],
+    ["screen_capture", "process_inspection"],
+    { processAnchorPid: 100 }
+  );
+  const beta = new RecordingTerminalControlProvider(
+    "beta",
+    ["screen_status", "send_keys"],
+    ["screen_capture", "process_inspection"],
+    { processAnchorPid: 100 }
+  );
+  const provider = createTerminalControlProviderRegistry([
+    alpha,
+    beta
+  ]).asProvider();
+
+  const [enriched] = await enrichActiveProcessesWithTerminalControl(
+    [process],
+    provider
+  );
+
+  assert.equal(enriched.terminalControl, undefined);
+  assert.equal(alpha.calls.includes("toControlRef"), false);
+  assert.equal(beta.calls.includes("toControlRef"), false);
 });
 
 test("terminal resolve refreshes the route without changing stable resource identity", async () => {

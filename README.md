@@ -4,13 +4,13 @@
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.19-339933)](https://nodejs.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/scotthuang/agent-knock-knock/blob/main/LICENSE)
 
-Agent Knock Knock lets OpenClaw control local Codex and Claude Code through shared tmux terminals, so you can take over and hand work back without losing context.
+Agent Knock Knock lets OpenClaw control local Codex and Claude Code through shared tmux or Herdr terminals, so you can take over and hand work back without losing context.
 
 **No hooks. No agent-side plugins. Just share a terminal and stay in control. No YOLO. Automate the trusted. Review the rest.**
 
 ## Quick Start with ClawHub
 
-AKK reuses Codex or Claude Code already running in tmux; it never launches a coding agent. You need OpenClaw `2026.6.5`+, tmux, and an authenticated `codex` or `claude` CLI, all running as the same OS user.
+AKK reuses Codex or Claude Code already running in tmux or a supported Herdr session; it never launches a coding agent. You need OpenClaw `2026.6.5`+, a supported terminal host, and an authenticated `codex` or `claude` CLI, all running as the same OS user.
 
 Install AKK and restart the Gateway:
 
@@ -27,6 +27,8 @@ tmux new-session -s akk-work -c "$(pwd -P)" codex
 ```
 
 Use `claude` instead of `codex` if preferred. Wait for the coding agent's idle prompt, then detach from tmux with `Ctrl-b`, followed by `d`.
+
+Herdr `0.8.0` is also supported as an exact-version local terminal provider. See [Quick Start with Herdr](docs/quickstart-herdr.md).
 
 From any configured OpenClaw channel, first send:
 
@@ -58,13 +60,13 @@ The second command proves that AKK can find the one eligible idle pane, revalida
 
 ## How It Works
 
-AKK connects OpenClaw to Codex or Claude Code already running inside tmux:
+AKK connects OpenClaw to Codex or Claude Code already running inside a supported shared terminal:
 
 1. OpenClaw selects an AKK session and sends the next user-facing request.
 2. AKK verifies the bound agent pane, creates a new Turn, and writes only that request into the terminal.
 3. AKK monitors the same pane for reliable approval, completion, cancellation, and failure evidence correlated to that Turn.
 4. AKK reports the result, `session_id`, and `turn_id` to the originating OpenClaw conversation.
-5. A human can attach to the same tmux terminal at any time and continue directly.
+5. A human can attach to the same tmux or Herdr terminal at any time and continue directly.
 
 AKK is local-first. It has no hosted control plane or telemetry and does not change the coding agent's configured permission mode.
 
@@ -73,7 +75,7 @@ AKK is local-first. It has no hosted control plane or telemetry and does not cha
 AKK keeps four identities separate:
 
 ```text
-tmux terminal / process incarnation
+terminal resource / process incarnation
 └─ native Codex or Claude Code session
    └─ AKK session (session_id)
       ├─ Turn 1 (turn_id)
@@ -114,9 +116,9 @@ Requirements:
 
 - A Node.js version supported by your OpenClaw release (Node.js 24 LTS is recommended)
 - [OpenClaw](https://docs.openclaw.ai/) `2026.6.5` or newer
-- `tmux`
+- At least one supported terminal host: tmux, or local Herdr `0.8.0` (protocol 19)
 - At least one authenticated coding-agent CLI: Codex or Claude Code
-- OpenClaw, AKK, tmux, and the coding agent running as the same OS user
+- OpenClaw, AKK, the selected terminal host, and the coding agent running as the same OS user
 
 | Compatibility layer | Version | Evidence |
 | --- | --- | --- |
@@ -153,6 +155,8 @@ agent-knock-knock install-openclaw --openclaw-bin /path/to/openclaw/openclaw.mjs
 
 ## Shared Terminal Details
 
+AKK discovers both tmux and local Herdr sessions. If a process appears under more than one provider, AKK fails closed instead of guessing which terminal owns it. Remote Herdr sessions and Windows named-pipe transport are not supported yet.
+
 Install tmux on macOS:
 
 ```bash
@@ -175,6 +179,8 @@ Use `claude` instead of `codex` for Claude Code. Detach with `Ctrl-b`, then `d`.
 
 Claude tmux support requires no hooks and does not modify Claude Code settings. Hook-free completion monitoring is verified on Claude Code `2.1.198`, `2.1.218`, and `2.1.226`; newer versions remain eligible when their interactive transcripts preserve the required identity and completion structure. Hookless auto-approval is deliberately narrower: approval evidence currently requires Claude Code `2.1.x` at `2.1.198` or later, and other versions fall back to manual handling.
 
+For Herdr, AKK talks directly to each local session's Unix socket. It binds the stable Herdr `terminal_id`, refreshes the current `pane_id` before every operation, verifies the shell/agent process ancestry and cwd, reads the detector screen, and uses the bracketed-paste-aware `pane.send_input` API. Text injection and Enter remain separate operations so AKK can persist and revalidate the dispatch boundary between them.
+
 Run the diagnostic:
 
 ```bash
@@ -191,7 +197,7 @@ For one complete first run, follow [Agent Knock Knock in 5 minutes](https://gith
 
 ## Usage
 
-AKK discovers verified Codex and Claude Code panes across workspaces. It sends work only to a pane that is already running in tmux and at a verified idle prompt; it never starts a coding agent for you.
+AKK discovers verified Codex and Claude Code panes across workspaces. It sends work only to a pane that is already running in tmux or supported Herdr and at a verified idle prompt; it never starts a coding agent for you.
 
 If exactly one eligible idle coding-agent pane exists across all workspaces, send a task directly:
 
@@ -224,9 +230,9 @@ The core command surface is intentionally small:
 
 `/akk list` performs a controlled reconciliation across managed turns, and `/akk status` limits reconciliation to the selected turn. This can close records whose idle retention has elapsed and restore eligible missing monitors, but it does not send terminal input or retry callback delivery. Independently, the running OpenClaw plugin supervises eligible `waiting_for_agent` monitors every five seconds; this liveness pass only restores missing monitors and likewise never retries callback transport. Standalone shell queries are read-only unless `--reconcile` is explicitly passed, and resolving a selector never changes turn state.
 
-Selectors fail closed: `only` works only with one actionable target, `latest` requires a unique newest target, and `codex` or `claude` must identify exactly one eligible pane. These names and `@short-ref` are human-facing resolution inputs; a natural-language tool call may preserve one explicitly named by the user, but must not infer one. Managed JSON actions contain the authoritative full `session_id` or `turn_id`. For first attach, an unmanaged raw-terminal row's send action may instead contain its own prefilled `selector`; its advertised raw controls may contain that row's prefilled `conversation_id`. Neither compatibility selector may be guessed, copied from another row, or passed in an authoritative ID field. Before every terminal operation, AKK revalidates the expected agent PID and tmux pane identity, then confirms that the process and pane working directories still match; every send also revalidates the idle prompt immediately before typing.
+Selectors fail closed: `only` works only with one actionable target, `latest` requires a unique newest target, and `codex` or `claude` must identify exactly one eligible pane. These names and `@short-ref` are human-facing resolution inputs; a natural-language tool call may preserve one explicitly named by the user, but must not infer one. Managed JSON actions contain the authoritative full `session_id` or `turn_id`. For first attach, an unmanaged raw-terminal row's send action may instead contain its own prefilled `selector`; its advertised raw controls may contain that row's prefilled `conversation_id`. Neither compatibility selector may be guessed, copied from another row, or passed in an authoritative ID field. Before every terminal operation, AKK revalidates the expected agent PID and provider-owned terminal identity, then confirms that the process and pane working directories still match; every send also revalidates the idle prompt immediately before typing.
 
-To change native context, first copy the full `terminal_id` from `/akk list`; lifecycle commands do not accept an ordinary-send `@short-ref` or loose agent selector. `/akk threads <exact-terminal-id>` lists exact, same-workspace candidates with a deterministic number, a collision-safe display-only `@short-id`, an opaque snapshot handle, and the complete UUID. `/akk resume-thread <exact-terminal-id>` without a selection shows that list. A complete UUID remains compatible. A number or short ID resolves only against the latest list displayed in the same OpenClaw session, while an opaque handle names its exact snapshot; all expire after five minutes and fail after terminal, process, workspace, binding, candidate-set, or relevant action changes. None is ever passed to Codex or Claude Code as native identity: AKK resolves the saved tuple back to its full UUID and fresh evidence tokens first. `previous` (or `刚才那个`) is advertised only when the current Session's latest committed lifecycle transition identifies exactly one currently verified resumable source; it never guesses from title, recency, or static lineage. `/akk new-thread` and its human alias `/akk clear-thread` start a clean context. AKK does not poll bindings in the background: if a recorded owner process exits, the next lifecycle listing can classify that sole historical binding as resumable, and the resume mutation compare-and-swap detaches it before touching the terminal. Live, stale, expired, unsupported, busy, ambiguous, active-elsewhere, or unverifiable transitions fail closed. Do not send `/clear`, `/new`, `/resume`, `/status`, Codex `/fork`, `/side`, or `/btw`, Claude `/branch`, or any other first-line native slash command as an ordinary task or answer; use an advertised AKK action, express the request in natural language, or enter an unsupported native command manually in tmux.
+To change native context, first copy the full `terminal_id` from `/akk list`; lifecycle commands do not accept an ordinary-send `@short-ref` or loose agent selector. `/akk threads <exact-terminal-id>` lists exact, same-workspace candidates with a deterministic number, a collision-safe display-only `@short-id`, an opaque snapshot handle, and the complete UUID. `/akk resume-thread <exact-terminal-id>` without a selection shows that list. A complete UUID remains compatible. A number or short ID resolves only against the latest list displayed in the same OpenClaw session, while an opaque handle names its exact snapshot; all expire after five minutes and fail after terminal, process, workspace, binding, candidate-set, or relevant action changes. None is ever passed to Codex or Claude Code as native identity: AKK resolves the saved tuple back to its full UUID and fresh evidence tokens first. `previous` (or `刚才那个`) is advertised only when the current Session's latest committed lifecycle transition identifies exactly one currently verified resumable source; it never guesses from title, recency, or static lineage. `/akk new-thread` and its human alias `/akk clear-thread` start a clean context. AKK does not poll bindings in the background: if a recorded owner process exits, the next lifecycle listing can classify that sole historical binding as resumable, and the resume mutation compare-and-swap detaches it before touching the terminal. Live, stale, expired, unsupported, busy, ambiguous, active-elsewhere, or unverifiable transitions fail closed. Do not send `/clear`, `/new`, `/resume`, `/status`, Codex `/fork`, `/side`, or `/btw`, Claude `/branch`, or any other first-line native slash command as an ordinary task or answer; use an advertised AKK action, express the request in natural language, or enter an unsupported native command manually in the terminal UI.
 
 To request a native Codex status card or Claude Status panel, first run `agent_knock_knock_list` and use only that terminal row's advertised `native_inspect` action. The structured tool schema is closed to `inspection="status"`; callers cannot provide `/status` or another slash command as text. AKK serializes the inspection with terminal mutations, revalidates the fresh token and exact terminal identity, and returns only after it proves one fresh bounded status result and an idle postcondition. For Claude, that includes safely dismissing the exact modal once. It never turns ordinary `send` or `respond` into a slash-command escape hatch.
 
@@ -250,7 +256,7 @@ AKK works without project-specific plugin configuration. It reads these optional
 | --- | --- | --- |
 | `storeDir` | `~/.agent-knock-knock/store` | Stable Store root for the compatibility manifest, authoritative managed Sessions, and Turn records. |
 | `openclawBin` | Auto-detected | OpenClaw CLI used for callback delivery. |
-| `codexHome` | Auto-detected | Optional Codex home used to identify Codex sessions running in tmux. |
+| `codexHome` | Auto-detected | Optional Codex home used to identify Codex sessions running in a supported terminal. |
 | `idleTimeoutMinutes` | `10080` | Idle retention checked during controlled reconciliation. |
 | `agentTimeoutMinutes` | `60` | Terminal inactivity timeout. |
 | `agentHardTimeoutMinutes` | `720` | Maximum terminal monitor lifetime. |
@@ -267,7 +273,7 @@ For Claude Code, manual approval is deliberately narrow:
 
 - It is available only for the current AKK-managed turn.
 - AKK accepts only an exact, current Bash dialog with the one-time **Yes** choice already highlighted, correlated to one unresolved foreground Bash tool request in the anchored owner-private transcript. Persistent permission choices are rejected.
-- When no trusted rule matches, the callback takes the manual path. The user must personally inspect the named tmux pane, explicitly confirm the exact request, and then run `/akk approve @a1b2c3d4 --expected-approval-fingerprint <fresh-fingerprint>` using the fingerprint from that current notification; the hash-only callback is not sufficient for review.
+- When no trusted rule matches, the callback takes the manual path. The user must personally inspect the named terminal pane, explicitly confirm the exact request, and then run `/akk approve @a1b2c3d4 --expected-approval-fingerprint <fresh-fingerprint>` using the fingerprint from that current notification; the hash-only callback is not sufficient for review.
 - AKK re-evaluates the evidence and revalidates the process and pane immediately before sending one Enter.
 
 Unknown, stale, changed, ambiguous, or unmanaged dialogs fail closed and must be resolved in the terminal.
@@ -295,7 +301,7 @@ Place `autoApprove` inside the plugin `config` object. It is disabled by default
 
 AKK has no hosted control plane or telemetry and does not modify coding-agent settings. Its terminal state and logs stay on your machine; Claude approval callbacks omit raw commands, while Codex may include the visible command details OpenClaw needs to present for review.
 
-At startup, AKK registers its tools and reconciles monitors for existing managed turns. While the OpenClaw Gateway remains healthy, its single-flight supervisor schedules the next reconciliation five seconds after the previous sweep finishes, so an unexpectedly exited monitor is recreated without a `list` or `status` call. With the Store writable, reconciliation returning normally, and the same Turn binding still current, AKK prepares one immutable `done` message/outbox entry within 30 seconds after reliable native completion evidence becomes stable. External callback transport and wake acknowledgement are outside this bound. It never launches a coding agent; new work reuses exactly one eligible agent pane that you already started in tmux.
+At startup, AKK registers its tools and reconciles monitors for existing managed turns. While the OpenClaw Gateway remains healthy, its single-flight supervisor schedules the next reconciliation five seconds after the previous sweep finishes, so an unexpectedly exited monitor is recreated without a `list` or `status` call. With the Store writable, reconciliation returning normally, and the same Turn binding still current, AKK prepares one immutable `done` message/outbox entry within 30 seconds after reliable native completion evidence becomes stable. External callback transport and wake acknowledgement are outside this bound. It never launches a coding agent; new work reuses exactly one eligible agent pane that you already started in a supported terminal host.
 
 Your task content is still processed by OpenClaw and the coding-agent or model providers you configure. Review agent permissions and keep secrets out of task prompts.
 
@@ -305,12 +311,12 @@ With the global npm CLI installed, start with `agent-knock-knock doctor`. It run
 
 | Symptom | Action |
 | --- | --- |
-| No eligible terminal is available | Start Codex or Claude Code inside tmux as the same OS user, then run `AKK list`. |
+| No eligible terminal is available | Start Codex or Claude Code inside tmux or supported Herdr as the same OS user, then run `AKK list`. |
 | The npm installer or callbacks cannot find a local OpenClaw CLI | Set `openclawBin` and pass `--openclaw-bin` to `install-openclaw`. |
 | Source changes do not appear | Build, reinstall from the checkout, and restart the Gateway. |
 | Terminal Turn is `stalled` | Inspect `status` and the terminal; use `/akk renew only <minutes>` only when exactly one live stalled Turn needs more monitoring time. |
 | Turn is `callback_failed` | Run `/akk retry-callback only` when it is the only actionable failed callback, or use its `@short-ref`. |
-| `AKK list` reports an orphaned terminal dispatch or lifecycle transition | Inspect the named pane first, then run the exact `/akk close ...` recovery command returned by `list`. It contains exactly one fresh `--expected-message-id ...` or `--expected-transition-id ...` fence; do not construct, substitute, or reuse it. AKK leaves the coding agent and tmux pane running. |
+| `AKK list` reports an orphaned terminal dispatch or lifecycle transition | Inspect the named pane first, then run the exact `/akk close ...` recovery command returned by `list`. It contains exactly one fresh `--expected-message-id ...` or `--expected-transition-id ...` fence; do not construct, substitute, or reuse it. AKK leaves the coding agent and terminal pane running. |
 | Claude permission is not offered through AKK | Resolve unsupported dialogs in the terminal. The AKK path requires the exact supported one-time Bash prompt for the current managed turn. |
 | Claude request was not auto-approved | Check `autoApprove.enabled`, the agent, the rule's canonical `workspaces`, and the exact command vector. The request must also have matching current screen and local transcript evidence. |
 | Claude monitor becomes `stalled` | Check the Claude version and `status`, then inspect the terminal. Unknown transcript schemas, background work, identity changes, and ambiguous turns intentionally fail closed. |

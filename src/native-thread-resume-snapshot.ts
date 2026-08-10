@@ -57,6 +57,13 @@ export interface NativeThreadResumeSnapshot {
     target: string;
     socket_path?: string;
     pane_pid?: number;
+    kind?: "tmux" | "herdr";
+    session?: string;
+    session_dir?: string;
+    workspace_id?: string;
+    tab_id?: string;
+    pane_id?: string;
+    terminal_id?: string;
   };
   terminal_endpoint?: TerminalControlEvidence;
   current_session_id?: string;
@@ -303,7 +310,7 @@ export function createNativeThreadResumeSnapshot({
     target: string;
     socketPath?: string;
     panePid?: number;
-  };
+  } | TerminalControlRef;
   currentSessionId?: string;
   currentNativeThreadId?: string;
   expectedBindingToken: string;
@@ -340,7 +347,20 @@ export function createNativeThreadResumeSnapshot({
     terminal_control: {
       target: terminalControl.target,
       socket_path: terminalControl.socketPath,
-      pane_pid: terminalControl.panePid
+      pane_pid: terminalControl.panePid,
+      ...(isCompleteTerminalControlRef(terminalControl)
+        ? terminalControl.kind === "herdr"
+          ? {
+              kind: "herdr" as const,
+              session: terminalControl.session,
+              session_dir: terminalControl.sessionDir,
+              workspace_id: terminalControl.workspaceId,
+              tab_id: terminalControl.tabId,
+              pane_id: terminalControl.paneId,
+              terminal_id: terminalControl.terminalId
+            }
+          : { kind: "tmux" as const }
+        : {})
     },
     ...(canonicalTerminalControl
       ? { terminal_endpoint: terminalControlEvidence(terminalControl) }
@@ -734,6 +754,23 @@ function stableStringify(value: unknown): string {
 
 function snapshotTerminalControl(value: Record<string, any>): TerminalControlRef {
   const target = String(value.target ?? "");
+  if (value.kind === "herdr") {
+    return {
+      kind: "herdr",
+      target,
+      socketPath: String(value.socket_path ?? ""),
+      session: String(value.session ?? ""),
+      sessionDir: nonEmptyString(value.session_dir)
+        ? value.session_dir
+        : undefined,
+      workspaceId: String(value.workspace_id ?? ""),
+      tabId: String(value.tab_id ?? ""),
+      paneId: String(value.pane_id ?? ""),
+      terminalId: String(value.terminal_id ?? ""),
+      panePid: Number(value.pane_pid),
+      capabilities: []
+    };
+  }
   const [session = target, route = "0.0"] = target.split(":", 2);
   const [windowText = "0", paneText = "0"] = route.split(".", 2);
   return {
@@ -754,12 +791,23 @@ function isCompleteTerminalControlRef(
   value: { target: string; socketPath?: string; panePid?: number }
 ): value is TerminalControlRef {
   const candidate = value as Partial<TerminalControlRef>;
-  return candidate.kind === "tmux" &&
-    typeof candidate.session === "string" &&
-    Number.isSafeInteger(candidate.window) &&
-    Number.isSafeInteger(candidate.pane) &&
-    Number.isSafeInteger(candidate.panePid) &&
-    Array.isArray(candidate.capabilities);
+  if (
+    typeof candidate.session !== "string" ||
+    !Number.isSafeInteger(candidate.panePid) ||
+    !Array.isArray(candidate.capabilities)
+  ) {
+    return false;
+  }
+  if (candidate.kind === "tmux") {
+    return Number.isSafeInteger(candidate.window) &&
+      Number.isSafeInteger(candidate.pane);
+  }
+  return candidate.kind === "herdr" &&
+    typeof candidate.socketPath === "string" &&
+    typeof candidate.workspaceId === "string" &&
+    typeof candidate.tabId === "string" &&
+    typeof candidate.paneId === "string" &&
+    typeof candidate.terminalId === "string";
 }
 
 function snapshotEndpointMatches(

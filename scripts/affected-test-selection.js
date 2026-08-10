@@ -57,6 +57,7 @@ const sharedCorePaths = new Set([
   "src/codex-local-session-provider.ts",
   "src/codex-session-provider.ts",
   "src/executors.ts",
+  "src/herdr-terminal-control-provider.ts",
   "src/managed-session.ts",
   "src/protocol.ts",
   "src/session-store.ts",

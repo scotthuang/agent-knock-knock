@@ -382,7 +382,7 @@ export function formatAkkRespondCommandResult(
       text: [
         "AKK may have delivered the response, but its submission outcome is uncertain.",
         ...identityLines,
-        "next: do not retry automatically; inspect this Turn and the shared tmux pane."
+        "next: do not retry automatically; inspect this Turn and the shared terminal pane."
       ].join("\n"),
       isError: true
     };
@@ -406,7 +406,7 @@ export function formatAkkRespondCommandResult(
       text: [
         "AKK dispatched the response, but native acceptance is still pending.",
         ...identityLines,
-        "next: do not retry automatically; wait for native acceptance or inspect the shared tmux pane."
+        "next: do not retry automatically; wait for native acceptance or inspect the shared terminal pane."
       ].join("\n"),
       isError: true
     };
@@ -425,7 +425,7 @@ export function formatAkkRespondCommandResult(
     text: [
       "AKK could not confirm the response submission outcome.",
       ...identityLines,
-      "next: do not retry automatically; inspect this Turn and the shared tmux pane."
+      "next: do not retry automatically; inspect this Turn and the shared terminal pane."
     ].join("\n"),
     isError: true
   };
@@ -990,7 +990,7 @@ function formatTerminalLine(terminal: Record<string, unknown>): string {
   const terminalControl = recordValue(terminal.terminal_control) ?? {};
   const context = [
     nonEmptyString(terminalControl.target)
-      ? `tmux ${nonEmptyString(terminalControl.target)}`
+      ? `${nonEmptyString(terminalControl.kind) ?? "tmux"} ${nonEmptyString(terminalControl.target)}`
       : undefined,
     nonEmptyString(terminal.command),
     nonEmptyString(terminal.workspace) ?? nonEmptyString(terminal.cwd)

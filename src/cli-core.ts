@@ -136,6 +136,7 @@ import {
   type TerminalControlProvider,
   type TerminalControlProviderRegistry
 } from "./terminal-control-provider.js";
+import { HerdrTerminalControlProvider } from "./herdr-terminal-control-provider.js";
 import {
   parseTerminalConversationId,
   type ActiveTerminalProcess,
@@ -674,16 +675,16 @@ function runInstallOpenClaw(options) {
   const skillOnly = options.skillOnly === true;
   if (options.workspace !== undefined) {
     throw new Error(
-      "--workspace was removed from install-openclaw; AKK now discovers verified tmux panes across workspaces. Configure autoApprove.rules[].workspaces only for trusted automatic approvals."
+      "--workspace was removed from install-openclaw; AKK now discovers verified terminal panes across workspaces. Configure autoApprove.rules[].workspaces only for trusted automatic approvals."
     );
   }
   if (options.defaultAgent !== undefined) {
     throw new Error(
-      "--default-agent was removed; AKK now selects the only eligible idle tmux pane"
+      "--default-agent was removed; AKK now selects the only eligible idle terminal pane"
     );
   }
   if (options.mode !== undefined) {
-    throw new Error("--mode was removed; Agent Knock Knock now uses tmux only");
+    throw new Error("--mode was removed; Agent Knock Knock discovers supported terminal providers automatically");
   }
   if (skillOnly && options.verify === true) {
     throw new Error(
@@ -761,7 +762,8 @@ function runInstallOpenClaw(options) {
     ready,
     pending_restart: pendingRestart,
     mode: skillOnly ? "skill_only" : "full",
-    execution_mode: "tmux",
+    execution_mode: "terminal_provider",
+    terminal_providers: ["tmux", "herdr"],
     package_root: root,
     openclaw_bin: openclawBin ?? null,
     steps,
@@ -911,11 +913,11 @@ function runDoctor(options) {
 
 function buildDoctorReport(options): Record<string, any> {
   if (options.mode !== undefined) {
-    throw new Error("--mode was removed; Agent Knock Knock now checks tmux only");
+    throw new Error("--mode was removed; Agent Knock Knock checks supported terminal providers automatically");
   }
   if (options.workspace !== undefined) {
     throw new Error(
-      "--workspace was removed from doctor; AKK now discovers verified tmux panes across workspaces"
+      "--workspace was removed from doctor; AKK now discovers verified terminal panes across workspaces"
     );
   }
   const timeoutMs = options.timeoutMs === undefined
@@ -925,6 +927,7 @@ function buildDoctorReport(options): Record<string, any> {
   const executables = {
     openclaw: openclawBin,
     ...(options.tmuxBin ? { tmux: String(options.tmuxBin) } : {}),
+    herdr: String(options.herdrBin ?? resolveOptionalExecutable("herdr")),
     ...(options.codexBin ? { codex: String(options.codexBin) } : {}),
     ...(options.claudeBin ? { claude: String(options.claudeBin) } : {})
   };
@@ -976,26 +979,29 @@ function buildDoctorReport(options): Record<string, any> {
       : capabilities.readiness === "not_ready"
         ? "not_ready"
         : "partially_ready",
-    selected_mode: "tmux",
+    selected_mode: capabilities.available_transports[0] ?? "terminal_provider",
+    available_transports: capabilities.available_transports,
     live_terminal: {
       checked: false,
       required_for_install_readiness: false,
       detail:
-        "Installation readiness checks tmux and at least one supported CLI. " +
+        "Installation readiness checks tmux or exact-version Herdr and at least one supported CLI. " +
         "AKK verifies a live eligible pane when delegation begins."
     },
     package_root: root,
     checks,
     package_files: packageFiles,
     capabilities: {
-      tmux: capabilities.tmux
+      tmux: capabilities.tmux,
+      herdr: capabilities.herdr
     },
     openclaw,
     notes: [
       `Node.js ${MINIMUM_NODE_VERSION}+ and OpenClaw are required.`,
-      "AKK supports Codex and Claude Code through shared tmux terminals.",
+      "AKK supports Codex and Claude Code through shared tmux or local Herdr terminals.",
       "Doctor does not require a live coding-agent pane; delegation discovers and verifies one at send time.",
-      "Claude tmux completion is hook-free and fails closed unless the local transcript schema is verified."
+      "Claude terminal completion is hook-free and fails closed unless the local transcript schema is verified.",
+      "Herdr support is exact-version gated to 0.8.0/protocol 19 and uses local Unix sockets."
     ]
   };
 }
@@ -1063,7 +1069,12 @@ function createRuntimeTerminalControlProviderRegistry(
             ? parseJsonOption(options.terminalScreensJson, "--terminal-screens-json")
             : {}
         })
-      : new TmuxTerminalControlProvider()
+      : new TmuxTerminalControlProvider(),
+    ...(
+      options.terminalsJson || options.terminalScreensJson || options.processesJson
+        ? []
+        : [new HerdrTerminalControlProvider()]
+    )
   ]);
 }
 
@@ -1072,7 +1083,7 @@ function createTerminalControlProvider(
   registry: TerminalControlProviderRegistry =
     createRuntimeTerminalControlProviderRegistry(options)
 ): TerminalControlProvider {
-  return registry.require("tmux");
+  return registry.asProvider();
 }
 
 function createTerminalProcessSource(options): TerminalProcessSource {
@@ -1535,42 +1546,76 @@ function terminalControlFromTakeover(nativeTakeover): TerminalControlRef | undef
     return undefined;
   }
   const terminalControl = nativeTakeover["terminal_control"];
-  if (!isRecord(terminalControl) || terminalControl.kind !== "tmux") {
+  if (
+    !isRecord(terminalControl) ||
+    !(terminalControl.kind === "tmux" || terminalControl.kind === "herdr")
+  ) {
     return undefined;
   }
   const target = stringValue(terminalControl.target);
   const session = stringValue(terminalControl.session);
-  const window = Number(terminalControl.window);
-  const pane = Number(terminalControl.pane);
   const panePid = Number(terminalControl.panePid);
-  if (!target || !session || !Number.isInteger(window) || !Number.isInteger(pane) || !Number.isInteger(panePid)) {
+  if (!target || !session || !Number.isSafeInteger(panePid) || panePid <= 0) {
     return undefined;
   }
   const storedCapabilities = Array.isArray(terminalControl.capabilities)
     ? terminalControl.capabilities.filter(isTerminalControlCapability)
     : [];
-  const control: TerminalControlRef = {
-    kind: "tmux",
-    target,
-    session,
-    window,
-    pane,
-    panePid,
-    currentCommand: stringValue(terminalControl.currentCommand),
-    currentPath: stringValue(terminalControl.currentPath),
-    socketPath: stringValue(terminalControl.socketPath),
-    // State written before adapter capabilities were persisted always represented Codex.
-    capabilities: storedCapabilities.length > 0
-      ? storedCapabilities
-      : [
-          "screen_status",
-          "send_keys",
-          "terminal_approval",
-          "screen_completion",
-          "durable_completion",
-          "terminal_cancel"
-        ]
-  };
+  const capabilities = storedCapabilities.length > 0
+    ? storedCapabilities
+    : [
+        "screen_status",
+        "send_keys",
+        "terminal_approval",
+        "screen_completion",
+        "durable_completion",
+        "terminal_cancel"
+      ] as TerminalControlCapability[];
+  let control: TerminalControlRef;
+  if (terminalControl.kind === "tmux") {
+    const window = Number(terminalControl.window);
+    const pane = Number(terminalControl.pane);
+    if (!Number.isInteger(window) || !Number.isInteger(pane)) {
+      return undefined;
+    }
+    control = {
+      kind: "tmux",
+      target,
+      session,
+      window,
+      pane,
+      panePid,
+      currentCommand: stringValue(terminalControl.currentCommand),
+      currentPath: stringValue(terminalControl.currentPath),
+      socketPath: stringValue(terminalControl.socketPath),
+      // State written before adapter capabilities were persisted always represented Codex.
+      capabilities
+    };
+  } else {
+    const socketPath = stringValue(terminalControl.socketPath);
+    const workspaceId = stringValue(terminalControl.workspaceId);
+    const tabId = stringValue(terminalControl.tabId);
+    const paneId = stringValue(terminalControl.paneId);
+    const terminalId = stringValue(terminalControl.terminalId);
+    if (!socketPath || !workspaceId || !tabId || !paneId || !terminalId) {
+      return undefined;
+    }
+    control = {
+      kind: "herdr",
+      target,
+      socketPath,
+      session,
+      sessionDir: stringValue(terminalControl.sessionDir),
+      workspaceId,
+      tabId,
+      paneId,
+      terminalId,
+      panePid,
+      currentCommand: stringValue(terminalControl.currentCommand),
+      currentPath: stringValue(terminalControl.currentPath),
+      capabilities
+    };
+  }
   const endpointEvidence = nativeTakeover["terminal_endpoint"];
   if (endpointEvidence !== undefined) {
     try {
@@ -2152,7 +2197,7 @@ async function runDelegate(options) {
     statusFilter: undefined
   });
   if (scan.summary.error) {
-    throw new Error(`tmux discovery failed: ${scan.summary.error}`);
+    throw new Error(`terminal discovery failed: ${scan.summary.error}`);
   }
 
   const scopedCandidates = workspace === undefined
@@ -2185,7 +2230,7 @@ async function runDelegate(options) {
       : "";
     throw new Error(
       `No idle ${requestedExecutor?.displayName ?? "Codex or Claude Code"} pane is available${workspaceDetail}.${observed} ` +
-      `Start ${requestedAgent ?? "codex or claude"} inside tmux${workspaceDetail}, wait until it is idle, then retry.`
+      `Start ${requestedAgent ?? "codex or claude"} inside tmux or Herdr${workspaceDetail}, wait until it is idle, then retry.`
     );
   }
   if (eligible.length > 1) {
@@ -2878,7 +2923,7 @@ function replayExactActiveTerminalSubmission({
   ) {
     throw new Error(
       `terminal idempotency key ${messageId} does not match its original ` +
-      "Store, Session, Turn, OpenClaw session, message, or tmux pane binding; " +
+      "Store, Session, Turn, OpenClaw session, message, or terminal binding; " +
       "no terminal input was sent"
     );
   }
@@ -3059,10 +3104,10 @@ function replayExactActiveTerminalSubmission({
       ? { do_not_retry: replayReceipt.do_not_retry }
       : {}),
     reason: replayReceipt.delivered
-      ? "AKK replayed the durable native acceptance receipt and sent no additional tmux input."
+      ? "AKK replayed the durable native acceptance receipt and sent no additional terminal input."
       : acceptanceInvalid
-        ? "AKK replayed an invalid native acceptance receipt as uncertain and sent no additional tmux input."
-        : "AKK replayed the original transport proof without upgrading it and sent no additional tmux input.",
+        ? "AKK replayed an invalid native acceptance receipt as uncertain and sent no additional terminal input."
+        : "AKK replayed the original transport proof without upgrading it and sent no additional terminal input.",
     openclaw_next_action: replayReceipt.delivered
       ? openClawYieldNextAction({
           conversationId: owner.conversation_id,
@@ -3164,7 +3209,7 @@ function validateStoredTerminalSubmissionMatch({
   ) {
     throw new Error(
       `terminal idempotency key ${messageId} does not match its original ` +
-      "Store, Session, Turn, OpenClaw session, or tmux pane binding; no terminal input was sent"
+      "Store, Session, Turn, OpenClaw session, or terminal binding; no terminal input was sent"
     );
   }
 
@@ -3366,10 +3411,10 @@ function replayExactStoredTerminalSubmission({
       ? { do_not_retry: replayReceipt.do_not_retry }
       : {}),
     reason: replayReceipt.delivered
-      ? "AKK replayed the stored durable native acceptance receipt and sent no additional tmux input."
+      ? "AKK replayed the stored durable native acceptance receipt and sent no additional terminal input."
       : acceptanceInvalid
-        ? "AKK replayed an invalid stored native acceptance receipt as uncertain and sent no additional tmux input."
-        : "AKK replayed the stored transport proof without upgrading it and sent no additional tmux input.",
+        ? "AKK replayed an invalid stored native acceptance receipt as uncertain and sent no additional terminal input."
+        : "AKK replayed the stored transport proof without upgrading it and sent no additional terminal input.",
     openclaw_next_action: replayReceipt.delivered
       ? openClawYieldNextAction({
           conversationId: owner.conversation_id,
@@ -3586,7 +3631,7 @@ function stallOtherTerminalBridgeConversationsForUncertainDispatch({
         status: "stalled" as const,
         stalled_at: stalledAt,
         stalled_reason:
-          "a newer terminal submission has an uncertain outcome; inspect the shared tmux pane before continuing",
+          "a newer terminal submission has an uncertain outcome; inspect the shared terminal pane before continuing",
         native_session_takeover: {
           ...currentTakeover,
           terminal_bridge_uncertain_dispatch_fence: {
@@ -4601,7 +4646,7 @@ function terminalFirstListProjection({
           available: false,
           reason: managedOnly
             ? "terminal discovery was disabled by --managed-only"
-            : "the referenced tmux pane is not currently available"
+            : "the referenced terminal pane is not currently available"
         }
       };
     });
@@ -4944,7 +4989,7 @@ function terminalDispatchOwnership(
       state: "conflict",
       conflict: {
         reason: error instanceof Error ? error.message : String(error),
-        recovery: "inspect the shared tmux pane before performing a side effect"
+        recovery: "inspect the shared terminal pane before performing a side effect"
       }
     };
   }
@@ -4987,7 +5032,7 @@ function terminalDispatchOwnership(
       state: "conflict",
       conflict: terminalDispatchConflict(
         ledger,
-        "dispatch owner does not reference this tmux pane incarnation"
+        "dispatch owner does not reference this terminal pane incarnation"
       )
     };
   }
@@ -5032,7 +5077,7 @@ function terminalDispatchConflict(
     dispatch_status: stringValue(ledger.status),
     owner_conversation_id: stringValue(ledger.conversation_id),
     message_id: stringValue(ledger.message_id),
-    recovery: "inspect the shared tmux pane and explicitly resolve the current dispatch before performing a side effect"
+    recovery: "inspect the shared terminal pane and explicitly resolve the current dispatch before performing a side effect"
   };
 }
 
@@ -5056,7 +5101,7 @@ function localTerminalDispatchOwnership(
             "the terminal dispatch owner no longer matches the live coding-agent process identity or workspace",
           owner_conversation_id: ledgerOwner.conversation_id,
           recovery:
-            "inspect the shared tmux pane and explicitly resolve the stale dispatch before performing a side effect"
+            "inspect the shared terminal pane and explicitly resolve the stale dispatch before performing a side effect"
         }
       };
     }
@@ -5069,7 +5114,7 @@ function localTerminalDispatchOwnership(
         "the terminal dispatch owner belongs to another AKK store or is not supported by this list view",
       owner_conversation_id: ledgerOwner.conversation_id,
       recovery:
-        "inspect the shared tmux pane and use the AKK store that owns the current dispatch"
+        "inspect the shared terminal pane and use the AKK store that owns the current dispatch"
     }
   };
 }
@@ -5486,7 +5531,7 @@ function listActionContracts() {
       "Managed controls target turn_id. A raw terminal may be controlled only through its own list-prefilled conversation_id action; never construct, guess, or reuse that compatibility selector.",
       "Start with the action's prefilled arguments, supply every missing_required field, and consult the top-level action's optional fields only when needed.",
       "Authoritative full IDs are prefilled; short_ref is for display and human input.",
-      "Availability is a snapshot. AKK revalidates process, tmux pane, workspace, activity, approval, and recovery state before side effects."
+      "Availability is a snapshot. AKK revalidates process, provider-owned terminal identity, workspace, activity, approval, and recovery state before side effects."
     ],
     field_semantics: {
       process_state: {
@@ -11534,7 +11579,7 @@ function prepareManagedSend({
   if (unresolvedSubmission) {
     throw new Error(
       `cannot send to ${conversation.conversation_id}; its previous terminal submission is ` +
-      `${unresolvedSubmission.status}. Inspect the conversation and tmux pane, then close ` +
+      `${unresolvedSubmission.status}. Inspect the conversation and terminal pane, then close ` +
       "the AKK conversation before creating a replacement task."
     );
   }
@@ -11610,7 +11655,7 @@ async function runSend(options) {
   if (terminalConversation) {
     if (!options.background) {
       throw new Error(
-        "raw tmux terminal sends require --background so AKK can persist and monitor the submission safely"
+        "raw terminal sends require --background so AKK can persist and monitor the submission safely"
       );
     }
     const rawStoreDir = storeDirFromOptions(options);
@@ -11895,7 +11940,7 @@ async function runSend(options) {
     : await terminalBridge.resolveConversationId(rawTerminalId);
   if (!resolvedTerminal) {
     throw new Error(
-      `session ${sessionId} is not attached to a live tmux terminal`
+      `session ${sessionId} is not attached to a live terminal`
     );
   }
   const releaseTerminalLock = acquireTerminalBridgeSendLock(
@@ -12091,7 +12136,7 @@ async function runTurnResponse({ options, messageBody }) {
   const nativeTerminalId = stringValue(nativeTakeover?.native_session_id);
   if (!storedTerminalControl || !nativeTerminalId) {
     throw new Error(
-      `turn ${turnIdForConversation(initialConversation)} is not attached to a live tmux terminal`
+      `turn ${turnIdForConversation(initialConversation)} is not attached to a live terminal`
     );
   }
   const storedPid = Number(nativeTakeover?.terminal_agent_pid);
@@ -12116,7 +12161,7 @@ async function runTurnResponse({ options, messageBody }) {
     )
   ) {
     throw new Error(
-      `turn ${turnIdForConversation(initialConversation)} is not attached to its expected live tmux terminal`
+      `turn ${turnIdForConversation(initialConversation)} is not attached to its expected live terminal`
     );
   }
   const terminalControl = liveTerminal.terminalControl;
@@ -13153,7 +13198,7 @@ async function runTerminalControlSend({
       `terminal ${terminalControl.target} has a terminal-level ` +
       `${String(previousDispatchLedger.status)} dispatch owned by ` +
       `${stringValue(previousDispatchLedger.conversation_id) ?? "an unknown conversation"}; ` +
-      "inspect the shared tmux pane and explicitly close that AKK conversation before retrying"
+      "inspect the shared terminal pane and explicitly close that AKK conversation before retrying"
     );
   }
   if (
@@ -13167,7 +13212,7 @@ async function runTerminalControlSend({
     if (!owner) {
       throw new Error(
         `terminal ${terminalControl.target} has a submitted dispatch whose ` +
-        "owner state is unavailable; inspect the shared tmux pane and repair " +
+        "owner state is unavailable; inspect the shared terminal pane and repair " +
         "or explicitly resolve that conversation before sending another task"
       );
     }
@@ -13250,10 +13295,10 @@ async function runTerminalControlSend({
             : {}),
           reason:
             accepted
-              ? "AKK replayed the durable native acceptance receipt for an identical active terminal request and did not send tmux input again."
+              ? "AKK replayed the durable native acceptance receipt for an identical active terminal request and did not send terminal input again."
               : acceptanceInvalid
-                ? `AKK refused to replay an invalid native acceptance receipt (${replayReceipt.evidence_error ?? "evidence validation failed"}); no tmux input was sent.`
-                : "AKK replayed the original transport-level receipt without upgrading it to native acceptance and did not send tmux input again.",
+                ? `AKK refused to replay an invalid native acceptance receipt (${replayReceipt.evidence_error ?? "evidence validation failed"}); no terminal input was sent.`
+                : "AKK replayed the original transport-level receipt without upgrading it to native acceptance and did not send terminal input again.",
           openclaw_next_action: accepted
             ? openClawYieldNextAction({
                 conversationId: receiptConversationId,
@@ -13497,7 +13542,7 @@ async function runTerminalControlSend({
       restoreTerminalBridgeDispatchLedger({
         terminalControl,
         previousLedger: previousDispatchLedger,
-        reason: "prepared ledger persistence failed before tmux input"
+        reason: "prepared ledger persistence failed before terminal input"
       });
     } finally {
       rollbackRawAttachBeforeTransport();
@@ -13511,7 +13556,7 @@ async function runTerminalControlSend({
       restoreTerminalBridgeDispatchLedger({
         terminalControl,
         previousLedger: previousDispatchLedger,
-        reason: "prepared state persistence failed before tmux input"
+        reason: "prepared state persistence failed before terminal input"
       });
     } finally {
       rollbackRawAttachBeforeTransport();
@@ -13526,7 +13571,7 @@ async function runTerminalControlSend({
       cliEnv().AKK_TEST_TERMINAL_SETUP_FAILURE === "1"
     ) {
       throw new Error(
-        "injected terminal setup failure before tmux input"
+        "injected terminal setup failure before terminal input"
       );
     }
     if (recordRawAttachmentAfterSend) {
@@ -13583,7 +13628,7 @@ async function runTerminalControlSend({
       restoreTerminalBridgeDispatchLedger({
         terminalControl,
         previousLedger: previousDispatchLedger,
-        reason: "terminal submission aborted before tmux input"
+        reason: "terminal submission aborted before terminal input"
       });
     } catch (ledgerError) {
       dispatchLedgerRestored = false;
@@ -13604,7 +13649,7 @@ async function runTerminalControlSend({
           status: "failed" as const,
           failed_at: abortedAt,
           failure_reason:
-            "terminal submission setup failed before tmux input"
+            "terminal submission setup failed before terminal input"
         }
       : {
           ...preparedConversation,
@@ -13706,12 +13751,12 @@ async function runTerminalControlSend({
       safe_to_retry: safeToRetry,
       do_not_retry: !safeToRetry,
       reason: safeToRetry
-        ? "AKK failed before touching tmux; this terminal submission was not sent and may be retried."
+        ? "AKK failed before terminal input; this terminal submission was not sent and may be retried."
         : !dispatchLedgerRestored
-          ? "AKK failed before tmux input but could not restore the terminal dispatch ledger; inspect and close the conversation before retrying."
+          ? "AKK failed before terminal input but could not restore the terminal dispatch ledger; inspect and close the conversation before retrying."
           : !rawAttachRolledBack
-            ? "AKK failed before tmux input but could not detach the provisional raw-attach Session; inspect its exact binding before retrying."
-          : "AKK failed before tmux input but could not persist the aborted receipt; inspect the conversation before retrying.",
+            ? "AKK failed before terminal input but could not detach the provisional raw-attach Session; inspect its exact binding before retrying."
+          : "AKK failed before terminal input but could not persist the aborted receipt; inspect the conversation before retrying.",
       openclaw_next_action: {
         action: safeToRetry ? "retry" : "inspect",
         conversation_id: abortedConversation.conversation_id,
@@ -13720,7 +13765,7 @@ async function runTerminalControlSend({
         safe_to_retry: safeToRetry,
         do_not_retry: !safeToRetry,
         reason: safeToRetry
-          ? "The failure occurred before any tmux input."
+          ? "The failure occurred before any terminal input."
           : !dispatchLedgerRestored
             ? "The terminal ledger could not be restored automatically."
             : !rawAttachRolledBack
@@ -14300,7 +14345,7 @@ async function runTerminalControlSend({
       status: "stalled" as const,
       stalled_at: uncertainAt,
       stalled_reason:
-        "terminal submission outcome is uncertain; inspect the shared tmux pane before continuing",
+        "terminal submission outcome is uncertain; inspect the shared terminal pane before continuing",
       updated_at: uncertainAt
     };
     const uncertainConversation = withTerminalBridgeSubmission({
@@ -14408,7 +14453,7 @@ async function runTerminalControlSend({
         turn_id: turnIdForConversation(uncertainConversation),
         do_not_retry: true,
         reason:
-          "The terminal submission outcome is uncertain. Inspect AKK status and the shared tmux pane before deciding whether to close or continue."
+          "The terminal submission outcome is uncertain. Inspect AKK status and the shared terminal pane before deciding whether to close or continue."
       }
     });
     return;
@@ -15091,7 +15136,7 @@ function assertOrdinaryTerminalPayloadDoesNotInvokeNativeLifecycle(
   throw new Error(
     `ordinary send/respond cannot invoke native slash command /${reserved[1].toLowerCase()}; ` +
     "use an advertised dedicated native action when one exists, or enter " +
-    "the unsupported native command manually in tmux"
+    "the unsupported native command manually in the terminal UI"
   );
 }
 
@@ -17061,7 +17106,7 @@ async function runCancel(options) {
   }
 
   throw new Error(
-    `conversation ${conversation.conversation_id} is not attached to a live tmux terminal`
+    `conversation ${conversation.conversation_id} is not attached to a live terminal`
   );
 }
 
@@ -18241,7 +18286,7 @@ async function runTerminalBridgeMonitorWithLock(
                     status: "stalled" as const,
                     stalled_at: uncertainAt,
                     stalled_reason:
-                      "terminal dispatcher exited before AKK could prove the tmux submission",
+                      "terminal dispatcher exited before AKK could prove the terminal submission",
                     updated_at: uncertainAt
                   },
                   messageId: currentMessageId,
@@ -18342,7 +18387,7 @@ async function runTerminalBridgeMonitorWithLock(
             stringValue(afterSubmission?.status) ?? "uncertain",
           do_not_retry: true,
           reason:
-            "terminal submission outcome is not proven; inspect the shared tmux pane before deciding how to continue"
+            "terminal submission outcome is not proven; inspect the shared terminal pane before deciding how to continue"
         });
         return;
       }
@@ -18368,7 +18413,7 @@ async function runTerminalBridgeMonitorWithLock(
               : submissionStatus === "uncertain"
                 ? "terminal submission outcome is uncertain; automatic completion and approval attribution are disabled"
                 : abortedSafeToRetry
-                  ? "terminal submission was durably aborted before tmux input"
+                  ? "terminal submission was durably aborted before terminal input"
                   : "terminal submission was aborted but safe retry was not durably proven"
         });
         return;
@@ -20004,11 +20049,21 @@ function saveTerminalBridgeDispatchLedger(
       ? legacyTerminalBridgeRuntimeKey(terminalControl)
       : terminalBridgeRuntimeKey(terminalControl),
     terminal_control: {
-      kind: "tmux",
+      kind: terminalControl.kind,
       target: terminalControl.target,
       socket_path: terminalControl.socketPath ?? null,
       pane_pid: terminalControl.panePid ?? null,
-      current_path: terminalControl.currentPath ?? null
+      current_path: terminalControl.currentPath ?? null,
+      ...(terminalControl.kind === "herdr"
+        ? {
+            session: terminalControl.session,
+            session_dir: terminalControl.sessionDir ?? null,
+            workspace_id: terminalControl.workspaceId,
+            tab_id: terminalControl.tabId,
+            pane_id: terminalControl.paneId,
+            terminal_id: terminalControl.terminalId
+          }
+        : {})
     },
     ...(hasCanonicalTerminalEndpoint(terminalControl) && !preserveLegacyFormat
       ? { terminal_endpoint: terminalControlEvidence(terminalControl) }
@@ -20296,7 +20351,7 @@ function reconcilePreparedTerminalDispatchLedger(
       status: "resolved",
       resolved_at: cliNow().toISOString(),
       reason:
-        "dispatcher exited before the prepared owner state existed; no tmux input was possible"
+        "dispatcher exited before the prepared owner state existed; no terminal input was possible"
     });
     return loadTerminalBridgeDispatchLedger(terminalControl);
   }
@@ -20360,7 +20415,7 @@ function reconcilePreparedTerminalDispatchLedger(
         status: "uncertain",
         uncertain_at: cliNow().toISOString(),
         reason:
-          "dispatcher exited after the prepared state became durable; tmux submission cannot be proven"
+          "dispatcher exited after the prepared state became durable; terminal submission cannot be proven"
       });
     }
     return loadTerminalBridgeDispatchLedger(terminalControl);
@@ -20418,7 +20473,7 @@ function reconcilePreparedTerminalDispatchLedger(
       status: "resolved",
       resolved_at: cliNow().toISOString(),
       reason:
-        "dispatcher exited before the prepared generation reached durable state; no tmux input was possible"
+        "dispatcher exited before the prepared generation reached durable state; no terminal input was possible"
     });
   }
   return loadTerminalBridgeDispatchLedger(terminalControl);
@@ -20793,7 +20848,7 @@ async function reconcileLifecycleDispatchLedger(
         status: "resolved",
         resolved_at: now,
         reason:
-          "lifecycle dispatcher exited while durably prepared; no tmux input was possible"
+          "lifecycle dispatcher exited while durably prepared; no terminal input was possible"
       }, { expectedTransitionId: transitionId });
       return loadTerminalBridgeDispatchLedger(
         terminal.terminalControl
@@ -25896,7 +25951,7 @@ function usage() {
   agent-knock-knock retry-callback [--turn <turn-id|selector>] [--conversation <selector>]
   agent-knock-knock close [--turn <turn-id|selector>] [--conversation <selector>] [--reason <text>] [--expected-message-id <message-id> | --expected-transition-id <transition-id>]
   agent-knock-knock install-openclaw [--verify] [--openclaw-bin <path>] [--skill-path <path>] [--skill-only] [--no-restart]
-  agent-knock-knock doctor [--openclaw-bin <path>]
+  agent-knock-knock doctor [--openclaw-bin <path>] [--tmux-bin <path>] [--herdr-bin <path>]
   agent-knock-knock callback --state <file> --message-json <json> [--record-only]
   agent-knock-knock transcript --log <file> [--include-raw]
   agent-knock-knock transcript --conversation <dir> [--include-raw]

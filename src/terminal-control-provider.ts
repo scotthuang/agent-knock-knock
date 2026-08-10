@@ -60,6 +60,7 @@ export interface TerminalControlProvider {
 
 export class TerminalControlProviderRegistry {
   private readonly providers = new Map<string, TerminalControlProvider>();
+  private facade?: TerminalControlProvider;
 
   constructor(providers: readonly TerminalControlProvider[] = []) {
     for (const provider of providers) {
@@ -97,6 +98,183 @@ export class TerminalControlProviderRegistry {
   list(): TerminalControlProvider[] {
     return [...this.providers.values()];
   }
+
+  /**
+   * Exposes all registered providers through the same provider boundary used
+   * by the terminal bridge. Discovery is aggregated, while every operation on
+   * an existing endpoint is dispatched only to that endpoint's provider.
+   *
+   * The facade advertises only capabilities shared by every registered
+   * provider. This keeps generic preflight checks conservative; the selected
+   * provider still performs its own endpoint-specific checks when dispatched.
+   */
+  asProvider(): TerminalControlProvider {
+    this.facade ??= new RegistryTerminalControlProvider(() => this.list());
+    return this.facade;
+  }
+}
+
+class RegistryTerminalControlProvider implements TerminalControlProvider {
+  readonly kind = "registry";
+  private readonly discoveryErrors = new Map<string, string>();
+
+  constructor(
+    private readonly registeredProviders: () => TerminalControlProvider[]
+  ) {}
+
+  get supportedCapabilities(): readonly TerminalControlCapability[] {
+    return intersectRegisteredCapabilities(
+      this.registeredProviders(),
+      (provider) => provider.supportedCapabilities
+    );
+  }
+
+  get providerCapabilities(): readonly TerminalProviderCapability[] {
+    return intersectRegisteredCapabilities(
+      this.registeredProviders(),
+      (provider) => provider.providerCapabilities
+    );
+  }
+
+  async diagnostics(): Promise<Record<string, unknown>> {
+    const providers = this.registeredProviders();
+    const diagnostics = await Promise.all(providers.map(async (provider) => {
+      try {
+        return [provider.kind, await provider.diagnostics()] as const;
+      } catch (error) {
+        return [provider.kind, {
+          provider: provider.kind,
+          status: "error",
+          error: terminalProviderErrorMessage(error)
+        }] as const;
+      }
+    }));
+    return {
+      provider: this.kind,
+      providerKinds: providers.map((provider) => provider.kind),
+      providers: Object.fromEntries(diagnostics),
+      discoveryErrors: Object.fromEntries(this.discoveryErrors)
+    };
+  }
+
+  async listTerminals(): Promise<TerminalEndpointRef[]> {
+    const batches = await Promise.all(
+      this.registeredProviders().map(async (provider) => {
+        try {
+          const terminals = await provider.listTerminals();
+          for (const terminal of terminals) {
+            assertEndpointKind(terminal, provider.kind);
+          }
+          this.discoveryErrors.delete(provider.kind);
+          return terminals;
+        } catch (error) {
+          // A provider that cannot prove its own endpoints must contribute no
+          // candidates, but it must not make a different healthy transport
+          // disappear. Keep the last failure visible through diagnostics.
+          this.discoveryErrors.set(
+            provider.kind,
+            terminalProviderErrorMessage(error)
+          );
+          return [];
+        }
+      })
+    );
+    return batches.flat();
+  }
+
+  endpoint(terminalControl: TerminalControlRef): TerminalEndpointRef {
+    const provider = this.requireProvider(terminalControl.kind);
+    const terminal = provider.endpoint(terminalControl);
+    assertEndpointKind(terminal, provider.kind);
+    return terminal;
+  }
+
+  toControlRef(
+    terminal: TerminalEndpointRef,
+    capabilities?: readonly TerminalControlCapability[]
+  ): TerminalControlRef {
+    const provider = this.providerForEndpoint(terminal);
+    const control = provider.toControlRef(terminal, capabilities);
+    if (control.kind !== provider.kind) {
+      throw new Error(
+        `terminal control provider ${provider.kind} returned control for ` +
+        `${control.kind}`
+      );
+    }
+    return control;
+  }
+
+  async resolve(terminal: TerminalEndpointRef): Promise<TerminalEndpointRef> {
+    const provider = this.providerForEndpoint(terminal);
+    const resolved = await provider.resolve(terminal);
+    assertEndpointKind(resolved, provider.kind);
+    return resolved;
+  }
+
+  containsProcess(
+    terminal: TerminalEndpointRef,
+    process: Pick<TerminalProcessSnapshot, "pid" | "ppid">,
+    processes: readonly Pick<TerminalProcessSnapshot, "pid" | "ppid">[]
+  ): boolean {
+    return this.providerForEndpoint(terminal).containsProcess(
+      terminal,
+      process,
+      processes
+    );
+  }
+
+  capture(terminal: TerminalEndpointRef, options: {
+    scrollbackLines?: number;
+    preserveEscapes?: boolean;
+  } = {}): Promise<string> {
+    return this.providerForEndpoint(terminal).capture(terminal, options);
+  }
+
+  sendText(terminal: TerminalEndpointRef, text: string): Promise<void> {
+    return this.providerForEndpoint(terminal).sendText(terminal, text);
+  }
+
+  sendKeys(
+    terminal: TerminalEndpointRef,
+    keys: readonly string[]
+  ): Promise<void> {
+    return this.providerForEndpoint(terminal).sendKeys(terminal, keys);
+  }
+
+  private providerForEndpoint(
+    terminal: TerminalEndpointRef
+  ): TerminalControlProvider {
+    return this.requireProvider(terminal.identity.providerKind);
+  }
+
+  private requireProvider(kind: string): TerminalControlProvider {
+    const provider = this.registeredProviders().find(
+      (candidate) => candidate.kind === kind
+    );
+    if (!provider) {
+      throw new Error(
+        `terminal control provider is not registered for ${kind || "<empty>"}`
+      );
+    }
+    return provider;
+  }
+}
+
+function terminalProviderErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function intersectRegisteredCapabilities<T extends string>(
+  providers: readonly TerminalControlProvider[],
+  capabilities: (provider: TerminalControlProvider) => readonly T[]
+): T[] {
+  const [first, ...rest] = providers;
+  if (!first) {
+    return [];
+  }
+  return [...new Set(capabilities(first))].filter((capability) =>
+    rest.every((provider) => capabilities(provider).includes(capability))
+  );
 }
 
 export function createTerminalControlProviderRegistry(
@@ -730,13 +908,15 @@ export async function enrichActiveProcessesWithTerminalControl<T extends ActiveT
   const matches = new Map<number, TerminalEndpointRef>();
   const processTree = options.processTree ?? processes;
   for (const process of processes) {
-    const terminal = terminals.find((candidate) =>
+    const matchingTerminals = terminals.filter((candidate) =>
       provider.containsProcess(candidate, process, processTree)
     );
-    if (!terminal) {
+    // Never guess when nested/multiple terminal providers both contain the
+    // same process. A wrong match would grant control over an unrelated route.
+    if (matchingTerminals.length !== 1) {
       continue;
     }
-    matches.set(process.pid, terminal);
+    matches.set(process.pid, matchingTerminals[0]);
   }
 
   return processes.map((process) => {

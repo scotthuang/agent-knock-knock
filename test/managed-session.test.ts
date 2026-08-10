@@ -163,6 +163,45 @@ test("managed Session validation is strict throughout nested binding state", () 
   );
 });
 
+test("managed Session validation preserves strict Herdr terminal identity evidence", () => {
+  const herdrBinding = terminalBindingFrom({
+    terminalId: "terminal:v2:herdr:codex:default:w1:p2:6984",
+    terminalControl: {
+      kind: "herdr",
+      target: "default:w1:p2",
+      socketPath: "/Users/me/.config/herdr/herdr.sock",
+      session: "default",
+      sessionDir: "/Users/me/.config/herdr",
+      workspaceId: "w1",
+      tabId: "w1:t1",
+      paneId: "w1:p2",
+      terminalId: "term_658aefacc86a72",
+      panePid: 6_646,
+      currentCommand: "codex --yolo",
+      currentPath: "/workspace/project",
+      capabilities: ["screen_status", "send_keys", "durable_completion"]
+    },
+    pid: 6_984,
+    nativeThreadId: NATIVE_THREAD_ID,
+    processUuid: "codex-pid:6984:birth:12345",
+    evidence: "codex_rollout_fd",
+    generation: 1,
+    now: new Date("2026-08-10T01:00:00.000Z")
+  });
+  const herdrState: ManagedSessionState = {
+    ...state(),
+    binding: herdrBinding
+  };
+
+  assert.doesNotThrow(() => assertManagedSessionState(herdrState));
+  const tampered = structuredClone(herdrState) as any;
+  tampered.binding.terminal_endpoint.terminal_id = "term_other";
+  assert.throws(
+    () => assertManagedSessionState(tampered),
+    /invalid or inconsistent identity evidence|conflicts/u
+  );
+});
+
 test("transition schema distinguishes prepared from dispatching uncertainty", () => {
   const prepared: NativeThreadTransition = {
     schema: "agent-knock-knock/native-thread-transition",

@@ -1193,6 +1193,11 @@ function assertTerminalEndpointEvidence(value: unknown, label: string): void {
     "pane_pid",
     "server_socket_path",
     "pane_id",
+    "session_name",
+    "session_dir",
+    "workspace_id",
+    "tab_id",
+    "terminal_id",
     "current_path"
   ], label);
   if (
@@ -1248,29 +1253,47 @@ function assertTerminalControlRef(
   if (!isRecord(value)) {
     throw new Error(`${label} must be an object`);
   }
-  assertOnlyKeys(value, [
+  const commonKeys = [
     "kind",
     "target",
     "socketPath",
     "session",
-    "window",
-    "pane",
     "panePid",
     "currentCommand",
     "currentPath",
     "capabilities"
-  ], label);
-  if (value.kind !== "tmux") {
-    throw new Error(`${label} kind must be tmux`);
+  ];
+  if (value.kind === "tmux") {
+    assertOnlyKeys(value, [...commonKeys, "window", "pane"], label);
+  } else if (value.kind === "herdr") {
+    assertOnlyKeys(value, [
+      ...commonKeys,
+      "sessionDir",
+      "workspaceId",
+      "tabId",
+      "paneId",
+      "terminalId"
+    ], label);
+  } else {
+    throw new Error(`${label} kind must be tmux or herdr`);
   }
   assertNonEmptyString(value.target, `${label} target`);
-  assertOptionalNonEmptyString(value.socketPath, `${label} socketPath`);
   assertNonEmptyString(value.session, `${label} session`);
-  if (!isNonNegativeSafeInteger(value.window)) {
-    throw new Error(`${label} window must be a non-negative safe integer`);
-  }
-  if (!isNonNegativeSafeInteger(value.pane)) {
-    throw new Error(`${label} pane must be a non-negative safe integer`);
+  if (value.kind === "tmux") {
+    assertOptionalNonEmptyString(value.socketPath, `${label} socketPath`);
+    if (!isNonNegativeSafeInteger(value.window)) {
+      throw new Error(`${label} window must be a non-negative safe integer`);
+    }
+    if (!isNonNegativeSafeInteger(value.pane)) {
+      throw new Error(`${label} pane must be a non-negative safe integer`);
+    }
+  } else {
+    assertNonEmptyString(value.socketPath, `${label} socketPath`);
+    assertOptionalNonEmptyString(value.sessionDir, `${label} sessionDir`);
+    assertNonEmptyString(value.workspaceId, `${label} workspaceId`);
+    assertNonEmptyString(value.tabId, `${label} tabId`);
+    assertNonEmptyString(value.paneId, `${label} paneId`);
+    assertNonEmptyString(value.terminalId, `${label} terminalId`);
   }
   if (!isPositiveSafeInteger(value.panePid)) {
     throw new Error(`${label} panePid must be a positive safe integer`);

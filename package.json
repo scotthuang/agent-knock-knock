@@ -58,6 +58,7 @@
     "templates",
     "docs/assets/agent-knock-knock-cover.jpg",
     "docs/assets/agent-knock-knock-icon.png",
+    "docs/quickstart-herdr.md",
     "docs/quickstart-tmux.md",
     "openclaw.plugin.json",
     "README.md",
