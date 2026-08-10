@@ -564,7 +564,12 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
     const requestedLines = Number.isFinite(options.scrollbackLines)
       ? Math.max(0, Math.floor(options.scrollbackLines ?? 200))
       : 200;
-    const source = "detection";
+    // Herdr 0.8.0's detection buffer is the right agent-aware source for
+    // plain status reads, but it normalizes away SGR styling even when
+    // format=ansi. Codex uses dim styling to distinguish an empty composer
+    // placeholder from real draft text, so ANSI captures must come from the
+    // visible terminal buffer where those escapes are preserved.
+    const source = options.preserveEscapes ? "visible" : "detection";
     const format = options.preserveEscapes ? "ansi" : "text";
     const result = await this.invoke(
       control.socketPath!,
@@ -572,8 +577,8 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
       {
         pane_id: control.paneId,
         // Herdr's recent scrollback may be empty for a live Claude alternate
-        // screen, while detection is the server's terminal-state buffer and is
-        // populated for both Claude and Codex TUIs.
+        // screen. Plain reads therefore use its populated agent-detection
+        // buffer; ANSI reads use the visible buffer to retain composer style.
         source,
         lines: Math.min(requestedLines, HERDR_MAX_READ_LINES),
         format

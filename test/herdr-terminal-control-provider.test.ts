@@ -174,7 +174,10 @@ function createHarness(): HerdrHarness {
             tab_id: pane.tabId,
             source: wireRequest.params.source,
             format: wireRequest.params.format,
-            text: "\u001b[32mready\u001b[0m",
+            text: wireRequest.params.source === "visible" &&
+              wireRequest.params.format === "ansi"
+              ? "\u001b[2mplaceholder\u001b[0m"
+              : "placeholder",
             revision: 0,
             truncated: false
           }
@@ -382,7 +385,7 @@ test("Herdr skips an incompatible protocol but fails closed on live API errors",
   await assert.rejects(failed.provider.listTerminals(), /socket reset/u);
 });
 
-test("Herdr capture resolves freshly and reads the detection buffer", async () => {
+test("Herdr capture resolves freshly and selects a style-preserving source", async () => {
   const harness = createHarness();
   const [terminal] = await harness.provider.listTerminals();
   assert.ok(terminal);
@@ -390,17 +393,34 @@ test("Herdr capture resolves freshly and reads the detection buffer", async () =
 
   assert.equal(
     await harness.provider.capture(terminal, {
-      scrollbackLines: 5_000,
-      preserveEscapes: true
+      scrollbackLines: 80
     }),
-    "\u001b[32mready\u001b[0m"
+    "placeholder"
   );
-  const read = harness.requests.find((entry) =>
+  let read = harness.requests.find((entry) =>
     entry.request.method === "pane.read");
   assert.ok(read);
   assert.deepEqual(read.request.params, {
     pane_id: "w1:p1",
     source: "detection",
+    lines: 80,
+    format: "text"
+  });
+
+  harness.requests.length = 0;
+  assert.equal(
+    await harness.provider.capture(terminal, {
+      scrollbackLines: 5_000,
+      preserveEscapes: true
+    }),
+    "\u001b[2mplaceholder\u001b[0m"
+  );
+  read = harness.requests.find((entry) =>
+    entry.request.method === "pane.read");
+  assert.ok(read);
+  assert.deepEqual(read.request.params, {
+    pane_id: "w1:p1",
+    source: "visible",
     lines: 1_000,
     format: "ansi"
   });
