@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.12.0 - 2026-08-10
+
+### Added
+
+- Add exact local Herdr `0.8.0` / protocol 19 support as a second terminal provider alongside tmux, including discovery, screen capture, bracketed-paste-aware text delivery, key dispatch, lifecycle state, Resume snapshots, native inspection, monitoring, and OpenClaw actions.
+- Add a routed terminal-provider registry, Herdr-aware doctor diagnostics, packaged setup documentation, and provider-neutral terminal identities throughout the Store and public terminal list.
+
+### Changed
+
+- Split the CLI entrypoint from its injectable command core, move the slowest lifecycle and rollout semantics into deterministic in-process fixtures while retaining their real-process contract tests, and add a fail-closed affected-test runner for faster local iteration.
+- Isolate terminal-provider discovery and diagnostics failures so an unavailable Herdr session contributes no candidates without hiding healthy tmux terminals.
+
+### Security
+
+- Bind Herdr control to the local Unix-socket incarnation, stable `terminal_id`, refreshable pane route, shell and agent process ancestry, cwd, native coding-agent identity, and the existing Session/Turn binding fences before every side effect.
+- Preserve the durable `prepared → text_injected → enter_dispatched → agent_accepted` boundary, keep lost acknowledgements uncertain without blind retries, fail closed when multiple providers could own one process, and isolate a failed provider discovery without hiding healthy transports.
+
 ## 0.11.7 - 2026-08-10
 
 ### Changed
