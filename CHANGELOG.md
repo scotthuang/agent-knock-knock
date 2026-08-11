@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.12.2 - 2026-08-11
+
+### Added
+
+- Let terminal-scoped sends absorb an exact, verified native-thread switch made by a human through Codex or Claude Code, including `/clear`, new-thread, and Resume flows across tmux and Herdr.
+- Restore a uniquely matching historical Session with its own binding generation, or create a separate Session for a previously unseen native thread, without merging conversation history.
+
+### Changed
+
+- Keep explicit Session-scoped sends pinned to their original native context, while active Turns expose a snapshot-bound handoff decision that requires explicit confirmation before the current human context is adopted.
+
+### Security
+
+- Revalidate the native UUID, process birth, terminal endpoint, cwd, exclusive ownership, idle state, and exact composer immediately around terminal input, while preserving single-Enter and no-blind-retry guarantees.
+- Persist human-observed handoffs through fenced lifecycle transitions and ledgers with crash recovery, stale-decision rejection, and strict isolation for prior Turns, monitors, callbacks, approvals, and dispatch receipts.
+
 ## 0.12.1 - 2026-08-11
 
 ### Fixed
