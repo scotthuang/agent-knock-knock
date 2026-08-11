@@ -55,7 +55,12 @@ export interface ManagedTerminalBinding {
 }
 
 export interface ManagedSessionLineage {
-  created_by: "attach" | "new_thread" | "resume_thread" | "migration";
+  created_by:
+    | "attach"
+    | "new_thread"
+    | "resume_thread"
+    | "human_observed"
+    | "migration";
   previous_session_id?: string;
   resumed_from_native_thread_id?: string;
   transition_id?: string;
@@ -97,7 +102,11 @@ export interface NativeThreadTransition {
   transition_id: string;
   /** Monotonic Store revision used for transition state CAS. */
   revision?: number;
-  operation: "new_thread" | "resume_thread";
+  operation: "new_thread" | "resume_thread" | "adopt_external_thread";
+  /** An observed handoff is authority evidence, never a terminal command. */
+  origin?: "human_observed";
+  /** Explicitly fences recovery from ever replaying input for an observation. */
+  terminal_input_sent?: boolean;
   status: NativeThreadTransitionStatus;
   terminal_id: string;
   agent: ExecutorKind;
@@ -259,6 +268,70 @@ export function unmanagedTerminalBindingToken(value: {
       .digest("hex");
   }
   return legacyUnmanagedTerminalBindingToken(value);
+}
+
+export type HumanObservedHandoffTargetSnapshot =
+  | { state: "absent" }
+  | {
+      state: "detached";
+      session_id: string;
+      revision: number;
+      status: "detached";
+      binding_token: string;
+    };
+
+/**
+ * Snapshot authority for one advertised human-handoff send.
+ *
+ * The terminal token fences the provider endpoint, process incarnation, and
+ * observed after-thread identity.  Source and target snapshots are included
+ * separately because neither a Session revision nor a newly appeared/removed
+ * historical target is represented by that terminal-only token.
+ */
+export function humanObservedHandoffBindingToken(value: {
+  terminal_token: string;
+  source_session_id: string;
+  source_revision: number;
+  source_binding_token: string;
+  target: HumanObservedHandoffTargetSnapshot;
+}): string {
+  assertNonEmptyString(value.terminal_token, "handoff terminal token");
+  assertManagedSessionId(value.source_session_id);
+  if (!isPositiveSafeInteger(value.source_revision)) {
+    throw new Error("handoff source revision must be a positive integer");
+  }
+  assertNonEmptyString(
+    value.source_binding_token,
+    "handoff source binding token"
+  );
+  if (value.target.state === "detached") {
+    assertManagedSessionId(value.target.session_id);
+    if (!isPositiveSafeInteger(value.target.revision)) {
+      throw new Error("handoff target revision must be a positive integer");
+    }
+    if (value.target.status !== "detached") {
+      throw new Error("handoff target snapshot must remain detached");
+    }
+    assertNonEmptyString(
+      value.target.binding_token,
+      "handoff target binding token"
+    );
+  } else if (value.target.state !== "absent") {
+    throw new Error("handoff target snapshot state is invalid");
+  }
+  return createHash("sha256")
+    .update(JSON.stringify({
+      version: 1,
+      kind: "human_observed_handoff",
+      terminal_token: value.terminal_token,
+      source: {
+        session_id: value.source_session_id,
+        revision: value.source_revision,
+        binding_token: value.source_binding_token
+      },
+      target: value.target
+    }))
+    .digest("hex");
 }
 
 export function legacyUnmanagedTerminalBindingToken(value: {
@@ -433,6 +506,8 @@ export function assertNativeThreadTransition(
     "transition_id",
     "revision",
     "operation",
+    "origin",
+    "terminal_input_sent",
     "status",
     "terminal_id",
     "agent",
@@ -493,10 +568,34 @@ export function assertNativeThreadTransition(
   )) {
     throw new Error("native thread transition operation is invalid");
   }
+  const observedHandoff = value.operation === "adopt_external_thread";
+  if (
+    observedHandoff
+      ? value.origin !== "human_observed" || value.terminal_input_sent !== false
+      : value.origin !== undefined || value.terminal_input_sent !== undefined
+  ) {
+    throw new Error(
+      observedHandoff
+        ? "adopt_external_thread requires human_observed origin and terminal_input_sent=false"
+        : "native command transitions cannot carry human-observed input evidence"
+    );
+  }
   if (!NATIVE_THREAD_TRANSITION_STATUSES.has(
     value.status as NativeThreadTransitionStatus
   )) {
     throw new Error("native thread transition status is invalid");
+  }
+  if (
+    observedHandoff &&
+    (
+      ["dispatching", "submitted"].includes(String(value.status)) ||
+      value.dispatching_at !== undefined ||
+      value.submitted_at !== undefined
+    )
+  ) {
+    throw new Error(
+      "adopt_external_thread cannot carry terminal-dispatch state"
+    );
   }
   assertNonEmptyString(value.terminal_id, "native thread transition terminal_id");
   assertExecutorKind(value.agent, "native thread transition agent");
@@ -615,10 +714,12 @@ export function assertNativeThreadTransition(
     throw new Error("Claude transition requires before_process_started_at");
   }
   if (
-    value.operation === "resume_thread" &&
+    ["resume_thread", "adopt_external_thread"].includes(
+      String(value.operation)
+    ) &&
     value.target_native_thread_id === undefined
   ) {
-    throw new Error("resume_thread requires target_native_thread_id");
+    throw new Error(`${String(value.operation)} requires target_native_thread_id`);
   }
   if (
     value.operation === "new_thread" &&
@@ -687,14 +788,18 @@ export function assertNativeThreadTransition(
   if (
     ["dispatching", "submitted", "uncertain", "verified", "committed"].includes(
       String(value.status)
-    ) && value.dispatching_at === undefined
+    ) &&
+    !observedHandoff &&
+    value.dispatching_at === undefined
   ) {
     throw new Error(`${value.status} transition requires dispatching_at`);
   }
   if (
     ["submitted", "verified", "committed"].includes(
       String(value.status)
-    ) && value.submitted_at === undefined
+    ) &&
+    !observedHandoff &&
+    value.submitted_at === undefined
   ) {
     throw new Error(`${value.status} transition requires submitted_at`);
   }
@@ -786,7 +891,9 @@ function assertNativeThreadTransitionBindingConsistency(
   }
   const afterNativeThreadId = after.native_thread_id.toLowerCase();
   if (
-    transition.operation === "resume_thread"
+    ["resume_thread", "adopt_external_thread"].includes(
+      transition.operation
+    )
       ? afterNativeThreadId !== transition.target_native_thread_id?.toLowerCase()
       : afterNativeThreadId === transition.before_native_thread_id.toLowerCase()
   ) {
@@ -1444,11 +1551,13 @@ const MANAGED_SESSION_LINEAGE_KINDS = new Set<ManagedSessionLineage["created_by"
   "attach",
   "new_thread",
   "resume_thread",
+  "human_observed",
   "migration"
 ]);
 const NATIVE_THREAD_OPERATIONS = new Set<NativeThreadTransition["operation"]>([
   "new_thread",
-  "resume_thread"
+  "resume_thread",
+  "adopt_external_thread"
 ]);
 const NATIVE_THREAD_TRANSITION_STATUSES = new Set<NativeThreadTransitionStatus>([
   "prepared",

@@ -36,19 +36,30 @@ const sendParameters = {
   type: "object",
   additionalProperties: false,
   required: ["request"],
-  not: { required: ["session_id", "selector"] },
+  not: {
+    anyOf: [
+      { required: ["session_id", "selector"] },
+      { required: ["session_id", "expected_terminal_token"] }
+    ]
+  },
   properties: {
     session_id: {
       type: "string",
       minLength: 1,
       description:
-        "Authoritative AKK session id returned by list or a previous send. Ordinary sends target a session and create a new turn; discovery selectors, terminal ids, and turn ids are never session_id destinations."
+        "Strict session-scoped AKK id returned by list or a previous send. This preserves that exact native context and never follows the pane after a human switches threads. Discovery selectors, terminal ids, and turn ids are never session_id destinations."
     },
     selector: {
       type: "string",
       minLength: 1,
       description:
-        "Compatibility/discovery selector: codex, claude, only, latest, an @short-ref, or a live terminal id. Use one only when explicitly named by the user or prefilled by list; never infer it. Prefer session_id once a session exists. Omit both fields only when AKK should attach the unique eligible idle pane."
+        "Terminal-scoped selector: codex, claude, only, latest, an @short-ref, or a live terminal id. Use one only when explicitly named by the user or prefilled by list; never infer it. A follow-current handoff action uses the exact full terminal id together with expected_terminal_token. Legacy discovery selectors remain supported. Omit both target fields only when AKK should attach the unique eligible idle pane."
+    },
+    expected_terminal_token: {
+      type: "string",
+      minLength: 1,
+      description:
+        "Fresh terminal snapshot token prefilled by the same terminal row's follow-current send action. Preserve it exactly with that action's full terminal selector; never infer, copy, reuse, or combine it with session_id."
     },
     request: {
       type: "string",
@@ -378,7 +389,10 @@ const closeParameters = {
   not: {
     anyOf: [
       { required: ["turn_id", "conversation_id"] },
-      { required: ["expected_message_id", "expected_transition_id"] }
+      { required: ["expected_message_id", "expected_transition_id"] },
+      { required: ["expected_handoff_token", "conversation_id"] },
+      { required: ["expected_handoff_token", "expected_message_id"] },
+      { required: ["expected_handoff_token", "expected_transition_id"] }
     ]
   },
   anyOf: [
@@ -408,6 +422,11 @@ const closeParameters = {
       type: "string",
       description:
         "Required only to recover an unresolved native-thread lifecycle transition shown by AKK list. Must exactly match that entry's current transition_id and must not be combined with expected_message_id."
+    },
+    expected_handoff_token: {
+      type: "string",
+      description:
+        "Snapshot fence for the exact managed Turn close advertised only by terminals[].handoff_decision.choices.take_over_current.action. Copy that complete action only after explicit user confirmation; it requires turn_id and reason=superseded_by_human_context_switch, and cannot be combined with a raw-terminal target or another close fence."
     }
   }
 };
@@ -500,7 +519,7 @@ function createPlugin(
         default: "AKK is handling the request..."
       },
       agentPromptGuidance: [
-        "Use /akk <task> when exactly one eligible idle coding-agent terminal pane should receive new work. Use /akk codex: <task>, /akk claude: <task>, or another selector returned by /akk list to target an existing pane. Ordinary sends preserve native context. Use /akk threads, /akk new-thread or clear-thread, and /akk resume-thread only with an exact full terminal_id returned by /akk list; these switch native context without creating a Turn. Resume numbers and short IDs are bound to the last displayed snapshot, while previous is available only from the latest verified committed transition. For native Codex or Claude status, use only an advertised agent_knock_knock_native_inspect action; agent_knock_knock_status inspects AKK Turn state and does not execute /status. AKK never starts a coding-agent process."
+        "Use /akk <task> when exactly one eligible idle coding-agent terminal pane should receive new work. Use /akk codex: <task>, /akk claude: <task>, or another selector returned by /akk list to target an existing pane. A session_id send is strict to that Session's native context; an exact list-prefilled terminal selector plus expected_terminal_token is a terminal-scoped follow-current action that may safely absorb a verified quiescent human thread switch before creating the Turn. Never infer or reuse its token. Use /akk threads, /akk new-thread or clear-thread, and /akk resume-thread only with an exact full terminal_id returned by /akk list; these switch native context without creating a Turn. Resume numbers and short IDs are bound to the last displayed snapshot, while previous is available only from the latest verified committed transition. For native Codex or Claude status, use only an advertised agent_knock_knock_native_inspect action; agent_knock_knock_status inspects AKK Turn state and does not execute /status. AKK never starts a coding-agent process."
       ],
       handler: async (ctx) => handleAkkCommand(
         api,
@@ -511,7 +530,7 @@ function createPlugin(
 
     registerCliTool(api, {
       name: "agent_knock_knock_list",
-      description: "List existing Codex and Claude Code tmux or Herdr panes as the primary terminals[] resources. Each terminal may include managed.current_turn or managed.recent_turn; all=true also includes older managed.history and retained unavailable history. By default, unavailable_managed_turns contains attention-needed records whose pane is unavailable. Use only each row's available_actions and authoritative prefilled arguments: send targets a session and starts a new turn; respond targets the exact in-flight turn; native_inspect runs only a closed, exact-version Codex or Claude status profile with the current terminal/binding token; read-only thread listing targets the exact terminal, while new/resume mutations also require the current binding token and create no Turn; reconcile_binding detaches only the exact listed conflict and requires explicit user intent; managed controls target the exact turn; a raw terminal row may prefill its own compatibility selector for status or recovery controls. Never construct identifiers or tokens. AKK revalidates every terminal side effect and never starts a coding-agent process.",
+      description: "List existing Codex and Claude Code tmux or Herdr panes as the primary terminals[] resources. Each terminal may include managed.current_turn or managed.recent_turn; all=true also includes older managed.history and retained unavailable history. By default, unavailable_managed_turns contains attention-needed records whose pane is unavailable. A live human thread switch remains management_state=conflict and exposes handoff_state as adoptable or blocked without mutating the Store. Use only each row's available_actions and authoritative prefilled arguments: a session-scoped send targets session_id strictly and never redirects to the pane's replacement context; a terminal-scoped follow-current send preserves that row's exact selector and expected_terminal_token and may absorb only a verified quiescent human handoff before starting a Turn; legacy discovery sends remain compatible. respond targets the exact in-flight turn; native_inspect runs only a closed, exact-version Codex or Claude status profile with the current terminal/binding token; read-only thread listing targets the exact terminal, while new/resume mutations also require the current binding token and create no Turn; reconcile_binding remains a low-level conflict recovery action; managed controls target the exact turn; a raw terminal row may prefill its own compatibility selector for status or recovery controls. Never construct identifiers or tokens. AKK revalidates every terminal side effect and never starts a coding-agent process.",
       parameters: listParameters,
       buildArgs: (params) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
@@ -706,9 +725,9 @@ function createPlugin(
     api.registerTool(
       (toolContext) => ({
         label: "AKK Send",
-      name: "agent_knock_knock_send",
-      description:
-          "Start a new turn in an existing AKK session without clearing the coding agent's native context. Target the exact session_id from list or a prior send; never pass a turn id or discovery selector as session_id. selector is compatibility-only for initial live-terminal discovery: use one explicitly named by the user or prefilled by list, and never infer one. Both fields may be omitted only when AKK should require one unique eligible idle pane. To answer an in-flight question, use agent_knock_knock_respond instead. For ordinary use add only request and omit monitoring timeouts unless the user explicitly asks to change them. timeoutSeconds is unsupported. AKK never starts a coding agent. This is asynchronous: after acceptance, yield and wait for the callback or a later explicit status request.",
+        name: "agent_knock_knock_send",
+        description:
+          "Start a new AKK Turn. A session-scoped send uses the exact session_id from list or a prior send, preserves that Session's native context, and never redirects to a thread the human selected later in the pane. A terminal-scoped follow-current send uses only one exact list-prefilled full terminal selector together with its fresh expected_terminal_token; AKK may then atomically adopt a verified quiescent human handoff before creating the Turn. Preserve both values exactly and never infer, copy, or reuse the token. Legacy selector discovery remains supported, and both target fields may be omitted only when AKK should require one unique eligible idle pane. Never pass a turn id or selector as session_id. To answer an in-flight question, use agent_knock_knock_respond instead. For ordinary use omit monitoring timeouts unless the user explicitly asks to change them. timeoutSeconds is unsupported. AKK never starts a coding agent. This is asynchronous: after acceptance, yield and wait for the callback or a later explicit status request.",
         parameters: sendParameters,
         async execute(toolCallId, params) {
           const result = await runSendRequest(
@@ -827,7 +846,7 @@ function createPlugin(
     registerCliTool(api, {
       name: "agent_knock_knock_close",
       description:
-        "Close an AKK-managed turn record without terminating the shared terminal pane. For a list-prefilled raw-terminal recovery, the user must explicitly request it and provide the exact expected_message_id or expected_transition_id reported by that AKK list entry.",
+        "Close an AKK-managed turn record without terminating the shared terminal pane. For a list-prefilled raw-terminal recovery, the user must explicitly request it and provide the exact expected_message_id or expected_transition_id reported by that AKK list entry. When a verified human native-thread switch conflicts with one active Turn, only the complete nested handoff_decision take_over_current action is authoritative: it requires explicit user confirmation and its exact turn_id, supersede reason, and expected_handoff_token.",
       parameters: closeParameters,
       isErrorResult: isBlockedTerminalDispatchResult,
       buildArgs: (params) => {
@@ -845,6 +864,11 @@ function createPlugin(
           args,
           "--expected-transition-id",
           stringValue(params.expected_transition_id)
+        );
+        pushOptional(
+          args,
+          "--expected-handoff-token",
+          stringValue(params.expected_handoff_token)
         );
         pushOptional(
           args,
@@ -1677,6 +1701,28 @@ async function runSendRequest(api, params, toolContext, messageId?: string) {
   const selector = Object.hasOwn(params, "selector")
     ? requiredString(params.selector, "selector")
     : undefined;
+  const expectedTerminalToken = Object.hasOwn(
+    params,
+    "expected_terminal_token"
+  )
+    ? requiredString(
+        params.expected_terminal_token,
+        "expected_terminal_token"
+      )
+    : undefined;
+  if (expectedTerminalToken && !selector) {
+    throw new Error(
+      "expected_terminal_token requires a terminal-scoped selector and cannot be used with session_id"
+    );
+  }
+  if (
+    expectedTerminalToken &&
+    !/^terminal:v[0-9]+:/u.test(selector ?? "")
+  ) {
+    throw new Error(
+      "expected_terminal_token requires the exact full terminal selector prefilled by AKK list"
+    );
+  }
   if (!sessionId && !selector) {
     return runDelegate(api, { ...params, messageId }, toolContext);
   }
@@ -1693,6 +1739,11 @@ async function runSendRequest(api, params, toolContext, messageId?: string) {
   } else {
     args.push("--conversation", requiredString(selector, "selector"));
   }
+  pushOptional(
+    args,
+    "--expected-terminal-token",
+    expectedTerminalToken
+  );
   args.push(
     "--message",
     requiredString(params.request, "request"),
@@ -2671,12 +2722,35 @@ function authoritativeManagedId(value, name) {
 }
 
 function assertExclusiveRecoveryFence(params) {
-  if (
-    stringValue(params.expected_message_id) &&
-    stringValue(params.expected_transition_id)
-  ) {
+  const expectedMessageId = stringValue(params.expected_message_id);
+  const expectedTransitionId = stringValue(params.expected_transition_id);
+  const expectedHandoffToken = stringValue(params.expected_handoff_token);
+  const closeFenceCount = [
+    expectedMessageId,
+    expectedTransitionId,
+    expectedHandoffToken
+  ].filter(Boolean).length;
+  if (closeFenceCount > 1) {
     throw new Error(
-      "close accepts only one of expected_message_id or expected_transition_id"
+      "close accepts only one of expected_message_id, expected_transition_id, or expected_handoff_token"
+    );
+  }
+  const handoffReason = stringValue(params.reason) ===
+    "superseded_by_human_context_switch";
+  if (expectedHandoffToken) {
+    if (!stringValue(params.turn_id) || stringValue(params.conversation_id)) {
+      throw new Error(
+        "expected_handoff_token requires the exact managed turn_id from the advertised handoff_decision action"
+      );
+    }
+    if (!handoffReason) {
+      throw new Error(
+        "expected_handoff_token requires reason=superseded_by_human_context_switch"
+      );
+    }
+  } else if (handoffReason) {
+    throw new Error(
+      "reason=superseded_by_human_context_switch requires expected_handoff_token from the advertised handoff_decision action"
     );
   }
 }
