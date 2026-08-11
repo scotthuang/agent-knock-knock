@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.12.3 - 2026-08-11
+
+### Fixed
+
+- Recover a same-process Codex terminal after the previously bound rollout has conclusively ended by detaching the old Session and creating a separate virgin Session for the next exact terminal-scoped send.
+- Parse only Claude Code's current bottom composer frame, so a historical `/clear` prompt does not block Herdr handoff and exact soft-wrapped drafts can still receive one verified Enter.
+
+### Security
+
+- Keep generic unverifiable native identity and explicit Session-scoped sends fail-closed, while requiring the exact endpoint, PID, process birth, cwd, owner, source binding, idle state, and styled-empty composer before adopting a verified zero-rollout Codex context.
+- Preserve character-exact draft checks, repeated pre-text and pre-Enter identity revalidation, single-Enter dispatch, isolated Session history, and no blind retry after text may have reached the terminal.
+
 ## 0.12.2 - 2026-08-11
 
 ### Added
