@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.12.5 - 2026-08-12
+
+### Fixed
+
+- Let an advertised terminal-scoped ordinary Codex first task proceed in a narrow pane without an internal `/status` probe when the existing status-card-only context has a verified zero rollout, then bind the new AKK Session to the exact rollout that accepts the request.
+- Preserve strict UUID proof for explicit Session sends, responses, approvals, cancellations, lifecycle operations, and native inspection while keeping uncertain terminal input non-retryable.
+
+### Security
+
+- Isolate deferred foreground sends in a zero-UUID provisional Session and require exact process, terminal, request-acceptance, ownership, and binding-generation evidence before promoting it to the native thread.
+- Add Store protocol 4 writer fencing plus crash-safe deferred-transfer receipts and recovery across pre-input aborts, post-input uncertainty, same-thread handoff, acceptance backfill, and downgrade attempts without replaying terminal input.
+
 ## 0.12.4 - 2026-08-11
 
 ### Fixed
