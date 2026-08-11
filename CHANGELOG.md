@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.12.4 - 2026-08-11
+
+### Fixed
+
+- Submit every internal Codex `/status` through one exact-version closed path with bracketed-paste settling, current-composer proof, one Enter, and same-depth freshness, so narrow or stale Herdr screens cannot masquerade as a complete current Session.
+- Stop uncertain terminal dispatches from collateral-stalling already completed Claude Turns, and strictly repair legacy false stalls only when completion, callback, dispatch-fence, and closed-owner evidence agree.
+- Preserve exact Claude composer text across Herdr visual soft wraps while ignoring historical prompts outside the current bottom composer frame.
+
+### Security
+
+- Fence Codex status probes with exact tmux or kernel PTY viewport evidence, terminal route, process birth, TTY device identity, native identity, and final composer revalidation before the single Enter.
+- Apply terminal-incarnation blockers consistently across list, send, lifecycle, and native inspection, while keeping human-handoff source Turns behind snapshot-bound close decisions and retaining typed Store-only close for genuinely unavailable terminals.
+
 ## 0.12.3 - 2026-08-11
 
 ### Fixed
