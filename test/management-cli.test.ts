@@ -101,7 +101,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       hidden_turn_count: 0,
       session_count: 0
     });
-    assert.equal(listed.action_contracts.version, 8);
+    assert.equal(listed.action_contracts.version, 9);
     assert.match(
       listed.action_contracts.instructions.join("\n"),
       /Treat terminals\[\] as the primary resource/u
@@ -155,6 +155,25 @@ test("list exposes physical tmux terminals with the terminal-first action contra
         meaning: "currently_safe_actions",
         authoritative_for_tool_calls: true
       }
+    );
+    assert.match(
+      listed.action_contracts.field_semantics
+        .native_agent_identity_observation.meaning,
+      /verified_absent[\s\S]*unavailable resolver/u
+    );
+    assert.match(
+      listed.action_contracts.field_semantics.management_conflict
+        .verified_empty_native_session,
+      /snapshot-bound send[\s\S]*isolated virgin Session/u
+    );
+    assert.match(
+      listed.action_contracts.field_semantics.handoff_state
+        .verified_empty_native_session_adoptable,
+      /listed conflict send[\s\S]*revalidated before terminal input/u
+    );
+    assert.match(
+      listed.action_contracts.actions.send.ordinary_use,
+      /exact listed conflict send[\s\S]*verified-empty Codex source/u
     );
     assert.deepEqual(
       listed.action_contracts.field_semantics.handoff_decision,

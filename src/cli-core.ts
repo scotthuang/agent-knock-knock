@@ -173,6 +173,7 @@ import {
   type TerminalProcessSource
 } from "./terminal-process-source.js";
 import {
+  isExactClaudeIdleComposer,
   isExactClaudeNativeInspectionIdleComposer,
   NativeInspectionSubmissionError,
   TerminalAgentBridge,
@@ -3950,9 +3951,8 @@ async function terminalControlledListEntry(
       });
     }
   }
-  let nativeAgentIdentity: NativeAgentSessionIdentity | undefined;
-  try {
-    nativeAgentIdentity = await resolveCurrentNativeAgentSessionIdentity({
+  const nativeIdentityObservation =
+    await observeCurrentNativeAgentSessionIdentity({
       options,
       agent: session.agent,
       pid: session.pid,
@@ -3963,12 +3963,15 @@ async function terminalControlledListEntry(
       allowedAdditionalIdentities:
         codexIdentityContext?.companions.additional
     });
-  } catch (error) {
+  const nativeAgentIdentity = nativeIdentityObservation.status === "resolved"
+    ? nativeIdentityObservation.identity
+    : undefined;
+  if (nativeIdentityObservation.status === "unavailable") {
     runtimeLog("warn", "terminal_native_session_identity_unavailable", {
       agent: session.agent,
       terminal_target: terminalControl.target,
       pid: session.pid,
-      error: error instanceof Error ? error.message : String(error)
+      error: nativeIdentityObservation.reason
     });
   }
   let nativeProcessUuid = nativeAgentIdentity?.processUuid;
@@ -4051,16 +4054,20 @@ async function terminalControlledListEntry(
     ) &&
     SESSION_SEND_BLOCKING_STATUSES.has(turn.status)
   );
-  let nativeInspectionComposerReady = nativeInspectionComposerEmpty(
+  let automatedInputComposerReady = nativeInspectionComposerEmpty(
     session.agent,
     terminalState.screen_excerpt
   );
   if (
     session.agent === "codex" &&
-    terminalState.activity_state === "idle" &&
+    (
+      terminalState.activity_state === "idle" ||
+      (
+        terminalState.activity_state === "unknown" &&
+        nativeIdentityObservation.status === "verified_absent"
+      )
+    ) &&
     terminalState.approval_state.blocked !== true &&
-    nativeInspectionCapability.status === "supported" &&
-    nativeInspectionCapability.statusInspection === true &&
     terminalControl.capabilities.includes("send_keys") &&
     terminalControl.capabilities.includes("screen_status")
   ) {
@@ -4073,11 +4080,11 @@ async function terminalControlledListEntry(
         resolvedTerminal,
         { scrollbackLines: 40, preserveEscapes: true }
       );
-      nativeInspectionComposerReady = codexStyledComposerEmpty(styledScreen);
+      automatedInputComposerReady = codexStyledComposerEmpty(styledScreen);
     } catch {
       // Advertising an input action is optional. The action itself repeats the
       // same styled composer proof under the terminal lock before any input.
-      nativeInspectionComposerReady = false;
+      automatedInputComposerReady = false;
     }
   }
   const entry = {
@@ -4098,6 +4105,14 @@ async function terminalControlledListEntry(
     native_agent_process_birth: nativeProcessBirth,
     native_agent_rollout: nativeAgentIdentity?.rollout,
     native_agent_identity_evidence: nativeProcessEvidence,
+    native_agent_identity_observation: {
+      status: nativeIdentityObservation.status,
+      ...(nativeIdentityObservation.status === "unavailable"
+        ? { reason: nativeIdentityObservation.reason }
+        : nativeIdentityObservation.status === "verified_absent"
+          ? { evidence: nativeIdentityObservation.evidence }
+          : {})
+    },
     agent_version: agentVersion,
     native_thread_lifecycle: lifecycleCapability,
     native_inspection: nativeInspectionCapability,
@@ -4108,6 +4123,10 @@ async function terminalControlledListEntry(
     approval_state: terminalState.approval_state,
     activity_state: terminalState.activity_state,
     activity_reason: terminalState.activity_reason,
+    // Internal action-projection evidence. terminalFirstListProjection strips
+    // this field after gating every automated-input action that can follow a
+    // human native-thread switch.
+    _automated_input_composer_ready: automatedInputComposerReady,
     ...(orphanedDispatch
       ? {
           orphaned_terminal_dispatch: {
@@ -4147,7 +4166,8 @@ async function terminalControlledListEntry(
       native_inspect:
         nativeInspectionCapability.status === "supported" &&
         nativeInspectionCapability.statusInspection === true &&
-        nativeInspectionComposerReady &&
+        terminalState.activity_state === "idle" &&
+        automatedInputComposerReady &&
         terminalControl.capabilities.includes("send_keys") &&
         terminalControl.capabilities.includes("screen_status") &&
         (
@@ -4204,6 +4224,10 @@ function terminalFirstListProjection({
   });
 
   const projectedTerminals = terminals.map((terminal) => {
+    const {
+      _automated_input_composer_ready: automatedInputComposerReady,
+      ...publicTerminal
+    } = terminal;
     const terminalControl = isRecord(terminal.terminal_control)
       ? terminal.terminal_control as unknown as TerminalControlRef
       : undefined;
@@ -4451,6 +4475,91 @@ function terminalFirstListProjection({
     const blockingHandoffTurns = conflictingSessionTurns.filter((turn) =>
       SESSION_SEND_BLOCKING_STATUSES.has(turn.status)
     );
+    const nativeIdentityObservation = isRecord(
+      terminal.native_agent_identity_observation
+    )
+      ? terminal.native_agent_identity_observation
+      : undefined;
+    const verifiedEmptyProcessUuid = stringValue(
+      terminal.native_agent_process_uuid
+    );
+    const verifiedEmptyProcessBirth = stringValue(
+      terminal.native_agent_process_birth
+    );
+    const verifiedEmptyWorkspace = stringValue(
+      terminal.workspace ?? terminal.cwd
+    );
+    const verifiedEmptySourceNativeThreadId = stringValue(
+      soleBindingConflict?.session.binding?.native_thread_id
+    )?.toLowerCase();
+    const verifiedEmptySourceActiveElsewhere = Boolean(
+      verifiedEmptySourceNativeThreadId &&
+      terminals.some((candidate) =>
+        candidate !== terminal &&
+        candidate.agent === "codex" &&
+        stringValue(candidate.native_agent_session_id)?.toLowerCase() ===
+          verifiedEmptySourceNativeThreadId
+      )
+    );
+    const verifiedEmptyRawSendAction = isRecord(rawActions.send)
+      ? rawActions.send
+      : {
+          tool: "agent_knock_knock_send",
+          arguments: { selector: stringValue(terminal.id) },
+          missing_required: ["request"]
+        };
+    const verifiedEmptyCodexHandoffEligible = Boolean(
+      mutationsAllowed &&
+      terminal.agent === "codex" &&
+      terminalControl &&
+      discoveredOwnership.state === "none" &&
+      unresolvedSessionClaims.length === 0 &&
+      matchingSessions.length === 0 &&
+      soleBindingConflict?.kind === "unverifiable" &&
+      nativeIdentityObservation?.status === "verified_absent" &&
+      verifiedEmptyProcessUuid &&
+      verifiedEmptyProcessBirth &&
+      verifiedEmptyWorkspace &&
+      exactBoundCodexSourceForVerifiedEmptyHandoff({
+        session: soleBindingConflict.session,
+        terminalId: String(terminal.id),
+        terminalControl,
+        pid: Number(terminal.pid),
+        workspace: verifiedEmptyWorkspace,
+        processUuid: verifiedEmptyProcessUuid,
+        processBirth: verifiedEmptyProcessBirth
+      }) &&
+      ["idle", "unknown"].includes(String(terminal.activity_state)) &&
+      automatedInputComposerReady === true &&
+      !(isRecord(terminal.approval_state) &&
+        terminal.approval_state.blocked === true) &&
+      blockingHandoffTurns.length === 0 &&
+      !managedSessionHasUnresolvedNativeTransition(
+        storeDir,
+        soleBindingConflict.session
+      ) &&
+      !verifiedEmptySourceActiveElsewhere &&
+      terminal.orphaned_terminal_dispatch === undefined &&
+      terminalControl?.capabilities.includes("send_keys") &&
+      terminalControl.capabilities.includes("screen_status")
+    );
+    const verifiedEmptyCodexSnapshotToken =
+      verifiedEmptyCodexHandoffEligible &&
+      terminalControl &&
+      soleBindingConflict &&
+      verifiedEmptyProcessUuid &&
+      verifiedEmptyProcessBirth &&
+      verifiedEmptyWorkspace
+        ? verifiedEmptyCodexHandoffToken({
+            terminalId: String(terminal.id),
+            terminalControl,
+            pid: Number(terminal.pid),
+            workspace: verifiedEmptyWorkspace,
+            processUuid: verifiedEmptyProcessUuid,
+            processBirth: verifiedEmptyProcessBirth,
+            sourceSession: soleBindingConflict.session
+          })
+        : undefined;
     const reconcileBindingAction =
       mutationsAllowed &&
       discoveredOwnership.state === "none" &&
@@ -4492,6 +4601,7 @@ function terminalFirstListProjection({
       unresolvedSessionClaims.length === 0 &&
       soleBindingConflict?.kind === "live_external_thread_change" &&
       terminal.activity_state === "idle" &&
+      automatedInputComposerReady === true &&
       !(isRecord(terminal.approval_state) &&
         terminal.approval_state.blocked === true) &&
       !conflictingSessionTurns.some((turn) =>
@@ -4703,6 +4813,20 @@ function terminalFirstListProjection({
                   }
                 }
               : {}),
+            ...(verifiedEmptyCodexSnapshotToken
+              ? {
+                  send: {
+                    ...verifiedEmptyRawSendAction,
+                    arguments: {
+                      ...(isRecord(verifiedEmptyRawSendAction.arguments)
+                        ? verifiedEmptyRawSendAction.arguments
+                        : {}),
+                      expected_terminal_token:
+                        verifiedEmptyCodexSnapshotToken
+                    }
+                  }
+                }
+              : {}),
             ...(reconcileBindingAction
               ? { reconcile_binding: reconcileBindingAction }
               : {})
@@ -4737,9 +4861,23 @@ function terminalFirstListProjection({
             managedSessionBindingToken(authoritativeSession)
         }
       : {};
+    const publicManagementConflict =
+      ownership.state === "conflict" && verifiedEmptyCodexSnapshotToken
+        ? {
+            ...ownership.conflict,
+            kind: "verified_empty_native_session",
+            reason:
+              "the previously bound Codex rollout is conclusively closed " +
+              "while the same terminal process is at an exact empty prompt",
+            recovery:
+              "use only the exact snapshot-bound send action listed for this terminal"
+          }
+        : ownership.state === "conflict"
+          ? ownership.conflict
+          : undefined;
 
     return {
-      ...terminal,
+      ...publicTerminal,
       ...authoritativeIdentity,
       management_state: ownership.state === "conflict"
         ? "conflict"
@@ -4747,14 +4885,23 @@ function terminalFirstListProjection({
           ? "managed"
           : "unmanaged",
       ...(ownership.state === "conflict"
-        ? { management_conflict: ownership.conflict }
+        ? { management_conflict: publicManagementConflict }
         : {}),
       ...(externalHandoffDetected
         ? {
             handoff_state: externalHandoffAdoptable
               ? "external_handoff_adoptable"
-              : "external_handoff_blocked"
+              : "external_handoff_blocked",
+            ...(automatedInputComposerReady !== true
+              ? {
+                  handoff_blocked_reason:
+                    "the current terminal composer is not an exact empty idle frame"
+                }
+              : {})
           }
+        : {}),
+      ...(verifiedEmptyCodexSnapshotToken
+        ? { handoff_state: "verified_empty_native_session_adoptable" }
         : {}),
       ...(handoffDecision ? { handoff_decision: handoffDecision } : {}),
       managed: management,
@@ -5680,13 +5827,13 @@ function managedListApprovalState(
 
 function listActionContracts() {
   return {
-    version: 8,
+    version: 9,
     instructions: [
       "Treat terminals[] as the primary resource and use only actions present in available_actions, except the snapshot-bound terminals[].handoff_decision.choices.take_over_current.action. That nested action requires explicit user confirmation; after it succeeds, refresh list before any follow-current send.",
       "An existing managed session's ordinary send targets session_id and creates a new turn. A turn id is never an ordinary send target.",
       "Read-only native-thread listing targets an exact terminal_id. Native-thread new/resume mutations also use the listed expected_binding_token and never create a Turn.",
       "Native inspection is a separate terminal action: use only its closed inspection enum and current exact terminal_id/token; AKK status does not execute a native slash command.",
-      "A verified, idle human native-thread switch may expose a terminal-scoped send with expected_terminal_token; that action atomically adopts the live context before creating its Turn. Other binding conflicts remain fail-closed and may expose only exact low-level reconcile_binding recovery.",
+      "A verified, idle human native-thread switch may expose a terminal-scoped send with expected_terminal_token; that action atomically adopts the live context before creating its Turn. A conclusively ended Codex rollout may expose the same snapshot-bound send only after AKK proves zero current rollout and an exact empty composer; it detaches the ended Session and creates an isolated virgin Session. Other binding conflicts remain fail-closed and may expose only exact low-level reconcile_binding recovery.",
       "List resumable threads before resume; use only a complete native_thread_id and the action returned for that candidate.",
       "Use a terminal selector only when explicitly named by the user or prefilled by that terminal row's send action. A handoff action also carries expected_terminal_token; never infer, guess, or reuse either value.",
       "Use respond only for an in-flight turn that is explicitly waiting for OpenClaw.",
@@ -5720,6 +5867,21 @@ function listActionContracts() {
         meaning: "currently_safe_actions",
         authoritative_for_tool_calls: true
       },
+      native_agent_identity_observation: {
+        meaning:
+          "the latest bounded native identity probe; verified_absent is distinct from an unavailable resolver",
+        authoritative_for_tool_calls: false
+      },
+      management_conflict: {
+        verified_empty_native_session:
+          "a previously bound Codex rollout is conclusively closed; only the exact snapshot-bound send in available_actions may detach it and create an isolated virgin Session"
+      },
+      handoff_state: {
+        meaning:
+          "why a conflict-scoped follow-current send is available or blocked",
+        verified_empty_native_session_adoptable:
+          "the exact current terminal snapshot permits the listed conflict send; availability is revalidated before terminal input"
+      },
       handoff_decision: {
         meaning:
           "an explicit human choice required before superseding an active source Turn",
@@ -5747,7 +5909,7 @@ function listActionContracts() {
         ],
         unsupported: ["timeoutSeconds"],
         ordinary_use:
-          "Create a new managed turn in the exact Session. A live terminal selector can attach an unmanaged pane or adopt one verified human-selected native context; an explicit session_id never follows the pane."
+          "Create a new managed turn in the exact Session. A live terminal selector can attach an unmanaged pane, adopt one verified human-selected native context, or use the exact listed conflict send to detach a verified-empty Codex source before an isolated virgin attach; an explicit session_id never follows the pane."
       },
       new_thread: {
         tool: "agent_knock_knock_new_thread",
@@ -7726,6 +7888,347 @@ const HUMAN_OBSERVED_HANDOFF_FINGERPRINT =
   nativeThreadCommandFingerprint(
     "adopt_external_thread:human_observed:no_terminal_input:v1"
   );
+
+function exactBoundCodexSourceForVerifiedEmptyHandoff({
+  session,
+  terminalId,
+  terminalControl,
+  pid,
+  workspace,
+  processUuid,
+  processBirth
+}: {
+  session: ManagedSessionState;
+  terminalId: string;
+  terminalControl: TerminalControlRef;
+  pid: number;
+  workspace?: string;
+  processUuid?: string;
+  processBirth?: string;
+}): boolean {
+  const binding = session.binding;
+  return Boolean(
+    session.agent === "codex" &&
+    session.status === "bound" &&
+    binding &&
+    isExactNativeThreadId(binding.native_thread_id) &&
+    isCompleteNativeRollout(binding.native_process.rollout) &&
+    binding.native_process.process_uuid &&
+    binding.native_process.process_birth &&
+    binding.native_process.pid === pid &&
+    terminalControlAliasMatches(
+      binding.terminal_id,
+      binding.terminal_control,
+      terminalId,
+      terminalControl
+    ) &&
+    workspace &&
+    path.resolve(session.workspace) === path.resolve(workspace) &&
+    processIncarnationRelationship({
+      binding,
+      livePid: pid,
+      liveProcessUuid: processUuid,
+      liveProcessBirth: processBirth
+    }) === "same"
+  );
+}
+
+function verifiedEmptyCodexHandoffToken({
+  terminalId,
+  terminalControl,
+  pid,
+  workspace,
+  processUuid,
+  processBirth,
+  sourceSession
+}: {
+  terminalId: string;
+  terminalControl: TerminalControlRef;
+  pid: number;
+  workspace: string;
+  processUuid: string;
+  processBirth: string;
+  sourceSession: ManagedSessionState;
+}): string {
+  const terminalToken = unmanagedTerminalBindingToken({
+    terminalId,
+    terminalControl,
+    agent: "codex",
+    pid,
+    workspace,
+    processUuid,
+    processBirth
+  });
+  return createHash("sha256")
+    .update(JSON.stringify({
+      version: 1,
+      kind: "verified_empty_codex_handoff",
+      terminal_token: terminalToken,
+      source_session_id: sourceSession.session_id,
+      source_revision: managedSessionRevision(sourceSession),
+      source_binding_token: managedSessionBindingToken(sourceSession),
+      observation: "verified_absent"
+    }))
+    .digest("hex");
+}
+
+interface VerifiedEmptyCodexHandoffBoundary {
+  terminal: ResolvedTerminalConversation;
+  detachedSourceSessionId: string;
+  detachedSourceRevision: number;
+  detachedSourceBindingToken: string;
+  processUuid: string;
+  processBirth: string;
+}
+
+async function assertVerifiedEmptyCodexHandoffBoundary({
+  options,
+  terminal,
+  sourceSession,
+  expectedSourceStatus,
+  requireNoDispatch,
+  requireEmptyComposer = true
+}: {
+  options: Record<string, any>;
+  terminal: ResolvedTerminalConversation;
+  sourceSession: ManagedSessionState;
+  expectedSourceStatus: "bound" | "detached";
+  requireNoDispatch: boolean;
+  requireEmptyComposer?: boolean;
+}): Promise<void> {
+  const currentSource = loadManagedSession(
+    storeDirFromOptions(options),
+    sourceSession.session_id
+  );
+  if (
+    currentSource.status !== expectedSourceStatus ||
+    currentSource.revision !== sourceSession.revision ||
+    managedSessionBindingToken(currentSource) !==
+      managedSessionBindingToken(sourceSession)
+  ) {
+    throw new Error(
+      "the verified-empty source Session changed; refresh AKK list"
+    );
+  }
+  const liveIncarnation = codexProcessIncarnationForPid(terminal.pid);
+  if (
+    !exactBoundCodexSourceForVerifiedEmptyHandoff({
+      session: {
+        ...currentSource,
+        // The exact source binding remains authoritative after the monotonic
+        // detach; only the Session status changes.
+        status: "bound"
+      },
+      terminalId: terminal.conversationId,
+      terminalControl: terminal.terminalControl,
+      pid: terminal.pid,
+      workspace: terminal.terminalControl.currentPath,
+      processUuid: liveIncarnation.processUuid,
+      processBirth: liveIncarnation.processBirth
+    })
+  ) {
+    throw new Error(
+      "the verified-empty source binding no longer matches the terminal"
+    );
+  }
+  const observation = await observeCurrentNativeAgentSessionIdentity({
+    options,
+    agent: "codex",
+    pid: terminal.pid,
+    cwd: terminal.terminalControl.currentPath
+  });
+  if (observation.status === "unavailable") {
+    throw new Error(
+      `Codex native identity observation is unavailable: ${observation.reason}`
+    );
+  }
+  if (observation.status !== "verified_absent") {
+    throw new Error(
+      `Codex materialized native thread ${observation.identity.sessionId}; ` +
+      "refresh AKK list before sending"
+    );
+  }
+  const status = await createTerminalAgentBridge(options).status(
+    "codex",
+    terminal.terminalControl,
+    {
+      runtime: terminalRuntimeForLiveIdentity({
+        terminal,
+        expectedEmptyNativeSession: true
+      })
+    }
+  );
+  if (
+    status.reachable !== true ||
+    status.approval_state.blocked === true ||
+    !["idle", "unknown"].includes(status.activity_state)
+  ) {
+    throw new Error(
+      `terminal ${terminal.terminalControl.target} is not at a verified ` +
+      `empty Codex prompt (${status.activity_state}: ${status.activity_reason})`
+    );
+  }
+  if (requireNoDispatch) {
+    assertTerminalLifecycleReady({
+      options,
+      terminal,
+      // A fully styled empty/placeholder composer below is stronger prompt
+      // evidence than the plain-screen parser's conservative `unknown`.
+      terminalStatus: { ...status, activity_state: "idle" }
+    });
+  }
+  if (managedSessionHasUnresolvedNativeTransition(
+    storeDirFromOptions(options),
+    currentSource
+  )) {
+    throw new Error(
+      `managed Session ${currentSource.session_id} has an unresolved native-thread transition`
+    );
+  }
+  if (requireEmptyComposer) {
+    await assertCodexComposerReadyForAutomatedInput({
+      options,
+      terminalControl: terminal.terminalControl
+    });
+  }
+}
+
+async function maybeDetachVerifiedEmptyCodexSource({
+  options,
+  terminal,
+  sourceSession,
+  observation
+}: {
+  options: Record<string, any>;
+  terminal: ResolvedTerminalConversation;
+  sourceSession?: ManagedSessionState;
+  observation: NativeAgentSessionIdentityObservation;
+}): Promise<{
+  detached: ManagedSessionState;
+  boundary: VerifiedEmptyCodexHandoffBoundary;
+} | undefined> {
+  if (
+    terminal.agent !== "codex" ||
+    !sourceSession?.binding ||
+    observation.status !== "verified_absent"
+  ) {
+    return undefined;
+  }
+  const processUuid = sourceSession.binding.native_process.process_uuid;
+  const processBirth = sourceSession.binding.native_process.process_birth;
+  const workspace = terminal.terminalControl.currentPath;
+  const liveIncarnation = codexProcessIncarnationForPid(terminal.pid);
+  if (
+    !processUuid ||
+    !processBirth ||
+    !workspace ||
+    !exactBoundCodexSourceForVerifiedEmptyHandoff({
+      session: sourceSession,
+      terminalId: terminal.conversationId,
+      terminalControl: terminal.terminalControl,
+      pid: terminal.pid,
+      workspace,
+      processUuid: liveIncarnation.processUuid,
+      processBirth: liveIncarnation.processBirth
+    })
+  ) {
+    return undefined;
+  }
+  const expectedToken = verifiedEmptyCodexHandoffToken({
+    terminalId: terminal.conversationId,
+    terminalControl: terminal.terminalControl,
+    pid: terminal.pid,
+    workspace,
+    processUuid,
+    processBirth,
+    sourceSession
+  });
+  if (stringValue(options.expectedTerminalToken) !== expectedToken) {
+    throw new Error(
+      "verified-empty Codex handoff requires the fresh exact terminal token " +
+      "advertised by AKK list"
+    );
+  }
+  await assertVerifiedEmptyCodexHandoffBoundary({
+    options,
+    terminal,
+    sourceSession,
+    expectedSourceStatus: "bound",
+    requireNoDispatch: true
+  });
+  await assertNativeThreadHasExclusiveOwnership({
+    options,
+    agent: "codex",
+    currentPid: terminal.pid,
+    nativeThreadId: sourceSession.binding.native_thread_id as string,
+    storeDir: storeDirFromOptions(options),
+    terminalControl: terminal.terminalControl,
+    excludedManagedSessionId: sourceSession.session_id
+  });
+  const detachedAt = cliNow().toISOString();
+  const detached = saveManagedSession(storeDirFromOptions(options), {
+    ...sourceSession,
+    status: "detached",
+    detached_at: detachedAt,
+    updated_at: detachedAt
+  }, {
+    expectedRevision: managedSessionRevision(sourceSession)
+  });
+  runtimeLog("info", "verified_empty_codex_source_detached", {
+    terminal_id: terminal.conversationId,
+    source_session_id: sourceSession.session_id,
+    native_thread_id: sourceSession.binding.native_thread_id,
+    process_uuid: processUuid,
+    process_birth: processBirth,
+    terminal_input_sent: false
+  });
+  return {
+    detached,
+    boundary: {
+      terminal,
+      detachedSourceSessionId: detached.session_id,
+      detachedSourceRevision: managedSessionRevision(detached),
+      detachedSourceBindingToken: managedSessionBindingToken(detached),
+      processUuid,
+      processBirth
+    }
+  };
+}
+
+async function assertVerifiedEmptyCodexTransportBoundary({
+  options,
+  boundary,
+  requireEmptyComposer
+}: {
+  options: Record<string, any>;
+  boundary: VerifiedEmptyCodexHandoffBoundary;
+  requireEmptyComposer: boolean;
+}): Promise<void> {
+  const source = loadManagedSession(
+    storeDirFromOptions(options),
+    boundary.detachedSourceSessionId
+  );
+  if (
+    source.status !== "detached" ||
+    managedSessionRevision(source) !== boundary.detachedSourceRevision ||
+    managedSessionBindingToken(source) !==
+      boundary.detachedSourceBindingToken ||
+    source.binding?.native_process.process_uuid !== boundary.processUuid ||
+    source.binding.native_process.process_birth !== boundary.processBirth
+  ) {
+    throw new Error(
+      "verified-empty Codex source authority changed before text injection"
+    );
+  }
+  await assertVerifiedEmptyCodexHandoffBoundary({
+    options,
+    terminal: boundary.terminal,
+    sourceSession: source,
+    expectedSourceStatus: "detached",
+    requireNoDispatch: false,
+    requireEmptyComposer
+  });
+}
 
 function observedHandoffAuthorityToken({
   terminal,
@@ -12612,18 +13115,18 @@ async function runSend(options) {
       })) {
         return;
       }
-      const claimedSession = soleBoundManagedSessionClaimForTerminal(
+      let claimedSession = soleBoundManagedSessionClaimForTerminal(
         rawStoreDir,
         terminalConversation
       );
-      const knownCodexCompanions: CodexAllowedCompanionSet = claimedSession
+      let knownCodexCompanions: CodexAllowedCompanionSet = claimedSession
         ? codexAllowedCompanionSetForManagedSession({
             storeDir: rawStoreDir,
             session: claimedSession
           })
         : { additional: [] };
-      let currentNativeIdentity =
-        await resolveCurrentNativeAgentSessionIdentity({
+      const nativeIdentityObservation =
+        await observeCurrentNativeAgentSessionIdentity({
           options,
           agent: terminalConversation.agent,
           pid: terminalConversation.pid,
@@ -12634,6 +13137,30 @@ async function runSend(options) {
           allowedCompanionIdentity: knownCodexCompanions.primary,
           allowedAdditionalIdentities: knownCodexCompanions.additional
         });
+      if (nativeIdentityObservation.status === "unavailable") {
+        throw new Error(
+          `native ${terminalConversation.agent} identity observation is ` +
+          `unavailable: ${nativeIdentityObservation.reason}`
+        );
+      }
+      let currentNativeIdentity =
+        nativeIdentityObservation.status === "resolved"
+          ? nativeIdentityObservation.identity
+          : undefined;
+      const verifiedEmptyHandoff =
+        await maybeDetachVerifiedEmptyCodexSource({
+          options,
+          terminal: terminalConversation,
+          sourceSession: claimedSession,
+          observation: nativeIdentityObservation
+        });
+      if (verifiedEmptyHandoff) {
+        // The old rollout is conclusively closed.  Never carry it forward as
+        // a pre-materialization companion for the new virgin Session.
+        claimedSession = undefined;
+        knownCodexCompanions = { additional: [] };
+        currentNativeIdentity = undefined;
+      }
       const physicalNativeIdentityBeforeHandoff = currentNativeIdentity;
       const handoff = await maybeAdoptObservedExternalThread({
         options,
@@ -12835,7 +13362,8 @@ async function runSend(options) {
                   terminal: terminalConversation,
                   transition: handoff.transition
                 }
-              : undefined
+              : undefined,
+          verifiedEmptyCodexHandoff: verifiedEmptyHandoff?.boundary
         });
       } finally {
         releaseStateLock();
@@ -14034,6 +14562,8 @@ async function runTerminalControlSend({
         transition: NativeThreadTransition;
       }
     | undefined,
+  verifiedEmptyCodexHandoff = undefined as
+    VerifiedEmptyCodexHandoffBoundary | undefined,
   continuingTurnResponse = false
 }) {
   const bridge = terminalBridgeEnabled(conversation);
@@ -14062,6 +14592,7 @@ async function runTerminalControlSend({
         allowedPreMaterializationIdentity,
         allowedAdditionalIdentities,
         observedHandoff,
+        verifiedEmptyCodexHandoff,
         continuingTurnResponse
       });
     } finally {
@@ -14105,6 +14636,7 @@ async function runTerminalControlSend({
         allowedPreMaterializationIdentity,
         allowedAdditionalIdentities,
         observedHandoff,
+        verifiedEmptyCodexHandoff,
         continuingTurnResponse
       });
     } finally {
@@ -14135,6 +14667,7 @@ async function runTerminalControlSend({
         allowedPreMaterializationIdentity,
         allowedAdditionalIdentities,
         observedHandoff,
+        verifiedEmptyCodexHandoff,
         continuingTurnResponse
       })
     );
@@ -14389,7 +14922,21 @@ async function runTerminalControlSend({
       scrollbackLines: Number(options.scrollbackLines ?? 120),
       runtime: preSendRuntime
     });
-    assertSafeTerminalSend(executor.kind, status);
+    if (verifiedEmptyCodexHandoff) {
+      if (
+        executor.kind !== "codex" ||
+        status.reachable !== true ||
+        status.approval_state.blocked === true ||
+        !["idle", "unknown"].includes(status.activity_state)
+      ) {
+        throw new Error(
+          `Codex verified-empty handoff is not at a safe prompt ` +
+          `(${status.activity_state}: ${status.activity_reason})`
+        );
+      }
+    } else {
+      assertSafeTerminalSend(executor.kind, status);
+    }
     if (executor.kind === "codex" && needsPostSendNativeBinding) {
       if (pendingManagedNativeBinding || allowedPreMaterializationIdentity) {
         const expectedForegroundId = stringValue(
@@ -14786,7 +15333,9 @@ async function runTerminalControlSend({
   try {
     await terminalBridge.send(executor.kind, terminalControl, terminalPayload, {
       runtime: preSendRuntime,
-      requireExactComposerBeforeEnter: observedHandoff !== undefined,
+      requireExactComposerBeforeEnter:
+        observedHandoff !== undefined ||
+        verifiedEmptyCodexHandoff !== undefined,
       beforeText: observedHandoff
         ? async () => {
             await assertObservedHandoffTransportBoundary({
@@ -14796,7 +15345,15 @@ async function runTerminalControlSend({
               requireEmptyComposer: true
             });
           }
-        : undefined,
+        : verifiedEmptyCodexHandoff
+          ? async () => {
+              await assertVerifiedEmptyCodexTransportBoundary({
+                options,
+                boundary: verifiedEmptyCodexHandoff,
+                requireEmptyComposer: true
+              });
+            }
+          : undefined,
       beforeEnter: observedHandoff
         ? async () => {
             await assertObservedHandoffTransportBoundary({
@@ -14806,7 +15363,15 @@ async function runTerminalControlSend({
               requireEmptyComposer: false
             });
           }
-        : undefined,
+        : verifiedEmptyCodexHandoff
+          ? async () => {
+              await assertVerifiedEmptyCodexTransportBoundary({
+                options,
+                boundary: verifiedEmptyCodexHandoff,
+                requireEmptyComposer: false
+              });
+            }
+          : undefined,
       async onTransportStage(event) {
         const stageAt = cliNow().toISOString();
         if (event.stage === "text_injected") {
@@ -14852,6 +15417,13 @@ async function runTerminalControlSend({
             options,
             terminal: observedHandoff.terminal,
             transition: observedHandoff.transition,
+            requireEmptyComposer: false
+          });
+        }
+        if (event.stage === "text_injected" && verifiedEmptyCodexHandoff) {
+          await assertVerifiedEmptyCodexTransportBoundary({
+            options,
+            boundary: verifiedEmptyCodexHandoff,
             requireEmptyComposer: false
           });
         }
@@ -16582,6 +17154,20 @@ interface NativeAgentSessionIdentity {
   evidence: string;
 }
 
+type NativeAgentSessionIdentityObservation =
+  | {
+      status: "resolved";
+      identity: NativeAgentSessionIdentity;
+    }
+  | {
+      status: "verified_absent";
+      evidence: "native_identity_resolver_verified_absent";
+    }
+  | {
+      status: "unavailable";
+      reason: string;
+    };
+
 function isCompleteNativeRollout(value: unknown): value is {
   fd: string;
   device: string;
@@ -16673,6 +17259,31 @@ async function resolveCurrentNativeAgentSessionIdentity({
     processUuid: `claude-pid:${pid}:started:${startedAt}`,
     evidence: "claude_agents_exact_pid"
   };
+}
+
+/**
+ * Preserve the security-significant difference between a successful native
+ * identity probe that found no current Session and a probe that could not be
+ * completed.  `undefined` from the Codex provider is authoritative only after
+ * both the process-incarnation and open-rollout inspections succeeded.
+ */
+async function observeCurrentNativeAgentSessionIdentity(
+  request: Parameters<typeof resolveCurrentNativeAgentSessionIdentity>[0]
+): Promise<NativeAgentSessionIdentityObservation> {
+  try {
+    const identity = await resolveCurrentNativeAgentSessionIdentity(request);
+    return identity
+      ? { status: "resolved", identity }
+      : {
+          status: "verified_absent",
+          evidence: "native_identity_resolver_verified_absent"
+        };
+  } catch (error) {
+    return {
+      status: "unavailable",
+      reason: error instanceof Error ? error.message : String(error)
+    };
+  }
 }
 
 function nativeAgentIdentityMatchesTurn(
@@ -23989,14 +24600,7 @@ function claudeComposerVisible(screen: string | undefined): boolean {
 }
 
 function claudeComposerEmpty(screen: string | undefined): boolean {
-  const lines = String(screen ?? "").split(/\r?\n/u);
-  while (lines.length > 0 && lines.at(-1)?.trim() === "") {
-    lines.pop();
-  }
-  const composers = lines
-    .slice(-8)
-    .filter((line) => /^\s*❯(?:\s|$)/u.test(line));
-  return composers.length === 1 && /^\s*❯\s*$/u.test(composers[0]);
+  return isExactClaudeIdleComposer(String(screen ?? ""));
 }
 
 function assertManualLifecycleProcessIncarnation(

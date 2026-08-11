@@ -42,6 +42,13 @@ const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 const BEFORE_ID = "11111111-1111-4111-8111-111111111111";
 const TARGET_ID = "22222222-2222-4222-8222-222222222222";
 const THIRD_ID = "33333333-3333-4333-8333-333333333333";
+const CLAUDE_CURRENT_EMPTY_COMPOSER = [
+  "Ready",
+  "────────────────────────────────────────────────",
+  "❯ ",
+  "────────────────────────────────────────────────",
+  "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+].join("\n");
 
 test("black-box Codex recovery clears a dispatching composer and rolls exact-before back without replay", async () => {
   const fixture = seededCodexRecoveryFixture("dispatching", {
@@ -1143,7 +1150,7 @@ function seededClaudeRecoveryFixture(
   fs.mkdirSync(fakeBinDir, { recursive: true });
   fs.mkdirSync(workspace, { recursive: true });
   fs.writeFileSync(currentIdPath, BEFORE_ID);
-  fs.writeFileSync(screenPath, "Ready\n❯ ");
+  fs.writeFileSync(screenPath, CLAUDE_CURRENT_EMPTY_COMPOSER);
   writeClaudeRecoveryFakeTmux({
     fakeBinDir,
     callsPath,
@@ -1216,8 +1223,8 @@ function seededClaudeRecoveryFixture(
       },
       sendKeys(operation, provider) {
         if (operation.keys.includes("C-u")) {
-          fs.writeFileSync(screenPath, "Ready\n❯ ");
-          provider.setScreen(target, "Ready\n❯ ");
+          fs.writeFileSync(screenPath, CLAUDE_CURRENT_EMPTY_COMPOSER);
+          provider.setScreen(target, CLAUDE_CURRENT_EMPTY_COMPOSER);
         }
       }
     }
@@ -1423,7 +1430,9 @@ function seededClaudeRecoveryFixture(
       fs.writeFileSync(currentIdPath, id);
       fs.writeFileSync(
         screenPath,
-        composer === undefined ? "Ready\n❯ " : `Ready\n❯ ${composer}`
+        composer === undefined
+          ? CLAUDE_CURRENT_EMPTY_COMPOSER
+          : `Ready\n❯ ${composer}`
       );
     },
     source: () => listManagedSessions(storeDir).find((session) =>
@@ -1598,7 +1607,10 @@ if (args[0] === "capture-pane") {
   process.exit(0);
 }
 if (args[0] === "send-keys" && args.includes("C-u")) {
-  fs.writeFileSync(${JSON.stringify(options.screenPath)}, "Ready\\n❯ ");
+  fs.writeFileSync(
+    ${JSON.stringify(options.screenPath)},
+    ${JSON.stringify(CLAUDE_CURRENT_EMPTY_COMPOSER)}
+  );
 }
 `, { mode: 0o755 });
 }
