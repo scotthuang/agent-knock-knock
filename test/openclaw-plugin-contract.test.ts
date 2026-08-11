@@ -149,6 +149,10 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   assert.match(listTool.description ?? "", /terminals\[\]/u);
   assert.match(listTool.description ?? "", /managed\.current_turn/u);
   assert.match(listTool.description ?? "", /respond targets the exact in-flight turn/u);
+  assert.match(listTool.description ?? "", /session-scoped send/u);
+  assert.match(listTool.description ?? "", /terminal-scoped follow-current/u);
+  assert.match(listTool.description ?? "", /handoff_state as adoptable or blocked/u);
+  assert.match(listTool.description ?? "", /low-level conflict recovery/u);
   assert.doesNotMatch(listTool.description ?? "", /follow_up/u);
   assert.doesNotMatch(
     listTool.description ?? "",
@@ -858,7 +862,10 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
     assert.equal(sendTool?.parameters?.additionalProperties, false);
     assert.deepEqual(sendTool?.parameters?.required, ["request"]);
     assert.deepEqual(sendTool?.parameters?.not, {
-      required: ["session_id", "selector"]
+      anyOf: [
+        { required: ["session_id", "selector"] },
+        { required: ["session_id", "expected_terminal_token"] }
+      ]
     });
     assert.equal(
       "timeoutSeconds" in (sendTool?.parameters?.properties ?? {}),
@@ -869,7 +876,12 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
       isRecord(sendTypeSchema) ? sendTypeSchema.enum : undefined,
       ["task"]
     );
-    for (const field of ["session_id", "selector", "request"]) {
+    for (const field of [
+      "session_id",
+      "selector",
+      "expected_terminal_token",
+      "request"
+    ]) {
       const schema = sendTool?.parameters?.properties?.[field];
       assert.equal(
         isRecord(schema) ? schema.minLength : undefined,
@@ -885,6 +897,16 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
       /idle or completed AKK Turn record is retained/u
     );
     assert.match(sendTool?.description ?? "", /timeoutSeconds is unsupported/u);
+    assert.match(sendTool?.description ?? "", /session-scoped send/u);
+    assert.match(sendTool?.description ?? "", /terminal-scoped follow-current/u);
+    const expectedTerminalTokenSchema =
+      sendTool?.parameters?.properties?.expected_terminal_token;
+    assert.match(
+      isRecord(expectedTerminalTokenSchema)
+        ? String(expectedTerminalTokenSchema.description ?? "")
+        : "",
+      /never infer, copy, reuse, or combine it with session_id/u
+    );
     await assert.rejects(
       () => sendTool!.execute!("tool-call-invalid-answer", {
         request: "Do not route this as an ordinary send",
@@ -908,11 +930,36 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
       }),
       /only one of session_id or selector/u
     );
+    await assert.rejects(
+      () => sendTool!.execute!("tool-call-session-token", {
+        session_id: "session-1",
+        expected_terminal_token: "terminal-token-current",
+        request: "Do not redirect this strict Session send"
+      }),
+      /requires a terminal-scoped selector and cannot be used with session_id/u
+    );
+    await assert.rejects(
+      () => sendTool!.execute!("tool-call-unscoped-token", {
+        expected_terminal_token: "terminal-token-current",
+        request: "Do not guess the terminal for this snapshot"
+      }),
+      /requires a terminal-scoped selector/u
+    );
+    await assert.rejects(
+      () => sendTool!.execute!("tool-call-short-selector-token", {
+        selector: "@a1b2c3d4",
+        expected_terminal_token: "terminal-token-current",
+        request: "Do not expand a short selector under a terminal fence"
+      }),
+      /requires the exact full terminal selector/u
+    );
     for (const [field, value] of [
       ["session_id", ""],
       ["session_id", "   "],
       ["selector", ""],
-      ["selector", "   "]
+      ["selector", "   "],
+      ["expected_terminal_token", ""],
+      ["expected_terminal_token", "   "]
     ] as const) {
       await assert.rejects(
         () => sendTool!.execute!(`tool-call-empty-${field}`, {
@@ -970,6 +1017,13 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
     } as never);
     await nextConversationSend?.execute?.("tool-call-1", {
       request: "Verify a reset OpenClaw conversation is isolated"
+    });
+    const followCurrentTerminalId =
+      "terminal:v2:tmux:codex:work:0.0:1234";
+    await sendTool?.execute?.("tool-call-follow-current", {
+      selector: followCurrentTerminalId,
+      expected_terminal_token: "terminal-token-current",
+      request: "Continue in the human-selected terminal context"
     });
     const calls = fs.readFileSync(callsPath, "utf8")
       .trim()
@@ -1074,6 +1128,17 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
       optionValue(calls[9] ?? [], "--message-id"),
       expectedToolCall1MessageId,
       "a new OpenClaw conversation incarnation must not replay an old receipt"
+    );
+    assert.deepEqual(calls[10]?.slice(0, 5), [
+      "send",
+      "--conversation",
+      followCurrentTerminalId,
+      "--expected-terminal-token",
+      "terminal-token-current"
+    ]);
+    assert.equal(
+      optionValue(calls[10] ?? [], "--message"),
+      "Continue in the human-selected terminal context"
     );
   } finally {
     await reconciliationService?.stop?.();
@@ -1244,6 +1309,18 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
                     "expected_message_id",
                     "expected_transition_id"
                   ]
+                },
+                {
+                  required: ["expected_handoff_token", "conversation_id"]
+                },
+                {
+                  required: ["expected_handoff_token", "expected_message_id"]
+                },
+                {
+                  required: [
+                    "expected_handoff_token",
+                    "expected_transition_id"
+                  ]
                 }
               ]
             }
@@ -1275,7 +1352,17 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
     assert.equal(closeTool?.parameters?.additionalProperties, false);
     assert.ok(closeTool?.parameters?.properties?.expected_message_id);
     assert.ok(closeTool?.parameters?.properties?.expected_transition_id);
+    assert.ok(closeTool?.parameters?.properties?.expected_handoff_token);
     assert.match(closeTool?.description ?? "", /expected_transition_id/u);
+    assert.match(closeTool?.description ?? "", /handoff_decision/u);
+    const expectedHandoffTokenSchema =
+      closeTool?.parameters?.properties?.expected_handoff_token;
+    assert.match(
+      isRecord(expectedHandoffTokenSchema)
+        ? String(expectedHandoffTokenSchema.description ?? "")
+        : "",
+      /explicit user confirmation/u
+    );
 
     await assert.rejects(
       () => closeTool!.execute!("ambiguous-recovery-fence", {
@@ -1283,7 +1370,38 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
         expected_message_id: "message-current",
         expected_transition_id: "transition-current"
       }),
-      /only one of expected_message_id or expected_transition_id/u
+      /only one of expected_message_id, expected_transition_id, or expected_handoff_token/u
+    );
+    await assert.rejects(
+      () => closeTool!.execute!("ambiguous-handoff-fence", {
+        turn_id: "turn-active",
+        reason: "superseded_by_human_context_switch",
+        expected_message_id: "message-current",
+        expected_handoff_token: "handoff-current"
+      }),
+      /only one of expected_message_id, expected_transition_id, or expected_handoff_token/u
+    );
+    await assert.rejects(
+      () => closeTool!.execute!("raw-handoff-target", {
+        conversation_id: "terminal:v2:tmux:codex:work:0.0:1234",
+        reason: "superseded_by_human_context_switch",
+        expected_handoff_token: "handoff-current"
+      }),
+      /requires the exact managed turn_id/u
+    );
+    await assert.rejects(
+      () => closeTool!.execute!("unfenced-handoff-reason", {
+        turn_id: "turn-active",
+        reason: "superseded_by_human_context_switch"
+      }),
+      /requires expected_handoff_token/u
+    );
+    await assert.rejects(
+      () => closeTool!.execute!("handoff-token-without-reason", {
+        turn_id: "turn-active",
+        expected_handoff_token: "handoff-current"
+      }),
+      /requires reason=superseded_by_human_context_switch/u
     );
 
     for (const name of [
@@ -1362,6 +1480,11 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
     await tools.get("agent_knock_knock_close")?.execute?.("close", {
       turn_id: "turn-close"
     });
+    await tools.get("agent_knock_knock_close")?.execute?.("take-over-current", {
+      turn_id: "turn-active",
+      reason: "superseded_by_human_context_switch",
+      expected_handoff_token: "handoff-current"
+    });
     const blockedCloseTool = await tools.get("agent_knock_knock_close")?.execute?.(
       "recover-lifecycle",
       {
@@ -1399,6 +1522,7 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
       ["retry-callback", "--turn", "turn-retry"],
       ["cancel", "--turn", "turn-cancel"],
       ["close", "--turn", "turn-close"],
+      ["close", "--turn", "turn-active", "--reason"],
       [
         "close",
         "--conversation",
@@ -1411,6 +1535,15 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
         "terminal:v2:tmux:codex:work:0.0:1234",
         "--reason"
       ]
+    ]);
+    assert.deepEqual(calls.at(-3), [
+      "close",
+      "--turn",
+      "turn-active",
+      "--reason",
+      "superseded_by_human_context_switch",
+      "--expected-handoff-token",
+      "handoff-current"
     ]);
     assert.deepEqual(calls.at(-2)?.slice(0, 5), [
       "close",

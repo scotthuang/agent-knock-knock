@@ -101,14 +101,22 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       hidden_turn_count: 0,
       session_count: 0
     });
-    assert.equal(listed.action_contracts.version, 7);
+    assert.equal(listed.action_contracts.version, 8);
     assert.match(
       listed.action_contracts.instructions.join("\n"),
       /Treat terminals\[\] as the primary resource/u
     );
     assert.match(
       listed.action_contracts.instructions.join("\n"),
-      /first attach only[\s\S]*explicitly named by the user[\s\S]*prefilled[\s\S]*never infer/u
+      /handoff_decision\.choices\.take_over_current\.action[\s\S]*explicit user confirmation[\s\S]*refresh list/u
+    );
+    assert.match(
+      listed.action_contracts.instructions.join("\n"),
+      /terminal selector only[\s\S]*explicitly named by the user[\s\S]*prefilled[\s\S]*never infer/u
+    );
+    assert.match(
+      listed.action_contracts.instructions.join("\n"),
+      /verified, idle human native-thread switch[\s\S]*expected_terminal_token[\s\S]*atomically adopts/u
     );
     assert.match(
       listed.action_contracts.instructions.join("\n"),
@@ -146,6 +154,17 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       {
         meaning: "currently_safe_actions",
         authoritative_for_tool_calls: true
+      }
+    );
+    assert.deepEqual(
+      listed.action_contracts.field_semantics.handoff_decision,
+      {
+        meaning:
+          "an explicit human choice required before superseding an active source Turn",
+        authoritative_action_path:
+          "terminals[].handoff_decision.choices.take_over_current.action",
+        requires_explicit_user_confirmation: true,
+        after_success: "refresh list before using a follow-current send action"
       }
     );
     assert.deepEqual(
@@ -257,7 +276,12 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     }
     assert.deepEqual(
       listed.action_contracts.actions.close.optional,
-      ["reason", "expected_message_id", "expected_transition_id"]
+      [
+        "reason",
+        "expected_message_id",
+        "expected_transition_id",
+        "expected_handoff_token"
+      ]
     );
     const approvalActions = terminal.available_actions;
     assert.deepEqual(

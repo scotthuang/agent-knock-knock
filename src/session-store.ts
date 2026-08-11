@@ -354,7 +354,7 @@ export function saveNativeThreadTransition(
     }
     if (current) {
       assertImmutableTransitionFields(current, transition);
-      assertTransitionStatusAdvance(current.status, transition.status);
+      assertTransitionStatusAdvance(current, transition);
     }
     const revision = current
       ? requiredTransitionRevision(current) + 1
@@ -383,6 +383,40 @@ export function loadNativeThreadTransition(
   );
   assertNativeThreadTransition(transition, transitionId);
   return transition;
+}
+
+export function listNativeThreadTransitions(
+  storeDir: string
+): NativeThreadTransition[] {
+  if (!fs.existsSync(storeDir)) {
+    return [];
+  }
+  assertStoreReadable(storeDir);
+  const root = nativeThreadTransitionsDir(storeDir);
+  if (!fs.existsSync(root)) {
+    return [];
+  }
+  assertRealDirectory(root, "native thread transitions directory");
+  return fs.readdirSync(root, { withFileTypes: true })
+    .map((entry) => {
+      if (entry.isSymbolicLink() || !entry.isDirectory()) {
+        throw new Error(
+          `native thread transitions directory contains an invalid entry: ` +
+          path.join(root, entry.name)
+        );
+      }
+      const statePath = path.join(root, entry.name, SESSION_STATE_FILE);
+      const transition = readJsonFile(
+        statePath,
+        "native thread transition state"
+      );
+      assertNativeThreadTransition(transition, entry.name);
+      return transition;
+    })
+    .sort((left, right) =>
+      right.prepared_at.localeCompare(left.prepared_at) ||
+      left.transition_id.localeCompare(right.transition_id)
+    );
 }
 
 function tryReadManagedSessionState(
@@ -488,6 +522,8 @@ function assertImmutableTransitionFields(
 ): void {
   const immutablePairs: Array<[string, unknown, unknown]> = [
     ["operation", current.operation, candidate.operation],
+    ["origin", current.origin, candidate.origin],
+    ["terminal_input_sent", current.terminal_input_sent, candidate.terminal_input_sent],
     ["terminal_id", current.terminal_id, candidate.terminal_id],
     ["agent", current.agent, candidate.agent],
     ["workspace", current.workspace, candidate.workspace],
@@ -537,11 +573,13 @@ function assertImmutableTransitionFields(
 }
 
 function assertTransitionStatusAdvance(
-  current: NativeThreadTransitionStatus,
-  candidate: NativeThreadTransitionStatus
+  current: NativeThreadTransition,
+  candidate: NativeThreadTransition
 ): void {
   const allowed: Record<NativeThreadTransitionStatus, readonly NativeThreadTransitionStatus[]> = {
-    prepared: ["dispatching", "aborted"],
+    prepared: current.operation === "adopt_external_thread"
+      ? ["verified", "uncertain", "aborted"]
+      : ["dispatching", "aborted"],
     dispatching: ["submitted", "uncertain", "aborted"],
     submitted: ["verified", "uncertain", "aborted"],
     verified: ["committed"],
@@ -549,9 +587,9 @@ function assertTransitionStatusAdvance(
     committed: [],
     aborted: []
   };
-  if (!allowed[current].includes(candidate)) {
+  if (!allowed[current.status].includes(candidate.status)) {
     throw new Error(
-      `native thread transition cannot move from ${current} to ${candidate}`
+      `native thread transition cannot move from ${current.status} to ${candidate.status}`
     );
   }
 }

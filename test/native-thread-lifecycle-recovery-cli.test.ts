@@ -402,10 +402,7 @@ test("raw terminal send directly rolls a verified crash forward before one Sessi
       loadNativeThreadTransition(fixture.storeDir, fixture.transitionId).status,
       "committed"
     );
-    assert.deepEqual(fixture.literalInputs(), [
-      "/status",
-      "Report the current branch."
-    ]);
+    assert.deepEqual(fixture.literalInputs(), ["Report the current branch."]);
   } finally {
     fixture.cleanup();
   }

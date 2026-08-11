@@ -907,7 +907,7 @@ test("a provisional attach orphan exposes one fenced reconcile action and detach
   }
 });
 
-test("a same-process external native-thread change stays fail-closed until exact reconcile", async () => {
+test("a same-process external native-thread change keeps exact reconcile alongside handoff send", async () => {
   const fixture = createNoRolloutFixture();
   try {
     fs.writeFileSync(fixture.materializedPath, "ready");
@@ -923,10 +923,20 @@ test("a same-process external native-thread change stays fail-closed until exact
       terminal.management_conflict.kind,
       "live_external_thread_change"
     );
+    assert.equal(terminal.handoff_state, "external_handoff_adoptable");
     assert.deepEqual(Object.keys(terminal.available_actions), [
       "status",
+      "send",
       "reconcile_binding"
     ]);
+    assert.equal(
+      terminal.available_actions.send.arguments.selector,
+      fixture.terminalId
+    );
+    assert.equal(
+      typeof terminal.available_actions.send.arguments.expected_terminal_token,
+      "string"
+    );
 
     const reconciled = await runCli(
       reconcileArguments(
@@ -1037,7 +1047,7 @@ test("ambiguous and unverifiable binding claims never advertise reconciliation",
   }
 });
 
-test("a /status card that disagrees with the open rollout is projected as unverifiable", async () => {
+test("a fresh /status card that supersedes the open rollout is projected as an adoptable handoff", async () => {
   const fixture = createNoRolloutFixture();
   try {
     fs.writeFileSync(fixture.materializedPath, "ready");
@@ -1057,8 +1067,16 @@ test("a /status card that disagrees with the open rollout is projected as unveri
       EXTERNAL_THREAD_ID
     );
     assert.equal(terminal.management_state, "conflict");
-    assert.equal(terminal.management_conflict.kind, "unverifiable");
-    assert.deepEqual(Object.keys(terminal.available_actions), ["status"]);
+    assert.equal(
+      terminal.management_conflict.kind,
+      "live_external_thread_change"
+    );
+    assert.equal(terminal.handoff_state, "external_handoff_adoptable");
+    assert.deepEqual(Object.keys(terminal.available_actions), [
+      "status",
+      "send",
+      "reconcile_binding"
+    ]);
   } finally {
     fixture.cleanup();
   }

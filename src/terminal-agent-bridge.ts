@@ -222,8 +222,25 @@ export interface TerminalTransportStageEvent {
   multiline: boolean;
 }
 
+export interface TerminalSendBoundaryContext {
+  agent: ExecutorKind;
+  terminalControl: TerminalControlRef;
+  multiline: boolean;
+  text: string;
+}
+
 export interface TerminalSendOptions {
   runtime?: TerminalRuntimeIdentity;
+  /** Runs after identity verification and immediately before text injection. */
+  beforeText?: (
+    context: TerminalSendBoundaryContext
+  ) => void | Promise<void>;
+  /** Runs after exact composer/identity proof and immediately before Enter. */
+  beforeEnter?: (
+    context: TerminalSendBoundaryContext
+  ) => void | Promise<void>;
+  /** Require Codex's exact stable composer proof even for a single-line send. */
+  requireExactComposerBeforeEnter?: boolean;
   /**
    * Awaited immediately after each irreversible transport boundary so the
    * caller can durably persist the exact proof level before continuing.
@@ -562,13 +579,16 @@ export class TerminalAgentBridge {
   ): Promise<TerminalSendResult> {
     const adapter = this.registry.require(agent);
     const multiline = /[\r\n]/u.test(text.trimEnd());
+    const requireExactComposer =
+      (adapter.agent === "codex" && multiline) ||
+      options.requireExactComposerBeforeEnter === true;
     try {
       assertTerminalMutationCapabilities({
         provider: this.terminalProvider,
         terminal: this.terminalProvider.endpoint(terminalControl),
         semantic: [
           "send_keys",
-          ...(adapter.agent === "codex" && multiline
+          ...(requireExactComposer
             ? ["screen_status" as const]
             : [])
         ],
@@ -576,7 +596,7 @@ export class TerminalAgentBridge {
           "stable_resource_resolution",
           "text_delivery",
           "key_delivery",
-          ...(adapter.agent === "codex" && multiline
+          ...(requireExactComposer
             ? ["screen_capture" as const]
             : [])
         ]
@@ -604,12 +624,25 @@ export class TerminalAgentBridge {
         { cause: error }
       );
     }
+    if (!verifiedForText.capabilities.includes("send_keys")) {
+      throw new TerminalInputNotStartedError(
+        `${adapter.displayName} terminal input capability changed before injection`
+      );
+    }
     try {
-      if (!verifiedForText.capabilities.includes("send_keys")) {
-        throw new TerminalControlInputNotSentError(
-          `${adapter.displayName} terminal input capability changed before injection`
-        );
-      }
+      await options.beforeText?.({
+        agent: adapter.agent,
+        terminalControl: verifiedForText,
+        multiline,
+        text: normalized
+      });
+    } catch (error) {
+      throw new TerminalInputNotStartedError(
+        error instanceof Error ? error.message : String(error),
+        { cause: error }
+      );
+    }
+    try {
       await this.terminalProvider.sendText(
         this.terminalProvider.endpoint(verifiedForText),
         normalized
@@ -633,8 +666,15 @@ export class TerminalAgentBridge {
     // leaves the injected draft untouched because cleanup is also terminal
     // input and cannot safely use a stale route.
     let verifiedForEnter: TerminalControlRef;
-    if (adapter.agent === "codex" && multiline) {
+    if (adapter.agent === "codex" && requireExactComposer) {
       verifiedForEnter = await this.settleCodexMultilineComposer(
+        adapter,
+        terminalControl,
+        normalized,
+        options.runtime
+      );
+    } else if (requireExactComposer) {
+      verifiedForEnter = await this.verifyExactComposerBeforeEnter(
         adapter,
         terminalControl,
         normalized,
@@ -650,6 +690,37 @@ export class TerminalAgentBridge {
       } catch (error) {
         throw error;
       }
+    }
+    await options.beforeEnter?.({
+      agent: adapter.agent,
+      terminalControl: verifiedForEnter,
+      multiline,
+      text: normalized
+    });
+    // `beforeEnter` may await Store and terminal identity fences. The human can
+    // still edit the composer or change the native thread while that callback
+    // is pending, so its successful return is not authority to press Enter.
+    // Recapture the exact draft and process identity at the final boundary.
+    if (requireExactComposer) {
+      verifiedForEnter = adapter.agent === "codex"
+        ? await this.settleCodexMultilineComposer(
+            adapter,
+            terminalControl,
+            normalized,
+            options.runtime
+          )
+        : await this.verifyExactComposerBeforeEnter(
+            adapter,
+            terminalControl,
+            normalized,
+            options.runtime
+          );
+    } else if (options.beforeEnter) {
+      verifiedForEnter = await this.verifyTerminalIdentity(
+        adapter.agent,
+        terminalControl,
+        options.runtime
+      );
     }
     await this.terminalProvider.sendKeys(
       this.terminalProvider.endpoint(verifiedForEnter),
@@ -667,6 +738,48 @@ export class TerminalAgentBridge {
       terminalControl: verifiedForEnter,
       multiline
     };
+  }
+
+  private async verifyExactComposerBeforeEnter(
+    adapter: TerminalAgentAdapter,
+    terminalControl: TerminalControlRef,
+    expectedText: string,
+    runtime?: TerminalRuntimeIdentity
+  ): Promise<TerminalControlRef> {
+    const captured = await this.captureInspection(adapter, terminalControl, {
+      runtime,
+      scrollbackLines: CODEX_MULTILINE_SETTLE_SCROLLBACK_LINES
+    });
+    const exactComposer = exactTerminalComposerCapture(
+      adapter.agent,
+      captured.screen,
+      expectedText
+    );
+    if (
+      captured.inspection.approval.blocked ||
+      !["idle", "unknown"].includes(captured.inspection.activity.state) ||
+      !exactComposer
+    ) {
+      throw new Error(
+        `${adapter.displayName} composer was not exact and idle immediately before Enter`
+      );
+    }
+    const verifiedImmediatelyBeforeEnter = await this.verifyTerminalIdentity(
+      adapter.agent,
+      captured.terminalControl,
+      runtime
+    );
+    if (
+      !sameTerminalControlIdentity(
+        captured.terminalControl,
+        verifiedImmediatelyBeforeEnter
+      )
+    ) {
+      throw new Error(
+        "terminal control identity changed after the final exact composer capture"
+      );
+    }
+    return verifiedImmediatelyBeforeEnter;
   }
 
   /**

@@ -90,6 +90,7 @@ import {
 import {
   createManagedSessionId,
   createNativeThreadTransitionId,
+  humanObservedHandoffBindingToken,
   isExactNativeThreadId,
   legacyManagedSessionBindingToken,
   legacyUnmanagedTerminalBindingToken,
@@ -99,6 +100,7 @@ import {
   unmanagedTerminalBindingToken,
   type ManagedSessionState,
   type ManagedTerminalBinding,
+  type HumanObservedHandoffTargetSnapshot,
   type NativeThreadCandidate,
   type NativeThreadTransition
 } from "./managed-session.js";
@@ -121,6 +123,7 @@ import {
   type NativeThreadResumeSnapshot
 } from "./native-thread-resume-snapshot.js";
 import {
+  listNativeThreadTransitions,
   listManagedSessions,
   loadManagedSession,
   loadNativeThreadTransition,
@@ -4376,6 +4379,9 @@ function terminalFirstListProjection({
     const soleBindingConflict = conflictingBoundSessionClaims.length === 1
       ? conflictingBoundSessionClaims[0]
       : undefined;
+    const externalHandoffDetected = conflictingBoundSessionClaims.some(
+      ({ kind }) => kind === "live_external_thread_change"
+    );
     const conflictingSessionRevision = Number(
       soleBindingConflict?.session.revision
     );
@@ -4387,6 +4393,63 @@ function terminalFirstListProjection({
       : [];
     const expectedTerminalToken = stringValue(
       terminal.lifecycle_binding_token
+    );
+    const externalHandoffNativeThreadId = stringValue(
+      terminal.native_agent_status_card_session_id
+    ) ?? stringValue(terminal.native_agent_session_id);
+    const resolvedNativeThreadId = stringValue(
+      terminal.native_agent_session_id
+    );
+    const externalHandoffTerminalToken =
+      terminalControl &&
+      externalHandoffNativeThreadId &&
+      isExactNativeThreadId(externalHandoffNativeThreadId)
+        ? unmanagedTerminalBindingToken({
+            terminalId: stringValue(terminal.id) as string,
+            terminalControl,
+            agent: terminal.agent,
+            pid: Number(terminal.pid),
+            workspace: terminal.workspace ?? terminal.cwd ?? cliCwd(),
+            nativeThreadId: externalHandoffNativeThreadId,
+            processUuid: stringValue(terminal.native_agent_process_uuid),
+            processBirth: stringValue(terminal.native_agent_process_birth),
+            rollout:
+              resolvedNativeThreadId === externalHandoffNativeThreadId &&
+              isRecord(terminal.native_agent_rollout)
+                ? terminal.native_agent_rollout as any
+                : undefined
+          })
+        : undefined;
+    const externalHandoffTarget =
+      soleBindingConflict?.kind === "live_external_thread_change" &&
+      externalHandoffNativeThreadId &&
+      isExactNativeThreadId(externalHandoffNativeThreadId)
+        ? observedHandoffTargetResolution({
+            storeDir,
+            agent: terminal.agent,
+            workspace: terminal.workspace ?? terminal.cwd ?? cliCwd(),
+            nativeThreadId: externalHandoffNativeThreadId.toLowerCase(),
+            sourceSessionId: soleBindingConflict.session.session_id
+          })
+        : undefined;
+    const externalHandoffSnapshotToken =
+      externalHandoffTerminalToken &&
+      soleBindingConflict?.kind === "live_external_thread_change" &&
+      externalHandoffTarget?.status === "eligible"
+        ? humanObservedHandoffBindingToken({
+            terminal_token: externalHandoffTerminalToken,
+            source_session_id: soleBindingConflict.session.session_id,
+            source_revision: managedSessionRevision(
+              soleBindingConflict.session
+            ),
+            source_binding_token: managedSessionBindingToken(
+              soleBindingConflict.session
+            ),
+            target: externalHandoffTarget.snapshot
+          })
+        : undefined;
+    const blockingHandoffTurns = conflictingSessionTurns.filter((turn) =>
+      SESSION_SEND_BLOCKING_STATUSES.has(turn.status)
     );
     const reconcileBindingAction =
       mutationsAllowed &&
@@ -4423,6 +4486,79 @@ function terminalFirstListProjection({
             requires_user_intent: true
           }
         : undefined;
+    const externalHandoffAdoptable = Boolean(
+      mutationsAllowed &&
+      discoveredOwnership.state === "none" &&
+      unresolvedSessionClaims.length === 0 &&
+      soleBindingConflict?.kind === "live_external_thread_change" &&
+      terminal.activity_state === "idle" &&
+      !(isRecord(terminal.approval_state) &&
+        terminal.approval_state.blocked === true) &&
+      !conflictingSessionTurns.some((turn) =>
+        SESSION_SEND_BLOCKING_STATUSES.has(turn.status)
+      ) &&
+      !managedSessionHasUnresolvedNativeTransition(
+        storeDir,
+        soleBindingConflict.session
+      ) &&
+      externalHandoffTarget?.status === "eligible" &&
+      isRecord(rawActions.send) &&
+      Boolean(externalHandoffSnapshotToken)
+    );
+    const handoffDecisionTurn =
+      mutationsAllowed &&
+      soleBindingConflict?.kind === "live_external_thread_change" &&
+      externalHandoffTarget?.status === "eligible" &&
+      terminal.activity_state === "idle" &&
+      !(isRecord(terminal.approval_state) &&
+        terminal.approval_state.blocked === true) &&
+      !managedSessionHasUnresolvedNativeTransition(
+        storeDir,
+        soleBindingConflict.session
+      ) &&
+      blockingHandoffTurns.length === 1
+        ? blockingHandoffTurns[0]
+        : undefined;
+    const handoffDecisionToken =
+      handoffDecisionTurn &&
+      externalHandoffSnapshotToken &&
+      terminalControl
+        ? activeTurnHandoffDecisionToken({
+            handoffToken: externalHandoffSnapshotToken,
+            turn: handoffDecisionTurn,
+            ledger: loadTerminalBridgeDispatchLedger(terminalControl)
+          })
+        : undefined;
+    const handoffDecision =
+      handoffDecisionTurn &&
+      handoffDecisionToken &&
+      externalHandoffNativeThreadId
+      ? {
+          kind: "active_turn_requires_decision",
+          source_session_id: soleBindingConflict?.session.session_id,
+          source_turn_id: turnIdForConversation(handoffDecisionTurn),
+          live_native_thread_id: externalHandoffNativeThreadId,
+          choices: {
+            take_over_current: {
+              action: {
+                tool: "agent_knock_knock_close",
+                arguments: {
+                  turn_id: turnIdForConversation(handoffDecisionTurn),
+                  reason: "superseded_by_human_context_switch",
+                  expected_handoff_token: handoffDecisionToken
+                },
+                requires_explicit_user_confirmation: true
+              },
+              after: "refresh list and use its follow-current send"
+            },
+            keep_source: {
+              effect: "no Store or terminal mutation",
+              after:
+                "restore source native thread in the Codex/Claude TUI, then refresh list"
+            }
+          }
+        }
+      : undefined;
     const terminalCanAcceptSend =
       ownership.state === "none" && isRecord(sessionAwareRawActions.send);
     if (
@@ -4553,6 +4689,20 @@ function terminalFirstListProjection({
       : ownership.state === "conflict"
         ? {
             ...safeTerminalActionsDuringConflict(sessionAwareRawActions),
+            ...(externalHandoffAdoptable
+              ? {
+                  send: {
+                    ...rawActions.send,
+                    arguments: {
+                      ...(isRecord(rawActions.send.arguments)
+                        ? rawActions.send.arguments
+                        : {}),
+                      expected_terminal_token:
+                        externalHandoffSnapshotToken
+                    }
+                  }
+                }
+              : {}),
             ...(reconcileBindingAction
               ? { reconcile_binding: reconcileBindingAction }
               : {})
@@ -4599,6 +4749,14 @@ function terminalFirstListProjection({
       ...(ownership.state === "conflict"
         ? { management_conflict: ownership.conflict }
         : {}),
+      ...(externalHandoffDetected
+        ? {
+            handoff_state: externalHandoffAdoptable
+              ? "external_handoff_adoptable"
+              : "external_handoff_blocked"
+          }
+        : {}),
+      ...(handoffDecision ? { handoff_decision: handoffDecision } : {}),
       managed: management,
       available_actions: availableActions
     };
@@ -4868,8 +5026,12 @@ function managedBindingConflictKindForLiveTerminalEntry({
   ) {
     return relationship === "same" &&
         isExactNativeThreadId(liveNativeThreadId) &&
-        liveNativeThreadId.toLowerCase() ===
-          statusCardThreadId.toLowerCase()
+        (
+          liveNativeThreadId.toLowerCase() ===
+            statusCardThreadId.toLowerCase() ||
+          liveNativeThreadId.toLowerCase() ===
+            binding.native_thread_id.toLowerCase()
+        )
       ? "live_external_thread_change"
       : "unverifiable";
   }
@@ -5518,15 +5680,15 @@ function managedListApprovalState(
 
 function listActionContracts() {
   return {
-    version: 7,
+    version: 8,
     instructions: [
-      "Treat terminals[] as the primary resource and use only actions present in available_actions.",
+      "Treat terminals[] as the primary resource and use only actions present in available_actions, except the snapshot-bound terminals[].handoff_decision.choices.take_over_current.action. That nested action requires explicit user confirmation; after it succeeds, refresh list before any follow-current send.",
       "An existing managed session's ordinary send targets session_id and creates a new turn. A turn id is never an ordinary send target.",
       "Read-only native-thread listing targets an exact terminal_id. Native-thread new/resume mutations also use the listed expected_binding_token and never create a Turn.",
       "Native inspection is a separate terminal action: use only its closed inspection enum and current exact terminal_id/token; AKK status does not execute a native slash command.",
-      "A binding conflict may be detached only through its exact reconcile_binding action, which is snapshot-bound to the Session revision, binding, and live terminal identity and never adopts a replacement native thread.",
+      "A verified, idle human native-thread switch may expose a terminal-scoped send with expected_terminal_token; that action atomically adopts the live context before creating its Turn. Other binding conflicts remain fail-closed and may expose only exact low-level reconcile_binding recovery.",
       "List resumable threads before resume; use only a complete native_thread_id and the action returned for that candidate.",
-      "For first attach only, use a discovery selector explicitly named by the user or the selector prefilled by that unmanaged raw-terminal row's available send action; never infer, guess, or reuse one.",
+      "Use a terminal selector only when explicitly named by the user or prefilled by that terminal row's send action. A handoff action also carries expected_terminal_token; never infer, guess, or reuse either value.",
       "Use respond only for an in-flight turn that is explicitly waiting for OpenClaw.",
       "Managed controls target turn_id. A raw terminal may be controlled only through its own list-prefilled conversation_id action; never construct, guess, or reuse that compatibility selector.",
       "Start with the action's prefilled arguments, supply every missing_required field, and consult the top-level action's optional fields only when needed.",
@@ -5557,6 +5719,14 @@ function listActionContracts() {
       available_actions: {
         meaning: "currently_safe_actions",
         authoritative_for_tool_calls: true
+      },
+      handoff_decision: {
+        meaning:
+          "an explicit human choice required before superseding an active source Turn",
+        authoritative_action_path:
+          "terminals[].handoff_decision.choices.take_over_current.action",
+        requires_explicit_user_confirmation: true,
+        after_success: "refresh list before using a follow-current send action"
       }
     },
     actions: {
@@ -5569,6 +5739,7 @@ function listActionContracts() {
         required: ["request"],
         optional: [
           "selector",
+          "expected_terminal_token",
           "type",
           "idleTimeoutMinutes",
           "agentTimeoutMinutes",
@@ -5576,7 +5747,7 @@ function listActionContracts() {
         ],
         unsupported: ["timeoutSeconds"],
         ordinary_use:
-          "Create a new managed turn in the selected session. A live terminal selector is accepted only for initial attach/discovery compatibility."
+          "Create a new managed turn in the exact Session. A live terminal selector can attach an unmanaged pane or adopt one verified human-selected native context; an explicit session_id never follows the pane."
       },
       new_thread: {
         tool: "agent_knock_knock_new_thread",
@@ -5695,9 +5866,12 @@ function listActionContracts() {
         optional: [
           "reason",
           "expected_message_id",
-          "expected_transition_id"
+          "expected_transition_id",
+          "expected_handoff_token"
         ],
-        requires_explicit_user_confirmation: true
+        requires_explicit_user_confirmation: true,
+        handoff_scope:
+          "expected_handoff_token is valid only by copying the complete nested action from terminals[].handoff_decision.choices.take_over_current; never construct, guess, or reuse it."
       }
     }
   };
@@ -5915,13 +6089,25 @@ function availableListActions(
 }
 
 async function resolveConversationSelectorOption(commandName, options): Promise<void> {
+  const sendOperation = commandName === "send";
+  if (sendOperation && stringValue(options.expectedTerminalToken)) {
+    // Selector resolution may replace an alias (or an omitted selector) with a
+    // discovered full terminal id. Preserve the caller's actual authority so
+    // the handoff token fence cannot mistake that convenience resolution for
+    // an exact selector supplied by the caller.
+    originalExpectedTerminalSelector.set(
+      options,
+      stringValue(
+        options.session ?? options.conversation ?? options.conversationId
+      )?.trim()
+    );
+  }
   if (
     !SESSION_SELECTOR_COMMANDS.has(String(commandName ?? "")) ||
     options.state
   ) {
     return;
   }
-  const sendOperation = commandName === "send";
   const supplied = stringValue(
     sendOperation
       ? options.session ?? options.conversation ?? options.conversationId
@@ -6515,7 +6701,10 @@ function codexKnownBeforeIdentityForManagedSession({
   const after = transition.after_binding;
   if (
     transition.status !== "committed" ||
-    (requireNewThread && transition.operation !== "new_thread") ||
+    (requireNewThread && ![
+      "new_thread",
+      "adopt_external_thread"
+    ].includes(transition.operation)) ||
     transition.target_session_id !== session.session_id ||
     !after ||
     after.binding_id !== binding.binding_id ||
@@ -6582,7 +6771,9 @@ function codexLingeringBeforeIdentityMatchesSession({
   const after = transition.after_binding;
   if (
     transition.status !== "committed" ||
-    transition.operation !== "new_thread" ||
+    !["new_thread", "adopt_external_thread"].includes(
+      transition.operation
+    ) ||
     transition.target_session_id !== session.session_id ||
     !after ||
     after.binding_id !== binding.binding_id ||
@@ -7529,6 +7720,733 @@ async function reattachManagedSessionForNativeIdentity({
     quarantine_reason: undefined,
     updated_at: now.toISOString()
   }, { expectedRevision: managedSessionRevision(existing) });
+}
+
+const HUMAN_OBSERVED_HANDOFF_FINGERPRINT =
+  nativeThreadCommandFingerprint(
+    "adopt_external_thread:human_observed:no_terminal_input:v1"
+  );
+
+function observedHandoffAuthorityToken({
+  terminal,
+  identity,
+  sourceSession,
+  target
+}: {
+  terminal: ResolvedTerminalConversation;
+  identity: NativeAgentSessionIdentity;
+  sourceSession: ManagedSessionState;
+  target: HumanObservedHandoffTargetSnapshot;
+}): string {
+  const exact = exactLifecycleProcessIdentity(terminal, identity);
+  const terminalToken = unmanagedTerminalBindingToken({
+    terminalId: terminal.conversationId,
+    terminalControl: terminal.terminalControl,
+    agent: terminal.agent,
+    pid: terminal.pid,
+    workspace: terminal.terminalControl.currentPath ?? cliCwd(),
+    nativeThreadId: exact.sessionId,
+    processUuid: exact.processUuid,
+    processBirth: exact.processBirth,
+    rollout: exact.rollout
+  });
+  return humanObservedHandoffBindingToken({
+    terminal_token: terminalToken,
+    source_session_id: sourceSession.session_id,
+    source_revision: managedSessionRevision(sourceSession),
+    source_binding_token: managedSessionBindingToken(sourceSession),
+    target
+  });
+}
+
+function activeTurnHandoffDecisionToken({
+  handoffToken,
+  turn,
+  ledger
+}: {
+  handoffToken: string;
+  turn: Record<string, any>;
+  ledger?: Record<string, any>;
+}): string {
+  const takeover = isRecord(turn.native_session_takeover)
+    ? turn.native_session_takeover
+    : undefined;
+  const submission = terminalBridgeSubmission(turn);
+  return createHash("sha256")
+    .update(JSON.stringify({
+      version: 1,
+      kind: "active_turn_human_handoff",
+      handoff_token: handoffToken,
+      session_id: sessionIdForConversation(turn),
+      turn_id: turnIdForConversation(turn),
+      turn_status: turn.status,
+      turn_updated_at: turn.updated_at ?? null,
+      current_message_id:
+        stringValue(takeover?.terminal_bridge_message_id) ??
+        stringValue(submission?.message_id) ??
+        null,
+      ledger_generation_id: stringValue(ledger?.generation_id) ?? null,
+      ledger_message_id: stringValue(ledger?.message_id) ?? null,
+      ledger_status: stringValue(ledger?.status) ?? null
+    }))
+    .digest("hex");
+}
+
+const originalExpectedTerminalSelector =
+  new WeakMap<Record<string, any>, string | undefined>();
+
+function assertExpectedHandoffTokenUsesExactTerminalSelector({
+  options,
+  terminal
+}: {
+  options: Record<string, any>;
+  terminal: ResolvedTerminalConversation;
+}): void {
+  if (!stringValue(options.expectedTerminalToken)) {
+    return;
+  }
+  const supplied = originalExpectedTerminalSelector.has(options)
+    ? originalExpectedTerminalSelector.get(options)
+    : stringValue(
+        options.session ?? options.conversation ?? options.conversationId
+      )?.trim();
+  if (supplied !== terminal.conversationId) {
+    throw new Error(
+      "--expected-terminal-token is valid only with the exact full terminal " +
+      "conversation selector advertised by AKK list"
+    );
+  }
+}
+
+async function observedExternalHandoffIdentity({
+  options,
+  terminal,
+  sourceSession,
+  resolvedIdentity
+}: {
+  options: Record<string, any>;
+  terminal: ResolvedTerminalConversation;
+  sourceSession: ManagedSessionState;
+  resolvedIdentity?: NativeAgentSessionIdentity;
+}): Promise<{
+  identity?: NativeAgentSessionIdentity;
+  status: Awaited<ReturnType<TerminalAgentBridge["status"]>>;
+}> {
+  const bridge = createTerminalAgentBridge(options);
+  const status = await bridge.status(
+    terminal.agent,
+    terminal.terminalControl,
+    { runtime: terminalRuntimeForLiveIdentity({ terminal, physicalOnly: true }) }
+  );
+  assertSafeTerminalSend(terminal.agent, status);
+  if (terminal.agent !== "codex") {
+    return { identity: resolvedIdentity, status };
+  }
+  const sourceBinding = sourceSession.binding;
+  const statusCard = terminal.adapter.observeThreadLifecycle?.({
+    operation: { kind: "new_thread" },
+    phase: "before",
+    screen: status.screen.excerpt ?? ""
+  });
+  const statusCardId =
+    statusCard?.status === "observed" &&
+      isExactNativeThreadId(statusCard.nativeThreadId)
+      ? statusCard.nativeThreadId.toLowerCase()
+      : undefined;
+  const sourceId = sourceBinding?.native_thread_id?.toLowerCase();
+  if (statusCardId && sourceId && statusCardId !== sourceId) {
+    const processUuid = sourceBinding?.native_process.process_uuid;
+    const processBirth = sourceBinding?.native_process.process_birth;
+    if (!processUuid || !processBirth) {
+      return { identity: undefined, status };
+    }
+    const resolvedMatchesStatus =
+      resolvedIdentity?.sessionId.toLowerCase() === statusCardId;
+    return {
+      identity: {
+        sessionId: statusCardId,
+        processUuid,
+        processBirth,
+        rollout: resolvedMatchesStatus ? resolvedIdentity?.rollout : undefined,
+        evidence: resolvedMatchesStatus
+          ? `${resolvedIdentity?.evidence ?? "native_thread_boundary"}+codex_status_card`
+          : statusCard?.evidence ?? "codex_status_card"
+      },
+      status
+    };
+  }
+  return { identity: resolvedIdentity, status };
+}
+
+type ObservedHandoffTargetResolution =
+  | {
+      status: "eligible";
+      session?: ManagedSessionState;
+      snapshot: HumanObservedHandoffTargetSnapshot;
+    }
+  | { status: "blocked"; reason: string };
+
+function observedHandoffTargetResolution({
+  storeDir,
+  agent,
+  workspace,
+  nativeThreadId,
+  sourceSessionId
+}: {
+  storeDir: string;
+  agent: ExecutorKind;
+  workspace: string;
+  nativeThreadId: string;
+  sourceSessionId: string;
+}): ObservedHandoffTargetResolution {
+  const matches = listManagedSessions(storeDir).filter((session) =>
+    session.session_id !== sourceSessionId &&
+    session.agent === agent &&
+    session.binding?.native_thread_id?.toLowerCase() === nativeThreadId &&
+    path.resolve(session.workspace) === path.resolve(workspace)
+  );
+  if (matches.length > 1) {
+    return {
+      status: "blocked",
+      reason:
+        `native thread ${nativeThreadId} is claimed by multiple managed Sessions`
+    };
+  }
+  const target = matches[0];
+  if (!target) {
+    return { status: "eligible", snapshot: { state: "absent" } };
+  }
+  if (
+    !target.binding ||
+    target.status !== "detached" ||
+    managedSessionHasUnresolvedNativeTransition(storeDir, target)
+  ) {
+    return {
+      status: "blocked",
+      reason:
+        `managed Session ${target.session_id} cannot be adopted from ` +
+        `${target.status} state or while its lifecycle is unresolved`
+    };
+  }
+  try {
+    assertManagedSessionCanStartTurn(
+      managedTurnsForSession(storeDir, target.session_id)
+    );
+  } catch (error) {
+    return {
+      status: "blocked",
+      reason:
+        `managed Session ${target.session_id} has unresolved work: ` +
+        `${error instanceof Error ? error.message : String(error)}`
+    };
+  }
+  return {
+    status: "eligible",
+    session: target,
+    snapshot: {
+      state: "detached",
+      session_id: target.session_id,
+      revision: managedSessionRevision(target),
+      status: "detached",
+      binding_token: managedSessionBindingToken(target)
+    }
+  };
+}
+
+async function maybeAdoptObservedExternalThread({
+  options,
+  terminal,
+  sourceSession,
+  resolvedIdentity,
+  storeDir
+}: {
+  options: Record<string, any>;
+  terminal: ResolvedTerminalConversation;
+  sourceSession?: ManagedSessionState;
+  resolvedIdentity?: NativeAgentSessionIdentity;
+  storeDir: string;
+}): Promise<{
+  session?: ManagedSessionState;
+  identity?: NativeAgentSessionIdentity;
+  transition?: NativeThreadTransition;
+  adopted: boolean;
+}> {
+  if (!sourceSession?.binding) {
+    return { identity: resolvedIdentity, adopted: false };
+  }
+  const observed = await observedExternalHandoffIdentity({
+    options,
+    terminal,
+    sourceSession,
+    resolvedIdentity
+  });
+  const identity = observed.identity;
+  const conflictKind = managedBindingConflictKindForResolvedTerminal({
+    storeDir,
+    session: sourceSession,
+    terminal,
+    identity
+  });
+  if (conflictKind !== "live_external_thread_change") {
+    return { identity, adopted: false };
+  }
+  assertTerminalLifecycleReady({
+    options,
+    terminal,
+    terminalStatus: observed.status
+  });
+  if (!identity || !isExactNativeThreadId(identity.sessionId)) {
+    throw new Error(
+      "the externally selected native thread has no exact supported identity"
+    );
+  }
+  if (managedSessionHasUnresolvedNativeTransition(storeDir, sourceSession)) {
+    throw new Error(
+      `managed Session ${sourceSession.session_id} has an unresolved native-thread transition`
+    );
+  }
+  assertManagedSessionCanStartTurn(
+    managedTurnsForSession(storeDir, sourceSession.session_id)
+  );
+  if (
+    terminal.agent === "codex"
+      ? !codexComposerEmpty(observed.status.screen.excerpt)
+      : !claudeComposerEmpty(observed.status.screen.excerpt)
+  ) {
+    throw new Error(
+      "external handoff adoption requires an exact empty idle composer"
+    );
+  }
+  if (terminal.agent === "codex") {
+    await assertCodexComposerReadyForAutomatedInput({
+      options,
+      terminalControl: terminal.terminalControl
+    });
+  }
+  const targetNativeThreadId = identity.sessionId.toLowerCase();
+  const targetResolution = observedHandoffTargetResolution({
+    storeDir,
+    agent: terminal.agent,
+    workspace: terminal.terminalControl.currentPath ?? cliCwd(),
+    nativeThreadId: targetNativeThreadId,
+    sourceSessionId: sourceSession.session_id
+  });
+  const expectedTerminalToken = stringValue(options.expectedTerminalToken);
+  if (targetResolution.status === "blocked") {
+    if (expectedTerminalToken) {
+      throw new Error(
+        "live source or target Session snapshot changed after the handoff was " +
+        "listed; refresh AKK list"
+      );
+    }
+    throw new Error(targetResolution.reason);
+  }
+  const freshHandoffToken = observedHandoffAuthorityToken({
+    terminal,
+    identity,
+    sourceSession,
+    target: targetResolution.snapshot
+  });
+  if (
+    expectedTerminalToken &&
+    expectedTerminalToken !== freshHandoffToken
+  ) {
+    throw new Error(
+      "live source, target, or terminal identity changed after the handoff " +
+      "was listed; refresh AKK list"
+    );
+  }
+  const targetSession = targetResolution.session;
+  await assertNativeThreadHasExclusiveOwnership({
+    options,
+    agent: terminal.agent,
+    currentPid: terminal.pid,
+    nativeThreadId: targetNativeThreadId,
+    storeDir,
+    terminalControl: terminal.terminalControl,
+    excludedManagedSessionId: targetSession?.session_id
+  });
+  const adapterVersion = required(
+    stringValue(agentVersionForRunningProcess(terminal.agent, terminal.pid, options)),
+    "external handoff adoption requires the exact running agent version"
+  );
+  const capability = terminal.adapter.probeThreadLifecycle?.(adapterVersion);
+  if (capability?.status !== "supported") {
+    throw new Error(
+      capability?.reason ?? "external handoff adoption is unsupported for this agent version"
+    );
+  }
+  const now = cliNow();
+  const sourceBinding = sourceSession.binding;
+  const targetSessionId = targetSession?.session_id ?? createManagedSessionId(now);
+  const transitionId = createNativeThreadTransitionId();
+  const exactIdentity = exactLifecycleProcessIdentity(terminal, identity);
+  const nextBinding = terminalBindingFrom({
+    terminalId: terminal.conversationId,
+    terminalControl: terminal.terminalControl,
+    pid: terminal.pid,
+    nativeThreadId: targetNativeThreadId,
+    processUuid: exactIdentity.processUuid,
+    processBirth: exactIdentity.processBirth,
+    rollout: exactIdentity.rollout,
+    evidence: `${exactIdentity.evidence}+human_observed`,
+    generation: (targetSession?.binding?.generation ?? 0) + 1,
+    now
+  });
+  const previousLedger = loadTerminalBridgeDispatchLedger(
+    terminal.terminalControl
+  );
+  let transition: NativeThreadTransition = {
+    schema: "agent-knock-knock/native-thread-transition",
+    version: 1,
+    transition_id: transitionId,
+    operation: "adopt_external_thread",
+    origin: "human_observed",
+    terminal_input_sent: false,
+    status: "prepared",
+    terminal_id: terminal.conversationId,
+    agent: terminal.agent,
+    workspace: terminal.terminalControl.currentPath ?? cliCwd(),
+    source_session_id: sourceSession.session_id,
+    source_expected_revision: managedSessionRevision(sourceSession),
+    source_previous_last_transition_id: sourceSession.last_transition_id,
+    target_session_id: targetSessionId,
+    target_expected_revision: targetSession
+      ? managedSessionRevision(targetSession)
+      : null,
+    target_native_thread_id: targetNativeThreadId,
+    before_native_thread_id: sourceBinding.native_thread_id as string,
+    before_process_uuid: sourceBinding.native_process.process_uuid as string,
+    before_process_started_at: exactIdentity.processStartedAt,
+    before_process_birth: sourceBinding.native_process.process_birth,
+    before_process_rollout: sourceBinding.native_process.rollout,
+    before_binding: sourceBinding,
+    adapter_version: adapterVersion,
+    command_fingerprint: HUMAN_OBSERVED_HANDOFF_FINGERPRINT,
+    dispatcher_pid: cliPid(),
+    prepared_at: now.toISOString()
+  };
+  transition = saveNativeThreadTransition(storeDir, transition, {
+    expectedRevision: null
+  });
+  if (
+    cliEnv().AKK_TEST_EXIT_AFTER_HANDOFF_TRANSITION_BEFORE_LEDGER === "1"
+  ) {
+    cliExit(88);
+  }
+  saveLifecycleTerminalDispatchLedger(terminal.terminalControl, {
+    ...lifecycleLedgerFields(transition, storeDir),
+    status: "prepared",
+    target_native_thread_id: targetNativeThreadId,
+    previous_generation_id:
+      stringValue(previousLedger?.generation_id) ??
+      stringValue(previousLedger?.message_id)
+  }, { expectedTransitionId: null });
+  if (cliEnv().AKK_TEST_EXIT_AFTER_LIFECYCLE_PREPARED === "1") {
+    cliExit(86);
+  }
+  const sourceTransitioning = saveManagedSession(storeDir, {
+    ...sourceSession,
+    status: "transitioning",
+    last_transition_id: transitionId,
+    updated_at: now.toISOString()
+  }, { expectedRevision: managedSessionRevision(sourceSession) });
+  try {
+    const reObserved = await observedExternalHandoffIdentity({
+      options,
+      terminal,
+      sourceSession: sourceTransitioning,
+      resolvedIdentity: await resolveCurrentNativeAgentSessionIdentity({
+        options,
+        agent: terminal.agent,
+        pid: terminal.pid,
+        cwd: terminal.terminalControl.currentPath,
+        preferredSessionId: targetNativeThreadId,
+        allowedCompanionIdentity: codexIdentityFence({
+          sessionId: sourceBinding.native_thread_id as string,
+          processUuid: sourceBinding.native_process.process_uuid,
+          processBirth: sourceBinding.native_process.process_birth,
+          rollout: sourceBinding.native_process.rollout,
+          evidence: sourceBinding.native_process.evidence
+        }),
+        allowedAdditionalIdentities: []
+      })
+    });
+    const reObservedExact = reObserved.identity
+      ? exactLifecycleProcessIdentity(terminal, reObserved.identity)
+      : undefined;
+    if (
+      reObservedExact?.sessionId.toLowerCase() !== targetNativeThreadId ||
+      reObservedExact.processUuid !== nextBinding.native_process.process_uuid ||
+      reObservedExact.processBirth !== nextBinding.native_process.process_birth ||
+      JSON.stringify(reObservedExact.rollout ?? null) !==
+        JSON.stringify(nextBinding.native_process.rollout ?? null)
+    ) {
+      throw new Error("live native thread changed during external handoff adoption");
+    }
+    await assertNativeThreadHasExclusiveOwnership({
+      options,
+      agent: terminal.agent,
+      currentPid: terminal.pid,
+      nativeThreadId: targetNativeThreadId,
+      storeDir,
+      terminalControl: terminal.terminalControl,
+      excludedManagedSessionId: targetSession?.session_id
+    });
+    transition = saveNativeThreadTransition(storeDir, {
+      ...transition,
+      status: "verified",
+      after_binding: nextBinding,
+      verified_at: cliNow().toISOString()
+    }, { expectedRevision: nativeThreadTransitionRevision(transition) });
+    if (
+      cliEnv().AKK_TEST_EXIT_AFTER_HANDOFF_VERIFIED_TRANSITION_BEFORE_LEDGER ===
+        "1"
+    ) {
+      cliExit(89);
+    }
+    saveLifecycleTerminalDispatchLedger(terminal.terminalControl, {
+      ...lifecycleLedgerFields(transition, storeDir),
+      status: "verified",
+      binding: sourceBinding
+    }, {
+      expectedTransitionId: transitionId,
+      expectedStatus: "prepared"
+    });
+    if (cliEnv().AKK_TEST_EXIT_AFTER_LIFECYCLE_VERIFIED === "1") {
+      cliExit(87);
+    }
+    const committedTarget = commitVerifiedLifecycleTransition(
+      storeDir,
+      transition,
+      cliNow().toISOString()
+    );
+    transition = saveNativeThreadTransition(storeDir, {
+      ...transition,
+      status: "committed",
+      committed_at: cliNow().toISOString()
+    }, { expectedRevision: nativeThreadTransitionRevision(transition) });
+    saveLifecycleTerminalDispatchLedger(terminal.terminalControl, {
+      ...lifecycleLedgerFields(transition, storeDir),
+      status: "resolved",
+      resolved_at: cliNow().toISOString(),
+      binding: committedTarget.binding,
+      reason: "verified human-observed native thread handoff committed"
+    }, {
+      expectedTransitionId: transitionId,
+      expectedStatus: "verified"
+    });
+    runtimeLog("info", "human_observed_handoff_adopted", {
+      transition_id: transitionId,
+      terminal_id: terminal.conversationId,
+      source_session_id: sourceSession.session_id,
+      target_session_id: committedTarget.session_id,
+      native_thread_id: targetNativeThreadId,
+      terminal_input_sent: false
+    });
+    return {
+      session: committedTarget,
+      identity: exactIdentity,
+      transition,
+      adopted: true
+    };
+  } catch (error) {
+    const failedAt = cliNow().toISOString();
+    const durable = loadNativeThreadTransition(storeDir, transitionId);
+    if (durable.status === "verified" || durable.status === "committed") {
+      throw error;
+    }
+    const uncertain = saveNativeThreadTransition(storeDir, {
+      ...durable,
+      status: "uncertain",
+      uncertain_at: failedAt,
+      error: error instanceof Error ? error.message : String(error),
+      do_not_retry: true
+    }, { expectedRevision: nativeThreadTransitionRevision(durable) });
+    saveManagedSession(storeDir, {
+      ...sourceTransitioning,
+      status: "quarantined",
+      quarantine_reason: "human-observed handoff could not be revalidated",
+      updated_at: failedAt
+    }, { expectedRevision: managedSessionRevision(sourceTransitioning) });
+    saveLifecycleTerminalDispatchLedger(terminal.terminalControl, {
+      ...lifecycleLedgerFields(uncertain, storeDir),
+      status: "uncertain",
+      uncertain_at: failedAt,
+      reason: "human-observed handoff could not be revalidated"
+    }, { expectedTransitionId: transitionId });
+    throw error;
+  }
+}
+
+async function assertObservedHandoffTransportBoundary({
+  options,
+  terminal,
+  transition,
+  requireEmptyComposer
+}: {
+  options: Record<string, any>;
+  terminal: ResolvedTerminalConversation;
+  transition: NativeThreadTransition;
+  requireEmptyComposer: boolean;
+}): Promise<void> {
+  const storeDir = storeDirFromOptions(options);
+  const durable = loadNativeThreadTransition(
+    storeDir,
+    transition.transition_id
+  );
+  if (
+    durable.operation !== "adopt_external_thread" ||
+    durable.origin !== "human_observed" ||
+    durable.terminal_input_sent !== false ||
+    durable.status !== "committed" ||
+    !durable.source_session_id ||
+    !durable.before_binding ||
+    !durable.after_binding ||
+    JSON.stringify(durable.after_binding) !==
+      JSON.stringify(transition.after_binding)
+  ) {
+    throw new Error("human-observed handoff changed before terminal transport");
+  }
+  const source = loadManagedSession(storeDir, durable.source_session_id);
+  const target = loadManagedSession(storeDir, durable.target_session_id);
+  if (
+    source.status !== "detached" ||
+    source.last_transition_id !== durable.transition_id ||
+    JSON.stringify(source.binding) !== JSON.stringify(durable.before_binding) ||
+    target.status !== "bound" ||
+    target.last_transition_id !== durable.transition_id ||
+    JSON.stringify(target.binding) !== JSON.stringify(durable.after_binding)
+  ) {
+    throw new Error("human-observed handoff Session authority changed before send");
+  }
+  const targetId = durable.after_binding.native_thread_id;
+  if (!targetId) {
+    throw new Error("human-observed handoff target identity is incomplete");
+  }
+  const resolved = await resolveCurrentNativeAgentSessionIdentity({
+    options,
+    agent: terminal.agent,
+    pid: terminal.pid,
+    cwd: terminal.terminalControl.currentPath,
+    preferredSessionId: targetId,
+    allowedCompanionIdentity: codexIdentityFence({
+      sessionId: durable.before_native_thread_id,
+      processUuid: durable.before_process_uuid,
+      processBirth: durable.before_process_birth,
+      rollout: durable.before_process_rollout,
+      evidence: durable.before_binding.native_process.evidence
+    }),
+    allowedAdditionalIdentities: []
+  });
+  const bridge = createTerminalAgentBridge(options);
+  const status = await bridge.status(
+    terminal.agent,
+    terminal.terminalControl,
+    { runtime: terminalRuntimeForLiveIdentity({ terminal, physicalOnly: true }) }
+  );
+  if (requireEmptyComposer) {
+    assertSafeTerminalSend(terminal.agent, status);
+  } else {
+    const displayName = executorDefinitionForKind(terminal.agent).displayName;
+    const approval = isRecord(status?.approval_state)
+      ? status.approval_state
+      : undefined;
+    if (status?.reachable !== true) {
+      throw new Error(`${displayName} terminal status is unavailable`);
+    }
+    if (approval?.blocked === true) {
+      throw new Error(
+        stringValue(approval.reason) ??
+          `${displayName} is waiting at a permission dialog`
+      );
+    }
+    // With an exact draft in the composer, native TUIs can classify the screen
+    // as `unknown` instead of `idle`. Exact draft materialization is proven by
+    // the bridge before Enter, so only a positively busy state is unsafe here.
+    if (
+      status.activity_state !== "idle" &&
+      status.activity_state !== "unknown"
+    ) {
+      throw new Error(
+        `${displayName} terminal became ${
+          stringValue(status.activity_state) ?? "unknown"
+        } before handoff submission`
+      );
+    }
+  }
+  let liveIdentity = resolved;
+  if (terminal.agent === "codex") {
+    const foreground = terminal.adapter.observeThreadLifecycle?.({
+      operation: { kind: "new_thread" },
+      phase: "before",
+      screen: status.screen.excerpt ?? ""
+    });
+    const foregroundId =
+      foreground?.status === "observed" &&
+        isExactNativeThreadId(foreground.nativeThreadId)
+        ? foreground.nativeThreadId.toLowerCase()
+        : undefined;
+    if (foregroundId && foregroundId !== targetId.toLowerCase()) {
+      throw new Error(
+        "Codex foreground native thread changed after handoff adoption"
+      );
+    }
+    if (!durable.after_binding.native_process.rollout) {
+      if (
+        requireEmptyComposer &&
+        foregroundId !== targetId.toLowerCase()
+      ) {
+        throw new Error(
+          "status-card-only Codex handoff lost its exact foreground identity"
+        );
+      }
+      liveIdentity = resolved?.sessionId.toLowerCase() === targetId.toLowerCase()
+        ? resolved
+        : {
+            sessionId: targetId,
+            processUuid: durable.after_binding.native_process.process_uuid,
+            processBirth: durable.after_binding.native_process.process_birth,
+            evidence: foreground?.evidence ?? "codex_status_card"
+          };
+    } else if (
+      !liveIdentity ||
+      liveIdentity.sessionId.toLowerCase() !== targetId.toLowerCase()
+    ) {
+      throw new Error(
+        "Codex handoff rollout identity changed before terminal transport"
+      );
+    }
+  }
+  if (!liveIdentity) {
+    throw new Error("human-observed handoff identity is unavailable before send");
+  }
+  const exact = exactLifecycleProcessIdentity(terminal, liveIdentity);
+  if (
+    exact.sessionId.toLowerCase() !== targetId.toLowerCase() ||
+    exact.processUuid !== durable.after_binding.native_process.process_uuid ||
+    exact.processBirth !== durable.after_binding.native_process.process_birth ||
+    JSON.stringify(exact.rollout ?? null) !==
+      JSON.stringify(durable.after_binding.native_process.rollout ?? null)
+  ) {
+    throw new Error("human-observed handoff identity changed before send");
+  }
+  if (requireEmptyComposer) {
+    const empty = terminal.agent === "codex"
+      ? codexComposerEmpty(status.screen.excerpt)
+      : claudeComposerEmpty(status.screen.excerpt);
+    if (!empty) {
+      throw new Error(
+        "human-observed handoff composer changed before text injection"
+      );
+    }
+    if (terminal.agent === "codex") {
+      await assertCodexComposerReadyForAutomatedInput({
+        options,
+        terminalControl: terminal.terminalControl
+      });
+    }
+  }
 }
 
 function lifecycleBindingToken({
@@ -10933,6 +11851,10 @@ async function runStatus(options) {
       };
   const terminalConversation = await resolveTerminalConversationFromOptions(options);
   if (terminalConversation) {
+    assertExpectedHandoffTokenUsesExactTerminalSelector({
+      options,
+      terminal: terminalConversation
+    });
     const terminalStatus = await terminalStatusForControl(
       terminalConversation.agent,
       terminalConversation.terminalControl,
@@ -11653,6 +12575,13 @@ async function runSend(options) {
 
   const terminalConversation = await resolveTerminalConversationFromOptions(options);
   if (terminalConversation) {
+    // A token copied from list is authority for exactly the advertised full
+    // terminal selector. Reject aliases and implicit/no-selector resolution
+    // before taking locks or touching Store state.
+    assertExpectedHandoffTokenUsesExactTerminalSelector({
+      options,
+      terminal: terminalConversation
+    });
     if (!options.background) {
       throw new Error(
         "raw terminal sends require --background so AKK can persist and monitor the submission safely"
@@ -11693,7 +12622,7 @@ async function runSend(options) {
             session: claimedSession
           })
         : { additional: [] };
-      const currentNativeIdentity =
+      let currentNativeIdentity =
         await resolveCurrentNativeAgentSessionIdentity({
           options,
           agent: terminalConversation.agent,
@@ -11705,11 +12634,26 @@ async function runSend(options) {
           allowedCompanionIdentity: knownCodexCompanions.primary,
           allowedAdditionalIdentities: knownCodexCompanions.additional
         });
-      let managedSession = materializeCurrentManagedSession({
+      const physicalNativeIdentityBeforeHandoff = currentNativeIdentity;
+      const handoff = await maybeAdoptObservedExternalThread({
         options,
         terminal: terminalConversation,
-        identity: currentNativeIdentity
+        sourceSession: claimedSession,
+        resolvedIdentity: currentNativeIdentity,
+        storeDir: rawStoreDir
       });
+      currentNativeIdentity =
+        handoff.adopted &&
+          terminalConversation.agent === "codex" &&
+          !handoff.session?.binding?.native_process.rollout
+          ? physicalNativeIdentityBeforeHandoff
+          : handoff.identity;
+      let managedSession = handoff.session ??
+        materializeCurrentManagedSession({
+          options,
+          terminal: terminalConversation,
+          identity: currentNativeIdentity
+        });
       if (!managedSession && currentNativeIdentity) {
         managedSession = await reattachManagedSessionForNativeIdentity({
           options,
@@ -11759,21 +12703,37 @@ async function runSend(options) {
           storeDir: rawStoreDir,
           session: managedSession,
           observedIdentity: currentNativeIdentity
-        }) ?? knownCodexCompanions.primary;
+        }) ?? (
+          currentNativeIdentity === undefined ||
+          nativeIdentityMatchesCodexPreMaterialization(
+            currentNativeIdentity,
+            knownCodexCompanions.primary
+          )
+            ? knownCodexCompanions.primary
+            : undefined
+        );
       const allowedAdditionalIdentities =
-        knownCodexCompanions.additional;
+        allowedPreMaterializationIdentity
+          ? knownCodexCompanions.additional
+          : [];
       const materializedNativeIdentity =
         currentNativeIdentity?.sessionId === logicalNativeIdentity?.sessionId
           ? currentNativeIdentity
           : undefined;
-      await verifyCodexPendingManagedSendStatus({
-        options,
-        terminal: terminalConversation,
-        session: managedSession,
-        logicalIdentity: logicalNativeIdentity,
-        allowedPreMaterializationIdentity,
-        allowedAdditionalIdentities
-      });
+      if (!(
+        handoff.adopted &&
+        terminalConversation.agent === "codex" &&
+        !managedSession.binding?.native_process.rollout
+      )) {
+        await verifyCodexPendingManagedSendStatus({
+          options,
+          terminal: terminalConversation,
+          session: managedSession,
+          logicalIdentity: logicalNativeIdentity,
+          allowedPreMaterializationIdentity,
+          allowedAdditionalIdentities
+        });
+      }
       const managedNativeThreadId =
         logicalNativeIdentity?.sessionId ??
         managedSession.binding?.native_thread_id;
@@ -11868,7 +12828,14 @@ async function runSend(options) {
               }
             : undefined,
           allowedPreMaterializationIdentity,
-          allowedAdditionalIdentities
+          allowedAdditionalIdentities,
+          observedHandoff:
+            handoff.adopted && handoff.transition
+              ? {
+                  terminal: terminalConversation,
+                  transition: handoff.transition
+                }
+              : undefined
         });
       } finally {
         releaseStateLock();
@@ -11878,6 +12845,13 @@ async function runSend(options) {
       releaseTerminalLock();
     }
     return;
+  }
+
+  if (stringValue(options.expectedTerminalToken)) {
+    throw new Error(
+      "--expected-terminal-token cannot be used with a managed Session; " +
+      "use the exact full terminal selector advertised by AKK list"
+    );
   }
 
   const sessionId = required(
@@ -13054,6 +14028,12 @@ async function runTerminalControlSend({
   allowedPreMaterializationIdentity = undefined as
     CodexPreMaterializationIdentity | undefined,
   allowedAdditionalIdentities = [] as CodexPreMaterializationIdentity[],
+  observedHandoff = undefined as
+    | {
+        terminal: ResolvedTerminalConversation;
+        transition: NativeThreadTransition;
+      }
+    | undefined,
   continuingTurnResponse = false
 }) {
   const bridge = terminalBridgeEnabled(conversation);
@@ -13081,6 +14061,7 @@ async function runTerminalControlSend({
         onTerminalPreflightVerified,
         allowedPreMaterializationIdentity,
         allowedAdditionalIdentities,
+        observedHandoff,
         continuingTurnResponse
       });
     } finally {
@@ -13123,6 +14104,7 @@ async function runTerminalControlSend({
         onTerminalPreflightVerified,
         allowedPreMaterializationIdentity,
         allowedAdditionalIdentities,
+        observedHandoff,
         continuingTurnResponse
       });
     } finally {
@@ -13152,6 +14134,7 @@ async function runTerminalControlSend({
         onTerminalPreflightVerified,
         allowedPreMaterializationIdentity,
         allowedAdditionalIdentities,
+        observedHandoff,
         continuingTurnResponse
       })
     );
@@ -13803,6 +14786,27 @@ async function runTerminalControlSend({
   try {
     await terminalBridge.send(executor.kind, terminalControl, terminalPayload, {
       runtime: preSendRuntime,
+      requireExactComposerBeforeEnter: observedHandoff !== undefined,
+      beforeText: observedHandoff
+        ? async () => {
+            await assertObservedHandoffTransportBoundary({
+              options,
+              terminal: observedHandoff.terminal,
+              transition: observedHandoff.transition,
+              requireEmptyComposer: true
+            });
+          }
+        : undefined,
+      beforeEnter: observedHandoff
+        ? async () => {
+            await assertObservedHandoffTransportBoundary({
+              options,
+              terminal: observedHandoff.terminal,
+              transition: observedHandoff.transition,
+              requireEmptyComposer: false
+            });
+          }
+        : undefined,
       async onTransportStage(event) {
         const stageAt = cliNow().toISOString();
         if (event.stage === "text_injected") {
@@ -13843,6 +14847,14 @@ async function runTerminalControlSend({
             stringValue(previousDispatchLedger?.generation_id) ??
             stringValue(previousDispatchLedger?.message_id)
         });
+        if (event.stage === "text_injected" && observedHandoff) {
+          await assertObservedHandoffTransportBoundary({
+            options,
+            terminal: observedHandoff.terminal,
+            transition: observedHandoff.transition,
+            requireEmptyComposer: false
+          });
+        }
         try {
           appendEvent(logPath, {
             ts: stageAt,
@@ -17679,10 +18691,243 @@ async function runTerminalControlCancel({ options, statePath, logPath, agent, te
   }
 }
 
+async function runObservedHandoffClose({
+  options,
+  statePath,
+  logPath,
+  initialConversation
+}: {
+  options: Record<string, any>;
+  statePath: string;
+  logPath: string;
+  initialConversation: Conversation;
+}): Promise<void> {
+  const expectedToken = required(
+    stringValue(options.expectedHandoffToken),
+    "--expected-handoff-token is required"
+  );
+  if (
+    stringValue(options.expectedMessageId) ||
+    stringValue(options.expectedTransitionId)
+  ) {
+    throw new Error(
+      "--expected-handoff-token cannot be combined with dispatch or lifecycle recovery tokens"
+    );
+  }
+  if (stringValue(options.reason) !== "superseded_by_human_context_switch") {
+    throw new Error(
+      "a handoff close requires reason superseded_by_human_context_switch"
+    );
+  }
+  const storeDir = storeDirFromOptions(options);
+  const sourceSessionId = sessionIdForConversation(initialConversation);
+  const initialSource = loadManagedSession(storeDir, sourceSessionId);
+  if (!initialSource.binding || initialSource.status !== "bound") {
+    throw new Error("handoff source Session is no longer bound; refresh list");
+  }
+  const terminal = await createTerminalAgentBridge(options).resolveStoredTerminal(
+    initialSource.agent,
+    initialSource.binding.native_process.pid,
+    initialSource.binding.terminal_control,
+    { pid: initialSource.binding.native_process.pid }
+  );
+  const releaseTerminalLock = acquireTerminalBridgeSendLock(
+    storeDir,
+    terminal.terminalControl,
+    { timeoutMs: 30000 }
+  );
+  try {
+    await withStoreWriterLeaseAsync(storeDir, async () => {
+      const releaseStateLock = acquireFileLock(`${statePath}.lock`);
+      try {
+        const conversation = loadState(statePath);
+        const turnId = turnIdForConversation(conversation);
+        if (
+          conversation.conversation_id !== initialConversation.conversation_id ||
+          sessionIdForConversation(conversation) !== sourceSessionId ||
+          !SESSION_SEND_BLOCKING_STATUSES.has(conversation.status)
+        ) {
+          throw new Error(
+            "active handoff Turn changed after it was listed; refresh AKK list"
+          );
+        }
+        const source = loadManagedSession(storeDir, sourceSessionId);
+        if (
+          source.status !== "bound" ||
+          !source.binding ||
+          managedSessionHasUnresolvedNativeTransition(storeDir, source)
+        ) {
+          throw new Error(
+            "handoff source Session changed after it was listed; refresh AKK list"
+          );
+        }
+        const companions = codexAllowedCompanionSetForManagedSession({
+          storeDir,
+          session: source
+        });
+        const resolved = await resolveCurrentNativeAgentSessionIdentity({
+          options,
+          agent: terminal.agent,
+          pid: terminal.pid,
+          cwd: terminal.terminalControl.currentPath,
+          preferredSessionId: companions.primary
+            ? source.binding.native_thread_id
+            : undefined,
+          allowedCompanionIdentity: companions.primary,
+          allowedAdditionalIdentities: companions.additional
+        });
+        const observed = await observedExternalHandoffIdentity({
+          options,
+          terminal,
+          sourceSession: source,
+          resolvedIdentity: resolved
+        });
+        if (
+          !observed.identity ||
+          managedBindingConflictKindForResolvedTerminal({
+            storeDir,
+            session: source,
+            terminal,
+            identity: observed.identity
+          }) !== "live_external_thread_change"
+        ) {
+          throw new Error(
+            "live native thread no longer matches the listed handoff; refresh AKK list"
+          );
+        }
+        const targetNativeThreadId = observed.identity.sessionId.toLowerCase();
+        const target = observedHandoffTargetResolution({
+          storeDir,
+          agent: terminal.agent,
+          workspace: terminal.terminalControl.currentPath ?? cliCwd(),
+          nativeThreadId: targetNativeThreadId,
+          sourceSessionId
+        });
+        if (target.status !== "eligible") {
+          throw new Error(
+            "handoff target Session changed after it was listed; refresh AKK list"
+          );
+        }
+        await assertNativeThreadHasExclusiveOwnership({
+          options,
+          agent: terminal.agent,
+          currentPid: terminal.pid,
+          nativeThreadId: targetNativeThreadId,
+          storeDir,
+          terminalControl: terminal.terminalControl,
+          excludedManagedSessionId: target.snapshot.state === "detached"
+            ? target.snapshot.session_id
+            : undefined
+        });
+        const handoffToken = observedHandoffAuthorityToken({
+          terminal,
+          identity: observed.identity,
+          sourceSession: source,
+          target: target.snapshot
+        });
+        const takeover = isRecord(conversation.native_session_takeover)
+          ? conversation.native_session_takeover
+          : undefined;
+        const expectedMessageId = stringValue(
+          takeover?.terminal_bridge_message_id
+        ) ?? stringValue(terminalBridgeSubmission(conversation)?.message_id);
+        const ledger = loadTerminalBridgeDispatchLedger(
+          terminal.terminalControl
+        );
+        const exactDispatchGeneration = Boolean(
+          expectedMessageId &&
+          ledger &&
+          !terminalDispatchLedgerLooksLifecycle(ledger) &&
+          stringValue(ledger.conversation_id) ===
+            conversation.conversation_id &&
+          stringValue(ledger.session_id) === sourceSessionId &&
+          stringValue(ledger.turn_id) === turnId &&
+          stringValue(ledger.message_id) === expectedMessageId
+        );
+        const exactNoLedgerGeneration = Boolean(
+          !expectedMessageId &&
+          (!ledger || ledger.status === "resolved")
+        );
+        if (!exactDispatchGeneration && !exactNoLedgerGeneration) {
+          throw new Error(
+            "active handoff dispatch generation changed; refresh AKK list"
+          );
+        }
+        const freshToken = activeTurnHandoffDecisionToken({
+          handoffToken,
+          turn: conversation,
+          ledger
+        });
+        if (freshToken !== expectedToken) {
+          throw new Error(
+            "active handoff snapshot changed; refresh AKK list before closing"
+          );
+        }
+        const now = cliNow().toISOString();
+        const closed: Conversation = {
+          ...conversation,
+          status: "closed",
+          closed_at: now,
+          close_reason: "superseded_by_human_context_switch",
+          disposition: "superseded_by_human_context_switch",
+          updated_at: now
+        };
+        saveState(statePath, closed);
+        const dispatchResolved = expectedMessageId
+          ? resolveTerminalBridgeDispatchLedger({
+              terminalControl: terminal.terminalControl,
+              conversation: closed,
+              expectedMessageId,
+              reason: "Turn superseded by a verified human context switch"
+            })
+          : false;
+        if (expectedMessageId && !dispatchResolved) {
+          throw new Error(
+            "active handoff dispatch changed during close; inspect before retrying"
+          );
+        }
+        appendEvent(logPath, {
+          ts: now,
+          conversation_id: conversation.conversation_id,
+          event: "conversation_closed",
+          status: "closed",
+          reason: "superseded_by_human_context_switch",
+          disposition: "superseded_by_human_context_switch",
+          handoff_native_thread_id: targetNativeThreadId
+        });
+        runtimeLog("info", "conversation_closed", {
+          conversation_id: conversation.conversation_id,
+          status: "closed",
+          reason: "superseded_by_human_context_switch",
+          disposition: "superseded_by_human_context_switch",
+          state_path: statePath,
+          event_log_path: logPath
+        });
+        printJson({
+          conversation: closed,
+          closed: true,
+          terminal_dispatch_resolved: dispatchResolved,
+          handoff_disposition: "superseded_by_human_context_switch",
+          next_action: "refresh list and use its follow-current send"
+        });
+      } finally {
+        releaseStateLock();
+      }
+    });
+  } finally {
+    releaseTerminalLock();
+  }
+}
+
 async function runClose(options) {
   const terminalConversation =
     await resolveTerminalConversationFromOptions(options);
   if (terminalConversation) {
+    if (stringValue(options.expectedHandoffToken)) {
+      throw new Error(
+        "--expected-handoff-token cannot be used with raw terminal close"
+      );
+    }
     await runTerminalDispatchClose({
       options,
       terminalConversation
@@ -17690,6 +18935,15 @@ async function runClose(options) {
     return;
   }
   const loaded = loadConversationFromOptions(options);
+  if (stringValue(options.expectedHandoffToken)) {
+    await runObservedHandoffClose({
+      options,
+      statePath: loaded.statePath,
+      logPath: loaded.logPath,
+      initialConversation: loaded.conversation
+    });
+    return;
+  }
   const { statePath, logPath } = loaded;
   const nativeTakeover = isRecord(loaded.conversation.native_session_takeover)
     ? loaded.conversation.native_session_takeover
@@ -17707,11 +18961,19 @@ async function runClose(options) {
     releaseStateLock = acquireFileLock(`${statePath}.lock`);
     const conversation = loadState(statePath);
     const now = cliNow().toISOString();
+    const closeReason = options.reason ?? "closed by request";
+    const handoffDisposition =
+      closeReason === "superseded_by_human_context_switch"
+        ? closeReason
+        : undefined;
     const closed = {
       ...conversation,
       status: "closed" as const,
       closed_at: now,
-      close_reason: options.reason ?? "closed by request",
+      close_reason: closeReason,
+      ...(handoffDisposition
+        ? { disposition: handoffDisposition }
+        : {}),
       updated_at: now
     };
     saveState(statePath, closed);
@@ -20144,6 +21406,7 @@ function terminalDispatchLedgerLooksLifecycle(
       ledger.transition_id !== undefined ||
       ledger.operation === "new_thread" ||
       ledger.operation === "resume_thread" ||
+      ledger.operation === "adopt_external_thread" ||
       ledger.adapter_version !== undefined ||
       ledger.command_fingerprint !== undefined ||
       ledger.target_session_id !== undefined ||
@@ -20165,6 +21428,8 @@ function lifecycleLedgerFields(
     generation_id: transition.transition_id,
     transition_id: transition.transition_id,
     operation: transition.operation,
+    origin: transition.origin,
+    terminal_input_sent: transition.terminal_input_sent,
     terminal_id: transition.terminal_id,
     agent: transition.agent,
     workspace: transition.workspace,
@@ -20751,6 +22016,7 @@ function reconcilePreparedTerminalDispatchLedger(
   if (
     Number.isSafeInteger(dispatcherPid) &&
     dispatcherPid > 1 &&
+    dispatcherPid !== cliPid() &&
     isProcessAlive(dispatcherPid)
   ) {
     return ledger;
@@ -21162,9 +22428,16 @@ async function recoverLifecycleFenceBeforeMutation({
   options: Record<string, any>;
   terminal: ResolvedTerminalConversation;
 }): Promise<void> {
-  const ledger = loadTerminalBridgeDispatchLedger(terminal.terminalControl);
+  let ledger = loadTerminalBridgeDispatchLedger(terminal.terminalControl);
   if (!ledger || ledger.status === "resolved") {
-    return;
+    ledger = rebuildObservedHandoffLedgerFromTransition({
+      options,
+      terminal,
+      previousLedger: ledger
+    });
+    if (!ledger) {
+      return;
+    }
   }
   if (!terminalDispatchLedgerLooksLifecycle(ledger)) {
     return;
@@ -21190,6 +22463,230 @@ async function recoverLifecycleFenceBeforeMutation({
       "expected-transition-id recovery action"
     );
   }
+}
+
+function rebuildObservedHandoffLedgerFromTransition({
+  options,
+  terminal,
+  previousLedger
+}: {
+  options: Record<string, any>;
+  terminal: ResolvedTerminalConversation;
+  previousLedger?: Record<string, any>;
+}): Record<string, any> | undefined {
+  const storeDir = storeDirFromOptions(options);
+  const candidates = listNativeThreadTransitions(storeDir).filter(
+    (transition) =>
+      transition.operation === "adopt_external_thread" &&
+      transition.origin === "human_observed" &&
+      transition.terminal_input_sent === false &&
+      ["prepared", "verified"].includes(transition.status) &&
+      transition.agent === terminal.agent &&
+      transition.before_binding?.native_process.pid === terminal.pid &&
+      terminalControlAliasMatches(
+        transition.terminal_id,
+        transition.before_binding?.terminal_control,
+        terminal.conversationId,
+        terminal.terminalControl
+      ) &&
+      matchesConfiguredWorkspace(
+        transition.workspace,
+        terminal.terminalControl.currentPath
+      )
+  );
+  if (candidates.length === 0) {
+    return undefined;
+  }
+  if (candidates.length !== 1) {
+    throw new Error(
+      `terminal ${terminal.terminalControl.target} has multiple unresolved ` +
+      "human-observed handoff transitions; refusing to infer one ledger owner"
+    );
+  }
+  const transition = candidates[0];
+  if (
+    previousLedger?.status === "resolved" &&
+    stringValue(previousLedger.transition_id) === transition.transition_id
+  ) {
+    throw new Error(
+      `human-observed handoff transition ${transition.transition_id} is ` +
+      "unresolved but its terminal ledger is already resolved"
+    );
+  }
+  const rebuilt = {
+    ...lifecycleLedgerFields(transition, storeDir),
+    status: transition.status,
+    binding: transition.before_binding,
+    terminal_control: {
+      kind: terminal.terminalControl.kind,
+      target: terminal.terminalControl.target,
+      socket_path: terminal.terminalControl.socketPath ?? null,
+      pane_pid: terminal.terminalControl.panePid ?? null,
+      current_path: terminal.terminalControl.currentPath ?? null
+    },
+    ...(hasCanonicalTerminalEndpoint(terminal.terminalControl)
+      ? {
+          terminal_endpoint: terminalControlEvidence(
+            terminal.terminalControl
+          )
+        }
+      : {}),
+    previous_generation_id:
+      stringValue(previousLedger?.generation_id) ??
+      stringValue(previousLedger?.message_id)
+  };
+  // Validate the complete transition/terminal/adapter relationship before
+  // replacing a missing or older resolved ledger.  Rebuilding a fence is a
+  // Store-side recovery operation only and never sends terminal input.
+  assertLifecycleLedgerMatchesTransition({
+    options,
+    terminal,
+    ledger: rebuilt,
+    transition,
+    storeDir
+  });
+  saveLifecycleTerminalDispatchLedger(terminal.terminalControl, rebuilt, {
+    expectedTransitionId: null
+  });
+  return loadTerminalBridgeDispatchLedger(
+    terminal.terminalControl
+  ) as Record<string, any>;
+}
+
+async function recoverPreparedObservedHandoff({
+  options,
+  terminal,
+  ledger,
+  transition,
+  storeDir,
+  now
+}: {
+  options: Record<string, any>;
+  terminal: ResolvedTerminalConversation;
+  ledger: Record<string, any>;
+  transition: NativeThreadTransition;
+  storeDir: string;
+  now: string;
+}): Promise<NativeThreadTransition> {
+  if (
+    transition.operation !== "adopt_external_thread" ||
+    transition.status !== "prepared" ||
+    ledger.status !== "prepared" ||
+    !transition.source_session_id ||
+    transition.source_expected_revision === undefined ||
+    !transition.before_binding ||
+    !transition.target_native_thread_id
+  ) {
+    return transition;
+  }
+  let source = loadManagedSession(storeDir, transition.source_session_id);
+  if (
+    source.status === "bound" &&
+    source.revision === transition.source_expected_revision &&
+    JSON.stringify(source.binding) === JSON.stringify(transition.before_binding)
+  ) {
+    source = saveManagedSession(storeDir, {
+      ...source,
+      status: "transitioning",
+      last_transition_id: transition.transition_id,
+      updated_at: now
+    }, { expectedRevision: managedSessionRevision(source) });
+  } else if (
+    source.status !== "transitioning" ||
+    source.last_transition_id !== transition.transition_id ||
+    source.revision !== transition.source_expected_revision + 1 ||
+    JSON.stringify(source.binding) !== JSON.stringify(transition.before_binding)
+  ) {
+    throw new Error("human-observed handoff source changed before recovery");
+  }
+  const before = transition.before_binding;
+  const resolved = await resolveCurrentNativeAgentSessionIdentity({
+    options,
+    agent: terminal.agent,
+    pid: terminal.pid,
+    cwd: terminal.terminalControl.currentPath,
+    preferredSessionId: transition.target_native_thread_id,
+    allowedCompanionIdentity: codexIdentityFence({
+      sessionId: transition.before_native_thread_id,
+      processUuid: transition.before_process_uuid,
+      processBirth: transition.before_process_birth,
+      rollout: transition.before_process_rollout,
+      evidence: before.native_process.evidence
+    }),
+    allowedAdditionalIdentities: []
+  });
+  const observed = await observedExternalHandoffIdentity({
+    options,
+    terminal,
+    sourceSession: source,
+    resolvedIdentity: resolved
+  });
+  const liveId = observed.identity?.sessionId.toLowerCase();
+  if (liveId === transition.before_native_thread_id.toLowerCase()) {
+    transition = saveNativeThreadTransition(storeDir, {
+      ...transition,
+      status: "aborted",
+      aborted_at: now,
+      error: "recovery observed the exact source native thread"
+    }, { expectedRevision: nativeThreadTransitionRevision(transition) });
+    restorePreparedLifecycleSource(storeDir, transition, now);
+    saveLifecycleTerminalDispatchLedger(terminal.terminalControl, {
+      ...lifecycleLedgerFields(transition, storeDir),
+      status: "resolved",
+      resolved_at: now,
+      reason: "human-observed handoff rolled back to its exact source"
+    }, { expectedTransitionId: transition.transition_id });
+    return transition;
+  }
+  if (
+    !observed.identity ||
+    liveId !== transition.target_native_thread_id.toLowerCase()
+  ) {
+    throw new Error(
+      "human-observed handoff recovery found neither its exact source nor target"
+    );
+  }
+  const target = tryLoadManagedSession(storeDir, transition.target_session_id);
+  if ((target?.revision ?? null) !== transition.target_expected_revision) {
+    throw new Error("human-observed handoff target changed before recovery");
+  }
+  await assertNativeThreadHasExclusiveOwnership({
+    options,
+    agent: terminal.agent,
+    currentPid: terminal.pid,
+    nativeThreadId: transition.target_native_thread_id,
+    storeDir,
+    terminalControl: terminal.terminalControl,
+    excludedManagedSessionId: target?.session_id
+  });
+  const exact = exactLifecycleProcessIdentity(terminal, observed.identity);
+  const afterBinding = terminalBindingFrom({
+    terminalId: terminal.conversationId,
+    terminalControl: terminal.terminalControl,
+    pid: terminal.pid,
+    nativeThreadId: transition.target_native_thread_id,
+    processUuid: exact.processUuid,
+    processBirth: exact.processBirth,
+    rollout: exact.rollout,
+    evidence: `${exact.evidence}+human_observed_recovery`,
+    generation: (target?.binding?.generation ?? 0) + 1,
+    now: new Date(now)
+  });
+  transition = saveNativeThreadTransition(storeDir, {
+    ...transition,
+    status: "verified",
+    verified_at: now,
+    after_binding: afterBinding
+  }, { expectedRevision: nativeThreadTransitionRevision(transition) });
+  saveLifecycleTerminalDispatchLedger(terminal.terminalControl, {
+    ...lifecycleLedgerFields(transition, storeDir),
+    status: "verified",
+    binding: before
+  }, {
+    expectedTransitionId: transition.transition_id,
+    expectedStatus: "prepared"
+  });
+  return transition;
 }
 
 async function reconcileLifecycleDispatchLedger(
@@ -21248,6 +22745,43 @@ async function reconcileLifecycleDispatchLedger(
       transition,
       storeDir
     });
+    if (
+      transition.operation === "adopt_external_thread" &&
+      transition.status === "verified" &&
+      ledger.status === "prepared"
+    ) {
+      saveLifecycleTerminalDispatchLedger(terminal.terminalControl, {
+        ...lifecycleLedgerFields(transition, storeDir),
+        status: "verified",
+        binding: transition.before_binding,
+        previous_generation_id:
+          stringValue(ledger.previous_generation_id)
+      }, {
+        expectedTransitionId: transition.transition_id,
+        expectedStatus: "prepared"
+      });
+      ledger = loadTerminalBridgeDispatchLedger(
+        terminal.terminalControl
+      ) as Record<string, any>;
+    }
+    if (
+      transition.operation === "adopt_external_thread" &&
+      transition.status === "prepared"
+    ) {
+      transition = await recoverPreparedObservedHandoff({
+        options,
+        terminal,
+        ledger,
+        transition,
+        storeDir,
+        now
+      });
+      if (["aborted", "committed"].includes(transition.status)) {
+        return loadTerminalBridgeDispatchLedger(
+          terminal.terminalControl
+        ) as Record<string, any>;
+      }
+    }
     if (transition.status === "prepared" && ledger.status === "prepared") {
       await assertNativeThreadHasExclusiveOwnership({
         options,
@@ -21418,9 +22952,9 @@ function assertLifecycleLedgerMatchesTransition({
   transition: NativeThreadTransition;
   storeDir: string;
 }): void {
-  const operationTarget = transition.operation === "resume_thread"
-    ? transition.target_native_thread_id
-    : undefined;
+  const operationTarget = transition.operation === "new_thread"
+    ? undefined
+    : transition.target_native_thread_id;
   const ledgerControl = isRecord(ledger.terminal_control)
     ? ledger.terminal_control
     : undefined;
@@ -21432,8 +22966,12 @@ function assertLifecycleLedgerMatchesTransition({
     dispatching: ["prepared", "dispatching", "uncertain"],
     submitted: ["dispatching", "submitted", "uncertain"],
     uncertain: ["dispatching", "submitted", "uncertain"],
-    verified: ["submitted", "verified", "uncertain"],
-    committed: ["submitted", "verified", "uncertain"],
+    verified: transition.operation === "adopt_external_thread"
+      ? ["prepared", "verified", "uncertain"]
+      : ["submitted", "verified", "uncertain"],
+    committed: transition.operation === "adopt_external_thread"
+      ? ["verified", "uncertain"]
+      : ["submitted", "verified", "uncertain"],
     aborted: transition.reconciled_outcome === "before"
       ? ["dispatching", "submitted", "uncertain"]
       : ["prepared", "dispatching"]
@@ -21443,6 +22981,8 @@ function assertLifecycleLedgerMatchesTransition({
     stringValue(ledger.transition_id) !== transition.transition_id ||
     stringValue(ledger.generation_id) !== transition.transition_id ||
     stringValue(ledger.operation) !== transition.operation ||
+    stringValue(ledger.origin) !== transition.origin ||
+    ledger.terminal_input_sent !== transition.terminal_input_sent ||
     stringValue(ledger.terminal_id) !== transition.terminal_id ||
     stringValue(ledger.agent) !== transition.agent ||
     stringValue(ledger.workspace) !== transition.workspace ||
@@ -21513,6 +23053,20 @@ function assertLifecycleLedgerMatchesTransition({
   const adapter = createRuntimeTerminalAgentRegistry(options)
     .require(terminal.agent);
   const capability = adapter.probeThreadLifecycle?.(currentVersion);
+  if (transition.operation === "adopt_external_thread") {
+    if (
+      currentVersion !== transition.adapter_version ||
+      capability?.status !== "supported" ||
+      transition.origin !== "human_observed" ||
+      transition.terminal_input_sent !== false ||
+      transition.command_fingerprint !== HUMAN_OBSERVED_HANDOFF_FINGERPRINT
+    ) {
+      throw new Error(
+        "human-observed handoff adapter profile changed during recovery"
+      );
+    }
+    return;
+  }
   const operation = transition.operation === "resume_thread"
     ? {
         kind: "resume_thread" as const,
@@ -21554,6 +23108,57 @@ async function verifyRecoveredLifecycleAfterBinding({
     )
   ) {
     throw new Error("verified after_binding no longer matches the terminal or pid");
+  }
+  if (transition.operation === "adopt_external_thread") {
+    if (
+      transition.origin !== "human_observed" ||
+      transition.terminal_input_sent !== false ||
+      !transition.source_session_id ||
+      !transition.before_binding
+    ) {
+      throw new Error("human-observed handoff recovery evidence is incomplete");
+    }
+    const storeDir = storeDirFromOptions(options);
+    const source = loadManagedSession(storeDir, transition.source_session_id);
+    const resolved = await resolveCurrentNativeAgentSessionIdentity({
+      options,
+      agent: terminal.agent,
+      pid: terminal.pid,
+      cwd: terminal.terminalControl.currentPath,
+      preferredSessionId: binding.native_thread_id,
+      allowedCompanionIdentity: codexIdentityFence({
+        sessionId: transition.before_native_thread_id,
+        processUuid: transition.before_process_uuid,
+        processBirth: transition.before_process_birth,
+        rollout: transition.before_process_rollout,
+        evidence: transition.before_binding.native_process.evidence
+      }),
+      allowedAdditionalIdentities: []
+    });
+    const observed = await observedExternalHandoffIdentity({
+      options,
+      terminal,
+      sourceSession: source,
+      resolvedIdentity: resolved
+    });
+    if (!observed.identity) {
+      throw new Error(
+        "human-observed handoff target identity is unavailable during recovery"
+      );
+    }
+    const exact = exactLifecycleProcessIdentity(terminal, observed.identity);
+    if (
+      exact.sessionId.toLowerCase() !== binding.native_thread_id.toLowerCase() ||
+      exact.processUuid !== binding.native_process.process_uuid ||
+      exact.processBirth !== binding.native_process.process_birth ||
+      JSON.stringify(exact.rollout ?? null) !==
+        JSON.stringify(binding.native_process.rollout ?? null)
+    ) {
+      throw new Error(
+        "human-observed handoff target identity changed during recovery"
+      );
+    }
+    return;
   }
   const bridge = createTerminalAgentBridge(options);
   const status = await bridge.status(
@@ -21664,6 +23269,11 @@ async function reconcileUncertainLifecycleTransition({
   storeDir: string;
   now: string;
 }): Promise<Record<string, any>> {
+  if (transition.operation === "adopt_external_thread") {
+    throw new Error(
+      "uncertain human-observed handoff remains quarantined because recovery cannot send terminal input"
+    );
+  }
   const live = terminal.agent === "claude"
     ? await probeManualClaudeLifecycleRecoveryIdentity({
         options,
@@ -21717,7 +23327,9 @@ async function reconcileUncertainLifecycleTransition({
   }
 
   if (
-    transition.operation !== "resume_thread" ||
+    !["resume_thread", "adopt_external_thread"].includes(
+      transition.operation
+    ) ||
     live.sessionId !== transition.target_native_thread_id
   ) {
     throw new Error(
@@ -21725,12 +23337,19 @@ async function reconcileUncertainLifecycleTransition({
       "nor a durably known exact after identity"
     );
   }
-  if (terminal.agent === "codex" && !live.rollout) {
+  if (
+    transition.operation === "resume_thread" &&
+    terminal.agent === "codex" &&
+    !live.rollout
+  ) {
     throw new Error(
       "Codex resume recovery requires an exact live rollout incarnation"
     );
   }
-  if (terminal.agent === "codex") {
+  if (
+    transition.operation === "resume_thread" &&
+    terminal.agent === "codex"
+  ) {
     assertResumedCodexRolloutMatchesCandidate(
       live,
       transition.target_candidate_file_identity
@@ -22151,7 +23770,9 @@ async function probeManualCodexLifecycleRecoveryIdentity({
               ? "no_rollout"
               : "invalid"
           : classifyCodexLifecyclePostcondition({
-              operation: transition.operation,
+              operation: transition.operation === "resume_thread"
+                ? "resume_thread"
+                : "new_thread",
               parsedNativeThreadId: observed.nativeThreadId,
               observationSucceeded: true,
               observedIdentity: resolved,
@@ -22546,7 +24167,9 @@ function commitVerifiedLifecycleTransition(
     status: "bound",
     binding: afterBinding,
     lineage: targetExisting?.lineage ?? {
-      created_by: transition.operation,
+      created_by: transition.operation === "adopt_external_thread"
+        ? "human_observed"
+        : transition.operation,
       previous_session_id: transition.source_session_id,
       resumed_from_native_thread_id:
         transition.operation === "resume_thread"
@@ -26360,7 +27983,7 @@ function usage() {
   agent-knock-knock delegate --request <text> [--agent ${agentList}] [--workspace <path>] [--store-dir <dir>]
   agent-knock-knock list [--store-dir <dir>] [--agent ${agentList}] [--status <status>] [--all] [--reconcile] [--no-approval-scan] [--terminal-debug]
   agent-knock-knock status [--turn <turn-id|selector>] [--conversation <selector>] [--store-dir <dir>] [--reconcile] [--trace]
-  agent-knock-knock send [--session <session-id|selector>] [--conversation <selector>] --message <text> [--type task] [--agent-timeout-minutes <minutes>] [--agent-hard-timeout-minutes <minutes>]
+  agent-knock-knock send [--session <session-id|selector>] [--conversation <selector>] --message <text> [--expected-terminal-token <token>] [--type task] [--agent-timeout-minutes <minutes>] [--agent-hard-timeout-minutes <minutes>]
   agent-knock-knock new-thread --terminal <exact-terminal-id> --expected-binding-token <token>
   agent-knock-knock clear-thread --terminal <exact-terminal-id> --expected-binding-token <token>
   agent-knock-knock list-resumable-threads --terminal <exact-terminal-id> [--selection-scope <opaque-scope>]
@@ -26373,7 +27996,7 @@ function usage() {
   agent-knock-knock cancel [--turn <turn-id|selector>] [--conversation <selector>]
   agent-knock-knock renew [--turn <turn-id|selector>] [--conversation <selector>]
   agent-knock-knock retry-callback [--turn <turn-id|selector>] [--conversation <selector>]
-  agent-knock-knock close [--turn <turn-id|selector>] [--conversation <selector>] [--reason <text>] [--expected-message-id <message-id> | --expected-transition-id <transition-id>]
+  agent-knock-knock close [--turn <turn-id|selector>] [--conversation <selector>] [--reason <text>] [--expected-message-id <message-id> | --expected-transition-id <transition-id> | --expected-handoff-token <token>]
   agent-knock-knock install-openclaw [--verify] [--openclaw-bin <path>] [--skill-path <path>] [--skill-only] [--no-restart]
   agent-knock-knock doctor [--openclaw-bin <path>] [--tmux-bin <path>] [--herdr-bin <path>]
   agent-knock-knock callback --state <file> --message-json <json> [--record-only]

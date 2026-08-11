@@ -932,7 +932,7 @@ test("Codex multiline send fails closed when the stable composer drifts before E
       request,
       { runtime: { pid: 110 } }
     ),
-    /composer changed/u
+    /composer (?:changed|did not become exact)/u
   );
   assert.equal(
     provider.operations.some((operation) =>
