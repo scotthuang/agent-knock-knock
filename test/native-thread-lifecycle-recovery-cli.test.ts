@@ -49,6 +49,11 @@ const CLAUDE_CURRENT_EMPTY_COMPOSER = [
   "────────────────────────────────────────────────",
   "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
 ].join("\n");
+const CODEX_STATUS_COMPOSER = [
+  "Ready",
+  "› /status",
+  "  /status  show current session configuration and token usage"
+].join("\n");
 
 test("black-box Codex recovery clears a dispatching composer and rolls exact-before back without replay", async () => {
   const fixture = seededCodexRecoveryFixture("dispatching", {
@@ -437,6 +442,25 @@ test("verified no-rollout recovery rejects a stale Codex status screen", async (
   }
 });
 
+test("submitted recovery rejects an unchanged old Codex status card beyond 120 lines", async () => {
+  const fixture = seededCodexRecoveryFixture("submitted");
+  try {
+    fixture.setLongUnchangedStatusProbe(TARGET_ID);
+    const blocked = await fixture.close();
+    assert.equal(blocked.status, 0, fixture.debug(blocked));
+    assert.equal(
+      JSON.parse(blocked.stdout).terminal_dispatch_resolved,
+      false,
+      fixture.debug(blocked)
+    );
+    assert.equal(fixture.source().status, "quarantined");
+    assert.deepEqual(fixture.literalInputs(), ["/status"]);
+    assert.equal(listManagedSessions(fixture.storeDir).length, 1);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test("verified rollout recovery fails closed on a Codex resolver error", async () => {
   const fixture = seededCodexRecoveryFixture("verified");
   try {
@@ -581,8 +605,10 @@ function seededCodexRecoveryFixture(
   const currentIdPath = path.join(root, "current-id.txt");
   const callsPath = path.join(root, "tmux-calls.ndjson");
   const probeCountPath = path.join(root, "probe-count.txt");
+  const preProbeScreenPath = path.join(root, "pre-probe-screen.txt");
   const clearNoopPath = path.join(root, "clear-noop");
   const statusNoopPath = path.join(root, "status-noop");
+  const statusUnchangedPath = path.join(root, "status-unchanged");
   const resolverErrorRequestPath = path.join(root, "resolver-error-request");
   const resolverErrorArmedPath = path.join(root, "resolver-error-armed");
   const secondOwnerIdPath = path.join(root, "second-owner-id.txt");
@@ -632,6 +658,7 @@ function seededCodexRecoveryFixture(
     screenPath,
     currentIdPath,
     probeCountPath,
+    preProbeScreenPath,
     clearNoopPath,
     statusNoopPath,
     resolverErrorRequestPath,
@@ -712,21 +739,47 @@ function seededCodexRecoveryFixture(
       pane: 0,
       panePid,
       currentCommand: "codex",
-      currentPath: workspace
+      currentPath: workspace,
+      columns: 100,
+      rows: 30
     }],
     screens: { [target]: fs.readFileSync(screenPath, "utf8") },
     hooks: {
-      capture(_operation, provider) {
+      capture(operation, provider) {
         if (fs.existsSync(resolverErrorRequestPath)) {
           fs.writeFileSync(resolverErrorArmedPath, "1");
         }
         const screen = fs.readFileSync(screenPath, "utf8");
         provider.setScreen(target, screen);
-        return screen;
+        if (operation.scrollbackLines === undefined) {
+          return screen;
+        }
+        return screen.split("\n")
+          .slice(-operation.scrollbackLines)
+          .join("\n");
       },
       sendText(operation, provider) {
         if (operation.text === "/status") {
+          fs.copyFileSync(screenPath, preProbeScreenPath);
+          const composerScreen = fs.existsSync(statusUnchangedPath)
+            ? `${fs.readFileSync(screenPath, "utf8")}\n${CODEX_STATUS_COMPOSER}`
+            : CODEX_STATUS_COMPOSER;
+          fs.writeFileSync(screenPath, composerScreen);
+          provider.setScreen(target, composerScreen);
+          return;
+        }
+        fs.writeFileSync(screenPath, "Working\n");
+        provider.setScreen(target, "Working\n");
+      },
+      sendKeys(operation, provider) {
+        if (operation.keys.includes("C-m")) {
+          if (fs.existsSync(statusUnchangedPath)) {
+            return;
+          }
           if (fs.existsSync(statusNoopPath)) {
+            const staleScreen = fs.readFileSync(preProbeScreenPath, "utf8");
+            fs.writeFileSync(screenPath, staleScreen);
+            provider.setScreen(target, staleScreen);
             return;
           }
           const count = fs.existsSync(probeCountPath)
@@ -739,10 +792,6 @@ function seededCodexRecoveryFixture(
           provider.setScreen(target, screen);
           return;
         }
-        fs.writeFileSync(screenPath, "Working\n");
-        provider.setScreen(target, "Working\n");
-      },
-      sendKeys(operation, provider) {
         if (
           operation.keys.includes("C-u") &&
           !fs.existsSync(clearNoopPath)
@@ -1049,6 +1098,16 @@ function seededCodexRecoveryFixture(
       : terminalProvider.keyDispatches(),
     setClearLineNoop: () => fs.writeFileSync(clearNoopPath, "1"),
     setStatusProbeNoop: () => fs.writeFileSync(statusNoopPath, "1"),
+    setLongUnchangedStatusProbe(id: string) {
+      fs.writeFileSync(currentIdPath, id);
+      fs.writeFileSync(statusUnchangedPath, "1");
+      fs.writeFileSync(screenPath, [
+        ...Array.from({ length: 130 }, (_, index) => `history-${index}`),
+        "/status external",
+        `Session: ${id}`,
+        "› "
+      ].join("\n"));
+    },
     setResolverError: () => fs.writeFileSync(resolverErrorRequestPath, "1"),
     setSecondOwner(id: string) {
       fs.writeFileSync(secondOwnerIdPath, id);
@@ -1467,6 +1526,7 @@ function writeRecoveryFakeTmux(options: {
   screenPath: string;
   currentIdPath: string;
   probeCountPath: string;
+  preProbeScreenPath: string;
   clearNoopPath: string;
   statusNoopPath: string;
   resolverErrorRequestPath: string;
@@ -1481,8 +1541,12 @@ const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(options.callsPath)}, JSON.stringify({ args }) + "\\n");
 if (args[0] === "list-panes") {
   process.stdout.write(${JSON.stringify(
-    `recovery-fixture\t0\t0\t${options.panePid}\tcodex\t${options.workspace}\n`
+    `recovery-fixture\t0\t0\t${options.panePid}\tcodex\t${options.workspace}\t\t%77\n`
   )});
+  process.exit(0);
+}
+if (args[0] === "display-message") {
+  process.stdout.write("100\\t30\\n");
   process.exit(0);
 }
 if (args[0] === "capture-pane") {
@@ -1501,19 +1565,35 @@ if (args[0] === "send-keys" && args.includes("C-u")) {
 if (args[0] === "send-keys" && args.includes("-l")) {
   const text = args[args.length - 1];
   if (text === "/status") {
-    if (fs.existsSync(${JSON.stringify(options.statusNoopPath)})) {
-      process.exit(0);
-    }
-    const count = fs.existsSync(${JSON.stringify(options.probeCountPath)})
-      ? Number(fs.readFileSync(${JSON.stringify(options.probeCountPath)}, "utf8")) + 1
-      : 1;
-    fs.writeFileSync(${JSON.stringify(options.probeCountPath)}, String(count));
-    const id = fs.readFileSync(${JSON.stringify(options.currentIdPath)}, "utf8").trim();
-    fs.writeFileSync(${JSON.stringify(options.screenPath)},
-      "/status\\nprobe-" + count + "\\nSession: " + id + "\\n› ");
+    fs.copyFileSync(
+      ${JSON.stringify(options.screenPath)},
+      ${JSON.stringify(options.preProbeScreenPath)}
+    );
+    fs.writeFileSync(
+      ${JSON.stringify(options.screenPath)},
+      ${JSON.stringify(CODEX_STATUS_COMPOSER)}
+    );
   } else {
     fs.writeFileSync(${JSON.stringify(options.screenPath)}, "Working\\n");
   }
+  process.exit(0);
+}
+if (args[0] === "send-keys" && args.includes("C-m")) {
+  if (fs.existsSync(${JSON.stringify(options.statusNoopPath)})) {
+    fs.copyFileSync(
+      ${JSON.stringify(options.preProbeScreenPath)},
+      ${JSON.stringify(options.screenPath)}
+    );
+    process.exit(0);
+  }
+  const count = fs.existsSync(${JSON.stringify(options.probeCountPath)})
+    ? Number(fs.readFileSync(${JSON.stringify(options.probeCountPath)}, "utf8")) + 1
+    : 1;
+  fs.writeFileSync(${JSON.stringify(options.probeCountPath)}, String(count));
+  const id = fs.readFileSync(${JSON.stringify(options.currentIdPath)}, "utf8").trim();
+  fs.writeFileSync(${JSON.stringify(options.screenPath)},
+    "/status\\nprobe-" + count + "\\nSession: " + id + "\\n› ");
+  process.exit(0);
 }
 `, { mode: 0o755 });
 }

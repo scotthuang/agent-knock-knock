@@ -34,6 +34,7 @@ test("verified lifecycle target conflict preserves source and later rolls forwar
   const statusCountPath = path.join(tempDir, "status-count.txt");
   const materializedPath = path.join(tempDir, "materialized");
   const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const spawnHookPath = path.join(tempDir, "lifecycle-spawn-hook.cjs");
   const target = "tmux-test-fixture:0.0";
   const panePid = 71_000;
   const codexPid = 71_001;
@@ -86,6 +87,21 @@ test("verified lifecycle target conflict preserves source and later rolls forwar
       codexPid,
       processBirth: codexProcessBirth
     });
+    writeLifecycleSpawnHook({
+      hookPath: spawnHookPath,
+      callsPath: tmuxCallsPath,
+      screenPath,
+      statusCountPath,
+      materializedPath,
+      rolloutPath,
+      executablePath,
+      workspace,
+      panePid,
+      codexPid,
+      processBirth: codexProcessBirth,
+      oldNativeThreadId,
+      newNativeThreadId
+    });
 
     const terminalControl: TerminalControlRef = {
       kind: "tmux",
@@ -108,6 +124,10 @@ test("verified lifecycle target conflict preserves source and later rolls forwar
     const environment = {
       ...process.env,
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      NODE_OPTIONS: [
+        process.env.NODE_OPTIONS,
+        `--require=${spawnHookPath}`
+      ].filter(Boolean).join(" "),
       AKK_RUNTIME_DIR: runtimeDir,
       AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "1",
       AKK_TEST_TERMINAL_ACCEPTANCE_OUTCOME: "accepted"
@@ -498,6 +518,10 @@ if (args[0] === "list-panes") {
   )});
   process.exit(0);
 }
+if (args[0] === "display-message") {
+  process.stdout.write("100\\t30\\n");
+  process.exit(0);
+}
 if (args[0] === "capture-pane") {
   process.stdout.write(fs.readFileSync(${JSON.stringify(options.screenPath)}, "utf8"));
   process.exit(0);
@@ -505,6 +529,21 @@ if (args[0] === "capture-pane") {
 if (args[0] === "send-keys" && args.includes("-l")) {
   const text = args[args.length - 1];
   if (text === "/status") {
+    fs.writeFileSync(${JSON.stringify(options.screenPath)},
+      "Ready\\n› /status\\n" +
+      "  /status      show current session configuration and token usage\\n" +
+      "  /statusline  configure which items appear in the status line");
+  } else if (text === "/clear") {
+    fs.writeFileSync(${JSON.stringify(options.screenPath)}, "Cleared\\n› ");
+  } else {
+    fs.writeFileSync(${JSON.stringify(options.materializedPath)}, "ready");
+    fs.writeFileSync(${JSON.stringify(options.screenPath)}, "Working\\n");
+  }
+  process.exit(0);
+}
+if (args[0] === "send-keys" && args.includes("C-m")) {
+  const screen = fs.readFileSync(${JSON.stringify(options.screenPath)}, "utf8");
+  if (screen.includes("› /status")) {
     const count = fs.existsSync(${JSON.stringify(options.statusCountPath)})
       ? Number(fs.readFileSync(${JSON.stringify(options.statusCountPath)}, "utf8"))
       : 0;
@@ -515,12 +554,8 @@ if (args[0] === "send-keys" && args.includes("-l")) {
       : ${JSON.stringify(options.newNativeThreadId)};
     fs.writeFileSync(${JSON.stringify(options.screenPath)},
       "/status\\nprobe-" + next + "\\nSession: " + id + "\\n› ");
-  } else if (text === "/clear") {
-    fs.writeFileSync(${JSON.stringify(options.screenPath)}, "Cleared\\n› ");
-  } else {
-    fs.writeFileSync(${JSON.stringify(options.materializedPath)}, "ready");
-    fs.writeFileSync(${JSON.stringify(options.screenPath)}, "Working\\n");
   }
+  process.exit(0);
 }
 `, { mode: 0o755 });
 }
@@ -562,6 +597,139 @@ if (args.includes("cwd")) {
     "\\ni" + stat.ino + "\\nn${options.rolloutPath}\\n");
 }
 `, { mode: 0o755 });
+}
+
+function writeLifecycleSpawnHook(options: {
+  hookPath: string;
+  callsPath: string;
+  screenPath: string;
+  statusCountPath: string;
+  materializedPath: string;
+  rolloutPath: string;
+  executablePath: string;
+  workspace: string;
+  panePid: number;
+  codexPid: number;
+  processBirth: string;
+  oldNativeThreadId: string;
+  newNativeThreadId: string;
+}): void {
+  fs.writeFileSync(options.hookPath, `
+const childProcess = require("node:child_process");
+const fs = require("node:fs");
+const path = require("node:path");
+const { syncBuiltinESMExports } = require("node:module");
+const originalSpawnSync = childProcess.spawnSync;
+
+function result(stdout = "", status = 0, stderr = "") {
+  return {
+    pid: 0,
+    output: [null, stdout, stderr],
+    stdout,
+    stderr,
+    status,
+    signal: null
+  };
+}
+
+function tmux(args) {
+  fs.appendFileSync(
+    ${JSON.stringify(options.callsPath)},
+    JSON.stringify({ args }) + "\\n"
+  );
+  const offset = args[0] === "-S" ? 2 : 0;
+  const operation = args[offset];
+  if (operation === "list-panes") {
+    return result(${JSON.stringify(
+      `tmux-test-fixture\t0\t0\t${options.panePid}\tcodex\t${options.workspace}\t\t%42\n`
+    )});
+  }
+  if (operation === "display-message") {
+    return result("100\\t30\\n");
+  }
+  if (operation === "capture-pane") {
+    return result(fs.readFileSync(${JSON.stringify(options.screenPath)}, "utf8"));
+  }
+  if (operation === "send-keys") {
+    const operationArgs = args.slice(offset);
+    if (operationArgs.includes("-l")) {
+      const text = operationArgs.at(-1);
+      if (text === "/status") {
+        fs.writeFileSync(
+          ${JSON.stringify(options.screenPath)},
+          "Ready\\n› /status\\n" +
+          "  /status      show current session configuration and token usage\\n" +
+          "  /statusline  configure which items appear in the status line"
+        );
+      } else if (text === "/clear") {
+        fs.writeFileSync(${JSON.stringify(options.screenPath)}, "Cleared\\n› ");
+      } else {
+        fs.writeFileSync(${JSON.stringify(options.materializedPath)}, "ready");
+        fs.writeFileSync(${JSON.stringify(options.screenPath)}, "Working\\n");
+      }
+    } else if (operationArgs.includes("C-m")) {
+      const screen = fs.readFileSync(${JSON.stringify(options.screenPath)}, "utf8");
+      if (screen.includes("› /status")) {
+        const count = fs.existsSync(${JSON.stringify(options.statusCountPath)})
+          ? Number(fs.readFileSync(${JSON.stringify(options.statusCountPath)}, "utf8"))
+          : 0;
+        const next = count + 1;
+        fs.writeFileSync(${JSON.stringify(options.statusCountPath)}, String(next));
+        const id = next === 1
+          ? ${JSON.stringify(options.oldNativeThreadId)}
+          : ${JSON.stringify(options.newNativeThreadId)};
+        fs.writeFileSync(
+          ${JSON.stringify(options.screenPath)},
+          "/status\\nprobe-" + next + "\\nSession: " + id + "\\n› "
+        );
+      }
+    }
+  }
+  return result();
+}
+
+function ps(args) {
+  if (args.includes("lstart=")) {
+    return result(${JSON.stringify(`${options.processBirth}\n`)});
+  }
+  return result(
+    "  PID  PPID ELAPSED COMMAND\\n" +
+    ${JSON.stringify(`${options.panePid} 1 00:10 zsh\n`)} +
+    ${JSON.stringify(`${options.codexPid} ${options.panePid} 00:09 ${options.executablePath}\n`)}
+  );
+}
+
+function lsof(args) {
+  if (args.includes("cwd")) {
+    return result(
+      "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\\n" +
+      ${JSON.stringify(`codex ${options.codexPid} me cwd DIR 1,18 64 123 ${options.workspace}\n`)}
+    );
+  }
+  if (args.includes("txt")) {
+    return result(${JSON.stringify(
+      `p${options.codexPid}\nftxt\nn${options.executablePath}\n`
+    )});
+  }
+  if (fs.existsSync(${JSON.stringify(options.materializedPath)})) {
+    const stat = fs.statSync(${JSON.stringify(options.rolloutPath)});
+    return result(
+      "p${options.codexPid}\\nf12u\\ntREG\\nD" + stat.dev +
+      "\\ni" + stat.ino + "\\nn${options.rolloutPath}\\n"
+    );
+  }
+  return result();
+}
+
+childProcess.spawnSync = function patchedSpawnSync(command, args = [], options) {
+  const basename = path.basename(String(command));
+  if (basename === "tmux") return tmux(args.map(String));
+  if (basename === "ps") return ps(args.map(String));
+  if (basename === "lsof") return lsof(args.map(String));
+  return originalSpawnSync.call(this, command, args, options);
+};
+syncBuiltinESMExports();
+`, { mode: 0o600 });
 }
 
 function readJsonLines(filePath: string): Array<{ args: string[] }> {

@@ -8,6 +8,7 @@ import type {
 } from "./terminal-agent-adapter.js";
 import {
   createTerminalEndpointRef,
+  sameTerminalControlIncarnation,
   sameTerminalEndpointIdentity,
   terminalControlWithCapabilities,
   terminalEndpointFromControlRef,
@@ -31,6 +32,13 @@ export interface TerminalPane {
   panePid: number;
   currentCommand?: string;
   currentPath?: string;
+  columns?: number;
+  rows?: number;
+}
+
+export interface TerminalViewport {
+  columns: number;
+  rows: number;
 }
 
 export interface TerminalControlProvider {
@@ -45,6 +53,9 @@ export interface TerminalControlProvider {
     capabilities?: readonly TerminalControlCapability[]
   ): TerminalControlRef;
   resolve(terminal: TerminalEndpointRef): Promise<TerminalEndpointRef>;
+  inspectViewport?(
+    terminal: TerminalEndpointRef
+  ): Promise<TerminalViewport | undefined>;
   containsProcess(
     terminal: TerminalEndpointRef,
     process: Pick<TerminalProcessSnapshot, "pid" | "ppid">,
@@ -211,6 +222,15 @@ class RegistryTerminalControlProvider implements TerminalControlProvider {
     return resolved;
   }
 
+  async inspectViewport(
+    terminal: TerminalEndpointRef
+  ): Promise<TerminalViewport | undefined> {
+    const provider = this.providerForEndpoint(terminal);
+    return provider.inspectViewport
+      ? provider.inspectViewport(terminal)
+      : undefined;
+  }
+
   containsProcess(
     terminal: TerminalEndpointRef,
     process: Pick<TerminalProcessSnapshot, "pid" | "ppid">,
@@ -281,6 +301,18 @@ export function createTerminalControlProviderRegistry(
   providers: readonly TerminalControlProvider[] = []
 ): TerminalControlProviderRegistry {
   return new TerminalControlProviderRegistry(providers);
+}
+
+/**
+ * Stable-resource resolution found no controllable instance of the requested
+ * terminal endpoint. Ambiguity, identity drift, malformed provider data, and
+ * transport integrity failures must use another error and remain fail-closed.
+ */
+export class TerminalControlUnavailableError extends Error {
+  constructor(message: string, options: { cause?: unknown } = {}) {
+    super(message, options);
+    this.name = "TerminalControlUnavailableError";
+  }
 }
 
 /**
@@ -393,11 +425,14 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
       sameTerminalEndpointIdentity(candidate, terminal) ||
       legacyTmuxEndpointMatches(candidate, terminal)
     );
+    if (matches.length === 0) {
+      throw new TerminalControlUnavailableError(
+        `terminal resource ${terminal.route.label} is no longer available`
+      );
+    }
     if (matches.length !== 1) {
       throw new Error(
-        matches.length === 0
-          ? `terminal resource ${terminal.route.label} is no longer available`
-          : `terminal resource ${terminal.route.label} is ambiguous`
+        `terminal resource ${terminal.route.label} is ambiguous`
       );
     }
     return endpointWithCapabilities(
@@ -514,6 +549,42 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
       lastResult = result;
     }
     throw new Error(lastResult?.stderr || lastResult?.error?.message || `tmux capture-pane failed for ${target}`);
+  }
+
+  async inspectViewport(
+    terminal: TerminalEndpointRef
+  ): Promise<TerminalViewport | undefined> {
+    const resolved = await this.resolve(terminal);
+    if (!sameTerminalControlIncarnation(terminal, resolved)) {
+      throw new Error(
+        "tmux terminal stable resource or process anchor changed before viewport inspection"
+      );
+    }
+    const stablePaneId = resolved.identity.resourceKey.startsWith("pane-id:")
+      ? resolved.identity.resourceKey.slice("pane-id:".length)
+      : undefined;
+    if (!stablePaneId || !/^%\d+$/u.test(stablePaneId)) {
+      return undefined;
+    }
+    const { socketPath } = tmuxIoRoute(resolved);
+    let lastResult: CommandResult | undefined;
+    for (const command of this.commands) {
+      const result = this.runCommand(command, tmuxArgs(socketPath, [
+        "display-message",
+        "-p",
+        "-t",
+        stablePaneId,
+        "#{pane_width}\t#{pane_height}"
+      ]));
+      if (result.status === 0) {
+        return parseTmuxViewport(result.stdout, resolved.route.label);
+      }
+      lastResult = result;
+    }
+    throw new Error(
+      lastResult?.stderr || lastResult?.error?.message ||
+      `tmux display-message failed for ${stablePaneId}`
+    );
   }
 
   async sendKeys(
@@ -648,6 +719,31 @@ function commandDefinitelyDidNotStart(error: Error | undefined): boolean {
   return code === "ENOENT" || code === "EACCES" || code === "ENOTDIR";
 }
 
+function parseTmuxViewport(
+  output: string,
+  terminalLabel: string
+): TerminalViewport | undefined {
+  const value = output.trim();
+  if (!value) {
+    return undefined;
+  }
+  const match = /^(\d+)\t(\d+)$/u.exec(value);
+  const columns = match ? positiveSafeInteger(Number(match[1])) : undefined;
+  const rows = match ? positiveSafeInteger(Number(match[2])) : undefined;
+  if (!columns || !rows) {
+    throw new Error(
+      `tmux display-message returned an invalid viewport for ${terminalLabel}`
+    );
+  }
+  return { columns, rows };
+}
+
+function positiveSafeInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? value
+    : undefined;
+}
+
 export class StaticTerminalControlProvider implements TerminalControlProvider {
   readonly kind = "tmux";
   readonly supportedCapabilities: readonly TerminalControlCapability[] = [
@@ -722,11 +818,14 @@ export class StaticTerminalControlProvider implements TerminalControlProvider {
       sameTerminalEndpointIdentity(candidate, terminal) ||
       legacyTmuxEndpointMatches(candidate, terminal)
     );
+    if (matches.length === 0) {
+      throw new TerminalControlUnavailableError(
+        `terminal resource ${terminal.route.label} is no longer available`
+      );
+    }
     if (matches.length !== 1) {
       throw new Error(
-        matches.length === 0
-          ? `terminal resource ${terminal.route.label} is no longer available`
-          : `terminal resource ${terminal.route.label} is ambiguous`
+        `terminal resource ${terminal.route.label} is ambiguous`
       );
     }
     return endpointWithCapabilities(
@@ -768,6 +867,31 @@ export class StaticTerminalControlProvider implements TerminalControlProvider {
     );
     const { target } = tmuxControlFromEndpoint(terminal);
     return this.screens.get(target) ?? "";
+  }
+
+  async inspectViewport(
+    terminal: TerminalEndpointRef
+  ): Promise<TerminalViewport | undefined> {
+    const resolved = await this.resolve(terminal);
+    if (!sameTerminalControlIncarnation(terminal, resolved)) {
+      throw new Error(
+        "static terminal stable resource or process anchor changed before viewport inspection"
+      );
+    }
+    const matches = this.panes.filter((pane) =>
+      sameTerminalEndpointIdentity(
+        tmuxEndpointFromPane(pane, this.supportedCapabilities),
+        resolved
+      )
+    );
+    if (matches.length !== 1) {
+      throw new Error(
+        `static terminal viewport identity is ${matches.length === 0 ? "missing" : "ambiguous"}`
+      );
+    }
+    const columns = positiveSafeInteger(matches[0].columns);
+    const rows = positiveSafeInteger(matches[0].rows);
+    return columns && rows ? { columns, rows } : undefined;
   }
 
   async sendText(

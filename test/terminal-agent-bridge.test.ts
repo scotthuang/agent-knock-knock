@@ -49,7 +49,9 @@ const PANE: TerminalPane = {
   pane: 2,
   panePid: 100,
   currentCommand: "node",
-  currentPath: "/repo"
+  currentPath: "/repo",
+  columns: 80,
+  rows: 40
 };
 
 const MANAGED_CLAUDE_RUNTIME = {
@@ -85,6 +87,17 @@ class RecordingTerminalProvider extends StaticTerminalControlProvider {
     super({ panes, screens });
     for (const [target, screen] of Object.entries(screens)) {
       this.recordingScreens.set(target, screen);
+    }
+    for (const pane of panes) {
+      if (!this.recordingScreens.has(pane.target)) {
+        // Mutating bridge tests start from the newly required exact safe
+        // Codex pre-text frame. Tests for another initial state always pass an
+        // explicit screen and therefore do not inherit this fixture default.
+        this.recordingScreens.set(
+          pane.target,
+          codexPaddedStyledIdleScreen(80)
+        );
+      }
     }
   }
 
@@ -322,6 +335,20 @@ function codexStatusInspectionPlan(version = "0.146.1") {
     { kind: "status" },
     probeCodexNativeInspection(version)
   );
+}
+
+function codexPaddedStyledIdleScreen(columns: number): string {
+  const pad = (value: string): string => {
+    const visible = value.replace(/\u001b\[[0-9;]*m/gu, "");
+    return `${value}${" ".repeat(
+      Math.max(0, columns - Array.from(visible).length)
+    )}`;
+  };
+  return [
+    pad("Ready"),
+    pad("› \u001b[2mSummarize recent commits\u001b[0m"),
+    pad("gpt-5.6-sol high · /repo")
+  ].join("\n");
 }
 
 function claudeStatusInspectionPlan(version = "2.1.218") {
@@ -2500,6 +2527,469 @@ test("native inspection preflights every transport capability before terminal in
       assert.deepEqual(provider.operations, []);
     });
   }
+});
+
+test("closed Codex status probe crosses a Herdr-style paste window before exactly one Enter", async () => {
+  let nowMs = 0;
+  class HerdrBracketedPasteFake extends RecordingTerminalProvider {
+    injectedAt?: number;
+    enterAttempts = 0;
+
+    override async sendText(
+      target: TerminalEndpointRef | string,
+      text: string,
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      await super.sendText(target, text, options);
+      this.injectedAt = nowMs;
+      const pad = (value: string): string =>
+        `${value}${" ".repeat(Math.max(0, 80 - Array.from(value).length))}`;
+      this.setScreen(target, [
+        pad("Ready"),
+        pad("› /status"),
+        pad("gpt-5.6-sol high · /repo")
+      ].join("\n"));
+    }
+
+    override async sendKeys(
+      target: TerminalEndpointRef | string,
+      keys: readonly string[],
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      if (keys.includes("C-m")) {
+        this.enterAttempts += 1;
+        assert.ok(this.injectedAt !== undefined);
+        assert.ok(nowMs - this.injectedAt >= 121);
+      }
+      await super.sendKeys(target, keys, options);
+    }
+  }
+
+  const provider = new HerdrBracketedPasteFake([PANE], {
+    [PANE.target]: codexPaddedStyledIdleScreen(80)
+  });
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+    terminalProvider: provider,
+    async verifyIdentity() {},
+    nowMs: () => nowMs,
+    async sleep(milliseconds) {
+      nowMs += milliseconds;
+    }
+  });
+  const result = await bridge.submitCodexStatusProbe(
+    terminalControl(codexTerminalAgentAdapter),
+    "0.147.0",
+    { runtime: { pid: 110 } }
+  );
+
+  assert.equal(result.agent, "codex");
+  assert.equal(result.enterCount, 1);
+  assert.equal(result.materialization.stableForMs >= 121, true);
+  assert.match(result.preTextScreenDigest, /^sha256:[0-9a-f]{64}$/u);
+  assert.match(result.observationBaselineDigest, /^[0-9a-f]{64}$/u);
+  assert.equal(
+    result.preEnterScreenDigest,
+    `sha256:${result.observationBaselineDigest}`
+  );
+  assert.equal(result.observationScrollbackLines, 240);
+  assert.equal(provider.enterAttempts, 1);
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind !== "capture"),
+    [
+      {
+        kind: "text",
+        target: PANE.target,
+        text: "/status",
+        socketPath: PANE.socketPath
+      },
+      {
+        kind: "keys",
+        target: PANE.target,
+        keys: ["C-m"],
+        socketPath: PANE.socketPath
+      }
+    ]
+  );
+});
+
+test("Codex status freshness baseline matches the returned 240-line observation domain", async () => {
+  let nowMs = 0;
+  const unchangedLongScreen = [
+    ...Array.from({ length: 130 }, (_, index) => `history-${index}`),
+    "/status",
+    "Session: 11111111-1111-4111-8111-111111111111",
+    "Ready",
+    "› /status",
+    "  /status      show current session configuration and token usage",
+    "  /statusline  configure which items appear in the status line"
+  ].join("\n");
+  class UnchangedLongStatusProvider extends RecordingTerminalProvider {
+    override async capture(
+      terminal: TerminalEndpointRef | string,
+      options: {
+        scrollbackLines?: number;
+        socketPath?: string;
+        preserveEscapes?: boolean;
+      } = {}
+    ): Promise<string> {
+      const screen = await super.capture(terminal, options);
+      const lines = screen.split("\n");
+      return options.scrollbackLines === undefined
+        ? screen
+        : lines.slice(-options.scrollbackLines).join("\n");
+    }
+
+    override async sendText(
+      target: TerminalEndpointRef | string,
+      text: string,
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      await super.sendText(target, text, options);
+      this.setScreen(target, unchangedLongScreen);
+    }
+  }
+
+  const provider = new UnchangedLongStatusProvider([PANE], {
+    [PANE.target]: codexPaddedStyledIdleScreen(80)
+  });
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+    terminalProvider: provider,
+    async verifyIdentity() {},
+    nowMs: () => nowMs,
+    async sleep(milliseconds) {
+      nowMs += milliseconds;
+    }
+  });
+
+  const submission = await bridge.submitCodexStatusProbe(
+    terminalControl(codexTerminalAgentAdapter),
+    "0.147.0",
+    { runtime: { pid: 110 } }
+  );
+  const legacyDepth = await bridge.status(
+    "codex",
+    terminalControl(codexTerminalAgentAdapter),
+    { runtime: { pid: 110 }, scrollbackLines: 120 }
+  );
+  const exactDepth = await bridge.status(
+    "codex",
+    terminalControl(codexTerminalAgentAdapter),
+    {
+      runtime: { pid: 110 },
+      scrollbackLines: submission.observationScrollbackLines
+    }
+  );
+
+  assert.notEqual(
+    legacyDepth.screen.digest,
+    submission.observationBaselineDigest
+  );
+  assert.equal(
+    exactDepth.screen.digest,
+    submission.observationBaselineDigest
+  );
+});
+
+test("closed Codex status probe rejects a proven narrow viewport before text", async () => {
+  const provider = new RecordingTerminalProvider([{ ...PANE, columns: 54 }], {
+    [PANE.target]: codexPaddedStyledIdleScreen(54)
+  });
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+    terminalProvider: provider,
+    async verifyIdentity() {}
+  });
+
+  await assert.rejects(
+    bridge.submitCodexStatusProbe(
+      terminalControl(codexTerminalAgentAdapter),
+      "0.147.0",
+      { runtime: { pid: 110 } }
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof NativeInspectionSubmissionError);
+      assert.equal(error.stage, "not_started");
+      assert.equal(error.doNotRetry, false);
+      assert.equal(error.diagnostic, "viewport_too_narrow");
+      assert.match(error.message, /at least 80 columns.*observed 54/u);
+      return true;
+    }
+  );
+  assert.equal(
+    provider.operations.some((operation) =>
+      operation.kind === "text" || operation.kind === "keys"
+    ),
+    false
+  );
+});
+
+test("generic Codex native inspection shares the pre-text viewport gate", async () => {
+  const provider = new RecordingTerminalProvider([{ ...PANE, columns: 54 }], {
+    [PANE.target]: codexPaddedStyledIdleScreen(54)
+  });
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+    terminalProvider: provider,
+    async verifyIdentity() {}
+  });
+
+  await assert.rejects(
+    bridge.submitNativeInspection(
+      "codex",
+      terminalControl(codexTerminalAgentAdapter),
+      codexStatusInspectionPlan("0.147.0"),
+      { runtime: { pid: 110 } }
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof NativeInspectionSubmissionError);
+      assert.equal(error.stage, "not_started");
+      assert.equal(error.diagnostic, "viewport_too_narrow");
+      return true;
+    }
+  );
+  assert.equal(
+    provider.operations.some((operation) =>
+      operation.kind === "text" || operation.kind === "keys"
+    ),
+    false
+  );
+});
+
+test("Codex status sends no text when an available viewport inspector returns unknown", async () => {
+  class UnknownViewportProvider extends RecordingTerminalProvider {
+    async inspectViewport(): Promise<undefined> {
+      return undefined;
+    }
+  }
+  const provider = new UnknownViewportProvider([PANE], {
+    [PANE.target]: codexPaddedStyledIdleScreen(80)
+  });
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+    terminalProvider: provider,
+    async verifyIdentity() {}
+  });
+
+  await assert.rejects(
+    bridge.submitCodexStatusProbe(
+      terminalControl(codexTerminalAgentAdapter),
+      "0.147.0",
+      { runtime: { pid: 110 } }
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof NativeInspectionSubmissionError);
+      assert.equal(error.stage, "not_started");
+      assert.equal(error.diagnostic, "viewport_unavailable");
+      return true;
+    }
+  );
+  assert.equal(
+    provider.operations.some((operation) =>
+      operation.kind === "text" || operation.kind === "keys"
+    ),
+    false
+  );
+});
+
+test("closed Codex status probe diagnoses a truncated popup and sends no Enter", async () => {
+  let nowMs = 0;
+  class NarrowPopupProvider extends RecordingTerminalProvider {
+    override async sendText(
+      target: TerminalEndpointRef | string,
+      text: string,
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      await super.sendText(target, text, options);
+      this.setScreen(target, [
+        "› /status",
+        "  /status      show current session configuration and token…",
+        "  /statusline  configure which items appear in the status…"
+      ].join("\n"));
+    }
+  }
+  const idleAdapter = {
+    ...codexTerminalAgentAdapter,
+    inspectScreen(options: Parameters<
+      typeof codexTerminalAgentAdapter.inspectScreen
+    >[0]) {
+      return {
+        ...codexTerminalAgentAdapter.inspectScreen(options),
+        activity: { state: "idle" as const, reason: "test-only idle" }
+      };
+    }
+  };
+  const provider = new NarrowPopupProvider([PANE], {
+    [PANE.target]: "› \n\ngpt-5.6-sol high · /repo"
+  });
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([idleAdapter]),
+    terminalProvider: provider,
+    async verifyIdentity() {},
+    nowMs: () => nowMs,
+    async sleep(milliseconds) {
+      nowMs += milliseconds;
+    }
+  });
+
+  await assert.rejects(
+    bridge.submitCodexStatusProbe(
+      terminalControl(codexTerminalAgentAdapter),
+      "0.147.0",
+      { runtime: { pid: 110 } }
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof NativeInspectionSubmissionError);
+      assert.equal(error.stage, "text_injected");
+      assert.equal(error.doNotRetry, true);
+      assert.equal(error.diagnostic, "composer_viewport_truncated");
+      return true;
+    }
+  );
+  assert.equal(
+    provider.operations.filter((operation) => operation.kind === "text").length,
+    1
+  );
+  assert.equal(
+    provider.operations.some((operation) => operation.kind === "keys"),
+    false
+  );
+});
+
+test("Codex status rechecks viewport after beforeEnter and sends no Enter after resize", async () => {
+  let nowMs = 0;
+  const mutablePane: TerminalPane = { ...PANE, columns: 80, rows: 40 };
+  class ResizeBeforeEnterProvider extends RecordingTerminalProvider {
+    override async sendText(
+      target: TerminalEndpointRef | string,
+      text: string,
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      await super.sendText(target, text, options);
+      this.setScreen(target, [
+        "Ready",
+        "› /status",
+        "",
+        "gpt-5.6-sol high · /repo"
+      ].join("\n"));
+    }
+  }
+  const provider = new ResizeBeforeEnterProvider([mutablePane], {
+    [PANE.target]: codexPaddedStyledIdleScreen(80)
+  });
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+    terminalProvider: provider,
+    async verifyIdentity() {},
+    nowMs: () => nowMs,
+    async sleep(milliseconds) {
+      nowMs += milliseconds;
+    }
+  });
+
+  await assert.rejects(
+    bridge.submitCodexStatusProbe(
+      terminalControl(codexTerminalAgentAdapter),
+      "0.147.0",
+      {
+        runtime: { pid: 110 },
+        beforeEnter() {
+          mutablePane.columns = 70;
+        }
+      }
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof NativeInspectionSubmissionError);
+      assert.equal(error.stage, "text_injected");
+      assert.equal(error.doNotRetry, true);
+      assert.equal(error.diagnostic, "viewport_too_narrow");
+      assert.match(error.message, /narrowed to 70 columns before Enter/u);
+      return true;
+    }
+  );
+  assert.equal(
+    provider.operations.filter((operation) => operation.kind === "text").length,
+    1
+  );
+  assert.equal(
+    provider.operations.some((operation) => operation.kind === "keys"),
+    false
+  );
+});
+
+test("Codex status catches composer drift during the final viewport proof", async () => {
+  let nowMs = 0;
+  class ComposerDriftDuringViewportProvider extends RecordingTerminalProvider {
+    viewportInspections = 0;
+
+    override async sendText(
+      target: TerminalEndpointRef | string,
+      text: string,
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      await super.sendText(target, text, options);
+      this.setScreen(target, [
+        "Ready",
+        "› /status",
+        "",
+        "gpt-5.6-sol high · /repo"
+      ].join("\n"));
+    }
+
+    override async inspectViewport(
+      terminal: TerminalEndpointRef
+    ): Promise<{ columns: number; rows: number }> {
+      this.viewportInspections += 1;
+      if (this.viewportInspections === 3) {
+        await Promise.resolve();
+        this.setScreen(terminal, [
+          "Ready",
+          "› /status changed by a human",
+          "",
+          "gpt-5.6-sol high · /repo"
+        ].join("\n"));
+      }
+      return { columns: 80, rows: 40 };
+    }
+  }
+
+  const provider = new ComposerDriftDuringViewportProvider([PANE], {
+    [PANE.target]: codexPaddedStyledIdleScreen(80)
+  });
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+    terminalProvider: provider,
+    async verifyIdentity() {},
+    nowMs: () => nowMs,
+    async sleep(milliseconds) {
+      nowMs += milliseconds;
+    }
+  });
+
+  await assert.rejects(
+    bridge.submitCodexStatusProbe(
+      terminalControl(codexTerminalAgentAdapter),
+      "0.147.0",
+      { runtime: { pid: 110 } }
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof NativeInspectionSubmissionError);
+      assert.equal(error.stage, "text_injected");
+      assert.equal(error.doNotRetry, true);
+      assert.equal(error.diagnostic, "composer_drift");
+      return true;
+    }
+  );
+  assert.equal(provider.viewportInspections, 3);
+  assert.equal(
+    provider.operations.filter((operation) => operation.kind === "text").length,
+    1
+  );
+  assert.equal(
+    provider.operations.some((operation) => operation.kind === "keys"),
+    false
+  );
 });
 
 test("native status inspection proves an exact stable composer before one Enter", async () => {

@@ -18,7 +18,7 @@ import {
 } from "./codex-sticky-rollout-fixture.js";
 
 test("sticky lifecycle draft guards fail before mutation", async () => {
-  const fixture = new StickyRolloutFixture();
+  const fixture = stickyRolloutFixture();
   try {
     fixture.setScreen(
       "Ready\n› unsent lifecycle draft\ngpt-5.4 default · 100% left"
@@ -54,7 +54,7 @@ test("sticky lifecycle draft guards fail before mutation", async () => {
 });
 
 test("A -> New B isolates the sticky rollout and commits the exact ledger", async () => {
-  const fixture = new StickyRolloutFixture();
+  const fixture = stickyRolloutFixture();
   try {
     const { output, source, target } = await createB(fixture);
     assert.equal(output.previous_session_id, fixture.sourceSessionId);
@@ -130,7 +130,7 @@ test("A -> New B isolates the sticky rollout and commits the exact ledger", asyn
 });
 
 test("B send rejects drafts and wrong status, then materializes only B", async () => {
-  const fixture = new StickyRolloutFixture();
+  const fixture = stickyRolloutFixture();
   try {
     const { target } = await createB(fixture);
     const targetPath = pathsForManagedSession(
@@ -260,7 +260,7 @@ test("B send rejects drafts and wrong status, then materializes only B", async (
 });
 
 test("previous toggles A -> B without creating a Turn", async () => {
-  const fixture = new StickyRolloutFixture();
+  const fixture = stickyRolloutFixture();
   try {
     const { target } = await createB(fixture);
     const materialized = await fixture.send(target.session_id, "Materialize B.");
@@ -314,7 +314,7 @@ test("previous toggles A -> B without creating a Turn", async () => {
 });
 
 test("B -> New C keeps multiple roots as exact companions", async () => {
-  const fixture = new StickyRolloutFixture();
+  const fixture = stickyRolloutFixture();
   try {
     const { target } = await createB(fixture);
     const bSent = await fixture.send(target.session_id, "Materialize B.");
@@ -370,7 +370,7 @@ test("B -> New C keeps multiple roots as exact companions", async () => {
 });
 
 test("monitor preserves sticky companion fences for the active C Turn", async () => {
-  const fixture = new StickyRolloutFixture();
+  const fixture = stickyRolloutFixture();
   try {
     const { c, cTurn } = await createActiveC(fixture);
     fixture.setScreen("Ready\n› ");
@@ -411,7 +411,7 @@ test("monitor preserves sticky companion fences for the active C Turn", async ()
 });
 
 test("an unknown fourth open rollout fails closed without mutation", async () => {
-  const fixture = new StickyRolloutFixture();
+  const fixture = stickyRolloutFixture();
   try {
     const { c, cTurn } = await createActiveC(fixture);
     await fixture.close(cTurn.turn_id);
@@ -484,6 +484,10 @@ function boundSession(fixture: StickyRolloutFixture) {
     .find((candidate) => candidate.status === "bound");
   assert.ok(session);
   return session;
+}
+
+function stickyRolloutFixture(): StickyRolloutFixture {
+  return new StickyRolloutFixture({ exactStatusProbe: true });
 }
 
 function readOnlyDispatchLedger(runtimeDir: string): Record<string, any> {

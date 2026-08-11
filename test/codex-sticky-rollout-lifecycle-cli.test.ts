@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import {
   managedSessionBindingToken,
   terminalBindingFrom
@@ -27,6 +28,8 @@ test("emitted CLI keeps the tmux/process/sqlite-adapter A -> B -> A contract", (
   const activePath = path.join(tempDir, "active.txt");
   const literalPath = path.join(tempDir, "literal.txt");
   const statusCountPath = path.join(tempDir, "status-count.txt");
+  const pendingInputPath = path.join(tempDir, "pending-input.txt");
+  const preloadPath = path.join(tempDir, "isolate-tmux-discovery.mjs");
   const threadA = "11111111-1111-4111-8111-111111111111";
   const threadB = "22222222-2222-4222-8222-222222222222";
   const target = "tmux-sticky-bin:0.0";
@@ -61,11 +64,79 @@ test("emitted CLI keeps the tmux/process/sqlite-adapter A -> B -> A contract", (
     const stateDbPath = path.join(codexHome, "state_1.sqlite");
     fs.writeFileSync(stateDbPath, "", { mode: 0o600 });
     const rolloutStat = fs.statSync(rolloutPath);
+    fs.writeFileSync(preloadPath, `
+import childProcess from "node:child_process";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+const readDirectory = fs.readdirSync.bind(fs);
+fs.readdirSync = (directory, ...args) =>
+  directory === "/private/tmp" || directory === "/tmp"
+    ? []
+    : readDirectory(directory, ...args);
+const spawnSync = childProcess.spawnSync.bind(childProcess);
+const successful = (stdout) => ({
+  pid: process.pid,
+  output: [null, stdout, ""],
+  stdout,
+  stderr: "",
+  status: 0,
+  signal: null
+});
+childProcess.spawnSync = (command, args = [], options) => {
+  const commandName = String(command).slice(String(command).lastIndexOf("/") + 1);
+  if (commandName === "tmux" && args[0] === "list-panes") {
+    return successful(${JSON.stringify(
+      `tmux-sticky-bin\t0\t0\t${panePid}\tcodex\t${workspace}\t\t%42\n`
+    )});
+  }
+  if (commandName === "tmux" && args[0] === "display-message") {
+    return successful("100\\t40\\n");
+  }
+  if (commandName === "tmux" && args[0] === "capture-pane") {
+    return successful(fs.readFileSync(${JSON.stringify(screenPath)}, "utf8"));
+  }
+  if (commandName === "ps") {
+    return successful(args.includes("lstart=")
+      ? ${JSON.stringify(`${processBirth}\n`)}
+      : ${JSON.stringify(
+          "PID PPID ELAPSED COMMAND\n" +
+          `${panePid} 1 00:10 zsh\n` +
+          `${codexPid} ${panePid} 00:09 ${executable}\n`
+        )});
+  }
+  if (commandName === "lsof") {
+    if (args.includes("cwd")) {
+      return successful(${JSON.stringify(
+        "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\n" +
+        `codex ${codexPid} me cwd DIR 1,18 64 123 ${workspace}\n`
+      )});
+    }
+    if (args.includes("txt")) {
+      return successful(${JSON.stringify(
+        `p${codexPid}\nftxt\nn${executable}\n`
+      )});
+    }
+    return successful(${JSON.stringify(
+      `p${codexPid}\nf12u\ntREG\nD${rolloutStat.dev}\n` +
+      `i${rolloutStat.ino}\nn${rolloutPath}\n`
+    )});
+  }
+  return spawnSync(command, args, options);
+};
+process.getuid = undefined;
+delete process.env.AKK_TMUX_SOCKET;
+delete process.env.TMUX;
+syncBuiltinESMExports();
+`);
     writeExecutable(path.join(fakeBinDir, "tmux"), `#!/bin/sh
 if [ "$1" = "-S" ]; then shift 2; fi
 command="$1"
 if [ "$command" = "list-panes" ]; then
-  printf '%s\\n' ${sh(`tmux-sticky-bin\t0\t0\t${panePid}\tcodex\t${workspace}`)}
+  printf '%s\\n' ${sh(
+    `tmux-sticky-bin\t0\t0\t${panePid}\tcodex\t${workspace}\t\t%42`
+  )}
+elif [ "$command" = "display-message" ]; then
+  printf '100\\t40\\n'
 elif [ "$command" = "capture-pane" ]; then
   cat ${sh(screenPath)}
 elif [ "$command" = "send-keys" ]; then
@@ -77,23 +148,32 @@ elif [ "$command" = "send-keys" ]; then
   done
   if [ "$literal" = "1" ]; then
     printf '%s\\n' "$last" >> ${sh(literalPath)}
+    printf '%s' "$last" > ${sh(pendingInputPath)}
     if [ "$last" = "/status" ]; then
-      count=$(( $(cat ${sh(statusCountPath)}) + 1 ))
-      printf '%s' "$count" > ${sh(statusCountPath)}
-      active=$(cat ${sh(activePath)})
-      printf '/status\\nprobe-%s\\nSession: %s\\n› ' "$count" "$active" > ${sh(screenPath)}
-    elif [ "$last" = "/clear" ]; then
-      printf '%s' ${sh(threadB)} > ${sh(activePath)}
-      printf 'Cleared\\n› ' > ${sh(screenPath)}
+      printf 'Ready\\n› /status\\n\\n  /status  show current session configuration and token usage\\n' > ${sh(screenPath)}
     else
-      case "$last" in
-        '/resume '*)
-          requested=$(printf '%s' "$last" | sed 's#^/resume ##')
-          printf '%s' "$requested" > ${sh(activePath)}
-          printf 'Resumed\\n› ' > ${sh(screenPath)}
-          ;;
-      esac
+      printf 'Ready\\n› %s\\n' "$last" > ${sh(screenPath)}
     fi
+  elif [ "$last" = "C-m" ] && [ -f ${sh(pendingInputPath)} ]; then
+    pending=$(cat ${sh(pendingInputPath)})
+    rm ${sh(pendingInputPath)}
+    case "$pending" in
+      '/status')
+        count=$(( $(cat ${sh(statusCountPath)}) + 1 ))
+        printf '%s' "$count" > ${sh(statusCountPath)}
+        active=$(cat ${sh(activePath)})
+        printf '/status\\nprobe-%s\\nSession: %s\\n› ' "$count" "$active" > ${sh(screenPath)}
+        ;;
+      '/clear')
+        printf '%s' ${sh(threadB)} > ${sh(activePath)}
+        printf 'Cleared\\n› ' > ${sh(screenPath)}
+        ;;
+      '/resume '*)
+        requested=$(printf '%s' "$pending" | sed 's#^/resume ##')
+        printf '%s' "$requested" > ${sh(activePath)}
+        printf 'Resumed\\n› ' > ${sh(screenPath)}
+        ;;
+    esac
   fi
 fi
 `);
@@ -179,7 +259,11 @@ esac
     const env = {
       ...process.env,
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
-      AKK_RUNTIME_DIR: runtimeDir
+      AKK_RUNTIME_DIR: runtimeDir,
+      NODE_OPTIONS: [
+        process.env.NODE_OPTIONS,
+        `--import=${pathToFileURL(preloadPath).href}`
+      ].filter(Boolean).join(" ")
     };
     const common = ["--store-dir", storeDir, "--codex-home", codexHome];
     const created = runCli([

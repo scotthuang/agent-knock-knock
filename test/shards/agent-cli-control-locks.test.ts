@@ -542,7 +542,13 @@ fs.openSync = function(file, ...args) {
 };
 fs.readFileSync = function(file, ...args) {
   const value = originalReadFileSync.call(this, file, ...args);
-  if (!snapshotCaptured && typeof file === "number" && trackedStateFds.has(file)) {
+  const idleCleanupRead = new Error().stack?.includes("reconcileIdleConversations") === true;
+  if (
+    !snapshotCaptured &&
+    idleCleanupRead &&
+    typeof file === "number" &&
+    trackedStateFds.has(file)
+  ) {
     snapshotCaptured = true;
     fs.writeFileSync(snapshotReadPath, "");
     while (!fs.existsSync(snapshotReleasePath)) {

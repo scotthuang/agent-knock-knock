@@ -61,6 +61,7 @@ const NATIVE_THREAD_ID = "11111111-1111-4111-8111-111111111111";
 const EXTERNAL_THREAD_ID = "22222222-2222-4222-8222-222222222222";
 const SECOND_EXTERNAL_THREAD_ID = "33333333-3333-4333-8333-333333333333";
 const FIRST_NATIVE_TURN_ID = "44444444-4444-4444-8444-444444444444";
+const FIXTURE_TMUX_PANE_ID = "%42";
 
 test("virgin raw Codex attach atomically refines the Session and Turn binding after send", async () => {
   const fixture = createNoRolloutFixture();
@@ -133,14 +134,14 @@ test("virgin raw Codex attach atomically refines the Session and Turn binding af
     assert.deepEqual(sends.at(-2)?.args, [
       "send-keys",
       "-t",
-      fixture.target,
+      fixture.inputTarget,
       "-l",
       "Start the first native Codex thread."
     ]);
     assert.deepEqual(sends.at(-1)?.args, [
       "send-keys",
       "-t",
-      fixture.target,
+      fixture.inputTarget,
       "C-m"
     ]);
   } finally {
@@ -231,11 +232,11 @@ test("production-mode virgin Codex first send creates and binds its exact rollou
       [
         "send-keys",
         "-t",
-        fixture.target,
+        fixture.inputTarget,
         "-l",
         "Open the first real Codex thread."
       ],
-      ["send-keys", "-t", fixture.target, "C-m"]
+      ["send-keys", "-t", fixture.inputTarget, "C-m"]
     ]);
   } finally {
     fixture.cleanup();
@@ -1042,7 +1043,8 @@ test("a verified-empty Codex process detaches its ended rollout and starts one i
     assert.equal(terminal.management_state, "conflict");
     assert.equal(
       terminal.management_conflict.kind,
-      "verified_empty_native_session"
+      "verified_empty_native_session",
+      JSON.stringify(terminal, null, 2)
     );
     assert.match(
       terminal.management_conflict.recovery,
@@ -1050,7 +1052,8 @@ test("a verified-empty Codex process detaches its ended rollout and starts one i
     );
     assert.equal(
       terminal.handoff_state,
-      "verified_empty_native_session_adoptable"
+      "verified_empty_native_session_adoptable",
+      JSON.stringify(terminal, null, 2)
     );
     const action = terminal.available_actions.send;
     assert.equal(action.arguments.selector, fixture.terminalId);
@@ -1131,7 +1134,7 @@ test("a verified-empty Codex process detaches its ended rollout and starts one i
     assert.equal(explicitOldSession.status, 1);
     assert.match(
       explicitOldSession.stderr,
-      /detached|not bound|no longer bound|cannot send/iu
+      /detached|not bound|no longer bound|cannot send|unresolved Turn/iu
     );
   } finally {
     fixture.cleanup();
@@ -1551,16 +1554,56 @@ test("Codex status-card binding with the same process birth authorizes and refin
     assert.deepEqual(sends.at(-2)?.args, [
       "send-keys",
       "-t",
-      fixture.target,
+      fixture.inputTarget,
       "-l",
       "Inspect the repository without changing files."
     ]);
     assert.deepEqual(sends.at(-1)?.args, [
       "send-keys",
       "-t",
-      fixture.target,
+      fixture.inputTarget,
       "C-m"
     ]);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("a submitted status probe reports a truncated Session card without retrying Enter", async () => {
+  const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
+  try {
+    const session = persistStatusCardSession(fixture, LIVE_PROCESS_BIRTH);
+    const sent = await runCli([
+      "send",
+      "--session",
+      session.session_id,
+      "--message",
+      "This task must wait for an exact status identity.",
+      "--background",
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor"
+    ], {
+      ...fixture.environment,
+      AKK_TEST_TRUNCATED_STATUS_CARD: "1"
+    });
+
+    assert.equal(sent.status, 1, sent.stdout);
+    assert.match(
+      sent.stderr,
+      /Enter was dispatched exactly once[\s\S]*status card was truncated[\s\S]*widen or zoom[\s\S]*do not retry/iu
+    );
+    const sends = readTmuxCalls(fixture.tmuxCallsPath)
+      .filter((call) => call.args[0] === "send-keys");
+    assert.deepEqual(sends.map((call) => call.args), [
+      ["send-keys", "-t", fixture.inputTarget, "-l", "/status"],
+      ["send-keys", "-t", fixture.inputTarget, "C-m"]
+    ]);
+    assert.deepEqual(listConversations(fixture.storeDir), []);
   } finally {
     fixture.cleanup();
   }
@@ -1836,8 +1879,8 @@ test("native status inspection is snapshot-bound, settles the slash composer, an
     const sends = readTmuxCalls(fixture.tmuxCallsPath)
       .filter((call) => call.args[0] === "send-keys");
     assert.deepEqual(sends.map((call) => call.args), [
-      ["send-keys", "-t", fixture.target, "-l", "/status"],
-      ["send-keys", "-t", fixture.target, "C-m"]
+      ["send-keys", "-t", fixture.inputTarget, "-l", "/status"],
+      ["send-keys", "-t", fixture.inputTarget, "C-m"]
     ]);
     assert.ok(
       Number(sends[1].at) - Number(sends[0].at) >= 121,
@@ -1850,6 +1893,197 @@ test("native status inspection is snapshot-bound, settles the slash composer, an
     );
     assert.deepEqual(listConversations(fixture.storeDir), []);
     assert.deepEqual(listManagedSessions(fixture.storeDir), []);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+for (const [label, viewportColumns] of [
+  ["narrow", 54],
+  ["unavailable", null]
+] as const) {
+  test(
+    `native status inspection rejects ${label === "unavailable" ? "an" : "a"} ` +
+      `${label} viewport before slash input`,
+    async () => {
+      const fixture = createNoRolloutFixture({
+        codexVersion: "0.147.0",
+        viewportColumns
+      });
+      try {
+        const listed = await listFixtureTerminal(fixture);
+        const inspected = await runCli([
+          "native-inspect",
+          "--terminal",
+          fixture.terminalId,
+          "--inspection",
+          "status",
+          "--expected-binding-token",
+          String(listed.lifecycle_binding_token),
+          "--store-dir",
+          fixture.storeDir,
+          "--codex-home",
+          fixture.codexHome
+        ], fixture.environment);
+
+        assert.equal(inspected.status, 1, inspected.stdout);
+        assert.match(
+          inspected.stderr,
+          /viewport|widen|zoom|geometry/iu
+        );
+        assert.equal(
+          readTmuxCalls(fixture.tmuxCallsPath)
+            .some((call) => call.args[0] === "send-keys"),
+          false,
+          "a viewport AKK cannot prove must fail before /status text or Enter"
+        );
+        assert.equal(fs.existsSync(fixture.storeDir), false);
+      } finally {
+        fixture.cleanup();
+      }
+    }
+  );
+}
+
+test("Herdr zoomed focused effective area gates closed Codex status at the exact boundary", async () => {
+  const fixture = createNoRolloutFixture({
+    codexVersion: "0.147.0",
+    terminalKind: "herdr",
+    viewportColumns: 54,
+    viewportZoomed: false,
+    viewportFocusedPaneId: "w1:p1",
+    viewportAreaColumns: 108,
+    viewportAreaRows: 40,
+    ttyViewportColumns: 51,
+    ttyViewportRows: 38
+  });
+  try {
+    const listed = await listFixtureTerminal(fixture);
+    const nativeInspectArguments = [
+      "native-inspect",
+      "--terminal",
+      fixture.terminalId,
+      "--inspection",
+      "status",
+      "--expected-binding-token",
+      String(listed.lifecycle_binding_token),
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome
+    ];
+
+    const inspect = () => runCli(nativeInspectArguments, fixture.environment);
+    const statusSends = () => readTmuxCalls(fixture.tmuxCallsPath)
+      .filter((call) => call.args[0] === "send-keys");
+    const assertNewTtyInspectionsUseShellPid = (before: number) => {
+      const inspectedPids = fixture.ttyViewportInspectionPids.slice(before);
+      assert.ok(inspectedPids.length > 0);
+      assert.equal(
+        inspectedPids.every((pid) => pid === fixture.terminalControl.panePid),
+        true
+      );
+    };
+
+    let ttyInspectionsBefore = fixture.ttyViewportInspectionPids.length;
+    const unzoomed = await inspect();
+    assert.equal(unzoomed.status, 1, unzoomed.stdout);
+    assert.match(unzoomed.stderr, /at least 80 columns.*observed 51/iu);
+    assert.equal(
+      readTmuxCalls(fixture.tmuxCallsPath)
+        .some((call) => call.args[0] === "send-keys"),
+      false,
+      "an unzoomed pane with an exact 51-column TTY must fail before input"
+    );
+    assertNewTtyInspectionsUseShellPid(ttyInspectionsBefore);
+
+    // Keep the exact terminal/socket/pane/layout identity and geometry. Only
+    // Herdr's zoom state and exact TTY authority change. The 108-column outer
+    // area remains only visibility evidence; the inspector proves 105 columns.
+    fixture.viewportZoomed = true;
+    fixture.ttyViewportColumns = 105;
+    ttyInspectionsBefore = fixture.ttyViewportInspectionPids.length;
+    const zoomed = await inspect();
+    assert.equal(zoomed.status, 0, zoomed.stderr || zoomed.stdout);
+    const output = JSON.parse(zoomed.stdout);
+    assert.equal(output.status, "observed");
+    assert.equal(output.native_thread_id, NATIVE_THREAD_ID);
+    assert.equal(output.terminal_submission.command, "/status");
+    assert.equal(output.terminal_submission.enter_count, 1);
+    assert.equal(output.store_mutation, false);
+    assertNewTtyInspectionsUseShellPid(ttyInspectionsBefore);
+
+    assert.deepEqual(statusSends().map((call) => call.args), [
+      ["send-keys", "-t", fixture.inputTarget, "-l", "/status"],
+      ["send-keys", "-t", fixture.inputTarget, "C-m"]
+    ]);
+    let sends = statusSends();
+    assert.ok(
+      Number(sends[1].at) - Number(sends[0].at) >= 121,
+      "the zoomed Herdr path must retain the Codex suppression boundary"
+    );
+
+    fs.writeFileSync(fixture.screenPath, "Ready\n› ");
+    // Direct-attach simulation: Herdr still reports a visible 108-column
+    // outer layout, but the exact PTY is only 77 columns. Layout geometry must
+    // never upgrade or override that narrower authority.
+    fixture.ttyViewportColumns = 77;
+    ttyInspectionsBefore = fixture.ttyViewportInspectionPids.length;
+    const directAttachNarrow = await inspect();
+    assert.equal(
+      directAttachNarrow.status,
+      1,
+      directAttachNarrow.stdout
+    );
+    assert.match(
+      directAttachNarrow.stderr,
+      /at least 80 columns.*observed 77/iu
+    );
+    assertNewTtyInspectionsUseShellPid(ttyInspectionsBefore);
+    assert.equal(
+      statusSends().length,
+      2,
+      "a visible 108-column layout with an exact 77-column TTY must not input"
+    );
+
+    fixture.ttyViewportColumns = 80;
+    ttyInspectionsBefore = fixture.ttyViewportInspectionPids.length;
+    const atBoundary = await inspect();
+    assert.equal(atBoundary.status, 0, atBoundary.stderr || atBoundary.stdout);
+    assert.equal(JSON.parse(atBoundary.stdout).status, "observed");
+    assertNewTtyInspectionsUseShellPid(ttyInspectionsBefore);
+    sends = statusSends();
+    assert.equal(sends.length, 4);
+    assert.deepEqual(sends.slice(-2).map((call) => call.args), [
+      ["send-keys", "-t", fixture.inputTarget, "-l", "/status"],
+      ["send-keys", "-t", fixture.inputTarget, "C-m"]
+    ]);
+    assert.ok(
+      Number(sends[3].at) - Number(sends[2].at) >= 121,
+      "the exact 80-column TTY must preserve the Codex suppression boundary"
+    );
+
+    fs.writeFileSync(fixture.screenPath, "Ready\n› ");
+    fixture.viewportFocusedPaneId = "w1:p2";
+    fixture.viewportPaneFocused = false;
+    ttyInspectionsBefore = fixture.ttyViewportInspectionPids.length;
+    const otherFocused = await inspect();
+    assert.equal(otherFocused.status, 1, otherFocused.stdout);
+    assert.match(
+      otherFocused.stderr,
+      /exact terminal viewport geometry|could not prove|unavailable/iu
+    );
+    assert.equal(
+      statusSends().length,
+      4,
+      "a zoomed layout focused on another pane must fail before input"
+    );
+    assert.equal(
+      fixture.ttyViewportInspectionPids.length,
+      ttyInspectionsBefore,
+      "a hidden zoomed pane must return unknown before consulting its TTY"
+    );
+    assert.equal(fs.existsSync(fixture.storeDir), false);
   } finally {
     fixture.cleanup();
   }
@@ -1913,7 +2147,7 @@ test("native status inspection sends no Enter after post-injection process drift
     const sends = readTmuxCalls(fixture.tmuxCallsPath)
       .filter((call) => call.args[0] === "send-keys");
     assert.deepEqual(sends.map((call) => call.args), [
-      ["send-keys", "-t", fixture.target, "-l", "/status"]
+      ["send-keys", "-t", fixture.inputTarget, "-l", "/status"]
     ]);
   } finally {
     fixture.cleanup();
@@ -1986,6 +2220,7 @@ interface NoRolloutFixture {
   processBirthPath: string;
   tmuxCallsPath: string;
   target: string;
+  inputTarget: string;
   terminalId: string;
   terminalControl: TerminalControlRef;
   codexPid: number;
@@ -1999,6 +2234,16 @@ interface NoRolloutFixture {
   identityObservationError?: string;
   activeNativeThreadId: string;
   activeRolloutPath: string;
+  viewportColumns: number | null;
+  viewportRows: number;
+  viewportZoomed: boolean;
+  viewportPaneFocused: boolean;
+  viewportFocusedPaneId?: string;
+  viewportAreaColumns?: number;
+  viewportAreaRows?: number;
+  ttyViewportColumns: number | null;
+  ttyViewportRows: number;
+  ttyViewportInspectionPids: number[];
   environment: NodeJS.ProcessEnv;
   cleanup(): void;
 }
@@ -2009,13 +2254,30 @@ function createNoRolloutFixture(
     materializeRolloutOnProbe,
     persistedCandidate = false,
     rolloutInitiallyAbsent = false,
-    terminalKind = "tmux"
+    terminalKind = "tmux",
+    viewportColumns = 100,
+    viewportZoomed = false,
+    viewportPaneFocused = true,
+    viewportFocusedPaneId,
+    viewportAreaColumns,
+    viewportAreaRows = 40,
+    ttyViewportColumns,
+    ttyViewportRows
   }: {
     codexVersion?: "0.146.0" | "0.147.0";
     materializeRolloutOnProbe?: number;
     persistedCandidate?: boolean;
     rolloutInitiallyAbsent?: boolean;
     terminalKind?: "tmux" | "herdr";
+    /** `null` simulates a provider that cannot prove exact viewport geometry. */
+    viewportColumns?: number | null;
+    viewportZoomed?: boolean;
+    viewportPaneFocused?: boolean;
+    viewportFocusedPaneId?: string;
+    viewportAreaColumns?: number;
+    viewportAreaRows?: number;
+    ttyViewportColumns?: number | null;
+    ttyViewportRows?: number;
   } = {}
 ): NoRolloutFixture {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-birth-"));
@@ -2044,6 +2306,12 @@ function createNoRolloutFixture(
   );
   const executablePath =
     `/opt/akk-test/releases/${codexVersion}-aarch64-apple-darwin/bin/codex`;
+  const exactTtyViewportColumns = ttyViewportColumns === undefined
+    ? viewportColumns === null
+      ? null
+      : viewportColumns - 3
+    : ttyViewportColumns;
+  const exactTtyViewportRows = ttyViewportRows ?? 38;
 
   fs.mkdirSync(fakeBinDir, { recursive: true });
   fs.mkdirSync(workspace, { recursive: true });
@@ -2088,7 +2356,9 @@ function createNoRolloutFixture(
     codexVersion,
     target,
     panePid,
-    workspace
+    workspace,
+    viewportColumns,
+    viewportRows: 40
   });
   writeFakeProcessTools({
     fakeBinDir,
@@ -2149,6 +2419,7 @@ function createNoRolloutFixture(
     processBirthPath,
     tmuxCallsPath,
     target,
+    inputTarget: terminalKind === "tmux" ? FIXTURE_TMUX_PANE_ID : target,
     terminalId,
     terminalControl,
     codexPid,
@@ -2159,6 +2430,16 @@ function createNoRolloutFixture(
     materializeRolloutOnProbe,
     activeNativeThreadId: NATIVE_THREAD_ID,
     activeRolloutPath: rolloutPath,
+    viewportColumns,
+    viewportRows: 40,
+    viewportZoomed,
+    viewportPaneFocused,
+    viewportFocusedPaneId,
+    viewportAreaColumns,
+    viewportAreaRows,
+    ttyViewportColumns: exactTtyViewportColumns,
+    ttyViewportRows: exactTtyViewportRows,
+    ttyViewportInspectionPids: [],
     environment: {
       ...process.env,
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
@@ -2516,6 +2797,15 @@ function createFixtureHerdrProvider(
       ctimeNs: "1000000",
       ownerUid: 501
     }),
+    inspectTtyViewport: (shellPid) => {
+      fixture.ttyViewportInspectionPids.push(shellPid);
+      return fixture.ttyViewportColumns === null
+        ? undefined
+        : {
+            columns: fixture.ttyViewportColumns,
+            rows: fixture.ttyViewportRows
+          };
+    },
     request: async (_socketPath, request) => {
       if (request.method === "ping") {
         return fixtureHerdrResponse(request, {
@@ -2543,7 +2833,41 @@ function createFixtureHerdrProvider(
               focused: true,
               agent_status: null,
               revision: 1
-            }]
+            }],
+            ...(fixture.viewportColumns === null
+              ? {}
+              : {
+                  layouts: [{
+                    workspace_id: control.workspaceId,
+                    tab_id: control.tabId,
+                    zoomed: fixture.viewportZoomed,
+                    ...(fixture.viewportFocusedPaneId
+                      ? { focused_pane_id: fixture.viewportFocusedPaneId }
+                      : {}),
+                    ...(fixture.viewportAreaColumns === undefined ||
+                      fixture.viewportAreaRows === undefined
+                      ? {}
+                      : {
+                          area: {
+                            x: 0,
+                            y: 0,
+                            width: fixture.viewportAreaColumns,
+                            height: fixture.viewportAreaRows
+                          }
+                        }),
+                    panes: [{
+                      pane_id: control.paneId,
+                      focused: fixture.viewportPaneFocused,
+                      rect: {
+                        x: 0,
+                        y: 0,
+                        width: fixture.viewportColumns,
+                        height: fixture.viewportRows
+                      }
+                    }],
+                    splits: []
+                  }]
+                })
           }
         });
       }
@@ -2864,7 +3188,15 @@ function runInProcessTmux(
     return successfulCommand(
       `${fixture.target.split(":")[0]}\t0\t0\t` +
       `${fixture.terminalControl.panePid}\tcodex\t` +
-      `${fixture.terminalControl.currentPath}\n`
+      `${fixture.terminalControl.currentPath}\t` +
+      `\t${FIXTURE_TMUX_PANE_ID}\n`
+    );
+  }
+  if (args[0] === "display-message") {
+    return successfulCommand(
+      fixture.viewportColumns === null
+        ? ""
+        : `${fixture.viewportColumns}\t${fixture.viewportRows}\n`
     );
   }
   if (args[0] === "capture-pane") {
@@ -2932,11 +3264,14 @@ function runInProcessTmux(
       : "";
     fs.writeFileSync(pendingInputPath, "");
     if (pendingInput === "/status") {
+      const statusSession = env.AKK_TEST_TRUNCATED_STATUS_CARD === "1"
+        ? `${fixture.activeNativeThreadId.slice(0, 10)}...`
+        : fixture.activeNativeThreadId;
       fs.writeFileSync(
         fixture.screenPath,
         `/status\n╭──────────────────────────────────────────────────╮\n` +
         `│ OpenAI Codex (v${fixture.codexVersion})                       │\n` +
-        `│ Session: ${fixture.activeNativeThreadId} │\n` +
+        `│ Session: ${statusSession} │\n` +
         "│ Account: private@example.com                 │\n" +
         `╰──────────────────────────────────────────────────╯\n› `
       );
@@ -3009,6 +3344,8 @@ function writeFakeTmux(options: {
   target: string;
   panePid: number;
   workspace: string;
+  viewportColumns: number | null;
+  viewportRows: number;
 }): void {
   const statusPopup = options.codexVersion === "0.147.0"
     ? "Ready\n› /status\n\n" +
@@ -3023,7 +3360,14 @@ const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(options.callsPath)}, JSON.stringify({ args, at: Date.now() }) + "\\n");
 if (args[0] === "list-panes") {
   process.stdout.write(${JSON.stringify(
-    `tmux-birth\t0\t0\t${options.panePid}\tcodex\t${options.workspace}\n`
+    `tmux-birth\t0\t0\t${options.panePid}\tcodex\t${options.workspace}` +
+      `\t\t${FIXTURE_TMUX_PANE_ID}\n`
+  )});
+} else if (args[0] === "display-message") {
+  process.stdout.write(${JSON.stringify(
+    options.viewportColumns === null
+      ? ""
+      : `${options.viewportColumns}\t${options.viewportRows}\n`
   )});
 } else if (args[0] === "capture-pane") {
   const screen = fs.readFileSync(${JSON.stringify(options.screenPath)}, "utf8");
@@ -3060,11 +3404,15 @@ if (args[0] === "list-panes") {
     : "";
   fs.writeFileSync(${JSON.stringify(options.pendingInputPath)}, "");
   if (pendingInput === "/status") {
+    const statusSession = process.env.AKK_TEST_TRUNCATED_STATUS_CARD === "1"
+      ? ${JSON.stringify(`${NATIVE_THREAD_ID.slice(0, 10)}...`)}
+      : ${JSON.stringify(NATIVE_THREAD_ID)};
     fs.writeFileSync(${JSON.stringify(options.screenPath)}, ${JSON.stringify(
       `/status\n╭──────────────────────────────────────────────────╮\n` +
       `│ OpenAI Codex (v${options.codexVersion})                       │\n` +
-      `│ Session: ${NATIVE_THREAD_ID} │\n` +
-      `│ Account: private@example.com                 │\n` +
+      `│ Session: `
+    )} + statusSession + ${JSON.stringify(
+      ` │\n│ Account: private@example.com                 │\n` +
       `╰──────────────────────────────────────────────────╯\n› `
     )});
   } else {

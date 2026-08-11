@@ -101,7 +101,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       hidden_turn_count: 0,
       session_count: 0
     });
-    assert.equal(listed.action_contracts.version, 9);
+    assert.equal(listed.action_contracts.version, 10);
     assert.match(
       listed.action_contracts.instructions.join("\n"),
       /Treat terminals\[\] as the primary resource/u
@@ -184,6 +184,17 @@ test("list exposes physical tmux terminals with the terminal-first action contra
           "terminals[].handoff_decision.choices.take_over_current.action",
         requires_explicit_user_confirmation: true,
         after_success: "refresh list before using a follow-current send action"
+      }
+    );
+    assert.deepEqual(
+      listed.action_contracts.field_semantics.blocking_turns,
+      {
+        meaning:
+          "terminal-incarnation-wide collateral unresolved managed Turns that suppress send, lifecycle, and native-inspection actions; an active human-handoff source Turn is never listed here and remains governed only by handoff_decision",
+        authoritative_action_path:
+          "terminals[].blocking_turns[].recovery_action",
+        requires_explicit_user_confirmation: true,
+        after_success: "refresh list before using any terminal action"
       }
     );
     assert.deepEqual(

@@ -448,7 +448,10 @@ test("a newer raw terminal task cannot replace an active callback boundary", () 
 
     const second = sendTask("Second task");
     assert.notEqual(second.status, 0);
-    assert.match(second.stderr, /session .* already has active turn/u);
+    assert.match(
+      second.stderr,
+      /terminal .* still has unresolved Turn .* \(waiting_for_agent\)/u
+    );
     const firstState = JSON.parse(fs.readFileSync(firstStatePath, "utf8"));
     assert.equal(firstState.status, "waiting_for_agent");
     assert.equal(firstState.superseded_by_conversation_id, undefined);
@@ -650,7 +653,10 @@ test("durable completion must settle before a newer raw task can send", async ()
       JSON.stringify({ [completedRolloutPath]: completedRollout })
     ], env);
     assert.notEqual(second.status, 0);
-    assert.match(second.stderr, /session .* already has active turn/u);
+    assert.match(
+      second.stderr,
+      /terminal .* still has unresolved Turn .* \((?:waiting_for_agent|stalled)\)/u
+    );
     assert.equal(
       JSON.parse(fs.readFileSync(firstStatePath, "utf8")).status,
       "waiting_for_agent"
@@ -892,7 +898,10 @@ test("an active dispatch blocks a replacement before tmux input", () => {
     writeFakeTmux(fakeBinDir, tmuxCallsPath, screenPath, listPanesOutput, "Second task");
     const second = sendTask("Second task");
     assert.notEqual(second.status, 0);
-    assert.match(second.stderr, /session .* already has active turn/u);
+    assert.match(
+      second.stderr,
+      /terminal .* still has unresolved Turn .* \(waiting_for_agent\)/u
+    );
 
     const firstState = JSON.parse(fs.readFileSync(firstStatePath, "utf8"));
     assert.equal(firstState.status, "waiting_for_agent");
@@ -911,6 +920,597 @@ test("an active dispatch blocks a replacement before tmux input", () => {
         ).length,
       1
     );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("an uncertain dispatch does not collateral-stall a delivered idle Turn", () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-uncertain-idle-release-")
+  );
+  const storeDir = path.join(tempDir, "conversations");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+  const tmuxSession = `akk-uncertain-idle-${process.pid}`;
+  const terminalTarget = `${tmuxSession}:0.1`;
+  const panePid = 43396;
+  const nativeSessionId = "019ee559-7bb8-7fd1-970c-0f7b6978c460";
+  const nativeIdentityArgs = codexNativeIdentityArgs({
+    pid: panePid,
+    sessionId: nativeSessionId,
+    processUuid: "codex-uncertain-idle-process",
+    rolloutPath: path.join(tempDir, "codex-uncertain-idle.jsonl")
+  });
+  const testEnv = {
+    PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+  };
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "› \n");
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `${tmuxSession}\t0\t1\t${panePid}\tnode\t${workspace}\n`
+    );
+    const commonArgs = [
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--threads-json",
+      JSON.stringify([]),
+      ...nativeIdentityArgs,
+      "--disable-terminal-bridge-monitor"
+    ];
+    const first = runAgentCli([
+      "send",
+      "--conversation",
+      `terminal:tmux:${terminalTarget}:${panePid}`,
+      "--message",
+      "A task that already completed",
+      ...commonArgs
+    ], testEnv);
+    assert.equal(first.status, 0, first.stderr || first.stdout);
+    const firstParsed = JSON.parse(first.stdout);
+    const firstStatePath = firstParsed.conversation.state_path;
+    const firstLogPath = firstParsed.conversation.event_log_path;
+    const firstState = JSON.parse(fs.readFileSync(firstStatePath, "utf8"));
+    const idleAt = new Date().toISOString();
+    const callbackMessageId = "msg-terminal-delivered-idle-release";
+    fs.writeFileSync(firstStatePath, `${JSON.stringify({
+      ...firstState,
+      status: "idle",
+      idle_since: idleAt,
+      callback_delivery: {
+        status: "delivered",
+        message: {
+          id: callbackMessageId,
+          ts: idleAt,
+          conversation_id: firstState.conversation_id,
+          session_id: firstState.session_id,
+          turn_id: firstState.turn_id,
+          from: "codex",
+          to: "openclaw",
+          type: "done",
+          requires_response: false,
+          round: 1,
+          max_rounds: 50,
+          body: "The first task completed.",
+          metadata: {}
+        },
+        attempts: 1,
+        status_before_delivery: "idle",
+        final_status: "idle",
+        preserve_conversation_status: true,
+        delivered_at: idleAt,
+        updated_at: idleAt
+      },
+      updated_at: idleAt
+    }, null, 2)}\n`);
+
+    const uncertain = runAgentCli([
+      "send",
+      "--session",
+      firstParsed.session_id,
+      "--message",
+      "A newer dispatch with an uncertain acceptance outcome",
+      ...commonArgs
+    ], {
+      ...testEnv,
+      AKK_TEST_TERMINAL_ACCEPTANCE_OUTCOME: "identity_drift"
+    });
+    assert.equal(uncertain.status, 0, uncertain.stderr || uncertain.stdout);
+    const uncertainParsed = JSON.parse(uncertain.stdout);
+    assert.equal(uncertainParsed.submission_outcome, "uncertain");
+    assert.equal(uncertainParsed.conversation.status, "stalled");
+
+    const released = JSON.parse(fs.readFileSync(firstStatePath, "utf8"));
+    assert.equal(released.status, "idle");
+    assert.equal(released.idle_since, idleAt);
+    assert.equal(released.callback_delivery.status, "delivered");
+    assert.equal(
+      released.native_session_takeover
+        .terminal_bridge_uncertain_dispatch_fence,
+      undefined
+    );
+    assert.doesNotMatch(
+      fs.readFileSync(firstLogPath, "utf8"),
+      /terminal_bridge_stalled_by_uncertain_dispatch/u
+    );
+    const supervised = runAgentCli([
+      "reconcile-monitors",
+      "--store-dir",
+      storeDir,
+      "--reason",
+      "monitor_supervision",
+      "--terminal-monitors-only"
+    ], testEnv);
+    assert.equal(supervised.status, 0, supervised.stderr || supervised.stdout);
+    assert.equal(JSON.parse(supervised.stdout).repaired, 0);
+    assert.equal(
+      JSON.parse(fs.readFileSync(
+        uncertainParsed.conversation.state_path,
+        "utf8"
+      )).status,
+      "stalled",
+      "the current uncertain owner must never be repaired as collateral"
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("monitor supervision repairs only an exact legacy idle collateral stall and list actions match runtime blockers", () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-collateral-stall-repair-")
+  );
+  const storeDir = path.join(tempDir, "conversations");
+  const runtimeDir = path.join(tempDir, ".akk-cli-test-runtime");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+  const tmuxSession = `akk-collateral-repair-${process.pid}`;
+  const terminalTarget = `${tmuxSession}:0.1`;
+  const panePid = 43397;
+  const nativeSessionId = "019ee559-7bb8-7fd1-970c-0f7b6978c461";
+  const nativeIdentityArgs = codexNativeIdentityArgs({
+    pid: panePid,
+    sessionId: nativeSessionId,
+    processUuid: "codex-collateral-repair-process",
+    rolloutPath: path.join(tempDir, "codex-collateral-repair.jsonl")
+  });
+  const testEnv = {
+    PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+  };
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "› \n");
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `${tmuxSession}\t0\t1\t${panePid}\tnode\t${workspace}\n`
+    );
+    const first = runAgentCli([
+      "send",
+      "--conversation",
+      `terminal:tmux:${terminalTarget}:${panePid}`,
+      "--message",
+      "A completed task later poisoned by an old collateral fence",
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--threads-json",
+      JSON.stringify([]),
+      ...nativeIdentityArgs,
+      "--disable-terminal-bridge-monitor"
+    ], testEnv);
+    assert.equal(first.status, 0, first.stderr || first.stdout);
+    const firstParsed = JSON.parse(first.stdout);
+    const firstStatePath = firstParsed.conversation.state_path;
+    const firstLogPath = firstParsed.conversation.event_log_path;
+    const firstState = JSON.parse(fs.readFileSync(firstStatePath, "utf8"));
+    const baseTime = Date.now() - 10_000;
+    const claimedAt = new Date(baseTime + 1_000).toISOString();
+    const completionAt = new Date(baseTime + 2_000).toISOString();
+    const deliveredAt = new Date(baseTime + 3_000).toISOString();
+    const fenceAt = new Date(baseTime + 4_000).toISOString();
+    const ownerClosedAt = new Date(baseTime + 5_000).toISOString();
+    const ownMessageId =
+      firstState.native_session_takeover.terminal_bridge_message_id;
+    const callbackMessageId = "msg-terminal-collateral-repair";
+    const completionFingerprint = "completion-collateral-repair";
+    const uncertainMessageId = "msg-uncertain-collateral-owner";
+    const ownerConversationId = "turn-collateral-uncertain-owner";
+    const callbackMessage = {
+      id: callbackMessageId,
+      ts: completionAt,
+      conversation_id: firstState.conversation_id,
+      session_id: firstState.session_id,
+      turn_id: firstState.turn_id,
+      from: "codex",
+      to: "openclaw",
+      type: "done",
+      requires_response: false,
+      round: 1,
+      max_rounds: 50,
+      body: "The completed result was delivered.",
+      metadata: {
+        terminal_bridge_message_id: ownMessageId
+      }
+    };
+    const poisoned = {
+      ...firstState,
+      status: "stalled",
+      idle_since: completionAt,
+      stalled_at: fenceAt,
+      stalled_reason:
+        "a newer terminal submission has an uncertain outcome; inspect the shared terminal pane before continuing",
+      callback_delivery: {
+        status: "delivered",
+        message: callbackMessage,
+        attempts: 1,
+        final_status: "idle",
+        preserve_conversation_status: true,
+        delivered_at: deliveredAt,
+        updated_at: deliveredAt
+      },
+      native_session_takeover: {
+        ...firstState.native_session_takeover,
+        terminal_bridge_completion_claim: {
+          terminal_bridge_message_id: ownMessageId,
+          completion_fingerprint: completionFingerprint,
+          completion_id: "completion-id-collateral-repair",
+          callback_message_id: callbackMessageId,
+          outcome: "success",
+          claimed_at: claimedAt
+        },
+        terminal_bridge_uncertain_dispatch_fence: {
+          message_id: uncertainMessageId,
+          observed_at: fenceAt
+        }
+      },
+      updated_at: fenceAt
+    };
+    fs.writeFileSync(
+      firstStatePath,
+      `${JSON.stringify(poisoned, null, 2)}\n`
+    );
+    fs.appendFileSync(firstLogPath, [
+      JSON.stringify({
+        ts: claimedAt,
+        conversation_id: firstState.conversation_id,
+        event: "terminal_bridge_completion_claimed",
+        terminal_bridge_message_id: ownMessageId,
+        completion_fingerprint: completionFingerprint,
+        completion_id: "completion-id-collateral-repair",
+        callback_message_id: callbackMessageId,
+        outcome: "success"
+      }),
+      JSON.stringify({
+        ts: completionAt,
+        conversation_id: firstState.conversation_id,
+        event: "terminal_bridge_completion_detected",
+        terminal_bridge_message_id: ownMessageId,
+        callback_message_id: callbackMessageId,
+        completion_id: "completion-id-collateral-repair",
+        completion_outcome: "success"
+      }),
+      JSON.stringify({
+        ts: deliveredAt,
+        conversation_id: firstState.conversation_id,
+        event: "callback_delivery_succeeded",
+        message_id: callbackMessageId,
+        attempt: 1,
+        status: "idle",
+        state_preserved: true
+      }),
+      JSON.stringify({
+        ts: fenceAt,
+        conversation_id: firstState.conversation_id,
+        event: "terminal_bridge_stalled_by_uncertain_dispatch",
+        uncertain_message_id: uncertainMessageId
+      })
+    ].join("\n") + "\n");
+
+    const ownerStatePath = writeConversationClone(
+      storeDir,
+      firstState,
+      ownerConversationId,
+      (state) => {
+        const {
+          callback_delivery: _callbackDelivery,
+          idle_since: _idleSince,
+          stalled_at: _stalledAt,
+          stalled_reason: _stalledReason,
+          ...ownerBase
+        } = state;
+        return {
+          ...ownerBase,
+          status: "closed",
+          closed_at: ownerClosedAt,
+          close_reason: "operator resolved the uncertain dispatch",
+          native_session_takeover: {
+            ...state.native_session_takeover,
+            terminal_bridge_message_id: uncertainMessageId,
+            terminal_bridge_completion_claim: undefined,
+            terminal_bridge_uncertain_dispatch_fence: undefined,
+            terminal_bridge_submission: {
+              ...state.native_session_takeover.terminal_bridge_submission,
+              status: "uncertain",
+              session_id: state.session_id,
+              turn_id: ownerConversationId,
+              message_id: uncertainMessageId,
+              last_proven_stage: "text_injected",
+              uncertain_at: fenceAt
+            }
+          },
+          updated_at: ownerClosedAt
+        };
+      }
+    );
+    const ownerLogPath = path.join(
+      path.dirname(ownerStatePath),
+      "events.ndjson"
+    );
+    fs.writeFileSync(ownerLogPath, `${JSON.stringify({
+      ts: ownerClosedAt,
+      conversation_id: ownerConversationId,
+      event: "conversation_closed",
+      status: "closed",
+      reason: "operator resolved the uncertain dispatch"
+    })}\n`);
+
+    const ledgerPath = findTerminalDispatchLedgerPath(
+      firstState.conversation_id,
+      runtimeDir
+    );
+    const ledger = JSON.parse(fs.readFileSync(ledgerPath, "utf8"));
+    fs.writeFileSync(ledgerPath, `${JSON.stringify({
+      ...ledger,
+      status: "resolved",
+      generation_id: uncertainMessageId,
+      conversation_id: ownerConversationId,
+      message_id: uncertainMessageId,
+      state_path: ownerStatePath,
+      event_log_path: ownerLogPath,
+      resolved_at: ownerClosedAt,
+      reason: "operator resolved the uncertain dispatch"
+    }, null, 2)}\n`);
+
+    const terminalFixtures = [
+      "--processes-json",
+      JSON.stringify([{
+        pid: panePid,
+        ppid: 999,
+        command: "codex",
+        cwd: workspace
+      }]),
+      "--terminals-json",
+      JSON.stringify([tmuxPane({
+        target: terminalTarget,
+        session: tmuxSession,
+        pane: 1,
+        panePid,
+        currentPath: workspace
+      })]),
+      "--terminal-screens-json",
+      JSON.stringify({ [terminalTarget]: "› \n" }),
+      ...nativeIdentityArgs
+    ];
+    const runtimeSendCommon = [
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--threads-json",
+      JSON.stringify([]),
+      ...nativeIdentityArgs,
+      "--disable-terminal-bridge-monitor"
+    ];
+    const terminalInputCount = () => readJsonLines(tmuxCallsPath)
+      .filter((call) => call.args[0] === "send-keys")
+      .length;
+    const substantiveStoreSnapshot = () => ({
+      sessions: listManagedSessions(storeDir)
+        .map((session) => {
+          const statePath = pathsForManagedSession(
+            session.session_id,
+            storeDir
+          ).statePath;
+          return [session.session_id, fs.readFileSync(statePath, "utf8")];
+        })
+        .sort(([left], [right]) => left.localeCompare(right)),
+      turns: listConversations(storeDir)
+        .map((turn) => {
+          const paths = pathsForConversation(turn.conversation_id, storeDir);
+          return [
+            turn.conversation_id,
+            fs.readFileSync(paths.statePath, "utf8"),
+            fs.readFileSync(paths.logPath, "utf8")
+          ];
+        })
+        .sort(([left], [right]) => left.localeCompare(right))
+    });
+    const before = runAgentCli([
+      "list",
+      "--store-dir",
+      storeDir,
+      "--all",
+      ...terminalFixtures
+    ], testEnv);
+    assert.equal(before.status, 0, before.stderr || before.stdout);
+    const beforeTerminal = JSON.parse(before.stdout).terminals[0];
+    assert.equal(beforeTerminal.available_actions.send, undefined);
+    assert.deepEqual(beforeTerminal.blocking_turns, [{
+      session_id: firstState.session_id,
+      turn_id: firstState.turn_id,
+      status: "stalled",
+      recovery_action: {
+        tool: "agent_knock_knock_close",
+        arguments: { turn_id: firstState.turn_id },
+        requires_explicit_user_confirmation: true
+      }
+    }]);
+    assert.equal(
+      JSON.parse(fs.readFileSync(firstStatePath, "utf8")).status,
+      "stalled",
+      "plain list must remain read-only"
+    );
+
+    const beforeRuntimeRejections = substantiveStoreSnapshot();
+    const inputsBeforeRuntimeRejections = terminalInputCount();
+    const managedBlocked = runAgentCli([
+      "send",
+      "--session",
+      firstState.session_id,
+      "--message",
+      "This managed task must remain fenced by the collateral stall.",
+      ...runtimeSendCommon
+    ], testEnv);
+    assert.notEqual(managedBlocked.status, 0);
+    assert.match(
+      managedBlocked.stderr,
+      /terminal .* still has unresolved Turn .*\(stalled\)/u
+    );
+    assert.deepEqual(
+      substantiveStoreSnapshot(),
+      beforeRuntimeRejections,
+      "managed send must reject before substantive Store mutation"
+    );
+    assert.equal(
+      terminalInputCount(),
+      inputsBeforeRuntimeRejections,
+      "managed send must reject before terminal input"
+    );
+
+    const rawBlocked = runAgentCli([
+      "send",
+      "--conversation",
+      `terminal:v2:tmux:codex:${terminalTarget}:${panePid}`,
+      "--message",
+      "This raw terminal task must remain fenced by the collateral stall.",
+      ...runtimeSendCommon
+    ], testEnv);
+    assert.notEqual(rawBlocked.status, 0);
+    assert.match(
+      rawBlocked.stderr,
+      /terminal .* still has unresolved Turn .*\(stalled\)/u
+    );
+    assert.deepEqual(
+      substantiveStoreSnapshot(),
+      beforeRuntimeRejections,
+      "raw terminal send must reject before substantive Store mutation"
+    );
+    assert.equal(
+      terminalInputCount(),
+      inputsBeforeRuntimeRejections,
+      "raw terminal send must reject before terminal input"
+    );
+
+    const reconciled = runAgentCli([
+      "reconcile-monitors",
+      "--store-dir",
+      storeDir,
+      "--reason",
+      "monitor_supervision",
+      "--terminal-monitors-only"
+    ], testEnv);
+    assert.equal(
+      reconciled.status,
+      0,
+      reconciled.stderr || reconciled.stdout
+    );
+    const reconciledParsed = JSON.parse(reconciled.stdout);
+    assert.equal(reconciledParsed.repaired, 1);
+    assert.equal(reconciledParsed.collateral_stalls_checked, 1);
+    assert.equal(
+      reconciledParsed.items.some((item) =>
+        item.conversation_id === firstState.conversation_id &&
+        item.status === "repaired" &&
+        item.uncertain_owner_conversation_id === ownerConversationId
+      ),
+      true
+    );
+    const repaired = JSON.parse(fs.readFileSync(firstStatePath, "utf8"));
+    assert.equal(repaired.status, "idle");
+    assert.equal(repaired.idle_since, completionAt);
+    assert.equal(repaired.stalled_at, undefined);
+    assert.equal(repaired.stalled_reason, undefined);
+    assert.equal(
+      repaired.native_session_takeover
+        .terminal_bridge_uncertain_dispatch_fence,
+      undefined
+    );
+    assert.equal(
+      repaired.native_session_takeover
+        .terminal_bridge_collateral_stall_repair
+        .uncertain_owner_conversation_id,
+      ownerConversationId
+    );
+    assert.match(
+      fs.readFileSync(firstLogPath, "utf8"),
+      /terminal_bridge_collateral_stall_repaired/u
+    );
+
+    const after = runAgentCli([
+      "list",
+      "--store-dir",
+      storeDir,
+      "--all",
+      ...terminalFixtures
+    ], testEnv);
+    assert.equal(after.status, 0, after.stderr || after.stdout);
+    const afterTerminal = JSON.parse(after.stdout).terminals[0];
+    assert.equal(afterTerminal.blocking_turns, undefined);
+    assert.equal(
+      afterTerminal.available_actions.send.arguments.session_id,
+      firstState.session_id
+    );
+
+    const turnsBeforeRepairedSend = listConversations(storeDir).length;
+    const inputsBeforeRepairedSend = terminalInputCount();
+    const repairedMessage =
+      "A fresh managed task after exact collateral-stall repair.";
+    const sentAfterRepair = runAgentCli([
+      "send",
+      "--session",
+      firstState.session_id,
+      "--message",
+      repairedMessage,
+      ...runtimeSendCommon
+    ], testEnv);
+    assert.equal(
+      sentAfterRepair.status,
+      0,
+      sentAfterRepair.stderr || sentAfterRepair.stdout
+    );
+    const sentAfterRepairParsed = JSON.parse(sentAfterRepair.stdout);
+    assert.equal(sentAfterRepairParsed.delivered, true);
+    assert.equal(sentAfterRepairParsed.session_id, firstState.session_id);
+    assert.equal(
+      listConversations(storeDir).length,
+      turnsBeforeRepairedSend + 1
+    );
+    assert.equal(terminalInputCount(), inputsBeforeRepairedSend + 2);
+    const repairedSendInputs = readJsonLines(tmuxCallsPath)
+      .filter((call) => call.args[0] === "send-keys")
+      .slice(-2);
+    assert.equal(repairedSendInputs[0].args.at(-1), repairedMessage);
+    assert.equal(repairedSendInputs[1].args.at(-1), "C-m");
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

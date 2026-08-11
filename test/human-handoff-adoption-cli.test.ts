@@ -822,6 +822,15 @@ test("an active source Turn exposes an exact supersede decision before handoff",
     const listed = await fixture.listTerminal();
     assert.equal(listed.handoff_state, "external_handoff_blocked");
     assert.equal(listed.available_actions?.send, undefined);
+    assert.equal(
+      listed.blocking_turns,
+      undefined,
+      "an active handoff source must never expose an unfenced generic close"
+    );
+    assert.match(
+      String(listed.handoff_blocked_reason ?? ""),
+      /snapshot-bound handoff_decision/u
+    );
     const expectedHandoffToken = String(
       listed.handoff_decision?.choices?.take_over_current?.action?.arguments
         ?.expected_handoff_token ?? ""
@@ -854,6 +863,15 @@ test("an active source Turn exposes an exact supersede decision before handoff",
     });
     const closeAction = listed.handoff_decision.choices
       .take_over_current.action;
+    assert.deepEqual(
+      serializedCloseActionsForTurn(listed, oldTurn.conversation_id),
+      [closeAction],
+      "the complete serialized terminal row must expose only the token-fenced handoff close"
+    );
+    assert.equal(
+      closeAction.arguments.expected_handoff_token,
+      expectedHandoffToken
+    );
     const closed = await fixture.closeTurn(
       closeAction.arguments.turn_id,
       closeAction.arguments.reason,
@@ -905,6 +923,198 @@ test("an active source Turn exposes an exact supersede decision before handoff",
       ),
       false
     );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("a generic close cached before a human thread switch cannot bypass the fresh handoff decision", async () => {
+  const fixture = createHandoffFixture({ agent: "claude" });
+  try {
+    const source = fixture.persistSession({
+      sessionId: "session-cached-generic-close-source",
+      nativeThreadId: NATIVE_A,
+      status: "bound",
+      generation: 1
+    });
+    const oldTurn = fixture.persistBlockingTurn(source);
+    fixture.setCurrentNativeThreadId(NATIVE_A);
+
+    const beforeSwitch = await fixture.listTerminal();
+    assert.equal(beforeSwitch.management_state, "managed");
+    assert.equal(beforeSwitch.handoff_decision, undefined);
+    const cachedClose = beforeSwitch.managed?.recent_turn
+      ?.available_actions?.close;
+    assert.equal(cachedClose?.tool, "agent_knock_knock_close");
+    assert.equal(
+      cachedClose?.arguments?.turn_id,
+      oldTurn.conversation_id
+    );
+    assert.equal(
+      cachedClose?.arguments?.expected_handoff_token,
+      undefined,
+      "the pre-switch generic close must not carry handoff authority"
+    );
+
+    fixture.setCurrentNativeThreadId(NATIVE_B);
+    const sourcePaths = pathsForManagedSession(
+      source.session_id,
+      fixture.storeDir
+    );
+    const turnPaths = pathsForConversation(
+      oldTurn.conversation_id,
+      fixture.storeDir
+    );
+    const ledgerDir = path.join(
+      fixture.root,
+      "runtime",
+      "terminal-dispatch"
+    );
+    const sourceBytes = snapshotDirectoryBytes(sourcePaths.directory);
+    const turnBytes = snapshotDirectoryBytes(turnPaths.conversationDir);
+    const ledgerBytes = snapshotDirectoryBytes(ledgerDir);
+
+    const rejected = await fixture.closeTurn(
+      cachedClose.arguments.turn_id,
+      cachedClose.arguments.reason
+    );
+    assert.equal(rejected.status, 1, fixture.debug(rejected));
+    assert.match(
+      rejected.stderr,
+      /handoff|human context switch|expected-handoff-token|refresh/iu
+    );
+    assert.deepEqual(
+      snapshotDirectoryBytes(sourcePaths.directory),
+      sourceBytes,
+      "a stale generic close must not mutate the source Session"
+    );
+    assert.deepEqual(
+      snapshotDirectoryBytes(turnPaths.conversationDir),
+      turnBytes,
+      "a stale generic close must not mutate the source Turn or event log"
+    );
+    assert.deepEqual(
+      snapshotDirectoryBytes(ledgerDir),
+      ledgerBytes,
+      "a stale generic close must not create or mutate a dispatch ledger"
+    );
+    assert.deepEqual(fixture.literalInputs(), []);
+    assert.equal(fixture.enterCount(), 0);
+    assert.equal(fixture.transitionCount(), 0);
+
+    const fresh = await fixture.listTerminal();
+    const handoffClose = fresh.handoff_decision?.choices
+      ?.take_over_current?.action;
+    assert.equal(handoffClose?.tool, "agent_knock_knock_close");
+    assert.equal(
+      handoffClose?.arguments?.turn_id,
+      oldTurn.conversation_id
+    );
+    assert.ok(handoffClose?.arguments?.expected_handoff_token);
+    const closed = await fixture.closeTurn(
+      handoffClose.arguments.turn_id,
+      handoffClose.arguments.reason,
+      handoffClose.arguments.expected_handoff_token
+    );
+    assert.equal(closed.status, 0, fixture.debug(closed));
+    const oldTurnAfter = listConversations(fixture.storeDir).find(
+      (turn) => turn.conversation_id === oldTurn.conversation_id
+    );
+    assert.equal(oldTurnAfter?.status, "closed");
+    assert.equal(
+      oldTurnAfter?.disposition,
+      "superseded_by_human_context_switch"
+    );
+    assert.deepEqual(fixture.literalInputs(), []);
+    assert.equal(fixture.enterCount(), 0);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("a cached generic close remains available as Store-only recovery after its terminal pane is gone", async () => {
+  const fixture = createHandoffFixture({ agent: "claude" });
+  try {
+    const source = fixture.persistSession({
+      sessionId: "session-gone-terminal-close-source",
+      nativeThreadId: NATIVE_A,
+      status: "bound",
+      generation: 1
+    });
+    const turn = fixture.persistBlockingTurn(source);
+    fixture.setCurrentNativeThreadId(NATIVE_A);
+
+    const listed = await fixture.listTerminal();
+    const cachedClose = listed.managed?.recent_turn
+      ?.available_actions?.close;
+    assert.equal(cachedClose?.tool, "agent_knock_knock_close");
+    assert.equal(cachedClose?.arguments?.turn_id, turn.conversation_id);
+
+    const sourcePaths = pathsForManagedSession(
+      source.session_id,
+      fixture.storeDir
+    );
+    const sourceBytes = snapshotDirectoryBytes(sourcePaths.directory);
+    fixture.removeTerminalPane();
+
+    const closed = await fixture.closeTurn(
+      cachedClose.arguments.turn_id,
+      cachedClose.arguments.reason
+    );
+    assert.equal(closed.status, 0, fixture.debug(closed));
+    const turnAfter = listConversations(fixture.storeDir).find(
+      (candidate) => candidate.conversation_id === turn.conversation_id
+    );
+    assert.equal(turnAfter?.status, "closed");
+    assert.deepEqual(
+      snapshotDirectoryBytes(sourcePaths.directory),
+      sourceBytes,
+      "Store-only recovery must not mutate the unavailable terminal's Session"
+    );
+    assert.deepEqual(fixture.literalInputs(), []);
+    assert.equal(fixture.enterCount(), 0);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("a cached generic close does not treat agent process identity drift as terminal unavailability", async () => {
+  const fixture = createHandoffFixture({ agent: "claude" });
+  try {
+    const source = fixture.persistSession({
+      sessionId: "session-close-process-drift-source",
+      nativeThreadId: NATIVE_A,
+      status: "bound",
+      generation: 1
+    });
+    const turn = fixture.persistBlockingTurn(source);
+    fixture.setCurrentNativeThreadId(NATIVE_A);
+
+    const listed = await fixture.listTerminal();
+    const cachedClose = listed.managed?.recent_turn
+      ?.available_actions?.close;
+    assert.equal(cachedClose?.tool, "agent_knock_knock_close");
+
+    const turnPaths = pathsForConversation(
+      turn.conversation_id,
+      fixture.storeDir
+    );
+    const turnBytes = snapshotDirectoryBytes(turnPaths.conversationDir);
+    fixture.setAgentProcessIntegrityDrift();
+
+    const rejected = await fixture.closeTurn(
+      cachedClose.arguments.turn_id,
+      cachedClose.arguments.reason
+    );
+    assert.equal(rejected.status, 1, fixture.debug(rejected));
+    assert.match(rejected.stderr, /no longer active|identity|process/iu);
+    assert.deepEqual(
+      snapshotDirectoryBytes(turnPaths.conversationDir),
+      turnBytes,
+      "process identity drift must reject before Turn or event-log mutation"
+    );
+    assert.deepEqual(fixture.literalInputs(), []);
+    assert.equal(fixture.enterCount(), 0);
   } finally {
     fixture.cleanup();
   }
@@ -1108,7 +1318,7 @@ for (const callbackStatus of [
 test("a target native thread already bound in Store remains a blocked handoff", async () => {
   const fixture = createHandoffFixture({ agent: "claude" });
   try {
-    fixture.persistSession({
+    const source = fixture.persistSession({
       sessionId: "session-target-bound-source",
       nativeThreadId: NATIVE_A,
       status: "bound",
@@ -1120,18 +1330,39 @@ test("a target native thread already bound in Store remains a blocked handoff", 
       status: "bound",
       generation: 3
     });
+    const sourceTurn = fixture.persistBlockingTurn(source);
     const before = JSON.stringify(listManagedSessions(fixture.storeDir));
 
     const listed = await fixture.listTerminal();
     assert.equal(listed.handoff_state, "external_handoff_blocked");
     assert.equal(listed.available_actions?.send, undefined);
+    assert.equal(listed.handoff_decision, undefined);
+    assert.equal(
+      listed.blocking_turns,
+      undefined,
+      "an ineligible target must not make the active source generically closable"
+    );
+    assert.deepEqual(
+      serializedCloseActionsForTurn(listed, sourceTurn.conversation_id),
+      [],
+      "the complete serialized terminal row must not expose a close for an ineligible handoff source"
+    );
     const rejected = await fixture.sendToTerminal(
       "Never adopt a target with a competing bound claim."
     );
     assert.equal(rejected.status, 1, fixture.debug(rejected));
-    assert.match(rejected.stderr, /multiple bound|claimed|cannot be adopted/iu);
+    assert.match(
+      rejected.stderr,
+      new RegExp(
+        `still has unresolved Turn ${sourceTurn.conversation_id} \\(waiting_for_agent\\)`,
+        "u"
+      )
+    );
     assert.equal(JSON.stringify(listManagedSessions(fixture.storeDir)), before);
-    assert.equal(listConversations(fixture.storeDir).length, 0);
+    assert.deepEqual(
+      listConversations(fixture.storeDir).map((turn) => turn.conversation_id),
+      [sourceTurn.conversation_id]
+    );
     assert.equal(fixture.transitionCount(), 0);
     assert.deepEqual(fixture.literalInputs(), []);
     assert.equal(fixture.enterCount(), 0);
@@ -1143,7 +1374,7 @@ test("a target native thread already bound in Store remains a blocked handoff", 
 test("ambiguous source claims block automatic handoff before terminal input", async () => {
   const fixture = createHandoffFixture({ agent: "codex" });
   try {
-    fixture.persistSession({
+    const sourceA = fixture.persistSession({
       sessionId: "session-ambiguous-human-a",
       nativeThreadId: NATIVE_A,
       status: "bound",
@@ -1155,16 +1386,34 @@ test("ambiguous source claims block automatic handoff before terminal input", as
       status: "bound",
       generation: 1
     });
+    const sourceTurn = fixture.persistBlockingTurn(sourceA);
     const before = JSON.stringify(listManagedSessions(fixture.storeDir));
     const listed = await fixture.listTerminal();
     assert.equal(listed.handoff_state, "external_handoff_blocked");
     assert.equal(listed.available_actions?.send, undefined);
+    assert.equal(listed.handoff_decision, undefined);
+    assert.equal(
+      listed.blocking_turns,
+      undefined,
+      "ambiguous handoff sources must not leak a generic close action"
+    );
+    assert.deepEqual(
+      serializedCloseActionsForTurn(listed, sourceTurn.conversation_id),
+      [],
+      "the complete serialized terminal row must not expose a close for an ambiguous handoff source"
+    );
 
     const rejected = await fixture.sendToTerminal(
       "Never guess which source claim should be detached."
     );
     assert.equal(rejected.status, 1, fixture.debug(rejected));
-    assert.match(rejected.stderr, /multiple bound managed Session claims|ambiguous/iu);
+    assert.match(
+      rejected.stderr,
+      new RegExp(
+        `still has unresolved Turn ${sourceTurn.conversation_id} \\(waiting_for_agent\\)`,
+        "u"
+      )
+    );
     assert.equal(JSON.stringify(listManagedSessions(fixture.storeDir)), before);
     assert.equal(fixture.transitionCount(), 0);
     assert.deepEqual(fixture.literalInputs(), []);
@@ -1492,7 +1741,7 @@ interface HandoffFixture {
   ): Promise<InProcessCliResult>;
   closeTurn(
     turnId: string,
-    reason: string,
+    reason: string | undefined,
     expectedHandoffToken?: string
   ): Promise<InProcessCliResult>;
   persistBlockingTurn(session: ManagedSessionState): ReturnType<
@@ -1505,6 +1754,8 @@ interface HandoffFixture {
   persistHistoricalTurn(session: ManagedSessionState, request: string): void;
   addActiveOwnerForCurrentThread(): void;
   setCurrentNativeThreadId(nativeThreadId: string): void;
+  removeTerminalPane(): void;
+  setAgentProcessIntegrityDrift(): void;
   literalInputs(): string[];
   keyDispatches(): string[][];
   enterCount(): number;
@@ -1526,6 +1777,63 @@ function committedTransitionExists(storeDir: string): boolean {
     .some((entry) =>
       loadNativeThreadTransition(storeDir, entry.name).status === "committed"
     );
+}
+
+function serializedCloseActionsForTurn(
+  terminalRow: Record<string, any>,
+  turnId: string
+): Array<Record<string, any>> {
+  const matches: Array<Record<string, any>> = [];
+  const serializedRow: unknown = JSON.parse(JSON.stringify(terminalRow));
+
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        visit(entry);
+      }
+      return;
+    }
+    if (value === null || typeof value !== "object") {
+      return;
+    }
+    const record = value as Record<string, any>;
+    if (
+      record.tool === "agent_knock_knock_close" &&
+      record.arguments?.turn_id === turnId
+    ) {
+      matches.push(record);
+    }
+    for (const nested of Object.values(record)) {
+      visit(nested);
+    }
+  };
+
+  visit(serializedRow);
+  return matches;
+}
+
+function snapshotDirectoryBytes(rootDir: string): Array<[string, string]> {
+  if (!fs.existsSync(rootDir)) {
+    return [];
+  }
+  const snapshot: Array<[string, string]> = [];
+  const visit = (directory: string): void => {
+    const entries = fs.readdirSync(directory, { withFileTypes: true })
+      .sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const absolutePath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        visit(absolutePath);
+      } else if (entry.isFile()) {
+        snapshot.push([
+          path.relative(rootDir, absolutePath),
+          fs.readFileSync(absolutePath).toString("base64")
+        ]);
+      }
+    }
+  };
+  visit(rootDir);
+  return snapshot;
 }
 
 function createHandoffFixture({
@@ -1610,8 +1918,7 @@ function createHandoffFixture({
       codexTargetMode === "status_card_only"
     ? codexStatusScreen(NATIVE_B, "initial")
     : prompt;
-  const provider = new MutableRecordingTerminalProvider({
-    panes: [{
+  const panes = [{
       kind: "tmux",
       target,
       session: `human-${agent}`,
@@ -1619,8 +1926,13 @@ function createHandoffFixture({
       pane: 0,
       panePid,
       currentCommand: agent,
-      currentPath: workspace
-    }],
+      currentPath: workspace,
+      columns: 100,
+      rows: 30
+    }] as const;
+  const mutablePanes = panes.map((pane) => ({ ...pane }));
+  const provider = new MutableRecordingTerminalProvider({
+    panes: mutablePanes,
     screens: { [target]: initialScreen },
     hooks: {
       capture(_operation, mutable) {
@@ -1965,8 +2277,7 @@ function createHandoffFixture({
         "close",
         "--turn",
         turnId,
-        "--reason",
-        reason,
+        ...(reason ? ["--reason", reason] : []),
         ...(expectedHandoffToken
           ? ["--expected-handoff-token", expectedHandoffToken]
           : []),
@@ -2071,6 +2382,16 @@ function createHandoffFixture({
           ? codexStatusScreen(nativeThreadId, "manual-test-drift")
           : claudeComposerScreen()
       );
+    },
+    removeTerminalPane() {
+      mutablePanes.length = 0;
+    },
+    setAgentProcessIntegrityDrift() {
+      processSource.setSnapshots(baseProcessSnapshots.map((snapshot) =>
+        snapshot.pid === agentPid
+          ? { ...snapshot, command: "/usr/bin/sleep 999" }
+          : snapshot
+      ));
     },
     literalInputs: () => provider.literalInputs(),
     keyDispatches: () => provider.keyDispatches(),
