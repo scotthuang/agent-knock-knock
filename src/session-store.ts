@@ -14,6 +14,7 @@ import {
 import {
   assertStoreReadable,
   ensureDir,
+  STORE_SESSION_AUTHORITY_PROTOCOL,
   withStoreWriterLease
 } from "./store.js";
 
@@ -75,7 +76,7 @@ export class ManagedSessionStateMissingError extends Error {
 
   constructor(sessionId: string) {
     super(
-      `Store protocol 3 requires authoritative state for managed Session ${sessionId}; ` +
+      `Store protocol 3+ requires authoritative state for managed Session ${sessionId}; ` +
       "refusing to infer a binding from Turn recency"
     );
     this.name = "ManagedSessionStateMissingError";
@@ -249,7 +250,10 @@ export function loadManagedSession(
     assertManagedSessionState(state, sessionId);
     return state;
   } catch (error) {
-    if (isNodeError(error, "ENOENT") && compatibility.writer_protocol === 3) {
+    if (
+      isNodeError(error, "ENOENT") &&
+      Number(compatibility.writer_protocol) >= STORE_SESSION_AUTHORITY_PROTOCOL
+    ) {
       throw new ManagedSessionStateMissingError(sessionId);
     }
     throw error;
@@ -280,9 +284,12 @@ export function listManagedSessions(storeDir: string): ManagedSessionState[] {
   const compatibility = assertStoreReadable(storeDir);
   const root = managedSessionsDir(storeDir);
   if (!fs.existsSync(root)) {
-    if (compatibility.writer_protocol === 3) {
+    if (
+      Number(compatibility.writer_protocol) >= STORE_SESSION_AUTHORITY_PROTOCOL
+    ) {
       throw new Error(
-        `Store protocol 3 requires a managed sessions directory: ${root}`
+        `Store protocol ${String(compatibility.writer_protocol)} requires a ` +
+        `managed sessions directory: ${root}`
       );
     }
     return [];

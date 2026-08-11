@@ -26,6 +26,8 @@ const STORE_CONVERSATIONS_DIRECTORY = "conversations";
 const STORE_RUNTIME_DIRECTORY = "runtime";
 const STORE_SESSIONS_DIRECTORY = "sessions";
 const STORE_TRANSITIONS_DIRECTORY = "transitions";
+export const STORE_DEFERRED_FOREGROUND_TRANSFERS_DIRECTORY =
+  "deferred-foreground-transfers";
 const STORE_WRITER_LOCK_FILE = ".akk-writer.lock";
 const STORE_MANIFEST_TEMP_PREFIX = `.${STORE_MANIFEST_FILE}.`;
 const STORE_MANIFEST_TEMP_SUFFIX = ".tmp";
@@ -39,8 +41,9 @@ const NO_FOLLOW_FLAG = typeof fs.constants.O_NOFOLLOW === "number"
   : 0;
 
 export const STORE_FORMAT_VERSION = 1;
-export const STORE_WRITER_PROTOCOL = 3;
-const STORE_UPGRADEABLE_WRITER_PROTOCOLS = new Set([1, 2]);
+export const STORE_WRITER_PROTOCOL = 4;
+export const STORE_SESSION_AUTHORITY_PROTOCOL = 3;
+const STORE_UPGRADEABLE_WRITER_PROTOCOLS = new Set([1, 2, 3]);
 
 export interface StoreManifest {
   schema: typeof STORE_SCHEMA;
@@ -917,7 +920,7 @@ function materializeManagedSessionStatesWhileLocked(
     atomicSaveManagedSessionState(write.path, write.state);
   }
   // Record-directory creation and every state rename are durable before a
-  // protocol-3 manifest can become visible.
+  // protocol-4 manifest can become visible.
   fsyncDirectory(sessionsDir);
   fsyncDirectory(storeDir);
 }
@@ -1047,7 +1050,8 @@ function ensureStoreDir(storeDir: string, currentConversationDir: string): void 
     }
     if (
       (entry.name === STORE_SESSIONS_DIRECTORY ||
-        entry.name === STORE_TRANSITIONS_DIRECTORY) &&
+        entry.name === STORE_TRANSITIONS_DIRECTORY ||
+        entry.name === STORE_DEFERRED_FOREGROUND_TRANSFERS_DIRECTORY) &&
       entry.isDirectory()
     ) {
       return true;
@@ -1235,22 +1239,27 @@ function createStoreManifest(storeDir: string): void {
   }
 }
 
-/** Upgrade the one explicitly supported predecessor while holding the root lock. */
+/** Upgrade one explicitly supported predecessor while holding the root lock. */
 function upgradeStoreWriterProtocolWhileLocked(storeDir: string): void {
   const manifestPath = storeManifestPath(storeDir);
   const previous = readStoreManifestSnapshot(manifestPath);
   assertUpgradeableStoreManifest(previous.manifest, storeDir);
 
-  // Protocol 3 makes Session state the routing/binding authority. Validate all
-  // predecessor Turns, derive every Session without using mutable Turn
-  // recency, and durably materialize those records before publishing the new
-  // manifest. Turn files and event logs remain byte-for-byte untouched.
-  const stateSnapshots = readUpgradeableStoreStateSnapshots(storeDir);
-  const sessions = managedSessionStatesFromConversations(
-    stateSnapshots.map(({ conversation }) => conversation)
-  );
-  assertUpgradeableManagedSessionTree(storeDir, sessions);
-  materializeManagedSessionStatesWhileLocked(storeDir, sessions, true);
+  // Protocol 3 already has authoritative Session state. Its protocol-4
+  // upgrade only publishes the new writer fence atomically; protocols 1/2
+  // still need the one-time Session materialization before publication.
+  const requiresSessionMaterialization = previous.manifest.writer_protocol <
+    STORE_SESSION_AUTHORITY_PROTOCOL;
+  const stateSnapshots = requiresSessionMaterialization
+    ? readUpgradeableStoreStateSnapshots(storeDir)
+    : [];
+  if (requiresSessionMaterialization) {
+    const sessions = managedSessionStatesFromConversations(
+      stateSnapshots.map(({ conversation }) => conversation)
+    );
+    assertUpgradeableManagedSessionTree(storeDir, sessions);
+    materializeManagedSessionStatesWhileLocked(storeDir, sessions, true);
+  }
 
   const upgraded: StoreManifest = {
     ...previous.manifest,
@@ -1280,7 +1289,9 @@ function upgradeStoreWriterProtocolWhileLocked(storeDir: string): void {
     // A process that ignores the root writer lock must not trick us into
     // replacing a different manifest. Re-check both file identity and the
     // supported predecessor immediately before the atomic rename.
-    revalidateUpgradeableStoreStateSnapshots(storeDir, stateSnapshots);
+    if (requiresSessionMaterialization) {
+      revalidateUpgradeableStoreStateSnapshots(storeDir, stateSnapshots);
+    }
     const current = readStoreManifestSnapshot(manifestPath);
     if (
       current.device !== previous.device ||
