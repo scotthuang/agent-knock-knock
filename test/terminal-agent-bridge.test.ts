@@ -20,6 +20,8 @@ import {
   probeCodexNativeInspection
 } from "../src/codex-terminal-agent-adapter.js";
 import {
+  isExactClaudeIdleComposer,
+  isExactClaudeNativeInspectionIdleComposer,
   NativeInspectionDismissalError,
   NativeInspectionSubmissionError,
   TerminalAgentBridge,
@@ -872,6 +874,124 @@ test("Claude exact-draft proof only accepts the complete bottom composer frame",
     request,
     { runtime: MANAGED_CLAUDE_RUNTIME }
   ), false, "ordinary prose containing a key hint is not a composer footer");
+});
+
+test("Claude exact send accepts Herdr visual wraps without relaxing draft equality", async (t) => {
+  const request = "Herdr live validation. Reply with exactly: " +
+    "AKK-HERDR-CLAUDE-LIVE-1786438038. Do not run commands or modify files.";
+  const composerScreen = (lastLine: string) => [
+    "❯ /clear",
+    "",
+    "───────────────────────────────────────────────────",
+    "❯\u00a0Herdr live validation. Reply with exactly:",
+    "  AKK-HERDR-CLAUDE-LIVE-1786438038. Do not run",
+    `  ${lastLine}`,
+    "───────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+  ].join("\n");
+
+  class WrappedClaudeComposerProvider extends RecordingTerminalProvider {
+    constructor(private readonly finalLine: string) {
+      super([PANE]);
+    }
+
+    override async sendText(
+      target: TerminalEndpointRef | string,
+      text: string,
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      await super.sendText(target, text, options);
+      this.setScreen(target, composerScreen(this.finalLine));
+    }
+  }
+
+  await t.test("dispatches one Enter for the exact soft-wrapped draft", async () => {
+    const provider = new WrappedClaudeComposerProvider(
+      "commands or modify files."
+    );
+    const bridge = createBridge(createTestClaudeAdapter(), provider);
+    const stages: string[] = [];
+
+    const result = await bridge.send(
+      "claude",
+      terminalControl(),
+      request,
+      {
+        runtime: MANAGED_CLAUDE_RUNTIME,
+        requireExactComposerBeforeEnter: true,
+        onTransportStage(event) {
+          stages.push(event.stage);
+        }
+      }
+    );
+
+    assert.equal(result.stage, "enter_dispatched");
+    assert.deepEqual(stages, ["text_injected", "enter_dispatched"]);
+    assert.equal(
+      provider.operations.filter((operation) =>
+        operation.kind === "keys" && operation.keys.includes("C-m")
+      ).length,
+      1
+    );
+  });
+
+  await t.test("fails closed when a visible wrapped character differs", async () => {
+    const provider = new WrappedClaudeComposerProvider(
+      "commands or modify filez."
+    );
+    const bridge = createBridge(createTestClaudeAdapter(), provider);
+    const stages: string[] = [];
+
+    await assert.rejects(
+      bridge.send("claude", terminalControl(), request, {
+        runtime: MANAGED_CLAUDE_RUNTIME,
+        requireExactComposerBeforeEnter: true,
+        onTransportStage(event) {
+          stages.push(event.stage);
+        }
+      }),
+      /composer was not exact and idle immediately before Enter/u
+    );
+
+    assert.deepEqual(stages, ["text_injected"]);
+    assert.equal(
+      provider.operations.some((operation) =>
+        operation.kind === "keys" && operation.keys.includes("C-m")
+      ),
+      false
+    );
+  });
+});
+
+test("Claude exact idle proof uses only the current Herdr composer frame", () => {
+  const divider = "────────────────────────────────────────────────";
+  const clearedScreen = [
+    "Welcome back",
+    "❯ /clear",
+    "",
+    divider,
+    `❯\u00a0`,
+    divider,
+    "\u00a0 ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+  ].join("\n");
+
+  assert.equal(isExactClaudeIdleComposer(clearedScreen), true);
+  assert.equal(
+    isExactClaudeNativeInspectionIdleComposer(clearedScreen),
+    true,
+    "the compatibility export must preserve the same exact-frame proof"
+  );
+  assert.equal(isExactClaudeIdleComposer([
+    "❯ /clear",
+    divider,
+    "❯ A human-authored draft must be preserved.",
+    divider,
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+  ].join("\n")), false);
+  assert.equal(isExactClaudeIdleComposer([
+    "Completed earlier output",
+    "❯ "
+  ].join("\n")), false, "an unframed prompt must fail closed");
 });
 
 test("Codex multiline send fails closed when the stable composer drifts before Enter", async () => {

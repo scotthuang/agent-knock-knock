@@ -2220,7 +2220,7 @@ function exactClaudeNativeInspectionComposerCapture(
   digest: string;
   kind: TerminalNativeInspectionMaterializationKind;
 } | undefined {
-  const frame = exactClaudeNativeInspectionComposerFrame(screen);
+  const frame = exactClaudeComposerFrame(screen);
   if (!frame) {
     return undefined;
   }
@@ -2299,14 +2299,14 @@ function closedClaudeNativeStatusSuggestionsMatch(
 }
 
 /**
- * Prove the exact idle input frame from a verified Claude Code native-status
- * profile. A loose or historical `❯` prompt is not enough to authorize even
- * the initial literal `/status` injection.
+ * Prove Claude Code's exact current idle input frame. This is shared by every
+ * automated-input path: a loose or historical `❯` prompt is not authority to
+ * inject text into the terminal.
  */
-export function isExactClaudeNativeInspectionIdleComposer(
+export function isExactClaudeIdleComposer(
   screen: string
 ): boolean {
-  const frame = exactClaudeNativeInspectionComposerFrame(screen);
+  const frame = exactClaudeComposerFrame(screen);
   if (!frame) {
     return false;
   }
@@ -2320,7 +2320,17 @@ export function isExactClaudeNativeInspectionIdleComposer(
   );
 }
 
-function exactClaudeNativeInspectionComposerFrame(screen: string): {
+/**
+ * Compatibility export retained for callers that adopted the native-status
+ * name before the same exact-frame proof was reused by lifecycle handoff.
+ */
+export function isExactClaudeNativeInspectionIdleComposer(
+  screen: string
+): boolean {
+  return isExactClaudeIdleComposer(screen);
+}
+
+function exactClaudeComposerFrame(screen: string): {
   lines: string[];
   openIndex: number;
   closeIndex: number;
@@ -2394,7 +2404,7 @@ function exactCodexComposerCapture(
       )
     ];
     const comparable = composerComparableText(bodyRows.join("\n"));
-    const exactVisibleDraft = codexComposerRowsMatchExpected(
+    const exactVisibleDraft = terminalComposerRowsMatchExpected(
       bodyRows,
       expectedComparable
     );
@@ -2420,9 +2430,10 @@ function exactCodexComposerCapture(
 }
 
 /**
- * Codex paints wrapped composer content as independent terminal rows, so tmux
- * cannot distinguish a visual wrap from an authored newline. Align the rows
- * against the exact text AKK injected instead of joining every row with `\n`.
+ * Terminal UIs paint wrapped composer content as independent screen rows, so
+ * a provider capture cannot distinguish a visual wrap from an authored
+ * newline. Align the rows against the exact text AKK injected instead of
+ * joining every row with `\n`.
  *
  * Only row boundaries are ambiguous: they may consume an authored newline, an
  * omitted run of ASCII spaces at a word wrap, or no character at a CJK/token
@@ -2430,7 +2441,7 @@ function exactCodexComposerCapture(
  * empty row can only advance through an authored newline (plus terminal-trimmed
  * spaces before it), so blank-line structure is preserved.
  */
-function codexComposerRowsMatchExpected(
+function terminalComposerRowsMatchExpected(
   rows: readonly string[],
   expectedText: string
 ): boolean {
@@ -2520,13 +2531,13 @@ function exactClaudeComposerCapture(
   if (region.length === 0 || !/^\s*❯(?:\s|$)/u.test(region[0])) {
     return undefined;
   }
-  const body = [
+  const bodyRows = [
     region[0].replace(/^\s*❯\s?/u, ""),
     ...region.slice(1).map((line) =>
       line.startsWith("  ") ? line.slice(2) : line
     )
-  ].join("\n");
-  if (composerComparableText(body) !== composerComparableText(expectedText)) {
+  ];
+  if (!terminalComposerRowsMatchExpected(bodyRows, expectedText)) {
     return undefined;
   }
   return {

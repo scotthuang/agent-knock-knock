@@ -39,6 +39,12 @@ import {
   TmuxTerminalControlProvider,
   type CommandResult
 } from "../src/terminal-control-provider.js";
+import {
+  HERDR_EXACT_PROTOCOL,
+  HERDR_EXACT_VERSION,
+  HerdrTerminalControlProvider,
+  type HerdrWireRequest
+} from "../src/herdr-terminal-control-provider.js";
 import { StaticTerminalProcessSource } from "../src/terminal-process-source.js";
 import type {
   TerminalControlRef,
@@ -1016,6 +1022,329 @@ test("a proved Codex PID reuse ignores the stale binding without adopting its na
   }
 });
 
+test("a verified-empty Codex process detaches its ended rollout and starts one isolated virgin Session", async () => {
+  const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
+  try {
+    const source = persistExactEndedRolloutSession(fixture);
+    fs.writeFileSync(
+      fixture.screenPath,
+      "Token usage: 1,234\n" +
+      `To continue this session, run codex resume ${NATIVE_THREAD_ID}\n\n` +
+      "› \u001b[2mRun /review on my current changes\u001b[0m"
+    );
+
+    const terminal = await listFixtureTerminal(fixture);
+    assert.equal(terminal.activity_state, "unknown");
+    assert.equal(
+      terminal.native_agent_identity_observation.status,
+      "verified_absent"
+    );
+    assert.equal(terminal.management_state, "conflict");
+    assert.equal(
+      terminal.management_conflict.kind,
+      "verified_empty_native_session"
+    );
+    assert.match(
+      terminal.management_conflict.recovery,
+      /snapshot-bound send action/u
+    );
+    assert.equal(
+      terminal.handoff_state,
+      "verified_empty_native_session_adoptable"
+    );
+    const action = terminal.available_actions.send;
+    assert.equal(action.arguments.selector, fixture.terminalId);
+    assert.equal(typeof action.arguments.expected_terminal_token, "string");
+
+    fixture.activeNativeThreadId = EXTERNAL_THREAD_ID;
+    fixture.activeRolloutPath = path.join(
+      path.dirname(fixture.rolloutPath),
+      `rollout-2026-08-11T03-00-00-${EXTERNAL_THREAD_ID}.jsonl`
+    );
+    const sent = await runCli([
+      "send",
+      "--conversation",
+      String(action.arguments.selector),
+      "--expected-terminal-token",
+      String(action.arguments.expected_terminal_token),
+      "--message",
+      "Continue in a fresh Codex thread without reusing the ended binding.",
+      "--background",
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor"
+    ], fixture.environment);
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    const output = JSON.parse(sent.stdout);
+    assert.equal(output.delivered, true, sent.stdout);
+    assert.equal(output.conversation.native_thread_id, EXTERNAL_THREAD_ID);
+    assert.notEqual(output.session_id, source.session_id);
+
+    const sessions = listManagedSessions(fixture.storeDir);
+    const detachedSource = sessions.find((candidate) =>
+      candidate.session_id === source.session_id
+    );
+    const attachedTarget = sessions.find((candidate) =>
+      candidate.session_id === output.session_id
+    );
+    assert.equal(detachedSource?.status, "detached");
+    assert.equal(detachedSource?.binding?.native_thread_id, NATIVE_THREAD_ID);
+    assert.equal(attachedTarget?.status, "bound");
+    assert.equal(
+      attachedTarget?.binding?.native_thread_id,
+      EXTERNAL_THREAD_ID
+    );
+    assert.equal(attachedTarget?.binding?.generation, 1);
+
+    const taskInput = readTmuxCalls(fixture.tmuxCallsPath).filter((call) =>
+      call.args[0] === "send-keys" &&
+      (call.args.includes("-l") || call.args.at(-1) === "C-m")
+    );
+    assert.equal(
+      taskInput.filter((call) => call.args.includes("-l")).length,
+      1
+    );
+    assert.equal(
+      taskInput.filter((call) => call.args.at(-1) === "C-m").length,
+      1
+    );
+
+    const explicitOldSession = await runCli([
+      "send",
+      "--session",
+      source.session_id,
+      "--message",
+      "This must never follow the pane into the new thread.",
+      "--background",
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor"
+    ], fixture.environment);
+    assert.equal(explicitOldSession.status, 1);
+    assert.match(
+      explicitOldSession.stderr,
+      /detached|not bound|no longer bound|cannot send/iu
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("verified-empty handoff stays fail-closed for a real draft, resolver failure, stale token, and active Turn", async () => {
+  for (const blocker of ["draft", "resolver", "stale_token", "active_turn"] as const) {
+    const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
+    try {
+      const source = persistExactEndedRolloutSession(
+        fixture,
+        `session-verified-empty-${blocker}`
+      );
+      fs.writeFileSync(
+        fixture.screenPath,
+        blocker === "draft"
+          ? "Ready\n› preserve this real operator draft\n\n  gpt-5.6 · 90% left"
+          : "Ready\n› \u001b[2mRun /review on my current changes\u001b[0m\n\n" +
+            "  gpt-5.6 · 90% left"
+      );
+      if (blocker === "resolver") {
+        fixture.identityObservationError = "injected lsof observation failure";
+      } else if (blocker === "active_turn") {
+        persistBlockingTurn(fixture, source);
+      }
+      const terminal = await listFixtureTerminal(fixture);
+      if (blocker === "resolver") {
+        assert.equal(
+          terminal.native_agent_identity_observation.status,
+          "unavailable"
+        );
+      }
+      if (blocker === "draft" || blocker === "resolver" || blocker === "active_turn") {
+        assert.equal(terminal.available_actions.send, undefined, blocker);
+        assert.equal(
+          loadManagedSession(fixture.storeDir, source.session_id).status,
+          "bound",
+          blocker
+        );
+        assert.equal(
+          readTmuxCalls(fixture.tmuxCallsPath)
+            .some((call) => call.args[0] === "send-keys"),
+          false,
+          blocker
+        );
+        continue;
+      }
+
+      const action = terminal.available_actions.send;
+      assert.ok(action, JSON.stringify(terminal));
+      const current = loadManagedSession(fixture.storeDir, source.session_id);
+      saveManagedSession(fixture.storeDir, {
+        ...current,
+        updated_at: "2026-08-11T03:10:00.000Z"
+      }, { expectedRevision: current.revision as number });
+      const rejected = await runCli([
+        "send",
+        "--conversation",
+        fixture.terminalId,
+        "--expected-terminal-token",
+        String(action.arguments.expected_terminal_token),
+        "--message",
+        "A stale list token must not detach the source.",
+        "--background",
+        "--store-dir",
+        fixture.storeDir,
+        "--codex-home",
+        fixture.codexHome,
+        "--openclaw-bin",
+        "/usr/bin/true",
+        "--disable-terminal-bridge-monitor"
+      ], fixture.environment);
+      assert.equal(rejected.status, 1, rejected.stdout);
+      assert.match(rejected.stderr, /fresh exact terminal token|refresh/iu);
+      assert.equal(
+        loadManagedSession(fixture.storeDir, source.session_id).status,
+        "bound"
+      );
+      assert.equal(
+        readTmuxCalls(fixture.tmuxCallsPath)
+          .some((call) => call.args[0] === "send-keys"),
+        false
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  }
+});
+
+test("verified-empty handoff sends no Enter when a native rollout appears after text injection", async () => {
+  const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
+  try {
+    const source = persistExactEndedRolloutSession(fixture);
+    fs.writeFileSync(
+      fixture.screenPath,
+      "Ready\n› \u001b[2mRun /review on my current changes\u001b[0m\n\n" +
+      "  gpt-5.6 · 90% left"
+    );
+    const terminal = await listFixtureTerminal(fixture);
+    const action = terminal.available_actions.send;
+    assert.ok(action, JSON.stringify(terminal));
+    fixture.activeNativeThreadId = EXTERNAL_THREAD_ID;
+    fixture.activeRolloutPath = path.join(
+      path.dirname(fixture.rolloutPath),
+      `rollout-2026-08-11T03-20-00-${EXTERNAL_THREAD_ID}.jsonl`
+    );
+    const sent = await runCli([
+      "send",
+      "--conversation",
+      fixture.terminalId,
+      "--expected-terminal-token",
+      String(action.arguments.expected_terminal_token),
+      "--message",
+      "Race with a human-created native thread after text injection.",
+      "--background",
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor"
+    ], {
+      ...fixture.environment,
+      AKK_TEST_MATERIALIZE_ROLLOUT_AFTER_TEXT: "1"
+    });
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    const output = JSON.parse(sent.stdout);
+    assert.equal(output.submission_outcome, "uncertain");
+    assert.equal(output.do_not_retry, true);
+    assert.equal(
+      loadManagedSession(fixture.storeDir, source.session_id).status,
+      "detached"
+    );
+    const sends = readTmuxCalls(fixture.tmuxCallsPath).filter((call) =>
+      call.args[0] === "send-keys"
+    );
+    assert.equal(sends.filter((call) => call.args.includes("-l")).length, 1);
+    assert.equal(sends.filter((call) => call.args.at(-1) === "C-m").length, 0);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("Herdr uses the same verified-empty Codex handoff fence and virgin post-submit binding", async () => {
+  const fixture = createNoRolloutFixture({
+    codexVersion: "0.147.0",
+    terminalKind: "herdr"
+  });
+  try {
+    const source = persistExactEndedRolloutSession(fixture);
+    fs.writeFileSync(
+      fixture.screenPath,
+      `To continue this session, run codex resume ${NATIVE_THREAD_ID}\n\n` +
+      "› \u001b[2mRun /review on my current changes\u001b[0m"
+    );
+    const terminal = await listFixtureTerminal(fixture);
+    assert.equal(terminal.terminal_control.kind, "herdr");
+    assert.equal(terminal.activity_state, "unknown");
+    assert.equal(
+      terminal.handoff_state,
+      "verified_empty_native_session_adoptable"
+    );
+    const action = terminal.available_actions.send;
+    assert.ok(action, JSON.stringify(terminal));
+
+    fixture.activeNativeThreadId = EXTERNAL_THREAD_ID;
+    fixture.activeRolloutPath = path.join(
+      path.dirname(fixture.rolloutPath),
+      `rollout-2026-08-11T03-30-00-${EXTERNAL_THREAD_ID}.jsonl`
+    );
+    const sent = await runCli([
+      "send",
+      "--conversation",
+      fixture.terminalId,
+      "--expected-terminal-token",
+      String(action.arguments.expected_terminal_token),
+      "--message",
+      "Deliver this task through the Herdr provider.",
+      "--background",
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor"
+    ], fixture.environment);
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    const output = JSON.parse(sent.stdout);
+    assert.equal(output.delivered, true, sent.stdout);
+    assert.equal(output.terminal_control.kind, "herdr");
+    assert.equal(output.conversation.native_thread_id, EXTERNAL_THREAD_ID);
+    assert.equal(
+      loadManagedSession(fixture.storeDir, source.session_id).status,
+      "detached"
+    );
+    assert.equal(
+      loadManagedSession(fixture.storeDir, output.session_id)
+        .binding?.native_thread_id,
+      EXTERNAL_THREAD_ID
+    );
+    const input = readTmuxCalls(fixture.tmuxCallsPath).filter((call) =>
+      call.args[0] === "send-keys"
+    );
+    assert.equal(input.filter((call) => call.args.includes("-l")).length, 1);
+    assert.equal(input.filter((call) => call.args.at(-1) === "C-m").length, 1);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test("ambiguous and unverifiable binding claims never advertise reconciliation", async () => {
   for (const kind of ["ambiguous", "unverifiable"] as const) {
     const fixture = createNoRolloutFixture();
@@ -1661,11 +1990,13 @@ interface NoRolloutFixture {
   terminalControl: TerminalControlRef;
   codexPid: number;
   codexVersion: "0.146.0" | "0.147.0";
+  terminalKind: "tmux" | "herdr";
   persistedCandidate: boolean;
   rolloutInitiallyAbsent: boolean;
   materializeRolloutOnProbe?: number;
   appendAcceptanceOnProbe?: number;
   deferredAcceptanceRequest?: string;
+  identityObservationError?: string;
   activeNativeThreadId: string;
   activeRolloutPath: string;
   environment: NodeJS.ProcessEnv;
@@ -1677,12 +2008,14 @@ function createNoRolloutFixture(
     codexVersion = "0.146.0",
     materializeRolloutOnProbe,
     persistedCandidate = false,
-    rolloutInitiallyAbsent = false
+    rolloutInitiallyAbsent = false,
+    terminalKind = "tmux"
   }: {
     codexVersion?: "0.146.0" | "0.147.0";
     materializeRolloutOnProbe?: number;
     persistedCandidate?: boolean;
     rolloutInitiallyAbsent?: boolean;
+    terminalKind?: "tmux" | "herdr";
   } = {}
 ): NoRolloutFixture {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-birth-"));
@@ -1698,10 +2031,13 @@ function createNoRolloutFixture(
   const rolloutProbeCountPath = path.join(tempDir, "rollout-probe-count.txt");
   const processBirthPath = path.join(tempDir, "process-birth.txt");
   const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
-  const target = "tmux-birth:0.0";
+  const target = terminalKind === "herdr"
+    ? "default:w1:p1"
+    : "tmux-birth:0.0";
   const panePid = 72_000;
   const codexPid = 72_001;
-  const terminalId = `terminal:v2:tmux:codex:${target}:${codexPid}`;
+  const terminalId =
+    `terminal:v2:${terminalKind}:codex:${target}:${codexPid}`;
   const rolloutPath = path.join(
     sessionsDir,
     `rollout-2026-08-06T00-00-00-${NATIVE_THREAD_ID}.jsonl`
@@ -1767,24 +2103,41 @@ function createNoRolloutFixture(
     codexPid
   });
 
-  const terminalControl: TerminalControlRef = {
-    kind: "tmux",
-    target,
-    session: "tmux-birth",
-    window: 0,
-    pane: 0,
-    panePid,
-    currentCommand: "codex",
-    currentPath: workspace,
-    capabilities: [
-      "screen_status",
-      "send_keys",
-      "terminal_approval",
-      "screen_completion",
-      "durable_completion",
-      "terminal_cancel"
-    ]
-  };
+  const capabilities = [
+    "screen_status",
+    "send_keys",
+    "terminal_approval",
+    "screen_completion",
+    "durable_completion",
+    "terminal_cancel"
+  ] as const;
+  const terminalControl: TerminalControlRef = terminalKind === "herdr"
+    ? {
+        kind: "herdr",
+        target,
+        socketPath: path.join(tempDir, "herdr.sock"),
+        session: "default",
+        sessionDir: path.join(tempDir, "herdr-session"),
+        workspaceId: "w1",
+        tabId: "w1:t1",
+        paneId: "w1:p1",
+        terminalId: "term-fixture-codex",
+        panePid,
+        currentCommand: "codex --yolo",
+        currentPath: workspace,
+        capabilities: [...capabilities]
+      }
+    : {
+        kind: "tmux",
+        target,
+        session: "tmux-birth",
+        window: 0,
+        pane: 0,
+        panePid,
+        currentCommand: "codex",
+        currentPath: workspace,
+        capabilities: [...capabilities]
+      };
   const fixture: NoRolloutFixture = {
     tempDir,
     storeDir,
@@ -1800,6 +2153,7 @@ function createNoRolloutFixture(
     terminalControl,
     codexPid,
     codexVersion,
+    terminalKind,
     persistedCandidate,
     rolloutInitiallyAbsent,
     materializeRolloutOnProbe,
@@ -1842,6 +2196,43 @@ function persistStatusCardSession(
       processUuid: processUuid(fixture.codexPid, processBirth),
       processBirth,
       evidence: "codex_status_card",
+      generation: 1,
+      now
+    }),
+    lineage: { created_by: "attach" },
+    created_at: now.toISOString(),
+    updated_at: now.toISOString()
+  }, { expectedRevision: null });
+}
+
+function persistExactEndedRolloutSession(
+  fixture: NoRolloutFixture,
+  sessionId = "session-codex-ended-rollout"
+): ManagedSessionState {
+  ensureStoreWritable(fixture.storeDir);
+  const now = new Date("2026-08-11T02:36:56.000Z");
+  const stat = fs.statSync(fixture.rolloutPath);
+  return saveManagedSession(fixture.storeDir, {
+    schema: "agent-knock-knock/session",
+    version: 1,
+    session_id: sessionId,
+    agent: "codex",
+    workspace: fixture.terminalControl.currentPath as string,
+    status: "bound",
+    binding: terminalBindingFrom({
+      terminalId: fixture.terminalId,
+      terminalControl: fixture.terminalControl,
+      pid: fixture.codexPid,
+      nativeThreadId: NATIVE_THREAD_ID,
+      processUuid: processUuid(fixture.codexPid, LIVE_PROCESS_BIRTH),
+      processBirth: LIVE_PROCESS_BIRTH,
+      rollout: {
+        fd: "24",
+        device: String(stat.dev),
+        inode: String(stat.ino),
+        path: fs.realpathSync(fixture.rolloutPath)
+      },
+      evidence: "codex_open_root_rollout",
       generation: 1,
       now
     }),
@@ -2090,16 +2481,155 @@ function runCliSubprocess(args: string[], env: NodeJS.ProcessEnv) {
 
 const inProcessFixtures = new Map<string, NoRolloutFixture>();
 
+function fixtureHerdrResponse(
+  request: HerdrWireRequest,
+  result: Record<string, unknown>
+): Record<string, unknown> {
+  return { id: request.id, result };
+}
+
+function createFixtureHerdrProvider(
+  fixture: NoRolloutFixture,
+  env: NodeJS.ProcessEnv,
+  nowMs: () => number
+): HerdrTerminalControlProvider {
+  const control = fixture.terminalControl;
+  assert.equal(control.kind, "herdr");
+  const sessionList = JSON.stringify({
+    sessions: [{
+      name: control.session,
+      default: true,
+      running: true,
+      socket_path: control.socketPath,
+      session_dir: control.sessionDir
+    }]
+  });
+  return new HerdrTerminalControlProvider({
+    command: "herdr-fixture",
+    runCommand: (_command, args) =>
+      args[0] === "--version"
+        ? successfulCommand(`herdr ${HERDR_EXACT_VERSION}\n`)
+        : successfulCommand(sessionList),
+    statSocket: () => ({
+      device: "1",
+      inode: "7001",
+      ctimeNs: "1000000",
+      ownerUid: 501
+    }),
+    request: async (_socketPath, request) => {
+      if (request.method === "ping") {
+        return fixtureHerdrResponse(request, {
+          type: "pong",
+          version: HERDR_EXACT_VERSION,
+          protocol: HERDR_EXACT_PROTOCOL,
+          capabilities: {
+            live_handoff: true,
+            detached_server_daemon: true
+          }
+        });
+      }
+      if (request.method === "session.snapshot") {
+        return fixtureHerdrResponse(request, {
+          type: "session_snapshot",
+          snapshot: {
+            version: HERDR_EXACT_VERSION,
+            protocol: HERDR_EXACT_PROTOCOL,
+            panes: [{
+              pane_id: control.paneId,
+              terminal_id: control.terminalId,
+              workspace_id: control.workspaceId,
+              tab_id: control.tabId,
+              cwd: control.currentPath,
+              focused: true,
+              agent_status: null,
+              revision: 1
+            }]
+          }
+        });
+      }
+      if (request.method === "pane.process_info") {
+        return fixtureHerdrResponse(request, {
+          type: "pane_process_info",
+          process_info: {
+            pane_id: control.paneId,
+            shell_pid: control.panePid,
+            foreground_process_group_id: fixture.codexPid,
+            foreground_processes: [{
+              pid: fixture.codexPid,
+              name: "codex",
+              argv0: "codex",
+              argv: ["codex", "--yolo"],
+              cmdline: "codex --yolo",
+              cwd: control.currentPath
+            }]
+          }
+        });
+      }
+      if (request.method === "pane.read") {
+        const screen = fs.readFileSync(fixture.screenPath, "utf8");
+        const preserveEscapes = request.params.source === "visible" &&
+          request.params.format === "ansi";
+        return fixtureHerdrResponse(request, {
+          type: "pane_read",
+          read: {
+            pane_id: control.paneId,
+            workspace_id: control.workspaceId,
+            tab_id: control.tabId,
+            source: request.params.source,
+            format: request.params.format,
+            text: preserveEscapes
+              ? screen
+              : screen.replace(/\u001b\[[0-9;]*m/gu, ""),
+            revision: 1,
+            truncated: false
+          }
+        });
+      }
+      if (request.method === "pane.send_input") {
+        const text = typeof request.params.text === "string"
+          ? request.params.text
+          : undefined;
+        const keys = Array.isArray(request.params.keys)
+          ? request.params.keys
+          : [];
+        const result = text !== undefined
+          ? runInProcessTmux(
+              fixture,
+              env,
+              ["send-keys", "-t", fixture.target, "-l", text],
+              nowMs()
+            )
+          : keys.includes("enter")
+            ? runInProcessTmux(
+                fixture,
+                env,
+                ["send-keys", "-t", fixture.target, "C-m"],
+                nowMs()
+              )
+            : successfulCommand();
+        if (result.status !== 0) {
+          throw new Error(result.stderr || "fixture Herdr input failed");
+        }
+        return fixtureHerdrResponse(request, { type: "ok" });
+      }
+      throw new Error(`unexpected fixture Herdr request ${request.method}`);
+    }
+  });
+}
+
 function inProcessDependencies(
   fixture: NoRolloutFixture,
   env: NodeJS.ProcessEnv
 ): CliCommandDependencies {
   let nowMs = Date.now();
-  const provider = new TmuxTerminalControlProvider({
-    commands: ["tmux"],
-    socketPaths: [],
-    runCommand: (_command, args) => runInProcessTmux(fixture, env, args, nowMs)
-  });
+  const provider = fixture.terminalKind === "herdr"
+    ? createFixtureHerdrProvider(fixture, env, () => nowMs)
+    : new TmuxTerminalControlProvider({
+        commands: ["tmux"],
+        socketPaths: [],
+        runCommand: (_command, args) =>
+          runInProcessTmux(fixture, env, args, nowMs)
+      });
   return {
     terminalControlProviderRegistry:
       createTerminalControlProviderRegistry([provider]),
@@ -2177,6 +2707,9 @@ function createFixtureCodexAdapter(
     },
     async resolveActiveSessionIdentityForPid(pid) {
       assert.equal(pid, fixture.codexPid);
+      if (fixture.identityObservationError) {
+        throw new Error(fixture.identityObservationError);
+      }
       const probeCount = fs.existsSync(fixture.rolloutProbeCountPath)
         ? Number(fs.readFileSync(fixture.rolloutProbeCountPath, "utf8"))
         : 0;
@@ -2353,6 +2886,26 @@ function runInProcessTmux(
     }
     const pendingInputPath = path.join(fixture.tempDir, "pending-input.txt");
     fs.writeFileSync(pendingInputPath, text);
+    if (text !== "/status") {
+      fs.writeFileSync(fixture.screenPath, `Ready\n› ${text}`);
+    }
+    if (
+      text !== "/status" &&
+      env.AKK_TEST_MATERIALIZE_ROLLOUT_AFTER_TEXT === "1"
+    ) {
+      fs.writeFileSync(fixture.materializedPath, "ready");
+      appendNativeAcceptance(
+        fixture.activeRolloutPath,
+        text,
+        FIRST_NATIVE_TURN_ID,
+        {
+          nativeThreadId: fixture.activeNativeThreadId,
+          workspace: String(fixture.terminalControl.currentPath),
+          codexVersion: fixture.codexVersion,
+          timestamp: new Date(nowMs).toISOString()
+        }
+      );
+    }
     if (text === "/status") {
       fs.writeFileSync(
         fixture.screenPath,

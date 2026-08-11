@@ -69,6 +69,18 @@ function claudeComposerScreen(text = ""): string {
   ].join("\n");
 }
 
+function claudeHerdrClearedComposerScreen(): string {
+  return [
+    "Welcome back",
+    "❯ /clear",
+    "",
+    CLAUDE_COMPOSER_DIVIDER,
+    `❯\u00a0`,
+    CLAUDE_COMPOSER_DIVIDER,
+    "\u00a0 ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+  ].join("\n");
+}
+
 test("a terminal-scoped Codex send adopts an exact unknown human-switched thread", async () => {
   const fixture = createHandoffFixture({
     agent: "codex",
@@ -243,7 +255,7 @@ test("Herdr Claude handoff uses the exact listed token and only one task input p
     request: HerdrWireRequest;
     options?: HerdrRequestOptions;
   }> = [];
-  let screen = claudeComposerScreen();
+  let screen = claudeHerdrClearedComposerScreen();
   let pendingText = "";
   let revision = 0;
 
@@ -448,6 +460,40 @@ test("Herdr Claude handoff uses the exact listed token and only one task input p
       claudeHome
     ];
 
+    screen = claudeComposerScreen("Preserve this human-authored draft.");
+    const draftListedResult = await runInProcessCli(
+      ["list", ...storeArgs],
+      dependencies
+    );
+    assert.equal(draftListedResult.status, 0, draftListedResult.stderr);
+    const draftListed = JSON.parse(draftListedResult.stdout).terminals?.find(
+      (entry: Record<string, unknown>) => entry.id === terminalId
+    );
+    assert.ok(draftListed, draftListedResult.stdout);
+    assert.equal(draftListed.handoff_state, "external_handoff_blocked");
+    assert.equal(draftListed.available_actions?.send, undefined);
+    assert.match(
+      String(draftListed.handoff_blocked_reason),
+      /composer is not an exact empty idle frame/iu
+    );
+
+    screen = ["Ready", "❯\u00a0"].join("\n");
+    const unframedListedResult = await runInProcessCli(
+      ["list", ...storeArgs],
+      dependencies
+    );
+    assert.equal(unframedListedResult.status, 0, unframedListedResult.stderr);
+    const unframedListed = JSON.parse(
+      unframedListedResult.stdout
+    ).terminals?.find(
+      (entry: Record<string, unknown>) => entry.id === terminalId
+    );
+    assert.ok(unframedListed, unframedListedResult.stdout);
+    assert.equal(unframedListed.activity_state, "idle");
+    assert.equal(unframedListed.handoff_state, "external_handoff_blocked");
+    assert.equal(unframedListed.available_actions?.send, undefined);
+
+    screen = claudeHerdrClearedComposerScreen();
     const listedResult = await runInProcessCli(
       ["list", ...storeArgs],
       dependencies
@@ -458,6 +504,7 @@ test("Herdr Claude handoff uses the exact listed token and only one task input p
     );
     assert.ok(listed, listedResult.stdout);
     assert.equal(listed.handoff_state, "external_handoff_adoptable");
+    assert.equal("_automated_input_composer_ready" in listed, false);
     assert.equal(listed.available_actions?.send?.arguments?.selector, terminalId);
     const expectedTerminalToken = String(
       listed.available_actions?.send?.arguments?.expected_terminal_token ?? ""
@@ -519,6 +566,16 @@ test("Herdr Claude handoff uses the exact listed token and only one task input p
         JSON.stringify(entry.request.params).includes("/resume")
       ),
       false
+    );
+    assert.equal(
+      inputs.some((entry) =>
+        Array.isArray(entry.request.params.keys) &&
+        entry.request.params.keys.some((key) =>
+          ["Escape", "escape", "C-u"].includes(String(key))
+        )
+      ),
+      false,
+      "handoff must preserve human input instead of clearing the composer"
     );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
