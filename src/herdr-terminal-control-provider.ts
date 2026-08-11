@@ -4,8 +4,10 @@ import { createConnection } from "node:net";
 import path from "node:path";
 import {
   TerminalControlInputNotSentError,
+  TerminalControlUnavailableError,
   type CommandResult,
-  type TerminalControlProvider
+  type TerminalControlProvider,
+  type TerminalViewport
 } from "./terminal-control-provider.js";
 import {
   createTerminalEndpointRef,
@@ -29,6 +31,8 @@ const HERDR_MAX_REQUEST_BYTES = 1024 * 1024;
 const HERDR_MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 const HERDR_DEFAULT_TIMEOUT_MS = 5_000;
 const HERDR_MAX_READ_LINES = 1_000;
+const HERDR_MAX_TTY_PATH_BYTES = 1_024;
+const HERDR_MAX_TTY_VIEWPORT_DIMENSION = 65_535;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -43,6 +47,36 @@ export interface HerdrSocketIdentity {
   inode: string;
   ctimeNs: string;
   ownerUid?: number;
+}
+
+export interface HerdrTtyDeviceIdentity {
+  device: string;
+  inode: string;
+  rdev: string;
+  ctimeNs: string;
+  ownerUid: number;
+  symbolicLink: boolean;
+  characterDevice: boolean;
+}
+
+export interface HerdrTtyViewportInspectionOptions {
+  platform?: NodeJS.Platform;
+  runCommand?: (command: string, args: string[]) => CommandResult;
+  statTty?: (ttyPath: string) => HerdrTtyDeviceIdentity;
+  currentUid?: number;
+}
+
+export type HerdrTtyViewportInspector = (
+  shellPid: number
+) =>
+  | TerminalViewport
+  | undefined
+  | Promise<TerminalViewport | undefined>;
+
+interface HerdrProcessTtyEvidence {
+  pid: number;
+  ttyPath: string;
+  processBirth: string;
 }
 
 export interface HerdrRequestOptions {
@@ -335,6 +369,7 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
   private readonly runCommand: (command: string, args: string[]) => CommandResult;
   private readonly request: HerdrRequestFunction;
   private readonly statSocket: (socketPath: string) => HerdrSocketIdentity;
+  private readonly inspectTtyViewport: HerdrTtyViewportInspector;
   private readonly endpointSocketIdentities =
     new WeakMap<TerminalEndpointRef, HerdrSocketIdentity>();
   private requestSequence = 0;
@@ -345,12 +380,15 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
     request?: HerdrRequestFunction;
     requestTimeoutMs?: number;
     statSocket?: (socketPath: string) => HerdrSocketIdentity;
+    inspectTtyViewport?: HerdrTtyViewportInspector;
   } = {}) {
     this.commands = options.command
       ? [options.command]
       : ["herdr", "/opt/homebrew/bin/herdr", "/usr/local/bin/herdr"];
     this.runCommand = options.runCommand ?? runHerdrCommand;
     this.statSocket = options.statSocket ?? readHerdrSocketIdentity;
+    this.inspectTtyViewport = options.inspectTtyViewport ??
+      inspectHerdrTtyViewport;
     const requestTimeoutMs = options.requestTimeoutMs;
     this.request = options.request ?? ((socketPath, request, requestOptions) =>
       requestHerdrUnixSocket(socketPath, request, {
@@ -479,11 +517,14 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
     const matches = (await this.listTerminals()).filter((candidate) =>
       sameTerminalEndpointIdentity(candidate, terminal)
     );
+    if (matches.length === 0) {
+      throw new TerminalControlUnavailableError(
+        `Herdr terminal resource ${terminal.route.label} is no longer available`
+      );
+    }
     if (matches.length !== 1) {
       throw new Error(
-        matches.length === 0
-          ? `Herdr terminal resource ${terminal.route.label} is no longer available`
-          : `Herdr terminal resource ${terminal.route.label} is ambiguous`
+        `Herdr terminal resource ${terminal.route.label} is ambiguous`
       );
     }
     const expectedSocketIdentity = this.endpointSocketIdentities.get(terminal);
@@ -542,6 +583,208 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
       parentPid = byPid.get(currentParentPid)?.ppid;
     }
     return false;
+  }
+
+  async inspectViewport(
+    terminal: TerminalEndpointRef
+  ): Promise<TerminalViewport | undefined> {
+    assertEndpointKind(terminal, this.kind);
+    const resolved = await this.resolve(terminal);
+    if (!sameTerminalControlIncarnation(terminal, resolved)) {
+      throw new Error(
+        "Herdr terminal stable resource or process anchor changed before viewport inspection"
+      );
+    }
+    const control = herdrControlFromEndpoint(resolved);
+    const socketIdentity = this.requireEndpointSocketIdentity(resolved);
+    const result = await this.invoke(
+      control.socketPath!,
+      "session.snapshot",
+      {},
+      { expectedSocketIdentity: socketIdentity }
+    );
+    if (result.type !== "session_snapshot" || !isRecord(result.snapshot)) {
+      throw new Error(
+        `Herdr session ${control.session} returned an unexpected viewport snapshot`
+      );
+    }
+    if (
+      result.snapshot.version !== HERDR_EXACT_VERSION ||
+      result.snapshot.protocol !== HERDR_EXACT_PROTOCOL
+    ) {
+      throw new HerdrCompatibilityError(
+        `Herdr session ${control.session} viewport snapshot is not exact ` +
+        `${HERDR_EXACT_VERSION}/protocol ${HERDR_EXACT_PROTOCOL}`
+      );
+    }
+    if (!Array.isArray(result.snapshot.panes)) {
+      throw new Error(
+        `Herdr session ${control.session} viewport snapshot panes are invalid`
+      );
+    }
+    const matchingPanes = result.snapshot.panes
+      .map((value, index) =>
+        parsePaneInfo(value, `${control.session} viewport pane ${index}`))
+      .filter((pane) => pane.paneId === control.paneId);
+    if (matchingPanes.length !== 1) {
+      throw new Error(
+        `Herdr terminal ${control.target} changed during viewport inspection`
+      );
+    }
+    const [pane] = matchingPanes;
+    if (
+      pane.terminalId !== control.terminalId ||
+      pane.workspaceId !== control.workspaceId ||
+      pane.tabId !== control.tabId
+    ) {
+      throw new Error(
+        `Herdr terminal ${control.target} identity or route changed during viewport inspection`
+      );
+    }
+
+    if (result.snapshot.layouts === undefined) {
+      return undefined;
+    }
+    if (!Array.isArray(result.snapshot.layouts)) {
+      throw new Error(
+        `Herdr session ${control.session} viewport snapshot layouts are invalid`
+      );
+    }
+    const matchingLayouts = result.snapshot.layouts.filter((value, index) => {
+      if (!isRecord(value)) {
+        throw new Error(
+          `invalid Herdr ${control.session} viewport layout ${index}`
+        );
+      }
+      const workspaceId = nonEmptyString(value.workspace_id);
+      const tabId = nonEmptyString(value.tab_id);
+      if (!workspaceId || !tabId) {
+        throw new Error(
+          `invalid Herdr ${control.session} viewport layout ${index} route`
+        );
+      }
+      return workspaceId === control.workspaceId && tabId === control.tabId;
+    });
+    if (matchingLayouts.length === 0) {
+      return undefined;
+    }
+    if (matchingLayouts.length !== 1) {
+      throw new Error(
+        `Herdr terminal ${control.target} has an ambiguous viewport layout`
+      );
+    }
+    const layout = matchingLayouts[0];
+    if (typeof layout.zoomed !== "boolean") {
+      throw new Error(
+        `Herdr terminal ${control.target} viewport layout zoom state is invalid`
+      );
+    }
+    const layoutPanes = layout.panes;
+    if (layoutPanes === undefined) {
+      return undefined;
+    }
+    if (!Array.isArray(layoutPanes)) {
+      throw new Error(
+        `Herdr terminal ${control.target} viewport layout panes are invalid`
+      );
+    }
+    const matchingLayoutPanes = layoutPanes.filter((value, index) => {
+      if (!isRecord(value)) {
+        throw new Error(
+          `invalid Herdr ${control.target} viewport layout pane ${index}`
+        );
+      }
+      const paneId = nonEmptyString(value.pane_id);
+      if (!paneId) {
+        throw new Error(
+          `invalid Herdr ${control.target} viewport layout pane ${index} identity`
+        );
+      }
+      return paneId === control.paneId;
+    });
+    if (matchingLayoutPanes.length === 0) {
+      return undefined;
+    }
+    if (matchingLayoutPanes.length !== 1) {
+      throw new Error(
+        `Herdr terminal ${control.target} has an ambiguous viewport rectangle`
+      );
+    }
+    const layoutPane = matchingLayoutPanes[0];
+    const paneFocused = layoutPane.focused;
+    if (typeof paneFocused !== "boolean") {
+      throw new Error(
+        `Herdr terminal ${control.target} viewport layout pane focus is invalid`
+      );
+    }
+    const focusedPaneId = nonEmptyString(layout.focused_pane_id);
+    if (
+      layout.focused_pane_id !== undefined &&
+      focusedPaneId === undefined
+    ) {
+      throw new Error(
+        `Herdr terminal ${control.target} viewport layout focused pane identity is invalid`
+      );
+    }
+
+    if (layout.zoomed === true) {
+      if (!focusedPaneId) {
+        throw new Error(
+          `Herdr terminal ${control.target} zoomed viewport requires an exact focused pane identity`
+        );
+      }
+      if (focusedPaneId !== control.paneId) {
+        if (paneFocused === true) {
+          throw new Error(
+            `Herdr terminal ${control.target} zoomed viewport focus metadata is inconsistent`
+          );
+        }
+        return undefined;
+      }
+      if (paneFocused !== true) {
+        throw new Error(
+          `Herdr terminal ${control.target} zoomed viewport focus metadata is inconsistent or missing`
+        );
+      }
+    } else if (
+      focusedPaneId !== undefined &&
+      (
+        (focusedPaneId === control.paneId && paneFocused === false) ||
+        (focusedPaneId !== control.paneId && paneFocused === true)
+      )
+    ) {
+      throw new Error(
+        `Herdr terminal ${control.target} viewport focus metadata is inconsistent`
+      );
+    }
+
+    const shellPid = positiveInteger(resolved.processAnchorPid);
+    if (!shellPid) {
+      return undefined;
+    }
+    const viewport = await this.inspectTtyViewport(shellPid);
+    if (viewport === undefined) {
+      return undefined;
+    }
+    const columns = positiveInteger(viewport.columns);
+    const rows = positiveInteger(viewport.rows);
+    if (
+      !columns ||
+      !rows ||
+      columns > HERDR_MAX_TTY_VIEWPORT_DIMENSION ||
+      rows > HERDR_MAX_TTY_VIEWPORT_DIMENSION
+    ) {
+      throw new Error(
+        `Herdr terminal ${control.target} returned invalid exact PTY viewport dimensions`
+      );
+    }
+    const finalResolved = await this.resolve(resolved);
+    if (!sameTerminalControlIncarnation(resolved, finalResolved)) {
+      throw new Error(
+        `Herdr terminal ${control.target} changed after exact PTY viewport inspection`
+      );
+    }
+    return { columns, rows };
   }
 
   async capture(
@@ -1283,6 +1526,250 @@ function runHerdrCommand(command: string, args: string[]): CommandResult {
     stderr: result.stderr,
     error: result.error
   };
+}
+
+/**
+ * Read the exact inner PTY viewport owned by a verified Herdr shell process.
+ * Herdr layout geometry is deliberately not used here: direct attaches may
+ * resize the PTY without updating the layout rectangle that owns the pane.
+ */
+export function inspectHerdrTtyViewport(
+  shellPid: number,
+  options: HerdrTtyViewportInspectionOptions = {}
+): TerminalViewport | undefined {
+  const pid = positiveInteger(shellPid);
+  if (!pid) {
+    throw new Error("Herdr exact PTY viewport requires a positive shell PID");
+  }
+  const commands = herdrTtyCommands(options.platform ?? process.platform);
+  if (!commands) {
+    return undefined;
+  }
+  const runCommand = options.runCommand ?? runHerdrTtyCommand;
+  const statTty = options.statTty ?? readHerdrTtyDeviceIdentity;
+  const currentUid = options.currentUid ?? (
+    typeof process.getuid === "function" ? process.getuid() : undefined
+  );
+  if (currentUid === undefined) {
+    return undefined;
+  }
+
+  const before = readHerdrProcessTtyEvidence(
+    commands.ps,
+    pid,
+    runCommand,
+    "before stty"
+  );
+  if (!before) {
+    return undefined;
+  }
+  const beforeDevice = statTty(before.ttyPath);
+  assertSafeHerdrTtyDevice(before.ttyPath, beforeDevice, currentUid);
+
+  const sizeResult = runCommand(commands.stty, [
+    commands.sttyDeviceFlag,
+    before.ttyPath,
+    "size"
+  ]);
+  if (sizeResult.status !== 0) {
+    return undefined;
+  }
+  const size = parseHerdrSttySize(sizeResult.stdout);
+  if (!size) {
+    throw new Error(
+      `Herdr stty returned malformed PTY viewport dimensions for ${before.ttyPath}`
+    );
+  }
+
+  const after = readHerdrProcessTtyEvidence(
+    commands.ps,
+    pid,
+    runCommand,
+    "after stty"
+  );
+  if (!after) {
+    return undefined;
+  }
+  if (
+    after.pid !== before.pid ||
+    after.ttyPath !== before.ttyPath ||
+    after.processBirth !== before.processBirth
+  ) {
+    throw new Error(
+      `Herdr shell ${pid} TTY process identity changed during viewport inspection`
+    );
+  }
+  const afterDevice = statTty(after.ttyPath);
+  assertSafeHerdrTtyDevice(after.ttyPath, afterDevice, currentUid);
+  if (!sameHerdrTtyDeviceIdentity(beforeDevice, afterDevice)) {
+    throw new Error(
+      `Herdr TTY device ${after.ttyPath} changed during viewport inspection`
+    );
+  }
+  return size;
+}
+
+function herdrTtyCommands(platform: NodeJS.Platform): {
+  ps: string;
+  stty: string;
+  sttyDeviceFlag: "-f" | "-F";
+} | undefined {
+  if (platform === "darwin") {
+    return { ps: "/bin/ps", stty: "/bin/stty", sttyDeviceFlag: "-f" };
+  }
+  if (platform === "linux") {
+    return { ps: "/bin/ps", stty: "/bin/stty", sttyDeviceFlag: "-F" };
+  }
+  return undefined;
+}
+
+function runHerdrTtyCommand(command: string, args: string[]): CommandResult {
+  const result = spawnSync(command, args, {
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024,
+    timeout: HERDR_DEFAULT_TIMEOUT_MS
+  });
+  return {
+    status: result.status,
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
+    error: result.error
+  };
+}
+
+function readHerdrProcessTtyEvidence(
+  psCommand: string,
+  pid: number,
+  runCommand: (command: string, args: string[]) => CommandResult,
+  stage: string
+): HerdrProcessTtyEvidence | undefined {
+  const result = runCommand(psCommand, [
+    "-p",
+    String(pid),
+    "-o",
+    "pid=,tty=,lstart="
+  ]);
+  if (result.status !== 0) {
+    return undefined;
+  }
+  const raw = result.stdout.trim();
+  if (!raw) {
+    return undefined;
+  }
+  if (raw.includes("\n") || raw.includes("\r")) {
+    throw new Error(`Herdr ps returned ambiguous TTY ${stage}`);
+  }
+  const match = /^(\d+)\s+(\S+)\s+(.+)$/u.exec(raw);
+  if (!match) {
+    throw new Error(`Herdr ps returned malformed process TTY evidence ${stage}`);
+  }
+  const observedPid = positiveInteger(Number(match[1]));
+  if (observedPid !== pid) {
+    throw new Error(`Herdr ps returned mismatched shell PID ${stage}`);
+  }
+  const rawTty = match[2];
+  if (rawTty === "?" || rawTty === "??" || rawTty === "-") {
+    return undefined;
+  }
+  const processBirth = match[3].trim();
+  if (!processBirth) {
+    throw new Error(`Herdr ps returned missing shell process birth ${stage}`);
+  }
+  return {
+    pid: observedPid,
+    ttyPath: safeHerdrTtyPath(rawTty, stage),
+    processBirth
+  };
+}
+
+function safeHerdrTtyPath(raw: string, stage: string): string {
+  if (Buffer.byteLength(raw) > HERDR_MAX_TTY_PATH_BYTES) {
+    throw new Error(`Herdr ps returned overlong TTY path ${stage}`);
+  }
+  const relative = raw.startsWith("/dev/") ? raw.slice(5) : raw;
+  const segments = relative.split("/");
+  if (
+    segments.length === 0 ||
+    segments.some((segment) =>
+      !segment ||
+      segment === "." ||
+      segment === ".." ||
+      !/^[A-Za-z0-9._-]+$/u.test(segment))
+  ) {
+    throw new Error(`Herdr ps returned unsafe TTY path ${stage}`);
+  }
+  const ttyPath = `/dev/${segments.join("/")}`;
+  if (
+    Buffer.byteLength(ttyPath) > HERDR_MAX_TTY_PATH_BYTES ||
+    path.posix.normalize(ttyPath) !== ttyPath
+  ) {
+    throw new Error(`Herdr ps returned unsafe TTY path ${stage}`);
+  }
+  return ttyPath;
+}
+
+function parseHerdrSttySize(output: string): TerminalViewport | undefined {
+  const match = /^(\d+)\s+(\d+)$/u.exec(output.trim());
+  if (!match) {
+    return undefined;
+  }
+  const rows = positiveInteger(Number(match[1]));
+  const columns = positiveInteger(Number(match[2]));
+  if (
+    !rows ||
+    !columns ||
+    rows > HERDR_MAX_TTY_VIEWPORT_DIMENSION ||
+    columns > HERDR_MAX_TTY_VIEWPORT_DIMENSION
+  ) {
+    return undefined;
+  }
+  return { columns, rows };
+}
+
+function readHerdrTtyDeviceIdentity(
+  ttyPath: string
+): HerdrTtyDeviceIdentity {
+  const stats = fs.lstatSync(ttyPath, { bigint: true });
+  return {
+    device: stats.dev.toString(),
+    inode: stats.ino.toString(),
+    rdev: stats.rdev.toString(),
+    ctimeNs: stats.ctimeNs.toString(),
+    ownerUid: Number(stats.uid),
+    symbolicLink: stats.isSymbolicLink(),
+    characterDevice: stats.isCharacterDevice()
+  };
+}
+
+function assertSafeHerdrTtyDevice(
+  ttyPath: string,
+  identity: HerdrTtyDeviceIdentity,
+  currentUid: number
+): void {
+  if (identity.symbolicLink) {
+    throw new Error(`Herdr TTY must not be a symbolic link: ${ttyPath}`);
+  }
+  if (!identity.characterDevice) {
+    throw new Error(`Herdr TTY is not a character device: ${ttyPath}`);
+  }
+  if (identity.ownerUid !== currentUid) {
+    throw new Error(
+      `Herdr TTY ${ttyPath} is owned by uid ${identity.ownerUid}, expected ${currentUid}`
+    );
+  }
+}
+
+function sameHerdrTtyDeviceIdentity(
+  left: HerdrTtyDeviceIdentity,
+  right: HerdrTtyDeviceIdentity
+): boolean {
+  return left.device === right.device &&
+    left.inode === right.inode &&
+    left.rdev === right.rdev &&
+    left.ctimeNs === right.ctimeNs &&
+    left.ownerUid === right.ownerUid &&
+    left.symbolicLink === right.symbolicLink &&
+    left.characterDevice === right.characterDevice;
 }
 
 export function readHerdrSocketIdentity(

@@ -126,7 +126,10 @@ test("an active managed task blocks a follow-up before tmux input", () => {
       "--disable-terminal-bridge-monitor"
     ], testEnv);
     assert.notEqual(second.status, 0);
-    assert.match(second.stderr, /session .* already has active turn/u);
+    assert.match(
+      second.stderr,
+      /terminal .* still has unresolved Turn .* \(waiting_for_agent\)/u
+    );
 
     const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
     assert.equal(
@@ -509,7 +512,7 @@ test("concurrent raw terminal sends allow exactly one active generation", async 
     const rejected = first.status === 0 ? second : first;
     assert.match(
       rejected.stderr,
-      /session .* already has active turn/u
+      /terminal .* still has unresolved Turn .* \(waiting_for_agent\)/u
     );
 
     const states = fs.readdirSync(storeConversationsDir(storeDir), { withFileTypes: true })

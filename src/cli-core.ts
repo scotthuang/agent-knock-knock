@@ -135,6 +135,7 @@ import {
 import {
   createTerminalControlProviderRegistry as createProviderRegistry,
   StaticTerminalControlProvider,
+  TerminalControlUnavailableError,
   TmuxTerminalControlProvider,
   type TerminalControlProvider,
   type TerminalControlProviderRegistry
@@ -287,6 +288,8 @@ const SESSION_SEND_BLOCKING_STATUSES = new Set<ConversationStatus>([
   "callback_failed",
   "cancelling"
 ]);
+const TERMINAL_BRIDGE_UNCERTAIN_COLLATERAL_STALL_REASON =
+  "a newer terminal submission has an uncertain outcome; inspect the shared terminal pane before continuing";
 const TERMINAL_BRIDGE_MONITOR_LOCK_VERSION = 1;
 const MINIMUM_NODE_VERSION = "22.19.0";
 const PRIVATE_LOCK_FILE_MODE = 0o600;
@@ -3593,7 +3596,7 @@ function stallOtherTerminalBridgeConversationsForUncertainDispatch({
   for (const listed of listConversations(storeDir)) {
     if (
       listed.conversation_id === currentConversationId ||
-      !isActiveStatus(listed.status)
+      !SESSION_SEND_BLOCKING_STATUSES.has(listed.status)
     ) {
       continue;
     }
@@ -3620,7 +3623,7 @@ function stallOtherTerminalBridgeConversationsForUncertainDispatch({
         ? current.native_session_takeover
         : undefined;
       if (
-        !isActiveStatus(current.status) ||
+        !SESSION_SEND_BLOCKING_STATUSES.has(current.status) ||
         currentTakeover?.terminal_bridge !== true ||
         !terminalControlsShareIncarnation(
           terminalControlFromTakeover(currentTakeover),
@@ -3634,13 +3637,13 @@ function stallOtherTerminalBridgeConversationsForUncertainDispatch({
         ...current,
         status: "stalled" as const,
         stalled_at: stalledAt,
-        stalled_reason:
-          "a newer terminal submission has an uncertain outcome; inspect the shared terminal pane before continuing",
+        stalled_reason: TERMINAL_BRIDGE_UNCERTAIN_COLLATERAL_STALL_REASON,
         native_session_takeover: {
           ...currentTakeover,
           terminal_bridge_uncertain_dispatch_fence: {
             message_id: uncertainMessageId,
-            observed_at: stalledAt
+            observed_at: stalledAt,
+            previous_status: current.status
           }
         },
         updated_at: stalledAt
@@ -3663,6 +3666,361 @@ function stallOtherTerminalBridgeConversationsForUncertainDispatch({
     }
   }
   return stalledConversationIds;
+}
+
+interface TerminalBridgeCollateralStallRepairEvidence {
+  uncertainMessageId: string;
+  ownerConversationId: string;
+  restoredStatus: "idle";
+}
+
+function exactTerminalBridgeCollateralStallRepairEvidence({
+  conversation,
+  storeDir
+}: {
+  conversation: Conversation;
+  storeDir: string;
+}): TerminalBridgeCollateralStallRepairEvidence | undefined {
+  if (
+    conversation.status !== "stalled" ||
+    conversation.stalled_reason !==
+      TERMINAL_BRIDGE_UNCERTAIN_COLLATERAL_STALL_REASON
+  ) {
+    return undefined;
+  }
+  const takeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const fence = isRecord(
+    takeover?.terminal_bridge_uncertain_dispatch_fence
+  )
+    ? takeover.terminal_bridge_uncertain_dispatch_fence
+    : undefined;
+  const uncertainMessageId = stringValue(fence?.message_id);
+  const fenceObservedAt = stringValue(fence?.observed_at);
+  const previousStatus = stringValue(fence?.previous_status);
+  const ownMessageId = stringValue(takeover?.terminal_bridge_message_id);
+  const ownSubmission = terminalBridgeSubmission(conversation);
+  const completionClaim = isRecord(takeover?.terminal_bridge_completion_claim)
+    ? takeover.terminal_bridge_completion_claim
+    : undefined;
+  const callbackDelivery = isRecord(conversation.callback_delivery)
+    ? conversation.callback_delivery
+    : undefined;
+  const callbackMessage = isRecord(callbackDelivery?.message)
+    ? callbackDelivery.message
+    : undefined;
+  const idleSince = stringValue(conversation.idle_since);
+  const deliveredAt = stringValue(callbackDelivery?.delivered_at);
+  const claimedAt = stringValue(completionClaim?.claimed_at);
+  const fenceAtMs = validTimestampMs(fenceObservedAt);
+  const idleAtMs = validTimestampMs(idleSince);
+  const deliveredAtMs = validTimestampMs(deliveredAt);
+  const claimedAtMs = validTimestampMs(claimedAt);
+  if (
+    takeover?.terminal_bridge !== true ||
+    !uncertainMessageId ||
+    !fenceObservedAt ||
+    fenceAtMs === undefined ||
+    uncertainMessageId === ownMessageId ||
+    (previousStatus !== undefined && previousStatus !== "idle") ||
+    conversation.stalled_at !== fenceObservedAt ||
+    conversation.updated_at !== fenceObservedAt ||
+    !idleSince ||
+    idleAtMs === undefined ||
+    idleAtMs > fenceAtMs ||
+    !ownMessageId ||
+    ownSubmission?.status !== "agent_accepted" ||
+    stringValue(ownSubmission.message_id) !== ownMessageId ||
+    stringValue(ownSubmission.session_id) !==
+      sessionIdForConversation(conversation) ||
+    stringValue(ownSubmission.turn_id) !== turnIdForConversation(conversation) ||
+    !completionClaim ||
+    stringValue(completionClaim.terminal_bridge_message_id) !== ownMessageId ||
+    completionClaim.outcome !== "success" ||
+    !claimedAt ||
+    claimedAtMs === undefined ||
+    claimedAtMs > fenceAtMs ||
+    callbackDelivery?.status !== "delivered" ||
+    callbackDelivery.final_status !== "idle" ||
+    callbackDelivery.preserve_conversation_status !== true ||
+    !callbackMessage ||
+    callbackMessage.type !== "done" ||
+    callbackMessage.requires_response !== false ||
+    stringValue(callbackMessage.id) !==
+      stringValue(completionClaim.callback_message_id) ||
+    stringValue(callbackMessage.conversation_id) !==
+      conversation.conversation_id ||
+    stringValue(callbackMessage.session_id) !==
+      sessionIdForConversation(conversation) ||
+    stringValue(callbackMessage.turn_id) !== turnIdForConversation(conversation) ||
+    stringValue(
+      isRecord(callbackMessage.metadata)
+        ? callbackMessage.metadata.terminal_bridge_message_id
+        : undefined
+    ) !== ownMessageId ||
+    !deliveredAt ||
+    deliveredAtMs === undefined ||
+    deliveredAtMs > fenceAtMs
+  ) {
+    return undefined;
+  }
+  const control = terminalControlForManagedConversation(conversation);
+  if (!control) {
+    return undefined;
+  }
+  // The target state lock is already held by the caller. Rescan owner state
+  // now instead of trusting the unlocked discovery snapshot used to find the
+  // target candidate.
+  const ownerCandidates = listConversations(storeDir).filter((candidate) => {
+    if (candidate.conversation_id === conversation.conversation_id) {
+      return false;
+    }
+    const candidateTakeover = isRecord(candidate.native_session_takeover)
+      ? candidate.native_session_takeover
+      : undefined;
+    const candidateSubmission = terminalBridgeSubmission(candidate);
+    return candidateTakeover?.terminal_bridge === true &&
+      stringValue(candidateTakeover.terminal_bridge_message_id) ===
+        uncertainMessageId &&
+      stringValue(candidateSubmission?.message_id) === uncertainMessageId &&
+      terminalControlsShareIncarnation(
+        terminalControlForManagedConversation(candidate),
+        control
+      );
+  });
+  if (ownerCandidates.length !== 1) {
+    return undefined;
+  }
+  const ownerListed = ownerCandidates[0];
+  const ownerStatePath = stringValue(ownerListed.state_path);
+  if (!ownerStatePath) {
+    return undefined;
+  }
+  let owner: Conversation;
+  let ownerEvents: Record<string, any>[];
+  let events: Record<string, any>[];
+  try {
+    owner = loadState(ownerStatePath);
+    ownerEvents = readNdjsonLog(
+      stringValue(owner.event_log_path) ?? logPathForStatePath(ownerStatePath)
+    );
+    const statePath = stringValue(conversation.state_path);
+    if (!statePath) {
+      return undefined;
+    }
+    events = readNdjsonLog(
+      stringValue(conversation.event_log_path) ??
+        logPathForStatePath(statePath)
+    );
+  } catch {
+    return undefined;
+  }
+  const ownerTakeover = isRecord(owner.native_session_takeover)
+    ? owner.native_session_takeover
+    : undefined;
+  const ownerSubmission = terminalBridgeSubmission(owner);
+  const ownerClosedAt = stringValue(owner.closed_at);
+  const ownerClosedAtMs = validTimestampMs(ownerClosedAt);
+  if (
+    owner.conversation_id !== ownerListed.conversation_id ||
+    owner.status !== "closed" ||
+    !ownerClosedAt ||
+    ownerClosedAtMs === undefined ||
+    ownerClosedAtMs < fenceAtMs ||
+    !stringValue(owner.close_reason) ||
+    owner.updated_at !== ownerClosedAt ||
+    ownerTakeover?.terminal_bridge !== true ||
+    stringValue(ownerTakeover.terminal_bridge_message_id) !==
+      uncertainMessageId ||
+    ownerSubmission?.status !== "uncertain" ||
+    stringValue(ownerSubmission.message_id) !== uncertainMessageId ||
+    stringValue(ownerSubmission.session_id) !== sessionIdForConversation(owner) ||
+    stringValue(ownerSubmission.turn_id) !== turnIdForConversation(owner) ||
+    isRecord(ownerTakeover.terminal_bridge_uncertain_dispatch_fence) ||
+    !terminalControlsShareIncarnation(
+      terminalControlForManagedConversation(owner),
+      control
+    )
+  ) {
+    return undefined;
+  }
+  const callbackMessageId = stringValue(callbackMessage.id) as string;
+  const hasCompletionClaim = events.some((event) =>
+    event.event === "terminal_bridge_completion_claimed" &&
+    event.conversation_id === conversation.conversation_id &&
+    event.terminal_bridge_message_id === ownMessageId &&
+    event.callback_message_id === callbackMessageId &&
+    event.completion_fingerprint === completionClaim.completion_fingerprint &&
+    event.completion_id === completionClaim.completion_id &&
+    event.outcome === "success" &&
+    event.ts === claimedAt
+  );
+  const hasCompletionDetected = events.some((event) =>
+    event.event === "terminal_bridge_completion_detected" &&
+    event.conversation_id === conversation.conversation_id &&
+    event.terminal_bridge_message_id === ownMessageId &&
+    event.callback_message_id === callbackMessageId &&
+    event.completion_id === completionClaim.completion_id &&
+    event.completion_outcome === "success" &&
+    validTimestampMs(event.ts) !== undefined &&
+    (validTimestampMs(event.ts) as number) <= fenceAtMs
+  );
+  const hasDeliveredCallback = events.some((event) =>
+    event.event === "callback_delivery_succeeded" &&
+    event.conversation_id === conversation.conversation_id &&
+    event.message_id === callbackMessageId &&
+    event.status === "idle" &&
+    event.ts === deliveredAt
+  );
+  const hasExactFence = events.some((event) =>
+    event.event === "terminal_bridge_stalled_by_uncertain_dispatch" &&
+    event.conversation_id === conversation.conversation_id &&
+    event.uncertain_message_id === uncertainMessageId &&
+    event.ts === fenceObservedAt
+  );
+  const hasExactOwnerClose = ownerEvents.some((event) =>
+    event.event === "conversation_closed" &&
+    event.conversation_id === owner.conversation_id &&
+    event.status === "closed" &&
+    event.ts === ownerClosedAt &&
+    event.reason === owner.close_reason
+  );
+  if (
+    !hasCompletionClaim ||
+    !hasCompletionDetected ||
+    !hasDeliveredCallback ||
+    !hasExactFence ||
+    !hasExactOwnerClose
+  ) {
+    return undefined;
+  }
+  return {
+    uncertainMessageId,
+    ownerConversationId: owner.conversation_id,
+    restoredStatus: "idle"
+  };
+}
+
+function reconcileTerminalBridgeCollateralStalls(
+  storeDir: string,
+  conversationId?: string
+): {
+  checked: number;
+  repaired: number;
+  skipped: number;
+  errors: string[];
+  items: Record<string, unknown>[];
+} {
+  const candidates = listConversations(storeDir).filter((conversation) => {
+    const takeover = isRecord(conversation.native_session_takeover)
+      ? conversation.native_session_takeover
+      : undefined;
+    return (
+      conversationId === undefined ||
+      conversation.conversation_id === conversationId
+    ) &&
+      conversation.status === "stalled" &&
+      isRecord(takeover?.terminal_bridge_uncertain_dispatch_fence);
+  });
+  let repaired = 0;
+  let skipped = 0;
+  const errors: string[] = [];
+  const items: Record<string, unknown>[] = [];
+  for (const listed of candidates) {
+    const statePath = stringValue(listed.state_path);
+    if (!statePath) {
+      skipped += 1;
+      continue;
+    }
+    let releaseStateLock: (() => void) | undefined;
+    try {
+      releaseStateLock = acquireFileLock(`${statePath}.lock`);
+      const current = loadState(statePath);
+      const evidence = exactTerminalBridgeCollateralStallRepairEvidence({
+        conversation: current,
+        storeDir
+      });
+      if (!evidence) {
+        skipped += 1;
+        continue;
+      }
+      const takeover = {
+        ...(current.native_session_takeover as Record<string, any>)
+      };
+      delete takeover.terminal_bridge_uncertain_dispatch_fence;
+      const repairedAt = cliNow().toISOString();
+      takeover.terminal_bridge_collateral_stall_repair = {
+        repaired_at: repairedAt,
+        uncertain_message_id: evidence.uncertainMessageId,
+        uncertain_owner_conversation_id: evidence.ownerConversationId,
+        restored_status: evidence.restoredStatus,
+        evidence:
+          "foreign_uncertain_fence+completion_claim+delivered_callback+closed_owner"
+      };
+      const repairedConversation: Conversation = {
+        ...current,
+        status: evidence.restoredStatus,
+        native_session_takeover: takeover,
+        updated_at: repairedAt
+      };
+      delete repairedConversation.stalled_at;
+      delete repairedConversation.stalled_reason;
+      saveState(statePath, repairedConversation);
+      let eventWarning: string | undefined;
+      try {
+        appendEvent(
+          stringValue(current.event_log_path) ?? logPathForStatePath(statePath),
+          {
+            ts: repairedAt,
+            conversation_id: current.conversation_id,
+            event: "terminal_bridge_collateral_stall_repaired",
+            uncertain_message_id: evidence.uncertainMessageId,
+            uncertain_owner_conversation_id: evidence.ownerConversationId,
+            previous_status: "stalled",
+            restored_status: evidence.restoredStatus,
+            evidence:
+              "foreign_uncertain_fence+completion_claim+delivered_callback+closed_owner"
+          }
+        );
+      } catch (error) {
+        eventWarning = error instanceof Error ? error.message : String(error);
+        runtimeLog("warn", "terminal_bridge_collateral_stall_repair_event_failed", {
+          conversation_id: current.conversation_id,
+          uncertain_message_id: evidence.uncertainMessageId,
+          error: eventWarning
+        });
+      }
+      repaired += 1;
+      items.push({
+        conversation_id: current.conversation_id,
+        status: "repaired",
+        reason: "legacy_terminal_bridge_collateral_stall",
+        uncertain_message_id: evidence.uncertainMessageId,
+        uncertain_owner_conversation_id: evidence.ownerConversationId,
+        restored_status: evidence.restoredStatus,
+        ...(eventWarning ? { event_warning: eventWarning } : {})
+      });
+    } catch (error) {
+      skipped += 1;
+      const reason = error instanceof Error ? error.message : String(error);
+      errors.push(`${listed.conversation_id}: ${reason}`);
+      items.push({
+        conversation_id: listed.conversation_id,
+        status: "error",
+        reason
+      });
+    } finally {
+      releaseStateLock?.();
+    }
+  }
+  return {
+    checked: candidates.length,
+    repaired,
+    skipped,
+    errors,
+    items
+  };
 }
 
 function environmentWithoutGatewayTokens(): NodeJS.ProcessEnv {
@@ -3759,17 +4117,23 @@ async function reconcileStoreForList(storeDir, options) {
     throw error;
   }
 
-  const idle = reconcileIdleConversations(storeDir, options);
   const monitors = await reconcileMonitors(options, {
     includeCallbackRecovery: false,
     reason: "list_reconciliation",
     conversationId: undefined
   });
+  const idle = reconcileIdleConversations(storeDir, options);
   return {
     status: "completed",
     checked: Math.max(idle.checked, monitors.checked),
-    changed: idle.closed + monitors.launched,
+    changed: idle.closed + monitors.launched + monitors.repaired,
     closed: idle.closed,
+    repaired: monitors.repaired,
+    collateral_stalls_checked: monitors.collateral_stalls_checked,
+    collateral_stalls_skipped: monitors.collateral_stalls_skipped,
+    collateral_stall_repairs: monitors.items.filter((item) =>
+      item.status === "repaired"
+    ),
     monitors_launched: monitors.launched,
     monitors_already_running: monitors.already_running,
     skipped: idle.skipped + monitors.skipped,
@@ -4044,16 +4408,10 @@ async function terminalControlledListEntry(
   const codexLifecycleIncarnationAvailable =
     session.agent !== "codex" ||
     Boolean(nativeProcessUuid && nativeProcessBirth);
-  const nativeInspectionHasBlockingTurn = listConversations(
-    storeDirFromOptions(options)
-  ).some((turn) =>
-    isDiscoverableTmuxConversation(turn) &&
-    terminalControlsShareIncarnation(
-      terminalControlForManagedConversation(turn),
-      terminalControl
-    ) &&
-    SESSION_SEND_BLOCKING_STATUSES.has(turn.status)
-  );
+  const terminalHasBlockingTurn = terminalIncarnationBlockingTurns(
+    storeDirFromOptions(options),
+    terminalControl
+  ).length > 0;
   let automatedInputComposerReady = nativeInspectionComposerEmpty(
     session.agent,
     terminalState.screen_excerpt
@@ -4149,7 +4507,7 @@ async function terminalControlledListEntry(
         }
       : {}),
     commands: {
-      send: true,
+      send: !terminalHasBlockingTurn,
       approve: terminalControl.capabilities.includes("terminal_approval") &&
         terminalState.approval_state.approvable === true,
       status: true,
@@ -4158,7 +4516,8 @@ async function terminalControlledListEntry(
       new_thread:
         lifecycleCapability.status === "supported" &&
         lifecycleCapability.newThread === true &&
-        codexLifecycleIncarnationAvailable,
+        codexLifecycleIncarnationAvailable &&
+        !terminalHasBlockingTurn,
       list_resumable_threads:
         lifecycleCapability.status === "supported" &&
         lifecycleCapability.resumeExact === true &&
@@ -4179,7 +4538,7 @@ async function terminalControlledListEntry(
               )
         ) &&
         orphanedDispatch === undefined &&
-        !nativeInspectionHasBlockingTurn
+        !terminalHasBlockingTurn
     }
   };
   const availableActions = availableListActions(entry);
@@ -4475,6 +4834,21 @@ function terminalFirstListProjection({
     const blockingHandoffTurns = conflictingSessionTurns.filter((turn) =>
       SESSION_SEND_BLOCKING_STATUSES.has(turn.status)
     );
+    const terminalBlockingTurns = terminalControl
+      ? terminalIncarnationBlockingTurns(
+          storeDir,
+          terminalControl,
+          allRelated
+        )
+      : [];
+    const externalHandoffSourceSessionIds = new Set(
+      conflictingBoundSessionClaims
+        .filter(({ kind }) => kind === "live_external_thread_change")
+        .map(({ session }) => session.session_id)
+    );
+    const handoffSourceBlockingTurns = terminalBlockingTurns.filter((turn) =>
+      externalHandoffSourceSessionIds.has(sessionIdForConversation(turn))
+    );
     const nativeIdentityObservation = isRecord(
       terminal.native_agent_identity_observation
     )
@@ -4534,6 +4908,7 @@ function terminalFirstListProjection({
       !(isRecord(terminal.approval_state) &&
         terminal.approval_state.blocked === true) &&
       blockingHandoffTurns.length === 0 &&
+      terminalBlockingTurns.length === 0 &&
       !managedSessionHasUnresolvedNativeTransition(
         storeDir,
         soleBindingConflict.session
@@ -4576,6 +4951,7 @@ function terminalFirstListProjection({
       !conflictingSessionTurns.some((turn) =>
         SESSION_SEND_BLOCKING_STATUSES.has(turn.status)
       ) &&
+      terminalBlockingTurns.length === 0 &&
       !managedSessionHasUnresolvedNativeTransition(
         storeDir,
         soleBindingConflict.session
@@ -4607,6 +4983,7 @@ function terminalFirstListProjection({
       !conflictingSessionTurns.some((turn) =>
         SESSION_SEND_BLOCKING_STATUSES.has(turn.status)
       ) &&
+      terminalBlockingTurns.length === 0 &&
       !managedSessionHasUnresolvedNativeTransition(
         storeDir,
         soleBindingConflict.session
@@ -4626,7 +5003,10 @@ function terminalFirstListProjection({
         storeDir,
         soleBindingConflict.session
       ) &&
-      blockingHandoffTurns.length === 1
+      blockingHandoffTurns.length === 1 &&
+      terminalBlockingTurns.every((turn) =>
+        turn.conversation_id === blockingHandoffTurns[0].conversation_id
+      )
         ? blockingHandoffTurns[0]
         : undefined;
     const handoffDecisionToken =
@@ -4669,6 +5049,18 @@ function terminalFirstListProjection({
           }
         }
       : undefined;
+    const blockingHandoffTurnIds = new Set(
+      handoffSourceBlockingTurns.map((turn) => turn.conversation_id)
+    );
+    // An active source Turn may be superseded only through the snapshot-bound
+    // handoff decision above. Never expose the generic Store-only close action
+    // for that Turn, because doing so would bypass expected_handoff_token after
+    // the live native thread or Turn generation changed. `blocking_turns` is
+    // reserved for other same-incarnation blockers such as legacy collateral
+    // stalls; clear those first, refresh, and only then decide the handoff.
+    const terminalRecoveryBlockingTurns = terminalBlockingTurns.filter(
+      (turn) => !blockingHandoffTurnIds.has(turn.conversation_id)
+    );
     const terminalCanAcceptSend =
       ownership.state === "none" && isRecord(sessionAwareRawActions.send);
     if (
@@ -4728,9 +5120,15 @@ function terminalFirstListProjection({
           sessionAwareRawActions
         )
       : undefined;
-    const currentTurn = currentTurnValue && !mutationsAllowed
+    const currentTurnProjection = currentTurnValue && !mutationsAllowed
       ? readOnlyManagedTurn(currentTurnValue)
       : currentTurnValue;
+    const currentTurn = currentTurnProjection
+      ? withoutGenericHandoffSourceClose(
+          currentTurnProjection,
+          blockingHandoffTurnIds
+        )
+      : undefined;
     const sortedDisplayed = [...sessionDisplayedRelated]
       .filter((conversation) =>
         conversation.conversation_id !== currentTurn?.conversation_id
@@ -4744,9 +5142,15 @@ function terminalFirstListProjection({
           terminal
         )
       : undefined;
-    const recentTurn = recentTurnValue && !mutationsAllowed
+    const recentTurnProjection = recentTurnValue && !mutationsAllowed
       ? readOnlyManagedTurn(recentTurnValue)
       : recentTurnValue;
+    const recentTurn = recentTurnProjection
+      ? withoutGenericHandoffSourceClose(
+          recentTurnProjection,
+          blockingHandoffTurnIds
+        )
+      : undefined;
     const historyConversations = includeAll
       ? sortedDisplayed.filter((conversation) =>
           conversation.conversation_id !== recentConversation?.conversation_id
@@ -4759,7 +5163,10 @@ function terminalFirstListProjection({
         terminalCanAcceptSend,
         terminal
       );
-      return mutationsAllowed ? turn : readOnlyManagedTurn(turn);
+      return withoutGenericHandoffSourceClose(
+        mutationsAllowed ? turn : readOnlyManagedTurn(turn),
+        blockingHandoffTurnIds
+      );
     });
     const visibleTurnIds = new Set(
       [currentTurn, recentTurn, ...history]
@@ -4892,7 +5299,22 @@ function terminalFirstListProjection({
             handoff_state: externalHandoffAdoptable
               ? "external_handoff_adoptable"
               : "external_handoff_blocked",
-            ...(automatedInputComposerReady !== true
+            ...(terminalRecoveryBlockingTurns.length > 0
+              ? {
+                  handoff_blocked_reason:
+                    "the terminal has unresolved managed Turn state; use only a listed blocking_turns recovery action"
+                }
+              : handoffDecision
+              ? {
+                  handoff_blocked_reason:
+                    "the source Session has one active Turn; use only the snapshot-bound handoff_decision after explicit confirmation"
+                }
+              : handoffSourceBlockingTurns.length > 0
+              ? {
+                  handoff_blocked_reason:
+                    "the conflicting source Session has unresolved Turn state but no snapshot-bound handoff decision is currently safe; inspect the conflict and refresh"
+                }
+              : automatedInputComposerReady !== true
               ? {
                   handoff_blocked_reason:
                     "the current terminal composer is not an exact empty idle frame"
@@ -4904,6 +5326,22 @@ function terminalFirstListProjection({
         ? { handoff_state: "verified_empty_native_session_adoptable" }
         : {}),
       ...(handoffDecision ? { handoff_decision: handoffDecision } : {}),
+      ...(terminalRecoveryBlockingTurns.length > 0
+        ? {
+            blocking_turns: terminalRecoveryBlockingTurns.map((turn) => ({
+              session_id: sessionIdForConversation(turn),
+              turn_id: turnIdForConversation(turn),
+              status: turn.status,
+              recovery_action: {
+                tool: "agent_knock_knock_close",
+                arguments: {
+                  turn_id: turnIdForConversation(turn)
+                },
+                requires_explicit_user_confirmation: true
+              }
+            }))
+          }
+        : {}),
       managed: management,
       available_actions: availableActions
     };
@@ -5250,6 +5688,40 @@ function terminalControlForManagedConversation(
   );
 }
 
+function terminalIncarnationBlockingTurns(
+  storeDir: string,
+  terminalControl: TerminalControlRef,
+  conversations: Conversation[] = listConversations(storeDir)
+): Conversation[] {
+  return conversations
+    .filter(isDiscoverableTmuxConversation)
+    .filter((turn) =>
+      terminalControlsShareIncarnation(
+        terminalControlForManagedConversation(turn),
+        terminalControl
+      ) &&
+      SESSION_SEND_BLOCKING_STATUSES.has(turn.status)
+    )
+    .sort(compareManagedConversationRecency);
+}
+
+function assertTerminalIncarnationCanStartTurn(
+  storeDir: string,
+  terminalControl: TerminalControlRef
+): void {
+  const blocker = terminalIncarnationBlockingTurns(
+    storeDir,
+    terminalControl
+  )[0];
+  if (!blocker) {
+    return;
+  }
+  throw new Error(
+    `terminal ${terminalControl.target} still has unresolved Turn ` +
+    `${turnIdForConversation(blocker)} (${blocker.status})`
+  );
+}
+
 function compareManagedConversationRecency(
   left: Conversation,
   right: Conversation
@@ -5533,6 +6005,24 @@ function readOnlyManagedTurn(
         ? managedTurn.available_actions
         : {}
     )
+  };
+}
+
+function withoutGenericHandoffSourceClose(
+  managedTurn: Record<string, any>,
+  blockingHandoffTurnIds: ReadonlySet<string>
+): Record<string, any> {
+  const conversationId = stringValue(managedTurn.conversation_id);
+  if (!conversationId || !blockingHandoffTurnIds.has(conversationId)) {
+    return managedTurn;
+  }
+  const availableActions = isRecord(managedTurn.available_actions)
+    ? managedTurn.available_actions
+    : {};
+  const { close: _genericClose, ...safeActions } = availableActions;
+  return {
+    ...managedTurn,
+    available_actions: safeActions
   };
 }
 
@@ -5827,9 +6317,9 @@ function managedListApprovalState(
 
 function listActionContracts() {
   return {
-    version: 9,
+    version: 10,
     instructions: [
-      "Treat terminals[] as the primary resource and use only actions present in available_actions, except the snapshot-bound terminals[].handoff_decision.choices.take_over_current.action. That nested action requires explicit user confirmation; after it succeeds, refresh list before any follow-current send.",
+      "Treat terminals[] as the primary resource and use only actions present in available_actions, except the snapshot-bound terminals[].handoff_decision.choices.take_over_current.action and an exact terminals[].blocking_turns[].recovery_action. Either nested action requires explicit user confirmation; after it succeeds, refresh list before any follow-current send.",
       "An existing managed session's ordinary send targets session_id and creates a new turn. A turn id is never an ordinary send target.",
       "Read-only native-thread listing targets an exact terminal_id. Native-thread new/resume mutations also use the listed expected_binding_token and never create a Turn.",
       "Native inspection is a separate terminal action: use only its closed inspection enum and current exact terminal_id/token; AKK status does not execute a native slash command.",
@@ -5889,6 +6379,14 @@ function listActionContracts() {
           "terminals[].handoff_decision.choices.take_over_current.action",
         requires_explicit_user_confirmation: true,
         after_success: "refresh list before using a follow-current send action"
+      },
+      blocking_turns: {
+        meaning:
+          "terminal-incarnation-wide collateral unresolved managed Turns that suppress send, lifecycle, and native-inspection actions; an active human-handoff source Turn is never listed here and remains governed only by handoff_decision",
+        authoritative_action_path:
+          "terminals[].blocking_turns[].recovery_action",
+        requires_explicit_user_confirmation: true,
+        after_success: "refresh list before using any terminal action"
       }
     },
     actions: {
@@ -7402,14 +7900,9 @@ async function verifyCodexPendingManagedSendStatus({
       "Codex status-card verification requires a visible idle composer"
     );
   }
-  await assertCodexComposerReadyForAutomatedInput({
-    options,
-    terminalControl: terminal.terminalControl
-  });
   const observed = await probeCodexCurrentThread({
     options,
     terminal,
-    initialStatus,
     currentIdentity: logicalIdentity,
     runtimeOverride: runtime
   });
@@ -8325,12 +8818,14 @@ async function observedExternalHandoffIdentity({
   options,
   terminal,
   sourceSession,
-  resolvedIdentity
+  resolvedIdentity,
+  requireSafeTerminal = true
 }: {
   options: Record<string, any>;
   terminal: ResolvedTerminalConversation;
   sourceSession: ManagedSessionState;
   resolvedIdentity?: NativeAgentSessionIdentity;
+  requireSafeTerminal?: boolean;
 }): Promise<{
   identity?: NativeAgentSessionIdentity;
   status: Awaited<ReturnType<TerminalAgentBridge["status"]>>;
@@ -8341,7 +8836,9 @@ async function observedExternalHandoffIdentity({
     terminal.terminalControl,
     { runtime: terminalRuntimeForLiveIdentity({ terminal, physicalOnly: true }) }
   );
-  assertSafeTerminalSend(terminal.agent, status);
+  if (requireSafeTerminal) {
+    assertSafeTerminalSend(terminal.agent, status);
+  }
   if (terminal.agent !== "codex") {
     return { identity: resolvedIdentity, status };
   }
@@ -9080,15 +9577,10 @@ function assertTerminalLifecycleReady({
       `(${terminalStatus.activity_state}: ${terminalStatus.activity_reason})`
     );
   }
-  const blockers = listConversations(storeDirFromOptions(options))
-    .filter(isDiscoverableTmuxConversation)
-    .filter((turn) =>
-      terminalControlsShareIncarnation(
-        terminalControlForManagedConversation(turn),
-        terminal.terminalControl
-      ) &&
-      SESSION_SEND_BLOCKING_STATUSES.has(turn.status)
-    );
+  const blockers = terminalIncarnationBlockingTurns(
+    storeDirFromOptions(options),
+    terminal.terminalControl
+  );
   if (blockers.length > 0) {
     throw new Error(
       `terminal ${terminal.terminalControl.target} still has unresolved Turn ` +
@@ -10065,15 +10557,10 @@ function assertTerminalNativeInspectionReady({
       `(${terminalStatus.activity_state}: ${terminalStatus.activity_reason})`
     );
   }
-  const blocker = listConversations(storeDirFromOptions(options))
-    .filter(isDiscoverableTmuxConversation)
-    .find((turn) =>
-      terminalControlsShareIncarnation(
-        terminalControlForManagedConversation(turn),
-        terminal.terminalControl
-      ) &&
-      SESSION_SEND_BLOCKING_STATUSES.has(turn.status)
-    );
+  const blocker = terminalIncarnationBlockingTurns(
+    storeDirFromOptions(options),
+    terminal.terminalControl
+  )[0];
   if (blocker) {
     throw new Error(
       `terminal ${terminal.terminalControl.target} still has unresolved Turn ` +
@@ -10763,6 +11250,7 @@ async function waitForVerifiedThreadTransition({
   const bridge = createTerminalAgentBridge(options);
   let probeSent = false;
   let postProbeBaselineDigest: string | undefined;
+  let postProbeObservationScrollbackLines: number | undefined;
   let stableIdentity: NativeAgentSessionIdentity | undefined;
   let stableCount = 0;
   const physicalBeforeFence = codexIdentityFence(physicalBeforeIdentity);
@@ -10840,9 +11328,23 @@ async function waitForVerifiedThreadTransition({
       const afterProbe = plan.steps.find((step) =>
         step.kind === "identity_probe_after"
       );
-      if (!afterProbe || afterProbe.effect !== "read_only") {
+      if (
+        !afterProbe ||
+        afterProbe.effect !== "read_only" ||
+        afterProbe.command !== "/status"
+      ) {
         throw new Error(
           "the Codex lifecycle plan has no exact post-transition identity probe"
+        );
+      }
+      const agentVersion = agentVersionForRunningProcess(
+        terminal.agent,
+        terminal.pid,
+        options
+      );
+      if (!agentVersion) {
+        throw new Error(
+          "Codex lifecycle postcondition /status requires the exact running version before terminal input"
         );
       }
       const physicalRuntime = terminalRuntimeForLiveIdentity({
@@ -10852,7 +11354,14 @@ async function waitForVerifiedThreadTransition({
       const status = await bridge.status(
         terminal.agent,
         terminal.terminalControl,
-        { runtime: physicalRuntime }
+        {
+          runtime: physicalRuntime,
+          ...(postProbeObservationScrollbackLines === undefined
+            ? {}
+            : {
+                scrollbackLines: postProbeObservationScrollbackLines
+              })
+        }
       );
       const screenDigest = stringValue(status.screen.digest);
       if (
@@ -10862,13 +11371,14 @@ async function waitForVerifiedThreadTransition({
         screenDigest !== undefined &&
         screenDigest !== initialScreenDigest
       ) {
-        postProbeBaselineDigest = screenDigest;
-        await bridge.send(
-          terminal.agent,
+        const submission = await bridge.submitCodexStatusProbe(
           terminal.terminalControl,
-          afterProbe.command,
+          agentVersion,
           { runtime: physicalRuntime }
         );
+        postProbeBaselineDigest = submission.observationBaselineDigest;
+        postProbeObservationScrollbackLines =
+          submission.observationScrollbackLines;
         probeSent = true;
       } else if (
         status.reachable &&
@@ -11036,14 +11546,12 @@ function assertVerifiedClaudeLifecycleBeforeObservation({
 async function probeCodexCurrentThread({
   options,
   terminal,
-  initialStatus,
   currentIdentity,
   runtimeIdentity,
   runtimeOverride
 }: {
   options: Record<string, any>;
   terminal: ResolvedTerminalConversation;
-  initialStatus: Awaited<ReturnType<TerminalAgentBridge["status"]>>;
   currentIdentity?: NativeAgentSessionIdentity;
   runtimeIdentity?: NativeAgentSessionIdentity;
   runtimeOverride?: TerminalRuntimeIdentity;
@@ -11059,35 +11567,48 @@ async function probeCodexCurrentThread({
           terminal,
           expectedEmptyNativeSession: true
         }));
-  // The plain activity parser intentionally recognizes Codex's composer even
-  // when a footer follows it, so "idle" alone is not authority to press Enter.
-  // Re-read the styled pane immediately before the slash probe and accept only
-  // an empty composer (or Codex's fully dim replace-on-type placeholder).
-  await assertCodexComposerReadyForAutomatedInput({
-    options,
-    terminalControl: terminal.terminalControl
-  });
-  await bridge.send(
+  const agentVersion = agentVersionForRunningProcess(
     terminal.agent,
+    terminal.pid,
+    options
+  );
+  if (!agentVersion) {
+    throw new Error(
+      "Codex /status requires the exact running version before terminal input"
+    );
+  }
+  // Internal status probes use the same closed submission boundary as native
+  // inspection: exact viewport and styled-empty composer proof, Codex's paste
+  // suppression settle, identity revalidation, and exactly one Enter.
+  const submission = await bridge.submitCodexStatusProbe(
     terminal.terminalControl,
-    "/status",
+    agentVersion,
     { runtime: probeRuntime }
   );
+  let lastObservationReason =
+    "no fresh idle Codex /status card was captured after the one Enter dispatch";
+  let sawIncompleteSessionUuid = false;
   for (let attempt = 0; attempt < 50; attempt += 1) {
     const status = await bridge.status(
       terminal.agent,
       terminal.terminalControl,
-      { runtime: probeRuntime }
+      {
+        runtime: probeRuntime,
+        scrollbackLines: submission.observationScrollbackLines
+      }
     );
     if (
       status.reachable &&
-      status.screen.digest !== initialStatus.screen.digest
+      status.screen.digest !== submission.observationBaselineDigest
     ) {
       const observed = terminal.adapter.observeThreadLifecycle?.({
         operation: { kind: "new_thread" },
         phase: "before",
         screen: status.screen.excerpt ?? ""
       });
+      lastObservationReason = observed?.reason ?? lastObservationReason;
+      sawIncompleteSessionUuid ||= observed?.status === "missing" &&
+        /complete Session UUID/iu.test(observed.reason ?? "");
       if (
         observed?.status === "observed" &&
         observed.nativeThreadId &&
@@ -11110,7 +11631,12 @@ async function probeCodexCurrentThread({
     await cliSleep(100);
   }
   throw new Error(
-    "Codex /status did not expose a complete current Session UUID"
+    sawIncompleteSessionUuid
+      ? "Codex /status Enter was dispatched exactly once, but the status card " +
+        "was truncated before the complete current Session UUID; widen or zoom " +
+        "the pane, refresh AKK list, and do not retry the probe automatically"
+      : "Codex /status Enter was dispatched exactly once, but no fresh exact " +
+        `current Session UUID was proven; do not retry automatically: ${lastObservationReason}`
   );
 }
 
@@ -11662,7 +12188,6 @@ async function runNativeThreadTransition(
         const statusIdentity = await probeCodexCurrentThread({
           options,
           terminal,
-          initialStatus: terminalStatus,
           currentIdentity: beforeIdentity,
           runtimeIdentity: snapshot.runtimeIdentity,
           runtimeOverride: beforeRuntime
@@ -12461,22 +12986,28 @@ async function reconcileStoreForStatus(storeDir, options, conversationId) {
     }
     throw error;
   }
+  const monitors = await reconcileMonitors(options, {
+    includeCallbackRecovery: false,
+    reason: "status_reconciliation",
+    conversationId
+  });
   const idle = reconcileIdleConversations(
     storeDir,
     options,
     cliNow(),
     conversationId
   );
-  const monitors = await reconcileMonitors(options, {
-    includeCallbackRecovery: false,
-    reason: "status_reconciliation",
-    conversationId
-  });
   return {
     status: "completed",
     checked: Math.max(idle.checked, monitors.checked),
-    changed: idle.closed + monitors.launched,
+    changed: idle.closed + monitors.launched + monitors.repaired,
     closed: idle.closed,
+    repaired: monitors.repaired,
+    collateral_stalls_checked: monitors.collateral_stalls_checked,
+    collateral_stalls_skipped: monitors.collateral_stalls_skipped,
+    collateral_stall_repairs: monitors.items.filter((item) =>
+      item.status === "repaired"
+    ),
     monitors_launched: monitors.launched,
     monitors_already_running: monitors.already_running,
     skipped: idle.skipped + monitors.skipped,
@@ -13115,6 +13646,10 @@ async function runSend(options) {
       })) {
         return;
       }
+      assertTerminalIncarnationCanStartTurn(
+        rawStoreDir,
+        terminalConversation.terminalControl
+      );
       let claimedSession = soleBoundManagedSessionClaimForTerminal(
         rawStoreDir,
         terminalConversation
@@ -13470,6 +14005,10 @@ async function runSend(options) {
     })) {
       return;
     }
+    assertTerminalIncarnationCanStartTurn(
+      storeDir,
+      resolvedTerminal.terminalControl
+    );
     let currentSession = tryLoadManagedSession(storeDir, sessionId);
     const knownCodexCompanions: CodexAllowedCompanionSet = currentSession
       ? codexAllowedCompanionSetForManagedSession({
@@ -18487,17 +19026,34 @@ async function reconcileMonitors(
   }
 ) {
   const storeDir = storeDirFromOptions(options);
+  const collateralStalls = await withStoreWriterLeaseAsync(
+    storeDir,
+    async () => reconcileTerminalBridgeCollateralStalls(
+      storeDir,
+      conversationId
+    )
+  );
   const conversations = listConversations(storeDir).filter((conversation) =>
     conversationId === undefined || conversation.conversation_id === conversationId
   );
-  const items: Record<string, unknown>[] = [];
+  const items: Record<string, unknown>[] = [...collateralStalls.items];
+  const repairedConversationIds = new Set(
+    collateralStalls.items
+      .filter((item) => item.status === "repaired")
+      .map((item) => stringValue(item.conversation_id))
+      .filter((id): id is string => id !== undefined)
+  );
   let ignored = 0;
   let launched = 0;
   let alreadyRunning = 0;
   let skipped = 0;
-  let errors = 0;
+  let errors = collateralStalls.errors.length;
 
   for (const listedConversation of conversations) {
+    if (repairedConversationIds.has(listedConversation.conversation_id)) {
+      ignored += 1;
+      continue;
+    }
     if (
       !matchesConfiguredWorkspace(
         options.workspace,
@@ -18754,6 +19310,9 @@ async function reconcileMonitors(
     reconciled: true,
     store_dir: storeDir,
     checked: conversations.length,
+    repaired: collateralStalls.repaired,
+    collateral_stalls_checked: collateralStalls.checked,
+    collateral_stalls_skipped: collateralStalls.skipped,
     ignored,
     launched,
     already_running: alreadyRunning,
@@ -19330,7 +19889,7 @@ async function runObservedHandoffClose({
       "a handoff close requires reason superseded_by_human_context_switch"
     );
   }
-  const storeDir = storeDirFromOptions(options);
+  const storeDir = pathsForConversationDir(path.dirname(statePath)).storeDir;
   const sourceSessionId = sessionIdForConversation(initialConversation);
   const initialSource = loadManagedSession(storeDir, sourceSessionId);
   if (!initialSource.binding || initialSource.status !== "bound") {
@@ -19555,93 +20114,224 @@ async function runClose(options) {
     });
     return;
   }
+  if (stringValue(options.reason) === "superseded_by_human_context_switch") {
+    throw new Error(
+      "reason superseded_by_human_context_switch requires the fresh " +
+      "expected_handoff_token advertised by AKK list"
+    );
+  }
   const { statePath, logPath } = loaded;
+  const closeStoreDir = pathsForConversationDir(
+    path.dirname(statePath)
+  ).storeDir;
   const nativeTakeover = isRecord(loaded.conversation.native_session_takeover)
     ? loaded.conversation.native_session_takeover
     : undefined;
   const terminalControl = terminalControlFromTakeover(nativeTakeover);
   const releaseTerminalLock = terminalControl
     ? acquireTerminalBridgeSendLock(
-        storeDirFromOptions(options),
+        closeStoreDir,
         terminalControl,
         { timeoutMs: 30000 }
       )
     : () => {};
-  let releaseStateLock: (() => void) | undefined;
-  try {
-    releaseStateLock = acquireFileLock(`${statePath}.lock`);
-    const conversation = loadState(statePath);
-    const now = cliNow().toISOString();
-    const closeReason = options.reason ?? "closed by request";
-    const handoffDisposition =
-      closeReason === "superseded_by_human_context_switch"
-        ? closeReason
+  const closeWithFreshState = async (): Promise<void> => {
+    const releaseStateLock = acquireFileLock(`${statePath}.lock`);
+    try {
+      const conversation = loadState(statePath);
+      const currentTakeover = isRecord(conversation.native_session_takeover)
+        ? conversation.native_session_takeover
         : undefined;
-    const closed = {
-      ...conversation,
-      status: "closed" as const,
-      closed_at: now,
-      close_reason: closeReason,
-      ...(handoffDisposition
-        ? { disposition: handoffDisposition }
-        : {}),
-      updated_at: now
-    };
-    saveState(statePath, closed);
-    let dispatchLedgerResolved = false;
-    let dispatchLedgerWarning: string | undefined;
-    if (terminalControl) {
-      try {
-        dispatchLedgerResolved = resolveTerminalBridgeDispatchLedger({
-          terminalControl,
-          conversation: closed,
-          expectedMessageId: stringValue(
-            nativeTakeover?.terminal_bridge_message_id
-          ),
-          reason: "conversation explicitly closed by request"
-        });
-      } catch (error) {
-        dispatchLedgerWarning =
-          error instanceof Error ? error.message : String(error);
-        runtimeLog("error", "terminal_dispatch_ledger_resolve_failed", {
-          conversation_id: closed.conversation_id,
-          terminal_target: terminalControl.target,
-          error: dispatchLedgerWarning
+      const currentTerminalControl = terminalControlFromTakeover(
+        currentTakeover
+      );
+      if (
+        terminalControl &&
+        !terminalControlsShareIncarnation(
+          currentTerminalControl,
+          terminalControl
+        )
+      ) {
+        throw new Error(
+          "terminal control changed after the close action was listed; refresh AKK list"
+        );
+      }
+      if (terminalControl && currentTerminalControl) {
+        await assertGenericCloseDoesNotBypassObservedHandoff({
+          options,
+          storeDir: closeStoreDir,
+          conversation,
+          terminalControl: currentTerminalControl
         });
       }
-    }
-    appendEvent(logPath, {
-      ts: now,
-      conversation_id: conversation.conversation_id,
-      event: "conversation_closed",
-      status: "closed",
-      reason: closed.close_reason
-    });
-    runtimeLog("info", "conversation_closed", {
-      conversation_id: conversation.conversation_id,
-      status: "closed",
-      reason: closed.close_reason,
-      state_path: statePath,
-      event_log_path: logPath
-    });
-    printJson({
-      conversation: closed,
-      closed: true,
-      terminal_dispatch_resolved: dispatchLedgerResolved,
-      ...(dispatchLedgerWarning
-        ? {
-            terminal_dispatch_warning:
-              textSummary(dispatchLedgerWarning),
-            do_not_retry: true
-          }
-        : {})
-    });
-  } finally {
-    try {
-      releaseStateLock?.();
+      const now = cliNow().toISOString();
+      const closeReason = options.reason ?? "closed by request";
+      const closed = {
+        ...conversation,
+        status: "closed" as const,
+        closed_at: now,
+        close_reason: closeReason,
+        updated_at: now
+      };
+      saveState(statePath, closed);
+      let dispatchLedgerResolved = false;
+      let dispatchLedgerWarning: string | undefined;
+      if (currentTerminalControl) {
+        try {
+          dispatchLedgerResolved = resolveTerminalBridgeDispatchLedger({
+            terminalControl: currentTerminalControl,
+            conversation: closed,
+            expectedMessageId: stringValue(
+              currentTakeover?.terminal_bridge_message_id
+            ),
+            reason: "conversation explicitly closed by request"
+          });
+        } catch (error) {
+          dispatchLedgerWarning =
+            error instanceof Error ? error.message : String(error);
+          runtimeLog("error", "terminal_dispatch_ledger_resolve_failed", {
+            conversation_id: closed.conversation_id,
+            terminal_target: currentTerminalControl.target,
+            error: dispatchLedgerWarning
+          });
+        }
+      }
+      appendEvent(logPath, {
+        ts: now,
+        conversation_id: conversation.conversation_id,
+        event: "conversation_closed",
+        status: "closed",
+        reason: closed.close_reason
+      });
+      runtimeLog("info", "conversation_closed", {
+        conversation_id: conversation.conversation_id,
+        status: "closed",
+        reason: closed.close_reason,
+        state_path: statePath,
+        event_log_path: logPath
+      });
+      printJson({
+        conversation: closed,
+        closed: true,
+        terminal_dispatch_resolved: dispatchLedgerResolved,
+        ...(dispatchLedgerWarning
+          ? {
+              terminal_dispatch_warning:
+                textSummary(dispatchLedgerWarning),
+              do_not_retry: true
+            }
+          : {})
+      });
     } finally {
-      releaseTerminalLock();
+      releaseStateLock();
     }
+  };
+  try {
+    if (terminalControl) {
+      await withStoreWriterLeaseAsync(
+        closeStoreDir,
+        closeWithFreshState
+      );
+    } else {
+      await closeWithFreshState();
+    }
+  } finally {
+    releaseTerminalLock();
+  }
+}
+
+async function assertGenericCloseDoesNotBypassObservedHandoff({
+  options,
+  storeDir,
+  conversation,
+  terminalControl
+}: {
+  options: Record<string, any>;
+  storeDir: string;
+  conversation: Conversation;
+  terminalControl: TerminalControlRef;
+}): Promise<void> {
+  if (!SESSION_SEND_BLOCKING_STATUSES.has(conversation.status)) {
+    return;
+  }
+  const sourceSession = tryLoadManagedSession(
+    storeDir,
+    sessionIdForConversation(conversation)
+  );
+  if (
+    sourceSession?.status !== "bound" ||
+    !sourceSession.binding ||
+    !terminalControlsShareIncarnation(
+      sourceSession.binding.terminal_control,
+      terminalControl
+    )
+  ) {
+    return;
+  }
+  const takeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const pid = Number(takeover?.terminal_agent_pid);
+  if (!Number.isSafeInteger(pid) || pid <= 1) {
+    return;
+  }
+  const bridge = createTerminalAgentBridge(options);
+  let terminal: ResolvedTerminalConversation;
+  try {
+    terminal = await bridge.resolveStoredTerminal(
+      sourceSession.agent,
+      pid,
+      terminalControl,
+      { pid }
+    );
+  } catch (error) {
+    if (!(error instanceof TerminalControlUnavailableError)) {
+      throw error;
+    }
+    // An unavailable terminal cannot prove a live A -> B handoff. Preserve the
+    // explicit Store-only close path used to retire unavailable Turn history.
+    return;
+  }
+  const companions = sourceSession.agent === "codex"
+    ? codexAllowedCompanionSetForManagedSession({
+        storeDir,
+        session: sourceSession
+      })
+    : { additional: [] };
+  const identityObservation = await observeCurrentNativeAgentSessionIdentity({
+    options,
+    agent: terminal.agent,
+    pid: terminal.pid,
+    cwd: terminal.terminalControl.currentPath,
+    preferredSessionId: companions.primary
+      ? sourceSession.binding.native_thread_id
+      : undefined,
+    allowedCompanionIdentity: companions.primary,
+    allowedAdditionalIdentities: companions.additional
+  });
+  const resolvedIdentity = identityObservation.status === "resolved"
+    ? identityObservation.identity
+    : undefined;
+  const observed = await observedExternalHandoffIdentity({
+    options,
+    terminal,
+    sourceSession,
+    resolvedIdentity,
+    requireSafeTerminal: false
+  });
+  if (
+    managedBindingConflictKindForResolvedTerminal({
+      storeDir,
+      session: sourceSession,
+      terminal,
+      identity: observed.identity
+    }) === "live_external_thread_change"
+  ) {
+    throw new Error(
+      `terminal ${terminalControl.target} changed native thread after the ` +
+      "generic close action was listed; refresh AKK list and use only its " +
+      "fresh snapshot-bound handoff_decision"
+    );
   }
 }
 
@@ -24291,17 +24981,22 @@ async function probeManualCodexLifecycleRecoveryIdentity({
   if (!cleared?.screen.digest) {
     throw new Error("Codex composer did not become empty after recovery clear-line");
   }
-  await assertCodexComposerReadyForAutomatedInput({
-    options,
-    terminalControl: terminal.terminalControl
-  });
-  const baselineDigest = cleared.screen.digest;
-  await bridge.send(
+  const agentVersion = agentVersionForRunningProcess(
     terminal.agent,
+    terminal.pid,
+    options
+  );
+  if (!agentVersion) {
+    throw new Error(
+      "Codex lifecycle recovery /status requires the exact running version before terminal input"
+    );
+  }
+  const submission = await bridge.submitCodexStatusProbe(
     terminal.terminalControl,
-    "/status",
+    agentVersion,
     { runtime: recoveryRuntime }
   );
+  const baselineDigest = submission.observationBaselineDigest;
 
   let stable: NativeAgentSessionIdentity | undefined;
   let stableCount = 0;
@@ -24310,7 +25005,10 @@ async function probeManualCodexLifecycleRecoveryIdentity({
     const status = await bridge.status(
       terminal.agent,
       terminal.terminalControl,
-      { runtime: recoveryRuntime }
+      {
+        runtime: recoveryRuntime,
+        scrollbackLines: submission.observationScrollbackLines
+      }
     );
     if (
       status.reachable &&

@@ -23,7 +23,8 @@ import {
 import {
   enrichActiveProcessesWithTerminalControl,
   TerminalControlInputNotSentError,
-  type TerminalControlProvider
+  type TerminalControlProvider,
+  type TerminalViewport
 } from "./terminal-control-provider.js";
 import {
   hasCanonicalTerminalEndpoint,
@@ -63,6 +64,18 @@ const CODEX_NATIVE_STATUS_POPUP_BY_PROFILE: Readonly<
     "  /statusline  configure which items appear in the status line"
   ]
 };
+// Codex's verified `/status` profiles are exercised against its canonical
+// 80-column status surface. Narrower layouts can truncate the 36-character
+// Session UUID after a dynamically sized label column. Exact provider geometry
+// is required before input; ANSI visible-buffer width is only a conservative
+// fallback diagnostic and never upgrades unknown geometry to safe.
+const CODEX_NATIVE_STATUS_MIN_VIEWPORT_BY_PROFILE: Readonly<
+  Record<string, number>
+> = {
+  "codex-tui-0.146.0": 80,
+  "codex-tui-0.146.1": 80,
+  "codex-tui-0.147.0": 80
+};
 const CLAUDE_NATIVE_STATUS_POPUP_BY_PROFILE: Readonly<
   Record<string, readonly string[]>
 > = {
@@ -96,6 +109,21 @@ export type NativeInspectionSubmissionStage =
   | "text_injected"
   | "enter_uncertain";
 
+/** Machine-readable reason for a closed native-inspection submission failure. */
+export type NativeInspectionSubmissionDiagnostic =
+  | "unsupported_profile"
+  | "capability_unavailable"
+  | "identity_unverified"
+  | "composer_not_ready"
+  | "viewport_too_narrow"
+  | "viewport_unavailable"
+  | "text_delivery_unproven"
+  | "composer_viewport_truncated"
+  | "composer_not_exact"
+  | "composer_drift"
+  | "evidence_unproven"
+  | "enter_uncertain";
+
 /**
  * A fail-closed native-inspection submission result.
  *
@@ -110,11 +138,28 @@ export class NativeInspectionSubmissionError extends Error {
   constructor(
     readonly stage: NativeInspectionSubmissionStage,
     message: string,
-    options: { cause?: unknown } = {}
+    options: {
+      cause?: unknown;
+      diagnostic?: NativeInspectionSubmissionDiagnostic;
+    } = {}
   ) {
     super(message, options);
     this.name = "NativeInspectionSubmissionError";
     this.doNotRetry = stage !== "not_started";
+    this.diagnostic = options.diagnostic;
+  }
+
+  readonly diagnostic?: NativeInspectionSubmissionDiagnostic;
+}
+
+class NativeInspectionDiagnosticError extends Error {
+  constructor(
+    readonly diagnostic: NativeInspectionSubmissionDiagnostic,
+    message: string,
+    options: { cause?: unknown } = {}
+  ) {
+    super(message, options);
+    this.name = "NativeInspectionDiagnosticError";
   }
 }
 
@@ -299,6 +344,20 @@ export interface TerminalNativeInspectionResult {
     readonly TerminalNativeInspectionEvidenceInventoryEntry[];
   materialization: TerminalNativeInspectionMaterializationEvidence;
   enterCount: 1;
+}
+
+export interface TerminalCodexStatusProbeResult
+  extends TerminalNativeInspectionResult {
+  agent: "codex";
+  /** Identity-fenced ANSI capture proving an empty/dim placeholder composer. */
+  preTextScreenDigest: string;
+  /**
+   * Bare SHA-256 of the final pre-Enter 240-line capture. This deliberately
+   * matches `status().screen.digest` when observed with the returned depth.
+   */
+  observationBaselineDigest: string;
+  /** Capture depth required for same-domain post-Enter freshness checks. */
+  observationScrollbackLines: 240;
 }
 
 export interface TerminalNativeInspectionBeforeDismissContext {
@@ -795,6 +854,93 @@ export class TerminalAgentBridge {
     plan: TerminalNativeInspectionPlan,
     options: TerminalNativeInspectionOptions = {}
   ): Promise<TerminalNativeInspectionResult> {
+    return this.submitClosedNativeInspection(
+      agent,
+      terminalControl,
+      plan,
+      options,
+      { requireCodexReadyComposer: agent === "codex" }
+    );
+  }
+
+  /**
+   * Submit Codex's closed, version-profiled `/status` probe.
+   *
+   * Unlike the generic native-inspection entry point, callers provide only
+   * the detected Codex version, never a command or plan. The bridge proves an
+   * exact empty (or fully dim replace-on-type) ANSI composer before injecting
+   * text, then crosses Codex's paste suppression window under the same exact
+   * composer and terminal-identity fences used by native inspection.
+   */
+  async submitCodexStatusProbe(
+    terminalControl: TerminalControlRef,
+    agentVersion: string,
+    options: TerminalNativeInspectionOptions = {}
+  ): Promise<TerminalCodexStatusProbeResult> {
+    const adapter = this.registry.require("codex");
+    let plan: TerminalNativeInspectionPlan;
+    try {
+      const capability = adapter.probeNativeInspection?.(agentVersion);
+      if (
+        capability?.status !== "supported" ||
+        capability.statusInspection !== true
+      ) {
+        throw new NativeInspectionDiagnosticError(
+          "unsupported_profile",
+          capability?.reason ??
+            `Codex ${agentVersion} has no closed /status behavior profile`
+        );
+      }
+      const planned = adapter.planNativeInspection?.(
+        { kind: "status" },
+        capability
+      );
+      if (!planned) {
+        throw new NativeInspectionDiagnosticError(
+          "unsupported_profile",
+          `Codex ${agentVersion} did not produce a closed /status plan`
+        );
+      }
+      plan = planned;
+    } catch (error) {
+      throw nativeInspectionSubmissionError(
+        "not_started",
+        error,
+        "unsupported_profile"
+      );
+    }
+
+    const result = await this.submitClosedNativeInspection(
+      "codex",
+      terminalControl,
+      plan,
+      options,
+      { requireCodexReadyComposer: true }
+    );
+    if (!result.preTextScreenDigest) {
+      throw new Error("Codex /status pre-text composer evidence is missing");
+    }
+    return {
+      ...result,
+      agent: "codex",
+      preTextScreenDigest: result.preTextScreenDigest,
+      observationBaselineDigest:
+        bareDigestFromNativeInspectionScreenFingerprint(
+          result.preEnterScreenDigest
+        ),
+      observationScrollbackLines: CODEX_MULTILINE_SETTLE_SCROLLBACK_LINES
+    };
+  }
+
+  private async submitClosedNativeInspection(
+    agent: ExecutorKind,
+    terminalControl: TerminalControlRef,
+    plan: TerminalNativeInspectionPlan,
+    options: TerminalNativeInspectionOptions,
+    safety: { requireCodexReadyComposer?: boolean } = {}
+  ): Promise<TerminalNativeInspectionResult & {
+    preTextScreenDigest?: string;
+  }> {
     const adapter = this.registry.require(agent);
     try {
       assertClosedStatusInspectionPlan(adapter, terminalControl, plan);
@@ -806,11 +952,18 @@ export class TerminalAgentBridge {
           "stable_resource_resolution",
           "screen_capture",
           "text_delivery",
-          "key_delivery"
+          "key_delivery",
+          ...(safety.requireCodexReadyComposer
+            ? ["ansi_capture" as const]
+            : [])
         ]
       });
     } catch (error) {
-      throw nativeInspectionSubmissionError("not_started", error);
+      throw nativeInspectionSubmissionError(
+        "not_started",
+        error,
+        "capability_unavailable"
+      );
     }
 
     let verifiedForText: TerminalControlRef;
@@ -821,7 +974,31 @@ export class TerminalAgentBridge {
         options.runtime
       );
     } catch (error) {
-      throw nativeInspectionSubmissionError("not_started", error);
+      throw nativeInspectionSubmissionError(
+        "not_started",
+        error,
+        "identity_unverified"
+      );
+    }
+
+    let preTextScreenDigest: string | undefined;
+    if (safety.requireCodexReadyComposer) {
+      try {
+        const ready = await this.captureCodexReadyComposer(
+          adapter,
+          verifiedForText,
+          plan,
+          options.runtime
+        );
+        verifiedForText = ready.terminalControl;
+        preTextScreenDigest = ready.screenDigest;
+      } catch (error) {
+        throw nativeInspectionSubmissionError(
+          "not_started",
+          error,
+          "composer_not_ready"
+        );
+      }
     }
 
     try {
@@ -836,11 +1013,19 @@ export class TerminalAgentBridge {
       );
     } catch (error) {
       if (error instanceof TerminalControlInputNotSentError) {
-        throw nativeInspectionSubmissionError("not_started", error);
+        throw nativeInspectionSubmissionError(
+          "not_started",
+          error,
+          "text_delivery_unproven"
+        );
       }
       // The transport cannot prove whether an untyped failure happened before
       // or after tmux accepted the literal input. Fail closed as injected.
-      throw nativeInspectionSubmissionError("text_injected", error);
+      throw nativeInspectionSubmissionError(
+        "text_injected",
+        error,
+        "text_delivery_unproven"
+      );
     }
 
     let settled: {
@@ -864,6 +1049,20 @@ export class TerminalAgentBridge {
         preEnterScreenDigest: settled.screenDigest,
         materialization: settled.materialization
       });
+      if (safety.requireCodexReadyComposer) {
+        settled = {
+          ...settled,
+          terminalControl: await this.assertFinalCodexStatusViewport(
+            settled.terminalControl,
+            plan,
+            options.runtime
+          )
+        };
+      }
+      // Viewport inspection may await provider I/O and the PTY may receive
+      // human input while that proof is in flight. Keep the exact composer
+      // capture as the final substantive asynchronous evidence before the
+      // single Enter attempt.
       settled = await this.revalidateNativeInspectionComposer(
         adapter,
         settled.terminalControl,
@@ -872,7 +1071,11 @@ export class TerminalAgentBridge {
         options.runtime
       );
     } catch (error) {
-      throw nativeInspectionSubmissionError("text_injected", error);
+      throw nativeInspectionSubmissionError(
+        "text_injected",
+        error,
+        "composer_not_exact"
+      );
     }
 
     try {
@@ -883,7 +1086,11 @@ export class TerminalAgentBridge {
         ["C-m"]
       );
     } catch (error) {
-      throw nativeInspectionSubmissionError("enter_uncertain", error);
+      throw nativeInspectionSubmissionError(
+        "enter_uncertain",
+        error,
+        "enter_uncertain"
+      );
     }
 
     return {
@@ -895,7 +1102,8 @@ export class TerminalAgentBridge {
       preEnterScreenDigest: settled.screenDigest,
       preEnterEvidenceInventory: settled.evidenceInventory,
       materialization: settled.materialization,
-      enterCount: 1
+      enterCount: 1,
+      ...(preTextScreenDigest ? { preTextScreenDigest } : {})
     };
   }
 
@@ -1053,6 +1261,219 @@ export class TerminalAgentBridge {
     }
   }
 
+  private async captureCodexReadyComposer(
+    adapter: TerminalAgentAdapter,
+    terminalControl: TerminalControlRef,
+    plan: TerminalNativeInspectionPlan,
+    runtime?: TerminalRuntimeIdentity
+  ): Promise<{
+    terminalControl: TerminalControlRef;
+    screenDigest: string;
+  }> {
+    if (adapter.agent !== "codex") {
+      throw new NativeInspectionDiagnosticError(
+        "unsupported_profile",
+        "the closed Codex /status probe requires the Codex adapter"
+      );
+    }
+    const minimumViewport =
+      CODEX_NATIVE_STATUS_MIN_VIEWPORT_BY_PROFILE[plan.behaviorProfile];
+    if (minimumViewport === undefined) {
+      throw new NativeInspectionDiagnosticError(
+        "unsupported_profile",
+        `Codex ${plan.behaviorProfile} has no exact /status viewport profile`
+      );
+    }
+
+    const captureReady = async (control: TerminalControlRef) => {
+      const verified = await this.verifyTerminalIdentity(
+        adapter.agent,
+        control,
+        runtime
+      );
+      const endpoint = this.terminalProvider.endpoint(verified);
+      const viewportInspector = this.terminalProvider.inspectViewport;
+      let exactViewport: number | undefined;
+      let viewportUnavailableReason =
+        "terminal provider has no exact viewport inspector";
+      if (viewportInspector) {
+        let viewport: TerminalViewport | undefined;
+        try {
+          viewport = await viewportInspector.call(
+            this.terminalProvider,
+            endpoint
+          );
+        } catch (error) {
+          throw new NativeInspectionDiagnosticError(
+            "viewport_unavailable",
+            `Codex /status viewport inspection failed before terminal input: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+            { cause: error }
+          );
+        }
+        if (viewport) {
+          if (
+            !Number.isSafeInteger(viewport.columns) ||
+            viewport.columns <= 0 ||
+            !Number.isSafeInteger(viewport.rows) ||
+            viewport.rows <= 0
+          ) {
+            throw new NativeInspectionDiagnosticError(
+              "viewport_unavailable",
+              "Codex /status viewport inspector returned invalid geometry"
+            );
+          }
+          exactViewport = viewport.columns;
+        } else {
+          viewportUnavailableReason =
+            "terminal provider could not prove exact viewport geometry";
+        }
+      }
+      const styledScreen = await this.terminalProvider.capture(
+        endpoint,
+        { scrollbackLines: 40, preserveEscapes: true }
+      );
+      const plainScreen = stripTerminalEscapeSequences(styledScreen);
+      const inspection = adapter.inspectScreen({ screen: plainScreen, runtime });
+      assertNativeInspectionComposerSafe(inspection, adapter.displayName);
+      const composer = exactCodexReadyStyledComposerCapture(styledScreen);
+      if (!composer) {
+        throw new NativeInspectionDiagnosticError(
+          "composer_not_ready",
+          "Codex composer contains non-placeholder input or is not at the exact idle prompt"
+        );
+      }
+      const inferredViewport = inferCodexVisibleViewportColumns(styledScreen);
+      const observedViewport = exactViewport ?? inferredViewport;
+      if (
+        (observedViewport !== undefined && observedViewport < minimumViewport) ||
+        hasTruncatedCodexStatusSessionLine(plainScreen)
+      ) {
+        throw new NativeInspectionDiagnosticError(
+          "viewport_too_narrow",
+          `Codex /status requires a proven viewport of at least ` +
+            `${minimumViewport} columns to preserve the complete Session UUID` +
+            `${observedViewport === undefined
+              ? ""
+              : `; observed ${observedViewport}`}; widen or zoom the pane before retrying`
+        );
+      }
+      if (exactViewport === undefined) {
+        throw new NativeInspectionDiagnosticError(
+          "viewport_unavailable",
+          `Codex /status requires exact terminal viewport geometry before input; ` +
+            viewportUnavailableReason +
+            `${inferredViewport === undefined
+              ? ""
+              : ` (ANSI fallback estimated ${inferredViewport} columns)`}`
+        );
+      }
+      const reverified = await this.verifyTerminalIdentity(
+        adapter.agent,
+        verified,
+        runtime
+      );
+      if (!sameTerminalControlIdentity(verified, reverified)) {
+        throw new NativeInspectionDiagnosticError(
+          "identity_unverified",
+          "terminal control identity changed after the Codex pre-text composer capture"
+        );
+      }
+      return {
+        terminalControl: reverified,
+        screenDigest: nativeInspectionScreenFingerprint(styledScreen),
+        composerDigest: composer.digest
+      };
+    };
+
+    const first = await captureReady(terminalControl);
+    const second = await captureReady(first.terminalControl);
+    if (second.composerDigest !== first.composerDigest) {
+      throw new NativeInspectionDiagnosticError(
+        "composer_not_ready",
+        "Codex empty composer changed across its stable pre-text captures"
+      );
+    }
+    return {
+      terminalControl: second.terminalControl,
+      screenDigest: second.screenDigest
+    };
+  }
+
+  private async assertFinalCodexStatusViewport(
+    terminalControl: TerminalControlRef,
+    plan: TerminalNativeInspectionPlan,
+    runtime?: TerminalRuntimeIdentity
+  ): Promise<TerminalControlRef> {
+    const minimumViewport =
+      CODEX_NATIVE_STATUS_MIN_VIEWPORT_BY_PROFILE[plan.behaviorProfile];
+    if (minimumViewport === undefined) {
+      throw new NativeInspectionDiagnosticError(
+        "unsupported_profile",
+        `Codex ${plan.behaviorProfile} has no exact /status viewport profile`
+      );
+    }
+    const verified = await this.verifyTerminalIdentity(
+      "codex",
+      terminalControl,
+      runtime
+    );
+    const viewportInspector = this.terminalProvider.inspectViewport;
+    if (!viewportInspector) {
+      throw new NativeInspectionDiagnosticError(
+        "viewport_unavailable",
+        "Codex /status requires exact terminal viewport geometry immediately before Enter"
+      );
+    }
+    let viewport: TerminalViewport | undefined;
+    try {
+      viewport = await viewportInspector.call(
+        this.terminalProvider,
+        this.terminalProvider.endpoint(verified)
+      );
+    } catch (error) {
+      throw new NativeInspectionDiagnosticError(
+        "viewport_unavailable",
+        `Codex /status viewport inspection failed immediately before Enter: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        { cause: error }
+      );
+    }
+    if (
+      !viewport ||
+      !Number.isSafeInteger(viewport.columns) ||
+      viewport.columns <= 0 ||
+      !Number.isSafeInteger(viewport.rows) ||
+      viewport.rows <= 0
+    ) {
+      throw new NativeInspectionDiagnosticError(
+        "viewport_unavailable",
+        "Codex /status exact terminal viewport became unavailable immediately before Enter"
+      );
+    }
+    if (viewport.columns < minimumViewport) {
+      throw new NativeInspectionDiagnosticError(
+        "viewport_too_narrow",
+        `Codex /status viewport narrowed to ${viewport.columns} columns before Enter; ` +
+          `at least ${minimumViewport} are required to preserve the complete Session UUID`
+      );
+    }
+    const reverified = await this.verifyTerminalIdentity(
+      "codex",
+      verified,
+      runtime
+    );
+    if (!sameTerminalControlIdentity(verified, reverified)) {
+      throw new NativeInspectionDiagnosticError(
+        "identity_unverified",
+        "terminal control identity changed after the final Codex viewport proof"
+      );
+    }
+    return reverified;
+  }
+
   private async settleNativeInspectionComposer(
     adapter: TerminalAgentAdapter,
     terminalControl: TerminalControlRef,
@@ -1071,6 +1492,8 @@ export class TerminalAgentBridge {
     let stableKind: TerminalNativeInspectionMaterializationKind | undefined;
     let stableSince: number | undefined;
     let stableCaptures = 0;
+    let lastMismatchDiagnostic: NativeInspectionSubmissionDiagnostic =
+      "composer_not_exact";
 
     while (this.nowMs() - startedAt <= settleTimeoutMs) {
       const captured = await this.captureInspection(adapter, terminalControl, {
@@ -1116,6 +1539,12 @@ export class TerminalAgentBridge {
           );
         }
       } else {
+        lastMismatchDiagnostic = adapter.agent === "codex"
+          ? codexNativeInspectionComposerMismatchDiagnostic(
+              captured.screen,
+              plan
+            )
+          : "composer_not_exact";
         stableDigest = undefined;
         stableKind = undefined;
         stableSince = undefined;
@@ -1132,8 +1561,11 @@ export class TerminalAgentBridge {
         remaining
       ));
     }
-    throw new Error(
-      `${adapter.displayName} /status composer did not become exact, idle, and stable before the bounded submit deadline`
+    throw new NativeInspectionDiagnosticError(
+      lastMismatchDiagnostic,
+      lastMismatchDiagnostic === "composer_viewport_truncated"
+        ? `${adapter.displayName} /status slash popup was truncated by the viewport; widen or zoom the pane before retrying manually`
+        : `${adapter.displayName} /status composer did not become exact, idle, and stable before the bounded submit deadline`
     );
   }
 
@@ -1165,7 +1597,8 @@ export class TerminalAgentBridge {
       materialized.digest !== expected.digest ||
       materialized.kind !== expected.kind
     ) {
-      throw new Error(
+      throw new NativeInspectionDiagnosticError(
+        "composer_drift",
         `${adapter.displayName} /status composer changed after its stable pre-submit capture`
       );
     }
@@ -1178,9 +1611,10 @@ export class TerminalAgentBridge {
       baseline.status === "ambiguous" ||
       !Array.isArray(baseline.evidenceInventory)
     ) {
-      throw new Error(
+      throw new NativeInspectionDiagnosticError(
+        "evidence_unproven",
         baseline?.reason ??
-        `${adapter.displayName} /status pre-Enter evidence inventory was not proven`
+          `${adapter.displayName} /status pre-Enter evidence inventory was not proven`
       );
     }
     const verifiedImmediatelyBeforeEnter = await this.verifyTerminalIdentity(
@@ -1194,7 +1628,8 @@ export class TerminalAgentBridge {
         verifiedImmediatelyBeforeEnter
       )
     ) {
-      throw new Error(
+      throw new NativeInspectionDiagnosticError(
+        "identity_unverified",
         `terminal control identity changed after the final ${adapter.displayName} /status composer capture`
       );
     }
@@ -2040,8 +2475,14 @@ function assertTerminalMutationCapabilities({
 
 function nativeInspectionSubmissionError(
   stage: NativeInspectionSubmissionStage,
-  error: unknown
+  error: unknown,
+  fallbackDiagnostic?: NativeInspectionSubmissionDiagnostic
 ): NativeInspectionSubmissionError {
+  const diagnostic = error instanceof NativeInspectionSubmissionError
+    ? error.diagnostic
+    : error instanceof NativeInspectionDiagnosticError
+      ? error.diagnostic
+      : fallbackDiagnostic;
   if (error instanceof NativeInspectionSubmissionError) {
     const stageRank: Record<NativeInspectionSubmissionStage, number> = {
       not_started: 0,
@@ -2052,13 +2493,14 @@ function nativeInspectionSubmissionError(
       return error;
     }
     return new NativeInspectionSubmissionError(stage, error.message, {
-      cause: error
+      cause: error,
+      diagnostic
     });
   }
   return new NativeInspectionSubmissionError(
     stage,
     error instanceof Error ? error.message : String(error),
-    { cause: error }
+    { cause: error, diagnostic }
   );
 }
 
@@ -2136,7 +2578,8 @@ function assertNativeInspectionComposerSafe(
     inspection.activity.state === "awaiting_approval" ||
     inspection.activity.state === "working"
   ) {
-    throw new Error(
+    throw new NativeInspectionDiagnosticError(
+      "composer_not_ready",
       `${displayName} became busy or blocked while its /status composer was settling`
     );
   }
@@ -2369,6 +2812,209 @@ function claudeNativeInspectionTrailingIsFooter(
 
 function nativeInspectionScreenFingerprint(screen: string): string {
   return `sha256:${createHash("sha256").update(screen).digest("hex")}`;
+}
+
+function bareDigestFromNativeInspectionScreenFingerprint(
+  fingerprint: string
+): string {
+  const match = /^sha256:([0-9a-f]{64})$/u.exec(fingerprint);
+  if (!match) {
+    throw new Error("native inspection screen fingerprint is malformed");
+  }
+  return match[1];
+}
+
+function stripTerminalEscapeSequences(value: string): string {
+  return value.replace(
+    /\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/gu,
+    ""
+  );
+}
+
+function exactCodexReadyStyledComposerCapture(
+  screen: string
+): { digest: string } | undefined {
+  const lines = screen.replace(/\r\n?/gu, "\n").split("\n");
+  while (
+    lines.length > 0 &&
+    stripTerminalEscapeSequences(lines.at(-1) ?? "").trim().length === 0
+  ) {
+    lines.pop();
+  }
+  const composerLine = [...lines.slice(-12)].reverse().find((line) =>
+    CODEX_COMPOSER_MARKER.test(
+      stripTerminalEscapeSequences(line).trimEnd()
+    )
+  );
+  if (composerLine === undefined) {
+    return undefined;
+  }
+
+  let dim = false;
+  const visible: Array<{ character: string; dim: boolean }> = [];
+  for (let index = 0; index < composerLine.length;) {
+    if (composerLine[index] === "\x1b") {
+      const escape = /^(?:\x1B\[([0-9;]*)m|\x1B\][^\x07]*(?:\x07|\x1B\\))/u
+        .exec(composerLine.slice(index));
+      if (escape) {
+        if (escape[1] !== undefined) {
+          const codes = escape[1] === ""
+            ? [0]
+            : escape[1].split(";").map((value) => Number(value));
+          for (let codeIndex = 0; codeIndex < codes.length; codeIndex += 1) {
+            const code = codes[codeIndex];
+            if (
+              [38, 48, 58].includes(code) &&
+              codes[codeIndex + 1] === 2
+            ) {
+              codeIndex += 4;
+              continue;
+            }
+            if (
+              [38, 48, 58].includes(code) &&
+              codes[codeIndex + 1] === 5
+            ) {
+              codeIndex += 2;
+              continue;
+            }
+            if (code === 0 || code === 22) {
+              dim = false;
+            } else if (code === 2) {
+              dim = true;
+            }
+          }
+        }
+        index += escape[0].length;
+        continue;
+      }
+    }
+    const codePoint = composerLine.codePointAt(index);
+    if (codePoint === undefined) {
+      break;
+    }
+    const character = String.fromCodePoint(codePoint);
+    visible.push({ character, dim });
+    index += character.length;
+  }
+  const promptIndex = visible.findIndex(({ character }) =>
+    character === "›" || character === "»"
+  );
+  if (promptIndex < 0) {
+    return undefined;
+  }
+  const content = visible.slice(promptIndex + 1)
+    .filter(({ character }) => !/^\s$/u.test(character));
+  if (content.length > 0 && !content.every((entry) => entry.dim)) {
+    return undefined;
+  }
+  return {
+    digest: createHash("sha256").update(composerLine).digest("hex")
+  };
+}
+
+/**
+ * Infer a viewport only from fixed-width visible-buffer rows. Trimmed captures
+ * deliberately return undefined: a short content row is not proof of a short
+ * terminal. This keeps the fallback provider-neutral and fail-closed only on
+ * positive geometry evidence.
+ */
+function inferCodexVisibleViewportColumns(screen: string): number | undefined {
+  const rows = screen.replace(/\r\n?/gu, "\n").split("\n")
+    .map(stripTerminalEscapeSequences);
+  const widthOneRows = rows.filter((row) =>
+    /^[\x20-\x7e›»·─━╭╮╰╯│]*$/u.test(row)
+  );
+  const maxWidth = widthOneRows.reduce(
+    (maximum, row) => Math.max(maximum, Array.from(row).length),
+    0
+  );
+  if (maxWidth < 20) {
+    return undefined;
+  }
+  const paddedAtMax = widthOneRows.filter((row) =>
+    row.endsWith(" ") && Array.from(row).length === maxWidth
+  );
+  const composerAtMax = paddedAtMax.some((row) =>
+    CODEX_COMPOSER_MARKER.test(row.trimEnd())
+  );
+  return paddedAtMax.length >= 3 && composerAtMax
+    ? maxWidth
+    : undefined;
+}
+
+function hasTruncatedCodexStatusSessionLine(screen: string): boolean {
+  return screen.replace(/\r\n?/gu, "\n").split("\n").some((line) => {
+    const match = /^\s*│\s*Session:\s*([^│\s]+).*│?\s*$/iu.exec(line);
+    if (!match) {
+      return false;
+    }
+    return !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
+      .test(match[1]);
+  });
+}
+
+function codexNativeInspectionComposerMismatchDiagnostic(
+  screen: string,
+  plan: TerminalNativeInspectionPlan
+): NativeInspectionSubmissionDiagnostic {
+  const expectedRows = CODEX_NATIVE_STATUS_POPUP_BY_PROFILE[
+    plan.behaviorProfile
+  ];
+  if (!expectedRows) {
+    return "composer_not_exact";
+  }
+  const lines = screen.replace(/\r\n?/gu, "\n").split("\n");
+  let composerIndex = -1;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (CODEX_COMPOSER_MARKER.test(lines[index])) {
+      composerIndex = index;
+      break;
+    }
+  }
+  if (
+    composerIndex < 0 ||
+    lines[composerIndex].replace(/^[›»]\s?/u, "").trimEnd() !== plan.command
+  ) {
+    return "composer_not_exact";
+  }
+  const footerIndex = lines.findIndex((line, index) =>
+    index > composerIndex && CODEX_COMPOSER_FOOTER.test(line.trim())
+  );
+  const popupRows = lines.slice(
+    composerIndex + 1,
+    footerIndex < 0 ? lines.length : footerIndex
+  ).filter((line) => line.trim().length > 0);
+  if (popupRows.length === 0) {
+    return "composer_not_exact";
+  }
+
+  const logicalRows: string[] = [];
+  let observedTruncation = false;
+  for (const row of popupRows) {
+    const trimmed = row.trim().replace(/\s+/gu, " ");
+    if (trimmed.startsWith("/")) {
+      logicalRows.push(trimmed);
+    } else if (logicalRows.length > 0) {
+      logicalRows[logicalRows.length - 1] += ` ${trimmed}`;
+      observedTruncation = true;
+    } else {
+      return "composer_not_exact";
+    }
+    observedTruncation ||= trimmed.endsWith("…");
+  }
+  const normalizedExpected = expectedRows.map((row) =>
+    row.trim().replace(/\s+/gu, " ")
+  );
+  const everyKnownPrefix = logicalRows.length <= normalizedExpected.length &&
+    logicalRows.every((row, index) => {
+      const withoutEllipsis = row.endsWith("…")
+        ? row.slice(0, -1).trimEnd()
+        : row;
+      return normalizedExpected[index]?.startsWith(withoutEllipsis) === true;
+    });
+  return observedTruncation && everyKnownPrefix
+    ? "composer_viewport_truncated"
+    : "composer_not_exact";
 }
 
 function exactCodexComposerCapture(

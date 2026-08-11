@@ -9,6 +9,7 @@ import {
   HERDR_EXACT_VERSION,
   HerdrTerminalControlProvider,
   HerdrTransportError,
+  inspectHerdrTtyViewport,
   parseHerdrSessionList,
   readHerdrSocketIdentity,
   requestHerdrUnixSocket,
@@ -17,6 +18,7 @@ import {
   type HerdrRequestOptions,
   type HerdrSessionInfo,
   type HerdrSocketIdentity,
+  type HerdrTtyDeviceIdentity,
   type HerdrWireRequest
 } from "../src/herdr-terminal-control-provider.js";
 import {
@@ -66,6 +68,18 @@ interface HerdrHarness {
   serverVersion: string;
   serverProtocol: number;
   socketIdentity: HerdrSocketIdentity;
+  viewportColumns: number;
+  viewportRows: number;
+  includeViewportLayout: boolean;
+  viewportLayoutOverrides?: Record<string, unknown>;
+  viewportLayoutPaneFocused?: unknown;
+  ttyViewport?: { columns: number; rows: number };
+  ttyViewportCalls: number[];
+  ttyViewportError?: Error;
+  viewportSnapshotPane?: Partial<Pick<
+    PaneState,
+    "paneId" | "terminalId" | "workspaceId" | "tabId"
+  >>;
 }
 
 function sessionListJson(sessions: readonly HerdrSessionInfo[] = [SESSION]): string {
@@ -82,6 +96,29 @@ function sessionListJson(sessions: readonly HerdrSessionInfo[] = [SESSION]): str
 
 function commandSuccess(stdout: string): CommandResult {
   return { status: 0, stdout, stderr: "" };
+}
+
+function ttyDeviceIdentity(
+  overrides: Partial<HerdrTtyDeviceIdentity> = {}
+): HerdrTtyDeviceIdentity {
+  return {
+    device: "13",
+    inode: "37",
+    rdev: "42",
+    ctimeNs: "9000",
+    ownerUid: 501,
+    symbolicLink: false,
+    characterDevice: true,
+    ...overrides
+  };
+}
+
+function psTtyEvidence(
+  tty: string,
+  processBirth = "Mon Aug 11 12:34:56 2026",
+  pid = 7_001
+): string {
+  return `${pid} ${tty} ${processBirth}\n`;
 }
 
 function response(
@@ -106,6 +143,15 @@ function createHarness(): HerdrHarness {
     serverVersion: HERDR_EXACT_VERSION,
     serverProtocol: HERDR_EXACT_PROTOCOL,
     socketIdentity: SOCKET_IDENTITY,
+    viewportColumns: 132,
+    viewportRows: 41,
+    includeViewportLayout: true,
+    viewportLayoutOverrides: undefined,
+    viewportLayoutPaneFocused: true,
+    ttyViewport: { columns: 80, rows: 40 },
+    ttyViewportCalls: [],
+    ttyViewportError: undefined,
+    viewportSnapshotPane: undefined,
     provider: undefined as unknown as HerdrTerminalControlProvider,
     inputFailure: undefined,
     inputResult: undefined
@@ -129,24 +175,50 @@ function createHarness(): HerdrHarness {
             detached_server_daemon: true
           }
         });
-      case "session.snapshot":
+      case "session.snapshot": {
+        const snapshotOrdinal = harness.requests.filter((entry) =>
+          entry.request.method === "session.snapshot").length;
+        const snapshotPane = snapshotOrdinal >= 3 &&
+          harness.viewportSnapshotPane
+          ? { ...pane, ...harness.viewportSnapshotPane }
+          : pane;
         return response(wireRequest, {
           type: "session_snapshot",
           snapshot: {
             version: harness.serverVersion,
             protocol: harness.serverProtocol,
             panes: [{
-              pane_id: pane.paneId,
-              terminal_id: pane.terminalId,
-              workspace_id: pane.workspaceId,
-              tab_id: pane.tabId,
-              cwd: pane.cwd,
+              pane_id: snapshotPane.paneId,
+              terminal_id: snapshotPane.terminalId,
+              workspace_id: snapshotPane.workspaceId,
+              tab_id: snapshotPane.tabId,
+              cwd: snapshotPane.cwd,
               focused: true,
               agent_status: null,
               revision: 0
-            }]
+            }],
+            ...(harness.includeViewportLayout ? {
+              layouts: [{
+                workspace_id: pane.workspaceId,
+                tab_id: pane.tabId,
+                zoomed: false,
+                ...harness.viewportLayoutOverrides,
+                panes: [{
+                  pane_id: pane.paneId,
+                  focused: harness.viewportLayoutPaneFocused,
+                  rect: {
+                    x: 0,
+                    y: 0,
+                    width: harness.viewportColumns,
+                    height: harness.viewportRows
+                  }
+                }],
+                splits: []
+              }]
+            } : {})
           }
         });
+      }
       case "pane.process_info":
         return response(wireRequest, {
           type: "pane_process_info",
@@ -202,7 +274,14 @@ function createHarness(): HerdrHarness {
       return commandSuccess(sessionListJson());
     },
     request,
-    statSocket: () => harness.socketIdentity
+    statSocket: () => harness.socketIdentity,
+    inspectTtyViewport: async (shellPid) => {
+      harness.ttyViewportCalls.push(shellPid);
+      if (harness.ttyViewportError) {
+        throw harness.ttyViewportError;
+      }
+      return harness.ttyViewport;
+    }
   });
   return harness;
 }
@@ -424,6 +503,453 @@ test("Herdr capture resolves freshly and selects a style-preserving source", asy
     lines: 1_000,
     format: "ansi"
   });
+});
+
+test("Herdr viewport inspection uses a fresh same-incarnation snapshot", async () => {
+  const harness = createHarness();
+  const [terminal] = await harness.provider.listTerminals();
+  assert.ok(terminal);
+  harness.requests.length = 0;
+
+  assert.deepEqual(await harness.provider.inspectViewport(terminal), {
+    columns: 80,
+    rows: 40
+  });
+  assert.deepEqual(harness.ttyViewportCalls, [7_001]);
+  const snapshots = harness.requests.filter((entry) =>
+    entry.request.method === "session.snapshot");
+  assert.equal(snapshots.length, 5);
+  assert.deepEqual(
+    snapshots.at(-1)?.options?.expectedSocketIdentity,
+    SOCKET_IDENTITY
+  );
+});
+
+test("Herdr viewport inspection prefers exact PTY size over zoomed layout area", async () => {
+  const harness = createHarness();
+  const [terminal] = await harness.provider.listTerminals();
+  assert.ok(terminal);
+  harness.requests.length = 0;
+  harness.viewportColumns = 54;
+  harness.viewportRows = 40;
+  harness.viewportLayoutOverrides = {
+    zoomed: true,
+    focused_pane_id: "w1:p1",
+    area: { x: 0, y: 0, width: 108, height: 40 }
+  };
+
+  assert.deepEqual(await harness.provider.inspectViewport(terminal), {
+    columns: 80,
+    rows: 40
+  });
+  assert.deepEqual(harness.ttyViewportCalls, [7_001]);
+});
+
+test("Herdr viewport inspection returns unknown when another pane is zoomed", async () => {
+  const harness = createHarness();
+  const [terminal] = await harness.provider.listTerminals();
+  assert.ok(terminal);
+  harness.requests.length = 0;
+  harness.viewportColumns = 54;
+  harness.viewportRows = 40;
+  harness.viewportLayoutPaneFocused = false;
+  harness.viewportLayoutOverrides = {
+    zoomed: true,
+    focused_pane_id: "w1:p2",
+    area: { x: 0, y: 0, width: 108, height: 40 }
+  };
+
+  assert.equal(await harness.provider.inspectViewport(terminal), undefined);
+  assert.deepEqual(harness.ttyViewportCalls, []);
+});
+
+test("Herdr viewport inspection never falls back to layout geometry", async () => {
+  for (const area of [undefined, "108x40", { width: 0, height: 40 }]) {
+    const harness = createHarness();
+    const [terminal] = await harness.provider.listTerminals();
+    assert.ok(terminal);
+    harness.requests.length = 0;
+    harness.viewportLayoutOverrides = {
+      zoomed: true,
+      focused_pane_id: "w1:p1",
+      ...(area === undefined ? {} : { area })
+    };
+
+    assert.deepEqual(await harness.provider.inspectViewport(terminal), {
+      columns: 80,
+      rows: 40
+    });
+  }
+});
+
+test("Herdr zoomed viewport rejects missing or inconsistent focus metadata", async () => {
+  const cases: Array<{
+    overrides: Record<string, unknown>;
+    paneFocused: unknown;
+    error: RegExp;
+  }> = [
+    {
+      overrides: {
+        zoomed: true,
+        area: { width: 108, height: 40 }
+      },
+      paneFocused: true,
+      error: /requires an exact focused pane identity/u
+    },
+    {
+      overrides: {
+        zoomed: true,
+        focused_pane_id: "w1:p1",
+        area: { width: 108, height: 40 }
+      },
+      paneFocused: false,
+      error: /focus metadata is inconsistent or missing/u
+    },
+    {
+      overrides: {
+        zoomed: true,
+        focused_pane_id: "w1:p2",
+        area: { width: 108, height: 40 }
+      },
+      paneFocused: true,
+      error: /focus metadata is inconsistent/u
+    },
+    {
+      overrides: {
+        zoomed: true,
+        focused_pane_id: "w1:p1",
+        area: { width: 108, height: 40 }
+      },
+      paneFocused: "true",
+      error: /layout pane focus is invalid/u
+    }
+  ];
+
+  for (const scenario of cases) {
+    const harness = createHarness();
+    const [terminal] = await harness.provider.listTerminals();
+    assert.ok(terminal);
+    harness.requests.length = 0;
+    harness.viewportLayoutOverrides = scenario.overrides;
+    harness.viewportLayoutPaneFocused = scenario.paneFocused;
+
+    await assert.rejects(
+      harness.provider.inspectViewport(terminal),
+      scenario.error
+    );
+    assert.deepEqual(harness.ttyViewportCalls, []);
+  }
+});
+
+test("Herdr viewport inspection fails closed for malformed visibility metadata", async () => {
+  const cases: Array<{
+    overrides: Record<string, unknown>;
+    error: RegExp;
+  }> = [
+    {
+      overrides: { zoomed: "true" },
+      error: /zoom state is invalid/u
+    },
+    {
+      overrides: { zoomed: true, focused_pane_id: {} },
+      error: /focused pane identity is invalid/u
+    }
+  ];
+
+  for (const scenario of cases) {
+    const harness = createHarness();
+    const [terminal] = await harness.provider.listTerminals();
+    assert.ok(terminal);
+    harness.requests.length = 0;
+    harness.viewportLayoutOverrides = scenario.overrides;
+
+    await assert.rejects(
+      harness.provider.inspectViewport(terminal),
+      scenario.error
+    );
+  }
+});
+
+test("Herdr viewport inspection needs no layout area for a visible exact PTY", async () => {
+  const harness = createHarness();
+  const [terminal] = await harness.provider.listTerminals();
+  assert.ok(terminal);
+  harness.requests.length = 0;
+  harness.viewportLayoutOverrides = {
+    zoomed: true,
+    focused_pane_id: "w1:p1"
+  };
+
+  assert.deepEqual(await harness.provider.inspectViewport(terminal), {
+    columns: 80,
+    rows: 40
+  });
+});
+
+test("Herdr viewport inspection fails closed when exact PTY size is unavailable or invalid", async () => {
+  const unavailable = createHarness();
+  const [unavailableTerminal] = await unavailable.provider.listTerminals();
+  assert.ok(unavailableTerminal);
+  unavailable.requests.length = 0;
+  unavailable.ttyViewport = undefined;
+  assert.equal(
+    await unavailable.provider.inspectViewport(unavailableTerminal),
+    undefined
+  );
+
+  const invalid = createHarness();
+  const [invalidTerminal] = await invalid.provider.listTerminals();
+  assert.ok(invalidTerminal);
+  invalid.requests.length = 0;
+  invalid.ttyViewport = { columns: 0, rows: 40 };
+  await assert.rejects(
+    invalid.provider.inspectViewport(invalidTerminal),
+    /invalid exact PTY viewport dimensions/u
+  );
+
+  const overflow = createHarness();
+  const [overflowTerminal] = await overflow.provider.listTerminals();
+  assert.ok(overflowTerminal);
+  overflow.requests.length = 0;
+  overflow.ttyViewport = { columns: 65_536, rows: 40 };
+  await assert.rejects(
+    overflow.provider.inspectViewport(overflowTerminal),
+    /invalid exact PTY viewport dimensions/u
+  );
+});
+
+test("exact Herdr PTY inspection uses absolute macOS and Linux command variants", () => {
+  for (const scenario of [
+    {
+      platform: "darwin" as const,
+      tty: "ttys007",
+      ttyPath: "/dev/ttys007",
+      sttyFlag: "-f"
+    },
+    {
+      platform: "linux" as const,
+      tty: "pts/4",
+      ttyPath: "/dev/pts/4",
+      sttyFlag: "-F"
+    }
+  ]) {
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const statPaths: string[] = [];
+    const viewport = inspectHerdrTtyViewport(7_001, {
+      platform: scenario.platform,
+      currentUid: 501,
+      statTty(ttyPath) {
+        statPaths.push(ttyPath);
+        return ttyDeviceIdentity();
+      },
+      runCommand(command, args) {
+        calls.push({ command, args });
+        return command.endsWith("/stty")
+          ? commandSuccess("40 80\n")
+          : commandSuccess(psTtyEvidence(scenario.tty));
+      }
+    });
+
+    assert.deepEqual(viewport, { columns: 80, rows: 40 });
+    assert.deepEqual(calls, [
+      {
+        command: "/bin/ps",
+        args: ["-p", "7001", "-o", "pid=,tty=,lstart="]
+      },
+      {
+        command: "/bin/stty",
+        args: [scenario.sttyFlag, scenario.ttyPath, "size"]
+      },
+      {
+        command: "/bin/ps",
+        args: ["-p", "7001", "-o", "pid=,tty=,lstart="]
+      }
+    ]);
+    assert.deepEqual(statPaths, [scenario.ttyPath, scenario.ttyPath]);
+  }
+});
+
+test("exact Herdr PTY inspection rejects TTY, birth, and device incarnation drift", () => {
+  let psCount = 0;
+  assert.throws(
+    () => inspectHerdrTtyViewport(7_001, {
+      platform: "darwin",
+      currentUid: 501,
+      statTty: () => ttyDeviceIdentity(),
+      runCommand(command) {
+        if (command.endsWith("/stty")) {
+          return commandSuccess("40 80\n");
+        }
+        psCount += 1;
+        return commandSuccess(psTtyEvidence(
+          psCount === 1 ? "ttys007" : "ttys008"
+        ));
+      }
+    }),
+    /TTY process identity changed during viewport inspection/u
+  );
+
+  psCount = 0;
+  assert.throws(
+    () => inspectHerdrTtyViewport(7_001, {
+      platform: "darwin",
+      currentUid: 501,
+      statTty: () => ttyDeviceIdentity(),
+      runCommand(command) {
+        if (command.endsWith("/stty")) {
+          return commandSuccess("40 80\n");
+        }
+        psCount += 1;
+        return commandSuccess(psTtyEvidence(
+          "ttys007",
+          psCount === 1
+            ? "Mon Aug 11 12:34:56 2026"
+            : "Mon Aug 11 12:35:01 2026"
+        ));
+      }
+    }),
+    /TTY process identity changed during viewport inspection/u
+  );
+
+  let statCount = 0;
+  assert.throws(
+    () => inspectHerdrTtyViewport(7_001, {
+      platform: "linux",
+      currentUid: 501,
+      statTty() {
+        statCount += 1;
+        return ttyDeviceIdentity({ rdev: String(41 + statCount) });
+      },
+      runCommand(command) {
+        return command.endsWith("/stty")
+          ? commandSuccess("40 80\n")
+          : commandSuccess(psTtyEvidence("pts/4"));
+      }
+    }),
+    /TTY device .* changed during viewport inspection/u
+  );
+});
+
+test("exact Herdr PTY inspection rejects unsafe devices and malformed sizes", () => {
+  assert.throws(
+    () => inspectHerdrTtyViewport(7_001, {
+      platform: "linux",
+      currentUid: 501,
+      statTty: () => ttyDeviceIdentity(),
+      runCommand: () => commandSuccess(psTtyEvidence("../../etc/passwd"))
+    }),
+    /unsafe TTY path/u
+  );
+
+  for (const identity of [
+    ttyDeviceIdentity({ symbolicLink: true }),
+    ttyDeviceIdentity({ characterDevice: false }),
+    ttyDeviceIdentity({ ownerUid: 502 })
+  ]) {
+    assert.throws(
+      () => inspectHerdrTtyViewport(7_001, {
+        platform: "darwin",
+        currentUid: 501,
+        statTty: () => identity,
+        runCommand: () => commandSuccess(psTtyEvidence("ttys007"))
+      }),
+      /symbolic link|character device|owned by uid/u
+    );
+  }
+
+  assert.throws(
+    () => inspectHerdrTtyViewport(7_001, {
+      platform: "darwin",
+      currentUid: 501,
+      statTty: () => ttyDeviceIdentity(),
+      runCommand(command) {
+        return command.endsWith("/stty")
+          ? commandSuccess("80x40\n")
+          : commandSuccess(psTtyEvidence("ttys007"));
+      }
+    }),
+    /malformed PTY viewport dimensions/u
+  );
+
+  assert.throws(
+    () => inspectHerdrTtyViewport(7_001, {
+      platform: "linux",
+      currentUid: 501,
+      statTty: () => ttyDeviceIdentity(),
+      runCommand(command) {
+        return command.endsWith("/stty")
+          ? commandSuccess("40 65536\n")
+          : commandSuccess(psTtyEvidence("pts/4"));
+      }
+    }),
+    /malformed PTY viewport dimensions/u
+  );
+
+  assert.throws(
+    () => inspectHerdrTtyViewport(7_001, {
+      platform: "linux",
+      currentUid: 501,
+      statTty: () => ttyDeviceIdentity(),
+      runCommand: () => commandSuccess(psTtyEvidence(
+        `pts/${"1".repeat(1_025)}`
+      ))
+    }),
+    /overlong TTY path/u
+  );
+});
+
+test("exact Herdr PTY inspection returns unknown when TTY authority is unavailable", () => {
+  assert.equal(
+    inspectHerdrTtyViewport(7_001, {
+      platform: "linux",
+      currentUid: 501,
+      statTty: () => ttyDeviceIdentity(),
+      runCommand: () => commandSuccess(psTtyEvidence("??"))
+    }),
+    undefined
+  );
+  assert.equal(
+    inspectHerdrTtyViewport(7_001, {
+      platform: "linux",
+      currentUid: 501,
+      statTty: () => ttyDeviceIdentity(),
+      runCommand(command) {
+        return command.endsWith("/stty")
+          ? { status: 1, stdout: "", stderr: "not attached" }
+          : commandSuccess(psTtyEvidence("pts/4"));
+      }
+    }),
+    undefined
+  );
+});
+
+test("Herdr viewport inspection rejects fresh pane identity and route drift", async () => {
+  for (const viewportSnapshotPane of [
+    { terminalId: "terminal-replaced" },
+    { workspaceId: "w2" },
+    { tabId: "w1:t2" }
+  ]) {
+    const harness = createHarness();
+    const [terminal] = await harness.provider.listTerminals();
+    assert.ok(terminal);
+    harness.requests.length = 0;
+    harness.viewportSnapshotPane = viewportSnapshotPane;
+
+    await assert.rejects(
+      harness.provider.inspectViewport(terminal),
+      /identity or route changed during viewport inspection/u
+    );
+  }
+});
+
+test("Herdr viewport inspection returns unknown when layout geometry is missing", async () => {
+  const harness = createHarness();
+  const [terminal] = await harness.provider.listTerminals();
+  assert.ok(terminal);
+  harness.requests.length = 0;
+  harness.includeViewportLayout = false;
+
+  assert.equal(await harness.provider.inspectViewport(terminal), undefined);
 });
 
 test("Herdr sends literal text and translated keys in separate single requests", async () => {

@@ -1965,7 +1965,7 @@ test("rejected managed Claude send leaves callback state and event log unchanged
     assert.notEqual(rejected.status, 0);
     assert.match(
       rejected.stderr,
-      /already has active turn|verified idle terminal|permission dialog|still owned by active AKK conversation/u
+      /terminal .* still has unresolved Turn .* \(waiting_for_openclaw\)/u
     );
 
     const afterStateRaw = fs.readFileSync(conversation.state_path, "utf8");

@@ -11,7 +11,9 @@ import {
   discoverTmuxSocketPaths,
   enrichActiveProcessesWithTerminalControl,
   parseTmuxListPanes,
-  type TerminalControlProvider
+  type TerminalControlProvider,
+  type TerminalPane,
+  type TerminalViewport
 } from "../src/terminal-control-provider.js";
 import {
   createTerminalEndpointRef,
@@ -147,6 +149,23 @@ class FailingDiscoveryTerminalControlProvider extends RecordingTerminalControlPr
       throw new Error(`${this.kind} discovery failed`);
     }
     return [this.terminal];
+  }
+}
+
+class ViewportRecordingTerminalControlProvider extends RecordingTerminalControlProvider {
+  constructor(
+    kind: string,
+    private readonly viewport: TerminalViewport | undefined
+  ) {
+    super(kind, ["screen_status"], ["screen_capture"]);
+  }
+
+  async inspectViewport(
+    terminal: TerminalEndpointRef
+  ): Promise<TerminalViewport | undefined> {
+    this.calls.push("inspectViewport");
+    assert.equal(terminal.identity.providerKind, this.kind);
+    return this.viewport;
   }
 }
 
@@ -686,6 +705,28 @@ test("terminal provider registry isolates discovery failures by provider", async
   );
 });
 
+test("terminal provider registry routes optional viewport inspection exactly", async () => {
+  const alpha = new ViewportRecordingTerminalControlProvider(
+    "alpha",
+    { columns: 132, rows: 41 }
+  );
+  const beta = new RecordingTerminalControlProvider(
+    "beta",
+    ["screen_status"],
+    ["screen_capture"]
+  );
+  const provider = createTerminalControlProviderRegistry([alpha, beta])
+    .asProvider();
+
+  assert.deepEqual(await provider.inspectViewport?.(alpha.terminal), {
+    columns: 132,
+    rows: 41
+  });
+  assert.equal(await provider.inspectViewport?.(beta.terminal), undefined);
+  assert.deepEqual(alpha.calls, ["inspectViewport"]);
+  assert.deepEqual(beta.calls, []);
+});
+
 test("terminal enrichment fails closed when providers contain the same process", async () => {
   const process: ActiveCodexProcess = {
     agent: "codex",
@@ -902,6 +943,170 @@ test("tmux provider uses canonical socket and pane identity for capture and send
     ["-S", canonicalSocketPath, "send-keys", "-t", "%42", "-l", "hello"],
     ["-S", canonicalSocketPath, "send-keys", "-t", "%42", "Enter"]
   ]);
+});
+
+test("tmux viewport inspection freshly resolves a stable pane id", async () => {
+  const calls: string[][] = [];
+  const canonicalSocketPath = "/private/tmp/tmux-501/canonical";
+  const terminal = await terminalEndpoint(
+    "codex-work:0.0",
+    canonicalSocketPath,
+    { paneId: "%42" }
+  );
+  const provider = new TmuxTerminalControlProvider({
+    socketPaths: [],
+    commands: ["tmux"],
+    runCommand(_command, args) {
+      calls.push(args);
+      if (args.includes("list-panes")) {
+        return {
+          status: 0,
+          stdout:
+            `codex-work\t0\t0\t36017\tnode\t/repo\t${canonicalSocketPath}\t%42\n`,
+          stderr: ""
+        };
+      }
+      if (args.includes("display-message")) {
+        return { status: 0, stdout: "132\t41\n", stderr: "" };
+      }
+      throw new Error(`unexpected tmux command ${args.join(" ")}`);
+    }
+  });
+
+  assert.deepEqual(await provider.inspectViewport(terminal), {
+    columns: 132,
+    rows: 41
+  });
+  assert.deepEqual(calls, [
+    [
+      "list-panes",
+      "-a",
+      "-F",
+      "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}\t#{socket_path}\t#{pane_id}"
+    ],
+    [
+      "-S",
+      canonicalSocketPath,
+      "display-message",
+      "-p",
+      "-t",
+      "%42",
+      "#{pane_width}\t#{pane_height}"
+    ]
+  ]);
+});
+
+test("tmux viewport inspection rejects process-anchor drift before display", async () => {
+  const canonicalSocketPath = "/private/tmp/tmux-501/canonical";
+  const terminal = await terminalEndpoint(
+    "codex-work:0.0",
+    canonicalSocketPath,
+    { paneId: "%42" }
+  );
+  let displayAttempts = 0;
+  const provider = new TmuxTerminalControlProvider({
+    socketPaths: [],
+    commands: ["tmux"],
+    runCommand(_command, args) {
+      if (args.includes("display-message")) {
+        displayAttempts += 1;
+        return { status: 0, stdout: "132\t41\n", stderr: "" };
+      }
+      return {
+        status: 0,
+        stdout:
+          `codex-work\t0\t0\t36018\tnode\t/repo\t${canonicalSocketPath}\t%42\n`,
+        stderr: ""
+      };
+    }
+  });
+
+  await assert.rejects(
+    provider.inspectViewport(terminal),
+    /process anchor changed before viewport inspection/u
+  );
+  assert.equal(displayAttempts, 0);
+});
+
+test("tmux viewport inspection returns unknown for missing geometry", async () => {
+  const canonicalSocketPath = "/private/tmp/tmux-501/canonical";
+  const terminal = await terminalEndpoint(
+    "codex-work:0.0",
+    canonicalSocketPath,
+    { paneId: "%42" }
+  );
+  const provider = new TmuxTerminalControlProvider({
+    socketPaths: [],
+    commands: ["tmux"],
+    runCommand(_command, args) {
+      return args.includes("display-message")
+        ? { status: 0, stdout: "", stderr: "" }
+        : {
+            status: 0,
+            stdout:
+              `codex-work\t0\t0\t36017\tnode\t/repo\t${canonicalSocketPath}\t%42\n`,
+            stderr: ""
+          };
+    }
+  });
+
+  assert.equal(await provider.inspectViewport(terminal), undefined);
+});
+
+test("tmux viewport inspection never falls back to a mutable legacy selector", async () => {
+  const endpointProvider = new StaticTerminalControlProvider({
+    panes: [{
+      kind: "tmux",
+      target: "legacy-work:0.0",
+      session: "legacy-work",
+      window: 0,
+      pane: 0,
+      panePid: 36_017
+    }]
+  });
+  const [terminal] = await endpointProvider.listTerminals();
+  let displayAttempts = 0;
+  const provider = new TmuxTerminalControlProvider({
+    socketPaths: [],
+    commands: ["tmux"],
+    runCommand(_command, args) {
+      if (args.includes("display-message")) {
+        displayAttempts += 1;
+      }
+      return {
+        status: 0,
+        stdout: args.includes("list-panes")
+          ? "legacy-work\t0\t0\t36017\tnode\t/repo\n"
+          : "132\t41\n",
+        stderr: ""
+      };
+    }
+  });
+
+  assert.equal(await provider.inspectViewport(terminal), undefined);
+  assert.equal(displayAttempts, 0);
+});
+
+test("static viewport inspection requires explicit positive geometry", async () => {
+  const pane: TerminalPane = {
+    kind: "tmux",
+    target: "codex-work:0.0",
+    session: "codex-work",
+    window: 0,
+    pane: 0,
+    panePid: 100,
+    columns: 80,
+    rows: 24
+  };
+  const provider = new StaticTerminalControlProvider({ panes: [pane] });
+  const [terminal] = await provider.listTerminals();
+
+  assert.deepEqual(await provider.inspectViewport(terminal), {
+    columns: 80,
+    rows: 24
+  });
+  pane.columns = undefined;
+  assert.equal(await provider.inspectViewport(terminal), undefined);
 });
 
 test("tmux provider uses canonical socket and pane identity for multiline paste", async () => {

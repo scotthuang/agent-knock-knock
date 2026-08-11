@@ -50,6 +50,16 @@ export const STICKY_THREAD_IDS = {
   unknown: "55555555-5555-4555-8555-555555555555"
 } as const;
 
+const CODEX_STATUS_COMPOSER = [
+  "Ready",
+  "› /status",
+  "  /status  show current session configuration and token usage"
+].join("\n");
+
+interface StickyRolloutFixtureOptions {
+  exactStatusProbe?: boolean;
+}
+
 export class StickyRolloutFixture {
   readonly tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-sticky-in-process-")
@@ -89,8 +99,11 @@ export class StickyRolloutFixture {
   draftAfterNextStatus = false;
   blankRowsAfterNextStatus = false;
   sourceBindingToken: string;
+  private readonly exactStatusProbe: boolean;
+  private statusProbePending = false;
 
-  constructor() {
+  constructor(options: StickyRolloutFixtureOptions = {}) {
+    this.exactStatusProbe = options.exactStatusProbe === true;
     fs.mkdirSync(this.workspace, { recursive: true });
     fs.mkdirSync(this.sessionsDir, { recursive: true, mode: 0o700 });
     fs.writeFileSync(path.join(this.codexHome, "state_1.sqlite"), "", {
@@ -149,11 +162,15 @@ export class StickyRolloutFixture {
         pane: 0,
         panePid: this.panePid,
         currentCommand: "codex",
-        currentPath: this.workspace
+        currentPath: this.workspace,
+        ...(this.exactStatusProbe
+          ? { columns: 100, rows: 30 }
+          : {})
       }],
       screens: { [this.target]: "Ready\n› " },
       hooks: {
-        sendText: async ({ text }) => this.onSendText(text)
+        sendText: async ({ text }) => this.onSendText(text),
+        sendKeys: async ({ keys }) => this.onSendKeys(keys)
       }
     });
     const snapshots: TerminalProcessSnapshot[] = [
@@ -369,21 +386,12 @@ export class StickyRolloutFixture {
 
   private onSendText(text: string): void {
     if (text === "/status") {
-      this.statusCount += 1;
-      const nativeThreadId = this.wrongNextStatus
-        ? STICKY_THREAD_IDS.wrong
-        : this.activeThreadId;
-      const draft = this.draftAfterNextStatus;
-      const blankRows = this.blankRowsAfterNextStatus;
-      this.wrongNextStatus = false;
-      this.draftAfterNextStatus = false;
-      this.blankRowsAfterNextStatus = false;
-      this.setScreen(
-        `/status\nprobe-${this.statusCount}\nSession: ${nativeThreadId}` +
-        (draft
-          ? "\n› unsent lifecycle draft\ngpt-5.4 default · 100% left"
-          : `\n› ${blankRows ? "\n".repeat(30) : ""}`)
-      );
+      if (this.exactStatusProbe) {
+        this.statusProbePending = true;
+        this.setScreen(CODEX_STATUS_COMPOSER);
+      } else {
+        this.materializeStatusPanel();
+      }
       return;
     }
     if (text === "/clear") {
@@ -407,6 +415,35 @@ export class StickyRolloutFixture {
       this.writeRollout("c");
     }
     this.setScreen("Working\n");
+  }
+
+  private onSendKeys(keys: readonly string[]): void {
+    if (
+      this.exactStatusProbe &&
+      this.statusProbePending &&
+      keys.includes("C-m")
+    ) {
+      this.statusProbePending = false;
+      this.materializeStatusPanel();
+    }
+  }
+
+  private materializeStatusPanel(): void {
+    this.statusCount += 1;
+    const nativeThreadId = this.wrongNextStatus
+      ? STICKY_THREAD_IDS.wrong
+      : this.activeThreadId;
+    const draft = this.draftAfterNextStatus;
+    const blankRows = this.blankRowsAfterNextStatus;
+    this.wrongNextStatus = false;
+    this.draftAfterNextStatus = false;
+    this.blankRowsAfterNextStatus = false;
+    this.setScreen(
+      `/status\nprobe-${this.statusCount}\nSession: ${nativeThreadId}` +
+      (draft
+        ? "\n› unsent lifecycle draft\ngpt-5.4 default · 100% left"
+        : `\n› ${blankRows ? "\n".repeat(30) : ""}`)
+    );
   }
 
   private runCodexInspection(command: string, args: string[]) {
