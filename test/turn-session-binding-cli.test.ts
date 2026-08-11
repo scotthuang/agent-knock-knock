@@ -45,7 +45,7 @@ test("protocol-3 terminal callback fails closed when its Session state is missin
     assert.notEqual(result.status, 0);
     assert.match(
       result.stderr,
-      /protocol 3 requires authoritative state for managed Session/u
+      /protocol 3\+ requires authoritative state for managed Session/u
     );
     assert.equal(
       JSON.parse(fs.readFileSync(fixture.conversation.state_path!, "utf8")).status,

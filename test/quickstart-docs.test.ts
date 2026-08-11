@@ -168,7 +168,29 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
     assert.match(document, /`expected_binding_token`/u);
     assert.match(document, /`native_thread_id`/u);
     assert.match(document, /`candidate_token`/u);
-    assert.match(document, /v10 `action_contracts`/u);
+    assert.match(document, /v11 `action_contracts`/u);
+    assert.match(document, /status-card-only/u);
+    assert.match(document, /verified zero rollout/u);
+    assert.match(document, /zero-UUID provisional/u);
+    assert.match(
+      document,
+      /exact full `selector` and fresh `expected_terminal_token`/u
+    );
+    assert.match(document, /fresh rollout/u);
+    assert.match(document, /at least 80 columns/u);
+    assert.match(
+      document,
+      /ordinary first task does not run `\/status` and does not fail merely because the pane is narrow/u
+    );
+    assert.match(document, /no managed control or callback authority/u);
+    assert.match(
+      document,
+      /strict `session_id` send, `respond`, `approve`, `cancel`, native lifecycle, and `native_inspect`[\s\S]*exact native UUID binding or pre-input status proof/u
+    );
+    assert.match(
+      document,
+      /If dispatch, acceptance, or post-submit binding is uncertain, do not retry automatically/u
+    );
     assert.match(document, /creates no (?:AKK )?Turn/u);
     assert.match(document, /previous/u);
     assert.match(document, /snapshot/ui);
@@ -192,6 +214,15 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
       /\/akk approve @a1b2c3d4 --expected-approval-fingerprint <fresh-fingerprint>/u
     );
   }
+  assert.match(readme, /current writer protocol is 4/u);
+  assert.match(
+    readme,
+    /Upgrading protocol 1 or 2[\s\S]*atomically publishing protocol 4/u
+  );
+  assert.match(
+    readme,
+    /Protocol 3 already has Session authority[\s\S]*manifest-only writer fence with no data migration/u
+  );
   assert.match(
     readme,
     /If `previous` is present, use only its exact prefilled action for a natural-language “刚才那个” request/u

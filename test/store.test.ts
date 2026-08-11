@@ -477,6 +477,80 @@ test("an empty protocol 1 Store is reported upgradeable and upgrades in place", 
   }
 });
 
+test("protocol 3 upgrades to protocol 4 by atomically publishing only the manifest", () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "akk-store-upgrade-p3-"));
+  const storeDir = path.join(sandbox, "store");
+  const createdAt = "2026-08-12T00:00:00.000Z";
+  try {
+    const turn = storedConversation(storeDir, "turn-protocol-3-nonempty");
+    writeStoreManifest(storeDir, {
+      writerProtocol: 2,
+      createdAt
+    });
+    fs.mkdirSync(turn.paths.conversationDir, {
+      recursive: true,
+      mode: 0o700
+    });
+    fs.writeFileSync(
+      turn.paths.statePath,
+      `${JSON.stringify(turn.conversation, null, 2)}\n`,
+      { mode: 0o600 }
+    );
+    // Materialize the exact protocol-3 data shape using the supported p2
+    // migration, then put back its predecessor manifest for this upgrade test.
+    ensureStoreWritable(storeDir);
+    const sessionPath = pathsForManagedSession(
+      String(turn.conversation.session_id),
+      storeDir
+    ).statePath;
+    const manifestPath = writeStoreManifest(storeDir, {
+      writerProtocol: 3,
+      createdAt
+    });
+    const conversationsDir = path.join(storeDir, "conversations");
+    const sessionsDir = path.join(storeDir, "sessions");
+    fs.mkdirSync(conversationsDir, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(sessionsDir, { recursive: true, mode: 0o700 });
+    const conversationSentinel = path.join(conversationsDir, "sentinel");
+    const sessionSentinel = path.join(sessionsDir, "sentinel");
+    fs.writeFileSync(conversationSentinel, "conversation-bytes\n", { mode: 0o600 });
+    fs.writeFileSync(sessionSentinel, "session-bytes\n", { mode: 0o600 });
+    const before = {
+      conversation: fileSnapshot(conversationSentinel),
+      session: fileSnapshot(sessionSentinel),
+      turnState: fileSnapshot(turn.paths.statePath),
+      sessionState: fileSnapshot(sessionPath),
+      manifestInode: fs.statSync(manifestPath).ino
+    };
+
+    const compatibility = inspectStoreCompatibility(storeDir);
+    assert.equal(compatibility.status, "upgradeable");
+    assert.equal(compatibility.writer_protocol, 3);
+    const upgraded = ensureStoreWritable(storeDir);
+
+    assert.equal(upgraded.writer_protocol, STORE_WRITER_PROTOCOL);
+    assert.equal(upgraded.created_at, createdAt);
+    assert.notEqual(fs.statSync(manifestPath).ino, before.manifestInode);
+    assert.deepEqual(fileSnapshot(conversationSentinel), before.conversation);
+    assert.deepEqual(fileSnapshot(sessionSentinel), before.session);
+    assert.deepEqual(fileSnapshot(turn.paths.statePath), before.turnState);
+    assert.deepEqual(fileSnapshot(sessionPath), before.sessionState);
+    assert.equal(loadState(turn.paths.statePath).conversation_id, turn.conversation.conversation_id);
+    assert.equal(
+      loadManagedSession(storeDir, String(turn.conversation.session_id)).session_id,
+      turn.conversation.session_id
+    );
+    assert.equal(
+      fs.readdirSync(storeDir).some((entry) =>
+        entry.startsWith(".manifest.json.") && entry.endsWith(".tmp")
+      ),
+      false
+    );
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
 test("a non-empty protocol 1 Store preserves state, events, and created_at while upgrading", () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "akk-store-upgrade-data-"));
   const storeDir = path.join(sandbox, "store");
@@ -535,7 +609,7 @@ test("a non-empty protocol 1 Store preserves state, events, and created_at while
   }
 });
 
-test("protocol 2 migration materializes one hashed Session before publishing protocol 3", () => {
+test("protocol 2 migration materializes one hashed Session before publishing the current protocol", () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "akk-store-session-migration-"));
   const storeDir = path.join(sandbox, "store");
   const sessionId = "session/legacy/path/会话";
@@ -599,7 +673,7 @@ test("protocol 2 migration materializes one hashed Session before publishing pro
     ensureStoreWritable(storeDir);
 
     const manifest = JSON.parse(fs.readFileSync(storeManifestPath(storeDir), "utf8"));
-    assert.equal(manifest.writer_protocol, 3);
+    assert.equal(manifest.writer_protocol, STORE_WRITER_PROTOCOL);
     const sessionPaths = pathsForManagedSession(sessionId, storeDir);
     assert.match(path.basename(sessionPaths.directory), /^[0-9a-f]{64}$/u);
     const session = loadManagedSession(storeDir, sessionId);
@@ -1157,14 +1231,14 @@ test("a readable future writer protocol blocks every write without changing data
     assert.equal(listConversations(storeDir).length, 1);
     assert.throws(
       () => saveState(paths.statePath, { ...conversation, status: "closed" }),
-      /writer protocol 3|refusing to mutate/u
+      new RegExp(`writer protocol ${STORE_WRITER_PROTOCOL}|refusing to mutate`, "u")
     );
     assert.throws(
       () => appendEvent(paths.logPath, {
         event: "message",
         conversation_id: conversation.conversation_id
       }),
-      /writer protocol 3|refusing to mutate/u
+      new RegExp(`writer protocol ${STORE_WRITER_PROTOCOL}|refusing to mutate`, "u")
     );
     assert.equal(fs.readFileSync(paths.statePath, "utf8"), stateBefore);
     assert.equal(fs.readFileSync(paths.logPath, "utf8"), eventsBefore);

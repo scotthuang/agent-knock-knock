@@ -101,7 +101,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       hidden_turn_count: 0,
       session_count: 0
     });
-    assert.equal(listed.action_contracts.version, 10);
+    assert.equal(listed.action_contracts.version, 11);
     assert.match(
       listed.action_contracts.instructions.join("\n"),
       /Treat terminals\[\] as the primary resource/u
@@ -117,6 +117,10 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     assert.match(
       listed.action_contracts.instructions.join("\n"),
       /verified, idle human native-thread switch[\s\S]*expected_terminal_token[\s\S]*atomically adopts/u
+    );
+    assert.match(
+      listed.action_contracts.instructions.join("\n"),
+      /status-card-only Codex Session[\s\S]*narrow panes do not require \/status[\s\S]*strict session_id send, respond, approve, cancel, native lifecycle, and native_inspect remain unavailable[\s\S]*do not retry automatically/u
     );
     assert.match(
       listed.action_contracts.instructions.join("\n"),
@@ -166,6 +170,11 @@ test("list exposes physical tmux terminals with the terminal-first action contra
         .verified_empty_native_session,
       /snapshot-bound send[\s\S]*isolated virgin Session/u
     );
+    assert.equal(
+      "status_card_only_deferred_binding" in
+        listed.action_contracts.field_semantics.management_conflict,
+      false
+    );
     assert.match(
       listed.action_contracts.field_semantics.handoff_state
         .verified_empty_native_session_adoptable,
@@ -173,7 +182,11 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     );
     assert.match(
       listed.action_contracts.actions.send.ordinary_use,
-      /exact listed conflict send[\s\S]*verified-empty Codex source/u
+      /verified-empty Codex source[\s\S]*status-card-only binding/u
+    );
+    assert.match(
+      listed.action_contracts.actions.send.status_card_only_deferred_scope,
+      /listed selector\/token send[\s\S]*strict managed controls[\s\S]*callback authority remain unavailable[\s\S]*must not be retried automatically/u
     );
     assert.deepEqual(
       listed.action_contracts.field_semantics.handoff_decision,
