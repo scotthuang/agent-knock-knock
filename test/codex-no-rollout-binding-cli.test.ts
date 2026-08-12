@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   executeCliCommand,
   parseCliCommand,
@@ -13,6 +13,12 @@ import {
 import type {
   CodexLocalSessionAdapter
 } from "../src/codex-local-session-provider.js";
+import type {
+  CodexOpenRootRolloutInventory
+} from "../src/agent-session-provider.js";
+import {
+  inspectCodexOpenRootRolloutInventory
+} from "../src/codex-store-adapter.js";
 import {
   managedSessionBindingToken,
   terminalBindingFrom,
@@ -20,7 +26,12 @@ import {
   type NativeThreadTransition
 } from "../src/managed-session.js";
 import {
+  createDeferredForegroundTransferId,
+  DEFERRED_FOREGROUND_TRANSFER_SCHEMA,
+  DEFERRED_FOREGROUND_TRANSFER_VERSION,
   listDeferredForegroundTransfers,
+  saveDeferredForegroundTransfer,
+  pathsForDeferredForegroundTransfer,
   type DeferredForegroundTransfer
 } from "../src/deferred-foreground-transfer.js";
 import {
@@ -28,6 +39,7 @@ import {
   loadManagedSession,
   loadNativeThreadTransition,
   nativeThreadTransitionsDir,
+  pathsForManagedSession,
   saveManagedSession,
   saveNativeThreadTransition
 } from "../src/session-store.js";
@@ -458,11 +470,7 @@ test("monitor binds a virgin Codex before accepting evidence that lands between 
       ...fixture.environment,
       AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
     });
-    assert.equal(monitored.status, 1, monitored.stdout);
-    assert.match(
-      monitored.stderr,
-      /callback delivery requires a configured OpenClaw gateway method/u
-    );
+    assert.equal(monitored.status, 0, monitored.stderr || monitored.stdout);
 
     const finalTurn = listConversations(fixture.storeDir)[0];
     const finalSession = loadManagedSession(
@@ -480,6 +488,13 @@ test("monitor binds a virgin Codex before accepting evidence that lands between 
       finalTakeover.terminal_bridge_submission?.acceptance_evidence
         ?.nativeThreadId,
       NATIVE_THREAD_ID
+    );
+    assert.equal(finalTurn.status, "idle");
+    assert.equal(finalTurn.gateway_method, undefined);
+    assert.equal(finalTurn.callback_delivery, undefined);
+    assert.doesNotMatch(
+      fs.readFileSync(eventLogPath, "utf8"),
+      /callback_delivery_(?:pending|failed)|callback_outbox/u
     );
     assert.ok(
       Number(fs.readFileSync(fixture.rolloutProbeCountPath, "utf8")) >= 3,
@@ -2696,6 +2711,842 @@ test("managed approve and cancel cannot bypass committed deferred recovery", asy
   }
 });
 
+test("unmanaged Codex approval remains raw while arbitrary terminal authority is rejected", async () => {
+  const fixture = createNoRolloutFixture();
+  try {
+    fs.writeFileSync(fixture.screenPath, [
+      "  Would you like to run the following command?",
+      "",
+      "  $ npm test",
+      "",
+      "› 1. Yes, proceed (y)",
+      "  2. No, and tell Codex what to do differently (esc)"
+    ].join("\n"));
+    const terminal = await listFixtureTerminal(fixture);
+    assert.ok(terminal.available_actions.approve);
+    assert.deepEqual(terminal.available_actions.approve.arguments, {
+      conversation_id: fixture.terminalId
+    });
+    const status = await runCli([
+      "status",
+      "--conversation",
+      fixture.terminalId,
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome
+    ], fixture.environment);
+    assert.equal(status.status, 0, status.stderr || status.stdout);
+    const fingerprint = String(
+      JSON.parse(status.stdout).terminal_status.approval_state.fingerprint
+    );
+    const keysBefore = approvalKeyCalls(fixture).length;
+
+    const forgedAuthority = await runCli([
+      "approve",
+      "--conversation",
+      fixture.terminalId,
+      "--expected-terminal-token",
+      "forged-terminal-authority",
+      "--expected-approval-fingerprint",
+      fingerprint,
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome
+    ], fixture.environment);
+    assert.equal(forgedAuthority.status, 1, forgedAuthority.stdout);
+    assert.match(
+      forgedAuthority.stderr,
+      /does not match an advertised terminal-scoped Codex approval/iu
+    );
+    assert.equal(approvalKeyCalls(fixture).length, keysBefore);
+
+    const rawApproval = await runCli([
+      "approve",
+      "--conversation",
+      fixture.terminalId,
+      "--expected-approval-fingerprint",
+      fingerprint,
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome
+    ], fixture.environment);
+    assert.equal(rawApproval.status, 0, rawApproval.stderr || rawApproval.stdout);
+    const output = JSON.parse(rawApproval.stdout);
+    assert.equal(output.approved, true);
+    assert.equal(output.terminal_scoped, false);
+    assert.deepEqual(
+      approvalKeyCalls(fixture).slice(keysBefore).map((call) => call.args),
+      [["send-keys", "-t", fixture.inputTarget, "y"]]
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("human-confirmed Codex approval falls back to the exact terminal when managed rollout identity is unavailable", async () => {
+  const fixture = createNoRolloutFixture();
+  try {
+    const seeded = await seedStatusCardManagedApproval(fixture);
+    const terminal = await listFixtureTerminal(fixture);
+    assert.equal(terminal.management_state, "conflict");
+    assert.equal(terminal.managed.current_turn, null);
+    const action = terminal.available_actions.approve;
+    assert.ok(action, JSON.stringify(terminal, null, 2));
+    assert.deepEqual(action.arguments, {
+      conversation_id: fixture.terminalId,
+      expected_terminal_token: action.arguments.expected_terminal_token
+    });
+    assert.equal(typeof action.arguments.expected_terminal_token, "string");
+    assert.deepEqual(action.before_call.arguments, {
+      conversation_id: fixture.terminalId
+    });
+    assert.equal(action.requires_explicit_user_confirmation, true);
+    assert.equal(action.requires_fresh_status, true);
+    assert.equal(action.scope, "terminal_current_prompt");
+
+    const status = await runCli([
+      "status",
+      "--conversation",
+      fixture.terminalId,
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome
+    ], fixture.environment);
+    assert.equal(status.status, 0, status.stderr || status.stdout);
+    const statusOutput = JSON.parse(status.stdout);
+    const fingerprint = String(
+      statusOutput.terminal_status.approval_state.fingerprint
+    );
+    assert.equal(statusOutput.source, "terminal_control");
+    assert.match(fingerprint, /^[0-9a-f]{64}$/u);
+    assert.equal(
+      terminal.approval_state.fingerprint,
+      fingerprint,
+      "list/status must share the canonical terminal approval runtime identity"
+    );
+
+    const keysBefore = approvalKeyCalls(fixture).length;
+    const aliasedSelector = await runCli([
+      "approve",
+      "--conversation",
+      "codex",
+      "--expected-terminal-token",
+      String(action.arguments.expected_terminal_token),
+      "--expected-approval-fingerprint",
+      fingerprint,
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome
+    ], fixture.environment);
+    assert.equal(aliasedSelector.status, 1, aliasedSelector.stdout);
+    assert.match(aliasedSelector.stderr, /exact full terminal.*selector/iu);
+    assert.equal(approvalKeyCalls(fixture).length, keysBefore);
+
+    const automatic = await runCli([
+      "approve",
+      "--conversation",
+      fixture.terminalId,
+      "--expected-terminal-token",
+      String(action.arguments.expected_terminal_token),
+      "--expected-approval-fingerprint",
+      fingerprint,
+      "--auto-approved",
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome
+    ], fixture.environment);
+    assert.equal(automatic.status, 1, automatic.stdout);
+    assert.match(automatic.stderr, /automatic approval.*managed Turn/iu);
+    assert.equal(approvalKeyCalls(fixture).length, keysBefore);
+
+    const stale = await runCli([
+      "approve",
+      "--conversation",
+      fixture.terminalId,
+      "--expected-terminal-token",
+      String(action.arguments.expected_terminal_token),
+      "--expected-approval-fingerprint",
+      "0".repeat(64),
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome
+    ], fixture.environment);
+    assert.equal(stale.status, 0, stale.stderr || stale.stdout);
+    assert.equal(JSON.parse(stale.stdout).approved, false);
+    assert.match(JSON.parse(stale.stdout).reason, /fingerprint changed/iu);
+    assert.equal(approvalKeyCalls(fixture).length, keysBefore);
+
+    const approved = await runCli([
+      "approve",
+      "--conversation",
+      fixture.terminalId,
+      "--expected-terminal-token",
+      String(action.arguments.expected_terminal_token),
+      "--expected-approval-fingerprint",
+      fingerprint,
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome
+    ], fixture.environment);
+    assert.equal(approved.status, 0, approved.stderr || approved.stdout);
+    const output = JSON.parse(approved.stdout);
+    assert.equal(output.source, "terminal_control");
+    assert.equal(output.approved, true);
+    assert.equal(output.key, "y");
+    assert.equal(output.terminal_scoped, true);
+    assert.deepEqual(
+      approvalKeyCalls(fixture).slice(keysBefore).map((call) => call.args),
+      [["send-keys", "-t", fixture.inputTarget, "y"]]
+    );
+    assert.deepEqual(
+      loadManagedSession(fixture.storeDir, seeded.session.session_id),
+      seeded.session
+    );
+    assert.deepEqual(
+      listConversations(fixture.storeDir)[0],
+      seeded.turn
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("human-confirmed Codex approval can target a managed pane with no AKK dispatch owner", async () => {
+  for (const dispatchHistory of ["none", "resolved"] as const) {
+    const fixture = createNoRolloutFixture({
+      rolloutInitiallyAbsent: dispatchHistory === "resolved"
+    });
+    try {
+      let session: ManagedSessionState;
+      if (dispatchHistory === "resolved") {
+        session = seedResolvedHistoricalDispatchAndStatusCard(fixture).source;
+      } else {
+        session = persistStatusCardSession(fixture, LIVE_PROCESS_BIRTH);
+      }
+      fixture.identityObservationError =
+        "injected Codex rollout observation unavailable";
+      fs.rmSync(fixture.materializedPath, { force: true });
+      fs.writeFileSync(fixture.screenPath, codexApprovalScreen("npm test"));
+
+      const sessionsBefore = JSON.parse(JSON.stringify(
+        listManagedSessions(fixture.storeDir)
+      ));
+      const turnsBefore = JSON.parse(JSON.stringify(
+        listConversations(fixture.storeDir)
+      ));
+      const ledgerBefore = dispatchHistory === "resolved"
+        ? readSoleTerminalDispatchLedger(fixture)
+        : undefined;
+      const terminal = await listFixtureTerminal(fixture);
+      assert.equal(terminal.management_state, "managed", dispatchHistory);
+      assert.equal(terminal.managed.current_turn, null, dispatchHistory);
+      const action = terminal.available_actions.approve;
+      assert.ok(action, `${dispatchHistory}: ${JSON.stringify(terminal, null, 2)}`);
+      assert.equal(
+        action.authority,
+        "managed_session_no_dispatch_owner",
+        dispatchHistory
+      );
+      assert.deepEqual(action.arguments, {
+        conversation_id: fixture.terminalId,
+        expected_terminal_token: action.arguments.expected_terminal_token
+      });
+      assert.equal(action.requires_explicit_user_confirmation, true);
+      assert.equal(action.requires_fresh_status, true);
+      assert.equal(action.managed_state_unchanged, true);
+      assert.equal(action.automatic_approval_eligible, false);
+      assert.equal(action.durable_dispatch_receipt, false);
+      assert.match(action.uncertain_outcome_recovery, /do not retry blindly/iu);
+
+      const status = await runCli([
+        "status",
+        "--conversation",
+        fixture.terminalId,
+        "--store-dir",
+        fixture.storeDir,
+        "--codex-home",
+        fixture.codexHome
+      ], fixture.environment);
+      assert.equal(status.status, 0, status.stderr || status.stdout);
+      const statusOutput = JSON.parse(status.stdout);
+      const statusFingerprint = String(
+        statusOutput.terminal_status.approval_state.fingerprint
+      );
+      assert.equal(
+        terminal.approval_state.fingerprint,
+        statusFingerprint,
+        "list/status must share the canonical terminal approval runtime identity"
+      );
+
+      const keysBefore = approvalKeyCalls(fixture).length;
+      const approved = await runCli([
+        "approve",
+        "--conversation",
+        fixture.terminalId,
+        "--expected-terminal-token",
+        String(action.arguments.expected_terminal_token),
+        "--expected-approval-fingerprint",
+        statusFingerprint,
+        "--store-dir",
+        fixture.storeDir,
+        "--codex-home",
+        fixture.codexHome
+      ], fixture.environment);
+      assert.equal(approved.status, 0, approved.stderr || approved.stdout);
+      const output = JSON.parse(approved.stdout);
+      assert.equal(output.approved, true);
+      assert.equal(output.terminal_scoped, true);
+      assert.equal(output.durable_dispatch_receipt, false);
+      assert.match(output.uncertain_outcome_recovery, /do not retry blindly/iu);
+      assert.deepEqual(
+        approvalKeyCalls(fixture).slice(keysBefore).map((call) => call.args),
+        [["send-keys", "-t", fixture.inputTarget, "y"]]
+      );
+      assert.deepEqual(
+        JSON.parse(JSON.stringify(listManagedSessions(fixture.storeDir))),
+        sessionsBefore
+      );
+      assert.deepEqual(
+        JSON.parse(JSON.stringify(listConversations(fixture.storeDir))),
+        turnsBefore
+      );
+      assert.deepEqual(
+        dispatchHistory === "resolved"
+          ? readSoleTerminalDispatchLedger(fixture)
+          : undefined,
+        ledgerBefore
+      );
+      assert.deepEqual(
+        JSON.parse(JSON.stringify(
+          loadManagedSession(fixture.storeDir, session.session_id)
+        )),
+        JSON.parse(JSON.stringify(session))
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  }
+});
+
+test("terminal-scoped Codex approval token binds the exact current prompt with or without a dispatch owner", async () => {
+  for (const authority of [
+    "managed_session_no_dispatch_owner",
+    "current_dispatch_owner"
+  ] as const) {
+    const fixture = createNoRolloutFixture();
+    try {
+      if (authority === "current_dispatch_owner") {
+        await seedStatusCardManagedApproval(fixture);
+      } else {
+        persistStatusCardSession(fixture, LIVE_PROCESS_BIRTH);
+        fixture.identityObservationError =
+          "injected Codex rollout observation unavailable";
+        fs.rmSync(fixture.materializedPath, { force: true });
+      }
+      fs.writeFileSync(fixture.screenPath, codexApprovalScreen("npm test"));
+      const terminal = await listFixtureTerminal(fixture);
+      const action = terminal.available_actions.approve;
+      assert.ok(action, `${authority}: ${JSON.stringify(terminal, null, 2)}`);
+      assert.equal(action.authority, authority);
+
+      fs.writeFileSync(fixture.screenPath, codexApprovalScreen("npm run lint"));
+      const status = await runCli([
+        "status",
+        "--conversation",
+        fixture.terminalId,
+        "--store-dir",
+        fixture.storeDir,
+        "--codex-home",
+        fixture.codexHome
+      ], fixture.environment);
+      assert.equal(status.status, 0, status.stderr || status.stdout);
+      const freshFingerprint = String(
+        JSON.parse(status.stdout).terminal_status.approval_state.fingerprint
+      );
+      assert.notEqual(freshFingerprint, terminal.approval_state.fingerprint);
+      const keysBefore = approvalKeyCalls(fixture).length;
+
+      const rejected = await runCli([
+        "approve",
+        "--conversation",
+        fixture.terminalId,
+        "--expected-terminal-token",
+        String(action.arguments.expected_terminal_token),
+        "--expected-approval-fingerprint",
+        freshFingerprint,
+        "--store-dir",
+        fixture.storeDir,
+        "--codex-home",
+        fixture.codexHome
+      ], fixture.environment);
+      assert.equal(rejected.status, 1, rejected.stdout);
+      assert.match(
+        rejected.stderr,
+        /token is missing or stale|authority changed/iu
+      );
+      assert.equal(approvalKeyCalls(fixture).length, keysBefore);
+    } finally {
+      fixture.cleanup();
+    }
+  }
+});
+
+test("managed no-owner Codex approval waits for aborted deferred cleanup before recovering", async () => {
+  const fixture = createNoRolloutFixture();
+  try {
+    const session = persistStatusCardSession(fixture, LIVE_PROCESS_BIRTH);
+    fixture.identityObservationError =
+      "injected Codex rollout observation unavailable";
+    fs.rmSync(fixture.materializedPath, { force: true });
+    fs.writeFileSync(fixture.screenPath, codexApprovalScreen("npm test"));
+    const listed = await listFixtureTerminal(fixture);
+    const staleAction = listed.available_actions.approve;
+    assert.ok(staleAction, JSON.stringify(listed, null, 2));
+    const status = await runCli([
+      "status",
+      "--conversation",
+      fixture.terminalId,
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome
+    ], fixture.environment);
+    assert.equal(status.status, 0, status.stderr || status.stdout);
+    const fingerprint = String(
+      JSON.parse(status.stdout).terminal_status.approval_state.fingerprint
+    );
+    const binding = session.binding;
+    assert.ok(binding?.terminal_endpoint);
+    const now = new Date().toISOString();
+    const prepared = saveDeferredForegroundTransfer(fixture.storeDir, {
+      schema: DEFERRED_FOREGROUND_TRANSFER_SCHEMA,
+      version: DEFERRED_FOREGROUND_TRANSFER_VERSION,
+      transfer_id: createDeferredForegroundTransferId(),
+      status: "prepared",
+      input_stage: "none",
+      terminal_id: fixture.terminalId,
+      terminal_endpoint: binding.terminal_endpoint,
+      process_pid: binding.native_process.pid,
+      process_uuid: String(binding.native_process.process_uuid),
+      process_birth: String(binding.native_process.process_birth),
+      workspace: session.workspace,
+      source_session_id: session.session_id,
+      source_expected_revision: session.revision as number,
+      source_binding_token: managedSessionBindingToken(session),
+      source_before_binding: binding,
+      source_kind: "status_card_only",
+      target_session_id: `${session.session_id}-deferred-target`,
+      target_expected_revision: null,
+      previous_dispatch_status: "none",
+      previous_dispatch_fingerprint: "a".repeat(64),
+      request_hash: "b".repeat(64),
+      dispatcher_pid: process.pid,
+      prepared_at: now
+    }, { expectedRevision: null });
+    const aborted = saveDeferredForegroundTransfer(fixture.storeDir, {
+      ...prepared,
+      status: "aborted",
+      aborted_at: now,
+      error: "test-only abort intent awaiting cleanup"
+    }, { expectedRevision: prepared.revision as number });
+    const keysBefore = approvalKeyCalls(fixture).length;
+
+    const blockedList = await listFixtureTerminal(fixture);
+    assert.equal(blockedList.available_actions.approve, undefined);
+    const blocked = await runCli([
+      "approve",
+      "--conversation",
+      fixture.terminalId,
+      "--expected-terminal-token",
+      String(staleAction.arguments.expected_terminal_token),
+      "--expected-approval-fingerprint",
+      fingerprint,
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome
+    ], fixture.environment);
+    assert.equal(blocked.status, 1, blocked.stdout);
+    assert.match(blocked.stderr, /managed recovery|deferred foreground/iu);
+    assert.equal(approvalKeyCalls(fixture).length, keysBefore);
+
+    const cleanupAt = new Date(Date.now() + 1).toISOString();
+    saveDeferredForegroundTransfer(fixture.storeDir, {
+      ...aborted,
+      status: "abort_resolved",
+      abort_cleanup_completed_at: cleanupAt,
+      abort_source_after_revision: session.revision as number,
+      abort_source_after_status: "bound",
+      abort_source_after_binding_token: managedSessionBindingToken(session),
+      abort_source_after_binding: binding,
+      abort_target_after_status: "absent"
+    }, { expectedRevision: aborted.revision as number });
+    const recoveredList = await listFixtureTerminal(fixture);
+    const recoveredAction = recoveredList.available_actions.approve;
+    assert.ok(recoveredAction, JSON.stringify(recoveredList, null, 2));
+    const approved = await runCli([
+      "approve",
+      "--conversation",
+      fixture.terminalId,
+      "--expected-terminal-token",
+      String(recoveredAction.arguments.expected_terminal_token),
+      "--expected-approval-fingerprint",
+      fingerprint,
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome
+    ], fixture.environment);
+    assert.equal(approved.status, 0, approved.stderr || approved.stdout);
+    assert.equal(JSON.parse(approved.stdout).approved, true);
+    assert.deepEqual(
+      approvalKeyCalls(fixture).slice(keysBefore).map((call) => call.args),
+      [["send-keys", "-t", fixture.inputTarget, "y"]]
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("managed no-owner Codex approval fails closed when Store or native authority drifts", async () => {
+  for (const drift of [
+    "blocking_turn",
+    "native_transition",
+    "uncertain_orphan",
+    "multiple_bound_sessions",
+    "session_revision",
+    "native_thread",
+    "process"
+  ] as const) {
+    const fixture = createNoRolloutFixture();
+    try {
+      const session = persistStatusCardSession(fixture, LIVE_PROCESS_BIRTH);
+      fixture.identityObservationError =
+        "injected Codex rollout observation unavailable";
+      fs.rmSync(fixture.materializedPath, { force: true });
+      fs.writeFileSync(fixture.screenPath, codexApprovalScreen("npm test"));
+      const terminal = await listFixtureTerminal(fixture);
+      const action = terminal.available_actions.approve;
+      assert.ok(action, `${drift}: ${JSON.stringify(terminal, null, 2)}`);
+      const status = await runCli([
+        "status",
+        "--conversation",
+        fixture.terminalId,
+        "--store-dir",
+        fixture.storeDir,
+        "--codex-home",
+        fixture.codexHome
+      ], fixture.environment);
+      assert.equal(status.status, 0, `${drift}: ${status.stderr || status.stdout}`);
+      const fingerprint = String(
+        JSON.parse(status.stdout).terminal_status.approval_state.fingerprint
+      );
+      const now = new Date("2026-08-12T05:00:00.000Z");
+
+      if (drift === "blocking_turn") {
+        persistBlockingTurn(fixture, session);
+      } else if (drift === "native_transition") {
+        persistUnresolvedTransition(fixture, session);
+      } else if (drift === "uncertain_orphan") {
+        persistUnresolvedDispatchLedger(fixture, session);
+      } else if (drift === "multiple_bound_sessions") {
+        saveManagedSession(fixture.storeDir, {
+          schema: "agent-knock-knock/session",
+          version: 1,
+          session_id: "session-codex-second-owner",
+          agent: "codex",
+          workspace: session.workspace,
+          status: "bound",
+          binding: terminalBindingFrom({
+            terminalId: fixture.terminalId,
+            terminalControl: fixture.terminalControl,
+            pid: fixture.codexPid,
+            nativeThreadId: EXTERNAL_THREAD_ID,
+            processUuid: processUuid(fixture.codexPid, LIVE_PROCESS_BIRTH),
+            processBirth: LIVE_PROCESS_BIRTH,
+            evidence: "codex_status_card",
+            generation: 1,
+            now
+          }),
+          lineage: { created_by: "attach" },
+          created_at: now.toISOString(),
+          updated_at: now.toISOString()
+        }, { expectedRevision: null });
+      } else if (drift === "session_revision") {
+        saveManagedSession(fixture.storeDir, {
+          ...session,
+          updated_at: now.toISOString()
+        }, { expectedRevision: session.revision as number });
+      } else if (drift === "native_thread") {
+        fixture.identityObservationError = undefined;
+        fixture.activeNativeThreadId = EXTERNAL_THREAD_ID;
+        fixture.activeRolloutPath = path.join(
+          path.dirname(fixture.rolloutPath),
+          `rollout-2026-08-12T00-00-00-${EXTERNAL_THREAD_ID}.jsonl`
+        );
+        fs.writeFileSync(fixture.activeRolloutPath, `${JSON.stringify({
+          timestamp: now.toISOString(),
+          type: "session_meta",
+          payload: {
+            id: EXTERNAL_THREAD_ID,
+            cwd: fixture.terminalControl.currentPath,
+            originator: "codex-tui",
+            source: "cli",
+            cli_version: fixture.codexVersion
+          }
+        })}\n`);
+        fs.writeFileSync(fixture.materializedPath, "ready");
+      } else {
+        fs.writeFileSync(fixture.processBirthPath, STALE_PROCESS_BIRTH);
+      }
+
+      const relisted = await listFixtureTerminal(fixture);
+      const relistedApproval = relisted.available_actions.approve;
+      if (drift === "session_revision") {
+        assert.ok(relistedApproval, JSON.stringify(relisted, null, 2));
+        assert.notEqual(
+          relistedApproval.arguments.expected_terminal_token,
+          action.arguments.expected_terminal_token
+        );
+      } else {
+        assert.equal(
+          relistedApproval?.arguments?.expected_terminal_token,
+          undefined,
+          drift
+        );
+      }
+      const keysBefore = approvalKeyCalls(fixture).length;
+      const rejected = await runCli([
+        "approve",
+        "--conversation",
+        fixture.terminalId,
+        "--expected-terminal-token",
+        String(action.arguments.expected_terminal_token),
+        "--expected-approval-fingerprint",
+        fingerprint,
+        "--store-dir",
+        fixture.storeDir,
+        "--codex-home",
+        fixture.codexHome
+      ], fixture.environment);
+      assert.equal(rejected.status, 1, `${drift}: ${rejected.stdout}`);
+      assert.match(
+        rejected.stderr,
+        /managed recovery|unresolved|uncertain|ambiguous|token is missing or stale|different native thread|no single exact managed Session|process incarnation|dispatch owner/iu,
+        drift
+      );
+      assert.equal(approvalKeyCalls(fixture).length, keysBefore, drift);
+    } finally {
+      fixture.cleanup();
+    }
+  }
+});
+
+test("terminal-scoped Codex approval rejects a known native-thread handoff and process drift before keys", async () => {
+  for (const drift of ["native_thread", "process"] as const) {
+    const fixture = createNoRolloutFixture();
+    try {
+      await seedStatusCardManagedApproval(fixture);
+      const terminal = await listFixtureTerminal(fixture);
+      const action = terminal.available_actions.approve;
+      assert.ok(action, `${drift}: ${JSON.stringify(terminal, null, 2)}`);
+      const status = await runCli([
+        "status",
+        "--conversation",
+        fixture.terminalId,
+        "--store-dir",
+        fixture.storeDir,
+        "--codex-home",
+        fixture.codexHome
+      ], fixture.environment);
+      assert.equal(status.status, 0, status.stderr || status.stdout);
+      const fingerprint = JSON.parse(status.stdout)
+        .terminal_status.approval_state.fingerprint;
+      const keysBefore = approvalKeyCalls(fixture).length;
+
+      if (drift === "native_thread") {
+        fixture.identityObservationError = undefined;
+        fixture.activeNativeThreadId = EXTERNAL_THREAD_ID;
+        fixture.activeRolloutPath = path.join(
+          path.dirname(fixture.rolloutPath),
+          `rollout-2026-08-12T00-00-00-${EXTERNAL_THREAD_ID}.jsonl`
+        );
+        fs.writeFileSync(fixture.activeRolloutPath, `${JSON.stringify({
+          timestamp: "2026-08-12T00:00:00.000Z",
+          type: "session_meta",
+          payload: {
+            id: EXTERNAL_THREAD_ID,
+            cwd: fixture.terminalControl.currentPath,
+            originator: "codex-tui",
+            source: "cli",
+            cli_version: fixture.codexVersion
+          }
+        })}\n`);
+        fs.writeFileSync(fixture.materializedPath, "ready");
+      } else {
+        fs.writeFileSync(fixture.processBirthPath, STALE_PROCESS_BIRTH);
+      }
+
+      const relisted = await listFixtureTerminal(fixture);
+      assert.equal(relisted.available_actions.approve, undefined, drift);
+      const rejected = await runCli([
+        "approve",
+        "--conversation",
+        fixture.terminalId,
+        "--expected-terminal-token",
+        String(action.arguments.expected_terminal_token),
+        "--expected-approval-fingerprint",
+        String(fingerprint),
+        "--store-dir",
+        fixture.storeDir,
+        "--codex-home",
+        fixture.codexHome
+      ], fixture.environment);
+      assert.equal(rejected.status, 1, `${drift}: ${rejected.stdout}`);
+      assert.match(
+        rejected.stderr,
+        drift === "native_thread"
+          ? /native.*thread.*changed|different native.*thread/iu
+          : /process incarnation changed|no single current managed owner/iu
+      );
+      assert.equal(approvalKeyCalls(fixture).length, keysBefore, drift);
+    } finally {
+      fixture.cleanup();
+    }
+  }
+});
+
+test("terminal-scoped Codex approval rejects uncertain dispatch ownership before keys", async () => {
+  const fixture = createNoRolloutFixture();
+  try {
+    await seedStatusCardManagedApproval(fixture);
+    const terminal = await listFixtureTerminal(fixture);
+    const action = terminal.available_actions.approve;
+    assert.ok(action, JSON.stringify(terminal, null, 2));
+    const status = await runCli([
+      "status",
+      "--conversation",
+      fixture.terminalId,
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome
+    ], fixture.environment);
+    const fingerprint = JSON.parse(status.stdout)
+      .terminal_status.approval_state.fingerprint;
+    const ledger = readSoleTerminalDispatchLedger(fixture);
+    const ledgerPath = soleTerminalDispatchLedgerPath(fixture);
+    fs.writeFileSync(ledgerPath, `${JSON.stringify({
+      ...ledger,
+      status: "uncertain",
+      uncertain_at: new Date().toISOString(),
+      do_not_retry: true
+    }, null, 2)}\n`);
+    const keysBefore = approvalKeyCalls(fixture).length;
+
+    const relisted = await listFixtureTerminal(fixture);
+    assert.equal(relisted.available_actions.approve, undefined);
+    const rejected = await runCli([
+      "approve",
+      "--conversation",
+      fixture.terminalId,
+      "--expected-terminal-token",
+      String(action.arguments.expected_terminal_token),
+      "--expected-approval-fingerprint",
+      String(fingerprint),
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome
+    ], fixture.environment);
+    assert.equal(rejected.status, 1, rejected.stdout);
+    assert.match(rejected.stderr, /uncertain.*dispatch|dispatch.*uncertain/iu);
+    assert.equal(approvalKeyCalls(fixture).length, keysBefore);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("terminal-scoped Codex approval rejects a nonterminal deferred transfer before keys", async () => {
+  const fixture = createNoRolloutFixture();
+  try {
+    const seeded = await seedStatusCardManagedApproval(fixture);
+    const terminal = await listFixtureTerminal(fixture);
+    const action = terminal.available_actions.approve;
+    assert.ok(action, JSON.stringify(terminal, null, 2));
+    const status = await runCli([
+      "status",
+      "--conversation",
+      fixture.terminalId,
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome
+    ], fixture.environment);
+    assert.equal(status.status, 0, status.stderr || status.stdout);
+    const fingerprint = JSON.parse(status.stdout)
+      .terminal_status.approval_state.fingerprint;
+    const binding = seeded.session.binding;
+    assert.ok(binding?.terminal_endpoint);
+    const transferId = createDeferredForegroundTransferId();
+    saveDeferredForegroundTransfer(fixture.storeDir, {
+      schema: DEFERRED_FOREGROUND_TRANSFER_SCHEMA,
+      version: DEFERRED_FOREGROUND_TRANSFER_VERSION,
+      transfer_id: transferId,
+      status: "prepared",
+      input_stage: "none",
+      terminal_id: fixture.terminalId,
+      terminal_endpoint: binding.terminal_endpoint,
+      process_pid: binding.native_process.pid,
+      process_uuid: String(binding.native_process.process_uuid),
+      process_birth: String(binding.native_process.process_birth),
+      workspace: seeded.session.workspace,
+      source_session_id: seeded.session.session_id,
+      source_expected_revision: seeded.session.revision as number,
+      source_binding_token: managedSessionBindingToken(seeded.session),
+      source_before_binding: binding,
+      source_kind: "status_card_only",
+      target_session_id: `${seeded.session.session_id}-deferred-target`,
+      target_expected_revision: null,
+      previous_dispatch_status: "resolved",
+      previous_dispatch_fingerprint: "a".repeat(64),
+      request_hash: "b".repeat(64),
+      dispatcher_pid: process.pid,
+      prepared_at: new Date().toISOString()
+    }, { expectedRevision: null });
+    const keysBefore = approvalKeyCalls(fixture).length;
+
+    const relisted = await listFixtureTerminal(fixture);
+    assert.equal(relisted.available_actions.approve, undefined);
+    const rejected = await runCli([
+      "approve",
+      "--conversation",
+      fixture.terminalId,
+      "--expected-terminal-token",
+      String(action.arguments.expected_terminal_token),
+      "--expected-approval-fingerprint",
+      String(fingerprint),
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome
+    ], fixture.environment);
+    assert.equal(rejected.status, 1, rejected.stdout);
+    assert.match(rejected.stderr, /managed recovery|deferred foreground transfer/iu);
+    assert.equal(approvalKeyCalls(fixture).length, keysBefore);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test("an accepted deferred Turn recovers before Session commit without replay", async () => {
   const fixture = createNoRolloutFixture({
     codexVersion: "0.147.0",
@@ -2928,6 +3779,927 @@ test("deferred terminal tokens fail closed while an unmanaged no-token send stil
     assertSingleTaskInput(unmanaged, message);
   } finally {
     unmanaged.cleanup();
+  }
+});
+
+for (const [label, acceptedNativeThreadId] of [
+  ["lingering old root", NATIVE_THREAD_ID],
+  ["new status-card root", EXTERNAL_THREAD_ID]
+] as const) {
+  test(
+    `candidate-set narrow Herdr send binds one ${label} acceptance without /status`,
+    async () => {
+      const fixture = createNoRolloutFixture({
+        codexVersion: "0.147.0",
+        terminalKind: "herdr",
+        viewportColumns: 54,
+        ttyViewportColumns: 51
+      });
+      const message = `Route once through the ${label}.`;
+      try {
+        enableFixtureCandidateInventory(fixture, [NATIVE_THREAD_ID]);
+        const source = persistStatusCardSession(
+          fixture,
+          LIVE_PROCESS_BIRTH,
+          EXTERNAL_THREAD_ID,
+          `session-candidate-status-card-${label.replaceAll(" ", "-")}`
+        );
+        fixture.identityObservationError =
+          "fixture foreground identity is unavailable while inventory is exact";
+        fixture.acceptanceNativeThreadIdsOnEnter = [acceptedNativeThreadId];
+
+        const action = await deferredForegroundSendAction(fixture);
+        const sent = await runCli(
+          deferredForegroundSendArgs(fixture, action, message),
+          {
+            ...fixture.environment,
+            AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
+          }
+        );
+        assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+        const output = JSON.parse(sent.stdout);
+        assert.equal(output.delivered, true, sent.stdout);
+        assert.equal(output.delivery_receipt, "agent_accepted");
+        assert.equal(
+          output.conversation.native_thread_id,
+          acceptedNativeThreadId
+        );
+        assert.notEqual(output.session_id, source.session_id);
+
+        const sourceAfter = loadManagedSession(
+          fixture.storeDir,
+          source.session_id
+        );
+        const target = loadManagedSession(
+          fixture.storeDir,
+          String(output.session_id)
+        );
+        assert.equal(sourceAfter.status, "detached");
+        if (acceptedNativeThreadId === EXTERNAL_THREAD_ID) {
+          assert.equal(sourceAfter.binding?.native_thread_id, undefined);
+          assert.equal(sourceAfter.binding?.native_process.rollout, undefined);
+          assert.equal(
+            sourceAfter.binding?.generation,
+            Number(source.binding?.generation) + 1
+          );
+        } else {
+          assert.equal(
+            sourceAfter.binding?.native_thread_id,
+            EXTERNAL_THREAD_ID
+          );
+          assert.equal(
+            sourceAfter.binding?.generation,
+            source.binding?.generation
+          );
+        }
+        assert.equal(target.status, "bound");
+        assert.equal(target.binding?.native_thread_id, acceptedNativeThreadId);
+        assert.equal(
+          listManagedSessions(fixture.storeDir).filter((session) =>
+            session.status === "bound" &&
+            session.binding?.native_thread_id === acceptedNativeThreadId
+          ).length,
+          1
+        );
+
+        const transfer = soleDeferredForegroundTransfer(fixture);
+        assert.equal(transfer.status, "resolved");
+        assert.equal(transfer.source_kind, "status_card_only");
+        const turn = listConversations(fixture.storeDir).find((candidate) =>
+          candidate.turn_id === output.turn_id
+        );
+        const anchor = (turn?.native_session_takeover as
+          Record<string, any>).codex_rollout_acceptance_anchor;
+        assert.equal(anchor.version, 3);
+        assert.equal(anchor.candidate_rollouts.length, 1);
+        assertSingleTaskInput(fixture, message);
+        assert.equal(
+          readTmuxCalls(fixture.tmuxCallsPath).some((call) =>
+            call.args.includes("/status")
+          ),
+          false
+        );
+        assert.deepEqual(fixture.ttyViewportInspectionPids, []);
+      } finally {
+        fixture.cleanup();
+      }
+    }
+  );
+}
+
+for (const [label, acceptedNativeThreadId] of [
+  ["same UUID", NATIVE_THREAD_ID],
+  ["different UUID", EXTERNAL_THREAD_ID]
+] as const) {
+  test(
+    `quiescent rollout candidate send preserves released history for ${label}`,
+    async () => {
+      const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
+      const message = `Accept the multi-root request on the ${label} candidate.`;
+      try {
+        enableFixtureCandidateInventory(fixture, [
+          NATIVE_THREAD_ID,
+          EXTERNAL_THREAD_ID
+        ]);
+        const source = persistExactEndedRolloutSession(
+          fixture,
+          `session-quiescent-candidate-${label.replaceAll(" ", "-")}`
+        );
+        persistReleasedCandidateSourceTurns(fixture, source);
+        fixture.acceptanceNativeThreadIdsOnEnter = [acceptedNativeThreadId];
+
+        const terminal = await listFixtureTerminal(fixture);
+        assert.equal(
+          terminal.native_agent_identity_observation.status,
+          "unavailable"
+        );
+        const action = terminal.available_actions.send;
+        assert.ok(action, JSON.stringify(terminal, null, 2));
+        assert.equal(action.arguments.selector, fixture.terminalId);
+        assert.equal("session_id" in action.arguments, false);
+        assert.equal(
+          typeof action.arguments.expected_terminal_token,
+          "string"
+        );
+
+        const sent = await runCli(
+          deferredForegroundSendArgs(fixture, action, message),
+          {
+            ...fixture.environment,
+            AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
+          }
+        );
+        assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+        const output = JSON.parse(sent.stdout);
+        assert.equal(output.delivered, true, sent.stdout);
+        assert.equal(output.conversation.native_thread_id, acceptedNativeThreadId);
+
+        const sourceAfter = loadManagedSession(
+          fixture.storeDir,
+          source.session_id
+        );
+        const target = loadManagedSession(
+          fixture.storeDir,
+          String(output.session_id)
+        );
+        assert.equal(sourceAfter.status, "detached");
+        assert.equal(target.status, "bound");
+        assert.equal(target.binding?.native_thread_id, acceptedNativeThreadId);
+        if (acceptedNativeThreadId === NATIVE_THREAD_ID) {
+          assert.equal(sourceAfter.binding?.native_thread_id, undefined);
+          assert.equal(
+            sourceAfter.binding?.generation,
+            Number(source.binding?.generation) + 1
+          );
+        } else {
+          assert.equal(sourceAfter.binding?.native_thread_id, NATIVE_THREAD_ID);
+          assert.equal(
+            sourceAfter.binding?.generation,
+            source.binding?.generation
+          );
+        }
+        assert.deepEqual(
+          listConversations(fixture.storeDir)
+            .filter((turn) => turn.session_id === source.session_id)
+            .map((turn) => turn.status)
+            .sort(),
+          ["cancelled", "closed", "failed", "idle"]
+        );
+        const transfer = soleDeferredForegroundTransfer(fixture);
+        assert.equal(transfer.status, "resolved");
+        assert.equal(transfer.source_kind, "candidate_rollout_quiescent");
+        assert.equal(transfer.source_turn_history?.length, 4);
+        assertSingleTaskInput(fixture, message);
+      } finally {
+        fixture.cleanup();
+      }
+    }
+  );
+}
+
+test("callbackless candidate pending acceptance restarts into one local completion", async () => {
+  const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
+  const message = "Reconcile this callbackless candidate request after restart.";
+  try {
+    enableFixtureCandidateInventory(fixture, [NATIVE_THREAD_ID]);
+    const source = persistStatusCardSession(
+      fixture,
+      LIVE_PROCESS_BIRTH,
+      EXTERNAL_THREAD_ID,
+      "session-candidate-callbackless-source"
+    );
+    fixture.identityObservationError =
+      "fixture foreground identity is unavailable while inventory is exact";
+    fixture.acceptanceNativeThreadIdsOnEnter = [];
+    fixture.cliPid = process.pid + 500_000;
+    const action = await deferredForegroundSendAction(fixture);
+
+    const pending = await runCli(
+      deferredForegroundSendArgs(fixture, action, message),
+      {
+        ...fixture.environment,
+        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
+      }
+    );
+    assert.equal(pending.status, 0, pending.stderr || pending.stdout);
+    const pendingOutput = JSON.parse(pending.stdout);
+    assert.equal(pendingOutput.delivered, false);
+    assert.equal(pendingOutput.status, "submission_pending_acceptance");
+    assert.equal(pendingOutput.submission_outcome, "pending_acceptance");
+    assert.equal(pendingOutput.callback_expected, false);
+    assert.equal(soleDeferredForegroundTransfer(fixture).status, "dispatch_started");
+    assertSingleTaskInput(fixture, message);
+
+    appendNativeAcceptance(
+      fixture.rolloutPath,
+      message,
+      FIRST_NATIVE_TURN_ID,
+      {
+        nativeThreadId: NATIVE_THREAD_ID,
+        workspace: String(fixture.terminalControl.currentPath),
+        codexVersion: fixture.codexVersion,
+        timestamp: "2026-08-12T00:00:01.000Z"
+      }
+    );
+    appendFixtureCompletion(fixture, NATIVE_THREAD_ID);
+    fixture.identityObservationError = undefined;
+    const pendingTurn = listConversations(fixture.storeDir).find((turn) =>
+      turn.turn_id === pendingOutput.turn_id
+    );
+    assert.ok(pendingTurn);
+    const monitored = await runCli([
+      "monitor",
+      "--terminal-bridge",
+      "--state",
+      String(pendingTurn.state_path),
+      "--log",
+      String(pendingTurn.event_log_path),
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome,
+      "--poll-interval-ms",
+      "50",
+      "--agent-timeout-minutes",
+      "1",
+      "--agent-hard-timeout-minutes",
+      "2"
+    ], {
+      ...fixture.environment,
+      AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
+    });
+    assert.equal(monitored.status, 0, monitored.stderr || monitored.stdout);
+
+    const finalTurn = listConversations(fixture.storeDir).find((turn) =>
+      turn.turn_id === pendingOutput.turn_id
+    );
+    assert.ok(finalTurn);
+    assert.equal(
+      finalTurn.status,
+      "idle",
+      JSON.stringify({
+        monitored: monitored.stdout || monitored.stderr,
+        stalled_reason: finalTurn.stalled_reason,
+        takeover: finalTurn.native_session_takeover
+      }, null, 2)
+    );
+    assert.equal(finalTurn.native_thread_id, NATIVE_THREAD_ID);
+    assert.equal(finalTurn.callback_delivery, undefined);
+    assert.equal(finalTurn.gateway_method, undefined);
+    assert.equal(soleDeferredForegroundTransfer(fixture).status, "resolved");
+    assert.equal(
+      loadManagedSession(fixture.storeDir, source.session_id).status,
+      "detached"
+    );
+    assert.equal(
+      loadManagedSession(fixture.storeDir, String(pendingOutput.session_id))
+        .binding?.native_thread_id,
+      NATIVE_THREAD_ID
+    );
+    assert.equal(readSoleTerminalDispatchLedger(fixture).status, "resolved");
+    const events = fs.readFileSync(String(finalTurn.event_log_path), "utf8");
+    assert.doesNotMatch(events, /callback_delivery_(?:pending|failed)|callback_outbox/u);
+    assertSingleTaskInput(fixture, message);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("v3 acceptance monitor defers a contended writer without weakening durable evidence", async () => {
+  const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
+  const message = "Recover this candidate only after the Store writer is released.";
+  let lockReleaser: ReturnType<typeof spawn> | undefined;
+  try {
+    enableFixtureCandidateInventory(fixture, [NATIVE_THREAD_ID]);
+    persistStatusCardSession(
+      fixture,
+      LIVE_PROCESS_BIRTH,
+      EXTERNAL_THREAD_ID,
+      "session-candidate-writer-contention"
+    );
+    fixture.identityObservationError =
+      "fixture foreground identity is unavailable while inventory is exact";
+    fixture.acceptanceNativeThreadIdsOnEnter = [];
+    fixture.cliPid = process.pid + 500_000;
+    const action = await deferredForegroundSendAction(fixture);
+    const pending = await runCli(
+      deferredForegroundSendArgs(fixture, action, message),
+      {
+        ...fixture.environment,
+        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
+      }
+    );
+    assert.equal(pending.status, 0, pending.stderr || pending.stdout);
+    const pendingOutput = JSON.parse(pending.stdout);
+    assert.equal(pendingOutput.status, "submission_pending_acceptance");
+    const transfer = soleDeferredForegroundTransfer(fixture);
+    const turn = listConversations(fixture.storeDir).find((candidate) =>
+      candidate.turn_id === pendingOutput.turn_id
+    );
+    assert.ok(turn);
+    const statePath = String(turn.state_path);
+    const logPath = String(turn.event_log_path);
+    const transferPath = pathsForDeferredForegroundTransfer(
+      transfer.transfer_id,
+      fixture.storeDir
+    ).statePath;
+    const ledgerPath = soleTerminalDispatchLedgerPath(fixture);
+    const snapshotPath = path.join(
+      fixture.tempDir,
+      "writer-contention-snapshot.json"
+    );
+    const writerLockPath = path.join(fixture.storeDir, ".akk-writer.lock");
+    fs.writeFileSync(writerLockPath, `${JSON.stringify({
+      pid: process.pid,
+      token: "candidate-v3-writer-contention",
+      created_at: new Date().toISOString()
+    })}\n`, { mode: 0o600 });
+
+    appendNativeAcceptance(
+      fixture.rolloutPath,
+      message,
+      FIRST_NATIVE_TURN_ID,
+      {
+        nativeThreadId: NATIVE_THREAD_ID,
+        workspace: String(fixture.terminalControl.currentPath),
+        codexVersion: fixture.codexVersion,
+        timestamp: new Date().toISOString()
+      }
+    );
+    appendFixtureCompletion(fixture, NATIVE_THREAD_ID);
+    fixture.identityObservationError = undefined;
+
+    const durablePaths = [statePath, transferPath, ledgerPath];
+    const before = Object.fromEntries(durablePaths.map((filePath) => [
+      filePath,
+      fs.readFileSync(filePath, "utf8")
+    ]));
+    const releaseScript = `
+      const fs = require("node:fs");
+      const durablePaths = ${JSON.stringify(durablePaths)};
+      const snapshotPath = ${JSON.stringify(snapshotPath)};
+      const writerLockPath = ${JSON.stringify(writerLockPath)};
+      setTimeout(() => {
+        const snapshot = Object.fromEntries(durablePaths.map((filePath) => [
+          filePath,
+          fs.readFileSync(filePath, "utf8")
+        ]));
+        fs.writeFileSync(snapshotPath, JSON.stringify(snapshot));
+        fs.unlinkSync(writerLockPath);
+      }, 10250);
+    `;
+    lockReleaser = spawn(process.execPath, ["-e", releaseScript], {
+      stdio: "ignore"
+    });
+
+    const monitored = await runCli([
+      "monitor",
+      "--terminal-bridge",
+      "--state",
+      statePath,
+      "--log",
+      logPath,
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome,
+      "--poll-interval-ms",
+      "50",
+      "--agent-timeout-minutes",
+      "1",
+      "--agent-hard-timeout-minutes",
+      "2"
+    ], {
+      ...fixture.environment,
+      AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
+    });
+    assert.equal(monitored.status, 0, monitored.stderr || monitored.stdout);
+    assert.deepEqual(JSON.parse(fs.readFileSync(snapshotPath, "utf8")), before);
+    assert.ok(
+      fixture.runtimeLogs.some((entry) =>
+        entry.event === "terminal_bridge_monitor_store_operation_deferred" &&
+        entry.fields.error_code === "AKK_STORE_LOCK_TIMEOUT"
+      ),
+      JSON.stringify(fixture.runtimeLogs, null, 2)
+    );
+    const finalTurn = listConversations(fixture.storeDir).find((candidate) =>
+      candidate.turn_id === pendingOutput.turn_id
+    );
+    assert.ok(finalTurn);
+    assert.equal(finalTurn.status, "idle");
+    assert.equal(finalTurn.native_thread_id, NATIVE_THREAD_ID);
+    assert.equal(finalTurn.callback_delivery, undefined);
+    assert.equal(soleDeferredForegroundTransfer(fixture).status, "resolved");
+    assert.equal(readSoleTerminalDispatchLedger(fixture).status, "resolved");
+    assertSingleTaskInput(fixture, message);
+  } finally {
+    if (lockReleaser && lockReleaser.exitCode === null) {
+      lockReleaser.kill("SIGKILL");
+    }
+    fs.rmSync(path.join(fixture.storeDir, ".akk-writer.lock"), {
+      force: true
+    });
+    fixture.cleanup();
+  }
+});
+
+test("raw terminal cancel cannot bypass a pending candidate transfer after a route rename", async () => {
+  const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
+  const message = "Keep this candidate request pending while cancel is fenced.";
+  try {
+    enableFixtureCandidateInventory(fixture, [NATIVE_THREAD_ID]);
+    persistStatusCardSession(
+      fixture,
+      LIVE_PROCESS_BIRTH,
+      EXTERNAL_THREAD_ID,
+      "session-candidate-cancel-source"
+    );
+    fixture.identityObservationError =
+      "fixture foreground identity is unavailable while inventory is exact";
+    fixture.acceptanceNativeThreadIdsOnEnter = [];
+    const action = await deferredForegroundSendAction(fixture);
+    const pending = await runCli(
+      deferredForegroundSendArgs(fixture, action, message),
+      {
+        ...fixture.environment,
+        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
+      }
+    );
+    assert.equal(pending.status, 0, pending.stderr || pending.stdout);
+    assert.equal(JSON.parse(pending.stdout).status, "submission_pending_acceptance");
+    const beforeTransfer = soleDeferredForegroundTransfer(fixture);
+    const beforeTurns = listConversations(fixture.storeDir);
+    assert.equal(beforeTransfer.status, "dispatch_started");
+    assertSingleTaskInput(fixture, message);
+
+    assert.equal(fixture.terminalControl.kind, "tmux");
+    const renamedTarget = "tmux-renamed:0.0";
+    fixture.target = renamedTarget;
+    fixture.terminalControl = {
+      ...fixture.terminalControl,
+      target: renamedTarget,
+      session: "tmux-renamed"
+    };
+    fixture.terminalId =
+      `terminal:v2:tmux:codex:${renamedTarget}:${fixture.codexPid}`;
+
+    const cancelled = await runCli([
+      "cancel",
+      "--conversation",
+      fixture.terminalId,
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome
+    ], fixture.environment);
+    assert.equal(cancelled.status, 1, cancelled.stdout);
+    assert.match(
+      cancelled.stderr,
+      /cannot cancel terminal.*deferred foreground transfer.*dispatch_started/iu
+    );
+    assert.deepEqual(soleDeferredForegroundTransfer(fixture), beforeTransfer);
+    assert.deepEqual(listConversations(fixture.storeDir), beforeTurns);
+    assertSingleTaskInput(fixture, message);
+    assert.equal(
+      readTmuxCalls(fixture.tmuxCallsPath).some((call) =>
+        ["C-c", "Escape"].includes(String(call.args.at(-1)))
+      ),
+      false
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("raw terminal cancel remains direct after a candidate transfer resolves", async () => {
+  const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
+  const message = "Resolve this candidate request before raw cancel.";
+  try {
+    enableFixtureCandidateInventory(fixture, [NATIVE_THREAD_ID]);
+    persistStatusCardSession(
+      fixture,
+      LIVE_PROCESS_BIRTH,
+      EXTERNAL_THREAD_ID,
+      "session-resolved-cancel-source"
+    );
+    fixture.identityObservationError =
+      "fixture foreground identity is unavailable while inventory is exact";
+    fixture.acceptanceNativeThreadIdsOnEnter = [NATIVE_THREAD_ID];
+    const action = await deferredForegroundSendAction(fixture);
+    const sent = await runCli(
+      deferredForegroundSendArgs(fixture, action, message),
+      {
+        ...fixture.environment,
+        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
+      }
+    );
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    assert.equal(soleDeferredForegroundTransfer(fixture).status, "resolved");
+    const keyCountBefore = readTmuxCalls(fixture.tmuxCallsPath).filter((call) =>
+      ["C-c", "Escape"].includes(String(call.args.at(-1)))
+    ).length;
+
+    const cancelled = await runCli([
+      "cancel",
+      "--conversation",
+      fixture.terminalId,
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome
+    ], fixture.environment);
+    assert.equal(cancelled.status, 0, cancelled.stderr || cancelled.stdout);
+    const output = JSON.parse(cancelled.stdout);
+    assert.equal(output.source, "terminal_control");
+    assert.equal(output.cancel_requested, true);
+    assert.equal(
+      readTmuxCalls(fixture.tmuxCallsPath).filter((call) =>
+        ["C-c", "Escape"].includes(String(call.args.at(-1)))
+      ).length,
+      keyCountBefore + 1
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("startup reconciliation relaunches one pending candidate monitor without replay", async () => {
+  const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
+  const message = "Relaunch this pending candidate monitor after startup.";
+  let monitorPid: number | undefined;
+  try {
+    enableFixtureCandidateInventory(fixture, [NATIVE_THREAD_ID]);
+    const source = persistStatusCardSession(
+      fixture,
+      LIVE_PROCESS_BIRTH,
+      EXTERNAL_THREAD_ID,
+      "session-candidate-startup-reconcile"
+    );
+    fixture.identityObservationError =
+      "fixture foreground identity is unavailable while inventory is exact";
+    fixture.acceptanceNativeThreadIdsOnEnter = [];
+    fixture.cliPid = process.pid;
+    const action = await deferredForegroundSendAction(fixture);
+    const pending = await runCli(
+      deferredForegroundSendArgs(fixture, action, message),
+      {
+        ...fixture.environment,
+        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
+      }
+    );
+    assert.equal(pending.status, 0, pending.stderr || pending.stdout);
+    const pendingOutput = JSON.parse(pending.stdout);
+    assert.equal(pendingOutput.status, "submission_pending_acceptance");
+    assert.equal(pendingOutput.monitor_pid, null);
+    assertSingleTaskInput(fixture, message);
+
+    appendNativeAcceptance(
+      fixture.rolloutPath,
+      message,
+      FIRST_NATIVE_TURN_ID,
+      {
+        nativeThreadId: NATIVE_THREAD_ID,
+        workspace: String(fixture.terminalControl.currentPath),
+        codexVersion: fixture.codexVersion,
+        timestamp: new Date().toISOString()
+      }
+    );
+    const pendingTurn = listConversations(fixture.storeDir).find((turn) =>
+      turn.turn_id === pendingOutput.turn_id
+    );
+    assert.ok(pendingTurn);
+    const statePath = String(pendingTurn.state_path);
+    const logPath = String(pendingTurn.event_log_path);
+    fixture.identityObservationError = undefined;
+
+    const reconciled = runCliSubprocess([
+      "reconcile-monitors",
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome,
+      "--reason",
+      "test_candidate_startup_reconcile",
+      "--terminal-monitors-only",
+      "--monitor-poll-interval-ms",
+      "50"
+    ], {
+      ...fixture.environment,
+      AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0",
+      PATH: fixture.environment.PATH
+    });
+    assert.equal(reconciled.status, 0, reconciled.stderr || reconciled.stdout);
+    const reconciliation = JSON.parse(reconciled.stdout);
+    assert.equal(reconciliation.errors, 0, reconciled.stdout);
+    assert.equal(reconciliation.launched, 1, reconciled.stdout);
+    monitorPid = Number(
+      reconciliation.items.find((item: Record<string, any>) =>
+        item.status === "launched"
+      )?.monitor_pid
+    );
+    assert.ok(Number.isInteger(monitorPid) && monitorPid > 0, reconciled.stdout);
+
+    await waitForFixtureConversation(
+      statePath,
+      (conversation) =>
+        conversation.native_session_takeover?.terminal_bridge_submission
+          ?.status === "agent_accepted",
+      5_000
+    );
+    appendFixtureCompletion(fixture, NATIVE_THREAD_ID);
+
+    const settled = await waitForFixtureConversation(
+      statePath,
+      (conversation) => conversation.status === "idle",
+      5_000
+    );
+    assert.equal(settled.native_thread_id, NATIVE_THREAD_ID);
+    assert.equal(settled.callback_delivery, undefined);
+    assert.equal(settled.gateway_method, undefined);
+    assert.equal(soleDeferredForegroundTransfer(fixture).status, "resolved");
+    assert.equal(
+      loadManagedSession(fixture.storeDir, source.session_id).status,
+      "detached"
+    );
+    await waitForProcessExit(monitorPid, 5_000);
+    monitorPid = undefined;
+    assert.equal(readSoleTerminalDispatchLedger(fixture).status, "resolved");
+    assert.doesNotMatch(
+      fs.readFileSync(logPath, "utf8"),
+      /callback_delivery_(?:pending|failed)|callback_outbox/u
+    );
+    assertSingleTaskInput(fixture, message);
+  } finally {
+    if (monitorPid) {
+      await waitForProcessExit(monitorPid, 5_000);
+    }
+    fixture.cleanup();
+  }
+});
+
+test("active candidate transfer protects expired idle source history from reconciliation", async () => {
+  const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
+  const message = "Keep frozen source history while candidate acceptance is pending.";
+  try {
+    enableFixtureCandidateInventory(fixture, [
+      NATIVE_THREAD_ID,
+      EXTERNAL_THREAD_ID
+    ]);
+    const source = persistExactEndedRolloutSession(
+      fixture,
+      "session-candidate-idle-cleanup-source"
+    );
+    persistReleasedCandidateSourceTurns(fixture, source);
+    fixture.acceptanceNativeThreadIdsOnEnter = [];
+    fixture.cliPid = process.pid;
+    const action = await deferredForegroundSendAction(fixture);
+    const pending = await runCli(
+      deferredForegroundSendArgs(fixture, action, message),
+      {
+        ...fixture.environment,
+        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
+      }
+    );
+    assert.equal(pending.status, 0, pending.stderr || pending.stdout);
+    assert.equal(
+      JSON.parse(pending.stdout).status,
+      "submission_pending_acceptance"
+    );
+    const transfer = soleDeferredForegroundTransfer(fixture);
+    assert.equal(transfer.status, "dispatch_started");
+    assert.equal(transfer.source_turn_history?.length, 4);
+    const idleTurn = listConversations(fixture.storeDir).find((turn) =>
+      turn.session_id === source.session_id && turn.status === "idle"
+    );
+    assert.ok(idleTurn);
+    const statePath = String(idleTurn.state_path);
+    const logPath = String(idleTurn.event_log_path);
+    const beforeState = fs.readFileSync(statePath);
+    const beforeEvents = fs.existsSync(logPath)
+      ? fs.readFileSync(logPath)
+      : Buffer.alloc(0);
+
+    const listed = await runCli([
+      "list",
+      "--reconcile",
+      "--all",
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome,
+      "--idle-timeout-minutes",
+      "1"
+    ], fixture.environment);
+    assert.equal(listed.status, 0, listed.stderr || listed.stdout);
+    const output = JSON.parse(listed.stdout);
+    assert.equal(output.reconciliation.status, "completed");
+    assert.equal(output.reconciliation.closed, 0);
+    assert.ok(output.reconciliation.skipped >= 1, listed.stdout);
+    assert.deepEqual(fs.readFileSync(statePath), beforeState);
+    assert.deepEqual(
+      fs.existsSync(logPath) ? fs.readFileSync(logPath) : Buffer.alloc(0),
+      beforeEvents
+    );
+    assert.equal(soleDeferredForegroundTransfer(fixture).status, "dispatch_started");
+    assertSingleTaskInput(fixture, message);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+for (const acceptanceCase of ["zero", "multiple"] as const) {
+  test(`candidate ${acceptanceCase} acceptance never replays terminal input`, async () => {
+    const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
+    const message = `Do not replay a ${acceptanceCase} candidate acceptance.`;
+    try {
+      enableFixtureCandidateInventory(fixture, acceptanceCase === "multiple"
+        ? [NATIVE_THREAD_ID, EXTERNAL_THREAD_ID]
+        : [NATIVE_THREAD_ID]);
+      persistStatusCardSession(
+        fixture,
+        LIVE_PROCESS_BIRTH,
+        SECOND_EXTERNAL_THREAD_ID,
+        `session-candidate-${acceptanceCase}-source`
+      );
+      fixture.identityObservationError =
+        "fixture foreground identity is unavailable while inventory is exact";
+      fixture.acceptanceNativeThreadIdsOnEnter = acceptanceCase === "multiple"
+        ? [NATIVE_THREAD_ID, EXTERNAL_THREAD_ID]
+        : [];
+      const action = await deferredForegroundSendAction(fixture);
+      const args = deferredForegroundSendArgs(fixture, action, message);
+      const first = await runCli(args, {
+        ...fixture.environment,
+        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
+      });
+      assert.equal(first.status, 0, first.stderr || first.stdout);
+      const output = JSON.parse(first.stdout);
+      if (acceptanceCase === "zero") {
+        assert.equal(output.status, "submission_pending_acceptance");
+        assert.equal(output.submission_outcome, "pending_acceptance");
+        assert.equal(soleDeferredForegroundTransfer(fixture).status, "dispatch_started");
+      } else {
+        assert.equal(output.status, "submission_uncertain");
+        assert.equal(output.submission_outcome, "uncertain");
+        assert.equal(output.do_not_retry, true);
+        assert.equal(soleDeferredForegroundTransfer(fixture).status, "uncertain");
+      }
+      assertSingleTaskInput(fixture, message);
+
+      const replay = await runCli(args, {
+        ...fixture.environment,
+        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
+      });
+      assert.equal(replay.status, 1, replay.stdout);
+      assert.match(
+        replay.stderr,
+        acceptanceCase === "zero"
+          ? /still dispatch_started|pending|dispatch ledger|exact Turn authority|refresh|unresolved Turn.*waiting_for_agent/iu
+          : /uncertain|do not retry/iu
+      );
+      assertSingleTaskInput(fixture, message);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+}
+
+test("one exact open root keeps a rollout-backed Session on the strict route", async () => {
+  const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
+  try {
+    enableFixtureCandidateInventory(fixture, [NATIVE_THREAD_ID]);
+    const source = persistExactEndedRolloutSession(
+      fixture,
+      "session-single-exact-root"
+    );
+    const terminal = await listFixtureTerminal(fixture);
+    assert.equal(terminal.management_state, "managed");
+    assert.equal(terminal.managed.session_id, source.session_id);
+    const action = terminal.available_actions.send;
+    assert.ok(action, JSON.stringify(terminal, null, 2));
+    assert.equal(action.arguments.session_id, source.session_id);
+    assert.equal("selector" in action.arguments, false);
+    assert.equal("expected_terminal_token" in action.arguments, false);
+    assert.deepEqual(listDeferredForegroundTransfers(fixture.storeDir), []);
+    assert.deepEqual(taskInputCalls(fixture), []);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("known detached companion roots use the terminal-scoped human-priority route", async () => {
+  const fixture = createNoRolloutFixture({
+    codexVersion: "0.147.0",
+    terminalKind: "herdr",
+    viewportColumns: 54,
+    ttyViewportColumns: 51
+  });
+  const message = "Route this task without probing the narrow status card.";
+  try {
+    enableFixtureCandidateInventory(fixture, [
+      NATIVE_THREAD_ID,
+      EXTERNAL_THREAD_ID
+    ]);
+    const source = persistExactEndedRolloutSession(
+      fixture,
+      "session-known-companion-source"
+    );
+    persistReleasedCandidateSourceTurns(fixture, source);
+    persistDetachedRolloutCompanion(
+      fixture,
+      EXTERNAL_THREAD_ID,
+      "session-known-detached-companion"
+    );
+    fixture.acceptanceNativeThreadIdsOnEnter = [NATIVE_THREAD_ID];
+
+    const terminal = await listFixtureTerminal(fixture);
+    assert.equal(
+      terminal.native_agent_identity_observation.status,
+      "resolved"
+    );
+    assert.equal(
+      terminal.native_agent_session_id,
+      NATIVE_THREAD_ID
+    );
+    const action = terminal.available_actions.send;
+    assert.ok(action, JSON.stringify(terminal, null, 2));
+    assert.equal(action.arguments.selector, fixture.terminalId);
+    assert.equal("session_id" in action.arguments, false);
+    assert.equal(typeof action.arguments.expected_terminal_token, "string");
+
+    const sent = await runCli(
+      deferredForegroundSendArgs(fixture, action, message),
+      {
+        ...fixture.environment,
+        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
+      }
+    );
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    const output = JSON.parse(sent.stdout);
+    assert.equal(output.delivered, true, sent.stdout);
+    assert.notEqual(output.session_id, source.session_id);
+    assert.equal(output.conversation.native_thread_id, NATIVE_THREAD_ID);
+    assert.equal(
+      soleDeferredForegroundTransfer(fixture).source_kind,
+      "candidate_rollout_quiescent"
+    );
+    assert.equal(
+      readTmuxCalls(fixture.tmuxCallsPath).some((call) =>
+        call.args.includes("/status")
+      ),
+      false
+    );
+    assert.deepEqual(fixture.ttyViewportInspectionPids, []);
+    assertSingleTaskInput(fixture, message);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("a blocking Turn suppresses multi-root candidate send while released history does not", async () => {
+  const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
+  try {
+    enableFixtureCandidateInventory(fixture, [
+      NATIVE_THREAD_ID,
+      EXTERNAL_THREAD_ID
+    ]);
+    const source = persistExactEndedRolloutSession(
+      fixture,
+      "session-candidate-blocking-turn"
+    );
+    persistReleasedCandidateSourceTurns(fixture, source);
+    persistBlockingTurn(fixture, source);
+    const terminal = await listFixtureTerminal(fixture);
+    assert.equal(terminal.available_actions.send, undefined);
+    assert.ok(
+      terminal.blocking_turns?.some((turn: Record<string, any>) =>
+        turn.status === "waiting_for_agent"
+      ),
+      JSON.stringify(terminal, null, 2)
+    );
+    assert.deepEqual(taskInputCalls(fixture), []);
+  } finally {
+    fixture.cleanup();
   }
 });
 
@@ -3626,6 +5398,7 @@ interface NoRolloutFixture {
   terminalId: string;
   terminalControl: TerminalControlRef;
   codexPid: number;
+  cliPid?: number;
   codexVersion: "0.146.0" | "0.147.0";
   terminalKind: "tmux" | "herdr";
   persistedCandidate: boolean;
@@ -3634,6 +5407,12 @@ interface NoRolloutFixture {
   appendAcceptanceOnProbe?: number;
   deferredAcceptanceRequest?: string;
   identityObservationError?: string;
+  openRootRollouts?: Array<{
+    nativeThreadId: string;
+    rolloutPath: string;
+    fd: string;
+  }>;
+  acceptanceNativeThreadIdsOnEnter?: string[];
   activeNativeThreadId: string;
   activeRolloutPath: string;
   viewportColumns: number | null;
@@ -3646,6 +5425,11 @@ interface NoRolloutFixture {
   ttyViewportColumns: number | null;
   ttyViewportRows: number;
   ttyViewportInspectionPids: number[];
+  runtimeLogs: Array<{
+    level: "debug" | "info" | "warn" | "error";
+    event: string;
+    fields: Record<string, unknown>;
+  }>;
   environment: NodeJS.ProcessEnv;
   cleanup(): void;
 }
@@ -3868,6 +5652,7 @@ function createNoRolloutFixture(
     ttyViewportColumns: exactTtyViewportColumns,
     ttyViewportRows: exactTtyViewportRows,
     ttyViewportInspectionPids: [],
+    runtimeLogs: [],
     environment: {
       ...process.env,
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
@@ -3886,14 +5671,16 @@ function createNoRolloutFixture(
 
 function persistStatusCardSession(
   fixture: NoRolloutFixture,
-  processBirth: string
+  processBirth: string,
+  nativeThreadId = NATIVE_THREAD_ID,
+  sessionId = "session-codex-status-card"
 ): ManagedSessionState {
   ensureStoreWritable(fixture.storeDir);
   const now = new Date("2026-08-06T02:00:00.000Z");
   return saveManagedSession(fixture.storeDir, {
     schema: "agent-knock-knock/session",
     version: 1,
-    session_id: "session-codex-status-card",
+    session_id: sessionId,
     agent: "codex",
     workspace: fixture.terminalControl.currentPath as string,
     status: "bound",
@@ -3901,7 +5688,7 @@ function persistStatusCardSession(
       terminalId: fixture.terminalId,
       terminalControl: fixture.terminalControl,
       pid: fixture.codexPid,
-      nativeThreadId: NATIVE_THREAD_ID,
+      nativeThreadId,
       processUuid: processUuid(fixture.codexPid, processBirth),
       processBirth,
       evidence: "codex_status_card",
@@ -3921,6 +5708,11 @@ function persistExactEndedRolloutSession(
   ensureStoreWritable(fixture.storeDir);
   const now = new Date("2026-08-11T02:36:56.000Z");
   const stat = fs.statSync(fixture.rolloutPath);
+  const openRoot = fixture.openRootRollouts?.find((candidate) =>
+    candidate.nativeThreadId === NATIVE_THREAD_ID &&
+    fs.realpathSync(candidate.rolloutPath) ===
+      fs.realpathSync(fixture.rolloutPath)
+  );
   return saveManagedSession(fixture.storeDir, {
     schema: "agent-knock-knock/session",
     version: 1,
@@ -3936,7 +5728,7 @@ function persistExactEndedRolloutSession(
       processUuid: processUuid(fixture.codexPid, LIVE_PROCESS_BIRTH),
       processBirth: LIVE_PROCESS_BIRTH,
       rollout: {
-        fd: "24",
+        fd: openRoot?.fd ?? "24",
         device: String(stat.dev),
         inode: String(stat.ino),
         path: fs.realpathSync(fixture.rolloutPath)
@@ -3946,6 +5738,48 @@ function persistExactEndedRolloutSession(
       now
     }),
     lineage: { created_by: "attach" },
+    created_at: now.toISOString(),
+    updated_at: now.toISOString()
+  }, { expectedRevision: null });
+}
+
+function persistDetachedRolloutCompanion(
+  fixture: NoRolloutFixture,
+  nativeThreadId: string,
+  sessionId: string
+): ManagedSessionState {
+  const root = fixture.openRootRollouts?.find((candidate) =>
+    candidate.nativeThreadId === nativeThreadId
+  );
+  assert.ok(root, `missing fixture rollout for ${nativeThreadId}`);
+  const stat = fs.statSync(root.rolloutPath);
+  const now = new Date("2026-08-11T02:37:56.000Z");
+  return saveManagedSession(fixture.storeDir, {
+    schema: "agent-knock-knock/session",
+    version: 1,
+    session_id: sessionId,
+    agent: "codex",
+    workspace: fixture.terminalControl.currentPath as string,
+    status: "detached",
+    binding: terminalBindingFrom({
+      terminalId: fixture.terminalId,
+      terminalControl: fixture.terminalControl,
+      pid: fixture.codexPid,
+      nativeThreadId,
+      processUuid: processUuid(fixture.codexPid, LIVE_PROCESS_BIRTH),
+      processBirth: LIVE_PROCESS_BIRTH,
+      rollout: {
+        fd: root.fd,
+        device: String(stat.dev),
+        inode: String(stat.ino),
+        path: fs.realpathSync(root.rolloutPath)
+      },
+      evidence: "codex_open_root_rollout",
+      generation: 1,
+      now
+    }),
+    lineage: { created_by: "attach" },
+    detached_at: now.toISOString(),
     created_at: now.toISOString(),
     updated_at: now.toISOString()
   }, { expectedRevision: null });
@@ -4044,6 +5878,112 @@ function deferredForegroundSendArgs(
   ];
 }
 
+async function seedStatusCardManagedApproval(
+  fixture: NoRolloutFixture
+): Promise<{ session: ManagedSessionState; turn: Record<string, any> }> {
+  const sent = await runCli([
+    "send",
+    "--conversation",
+    fixture.terminalId,
+    "--message",
+    "Prepare one permission request for explicit human review.",
+    "--background",
+    "--store-dir",
+    fixture.storeDir,
+    "--codex-home",
+    fixture.codexHome,
+    "--openclaw-bin",
+    "/usr/bin/true",
+    "--disable-terminal-bridge-monitor"
+  ], fixture.environment);
+  assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+  const output = JSON.parse(sent.stdout);
+  assert.equal(output.delivery_receipt, "agent_accepted", sent.stdout);
+
+  const originalSession = loadManagedSession(
+    fixture.storeDir,
+    String(output.session_id)
+  );
+  assert.ok(originalSession.binding);
+  const statusCardAt = new Date().toISOString();
+  const sessionSnapshot: ManagedSessionState = {
+    ...originalSession,
+    revision: (originalSession.revision as number) + 1,
+    binding: {
+      ...originalSession.binding,
+      native_process: {
+        ...originalSession.binding.native_process,
+        rollout: undefined,
+        evidence: "codex_status_card"
+      }
+    },
+    updated_at: statusCardAt
+  };
+  // This fixture models a Store snapshot written by an older status-card
+  // binder. The current CAS API intentionally forbids degrading a verified
+  // rollout, so write the historical snapshot directly and immediately load
+  // it through today's validator before exercising list/runtime behavior.
+  fs.writeFileSync(
+    pathsForManagedSession(
+      originalSession.session_id,
+      fixture.storeDir
+    ).statePath,
+    `${JSON.stringify(sessionSnapshot, null, 2)}\n`,
+    { mode: 0o600 }
+  );
+  const session = loadManagedSession(
+    fixture.storeDir,
+    originalSession.session_id
+  );
+
+  const turn = listConversations(fixture.storeDir)[0];
+  assert.ok(turn);
+  const takeover = turn.native_session_takeover as Record<string, any>;
+  const statusCardTurn = {
+    ...turn,
+    native_session_takeover: {
+      ...takeover,
+      terminal_agent_rollout: undefined
+    },
+    updated_at: statusCardAt
+  };
+  saveState(turn.state_path as string, statusCardTurn);
+  fixture.identityObservationError =
+    "injected Codex rollout observation unavailable";
+  fs.rmSync(fixture.materializedPath, { force: true });
+  fs.writeFileSync(fixture.screenPath, [
+    "  Would you like to run the following command?",
+    "",
+    "  $ npm test",
+    "",
+    "› 1. Yes, proceed (y)",
+    "  2. No, and tell Codex what to do differently (esc)"
+  ].join("\n"));
+  return {
+    session: loadManagedSession(fixture.storeDir, session.session_id),
+    turn: listConversations(fixture.storeDir)[0]
+  };
+}
+
+function approvalKeyCalls(
+  fixture: NoRolloutFixture
+): Array<{ args: string[]; at?: number }> {
+  return readTmuxCalls(fixture.tmuxCallsPath).filter((call) =>
+    call.args[0] === "send-keys" && call.args.at(-1) === "y"
+  );
+}
+
+function codexApprovalScreen(command: string): string {
+  return [
+    "  Would you like to run the following command?",
+    "",
+    `  $ ${command}`,
+    "",
+    "› 1. Yes, proceed (y)",
+    "  2. No, and tell Codex what to do differently (esc)"
+  ].join("\n");
+}
+
 function soleDeferredForegroundTransfer(
   fixture: NoRolloutFixture
 ): DeferredForegroundTransfer {
@@ -4091,6 +6031,14 @@ function assertRecoveredTurnBlocksDuplicate(result: CliTestResult): void {
 function readSoleTerminalDispatchLedger(
   fixture: NoRolloutFixture
 ): Record<string, any> {
+  return JSON.parse(
+    fs.readFileSync(soleTerminalDispatchLedgerPath(fixture), "utf8")
+  );
+}
+
+function soleTerminalDispatchLedgerPath(
+  fixture: NoRolloutFixture
+): string {
   const ledgerDir = path.join(
     String(fixture.environment.AKK_RUNTIME_DIR),
     "terminal-dispatch"
@@ -4101,7 +6049,7 @@ function readSoleTerminalDispatchLedger(
         .map((name) => path.join(ledgerDir, name))
     : [];
   assert.equal(paths.length, 1, JSON.stringify(paths));
-  return JSON.parse(fs.readFileSync(paths[0], "utf8"));
+  return paths[0];
 }
 
 function seedResolvedHistoricalDispatchAndStatusCard(
@@ -4455,6 +6403,62 @@ function persistBlockingTurn(
   });
 }
 
+function persistReleasedCandidateSourceTurns(
+  fixture: NoRolloutFixture,
+  session: ManagedSessionState
+): void {
+  const statuses = ["idle", "closed", "cancelled", "failed"] as const;
+  statuses.forEach((status, index) => {
+    const now = new Date(Date.UTC(2026, 7, 12, 1, index, 0));
+    const base = createConversation({
+      userRequest: `Released candidate history ${status}.`,
+      sessionId: session.session_id,
+      executorKind: "codex",
+      executorSession: `codex-candidate-history-${status}`,
+      workspace: session.workspace,
+      now
+    });
+    const paths = pathsForConversation(base.conversation_id, fixture.storeDir);
+    saveState(paths.statePath, {
+      ...base,
+      status,
+      ...(status === "idle" ? { idle_since: now.toISOString() } : {}),
+      ...(status === "closed"
+        ? {
+            closed_at: now.toISOString(),
+            close_reason: "test-only released candidate history"
+          }
+        : {}),
+      terminal_binding_id: session.binding?.binding_id,
+      terminal_binding_generation: session.binding?.generation,
+      native_thread_id: session.binding?.native_thread_id,
+      native_session_takeover: {
+        agent: "codex",
+        terminal_agent_identity_protocol: 1,
+        native_session_id: fixture.terminalId,
+        terminal_agent_pid: fixture.codexPid,
+        terminal_agent_session_id: session.binding?.native_thread_id,
+        terminal_agent_process_uuid:
+          session.binding?.native_process.process_uuid,
+        terminal_agent_process_birth:
+          session.binding?.native_process.process_birth,
+        terminal_agent_rollout: session.binding?.native_process.rollout,
+        terminal_agent_identity_evidence:
+          session.binding?.native_process.evidence,
+        source_cwd: session.workspace,
+        strategy: "terminal_control",
+        terminal_control: fixture.terminalControl,
+        terminal_bridge: true
+      },
+      store_dir: paths.storeDir,
+      conversation_dir: paths.conversationDir,
+      event_log_path: paths.logPath,
+      state_path: paths.statePath,
+      updated_at: now.toISOString()
+    });
+  });
+}
+
 function persistUnresolvedTransition(
   fixture: NoRolloutFixture,
   session: ManagedSessionState
@@ -4790,6 +6794,7 @@ function inProcessDependencies(
     agentVersionForRunningProcess: () => fixture.codexVersion,
     codexProcessBirthForPid: () =>
       fs.readFileSync(fixture.processBirthPath, "utf8").trim(),
+    ...(fixture.cliPid ? { pid: fixture.cliPid } : {}),
     cwd: fixture.terminalControl.currentPath,
     env,
     now: () => nowMs,
@@ -4803,7 +6808,9 @@ function inProcessDependencies(
     exit: (status) => {
       throw new InProcessCliExit(status);
     },
-    runtimeLog: () => undefined
+    runtimeLog: (level, event, fields) => {
+      fixture.runtimeLogs.push({ level, event, fields });
+    }
   };
 }
 
@@ -4853,10 +6860,65 @@ function createFixtureCodexAdapter(
     async listProcessSnapshots() {
       return fixtureProcessSnapshots(fixture);
     },
-    async resolveActiveSessionIdentityForPid(pid) {
+    ...(fixture.openRootRollouts !== undefined
+      ? {
+          async inspectOpenRootRolloutInventoryForPid(pid: number, cwd?: string) {
+            assert.equal(pid, fixture.codexPid);
+            return fixtureCodexOpenRootInventory(fixture, cwd);
+          }
+        }
+      : {}),
+    async resolveActiveSessionIdentityForPid(
+      pid,
+      cwd,
+      preferredSessionId,
+      allowedCompanionIdentity,
+      allowedAdditionalIdentities
+    ) {
       assert.equal(pid, fixture.codexPid);
       if (fixture.identityObservationError) {
         throw new Error(fixture.identityObservationError);
+      }
+      if (fixture.openRootRollouts !== undefined) {
+        const inventory = fixtureCodexOpenRootInventory(fixture, cwd);
+        const roots = inventory.roots;
+        if (roots.length === 0) {
+          return undefined;
+        }
+        if (!preferredSessionId) {
+          if (roots.length !== 1) {
+            throw new Error(
+              `fixture Codex process has ${roots.length} ambiguous open roots`
+            );
+          }
+          return roots[0];
+        }
+        const preferred = roots.find((root) =>
+          root.sessionId === preferredSessionId
+        );
+        const allowed = [
+          allowedCompanionIdentity,
+          ...(allowedAdditionalIdentities ?? [])
+        ].flatMap((candidate) => candidate ? [candidate] : []);
+        const exactAllowed = roots.filter((root) => allowed.some((candidate) =>
+          candidate.sessionId === root.sessionId &&
+          candidate.processUuid === root.processUuid &&
+          candidate.processBirth === root.processBirth &&
+          candidate.rollout?.fd === root.rollout.fd &&
+          candidate.rollout?.device === root.rollout.device &&
+          candidate.rollout?.inode === root.rollout.inode &&
+          candidate.rollout?.path === root.rollout.path
+        ));
+        if (roots.some((root) => root !== preferred && !exactAllowed.includes(root))) {
+          throw new Error("fixture Codex process has an unexpected open root");
+        }
+        if (preferred) {
+          return preferred;
+        }
+        if (exactAllowed[0]) {
+          return exactAllowed[0];
+        }
+        throw new Error("fixture Codex preferred open root is unavailable");
       }
       const probeCount = fs.existsSync(fixture.rolloutProbeCountPath)
         ? Number(fs.readFileSync(fixture.rolloutProbeCountPath, "utf8"))
@@ -4918,6 +6980,34 @@ function createFixtureCodexAdapter(
       };
     }
   };
+}
+
+function fixtureCodexOpenRootInventory(
+  fixture: NoRolloutFixture,
+  cwd = String(fixture.terminalControl.currentPath)
+): CodexOpenRootRolloutInventory {
+  const records = [`p${fixture.codexPid}`];
+  for (const root of fixture.openRootRollouts ?? []) {
+    const rolloutPath = fs.realpathSync(root.rolloutPath);
+    const stat = fs.statSync(rolloutPath);
+    records.push(
+      `f${root.fd}`,
+      "tREG",
+      `D${stat.dev}`,
+      `i${stat.ino}`,
+      `n${rolloutPath}`
+    );
+  }
+  return inspectCodexOpenRootRolloutInventory({
+    codexHome: fixture.codexHome,
+    pid: fixture.codexPid,
+    cwd,
+    processBirth: fs.readFileSync(
+      fixture.processBirthPath,
+      "utf8"
+    ).trim(),
+    lsofOutput: `${records.join("\n")}\n`
+  });
 }
 
 function createFixtureLifecycleProvider(
@@ -5143,7 +7233,10 @@ function runInProcessTmux(
         );
       }
       fs.writeFileSync(fixture.materializedPath, "ready");
-      if (env.AKK_TEST_SUPPRESS_NATIVE_ACCEPTANCE === "1") {
+      if (
+        env.AKK_TEST_SUPPRESS_NATIVE_ACCEPTANCE === "1" ||
+        fixture.acceptanceNativeThreadIdsOnEnter?.length === 0
+      ) {
         if (!fs.existsSync(fixture.activeRolloutPath)) {
           fs.mkdirSync(path.dirname(fixture.activeRolloutPath), {
             recursive: true,
@@ -5161,6 +7254,32 @@ function runInProcessTmux(
             }
           })}\n`, { mode: 0o600 });
         }
+      } else if (fixture.acceptanceNativeThreadIdsOnEnter) {
+        for (const nativeThreadId of fixture.acceptanceNativeThreadIdsOnEnter) {
+          const rolloutPath = ensureFixtureCandidateRollout(
+            fixture,
+            nativeThreadId,
+            new Date(nowMs).toISOString()
+          );
+          appendNativeAcceptance(
+            rolloutPath,
+            pendingInput,
+            FIRST_NATIVE_TURN_ID,
+            {
+              nativeThreadId,
+              workspace: String(fixture.terminalControl.currentPath),
+              codexVersion: fixture.codexVersion,
+              timestamp: new Date(nowMs).toISOString()
+            }
+          );
+        }
+        fixture.activeNativeThreadId =
+          fixture.acceptanceNativeThreadIdsOnEnter[0];
+        fixture.activeRolloutPath = ensureFixtureCandidateRollout(
+          fixture,
+          fixture.activeNativeThreadId,
+          new Date(nowMs).toISOString()
+        );
       } else {
         appendNativeAcceptance(
           fixture.activeRolloutPath,
@@ -5515,4 +7634,125 @@ function appendNativeAcceptance(
     rolloutPath,
     `${records.map((record) => JSON.stringify(record)).join("\n")}\n`
   );
+}
+
+function enableFixtureCandidateInventory(
+  fixture: NoRolloutFixture,
+  nativeThreadIds: string[]
+): void {
+  fixture.openRootRollouts = [];
+  for (const nativeThreadId of nativeThreadIds) {
+    ensureFixtureCandidateRollout(fixture, nativeThreadId);
+  }
+}
+
+function ensureFixtureCandidateRollout(
+  fixture: NoRolloutFixture,
+  nativeThreadId: string,
+  materializedAt = new Date().toISOString()
+): string {
+  const existing = fixture.openRootRollouts?.find((candidate) =>
+    candidate.nativeThreadId === nativeThreadId
+  );
+  if (existing) {
+    return existing.rolloutPath;
+  }
+  const rolloutPath = nativeThreadId === NATIVE_THREAD_ID
+    ? fixture.rolloutPath
+    : path.join(
+        path.dirname(fixture.rolloutPath),
+        `rollout-2026-08-12T00-00-00-${nativeThreadId}.jsonl`
+      );
+  if (!fs.existsSync(rolloutPath)) {
+    fs.mkdirSync(path.dirname(rolloutPath), {
+      recursive: true,
+      mode: 0o700
+    });
+    fs.writeFileSync(rolloutPath, `${JSON.stringify({
+      timestamp: materializedAt,
+      type: "session_meta",
+      payload: {
+        id: nativeThreadId,
+        cwd: fixture.terminalControl.currentPath,
+        originator: "codex-tui",
+        source: "cli",
+        cli_version: fixture.codexVersion
+      }
+    })}\n`, { mode: 0o600 });
+  }
+  fixture.openRootRollouts?.push({
+    nativeThreadId,
+    rolloutPath,
+    fd: `${12 + (fixture.openRootRollouts?.length ?? 0)}u`
+  });
+  return rolloutPath;
+}
+
+function appendFixtureCompletion(
+  fixture: NoRolloutFixture,
+  nativeThreadId: string,
+  text = "Candidate rollout completed exactly once."
+): void {
+  const rolloutPath = ensureFixtureCandidateRollout(
+    fixture,
+    nativeThreadId
+  );
+  fs.appendFileSync(rolloutPath, `${JSON.stringify({
+    timestamp: new Date().toISOString(),
+    type: "event_msg",
+    payload: {
+      type: "task_complete",
+      turn_id: FIRST_NATIVE_TURN_ID,
+      last_agent_message: text
+    }
+  })}\n`);
+  fs.writeFileSync(fixture.screenPath, `${text}\n› `);
+}
+
+async function waitForFixtureConversation(
+  statePath: string,
+  predicate: (conversation: Record<string, any>) => boolean,
+  timeoutMs: number
+): Promise<Record<string, any>> {
+  const deadline = Date.now() + timeoutMs;
+  let latest: Record<string, any> | undefined;
+  while (Date.now() < deadline) {
+    const current = JSON.parse(
+      fs.readFileSync(statePath, "utf8")
+    ) as Record<string, any>;
+    latest = current;
+    if (predicate(current)) {
+      return current;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(
+    `fixture conversation did not settle before ${timeoutMs}ms: ` +
+      JSON.stringify({
+        status: latest?.status,
+        stalled_reason: latest?.stalled_reason,
+        native_session_takeover: latest?.native_session_takeover
+      }, null, 2)
+  );
+}
+
+async function waitForProcessExit(pid: number, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        error.code === "ESRCH"
+      ) {
+        return;
+      }
+      throw error;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`fixture process ${pid} did not exit before ${timeoutMs}ms`);
 }

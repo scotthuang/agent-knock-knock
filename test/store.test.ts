@@ -21,6 +21,7 @@ import {
   pathsForConversation,
   pathsForConversationDir,
   saveState,
+  STORE_DEFERRED_FOREGROUND_TRANSFERS_DIRECTORY,
   STORE_WRITER_PROTOCOL,
   statePathForConversationId,
   storeManifestPath,
@@ -88,6 +89,33 @@ function writeStoreManifest(
     { encoding: "utf8", mode: 0o600 }
   );
   return manifestPath;
+}
+
+function writeDeferredSourceHistoryFence(
+  storeDir: string,
+  transferId: string,
+  value: Record<string, unknown>
+): string {
+  const recordDir = path.join(
+    storeDir,
+    STORE_DEFERRED_FOREGROUND_TRANSFERS_DIRECTORY,
+    transferId
+  );
+  fs.mkdirSync(recordDir, { recursive: true, mode: 0o700 });
+  const statePath = path.join(recordDir, "state.json");
+  fs.writeFileSync(
+    statePath,
+    `${JSON.stringify({
+      schema: "agent-knock-knock/deferred-foreground-transfer",
+      version: 2,
+      transfer_id: transferId,
+      source_kind: "candidate_rollout_quiescent",
+      source_turn_history: [],
+      ...value
+    }, null, 2)}\n`,
+    { mode: 0o600 }
+  );
+  return statePath;
 }
 
 test("defaults to one stable store root under user home", () => {
@@ -444,6 +472,160 @@ test("the first write creates a stable manifest and canonical layout", () => {
   }
 });
 
+test("protocol 5 fences candidate source history until transfer cleanup is terminal", () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "akk-store-source-fence-"));
+  const storeDir = path.join(sandbox, "store");
+  const source = storedConversation(storeDir, "turn-source-history");
+  const unrelated = storedConversation(storeDir, "turn-unrelated-history");
+  const transferId = "transfer-source-history";
+  try {
+    saveState(source.paths.statePath, source.conversation);
+    appendEvent(source.paths.logPath, {
+      event: "conversation_created",
+      conversation_id: source.conversation.conversation_id
+    });
+    const sourceAuthority = {
+      turn_id: source.conversation.turn_id,
+      status: "idle",
+      updated_at: source.conversation.updated_at,
+      binding_id: "binding-source-history",
+      binding_generation: 3,
+      native_thread_id: "00000000-0000-4000-8000-000000000501",
+      turn_fingerprint: "a".repeat(64)
+    };
+    const transferStatePath = writeDeferredSourceHistoryFence(
+      storeDir,
+      transferId,
+      {
+        status: "prepared",
+        source_turn_history: [sourceAuthority]
+      }
+    );
+
+    for (const status of [
+      "prepared",
+      "source_reserved",
+      "aborted",
+      "committed"
+    ]) {
+      const current = JSON.parse(fs.readFileSync(transferStatePath, "utf8"));
+      fs.writeFileSync(
+        transferStatePath,
+        `${JSON.stringify({ ...current, status }, null, 2)}\n`,
+        { mode: 0o600 }
+      );
+      const beforeState = fileSnapshot(source.paths.statePath);
+      const beforeEvents = fileSnapshot(source.paths.logPath);
+      assert.throws(
+        () => saveState(source.paths.statePath, {
+          ...source.conversation,
+          updated_at: "2026-08-12T02:00:00.000Z"
+        }),
+        new RegExp(`deferred foreground transfer ${transferId} is ${status}`, "u")
+      );
+      assert.throws(
+        () => appendEvent(source.paths.logPath, {
+          event: "should_not_append",
+          conversation_id: source.conversation.conversation_id
+        }),
+        new RegExp(`deferred foreground transfer ${transferId} is ${status}`, "u")
+      );
+      assert.deepEqual(fileSnapshot(source.paths.statePath), beforeState);
+      assert.deepEqual(fileSnapshot(source.paths.logPath), beforeEvents);
+    }
+
+    // The fence is scoped to the immutable source history, not the target or
+    // unrelated Turns in the same Store.
+    saveState(unrelated.paths.statePath, unrelated.conversation);
+    appendEvent(unrelated.paths.logPath, {
+      event: "unrelated_write",
+      conversation_id: unrelated.conversation.conversation_id
+    });
+
+    for (const status of ["resolved", "abort_resolved"]) {
+      const current = JSON.parse(fs.readFileSync(transferStatePath, "utf8"));
+      fs.writeFileSync(
+        transferStatePath,
+        `${JSON.stringify({ ...current, status }, null, 2)}\n`,
+        { mode: 0o600 }
+      );
+      saveState(source.paths.statePath, {
+        ...source.conversation,
+        updated_at: status === "resolved"
+          ? "2026-08-12T02:01:00.000Z"
+          : "2026-08-12T02:02:00.000Z"
+      });
+      appendEvent(source.paths.logPath, {
+        event: `write_after_${status}`,
+        conversation_id: source.conversation.conversation_id
+      });
+    }
+
+    // A legacy v1 transfer never reserved historical source Turns.
+    const legacyId = "transfer-legacy-history";
+    writeDeferredSourceHistoryFence(storeDir, legacyId, {
+      version: 1,
+      status: "prepared",
+      source_kind: undefined,
+      source_turn_history: undefined
+    });
+    saveState(source.paths.statePath, {
+      ...source.conversation,
+      updated_at: "2026-08-12T02:03:00.000Z"
+    });
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("protocol 5 source-history fence fails closed for malformed and symlink records", {
+  skip: process.platform === "win32"
+}, () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "akk-store-source-fence-invalid-"));
+  const storeDir = path.join(sandbox, "store");
+  const turn = storedConversation(storeDir, "turn-source-fence-invalid");
+  try {
+    saveState(turn.paths.statePath, turn.conversation);
+    const malformedId = "transfer-malformed-history";
+    const malformedPath = writeDeferredSourceHistoryFence(
+      storeDir,
+      malformedId,
+      { status: "prepared", source_kind: "unknown" }
+    );
+    const before = fileSnapshot(turn.paths.statePath);
+    assert.throws(
+      () => saveState(turn.paths.statePath, {
+        ...turn.conversation,
+        updated_at: "2026-08-12T03:00:00.000Z"
+      }),
+      /deferred foreground transfer .* is malformed/u
+    );
+    assert.deepEqual(fileSnapshot(turn.paths.statePath), before);
+
+    fs.rmSync(path.dirname(malformedPath), { recursive: true, force: true });
+    const linkedId = "transfer-linked-history";
+    const linkedDir = path.join(
+      storeDir,
+      STORE_DEFERRED_FOREGROUND_TRANSFERS_DIRECTORY,
+      linkedId
+    );
+    fs.mkdirSync(linkedDir, { recursive: true, mode: 0o700 });
+    const outside = path.join(sandbox, "outside-transfer.json");
+    fs.writeFileSync(outside, "{}\n", { mode: 0o600 });
+    fs.symlinkSync(outside, path.join(linkedDir, "state.json"));
+    assert.throws(
+      () => appendEvent(turn.paths.logPath, {
+        event: "should_not_follow_transfer_symlink",
+        conversation_id: turn.conversation.conversation_id
+      }),
+      /deferred foreground transfer state must not be a symlink|ELOOP/u
+    );
+    assert.deepEqual(fileSnapshot(turn.paths.statePath), before);
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
 test("an empty protocol 1 Store is reported upgradeable and upgrades in place", () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "akk-store-upgrade-empty-"));
   const storeDir = path.join(sandbox, "store");
@@ -477,7 +659,7 @@ test("an empty protocol 1 Store is reported upgradeable and upgrades in place", 
   }
 });
 
-test("protocol 3 upgrades to protocol 4 by atomically publishing only the manifest", () => {
+test("protocol 3 upgrades to the current writer fence by atomically publishing only the manifest", () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "akk-store-upgrade-p3-"));
   const storeDir = path.join(sandbox, "store");
   const createdAt = "2026-08-12T00:00:00.000Z";
@@ -546,6 +728,44 @@ test("protocol 3 upgrades to protocol 4 by atomically publishing only the manife
       ),
       false
     );
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("non-empty protocol 4 upgrades to protocol 5 without rewriting Turn or Session state", () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "akk-store-upgrade-p4-"));
+  const storeDir = path.join(sandbox, "store");
+  const createdAt = "2026-08-12T01:00:00.000Z";
+  try {
+    const turn = storedConversation(storeDir, "turn-protocol-4-nonempty");
+    saveState(turn.paths.statePath, turn.conversation);
+    // Re-open the current Store as protocol 2 and let the supported migration
+    // materialize the exact Session authority that protocol 4 already owns.
+    writeStoreManifest(storeDir, { writerProtocol: 2, createdAt });
+    ensureStoreWritable(storeDir);
+    const sessionPath = pathsForManagedSession(
+      String(turn.conversation.session_id),
+      storeDir
+    ).statePath;
+    const manifestPath = writeStoreManifest(storeDir, {
+      writerProtocol: 4,
+      createdAt
+    });
+    const before = {
+      turn: fileSnapshot(turn.paths.statePath),
+      session: fileSnapshot(sessionPath),
+      manifestInode: fs.statSync(manifestPath).ino
+    };
+
+    assert.equal(inspectStoreCompatibility(storeDir).status, "upgradeable");
+    const upgraded = ensureStoreWritable(storeDir);
+
+    assert.equal(upgraded.writer_protocol, 5);
+    assert.equal(upgraded.created_at, createdAt);
+    assert.notEqual(fs.statSync(manifestPath).ino, before.manifestInode);
+    assert.deepEqual(fileSnapshot(turn.paths.statePath), before.turn);
+    assert.deepEqual(fileSnapshot(sessionPath), before.session);
   } finally {
     fs.rmSync(sandbox, { recursive: true, force: true });
   }

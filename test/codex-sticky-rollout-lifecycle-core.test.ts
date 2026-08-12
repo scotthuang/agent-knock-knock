@@ -410,7 +410,7 @@ test("monitor preserves sticky companion fences for the active C Turn", async ()
   }
 });
 
-test("an unknown fourth open rollout fails closed without mutation", async () => {
+test("an unknown fourth open rollout preserves managed display but only advertises fenced follow-current send", async () => {
   const fixture = stickyRolloutFixture();
   try {
     const { c, cTurn } = await createActiveC(fixture);
@@ -421,12 +421,15 @@ test("an unknown fourth open rollout fails closed without mutation", async () =>
     const listed = await fixture.action(["list", "--all", "--terminal-debug"]);
     assert.equal(listed.status, 0, listed.stderr);
     const terminal = JSON.parse(listed.stdout).terminals[0];
-    assert.notEqual(terminal.managed.session_id, c.session_id);
-    assert.notEqual(terminal.native_agent_session_id, STICKY_THREAD_IDS.c);
-    assert.notEqual(
-      terminal.available_actions.send?.arguments?.session_id,
-      c.session_id
+    assert.equal(terminal.managed.session_id, c.session_id);
+    const followCurrentSend = terminal.available_actions.send;
+    assert.ok(followCurrentSend, JSON.stringify(terminal, null, 2));
+    assert.equal(followCurrentSend.arguments.selector, fixture.terminalId);
+    assert.equal(
+      typeof followCurrentSend.arguments.expected_terminal_token,
+      "string"
     );
+    assert.equal(followCurrentSend.arguments.session_id, undefined);
 
     const statePath = pathsForManagedSession(c.session_id, fixture.storeDir).statePath;
     const beforeState = fs.readFileSync(statePath, "utf8");

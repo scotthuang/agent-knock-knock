@@ -20,6 +20,8 @@ import {
   saveManagedSession,
   tryLoadManagedSession
 } from "../../src/session-store.js";
+import { terminalBindingFrom } from "../../src/managed-session.js";
+import type { TerminalControlRef } from "../../src/terminal-agent-adapter.js";
 import {
   captureCodexRolloutAcceptanceAnchor,
   detectCodexRolloutAcceptance
@@ -684,14 +686,45 @@ test("approve sends y only when the terminal screen shows a primary Codex approv
 
     const rawConversationId =
       "terminal:v2:tmux:codex:codex-work:0.0:1234";
-    const attached = runAgentCli([
-      "send",
-      "--conversation",
-      rawConversationId,
-      "--message",
-      "Prepare the approval request",
-      "--background",
-      "--disable-terminal-bridge-monitor",
+    const terminalControl = tmuxPane({
+      panePid: 999,
+      currentPath: workspace,
+      capabilities: [
+        "screen_status",
+        "send_keys",
+        "terminal_approval",
+        "screen_completion",
+        "durable_completion",
+        "terminal_cancel"
+      ]
+    }) as TerminalControlRef;
+    ensureStoreWritable(storeDir);
+    const now = new Date().toISOString();
+    saveManagedSession(storeDir, {
+      schema: "agent-knock-knock/session",
+      version: 1,
+      session_id: "session-ownerless-manual-approval",
+      agent: "codex",
+      workspace,
+      status: "bound",
+      binding: terminalBindingFrom({
+        terminalId: rawConversationId,
+        terminalControl,
+        pid: 1234,
+        nativeThreadId: sessionId,
+        processUuid: "codex-pid:1234:birth:Thu Aug  6 10:00:00 2026",
+        processBirth: "Thu Aug  6 10:00:00 2026",
+        evidence: "codex_status_card",
+        generation: 1
+      }),
+      lineage: { created_by: "attach" },
+      created_at: now,
+      updated_at: now
+    }, { expectedRevision: null });
+    fs.writeFileSync(screenPath, approvalScreen);
+
+    const listed = runAgentCli([
+      "list",
       "--store-dir",
       storeDir,
       "--threads-json",
@@ -706,34 +739,24 @@ test("approve sends y only when the terminal screen shows a primary Codex approv
       "--terminals-json",
       JSON.stringify([tmuxPane({ panePid: 999, currentPath: workspace })]),
       "--terminal-screens-json",
-      JSON.stringify({ "codex-work:0.0": "› \n" })
+      JSON.stringify({ "codex-work:0.0": approvalScreen })
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     });
-    assert.equal(attached.status, 0, attached.stderr || attached.stdout);
-    const parsed = JSON.parse(attached.stdout);
-    fs.writeFileSync(screenPath, approvalScreen);
-
-    const status = runAgentCli([
-      "status",
-      "--conversation",
-      parsed.conversation.conversation_id,
-      "--store-dir",
-      storeDir
-    ], {
-      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    assert.equal(listed.status, 0, listed.stderr || listed.stdout);
+    const listedTerminal = JSON.parse(listed.stdout).terminals[0];
+    const approvalAction = listedTerminal.available_actions.approve;
+    assert.ok(approvalAction, listed.stdout);
+    assert.equal(approvalAction.authority, "managed_session_no_dispatch_owner");
+    assert.deepEqual(approvalAction.arguments, {
+      conversation_id: rawConversationId,
+      expected_terminal_token:
+        approvalAction.arguments.expected_terminal_token
     });
-    assert.equal(status.status, 0, status.stderr || status.stdout);
-    const statusParsed = JSON.parse(status.stdout);
-    assert.match(statusParsed.terminal_screen.excerpt, /Would you like to run the following command/);
-    assert.match(statusParsed.terminal_screen.excerpt, /ARK_API_KEY=\[REDACTED\]/);
-    assert.doesNotMatch(statusParsed.terminal_screen.excerpt, /ark-test-secret-value/);
-    assert.equal(statusParsed.terminal_screen.approval.approvable, true);
-    assert.equal(statusParsed.terminal_status.reachable, true);
-    assert.equal(statusParsed.terminal_status.target, "codex-work:0.0");
-    assert.equal(statusParsed.terminal_status.activity_state, "awaiting_approval");
-    assert.equal(statusParsed.terminal_status.approval_state.blocked, true);
-    assert.equal(statusParsed.terminal_status.approval_state.approvable, true);
+    assert.equal(
+      typeof approvalAction.arguments.expected_terminal_token,
+      "string"
+    );
 
     const rawStatus = runAgentCli([
       "status",
@@ -744,10 +767,37 @@ test("approve sends y only when the terminal screen shows a primary Codex approv
     });
     assert.equal(rawStatus.status, 0, rawStatus.stderr || rawStatus.stdout);
     const rawStatusParsed = JSON.parse(rawStatus.stdout);
+    assert.match(rawStatusParsed.terminal_screen.excerpt, /Would you like to run the following command/);
+    assert.match(rawStatusParsed.terminal_screen.excerpt, /ARK_API_KEY=\[REDACTED\]/);
+    assert.doesNotMatch(rawStatusParsed.terminal_screen.excerpt, /ark-test-secret-value/);
+    assert.equal(rawStatusParsed.terminal_screen.approval.approvable, true);
+    assert.equal(rawStatusParsed.terminal_status.reachable, true);
+    assert.equal(rawStatusParsed.terminal_status.target, "codex-work:0.0");
+    assert.equal(rawStatusParsed.terminal_status.activity_state, "awaiting_approval");
+    assert.equal(rawStatusParsed.terminal_status.approval_state.blocked, true);
+    assert.equal(rawStatusParsed.terminal_status.approval_state.approvable, true);
+    const sessionsBeforeApproval = listManagedSessions(storeDir);
+    const turnsBeforeApproval = listConversations(storeDir);
+    assert.equal(sessionsBeforeApproval.length, 1);
+    assert.equal(
+      sessionsBeforeApproval[0].session_id,
+      "session-ownerless-manual-approval"
+    );
+    assert.deepEqual(turnsBeforeApproval, []);
+    const sessionStatePath = pathsForManagedSession(
+      "session-ownerless-manual-approval",
+      storeDir
+    ).statePath;
+    const sessionStateBeforeApproval = fs.readFileSync(sessionStatePath, "utf8");
+    const approvalKeysBefore = readJsonLines(tmuxCallsPath).filter((call) =>
+      call.args[0] === "send-keys" && call.args.at(-1) === "y"
+    ).length;
     const approved = runAgentCli([
       "approve",
       "--conversation",
-      rawConversationId,
+      String(approvalAction.arguments.conversation_id),
+      "--expected-terminal-token",
+      String(approvalAction.arguments.expected_terminal_token),
       "--expected-approval-fingerprint",
       rawStatusParsed.terminal_status.approval_state.fingerprint,
       "--store-dir",
@@ -764,6 +814,16 @@ test("approve sends y only when the terminal screen shows a primary Codex approv
     const calls = readJsonLines(tmuxCallsPath)
       .filter((call) => call.args[0] === "send-keys");
     assert.deepEqual(calls.at(-1).args, ["send-keys", "-t", "codex-work:0.0", "y"]);
+    assert.equal(
+      calls.filter((call) => call.args.at(-1) === "y").length,
+      approvalKeysBefore + 1
+    );
+    assert.deepEqual(listManagedSessions(storeDir), sessionsBeforeApproval);
+    assert.deepEqual(listConversations(storeDir), turnsBeforeApproval);
+    assert.equal(
+      fs.readFileSync(sessionStatePath, "utf8"),
+      sessionStateBeforeApproval
+    );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

@@ -440,6 +440,12 @@ const approveParameters = {
     { required: ["turn_id"] },
     { required: ["conversation_id"] }
   ],
+  allOf: [
+    {
+      if: { required: ["expected_terminal_token"] },
+      then: { required: ["conversation_id"] }
+    }
+  ],
   properties: {
     turn_id: {
       type: "string",
@@ -455,6 +461,11 @@ const approveParameters = {
       type: "string",
       description:
         "Exact approval fingerprint returned by the latest status or approval-required callback. The prompt is captured again and must still match before keys are sent."
+    },
+    expected_terminal_token: {
+      type: "string",
+      description:
+        "Only for a terminal-scoped manual Codex approval prefilled by the latest AKK list action. Preserve it exactly with that action's full conversation_id; never construct, reuse, or use it for automatic approval."
     }
   }
 };
@@ -519,7 +530,7 @@ function createPlugin(
         default: "AKK is handling the request..."
       },
       agentPromptGuidance: [
-        "Use /akk <task> when exactly one eligible idle coding-agent terminal pane should receive new work. Use /akk codex: <task>, /akk claude: <task>, or another selector returned by /akk list to target an existing pane. A session_id send is strict to that Session's native context; an exact list-prefilled terminal selector plus expected_terminal_token is a terminal-scoped follow-current action that may safely absorb a verified quiescent human thread switch before creating the Turn. Never infer or reuse its token. Use /akk threads, /akk new-thread or clear-thread, and /akk resume-thread only with an exact full terminal_id returned by /akk list; these switch native context without creating a Turn. Resume numbers and short IDs are bound to the last displayed snapshot, while previous is available only from the latest verified committed transition. For native Codex or Claude status, use only an advertised agent_knock_knock_native_inspect action; agent_knock_knock_status inspects AKK Turn state and does not execute /status. AKK never starts a coding-agent process."
+        "Use /akk <task> when exactly one eligible idle coding-agent terminal pane should receive new work. Use /akk codex: <task>, /akk claude: <task>, or another selector returned by /akk list to target an existing pane. A session_id send is strict to that Session's native context; an exact list-prefilled terminal selector plus expected_terminal_token is a terminal-scoped follow-current action that may safely absorb a verified quiescent human thread switch or defer Codex foreground attribution within a complete exact rollout inventory. It sends the ordinary task once and binds only the uniquely accepting native thread. Never infer or reuse its token. Use /akk threads, /akk new-thread or clear-thread, and /akk resume-thread only with an exact full terminal_id returned by /akk list; these switch native context without creating a Turn. Resume numbers and short IDs are bound to the last displayed snapshot, while previous is available only from the latest verified committed transition. For native Codex or Claude status, use only an advertised agent_knock_knock_native_inspect action; agent_knock_knock_status inspects AKK Turn state and does not execute /status. AKK never starts a coding-agent process."
       ],
       handler: async (ctx) => handleAkkCommand(
         api,
@@ -530,7 +541,7 @@ function createPlugin(
 
     registerCliTool(api, {
       name: "agent_knock_knock_list",
-      description: "List existing Codex and Claude Code tmux or Herdr panes as the primary terminals[] resources. Each terminal may include managed.current_turn or managed.recent_turn; all=true also includes older managed.history and retained unavailable history. By default, unavailable_managed_turns contains attention-needed records whose pane is unavailable. A live human thread switch remains management_state=conflict and exposes handoff_state as adoptable or blocked without mutating the Store. Use only each row's available_actions and authoritative prefilled arguments, except for two explicit-confirmation nested recovery paths: handoff_decision.choices.take_over_current.action and blocking_turns[].recovery_action. The latter is only for collateral blockers; an active handoff source Turn remains exclusively snapshot-fenced by handoff_decision. Refresh list immediately after either nested action. A session-scoped send targets session_id strictly and never redirects to the pane's replacement context; a terminal-scoped follow-current send preserves that row's exact selector and expected_terminal_token and may absorb only a verified quiescent human handoff before starting a Turn; legacy discovery sends remain compatible. respond targets the exact in-flight turn; native_inspect runs only a closed, exact-version Codex or Claude status profile with the current terminal/binding token; read-only thread listing targets the exact terminal, while new/resume mutations also require the current binding token and create no Turn; reconcile_binding remains a low-level conflict recovery action; managed controls target the exact turn; a raw terminal row may prefill its own compatibility selector for status or recovery controls. Never construct identifiers or tokens. AKK revalidates every terminal side effect and never starts a coding-agent process.",
+      description: "List existing Codex and Claude Code tmux or Herdr panes as the primary terminals[] resources. Each terminal may include managed.current_turn or managed.recent_turn; all=true also includes older managed.history and retained unavailable history. By default, unavailable_managed_turns contains attention-needed records whose pane is unavailable. A live human thread switch remains management_state=conflict and exposes handoff_state as adoptable or blocked without mutating the Store. Use only each row's available_actions and authoritative prefilled arguments, except for two explicit-confirmation nested recovery paths: handoff_decision.choices.take_over_current.action and blocking_turns[].recovery_action. The latter is only for collateral blockers; an active handoff source Turn remains exclusively snapshot-fenced by handoff_decision. Refresh list immediately after either nested action. A session-scoped send targets session_id strictly and never redirects to the pane's replacement context; a terminal-scoped follow-current send preserves that row's exact selector and expected_terminal_token, then may either absorb a verified quiescent handoff or defer Codex foreground attribution within a complete exact rollout inventory while sending the task only once; legacy discovery sends remain compatible. respond targets the exact in-flight turn; native_inspect runs only a closed, exact-version Codex or Claude status profile with the current terminal/binding token; read-only thread listing targets the exact terminal, while new/resume mutations also require the current binding token and create no Turn; reconcile_binding remains a low-level conflict recovery action; managed controls target the exact turn; a raw terminal row may prefill its own compatibility selector for status or recovery controls. Never construct identifiers or tokens. AKK revalidates every terminal side effect and never starts a coding-agent process.",
       parameters: listParameters,
       buildArgs: (params) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
@@ -727,7 +738,7 @@ function createPlugin(
         label: "AKK Send",
         name: "agent_knock_knock_send",
         description:
-          "Start a new AKK Turn. A session-scoped send uses the exact session_id from list or a prior send, preserves that Session's native context, and never redirects to a thread the human selected later in the pane. A terminal-scoped follow-current send uses only one exact list-prefilled full terminal selector together with its fresh expected_terminal_token; AKK may then atomically adopt a verified quiescent human handoff before creating the Turn. Preserve both values exactly and never infer, copy, or reuse the token. Legacy selector discovery remains supported, and both target fields may be omitted only when AKK should require one unique eligible idle pane. Never pass a turn id or selector as session_id. To answer an in-flight question, use agent_knock_knock_respond instead. For ordinary use omit monitoring timeouts unless the user explicitly asks to change them. timeoutSeconds is unsupported. AKK never starts a coding agent. This is asynchronous: after acceptance, yield and wait for the callback or a later explicit status request.",
+          "Start a new AKK Turn. A session-scoped send uses the exact session_id from list or a prior send, preserves that Session's native context, and never redirects to a thread the human selected later in the pane. A terminal-scoped follow-current send uses only one exact list-prefilled full terminal selector together with its fresh expected_terminal_token; AKK may then atomically adopt a verified quiescent human handoff or send once before Codex foreground attribution and bind only the unique exact rollout that accepts that request. Preserve both values exactly and never infer, copy, or reuse the token. Legacy selector discovery remains supported, and both target fields may be omitted only when AKK should require one unique eligible idle pane. Never pass a turn id or selector as session_id. To answer an in-flight question, use agent_knock_knock_respond instead. For ordinary use omit monitoring timeouts unless the user explicitly asks to change them. timeoutSeconds is unsupported. AKK never starts a coding agent. This is asynchronous: after acceptance, yield and wait for the callback or a later explicit status request.",
         parameters: sendParameters,
         async execute(toolCallId, params) {
           const result = await runSendRequest(
@@ -782,7 +793,7 @@ function createPlugin(
     registerCliTool(api, {
       name: "agent_knock_knock_approve",
       description:
-        "Manually approve a permission request only after the user reviews and explicitly confirms it. Managed approval uses exact turn_id; an unmanaged raw terminal may be approved only through its own list-prefilled action. Claude Code uses no Hooks: this manual path accepts only an exact one-time Bash permission screen, then recaptures its short-lived evidence and process identity before sending Enter. Separately, trusted default-disabled plugin configuration can auto-approve an exact Claude command/workspace match without exposing policy control to the model. Hook-free durable completion is independently verified from the local Claude transcript.",
+        "Manually approve a permission request only after the user reviews and explicitly confirms it. Managed approval uses exact turn_id. An unmanaged raw terminal, or a managed Codex pane whose current prompt has no usable AKK Turn owner, may be approved only through its own latest list-prefilled action; preserve its full conversation_id and expected_terminal_token exactly. Terminal-scoped approval never enters automatic approval, never changes managed Turn or Session binding, and has no durable dispatch receipt: if its result is interrupted, refresh status and inspect the live prompt instead of retrying blindly. Claude Code uses no Hooks: this manual path accepts only an exact one-time Bash permission screen, then recaptures its short-lived evidence and process identity before sending Enter. Separately, trusted default-disabled plugin configuration can auto-approve an exact Claude command/workspace match without exposing policy control to the model. Hook-free durable completion is independently verified from the local Claude transcript.",
       parameters: approveParameters,
       buildArgs: (params) => {
         const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
@@ -792,6 +803,28 @@ function createPlugin(
           args,
           "--expected-approval-fingerprint",
           requiredString(params.expected_approval_fingerprint, "expected_approval_fingerprint")
+        );
+        const expectedTerminalToken = Object.hasOwn(
+          params,
+          "expected_terminal_token"
+        )
+          ? requiredString(
+              params.expected_terminal_token,
+              "expected_terminal_token"
+            )
+          : undefined;
+        if (
+          expectedTerminalToken &&
+          !Object.hasOwn(params, "conversation_id")
+        ) {
+          throw new Error(
+            "expected_terminal_token requires the exact list-prefilled conversation_id"
+          );
+        }
+        pushOptional(
+          args,
+          "--expected-terminal-token",
+          expectedTerminalToken
         );
         pushOptional(
           args,

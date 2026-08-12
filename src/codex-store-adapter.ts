@@ -4,7 +4,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import type { ActiveAgentSessionIdentity } from "./agent-session-provider.js";
+import type {
+  ActiveAgentSessionIdentity,
+  CodexOpenRootRolloutIdentity,
+  CodexOpenRootRolloutInventory
+} from "./agent-session-provider.js";
 import {
   codexLifecycleBehaviorProfile,
   supportedCodexLifecycleVersions
@@ -81,6 +85,7 @@ const MAX_SQLITE_QUERY_OUTPUT_BYTES = 10 * 1024 * 1024;
 const MAX_SQLITE_ERROR_OUTPUT_BYTES = 1024 * 1024;
 const SQLITE_QUERY_TIMEOUT_MS = 10_000;
 const DEFAULT_SQLITE_CANTOPEN_RETRY_DELAYS_MS = [25, 75, 150] as const;
+const MAX_CODEX_OPEN_ROOT_ROLLOUTS = 128;
 const NO_FOLLOW_FLAG = typeof fs.constants.O_NOFOLLOW === "number"
   ? fs.constants.O_NOFOLLOW
   : 0;
@@ -248,17 +253,51 @@ export class CodexStoreAdapter implements
     allowedCompanionIdentity?: ActiveAgentSessionIdentity,
     allowedAdditionalIdentities?: readonly ActiveAgentSessionIdentity[]
   ): Promise<ActiveAgentSessionIdentity | undefined> {
+    const inventory = await this.inspectOpenRootRolloutInventoryForPid(
+      pid,
+      cwd
+    );
+    return selectCodexOpenRolloutIdentity({
+      inventory,
+      preferredSessionId,
+      allowedCompanionIdentity,
+      allowedAdditionalIdentities
+    });
+  }
+
+  /**
+   * Return a complete, exact inventory of every open Codex TUI root rollout.
+   *
+   * A successful `unbound` result is deliberately different from an
+   * inspection failure: all descriptors and root metadata were verified, but
+   * more than one root is open so this layer cannot name the foreground one.
+   * Command, descriptor, ownership, cwd, or metadata failures throw and must
+   * remain fail-closed at the caller.
+   */
+  async inspectOpenRootRolloutInventoryForPid(
+    pid: number,
+    cwd?: string
+  ): Promise<CodexOpenRootRolloutInventory> {
     if (!Number.isSafeInteger(pid) || pid <= 1) {
       throw new Error("Codex process pid must be a positive integer greater than 1");
     }
-    const birthResult = this.runCommand("ps", ["-o", "lstart=", "-p", String(pid)]);
-    const processBirth = birthResult.stdout.trim();
-    if (birthResult.status !== 0 || !processBirth) {
-      throw new Error(
-        birthResult.stderr || birthResult.error?.message ||
-        `could not inspect start time for Codex process ${pid}`
-      );
-    }
+    const readProcessBirth = (): string => {
+      const result = this.runCommand("ps", [
+        "-o",
+        "lstart=",
+        "-p",
+        String(pid)
+      ]);
+      const processBirth = result.stdout.trim();
+      if (result.status !== 0 || !processBirth) {
+        throw new Error(
+          result.stderr || result.error?.message ||
+          `could not inspect start time for Codex process ${pid}`
+        );
+      }
+      return processBirth;
+    };
+    const processBirth = readProcessBirth();
     const result = this.runCommand("lsof", [
       "-a",
       "-p",
@@ -271,13 +310,16 @@ export class CodexStoreAdapter implements
         `could not inspect open rollout files for Codex process ${pid}`
       );
     }
-    return resolveCodexOpenRolloutIdentity({
+    const confirmedProcessBirth = readProcessBirth();
+    if (confirmedProcessBirth !== processBirth) {
+      throw new Error(
+        `Codex process ${pid} incarnation changed while open rollouts were inspected`
+      );
+    }
+    return inspectCodexOpenRootRolloutInventory({
       codexHome: this.codexHome,
       pid,
       cwd,
-      preferredSessionId,
-      allowedCompanionIdentity,
-      allowedAdditionalIdentities,
       processBirth,
       lsofOutput: result.stdout
     });
@@ -896,6 +938,37 @@ export function resolveCodexOpenRolloutIdentity({
   processBirth: string;
   lsofOutput: string;
 }): ActiveAgentSessionIdentity | undefined {
+  const inventory = inspectCodexOpenRootRolloutInventory({
+    codexHome,
+    pid,
+    cwd,
+    processBirth,
+    lsofOutput
+  });
+  return selectCodexOpenRolloutIdentity({
+    inventory,
+    preferredSessionId,
+    allowedCompanionIdentity,
+    allowedAdditionalIdentities
+  });
+}
+
+export function inspectCodexOpenRootRolloutInventory({
+  codexHome,
+  pid,
+  cwd,
+  processBirth,
+  lsofOutput
+}: {
+  codexHome: string;
+  pid: number;
+  cwd?: string;
+  processBirth: string;
+  lsofOutput: string;
+}): CodexOpenRootRolloutInventory {
+  if (!Number.isSafeInteger(pid) || pid <= 1 || !processBirth.trim()) {
+    throw new Error("Codex rollout inventory requires an exact process incarnation");
+  }
   const rolloutFiles = parseLsofOpenFiles(lsofOutput).filter((openFile) => {
     if (!openFile.path) {
       return false;
@@ -903,11 +976,24 @@ export function resolveCodexOpenRolloutIdentity({
     const openPath = openFile.path.replace(/\s+\(deleted\)$/u, "");
     return /^rollout-.*\.jsonl$/u.test(path.basename(openPath));
   });
-  // An absent sessions directory is only evidence of a virgin process when lsof
-  // also reported no rollout descriptor at all. Once a rollout FD exists, every
-  // part of its identity must be verified or the send fence fails closed.
+  if (rolloutFiles.length > MAX_CODEX_OPEN_ROOT_ROLLOUTS) {
+    throw new Error(
+      `Codex process ${pid} has too many open rollout files to inspect safely`
+    );
+  }
+  const processUuid = `codex-pid:${pid}:birth:${processBirth}`;
+  const expectedCwd = cwd ? path.resolve(cwd) : undefined;
+  // An absent sessions directory is only evidence of a virgin process when
+  // lsof also reported no rollout descriptor at all. Once a rollout FD exists,
+  // every descriptor and every root/subagent classification must be verified.
   if (rolloutFiles.length === 0) {
-    return undefined;
+    return codexOpenRootRolloutInventoryResult({
+      pid,
+      processUuid,
+      processBirth,
+      cwd: expectedCwd,
+      roots: []
+    });
   }
 
   const configuredSessionsRoot = path.join(codexHome, "sessions");
@@ -919,8 +1005,7 @@ export function resolveCodexOpenRolloutIdentity({
       `Codex process ${pid} has open rollout files but CODEX_HOME/sessions is unavailable`
     );
   }
-  const expectedCwd = cwd ? path.resolve(cwd) : undefined;
-  const identities: ActiveAgentSessionIdentity[] = [];
+  const identities: CodexOpenRootRolloutIdentity[] = [];
   for (const openFile of rolloutFiles) {
     const openPath = openFile.path!;
     const descriptorPath = openPath.replace(/\s+\(deleted\)$/u, "");
@@ -1008,7 +1093,7 @@ export function resolveCodexOpenRolloutIdentity({
     }
     identities.push({
       sessionId: metadata.id,
-      processUuid: `codex-pid:${pid}:birth:${processBirth}`,
+      processUuid,
       processBirth,
       rollout: {
         fd: openFile.fd,
@@ -1023,6 +1108,100 @@ export function resolveCodexOpenRolloutIdentity({
     throw new Error(
       `Codex process ${pid} has open rollout files but no exact TUI root identity`
     );
+  }
+  identities.sort((left, right) =>
+    left.sessionId.localeCompare(right.sessionId) ||
+    left.rollout.path.localeCompare(right.rollout.path) ||
+    left.rollout.fd.localeCompare(right.rollout.fd)
+  );
+  for (let index = 1; index < identities.length; index += 1) {
+    const previous = identities[index - 1];
+    const current = identities[index];
+    if (
+      previous.sessionId === current.sessionId ||
+      (
+        previous.rollout.device === current.rollout.device &&
+        previous.rollout.inode === current.rollout.inode
+      )
+    ) {
+      throw new Error(
+        `Codex process ${pid} has duplicate open root rollout identities`
+      );
+    }
+  }
+  return codexOpenRootRolloutInventoryResult({
+    pid,
+    processUuid,
+    processBirth,
+    cwd: expectedCwd,
+    roots: identities
+  });
+}
+
+function codexOpenRootRolloutInventoryResult({
+  pid,
+  processUuid,
+  processBirth,
+  cwd,
+  roots
+}: {
+  pid: number;
+  processUuid: string;
+  processBirth: string;
+  cwd?: string;
+  roots: CodexOpenRootRolloutIdentity[];
+}): CodexOpenRootRolloutInventory {
+  const authority = {
+    schema: "agent-knock-knock/codex-open-root-rollout-inventory" as const,
+    version: 1 as const,
+    pid,
+    processUuid,
+    processBirth,
+    ...(cwd ? { cwd } : {}),
+    roots
+  };
+  const inventoryFingerprint = createHash("sha256")
+    .update(JSON.stringify(authority))
+    .digest("hex");
+  if (roots.length === 0) {
+    return {
+      ...authority,
+      status: "verified_absent",
+      roots: [],
+      inventoryFingerprint
+    };
+  }
+  if (roots.length === 1) {
+    return {
+      ...authority,
+      status: "resolved",
+      roots: [roots[0]],
+      inventoryFingerprint
+    };
+  }
+  return {
+    ...authority,
+    status: "unbound",
+    reason: "multiple_open_root_rollouts",
+    inventoryFingerprint
+  };
+}
+
+function selectCodexOpenRolloutIdentity({
+  inventory,
+  preferredSessionId,
+  allowedCompanionIdentity,
+  allowedAdditionalIdentities
+}: {
+  inventory: CodexOpenRootRolloutInventory;
+  preferredSessionId?: string;
+  allowedCompanionIdentity?: ActiveAgentSessionIdentity;
+  allowedAdditionalIdentities?: readonly ActiveAgentSessionIdentity[];
+}): ActiveAgentSessionIdentity | undefined {
+  const pid = inventory.pid;
+  const identities: ActiveAgentSessionIdentity[] = inventory.roots;
+  if (identities.length === 0) {
+    return undefined;
   }
   if (preferredSessionId) {
     const preferred = identities.filter((identity) =>

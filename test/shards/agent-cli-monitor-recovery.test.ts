@@ -365,7 +365,14 @@ test("terminal bridge monitor singleton rejects a live owner and reclaims a dead
         ...handoffLedger,
         status: "submitted",
         conversation_id: handoffState.conversation_id,
+        session_id: handoffState.session_id,
+        turn_id: handoffState.turn_id,
         state_path: handoffStatePath,
+        event_log_path: handoffLogPath,
+        store_dir: handoffState.store_dir,
+        binding_id: handoffState.terminal_binding_id,
+        binding_generation: handoffState.terminal_binding_generation,
+        native_thread_id: handoffState.native_thread_id,
         message_id: handoffMessageId,
         submitted_at: new Date().toISOString()
       }, null, 2)}\n`
@@ -1000,9 +1007,12 @@ test("reconcile-monitors launches only recoverable waiting terminal bridges", as
     assert.equal(parsed.errors, 0);
     assert.equal(
       parsed.items.find((item) => item.conversation_id === "legacy-owner-unknown")?.reason,
-      "legacy_monitor_ownership_unknown"
+      "terminal_dispatch_agent_accepted"
     );
-    const launchedItem = parsed.items.find((item) => item.status === "launched");
+    const launchedItem = parsed.items.find((item) =>
+      item.status === "launched" &&
+      item.conversation_id === recoverableState.conversation_id
+    );
     assert.equal(launchedItem.conversation_id, recoverableState.conversation_id);
     monitorPid = launchedItem.monitor_pid;
 
@@ -1025,6 +1035,263 @@ test("reconcile-monitors launches only recoverable waiting terminal bridges", as
     );
   } finally {
     killPidBestEffort(monitorPid);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("callbackless completion crash resumes local settlement without outbox or replay", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-local-completion-recovery-"));
+  const storeDir = path.join(tempDir, "store");
+  const runtimeDir = path.join(tempDir, ".akk-cli-test-runtime");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const workspace = path.join(tempDir, "workspace");
+  const exactRolloutPath = path.join(tempDir, "callbackless-rollout.jsonl");
+  const nativeThreadId = "77777777-7777-4777-8777-777777777777";
+  const processUuid = "codex-callbackless-completion-process";
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "› \n");
+    fs.writeFileSync(
+      exactRolloutPath,
+      `${JSON.stringify({
+        timestamp: "2026-08-12T05:00:00.000Z",
+        type: "session_meta",
+        payload: {
+          id: nativeThreadId,
+          cwd: workspace,
+          originator: "codex-tui",
+          source: "cli",
+          cli_version: "0.147.0"
+        }
+      })}\n`,
+      { mode: 0o600 }
+    );
+    const rolloutStat = fs.statSync(exactRolloutPath);
+    const rollout = {
+      fd: "12r",
+      device: String(rolloutStat.dev),
+      inode: String(rolloutStat.ino),
+      path: exactRolloutPath
+    };
+    const nativeIdentityArgs = [
+      "--codex-active-session-identities-json",
+      JSON.stringify({
+        43389: {
+          sessionId: nativeThreadId,
+          processUuid,
+          processBirth: processUuid,
+          rollout
+        }
+      })
+    ];
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `codex-local\t0\t1\t43389\tnode\t${workspace}\n`
+    );
+    const testEnv = {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      AKK_RUNTIME_DIR: runtimeDir
+    };
+    const sent = runAgentCli([
+      "send",
+      "--conversation",
+      "terminal:tmux:codex-local:0.1:43389",
+      "--message",
+      "Complete locally without a callback route",
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--agent-timeout-minutes",
+      "60",
+      "--agent-hard-timeout-minutes",
+      "120",
+      ...nativeIdentityArgs,
+      "--disable-terminal-bridge-monitor"
+    ], testEnv);
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    const sentOutput = JSON.parse(sent.stdout).conversation;
+    const statePath = sentOutput.state_path;
+    const sentState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    const logPath = sentState.event_log_path;
+    const terminalMessageId = sentState.native_session_takeover
+      .terminal_bridge_message_id;
+    const exactAnchor = captureCodexRolloutAcceptanceAnchor({
+      nativeThreadId,
+      processUuid,
+      processBirth: processUuid,
+      mode: "existing",
+      rollout
+    });
+    const acceptedTurnId = "88888888-8888-4888-8888-888888888888";
+    fs.appendFileSync(exactRolloutPath, [
+      {
+        timestamp: "2026-08-12T05:00:00.500Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: acceptedTurnId }
+      },
+      {
+        timestamp: "2026-08-12T05:00:00.600Z",
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{
+            type: "input_text",
+            text: sentState.native_session_takeover
+              .terminal_bridge_request_text
+          }],
+          internal_chat_message_metadata_passthrough: {
+            turn_id: acceptedTurnId
+          }
+        }
+      },
+      {
+        timestamp: "2026-08-12T05:00:00.700Z",
+        type: "event_msg",
+        payload: {
+          type: "user_message",
+          message: sentState.native_session_takeover
+            .terminal_bridge_request_text
+        }
+      },
+      {
+        timestamp: "2026-08-12T05:00:01.000Z",
+        type: "event_msg",
+        payload: {
+          type: "task_complete",
+          turn_id: acceptedTurnId,
+          last_agent_message: "Completed without an OpenClaw callback."
+        }
+      }
+    ].map((record) => JSON.stringify(record)).join("\n") + "\n");
+    const exactAcceptance = detectCodexRolloutAcceptance({
+      anchor: exactAnchor,
+      currentIdentity: {
+        sessionId: nativeThreadId,
+        processUuid,
+        processBirth: processUuid,
+        rollout
+      },
+      requestHash: sentState.native_session_takeover
+        .terminal_bridge_request_hash
+    });
+    assert.ok(exactAcceptance);
+    const exactSubmission = {
+      ...sentState.native_session_takeover.terminal_bridge_submission,
+      acceptance_evidence: exactAcceptance
+    };
+    const exactState = {
+      ...sentState,
+      native_session_takeover: {
+        ...sentState.native_session_takeover,
+        codex_rollout_acceptance_anchor: exactAnchor,
+        terminal_bridge_submission: exactSubmission,
+        terminal_bridge_submission_receipts:
+          sentState.native_session_takeover
+            .terminal_bridge_submission_receipts.map((receipt) =>
+              receipt.message_id === terminalMessageId
+                ? exactSubmission
+                : receipt
+            )
+      }
+    };
+    fs.writeFileSync(
+      statePath,
+      `${JSON.stringify(exactState, null, 2)}\n`
+    );
+    fs.writeFileSync(screenPath, "› \n");
+    const inputCount = readJsonLines(tmuxCallsPath)
+      .filter((call) => call.args[0] === "send-keys").length;
+    const crashed = runAgentCli([
+      "monitor",
+      "--terminal-bridge",
+      "--state",
+      statePath,
+      "--log",
+      logPath,
+      "--poll-interval-ms",
+      "20",
+      "--agent-timeout-minutes",
+      "60",
+      "--agent-hard-timeout-minutes",
+      "120",
+      ...nativeIdentityArgs
+    ], {
+      ...testEnv,
+      AKK_TEST_EXIT_AFTER_LOCAL_COMPLETION_STATE: "1"
+    });
+    assert.equal(crashed.status, 86, crashed.stderr || crashed.stdout);
+    const finalBeforeRecovery = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    assert.equal(finalBeforeRecovery.status, "idle");
+    assert.equal(finalBeforeRecovery.callback_delivery, undefined);
+    assert.ok(
+      finalBeforeRecovery.native_session_takeover.terminal_bridge_completion_claim
+    );
+    const ledgerPath = findTerminalDispatchLedgerPath(
+      finalBeforeRecovery.conversation_id,
+      runtimeDir
+    );
+    assert.equal(
+      JSON.parse(fs.readFileSync(ledgerPath, "utf8")).status,
+      "agent_accepted"
+    );
+
+    const firstRecovery = runAgentCli([
+      "reconcile-monitors",
+      "--store-dir",
+      storeDir,
+      ...nativeIdentityArgs
+    ], testEnv);
+    assert.equal(firstRecovery.status, 0, firstRecovery.stderr || firstRecovery.stdout);
+    const firstParsed = JSON.parse(firstRecovery.stdout);
+    assert.equal(
+      firstParsed.items.find((item) =>
+        item.conversation_id === finalBeforeRecovery.conversation_id
+      )?.reason,
+      "local_terminal_completion_ledger_recovered"
+    );
+    assert.equal(
+      JSON.parse(fs.readFileSync(ledgerPath, "utf8")).status,
+      "resolved"
+    );
+    const stateAfterFirst = fs.readFileSync(statePath, "utf8");
+    const ledgerAfterFirst = fs.readFileSync(ledgerPath, "utf8");
+    const eventsAfterFirst = fs.readFileSync(logPath, "utf8");
+
+    const secondRecovery = runAgentCli([
+      "reconcile-monitors",
+      "--store-dir",
+      storeDir,
+      ...nativeIdentityArgs
+    ], testEnv);
+    assert.equal(secondRecovery.status, 0, secondRecovery.stderr || secondRecovery.stdout);
+    assert.equal(fs.readFileSync(statePath, "utf8"), stateAfterFirst);
+    assert.equal(fs.readFileSync(ledgerPath, "utf8"), ledgerAfterFirst);
+    assert.equal(fs.readFileSync(logPath, "utf8"), eventsAfterFirst);
+    assert.equal(
+      readJsonLines(tmuxCallsPath)
+        .filter((call) => call.args[0] === "send-keys").length,
+      inputCount
+    );
+    assert.equal(
+      readJsonLines(logPath).filter((event) =>
+        event.event === "terminal_bridge_local_completion_settled"
+      ).length,
+      1
+    );
+    assert.equal(
+      readJsonLines(logPath).some((event) =>
+        String(event.event).startsWith("callback_delivery_")
+      ),
+      false
+    );
+    assert.equal(terminalMessageId.length > 0, true);
+  } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });

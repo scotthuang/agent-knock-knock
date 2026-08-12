@@ -166,6 +166,19 @@ test("Codex store adapter fails closed when multiple root rollouts are open", as
         }
       }) + "\n", "utf8");
     }
+    const inventory = await adapter.inspectOpenRootRolloutInventoryForPid(
+      4242,
+      "/repo/project"
+    );
+    assert.equal(inventory.status, "unbound");
+    if (inventory.status === "unbound") {
+      assert.equal(inventory.reason, "multiple_open_root_rollouts");
+      assert.deepEqual(
+        inventory.roots.map((root) => root.sessionId),
+        [SESSION_ID, secondId]
+      );
+      assert.match(inventory.inventoryFingerprint, /^[0-9a-f]{64}$/u);
+    }
     await assert.rejects(
       adapter.resolveActiveSessionIdentityForPid(4242, "/repo/project"),
       /2 open root rollout files/u
@@ -218,6 +231,37 @@ test("Codex store adapter fails closed when multiple root rollouts are open", as
       ),
       /does not have the preferred session as its sole open root rollout/u
     );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Codex open-root inventory rejects a PID incarnation change across lsof", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-rollout-pid-drift-"));
+  let psCalls = 0;
+  const adapter = new CodexStoreAdapter({
+    codexHome: dir,
+    runCommand(command): CommandResult {
+      if (command === "ps") {
+        psCalls += 1;
+        return ok(
+          psCalls === 1
+            ? "Tue Aug  4 14:15:13 2026\n"
+            : "Tue Aug  4 14:15:14 2026\n"
+        );
+      }
+      if (command === "lsof") {
+        return ok("");
+      }
+      return { status: 1, stdout: "", stderr: "unexpected command" };
+    }
+  });
+  try {
+    await assert.rejects(
+      adapter.inspectOpenRootRolloutInventoryForPid(4242, "/repo/project"),
+      /incarnation changed while open rollouts were inspected/u
+    );
+    assert.equal(psCalls, 2);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -490,7 +534,7 @@ test("Codex store adapter fails closed when the same root rollout has multiple d
     }) + "\n", "utf8");
     await assert.rejects(
       adapter.resolveActiveSessionIdentityForPid(4242, "/repo/project"),
-      /2 open root rollout files/u
+      /duplicate open root rollout identities/u
     );
     await assert.rejects(
       adapter.resolveActiveSessionIdentityForPid(
@@ -498,10 +542,7 @@ test("Codex store adapter fails closed when the same root rollout has multiple d
         "/repo/project",
         SESSION_ID
       ),
-      new RegExp(
-        `multiple open root rollouts for preferred session ${SESSION_ID}`,
-        "u"
-      )
+      /duplicate open root rollout identities/u
     );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -597,7 +638,7 @@ test("Codex store adapter fails closed for deleted rollout descriptors", async (
     fs.mkdirSync(sessionsDir, { recursive: true });
     fs.writeFileSync(rolloutPath, "{}\n", "utf8");
     await assert.rejects(
-      adapter.resolveActiveSessionIdentityForPid(4242, "/repo/project"),
+      adapter.inspectOpenRootRolloutInventoryForPid(4242, "/repo/project"),
       /unverifiable open rollout descriptor/u
     );
   } finally {

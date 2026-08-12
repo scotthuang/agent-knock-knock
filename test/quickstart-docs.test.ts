@@ -168,29 +168,32 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
     assert.match(document, /`expected_binding_token`/u);
     assert.match(document, /`native_thread_id`/u);
     assert.match(document, /`candidate_token`/u);
-    assert.match(document, /v11 `action_contracts`/u);
+    assert.match(document, /v12 `action_contracts`/u);
     assert.match(document, /status-card-only/u);
-    assert.match(document, /verified zero rollout/u);
+    assert.match(document, /complete (?:set of exact Codex rollout candidates|open-rollout candidate inventory)/u);
     assert.match(document, /zero-UUID provisional/u);
     assert.match(
       document,
-      /exact full `selector` and fresh `expected_terminal_token`/u
+      /exact full (?:terminal )?`selector` and (?:a )?fresh `expected_terminal_token`/u
     );
-    assert.match(document, /fresh rollout/u);
+    assert.match(document, /exact (?:request acceptance|native acceptance)/u);
     assert.match(document, /at least 80 columns/u);
     assert.match(
       document,
-      /ordinary first task does not run `\/status` and does not fail merely because the pane is narrow/u
-    );
-    assert.match(document, /no managed control or callback authority/u);
-    assert.match(
-      document,
-      /strict `session_id` send, `respond`, `approve`, `cancel`, native lifecycle, and `native_inspect`[\s\S]*exact native UUID binding or pre-input status proof/u
+      /ordinary (?:terminal-scoped )?task[\s\S]{0,160}(?:does not|so it does not) run `\/status`[\s\S]{0,120}(?:does not fail|or fail) merely because the pane is narrow/u
     );
     assert.match(
       document,
-      /If dispatch, acceptance, or post-submit binding is uncertain, do not retry automatically/u
+      /Until (?:that )?promotion commits[\s\S]*strict `session_id` send[\s\S]*`respond`[\s\S]*(?:managed `approve`|`approve`)[\s\S]*`cancel`[\s\S]*native lifecycle[\s\S]*(?:callback delivery|callback authority)[\s\S]*`native_inspect`/u
     );
+    assert.match(
+      document,
+      /If (?:terminal )?delivery or (?:native )?acceptance is uncertain[\s\S]{0,100}(?:does not retry|do not retry automatically)/u
+    );
+    assert.match(document, /terminal-scoped manual Codex approval/u);
+    assert.match(document, /never (?:available to|participates? in) auto-?approv/iu);
+    assert.match(document, /(?:released[- ]owner|dispatch owner is already released)/u);
+    assert.match(document, /(?:must not|mustn.t|do not) be retried blindly/u);
     assert.match(document, /creates no (?:AKK )?Turn/u);
     assert.match(document, /previous/u);
     assert.match(document, /snapshot/ui);
@@ -206,7 +209,7 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
     );
     assert.match(
       document,
-      /raw (?:terminal|status)[\s\S]*prefilled `conversation_id`/ui
+      /(?:terminal-scoped manual Codex approval|raw (?:terminal|status))[\s\S]*prefill(?:ed|s)?(?: its(?: exact)?| the exact)? `conversation_id`/ui
     );
     assert.match(document, /never construct[\s\S]*guess/ui);
     assert.match(
@@ -214,14 +217,14 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
       /\/akk approve @a1b2c3d4 --expected-approval-fingerprint <fresh-fingerprint>/u
     );
   }
-  assert.match(readme, /current writer protocol is 4/u);
+  assert.match(readme, /current writer protocol is 5/u);
   assert.match(
     readme,
-    /Upgrading protocol 1 or 2[\s\S]*atomically publishing protocol 4/u
+    /Upgrading protocol 1 or 2[\s\S]*atomically publishing protocol 5/u
   );
   assert.match(
     readme,
-    /Protocol 3 already has Session authority[\s\S]*manifest-only writer fence with no data migration/u
+    /Protocols 3 and 4 already have Session authority[\s\S]*manifest-only writer fence with no data migration/u
   );
   assert.match(
     readme,
