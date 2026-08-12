@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.12.6 - 2026-08-12
+
+### Added
+
+- Add manual-only terminal-scoped Codex approval for one exact visible prompt when a human-entered task has no AKK dispatch owner or usable foreground UUID, while requiring a fresh list token, status fingerprint, and explicit confirmation.
+
+### Fixed
+
+- Let an advertised ordinary Codex task proceed once in a narrow pane when AKK has a complete but foreground-unbound rollout inventory, then bind only the rollout that uniquely accepts the exact request without an internal `/status` probe.
+- Reconcile callbackless terminal completion locally, release the exact dispatch ledger, and restart pending candidate monitors after a crash without creating a Gateway outbox or replaying terminal input.
+
+### Changed
+
+- Publish action contract 12 and Store writer protocol 5. Protocol 4 Stores upgrade through an atomic manifest-only writer fence.
+
+### Security
+
+- Freeze released predecessor Turn history throughout deferred candidate binding, preserve separate same-UUID and different-UUID Session lineages, and keep zero, multiple, drifted, or uncertain request acceptance non-retryable.
+- Revalidate manual approval and cancellation against the canonical terminal endpoint, process incarnation, dispatch snapshot, Session revision, and prompt immediately before terminal keys, while keeping auto-approval and provisional managed controls unavailable.
+- Serialize deferred recovery as terminal-to-writer-to-state and treat Store or state-lock contention as monitor backoff rather than native-acceptance uncertainty.
+
 ## 0.12.5 - 2026-08-12
 
 ### Fixed
