@@ -21,7 +21,8 @@ import {
 
 export const DEFERRED_FOREGROUND_TRANSFER_SCHEMA =
   "agent-knock-knock/deferred-foreground-transfer" as const;
-export const DEFERRED_FOREGROUND_TRANSFER_VERSION = 1 as const;
+export const DEFERRED_FOREGROUND_TRANSFER_VERSION = 2 as const;
+export const DEFERRED_FOREGROUND_TRANSFER_LEGACY_VERSION = 1 as const;
 
 const TRANSFER_STATE_FILE = "state.json";
 const PRIVATE_FILE_MODE = 0o600;
@@ -47,9 +48,25 @@ export type DeferredForegroundTransferInputStage =
   | "enter_dispatched"
   | "agent_accepted";
 
+export type DeferredForegroundTransferSourceKind =
+  | "status_card_only"
+  | "candidate_rollout_quiescent";
+
+export interface DeferredForegroundTransferSourceTurnAuthority {
+  turn_id: string;
+  status: "idle" | "failed" | "closed" | "cancelled";
+  updated_at: string;
+  binding_id: string;
+  binding_generation: number;
+  native_thread_id: string;
+  turn_fingerprint: string;
+}
+
 /**
- * Durable authority for replacing one status-card-only Codex Session with a
- * fresh provisional Session around an ordinary task submission.
+ * Durable authority for replacing one quiescent Codex Session with a fresh
+ * provisional Session around an ordinary task submission. Version 1 records
+ * cover status-card-only sources; version 2 also freezes exact historical Turn
+ * authority for rollout-backed sources.
  *
  * This record deliberately lives outside native lifecycle transitions.  It
  * never authorizes a slash command or terminal-input replay; the ordinary
@@ -57,7 +74,9 @@ export type DeferredForegroundTransferInputStage =
  */
 export interface DeferredForegroundTransfer {
   schema: typeof DEFERRED_FOREGROUND_TRANSFER_SCHEMA;
-  version: typeof DEFERRED_FOREGROUND_TRANSFER_VERSION;
+  version:
+    | typeof DEFERRED_FOREGROUND_TRANSFER_LEGACY_VERSION
+    | typeof DEFERRED_FOREGROUND_TRANSFER_VERSION;
   transfer_id: string;
   revision?: number;
   status: DeferredForegroundTransferStatus;
@@ -73,6 +92,8 @@ export interface DeferredForegroundTransfer {
   source_binding_token: string;
   source_previous_last_transition_id?: string;
   source_before_binding: ManagedTerminalBinding;
+  source_kind?: DeferredForegroundTransferSourceKind;
+  source_turn_history?: DeferredForegroundTransferSourceTurnAuthority[];
   target_session_id: string;
   target_expected_revision: null;
   previous_dispatch_status: "none" | "resolved";
@@ -207,6 +228,8 @@ export function assertDeferredForegroundTransfer(
     "source_binding_token",
     "source_previous_last_transition_id",
     "source_before_binding",
+    "source_kind",
+    "source_turn_history",
     "target_session_id",
     "target_expected_revision",
     "previous_dispatch_status",
@@ -265,7 +288,10 @@ export function assertDeferredForegroundTransfer(
   ], "deferred foreground transfer");
   if (
     value.schema !== DEFERRED_FOREGROUND_TRANSFER_SCHEMA ||
-    value.version !== DEFERRED_FOREGROUND_TRANSFER_VERSION
+    ![
+      DEFERRED_FOREGROUND_TRANSFER_LEGACY_VERSION,
+      DEFERRED_FOREGROUND_TRANSFER_VERSION
+    ].includes(value.version as 1 | 2)
   ) {
     throw new Error(
       "deferred foreground transfer has an unsupported schema or version"
@@ -318,6 +344,70 @@ export function assertDeferredForegroundTransfer(
     "deferred transfer source previous transition"
   );
   assertBinding(value.source_before_binding, "deferred transfer source binding");
+  const sourceKind = value.version === DEFERRED_FOREGROUND_TRANSFER_LEGACY_VERSION
+    ? "status_card_only"
+    : value.source_kind;
+  if (
+    value.version === DEFERRED_FOREGROUND_TRANSFER_LEGACY_VERSION
+      ? value.source_kind !== undefined || value.source_turn_history !== undefined
+      : !["status_card_only", "candidate_rollout_quiescent"].includes(
+          String(sourceKind)
+        )
+  ) {
+    throw new Error("deferred transfer source kind is invalid");
+  }
+  const sourceTurnHistory = value.source_turn_history;
+  if (sourceKind === "candidate_rollout_quiescent") {
+    if (
+      !Array.isArray(sourceTurnHistory) ||
+      sourceTurnHistory.length > 128
+    ) {
+      throw new Error(
+        "candidate-rollout deferred source requires exact Turn history authority"
+      );
+    }
+    const seenTurnIds = new Set<string>();
+    for (const turn of sourceTurnHistory) {
+      if (
+        !isRecord(turn) ||
+        Object.keys(turn).sort().join(",") !== [
+          "binding_generation",
+          "binding_id",
+          "native_thread_id",
+          "status",
+          "turn_fingerprint",
+          "turn_id",
+          "updated_at"
+        ].join(",") ||
+        !isSafeRecordId(turn.turn_id) ||
+        !["idle", "failed", "closed", "cancelled"].includes(
+          String(turn.status)
+        ) ||
+        !isValidTimestamp(turn.updated_at) ||
+        !isSafeRecordId(turn.binding_id) ||
+        !isPositiveSafeInteger(turn.binding_generation) ||
+        !isExactNativeThreadId(turn.native_thread_id) ||
+        turn.binding_id !== value.source_before_binding.binding_id ||
+        turn.binding_generation !== value.source_before_binding.generation ||
+        turn.native_thread_id !== value.source_before_binding.native_thread_id ||
+        typeof turn.turn_fingerprint !== "string" ||
+        !/^[0-9a-f]{64}$/u.test(turn.turn_fingerprint) ||
+        seenTurnIds.has(String(turn.turn_id))
+      ) {
+        throw new Error(
+          "candidate-rollout deferred source Turn history is invalid"
+        );
+      }
+      seenTurnIds.add(String(turn.turn_id));
+    }
+  } else if (sourceTurnHistory !== undefined) {
+    throw new Error(
+      "status-card deferred source cannot carry Turn history authority"
+    );
+  }
+  const statusCardSource = sourceKind === "status_card_only";
+  const candidateRolloutSource =
+    sourceKind === "candidate_rollout_quiescent";
   if (
     value.source_before_binding.native_process.pid !== value.process_pid ||
     value.source_before_binding.native_process.process_uuid !==
@@ -328,11 +418,21 @@ export function assertDeferredForegroundTransfer(
     JSON.stringify(value.source_before_binding.terminal_endpoint) !==
       JSON.stringify(value.terminal_endpoint) ||
     !isExactNativeThreadId(value.source_before_binding.native_thread_id) ||
-    value.source_before_binding.native_process.rollout !== undefined ||
-    !value.source_before_binding.native_process.evidence.includes(
-      "codex_status_card"
+    (
+      statusCardSource &&
+      (
+        value.source_before_binding.native_process.rollout !== undefined ||
+        !value.source_before_binding.native_process.evidence.includes(
+          "codex_status_card"
+        )
+      )
     ) ||
-    value.source_previous_last_transition_id !== undefined ||
+    (
+      candidateRolloutSource &&
+      value.source_before_binding.native_process.rollout === undefined
+    ) ||
+    (statusCardSource &&
+      value.source_previous_last_transition_id !== undefined) ||
     managedSessionBindingToken({
       session_id: value.source_session_id,
       status: "bound",
@@ -1023,6 +1123,8 @@ function assertTransferAdvance(
     "source_binding_token",
     "source_previous_last_transition_id",
     "source_before_binding",
+    "source_kind",
+    "source_turn_history",
     "target_session_id",
     "target_expected_revision",
     "previous_dispatch_status",
@@ -1384,6 +1486,19 @@ function assertRecordId(value: unknown, label: string): asserts value is string 
   ) {
     throw new Error(`${label} is not safe for storage: ${String(value)}`);
   }
+}
+
+function isSafeRecordId(value: unknown): value is string {
+  try {
+    assertRecordId(value, "record id");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isValidTimestamp(value: unknown): value is string {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
 }
 
 function assertContained(candidate: string, root: string, label: string): void {

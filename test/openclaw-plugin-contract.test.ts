@@ -33,11 +33,18 @@ type ToolDefinition = {
     additionalProperties?: boolean;
     required?: string[];
     anyOf?: Array<{ required?: string[] }>;
+    allOf?: Array<{
+      if?: { required?: string[] };
+      then?: { required?: string[] };
+    }>;
     not?: {
       required?: string[];
       anyOf?: Array<{ required?: string[] }>;
     };
-    properties?: Record<string, unknown>;
+    properties?: Record<string, {
+      description?: string;
+      [key: string]: unknown;
+    }>;
   };
   execute?: (
     toolCallId: string,
@@ -1363,6 +1370,29 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
         : "",
       /explicit user confirmation/u
     );
+    const approveTool = tools.get("agent_knock_knock_approve");
+    assert.ok(approveTool?.parameters?.properties?.expected_terminal_token);
+    assert.deepEqual(approveTool?.parameters?.allOf, [
+      {
+        if: { required: ["expected_terminal_token"] },
+        then: { required: ["conversation_id"] }
+      }
+    ]);
+    assert.match(
+      String(
+        approveTool?.parameters?.properties?.expected_terminal_token
+          ?.description ?? ""
+      ),
+      /manual Codex approval.*never construct.*automatic approval/iu
+    );
+    await assert.rejects(
+      () => approveTool!.execute!("managed-terminal-token", {
+        turn_id: "turn-managed",
+        expected_approval_fingerprint: "fingerprint-managed",
+        expected_terminal_token: "terminal-token-must-not-cross-scope"
+      }),
+      /expected_terminal_token requires the exact list-prefilled conversation_id/u
+    );
 
     await assert.rejects(
       () => closeTool!.execute!("ambiguous-recovery-fence", {
@@ -1468,6 +1498,14 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
       conversation_id: "legacy-turn",
       expected_approval_fingerprint: "fingerprint-1"
     });
+    await tools.get("agent_knock_knock_approve")?.execute?.(
+      "terminal-scoped-approve",
+      {
+        conversation_id: "terminal:v2:tmux:codex:work:0.0:1234",
+        expected_approval_fingerprint: "fingerprint-terminal",
+        expected_terminal_token: "terminal-token-current"
+      }
+    );
     await tools.get("agent_knock_knock_renew")?.execute?.("renew", {
       turn_id: "turn-renew"
     });
@@ -1518,6 +1556,12 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
     assert.deepEqual(calls.map((args) => args.slice(0, 4)), [
       ["status", "--reconcile", "--turn", "turn-status"],
       ["approve", "--conversation", "legacy-turn", "--expected-approval-fingerprint"],
+      [
+        "approve",
+        "--conversation",
+        "terminal:v2:tmux:codex:work:0.0:1234",
+        "--expected-approval-fingerprint"
+      ],
       ["renew", "--turn", "turn-renew"],
       ["retry-callback", "--turn", "turn-retry"],
       ["cancel", "--turn", "turn-cancel"],
@@ -1544,6 +1588,15 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
       "superseded_by_human_context_switch",
       "--expected-handoff-token",
       "handoff-current"
+    ]);
+    assert.deepEqual(calls[2], [
+      "approve",
+      "--conversation",
+      "terminal:v2:tmux:codex:work:0.0:1234",
+      "--expected-approval-fingerprint",
+      "fingerprint-terminal",
+      "--expected-terminal-token",
+      "terminal-token-current"
     ]);
     assert.deepEqual(calls.at(-2)?.slice(0, 5), [
       "close",

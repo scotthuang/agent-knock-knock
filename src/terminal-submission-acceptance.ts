@@ -2,6 +2,10 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { redactString } from "./runtime-log.js";
+import type {
+  CodexOpenRootRolloutIdentity,
+  CodexOpenRootRolloutInventory
+} from "./agent-session-provider.js";
 import type { TerminalCompletionEvidence } from "./terminal-agent-adapter.js";
 
 export interface TerminalSubmissionAcceptanceEvidence {
@@ -61,9 +65,59 @@ export interface CodexVirginRolloutAcceptanceAnchor
   expected_empty_native_session: true;
 }
 
+export interface CodexCandidateRolloutAcceptanceAnchorEntry {
+  native_thread_id: string;
+  rollout: CodexRolloutIdentity;
+  offset_bytes: number;
+}
+
+/**
+ * A process-bound pre-submit snapshot for a terminal whose open-root
+ * inventory is exact but cannot name one foreground root. Existing roots are
+ * fenced at their byte offsets; roots opened after capture are admitted only
+ * with a fresh exact session_meta header. No candidate is selected by mtime.
+ */
+export interface CodexCandidateSetRolloutAcceptanceAnchor
+  extends CodexRolloutAcceptanceAnchorBase {
+  version: 3;
+  mode: "candidate_set";
+  native_thread_binding: "post_submission";
+  file_existed: false;
+  offset_bytes: 0;
+  zero_file_baseline: boolean;
+  inventory_pid: number;
+  inventory_cwd?: string;
+  inventory_fingerprint: string;
+  candidate_rollouts: CodexCandidateRolloutAcceptanceAnchorEntry[];
+}
+
 export type CodexRolloutAcceptanceAnchor =
   | CodexBoundRolloutAcceptanceAnchor
-  | CodexVirginRolloutAcceptanceAnchor;
+  | CodexVirginRolloutAcceptanceAnchor
+  | CodexCandidateSetRolloutAcceptanceAnchor;
+
+export type CodexCandidateSetRolloutAcceptanceResult =
+  | {
+      status: "accepted";
+      identity: CodexOpenRootRolloutIdentity;
+      evidence: TerminalSubmissionAcceptanceEvidence;
+    }
+  | {
+      status: "pending";
+      inspected_candidates: number;
+      exact_matches: number;
+      incomplete_candidates?: number;
+    }
+  | {
+      status: "uncertain";
+      code:
+        | "multiple_exact_request_acceptances"
+        | "candidate_inventory_changed"
+        | "candidate_scan_invalid";
+      reason: string;
+      inspected_candidates: number;
+      exact_matches: number;
+    };
 
 export interface CodexRolloutAcceptanceIdentity {
   sessionId: string;
@@ -363,12 +417,226 @@ export function captureCodexRolloutAcceptanceAnchor(
   }
 }
 
+export function captureCodexCandidateSetRolloutAcceptanceAnchor({
+  inventory: inventoryValue,
+  now = new Date()
+}: {
+  inventory: CodexOpenRootRolloutInventory;
+  now?: Date;
+}): CodexCandidateSetRolloutAcceptanceAnchor {
+  const inventory = validateCodexOpenRootInventoryForAcceptance(
+    inventoryValue
+  );
+  const candidateRollouts = inventory.roots.map((identity) => {
+    const rollout = normalizedRolloutIdentity(identity.rollout);
+    const opened = openExactRollout(rollout);
+    try {
+      const before = opened.stat;
+      assertPrivateRegularFile(before);
+      if (before.size > 0 && !fileEndsWithNewline(opened.fd, before.size)) {
+        throw new Error(
+          "Codex candidate rollout did not end at a complete JSONL record before terminal submission"
+        );
+      }
+      const after = fs.fstatSync(opened.fd);
+      if (!sameStableFile(before, after)) {
+        throw new Error(
+          "Codex candidate rollout changed while its terminal submission anchor was captured"
+        );
+      }
+      return {
+        native_thread_id: exactNativeThreadId(identity.sessionId),
+        rollout,
+        offset_bytes: before.size
+      };
+    } finally {
+      fs.closeSync(opened.fd);
+    }
+  });
+  const base = {
+    schema: "agent-knock-knock/codex-rollout-acceptance-anchor" as const,
+    version: 3 as const,
+    process_uuid: inventory.processUuid,
+    process_birth: inventory.processBirth,
+    captured_at: now.toISOString(),
+    mode: "candidate_set" as const,
+    native_thread_binding: "post_submission" as const,
+    file_existed: false as const,
+    offset_bytes: 0 as const,
+    zero_file_baseline: candidateRollouts.length === 0,
+    inventory_pid: inventory.pid,
+    ...(inventory.cwd ? { inventory_cwd: inventory.cwd } : {}),
+    inventory_fingerprint: inventory.inventoryFingerprint,
+    candidate_rollouts: candidateRollouts
+  };
+  return {
+    ...base,
+    anchor_fingerprint: fingerprint(base)
+  };
+}
+
+export function detectCodexCandidateSetRolloutAcceptance({
+  anchor: anchorValue,
+  currentInventory: inventoryValue,
+  requestHash: requestHashValue
+}: {
+  anchor: CodexCandidateSetRolloutAcceptanceAnchor;
+  currentInventory: CodexOpenRootRolloutInventory;
+  requestHash: string;
+}): CodexCandidateSetRolloutAcceptanceResult {
+  const anchor = validateCodexRolloutAcceptanceAnchor(anchorValue);
+  if (anchor.version !== 3) {
+    throw new Error("Codex candidate-set acceptance requires a version 3 anchor");
+  }
+  const inventory = validateCodexOpenRootInventoryForAcceptance(
+    inventoryValue
+  );
+  const requestHash = sha256Value(
+    requestHashValue,
+    "terminal request hash"
+  );
+  if (
+    inventory.processUuid !== anchor.process_uuid ||
+    inventory.processBirth !== anchor.process_birth ||
+    inventory.pid !== anchor.inventory_pid ||
+    inventory.cwd !== anchor.inventory_cwd
+  ) {
+    return {
+      status: "uncertain",
+      code: "candidate_inventory_changed",
+      reason:
+        "Codex process incarnation changed during candidate-set acceptance polling",
+      inspected_candidates: 0,
+      exact_matches: 0
+    };
+  }
+
+  const anchoredByThread = new Map(
+    anchor.candidate_rollouts.map((candidate) => [
+      candidate.native_thread_id,
+      candidate
+    ])
+  );
+  const currentByThread = new Map(
+    inventory.roots.map((identity) => [identity.sessionId, identity])
+  );
+  for (const identity of inventory.roots) {
+    const anchored = anchoredByThread.get(identity.sessionId);
+    if (
+      anchored &&
+      !sameRolloutIdentity(anchored.rollout, identity.rollout)
+    ) {
+      return {
+        status: "uncertain",
+        code: "candidate_inventory_changed",
+        reason:
+          `Codex candidate ${identity.sessionId} changed rollout identity after capture`,
+        inspected_candidates: 0,
+        exact_matches: 0
+      };
+    }
+  }
+  for (const anchored of anchor.candidate_rollouts) {
+    if (!currentByThread.has(anchored.native_thread_id)) {
+      return {
+        status: "uncertain",
+        code: "candidate_inventory_changed",
+        reason:
+          `Codex candidate ${anchored.native_thread_id} is no longer open in the exact process inventory`,
+        inspected_candidates: 0,
+        exact_matches: 0
+      };
+    }
+  }
+
+  const candidates: Array<{
+    identity: CodexOpenRootRolloutIdentity;
+    offsetBytes: number;
+    requireFreshHeader: boolean;
+  }> = inventory.roots.map((identity) => {
+    const anchored = anchoredByThread.get(identity.sessionId);
+    return {
+      identity,
+      offsetBytes: anchored?.offset_bytes ?? 0,
+      requireFreshHeader: anchored === undefined
+    };
+  });
+
+  const matches: Array<{
+    identity: CodexOpenRootRolloutIdentity;
+    evidence: TerminalSubmissionAcceptanceEvidence;
+  }> = [];
+  let incompleteCandidates = 0;
+  for (const candidate of candidates) {
+    let scan: CodexAcceptanceRolloutScan;
+    try {
+      scan = scanCodexRolloutAcceptance({
+        rollout: candidate.identity.rollout,
+        nativeThreadId: candidate.identity.sessionId,
+        processUuid: anchor.process_uuid,
+        processBirth: anchor.process_birth,
+        requestHash,
+        anchorFingerprint: anchor.anchor_fingerprint,
+        offsetBytes: candidate.offsetBytes,
+        requireFreshHeader: candidate.requireFreshHeader,
+        capturedAt: anchor.captured_at
+      });
+    } catch (error) {
+      return {
+        status: "uncertain",
+        code: "candidate_scan_invalid",
+        reason: error instanceof Error ? error.message : String(error),
+        inspected_candidates: candidates.indexOf(candidate) + 1,
+        exact_matches: matches.length
+      };
+    }
+    if (scan.status === "incomplete") {
+      incompleteCandidates += 1;
+    } else if (scan.status === "accepted") {
+      matches.push({
+        identity: candidate.identity,
+        evidence: scan.evidence
+      });
+    }
+  }
+  if (matches.length > 1) {
+    return {
+      status: "uncertain",
+      code: "multiple_exact_request_acceptances",
+      reason:
+        "multiple Codex root rollouts durably accepted the exact terminal request",
+      inspected_candidates: candidates.length,
+      exact_matches: matches.length
+    };
+  }
+  if (matches.length === 0 || incompleteCandidates > 0) {
+    return {
+      status: "pending",
+      inspected_candidates: candidates.length,
+      exact_matches: matches.length,
+      ...(incompleteCandidates > 0
+        ? { incomplete_candidates: incompleteCandidates }
+        : {})
+    };
+  }
+  return {
+    status: "accepted",
+    identity: matches[0].identity,
+    evidence: matches[0].evidence
+  };
+}
+
 export function detectCodexRolloutAcceptance(options: {
   anchor: CodexRolloutAcceptanceAnchor;
   currentIdentity: CodexRolloutAcceptanceIdentity;
   requestHash: string;
 }): TerminalSubmissionAcceptanceEvidence | undefined {
   const anchor = validateCodexRolloutAcceptanceAnchor(options.anchor);
+  if (anchor.version === 3) {
+    throw new Error(
+      "Codex candidate-set acceptance requires the inventory-aware detector"
+    );
+  }
   const requestHash = sha256Value(options.requestHash, "terminal request hash");
   const current = options.currentIdentity;
   const currentNativeThreadId = exactNativeThreadId(current.sessionId);
@@ -393,74 +661,18 @@ export function detectCodexRolloutAcceptance(options: {
     throw new Error("Codex rollout identity changed during acceptance polling");
   }
 
-  const opened = openExactRollout(rollout);
-  try {
-    const before = opened.stat;
-    assertPrivateRegularFile(before);
-    if (before.size < anchor.offset_bytes) {
-      throw new Error("Codex rollout was truncated after terminal submission");
-    }
-    const bytesToRead = before.size - anchor.offset_bytes;
-    if (bytesToRead === 0) {
-      return undefined;
-    }
-    if (bytesToRead > CODEX_ACCEPTANCE_MAX_BYTES) {
-      throw new Error("Codex rollout acceptance suffix exceeded the bounded read limit");
-    }
-    if (!fileEndsWithNewline(opened.fd, before.size)) {
-      return undefined;
-    }
-    const buffer = Buffer.allocUnsafe(bytesToRead);
-    const bytesRead = fs.readSync(
-      opened.fd,
-      buffer,
-      0,
-      bytesToRead,
-      anchor.offset_bytes
-    );
-    if (bytesRead !== bytesToRead) {
-      return undefined;
-    }
-    const after = fs.fstatSync(opened.fd);
-    if (!sameStableFile(before, after)) {
-      return undefined;
-    }
-    const suffix = buffer.toString("utf8");
-    if (anchor.version === 2) {
-      assertVirginRolloutHeader({
-        text: suffix,
-        nativeThreadId: expectedNativeThreadId,
-        capturedAt: anchor.captured_at
-      });
-    }
-    const accepted = acceptedCodexTurnFromSuffix(
-      suffix,
-      requestHash
-    );
-    if (!accepted) {
-      return undefined;
-    }
-    const evidenceBase = {
-      source: "codex_rollout" as const,
-      kind: "native_user_turn" as const,
-      nativeThreadId: expectedNativeThreadId,
-      requestHash,
-      acceptanceId: accepted.turnId,
-      acceptedAt: accepted.userTimestamp ?? accepted.startedAt,
-      anchorFingerprint: anchor.anchor_fingerprint,
-      metadata: {
-        turn_id: accepted.turnId,
-        anchor_offset_bytes: anchor.offset_bytes,
-        observed_end_offset_bytes: before.size
-      }
-    };
-    return {
-      ...evidenceBase,
-      evidenceFingerprint: fingerprint(evidenceBase)
-    };
-  } finally {
-    fs.closeSync(opened.fd);
-  }
+  const scan = scanCodexRolloutAcceptance({
+    rollout,
+    nativeThreadId: expectedNativeThreadId,
+    processUuid: anchor.process_uuid,
+    processBirth: anchor.process_birth,
+    requestHash,
+    anchorFingerprint: anchor.anchor_fingerprint,
+    offsetBytes: anchor.offset_bytes,
+    requireFreshHeader: anchor.version === 2,
+    capturedAt: anchor.captured_at
+  });
+  return scan.status === "accepted" ? scan.evidence : undefined;
 }
 
 /**
@@ -515,8 +727,16 @@ export function detectCodexBoundRolloutCompletion(options: {
       initialDiagnostics
     );
   }
+  const acceptedCandidate = anchor.version === 3
+    ? anchor.candidate_rollouts.find((candidate) =>
+        candidate.native_thread_id === expectedNativeThreadId
+      )
+    : undefined;
+  const scanStartOffset = acceptedCandidate?.offset_bytes ??
+    anchor.offset_bytes;
   const baseDiagnostics = {
     ...initialDiagnostics,
+    scan_start_offset_bytes: scanStartOffset,
     native_thread_id: expectedNativeThreadId
   };
 
@@ -575,7 +795,7 @@ export function detectCodexBoundRolloutCompletion(options: {
   }
   if (
     evidenceAnchorOffset !== undefined &&
-    evidenceAnchorOffset !== anchor.offset_bytes
+    evidenceAnchorOffset !== scanStartOffset
   ) {
     return codexCompletionFailure(
       "acceptance_anchor_mismatch",
@@ -628,7 +848,10 @@ export function detectCodexBoundRolloutCompletion(options: {
     ...diagnostics,
     rollout_identity_fingerprint: fingerprint(rollout)
   };
-  if (anchor.rollout && !sameRolloutIdentity(anchor.rollout, rollout)) {
+  const anchoredRollout = anchor.version === 3
+    ? acceptedCandidate?.rollout
+    : anchor.rollout;
+  if (anchoredRollout && !sameRolloutIdentity(anchoredRollout, rollout)) {
     return codexCompletionFailure(
       "rollout_identity_mismatch",
       new Error("Codex rollout identity changed after terminal acceptance"),
@@ -674,7 +897,7 @@ export function detectCodexBoundRolloutCompletion(options: {
       );
     }
     if (
-      before.size < anchor.offset_bytes ||
+      before.size < scanStartOffset ||
       (evidenceEndOffset !== undefined && before.size < evidenceEndOffset)
     ) {
       return codexCompletionFailure(
@@ -686,7 +909,7 @@ export function detectCodexBoundRolloutCompletion(options: {
         }
       );
     }
-    const bytesToRead = before.size - anchor.offset_bytes;
+    const bytesToRead = before.size - scanStartOffset;
     const observedDiagnostics = {
       ...rolloutDiagnostics,
       observed_end_offset_bytes: before.size
@@ -719,7 +942,7 @@ export function detectCodexBoundRolloutCompletion(options: {
       buffer,
       0,
       bytesToRead,
-      anchor.offset_bytes
+      scanStartOffset
     );
     const after = fs.fstatSync(opened.fd);
     if (bytesRead !== bytesToRead || !sameStableFile(before, after)) {
@@ -764,7 +987,7 @@ export function detectCodexBoundRolloutCompletion(options: {
         anchor_fingerprint: anchor.anchor_fingerprint,
         rollout_identity_fingerprint:
           rolloutDiagnostics.rollout_identity_fingerprint,
-        scan_start_offset_bytes: anchor.offset_bytes,
+        scan_start_offset_bytes: scanStartOffset,
         observed_end_offset_bytes: before.size,
         scanned_records: scan.scannedRecords,
         observed_task_complete_records: scan.observedTaskCompleteRecords
@@ -1043,6 +1266,114 @@ function acceptedCodexTurnFromSuffix(
   return matches[0];
 }
 
+type CodexAcceptanceRolloutScan =
+  | { status: "pending" }
+  | { status: "incomplete" }
+  | {
+      status: "accepted";
+      evidence: TerminalSubmissionAcceptanceEvidence;
+    };
+
+function scanCodexRolloutAcceptance({
+  rollout: rolloutValue,
+  nativeThreadId: nativeThreadIdValue,
+  processUuid: processUuidValue,
+  processBirth: processBirthValue,
+  requestHash,
+  anchorFingerprint,
+  offsetBytes,
+  requireFreshHeader,
+  capturedAt
+}: {
+  rollout: CodexRolloutIdentity;
+  nativeThreadId: string;
+  processUuid: string;
+  processBirth: string;
+  requestHash: string;
+  anchorFingerprint: string;
+  offsetBytes: number;
+  requireFreshHeader: boolean;
+  capturedAt: string;
+}): CodexAcceptanceRolloutScan {
+  const rollout = normalizedRolloutIdentity(rolloutValue);
+  const nativeThreadId = exactNativeThreadId(nativeThreadIdValue);
+  requiredString(processUuidValue, "Codex process UUID");
+  requiredString(processBirthValue, "Codex process birth");
+  if (!Number.isSafeInteger(offsetBytes) || offsetBytes < 0) {
+    throw new Error("Codex rollout acceptance byte offset is invalid");
+  }
+  const opened = openExactRollout(rollout);
+  try {
+    const before = opened.stat;
+    assertPrivateRegularFile(before);
+    if (before.size < offsetBytes) {
+      throw new Error("Codex rollout was truncated after terminal submission");
+    }
+    const bytesToRead = before.size - offsetBytes;
+    if (bytesToRead === 0) {
+      return { status: "pending" };
+    }
+    if (bytesToRead > CODEX_ACCEPTANCE_MAX_BYTES) {
+      throw new Error(
+        "Codex rollout acceptance suffix exceeded the bounded read limit"
+      );
+    }
+    if (!fileEndsWithNewline(opened.fd, before.size)) {
+      return { status: "incomplete" };
+    }
+    const buffer = Buffer.allocUnsafe(bytesToRead);
+    const bytesRead = fs.readSync(
+      opened.fd,
+      buffer,
+      0,
+      bytesToRead,
+      offsetBytes
+    );
+    if (bytesRead !== bytesToRead) {
+      return { status: "incomplete" };
+    }
+    const after = fs.fstatSync(opened.fd);
+    if (!sameStableFile(before, after)) {
+      return { status: "incomplete" };
+    }
+    const suffix = buffer.toString("utf8");
+    if (requireFreshHeader) {
+      assertVirginRolloutHeader({
+        text: suffix,
+        nativeThreadId,
+        capturedAt
+      });
+    }
+    const accepted = acceptedCodexTurnFromSuffix(suffix, requestHash);
+    if (!accepted) {
+      return { status: "pending" };
+    }
+    const evidenceBase = {
+      source: "codex_rollout" as const,
+      kind: "native_user_turn" as const,
+      nativeThreadId,
+      requestHash,
+      acceptanceId: accepted.turnId,
+      acceptedAt: accepted.userTimestamp ?? accepted.startedAt,
+      anchorFingerprint,
+      metadata: {
+        turn_id: accepted.turnId,
+        anchor_offset_bytes: offsetBytes,
+        observed_end_offset_bytes: before.size
+      }
+    };
+    return {
+      status: "accepted",
+      evidence: {
+        ...evidenceBase,
+        evidenceFingerprint: fingerprint(evidenceBase)
+      }
+    };
+  } finally {
+    fs.closeSync(opened.fd);
+  }
+}
+
 function exactCodexUserResponseText(content: unknown): string | undefined {
   if (!Array.isArray(content) || content.length !== 1) {
     return undefined;
@@ -1094,14 +1425,16 @@ function assertVirginRolloutHeader(options: {
   }
 }
 
-function validateCodexRolloutAcceptanceAnchor(
+export function validateCodexRolloutAcceptanceAnchor(
   value: CodexRolloutAcceptanceAnchor
 ): CodexRolloutAcceptanceAnchor {
   if (
     !isRecord(value) ||
     value.schema !== "agent-knock-knock/codex-rollout-acceptance-anchor" ||
-    (value.version !== 1 && value.version !== 2) ||
-    !["existing", "pre_materialization"].includes(String(value.mode)) ||
+    (value.version !== 1 && value.version !== 2 && value.version !== 3) ||
+    !["existing", "pre_materialization", "candidate_set"].includes(
+      String(value.mode)
+    ) ||
     !Number.isSafeInteger(value.offset_bytes) ||
     value.offset_bytes < 0 ||
     typeof value.file_existed !== "boolean"
@@ -1113,12 +1446,31 @@ function validateCodexRolloutAcceptanceAnchor(
     if ("native_thread_binding" in value) {
       throw new Error("bound Codex acceptance anchor has deferred binding state");
     }
-  } else if (
+  } else if (value.version === 2 && (
     value.mode !== "pre_materialization" ||
     value.native_thread_binding !== "post_submission" ||
     "native_thread_id" in value
-  ) {
+  )) {
     throw new Error("virgin Codex acceptance anchor is inconsistent");
+  } else if (value.version === 3 && (
+    value.mode !== "candidate_set" ||
+    value.native_thread_binding !== "post_submission" ||
+    "native_thread_id" in value ||
+    value.file_existed !== false ||
+    value.offset_bytes !== 0 ||
+    typeof value.zero_file_baseline !== "boolean" ||
+    !Number.isSafeInteger(value.inventory_pid) ||
+    value.inventory_pid <= 1 ||
+    (
+      value.inventory_cwd !== undefined &&
+      !path.isAbsolute(value.inventory_cwd)
+    ) ||
+    !/^[0-9a-f]{64}$/u.test(String(value.inventory_fingerprint)) ||
+    !Array.isArray(value.candidate_rollouts) ||
+    value.candidate_rollouts.length > 128 ||
+    value.zero_file_baseline !== (value.candidate_rollouts.length === 0)
+  )) {
+    throw new Error("candidate-set Codex acceptance anchor is inconsistent");
   }
   requiredString(value.process_uuid, "Codex process UUID");
   requiredString(value.process_birth, "Codex process birth");
@@ -1129,6 +1481,30 @@ function validateCodexRolloutAcceptanceAnchor(
   const { anchor_fingerprint: _fingerprint, ...base } = value;
   if (fingerprint(base) !== value.anchor_fingerprint) {
     throw new Error("Codex rollout acceptance anchor fingerprint does not match");
+  }
+  if (value.version === 3) {
+    const seenThreads = new Set<string>();
+    const seenFiles = new Set<string>();
+    for (const candidate of value.candidate_rollouts) {
+      if (!isRecord(candidate)) {
+        throw new Error("Codex candidate-set rollout entry is invalid");
+      }
+      const nativeThreadId = exactNativeThreadId(
+        candidate.native_thread_id
+      );
+      const rollout = normalizedRolloutIdentity(candidate.rollout);
+      if (
+        !Number.isSafeInteger(candidate.offset_bytes) ||
+        candidate.offset_bytes < 0 ||
+        seenThreads.has(nativeThreadId) ||
+        seenFiles.has(`${rollout.device}:${rollout.inode}`)
+      ) {
+        throw new Error("Codex candidate-set rollout entries are ambiguous");
+      }
+      seenThreads.add(nativeThreadId);
+      seenFiles.add(`${rollout.device}:${rollout.inode}`);
+    }
+    return value;
   }
   const rollout = "rollout" in value ? value.rollout : undefined;
   if (
@@ -1148,6 +1524,85 @@ function validateCodexRolloutAcceptanceAnchor(
     value.expected_empty_native_session !== true
   ) {
     throw new Error("Codex pre-materialization acceptance anchor is inconsistent");
+  }
+  return value;
+}
+
+function validateCodexOpenRootInventoryForAcceptance(
+  value: CodexOpenRootRolloutInventory
+): CodexOpenRootRolloutInventory {
+  if (
+    !isRecord(value) ||
+    value.schema !==
+      "agent-knock-knock/codex-open-root-rollout-inventory" ||
+    value.version !== 1 ||
+    !["verified_absent", "resolved", "unbound"].includes(
+      String(value.status)
+    ) ||
+    !Number.isSafeInteger(value.pid) ||
+    value.pid <= 1 ||
+    !Array.isArray(value.roots) ||
+    value.roots.length > 128 ||
+    !/^[0-9a-f]{64}$/u.test(String(value.inventoryFingerprint))
+  ) {
+    throw new Error("Codex open-root rollout inventory is invalid");
+  }
+  requiredString(value.processUuid, "Codex process UUID");
+  requiredString(value.processBirth, "Codex process birth");
+  if (
+    value.processUuid !==
+      `codex-pid:${value.pid}:birth:${value.processBirth}`
+  ) {
+    throw new Error("Codex open-root rollout inventory process UUID is inconsistent");
+  }
+  if (value.cwd !== undefined && !path.isAbsolute(value.cwd)) {
+    throw new Error("Codex open-root rollout inventory cwd is not absolute");
+  }
+  if (
+    (value.status === "verified_absent" && value.roots.length !== 0) ||
+    (value.status === "resolved" && value.roots.length !== 1) ||
+    (
+      value.status === "unbound" &&
+      (
+        value.roots.length < 2 ||
+        value.reason !== "multiple_open_root_rollouts"
+      )
+    )
+  ) {
+    throw new Error("Codex open-root rollout inventory status is inconsistent");
+  }
+  const seenThreads = new Set<string>();
+  const seenFiles = new Set<string>();
+  for (const identity of value.roots) {
+    if (!isRecord(identity)) {
+      throw new Error("Codex open-root rollout inventory identity is invalid");
+    }
+    const nativeThreadId = exactNativeThreadId(identity.sessionId);
+    if (
+      identity.processUuid !== value.processUuid ||
+      identity.processBirth !== value.processBirth ||
+      identity.evidence !== "codex_open_root_rollout"
+    ) {
+      throw new Error(
+        "Codex open-root rollout inventory has mixed process authority"
+      );
+    }
+    const rollout = normalizedRolloutIdentity(identity.rollout);
+    if (
+      seenThreads.has(nativeThreadId) ||
+      seenFiles.has(`${rollout.device}:${rollout.inode}`)
+    ) {
+      throw new Error("Codex open-root rollout inventory is ambiguous");
+    }
+    seenThreads.add(nativeThreadId);
+    seenFiles.add(`${rollout.device}:${rollout.inode}`);
+  }
+  const { status: _status, inventoryFingerprint, reason: _reason, ...authority } =
+    value as CodexOpenRootRolloutInventory & { reason?: string };
+  if (fingerprint(authority) !== inventoryFingerprint) {
+    throw new Error(
+      "Codex open-root rollout inventory fingerprint does not match"
+    );
   }
   return value;
 }

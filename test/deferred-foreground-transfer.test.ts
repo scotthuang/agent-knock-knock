@@ -147,6 +147,48 @@ function prepared(): DeferredForegroundTransfer {
   };
 }
 
+function candidatePrepared(): DeferredForegroundTransfer {
+  const statusCard = sourceBinding();
+  const before: ManagedTerminalBinding = {
+    ...statusCard,
+    native_process: {
+      ...statusCard.native_process,
+      rollout: {
+        fd: "7",
+        device: "1",
+        inode: "399",
+        path: "/tmp/source-rollout.jsonl"
+      },
+      evidence: "codex_rollout_fd+process_birth"
+    }
+  };
+  return {
+    ...prepared(),
+    version: 2,
+    source_binding_token: managedSessionBindingToken({
+      session_id: "session-status-card",
+      status: "bound",
+      binding: before
+    }),
+    source_previous_last_transition_id: "transition-already-committed",
+    source_before_binding: before,
+    source_kind: "candidate_rollout_quiescent",
+    source_turn_history: [
+      {
+        turn_id: "turn-history-1",
+        status: "idle",
+        updated_at: T0,
+        binding_id: before.binding_id,
+        binding_generation: before.generation,
+        native_thread_id: SOURCE_UUID,
+        turn_fingerprint: createHash("sha256")
+          .update("exact historical Turn state")
+          .digest("hex")
+      }
+    ]
+  };
+}
+
 function sourceReserved(
   value: DeferredForegroundTransfer = prepared()
 ): DeferredForegroundTransfer {
@@ -376,6 +418,71 @@ test("schema rejects ineligible source and provisional binding drift", () => {
     }, undefined, { allowMissingRevision: true }),
     /zero-UUID authority/u
   );
+});
+
+test("version 2 freezes exact rollout-backed source history while version 1 remains readable", () => {
+  assertValid(prepared());
+  const candidate = candidatePrepared();
+  assertValid(candidate);
+  assert.equal(candidate.source_kind, "candidate_rollout_quiescent");
+  assert.equal(candidate.source_turn_history?.length, 1);
+
+  assert.throws(
+    () => assertDeferredForegroundTransfer({
+      ...candidate,
+      source_turn_history: candidate.source_turn_history?.map((turn) => ({
+        ...turn,
+        turn_fingerprint: "not-a-fingerprint"
+      }))
+    }, undefined, { allowMissingRevision: true }),
+    /Turn history is invalid/u
+  );
+  assert.throws(
+    () => assertDeferredForegroundTransfer({
+      ...candidate,
+      source_kind: "status_card_only",
+      source_turn_history: undefined
+    }, undefined, { allowMissingRevision: true }),
+    /source binding disagrees/u
+  );
+  assert.throws(
+    () => assertDeferredForegroundTransfer({
+      ...prepared(),
+      version: 1,
+      source_kind: "candidate_rollout_quiescent",
+      source_turn_history: []
+    }, undefined, { allowMissingRevision: true }),
+    /source kind is invalid/u
+  );
+});
+
+test("candidate source history authority is immutable across CAS advances", () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "akk-deferred-candidate-"));
+  const storeDir = path.join(sandbox, "store");
+  try {
+    const created = saveDeferredForegroundTransfer(storeDir, candidatePrepared(), {
+      expectedRevision: null
+    });
+    assert.throws(
+      () => saveDeferredForegroundTransfer(storeDir, {
+        ...sourceReserved(created),
+        source_turn_history: created.source_turn_history?.map((turn) => ({
+          ...turn,
+          updated_at: T1
+        })),
+        revision: created.revision
+      }, { expectedRevision: 1 }),
+      /cannot change immutable source_turn_history/u
+    );
+    const loaded = loadDeferredForegroundTransfer(
+      storeDir,
+      created.transfer_id
+    );
+    assert.equal(loaded.version, 2);
+    assert.deepEqual(loaded.source_turn_history, created.source_turn_history);
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
 });
 
 test("CAS preserves a different-UUID commit and exact resolved evidence", () => {

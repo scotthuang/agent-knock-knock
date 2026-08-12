@@ -1,6 +1,7 @@
 import type {
   ActiveAgentSessionIdentity,
   AgentSessionCapabilities,
+  CodexOpenRootRolloutInventory,
   CodingAgentSessionProvider,
   ForkContextOptions
 } from "./agent-session-provider.js";
@@ -27,6 +28,10 @@ export interface CodexLocalSessionAdapter {
     allowedCompanionIdentity?: ActiveAgentSessionIdentity,
     allowedAdditionalIdentities?: readonly ActiveAgentSessionIdentity[]
   ): Promise<ActiveAgentSessionIdentity | undefined>;
+  inspectOpenRootRolloutInventoryForPid?(
+    pid: number,
+    cwd?: string
+  ): Promise<CodexOpenRootRolloutInventory>;
 }
 
 export class CodexLocalSessionProvider implements CodingAgentSessionProvider {
@@ -108,6 +113,18 @@ export class CodexLocalSessionProvider implements CodingAgentSessionProvider {
           evidence: "process_command_session_id"
         }
       : undefined;
+  }
+
+  async inspectOpenRootRolloutInventoryForPid(
+    pid: number,
+    cwd?: string
+  ): Promise<CodexOpenRootRolloutInventory> {
+    if (!this.adapter.inspectOpenRootRolloutInventoryForPid) {
+      throw new Error(
+        "Codex open-root rollout inventory inspection is unavailable"
+      );
+    }
+    return this.adapter.inspectOpenRootRolloutInventoryForPid(pid, cwd);
   }
 
   async getSession(sessionId: string): Promise<CodexSessionSummary | undefined> {

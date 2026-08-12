@@ -4,9 +4,15 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type {
+  CodexOpenRootRolloutIdentity,
+  CodexOpenRootRolloutInventory
+} from "../src/agent-session-provider.js";
 import {
+  captureCodexCandidateSetRolloutAcceptanceAnchor,
   captureCodexRolloutAcceptanceAnchor,
   detectCodexBoundRolloutCompletion,
+  detectCodexCandidateSetRolloutAcceptance,
   detectCodexRolloutAcceptance,
   terminalSubmissionReplayReceipt,
   validateTerminalSubmissionAcceptanceEvidence,
@@ -16,6 +22,205 @@ import {
 const SESSION_ID = "019ee559-7bb8-7fd1-970c-0f7b6978c44e";
 const REQUEST = "请检查第一行\nThen verify the second line.";
 const REQUEST_HASH = createHash("sha256").update(REQUEST).digest("hex");
+
+test("candidate-set Codex acceptance uses the exact existing-root offset through completion", () => {
+  const firstId = SESSION_ID;
+  const secondId = "019ee559-7bb8-7fd1-970c-0f7b6978c451";
+  const first = codexFixture([{ type: "event_msg", payload: { type: "old" } }], firstId);
+  const second = codexFixture([{ type: "event_msg", payload: { type: "old" } }], secondId);
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  try {
+    const baseline = candidateInventory({
+      processUuid,
+      processBirth,
+      roots: [
+        candidateIdentity(firstId, processUuid, processBirth, first.identity),
+        candidateIdentity(secondId, processUuid, processBirth, second.identity)
+      ]
+    });
+    const anchor = captureCodexCandidateSetRolloutAcceptanceAnchor({
+      inventory: baseline,
+      now: new Date("2026-08-07T01:00:00.000Z")
+    });
+    const secondOffset = anchor.candidate_rollouts.find((candidate) =>
+      candidate.native_thread_id === secondId
+    )?.offset_bytes;
+    assert.ok(secondOffset && secondOffset > 0);
+
+    appendRecords(second.path, acceptedTurnRecords(REQUEST, 501));
+    const accepted = detectCodexCandidateSetRolloutAcceptance({
+      anchor,
+      currentInventory: baseline,
+      requestHash: REQUEST_HASH
+    });
+    assert.equal(accepted.status, "accepted");
+    if (accepted.status !== "accepted") {
+      return;
+    }
+    assert.equal(accepted.identity.sessionId, secondId);
+    assert.equal(
+      accepted.evidence.metadata?.anchor_offset_bytes,
+      secondOffset
+    );
+
+    appendRecords(second.path, [taskCompleteRecord(501, "Candidate exact result")]);
+    const completion = detectCodexBoundRolloutCompletion({
+      anchor,
+      acceptanceEvidence: accepted.evidence,
+      currentIdentity: accepted.identity,
+      requestHash: REQUEST_HASH
+    });
+    assert.equal(completion.status, "completed");
+    assert.equal(completion.diagnostics.scan_start_offset_bytes, secondOffset);
+  } finally {
+    first.cleanup();
+    second.cleanup();
+  }
+});
+
+test("candidate-set Codex acceptance admits a unique new PID-open root from offset zero", () => {
+  const nativeThreadId = "019ee559-7bb8-7fd1-970c-0f7b6978c452";
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  const fixture = codexFixture([], nativeThreadId);
+  try {
+    const anchor = captureCodexCandidateSetRolloutAcceptanceAnchor({
+      inventory: candidateInventory({ processUuid, processBirth, roots: [] }),
+      now: new Date("2026-08-07T00:59:58.000Z")
+    });
+    appendRecords(fixture.path, acceptedTurnRecords(REQUEST, 502));
+    const currentInventory = candidateInventory({
+      processUuid,
+      processBirth,
+      roots: [candidateIdentity(
+        nativeThreadId,
+        processUuid,
+        processBirth,
+        fixture.identity
+      )]
+    });
+    const accepted = detectCodexCandidateSetRolloutAcceptance({
+      anchor,
+      currentInventory,
+      requestHash: REQUEST_HASH
+    });
+    assert.equal(accepted.status, "accepted");
+    if (accepted.status !== "accepted") {
+      return;
+    }
+    assert.equal(accepted.evidence.metadata?.anchor_offset_bytes, 0);
+
+    appendRecords(fixture.path, [taskCompleteRecord(502, "New-root exact result")]);
+    const completion = detectCodexBoundRolloutCompletion({
+      anchor,
+      acceptanceEvidence: accepted.evidence,
+      currentIdentity: accepted.identity,
+      requestHash: REQUEST_HASH
+    });
+    assert.equal(completion.status, "completed");
+    assert.equal(completion.diagnostics.scan_start_offset_bytes, 0);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("candidate-set Codex acceptance rejects a newly opened historical rollout", () => {
+  const nativeThreadId = "019ee559-7bb8-7fd1-970c-0f7b6978c455";
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  const fixture = codexFixture([], nativeThreadId);
+  try {
+    const anchor = captureCodexCandidateSetRolloutAcceptanceAnchor({
+      inventory: candidateInventory({ processUuid, processBirth, roots: [] }),
+      now: new Date("2026-08-07T01:00:00.000Z")
+    });
+    appendRecords(fixture.path, acceptedTurnRecords(REQUEST, 505));
+    const result = detectCodexCandidateSetRolloutAcceptance({
+      anchor,
+      currentInventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: [candidateIdentity(
+          nativeThreadId,
+          processUuid,
+          processBirth,
+          fixture.identity
+        )]
+      }),
+      requestHash: REQUEST_HASH
+    });
+    assert.equal(result.status, "uncertain");
+    if (result.status === "uncertain") {
+      assert.equal(result.code, "candidate_scan_invalid");
+      assert.match(result.reason, /predates its terminal submission anchor/u);
+    }
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("candidate-set Codex acceptance is uncertain for a missing anchor or multiple exact matches", () => {
+  const secondId = "019ee559-7bb8-7fd1-970c-0f7b6978c453";
+  const first = codexFixture([], SESSION_ID);
+  const second = codexFixture([], secondId);
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  try {
+    const firstIdentity = candidateIdentity(
+      SESSION_ID,
+      processUuid,
+      processBirth,
+      first.identity
+    );
+    const secondIdentity = candidateIdentity(
+      secondId,
+      processUuid,
+      processBirth,
+      second.identity
+    );
+    const anchor = captureCodexCandidateSetRolloutAcceptanceAnchor({
+      inventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: [firstIdentity, secondIdentity]
+      })
+    });
+    const missing = detectCodexCandidateSetRolloutAcceptance({
+      anchor,
+      currentInventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: [firstIdentity]
+      }),
+      requestHash: REQUEST_HASH
+    });
+    assert.equal(missing.status, "uncertain");
+    if (missing.status === "uncertain") {
+      assert.equal(missing.code, "candidate_inventory_changed");
+    }
+
+    appendRecords(first.path, acceptedTurnRecords(REQUEST, 503));
+    appendRecords(second.path, acceptedTurnRecords(REQUEST, 504));
+    const duplicate = detectCodexCandidateSetRolloutAcceptance({
+      anchor,
+      currentInventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: [firstIdentity, secondIdentity]
+      }),
+      requestHash: REQUEST_HASH
+    });
+    assert.equal(duplicate.status, "uncertain");
+    if (duplicate.status === "uncertain") {
+      assert.equal(duplicate.code, "multiple_exact_request_acceptances");
+      assert.equal(duplicate.exact_matches, 2);
+    }
+  } finally {
+    first.cleanup();
+    second.cleanup();
+  }
+});
 
 test("Codex acceptance requires an exact post-anchor task start and same-turn user response", () => {
   const fixture = codexFixture();
@@ -721,14 +926,17 @@ test("bound Codex completion treats an incomplete stable record as retryable pen
   }
 });
 
-function codexFixture(initialRecords: readonly unknown[] = []) {
+function codexFixture(
+  initialRecords: readonly unknown[] = [],
+  nativeThreadId = SESSION_ID
+) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-acceptance-"));
-  const rolloutPath = path.join(directory, `rollout-${SESSION_ID}.jsonl`);
+  const rolloutPath = path.join(directory, `rollout-${nativeThreadId}.jsonl`);
   const metadata = {
     timestamp: "2026-08-07T00:59:59.000Z",
     type: "session_meta",
     payload: {
-      id: SESSION_ID,
+      id: nativeThreadId,
       timestamp: "2026-08-07T00:00:00.000Z",
       cwd: directory,
       originator: "codex-tui",
@@ -752,6 +960,65 @@ function codexFixture(initialRecords: readonly unknown[] = []) {
     path: rolloutPath,
     identity,
     cleanup: () => fs.rmSync(directory, { recursive: true, force: true })
+  };
+}
+
+function candidateIdentity(
+  nativeThreadId: string,
+  processUuid: string,
+  processBirth: string,
+  rollout: CodexRolloutIdentity
+): CodexOpenRootRolloutIdentity {
+  return {
+    sessionId: nativeThreadId,
+    processUuid,
+    processBirth,
+    rollout,
+    evidence: "codex_open_root_rollout"
+  };
+}
+
+function candidateInventory({
+  processUuid,
+  processBirth,
+  roots
+}: {
+  processUuid: string;
+  processBirth: string;
+  roots: CodexOpenRootRolloutIdentity[];
+}): CodexOpenRootRolloutInventory {
+  const authority = {
+    schema: "agent-knock-knock/codex-open-root-rollout-inventory" as const,
+    version: 1 as const,
+    pid: 4242,
+    processUuid,
+    processBirth,
+    roots
+  };
+  const inventoryFingerprint = createHash("sha256")
+    .update(JSON.stringify(authority))
+    .digest("hex");
+  if (roots.length === 0) {
+    return {
+      ...authority,
+      status: "verified_absent",
+      roots: [],
+      inventoryFingerprint
+    };
+  }
+  if (roots.length === 1) {
+    return {
+      ...authority,
+      status: "resolved",
+      roots: [roots[0]],
+      inventoryFingerprint
+    };
+  }
+  return {
+    ...authority,
+    status: "unbound",
+    reason: "multiple_open_root_rollouts",
+    inventoryFingerprint
   };
 }
 

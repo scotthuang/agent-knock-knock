@@ -41,9 +41,9 @@ const NO_FOLLOW_FLAG = typeof fs.constants.O_NOFOLLOW === "number"
   : 0;
 
 export const STORE_FORMAT_VERSION = 1;
-export const STORE_WRITER_PROTOCOL = 4;
+export const STORE_WRITER_PROTOCOL = 5;
 export const STORE_SESSION_AUTHORITY_PROTOCOL = 3;
-const STORE_UPGRADEABLE_WRITER_PROTOCOLS = new Set([1, 2, 3]);
+const STORE_UPGRADEABLE_WRITER_PROTOCOLS = new Set([1, 2, 3, 4]);
 
 export interface StoreManifest {
   schema: typeof STORE_SCHEMA;
@@ -459,6 +459,10 @@ export function saveState(statePath: string, conversation: Conversation): void {
   );
   assertConversationStorageMetadata(statePath, conversation);
   withStoreWriterLease(paths.storeDir, () => {
+    assertConversationNotReservedByDeferredSourceHistory(
+      paths.storeDir,
+      conversation.conversation_id
+    );
     saveStateWithWriterLease(statePath, conversation);
   });
 }
@@ -631,8 +635,141 @@ function assertConversationStateIdentity(
 export function appendEvent(logPath: string, event: EventRecord): void {
   const paths = assertCanonicalConversationDataPath(logPath, "events.ndjson");
   withStoreWriterLease(paths.storeDir, () => {
+    assertConversationNotReservedByDeferredSourceHistory(
+      paths.storeDir,
+      String(event.conversation_id)
+    );
     appendEventWithWriterLease(logPath, event);
   });
+}
+
+/**
+ * Protocol 5 makes a candidate-rollout deferred transfer's historical source
+ * Turns read-only until the transfer reaches a terminal receipt.  Keeping the
+ * fence at the Store write boundary covers foreground commands, monitors,
+ * callback reconciliation, and supervisor repair uniformly; no individual
+ * caller may accidentally mutate a source Turn while its binding is reserved.
+ *
+ * This deliberately performs a narrow, fail-closed read rather than importing
+ * the transfer module (which itself depends on Store writer leases).
+ */
+function assertConversationNotReservedByDeferredSourceHistory(
+  storeDir: string,
+  conversationId: string
+): void {
+  const root = path.join(
+    storeDir,
+    STORE_DEFERRED_FOREGROUND_TRANSFERS_DIRECTORY
+  );
+  if (!fs.existsSync(root)) {
+    return;
+  }
+  assertNotSymlink(root, "deferred foreground transfer root");
+  const rootStat = fs.lstatSync(root);
+  if (!rootStat.isDirectory()) {
+    throw new Error("deferred foreground transfer root must be a directory");
+  }
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    if (entry.isSymbolicLink() || !entry.isDirectory()) {
+      throw new Error(
+        "deferred foreground transfer root may contain only real record directories"
+      );
+    }
+    const recordDir = path.join(root, entry.name);
+    const statePath = path.join(recordDir, "state.json");
+    assertNotSymlink(recordDir, "deferred foreground transfer directory");
+    const fd = openRegularFileNoFollow(
+      statePath,
+      fs.constants.O_RDONLY,
+      "deferred foreground transfer state"
+    );
+    let value: unknown;
+    try {
+      value = JSON.parse(fs.readFileSync(fd, "utf8"));
+    } finally {
+      fs.closeSync(fd);
+    }
+    if (
+      !isStoreRecord(value) ||
+      value.schema !== "agent-knock-knock/deferred-foreground-transfer" ||
+      value.transfer_id !== entry.name ||
+      ![1, 2].includes(Number(value.version)) ||
+      ![
+        "prepared",
+        "source_reserved",
+        "target_prepared",
+        "dispatch_started",
+        "committed",
+        "resolved",
+        "uncertain",
+        "aborted",
+        "abort_resolved"
+      ].includes(String(value.status)) ||
+      (
+        Number(value.version) === 2 &&
+        !["status_card_only", "candidate_rollout_quiescent"].includes(
+          String(value.source_kind)
+        )
+      ) ||
+      (
+        Number(value.version) === 1 &&
+        (
+          value.source_kind !== undefined ||
+          value.source_turn_history !== undefined
+        )
+      ) ||
+      (
+        Number(value.version) === 2 &&
+        value.source_kind === "status_card_only" &&
+        value.source_turn_history !== undefined
+      ) ||
+      (
+        Number(value.version) === 2 &&
+        value.source_kind === "candidate_rollout_quiescent" &&
+        (
+          !Array.isArray(value.source_turn_history) ||
+          value.source_turn_history.length > 128
+        )
+      )
+    ) {
+      throw new Error(
+        `deferred foreground transfer ${entry.name} is malformed`
+      );
+    }
+    if (
+      ["resolved", "abort_resolved"].includes(value.status) ||
+      Number(value.version) < 2 ||
+      value.source_kind !== "candidate_rollout_quiescent"
+    ) {
+      continue;
+    }
+    if (value.source_turn_history.some((turn) =>
+      isStoreRecord(turn) && turn.turn_id === conversationId
+    )) {
+      throw new Error(
+        `cannot mutate Turn ${conversationId} while deferred foreground ` +
+        `transfer ${entry.name} is ${value.status}`
+      );
+    }
+    if (value.source_turn_history.some((turn) =>
+      !isStoreRecord(turn) ||
+      typeof turn.turn_id !== "string" ||
+      turn.turn_id.length === 0 ||
+      typeof turn.binding_id !== "string" ||
+      !Number.isSafeInteger(Number(turn.binding_generation)) ||
+      typeof turn.native_thread_id !== "string" ||
+      typeof turn.turn_fingerprint !== "string" ||
+      !/^[0-9a-f]{64}$/u.test(turn.turn_fingerprint)
+    )) {
+      throw new Error(
+        `deferred foreground transfer ${entry.name} has invalid source Turn authority`
+      );
+    }
+  }
+}
+
+function isStoreRecord(value: unknown): value is Record<string, any> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 function appendEventWithWriterLease(logPath: string, event: EventRecord): void {
@@ -920,7 +1057,7 @@ function materializeManagedSessionStatesWhileLocked(
     atomicSaveManagedSessionState(write.path, write.state);
   }
   // Record-directory creation and every state rename are durable before a
-  // protocol-4 manifest can become visible.
+  // target protocol manifest can become visible.
   fsyncDirectory(sessionsDir);
   fsyncDirectory(storeDir);
 }
@@ -1245,9 +1382,9 @@ function upgradeStoreWriterProtocolWhileLocked(storeDir: string): void {
   const previous = readStoreManifestSnapshot(manifestPath);
   assertUpgradeableStoreManifest(previous.manifest, storeDir);
 
-  // Protocol 3 already has authoritative Session state. Its protocol-4
-  // upgrade only publishes the new writer fence atomically; protocols 1/2
-  // still need the one-time Session materialization before publication.
+  // Protocol 3 already has authoritative Session state. Protocols 3/4 only
+  // publish the newer writer fence atomically; protocols 1/2 still need the
+  // one-time Session materialization before publication.
   const requiresSessionMaterialization = previous.manifest.writer_protocol <
     STORE_SESSION_AUTHORITY_PROTOCOL;
   const stateSnapshots = requiresSessionMaterialization
