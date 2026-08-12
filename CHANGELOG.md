@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.12.7 - 2026-08-12
+
+### Fixed
+
+- Follow a supported manual Codex `/clear` through a fresh terminal-scoped candidate send, binding only the rollout with one unique post-anchor acceptance without an internal `/status` probe.
+- Restore future-send liveness after explicitly closing an uncertain predecessor when its resolved close ledger, append-only uncertain receipt, frozen Turn history, absent old rollout, and unclaimed current inventory remain exact.
+- Recognize the supported Codex resume hint when its UUID wraps across lines in a narrow pane, while keeping the hint as routing evidence rather than native-identity authority.
+- Ignore closed detached Codex companions when one exact current rollout is open, and release completed Claude Turns for a fresh message ID while retaining immutable acceptance receipts.
+
+### Changed
+
+- Publish action contract 14. Store writer protocol remains 5.
+
+### Security
+
+- Revalidate candidate inventory, terminal and process identity, abandonment proof, and source/target lineage before input, commit, and crash recovery; ambiguous, drifted, or uncertain native acceptance remains non-retryable.
+
 ## 0.12.6 - 2026-08-12
 
 ### Added
