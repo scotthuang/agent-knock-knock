@@ -101,7 +101,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       hidden_turn_count: 0,
       session_count: 0
     });
-    assert.equal(listed.action_contracts.version, 12);
+    assert.equal(listed.action_contracts.version, 14);
     assert.match(
       listed.action_contracts.instructions.join("\n"),
       /Treat terminals\[\] as the primary resource/u
@@ -120,7 +120,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     );
     assert.match(
       listed.action_contracts.instructions.join("\n"),
-      /status-card-only zero-rollout source[\s\S]*quiescent rollout-backed source[\s\S]*released predecessor Turn history[\s\S]*uniquely accepts that exact request[\s\S]*narrow panes do not require \/status[\s\S]*strict session_id send, respond, approve, cancel, native lifecycle, and native_inspect remain unavailable[\s\S]*do not retry automatically/u
+      /status-card-only zero-rollout source[\s\S]*quiescent rollout-backed source[\s\S]*supported Codex \/clear foreground hint[\s\S]*released predecessor Turn history[\s\S]*uniquely accepts that exact request[\s\S]*narrow panes do not require \/status[\s\S]*strict session_id send, respond, approve, cancel, native lifecycle, and native_inspect remain unavailable[\s\S]*do not retry automatically[\s\S]*explicitly closed uncertain Turn[\s\S]*exact resolved close ledger[\s\S]*append-only uncertain receipt[\s\S]*close never forges the lost callback[\s\S]*cannot be renewed/u
     );
     assert.match(
       listed.action_contracts.instructions.join("\n"),
@@ -190,7 +190,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     );
     assert.match(
       listed.action_contracts.actions.send.candidate_rollout_deferred_scope,
-      /complete exact candidate inventory[\s\S]*predecessor Turn history stays read-only[\s\S]*unique post-anchor request acceptance[\s\S]*Same-UUID and different-UUID results keep separate Session lineages[\s\S]*never retried blindly/u
+      /complete exact candidate inventory[\s\S]*supported \/clear foreground hint[\s\S]*predecessor Turn history stays read-only[\s\S]*unique post-anchor request acceptance[\s\S]*Same-UUID and different-UUID results keep separate Session lineages[\s\S]*never retried blindly[\s\S]*Explicit close[\s\S]*append-only receipt[\s\S]*absent old rollout[\s\S]*never synthesizes callback delivery/u
     );
     assert.deepEqual(
       listed.action_contracts.field_semantics.handoff_decision,

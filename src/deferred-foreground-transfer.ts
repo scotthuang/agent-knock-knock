@@ -52,6 +52,10 @@ export type DeferredForegroundTransferSourceKind =
   | "status_card_only"
   | "candidate_rollout_quiescent";
 
+export type DeferredForegroundTransferSourceRolloutAuthority =
+  | "present"
+  | "explicitly_abandoned_predecessor";
+
 export interface DeferredForegroundTransferSourceTurnAuthority {
   turn_id: string;
   status: "idle" | "failed" | "closed" | "cancelled";
@@ -94,6 +98,8 @@ export interface DeferredForegroundTransfer {
   source_before_binding: ManagedTerminalBinding;
   source_kind?: DeferredForegroundTransferSourceKind;
   source_turn_history?: DeferredForegroundTransferSourceTurnAuthority[];
+  source_rollout_authority?: DeferredForegroundTransferSourceRolloutAuthority;
+  source_abandonment_fingerprint?: string;
   target_session_id: string;
   target_expected_revision: null;
   previous_dispatch_status: "none" | "resolved";
@@ -230,6 +236,8 @@ export function assertDeferredForegroundTransfer(
     "source_before_binding",
     "source_kind",
     "source_turn_history",
+    "source_rollout_authority",
+    "source_abandonment_fingerprint",
     "target_session_id",
     "target_expected_revision",
     "previous_dispatch_status",
@@ -403,6 +411,38 @@ export function assertDeferredForegroundTransfer(
   } else if (sourceTurnHistory !== undefined) {
     throw new Error(
       "status-card deferred source cannot carry Turn history authority"
+    );
+  }
+  const sourceRolloutAuthority = sourceKind === "candidate_rollout_quiescent"
+    ? value.source_rollout_authority ?? "present"
+    : undefined;
+  if (
+    sourceKind !== "candidate_rollout_quiescent"
+      ? value.source_rollout_authority !== undefined ||
+        value.source_abandonment_fingerprint !== undefined
+      : ![
+          "present",
+          "explicitly_abandoned_predecessor"
+        ].includes(String(sourceRolloutAuthority))
+  ) {
+    throw new Error("deferred transfer source rollout authority is invalid");
+  }
+  if (sourceRolloutAuthority === "explicitly_abandoned_predecessor") {
+    if (
+      !Array.isArray(sourceTurnHistory) ||
+      sourceTurnHistory.length === 0 ||
+      !sourceTurnHistory.some((turn) => turn.status === "closed") ||
+      value.previous_dispatch_status !== "resolved" ||
+      typeof value.source_abandonment_fingerprint !== "string" ||
+      !/^[0-9a-f]{64}$/u.test(value.source_abandonment_fingerprint)
+    ) {
+      throw new Error(
+        "explicitly abandoned predecessor requires exact resolved abandonment authority"
+      );
+    }
+  } else if (value.source_abandonment_fingerprint !== undefined) {
+    throw new Error(
+      "present deferred source rollout cannot carry abandonment authority"
     );
   }
   const statusCardSource = sourceKind === "status_card_only";
@@ -1125,6 +1165,8 @@ function assertTransferAdvance(
     "source_before_binding",
     "source_kind",
     "source_turn_history",
+    "source_rollout_authority",
+    "source_abandonment_fingerprint",
     "target_session_id",
     "target_expected_revision",
     "previous_dispatch_status",

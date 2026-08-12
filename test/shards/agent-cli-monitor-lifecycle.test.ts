@@ -924,6 +924,12 @@ test("renew reloads stalled state after pane discovery and cannot overwrite a co
   const screenPath = path.join(tempDir, "screen.txt");
   const tmuxListGatePath = path.join(tempDir, "tmux-list-gate");
   const terminalTarget = "codex-renew-race:0.1";
+  const nativeIdentityArgs = codexNativeIdentityArgs({
+    pid: 33389,
+    sessionId,
+    processUuid: "codex-renew-race-process",
+    rolloutPath
+  });
   let renewing: ReturnType<typeof spawnAgentCliCaptured> | undefined;
 
   try {
@@ -950,6 +956,7 @@ test("renew reloads stalled state after pane discovery and cannot overwrite a co
       storeDir,
       "--openclaw-bin",
       "/usr/bin/true",
+      ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ], testEnv);
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
@@ -958,6 +965,10 @@ test("renew reloads stalled state after pane discovery and cannot overwrite a co
     const statePath = sentParsed.conversation.state_path;
     const logPath = sentParsed.conversation.event_log_path;
     const waitingState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    assert.equal(
+      waitingState.native_session_takeover?.terminal_bridge_submission?.status,
+      "agent_accepted"
+    );
     fs.writeFileSync(statePath, `${JSON.stringify({
       ...waitingState,
       status: "stalled",
@@ -977,9 +988,20 @@ test("renew reloads stalled state after pane discovery and cannot overwrite a co
       ...testEnv,
       AKK_TEST_TMUX_LIST_GATE_PATH: tmuxListGatePath
     });
-    await waitForCondition(
-      () => fs.existsSync(`${tmuxListGatePath}.entered`),
-      "renew to load its stale snapshot and enter pane discovery"
+    const renewDiscovery = await Promise.race([
+      waitForCondition(
+        () => fs.existsSync(`${tmuxListGatePath}.entered`),
+        "renew to load its stale snapshot and enter pane discovery",
+        15_000
+      ).then(() => ({ kind: "entered" as const })),
+      renewing.result.then((result) => ({ kind: "exited" as const, result }))
+    ]);
+    assert.equal(
+      renewDiscovery.kind,
+      "entered",
+      renewDiscovery.kind === "exited"
+        ? renewDiscovery.result.stderr || renewDiscovery.result.stdout
+        : undefined
     );
 
     const closed = runAgentCli([

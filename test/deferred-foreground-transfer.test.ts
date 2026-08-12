@@ -189,6 +189,25 @@ function candidatePrepared(): DeferredForegroundTransfer {
   };
 }
 
+function abandonedPredecessorPrepared(): DeferredForegroundTransfer {
+  const candidate = candidatePrepared();
+  return {
+    ...candidate,
+    source_turn_history: candidate.source_turn_history?.map((turn) => ({
+      ...turn,
+      status: "closed" as const
+    })),
+    source_rollout_authority: "explicitly_abandoned_predecessor",
+    source_abandonment_fingerprint: createHash("sha256")
+      .update("exact abandoned predecessor receipt authority")
+      .digest("hex"),
+    previous_dispatch_status: "resolved",
+    previous_dispatch_fingerprint: createHash("sha256")
+      .update("exact resolved predecessor dispatch")
+      .digest("hex")
+  };
+}
+
 function sourceReserved(
   value: DeferredForegroundTransfer = prepared()
 ): DeferredForegroundTransfer {
@@ -426,6 +445,7 @@ test("version 2 freezes exact rollout-backed source history while version 1 rema
   assertValid(candidate);
   assert.equal(candidate.source_kind, "candidate_rollout_quiescent");
   assert.equal(candidate.source_turn_history?.length, 1);
+  assert.equal(candidate.source_rollout_authority, undefined);
 
   assert.throws(
     () => assertDeferredForegroundTransfer({
@@ -454,6 +474,109 @@ test("version 2 freezes exact rollout-backed source history while version 1 rema
     }, undefined, { allowMissingRevision: true }),
     /source kind is invalid/u
   );
+});
+
+test("explicit predecessor abandonment is paired, resolved, and immutable", () => {
+  const explicit = abandonedPredecessorPrepared();
+  assertValid(explicit);
+  assertValid({
+    ...candidatePrepared(),
+    source_rollout_authority: "present"
+  });
+
+  for (const candidate of [
+    {
+      ...explicit,
+      source_abandonment_fingerprint: undefined
+    },
+    {
+      ...explicit,
+      source_abandonment_fingerprint: "not-a-fingerprint"
+    },
+    {
+      ...explicit,
+      previous_dispatch_status: "none" as const
+    },
+    {
+      ...explicit,
+      source_turn_history: []
+    },
+    {
+      ...explicit,
+      source_turn_history: explicit.source_turn_history?.map((turn) => ({
+        ...turn,
+        status: "idle" as const
+      }))
+    }
+  ]) {
+    assert.throws(
+      () => assertDeferredForegroundTransfer(candidate, undefined, {
+        allowMissingRevision: true
+      }),
+      /exact resolved abandonment authority/u
+    );
+  }
+  assert.throws(
+    () => assertDeferredForegroundTransfer({
+      ...candidatePrepared(),
+      source_rollout_authority: "present",
+      source_abandonment_fingerprint: createHash("sha256")
+        .update("not valid for present authority")
+        .digest("hex")
+    }, undefined, { allowMissingRevision: true }),
+    /present deferred source rollout cannot carry abandonment authority/u
+  );
+  assert.throws(
+    () => assertDeferredForegroundTransfer({
+      ...candidatePrepared(),
+      source_rollout_authority: "unknown"
+    }, undefined, { allowMissingRevision: true }),
+    /source rollout authority is invalid/u
+  );
+  assert.throws(
+    () => assertDeferredForegroundTransfer({
+      ...prepared(),
+      version: 2,
+      source_kind: "status_card_only",
+      source_rollout_authority: "explicitly_abandoned_predecessor",
+      source_abandonment_fingerprint: createHash("sha256")
+        .update("status cards cannot retire rollout predecessors")
+        .digest("hex")
+    }, undefined, { allowMissingRevision: true }),
+    /source rollout authority is invalid/u
+  );
+
+  const sandbox = fs.mkdtempSync(path.join(
+    os.tmpdir(),
+    "akk-deferred-abandoned-predecessor-"
+  ));
+  const storeDir = path.join(sandbox, "store");
+  try {
+    const created = saveDeferredForegroundTransfer(storeDir, explicit, {
+      expectedRevision: null
+    });
+    assert.throws(
+      () => saveDeferredForegroundTransfer(storeDir, {
+        ...sourceReserved(created),
+        source_abandonment_fingerprint: createHash("sha256")
+          .update("changed abandonment authority")
+          .digest("hex"),
+        revision: created.revision
+      }, { expectedRevision: 1 }),
+      /cannot change immutable source_abandonment_fingerprint/u
+    );
+    assert.throws(
+      () => saveDeferredForegroundTransfer(storeDir, {
+        ...sourceReserved(created),
+        source_rollout_authority: "present",
+        source_abandonment_fingerprint: undefined,
+        revision: created.revision
+      }, { expectedRevision: 1 }),
+      /cannot change immutable source_rollout_authority/u
+    );
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
 });
 
 test("candidate source history authority is immutable across CAS advances", () => {

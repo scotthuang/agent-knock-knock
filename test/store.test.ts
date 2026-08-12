@@ -476,6 +476,10 @@ test("protocol 5 fences candidate source history until transfer cleanup is termi
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "akk-store-source-fence-"));
   const storeDir = path.join(sandbox, "store");
   const source = storedConversation(storeDir, "turn-source-history");
+  const abandoned = storedConversation(
+    storeDir,
+    "turn-explicitly-abandoned-history"
+  );
   const unrelated = storedConversation(storeDir, "turn-unrelated-history");
   const transferId = "transfer-source-history";
   try {
@@ -483,6 +487,22 @@ test("protocol 5 fences candidate source history until transfer cleanup is termi
     appendEvent(source.paths.logPath, {
       event: "conversation_created",
       conversation_id: source.conversation.conversation_id
+    });
+    const abandonedAt = "2026-08-12T01:59:59.000Z";
+    const abandonedConversation = {
+      ...abandoned.conversation,
+      status: "closed" as const,
+      closed_at: abandonedAt,
+      close_reason: "explicitly abandoned uncertain terminal submission",
+      updated_at: abandonedAt
+    };
+    saveState(abandoned.paths.statePath, abandonedConversation);
+    appendEvent(abandoned.paths.logPath, {
+      event: "conversation_closed",
+      conversation_id: abandonedConversation.conversation_id,
+      status: "closed",
+      ts: abandonedAt,
+      reason: abandonedConversation.close_reason
     });
     const sourceAuthority = {
       turn_id: source.conversation.turn_id,
@@ -493,18 +513,32 @@ test("protocol 5 fences candidate source history until transfer cleanup is termi
       native_thread_id: "00000000-0000-4000-8000-000000000501",
       turn_fingerprint: "a".repeat(64)
     };
+    const abandonedAuthority = {
+      turn_id: abandonedConversation.turn_id,
+      status: "closed",
+      updated_at: abandonedConversation.updated_at,
+      binding_id: "binding-source-history",
+      binding_generation: 3,
+      native_thread_id: "00000000-0000-4000-8000-000000000501",
+      turn_fingerprint: "b".repeat(64)
+    };
     const transferStatePath = writeDeferredSourceHistoryFence(
       storeDir,
       transferId,
       {
         status: "prepared",
-        source_turn_history: [sourceAuthority]
+        source_turn_history: [sourceAuthority, abandonedAuthority],
+        source_rollout_authority: "explicitly_abandoned_predecessor",
+        source_abandonment_fingerprint: "c".repeat(64)
       }
     );
 
     for (const status of [
       "prepared",
       "source_reserved",
+      "target_prepared",
+      "dispatch_started",
+      "uncertain",
       "aborted",
       "committed"
     ]) {
@@ -530,8 +564,32 @@ test("protocol 5 fences candidate source history until transfer cleanup is termi
         }),
         new RegExp(`deferred foreground transfer ${transferId} is ${status}`, "u")
       );
+      const beforeAbandonedState = fileSnapshot(abandoned.paths.statePath);
+      const beforeAbandonedEvents = fileSnapshot(abandoned.paths.logPath);
+      assert.throws(
+        () => saveState(abandoned.paths.statePath, {
+          ...abandonedConversation,
+          updated_at: "2026-08-12T02:00:00.000Z"
+        }),
+        new RegExp(`deferred foreground transfer ${transferId} is ${status}`, "u")
+      );
+      assert.throws(
+        () => appendEvent(abandoned.paths.logPath, {
+          event: "should_not_rewrite_abandonment",
+          conversation_id: abandonedConversation.conversation_id
+        }),
+        new RegExp(`deferred foreground transfer ${transferId} is ${status}`, "u")
+      );
       assert.deepEqual(fileSnapshot(source.paths.statePath), beforeState);
       assert.deepEqual(fileSnapshot(source.paths.logPath), beforeEvents);
+      assert.deepEqual(
+        fileSnapshot(abandoned.paths.statePath),
+        beforeAbandonedState
+      );
+      assert.deepEqual(
+        fileSnapshot(abandoned.paths.logPath),
+        beforeAbandonedEvents
+      );
     }
 
     // The fence is scoped to the immutable source history, not the target or
@@ -559,7 +617,97 @@ test("protocol 5 fences candidate source history until transfer cleanup is termi
         event: `write_after_${status}`,
         conversation_id: source.conversation.conversation_id
       });
+      saveState(abandoned.paths.statePath, {
+        ...abandonedConversation,
+        updated_at: status === "resolved"
+          ? "2026-08-12T02:01:30.000Z"
+          : "2026-08-12T02:02:30.000Z"
+      });
+      appendEvent(abandoned.paths.logPath, {
+        event: `abandonment_write_after_${status}`,
+        conversation_id: abandonedConversation.conversation_id
+      });
     }
+
+    // A transfer written by the original protocol-5 implementation has no
+    // predecessor-specific authority fields. Its v2 source history must
+    // remain fail-closed until that historical record reaches a terminal
+    // cleanup status.
+    const oldProtocolFiveId = "transfer-old-protocol-five-history";
+    const oldProtocolFivePath = writeDeferredSourceHistoryFence(
+      storeDir,
+      oldProtocolFiveId,
+      {
+        status: "dispatch_started",
+        source_turn_history: [sourceAuthority]
+      }
+    );
+    const beforeOldProtocolFiveState = fileSnapshot(source.paths.statePath);
+    assert.throws(
+      () => saveState(source.paths.statePath, {
+        ...source.conversation,
+        updated_at: "2026-08-12T02:02:45.000Z"
+      }),
+      new RegExp(
+        `deferred foreground transfer ${oldProtocolFiveId} is dispatch_started`,
+        "u"
+      )
+    );
+    assert.deepEqual(
+      fileSnapshot(source.paths.statePath),
+      beforeOldProtocolFiveState
+    );
+    const oldProtocolFive = JSON.parse(
+      fs.readFileSync(oldProtocolFivePath, "utf8")
+    );
+    fs.writeFileSync(
+      oldProtocolFivePath,
+      `${JSON.stringify({ ...oldProtocolFive, status: "resolved" }, null, 2)}\n`,
+      { mode: 0o600 }
+    );
+    saveState(source.paths.statePath, {
+      ...source.conversation,
+      updated_at: "2026-08-12T02:02:45.000Z"
+    });
+
+    // The central protocol-5 fence does not interpret the new semantic pair;
+    // the strict deferred-transfer loader does that. Even a partially written
+    // pair must therefore retain the conservative source-Turn freeze instead
+    // of letting a monitor mutate the proof before the malformed record is
+    // surfaced and repaired.
+    const partialAuthorityId = "transfer-partial-abandonment-authority";
+    const partialAuthorityPath = writeDeferredSourceHistoryFence(
+      storeDir,
+      partialAuthorityId,
+      {
+        status: "dispatch_started",
+        source_turn_history: [sourceAuthority],
+        source_rollout_authority: "explicitly_abandoned_predecessor"
+      }
+    );
+    const beforePartialAuthorityState = fileSnapshot(source.paths.statePath);
+    assert.throws(
+      () => saveState(source.paths.statePath, {
+        ...source.conversation,
+        updated_at: "2026-08-12T02:02:50.000Z"
+      }),
+      new RegExp(
+        `deferred foreground transfer ${partialAuthorityId} is dispatch_started`,
+        "u"
+      )
+    );
+    assert.deepEqual(
+      fileSnapshot(source.paths.statePath),
+      beforePartialAuthorityState
+    );
+    const partialAuthority = JSON.parse(
+      fs.readFileSync(partialAuthorityPath, "utf8")
+    );
+    fs.writeFileSync(
+      partialAuthorityPath,
+      `${JSON.stringify({ ...partialAuthority, status: "resolved" }, null, 2)}\n`,
+      { mode: 0o600 }
+    );
 
     // A legacy v1 transfer never reserved historical source Turns.
     const legacyId = "transfer-legacy-history";

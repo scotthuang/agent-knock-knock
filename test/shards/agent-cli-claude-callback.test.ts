@@ -1667,7 +1667,7 @@ test("hookless Claude send is refused when no transcript boundary can be bound",
   }
 });
 
-test("hookless Claude transcript completion closes a managed tmux task exactly once", async () => {
+test("hookless Claude completion releases the same Session for a repeated request", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-transcript-cli-"));
   const storeDir = path.join(tempDir, "conversations");
   const claudeHome = path.join(tempDir, ".claude");
@@ -1827,6 +1827,63 @@ test("hookless Claude transcript completion closes a managed tmux task exactly o
     assert.equal(
       eventCount(task.logPath, "terminal_bridge_completion_detected"),
       1
+    );
+
+    const firstTurn = JSON.parse(fs.readFileSync(task.statePath, "utf8"));
+    assert.equal(firstTurn.status, "idle");
+    assert.equal(
+      firstTurn.native_session_takeover.terminal_bridge_submission.status,
+      "agent_accepted"
+    );
+    fs.writeFileSync(tmuxCallsPath, "");
+    const repeated = runAgentCli([
+      "send",
+      "--session",
+      String(task.conversation.session_id),
+      "--message",
+      request,
+      "--message-id",
+      `msg-openclaw-${"b".repeat(64)}`,
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      "agent:channel:original",
+      "--openclaw-session",
+      "agent:channel:original",
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--claude-home",
+      claudeHome,
+      ...staticArgs,
+      "--disable-terminal-bridge-monitor"
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(repeated.status, 0, repeated.stderr || repeated.stdout);
+    const repeatedOutput = JSON.parse(repeated.stdout);
+    assert.equal(repeatedOutput.delivered, true);
+    assert.equal(repeatedOutput.session_id, task.conversation.session_id);
+    assert.notEqual(repeatedOutput.turn_id, task.conversation.turn_id);
+    assert.equal(
+      repeatedOutput.conversation.native_session_takeover
+        .terminal_bridge_submission.status,
+      "agent_accepted"
+    );
+    assert.equal(
+      repeatedOutput.conversation.native_session_takeover
+        .terminal_bridge_submission.message_body_hash,
+      firstTurn.native_session_takeover.terminal_bridge_submission
+        .message_body_hash,
+      "the fresh Claude Turn must carry the same request hash"
+    );
+    assert.equal(
+      JSON.parse(fs.readFileSync(task.statePath, "utf8"))
+        .native_session_takeover.terminal_bridge_submission.status,
+      "agent_accepted",
+      "the released Turn keeps its append-only native acceptance proof"
     );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });

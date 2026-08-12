@@ -617,6 +617,41 @@ test("an orphaned prepared submission becomes uncertain without terminal attribu
     assert.equal(uncertain.status, "uncertain");
     assert.equal(typeof uncertain.uncertain_at, "string");
     assert.equal(uncertainState.updated_at, uncertain.uncertain_at);
+    const entersBeforeConflictingSend = readJsonLines(tmuxCallsPath)
+      .filter((call) =>
+        call.args[0] === "send-keys" && call.args.at(-1) === "C-m"
+      ).length;
+    const conflictingSend = runAgentCli([
+      "send",
+      "--conversation",
+      `terminal:tmux:${terminalTarget}:33389`,
+      "--message",
+      "Original AKK task",
+      "--message-id",
+      `msg-openclaw-${"f".repeat(64)}`,
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--openclaw-bin",
+      openclawBin,
+      ...nativeIdentityArgs,
+      "--disable-terminal-bridge-monitor"
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.notEqual(conflictingSend.status, 0);
+    assert.match(
+      conflictingSend.stderr,
+      /uncertain|unresolved Turn|still owned by active AKK conversation/iu
+    );
+    assert.equal(
+      readJsonLines(tmuxCallsPath)
+        .filter((call) =>
+          call.args[0] === "send-keys" && call.args.at(-1) === "C-m"
+        ).length,
+      entersBeforeConflictingSend,
+      "an active uncertain submission must not dispatch another Enter"
+    );
     assert.equal(fs.existsSync(openclawCallsPath), false);
     const events = fs.readFileSync(logPath, "utf8");
     assert.match(events, /dispatcher_exited_before_submitted_receipt/u);
@@ -938,16 +973,28 @@ test("a released Turn replays one stable dispatch while a new id starts a new Tu
       .length;
     assert.equal(entersBeforeRetry, 1);
 
-    const closedAt = new Date().toISOString();
+    const releasedAt = new Date().toISOString();
     fs.writeFileSync(
       statePath,
       `${JSON.stringify({
         ...submittedState,
-        status: "closed",
-        closed_at: closedAt,
-        close_reason: "simulated callback completion",
-        updated_at: closedAt
+        status: "idle",
+        idle_since: releasedAt,
+        updated_at: releasedAt
       }, null, 2)}\n`
+    );
+    const resolvedLedger = JSON.parse(
+      fs.readFileSync(dispatchLedgerPath, "utf8")
+    );
+    fs.writeFileSync(
+      dispatchLedgerPath,
+      `${JSON.stringify({
+        ...resolvedLedger,
+        status: "resolved",
+        resolved_at: releasedAt,
+        reason: "simulated durable completion"
+      }, null, 2)}\n`,
+      { mode: 0o600 }
     );
     const closedReplay = runAgentCli(args, testEnv);
     assert.equal(
@@ -969,7 +1016,7 @@ test("a released Turn replays one stable dispatch while a new id starts a new Tu
         .filter((call) => call.args[0] === "send-keys" && call.args.at(-1) === "C-m")
         .length,
       1,
-      "a released accepted receipt must remain idempotent"
+      "an idle Turn's accepted receipt must remain idempotent"
     );
     const conflictingArgs = [...args];
     conflictingArgs[conflictingArgs.indexOf("--message") + 1] =
@@ -1012,6 +1059,13 @@ test("a released Turn replays one stable dispatch while a new id starts a new Tu
     assert.notEqual(retriedParsed.message.id, parsed.message.id);
     assert.equal(listManagedSessions(storeDir).length, 1);
     assert.equal(listConversations(storeDir).length, 2);
+    const releasedState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    assert.equal(releasedState.status, "idle");
+    assert.equal(
+      releasedState.native_session_takeover.terminal_bridge_submission.status,
+      "agent_accepted",
+      "starting a later Turn must not rewrite the released Turn's acceptance proof"
+    );
     const entersAfterRetry = readJsonLines(tmuxCallsPath)
       .filter((call) => call.args[0] === "send-keys" && call.args.at(-1) === "C-m")
       .length;
