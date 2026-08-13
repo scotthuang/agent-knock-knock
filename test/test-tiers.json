@@ -16,6 +16,7 @@
     "test/live-lifecycle-smoke-evidence.test.ts",
     "test/live-lifecycle-smoke.test.ts",
     "test/managed-session.test.ts",
+    "test/mutation-transaction.test.ts",
     "test/native-thread-lifecycle-policy.test.ts",
     "test/native-thread-resume-snapshot.test.ts",
     "test/openclaw-compatibility-metadata.test.ts",

@@ -238,6 +238,7 @@ import {
   terminalObservationFromResolvedIdentity,
   type TerminalNativeIdentity as NativeAgentSessionIdentity
 } from "./terminal-binding-authority.js";
+import { withMutationTransaction } from "./mutation-transaction.js";
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 10080;
 const DEFAULT_AGENT_TIMEOUT_MINUTES = 60;
@@ -16174,13 +16175,15 @@ async function runReconcileBinding(options: Record<string, any>) {
     stringValue(options.expectedTerminalToken),
     "--expected-terminal-token is required"
   );
-  const releaseTerminalLock = acquireTerminalBridgeSendLock(
-    storeDir,
-    initiallyResolved.terminalControl,
-    { timeoutMs: 30000 }
-  );
-  try {
-    return await withStoreWriterLeaseAsync(storeDir, async () => {
+  return withMutationTransaction({
+    acquireTerminal: () => acquireTerminalBridgeSendLock(
+      storeDir,
+      initiallyResolved.terminalControl,
+      { timeoutMs: 30000 }
+    ),
+    withStoreWriter: (operation) =>
+      withStoreWriterLeaseAsync(storeDir, operation)
+  }, async () => {
       const terminal = await resolveLifecycleTerminal(options);
       if (
         terminal.pid !== initiallyResolved.pid ||
@@ -16369,10 +16372,7 @@ async function runReconcileBinding(options: Record<string, any>) {
         turn_created: false,
         refresh_required: true
       });
-    });
-  } finally {
-    releaseTerminalLock();
-  }
+  });
 }
 
 function assertResumeSnapshotMatchesTerminal(
@@ -26086,13 +26086,15 @@ async function runCancel(options) {
 
 async function runTerminalConversationCancel({ options, conversationId, agent, terminalControl, pid }) {
   const storeDir = storeDirFromOptions(options);
-  const releaseTerminalLock = acquireTerminalBridgeSendLock(
-    storeDir,
-    terminalControl,
-    { timeoutMs: 30000 }
-  );
-  try {
-    await withStoreWriterLeaseAsync(storeDir, async () => {
+  await withMutationTransaction({
+    acquireTerminal: () => acquireTerminalBridgeSendLock(
+      storeDir,
+      terminalControl,
+      { timeoutMs: 30000 }
+    ),
+    withStoreWriter: (operation) =>
+      withStoreWriterLeaseAsync(storeDir, operation)
+  }, async () => {
       assertTerminalHasNoNonterminalDeferredForegroundTransfer({
         storeDir,
         pid,
@@ -26130,10 +26132,7 @@ async function runTerminalConversationCancel({ options, conversationId, agent, t
         denied_approval: cancellation.deniedApproval,
         request_id: cancellation.requestId
       });
-    });
-  } finally {
-    releaseTerminalLock();
-  }
+  });
 }
 
 async function runTerminalControlCancel({ options, statePath, logPath, agent, terminalControl }) {
@@ -26279,15 +26278,16 @@ async function runObservedHandoffClose({
     initialSource.binding.terminal_control,
     { pid: initialSource.binding.native_process.pid }
   );
-  const releaseTerminalLock = acquireTerminalBridgeSendLock(
-    storeDir,
-    terminal.terminalControl,
-    { timeoutMs: 30000 }
-  );
-  try {
-    await withStoreWriterLeaseAsync(storeDir, async () => {
-      const releaseStateLock = acquireFileLock(`${statePath}.lock`);
-      try {
+  await withMutationTransaction({
+    acquireTerminal: () => acquireTerminalBridgeSendLock(
+      storeDir,
+      terminal.terminalControl,
+      { timeoutMs: 30000 }
+    ),
+    withStoreWriter: (operation) =>
+      withStoreWriterLeaseAsync(storeDir, operation),
+    acquireState: () => acquireFileLock(`${statePath}.lock`)
+  }, async () => {
         const conversation = loadState(statePath);
         const turnId = turnIdForConversation(conversation);
         if (
@@ -26458,13 +26458,7 @@ async function runObservedHandoffClose({
           handoff_disposition: "superseded_by_human_context_switch",
           next_action: "refresh list and use its follow-current send"
         });
-      } finally {
-        releaseStateLock();
-      }
-    });
-  } finally {
-    releaseTerminalLock();
-  }
+  });
 }
 
 async function runClose(options) {
@@ -26881,13 +26875,15 @@ async function runTerminalDispatchClose({
 }): Promise<void> {
   const terminalControl = terminalConversation.terminalControl;
   const storeDir = storeDirFromOptions(options);
-  const releaseTerminalLock = acquireTerminalBridgeSendLock(
-    storeDir,
-    terminalControl,
-    { timeoutMs: 30000 }
-  );
-  try {
-    return await withStoreWriterLeaseAsync(storeDir, async () => {
+  return withMutationTransaction({
+    acquireTerminal: () => acquireTerminalBridgeSendLock(
+      storeDir,
+      terminalControl,
+      { timeoutMs: 30000 }
+    ),
+    withStoreWriter: (operation) =>
+      withStoreWriterLeaseAsync(storeDir, operation)
+  }, async () => {
     let ledger = resolveTerminalDispatchLedgerPaneIncarnation(
       terminalControl,
       loadTerminalBridgeDispatchLedger(terminalControl)
@@ -27081,10 +27077,7 @@ async function runTerminalDispatchClose({
       coding_agent_stopped: false,
       tmux_pane_closed: false
     });
-    });
-  } finally {
-    releaseTerminalLock();
-  }
+  });
 }
 
 async function runMonitor(options) {

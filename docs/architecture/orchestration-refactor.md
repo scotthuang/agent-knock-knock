@@ -331,6 +331,23 @@ The strongest durable proof is never overwritten by weaker observation. Event
 write failure after a stronger state/ledger commit is reconciled as lagging
 audit, not by downgrading the committed fact.
 
+### Initial transaction-shell write map
+
+PR3 first applies the lock shell only to operations that already use the target
+lock order. Their business callbacks remain in `cli-core.ts`; the shell does not
+own these records or effects.
+
+| Operation | Held capabilities | Durable writes and existing order | Terminal input | Crash/retry direction |
+| --- | --- | --- | --- | --- |
+| `runReconcileBinding` | terminal -> writer | one managed Session CAS detach at the listed revision | definitely zero | before CAS, refresh and reauthorize; after CAS, detached is final and a stale token cannot retry |
+| `runTerminalConversationCancel` | terminal -> writer | none; runtime audit and JSON output remain after the adapter call | possible ordered cancel keys | before input, a fresh cancel may retry; after an unacknowledged transport attempt, adapter semantics remain authoritative |
+| `runObservedHandoffClose` | terminal -> writer -> state | Turn state `closed` -> exact dispatch-ledger resolution -> close event | definitely zero | advance only toward ledger/event reconciliation; stale handoff authority cannot start a second close |
+| `runTerminalDispatchClose` | terminal -> writer | lifecycle reconciliation keeps its existing writes; orphan recovery writes one exact dispatch-ledger generation as `resolved` | definitely zero | advance only toward resolved; refresh is required after the recorded generation changes |
+
+Each callback continues to perform the same observations, compare-before-write
+checks, output, and error text under the same lock scopes. The transaction
+module supplies no effect DSL and cannot construct Store or protocol state.
+
 ## Immutable public and safety contracts
 
 The refactor must preserve all of the following unless a separate product issue

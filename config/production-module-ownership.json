@@ -2,7 +2,7 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 37880,
+    "cli_core_max_physical_loc": 37873,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -41,6 +41,16 @@
     },
     "lifecycle-smoke": {
       "selection": "full"
+    },
+    "mutation-transaction": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/codex-no-rollout-binding-cli.test.ts",
+        "test/human-handoff-adoption-cli.test.ts",
+        "test/shards/agent-cli-control-locks.test.ts",
+        "test/shards/agent-cli-dispatch-recovery.test.ts",
+        "test/shards/agent-cli-terminal-send-gates.test.ts"
+      ]
     },
     "openclaw-doctor": {
       "selection": "targeted",
@@ -190,6 +200,10 @@
     {
       "path": "src/managed-session.ts",
       "owner": "state-store"
+    },
+    {
+      "path": "src/mutation-transaction.ts",
+      "owner": "mutation-transaction"
     },
     {
       "path": "src/native-thread-lifecycle-policy.ts",
