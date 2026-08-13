@@ -29,7 +29,7 @@ function loadTiers(): { fast: string[]; integration: string[] } {
   );
 }
 
-test("production ownership covers every source module and preserves architecture ceilings", async () => {
+test("production ownership covers every source module and preserves architecture ratchets", async () => {
   const ownershipModule = await loadOwnershipModule();
   const ownership = ownershipModule.loadAndValidateProductionModuleOwnership({
     repoRoot,
@@ -49,8 +49,12 @@ test("production ownership covers every source module and preserves architecture
   assert.equal(architecture.productionModules, discovered.length);
   assert.ok(architecture.importEdges > 0);
   assert.equal(architecture.importCycles, 0);
-  assert.ok(architecture.cliCorePhysicalLoc <= 38_005);
+  assert.equal(architecture.cliCorePhysicalLoc, 38_005);
   assert.deepEqual(architecture.cliCoreImporters, ["src/cli.ts"]);
+  assert.equal(
+    ownershipModule.DYNAMIC_IMPORT_POLICY,
+    "literal-only-fail-closed"
+  );
 });
 
 test("production ownership rejects missing, duplicate, unknown, and stale entries", async () => {
@@ -86,9 +90,28 @@ test("production ownership rejects missing, duplicate, unknown, and stale entrie
     integration_tests: ["test/cli-ux.test.ts"]
   };
   assert.throws(() => validate(weakenedCore), /mandatory shared core module/u);
+
+  const missingCore = loadManifest();
+  missingCore.modules = missingCore.modules.filter(
+    (entry: { path: string }) => entry.path !== "src/cli-core.ts"
+  );
+  assert.throws(
+    () => ownershipModule.validateProductionModuleOwnershipManifest({
+      manifest: missingCore,
+      productionPaths: productionPaths.filter(
+        (modulePath: string) => modulePath !== "src/cli-core.ts"
+      ),
+      integrationTests
+    }),
+    /required production module is missing from disk: src\/cli-core\.ts/u
+  );
+
+  const cycleEscapeHatch = loadManifest();
+  cycleEscapeHatch.architecture.allow_import_cycles = [];
+  assert.throws(() => validate(cycleEscapeHatch), /unexpected keys: allow_import_cycles/u);
 });
 
-test("architecture checks reject cli-core growth and unapproved reverse imports", async () => {
+test("architecture checks reject cli-core LOC drift and unapproved reverse imports", async () => {
   const ownershipModule = await loadOwnershipModule();
   const ownership = ownershipModule.loadAndValidateProductionModuleOwnership({
     repoRoot,
@@ -108,7 +131,27 @@ test("architecture checks reject cli-core growth and unapproved reverse imports"
           : original;
       }
     }),
-    /exceeding manifest ceiling 38005/u
+    /manifest ratchet 38005 \(actual 38006\)/u
+  );
+
+  assert.throws(
+    () => ownershipModule.validateProductionArchitecture({
+      ownership,
+      repoRoot,
+      readSource(modulePath: string) {
+        const original = source(modulePath);
+        if (modulePath !== "src/cli-core.ts") {
+          return original;
+        }
+        const lines = original.split(/\r?\n/u);
+        if (lines.at(-1) === "") {
+          lines.pop();
+        }
+        lines.pop();
+        return `${lines.join("\n")}\n`;
+      }
+    }),
+    /manifest ratchet 38005 \(actual 38004\)/u
   );
 
   assert.throws(
@@ -138,7 +181,7 @@ test("architecture checks reject cli-core growth and unapproved reverse imports"
   );
 });
 
-test("production import cycles fail unless the exact cycle is explicitly reviewed", async () => {
+test("every production import cycle fails with no manifest escape hatch", async () => {
   const ownershipModule = await loadOwnershipModule();
   const manifest = loadManifest();
   const productionPaths = ownershipModule.discoverProductionModulePaths(repoRoot);
@@ -165,21 +208,88 @@ test("production import cycles fail unless the exact cycle is explicitly reviewe
     }),
     /production import graph contains cycles/u
   );
+});
 
-  manifest.architecture.allow_import_cycles = [[
-    "src/runtime-log.ts",
-    "src/transcript.ts"
-  ]];
-  const reviewedOwnership =
-    ownershipModule.validateProductionModuleOwnershipManifest({
-      manifest,
-      productionPaths,
-      integrationTests
-    });
-  const reviewed = ownershipModule.validateProductionArchitecture({
-    ownership: reviewedOwnership,
+test("compiler AST finds semicolonless exports, regex-adjacent exports, and import-equals", async () => {
+  const ownershipModule = await loadOwnershipModule();
+  const ownership = ownershipModule.loadAndValidateProductionModuleOwnership({
     repoRoot,
-    readSource
+    tiers: loadTiers()
   });
-  assert.equal(reviewed.importCycles, 1);
+  const originalSource = (modulePath: string) =>
+    fs.readFileSync(path.join(repoRoot, modulePath), "utf8");
+  const cycleWithRuntimeLog = (runtimeLogSource: string) =>
+    ownershipModule.validateProductionArchitecture({
+      ownership,
+      repoRoot,
+      readSource(modulePath: string) {
+        if (modulePath === "src/runtime-log.ts") {
+          return runtimeLogSource;
+        }
+        if (modulePath === "src/transcript.ts") {
+          return 'import "./runtime-log.js"\nexport const value = 1\n';
+        }
+        return originalSource(modulePath);
+      }
+    });
+
+  assert.throws(
+    () => cycleWithRuntimeLog(
+      'import assert from "node:assert"\n' +
+      'export { value } from "./transcript.js"\n'
+    ),
+    /production import graph contains cycles/u
+  );
+  assert.throws(
+    () => cycleWithRuntimeLog(
+      'const matcher = /\\{/u\n' +
+      'export { value } from "./transcript.js"\n'
+    ),
+    /production import graph contains cycles/u
+  );
+  assert.throws(
+    () => cycleWithRuntimeLog(
+      'import transcript = require("./transcript.js");\n' +
+      'export const value = transcript;\n'
+    ),
+    /production import graph contains cycles/u
+  );
+});
+
+test("dynamic imports include literal edges and reject computed edges", async () => {
+  const ownershipModule = await loadOwnershipModule();
+  const ownership = ownershipModule.loadAndValidateProductionModuleOwnership({
+    repoRoot,
+    tiers: loadTiers()
+  });
+  const originalSource = (modulePath: string) =>
+    fs.readFileSync(path.join(repoRoot, modulePath), "utf8");
+  const validateRuntimeLog = (runtimeLogSource: string) =>
+    ownershipModule.validateProductionArchitecture({
+      ownership,
+      repoRoot,
+      readSource(modulePath: string) {
+        if (modulePath === "src/runtime-log.ts") {
+          return runtimeLogSource;
+        }
+        if (modulePath === "src/transcript.ts") {
+          return 'import "./runtime-log.js";\nexport const value = 1;\n';
+        }
+        return originalSource(modulePath);
+      }
+    });
+
+  assert.throws(
+    () => validateRuntimeLog(
+      'export async function load() { return import("./transcript.js"); }\n'
+    ),
+    /production import graph contains cycles/u
+  );
+  assert.throws(
+    () => validateRuntimeLog(
+      'const target = "./transcript.js";\n' +
+      'export async function load() { return import(target); }\n'
+    ),
+    /dynamic import must use one literal specifier.*literal-only-fail-closed/u
+  );
 });

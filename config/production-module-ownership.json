@@ -5,8 +5,7 @@
     "cli_core_max_physical_loc": 38005,
     "cli_core_importers": [
       "src/cli.ts"
-    ],
-    "allow_import_cycles": []
+    ]
   },
   "domains": {
     "agent-session-core": {

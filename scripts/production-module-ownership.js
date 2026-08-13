@@ -1,10 +1,21 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { API as TypeScriptApi } from "typescript/unstable/sync";
+import {
+  SyntaxKind,
+  isCallExpression,
+  isExportDeclaration,
+  isExternalModuleReference,
+  isImportDeclaration,
+  isImportEqualsDeclaration,
+  isStringLiteralLikeNode
+} from "typescript/unstable/ast";
 
 export const PRODUCTION_OWNERSHIP_SCHEMA =
   "agent-knock-knock/production-module-ownership";
 export const PRODUCTION_OWNERSHIP_VERSION = 1;
+export const DYNAMIC_IMPORT_POLICY = "literal-only-fail-closed";
 export const MANDATORY_FULL_PRODUCTION_PATHS = Object.freeze([
   "src/cli-core.ts",
   "src/protocol.ts",
@@ -108,8 +119,7 @@ export function validateProductionModuleOwnershipManifest({
       manifest.architecture,
       [
         "cli_core_max_physical_loc",
-        "cli_core_importers",
-        "allow_import_cycles"
+        "cli_core_importers"
       ],
       "manifest architecture",
       errors
@@ -143,43 +153,12 @@ export function validateProductionModuleOwnershipManifest({
       }
       recordSorted(cliCoreImporters, "architecture cli_core_importers", errors);
     }
-    const allowedCycles = manifest.architecture.allow_import_cycles;
-    if (!Array.isArray(allowedCycles)) {
-      errors.push("architecture allow_import_cycles must be an array");
-    } else {
-      const seen = new Set();
-      for (const cycle of allowedCycles) {
-        if (
-          !Array.isArray(cycle) ||
-          cycle.length < 2 ||
-          cycle.some((modulePath) =>
-            typeof modulePath !== "string" ||
-            normalizedRepositoryPath(modulePath) !== modulePath ||
-            !/^src\/.+\.ts$/u.test(modulePath)
-          )
-        ) {
-          errors.push(`architecture has invalid allowed import cycle ${JSON.stringify(cycle)}`);
-          continue;
-        }
-        const cycleKey = cycle.join(" -> ");
-        if (seen.has(cycleKey)) {
-          errors.push(`architecture repeats allowed import cycle ${cycleKey}`);
-        }
-        seen.add(cycleKey);
-      }
-    }
     const normalizedCliCoreImporters = Array.isArray(cliCoreImporters)
       ? cliCoreImporters
       : [];
-    const normalizedAllowedCycles = Array.isArray(allowedCycles)
-      ? allowedCycles.filter(Array.isArray)
-      : [];
     architecture = Object.freeze({
       cliCoreMaxPhysicalLoc,
-      cliCoreImporters: Object.freeze([...normalizedCliCoreImporters]),
-      allowedImportCycles: Object.freeze(
-        normalizedAllowedCycles.map((cycle) => Object.freeze([...cycle]))
-      )
+      cliCoreImporters: Object.freeze([...normalizedCliCoreImporters])
     });
   }
 
@@ -322,15 +301,6 @@ export function validateProductionModuleOwnershipManifest({
         errors.push(`cli-core importer is not an owned production module: ${importer}`);
       }
     }
-    for (const cycle of architecture.allowedImportCycles) {
-      for (const modulePath of cycle) {
-        if (!moduleOwners.has(modulePath)) {
-          errors.push(
-            `allowed import cycle contains an unowned production module: ${modulePath}`
-          );
-        }
-      }
-    }
   }
 
   for (const domainName of domains.keys()) {
@@ -340,7 +310,10 @@ export function validateProductionModuleOwnershipManifest({
   }
   for (const mandatoryPath of MANDATORY_FULL_PRODUCTION_PATHS) {
     const impact = moduleOwners.get(mandatoryPath);
-    if (impact && impact.selection !== "full") {
+    if (!discoveredPaths.includes(mandatoryPath)) {
+      errors.push(`required production module is missing from disk: ${mandatoryPath}`);
+    }
+    if (!impact || impact.selection !== "full") {
       errors.push(`mandatory shared core module must select full: ${mandatoryPath}`);
     }
   }
@@ -387,102 +360,111 @@ export function physicalLineCount(source) {
   return lines.at(-1) === "" ? lines.length - 1 : lines.length;
 }
 
-function relativeImportSpecifiers(source) {
+function literalModuleSpecifier(expression) {
+  return expression && isStringLiteralLikeNode(expression)
+    ? expression.text
+    : undefined;
+}
+
+function relativeImportSpecifiers(sourceFile, modulePath) {
   const specifiers = [];
-  let index = 0;
-  let braceDepth = 0;
-  while (index < source.length) {
-    const skipped = skipTriviaOrLiteral(source, index);
-    if (skipped !== index) {
-      index = skipped;
-      continue;
+  const errors = [];
+  const recordSpecifier = (specifier) => {
+    if (specifier?.startsWith(".")) {
+      specifiers.push(specifier);
     }
-    const character = source[index];
-    const tokenBoundary = index === 0 || !/[A-Za-z0-9_$]/u.test(source[index - 1]);
-    if (tokenBoundary) {
-      const dynamicImport = source.slice(index).match(
-        /^import\s*\(\s*["']([^"']+)["']/u
-      );
-      if (dynamicImport) {
-        if (dynamicImport[1].startsWith(".")) {
-          specifiers.push(dynamicImport[1]);
-        }
-        index += dynamicImport[0].length;
+  };
+
+  // Static ESM/CommonJS declarations are read only from the compiler's
+  // top-level statement AST. This deliberately avoids source-text scanning.
+  for (const statement of sourceFile.statements) {
+    if (isImportDeclaration(statement) || isExportDeclaration(statement)) {
+      if (!statement.moduleSpecifier) {
         continue;
       }
-    }
-    if (character === "{") {
-      braceDepth += 1;
-      index += 1;
+      const specifier = literalModuleSpecifier(statement.moduleSpecifier);
+      if (specifier === undefined) {
+        errors.push(`static module specifier is not a literal in ${modulePath}`);
+      } else {
+        recordSpecifier(specifier);
+      }
       continue;
     }
-    if (character === "}") {
-      braceDepth = Math.max(0, braceDepth - 1);
-      index += 1;
+    if (!isImportEqualsDeclaration(statement)) {
       continue;
     }
-    if (braceDepth === 0 && tokenBoundary) {
-      const remainder = source.slice(index);
-      const declarationStart = remainder.match(
-        /^(?:import\s+(?![.(])|export\s+(?:type\s+)?(?:\{|\*))/u
-      );
-      if (declarationStart) {
-        const end = moduleDeclarationEnd(source, index);
-        const declaration = source.slice(index, end);
-        const specifierMatch = declaration.match(
-          /(?:\bfrom\s*|^import\s*)["']([^"']+)["']/u
+    if (!isExternalModuleReference(statement.moduleReference)) {
+      continue;
+    }
+    const specifier = literalModuleSpecifier(statement.moduleReference.expression);
+    if (specifier === undefined) {
+      errors.push(`import-equals module specifier is not a literal in ${modulePath}`);
+    } else {
+      recordSpecifier(specifier);
+    }
+  }
+
+  // Dynamic imports are edges only when their sole argument is a literal.
+  // Computed forms fail closed because their production dependency cannot be
+  // proven from the AST. This policy is intentionally stricter than ignoring
+  // an unknown runtime edge.
+  const visitDynamicImports = (node) => {
+    if (
+      isCallExpression(node) &&
+      node.expression.kind === SyntaxKind.ImportKeyword
+    ) {
+      const specifier = node.arguments.length === 1
+        ? literalModuleSpecifier(node.arguments[0])
+        : undefined;
+      if (specifier === undefined) {
+        errors.push(
+          `dynamic import must use one literal specifier in ${modulePath} ` +
+          `(policy: ${DYNAMIC_IMPORT_POLICY})`
         );
-        if (specifierMatch?.[1].startsWith(".")) {
-          specifiers.push(specifierMatch[1]);
-        }
-        index = end;
-        continue;
+      } else {
+        recordSpecifier(specifier);
       }
     }
-    index += 1;
-  }
-  return specifiers;
+    node.forEachChild(visitDynamicImports);
+  };
+  sourceFile.forEachChild(visitDynamicImports);
+
+  return { specifiers, errors };
 }
 
-function skipTriviaOrLiteral(source, index) {
-  const character = source[index];
-  const next = source[index + 1];
-  if (character === "/" && next === "/") {
-    const newline = source.indexOf("\n", index + 2);
-    return newline === -1 ? source.length : newline + 1;
-  }
-  if (character === "/" && next === "*") {
-    const end = source.indexOf("*/", index + 2);
-    return end === -1 ? source.length : end + 2;
-  }
-  if (character !== '"' && character !== "'" && character !== "`") {
-    return index;
-  }
-  const quote = character;
-  for (let cursor = index + 1; cursor < source.length; cursor += 1) {
-    if (source[cursor] === "\\") {
-      cursor += 1;
-      continue;
+function withTypeScriptSourceFiles({ repoRoot, sources }, inspect) {
+  const configPath = path.join(repoRoot, "tsconfig.json");
+  const api = new TypeScriptApi({
+    cwd: repoRoot,
+    fs: {
+      readFile(fileName) {
+        const repositoryPath = normalizedRepositoryPath(
+          path.relative(repoRoot, fileName)
+        );
+        return sources.has(repositoryPath)
+          ? sources.get(repositoryPath)
+          : undefined;
+      }
     }
-    if (source[cursor] === quote) {
-      return cursor + 1;
+  });
+  try {
+    const snapshot = api.updateSnapshot({ openProjects: [configPath] });
+    const project = snapshot.getProject(configPath);
+    if (!project) {
+      throw new Error(`TypeScript project could not be loaded: ${configPath}`);
     }
+    const sourceFiles = new Map();
+    for (const modulePath of sources.keys()) {
+      const sourceFile = project.program.getSourceFile(path.join(repoRoot, modulePath));
+      if (!sourceFile) {
+        throw new Error(`TypeScript AST is missing production module ${modulePath}`);
+      }
+      sourceFiles.set(modulePath, sourceFile);
+    }
+    return inspect(sourceFiles);
+  } finally {
+    api.close();
   }
-  return source.length;
-}
-
-function moduleDeclarationEnd(source, start) {
-  for (let index = start; index < source.length; index += 1) {
-    const skipped = skipTriviaOrLiteral(source, index);
-    if (skipped !== index) {
-      index = skipped - 1;
-      continue;
-    }
-    if (source[index] === ";") {
-      return index + 1;
-    }
-  }
-  return source.length;
 }
 
 function resolveProductionImport(importerPath, specifier, productionPaths) {
@@ -566,22 +548,41 @@ export function validateProductionArchitecture({
       continue;
     }
     sources.set(modulePath, source);
-    const dependencies = new Set();
-    for (const specifier of relativeImportSpecifiers(source)) {
-      const dependency = resolveProductionImport(
-        modulePath,
-        specifier,
-        productionPaths
+  }
+
+  if (sources.size === productionPaths.size) {
+    try {
+      withTypeScriptSourceFiles({ repoRoot, sources }, (sourceFiles) => {
+        for (const modulePath of [...productionPaths].sort()) {
+          const dependencies = new Set();
+          const parsed = relativeImportSpecifiers(
+            sourceFiles.get(modulePath),
+            modulePath
+          );
+          errors.push(...parsed.errors);
+          for (const specifier of parsed.specifiers) {
+            const dependency = resolveProductionImport(
+              modulePath,
+              specifier,
+              productionPaths
+            );
+            if (!dependency) {
+              errors.push(
+                `production import cannot be resolved: ${modulePath} -> ${specifier}`
+              );
+              continue;
+            }
+            dependencies.add(dependency);
+          }
+          graph.set(modulePath, [...dependencies].sort());
+        }
+      });
+    } catch (error) {
+      errors.push(
+        `cannot inspect production imports with TypeScript compiler API: ` +
+        `${error instanceof Error ? error.message : String(error)}`
       );
-      if (!dependency) {
-        errors.push(
-          `production import cannot be resolved: ${modulePath} -> ${specifier}`
-        );
-        continue;
-      }
-      dependencies.add(dependency);
     }
-    graph.set(modulePath, [...dependencies].sort());
   }
 
   const cliCorePath = "src/cli-core.ts";
@@ -589,13 +590,12 @@ export function validateProductionArchitecture({
   const cliCorePhysicalLoc = cliCoreSource === undefined
     ? undefined
     : physicalLineCount(cliCoreSource);
-  if (
-    cliCorePhysicalLoc !== undefined &&
-    cliCorePhysicalLoc > ownership.architecture.cliCoreMaxPhysicalLoc
-  ) {
+  if (cliCoreSource === undefined) {
+    errors.push(`${cliCorePath} is required for architecture validation`);
+  } else if (cliCorePhysicalLoc !== ownership.architecture.cliCoreMaxPhysicalLoc) {
     errors.push(
-      `${cliCorePath} has ${cliCorePhysicalLoc} physical LOC, exceeding manifest ` +
-      `ceiling ${ownership.architecture.cliCoreMaxPhysicalLoc}`
+      `${cliCorePath} physical LOC does not match manifest ratchet ` +
+      `${ownership.architecture.cliCoreMaxPhysicalLoc} (actual ${cliCorePhysicalLoc})`
     );
   }
 
@@ -624,27 +624,11 @@ export function validateProductionArchitecture({
     );
   }
 
-  const allowedCycleKeys = new Set(
-    ownership.architecture.allowedImportCycles
-      .map((cycle) => canonicalCycle(cycle).join("\0"))
-  );
   const cycles = importCycles(graph);
-  const unapprovedCycles = cycles.filter((cycle) =>
-    !allowedCycleKeys.has(cycle.join("\0"))
-  );
-  const staleAllowedCycles = [...allowedCycleKeys].filter((cycleKey) =>
-    !cycles.some((cycle) => cycle.join("\0") === cycleKey)
-  );
-  if (unapprovedCycles.length > 0) {
+  if (cycles.length > 0) {
     errors.push(
       "production import graph contains cycles: " +
-      unapprovedCycles.map((cycle) => `${cycle.join(" -> ")} -> ${cycle[0]}`).join(", ")
-    );
-  }
-  if (staleAllowedCycles.length > 0) {
-    errors.push(
-      "allowed import cycles are stale: " +
-      staleAllowedCycles.map((cycleKey) => cycleKey.split("\0").join(" -> ")).join(", ")
+      cycles.map((cycle) => `${cycle.join(" -> ")} -> ${cycle[0]}`).join(", ")
     );
   }
 
