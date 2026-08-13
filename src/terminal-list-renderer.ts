@@ -435,31 +435,14 @@ export function renderAvailableListActions(
     };
   }
 
-  const rawCancellable =
-    terminalControlled &&
-    commands.cancel === true &&
-    (
-      entry.activity_state === "working" ||
-      (
-        approvalState.blocked === true &&
-        approvalState.approvable === true
-      )
-    );
-  const managedCancellable =
-    terminalBridgeReady &&
-    ["waiting_for_agent", "waiting_for_openclaw"].includes(
-      String(entry.status)
-    ) &&
-    !(
-      managedApprovalPending &&
-      approvalState.approvable !== true
-    );
-  if (rawCancellable || managedCancellable) {
-    actions.cancel = {
-      tool: "agent_knock_knock_cancel",
-      arguments: targetArguments,
-      requires_user_intent: true
-    };
+  const cancelAction = renderCancelListAction(
+    entry,
+    facts,
+    targetArguments,
+    approvalState
+  );
+  if (cancelAction) {
+    actions.cancel = cancelAction;
   }
   if (managed && facts.renewEligible) {
     actions.renew = {
@@ -496,6 +479,43 @@ export function renderAvailableListActions(
     };
   }
   return actions;
+}
+
+function renderCancelListAction(
+  entry: JsonRecord,
+  facts: AvailableListActionFacts,
+  targetArguments: JsonRecord,
+  approvalState: JsonRecord
+): JsonRecord | undefined {
+  const rawCancellable =
+    entry.source === "terminal" &&
+    isRecord(entry.commands) &&
+    entry.commands.cancel === true &&
+    (
+      entry.activity_state === "working" ||
+      (
+        approvalState.blocked === true &&
+        approvalState.approvable === true
+      )
+    );
+  const managedCancellable =
+    entry.source === "managed_turn" &&
+    facts.terminalBridgeReady &&
+    ["waiting_for_agent", "waiting_for_openclaw"].includes(
+      String(entry.status)
+    ) &&
+    !(
+      facts.managedApprovalPending &&
+      approvalState.approvable !== true
+    );
+  if (!rawCancellable && !managedCancellable) {
+    return undefined;
+  }
+  return {
+    tool: "agent_knock_knock_cancel",
+    arguments: targetArguments,
+    requires_user_intent: true
+  };
 }
 
 function isActiveStatus(status: unknown): boolean {
