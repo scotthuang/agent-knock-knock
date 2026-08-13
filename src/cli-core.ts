@@ -234,9 +234,9 @@ import {
 } from "./session-selector.js";
 import {
   decideTerminalBindingMatch,
-  type TerminalCodexOpenRootInventory,
-  type TerminalNativeIdentityObservation,
-  type TerminalObservation
+  terminalObservationFromListEntry,
+  terminalObservationFromResolvedIdentity,
+  type TerminalNativeIdentity as NativeAgentSessionIdentity
 } from "./terminal-binding-authority.js";
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 10080;
@@ -6234,74 +6234,6 @@ function terminalFirstListProjection({
   };
 }
 
-function listEntryNativeIdentityObservation(
-  terminal: Record<string, any>
-): TerminalNativeIdentityObservation {
-  const liveThreadId = stringValue(terminal.native_agent_session_id);
-  const liveRollout = isRecord(terminal.native_agent_rollout) &&
-      isCompleteNativeRollout(terminal.native_agent_rollout)
-    ? terminal.native_agent_rollout
-    : undefined;
-  if (liveThreadId) {
-    return {
-      status: "resolved",
-      identity: {
-        sessionId: liveThreadId,
-        processUuid: stringValue(terminal.native_agent_process_uuid),
-        processBirth: stringValue(terminal.native_agent_process_birth),
-        rollout: liveRollout,
-        evidence:
-          stringValue(terminal.native_agent_identity_evidence) ??
-          "terminal_scan"
-      }
-    };
-  }
-  const observation = isRecord(terminal.native_agent_identity_observation)
-    ? terminal.native_agent_identity_observation
-    : undefined;
-  if (observation?.status === "verified_absent") {
-    return {
-      status: "verified_absent",
-      evidence: stringValue(observation.evidence)
-    };
-  }
-  if (observation?.status === "unavailable") {
-    return {
-      status: "unavailable",
-      reason: stringValue(observation.reason)
-    };
-  }
-  return { status: "not_observed" };
-}
-
-function terminalObservationFromListEntry(
-  terminal: Record<string, any>,
-  terminalControl: TerminalControlRef | undefined,
-  agent: ExecutorKind
-): TerminalObservation {
-  return {
-    terminalId: stringValue(terminal.id) ?? "",
-    agent,
-    pid: Number(terminal.pid),
-    terminalControl,
-    workspace: stringValue(terminal.workspace ?? terminal.cwd),
-    nativeIdentity: listEntryNativeIdentityObservation(terminal),
-    processIncarnation: {
-      processUuid: stringValue(terminal.native_agent_process_uuid),
-      processBirth: stringValue(terminal.native_agent_process_birth)
-    },
-    statusCardNativeThreadId: stringValue(
-      terminal.native_agent_status_card_session_id
-    ),
-    codexOpenRootInventory: isRecord(
-      terminal._codex_open_root_rollout_inventory
-    )
-      ? terminal._codex_open_root_rollout_inventory as unknown as
-          TerminalCodexOpenRootInventory
-      : undefined
-  };
-}
-
 function managedSessionMatchesLiveTerminalEntry(
   session: ManagedSessionState,
   terminal: Record<string, any>,
@@ -6337,7 +6269,6 @@ function managedSessionMatchesLiveTerminalEntry(
   }
   const observation = terminalObservationFromListEntry(
     terminal,
-    liveControl,
     session.agent
   );
   const evidence = {
@@ -9956,30 +9887,6 @@ function terminalRuntimeForLiveIdentity({
   };
 }
 
-function terminalObservationFromResolvedTerminal(
-  terminal: ResolvedTerminalConversation,
-  identity: NativeAgentSessionIdentity | undefined,
-  processIncarnation: {
-    processUuid?: string;
-    processBirth?: string;
-  }
-): TerminalObservation {
-  return {
-    terminalId: terminal.conversationId,
-    agent: terminal.agent,
-    pid: terminal.pid,
-    terminalControl: terminal.terminalControl,
-    workspace: terminal.terminalControl.currentPath,
-    nativeIdentity: identity
-      ? {
-          status: "resolved",
-          identity
-        }
-      : { status: "not_observed" },
-    processIncarnation
-  };
-}
-
 function bindingMatchesLiveTerminal(
   session: ManagedSessionState,
   terminal: ResolvedTerminalConversation,
@@ -10034,11 +9941,12 @@ function bindingMatchesLiveTerminal(
     }
   }
 
-  const observation = terminalObservationFromResolvedTerminal(
-    terminal,
+  const observation = terminalObservationFromResolvedIdentity({
+    agent: terminal.agent,
+    pid: terminal.pid,
     identity,
     processIncarnation
-  );
+  });
   const evidence = {
     terminalAliasMatches,
     workspaceMatches
@@ -22858,20 +22766,6 @@ function assertOrdinaryTerminalPayloadDoesNotInvokeNativeLifecycle(
     "use an advertised dedicated native action when one exists, or enter " +
     "the unsupported native command manually in the terminal UI"
   );
-}
-
-interface NativeAgentSessionIdentity {
-  sessionId: string;
-  processStartedAt?: number;
-  processUuid?: string;
-  processBirth?: string;
-  rollout?: {
-    fd: string;
-    device: string;
-    inode: string;
-    path: string;
-  };
-  evidence: string;
 }
 
 type NativeAgentSessionIdentityObservation =

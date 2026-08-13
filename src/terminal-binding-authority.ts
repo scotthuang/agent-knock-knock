@@ -3,7 +3,6 @@ import {
   isExactNativeThreadId,
   type ManagedSessionState
 } from "./managed-session.js";
-import type { TerminalControlRef } from "./terminal-agent-adapter.js";
 
 export interface TerminalNativeRolloutIdentity {
   fd: string;
@@ -14,6 +13,7 @@ export interface TerminalNativeRolloutIdentity {
 
 export interface TerminalNativeIdentity {
   sessionId: string;
+  processStartedAt?: number;
   processUuid?: string;
   processBirth?: string;
   rollout?: TerminalNativeRolloutIdentity;
@@ -61,11 +61,8 @@ export interface TerminalCodexOpenRootInventory {
  * authorization.
  */
 export interface TerminalObservation {
-  terminalId: string;
   agent: ExecutorKind;
   pid: number;
-  terminalControl?: TerminalControlRef;
-  workspace?: string;
   nativeIdentity: TerminalNativeIdentityObservation;
   processIncarnation: {
     processUuid?: string;
@@ -73,6 +70,84 @@ export interface TerminalObservation {
   };
   statusCardNativeThreadId?: string;
   codexOpenRootInventory?: TerminalCodexOpenRootInventory;
+}
+
+/** Build the list-side observation without importing CLI orchestration. */
+export function terminalObservationFromListEntry(
+  terminal: Record<string, unknown>,
+  agent: ExecutorKind
+): TerminalObservation {
+  const liveThreadId = stringValue(terminal.native_agent_session_id);
+  const liveRollout = completeRollout(terminal.native_agent_rollout)
+    ? terminal.native_agent_rollout
+    : undefined;
+  let nativeIdentity: TerminalNativeIdentityObservation;
+  if (liveThreadId) {
+    nativeIdentity = {
+      status: "resolved",
+      identity: {
+        sessionId: liveThreadId,
+        processUuid: stringValue(terminal.native_agent_process_uuid),
+        processBirth: stringValue(terminal.native_agent_process_birth),
+        rollout: liveRollout,
+        evidence:
+          stringValue(terminal.native_agent_identity_evidence) ??
+          "terminal_scan"
+      }
+    };
+  } else {
+    const identityObservation = recordValue(
+      terminal.native_agent_identity_observation
+    );
+    nativeIdentity = identityObservation?.status === "verified_absent"
+      ? {
+          status: "verified_absent",
+          evidence: stringValue(identityObservation.evidence)
+        }
+      : identityObservation?.status === "unavailable"
+        ? {
+            status: "unavailable",
+            reason: stringValue(identityObservation.reason)
+          }
+        : { status: "not_observed" };
+  }
+  return {
+    agent,
+    pid: Number(terminal.pid),
+    nativeIdentity,
+    processIncarnation: {
+      processUuid: stringValue(terminal.native_agent_process_uuid),
+      processBirth: stringValue(terminal.native_agent_process_birth)
+    },
+    statusCardNativeThreadId: stringValue(
+      terminal.native_agent_status_card_session_id
+    ),
+    codexOpenRootInventory: recordValue(
+      terminal._codex_open_root_rollout_inventory
+    ) as unknown as TerminalCodexOpenRootInventory | undefined
+  };
+}
+
+/** Build the mutation-side observation from evidence freshly read under lock. */
+export function terminalObservationFromResolvedIdentity({
+  agent,
+  pid,
+  identity,
+  processIncarnation
+}: {
+  agent: ExecutorKind;
+  pid: number;
+  identity: TerminalNativeIdentity | undefined;
+  processIncarnation: TerminalObservation["processIncarnation"];
+}): TerminalObservation {
+  return {
+    agent,
+    pid,
+    nativeIdentity: identity
+      ? { status: "resolved", identity }
+      : { status: "not_observed" },
+    processIncarnation
+  };
 }
 
 export interface TerminalBindingMatchEvidence {
@@ -276,4 +351,16 @@ function completeRollout(value: unknown): value is TerminalNativeRolloutIdentity
 
 function statusCardEvidence(evidence: string): boolean {
   return evidence.split("+").includes("codex_status_card");
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0
+    ? value
+    : undefined;
 }

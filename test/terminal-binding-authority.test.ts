@@ -19,9 +19,7 @@ const ROLLOUT = {
   path: "/safe/sessions/rollout.jsonl"
 };
 
-function terminalControl(
-  overrides: Partial<TerminalControlRef> = {}
-): TerminalControlRef {
+function terminalControl(): TerminalControlRef {
   return {
     kind: "tmux",
     target: "work:0.0",
@@ -32,9 +30,8 @@ function terminalControl(
     panePid: 4_000,
     currentCommand: "codex",
     currentPath: "/repo",
-    capabilities: ["screen_status", "send_keys"],
-    ...overrides
-  } as TerminalControlRef;
+    capabilities: ["screen_status", "send_keys"]
+  };
 }
 
 function managedSession(
@@ -76,11 +73,8 @@ function resolvedObservation(
   overrides: Partial<TerminalObservation> = {}
 ): TerminalObservation {
   return {
-    terminalId: "terminal:v2:tmux:codex:work:0.0:4100",
     agent: "codex",
     pid: 4_100,
-    terminalControl: terminalControl(),
-    workspace: "/repo",
     nativeIdentity: {
       status: "resolved",
       identity: {
