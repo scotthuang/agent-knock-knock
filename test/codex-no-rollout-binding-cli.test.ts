@@ -75,6 +75,11 @@ import {
   terminalEndpointIdentityKey,
   tmuxTerminalRouteKey
 } from "../src/terminal-control-ref.js";
+import {
+  codexNativeAcceptanceEnv,
+  codexNoRolloutBackgroundSendArgs,
+  codexNoRolloutStoreArgs
+} from "./support/codex-no-rollout-cli-harness.js";
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 const LIVE_PROCESS_BIRTH = "Thu Aug  6 10:00:00 2026";
@@ -94,14 +99,7 @@ test("virgin raw Codex attach atomically refines the Session and Turn binding af
       fixture.terminalId,
       "--message",
       "Start the first native Codex thread.",
-      "--background",
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome,
-      "--openclaw-bin",
-      "/usr/bin/true",
-      "--disable-terminal-bridge-monitor"
+      ...codexNoRolloutBackgroundSendArgs(fixture)
     ], fixture.environment);
 
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
@@ -173,10 +171,7 @@ test("virgin raw Codex attach atomically refines the Session and Turn binding af
 
 test("production-mode virgin Codex first send creates and binds its exact rollout", async () => {
   const fixture = createNoRolloutFixture({ rolloutInitiallyAbsent: true });
-  const environment = {
-    ...fixture.environment,
-    AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-  };
+  const environment = codexNativeAcceptanceEnv(fixture.environment);
   try {
     assert.equal(fs.existsSync(path.dirname(fixture.rolloutPath)), false);
     const result = await runCli([
@@ -185,14 +180,7 @@ test("production-mode virgin Codex first send creates and binds its exact rollou
       fixture.terminalId,
       "--message",
       "Open the first real Codex thread.",
-      "--background",
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome,
-      "--openclaw-bin",
-      "/usr/bin/true",
-      "--disable-terminal-bridge-monitor"
+      ...codexNoRolloutBackgroundSendArgs(fixture)
     ], environment);
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const output = JSON.parse(result.stdout);
@@ -291,14 +279,7 @@ test("virgin Codex binding recovery closes both post-Enter crash windows without
         fixture.terminalId,
         "--message",
         `Recover exactly once after ${crashPoint.env}.`,
-        "--background",
-        "--store-dir",
-        fixture.storeDir,
-        "--codex-home",
-        fixture.codexHome,
-        "--openclaw-bin",
-        "/usr/bin/true",
-        "--disable-terminal-bridge-monitor"
+        ...codexNoRolloutBackgroundSendArgs(fixture)
       ], environment);
       assert.equal(crashed.status, 86, crashed.stderr || crashed.stdout);
 
@@ -324,10 +305,7 @@ test("virgin Codex binding recovery closes both post-Enter crash windows without
 
       const reconcileArgs = [
         "reconcile-monitors",
-        "--store-dir",
-        fixture.storeDir,
-        "--codex-home",
-        fixture.codexHome,
+        ...codexNoRolloutStoreArgs(fixture),
         "--terminal-monitors-only"
       ];
       const recovered = runCliSubprocess(reconcileArgs, fixture.environment);
@@ -420,14 +398,7 @@ test("monitor binds a virgin Codex before accepting evidence that lands between 
       fixture.terminalId,
       "--message",
       request,
-      "--background",
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome,
-      "--openclaw-bin",
-      "/usr/bin/true",
-      "--disable-terminal-bridge-monitor"
+      ...codexNoRolloutBackgroundSendArgs(fixture)
     ], {
       ...fixture.environment,
       AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0",
@@ -456,20 +427,14 @@ test("monitor binds a virgin Codex before accepting evidence that lands between 
       statePath,
       "--log",
       eventLogPath,
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome,
+      ...codexNoRolloutStoreArgs(fixture),
       "--poll-interval-ms",
       "20",
       "--agent-timeout-minutes",
       "1",
       "--agent-hard-timeout-minutes",
       "2"
-    ], {
-      ...fixture.environment,
-      AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-    });
+    ], codexNativeAcceptanceEnv(fixture.environment));
     assert.equal(monitored.status, 0, monitored.stderr || monitored.stdout);
 
     const finalTurn = listConversations(fixture.storeDir)[0];
@@ -532,14 +497,7 @@ test("virgin Codex process drift after Enter quarantines the provisional binding
       fixture.terminalId,
       "--message",
       "This task must stay pinned to the original Codex process.",
-      "--background",
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome,
-      "--openclaw-bin",
-      "/usr/bin/true",
-      "--disable-terminal-bridge-monitor"
+      ...codexNoRolloutBackgroundSendArgs(fixture)
     ], {
       ...fixture.environment,
       AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0",
@@ -582,10 +540,7 @@ test("a rollout appearing between raw discovery and send preflight fails cleanly
     materializeRolloutOnProbe: 2,
     persistedCandidate: true
   });
-  const environment = {
-    ...fixture.environment,
-    AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-  };
+  const environment = codexNativeAcceptanceEnv(fixture.environment);
   try {
     const raced = await runCli([
       "send",
@@ -593,14 +548,7 @@ test("a rollout appearing between raw discovery and send preflight fails cleanly
       fixture.terminalId,
       "--message",
       "This task must not cross a newly materialized identity boundary.",
-      "--background",
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome,
-      "--openclaw-bin",
-      "/usr/bin/true",
-      "--disable-terminal-bridge-monitor"
+      ...codexNoRolloutBackgroundSendArgs(fixture)
     ], environment);
 
     assert.equal(raced.status, 1, raced.stdout);
@@ -641,14 +589,7 @@ test("a virgin attach setup failure CAS-detaches the Session before any task inp
       fixture.terminalId,
       "--message",
       "This task must stop during pre-transport setup.",
-      "--background",
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome,
-      "--openclaw-bin",
-      "/usr/bin/true",
-      "--disable-terminal-bridge-monitor"
+      ...codexNoRolloutBackgroundSendArgs(fixture)
     ], {
       ...fixture.environment,
       AKK_TEST_TERMINAL_SETUP_FAILURE: "1"
@@ -689,14 +630,7 @@ test("a proved tmux text-dispatch failure also detaches the virgin Session", asy
       fixture.terminalId,
       "--message",
       "This text dispatch must fail before reaching the composer.",
-      "--background",
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome,
-      "--openclaw-bin",
-      "/usr/bin/true",
-      "--disable-terminal-bridge-monitor"
+      ...codexNoRolloutBackgroundSendArgs(fixture)
     ], {
       ...fixture.environment,
       AKK_TEST_TMUX_TEXT_FAILURE: "1"
@@ -727,10 +661,7 @@ test("a proved tmux text-dispatch failure also detaches the virgin Session", asy
 
 test("native New and Resume remain reachable after draft-blocked virgin attaches", async () => {
   const fixture = createNoRolloutFixture({ persistedCandidate: true });
-  const productionEnvironment = {
-    ...fixture.environment,
-    AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-  };
+  const productionEnvironment = codexNativeAcceptanceEnv(fixture.environment);
   try {
     fs.writeFileSync(fixture.screenPath, "Ready\n› existing operator draft");
     const rejected = await runCli([
@@ -739,14 +670,7 @@ test("native New and Resume remain reachable after draft-blocked virgin attaches
       fixture.terminalId,
       "--message",
       "Blocked by the operator draft before resume.",
-      "--background",
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome,
-      "--openclaw-bin",
-      "/usr/bin/true",
-      "--disable-terminal-bridge-monitor"
+      ...codexNoRolloutBackgroundSendArgs(fixture)
     ], productionEnvironment);
     assert.equal(rejected.status, 1, rejected.stdout);
     assert.match(
@@ -765,10 +689,7 @@ test("native New and Resume remain reachable after draft-blocked virgin attaches
       "list-resumable-threads",
       "--terminal",
       fixture.terminalId,
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome
+      ...codexNoRolloutStoreArgs(fixture)
     ], productionEnvironment);
     assert.equal(listed.status, 0, listed.stderr || listed.stdout);
     const snapshot = JSON.parse(listed.stdout);
@@ -786,10 +707,7 @@ test("native New and Resume remain reachable after draft-blocked virgin attaches
       String(snapshot.expected_binding_token),
       "--candidate-token",
       String(candidate.candidate_token),
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome
+      ...codexNoRolloutStoreArgs(fixture)
     ], productionEnvironment);
     assert.equal(resumed.status, 0, resumed.stderr || resumed.stdout);
     assert.equal(JSON.parse(resumed.stdout).status, "already_active");
@@ -1024,14 +942,7 @@ test("a proved Codex PID reuse ignores the stale binding without adopting its na
       fixture.terminalId,
       "--message",
       "Control the proved replacement process without adopting stale history.",
-      "--background",
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome,
-      "--openclaw-bin",
-      "/usr/bin/true",
-      "--disable-terminal-bridge-monitor"
+      ...codexNoRolloutBackgroundSendArgs(fixture)
     ], fixture.environment);
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
     const output = JSON.parse(sent.stdout);
@@ -1097,14 +1008,7 @@ test("a verified-empty Codex process detaches its ended rollout and starts one i
       String(action.arguments.expected_terminal_token),
       "--message",
       "Continue in a fresh Codex thread without reusing the ended binding.",
-      "--background",
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome,
-      "--openclaw-bin",
-      "/usr/bin/true",
-      "--disable-terminal-bridge-monitor"
+      ...codexNoRolloutBackgroundSendArgs(fixture)
     ], fixture.environment);
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
     const output = JSON.parse(sent.stdout);
@@ -1147,14 +1051,7 @@ test("a verified-empty Codex process detaches its ended rollout and starts one i
       source.session_id,
       "--message",
       "This must never follow the pane into the new thread.",
-      "--background",
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome,
-      "--openclaw-bin",
-      "/usr/bin/true",
-      "--disable-terminal-bridge-monitor"
+      ...codexNoRolloutBackgroundSendArgs(fixture)
     ], fixture.environment);
     assert.equal(explicitOldSession.status, 1);
     assert.match(
@@ -1224,14 +1121,7 @@ test("verified-empty handoff stays fail-closed for a real draft, resolver failur
         String(action.arguments.expected_terminal_token),
         "--message",
         "A stale list token must not detach the source.",
-        "--background",
-        "--store-dir",
-        fixture.storeDir,
-        "--codex-home",
-        fixture.codexHome,
-        "--openclaw-bin",
-        "/usr/bin/true",
-        "--disable-terminal-bridge-monitor"
+        ...codexNoRolloutBackgroundSendArgs(fixture)
       ], fixture.environment);
       assert.equal(rejected.status, 1, rejected.stdout);
       assert.match(rejected.stderr, /fresh exact terminal token|refresh/iu);
@@ -1275,14 +1165,7 @@ test("verified-empty handoff sends no Enter when a native rollout appears after 
       String(action.arguments.expected_terminal_token),
       "--message",
       "Race with a human-created native thread after text injection.",
-      "--background",
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome,
-      "--openclaw-bin",
-      "/usr/bin/true",
-      "--disable-terminal-bridge-monitor"
+      ...codexNoRolloutBackgroundSendArgs(fixture)
     ], {
       ...fixture.environment,
       AKK_TEST_MATERIALIZE_ROLLOUT_AFTER_TEXT: "1"
@@ -1340,14 +1223,7 @@ test("Herdr uses the same verified-empty Codex handoff fence and virgin post-sub
       String(action.arguments.expected_terminal_token),
       "--message",
       "Deliver this task through the Herdr provider.",
-      "--background",
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome,
-      "--openclaw-bin",
-      "/usr/bin/true",
-      "--disable-terminal-bridge-monitor"
+      ...codexNoRolloutBackgroundSendArgs(fixture)
     ], fixture.environment);
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
     const output = JSON.parse(sent.stdout);
@@ -1497,14 +1373,7 @@ test("Codex status-card binding rejects the same PID with a different process bi
       session.session_id,
       "--message",
       "This must not reach the reused Codex PID.",
-      "--background",
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome,
-      "--openclaw-bin",
-      "/usr/bin/true",
-      "--disable-terminal-bridge-monitor"
+      ...codexNoRolloutBackgroundSendArgs(fixture)
     ], fixture.environment);
 
     assert.equal(sent.status, 1, sent.stdout);
@@ -1533,14 +1402,7 @@ test("Codex status-card binding with the same process birth authorizes and refin
       session.session_id,
       "--message",
       "Inspect the repository without changing files.",
-      "--background",
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome,
-      "--openclaw-bin",
-      "/usr/bin/true",
-      "--disable-terminal-bridge-monitor"
+      ...codexNoRolloutBackgroundSendArgs(fixture)
     ], fixture.environment);
 
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
@@ -1637,18 +1499,8 @@ for (const [label, acceptedNativeThreadId] of [
           String(action.arguments.expected_terminal_token),
           "--message",
           message,
-          "--background",
-          "--store-dir",
-          fixture.storeDir,
-          "--codex-home",
-          fixture.codexHome,
-          "--openclaw-bin",
-          "/usr/bin/true",
-          "--disable-terminal-bridge-monitor"
-        ], {
-          ...fixture.environment,
-          AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-        });
+          ...codexNoRolloutBackgroundSendArgs(fixture)
+        ], codexNativeAcceptanceEnv(fixture.environment));
 
         assert.equal(sent.status, 0, sent.stderr || sent.stdout);
         const output = JSON.parse(sent.stdout);
@@ -1809,10 +1661,7 @@ for (const crashCase of [
         // Recovery runs before terminal-token validation. The reservation is
         // durably aborted and the source restored, but that restoration bumps
         // its Session revision, so the old list token is intentionally stale.
-        const recoveredWithStaleToken = await runCli(args, {
-          ...fixture.environment,
-          AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-        });
+        const recoveredWithStaleToken = await runCli(args, codexNativeAcceptanceEnv(fixture.environment));
         assert.equal(
           recoveredWithStaleToken.status,
           1,
@@ -1849,10 +1698,7 @@ for (const crashCase of [
         );
         const retried = await runCli(
           deferredForegroundSendArgs(fixture, refreshedAction, message),
-          {
-            ...fixture.environment,
-            AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-          }
+          codexNativeAcceptanceEnv(fixture.environment)
         );
         assert.equal(retried.status, 0, retried.stderr || retried.stdout);
         assert.equal(
@@ -1910,10 +1756,7 @@ for (const crashCase of [
         );
         const third = await runCli(
           deferredForegroundSendArgs(fixture, thirdAction, thirdMessage),
-          {
-            ...fixture.environment,
-            AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-          }
+          codexNativeAcceptanceEnv(fixture.environment)
         );
         assert.equal(third.status, 0, third.stderr || third.stdout);
         assert.equal(JSON.parse(third.stdout).delivered, true, third.stdout);
@@ -2002,10 +1845,7 @@ for (const crashCase of [
           conversationsBeforeCrash
         );
 
-        const recoveredWithStaleToken = await runCli(args, {
-          ...fixture.environment,
-          AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-        });
+        const recoveredWithStaleToken = await runCli(args, codexNativeAcceptanceEnv(fixture.environment));
         assert.equal(
           recoveredWithStaleToken.status,
           1,
@@ -2035,10 +1875,7 @@ for (const crashCase of [
         const refreshed = await deferredForegroundSendAction(fixture);
         const retried = await runCli(
           deferredForegroundSendArgs(fixture, refreshed, message),
-          {
-            ...fixture.environment,
-            AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-          }
+          codexNativeAcceptanceEnv(fixture.environment)
         );
         assert.equal(retried.status, 0, retried.stderr || retried.stdout);
         assert.equal(JSON.parse(retried.stdout).delivered, true, retried.stdout);
@@ -2139,10 +1976,7 @@ for (const historyCase of [
         assert.equal(abortLedger.enter_dispatched_at, undefined);
         assert.deepEqual(taskInputCalls(fixture), callsBeforeCrash);
 
-        const recoveredWithStaleToken = runCliSubprocess(args, {
-          ...fixture.environment,
-          AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-        });
+        const recoveredWithStaleToken = runCliSubprocess(args, codexNativeAcceptanceEnv(fixture.environment));
         assert.equal(
           recoveredWithStaleToken.status,
           1,
@@ -2172,10 +2006,7 @@ for (const historyCase of [
         const refreshedAction = await deferredForegroundSendAction(fixture);
         const retried = runCliSubprocess(
           deferredForegroundSendArgs(fixture, refreshedAction, message),
-          {
-            ...fixture.environment,
-            AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-          }
+          codexNativeAcceptanceEnv(fixture.environment)
         );
         assert.equal(retried.status, 0, retried.stderr || retried.stdout);
         assert.equal(JSON.parse(retried.stdout).delivered, true, retried.stdout);
@@ -2234,10 +2065,7 @@ for (const historyCase of [
         );
         const third = runCliSubprocess(
           deferredForegroundSendArgs(fixture, thirdAction, thirdMessage),
-          {
-            ...fixture.environment,
-            AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-          }
+          codexNativeAcceptanceEnv(fixture.environment)
         );
         assert.equal(third.status, 0, third.stderr || third.stdout);
         assert.equal(JSON.parse(third.stdout).delivered, true, third.stdout);
@@ -2329,10 +2157,7 @@ test("a missing deferred Turn survives a second crash after its exact ledger abo
     assert.deepEqual(taskInputCalls(fixture), []);
     assert.deepEqual(listConversations(fixture.storeDir), []);
 
-    const recoveredWithStaleToken = runCliSubprocess(args, {
-      ...fixture.environment,
-      AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-    });
+    const recoveredWithStaleToken = runCliSubprocess(args, codexNativeAcceptanceEnv(fixture.environment));
     assert.equal(
       recoveredWithStaleToken.status,
       1,
@@ -2361,10 +2186,7 @@ test("a missing deferred Turn survives a second crash after its exact ledger abo
     const refreshedAction = await deferredForegroundSendAction(fixture);
     const retried = runCliSubprocess(
       deferredForegroundSendArgs(fixture, refreshedAction, message),
-      {
-        ...fixture.environment,
-        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-      }
+      codexNativeAcceptanceEnv(fixture.environment)
     );
     assert.equal(retried.status, 0, retried.stderr || retried.stdout);
     assert.equal(JSON.parse(retried.stdout).delivered, true, retried.stdout);
@@ -2404,10 +2226,7 @@ test("a missing deferred Turn survives a second crash after its exact ledger abo
     );
     const third = runCliSubprocess(
       deferredForegroundSendArgs(fixture, thirdAction, thirdMessage),
-      {
-        ...fixture.environment,
-        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-      }
+      codexNativeAcceptanceEnv(fixture.environment)
     );
     assert.equal(third.status, 0, third.stderr || third.stdout);
     assert.equal(JSON.parse(third.stdout).delivered, true, third.stdout);
@@ -2473,10 +2292,7 @@ for (const crashPoint of [
           Number(originalBinding?.generation) + 1
         );
 
-        const recovered = runCliSubprocess(args, {
-          ...fixture.environment,
-          AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-        });
+        const recovered = runCliSubprocess(args, codexNativeAcceptanceEnv(fixture.environment));
         assertRecoveredTurnBlocksDuplicate(recovered);
         assertResolvedSameUuidDeferredTransfer({
           fixture,
@@ -2522,10 +2338,7 @@ for (const crashPoint of [
         );
         assertSingleTaskInput(fixture, message);
 
-        const recovered = runCliSubprocess(args, {
-          ...fixture.environment,
-          AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-        });
+        const recovered = runCliSubprocess(args, codexNativeAcceptanceEnv(fixture.environment));
         assertRecoveredTurnBlocksDuplicate(recovered);
         assertResolvedSameUuidDeferredTransfer({
           fixture,
@@ -2625,10 +2438,7 @@ test("committed acceptance backfill survives a second recovery crash without rep
     );
     assertSingleTaskInput(fixture, message);
 
-    const recovered = runCliSubprocess(args, {
-      ...fixture.environment,
-      AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-    });
+    const recovered = runCliSubprocess(args, codexNativeAcceptanceEnv(fixture.environment));
     assertRecoveredTurnBlocksDuplicate(recovered);
     assertResolvedSameUuidDeferredTransfer({
       fixture,
@@ -2751,10 +2561,7 @@ test("unmanaged Codex approval remains raw while arbitrary terminal authority is
       "status",
       "--conversation",
       fixture.terminalId,
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome
+      ...codexNoRolloutStoreArgs(fixture)
     ], fixture.environment);
     assert.equal(status.status, 0, status.stderr || status.stdout);
     const fingerprint = String(
@@ -2770,10 +2577,7 @@ test("unmanaged Codex approval remains raw while arbitrary terminal authority is
       "forged-terminal-authority",
       "--expected-approval-fingerprint",
       fingerprint,
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome
+      ...codexNoRolloutStoreArgs(fixture)
     ], fixture.environment);
     assert.equal(forgedAuthority.status, 1, forgedAuthority.stdout);
     assert.match(
@@ -2788,10 +2592,7 @@ test("unmanaged Codex approval remains raw while arbitrary terminal authority is
       fixture.terminalId,
       "--expected-approval-fingerprint",
       fingerprint,
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome
+      ...codexNoRolloutStoreArgs(fixture)
     ], fixture.environment);
     assert.equal(rawApproval.status, 0, rawApproval.stderr || rawApproval.stdout);
     const output = JSON.parse(rawApproval.stdout);
@@ -2831,10 +2632,7 @@ test("human-confirmed Codex approval falls back to the exact terminal when manag
       "status",
       "--conversation",
       fixture.terminalId,
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome
+      ...codexNoRolloutStoreArgs(fixture)
     ], fixture.environment);
     assert.equal(status.status, 0, status.stderr || status.stdout);
     const statusOutput = JSON.parse(status.stdout);
@@ -2858,10 +2656,7 @@ test("human-confirmed Codex approval falls back to the exact terminal when manag
       String(action.arguments.expected_terminal_token),
       "--expected-approval-fingerprint",
       fingerprint,
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome
+      ...codexNoRolloutStoreArgs(fixture)
     ], fixture.environment);
     assert.equal(aliasedSelector.status, 1, aliasedSelector.stdout);
     assert.match(aliasedSelector.stderr, /exact full terminal.*selector/iu);
@@ -2876,10 +2671,7 @@ test("human-confirmed Codex approval falls back to the exact terminal when manag
       "--expected-approval-fingerprint",
       fingerprint,
       "--auto-approved",
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome
+      ...codexNoRolloutStoreArgs(fixture)
     ], fixture.environment);
     assert.equal(automatic.status, 1, automatic.stdout);
     assert.match(automatic.stderr, /automatic approval.*managed Turn/iu);
@@ -2893,10 +2685,7 @@ test("human-confirmed Codex approval falls back to the exact terminal when manag
       String(action.arguments.expected_terminal_token),
       "--expected-approval-fingerprint",
       "0".repeat(64),
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome
+      ...codexNoRolloutStoreArgs(fixture)
     ], fixture.environment);
     assert.equal(stale.status, 0, stale.stderr || stale.stdout);
     assert.equal(JSON.parse(stale.stdout).approved, false);
@@ -2911,10 +2700,7 @@ test("human-confirmed Codex approval falls back to the exact terminal when manag
       String(action.arguments.expected_terminal_token),
       "--expected-approval-fingerprint",
       fingerprint,
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome
+      ...codexNoRolloutStoreArgs(fixture)
     ], fixture.environment);
     assert.equal(approved.status, 0, approved.stderr || approved.stdout);
     const output = JSON.parse(approved.stdout);
@@ -2990,10 +2776,7 @@ test("human-confirmed Codex approval can target a managed pane with no AKK dispa
         "status",
         "--conversation",
         fixture.terminalId,
-        "--store-dir",
-        fixture.storeDir,
-        "--codex-home",
-        fixture.codexHome
+        ...codexNoRolloutStoreArgs(fixture)
       ], fixture.environment);
       assert.equal(status.status, 0, status.stderr || status.stdout);
       const statusOutput = JSON.parse(status.stdout);
@@ -3015,10 +2798,7 @@ test("human-confirmed Codex approval can target a managed pane with no AKK dispa
         String(action.arguments.expected_terminal_token),
         "--expected-approval-fingerprint",
         statusFingerprint,
-        "--store-dir",
-        fixture.storeDir,
-        "--codex-home",
-        fixture.codexHome
+        ...codexNoRolloutStoreArgs(fixture)
       ], fixture.environment);
       assert.equal(approved.status, 0, approved.stderr || approved.stdout);
       const output = JSON.parse(approved.stdout);
@@ -3100,10 +2880,7 @@ test("terminal-scoped Codex approval fingerprint and token ignore output outside
       firstToken,
       "--expected-approval-fingerprint",
       firstFingerprint,
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome
+      ...codexNoRolloutStoreArgs(fixture)
     ], fixture.environment);
     assert.equal(approved.status, 0, approved.stderr || approved.stdout);
     assert.equal(JSON.parse(approved.stdout).approved, true);
@@ -3146,10 +2923,7 @@ test("terminal-scoped Codex approval token binds the exact current prompt with o
         String(action.arguments.expected_terminal_token),
         "--expected-approval-fingerprint",
         staleFingerprint,
-        "--store-dir",
-        fixture.storeDir,
-        "--codex-home",
-        fixture.codexHome
+        ...codexNoRolloutStoreArgs(fixture)
       ], fixture.environment);
       assert.equal(
         stalePromptAuthority.status,
@@ -3166,10 +2940,7 @@ test("terminal-scoped Codex approval token binds the exact current prompt with o
         "status",
         "--conversation",
         fixture.terminalId,
-        "--store-dir",
-        fixture.storeDir,
-        "--codex-home",
-        fixture.codexHome
+        ...codexNoRolloutStoreArgs(fixture)
       ], fixture.environment);
       assert.equal(status.status, 0, status.stderr || status.stdout);
       const freshFingerprint = String(
@@ -3185,10 +2956,7 @@ test("terminal-scoped Codex approval token binds the exact current prompt with o
         String(action.arguments.expected_terminal_token),
         "--expected-approval-fingerprint",
         freshFingerprint,
-        "--store-dir",
-        fixture.storeDir,
-        "--codex-home",
-        fixture.codexHome
+        ...codexNoRolloutStoreArgs(fixture)
       ], fixture.environment);
       assert.equal(rejected.status, 1, rejected.stdout);
       assert.match(
@@ -3217,10 +2985,7 @@ test("managed no-owner Codex approval waits for aborted deferred cleanup before 
       "status",
       "--conversation",
       fixture.terminalId,
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome
+      ...codexNoRolloutStoreArgs(fixture)
     ], fixture.environment);
     assert.equal(status.status, 0, status.stderr || status.stdout);
     const fingerprint = String(
@@ -3272,10 +3037,7 @@ test("managed no-owner Codex approval waits for aborted deferred cleanup before 
       String(staleAction.arguments.expected_terminal_token),
       "--expected-approval-fingerprint",
       fingerprint,
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome
+      ...codexNoRolloutStoreArgs(fixture)
     ], fixture.environment);
     assert.equal(blocked.status, 1, blocked.stdout);
     assert.match(blocked.stderr, /managed recovery|deferred foreground/iu);
@@ -3303,10 +3065,7 @@ test("managed no-owner Codex approval waits for aborted deferred cleanup before 
       String(recoveredAction.arguments.expected_terminal_token),
       "--expected-approval-fingerprint",
       fingerprint,
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome
+      ...codexNoRolloutStoreArgs(fixture)
     ], fixture.environment);
     assert.equal(approved.status, 0, approved.stderr || approved.stdout);
     assert.equal(JSON.parse(approved.stdout).approved, true);
@@ -3343,10 +3102,7 @@ test("managed no-owner Codex approval fails closed when Store or native authorit
         "status",
         "--conversation",
         fixture.terminalId,
-        "--store-dir",
-        fixture.storeDir,
-        "--codex-home",
-        fixture.codexHome
+        ...codexNoRolloutStoreArgs(fixture)
       ], fixture.environment);
       assert.equal(status.status, 0, `${drift}: ${status.stderr || status.stdout}`);
       const fingerprint = String(
@@ -3435,10 +3191,7 @@ test("managed no-owner Codex approval fails closed when Store or native authorit
         String(action.arguments.expected_terminal_token),
         "--expected-approval-fingerprint",
         fingerprint,
-        "--store-dir",
-        fixture.storeDir,
-        "--codex-home",
-        fixture.codexHome
+        ...codexNoRolloutStoreArgs(fixture)
       ], fixture.environment);
       assert.equal(rejected.status, 1, `${drift}: ${rejected.stdout}`);
       assert.match(
@@ -3465,10 +3218,7 @@ test("terminal-scoped Codex approval rejects a known native-thread handoff and p
         "status",
         "--conversation",
         fixture.terminalId,
-        "--store-dir",
-        fixture.storeDir,
-        "--codex-home",
-        fixture.codexHome
+        ...codexNoRolloutStoreArgs(fixture)
       ], fixture.environment);
       assert.equal(status.status, 0, status.stderr || status.stdout);
       const fingerprint = JSON.parse(status.stdout)
@@ -3508,10 +3258,7 @@ test("terminal-scoped Codex approval rejects a known native-thread handoff and p
         String(action.arguments.expected_terminal_token),
         "--expected-approval-fingerprint",
         String(fingerprint),
-        "--store-dir",
-        fixture.storeDir,
-        "--codex-home",
-        fixture.codexHome
+        ...codexNoRolloutStoreArgs(fixture)
       ], fixture.environment);
       assert.equal(rejected.status, 1, `${drift}: ${rejected.stdout}`);
       assert.match(
@@ -3538,10 +3285,7 @@ test("terminal-scoped Codex approval rejects uncertain dispatch ownership before
       "status",
       "--conversation",
       fixture.terminalId,
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome
+      ...codexNoRolloutStoreArgs(fixture)
     ], fixture.environment);
     const fingerprint = JSON.parse(status.stdout)
       .terminal_status.approval_state.fingerprint;
@@ -3565,10 +3309,7 @@ test("terminal-scoped Codex approval rejects uncertain dispatch ownership before
       String(action.arguments.expected_terminal_token),
       "--expected-approval-fingerprint",
       String(fingerprint),
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome
+      ...codexNoRolloutStoreArgs(fixture)
     ], fixture.environment);
     assert.equal(rejected.status, 1, rejected.stdout);
     assert.match(rejected.stderr, /uncertain.*dispatch|dispatch.*uncertain/iu);
@@ -3589,10 +3330,7 @@ test("terminal-scoped Codex approval rejects a nonterminal deferred transfer bef
       "status",
       "--conversation",
       fixture.terminalId,
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome
+      ...codexNoRolloutStoreArgs(fixture)
     ], fixture.environment);
     assert.equal(status.status, 0, status.stderr || status.stdout);
     const fingerprint = JSON.parse(status.stdout)
@@ -3637,10 +3375,7 @@ test("terminal-scoped Codex approval rejects a nonterminal deferred transfer bef
       String(action.arguments.expected_terminal_token),
       "--expected-approval-fingerprint",
       String(fingerprint),
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome
+      ...codexNoRolloutStoreArgs(fixture)
     ], fixture.environment);
     assert.equal(rejected.status, 1, rejected.stdout);
     assert.match(rejected.stderr, /managed recovery|deferred foreground transfer/iu);
@@ -3689,10 +3424,7 @@ test("an accepted deferred Turn recovers before Session commit without replay", 
     );
     assertSingleTaskInput(fixture, message);
 
-    const recovered = runCliSubprocess(args, {
-      ...fixture.environment,
-      AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-    });
+    const recovered = runCliSubprocess(args, codexNativeAcceptanceEnv(fixture.environment));
     assertRecoveredTurnBlocksDuplicate(recovered);
     assertResolvedSameUuidDeferredTransfer({
       fixture,
@@ -3914,10 +3646,7 @@ for (const [label, acceptedNativeThreadId] of [
         const action = await deferredForegroundSendAction(fixture);
         const sent = await runCli(
           deferredForegroundSendArgs(fixture, action, message),
-          {
-            ...fixture.environment,
-            AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-          }
+          codexNativeAcceptanceEnv(fixture.environment)
         );
         assert.equal(sent.status, 0, sent.stderr || sent.stdout);
         const output = JSON.parse(sent.stdout);
@@ -4025,10 +3754,7 @@ for (const [label, acceptedNativeThreadId] of [
 
         const sent = await runCli(
           deferredForegroundSendArgs(fixture, action, message),
-          {
-            ...fixture.environment,
-            AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-          }
+          codexNativeAcceptanceEnv(fixture.environment)
         );
         assert.equal(sent.status, 0, sent.stderr || sent.stdout);
         const output = JSON.parse(sent.stdout);
@@ -4097,10 +3823,7 @@ test("callbackless candidate pending acceptance restarts into one local completi
 
     const pending = await runCli(
       deferredForegroundSendArgs(fixture, action, message),
-      {
-        ...fixture.environment,
-        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-      }
+      codexNativeAcceptanceEnv(fixture.environment)
     );
     assert.equal(pending.status, 0, pending.stderr || pending.stdout);
     const pendingOutput = JSON.parse(pending.stdout);
@@ -4135,20 +3858,14 @@ test("callbackless candidate pending acceptance restarts into one local completi
       String(pendingTurn.state_path),
       "--log",
       String(pendingTurn.event_log_path),
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome,
+      ...codexNoRolloutStoreArgs(fixture),
       "--poll-interval-ms",
       "50",
       "--agent-timeout-minutes",
       "1",
       "--agent-hard-timeout-minutes",
       "2"
-    ], {
-      ...fixture.environment,
-      AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-    });
+    ], codexNativeAcceptanceEnv(fixture.environment));
     assert.equal(monitored.status, 0, monitored.stderr || monitored.stdout);
 
     const finalTurn = listConversations(fixture.storeDir).find((turn) =>
@@ -4205,10 +3922,7 @@ test("v3 acceptance monitor defers a contended writer without weakening durable 
     const action = await deferredForegroundSendAction(fixture);
     const pending = await runCli(
       deferredForegroundSendArgs(fixture, action, message),
-      {
-        ...fixture.environment,
-        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-      }
+      codexNativeAcceptanceEnv(fixture.environment)
     );
     assert.equal(pending.status, 0, pending.stderr || pending.stdout);
     const pendingOutput = JSON.parse(pending.stdout);
@@ -4280,20 +3994,14 @@ test("v3 acceptance monitor defers a contended writer without weakening durable 
       statePath,
       "--log",
       logPath,
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome,
+      ...codexNoRolloutStoreArgs(fixture),
       "--poll-interval-ms",
       "50",
       "--agent-timeout-minutes",
       "1",
       "--agent-hard-timeout-minutes",
       "2"
-    ], {
-      ...fixture.environment,
-      AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-    });
+    ], codexNativeAcceptanceEnv(fixture.environment));
     assert.equal(monitored.status, 0, monitored.stderr || monitored.stdout);
     assert.deepEqual(JSON.parse(fs.readFileSync(snapshotPath, "utf8")), before);
     assert.ok(
@@ -4341,10 +4049,7 @@ test("raw terminal cancel cannot bypass a pending candidate transfer after a rou
     const action = await deferredForegroundSendAction(fixture);
     const pending = await runCli(
       deferredForegroundSendArgs(fixture, action, message),
-      {
-        ...fixture.environment,
-        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-      }
+      codexNativeAcceptanceEnv(fixture.environment)
     );
     assert.equal(pending.status, 0, pending.stderr || pending.stdout);
     assert.equal(JSON.parse(pending.stdout).status, "submission_pending_acceptance");
@@ -4368,10 +4073,7 @@ test("raw terminal cancel cannot bypass a pending candidate transfer after a rou
       "cancel",
       "--conversation",
       fixture.terminalId,
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome
+      ...codexNoRolloutStoreArgs(fixture)
     ], fixture.environment);
     assert.equal(cancelled.status, 1, cancelled.stdout);
     assert.match(
@@ -4409,10 +4111,7 @@ test("raw terminal cancel remains direct after a candidate transfer resolves", a
     const action = await deferredForegroundSendAction(fixture);
     const sent = await runCli(
       deferredForegroundSendArgs(fixture, action, message),
-      {
-        ...fixture.environment,
-        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-      }
+      codexNativeAcceptanceEnv(fixture.environment)
     );
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
     assert.equal(soleDeferredForegroundTransfer(fixture).status, "resolved");
@@ -4424,10 +4123,7 @@ test("raw terminal cancel remains direct after a candidate transfer resolves", a
       "cancel",
       "--conversation",
       fixture.terminalId,
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome
+      ...codexNoRolloutStoreArgs(fixture)
     ], fixture.environment);
     assert.equal(cancelled.status, 0, cancelled.stderr || cancelled.stdout);
     const output = JSON.parse(cancelled.stdout);
@@ -4463,10 +4159,7 @@ test("startup reconciliation relaunches one pending candidate monitor without re
     const action = await deferredForegroundSendAction(fixture);
     const pending = await runCli(
       deferredForegroundSendArgs(fixture, action, message),
-      {
-        ...fixture.environment,
-        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-      }
+      codexNativeAcceptanceEnv(fixture.environment)
     );
     assert.equal(pending.status, 0, pending.stderr || pending.stdout);
     const pendingOutput = JSON.parse(pending.stdout);
@@ -4495,10 +4188,7 @@ test("startup reconciliation relaunches one pending candidate monitor without re
 
     const reconciled = runCliSubprocess([
       "reconcile-monitors",
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome,
+      ...codexNoRolloutStoreArgs(fixture),
       "--reason",
       "test_candidate_startup_reconcile",
       "--terminal-monitors-only",
@@ -4576,10 +4266,7 @@ test("active candidate transfer protects expired idle source history from reconc
     const action = await deferredForegroundSendAction(fixture);
     const pending = await runCli(
       deferredForegroundSendArgs(fixture, action, message),
-      {
-        ...fixture.environment,
-        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-      }
+      codexNativeAcceptanceEnv(fixture.environment)
     );
     assert.equal(pending.status, 0, pending.stderr || pending.stdout);
     assert.equal(
@@ -4604,10 +4291,7 @@ test("active candidate transfer protects expired idle source history from reconc
       "list",
       "--reconcile",
       "--all",
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome,
+      ...codexNoRolloutStoreArgs(fixture),
       "--idle-timeout-minutes",
       "1"
     ], fixture.environment);
@@ -4649,10 +4333,7 @@ for (const acceptanceCase of ["zero", "multiple"] as const) {
         : [];
       const action = await deferredForegroundSendAction(fixture);
       const args = deferredForegroundSendArgs(fixture, action, message);
-      const first = await runCli(args, {
-        ...fixture.environment,
-        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-      });
+      const first = await runCli(args, codexNativeAcceptanceEnv(fixture.environment));
       assert.equal(first.status, 0, first.stderr || first.stdout);
       const output = JSON.parse(first.stdout);
       if (acceptanceCase === "zero") {
@@ -4667,10 +4348,7 @@ for (const acceptanceCase of ["zero", "multiple"] as const) {
       }
       assertSingleTaskInput(fixture, message);
 
-      const replay = await runCli(args, {
-        ...fixture.environment,
-        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-      });
+      const replay = await runCli(args, codexNativeAcceptanceEnv(fixture.environment));
       assert.equal(replay.status, 1, replay.stdout);
       assert.match(
         replay.stderr,
@@ -4727,10 +4405,7 @@ for (const identityCase of ["resolved", "unavailable"] as const) {
       fixture.acceptanceNativeThreadIdsOnEnter = [NATIVE_THREAD_ID];
       const sent = await runCli(
         deferredForegroundSendArgs(fixture, action, message),
-        {
-          ...fixture.environment,
-          AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-        }
+        codexNativeAcceptanceEnv(fixture.environment)
       );
       assert.equal(sent.status, 0, sent.stderr || sent.stdout);
       const output = JSON.parse(sent.stdout);
@@ -4821,10 +4496,7 @@ for (const hintCase of ["absent", "aged"] as const) {
       fixture.acceptanceNativeThreadIdsOnEnter = [EXTERNAL_THREAD_ID];
       const sent = await runCli(
         deferredForegroundSendArgs(fixture, action, message),
-        {
-          ...fixture.environment,
-          AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-        }
+        codexNativeAcceptanceEnv(fixture.environment)
       );
       assert.equal(sent.status, 0, sent.stderr || sent.stdout);
       const output = JSON.parse(sent.stdout);
@@ -4895,10 +4567,7 @@ test("multi-root unavailable identity uses the exact inventory token and binds t
     fixture.acceptanceNativeThreadIdsOnEnter = [SECOND_EXTERNAL_THREAD_ID];
     const sent = await runCli(
       deferredForegroundSendArgs(fixture, action, message),
-      {
-        ...fixture.environment,
-        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-      }
+      codexNativeAcceptanceEnv(fixture.environment)
     );
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
     const output = JSON.parse(sent.stdout);
@@ -5001,10 +4670,7 @@ for (const routeCase of ["exact_selector", "unique_delegate"] as const) {
           assert.equal(args.includes(targetFlag), false, targetFlag);
         }
       }
-      const sent = await runCli(args, {
-        ...fixture.environment,
-        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-      });
+      const sent = await runCli(args, codexNativeAcceptanceEnv(fixture.environment));
       assert.equal(sent.status, 0, sent.stderr || sent.stdout);
       const output = JSON.parse(sent.stdout);
       assert.equal(output.delivery_receipt, "agent_accepted", sent.stdout);
@@ -5202,10 +4868,7 @@ async function assertSafeAbortedRolloutDelegateRetry(
     );
 
     fixture.acceptanceNativeThreadIdsOnEnter = [NATIVE_THREAD_ID];
-    const retried = await runCli(delegateArgs, {
-      ...fixture.environment,
-      AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-    });
+    const retried = await runCli(delegateArgs, codexNativeAcceptanceEnv(fixture.environment));
     assert.equal(retried.status, 0, retried.stderr || retried.stdout);
     const output = JSON.parse(retried.stdout);
     assert.equal(output.delivery_receipt, "agent_accepted", retried.stdout);
@@ -5448,10 +5111,7 @@ async function assertSafeAbortedStatusCardDelegateRetry(
       0
     );
 
-    const retried = await runCli(delegateArgs, {
-      ...fixture.environment,
-      AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-    });
+    const retried = await runCli(delegateArgs, codexNativeAcceptanceEnv(fixture.environment));
     assert.equal(retried.status, 0, retried.stderr || retried.stdout);
     const output = JSON.parse(retried.stdout);
     assert.equal(output.delivery_receipt, "agent_accepted", retried.stdout);
@@ -5571,10 +5231,7 @@ test("a listed visible clear hint may disappear before token send while exact in
     fixture.acceptanceNativeThreadIdsOnEnter = [EXTERNAL_THREAD_ID];
     const sent = await runCli(
       deferredForegroundSendArgs(fixture, action, message),
-      {
-        ...fixture.environment,
-        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-      }
+      codexNativeAcceptanceEnv(fixture.environment)
     );
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
     const output = JSON.parse(sent.stdout);
@@ -5639,14 +5296,7 @@ test("rollout-backed strict Session send rejects before input and directs caller
       source.session_id,
       "--message",
       "A stale strict caller must refresh before this task is injected.",
-      "--background",
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome,
-      "--openclaw-bin",
-      "/usr/bin/true",
-      "--disable-terminal-bridge-monitor"
+      ...codexNoRolloutBackgroundSendArgs(fixture)
     ], fixture.environment);
     assert.equal(sent.status, 1, sent.stdout);
     assert.match(sent.stderr, /refresh.*list|list.*selector|follow-current/iu);
@@ -5726,10 +5376,7 @@ test("explicit close of a v1 uncertain clear dispatch restores only future candi
       "close",
       "--turn",
       turnId,
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome
+      ...codexNoRolloutStoreArgs(fixture)
     ], fixture.environment);
     assert.equal(closed.status, 0, closed.stderr || closed.stdout);
     assert.equal(JSON.parse(closed.stdout).terminal_dispatch_resolved, true);
@@ -5771,10 +5418,7 @@ test("explicit close of a v1 uncertain clear dispatch restores only future candi
     fixture.acceptanceNativeThreadIdsOnEnter = [EXTERNAL_THREAD_ID];
     const recovered = await runCli(
       deferredForegroundSendArgs(fixture, futureAction, lostMessage),
-      {
-        ...fixture.environment,
-        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-      }
+      codexNativeAcceptanceEnv(fixture.environment)
     );
     assert.equal(recovered.status, 0, recovered.stderr || recovered.stdout);
     const recoveredOutput = JSON.parse(recovered.stdout);
@@ -5862,10 +5506,7 @@ test("abandoned predecessor candidate token fails closed when exact authority dr
     ]);
     const inventoryDrift = await runCli(
       deferredForegroundSendArgs(fixture, inventoryBoundAction, message),
-      {
-        ...fixture.environment,
-        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-      }
+      codexNativeAcceptanceEnv(fixture.environment)
     );
     assert.equal(inventoryDrift.status, 1, inventoryDrift.stdout);
     assert.match(
@@ -5887,10 +5528,7 @@ test("abandoned predecessor candidate token fails closed when exact authority dr
 
     const rejected = await runCli(
       deferredForegroundSendArgs(fixture, action, message),
-      {
-        ...fixture.environment,
-        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-      }
+      codexNativeAcceptanceEnv(fixture.environment)
     );
     assert.equal(rejected.status, 1, rejected.stdout);
     assert.match(
@@ -5986,10 +5624,7 @@ test("closed detached Codex history does not force /status on a narrow candidate
     fixture.acceptanceNativeThreadIdsOnEnter = [NATIVE_THREAD_ID];
     const sent = await runCli(
       deferredForegroundSendArgs(fixture, action, message),
-      {
-        ...fixture.environment,
-        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-      }
+      codexNativeAcceptanceEnv(fixture.environment)
     );
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
     const output = JSON.parse(sent.stdout);
@@ -6077,10 +5712,7 @@ test("known detached companion roots use the terminal-scoped human-priority rout
 
     const sent = await runCli(
       deferredForegroundSendArgs(fixture, action, message),
-      {
-        ...fixture.environment,
-        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-      }
+      codexNativeAcceptanceEnv(fixture.environment)
     );
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
     const output = JSON.parse(sent.stdout);
@@ -6140,10 +5772,7 @@ test("a non-companion bound candidate claim suppresses present multi-root send a
 
     const rejected = await runCli(
       deferredForegroundSendArgs(fixture, cachedAction, message),
-      {
-        ...fixture.environment,
-        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-      }
+      codexNativeAcceptanceEnv(fixture.environment)
     );
     assert.equal(rejected.status, 1, rejected.stdout);
     assert.match(
@@ -6197,18 +5826,8 @@ test("strict Session send keeps the narrow /status viewport gate", async () => {
       source.session_id,
       "--message",
       "Strict Session authority still requires an exact UUID.",
-      "--background",
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome,
-      "--openclaw-bin",
-      "/usr/bin/true",
-      "--disable-terminal-bridge-monitor"
-    ], {
-      ...fixture.environment,
-      AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-    });
+      ...codexNoRolloutBackgroundSendArgs(fixture)
+    ], codexNativeAcceptanceEnv(fixture.environment));
     assert.equal(sent.status, 1, sent.stdout);
     assert.match(sent.stderr, /at least 80 columns|viewport|widen|zoom/iu);
     assert.deepEqual(taskInputCalls(fixture), []);
@@ -6232,14 +5851,7 @@ test("a submitted status probe reports a truncated Session card without retrying
       session.session_id,
       "--message",
       "This task must wait for an exact status identity.",
-      "--background",
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome,
-      "--openclaw-bin",
-      "/usr/bin/true",
-      "--disable-terminal-bridge-monitor"
+      ...codexNoRolloutBackgroundSendArgs(fixture)
     ], {
       ...fixture.environment,
       AKK_TEST_TRUNCATED_STATUS_CARD: "1"
@@ -6267,10 +5879,7 @@ test("unmanaged Codex lifecycle token changes when a PID is reused", async () =>
   try {
     const first = await runCli([
       "list",
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome,
+      ...codexNoRolloutStoreArgs(fixture),
       "--no-approval-scan"
     ], fixture.environment);
     assert.equal(first.status, 0, first.stderr || first.stdout);
@@ -6284,10 +5893,7 @@ test("unmanaged Codex lifecycle token changes when a PID is reused", async () =>
     fs.writeFileSync(fixture.processBirthPath, STALE_PROCESS_BIRTH);
     const second = await runCli([
       "list",
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome,
+      ...codexNoRolloutStoreArgs(fixture),
       "--no-approval-scan"
     ], fixture.environment);
     assert.equal(second.status, 0, second.stderr || second.stdout);
@@ -6307,10 +5913,7 @@ test("live-gate New rejects an unmanaged Codex origin that is not persisted", as
   try {
     const listed = await runCli([
       "list",
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome,
+      ...codexNoRolloutStoreArgs(fixture),
       "--no-approval-scan"
     ], fixture.environment);
     assert.equal(listed.status, 0, listed.stderr || listed.stdout);
@@ -6325,10 +5928,7 @@ test("live-gate New rejects an unmanaged Codex origin that is not persisted", as
       "--expected-binding-token",
       expectedBindingToken,
       "--require-restorable-origin",
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome
+      ...codexNoRolloutStoreArgs(fixture)
     ], {
       ...fixture.environment,
       AKK_TEST_EXIT_AFTER_LIFECYCLE_PREPARED: "1"
@@ -6365,10 +5965,7 @@ test("live-gate New accepts a persisted unmanaged Codex origin", async () => {
   try {
     const listed = await runCli([
       "list",
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome,
+      ...codexNoRolloutStoreArgs(fixture),
       "--no-approval-scan"
     ], fixture.environment);
     assert.equal(listed.status, 0, listed.stderr || listed.stdout);
@@ -6383,10 +5980,7 @@ test("live-gate New accepts a persisted unmanaged Codex origin", async () => {
       "--expected-binding-token",
       expectedBindingToken,
       "--require-restorable-origin",
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome
+      ...codexNoRolloutStoreArgs(fixture)
     ], fixture.environment);
 
     assert.equal(
@@ -6445,10 +6039,7 @@ test("native status inspection is snapshot-bound, settles the slash composer, an
       "status",
       "--expected-binding-token",
       token,
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome
+      ...codexNoRolloutStoreArgs(fixture)
     ];
 
     const stale = await runCli(
@@ -6573,10 +6164,7 @@ for (const [label, viewportColumns] of [
           "status",
           "--expected-binding-token",
           String(listed.lifecycle_binding_token),
-          "--store-dir",
-          fixture.storeDir,
-          "--codex-home",
-          fixture.codexHome
+          ...codexNoRolloutStoreArgs(fixture)
         ], fixture.environment);
 
         assert.equal(inspected.status, 1, inspected.stdout);
@@ -6620,10 +6208,7 @@ test("Herdr zoomed focused effective area gates closed Codex status at the exact
       "status",
       "--expected-binding-token",
       String(listed.lifecycle_binding_token),
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome
+      ...codexNoRolloutStoreArgs(fixture)
     ];
 
     const inspect = () => runCli(nativeInspectArguments, fixture.environment);
@@ -6756,10 +6341,7 @@ test("Codex 0.146.0 native status inspection remains backward compatible", async
       "status",
       "--expected-binding-token",
       String(listed.lifecycle_binding_token),
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome
+      ...codexNoRolloutStoreArgs(fixture)
     ], fixture.environment);
     assert.equal(inspected.status, 0, inspected.stderr || inspected.stdout);
     const result = JSON.parse(inspected.stdout);
@@ -6783,10 +6365,7 @@ test("native status inspection sends no Enter after post-injection process drift
       "status",
       "--expected-binding-token",
       String(listed.lifecycle_binding_token),
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome
+      ...codexNoRolloutStoreArgs(fixture)
     ], {
       ...fixture.environment,
       AKK_TEST_NATIVE_INSPECT_PROCESS_BIRTH_AFTER_TEXT: STALE_PROCESS_BIRTH
@@ -6837,10 +6416,7 @@ test("native status inspection is withheld and rejects a cached action while man
         "status",
         "--expected-binding-token",
         String(advertised.arguments.expected_binding_token),
-        "--store-dir",
-        fixture.storeDir,
-        "--codex-home",
-        fixture.codexHome
+        ...codexNoRolloutStoreArgs(fixture)
       ], fixture.environment);
       assert.equal(rejected.status, 1, `${blocker}: ${rejected.stdout}`);
       assert.match(
@@ -7309,10 +6885,7 @@ async function listFixtureTerminal(
 ): Promise<Record<string, any>> {
   const listed = await runCli([
     "list",
-    "--store-dir",
-    fixture.storeDir,
-    "--codex-home",
-    fixture.codexHome
+    ...codexNoRolloutStoreArgs(fixture)
   ], fixture.environment);
   assert.equal(listed.status, 0, listed.stderr || listed.stdout);
   const terminals = JSON.parse(listed.stdout).terminals;
@@ -7368,14 +6941,7 @@ async function seedStatusCardManagedApproval(
     fixture.terminalId,
     "--message",
     "Prepare one permission request for explicit human review.",
-    "--background",
-    "--store-dir",
-    fixture.storeDir,
-    "--codex-home",
-    fixture.codexHome,
-    "--openclaw-bin",
-    "/usr/bin/true",
-    "--disable-terminal-bridge-monitor"
+    ...codexNoRolloutBackgroundSendArgs(fixture)
   ], fixture.environment);
   assert.equal(sent.status, 0, sent.stderr || sent.stdout);
   const output = JSON.parse(sent.stdout);
@@ -7565,10 +7131,7 @@ function seedResolvedHistoricalDispatchAndStatusCard(
     "--openclaw-bin",
     "/usr/bin/true",
     "--disable-terminal-bridge-monitor"
-  ], {
-    ...fixture.environment,
-    AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-  });
+  ], codexNativeAcceptanceEnv(fixture.environment));
   assert.equal(sent.status, 0, sent.stderr || sent.stdout);
   const output = JSON.parse(sent.stdout);
   assert.equal(output.delivered, true, sent.stdout);
@@ -7860,10 +7423,7 @@ function reconcileArguments(
     String(argumentsValue.expected_binding_token),
     "--expected-terminal-token",
     String(argumentsValue.expected_terminal_token),
-    "--store-dir",
-    fixture.storeDir,
-    "--codex-home",
-    fixture.codexHome
+    ...codexNoRolloutStoreArgs(fixture)
   ];
 }
 
