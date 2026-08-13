@@ -6862,6 +6862,7 @@ interface NoRolloutFixture {
   terminalControl: TerminalControlRef;
   codexPid: number;
   cliPid?: number;
+  clockMs: number;
   codexVersion: "0.146.0" | "0.147.0";
   terminalKind: "tmux" | "herdr";
   persistedCandidate: boolean;
@@ -7098,6 +7099,7 @@ function createNoRolloutFixture(
     terminalId,
     terminalControl,
     codexPid,
+    clockMs: Date.now(),
     codexVersion,
     terminalKind,
     persistedCandidate,
@@ -8423,7 +8425,12 @@ function inProcessDependencies(
   fixture: NoRolloutFixture,
   env: NodeJS.ProcessEnv
 ): CliCommandDependencies {
-  let nowMs = Date.now();
+  // A fixture can invoke the CLI multiple times to simulate a restart. Keep its
+  // virtual clock monotonic across those invocations: sleep advances virtual
+  // time without blocking, so resetting to a faster wall clock can otherwise
+  // make a later acceptance appear to precede the persisted Enter dispatch.
+  let nowMs = Math.max(Date.now(), fixture.clockMs);
+  fixture.clockMs = nowMs;
   const provider = fixture.terminalKind === "herdr"
     ? createFixtureHerdrProvider(fixture, env, () => nowMs)
     : new TmuxTerminalControlProvider({
@@ -8451,9 +8458,11 @@ function inProcessDependencies(
     monotonicNowMs: () => nowMs,
     sleep: async (milliseconds) => {
       nowMs += milliseconds;
+      fixture.clockMs = nowMs;
     },
     sleepSync: (milliseconds) => {
       nowMs += milliseconds;
+      fixture.clockMs = nowMs;
     },
     exit: (status) => {
       throw new InProcessCliExit(status);
