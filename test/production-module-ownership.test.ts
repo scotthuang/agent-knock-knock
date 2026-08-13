@@ -49,7 +49,10 @@ test("production ownership covers every source module and preserves architecture
   assert.equal(architecture.productionModules, discovered.length);
   assert.ok(architecture.importEdges > 0);
   assert.equal(architecture.importCycles, 0);
-  assert.equal(architecture.cliCorePhysicalLoc, 38_005);
+  assert.equal(
+    architecture.cliCorePhysicalLoc,
+    loadManifest().architecture.cli_core_max_physical_loc
+  );
   assert.deepEqual(architecture.cliCoreImporters, ["src/cli.ts"]);
   assert.equal(
     ownershipModule.DYNAMIC_IMPORT_POLICY,
@@ -119,6 +122,7 @@ test("architecture checks reject cli-core LOC drift and unapproved reverse impor
   });
   const source = (modulePath: string) =>
     fs.readFileSync(path.join(repoRoot, modulePath), "utf8");
+  const ratchet = loadManifest().architecture.cli_core_max_physical_loc;
 
   assert.throws(
     () => ownershipModule.validateProductionArchitecture({
@@ -131,7 +135,7 @@ test("architecture checks reject cli-core LOC drift and unapproved reverse impor
           : original;
       }
     }),
-    /manifest ratchet 38005 \(actual 38006\)/u
+    new RegExp(`manifest ratchet ${ratchet} \\(actual ${ratchet + 1}\\)`, "u")
   );
 
   assert.throws(
@@ -151,7 +155,7 @@ test("architecture checks reject cli-core LOC drift and unapproved reverse impor
         return `${lines.join("\n")}\n`;
       }
     }),
-    /manifest ratchet 38005 \(actual 38004\)/u
+    new RegExp(`manifest ratchet ${ratchet} \\(actual ${ratchet - 1}\\)`, "u")
   );
 
   assert.throws(
