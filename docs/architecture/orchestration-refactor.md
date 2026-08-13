@@ -114,7 +114,7 @@ must preserve the responsibility and dependency rules.
 | Terminal observation | Typed terminal/process/agent snapshots and normalization | Permission decisions or mutations |
 | Authority and action projection | Binding match/conflict, ownership, selectors, tokens, `available_actions`, handoff decisions | I/O, clocks, filesystem paths, terminal input |
 | Persistence repositories/codecs | Backward-compatible decoding, validation, atomic write primitives, revisions and CAS | Product policy or terminal input |
-| Transaction/lock kernel | Lock acquisition, capability-scoped mutation context, durable effect ordering | Command parsing or agent-specific screen logic |
+| Transaction/lock kernel | Canonical lock acquisition/release; later, capabilities consumed by gated mutation ports | Business decisions, durable effect ordering, command parsing, or agent-specific screen logic |
 | Dispatch service | Send/respond/approve/cancel preparation, exact input stages, acceptance receipt decisions | CLI formatting, callback transport, native-thread lifecycle policy |
 | Lifecycle service | New/resume/adopt/reconcile classifications and transition reducer | Ordinary task submission or callback delivery |
 | Callback/outbox service | Immutable callback message, attempt lease, retry and delivery settlement | Monitor polling or terminal authority projection |
@@ -189,8 +189,11 @@ the left while it already holds a lock to the right.
 - The conversation state lock protects one Turn state/event transaction and its
   compare-before-write checks.
 
-The transaction shell should represent held capabilities with opaque typed
-values. Boolean parameters such as `terminalSendLockHeld`,
+The initial transaction shell only enforces canonical nesting and reverse
+release for migrated call sites. It must not advertise a capability until a
+persistence or terminal port actually requires and validates that token. Later
+repository extraction should introduce per-transaction opaque capabilities at
+those gated ports. Boolean parameters such as `terminalSendLockHeld`,
 `terminalStateLockHeld`, and `storeWriterLeaseHeld` must not be reproduced in
 new services.
 
@@ -320,7 +323,8 @@ ordering and compatibility are behavior, not implementation detail.
 For every extracted transaction, the PR must include a durable write map that
 states:
 
-- the precondition and held lock capabilities;
+- the precondition and held lock scopes (and, once enforced by a gated port,
+  capabilities);
 - the record and expected revision/generation;
 - whether terminal input is definitely zero, possible, or accepted;
 - the crash point immediately before and after the write;
@@ -337,7 +341,7 @@ PR3 first applies the lock shell only to operations that already use the target
 lock order. Their business callbacks remain in `cli-core.ts`; the shell does not
 own these records or effects.
 
-| Operation | Held capabilities | Durable writes and existing order | Terminal input | Crash/retry direction |
+| Operation | Held lock scopes | Durable writes and existing order | Terminal input | Crash/retry direction |
 | --- | --- | --- | --- | --- |
 | `runReconcileBinding` | terminal -> writer | one managed Session CAS detach at the listed revision | definitely zero | before CAS, refresh and reauthorize; after CAS, detached is final and a stale token cannot retry |
 | `runTerminalConversationCancel` | terminal -> writer | none; runtime audit and JSON output remain after the adapter call | possible ordered cancel keys | before input, a fresh cancel may retry; after an unacknowledged transport attempt, adapter semantics remain authoritative |

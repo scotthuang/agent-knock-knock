@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   decideTerminalBindingMatch,
+  terminalObservationFromListEntry,
+  terminalObservationFromResolvedIdentity,
   type TerminalBindingMatchEvidence,
   type TerminalObservation
 } from "../src/terminal-binding-authority.js";
@@ -97,6 +99,88 @@ const MATCHING_EVIDENCE: TerminalBindingMatchEvidence = {
   terminalAliasMatches: true,
   workspaceMatches: true
 };
+
+test("list observation adapter preserves resolved and no-identity evidence", () => {
+  const resolved = terminalObservationFromListEntry({
+    pid: 4_100,
+    native_agent_session_id: THREAD_A,
+    native_agent_process_uuid: PROCESS_UUID,
+    native_agent_process_birth: PROCESS_BIRTH,
+    native_agent_rollout: ROLLOUT,
+    native_agent_identity_evidence: "codex_rollout_fd",
+    native_agent_status_card_session_id: THREAD_A
+  }, "codex");
+  assert.deepEqual(resolved, {
+    ...resolvedObservation(),
+    statusCardNativeThreadId: THREAD_A,
+    codexOpenRootInventory: undefined
+  });
+
+  assert.deepEqual(
+    terminalObservationFromListEntry({
+      pid: 4_100,
+      native_agent_identity_observation: {
+        status: "verified_absent",
+        evidence: "native_identity_resolver_verified_absent"
+      }
+    }, "codex").nativeIdentity,
+    {
+      status: "verified_absent",
+      evidence: "native_identity_resolver_verified_absent"
+    }
+  );
+  assert.deepEqual(
+    terminalObservationFromListEntry({
+      pid: 4_100,
+      native_agent_identity_observation: {
+        status: "unavailable",
+        reason: "inventory unavailable"
+      }
+    }, "codex").nativeIdentity,
+    { status: "unavailable", reason: "inventory unavailable" }
+  );
+  assert.deepEqual(
+    terminalObservationFromListEntry({ pid: 4_100 }, "codex").nativeIdentity,
+    { status: "not_observed" }
+  );
+});
+
+test("mutation observation adapter never imports list-only supplemental evidence", () => {
+  const identity = resolvedObservation().nativeIdentity;
+  assert.equal(identity.status, "resolved");
+  assert.deepEqual(
+    terminalObservationFromResolvedIdentity({
+      agent: "codex",
+      pid: 4_100,
+      identity: identity.identity,
+      processIncarnation: {
+        processUuid: PROCESS_UUID,
+        processBirth: PROCESS_BIRTH
+      }
+    }),
+    resolvedObservation()
+  );
+  assert.deepEqual(
+    terminalObservationFromResolvedIdentity({
+      agent: "codex",
+      pid: 4_100,
+      identity: undefined,
+      processIncarnation: {
+        processUuid: PROCESS_UUID,
+        processBirth: PROCESS_BIRTH
+      }
+    }),
+    {
+      agent: "codex",
+      pid: 4_100,
+      nativeIdentity: { status: "not_observed" },
+      processIncarnation: {
+        processUuid: PROCESS_UUID,
+        processBirth: PROCESS_BIRTH
+      }
+    }
+  );
+});
 
 test("exact binding policy rejects every structural authority mismatch", () => {
   const session = managedSession();

@@ -238,7 +238,7 @@ import {
   terminalObservationFromResolvedIdentity,
   type TerminalNativeIdentity as NativeAgentSessionIdentity
 } from "./terminal-binding-authority.js";
-import { withMutationTransaction } from "./mutation-transaction.js";
+import { withCanonicalMutationLocks } from "./mutation-transaction.js";
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 10080;
 const DEFAULT_AGENT_TIMEOUT_MINUTES = 60;
@@ -16175,7 +16175,7 @@ async function runReconcileBinding(options: Record<string, any>) {
     stringValue(options.expectedTerminalToken),
     "--expected-terminal-token is required"
   );
-  return withMutationTransaction({
+  return withCanonicalMutationLocks({
     acquireTerminal: () => acquireTerminalBridgeSendLock(
       storeDir,
       initiallyResolved.terminalControl,
@@ -26086,7 +26086,7 @@ async function runCancel(options) {
 
 async function runTerminalConversationCancel({ options, conversationId, agent, terminalControl, pid }) {
   const storeDir = storeDirFromOptions(options);
-  await withMutationTransaction({
+  await withCanonicalMutationLocks({
     acquireTerminal: () => acquireTerminalBridgeSendLock(
       storeDir,
       terminalControl,
@@ -26278,7 +26278,7 @@ async function runObservedHandoffClose({
     initialSource.binding.terminal_control,
     { pid: initialSource.binding.native_process.pid }
   );
-  await withMutationTransaction({
+  await withCanonicalMutationLocks({
     acquireTerminal: () => acquireTerminalBridgeSendLock(
       storeDir,
       terminal.terminalControl,
@@ -26875,7 +26875,7 @@ async function runTerminalDispatchClose({
 }): Promise<void> {
   const terminalControl = terminalConversation.terminalControl;
   const storeDir = storeDirFromOptions(options);
-  return withMutationTransaction({
+  return withCanonicalMutationLocks({
     acquireTerminal: () => acquireTerminalBridgeSendLock(
       storeDir,
       terminalControl,
