@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -58,8 +57,7 @@ import {
   type DeferredForegroundTransferSourceTurnAuthority
 } from "./deferred-foreground-transfer.js";
 import type {
-  CodexOpenRootRolloutInventory,
-  CodingAgentSessionProvider
+  CodexOpenRootRolloutInventory
 } from "./agent-session-provider.js";
 import {
   applyMessageToConversation,
@@ -85,7 +83,7 @@ import {
   isExecutorKind,
   type ExecutorKind
 } from "./executors.js";
-import { redactString, writeRuntimeLog } from "./runtime-log.js";
+import { redactString } from "./runtime-log.js";
 import { formatTranscript, readNdjsonLog } from "./transcript.js";
 import {
   appendEvent,
@@ -277,6 +275,25 @@ import {
   terminalDispatchReceiptHistory as terminalLedgerReceiptHistory
 } from "./terminal-dispatch-ledger-codec.js";
 import * as dispatch from "./terminal-dispatch-policy.js";
+import {
+  cliCwd,
+  cliDependencies,
+  cliEnv,
+  cliExit,
+  cliNow,
+  cliNowMs,
+  cliPid,
+  cliRuntimeLog as runtimeLog,
+  cliSleep,
+  cliSleepSync as sleepSync,
+  runCliCommandExecution,
+  setCliExitCode,
+  writeCliStdout,
+  type CliCommandDependencies as RuntimeCliCommandDependencies,
+  type CliCommandExecutionResult
+} from "./cli-runtime-context.js";
+
+export type { CliCommandExecutionResult };
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 10080;
 const DEFAULT_AGENT_TIMEOUT_MINUTES = 60;
@@ -349,137 +366,13 @@ const STORE_MUTATION_COMMANDS = new Set([
 ]);
 
 export type CliCommandOptions = Record<string, any>;
-
-/**
- * Process-level dependencies used by an imported CLI command execution.
- *
- * Every dependency is scoped to one async execution. This deliberately avoids
- * mutating process globals, so independent in-process tests can run in
- * parallel without sharing providers, output, environment, or clocks.
- */
-export interface CliCommandDependencies {
-  terminalControlProviderRegistry?: TerminalControlProviderRegistry;
-  terminalProcessSource?: TerminalProcessSource;
-  createAgentSessionProvider?: (
-    agent: "codex",
-    options: Readonly<CliCommandOptions>
-  ) => CodingAgentSessionProvider;
-  codexLocalSessionAdapter?: CodexLocalSessionAdapter | ((
-    options: Readonly<CliCommandOptions>
-  ) => CodexLocalSessionAdapter);
-  codexThreadLifecycleProvider?: TerminalThreadLifecycleCandidateProvider;
-  loadClaudeAgentRows?: (
-    options: Readonly<CliCommandOptions>,
-    observation: { required?: boolean }
-  ) => ClaudeAgentRow[];
-  agentVersionForRunningProcess?: (
-    agent: ExecutorKind,
-    pid: number,
-    options: Readonly<CliCommandOptions>
-  ) => string | undefined;
-  codexProcessBirthForPid?: (pid: number) => string;
-  stdout?: (text: string) => void;
-  cwd?: string | (() => string);
-  env?: NodeJS.ProcessEnv;
-  pid?: number;
-  now?: () => Date | number;
-  /** Monotonic clock for terminal composer settling; production uses performance.now. */
-  monotonicNowMs?: () => number;
-  sleep?: (milliseconds: number) => Promise<void>;
-  sleepSync?: (milliseconds: number) => void;
-  exit?: (code: number) => never;
-  runtimeLog?: (
-    level: "info" | "warn" | "error",
-    event: string,
-    fields: Record<string, unknown>
-  ) => void;
-}
+export type CliCommandDependencies = RuntimeCliCommandDependencies<CliCommandOptions>;
 
 export interface ParsedCliCommand {
   command?: string;
   options: CliCommandOptions;
 }
 
-export interface CliCommandExecutionResult {
-  exitCode: number;
-  stdout: string;
-}
-
-interface CliExecutionContext {
-  dependencies: Readonly<CliCommandDependencies>;
-  exitCode: number;
-  stdout: string[];
-}
-
-const cliExecutionStorage = new AsyncLocalStorage<CliExecutionContext>();
-
-function cliContext(): CliExecutionContext | undefined {
-  return cliExecutionStorage.getStore();
-}
-
-function cliDependencies(): Readonly<CliCommandDependencies> {
-  return cliContext()?.dependencies ?? {};
-}
-
-function writeCliStdout(text: string): void {
-  const context = cliContext();
-  if (!context) {
-    throw new Error("CLI output requires an active executeCliCommand context");
-  }
-  context.stdout.push(text);
-  context.dependencies.stdout?.(text);
-}
-
-function setCliExitCode(exitCode: number): void {
-  const context = cliContext();
-  if (!context) {
-    throw new Error("CLI exit status requires an active executeCliCommand context");
-  }
-  context.exitCode = exitCode;
-}
-
-function cliCwd(): string {
-  const configured = cliDependencies().cwd;
-  return typeof configured === "function"
-    ? configured()
-    : configured ?? process.cwd();
-}
-
-function cliEnv(): NodeJS.ProcessEnv {
-  return cliDependencies().env ?? process.env;
-}
-
-function cliPid(): number {
-  return cliDependencies().pid ?? process.pid;
-}
-
-function cliNow(): Date {
-  const value = cliDependencies().now?.();
-  return value instanceof Date
-    ? new Date(value.getTime())
-    : new Date(value ?? Date.now());
-}
-
-function cliNowMs(): number {
-  return cliNow().getTime();
-}
-
-async function cliSleep(milliseconds: number): Promise<void> {
-  const injected = cliDependencies().sleep;
-  if (injected) {
-    await injected(milliseconds);
-    return;
-  }
-  await new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
-}
-
-function cliExit(code: number): never {
-  const injected = cliDependencies().exit;
-  if (injected) {
-    return injected(code);
-  }
-  return process.exit(code);
-}
 
 class TurnBindingSupersededError extends Error {
   readonly code = "AKK_TURN_BINDING_SUPERSEDED";
@@ -603,36 +496,12 @@ export async function executeCliCommand(
   options: CliCommandOptions = {},
   dependencies: CliCommandDependencies = {}
 ): Promise<CliCommandExecutionResult> {
-  const context: CliExecutionContext = {
+  return runCliCommandExecution(
+    commandName,
+    options,
     dependencies,
-    exitCode: 0,
-    stdout: []
-  };
-  return cliExecutionStorage.run(context, async () => {
-    runtimeLog("info", "cli_start", {
-      command: commandName ?? "help",
-      cwd: cliCwd(),
-      option_keys: Object.keys(options).sort()
-    });
-    try {
-      await dispatchCliCommand(commandName, options);
-      runtimeLog("info", "cli_finish", {
-        command: commandName ?? "help",
-        exit_code: context.exitCode
-      });
-      return {
-        exitCode: context.exitCode,
-        stdout: context.stdout.join("")
-      };
-    } catch (error) {
-      runtimeLog("error", "cli_error", {
-        command: commandName ?? "help",
-        message: error instanceof Error ? error.message : String(error),
-        stack: error instanceof Error ? error.stack : undefined
-      });
-      throw error;
-    }
-  });
+    () => dispatchCliCommand(commandName, options)
+  );
 }
 
 async function dispatchCliCommand(commandName, options) {
@@ -1086,7 +955,7 @@ async function listActiveSessionsWithTerminalControl(
 function createRuntimeTerminalControlProviderRegistry(
   options
 ): TerminalControlProviderRegistry {
-  const injected = cliDependencies().terminalControlProviderRegistry;
+  const injected = cliDependencies<CliCommandOptions>().terminalControlProviderRegistry;
   if (injected) {
     return injected;
   }
@@ -1118,7 +987,7 @@ function createTerminalControlProvider(
 }
 
 function createTerminalProcessSource(options): TerminalProcessSource {
-  const injected = cliDependencies().terminalProcessSource;
+  const injected = cliDependencies<CliCommandOptions>().terminalProcessSource;
   if (injected) {
     return injected;
   }
@@ -1134,7 +1003,7 @@ function loadClaudeAgentRows(
   options: Record<string, any> = {},
   observation: { required?: boolean } = {}
 ): ClaudeAgentRow[] {
-  const injected = cliDependencies().loadClaudeAgentRows;
+  const injected = cliDependencies<CliCommandOptions>().loadClaudeAgentRows;
   if (injected) {
     return injected(options, observation);
   }
@@ -1428,7 +1297,7 @@ function createTerminalAgentBridge(
   registry = createRuntimeTerminalAgentRegistry(options)
 ): TerminalAgentBridge {
   const processSource = createTerminalProcessSource(options);
-  const dependencies = cliDependencies();
+  const dependencies = cliDependencies<CliCommandOptions>();
   return new TerminalAgentBridge({
     registry,
     terminalProvider,
@@ -13325,7 +13194,7 @@ function agentVersionForRunningProcess(
   pid: number,
   options: Record<string, any>
 ): string | undefined {
-  const injected = cliDependencies().agentVersionForRunningProcess;
+  const injected = cliDependencies<CliCommandOptions>().agentVersionForRunningProcess;
   if (injected) {
     return injected(agent, pid, options);
   }
@@ -34964,15 +34833,6 @@ function readFileLockOwner(lockPath: string): { pid?: number; token?: string } {
   }
 }
 
-function sleepSync(ms) {
-  const injected = cliDependencies().sleepSync;
-  if (injected) {
-    injected(ms);
-    return;
-  }
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
 function readExistingEvents(logPath) {
   try {
     return readNdjsonLog(logPath);
@@ -35991,11 +35851,11 @@ function createAgentSessionProvider(agent, options) {
     throw new Error(`unsupported agent session provider: ${agent}`);
   }
 
-  const injected = cliDependencies().createAgentSessionProvider;
+  const injected = cliDependencies<CliCommandOptions>().createAgentSessionProvider;
   if (injected) {
     return injected(agent, options);
   }
-  const injectedAdapter = cliDependencies().codexLocalSessionAdapter;
+  const injectedAdapter = cliDependencies<CliCommandOptions>().codexLocalSessionAdapter;
   if (injectedAdapter) {
     return new CodexLocalSessionProvider(
       typeof injectedAdapter === "function"
@@ -36145,23 +36005,6 @@ function isRemoteCompactStreamDisconnect(text) {
     value.includes("stream disconnected") &&
     value.includes("/codex/responses/compact")
   );
-}
-
-function runtimeLog(level, event, fields = {}) {
-  const injected = cliDependencies().runtimeLog;
-  if (injected) {
-    injected(level, event, fields);
-    return;
-  }
-  try {
-    writeRuntimeLog({
-      level,
-      event,
-      ...fields
-    });
-  } catch {
-    // Runtime logging must never break the user-facing CLI command.
-  }
 }
 
 function withStoragePaths(conversation, paths) {

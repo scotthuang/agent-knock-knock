@@ -333,6 +333,7 @@ test("unknown paths and full production domains fail closed", async () => {
     "docs/new-generator.js",
     "src/cli.ts",
     "src/cli-core.ts",
+    "src/cli-runtime-context.ts",
     "src/store.ts",
     "src/protocol.ts",
     "src/claude-local-transcript-provider.ts",
