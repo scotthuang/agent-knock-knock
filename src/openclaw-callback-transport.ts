@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import type { CallbackDeliveryOutcome } from "./callback-outbox-policy.js";
 import {
   sessionIdForConversation,
   turnIdForConversation,
@@ -11,13 +12,6 @@ const CALLBACK_AGENT_WAIT_TIMEOUT_MS = 20_000;
 const CALLBACK_AGENT_WAIT_CLI_TIMEOUT_MS = 25_000;
 const CALLBACK_AGENT_WAIT_PROCESS_TIMEOUT_MS = 30_000;
 const CALLBACK_PROCESS_MAX_BUFFER = 1024 * 1024 * 10;
-
-export interface CallbackDeliveryOutcome {
-  kind: string;
-  injection: Record<string, unknown>;
-  wake: Record<string, unknown>;
-  run_observation?: Record<string, unknown>;
-}
 
 export type CallbackWakeAcknowledgementStatus =
   | "started"

@@ -254,12 +254,12 @@ import { withCanonicalMutationLocks } from "./mutation-transaction.js";
 import {
   beginCallbackRetryPolicy,
   reduceCallbackRetryPolicy,
+  type CallbackDeliveryOutcome,
   type CallbackRetryDisposition
 } from "./callback-outbox-policy.js";
 import { createCallbackOutboxSettlement } from "./callback-outbox-settlement.js";
 import {
   createOpenClawCallbackTransport,
-  type CallbackDeliveryOutcome,
   type CallbackProcessDeliveryObservation
 } from "./openclaw-callback-transport.js";
 import {

@@ -1,3 +1,10 @@
+export interface CallbackDeliveryOutcome {
+  kind: string;
+  injection: Record<string, unknown>;
+  wake: Record<string, unknown>;
+  run_observation?: Record<string, unknown>;
+}
+
 export type CallbackRetryDisposition =
   | { state: "retryable"; attempt: number }
   | {

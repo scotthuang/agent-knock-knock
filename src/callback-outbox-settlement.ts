@@ -1,7 +1,7 @@
 import {
-  callbackDeliveryHasAcceptedTransport
+  callbackDeliveryHasAcceptedTransport,
+  type CallbackDeliveryOutcome
 } from "./callback-outbox-policy.js";
-import type { CallbackDeliveryOutcome } from "./openclaw-callback-transport.js";
 import {
   normalizeLegacyCallbackStatus,
   type AgentMessage,
