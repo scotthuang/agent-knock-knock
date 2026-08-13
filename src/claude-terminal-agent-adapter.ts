@@ -31,6 +31,10 @@ import type {
   TerminalThreadLifecycleOperation,
   TerminalThreadLifecyclePlan
 } from "./terminal-agent-adapter.js";
+import {
+  normalizeTerminalApprovalPromptRegion,
+  terminalApprovalPromptEvidence
+} from "./terminal-agent-adapter.js";
 import { isExactNativeThreadId } from "./managed-session.js";
 
 export type ClaudeProcessKind = "claude_cli";
@@ -1229,7 +1233,7 @@ function singleLineClaudePermissionValue(value: string, maxLength: number): stri
 }
 
 export function detectClaudeApprovalPrompt(screen: string): TerminalApprovalInspection {
-  const lines = claudeDetectionTail(screen);
+  const lines = claudeApprovalDetectionLines(screen);
   const markerIndexes = lines
     .map((line, index) => /^\s*Do you want to proceed\?\s*$/iu.test(line) ? index : -1)
     .filter((index) => index >= 0);
@@ -1281,13 +1285,16 @@ export function detectClaudeApprovalPrompt(screen: string): TerminalApprovalInsp
       promptKind: "claude_permission"
     };
   }
-  const headerIndex = findLastIndex(
-    lines.slice(Math.max(0, markerIndex - 16), markerIndex),
-    (line) => /^\s*Bash command\s*$/iu.test(line)
-  );
-  const absoluteHeaderIndex = headerIndex < 0
-    ? -1
-    : Math.max(0, markerIndex - 16) + headerIndex;
+  const headerSearchStart = Math.max(0, markerIndex - 16);
+  const headerIndexes = lines
+    .slice(0, markerIndex)
+    .flatMap((line, index) =>
+      /^\s*Bash command\s*$/iu.test(line) ? [index] : []
+    );
+  const absoluteHeaderIndex = headerIndexes.length === 1 &&
+      headerIndexes[0] >= headerSearchStart
+    ? headerIndexes[0]
+    : -1;
   const choiceRows = region.flatMap((line, index) => {
     const match = /^\s*(❯\s*)?([1-3])\.\s*(.+?)\s*$/u.exec(line);
     return match
@@ -1367,18 +1374,32 @@ export function detectClaudeApprovalPrompt(screen: string): TerminalApprovalInsp
 
   const requestDetail = redactString(detailLines.join("\n"))
     .slice(0, CLAUDE_PERMISSION_DETAIL_LENGTH);
+  const promptRegionEnd = markerIndex + footerIndex;
   return {
     blocked: true,
     approvable: true,
     promptKind: "claude_permission",
     requestDetail,
     toolName: "Bash",
+    promptEvidence: terminalApprovalPromptEvidence(
+      "claude-bash-permission-prompt-v1",
+      lines.slice(absoluteHeaderIndex, promptRegionEnd + 1).join("\n")
+    ),
     action: {
       mode: "keys",
       keys: ["C-m"],
       label: "Yes"
     }
   };
+}
+
+function claudeApprovalDetectionLines(screen: string): string[] {
+  const lines = normalizeTerminalApprovalPromptRegion(String(screen || ""))
+    .split("\n");
+  while (lines.length > 0 && !lines.at(-1)?.trim()) {
+    lines.pop();
+  }
+  return lines;
 }
 
 function claudePermissionVisibleCommandLine(screen: string): string | undefined {

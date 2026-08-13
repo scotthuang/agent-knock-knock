@@ -175,7 +175,7 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
     assert.match(document, /`expected_binding_token`/u);
     assert.match(document, /`native_thread_id`/u);
     assert.match(document, /`candidate_token`/u);
-    assert.match(document, /v15 `action_contracts`/u);
+    assert.match(document, /v16 `action_contracts`/u);
     assert.match(
       document,
       /`session_exact`[\s\S]*`terminal_follow_current`/u
@@ -215,6 +215,22 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
       /If (?:terminal )?delivery or (?:native )?acceptance is uncertain[\s\S]{0,100}(?:does not retry|do not retry automatically)/u
     );
     assert.match(document, /terminal-scoped manual Codex approval/u);
+    assert.match(
+      document,
+      /v16[\s\S]{0,120}approval fingerprints?[\s\S]{0,120}(?:prompt-scoped|to the approval prompt rather than the whole terminal screen)/iu
+    );
+    assert.match(
+      document,
+      /exact unredacted (?:approval )?(?:region|prompt region)[\s\S]{0,400}(?:whole-screen digest|whole terminal capture digest)[\s\S]{0,160}diagnostic only/iu
+    );
+    assert.match(
+      document,
+      /output[\s\S]{0,80}outside (?:that region|the (?:approval )?(?:prompt )?region)[\s\S]{0,400}(?:without invalidating|may continue scrolling)/iu
+    );
+    assert.match(
+      document,
+      /change (?:inside|within) the (?:exact )?region[\s\S]{0,240}(?:secret|command)[\s\S]{0,300}(?:zero (?:approval )?keys|sends zero keys)/iu
+    );
     assert.match(document, /never (?:available to|participates? in) auto-?approv/iu);
     assert.match(document, /(?:released[- ]owner|dispatch owner is already released)/u);
     assert.match(document, /(?:must not|mustn.t|do not) be retried blindly/u);

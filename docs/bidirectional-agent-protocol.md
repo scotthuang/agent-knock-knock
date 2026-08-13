@@ -97,6 +97,8 @@ Each managed Turn is bound to a concrete identity, including:
 
 AKK revalidates that identity before sending tasks, interrupt keys, or approval input. Stale, changed, ambiguous, or replayed actions are rejected.
 
+Approval authorization is prompt-scoped. An adapter must isolate one complete bounded approval region and keep its exact unredacted bytes local; AKK fingerprints that region with the terminal/process identity, one-time decision, prompt kind, working directory, reason/detail, and request evidence. The whole terminal capture digest and redacted excerpt are diagnostic only. Output outside the prompt may continue scrolling across authorization and dispatch reservation without invalidating the reviewed approval, while any prompt-region, option/highlight, command/secret, kind, process, cwd, reason, or request-evidence change fails closed before an approval key is sent. Missing or ambiguous prompt-region evidence is never downgraded to whole-screen or parsed-display authority. Pre-v16 whole-screen fingerprints and approval tokens that embed them are stale and require fresh `list`/`status` evidence.
+
 The OpenClaw plugin supervises eligible terminal monitors independently of
 interactive commands. It reconciles every five seconds, distinguishes a
 transient Store-lock timeout from a proven binding supersession, and preserves

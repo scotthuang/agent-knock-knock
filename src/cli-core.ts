@@ -7942,7 +7942,7 @@ function managedListApprovalState(
 
 function listActionContracts() {
   return {
-    version: 15,
+    version: 16,
     instructions: [
       "Treat terminals[] as the primary resource and use only actions present in available_actions, except the snapshot-bound terminals[].handoff_decision.choices.take_over_current.action and an exact terminals[].blocking_turns[].recovery_action. Either nested action requires explicit user confirmation; after it succeeds, refresh list before any follow-current send.",
       "The session_exact scope uses session_id only when it is prefilled by the listed send action. A rollout-backed managed Codex pane instead uses the terminal_follow_current scope with its exact selector plus expected_terminal_token because even one materialized rollout does not prove the current TUI foreground thread. A turn id is never an ordinary send target.",
@@ -7953,6 +7953,7 @@ function listActionContracts() {
       "List resumable threads before resume; use only a complete native_thread_id and the action returned for that candidate.",
       "Use a terminal selector only when explicitly named by the user or prefilled by that terminal row's send action. A handoff action also carries expected_terminal_token; never infer, guess, or reuse either value.",
       "Use respond only for an in-flight turn that is explicitly waiting for OpenClaw.",
+      "Approval fingerprint v2 binds stable terminal, process, and action fields plus an unredacted exact prompt-region digest. Whole-screen digests and scrollback excerpts are diagnostic only and never authorize approval. A keys-mode prompt without exact prompt-region evidence is not approvable and exposes no approve action.",
       "Managed controls target turn_id. A raw terminal may be controlled only through its own list-prefilled conversation_id action. When a Codex managed prompt has no usable AKK Turn owner, list may expose one manual terminal-scoped approve carrying expected_terminal_token; copy the complete action after explicit human confirmation. It does not mutate the Turn or Session binding, has no durable dispatch receipt, and is never eligible for automatic approval. If its result is interrupted, refresh status and inspect the live prompt instead of retrying blindly. Never construct, guess, or reuse either selector or token.",
       "Start with the action's prefilled arguments, supply every missing_required field, and consult the top-level action's optional fields only when needed.",
       "Authoritative full IDs are prefilled; short_ref is for display and human input.",
@@ -8130,6 +8131,10 @@ function listActionContracts() {
         optional: ["expected_terminal_token"],
         terminal_scoped_scope:
           "Only the latest list-prefilled Codex conversation_id/token action may approve a managed current prompt without a usable Turn owner. It remains human-confirmed, revalidates exact terminal/process/Session/dispatch/prompt state before keys, never mutates managed state, has no durable dispatch receipt, cannot be auto-approved, and must not be blindly retried after an interrupted result.",
+        fingerprint_contract: "v2_prompt_region",
+        fingerprint_authority:
+          "Stable terminal, process, and action fields plus the unredacted exact prompt-region digest; whole-screen digests and scrollback excerpts are diagnostic only.",
+        missing_prompt_region_evidence: "not_approvable",
         requires_explicit_user_confirmation: true,
         requires_fresh_status: true
       },
@@ -17217,6 +17222,12 @@ function terminalBridgeApprovalFingerprint({ terminalControl, terminalStatus }) 
   if (adapterFingerprint) {
     return adapterFingerprint;
   }
+  if (
+    approval.approvable === true &&
+    (stringValue(approval.decision_mode) ?? "keys") === "keys"
+  ) {
+    return undefined;
+  }
   const endpoint = terminalEndpointFromControlRef(terminalControl);
   const processAnchorPid = Number(endpoint.processAnchorPid);
   if (!Number.isSafeInteger(processAnchorPid) || processAnchorPid <= 1) {
@@ -18911,12 +18922,10 @@ async function runApprove(options) {
       release();
     }
   };
-  releaseStateLock = acquireFileLock(`${statePath}.lock`);
   const writerStoreDir = pathsForConversationDir(
     path.dirname(statePath)
   ).storeDir;
-  try {
-    return await withStoreWriterLeaseAsync(writerStoreDir, async () => {
+  const runApprovalWithStateLock = async () => {
     let approval;
     let lockedConversation = conversation;
     const currentConversation = loadState(statePath);
@@ -19147,7 +19156,6 @@ async function runApprove(options) {
       executorPolicyDecision?.policyFingerprint ?? policyFingerprint;
     if (!approval.approved) {
       releaseApprovalStateLock();
-      releaseApprovalTerminalLock();
       if (autoApproved) {
         appendEvent(logPath, {
           ts: cliNow().toISOString(),
@@ -19284,7 +19292,6 @@ async function runApprove(options) {
     };
     saveState(statePath, nextConversation);
     releaseApprovalStateLock();
-    releaseApprovalTerminalLock();
 
     const bridgeMonitor = ensureTerminalBridgeMonitorAfterApproval({
       conversation: nextConversation,
@@ -19310,6 +19317,15 @@ async function runApprove(options) {
       monitor_pid: bridgeMonitor.monitorPid ?? null,
       monitor_handoff_pid: bridgeMonitor.handoffWatchdog?.pid ?? null
     });
+  };
+  try {
+    return await withStoreWriterLeaseAsync(writerStoreDir, async () => {
+      releaseStateLock = acquireFileLock(`${statePath}.lock`);
+      try {
+        return await runApprovalWithStateLock();
+      } finally {
+        releaseApprovalStateLock();
+      }
     });
   } finally {
     try {
@@ -27188,14 +27204,25 @@ async function runTerminalBridgeMonitorWithLock(
         });
       }
     }
+    const approvalPromptEvidenceUnavailable =
+      isRecord(approval) &&
+      approval.blocked === true &&
+      approval.approvable === true &&
+      (stringValue(approval.decision_mode) ?? "keys") === "keys" &&
+      !stringValue(approval.fingerprint);
     if (
       !suppressApprovalNotification &&
       isRecord(approval) &&
       approval.blocked === true &&
-      approval.approvable !== true
+      (
+        approval.approvable !== true ||
+        approvalPromptEvidenceUnavailable
+      )
     ) {
-      const approvalReason = stringValue(approval.reason) ??
-        "Claude Code permission state cannot be safely resolved through AKK";
+      const approvalReason = approvalPromptEvidenceUnavailable
+        ? `${executor.display_name} approval prompt lacks exact prompt-region evidence`
+        : stringValue(approval.reason) ??
+          "Claude Code permission state cannot be safely resolved through AKK";
       appendEvent(logPath, {
         ts: cliNow().toISOString(),
         conversation_id: conversation.conversation_id,

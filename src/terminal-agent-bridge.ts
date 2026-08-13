@@ -1985,6 +1985,24 @@ export class TerminalAgentBridge {
         screenExcerpt: inspection.screenExcerpt
       };
     }
+    if (
+      decisionMode === "keys" &&
+      !isTerminalApprovalPromptEvidence(
+        inspection.approval.promptEvidence
+      )
+    ) {
+      return {
+        approved: false,
+        blocked: true,
+        reason: `${adapter.displayName} approval prompt has no adapter-verified prompt evidence`,
+        label: inspection.approval.action.label,
+        promptKind: inspection.approval.promptKind,
+        command: inspection.approval.command,
+        screenExcerpt: inspection.screenExcerpt,
+        decisionMode,
+        requestId: inspection.approval.action.requestId
+      };
+    }
     const canonicalFingerprint = terminalApprovalFingerprint(
       adapter.agent,
       activeTerminalControl,
@@ -3221,13 +3239,18 @@ export function terminalApprovalFingerprint(
     return undefined;
   }
   const decisionMode = inspection.approval.action.mode ?? "keys";
-  const rawScreenDigest = decisionMode === "keys" && options.screen !== undefined
-    ? createHash("sha256").update(options.screen).digest("hex")
-    : undefined;
+  const promptEvidence = inspection.approval.promptEvidence;
+  if (
+    decisionMode === "keys" &&
+    !isTerminalApprovalPromptEvidence(promptEvidence)
+  ) {
+    return undefined;
+  }
   const terminal = terminalEndpointFromControlRef(terminalControl);
-  // A pending v0.11.x approval may outlive an upgrade. Preserve its exact
-  // fingerprint until the persisted control record has canonical endpoint
-  // evidence; new records bind the fingerprint to stable endpoint identity.
+  // Legacy control records without canonical endpoint evidence bind v2 to
+  // their exact stored tmux coordinates. A fresh canonical capture upgrades
+  // new fingerprints to stable endpoint identity; v1 fingerprints are never
+  // recomputed or accepted here.
   const terminalFingerprint = hasCanonicalTerminalEndpoint(terminalControl)
     ? {
         identity: terminalEndpointIdentityKey(terminal),
@@ -3246,12 +3269,35 @@ export function terminalApprovalFingerprint(
   }
   return createHash("sha256")
     .update(JSON.stringify({
+      version: 2,
       agent,
       provider: terminal.identity.providerKind,
       terminal: terminalFingerprint,
       runtime: {
         pid: options.runtime?.pid,
         session_id: options.runtime?.sessionId,
+        native_session_id: options.runtime?.nativeSessionId,
+        native_process_uuid: options.runtime?.nativeProcessUuid,
+        native_process_birth: options.runtime?.nativeProcessBirth,
+        require_native_process_uuid:
+          options.runtime?.requireNativeProcessUuid,
+        require_exact_claude_agent_row:
+          options.runtime?.requireExactClaudeAgentRow,
+        native_process_started_at:
+          options.runtime?.nativeProcessStartedAt,
+        exact_claude_agent_state:
+          options.runtime?.exactClaudeAgentState,
+        require_native_rollout_identity:
+          options.runtime?.requireNativeRolloutIdentity,
+        native_rollout: options.runtime?.nativeRollout,
+        expected_native_session_id:
+          options.runtime?.expectedNativeSessionId,
+        expected_empty_native_session:
+          options.runtime?.expectedEmptyNativeSession,
+        allowed_pre_materialization_native_identity:
+          options.runtime?.allowedPreMaterializationNativeIdentity,
+        allowed_additional_native_identities:
+          options.runtime?.allowedAdditionalNativeIdentities,
         cwd: options.runtime?.cwd,
         conversation_id: options.runtime?.conversationId,
         message_id: options.runtime?.messageId,
@@ -3275,11 +3321,29 @@ export function terminalApprovalFingerprint(
             metadata: inspection.approval.policyEvidence.metadata
           }
         : undefined,
-      raw_screen_sha256: rawScreenDigest,
+      prompt_evidence: promptEvidence
+        ? {
+            profile: promptEvidence.profile,
+            sha256: promptEvidence.sha256
+          }
+        : undefined,
       decision_mode: decisionMode,
       request_id: inspection.approval.action.requestId
     }))
     .digest("hex");
+}
+
+function isTerminalApprovalPromptEvidence(
+  value: unknown
+): value is { profile: string; sha256: string } {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const evidence = value as { profile?: unknown; sha256?: unknown };
+  return typeof evidence.profile === "string" &&
+    /^[a-z0-9][a-z0-9._-]{0,127}$/u.test(evidence.profile) &&
+    typeof evidence.sha256 === "string" &&
+    /^[0-9a-f]{64}$/u.test(evidence.sha256);
 }
 
 function statusFromInspection(
@@ -3291,11 +3355,14 @@ function statusFromInspection(
     runtime?: TerminalRuntimeIdentity;
   } = {}
 ): TerminalBridgeStatus {
-  const approval = inspection.approval;
+  const approval = dispatchableApprovalInspection(adapter, inspection.approval);
   const fingerprint = terminalApprovalFingerprint(
     adapter.agent,
     terminalControl,
-    inspection,
+    {
+      ...inspection,
+      approval
+    },
     options
   );
   return {
@@ -3341,6 +3408,29 @@ function statusFromInspection(
         : createHash("sha256").update(options.screen).digest("hex"),
       approval: approvalOutput(approval)
     }
+  };
+}
+
+function dispatchableApprovalInspection(
+  adapter: TerminalAgentAdapter,
+  approval: TerminalScreenInspection["approval"]
+): TerminalScreenInspection["approval"] {
+  if (
+    !approval.approvable ||
+    (approval.action.mode ?? "keys") !== "keys" ||
+    isTerminalApprovalPromptEvidence(approval.promptEvidence)
+  ) {
+    return approval;
+  }
+  return {
+    blocked: true,
+    approvable: false,
+    reason: `${adapter.displayName} approval prompt has no adapter-verified prompt evidence`,
+    promptKind: approval.promptKind,
+    command: approval.command,
+    cwd: approval.cwd,
+    toolName: approval.toolName,
+    requestDetail: approval.requestDetail
   };
 }
 

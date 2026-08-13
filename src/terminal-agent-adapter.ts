@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { isExecutorKind, type ExecutorKind } from "./executors.js";
 import type {
   TerminalControlCapability,
@@ -46,6 +47,46 @@ export interface TerminalApprovalAction {
 }
 
 /**
+ * Opaque authority derived from the exact, unredacted approval prompt region.
+ *
+ * The raw region must never be persisted or exposed. The profile identifies
+ * the adapter-owned region grammar, while the digest keeps every
+ * authorization-relevant character after only transport normalization.
+ */
+export interface TerminalApprovalPromptEvidence {
+  profile: string;
+  sha256: string;
+}
+
+const TERMINAL_APPROVAL_ANSI_ESCAPE_PATTERN =
+  /\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/gu;
+
+/**
+ * Hash an adapter-verified prompt region without redaction or semantic
+ * whitespace normalization. ANSI escapes and CRLF/CR line endings are
+ * provider transport differences, so those alone are normalized.
+ */
+export function terminalApprovalPromptEvidence(
+  profile: string,
+  unredactedPromptRegion: string
+): TerminalApprovalPromptEvidence {
+  const normalizedRegion = normalizeTerminalApprovalPromptRegion(
+    unredactedPromptRegion
+  );
+  return {
+    profile,
+    sha256: createHash("sha256").update(normalizedRegion).digest("hex")
+  };
+}
+
+/** Normalize only terminal-provider representation differences. */
+export function normalizeTerminalApprovalPromptRegion(value: string): string {
+  return value
+    .replace(TERMINAL_APPROVAL_ANSI_ESCAPE_PATTERN, "")
+    .replace(/\r\n?/gu, "\n");
+}
+
+/**
  * Executor-local authority for deterministic approval policy evaluation.
  *
  * `command` may contain raw terminal-agent input and must never be copied into
@@ -78,6 +119,8 @@ export type TerminalApprovalInspection =
       requestDetail?: string;
       /** Raw executor-local policy authority. Never serialize this object. */
       policyEvidence?: TerminalApprovalPolicyEvidence;
+      /** Adapter-verified digest of the exact, unredacted live prompt region. */
+      promptEvidence?: TerminalApprovalPromptEvidence;
       action: TerminalApprovalAction;
     }
   | {

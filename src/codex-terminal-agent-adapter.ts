@@ -9,6 +9,7 @@ import { redactString } from "./runtime-log.js";
 import type {
   TerminalAgentAdapter,
   TerminalApprovalInspection,
+  TerminalApprovalPromptEvidence,
   TerminalCompletionEvidence,
   TerminalDurableCompletionRequest,
   TerminalNativeInspectionCapabilities,
@@ -26,6 +27,10 @@ import type {
   TerminalThreadLifecycleOperation,
   TerminalThreadLifecyclePlan
 } from "./terminal-agent-adapter.js";
+import {
+  normalizeTerminalApprovalPromptRegion,
+  terminalApprovalPromptEvidence
+} from "./terminal-agent-adapter.js";
 import { isExactNativeThreadId } from "./managed-session.js";
 
 export type CodexApprovalPromptDetection =
@@ -36,6 +41,7 @@ export type CodexApprovalPromptDetection =
       label: string;
       promptKind: string;
       command?: string;
+      promptEvidence: TerminalApprovalPromptEvidence;
     }
   | {
       approvable: false;
@@ -50,9 +56,12 @@ export interface CreateCodexTerminalAgentAdapterOptions {
   >;
 }
 
-const CODEX_PRIMARY_APPROVAL_OPTION =
-  /^[\s›»]*1\.\s+(Yes,[^(]+)\(([^)]+)\)/u;
 const CODEX_NUMBERED_OPTION = /^[\s›»]*\d+\.\s+/u;
+const CODEX_EXACT_APPROVAL_OPTION =
+  /^\s*(?:[›»]\s*)?(\d+)\.\s+(.+)\s+\(([^()\r\n]+)\)\s*$/u;
+const CODEX_APPROVAL_FOOTER =
+  /^\s*Press enter to confirm or esc to cancel(?: or o to open thread)?\s*$/iu;
+const CODEX_APPROVAL_DECORATION = /^[─━═╌╍┄┅┈┉\s]+$/u;
 const CODEX_PROMPT_ACTIVITY = /^[›»]\s+(?!\d+\.)\S/u;
 const CODEX_COMPOSER_LINE = /^[›»](?:\s|$)/u;
 const CODEX_TRANSCRIPT_PROMPT_LINE = /^[›»](?:\s|$).*$/gmu;
@@ -773,6 +782,7 @@ export function inspectCodexScreen(options: TerminalScreenInspectionOptions): Te
         approvable: true,
         promptKind: detectedApproval.promptKind,
         command: detectedApproval.command,
+        promptEvidence: detectedApproval.promptEvidence,
         action: {
           keys: detectedApproval.keys,
           label: detectedApproval.label
@@ -811,32 +821,40 @@ export function detectCodexApprovalPrompt(screen: string): CodexApprovalPromptDe
       reason: prompt.reason
     };
   }
-
-  for (const line of prompt.region.split(/\r?\n/)) {
-    const match = CODEX_PRIMARY_APPROVAL_OPTION.exec(line.trim());
-    if (!match) {
-      continue;
-    }
-    const key = match[2].trim();
-    if (key !== "y") {
-      return {
-        approvable: false,
-        reason: `primary approval shortcut is ${key}, not y`,
-        ...approvalCandidateFromPrompt(prompt.marker, prompt.region)
-      };
-    }
+  if (!("region" in prompt)) {
     return {
-      approvable: true,
-      key,
-      keys: [key],
-      label: match[1].trim(),
-      ...approvalCandidateFromPrompt(prompt.marker, prompt.region)
+      approvable: false,
+      reason: prompt.reason
     };
   }
 
+  const primary = prompt.region.split("\n")
+    .map(parseCodexApprovalOption)
+    .find((option) => option?.number === 1);
+  if (!primary) {
+    return {
+      approvable: false,
+      reason: "no primary approve option with a shortcut was detected",
+      ...approvalCandidateFromPrompt(prompt.marker, prompt.region)
+    };
+  }
+  const key = primary.shortcut;
+  if (key !== "y") {
+    return {
+      approvable: false,
+      reason: `primary approval shortcut is ${key}, not y`,
+      ...approvalCandidateFromPrompt(prompt.marker, prompt.region)
+    };
+  }
   return {
-    approvable: false,
-    reason: "no primary approve option with a shortcut was detected",
+    approvable: true,
+    key,
+    keys: [key],
+    label: primary.label,
+    promptEvidence: terminalApprovalPromptEvidence(
+      "codex-approval-prompt-v1",
+      prompt.region
+    ),
     ...approvalCandidateFromPrompt(prompt.marker, prompt.region)
   };
 }
@@ -861,7 +879,7 @@ export function detectCodexActivityState(
   if (workingLine) {
     return {
       state: "working",
-      reason: `Codex working marker detected: ${workingLine.trim()}`
+      reason: `Codex working marker detected: ${redactString(workingLine.trim())}`
     };
   }
 
@@ -869,7 +887,7 @@ export function detectCodexActivityState(
   if (idleLine) {
     return {
       state: "idle",
-      reason: `Codex input prompt detected: ${idleLine}`
+      reason: "Codex input prompt detected"
     };
   }
 
@@ -964,24 +982,31 @@ export function detectCodexDurableCompletion(
 
 function codexApprovalPromptRegion(screen: string):
   | { visible: true; region: string; marker: string }
+  | { visible: true; reason: string; marker: string }
   | { visible: false; reason: string } {
   const approvalMarkers = [
     "Would you like to run the following command?",
     "Would you like to make the following edits?",
-    "Would you like to grant these permissions?",
-    "needs your approval."
+    "Would you like to grant these permissions?"
   ];
-  const lines = screen.split(/\r?\n/);
-  let markerIndex = -1;
-  let matchedMarker = "";
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const marker = approvalMarkers.find((candidate) => lines[index].includes(candidate));
-    if (marker) {
-      markerIndex = index;
-      matchedMarker = marker;
-      break;
-    }
+  const lines = normalizeTerminalApprovalPromptRegion(screen).split("\n");
+  const markerRows = lines.flatMap((line, index) => {
+    const trimmed = line.trim();
+    const marker = approvalMarkers.find((candidate) => trimmed === candidate) ??
+      (/^.+ needs your approval\.$/u.test(trimmed) ? trimmed : undefined);
+    return marker ? [{ index, marker }] : [];
+  });
+  if (markerRows.length > 1) {
+    return {
+      visible: true,
+      marker: markerRows.at(-1)?.marker ?? "",
+      reason:
+        "multiple Codex approval markers are ambiguous; resolve the dialog manually"
+    };
   }
+  const currentMarker = markerRows[0];
+  const markerIndex = currentMarker?.index ?? -1;
+  const matchedMarker = currentMarker?.marker ?? "";
 
   if (markerIndex < 0) {
     return {
@@ -990,20 +1015,126 @@ function codexApprovalPromptRegion(screen: string):
     };
   }
 
-  const regionLines = lines.slice(markerIndex);
-  const staleLine = regionLines.slice(1).find((line) => isPostApprovalActivityLine(line));
+  const candidateLines = lines.slice(markerIndex);
+  const staleLine = candidateLines.slice(1).find((line) => isPostApprovalActivityLine(line));
   if (staleLine) {
     return {
       visible: false,
-      reason: `Codex approval prompt appears stale after later terminal activity: ${staleLine.trim()}`
+      reason: "Codex approval prompt appears stale after later terminal activity"
+    };
+  }
+  const parsed = parseCodexApprovalMenu(candidateLines);
+  if (!parsed.ok) {
+    return {
+      visible: true,
+      marker: matchedMarker,
+      reason: parsed.reason
     };
   }
 
   return {
     visible: true,
-    region: regionLines.join("\n"),
+    region: candidateLines.slice(0, parsed.evidenceEndIndex + 1).join("\n"),
     marker: matchedMarker
   };
+}
+
+interface CodexApprovalOptionRow {
+  number: number;
+  label: string;
+  shortcut: string;
+}
+
+function parseCodexApprovalOption(line: string): CodexApprovalOptionRow | undefined {
+  const match = CODEX_EXACT_APPROVAL_OPTION.exec(line);
+  if (!match) {
+    return undefined;
+  }
+  const number = Number(match[1]);
+  const label = match[2].trim();
+  const shortcut = match[3].trim().toLowerCase();
+  return Number.isSafeInteger(number) && number > 0 && label && shortcut
+    ? { number, label, shortcut }
+    : undefined;
+}
+
+function parseCodexApprovalMenu(
+  candidateLines: readonly string[]
+):
+  | { ok: true; evidenceEndIndex: number }
+  | { ok: false; reason: string } {
+  const primaryIndexes = candidateLines.flatMap((line, index) => {
+    const option = parseCodexApprovalOption(line);
+    return option?.number === 1 &&
+        /^Yes(?:\b|,)/iu.test(option.label) &&
+        option.shortcut === "y"
+      ? [index]
+      : [];
+  });
+  if (primaryIndexes.length !== 1) {
+    return {
+      ok: false,
+      reason: primaryIndexes.length === 0
+        ? "no exact primary Codex approve option was detected"
+        : "multiple primary Codex approve options are ambiguous"
+    };
+  }
+
+  const primaryIndex = primaryIndexes[0];
+  const options: Array<CodexApprovalOptionRow & { index: number }> = [];
+  for (let index = primaryIndex; index < candidateLines.length; index += 1) {
+    const option = parseCodexApprovalOption(candidateLines[index]);
+    if (!option) {
+      break;
+    }
+    if (option.number !== options.length + 1) {
+      return {
+        ok: false,
+        reason: "Codex approval choices are duplicated or out of order"
+      };
+    }
+    options.push({ ...option, index });
+  }
+  const finalOption = options.at(-1);
+  if (
+    options.length < 2 ||
+    !finalOption ||
+    !/^(?:No|Cancel)(?:\b|,)/iu.test(finalOption.label) ||
+    finalOption.shortcut === "y"
+  ) {
+    return {
+      ok: false,
+      reason: "Codex approval prompt has no exact final reject or cancel choice"
+    };
+  }
+
+  let evidenceEndIndex = finalOption.index;
+  let trailingIndex = finalOption.index + 1;
+  while (
+    trailingIndex < candidateLines.length &&
+    !candidateLines[trailingIndex].trim()
+  ) {
+    trailingIndex += 1;
+  }
+  if (
+    trailingIndex < candidateLines.length &&
+    CODEX_APPROVAL_FOOTER.test(candidateLines[trailingIndex])
+  ) {
+    evidenceEndIndex = trailingIndex;
+    trailingIndex += 1;
+  }
+  if (
+    candidateLines.slice(trailingIndex).some((line) =>
+      line.trim() && !CODEX_APPROVAL_DECORATION.test(line)
+    )
+  ) {
+    return {
+      ok: false,
+      reason:
+        "text after the bounded Codex approval prompt is not safely attributable to the current dialog"
+    };
+  }
+  return { ok: true, evidenceEndIndex };
 }
 
 function approvalCandidateFromPrompt(marker: string, region: string): { promptKind: string; command?: string } {

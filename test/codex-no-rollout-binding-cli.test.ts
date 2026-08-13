@@ -3040,6 +3040,63 @@ test("human-confirmed Codex approval can target a managed pane with no AKK dispa
   }
 });
 
+test("terminal-scoped Codex approval fingerprint and token ignore output outside the exact prompt region", async () => {
+  const fixture = createNoRolloutFixture();
+  try {
+    persistStatusCardSession(fixture, LIVE_PROCESS_BIRTH);
+    fixture.identityObservationError =
+      "injected Codex rollout observation unavailable";
+    fs.rmSync(fixture.materializedPath, { force: true });
+    const prompt = codexApprovalScreen("npm test");
+    fs.writeFileSync(
+      fixture.screenPath,
+      `background test output before list\n${prompt}`
+    );
+
+    const first = await listFixtureTerminal(fixture);
+    const firstAction = first.available_actions.approve;
+    assert.ok(firstAction, JSON.stringify(first, null, 2));
+    const firstToken = String(firstAction.arguments.expected_terminal_token);
+    const firstFingerprint = String(first.approval_state.fingerprint);
+    assert.match(firstToken, /^[0-9a-f]{64}$/u);
+    assert.match(firstFingerprint, /^[0-9a-f]{64}$/u);
+
+    fs.writeFileSync(
+      fixture.screenPath,
+      `different background test output after list\n${prompt}`
+    );
+    const second = await listFixtureTerminal(fixture);
+    const secondAction = second.available_actions.approve;
+    assert.ok(secondAction, JSON.stringify(second, null, 2));
+    assert.equal(second.approval_state.fingerprint, firstFingerprint);
+    assert.equal(
+      secondAction.arguments.expected_terminal_token,
+      firstToken,
+      "diagnostic scrollback must not invalidate terminal-scoped approval authority"
+    );
+
+    const keysBefore = approvalKeyCalls(fixture).length;
+    const approved = await runCli([
+      "approve",
+      "--conversation",
+      fixture.terminalId,
+      "--expected-terminal-token",
+      firstToken,
+      "--expected-approval-fingerprint",
+      firstFingerprint,
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome
+    ], fixture.environment);
+    assert.equal(approved.status, 0, approved.stderr || approved.stdout);
+    assert.equal(JSON.parse(approved.stdout).approved, true);
+    assert.equal(approvalKeyCalls(fixture).length, keysBefore + 1);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test("terminal-scoped Codex approval token binds the exact current prompt with or without a dispatch owner", async () => {
   for (const authority of [
     "managed_session_no_dispatch_owner",
@@ -3060,8 +3117,35 @@ test("terminal-scoped Codex approval token binds the exact current prompt with o
       const action = terminal.available_actions.approve;
       assert.ok(action, `${authority}: ${JSON.stringify(terminal, null, 2)}`);
       assert.equal(action.authority, authority);
+      const staleFingerprint = String(terminal.approval_state.fingerprint);
+      assert.match(staleFingerprint, /^[0-9a-f]{64}$/u);
 
       fs.writeFileSync(fixture.screenPath, codexApprovalScreen("npm run lint"));
+      const keysBefore = approvalKeyCalls(fixture).length;
+      const stalePromptAuthority = await runCli([
+        "approve",
+        "--conversation",
+        fixture.terminalId,
+        "--expected-terminal-token",
+        String(action.arguments.expected_terminal_token),
+        "--expected-approval-fingerprint",
+        staleFingerprint,
+        "--store-dir",
+        fixture.storeDir,
+        "--codex-home",
+        fixture.codexHome
+      ], fixture.environment);
+      assert.equal(
+        stalePromptAuthority.status,
+        1,
+        stalePromptAuthority.stdout
+      );
+      assert.match(
+        stalePromptAuthority.stderr,
+        /token is missing or stale|authority changed/iu
+      );
+      assert.equal(approvalKeyCalls(fixture).length, keysBefore);
+
       const status = await runCli([
         "status",
         "--conversation",
@@ -3076,7 +3160,6 @@ test("terminal-scoped Codex approval token binds the exact current prompt with o
         JSON.parse(status.stdout).terminal_status.approval_state.fingerprint
       );
       assert.notEqual(freshFingerprint, terminal.approval_state.fingerprint);
-      const keysBefore = approvalKeyCalls(fixture).length;
 
       const rejected = await runCli([
         "approve",

@@ -101,7 +101,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       hidden_turn_count: 0,
       session_count: 0
     });
-    assert.equal(listed.action_contracts.version, 15);
+    assert.equal(listed.action_contracts.version, 16);
     assert.match(
       listed.action_contracts.instructions.join("\n"),
       /Treat terminals\[\] as the primary resource/u
@@ -145,6 +145,10 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     assert.match(
       listed.action_contracts.instructions.join("\n"),
       /Managed controls target turn_id[\s\S]*list-prefilled conversation_id/u
+    );
+    assert.match(
+      listed.action_contracts.instructions.join("\n"),
+      /Approval fingerprint v2[\s\S]*unredacted exact prompt-region digest[\s\S]*Whole-screen digests and scrollback excerpts are diagnostic only[\s\S]*without exact prompt-region evidence is not approvable/u
     );
     assert.deepEqual(
       listed.action_contracts.field_semantics.process_state,
@@ -284,6 +288,18 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     assert.deepEqual(
       listed.action_contracts.actions.send.required,
       ["request"]
+    );
+    assert.equal(
+      listed.action_contracts.actions.approve.fingerprint_contract,
+      "v2_prompt_region"
+    );
+    assert.match(
+      listed.action_contracts.actions.approve.fingerprint_authority,
+      /unredacted exact prompt-region digest[\s\S]*whole-screen digests and scrollback excerpts are diagnostic only/u
+    );
+    assert.equal(
+      listed.action_contracts.actions.approve.missing_prompt_region_evidence,
+      "not_approvable"
     );
     assert.equal(
       listed.action_contracts.actions.send.optional.includes("selector"),
