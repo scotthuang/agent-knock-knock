@@ -184,6 +184,28 @@ test("native thread transition policy selects its exact lifecycle parity set", a
   );
 });
 
+test("terminal dispatch policy selects its exact parity integration set", async () => {
+  const selection = await loadSelectionModule();
+  const tiers = loadTiers();
+  const expected = [
+    "test/codex-no-rollout-binding-cli.test.ts",
+    "test/shards/agent-cli-dispatch-authority.test.ts",
+    "test/shards/agent-cli-dispatch-recovery.test.ts",
+    "test/shards/agent-cli-session-acceptance.test.ts",
+    "test/shards/agent-cli-terminal-send-gates.test.ts"
+  ];
+  assert.deepEqual(
+    selection.selectAffectedTests(["src/terminal-dispatch-policy.ts"], tiers),
+    {
+      mode: "targeted",
+      changedPaths: ["src/terminal-dispatch-policy.ts"],
+      integrationFiles: tiers.integration.filter((testPath) =>
+        expected.includes(testPath)
+      )
+    }
+  );
+});
+
 test("an integration test selects itself while fast and documentation changes still use fast only", async () => {
   const selection = await loadSelectionModule();
   const tiers = loadTiers();

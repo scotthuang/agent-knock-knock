@@ -34,6 +34,7 @@
     "test/terminal-binding-authority.test.ts",
     "test/terminal-control-ref.test.ts",
     "test/terminal-control-provider.test.ts",
+    "test/terminal-dispatch-policy.test.ts",
     "test/terminal-monitor-poll-policy.test.ts",
     "test/terminal-process-source.test.ts",
     "test/terminal-submission-acceptance.test.ts",

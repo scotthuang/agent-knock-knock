@@ -260,6 +260,7 @@ import {
   reduceTerminalMonitorActivityPoll,
   reduceTerminalMonitorCompletionPoll
 } from "./terminal-monitor-poll-policy.js";
+import * as dispatch from "./terminal-dispatch-policy.js";
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 10080;
 const DEFAULT_AGENT_TIMEOUT_MINUTES = 60;
@@ -19925,165 +19926,163 @@ async function runTerminalControlSend({
       terminalControl,
       loadTerminalBridgeDispatchLedger(terminalControl)
     );
-  previousDispatchLedger =
-    reconcilePreparedTerminalDispatchLedger(
-      terminalControl,
-      previousDispatchLedger
-    );
-  if (
-    terminalDispatchLedgerLooksLifecycle(previousDispatchLedger) &&
-    previousDispatchLedger?.status !== "resolved"
-  ) {
-    throw new Error(
-      `terminal ${terminalControl.target} has unresolved lifecycle transition ` +
-      `${stringValue(previousDispatchLedger?.transition_id) ?? "with invalid identity"}; ` +
-      "refresh AKK list and use its exact recovery action"
-    );
-  }
-  if (
-    previousDispatchLedger?.status === "prepared" ||
-    previousDispatchLedger?.status === "text_injected" ||
-    previousDispatchLedger?.status === "dispatching" ||
-    previousDispatchLedger?.status === "uncertain" ||
-    previousDispatchLedger?.status === "not_accepted"
-  ) {
-    throw new Error(
-      `terminal ${terminalControl.target} has a terminal-level ` +
-      `${String(previousDispatchLedger.status)} dispatch owned by ` +
-      `${stringValue(previousDispatchLedger.conversation_id) ?? "an unknown conversation"}; ` +
-      "inspect the shared terminal pane and explicitly close that AKK conversation before retrying"
-    );
-  }
-  if (
-    previousDispatchLedger?.status === "submitted" ||
-    previousDispatchLedger?.status === "enter_dispatched" ||
-    previousDispatchLedger?.status === "agent_accepted"
-  ) {
-    const owner = loadTerminalDispatchLedgerOwner(
-      previousDispatchLedger
-    );
-    if (!owner) {
+  previousDispatchLedger = reconcilePreparedTerminalDispatchLedger(
+    terminalControl, previousDispatchLedger
+  );
+  const previousDispatchFacts = {
+    status: stringValue(previousDispatchLedger?.status),
+    lifecycle: terminalDispatchLedgerLooksLifecycle(previousDispatchLedger),
+    transitionId: stringValue(previousDispatchLedger?.transition_id),
+    ownerConversationId: stringValue(previousDispatchLedger?.conversation_id)
+  };
+  const previousDispatchOwner = dispatch.terminalDispatchPreflightRequiresOwner(
+    previousDispatchFacts
+  )
+    ? loadTerminalDispatchLedgerOwner(previousDispatchLedger!)
+    : undefined;
+  const ownerReleased = Boolean(
+    previousDispatchOwner && TERMINAL_DISPATCH_RELEASE_STATUSES.has(
+      previousDispatchOwner.status
+    )
+  );
+  const continuingSameTurn = Boolean(
+    previousDispatchOwner &&
+    continuingTurnResponse &&
+    sessionIdForConversation(previousDispatchOwner) ===
+      sessionIdForConversation(conversation) &&
+    turnIdForConversation(previousDispatchOwner) ===
+      turnIdForConversation(conversation) &&
+    sameCanonicalStatePath(previousDispatchLedger!.state_path, statePath)
+  );
+  const exactDispatchReplay = Boolean(
+    previousDispatchOwner && !ownerReleased && !continuingSameTurn &&
+    stringValue(previousDispatchLedger!.request_hash) === terminalRequestHash &&
+    stringValue(previousDispatchLedger!.conversation_id) ===
+      conversation.conversation_id &&
+    stringValue(previousDispatchLedger!.message_id) === message.id &&
+    sameCanonicalStatePath(previousDispatchLedger!.state_path, statePath)
+  );
+  const dispatchPreflight = dispatch.decideTerminalDispatchPreflight({
+    ledger: previousDispatchFacts,
+    owner: previousDispatchOwner
+      ? {
+          conversationId: previousDispatchOwner.conversation_id,
+          status: previousDispatchOwner.status,
+          released: ownerReleased,
+          continuingSameTurn,
+          exactReplay: exactDispatchReplay
+        }
+      : undefined
+  });
+  if (dispatchPreflight.action === "reject") {
+    if (dispatchPreflight.reason === "unresolved_lifecycle") {
+      throw new Error(
+        `terminal ${terminalControl.target} has unresolved lifecycle transition ` +
+        `${dispatchPreflight.transitionId ?? "with invalid identity"}; ` +
+        "refresh AKK list and use its exact recovery action"
+      );
+    }
+    if (dispatchPreflight.reason === "terminal_level_dispatch") {
+      throw new Error(
+        `terminal ${terminalControl.target} has a terminal-level ` +
+        `${String(dispatchPreflight.status)} dispatch owned by ` +
+        `${dispatchPreflight.ownerConversationId ?? "an unknown conversation"}; ` +
+        "inspect the shared terminal pane and explicitly close that AKK conversation before retrying"
+      );
+    }
+    if (dispatchPreflight.reason === "owner_unavailable") {
       throw new Error(
         `terminal ${terminalControl.target} has a submitted dispatch whose ` +
         "owner state is unavailable; inspect the shared terminal pane and repair " +
         "or explicitly resolve that conversation before sending another task"
       );
     }
-    const continuingSameTurn = Boolean(
-      continuingTurnResponse &&
-      sessionIdForConversation(owner) === sessionIdForConversation(conversation) &&
-      turnIdForConversation(owner) === turnIdForConversation(conversation) &&
-      sameCanonicalStatePath(previousDispatchLedger.state_path, statePath)
+    throw new Error(
+      `terminal ${terminalControl.target} is still owned by active AKK ` +
+      `conversation ${dispatchPreflight.ownerConversationId} ` +
+      `(${dispatchPreflight.ownerStatus}); wait for its callback, cancel it, ` +
+      "or explicitly close it before sending a different task"
     );
-    if (
-      !TERMINAL_DISPATCH_RELEASE_STATUSES.has(owner.status) &&
-      !continuingSameTurn
-    ) {
-      const exactDispatchReplay = Boolean(
-        stringValue(previousDispatchLedger.request_hash) ===
-          terminalRequestHash &&
-        stringValue(previousDispatchLedger.conversation_id) ===
-          conversation.conversation_id &&
-        stringValue(previousDispatchLedger.message_id) === message.id &&
-        sameCanonicalStatePath(
-          previousDispatchLedger.state_path,
-          statePath
-        )
-      );
-      if (exactDispatchReplay) {
-        const proofLevel = String(previousDispatchLedger.status) as
-          | "submitted"
-          | "enter_dispatched"
-          | "agent_accepted";
-        const replayReceipt = terminalSubmissionReplayReceipt({
-          proofLevel,
-          evidence: previousDispatchLedger.acceptance_evidence,
-          expected: terminalAcceptanceEvidenceExpectation(
-            owner,
-            terminalPayload
-          )
-        });
-        const accepted = replayReceipt.delivered;
-        const acceptanceInvalid =
-          replayReceipt.submission_outcome === "uncertain";
-        const receiptConversationId =
-          stringValue(previousDispatchLedger.conversation_id) ??
-          owner.conversation_id;
-        const receiptSessionId = sessionIdForConversation(owner);
-        const receiptTurnId = turnIdForConversation(owner);
-        const receiptMessageId =
-          stringValue(previousDispatchLedger.message_id) ??
-          message.id;
-        printJson({
+  }
+  if (dispatchPreflight.action === "replay") {
+    const owner = previousDispatchOwner!;
+    const replayReceipt = terminalSubmissionReplayReceipt({
+      proofLevel: dispatchPreflight.proofLevel,
+      evidence: previousDispatchLedger!.acceptance_evidence,
+      expected: terminalAcceptanceEvidenceExpectation(owner, terminalPayload)
+    });
+    const replayAcceptance = dispatch.decideTerminalDispatchReplayAcceptance({
+      delivered: replayReceipt.delivered,
+      submissionOutcome: replayReceipt.submission_outcome
+    });
+    const accepted = replayAcceptance.accepted;
+    const acceptanceInvalid = replayAcceptance.invalid;
+    const receiptConversationId =
+      stringValue(previousDispatchLedger?.conversation_id) ??
+      owner.conversation_id;
+    const receiptSessionId = sessionIdForConversation(owner);
+    const receiptTurnId = turnIdForConversation(owner);
+    const receiptMessageId =
+      stringValue(previousDispatchLedger?.message_id) ?? message.id;
+    printJson({
+      session_id: receiptSessionId,
+      turn_id: receiptTurnId,
+      conversation: owner,
+      message: {
+        ...message,
+        id: receiptMessageId,
+        conversation_id: receiptConversationId,
+        session_id: receiptSessionId,
+        turn_id: receiptTurnId,
+        metadata: {
+          ...(isRecord(message.metadata) ? message.metadata : {}),
+          task_id: receiptConversationId,
           session_id: receiptSessionId,
-          turn_id: receiptTurnId,
-          conversation: owner,
-          message: {
-            ...message,
-            id: receiptMessageId,
+          turn_id: receiptTurnId
+        }
+      },
+      delivered: replayReceipt.delivered,
+      status: replayReceipt.status,
+      submission_outcome: replayReceipt.submission_outcome,
+      background: true,
+      callback_expected: !acceptanceInvalid && Boolean(
+        owner.gateway_method ?? previousDispatchLedger?.callback_expected
+      ),
+      terminal_control: terminalControl,
+      executor,
+      replayed: replayReceipt.replayed,
+      delivery_receipt: replayReceipt.delivery_receipt,
+      ...(replayReceipt.do_not_retry
+        ? { do_not_retry: replayReceipt.do_not_retry }
+        : {}),
+      reason: accepted
+        ? "AKK replayed the durable native acceptance receipt for an identical active terminal request and did not send terminal input again."
+        : acceptanceInvalid
+          ? `AKK refused to replay an invalid native acceptance receipt (${replayReceipt.evidence_error ?? "evidence validation failed"}); no terminal input was sent.`
+          : "AKK replayed the original transport-level receipt without upgrading it to native acceptance and did not send terminal input again.",
+      openclaw_next_action: accepted
+        ? openClawYieldNextAction({
+            conversationId: receiptConversationId,
+            sessionId: receiptSessionId,
+            turnId: receiptTurnId,
+            source: "terminal_control",
+            callbackExpected: Boolean(
+              owner.gateway_method ??
+                previousDispatchLedger?.callback_expected
+            )
+          })
+        : {
+            action: "inspect",
             conversation_id: receiptConversationId,
             session_id: receiptSessionId,
             turn_id: receiptTurnId,
-            metadata: {
-              ...(isRecord(message.metadata) ? message.metadata : {}),
-              task_id: receiptConversationId,
-              session_id: receiptSessionId,
-              turn_id: receiptTurnId
-            }
-          },
-          delivered: replayReceipt.delivered,
-          status: replayReceipt.status,
-          submission_outcome: replayReceipt.submission_outcome,
-          background: true,
-          callback_expected: !acceptanceInvalid && Boolean(
-              owner.gateway_method ??
-                previousDispatchLedger.callback_expected
-            ),
-          terminal_control: terminalControl,
-          executor,
-          replayed: replayReceipt.replayed,
-          delivery_receipt: replayReceipt.delivery_receipt,
-          ...(replayReceipt.do_not_retry
-            ? { do_not_retry: replayReceipt.do_not_retry }
-            : {}),
-          reason:
-            accepted
-              ? "AKK replayed the durable native acceptance receipt for an identical active terminal request and did not send terminal input again."
-              : acceptanceInvalid
-                ? `AKK refused to replay an invalid native acceptance receipt (${replayReceipt.evidence_error ?? "evidence validation failed"}); no terminal input was sent.`
-                : "AKK replayed the original transport-level receipt without upgrading it to native acceptance and did not send terminal input again.",
-          openclaw_next_action: accepted
-            ? openClawYieldNextAction({
-                conversationId: receiptConversationId,
-                sessionId: receiptSessionId,
-                turnId: receiptTurnId,
-                source: "terminal_control",
-                callbackExpected: Boolean(
-                  owner.gateway_method ??
-                    previousDispatchLedger.callback_expected
-                )
-              })
-            : {
-                action: "inspect",
-                conversation_id: receiptConversationId,
-                session_id: receiptSessionId,
-                turn_id: receiptTurnId,
-                do_not_retry: true,
-                reason:
-                  acceptanceInvalid
-                    ? "The stored native acceptance evidence is invalid; inspect and explicitly close this Turn."
-                    : "Only terminal transport is proven; wait for native acceptance or inspect the shared pane."
-              }
-        });
-        return;
-      }
-      throw new Error(
-        `terminal ${terminalControl.target} is still owned by active AKK ` +
-        `conversation ${owner.conversation_id} (${owner.status}); wait for ` +
-        "its callback, cancel it, or explicitly close it before sending a " +
-        "different task"
-      );
-    }
+            do_not_retry: true,
+            reason: acceptanceInvalid
+              ? "The stored native acceptance evidence is invalid; inspect and explicitly close this Turn."
+              : "Only terminal transport is proven; wait for native acceptance or inspect the shared pane."
+          }
+    });
+    return;
   }
   if (bridge) {
     assertNoUnresolvedTerminalBridgeSubmission(
