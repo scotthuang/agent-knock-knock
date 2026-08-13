@@ -73,6 +73,15 @@ import graph is currently acyclic and the public imported surface of
 `cli-core.ts` is small, so behavior can be replaced behind that facade without
 forcing consumers to migrate in one step.
 
+The test cost is similarly concentrated. At the `v0.12.11` baseline, 71
+TypeScript test files contain 71,902 physical lines. Three clean fast-tier runs
+at concurrency four completed in 8.68, 8.70, and 8.85 seconds (median 8.70
+seconds). Two clean integration-tier runs took 922.01 and 985.75 seconds; one
+was green and one exposed the pre-existing monitor-singleton supersession
+timeout. In both runs, `test/codex-no-rollout-binding-cli.test.ts` alone took
+921.81–985.56 seconds. Refactoring success therefore requires narrower affected
+selection and lighter deterministic fixtures, not fewer safety invariants.
+
 ## Architectural vocabulary
 
 - **Facade**: stable CLI-facing API that parses a command, selects a handler,
@@ -388,10 +397,12 @@ bypass an unfinished safety boundary.
 
 1. **PR0 — baseline and architecture**: this document, machine-readable
    measurements, current ownership and contract inventory.
-2. **PR1 — typed command facade**: command registry and command-specific parsed
-   inputs; retain public facade and `AsyncLocalStorage` execution isolation.
-3. **PR2 — observation, authority, and action projection**: one typed decision
-   source shared by `list`, CLI execution, and OpenClaw mapping.
+2. **PR1 — terminal observation and binding authority**: extract the shared pure
+   exact-binding decision first while list and mutation each retain fresh,
+   purpose-built observations and mutation revalidation.
+3. **PR2 — verified-dead agent and orphan-turn policy**: one pure decision source
+   shared by managed close, startup reconciliation, and the direct monitor; keep
+   process, transcript, Store, terminal, and callback I/O in their existing shell.
 4. **PR3 — repositories and transaction kernel**: typed codecs/ports, lock
    capabilities, durable write maps; initially preserve legacy ordering where a
    documented exception requires it.
@@ -399,12 +410,12 @@ bypass an unfinished safety boundary.
    acceptance evidence behind the stable facade.
 6. **PR5 — lifecycle service**: new/resume/adopt/reconcile reducer and bounded I/O
    shell, including deferred foreground transfer recovery.
-7. **PR6 — callback/outbox service**: preparation, attempt lease, retry,
-   transport progress, and settlement.
-8. **PR7 — monitor/reconciliation service**: pure monitor decisions and bounded
-   polling/effect shell.
-9. **PR8 — secondary cleanup**: agent-profile ownership, OpenClaw plugin split,
-   dead compatibility shims, and justified test consolidation.
+7. **PR6 — callback/outbox and monitor/reconciliation services**: extract these
+   as separate reviewable commits behind their existing durable boundaries;
+   callback preparation/settlement and monitor polling remain distinct services.
+8. **PR7 — typed facade and secondary cleanup**: finish the command registry,
+   keep only stable facade exports in `cli-core.ts`, split remaining OpenClaw
+   adapter glue, and remove only compatibility shims proven dead by tests.
 
 Every PR records before/after metrics, responsibility movement, dependency
 edges, lock order, durable write points, and the focused tests that protect the

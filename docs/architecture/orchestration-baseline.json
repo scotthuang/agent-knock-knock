@@ -20,10 +20,11 @@
   },
   "measurement_method": {
     "physical_loc": "wc -l over checked-in production TypeScript files",
-    "ast_parser": "TypeScript compiler API 6.0.3",
+    "ast_parser": "project top-level TypeScript compiler API 7.0.2",
     "functions": "functions, methods, accessors, constructors, function expressions, and arrow functions with bodies",
     "approximate_complexity": "1 + if/loop/case/catch/conditional-expression/logical-and/logical-or/nullish-coalescing; nested function bodies excluded",
-    "dependency_cycles": "relative production TypeScript import declarations resolved by basename and depth-first cycle detection"
+    "dependency_cycles": "relative production TypeScript imports and exports resolved with the project TypeScript AST and depth-first cycle detection",
+    "test_profiles": "AKK_TEST_CONCURRENCY=4 npm run test:profile -- <fast|integration> --output <path>"
   },
   "production": {
     "physical_loc": 73792,
@@ -142,9 +143,48 @@
   ],
   "test_inventory": {
     "typescript_files": 71,
-    "physical_loc": 58414,
+    "physical_loc": 71902,
     "v0_12_11_release_baseline_tests": 1038,
-    "note": "The release baseline count is recorded from the v0.12.11 release gate; this architecture-only measurement did not rerun the suite."
+    "note": "The physical LOC includes both test/*.ts and test/shards/*.ts. The release baseline count is recorded from the v0.12.11 release gate."
+  },
+  "test_performance_baseline": {
+    "environment": {
+      "node": "v24.18.0",
+      "platform": "darwin",
+      "arch": "arm64",
+      "cpu_count": 10,
+      "concurrency": 4
+    },
+    "fast": {
+      "files": 33,
+      "tests": 576,
+      "runs_ms": [8684.173, 8696.722, 8854.166],
+      "median_ms": 8696.722,
+      "successful_runs": 3,
+      "failed_runs": 0
+    },
+    "integration": {
+      "files": 35,
+      "tests": 462,
+      "runs_ms": [922009.545, 985746.683],
+      "successful_runs": 1,
+      "failed_runs": 1,
+      "failure": {
+        "test": "terminal bridge monitor singleton rejects a live owner and reclaims a dead owner",
+        "reason": "timed out waiting for the replacement monitor to record binding supersession"
+      },
+      "largest_file": {
+        "path": "test/codex-no-rollout-binding-cli.test.ts",
+        "tests": 97,
+        "runs_ms": [921811.095, 985556.986]
+      },
+      "note": "Both runs used the clean ea592a8 worktree with no concurrent repository tests. The mixed result records a pre-refactor timing flake rather than reporting a false all-green baseline."
+    },
+    "combined_full": {
+      "tests": 1038,
+      "profiled_separately": true,
+      "note": "Fast and integration tiers were profiled separately so the integration flake and dominant file remain visible. A post-change combined full run remains a merge gate."
+    }
   },
   "persistence_contract": {
     "store_format_version": 1,
