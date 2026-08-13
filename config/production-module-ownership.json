@@ -2,7 +2,7 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 36828,
+    "cli_core_max_physical_loc": 36387,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -154,6 +154,16 @@
         "test/shards/agent-cli-dispatch-authority.test.ts",
         "test/shards/agent-cli-dispatch-recovery.test.ts",
         "test/shards/agent-cli-session-acceptance.test.ts",
+        "test/shards/agent-cli-terminal-send-gates.test.ts"
+      ]
+    },
+    "terminal-list-renderer": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/codex-no-rollout-binding-cli.test.ts",
+        "test/human-handoff-adoption-cli.test.ts",
+        "test/management-cli.test.ts",
+        "test/session-selector-cli.test.ts",
         "test/shards/agent-cli-terminal-send-gates.test.ts"
       ]
     },
@@ -342,6 +352,10 @@
     {
       "path": "src/terminal-dispatch-policy.ts",
       "owner": "terminal-dispatch-policy"
+    },
+    {
+      "path": "src/terminal-list-renderer.ts",
+      "owner": "terminal-list-renderer"
     },
     {
       "path": "src/terminal-monitor-poll-policy.ts",

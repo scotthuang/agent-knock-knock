@@ -37,6 +37,7 @@
     "test/terminal-control-provider.test.ts",
     "test/terminal-dispatch-ledger-codec.test.ts",
     "test/terminal-dispatch-policy.test.ts",
+    "test/terminal-list-renderer.test.ts",
     "test/terminal-monitor-poll-policy.test.ts",
     "test/terminal-process-source.test.ts",
     "test/terminal-submission-acceptance.test.ts",
