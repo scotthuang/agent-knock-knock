@@ -268,6 +268,8 @@ import {
   reduceTerminalMonitorActivityPoll,
   reduceTerminalMonitorCompletionPoll
 } from "./terminal-monitor-poll-policy.js";
+import * as monitorLaunch from "./terminal-monitor-launch-plan.js";
+import * as monitorOwner from "./terminal-monitor-ownership-policy.js";
 import {
   constructTerminalDispatchLedgerDocument,
   decodeTerminalDispatchLedgerDocument,
@@ -313,7 +315,6 @@ const SESSION_SEND_BLOCKING_STATUSES = new Set<ConversationStatus>([
 ]);
 const TERMINAL_BRIDGE_UNCERTAIN_COLLATERAL_STALL_REASON =
   "a newer terminal submission has an uncertain outcome; inspect the shared terminal pane before continuing";
-const TERMINAL_BRIDGE_MONITOR_LOCK_VERSION = 1;
 const MINIMUM_NODE_VERSION = "22.19.0";
 const PRIVATE_LOCK_FILE_MODE = 0o600;
 const NO_FOLLOW_FLAG = typeof fs.constants.O_NOFOLLOW === "number"
@@ -2533,139 +2534,33 @@ async function runDelegate(options) {
   });
 }
 
-function startTerminalBridgeMonitor({
-  statePath,
-  logPath,
-  agentTimeoutMinutes,
-  agentHardTimeoutMinutes,
-  pollIntervalMs,
-  codexHome,
-  claudeHome
-}) {
-  const args = [
-    cliEntryPath(),
-    "monitor",
-    "--terminal-bridge",
-    "--state",
-    statePath,
-    "--log",
-    logPath,
-    "--agent-timeout-minutes",
-    String(agentTimeoutMinutes),
-    "--agent-hard-timeout-minutes",
-    String(agentHardTimeoutMinutes),
-    "--poll-interval-ms",
-    String(pollIntervalMs)
-  ];
-  if (codexHome) {
-    args.push("--codex-home", codexHome);
+function spawnDetachedTerminalMonitor(
+  plan?: monitorLaunch.DetachedTerminalMonitorPlan
+) {
+  if (!plan) {
+    return undefined;
   }
-  if (claudeHome) {
-    args.push("--claude-home", claudeHome);
-  }
-  const child = spawn(process.execPath, args, {
+  const child = spawn(process.execPath, plan.args, {
     detached: true,
     stdio: "ignore",
     cwd: cliCwd(),
-    env: environmentWithoutGatewayTokens()
+    env: plan.environment
   });
   child.unref();
   return child;
 }
 
 function startTerminalBridgeMonitorForConversation({ conversation, statePath, logPath, options }) {
-  if (
-    !terminalBridgeEnabled(conversation) ||
-    options.disableTerminalBridgeMonitor === true
-  ) {
-    return undefined;
-  }
-  const nativeTakeover = isRecord(conversation.native_session_takeover)
-    ? conversation.native_session_takeover
-    : undefined;
-  return startTerminalBridgeMonitor({
-    statePath,
-    logPath,
-    agentTimeoutMinutes: Number(
-      options.agentTimeoutMinutes ??
-        nativeTakeover?.["terminal_bridge_inactivity_timeout_minutes"] ??
-        DEFAULT_AGENT_TIMEOUT_MINUTES
-    ),
-    agentHardTimeoutMinutes: Number(
-      options.agentHardTimeoutMinutes ??
-        nativeTakeover?.["terminal_bridge_hard_timeout_minutes"] ??
-        DEFAULT_AGENT_HARD_TIMEOUT_MINUTES
-    ),
-    pollIntervalMs: Number(options.monitorPollIntervalMs ?? DEFAULT_MONITOR_POLL_INTERVAL_MS),
-    codexHome: options.codexHome,
-    claudeHome: options.claudeHome ?? nativeTakeover?.["claude_home"]
-  });
-}
-
-function startTerminalBridgeMonitorHandoffWatchdog({
-  conversation,
-  statePath,
-  logPath,
-  options
-}) {
-  if (
-    options.disableTerminalBridgeMonitor === true ||
-    !terminalBridgeEnabled(conversation)
-  ) {
-    return undefined;
-  }
-  const nativeTakeover = isRecord(conversation.native_session_takeover)
-    ? conversation.native_session_takeover
-    : undefined;
-  const terminalMessageId = stringValue(
-    nativeTakeover?.terminal_bridge_message_id
+  return spawnDetachedTerminalMonitor(
+    monitorLaunch.planLaunch({
+      conversation,
+      statePath,
+      logPath,
+      options,
+      entryPath: cliEntryPath(),
+      environment: cliEnv()
+    })
   );
-  if (!terminalMessageId) {
-    return undefined;
-  }
-
-  const args = [
-    cliEntryPath(),
-    "monitor",
-    "--terminal-bridge-handoff",
-    "--state",
-    statePath,
-    "--log",
-    logPath,
-    "--expected-terminal-message-id",
-    terminalMessageId
-  ];
-  const monitorPollIntervalMs = Number(options.monitorPollIntervalMs);
-  if (Number.isFinite(monitorPollIntervalMs) && monitorPollIntervalMs > 0) {
-    args.push(
-      "--monitor-poll-interval-ms",
-      String(monitorPollIntervalMs)
-    );
-  }
-  const handoffPollIntervalMs = Number(options.monitorHandoffPollIntervalMs);
-  if (Number.isFinite(handoffPollIntervalMs) && handoffPollIntervalMs > 0) {
-    args.push(
-      "--monitor-handoff-poll-interval-ms",
-      String(handoffPollIntervalMs)
-    );
-  }
-  const claudeHome =
-    options.claudeHome ?? nativeTakeover?.["claude_home"];
-  if (options.codexHome) {
-    args.push("--codex-home", options.codexHome);
-  }
-  if (claudeHome) {
-    args.push("--claude-home", claudeHome);
-  }
-
-  const child = spawn(process.execPath, args, {
-    detached: true,
-    stdio: "ignore",
-    cwd: cliCwd(),
-    env: environmentWithoutGatewayTokens()
-  });
-  child.unref();
-  return child;
 }
 
 function ensureTerminalBridgeMonitorAfterApproval({
@@ -2685,33 +2580,20 @@ function ensureTerminalBridgeMonitorAfterApproval({
   const activeMonitor = terminalMessageId
     ? activeTerminalBridgeMonitorOwner(statePath, terminalMessageId)
     : undefined;
-  const launchedMonitor = activeMonitor
-    ? undefined
-    : startTerminalBridgeMonitorForConversation({
-        conversation,
-        statePath,
-        logPath,
-        options
-      });
-  const handoffWatchdog = activeMonitor
-    ? startTerminalBridgeMonitorHandoffWatchdog({
-        conversation,
-        statePath,
-        logPath,
-        options
-      })
-    : undefined;
+  const launchPlan = monitorLaunch.planAfterApproval({
+    conversation,
+    statePath,
+    logPath,
+    options,
+    entryPath: cliEntryPath(),
+    environment: cliEnv(),
+    activeMonitorPresent: activeMonitor !== undefined
+  });
+  const launchedMonitor = spawnDetachedTerminalMonitor(launchPlan.monitor);
+  const handoffWatchdog = spawnDetachedTerminalMonitor(launchPlan.handoff);
   const monitorPid = activeMonitor?.ownerPid ?? launchedMonitor?.pid;
-  const agentTimeoutMinutes = Number(
-    options.agentTimeoutMinutes ??
-      nativeTakeover?.terminal_bridge_inactivity_timeout_minutes ??
-      DEFAULT_AGENT_TIMEOUT_MINUTES
-  );
-  const agentHardTimeoutMinutes = Number(
-    options.agentHardTimeoutMinutes ??
-      nativeTakeover?.terminal_bridge_hard_timeout_minutes ??
-      DEFAULT_AGENT_HARD_TIMEOUT_MINUTES
-  );
+  const { agentTimeoutMinutes, agentHardTimeoutMinutes } =
+    monitorLaunch.terminalMonitorTimeoutPlan({ conversation, options });
   if (activeMonitor) {
     appendEvent(logPath, {
       ts: cliNow().toISOString(),
@@ -2812,7 +2694,7 @@ function withTerminalBridgeState({
       terminal_bridge_completion_claim: undefined,
       terminal_bridge_approval_dispatch: undefined,
       terminal_bridge_detector_diagnostic: undefined,
-      terminal_bridge_monitor_lock_version: TERMINAL_BRIDGE_MONITOR_LOCK_VERSION,
+      terminal_bridge_monitor_lock_version: monitorOwner.LOCK_VERSION,
       terminal_bridge_monitor_started_at: startedAt,
       terminal_bridge_last_activity_at: startedAt,
       terminal_bridge_inactivity_timeout_minutes: agentTimeoutMinutes,
@@ -4344,13 +4226,6 @@ function reconcileTerminalBridgeCollateralStalls(
     errors,
     items
   };
-}
-
-function environmentWithoutGatewayTokens(): NodeJS.ProcessEnv {
-  const environment = { ...cliEnv() };
-  delete environment.AKK_GATEWAY_TOKEN;
-  delete environment.OPENCLAW_GATEWAY_TOKEN;
-  return environment;
 }
 
 async function runList(options) {
@@ -19060,7 +18935,7 @@ async function runApprove(options) {
       terminal_bridge_last_approval_at: approvalResolvedAt,
       terminal_bridge_last_approval_message_id:
         nativeTakeoverForUpdate.terminal_bridge_message_id,
-      terminal_bridge_monitor_lock_version: TERMINAL_BRIDGE_MONITOR_LOCK_VERSION,
+      terminal_bridge_monitor_lock_version: monitorOwner.LOCK_VERSION,
       terminal_bridge_monitor_started_at: approvalResolvedAt,
       terminal_bridge_last_activity_at: approvalResolvedAt,
       terminal_bridge_last_activity_reason: "approval resolved",
@@ -23616,7 +23491,7 @@ async function runRenew(options) {
       status: "waiting_for_agent" as const,
       native_session_takeover: {
         ...currentTakeover,
-        terminal_bridge_monitor_lock_version: TERMINAL_BRIDGE_MONITOR_LOCK_VERSION,
+        terminal_bridge_monitor_lock_version: monitorOwner.LOCK_VERSION,
         terminal_bridge_monitor_started_at: now,
         terminal_bridge_last_activity_at: now,
         terminal_bridge_inactivity_timeout_minutes: inactivityTimeoutMinutes,
@@ -24000,52 +23875,33 @@ async function reconcileMonitors(
         statePath,
         initialEligibility.terminalMessageId
       );
-      if (activeOwner) {
-        alreadyRunning += 1;
+      const currentOwnership = monitorOwner.decideCurrent({
+        currentOwnerPresent: activeOwner !== undefined,
+        currentOwnerPid: activeOwner?.ownerPid,
+        monitorLockVersion:
+          initialEligibility.nativeTakeover.terminal_bridge_monitor_lock_version
+      });
+      const ownership = currentOwnership.action === "inspect_legacy"
+        ? (() => {
+            const legacyLaunchPid = latestTerminalBridgeMonitorLaunchPid(logPath);
+            return monitorOwner.decideLegacy({
+              latestLaunchPid: legacyLaunchPid,
+              launchProcessAlive: legacyLaunchPid !== undefined &&
+                isProcessAlive(legacyLaunchPid)
+            });
+          })()
+        : currentOwnership;
+      if (ownership.action === "stop") {
+        if (ownership.item.status === "already_running") {
+          alreadyRunning += 1;
+        } else {
+          skipped += 1;
+        }
         items.push({
           conversation_id: initialConversation.conversation_id,
-          status: "already_running",
-          reason: "monitor_lock_owner_alive",
-          monitor_owner_pid: activeOwner.ownerPid ?? null
+          ...ownership.item
         });
         continue;
-      }
-
-      const monitorLockVersion = Number(
-        initialEligibility.nativeTakeover.terminal_bridge_monitor_lock_version
-      );
-      if (monitorLockVersion !== TERMINAL_BRIDGE_MONITOR_LOCK_VERSION) {
-        if (Number.isFinite(monitorLockVersion)) {
-          skipped += 1;
-          items.push({
-            conversation_id: initialConversation.conversation_id,
-            status: "skipped",
-            reason: "monitor_lock_version_unsupported",
-            monitor_lock_version: monitorLockVersion
-          });
-          continue;
-        }
-
-        const legacyLaunchPid = latestTerminalBridgeMonitorLaunchPid(logPath);
-        if (legacyLaunchPid === undefined) {
-          skipped += 1;
-          items.push({
-            conversation_id: initialConversation.conversation_id,
-            status: "skipped",
-            reason: "legacy_monitor_ownership_unknown"
-          });
-          continue;
-        }
-        if (isProcessAlive(legacyLaunchPid)) {
-          alreadyRunning += 1;
-          items.push({
-            conversation_id: initialConversation.conversation_id,
-            status: "already_running",
-            reason: "legacy_monitor_launch_pid_alive",
-            monitor_owner_pid: legacyLaunchPid
-          });
-          continue;
-        }
       }
 
       const prepared = prepareTerminalBridgeMonitorReconciliation({
@@ -25452,22 +25308,11 @@ function settleLocalTerminalBridgeCompletionClaim({
 }
 
 function latestTerminalBridgeMonitorLaunchPid(logPath: string): number | undefined {
-  let events;
   try {
-    events = readExistingEvents(logPath);
+    return monitorOwner.latestLaunchPid(readExistingEvents(logPath));
   } catch {
     return undefined;
   }
-  const ownership = [...events].reverse().find((event) =>
-    event.event === "terminal_bridge_monitor_launch" ||
-    event.event === "terminal_bridge_monitor_started"
-  );
-  const pid = Number(
-    ownership?.event === "terminal_bridge_monitor_started"
-      ? ownership.monitor_pid
-      : ownership?.pid
-  );
-  return Number.isSafeInteger(pid) && pid > 1 ? pid : undefined;
 }
 
 function prepareTerminalBridgeMonitorReconciliation({
@@ -25525,11 +25370,11 @@ function prepareTerminalBridgeMonitorReconciliation({
 
     const nextNativeTakeover = {
       ...eligibility.nativeTakeover,
-      terminal_bridge_monitor_lock_version: TERMINAL_BRIDGE_MONITOR_LOCK_VERSION
+      terminal_bridge_monitor_lock_version: monitorOwner.LOCK_VERSION
     };
     const needsSave =
       eligibility.nativeTakeover.terminal_bridge_monitor_lock_version !==
-        TERMINAL_BRIDGE_MONITOR_LOCK_VERSION;
+        monitorOwner.LOCK_VERSION;
     const preparedConversation = needsSave
       ? {
           ...conversation,
@@ -26622,22 +26467,18 @@ function startCallbackRetryMonitor({
     0,
     Number.isFinite(Number(delayMs)) ? Number(delayMs) : CALLBACK_RETRY_DELAYS_MS[0]
   );
-  const child = spawn(process.execPath, [
-    cliEntryPath(),
-    "monitor",
-    "--callback-retry",
-    "--state",
-    statePath,
-    "--callback-retry-delay-ms",
-    String(normalizedDelayMs)
-  ], {
-    detached: true,
-    stdio: "ignore",
-    cwd: cliCwd(),
-    env: environmentWithoutGatewayTokens()
-  });
-  child.unref();
-  return child;
+  return spawnDetachedTerminalMonitor({
+    args: [
+      cliEntryPath(),
+      "monitor",
+      "--callback-retry",
+      "--state",
+      statePath,
+      "--callback-retry-delay-ms",
+      String(normalizedDelayMs)
+    ],
+    environment: monitorLaunch.withoutGatewayTokens(cliEnv())
+  })!;
 }
 
 function runCallbackRetryMonitor(options) {
@@ -26763,7 +26604,7 @@ function runTerminalBridgeMonitorHandoff(options) {
       ? configuredPollIntervalMs
       : 100
   );
-  const handoffLockPath = terminalBridgeMonitorHandoffLockPath(
+  const handoffLockPath = monitorOwner.handoffLockPath(
     statePath,
     expectedMessageId
   );
@@ -28494,45 +28335,23 @@ function terminalBridgeScreenFingerprint(value): string | undefined {
     : undefined;
 }
 
-function terminalBridgeMonitorLockPath(statePath: string, terminalMessageId: string): string {
-  const messageKey = createHash("sha256")
-    .update(terminalMessageId)
-    .digest("hex")
-    .slice(0, 20);
-  return `${statePath}.terminal-bridge-monitor-${messageKey}.lock`;
-}
-
-function terminalBridgeMonitorHandoffLockPath(
-  statePath: string,
-  terminalMessageId: string
-): string {
-  const messageKey = createHash("sha256")
-    .update(terminalMessageId)
-    .digest("hex")
-    .slice(0, 20);
-  return `${statePath}.terminal-bridge-monitor-handoff-${messageKey}.lock`;
-}
-
-function fileLockOwnerPid(lockPath: string): number | undefined {
-  return readFileLockOwner(lockPath).pid;
-}
-
 function activeTerminalBridgeMonitorOwner(
   statePath: string,
   terminalMessageId: string
 ): { lockPath: string; ownerPid?: number } | undefined {
-  const lockPath = terminalBridgeMonitorLockPath(statePath, terminalMessageId);
+  const lockPath = monitorOwner.lockPath(statePath, terminalMessageId);
   if (!fs.existsSync(lockPath) || staleFileLock(lockPath)) {
     return undefined;
   }
-  return {
-    lockPath,
-    ownerPid: fileLockOwnerPid(lockPath)
-  };
+  return terminalBridgeMonitorLockOwner(lockPath);
+}
+
+function terminalBridgeMonitorLockOwner(lockPath: string) {
+  return { lockPath, ownerPid: readFileLockOwner(lockPath).pid };
 }
 
 function tryAcquireTerminalBridgeMonitorLock(statePath: string, terminalMessageId: string) {
-  const lockPath = terminalBridgeMonitorLockPath(statePath, terminalMessageId);
+  const lockPath = monitorOwner.lockPath(statePath, terminalMessageId);
   try {
     return {
       acquired: true as const,
@@ -28543,8 +28362,7 @@ function tryAcquireTerminalBridgeMonitorLock(statePath: string, terminalMessageI
     if (isRecord(error) && error.code === "LOCK_TIMEOUT") {
       return {
         acquired: false as const,
-        lockPath,
-        ownerPid: fileLockOwnerPid(lockPath)
+        ...terminalBridgeMonitorLockOwner(lockPath)
       };
     }
     throw error;

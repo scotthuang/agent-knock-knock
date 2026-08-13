@@ -186,6 +186,30 @@ test("terminal monitor poll policy selects its timeout and recovery parity set",
   );
 });
 
+test("terminal monitor supervision seams select launch and recovery parity", async () => {
+  const selection = await loadSelectionModule();
+  const tiers = loadTiers();
+  const expected = [
+    "test/shards/agent-cli-claude-callback.test.ts",
+    "test/shards/agent-cli-monitor-approval-context.test.ts",
+    "test/shards/agent-cli-monitor-lifecycle.test.ts",
+    "test/shards/agent-cli-monitor-recovery.test.ts",
+    "test/shards/agent-cli-session-acceptance.test.ts"
+  ];
+  for (const changedPath of [
+    "src/terminal-monitor-launch-plan.ts",
+    "src/terminal-monitor-ownership-policy.ts"
+  ]) {
+    assert.deepEqual(selection.selectAffectedTests([changedPath], tiers), {
+      mode: "targeted",
+      changedPaths: [changedPath],
+      integrationFiles: tiers.integration.filter((testPath) =>
+        expected.includes(testPath)
+      )
+    });
+  }
+});
+
 test("native thread transition policy selects its exact lifecycle parity set", async () => {
   const selection = await loadSelectionModule();
   const tiers = loadTiers();
