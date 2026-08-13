@@ -232,6 +232,12 @@ import {
   sessionShortRef,
   type SessionSelectorCandidate
 } from "./session-selector.js";
+import {
+  decideTerminalBindingMatch,
+  type TerminalCodexOpenRootInventory,
+  type TerminalNativeIdentityObservation,
+  type TerminalObservation
+} from "./terminal-binding-authority.js";
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 10080;
 const DEFAULT_AGENT_TIMEOUT_MINUTES = 60;
@@ -6228,6 +6234,74 @@ function terminalFirstListProjection({
   };
 }
 
+function listEntryNativeIdentityObservation(
+  terminal: Record<string, any>
+): TerminalNativeIdentityObservation {
+  const liveThreadId = stringValue(terminal.native_agent_session_id);
+  const liveRollout = isRecord(terminal.native_agent_rollout) &&
+      isCompleteNativeRollout(terminal.native_agent_rollout)
+    ? terminal.native_agent_rollout
+    : undefined;
+  if (liveThreadId) {
+    return {
+      status: "resolved",
+      identity: {
+        sessionId: liveThreadId,
+        processUuid: stringValue(terminal.native_agent_process_uuid),
+        processBirth: stringValue(terminal.native_agent_process_birth),
+        rollout: liveRollout,
+        evidence:
+          stringValue(terminal.native_agent_identity_evidence) ??
+          "terminal_scan"
+      }
+    };
+  }
+  const observation = isRecord(terminal.native_agent_identity_observation)
+    ? terminal.native_agent_identity_observation
+    : undefined;
+  if (observation?.status === "verified_absent") {
+    return {
+      status: "verified_absent",
+      evidence: stringValue(observation.evidence)
+    };
+  }
+  if (observation?.status === "unavailable") {
+    return {
+      status: "unavailable",
+      reason: stringValue(observation.reason)
+    };
+  }
+  return { status: "not_observed" };
+}
+
+function terminalObservationFromListEntry(
+  terminal: Record<string, any>,
+  terminalControl: TerminalControlRef | undefined,
+  agent: ExecutorKind
+): TerminalObservation {
+  return {
+    terminalId: stringValue(terminal.id) ?? "",
+    agent,
+    pid: Number(terminal.pid),
+    terminalControl,
+    workspace: stringValue(terminal.workspace ?? terminal.cwd),
+    nativeIdentity: listEntryNativeIdentityObservation(terminal),
+    processIncarnation: {
+      processUuid: stringValue(terminal.native_agent_process_uuid),
+      processBirth: stringValue(terminal.native_agent_process_birth)
+    },
+    statusCardNativeThreadId: stringValue(
+      terminal.native_agent_status_card_session_id
+    ),
+    codexOpenRootInventory: isRecord(
+      terminal._codex_open_root_rollout_inventory
+    )
+      ? terminal._codex_open_root_rollout_inventory as unknown as
+          TerminalCodexOpenRootInventory
+      : undefined
+  };
+}
+
 function managedSessionMatchesLiveTerminalEntry(
   session: ManagedSessionState,
   terminal: Record<string, any>,
@@ -6241,120 +6315,53 @@ function managedSessionMatchesLiveTerminalEntry(
     session.status !== "bound" ||
     !binding ||
     session.agent !== terminal.agent ||
-    binding.native_process.pid !== Number(terminal.pid) ||
-    !terminalControlAliasMatches(
-      binding.terminal_id,
-      binding.terminal_control,
-      terminal.id,
-      liveControl
-    ) ||
-    !matchesConfiguredWorkspace(
-      session.workspace,
-      terminal.workspace ?? terminal.cwd
-    )
+    binding.native_process.pid !== Number(terminal.pid)
   ) {
     return false;
   }
-  const liveThreadId = stringValue(terminal.native_agent_session_id);
-  const statusCardThreadId = stringValue(
-    terminal.native_agent_status_card_session_id
+  const terminalAliasMatches = terminalControlAliasMatches(
+    binding.terminal_id,
+    binding.terminal_control,
+    terminal.id,
+    liveControl
   );
+  if (!terminalAliasMatches) {
+    return false;
+  }
+  const workspaceMatches = matchesConfiguredWorkspace(
+    session.workspace,
+    terminal.workspace ?? terminal.cwd
+  );
+  if (!workspaceMatches) {
+    return false;
+  }
+  const observation = terminalObservationFromListEntry(
+    terminal,
+    liveControl,
+    session.agent
+  );
+  const evidence = {
+    terminalAliasMatches,
+    workspaceMatches
+  };
+  let decision = decideTerminalBindingMatch(session, observation, evidence);
   if (
-    isExactNativeThreadId(binding.native_thread_id) &&
-    isExactNativeThreadId(statusCardThreadId) &&
-    binding.native_thread_id.toLowerCase() !==
-      statusCardThreadId.toLowerCase()
+    decision.state === "not_exact" &&
+    decision.reason === "native_identity_mismatch" &&
+    session.agent === "codex" &&
+    observation.nativeIdentity.status === "resolved"
   ) {
-    return false;
+    decision = decideTerminalBindingMatch(session, observation, {
+      ...evidence,
+      codexLingeringBeforeMatches:
+        codexLingeringBeforeIdentityMatchesSession({
+          storeDir,
+          session,
+          identity: observation.nativeIdentity.identity
+        })
+    });
   }
-  if (!liveThreadId) {
-    const candidateInventory = isRecord(
-      terminal._codex_open_root_rollout_inventory
-    )
-      ? terminal._codex_open_root_rollout_inventory as unknown as
-          CodexOpenRootRolloutInventory
-      : undefined;
-    const boundRollout = binding.native_process.rollout;
-    const candidateRoot = candidateInventory?.roots.find((root) =>
-      root.sessionId.toLowerCase() ===
-        binding.native_thread_id?.toLowerCase()
-    );
-    if (
-      session.agent === "codex" &&
-      binding.native_thread_id &&
-      isCompleteNativeRollout(boundRollout) &&
-      candidateRoot &&
-      exactNativeRolloutMatches(candidateRoot.rollout, boundRollout) &&
-      candidateInventory?.pid === binding.native_process.pid &&
-      candidateInventory.processUuid ===
-        binding.native_process.process_uuid &&
-      candidateInventory.processBirth ===
-        binding.native_process.process_birth
-    ) {
-      return true;
-    }
-    return Boolean(
-      session.agent === "codex" &&
-      binding.native_thread_id &&
-      isCodexStatusCardEvidence(binding.native_process.evidence) &&
-      binding.native_process.process_uuid &&
-      binding.native_process.process_birth &&
-      binding.native_process.process_uuid ===
-        stringValue(terminal.native_agent_process_uuid) &&
-      binding.native_process.process_birth ===
-        stringValue(terminal.native_agent_process_birth)
-    );
-  }
-  const liveRollout = isRecord(terminal.native_agent_rollout)
-    ? terminal.native_agent_rollout
-    : undefined;
-  const exactIdentityMatch = Boolean(
-    binding.native_thread_id === liveThreadId &&
-    (
-      !binding.native_process.process_uuid ||
-      binding.native_process.process_uuid ===
-        stringValue(terminal.native_agent_process_uuid)
-    ) &&
-    (
-      !binding.native_process.process_birth ||
-      binding.native_process.process_birth ===
-        stringValue(terminal.native_agent_process_birth)
-    ) &&
-    (
-      !binding.native_process.rollout ||
-      (
-        binding.native_process.rollout.fd === stringValue(liveRollout?.fd) &&
-        binding.native_process.rollout.device ===
-          stringValue(liveRollout?.device) &&
-        binding.native_process.rollout.inode ===
-          stringValue(liveRollout?.inode) &&
-        binding.native_process.rollout.path === stringValue(liveRollout?.path)
-      )
-    )
-  );
-  if (exactIdentityMatch || session.agent !== "codex") {
-    return exactIdentityMatch;
-  }
-  return codexLingeringBeforeIdentityMatchesSession({
-    storeDir,
-    session,
-    identity: {
-      sessionId: liveThreadId,
-      processUuid: stringValue(terminal.native_agent_process_uuid),
-      processBirth: stringValue(terminal.native_agent_process_birth),
-      rollout: liveRollout && isCompleteNativeRollout(liveRollout)
-        ? {
-            fd: String(liveRollout.fd),
-            device: String(liveRollout.device),
-            inode: String(liveRollout.inode),
-            path: String(liveRollout.path)
-          }
-        : undefined,
-      evidence:
-        stringValue(terminal.native_agent_identity_evidence) ??
-        "terminal_scan"
-    }
-  });
+  return decision.state === "exact";
 }
 
 function managedSessionClaimsLiveTerminalEntry(
@@ -9949,6 +9956,30 @@ function terminalRuntimeForLiveIdentity({
   };
 }
 
+function terminalObservationFromResolvedTerminal(
+  terminal: ResolvedTerminalConversation,
+  identity: NativeAgentSessionIdentity | undefined,
+  processIncarnation: {
+    processUuid?: string;
+    processBirth?: string;
+  }
+): TerminalObservation {
+  return {
+    terminalId: terminal.conversationId,
+    agent: terminal.agent,
+    pid: terminal.pid,
+    terminalControl: terminal.terminalControl,
+    workspace: terminal.terminalControl.currentPath,
+    nativeIdentity: identity
+      ? {
+          status: "resolved",
+          identity
+        }
+      : { status: "not_observed" },
+    processIncarnation
+  };
+}
+
 function bindingMatchesLiveTerminal(
   session: ManagedSessionState,
   terminal: ResolvedTerminalConversation,
@@ -9961,20 +9992,31 @@ function bindingMatchesLiveTerminal(
   }
   if (
     session.agent !== terminal.agent ||
-    binding.native_process.pid !== terminal.pid ||
-    !terminalControlAliasMatches(
-      binding.terminal_id,
-      binding.terminal_control,
-      terminal.conversationId,
-      terminal.terminalControl
-    ) ||
-    !matchesConfiguredWorkspace(
-      session.workspace,
-      terminal.terminalControl.currentPath
-    )
+    binding.native_process.pid !== terminal.pid
   ) {
     return false;
   }
+  const terminalAliasMatches = terminalControlAliasMatches(
+    binding.terminal_id,
+    binding.terminal_control,
+    terminal.conversationId,
+    terminal.terminalControl
+  );
+  if (!terminalAliasMatches) {
+    return false;
+  }
+  const workspaceMatches = matchesConfiguredWorkspace(
+    session.workspace,
+    terminal.terminalControl.currentPath
+  );
+  if (!workspaceMatches) {
+    return false;
+  }
+
+  let processIncarnation = {
+    processUuid: identity?.processUuid,
+    processBirth: identity?.processBirth
+  };
   if (!identity) {
     if (
       terminal.agent !== "codex" ||
@@ -9986,38 +10028,39 @@ function bindingMatchesLiveTerminal(
       return false;
     }
     try {
-      const incarnation = codexProcessIncarnationForPid(terminal.pid);
-      return binding.native_process.process_uuid === incarnation.processUuid &&
-        binding.native_process.process_birth === incarnation.processBirth;
+      processIncarnation = codexProcessIncarnationForPid(terminal.pid);
     } catch {
       return false;
     }
   }
-  const exactIdentityMatch = Boolean(
-    binding.native_thread_id === identity.sessionId &&
-    (
-      !binding.native_process.process_uuid ||
-      binding.native_process.process_uuid === identity.processUuid
-    ) &&
-    (
-      !binding.native_process.process_birth ||
-      binding.native_process.process_birth === identity.processBirth
-    ) &&
-    (
-      !binding.native_process.rollout ||
-      (
-        binding.native_process.rollout.fd === identity.rollout?.fd &&
-        binding.native_process.rollout.device === identity.rollout?.device &&
-        binding.native_process.rollout.inode === identity.rollout?.inode &&
-        binding.native_process.rollout.path === identity.rollout?.path
-      )
-    )
+
+  const observation = terminalObservationFromResolvedTerminal(
+    terminal,
+    identity,
+    processIncarnation
   );
-  return exactIdentityMatch || codexLingeringBeforeIdentityMatchesSession({
-    storeDir,
-    session,
+  const evidence = {
+    terminalAliasMatches,
+    workspaceMatches
+  };
+  let decision = decideTerminalBindingMatch(session, observation, evidence);
+  if (
+    decision.state === "not_exact" &&
+    decision.reason === "native_identity_mismatch" &&
+    session.agent === "codex" &&
     identity
-  });
+  ) {
+    decision = decideTerminalBindingMatch(session, observation, {
+      ...evidence,
+      codexLingeringBeforeMatches:
+        codexLingeringBeforeIdentityMatchesSession({
+          storeDir,
+          session,
+          identity
+        })
+    });
+  }
+  return decision.state === "exact";
 }
 
 function boundManagedSessionForTerminal({

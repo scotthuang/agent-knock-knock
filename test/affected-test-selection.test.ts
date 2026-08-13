@@ -78,6 +78,31 @@ test("known source subsystems select exact integration files in manifest order",
   );
 });
 
+test("terminal binding authority selects its exact parity integration set", async () => {
+  const selection = await loadSelectionModule();
+  const tiers = loadTiers();
+  const expected = [
+    "test/codex-no-rollout-binding-cli.test.ts",
+    "test/human-handoff-adoption-cli.test.ts",
+    "test/native-thread-lifecycle-cli.test.ts",
+    "test/native-thread-lifecycle-recovery-cli.test.ts",
+    "test/session-selector-cli.test.ts",
+    "test/shards/agent-cli-session-acceptance.test.ts",
+    "test/shards/agent-cli-terminal-send-gates.test.ts",
+    "test/stale-bound-resume-cli.test.ts"
+  ];
+  assert.deepEqual(
+    selection.selectAffectedTests(["src/terminal-binding-authority.ts"], tiers),
+    {
+      mode: "targeted",
+      changedPaths: ["src/terminal-binding-authority.ts"],
+      integrationFiles: tiers.integration.filter((testPath) =>
+        expected.includes(testPath)
+      )
+    }
+  );
+});
+
 test("an integration test selects itself while fast and documentation changes still use fast only", async () => {
   const selection = await loadSelectionModule();
   const tiers = loadTiers();

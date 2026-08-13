@@ -83,6 +83,19 @@
     "terminal-agent-core": {
       "selection": "full"
     },
+    "terminal-binding-authority": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/codex-no-rollout-binding-cli.test.ts",
+        "test/human-handoff-adoption-cli.test.ts",
+        "test/native-thread-lifecycle-cli.test.ts",
+        "test/native-thread-lifecycle-recovery-cli.test.ts",
+        "test/session-selector-cli.test.ts",
+        "test/shards/agent-cli-session-acceptance.test.ts",
+        "test/shards/agent-cli-terminal-send-gates.test.ts",
+        "test/stale-bound-resume-cli.test.ts"
+      ]
+    },
     "terminal-control": {
       "selection": "full"
     },
@@ -229,6 +242,10 @@
     {
       "path": "src/terminal-agent-registry.ts",
       "owner": "terminal-agent-core"
+    },
+    {
+      "path": "src/terminal-binding-authority.ts",
+      "owner": "terminal-binding-authority"
     },
     {
       "path": "src/terminal-control-provider.ts",
