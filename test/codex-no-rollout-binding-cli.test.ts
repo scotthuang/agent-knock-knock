@@ -1730,41 +1730,36 @@ for (const [label, acceptedNativeThreadId] of [
  *
  * - The four legacy cases below still execute the production reservation,
  *   Store, dispatch-ledger, cleanup, token-refresh, and later-send paths.
- * - Three crash points and every recovery/retry step now use the injected
- *   command boundary. InProcessCliExit represents the deliberate exit only
- *   after the production crash hook has durably written the same artifacts.
- * - The first case remains the executable process-crash witness: it proves
- *   the emitted CLI turns that exact hook into OS exit 86. All state, ledger,
- *   zero-input, single-input, and historical-liveness assertions stay shared.
+ * - Every crash point remains an executable process boundary so exit 86
+ *   terminates before ordinary exception compensation can run.
+ * - Recovery, retry, close, and later-send steps use the injected command
+ *   boundary. All state, ledger, zero-input, single-input, and historical-
+ *   liveness assertions stay shared.
  */
 for (const crashCase of [
   {
     label: "source Session reservation before its transfer receipt",
     hook: "AKK_TEST_EXIT_AFTER_DEFERRED_SOURCE_SESSION_RESERVED",
     expectedStatus: "prepared",
-    addPreparedLedgerWithoutState: false,
-    retainProcessCrashGolden: true
+    addPreparedLedgerWithoutState: false
   },
   {
     label: "source reservation",
     hook: "AKK_TEST_EXIT_AFTER_DEFERRED_SOURCE_RESERVED",
     expectedStatus: "source_reserved",
-    addPreparedLedgerWithoutState: false,
-    retainProcessCrashGolden: false
+    addPreparedLedgerWithoutState: false
   },
   {
     label: "target preparation",
     hook: "AKK_TEST_EXIT_AFTER_DEFERRED_TARGET_PREPARED",
     expectedStatus: "target_prepared",
-    addPreparedLedgerWithoutState: false,
-    retainProcessCrashGolden: false
+    addPreparedLedgerWithoutState: false
   },
   {
     label: "prepared ledger before Turn state",
     hook: "AKK_TEST_EXIT_AFTER_DEFERRED_TARGET_PREPARED",
     expectedStatus: "target_prepared",
-    addPreparedLedgerWithoutState: true,
-    retainProcessCrashGolden: false
+    addPreparedLedgerWithoutState: true
   }
 ] as const) {
   test(
@@ -1785,9 +1780,7 @@ for (const crashCase of [
           AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0",
           [crashCase.hook]: "1"
         };
-        const crashed = crashCase.retainProcessCrashGolden
-          ? runCliSubprocess(args, crashEnvironment)
-          : await runCli(args, crashEnvironment);
+        const crashed = runCliSubprocess(args, crashEnvironment);
         assert.equal(crashed.status, 86, crashed.stderr || crashed.stdout);
 
         const transfer = soleDeferredForegroundTransfer(fixture);
@@ -1945,10 +1938,10 @@ for (const crashCase of [
   );
 }
 
-// These two adjacent historical-ledger variants reuse the same in-process
-// invariant boundary as the matrix above. The retained executable witness
-// already proves exit 86; these cases uniquely prove that zero-input abort and
-// refreshed retry never mutate an exact resolved predecessor ledger.
+// These two adjacent historical-ledger variants retain the executable crash
+// boundary and use the in-process invariant boundary for recovery and retry.
+// They uniquely prove that zero-input abort and refreshed retry never mutate
+// an exact resolved predecessor ledger.
 for (const crashCase of [
   {
     label: "source Session reservation before receipt",
@@ -1984,7 +1977,7 @@ for (const crashCase of [
 
         const action = await deferredForegroundSendAction(fixture);
         const args = deferredForegroundSendArgs(fixture, action, message);
-        const crashed = await runCli(args, {
+        const crashed = runCliSubprocess(args, {
           ...fixture.environment,
           AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0",
           [crashCase.hook]: "1"
