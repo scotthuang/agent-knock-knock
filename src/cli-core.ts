@@ -276,12 +276,6 @@ import {
 } from "./terminal-dispatch-ledger-codec.js";
 import * as dispatch from "./terminal-dispatch-policy.js";
 import {
-  TerminalDispatchService,
-  type TerminalAcceptancePollResult,
-  type TerminalBridgeSubmissionMutation,
-  type TerminalBridgeSubmissionStatus
-} from "./terminal-dispatch-service.js";
-import {
   cliCwd,
   cliDependencies,
   cliEnv,
@@ -2581,8 +2575,18 @@ function withTerminalBridgeState({
   };
 }
 
-function withTerminalBridgeSubmission(mutation: TerminalBridgeSubmissionMutation): Conversation {
-  const {
+type TerminalBridgeSubmissionStatus =
+  | "prepared"
+  | "text_injected"
+  | "enter_dispatched"
+  | "agent_accepted"
+  | "not_accepted"
+  // Legacy `submitted` proves only that tmux accepted the Enter dispatch.
+  | "submitted"
+  | "uncertain"
+  | "aborted";
+
+function withTerminalBridgeSubmission({
   conversation,
   messageId,
   messageType,
@@ -2601,7 +2605,26 @@ function withTerminalBridgeSubmission(mutation: TerminalBridgeSubmissionMutation
   acceptanceEvidence,
   lastProvenStage,
   safeToRetry
-  } = mutation;
+}: {
+  conversation: Conversation;
+  messageId: string;
+  messageType?: "task" | "answer";
+  messageBody?: string;
+  requestText: string;
+  status: TerminalBridgeSubmissionStatus;
+  preparedAt: string;
+  textInjectedAt?: string;
+  enterDispatchedAt?: string;
+  agentAcceptedAt?: string;
+  notAcceptedAt?: string;
+  submittedAt?: string;
+  uncertainAt?: string;
+  abortedAt?: string;
+  error?: string;
+  acceptanceEvidence?: TerminalSubmissionAcceptanceEvidence;
+  lastProvenStage?: "prepared" | "text_injected" | "enter_dispatched" | "agent_accepted";
+  safeToRetry?: boolean;
+}): Conversation {
   const nativeTakeover = isRecord(conversation.native_session_takeover)
     ? conversation.native_session_takeover
     : {};
@@ -19585,71 +19608,269 @@ async function runTerminalControlSend({
     status: "prepared",
     preparedAt: bridgeStartedAt
   });
-  const dispatchService = new TerminalDispatchService({
-    bridgeEnabled: bridge,
-    conversation,
-    preparedConversation,
-    message,
-    executor,
-    terminalControl,
-    terminalPayload,
-    terminalRequestHash,
-    bridgeStartedAt,
-    statePath,
-    logPath,
-    previousDispatchLedger,
-    recordMessageAfterSend,
-    recordRawAttachmentAfterSend,
-    setupFailureInjected:
-      cliEnv().AKK_TEST_TERMINAL_SETUP_FAILURE === "1",
-    abortedStatePersistenceFailureInjected:
-      cliEnv().AKK_TEST_ABORTED_STATE_PERSISTENCE_FAILURE === "1",
-    finalLedgerFailureInjected:
-      cliEnv().AKK_TEST_FINAL_TERMINAL_LEDGER_FAILURE === "1",
-    dispatcherPid: cliPid(),
-    agentTimeoutMinutes,
-    agentHardTimeoutMinutes,
-    deferredTransferId: deferredCodexForegroundBinding?.transferId
-  }, {
-    nowIso: () => cliNow().toISOString(),
-    withSubmission: withTerminalBridgeSubmission,
-    ledgerFields: terminalBindingLedgerFields,
-    saveState: (state) => saveState(statePath, state),
-    saveLedger: (ledger) =>
-      saveTerminalBridgeDispatchLedger(terminalControl, ledger),
-    appendEvent: (event) => appendEvent(logPath, event),
-    appendMessage: (entry) => appendEvent(logPath, messageEvent(entry)),
-    log: runtimeLog,
-    print: printJson,
-    abortDeferredPreInput: abortDeferredPreInputBeforeTransport,
-    rollbackRawAttach: rollbackRawAttachBeforeTransport,
-    markDeferredUncertain: (reason) => {
-      if (deferredCodexForegroundBinding) {
-        markDeferredCodexForegroundTransferUncertain({
-          options,
-          boundary: deferredCodexForegroundBinding,
-          reason
+
+  try {
+    saveTerminalBridgeDispatchLedger(terminalControl, {
+      ...terminalBindingLedgerFields(preparedConversation),
+      status: "prepared",
+      generation_id: message.id,
+      conversation_id: preparedConversation.conversation_id,
+      session_id: sessionIdForConversation(preparedConversation),
+      turn_id: turnIdForConversation(preparedConversation),
+      message_id: message.id,
+      message_type: message.type,
+      request_hash: terminalRequestHash,
+      prepared_at: bridgeStartedAt,
+      dispatcher_pid: cliPid(),
+      state_path: statePath,
+      event_log_path: logPath,
+      callback_expected: Boolean(preparedConversation.gateway_method),
+      previous_generation_id:
+        stringValue(previousDispatchLedger?.generation_id) ??
+        stringValue(previousDispatchLedger?.message_id)
+    });
+  } catch (error) {
+    try {
+      if (!abortDeferredPreInputBeforeTransport()) {
+        restoreTerminalBridgeDispatchLedger({
+          terminalControl,
+          previousLedger: previousDispatchLedger,
+          reason: "prepared ledger persistence failed before terminal input"
         });
       }
-    },
-    stallOtherConversations: () =>
-      stallOtherTerminalBridgeConversationsForUncertainDispatch({
-        storeDir: storeDirFromOptions(options),
-        terminalControl,
-        currentConversationId: conversation.conversation_id,
-        uncertainMessageId: message.id
-      }),
-    startMonitor: (state) =>
-      startTerminalBridgeMonitorForConversation({
-        conversation: state,
-        statePath,
-        logPath,
-        options
-      })
-  });
-  dispatchService.persistPrepared();
-  let bridgeMonitor: { pid?: number } | undefined;
-  if (dispatchService.recordPreparedBookkeeping()) {
+    } finally {
+      rollbackRawAttachBeforeTransport();
+    }
+    throw error;
+  }
+  try {
+    saveState(statePath, preparedConversation);
+  } catch (error) {
+    try {
+      if (!abortDeferredPreInputBeforeTransport()) {
+        restoreTerminalBridgeDispatchLedger({
+          terminalControl,
+          previousLedger: previousDispatchLedger,
+          reason: "prepared state persistence failed before terminal input"
+        });
+      }
+    } finally {
+      rollbackRawAttachBeforeTransport();
+    }
+    throw error;
+  }
+  let bridgeMonitor:
+    | ReturnType<typeof startTerminalBridgeMonitorForConversation>
+    | undefined;
+  try {
+    if (
+      cliEnv().AKK_TEST_TERMINAL_SETUP_FAILURE === "1"
+    ) {
+      throw new Error(
+        "injected terminal setup failure before terminal input"
+      );
+    }
+    if (recordRawAttachmentAfterSend) {
+      const sourceConversationId = stringValue(
+        isRecord(conversation.native_session_takeover)
+          ? conversation.native_session_takeover.native_session_id
+          : undefined
+      );
+      appendEvent(logPath, {
+        ts: bridgeStartedAt,
+        conversation_id: conversation.conversation_id,
+        event: "raw_terminal_session_attached",
+        source_conversation_id: sourceConversationId,
+        agent: executor.kind,
+        terminal_control: terminalControl,
+        executor
+      });
+      runtimeLog("info", "raw_terminal_session_attached", {
+        conversation_id: conversation.conversation_id,
+        source_conversation_id: sourceConversationId,
+        terminal_target: terminalControl.target,
+        state_path: statePath,
+        event_log_path: logPath
+      });
+    }
+    if (recordMessageAfterSend) {
+      appendEvent(logPath, messageEvent(message));
+      runtimeLog("info", "message_created", {
+        conversation_id: conversation.conversation_id,
+        agent: executor.kind,
+        executor_session: executor.session,
+        message_type: message.type,
+        state_path: statePath,
+        event_log_path: logPath,
+        message: textSummary(message.body)
+      });
+    }
+    appendEvent(logPath, {
+      ts: bridgeStartedAt,
+      conversation_id: conversation.conversation_id,
+      event: "terminal_message_submit_prepared",
+      message_id: message.id,
+      executor,
+      terminal_control: terminalControl,
+      request_hash: terminalBridgeRequestFingerprint(terminalPayload),
+      dispatcher_pid: cliPid()
+    });
+
+  } catch (error) {
+    const abortedAt = cliNow().toISOString();
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    let dispatchLedgerRestored = true;
+    try {
+      if (!abortDeferredPreInputBeforeTransport()) {
+        restoreTerminalBridgeDispatchLedger({
+          terminalControl,
+          previousLedger: previousDispatchLedger,
+          reason: "terminal submission aborted before terminal input"
+        });
+      }
+    } catch (ledgerError) {
+      dispatchLedgerRestored = false;
+      runtimeLog("error", "terminal_dispatch_ledger_restore_failed", {
+        conversation_id: conversation.conversation_id,
+        terminal_target: terminalControl.target,
+        error: ledgerError instanceof Error
+          ? ledgerError.message
+          : String(ledgerError)
+      });
+    }
+    const rawAttachRolledBack = rollbackRawAttachBeforeTransport();
+    const durableAbortCanBeRetryable =
+      dispatchLedgerRestored && rawAttachRolledBack;
+    const failureBase = recordRawAttachmentAfterSend
+      ? {
+          ...preparedConversation,
+          status: "failed" as const,
+          failed_at: abortedAt,
+          failure_reason:
+            "terminal submission setup failed before terminal input"
+        }
+      : {
+          ...preparedConversation,
+          status: conversation.status,
+          ...(conversation.idle_since
+            ? { idle_since: conversation.idle_since }
+            : {})
+        };
+    const abortedConversation = withTerminalBridgeSubmission({
+      conversation: failureBase,
+      messageId: message.id,
+      messageType: message.type,
+      messageBody: String(message.body),
+      requestText: terminalPayload,
+      status: "aborted",
+      preparedAt: bridgeStartedAt,
+      abortedAt,
+      error: errorMessage,
+      safeToRetry: durableAbortCanBeRetryable
+    });
+    let abortedStatePersisted = false;
+    try {
+      if (
+        cliEnv().AKK_TEST_ABORTED_STATE_PERSISTENCE_FAILURE === "1"
+      ) {
+        throw new Error(
+          "injected aborted submission state persistence failure"
+        );
+      }
+      saveState(statePath, abortedConversation);
+      abortedStatePersisted = true;
+    } catch (persistenceError) {
+      runtimeLog("error", "terminal_message_submit_aborted_persist_failed", {
+        conversation_id: abortedConversation.conversation_id,
+        terminal_target: terminalControl.target,
+        error: persistenceError instanceof Error
+          ? persistenceError.message
+          : String(persistenceError)
+      });
+    }
+    const safeToRetry =
+      durableAbortCanBeRetryable && abortedStatePersisted;
+    try {
+      appendEvent(logPath, {
+        ts: abortedAt,
+        conversation_id: abortedConversation.conversation_id,
+        event: "terminal_message_submit_aborted",
+        message_id: message.id,
+        executor,
+        terminal_control: terminalControl,
+        error: textSummary(errorMessage),
+        safe_to_retry: safeToRetry
+      });
+    } catch (persistenceError) {
+      runtimeLog("error", "terminal_message_submit_aborted_event_failed", {
+        conversation_id: abortedConversation.conversation_id,
+        terminal_target: terminalControl.target,
+        error: persistenceError instanceof Error
+          ? persistenceError.message
+        : String(persistenceError)
+      });
+    }
+    const reportedAbortedConversation = safeToRetry
+      ? abortedConversation
+      : withTerminalBridgeSubmission({
+          conversation: abortedConversation,
+          messageId: message.id,
+          messageType: message.type,
+          messageBody: String(message.body),
+          requestText: terminalPayload,
+          status: "aborted",
+          preparedAt: bridgeStartedAt,
+          abortedAt,
+          error: errorMessage,
+          safeToRetry: false
+        });
+    runtimeLog("error", "terminal_message_submit_aborted", {
+      conversation_id: abortedConversation.conversation_id,
+      terminal_target: terminalControl.target,
+      error: errorMessage,
+      safe_to_retry: safeToRetry,
+      dispatch_ledger_restored: dispatchLedgerRestored,
+      aborted_state_persisted: abortedStatePersisted,
+      raw_attach_rolled_back: rawAttachRolledBack
+    });
+    printJson({
+      session_id: sessionIdForConversation(abortedConversation),
+      turn_id: turnIdForConversation(abortedConversation),
+      conversation: reportedAbortedConversation,
+      message,
+      delivered: false,
+      status: "submission_aborted",
+      submission_outcome: "aborted",
+      background: true,
+      callback_expected: false,
+      terminal_control: terminalControl,
+      monitor_pid: bridgeMonitor?.pid ?? null,
+      executor,
+      safe_to_retry: safeToRetry,
+      do_not_retry: !safeToRetry,
+      reason: safeToRetry
+        ? "AKK failed before terminal input; this terminal submission was not sent and may be retried."
+        : !dispatchLedgerRestored
+          ? "AKK failed before terminal input but could not restore the terminal dispatch ledger; inspect and close the conversation before retrying."
+          : !rawAttachRolledBack
+            ? "AKK failed before terminal input but could not detach the provisional raw-attach Session; inspect its exact binding before retrying."
+          : "AKK failed before terminal input but could not persist the aborted receipt; inspect the conversation before retrying.",
+      openclaw_next_action: {
+        action: safeToRetry ? "retry" : "inspect",
+        conversation_id: abortedConversation.conversation_id,
+        session_id: sessionIdForConversation(reportedAbortedConversation),
+        turn_id: turnIdForConversation(reportedAbortedConversation),
+        safe_to_retry: safeToRetry,
+        do_not_retry: !safeToRetry,
+        reason: safeToRetry
+          ? "The failure occurred before any terminal input."
+          : !dispatchLedgerRestored
+            ? "The terminal ledger could not be restored automatically."
+            : !rawAttachRolledBack
+              ? "The provisional raw-attach Session could not be detached automatically."
+            : "The aborted receipt could not be made durable."
+      }
+    });
     return;
   }
 
@@ -19659,6 +19880,19 @@ async function runTerminalControlSend({
   let enterDispatchedAt: string | undefined;
   let acceptanceResult: TerminalAcceptancePollResult | undefined;
   let bookkeepingWarning: string | undefined;
+  const recordPostTransportBookkeepingFailure = (
+    phase: string,
+    error: unknown
+  ): void => {
+    const message = error instanceof Error ? error.message : String(error);
+    bookkeepingWarning ??= message;
+    runtimeLog("warn", "terminal_message_post_transport_bookkeeping_failed", {
+      conversation_id: stagedConversation.conversation_id,
+      terminal_target: terminalControl.target,
+      phase,
+      error: message
+    });
+  };
   try {
     await terminalBridge.send(executor.kind, terminalControl, terminalPayload, {
       runtime: preSendRuntime,
@@ -19728,48 +19962,90 @@ async function runTerminalControlSend({
               }
             : undefined,
       async onTransportStage(event) {
-        await dispatchService.recordTransportStage(event.stage, {
-          advanceDeferred: deferredCodexForegroundBinding
-            ? (stage, at) =>
-                advanceDeferredCodexForegroundTransferInputStage({
-                  options,
-                  boundary: deferredCodexForegroundBinding,
-                  stage,
-                  at
-                })
-            : undefined,
-          assertBoundary: async (stage) => {
-            if (stage === "text_injected" && observedHandoff) {
-              await assertObservedHandoffTransportBoundary({
-                options,
-                terminal: observedHandoff.terminal,
-                transition: observedHandoff.transition,
-                requireEmptyComposer: false
-              });
-            }
-            if (stage === "text_injected" && verifiedEmptyCodexHandoff) {
-              await assertVerifiedEmptyCodexTransportBoundary({
-                options,
-                boundary: verifiedEmptyCodexHandoff,
-                requireEmptyComposer: false
-              });
-            }
-            if (stage === "text_injected" && deferredCodexForegroundBinding) {
-              await assertDeferredCodexForegroundBindingBoundary({
-                options,
-                boundary: deferredCodexForegroundBinding,
-                expectedSourceStatus: "transitioning",
-                requireNoDispatch: false,
-                requireEmptyComposer: false
-              });
-            }
-          }
-        });
-        ({
-          stagedConversation,
+        const stageAt = cliNow().toISOString();
+        if (event.stage === "text_injected") {
+          textInjectedAt = stageAt;
+        } else {
+          enterDispatchedAt = stageAt;
+        }
+        stagedConversation = withTerminalBridgeSubmission({
+          conversation: stagedConversation,
+          messageId: message.id,
+          messageType: message.type,
+          messageBody: String(message.body),
+          requestText: terminalPayload,
+          status: event.stage,
+          preparedAt: bridgeStartedAt,
           textInjectedAt,
           enterDispatchedAt
-        } = dispatchService.progress());
+        });
+        saveState(statePath, stagedConversation);
+        saveTerminalBridgeDispatchLedger(terminalControl, {
+          ...terminalBindingLedgerFields(stagedConversation),
+          status: event.stage,
+          generation_id: message.id,
+          conversation_id: stagedConversation.conversation_id,
+          session_id: sessionIdForConversation(stagedConversation),
+          turn_id: turnIdForConversation(stagedConversation),
+          message_id: message.id,
+          message_type: message.type,
+          request_hash: terminalRequestHash,
+          prepared_at: bridgeStartedAt,
+          ...(textInjectedAt ? { text_injected_at: textInjectedAt } : {}),
+          ...(enterDispatchedAt ? { enter_dispatched_at: enterDispatchedAt } : {}),
+          dispatcher_pid: cliPid(),
+          state_path: statePath,
+          event_log_path: logPath,
+          callback_expected: Boolean(stagedConversation.gateway_method),
+          previous_generation_id:
+            stringValue(previousDispatchLedger?.generation_id) ??
+            stringValue(previousDispatchLedger?.message_id)
+        });
+        if (deferredCodexForegroundBinding) {
+          advanceDeferredCodexForegroundTransferInputStage({
+            options,
+            boundary: deferredCodexForegroundBinding,
+            stage: event.stage,
+            at: stageAt
+          });
+        }
+        if (event.stage === "text_injected" && observedHandoff) {
+          await assertObservedHandoffTransportBoundary({
+            options,
+            terminal: observedHandoff.terminal,
+            transition: observedHandoff.transition,
+            requireEmptyComposer: false
+          });
+        }
+        if (event.stage === "text_injected" && verifiedEmptyCodexHandoff) {
+          await assertVerifiedEmptyCodexTransportBoundary({
+            options,
+            boundary: verifiedEmptyCodexHandoff,
+            requireEmptyComposer: false
+          });
+        }
+        if (event.stage === "text_injected" && deferredCodexForegroundBinding) {
+          await assertDeferredCodexForegroundBindingBoundary({
+            options,
+            boundary: deferredCodexForegroundBinding,
+              expectedSourceStatus: "transitioning",
+            requireNoDispatch: false,
+            requireEmptyComposer: false
+          });
+        }
+        try {
+          appendEvent(logPath, {
+            ts: stageAt,
+            conversation_id: stagedConversation.conversation_id,
+            event: `terminal_message_${event.stage}`,
+            message_id: message.id,
+            executor,
+            terminal_control: terminalControl,
+            request_hash: terminalRequestHash
+          });
+        } catch (error) {
+          recordPostTransportBookkeepingFailure(event.stage, error);
+        }
       }
     });
     if (!enterDispatchedAt) {
@@ -20120,20 +20396,431 @@ async function runTerminalControlSend({
           terminalControl,
           terminalBridge
         });
-    const acceptanceCommit = dispatchService.commitAcceptance(
-      submittedBase,
-      acceptanceResult
-    );
-    deliveredConversation = acceptanceCommit.deliveredConversation;
-    bridgeMonitor = acceptanceCommit.monitor;
-    bookkeepingWarning = acceptanceCommit.bookkeepingWarning;
+    const acceptanceResolvedAt = cliNow().toISOString();
+    const terminalStatus: TerminalBridgeSubmissionStatus =
+      acceptanceResult.outcome === "pending_acceptance"
+        ? "enter_dispatched"
+        : acceptanceResult.outcome;
+    const outcomeBase =
+      acceptanceResult.outcome === "not_accepted" ||
+      acceptanceResult.outcome === "uncertain"
+        ? {
+            ...submittedBase,
+            status: "stalled" as const,
+            stalled_at: acceptanceResolvedAt,
+            stalled_reason: acceptanceResult.reason,
+            updated_at: acceptanceResolvedAt
+          }
+        : submittedBase;
+    deliveredConversation = withTerminalBridgeSubmission({
+      conversation: outcomeBase,
+      messageId: message.id,
+      messageType: message.type,
+      messageBody: String(message.body),
+      requestText: terminalPayload,
+      status: terminalStatus,
+      preparedAt: bridgeStartedAt,
+      textInjectedAt,
+      enterDispatchedAt,
+      ...(acceptanceResult.outcome === "agent_accepted"
+        ? {
+            agentAcceptedAt: acceptanceResolvedAt,
+            acceptanceEvidence: acceptanceResult.evidence
+          }
+        : {}),
+      ...(acceptanceResult.outcome === "not_accepted"
+        ? { notAcceptedAt: acceptanceResolvedAt }
+        : {}),
+      ...(acceptanceResult.outcome === "uncertain"
+        ? {
+            uncertainAt: acceptanceResolvedAt,
+            error: acceptanceResult.reason,
+            lastProvenStage: "enter_dispatched" as const
+          }
+        : {})
+    });
+    saveState(statePath, deliveredConversation);
+    try {
+      if (cliEnv().AKK_TEST_FINAL_TERMINAL_LEDGER_FAILURE === "1") {
+        throw new Error("injected final terminal ledger persistence failure");
+      }
+      saveTerminalBridgeDispatchLedger(terminalControl, {
+        ...terminalBindingLedgerFields(deliveredConversation),
+        status: terminalStatus,
+        generation_id: message.id,
+        conversation_id: deliveredConversation.conversation_id,
+        session_id: sessionIdForConversation(deliveredConversation),
+        turn_id: turnIdForConversation(deliveredConversation),
+        message_id: message.id,
+        message_type: message.type,
+        request_hash: terminalRequestHash,
+        prepared_at: bridgeStartedAt,
+        text_injected_at: textInjectedAt,
+        enter_dispatched_at: enterDispatchedAt,
+        ...(acceptanceResult.outcome === "agent_accepted"
+          ? {
+              agent_accepted_at: acceptanceResolvedAt,
+              acceptance_evidence: acceptanceResult.evidence
+            }
+          : {}),
+        ...(acceptanceResult.outcome === "not_accepted"
+          ? { not_accepted_at: acceptanceResolvedAt }
+          : {}),
+        ...(acceptanceResult.outcome === "uncertain"
+          ? {
+              uncertain_at: acceptanceResolvedAt,
+              error: textSummary(acceptanceResult.reason)
+            }
+          : {}),
+        dispatcher_pid: null,
+        state_path: statePath,
+        event_log_path: logPath,
+        callback_expected: Boolean(deliveredConversation.gateway_method),
+        previous_generation_id:
+          stringValue(previousDispatchLedger?.generation_id) ??
+          stringValue(previousDispatchLedger?.message_id)
+      });
+    } catch (error) {
+      // State is the durable proof authority. Once a valid native ACK has
+      // committed there, a lagging ledger is bookkeeping debt and must never
+      // overwrite that strongest proof with `uncertain`.
+      recordPostTransportBookkeepingFailure(
+        "final_terminal_ledger",
+        error
+      );
+    }
+    try {
+      appendEvent(logPath, {
+        ts: acceptanceResolvedAt,
+        conversation_id: deliveredConversation.conversation_id,
+        event: acceptanceResult.outcome === "agent_accepted"
+          ? "terminal_message_agent_accepted"
+          : acceptanceResult.outcome === "pending_acceptance"
+            ? "terminal_message_acceptance_pending"
+            : `terminal_message_${acceptanceResult.outcome}`,
+        message_id: message.id,
+        executor,
+        terminal_control: terminalControl,
+        delivery_receipt: terminalStatus,
+        do_not_retry: acceptanceResult.outcome !== "agent_accepted"
+      });
+    } catch (error) {
+      recordPostTransportBookkeepingFailure(terminalStatus, error);
+    }
+    if (
+      bridge &&
+      (acceptanceResult.outcome === "agent_accepted" ||
+        acceptanceResult.outcome === "pending_acceptance")
+    ) {
+      try {
+        bridgeMonitor = startTerminalBridgeMonitorForConversation({
+          conversation: deliveredConversation,
+          statePath,
+          logPath,
+          options
+        });
+        if (bridgeMonitor) {
+          appendEvent(logPath, {
+            ts: cliNow().toISOString(),
+            conversation_id: deliveredConversation.conversation_id,
+            event: "terminal_bridge_monitor_launch",
+            pid: bridgeMonitor.pid ?? null,
+            terminal_control: terminalControl,
+            phase: acceptanceResult.outcome,
+            agent_timeout_minutes: agentTimeoutMinutes,
+            agent_hard_timeout_minutes: agentHardTimeoutMinutes
+          });
+        }
+      } catch (error) {
+        recordPostTransportBookkeepingFailure("monitor_launch", error);
+      }
+    }
   } catch (error) {
-    dispatchService.handleTransportFailure(
-      error,
+    if (
+      !textInjectedAt &&
       error instanceof TerminalInputNotStartedError
-    );
+    ) {
+      const abortedAt = cliNow().toISOString();
+      const errorMessage = error.message;
+      let dispatchLedgerRestored = true;
+      try {
+        if (!abortDeferredPreInputBeforeTransport(abortedAt)) {
+          restoreTerminalBridgeDispatchLedger({
+            terminalControl,
+            previousLedger: previousDispatchLedger,
+            reason: "terminal transport was proved not to have started"
+          });
+        }
+      } catch (ledgerError) {
+        dispatchLedgerRestored = false;
+        runtimeLog("error", "terminal_dispatch_ledger_restore_failed", {
+          conversation_id: conversation.conversation_id,
+          terminal_target: terminalControl.target,
+          error: ledgerError instanceof Error
+            ? ledgerError.message
+            : String(ledgerError)
+        });
+      }
+      const rawAttachRolledBack = rollbackRawAttachBeforeTransport();
+      const durableAbortCanBeRetryable =
+        dispatchLedgerRestored && rawAttachRolledBack;
+      const failureBase = recordRawAttachmentAfterSend
+        ? {
+            ...preparedConversation,
+            status: "failed" as const,
+            failed_at: abortedAt,
+            failure_reason:
+              "terminal transport failed before terminal input"
+          }
+        : {
+            ...preparedConversation,
+            status: conversation.status,
+            ...(conversation.idle_since
+              ? { idle_since: conversation.idle_since }
+              : {})
+          };
+      const abortedConversation = withTerminalBridgeSubmission({
+        conversation: failureBase,
+        messageId: message.id,
+        messageType: message.type,
+        messageBody: String(message.body),
+        requestText: terminalPayload,
+        status: "aborted",
+        preparedAt: bridgeStartedAt,
+        abortedAt,
+        error: errorMessage,
+        safeToRetry: durableAbortCanBeRetryable
+      });
+      let abortedStatePersisted = false;
+      try {
+        saveState(statePath, abortedConversation);
+        abortedStatePersisted = true;
+      } catch (persistenceError) {
+        runtimeLog("error", "terminal_message_submit_aborted_persist_failed", {
+          conversation_id: abortedConversation.conversation_id,
+          terminal_target: terminalControl.target,
+          error: persistenceError instanceof Error
+            ? persistenceError.message
+            : String(persistenceError)
+        });
+      }
+      const safeToRetry =
+        durableAbortCanBeRetryable && abortedStatePersisted;
+      const reportedConversation = safeToRetry
+        ? abortedConversation
+        : withTerminalBridgeSubmission({
+            conversation: abortedConversation,
+            messageId: message.id,
+            messageType: message.type,
+            messageBody: String(message.body),
+            requestText: terminalPayload,
+            status: "aborted",
+            preparedAt: bridgeStartedAt,
+            abortedAt,
+            error: errorMessage,
+            safeToRetry: false
+          });
+      try {
+        appendEvent(logPath, {
+          ts: abortedAt,
+          conversation_id: abortedConversation.conversation_id,
+          event: "terminal_message_submit_aborted",
+          message_id: message.id,
+          executor,
+          terminal_control: terminalControl,
+          error: textSummary(errorMessage),
+          safe_to_retry: safeToRetry,
+          terminal_input_started: false
+        });
+      } catch (persistenceError) {
+        runtimeLog("error", "terminal_message_submit_aborted_event_failed", {
+          conversation_id: abortedConversation.conversation_id,
+          terminal_target: terminalControl.target,
+          error: persistenceError instanceof Error
+            ? persistenceError.message
+            : String(persistenceError)
+        });
+      }
+      runtimeLog("error", "terminal_message_submit_aborted", {
+        conversation_id: abortedConversation.conversation_id,
+        terminal_target: terminalControl.target,
+        error: errorMessage,
+        safe_to_retry: safeToRetry,
+        terminal_input_started: false,
+        dispatch_ledger_restored: dispatchLedgerRestored,
+        aborted_state_persisted: abortedStatePersisted,
+        raw_attach_rolled_back: rawAttachRolledBack
+      });
+      printJson({
+        session_id: sessionIdForConversation(reportedConversation),
+        turn_id: turnIdForConversation(reportedConversation),
+        conversation: reportedConversation,
+        message,
+        delivered: false,
+        status: "submission_aborted",
+        submission_outcome: "aborted",
+        background: true,
+        callback_expected: false,
+        terminal_control: terminalControl,
+        monitor_pid: bridgeMonitor?.pid ?? null,
+        executor,
+        safe_to_retry: safeToRetry,
+        do_not_retry: !safeToRetry,
+        reason: safeToRetry
+          ? "AKK proved that terminal input never started; this submission may be retried."
+          : "AKK proved terminal input never started but could not make every abort receipt and Session rollback durable; inspect before retrying.",
+        openclaw_next_action: {
+          action: safeToRetry ? "retry" : "inspect",
+          conversation_id: reportedConversation.conversation_id,
+          session_id: sessionIdForConversation(reportedConversation),
+          turn_id: turnIdForConversation(reportedConversation),
+          safe_to_retry: safeToRetry,
+          do_not_retry: !safeToRetry,
+          reason: safeToRetry
+            ? "The terminal transport failed before any input operation succeeded."
+            : "The pre-input failure could not be fully reconciled in durable state."
+        }
+      });
+      return;
+    }
+    const uncertainAt = cliNow().toISOString();
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    if (deferredCodexForegroundBinding) {
+      try {
+        markDeferredCodexForegroundTransferUncertain({
+          options,
+          boundary: deferredCodexForegroundBinding,
+          reason: errorMessage
+        });
+      } catch (transferError) {
+        runtimeLog("error", "deferred_codex_foreground_uncertain_persist_failed", {
+          transfer_id: deferredCodexForegroundBinding.transferId,
+          error: transferError instanceof Error
+            ? transferError.message
+            : String(transferError)
+        });
+      }
+    }
+    const failureBase = stagedConversation;
+    const stalledFailureBase = {
+      ...failureBase,
+      status: "stalled" as const,
+      stalled_at: uncertainAt,
+      stalled_reason:
+        "terminal submission outcome is uncertain; inspect the shared terminal pane before continuing",
+      updated_at: uncertainAt
+    };
+    const uncertainConversation = withTerminalBridgeSubmission({
+      conversation: stalledFailureBase,
+      messageId: message.id,
+      messageType: message.type,
+      messageBody: String(message.body),
+      requestText: terminalPayload,
+      status: "uncertain",
+      preparedAt: bridgeStartedAt,
+      textInjectedAt,
+      enterDispatchedAt,
+      uncertainAt,
+      error: errorMessage,
+      lastProvenStage: enterDispatchedAt
+        ? "enter_dispatched"
+        : textInjectedAt
+          ? "text_injected"
+          : "prepared"
+    });
+    try {
+      saveTerminalBridgeDispatchLedger(terminalControl, {
+        ...terminalBindingLedgerFields(uncertainConversation),
+        status: "uncertain",
+        generation_id: message.id,
+        conversation_id: uncertainConversation.conversation_id,
+        session_id: sessionIdForConversation(uncertainConversation),
+        turn_id: turnIdForConversation(uncertainConversation),
+        message_id: message.id,
+        message_type: message.type,
+        request_hash: terminalRequestHash,
+        prepared_at: bridgeStartedAt,
+        ...(textInjectedAt ? { text_injected_at: textInjectedAt } : {}),
+        ...(enterDispatchedAt ? { enter_dispatched_at: enterDispatchedAt } : {}),
+        uncertain_at: uncertainAt,
+        dispatcher_pid: cliPid(),
+        state_path: statePath,
+        event_log_path: logPath,
+        callback_expected: Boolean(uncertainConversation.gateway_method),
+        error: textSummary(errorMessage),
+        previous_generation_id:
+          stringValue(previousDispatchLedger?.generation_id) ??
+          stringValue(previousDispatchLedger?.message_id)
+      });
+      saveState(statePath, uncertainConversation);
+      appendEvent(logPath, {
+        ts: uncertainAt,
+        conversation_id: uncertainConversation.conversation_id,
+        event: "terminal_message_submit_uncertain",
+        message_id: message.id,
+        executor,
+        terminal_control: terminalControl,
+        error: textSummary(errorMessage),
+        do_not_retry: true
+      });
+    } catch (persistenceError) {
+      runtimeLog("error", "terminal_message_submit_uncertain_persist_failed", {
+        conversation_id: uncertainConversation.conversation_id,
+        terminal_target: terminalControl.target,
+        error: persistenceError instanceof Error
+          ? persistenceError.message
+          : String(persistenceError)
+      });
+    }
+    const stalledConversationIds =
+      stallOtherTerminalBridgeConversationsForUncertainDispatch({
+        storeDir: storeDirFromOptions(options),
+        terminalControl,
+        currentConversationId: uncertainConversation.conversation_id,
+        uncertainMessageId: message.id
+      });
+    runtimeLog("error", "terminal_message_submit_uncertain", {
+      conversation_id: uncertainConversation.conversation_id,
+      agent: executor.kind,
+      terminal_target: terminalControl.target,
+      error: errorMessage,
+      do_not_retry: true,
+      stalled_conversation_ids: stalledConversationIds
+    });
+    printJson({
+      session_id: sessionIdForConversation(uncertainConversation),
+      turn_id: turnIdForConversation(uncertainConversation),
+      conversation: uncertainConversation,
+      message,
+      delivered: false,
+      status: "submission_uncertain",
+      submission_outcome: "uncertain",
+      background: true,
+      callback_expected: Boolean(uncertainConversation.gateway_method),
+      terminal_control: terminalControl,
+      monitor_pid: bridgeMonitor?.pid ?? null,
+      executor,
+      do_not_retry: true,
+      stalled_conversation_ids: stalledConversationIds,
+      reason:
+        enterDispatchedAt
+          ? "AKK dispatched Enter but native acceptance or its exact identity became uncertain. Do not retry automatically; inspect this conversation and pane."
+          : textInjectedAt
+            ? "AKK injected text but could not prove that Enter was dispatched. Do not retry automatically; inspect this conversation and pane."
+            : "AKK could not prove that terminal input remained untouched. Inspect this conversation before retrying.",
+      openclaw_next_action: {
+        action: "inspect",
+        conversation_id: uncertainConversation.conversation_id,
+        session_id: sessionIdForConversation(uncertainConversation),
+        turn_id: turnIdForConversation(uncertainConversation),
+        do_not_retry: true,
+        reason:
+          "The terminal submission outcome is uncertain. Inspect AKK status and the shared terminal pane before deciding whether to close or continue."
+      }
+    });
     return;
   }
+
   const nativeAccepted = acceptanceResult?.outcome === "agent_accepted";
   const acceptancePending = acceptanceResult?.outcome === "pending_acceptance";
   try {
@@ -20236,6 +20923,15 @@ function terminalSubmissionPayload(payload: string): string {
   assertOrdinaryTerminalPayloadDoesNotInvokeNativeLifecycle(payload);
   return payload.trimEnd();
 }
+
+type TerminalAcceptancePollResult =
+  | {
+      outcome: "agent_accepted";
+      evidence: TerminalSubmissionAcceptanceEvidence;
+    }
+  | { outcome: "pending_acceptance" }
+  | { outcome: "not_accepted"; reason: string }
+  | { outcome: "uncertain"; reason: string };
 
 function allowsSyntheticTerminalAcceptance(
   _options: Record<string, any>
@@ -32024,6 +32720,26 @@ function failClosedLifecycleLedger({
   return loadTerminalBridgeDispatchLedger(
     terminal.terminalControl
   ) as Record<string, any>;
+}
+
+function restoreTerminalBridgeDispatchLedger({
+  terminalControl,
+  previousLedger,
+  reason
+}: {
+  terminalControl: TerminalControlRef;
+  previousLedger?: Record<string, any>;
+  reason: string;
+}): void {
+  if (previousLedger) {
+    saveTerminalBridgeDispatchLedger(terminalControl, previousLedger);
+    return;
+  }
+  saveTerminalBridgeDispatchLedger(terminalControl, {
+    status: "resolved",
+    resolved_at: cliNow().toISOString(),
+    reason
+  });
 }
 
 function resolveTerminalBridgeDispatchLedger({
