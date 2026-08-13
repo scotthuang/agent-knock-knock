@@ -2,8 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   parseProcessElapsedSeconds,
+  StaticTerminalProcessSource,
   SystemTerminalProcessSource,
-  type ProcessCommandResult
+  type ProcessCommandResult,
+  type TerminalProcessSource
 } from "../src/terminal-process-source.js";
 
 test("ps elapsed values parse for selector recency", () => {
@@ -12,6 +14,18 @@ test("ps elapsed values parse for selector recency", () => {
   assert.equal(parseProcessElapsedSeconds("2-01:02:03"), 176523);
   assert.equal(parseProcessElapsedSeconds("not-a-duration"), undefined);
   assert.equal(parseProcessElapsedSeconds("00:99"), undefined);
+});
+
+test("only the system process source advertises complete inventory authority", () => {
+  const staticSource: TerminalProcessSource = new StaticTerminalProcessSource([]);
+  assert.equal(
+    new SystemTerminalProcessSource().completeInventoryAuthority,
+    true
+  );
+  assert.equal(
+    staticSource.completeInventoryAuthority,
+    undefined
+  );
 });
 
 test("system process source returns neutral filtered snapshots with cwd metadata", async () => {
@@ -26,7 +40,7 @@ test("system process source returns neutral filtered snapshots with cwd metadata
           " 1050   100       00:20 npm exec test-claude",
           " 1100  1050       00:12 test-claude --resume abc",
           " 1200   100       00:08 unrelated"
-        ].join("\n"));
+        ].join("\n") + "\n");
       }
       if (command === "lsof") {
         return ok([
@@ -83,7 +97,7 @@ test("system process source keeps valid cwd rows from a partial lsof failure", a
           "  100     1       01:00 tmux: server",
           " 1100   100       00:12 codex",
           " 1200   100       00:08 unrelated"
-        ].join("\n"));
+        ].join("\n") + "\n");
       }
       if (command === "lsof") {
         return {
@@ -107,6 +121,56 @@ test("system process source keeps valid cwd rows from a partial lsof failure", a
   assert.equal(snapshots.find((snapshot) => snapshot.pid === 1100)?.cwd, "/repo/project");
   assert.deepEqual(calls.map(({ command }) => command), ["ps", "lsof"]);
   assert.deepEqual(calls[1].args.slice(-1), ["1100"]);
+});
+
+test("system process source rejects incomplete or malformed successful ps inventories", async (t) => {
+  const cases = [
+    {
+      name: "malformed process row",
+      stdout: [
+        "  PID  PPID     ELAPSED COMMAND",
+        " 1100 malformed process row"
+      ].join("\n") + "\n",
+      expected: /unparseable process inventory row/u
+    },
+    {
+      name: "unexpected header",
+      stdout: [
+        "  PID  PPID COMMAND",
+        " 1100   100 codex"
+      ].join("\n") + "\n",
+      expected: /unexpected process inventory header/u
+    },
+    {
+      name: "header-only inventory",
+      stdout: "  PID  PPID     ELAPSED COMMAND\n",
+      expected: /header-only process inventory/u
+    },
+    {
+      name: "truncated inventory without a final newline",
+      stdout: [
+        "  PID  PPID     ELAPSED COMMAND",
+        " 1100   100       00:12 codex"
+      ].join("\n"),
+      expected: /truncated process inventory/u
+    }
+  ];
+
+  for (const fixture of cases) {
+    await t.test(fixture.name, async () => {
+      const source = new SystemTerminalProcessSource({
+        runCommand(command): ProcessCommandResult {
+          assert.equal(command, "ps");
+          return ok(fixture.stdout);
+        }
+      });
+
+      await assert.rejects(
+        source.listProcessSnapshots(),
+        fixture.expected
+      );
+    });
+  }
 });
 
 function ok(stdout: string): ProcessCommandResult {

@@ -864,7 +864,7 @@ test("Codex store adapter wraps sqlite and process command output behind the ada
         return ok([
           "  PID  PPID     ELAPSED COMMAND",
           ` 1000     1       50:35 node /Users/me/bin/codex resume ${SESSION_ID}`
-        ].join("\n"));
+        ].join("\n") + "\n");
       }
       if (command === "lsof") {
         return ok([

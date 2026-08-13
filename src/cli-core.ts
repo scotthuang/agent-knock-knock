@@ -27,6 +27,7 @@ import {
   detectClaudeTranscriptCompletion,
   detectClaudeTranscriptPendingApproval,
   listClaudeThreadLifecycleCandidates,
+  observeClaudeDeadProcessTranscriptCompletion,
   revalidateClaudeThreadLifecycleCandidate,
   type ClaudeTranscriptAnchor
 } from "./claude-local-transcript-provider.js";
@@ -8355,7 +8356,8 @@ function availableListActions(
   if (
     terminalBridgeReady &&
     entry.status === "stalled" &&
-    terminalBridgeSubmission(conversation)?.status !== "uncertain"
+    terminalBridgeSubmission(conversation)?.status !== "uncertain" &&
+    !isVerifiedDeadTerminalAgentProcess(conversation ?? {})
   ) {
     actions.renew = {
       tool: "agent_knock_knock_renew",
@@ -8876,6 +8878,342 @@ type ProcessIncarnationRelationship =
   | "same"
   | "different"
   | "unverifiable";
+
+type VerifiedDeadTerminalAgentProcessProof = {
+  kind: "exact_pid_absent_from_complete_process_inventory";
+  agent: ExecutorKind;
+  pid: number;
+  process_uuid: string;
+  process_birth?: string;
+  conversation_id: string;
+  session_id: string;
+  turn_id: string;
+  terminal_control: TerminalControlRef;
+  terminal_endpoint: TerminalControlEvidence;
+  binding_id: string;
+  binding_generation: number;
+  message_id: string;
+  observed_at: string;
+};
+
+type BoundTerminalAgentProcessObservation =
+  | {
+      status: "alive";
+      pid: number;
+    }
+  | {
+      status: "verified_dead";
+      proof: VerifiedDeadTerminalAgentProcessProof;
+    }
+  | {
+      status: "unverifiable";
+      reason: string;
+    };
+
+type DurableCompletionBeforeDeadStallObservation =
+  | { status: "present"; completion: TerminalCompletionEvidence }
+  | { status: "absent" }
+  | { status: "unverifiable"; reason: string };
+
+function observeExactCodexDeadProcessRolloutCompletion({
+  options,
+  conversation,
+  terminalControl
+}: {
+  options: Record<string, any>;
+  conversation: Conversation;
+  terminalControl: TerminalControlRef;
+}): DurableCompletionBeforeDeadStallObservation {
+  const takeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const submission = terminalBridgeSubmission(conversation);
+  const acceptanceEvidence = isRecord(submission?.acceptance_evidence)
+    ? submission.acceptance_evidence
+    : undefined;
+  const anchor = isRecord(takeover?.codex_rollout_acceptance_anchor)
+    ? takeover.codex_rollout_acceptance_anchor
+    : undefined;
+  if (
+    submission?.status !== "agent_accepted" ||
+    !requiresExactBoundCodexCompletion(conversation, options) ||
+    acceptanceEvidence?.source !== "codex_rollout" ||
+    !anchor
+  ) {
+    return {
+      status: "unverifiable",
+      reason: "Codex has no exact accepted rollout authority for the dead process"
+    };
+  }
+  const runtime = terminalRuntimeIdentityForConversation(
+    conversation,
+    terminalControl
+  );
+  const nativeRollout = isRecord(runtime.nativeRollout)
+    ? runtime.nativeRollout
+    : undefined;
+  const request = terminalDurableRequestForConversation(
+    conversation,
+    terminalControl
+  );
+  const result = detectCodexBoundRolloutCompletion({
+    anchor: anchor as unknown as CodexRolloutAcceptanceAnchor,
+    acceptanceEvidence:
+      acceptanceEvidence as unknown as TerminalSubmissionAcceptanceEvidence,
+    currentIdentity: {
+      sessionId: runtime.nativeSessionId ?? runtime.sessionId ?? "",
+      processUuid: runtime.nativeProcessUuid,
+      processBirth: runtime.nativeProcessBirth,
+      ...(nativeRollout
+        ? {
+            rollout: {
+              fd: String(nativeRollout.fd ?? ""),
+              device: String(nativeRollout.device ?? ""),
+              inode: String(nativeRollout.inode ?? ""),
+              path: String(nativeRollout.path ?? "")
+            }
+          }
+        : {})
+    },
+    requestHash:
+      stringValue(request.requestHash) ??
+      stringValue(takeover?.terminal_bridge_request_hash) ??
+      ""
+  });
+  if (result.status === "completed") {
+    return {
+      status: "present",
+      completion: {
+        ...result.completion,
+        metadata: {
+          ...result.completion.metadata,
+          context_match: "exact_bound_rollout",
+          detector_code: result.diagnostics.code
+        }
+      }
+    };
+  }
+  if (
+    result.status === "pending" &&
+    result.diagnostics.code === "exact_turn_not_complete"
+  ) {
+    return { status: "absent" };
+  }
+  return {
+    status: "unverifiable",
+    reason:
+      `[codex_exact_bound_rollout:${result.diagnostics.code}] ` +
+      (result.diagnostics.detail ??
+        "the exact bound rollout is not safely inspectable")
+  };
+}
+
+async function observeDurableCompletionBeforeDeadStall({
+  options,
+  conversation,
+  terminalControl
+}: {
+  options: Record<string, any>;
+  conversation: Conversation;
+  terminalControl: TerminalControlRef;
+}): Promise<DurableCompletionBeforeDeadStallObservation> {
+  try {
+    const executor = executorForConversation(conversation);
+    const takeover = isRecord(conversation.native_session_takeover)
+      ? conversation.native_session_takeover
+      : undefined;
+    if (executor.kind === "claude") {
+      const anchor = isRecord(takeover?.claude_transcript_anchor)
+        ? takeover.claude_transcript_anchor
+        : undefined;
+      const pid = Number(anchor?.pid);
+      const startedAt = Number(anchor?.agent_started_at_ms);
+      const sessionId = stringValue(anchor?.session_id);
+      const cwd = stringValue(anchor?.cwd);
+      if (
+        !Number.isSafeInteger(pid) ||
+        pid <= 1 ||
+        !Number.isSafeInteger(startedAt) ||
+        startedAt <= 0 ||
+        !sessionId ||
+        !cwd ||
+        pid !== Number(takeover?.terminal_agent_pid) ||
+        sessionId !== stringValue(takeover?.terminal_agent_session_id) ||
+        path.resolve(cwd) !== path.resolve(conversation.workspace)
+      ) {
+        return {
+          status: "unverifiable",
+          reason: "Claude has no exact immutable transcript anchor for the dead process"
+        };
+      }
+      const processUuid = stringValue(
+        takeover?.terminal_agent_process_uuid
+      );
+      if (
+        processUuid !== `claude-pid:${pid}:started:${startedAt}`
+      ) {
+        return {
+          status: "unverifiable",
+          reason: "Claude transcript anchor does not match the exact process incarnation"
+        };
+      }
+      const submission = terminalBridgeSubmission(conversation);
+      const observation = observeClaudeDeadProcessTranscriptCompletion(
+        terminalDurableRequestForConversation(conversation, terminalControl),
+        {
+          claudeHome: expandHome(options.claudeHome),
+          // Process death freezes this exact historical incarnation. The
+          // transcript detector still revalidates the immutable PID/session/
+          // cwd/start anchor and the no-follow file boundary before reading.
+          agentRows: [{
+            pid,
+            startedAt,
+            sessionId,
+            cwd,
+            kind: "interactive",
+            status: "idle"
+          }],
+          acceptanceEvidence: submission?.acceptance_evidence
+        }
+      );
+      return observation;
+    }
+    return observeExactCodexDeadProcessRolloutCompletion({
+      options,
+      conversation,
+      terminalControl
+    });
+  } catch (error) {
+    return {
+      status: "unverifiable",
+      reason: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+async function observeBoundTerminalAgentProcess({
+  options,
+  conversation,
+  terminalControl
+}: {
+  options: Record<string, any>;
+  conversation: Conversation;
+  terminalControl: TerminalControlRef;
+}): Promise<BoundTerminalAgentProcessObservation> {
+  try {
+    assertTurnBindingCurrent(conversation, "verify the bound agent process for");
+    const storeDir = managedSessionStoreDirForConversation(conversation);
+    if (!storeDir) {
+      return {
+        status: "unverifiable",
+        reason: "the managed Store is unavailable"
+      };
+    }
+    const session = loadManagedSession(
+      storeDir,
+      sessionIdForConversation(conversation)
+    );
+    const binding = session.binding;
+    const takeover = isRecord(conversation.native_session_takeover)
+      ? conversation.native_session_takeover
+      : undefined;
+    const pid = Number(takeover?.terminal_agent_pid);
+    const bindingId = stringValue(conversation.terminal_binding_id);
+    const bindingGeneration = Number(conversation.terminal_binding_generation);
+    const processUuid = stringValue(takeover?.terminal_agent_process_uuid);
+    const processBirth = stringValue(takeover?.terminal_agent_process_birth);
+    const messageId = stringValue(takeover?.terminal_bridge_message_id);
+    const submission = terminalBridgeSubmission(conversation);
+    if (
+      session.status !== "bound" ||
+      !binding ||
+      !Number.isSafeInteger(pid) ||
+      pid <= 1 ||
+      !bindingId ||
+      !Number.isSafeInteger(bindingGeneration) ||
+      bindingGeneration < 1 ||
+      !processUuid ||
+      !messageId ||
+      !hasCanonicalTerminalEndpoint(terminalControl) ||
+      binding.native_process.pid !== pid ||
+      !terminalControlsShareIncarnation(
+        binding.terminal_control,
+        terminalControl
+      ) ||
+      binding.binding_id !== bindingId ||
+      binding.generation !== bindingGeneration ||
+      session.agent !== executorForConversation(conversation).kind ||
+      path.resolve(session.workspace) !== path.resolve(conversation.workspace) ||
+      binding.native_thread_id !==
+        (
+          stringValue(conversation.native_thread_id) ??
+          stringValue(takeover?.terminal_agent_session_id)
+        ) ||
+      binding.native_process.process_uuid !== processUuid ||
+      stringValue(takeover?.terminal_binding_id) !== bindingId ||
+      Number(takeover?.terminal_binding_generation) !== bindingGeneration ||
+      submission?.status !== "agent_accepted" ||
+      stringValue(submission.session_id) !==
+        sessionIdForConversation(conversation) ||
+      stringValue(submission.turn_id) !== turnIdForConversation(conversation) ||
+      stringValue(submission.message_id) !== messageId ||
+      stringValue(submission.binding_id) !== bindingId ||
+      Number(submission.binding_generation) !== bindingGeneration ||
+      (binding.native_process.process_birth ?? undefined) !== processBirth
+    ) {
+      return {
+        status: "unverifiable",
+        reason: "the Turn and Session no longer share one exact process binding"
+      };
+    }
+    const processSource = createTerminalProcessSource(options);
+    if (processSource.completeInventoryAuthority !== true) {
+      return {
+        status: "unverifiable",
+        reason:
+          "the configured process source is not complete process-death authority"
+      };
+    }
+    const snapshots = await processSource.listProcessSnapshots(
+        (snapshot) => snapshot.pid === pid,
+        { includeCwd: false, includeAncestors: false }
+      );
+    const exact = snapshots.filter((snapshot) => snapshot.pid === pid);
+    if (exact.length === 1) {
+      return { status: "alive", pid };
+    }
+    if (exact.length !== 0) {
+      return {
+        status: "unverifiable",
+        reason: `the process inventory returned ${exact.length} rows for pid ${pid}`
+      };
+    }
+    return {
+      status: "verified_dead",
+      proof: {
+        kind: "exact_pid_absent_from_complete_process_inventory",
+        agent: session.agent,
+        pid,
+        process_uuid: processUuid,
+        process_birth: binding.native_process.process_birth,
+        conversation_id: conversation.conversation_id,
+        session_id: sessionIdForConversation(conversation),
+        turn_id: turnIdForConversation(conversation),
+        terminal_control: terminalControl,
+        terminal_endpoint: terminalControlEvidence(terminalControl),
+        binding_id: binding.binding_id,
+        binding_generation: binding.generation,
+        message_id: messageId,
+        observed_at: cliNow().toISOString()
+      }
+    };
+  } catch (error) {
+    return {
+      status: "unverifiable",
+      reason: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
 
 function processIncarnationRelationship({
   binding,
@@ -23730,6 +24068,12 @@ async function runRenew(options) {
   if (conversation.status !== "stalled") {
     throw new Error(`cannot renew ${conversation.conversation_id}; conversation is ${conversation.status}, not stalled`);
   }
+  if (isVerifiedDeadTerminalAgentProcess(conversation)) {
+    throw new Error(
+      `cannot renew ${conversation.conversation_id}; its bound terminal agent ` +
+      "process is verified dead. Close this orphaned Turn instead."
+    );
+  }
   if (terminalBridgeSubmission(conversation)?.status === "uncertain") {
     throw new Error(
       `cannot renew ${conversation.conversation_id}; its terminal submission ` +
@@ -23765,6 +24109,12 @@ async function runRenew(options) {
     if (current.status !== "stalled") {
       throw new Error(
         `cannot renew ${current.conversation_id}; conversation is ${current.status}, not stalled`
+      );
+    }
+    if (isVerifiedDeadTerminalAgentProcess(current)) {
+      throw new Error(
+        `cannot renew ${current.conversation_id}; its bound terminal agent ` +
+        "process is verified dead"
       );
     }
     if (terminalBridgeSubmission(current)?.status === "uncertain") {
@@ -24035,6 +24385,51 @@ async function reconcileMonitors(
         logPath,
         options
       });
+      const deadProcessStall = await stallAcceptedTurnForVerifiedDeadAgent({
+        options,
+        storeDir,
+        statePath,
+        logPath,
+        expectedConversationId: initialConversation.conversation_id,
+        expectedMessageId: stringValue(
+          isRecord(initialConversation.native_session_takeover)
+            ? initialConversation.native_session_takeover
+                .terminal_bridge_message_id
+            : undefined
+          )
+      });
+      if (deadProcessStall.completionPreparation) {
+        const completionPreparation = deadProcessStall.completionPreparation;
+        skipped += 1;
+        if (!completionPreparation.claimed) {
+          items.push({
+            conversation_id: initialConversation.conversation_id,
+            status: "skipped",
+            reason: completionPreparation.reason
+          });
+        } else {
+          const completionResult = runPreparedCallback(
+            completionPreparation.prepared,
+            { emit: false }
+          );
+          items.push({
+            conversation_id: initialConversation.conversation_id,
+            status: "recovered",
+            reason: "bound_agent_process_dead_completion_recovered",
+            delivered: completionResult.delivered
+          });
+        }
+        continue;
+      }
+      if (deadProcessStall.stalled) {
+        skipped += 1;
+        items.push({
+          conversation_id: initialConversation.conversation_id,
+          status: "stalled",
+          reason: deadProcessStall.reason
+        });
+        continue;
+      }
       const initialTakeover = isRecord(
         initialConversation.native_session_takeover
       )
@@ -24630,6 +25025,821 @@ function terminalBridgeReconciliationEligibility(conversation) {
     inactivityDeadlineAtMs,
     hardDeadlineAtMs
   };
+}
+
+function terminalAgentProcessDisposition(
+  conversation: Conversation | Record<string, any>
+): Record<string, any> | undefined {
+  return isRecord(conversation.terminal_agent_process_disposition)
+    ? conversation.terminal_agent_process_disposition
+    : undefined;
+}
+
+function isVerifiedDeadTerminalAgentProcess(
+  conversation: Conversation | Record<string, any>
+): boolean {
+  return terminalAgentProcessDisposition(conversation)?.status ===
+    "verified_dead";
+}
+
+function verifiedDeadTerminalAgentProcessEvidenceId(
+  proof: VerifiedDeadTerminalAgentProcessProof
+): string {
+  return createHash("sha256")
+    .update(canonicalJson({
+      kind: proof.kind,
+      agent: proof.agent,
+      pid: proof.pid,
+      process_uuid: proof.process_uuid,
+      process_birth: proof.process_birth ?? null,
+      conversation_id: proof.conversation_id,
+      session_id: proof.session_id,
+      turn_id: proof.turn_id,
+      terminal_endpoint: proof.terminal_endpoint,
+      binding_id: proof.binding_id,
+      binding_generation: proof.binding_generation,
+      message_id: proof.message_id
+    }))
+    .digest("hex");
+}
+
+function storedVerifiedDeadTerminalAgentProcessProof({
+  conversation,
+  storeDir,
+  terminalControl
+}: {
+  conversation: Conversation;
+  storeDir: string;
+  terminalControl: TerminalControlRef;
+}):
+  | { status: "absent" }
+  | {
+      status: "valid";
+      proof: VerifiedDeadTerminalAgentProcessProof;
+      evidenceId: string;
+      recordedAt: string;
+    }
+  | { status: "invalid"; reason: string } {
+  const disposition = terminalAgentProcessDisposition(conversation);
+  if (disposition?.status !== "verified_dead") {
+    return { status: "absent" };
+  }
+  const proof = isRecord(disposition.proof)
+    ? disposition.proof
+    : undefined;
+  const evidenceId = stringValue(disposition.evidence_id);
+  const recordedAt = stringValue(disposition.recorded_at);
+  const takeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const submission = terminalBridgeSubmission(conversation);
+  const session = tryLoadManagedSession(
+    storeDir,
+    sessionIdForConversation(conversation)
+  );
+  const binding = session?.binding;
+  const candidate = proof as VerifiedDeadTerminalAgentProcessProof | undefined;
+  if (
+    !candidate ||
+    candidate.kind !==
+      "exact_pid_absent_from_complete_process_inventory" ||
+    !session ||
+    session.status !== "bound" ||
+    !binding ||
+    candidate.agent !== session.agent ||
+    session.agent !== executorForConversation(conversation).kind ||
+    path.resolve(session.workspace) !== path.resolve(conversation.workspace) ||
+    candidate.pid !== Number(takeover?.terminal_agent_pid) ||
+    candidate.pid !== binding.native_process.pid ||
+    candidate.process_uuid !==
+      stringValue(takeover?.terminal_agent_process_uuid) ||
+    candidate.process_uuid !== binding.native_process.process_uuid ||
+    (candidate.process_birth ?? undefined) !==
+      (stringValue(takeover?.terminal_agent_process_birth) ?? undefined) ||
+    (candidate.process_birth ?? undefined) !==
+      (binding.native_process.process_birth ?? undefined) ||
+    candidate.conversation_id !== conversation.conversation_id ||
+    candidate.session_id !== sessionIdForConversation(conversation) ||
+    candidate.turn_id !== turnIdForConversation(conversation) ||
+    candidate.binding_id !== stringValue(conversation.terminal_binding_id) ||
+    candidate.binding_id !== binding.binding_id ||
+    candidate.binding_generation !==
+      Number(conversation.terminal_binding_generation) ||
+    candidate.binding_generation !== binding.generation ||
+    !terminalControlsShareIncarnation(
+      binding.terminal_control,
+      terminalControl
+    ) ||
+    candidate.binding_id !== stringValue(takeover?.terminal_binding_id) ||
+    candidate.binding_generation !==
+      Number(takeover?.terminal_binding_generation) ||
+    candidate.message_id !==
+      stringValue(takeover?.terminal_bridge_message_id) ||
+    candidate.message_id !== stringValue(submission?.message_id) ||
+    submission?.status !== "agent_accepted" ||
+    stringValue(submission?.session_id) !== candidate.session_id ||
+    stringValue(submission?.turn_id) !== candidate.turn_id ||
+    stringValue(submission?.binding_id) !== candidate.binding_id ||
+    Number(submission?.binding_generation) !==
+      candidate.binding_generation ||
+    !isRecord(candidate.terminal_control) ||
+    !terminalControlsShareIncarnation(
+      candidate.terminal_control,
+      terminalControl
+    ) ||
+    !terminalControlEvidenceMatches(
+      candidate.terminal_endpoint,
+      terminalControl,
+      { requireProcessAnchor: true }
+    ) ||
+    Number(candidate.terminal_endpoint.process_anchor_pid) !==
+      terminalEndpointFromControlRef(terminalControl).processAnchorPid ||
+    validTimestampMs(candidate.observed_at) === undefined ||
+    !recordedAt ||
+    validTimestampMs(recordedAt) === undefined ||
+    recordedAt !== candidate.observed_at ||
+    !evidenceId ||
+    evidenceId !== verifiedDeadTerminalAgentProcessEvidenceId(candidate)
+  ) {
+    return {
+      status: "invalid",
+      reason: "the persisted process-death proof no longer matches the exact Turn, Session, terminal, or submission binding"
+    };
+  }
+  return {
+    status: "valid",
+    proof: candidate,
+    evidenceId,
+    recordedAt
+  };
+}
+
+function eventVerifiedDeadTerminalAgentProcessProof({
+  conversation,
+  storeDir,
+  terminalControl,
+  logPath
+}: {
+  conversation: Conversation;
+  storeDir: string;
+  terminalControl: TerminalControlRef;
+  logPath: string;
+}):
+  | { status: "absent" }
+  | {
+      status: "valid";
+      proof: VerifiedDeadTerminalAgentProcessProof;
+      evidenceId: string;
+      recordedAt: string;
+    }
+  | { status: "invalid"; reason: string } {
+  const candidates = readExistingEvents(logPath).filter((event) =>
+    event.event === "terminal_agent_process_verified_dead" &&
+    event.conversation_id === conversation.conversation_id
+  );
+  if (candidates.length === 0) {
+    return { status: "absent" };
+  }
+  if (candidates.length !== 1) {
+    return {
+      status: "invalid",
+      reason: "the process-death event history is ambiguous"
+    };
+  }
+  const event = candidates[0];
+  const proof = isRecord(event.proof)
+    ? event.proof as VerifiedDeadTerminalAgentProcessProof
+    : undefined;
+  const evidenceId = stringValue(event.evidence_id);
+  const recordedAt = stringValue(event.ts);
+  if (
+    !proof ||
+    !evidenceId ||
+    !recordedAt ||
+    proof.observed_at !== recordedAt ||
+    verifiedDeadTerminalAgentProcessEvidenceId(proof) !== evidenceId
+  ) {
+    return {
+      status: "invalid",
+      reason: "the process-death event proof is malformed"
+    };
+  }
+  const synthetic: Conversation = {
+    ...conversation,
+    terminal_agent_process_disposition: {
+      status: "verified_dead",
+      proof,
+      evidence_id: evidenceId,
+      recorded_at: recordedAt
+    }
+  };
+  return storedVerifiedDeadTerminalAgentProcessProof({
+    conversation: synthetic,
+    storeDir,
+    terminalControl
+  });
+}
+
+function exactVerifiedDeadTerminalAgentProcessAuthority({
+  conversation,
+  storeDir,
+  terminalControl,
+  logPath
+}: {
+  conversation: Conversation;
+  storeDir: string;
+  terminalControl: TerminalControlRef;
+  logPath: string;
+}): ReturnType<typeof storedVerifiedDeadTerminalAgentProcessProof> {
+  const stored = storedVerifiedDeadTerminalAgentProcessProof({
+    conversation,
+    storeDir,
+    terminalControl
+  });
+  if (stored.status === "invalid") {
+    return stored;
+  }
+  const event = eventVerifiedDeadTerminalAgentProcessProof({
+    conversation,
+    storeDir,
+    terminalControl,
+    logPath
+  });
+  if (stored.status === "absent") {
+    return event;
+  }
+  if (
+    event.status !== "valid" ||
+    event.evidenceId !== stored.evidenceId ||
+    canonicalJson(event.proof) !== canonicalJson(stored.proof)
+  ) {
+    return {
+      status: "invalid",
+      reason:
+        "the persisted process-death disposition has no exact append-only event"
+    };
+  }
+  return stored;
+}
+
+function ensureVerifiedDeadTerminalAgentProcessEvent({
+  logPath,
+  proof,
+  action
+}: {
+  logPath: string;
+  proof: VerifiedDeadTerminalAgentProcessProof;
+  action: "managed_close" | "monitor_reconciliation";
+}): {
+  proof: VerifiedDeadTerminalAgentProcessProof;
+  evidenceId: string;
+  recordedAt: string;
+} {
+  const evidenceId = verifiedDeadTerminalAgentProcessEvidenceId(proof);
+  const existing = readExistingEvents(logPath).find((event) =>
+    event.event === "terminal_agent_process_verified_dead" &&
+    event.conversation_id === proof.conversation_id &&
+    event.evidence_id === evidenceId
+  );
+  if (existing) {
+    const existingProof = isRecord(existing.proof)
+      ? existing.proof as VerifiedDeadTerminalAgentProcessProof
+      : undefined;
+    const existingAt = stringValue(existing.ts);
+    if (
+      !existingProof ||
+      !existingAt ||
+      validTimestampMs(existingAt) === undefined ||
+      existingProof.observed_at !== existingAt ||
+      verifiedDeadTerminalAgentProcessEvidenceId(existingProof) !== evidenceId
+    ) {
+      throw new Error(
+        `verified-dead process event ${evidenceId} is inconsistent`
+      );
+    }
+    return {
+      proof: existingProof,
+      evidenceId,
+      recordedAt: existingAt
+    };
+  }
+  appendEvent(logPath, {
+    ts: proof.observed_at,
+    conversation_id: proof.conversation_id,
+    event: "terminal_agent_process_verified_dead",
+    evidence_id: evidenceId,
+    status: "verified_dead",
+    proof,
+    action
+  });
+  return {
+    proof,
+    evidenceId,
+    recordedAt: proof.observed_at
+  };
+}
+
+function ensureVerifiedDeadConversationStalledEvent({
+  logPath,
+  proof,
+  evidenceId,
+  reason,
+  terminalControl,
+  completionObservation
+}: {
+  logPath: string;
+  proof: VerifiedDeadTerminalAgentProcessProof;
+  evidenceId: string;
+  reason: string;
+  terminalControl: TerminalControlRef;
+  completionObservation: "absent" | "unverifiable";
+}): void {
+  const existing = readExistingEvents(logPath).find((event) =>
+    event.event === "conversation_stalled" &&
+    event.conversation_id === proof.conversation_id &&
+    event.evidence_id === evidenceId
+  );
+  if (existing) {
+    if (
+      existing.ts !== proof.observed_at ||
+      existing.reason !== reason ||
+      existing.disposition !== "verified_dead_agent_process" ||
+      existing.completion_observation !== completionObservation
+    ) {
+      throw new Error(
+        `verified-dead stalled event ${evidenceId} is inconsistent`
+      );
+    }
+    return;
+  }
+  appendEvent(logPath, {
+    ts: proof.observed_at,
+    conversation_id: proof.conversation_id,
+    event: "conversation_stalled",
+    evidence_id: evidenceId,
+    status: "stalled",
+    reason,
+    terminal_bridge: true,
+    terminal_control: terminalControl,
+    disposition: "verified_dead_agent_process",
+    completion_observation: completionObservation
+  });
+}
+
+function verifiedDeadConversationStalledEventDecision({
+  logPath,
+  proof,
+  evidenceId,
+  reason
+}: {
+  logPath: string;
+  proof: VerifiedDeadTerminalAgentProcessProof;
+  evidenceId: string;
+  reason: string;
+}):
+  | { status: "absent" }
+  | {
+      status: "valid";
+      completionObservation: "absent" | "unverifiable";
+    }
+  | { status: "invalid"; reason: string } {
+  const candidates = readExistingEvents(logPath).filter((event) =>
+    event.event === "conversation_stalled" &&
+    event.conversation_id === proof.conversation_id &&
+    event.evidence_id === evidenceId
+  );
+  if (candidates.length === 0) {
+    return { status: "absent" };
+  }
+  if (candidates.length !== 1) {
+    return {
+      status: "invalid",
+      reason: "the verified-dead stalled event history is ambiguous"
+    };
+  }
+  const event = candidates[0];
+  const completionObservation = stringValue(event.completion_observation);
+  if (
+    event.ts !== proof.observed_at ||
+    event.status !== "stalled" ||
+    event.reason !== reason ||
+    event.disposition !== "verified_dead_agent_process" ||
+    !["absent", "unverifiable"].includes(completionObservation ?? "")
+  ) {
+    return {
+      status: "invalid",
+      reason: "the verified-dead stalled event decision is inconsistent"
+    };
+  }
+  return {
+    status: "valid",
+    completionObservation:
+      completionObservation as "absent" | "unverifiable"
+  };
+}
+
+function ensureVerifiedDeadConversationClosedEvent({
+  logPath,
+  conversation,
+  evidenceId
+}: {
+  logPath: string;
+  conversation: Conversation;
+  evidenceId: string;
+}): void {
+  const closedAt = required(
+    stringValue(conversation.closed_at),
+    "verified-dead closed Turn has no closed_at timestamp"
+  );
+  const reason = required(
+    stringValue(conversation.close_reason),
+    "verified-dead closed Turn has no close reason"
+  );
+  if (
+    conversation.status !== "closed" ||
+    validTimestampMs(closedAt) === undefined
+  ) {
+    throw new Error("verified-dead closed Turn state is inconsistent");
+  }
+  const existing = readExistingEvents(logPath).find((event) =>
+    event.event === "conversation_closed" &&
+    event.conversation_id === conversation.conversation_id &&
+    event.evidence_id === evidenceId
+  );
+  if (existing) {
+    if (
+      existing.ts !== closedAt ||
+      existing.status !== "closed" ||
+      existing.reason !== reason ||
+      existing.disposition !== "verified_dead_agent_process"
+    ) {
+      throw new Error(
+        `verified-dead close event ${evidenceId} is inconsistent`
+      );
+    }
+    return;
+  }
+  appendEvent(logPath, {
+    ts: closedAt,
+    conversation_id: conversation.conversation_id,
+    event: "conversation_closed",
+    evidence_id: evidenceId,
+    status: "closed",
+    reason,
+    disposition: "verified_dead_agent_process"
+  });
+}
+
+function acceptedTurnCanBeStalledForDeadAgent({
+  storeDir,
+  conversation
+}: {
+  storeDir: string;
+  conversation: Conversation;
+}): boolean {
+  if (conversation.status !== "waiting_for_agent") {
+    return false;
+  }
+  const takeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const messageId = stringValue(takeover?.terminal_bridge_message_id);
+  const submission = terminalBridgeSubmission(conversation);
+  if (
+    takeover?.terminal_bridge !== true ||
+    !messageId ||
+    submission?.status !== "agent_accepted" ||
+    stringValue(submission.message_id) !== messageId
+  ) {
+    return false;
+  }
+  const transferId = stringValue(takeover.deferred_foreground_transfer_id);
+  if (!transferId) {
+    return true;
+  }
+  const transfer = loadDeferredForegroundTransfer(storeDir, transferId);
+  return transfer.status === "resolved";
+}
+
+async function stallAcceptedTurnForVerifiedDeadAgent({
+  options,
+  storeDir,
+  statePath,
+  logPath,
+  expectedConversationId,
+  expectedMessageId
+}: {
+  options: Record<string, any>;
+  storeDir: string;
+  statePath: string;
+  logPath: string;
+  expectedConversationId: string;
+  expectedMessageId?: string;
+}): Promise<{
+  stalled: boolean;
+  conversation: Conversation;
+  reason: string;
+  completionPreparation?: ReturnType<
+    typeof prepareTerminalBridgeCompletionCallbackWithLocksHeld
+  >;
+}> {
+  const canonicalStoreDir = pathsForConversationDir(
+    path.dirname(statePath)
+  ).storeDir;
+  if (path.resolve(storeDir) !== path.resolve(canonicalStoreDir)) {
+    const conversation = loadState(statePath);
+    return {
+      stalled: false,
+      conversation,
+      reason: "dead_process_stall_store_mismatch"
+    };
+  }
+  const initial = loadState(statePath);
+  const initialTakeover = isRecord(initial.native_session_takeover)
+    ? initial.native_session_takeover
+    : undefined;
+  const terminalControl = terminalControlFromTakeover(initialTakeover);
+  if (
+    initial.conversation_id !== expectedConversationId ||
+    !terminalControl ||
+    !acceptedTurnCanBeStalledForDeadAgent({ storeDir, conversation: initial })
+  ) {
+    return {
+      stalled: false,
+      conversation: initial,
+      reason: "dead_process_stall_not_applicable"
+    };
+  }
+  const releaseTerminalLock = acquireTerminalBridgeSendLock(
+    storeDir,
+    terminalControl,
+    { timeoutMs: 30000 }
+  );
+  try {
+    return await withStoreWriterLeaseAsync(storeDir, async () => {
+      const releaseStateLock = acquireFileLock(`${statePath}.lock`);
+      let stateLockReleased = false;
+      try {
+        const current = loadState(statePath);
+        const takeover = isRecord(current.native_session_takeover)
+          ? current.native_session_takeover
+          : undefined;
+        const currentControl = terminalControlFromTakeover(takeover);
+        const messageId = stringValue(takeover?.terminal_bridge_message_id);
+        if (
+          current.conversation_id !== expectedConversationId ||
+          (expectedMessageId !== undefined && messageId !== expectedMessageId) ||
+          !currentControl ||
+          !terminalControlsShareIncarnation(currentControl, terminalControl) ||
+          !acceptedTurnCanBeStalledForDeadAgent({
+            storeDir,
+            conversation: current
+          })
+        ) {
+          return {
+            stalled: false,
+            conversation: current,
+            reason: "dead_process_stall_generation_changed"
+          };
+        }
+        assertTurnBindingCurrent(current, "stall a verified-dead agent Turn for");
+        const ledger = loadTerminalBridgeDispatchLedger(currentControl);
+        if (
+          !ledger ||
+          stringValue(ledger.status) !== "agent_accepted" ||
+          !sameCanonicalStatePath(ledger.state_path, statePath) ||
+          path.resolve(stringValue(ledger.store_dir) ?? "") !==
+            path.resolve(storeDir) ||
+          path.resolve(stringValue(ledger.event_log_path) ?? "") !==
+            path.resolve(logPath) ||
+          stringValue(ledger.conversation_id) !== current.conversation_id ||
+          stringValue(ledger.session_id) !== sessionIdForConversation(current) ||
+          stringValue(ledger.turn_id) !== turnIdForConversation(current) ||
+          stringValue(ledger.message_id) !== messageId ||
+          !terminalDispatchRecordMatchesControl(ledger, currentControl, {
+            requireProcessAnchor: true
+          }) ||
+          terminalDispatchRecordProcessAnchor(ledger) !==
+            terminalEndpointFromControlRef(currentControl).processAnchorPid ||
+          stringValue(ledger.binding_id) !==
+            stringValue(current.terminal_binding_id) ||
+          Number(ledger.binding_generation) !==
+            Number(current.terminal_binding_generation)
+        ) {
+          return {
+            stalled: false,
+            conversation: current,
+            reason: "dead_process_stall_dispatch_changed"
+          };
+        }
+        try {
+          assertVerifiedDeadTerminalBridgeDispatchAuthority({
+            terminalControl: currentControl,
+            conversation: current,
+            storeDir,
+            statePath,
+            logPath,
+            expectedMessageId: required(
+              messageId,
+              "verified-dead stall has no terminal message id"
+            )
+          });
+        } catch (error) {
+          return {
+            stalled: false,
+            conversation: current,
+            reason:
+              "dead_process_stall_dispatch_changed: " +
+              (error instanceof Error ? error.message : String(error))
+          };
+        }
+        const persistedAuthority =
+          exactVerifiedDeadTerminalAgentProcessAuthority({
+            conversation: current,
+            storeDir,
+            terminalControl: currentControl,
+            logPath
+          });
+        if (persistedAuthority.status === "invalid") {
+          return {
+            stalled: false,
+            conversation: current,
+            reason: `bound_agent_process_evidence_invalid: ${persistedAuthority.reason}`
+          };
+        }
+        let proof: VerifiedDeadTerminalAgentProcessProof;
+        if (persistedAuthority.status === "valid") {
+          proof = persistedAuthority.proof;
+        } else {
+          const observation = await observeBoundTerminalAgentProcess({
+            options,
+            conversation: current,
+            terminalControl: currentControl
+          });
+          if (observation.status !== "verified_dead") {
+            return {
+              stalled: false,
+              conversation: current,
+              reason: observation.status === "alive"
+                ? "bound_agent_process_alive"
+                : `bound_agent_process_unverifiable: ${observation.reason}`
+            };
+          }
+          proof = observation.proof;
+        }
+        const stalledReason =
+          "bound terminal agent process is verified dead";
+        const priorStalledDecision =
+          verifiedDeadConversationStalledEventDecision({
+            logPath,
+            proof,
+            evidenceId: verifiedDeadTerminalAgentProcessEvidenceId(proof),
+            reason: stalledReason
+          });
+        if (priorStalledDecision.status === "invalid") {
+          return {
+            stalled: false,
+            conversation: current,
+            reason:
+              `bound_agent_process_evidence_invalid: ${priorStalledDecision.reason}`
+          };
+        }
+        if (priorStalledDecision.status === "valid") {
+          if (persistedAuthority.status !== "valid") {
+            return {
+              stalled: false,
+              conversation: current,
+              reason:
+                "bound_agent_process_evidence_invalid: the stalled decision has no exact death event"
+            };
+          }
+          const stalled: Conversation = {
+            ...current,
+            status: "stalled",
+            stalled_at: persistedAuthority.recordedAt,
+            stalled_reason: stalledReason,
+            terminal_agent_process_disposition: {
+              status: "verified_dead",
+              proof: persistedAuthority.proof,
+              evidence_id: persistedAuthority.evidenceId,
+              recorded_at: persistedAuthority.recordedAt,
+              completion_observation: {
+                status: priorStalledDecision.completionObservation
+              }
+            },
+            updated_at: persistedAuthority.recordedAt
+          };
+          saveState(statePath, stalled);
+          return {
+            stalled: true,
+            conversation: stalled,
+            reason:
+              priorStalledDecision.completionObservation === "unverifiable"
+                ? "bound_agent_process_verified_dead_completion_unverifiable"
+                : "bound_agent_process_verified_dead"
+          };
+        }
+        const durableCompletion =
+          await observeDurableCompletionBeforeDeadStall({
+            options,
+            conversation: current,
+            terminalControl: currentControl
+          });
+        if (durableCompletion.status === "present") {
+          // Completion claiming re-enters the Turn state lock. Keep the
+          // canonical terminal and Store-writer locks, but release the state
+          // lock before preparing the callback/local completion atomically.
+          releaseStateLock();
+          stateLockReleased = true;
+          const completionPreparation =
+            prepareTerminalBridgeCompletionCallbackWithLocksHeld({
+              options,
+              statePath,
+              logPath,
+              conversation: current,
+              executor: executorForConversation(current),
+              terminalControl: currentControl,
+              terminalMessageId: required(
+                messageId,
+                "verified-dead completion has no terminal message id"
+              ),
+              completion: durableCompletion.completion
+            });
+          return {
+            stalled: false,
+            conversation: completionPreparation.conversation,
+            reason: completionPreparation.claimed
+              ? "bound_agent_process_dead_completion_prepared"
+              : `bound_agent_process_dead_completion_${completionPreparation.reason}`,
+            completionPreparation
+          };
+        }
+        const completionUnverifiable =
+          durableCompletion.status === "unverifiable";
+        // Keep the durable lifecycle reason independent of a transient
+        // completion-read outcome. If the process crashes between the
+        // append-only events and state save, a later reconciliation must be
+        // able to reuse the same death evidence even when the transcript or
+        // rollout has become readable in the meantime.
+        const reason = stalledReason;
+        const audit = ensureVerifiedDeadTerminalAgentProcessEvent({
+          logPath,
+          proof,
+          action: "monitor_reconciliation"
+        });
+        ensureVerifiedDeadConversationStalledEvent({
+          logPath,
+          proof: audit.proof,
+          evidenceId: audit.evidenceId,
+          reason,
+          terminalControl: currentControl,
+          completionObservation:
+            completionUnverifiable ? "unverifiable" : "absent"
+        });
+        if (
+          cliEnv().AKK_TEST_EXIT_AFTER_VERIFIED_DEAD_STALL_EVENTS === "1"
+        ) {
+          cliExit(86);
+        }
+        const stalled: Conversation = {
+          ...current,
+          status: "stalled",
+          stalled_at: audit.recordedAt,
+          stalled_reason: reason,
+          terminal_agent_process_disposition: {
+            status: "verified_dead",
+            proof: audit.proof,
+            evidence_id: audit.evidenceId,
+            recorded_at: audit.recordedAt,
+            completion_observation: {
+              status: completionUnverifiable ? "unverifiable" : "absent"
+            }
+          },
+          updated_at: audit.recordedAt
+        };
+        saveState(statePath, stalled);
+        runtimeLog("warn", "terminal_agent_process_verified_dead", {
+          conversation_id: current.conversation_id,
+          terminal_target: currentControl.target,
+          pid: audit.proof.pid,
+          reason
+        });
+        return {
+          stalled: true,
+          conversation: stalled,
+          reason: completionUnverifiable
+            ? "bound_agent_process_verified_dead_completion_unverifiable"
+            : "bound_agent_process_verified_dead"
+        };
+      } finally {
+        if (!stateLockReleased) {
+          releaseStateLock();
+        }
+      }
+    });
+  } finally {
+    releaseTerminalLock();
+  }
 }
 
 function settleLocalTerminalBridgeCompletionClaim({
@@ -25442,6 +26652,7 @@ async function runClose(options) {
     const releaseStateLock = acquireFileLock(`${statePath}.lock`);
     try {
       const conversation = loadState(statePath);
+      let verifiedDeadProcess: VerifiedDeadTerminalAgentProcessProof | undefined;
       assertConversationHasNoNonterminalDeferredForegroundTransfer({
         storeDir: closeStoreDir,
         conversation,
@@ -25464,36 +26675,134 @@ async function runClose(options) {
           "terminal control changed after the close action was listed; refresh AKK list"
         );
       }
+      if (conversation.status === "closed" && currentTerminalControl) {
+        const recoveredAuthority =
+          exactVerifiedDeadTerminalAgentProcessAuthority({
+            conversation,
+            storeDir: closeStoreDir,
+            terminalControl: currentTerminalControl,
+            logPath
+          });
+        if (recoveredAuthority.status === "invalid") {
+          throw new Error(
+            `cannot finish close recovery for ${conversation.conversation_id}; ` +
+            recoveredAuthority.reason
+          );
+        }
+        if (recoveredAuthority.status === "valid") {
+          const audit = ensureVerifiedDeadTerminalAgentProcessEvent({
+            logPath,
+            proof: recoveredAuthority.proof,
+            action: "managed_close"
+          });
+          const expectedMessageId = required(
+            stringValue(currentTakeover?.terminal_bridge_message_id),
+            "verified-dead close recovery has no terminal message id"
+          );
+          const dispatchLedgerResolved =
+            resolveVerifiedDeadTerminalBridgeDispatchLedger({
+              terminalControl: currentTerminalControl,
+              conversation,
+              storeDir: closeStoreDir,
+              statePath,
+              logPath,
+              expectedMessageId,
+              reason: "conversation explicitly closed by request"
+            });
+          ensureVerifiedDeadConversationClosedEvent({
+            logPath,
+            conversation,
+            evidenceId: audit.evidenceId
+          });
+          printJson({
+            conversation,
+            closed: true,
+            recovered: true,
+            terminal_dispatch_resolved: dispatchLedgerResolved
+          });
+          return;
+        }
+      }
       if (terminalControl && currentTerminalControl) {
-        await assertGenericCloseDoesNotBypassObservedHandoff({
-          options,
-          storeDir: closeStoreDir,
-          conversation,
-          terminalControl: currentTerminalControl
-        });
+        verifiedDeadProcess =
+          await assertGenericCloseDoesNotBypassObservedHandoff({
+            options,
+            storeDir: closeStoreDir,
+            conversation,
+            terminalControl: currentTerminalControl
+          });
       }
       const now = cliNow().toISOString();
       const closeReason = options.reason ?? "closed by request";
+      const verifiedDeadAudit = verifiedDeadProcess
+        ? ensureVerifiedDeadTerminalAgentProcessEvent({
+            logPath,
+            proof: verifiedDeadProcess,
+            action: "managed_close"
+          })
+        : undefined;
+      const verifiedDeadMessageId = verifiedDeadAudit
+        ? required(
+            stringValue(currentTakeover?.terminal_bridge_message_id),
+            "verified-dead close has no terminal message id"
+          )
+        : undefined;
+      if (verifiedDeadAudit && currentTerminalControl) {
+        assertVerifiedDeadTerminalBridgeDispatchAuthority({
+          terminalControl: currentTerminalControl,
+          conversation,
+          storeDir: closeStoreDir,
+          statePath,
+          logPath,
+          expectedMessageId: verifiedDeadMessageId as string
+        });
+      }
       const closed = {
         ...conversation,
         status: "closed" as const,
         closed_at: now,
         close_reason: closeReason,
+        ...(verifiedDeadAudit
+          ? {
+              terminal_agent_process_disposition: {
+                status: "verified_dead",
+                proof: verifiedDeadAudit.proof,
+                evidence_id: verifiedDeadAudit.evidenceId,
+                recorded_at: verifiedDeadAudit.recordedAt
+              }
+            }
+          : {}),
         updated_at: now
       };
       saveState(statePath, closed);
+      if (
+        verifiedDeadAudit &&
+        cliEnv().AKK_TEST_EXIT_AFTER_VERIFIED_DEAD_CLOSE_STATE === "1"
+      ) {
+        cliExit(86);
+      }
       let dispatchLedgerResolved = false;
       let dispatchLedgerWarning: string | undefined;
       if (currentTerminalControl) {
         try {
-          dispatchLedgerResolved = resolveTerminalBridgeDispatchLedger({
-            terminalControl: currentTerminalControl,
-            conversation: closed,
-            expectedMessageId: stringValue(
-              currentTakeover?.terminal_bridge_message_id
-            ),
-            reason: "conversation explicitly closed by request"
-          });
+          dispatchLedgerResolved = verifiedDeadAudit
+            ? resolveVerifiedDeadTerminalBridgeDispatchLedger({
+                terminalControl: currentTerminalControl,
+                conversation: closed,
+                storeDir: closeStoreDir,
+                statePath,
+                logPath,
+                expectedMessageId: verifiedDeadMessageId as string,
+                reason: "conversation explicitly closed by request"
+              })
+            : resolveTerminalBridgeDispatchLedger({
+                terminalControl: currentTerminalControl,
+                conversation: closed,
+                expectedMessageId: stringValue(
+                  currentTakeover?.terminal_bridge_message_id
+                ),
+                reason: "conversation explicitly closed by request"
+              });
         } catch (error) {
           dispatchLedgerWarning =
             error instanceof Error ? error.message : String(error);
@@ -25504,13 +26813,21 @@ async function runClose(options) {
           });
         }
       }
-      appendEvent(logPath, {
-        ts: now,
-        conversation_id: conversation.conversation_id,
-        event: "conversation_closed",
-        status: "closed",
-        reason: closed.close_reason
-      });
+      if (verifiedDeadAudit) {
+        ensureVerifiedDeadConversationClosedEvent({
+          logPath,
+          conversation: closed,
+          evidenceId: verifiedDeadAudit.evidenceId
+        });
+      } else {
+        appendEvent(logPath, {
+          ts: now,
+          conversation_id: conversation.conversation_id,
+          event: "conversation_closed",
+          status: "closed",
+          reason: closed.close_reason
+        });
+      }
       runtimeLog("info", "conversation_closed", {
         conversation_id: conversation.conversation_id,
         status: "closed",
@@ -25558,7 +26875,10 @@ async function assertGenericCloseDoesNotBypassObservedHandoff({
   storeDir: string;
   conversation: Conversation;
   terminalControl: TerminalControlRef;
-}): Promise<void> {
+}): Promise<
+  | VerifiedDeadTerminalAgentProcessProof
+  | undefined
+> {
   if (!SESSION_SEND_BLOCKING_STATUSES.has(conversation.status)) {
     return;
   }
@@ -25575,6 +26895,26 @@ async function assertGenericCloseDoesNotBypassObservedHandoff({
     )
   ) {
     return;
+  }
+  const storedProof = exactVerifiedDeadTerminalAgentProcessAuthority({
+    conversation,
+    storeDir,
+    terminalControl,
+    logPath: stringValue(conversation.event_log_path) ??
+      logPathForStatePath(
+        required(
+          stringValue(conversation.state_path),
+          "managed Turn state path is unavailable"
+        )
+      )
+  });
+  if (storedProof.status === "valid") {
+    return storedProof.proof;
+  }
+  if (storedProof.status === "invalid") {
+    throw new Error(
+      `cannot close ${conversation.conversation_id}; ${storedProof.reason}`
+    );
   }
   const takeover = isRecord(conversation.native_session_takeover)
     ? conversation.native_session_takeover
@@ -25593,12 +26933,26 @@ async function assertGenericCloseDoesNotBypassObservedHandoff({
       { pid }
     );
   } catch (error) {
-    if (!(error instanceof TerminalControlUnavailableError)) {
-      throw error;
+    if (error instanceof TerminalControlUnavailableError) {
+      // An unavailable terminal cannot prove a live A -> B handoff. Preserve the
+      // explicit Store-only close path used to retire unavailable Turn history.
+      return;
     }
-    // An unavailable terminal cannot prove a live A -> B handoff. Preserve the
-    // explicit Store-only close path used to retire unavailable Turn history.
-    return;
+    const processObservation = await observeBoundTerminalAgentProcess({
+      options,
+      conversation,
+      terminalControl
+    });
+    if (processObservation.status === "verified_dead") {
+      return processObservation.proof;
+    }
+    if (processObservation.status === "unverifiable") {
+      throw new Error(
+        `cannot close ${conversation.conversation_id}; the bound agent process ` +
+        `death is unverifiable: ${processObservation.reason}`
+      );
+    }
+    throw error;
   }
   const companions = sourceSession.agent === "codex"
     ? codexAllowedCompanionSetForManagedSession({
@@ -27619,6 +28973,47 @@ async function runTerminalBridgeMonitorWithLock(
       }
       runPreparedCallback(preparedCompletion.prepared);
       return;
+    }
+
+    // Durable completion wins over process-death cleanup. A coding-agent
+    // process may exit immediately after committing its final transcript, so
+    // only classify the Turn as orphaned after this poll (and an independent
+    // durable probe under the mutation locks) both find no completion.
+    if (!completion) {
+      const deadProcessStall = await stallAcceptedTurnForVerifiedDeadAgent({
+        options,
+        storeDir: pathsForConversationDir(path.dirname(statePath)).storeDir,
+        statePath,
+        logPath,
+        expectedConversationId: conversation.conversation_id,
+        expectedMessageId: currentMessageId
+      });
+      if (deadProcessStall.completionPreparation) {
+        const completionPreparation = deadProcessStall.completionPreparation;
+        if (!completionPreparation.claimed) {
+          printJson({
+            conversation: completionPreparation.conversation,
+            monitored: true,
+            terminal_bridge: true,
+            completed: false,
+            duplicate: true,
+            reason: completionPreparation.reason
+          });
+          return;
+        }
+        runPreparedCallback(completionPreparation.prepared);
+        return;
+      }
+      if (deadProcessStall.stalled) {
+        printJson({
+          conversation: deadProcessStall.conversation,
+          monitored: true,
+          terminal_bridge: true,
+          stalled: true,
+          reason: deadProcessStall.reason
+        });
+        return;
+      }
     }
 
     // A concrete approval or completion observed on this poll wins over a timeout boundary.
@@ -32609,6 +34004,223 @@ function resolveTerminalBridgeDispatchLedger({
     resolved_at: cliNow().toISOString(),
     reason
   });
+  return true;
+}
+
+function assertVerifiedDeadTerminalBridgeDispatchAuthority({
+  terminalControl,
+  conversation,
+  storeDir,
+  statePath,
+  logPath,
+  expectedMessageId
+}: {
+  terminalControl: TerminalControlRef;
+  conversation: Conversation;
+  storeDir: string;
+  statePath: string;
+  logPath: string;
+  expectedMessageId: string;
+}): { ledger: Record<string, any>; resolved: boolean } {
+  assertTurnBindingCurrent(
+    conversation,
+    "resolve a verified-dead agent dispatch for"
+  );
+  const takeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const submission = terminalBridgeSubmission(conversation);
+  const rawStateReceiptHistory =
+    takeover?.terminal_bridge_submission_receipts;
+  const rawStateReceipts = Array.isArray(rawStateReceiptHistory)
+    ? rawStateReceiptHistory.filter((receipt) =>
+        isRecord(receipt) &&
+        stringValue(receipt.message_id) === expectedMessageId
+      )
+    : [];
+  const validatedStateReceipts = terminalBridgeSubmissionReceipts(
+    conversation
+  ).filter((receipt) =>
+    stringValue(receipt.message_id) === expectedMessageId
+  );
+  const requestText = String(
+    takeover?.terminal_bridge_request_text ?? conversation.user_request ?? ""
+  );
+  const requestHash = terminalBridgeRequestFingerprint(requestText);
+  const sessionId = sessionIdForConversation(conversation);
+  const turnId = turnIdForConversation(conversation);
+  const bindingId = stringValue(conversation.terminal_binding_id);
+  const bindingGeneration = Number(conversation.terminal_binding_generation);
+  const nativeThreadId = stringValue(conversation.native_thread_id) ??
+    stringValue(takeover?.terminal_agent_session_id);
+  const endpointAnchor = terminalEndpointFromControlRef(
+    terminalControl
+  ).processAnchorPid;
+  if (
+    !expectedMessageId ||
+    !Array.isArray(rawStateReceiptHistory) ||
+    rawStateReceipts.length !== 1 ||
+    validatedStateReceipts.length !== 1 ||
+    canonicalJson(rawStateReceipts[0]) !== canonicalJson(submission) ||
+    canonicalJson(validatedStateReceipts[0]) !== canonicalJson(submission) ||
+    stringValue(takeover?.terminal_bridge_message_id) !== expectedMessageId ||
+    submission?.status !== "agent_accepted" ||
+    stringValue(submission.message_id) !== expectedMessageId ||
+    stringValue(submission.session_id) !== sessionId ||
+    stringValue(submission.turn_id) !== turnId ||
+    stringValue(submission.binding_id) !== bindingId ||
+    Number(submission.binding_generation) !== bindingGeneration ||
+    !requestHash ||
+    stringValue(submission.request_hash) !== requestHash ||
+    !bindingId ||
+    !Number.isSafeInteger(bindingGeneration) ||
+    bindingGeneration < 1 ||
+    !nativeThreadId ||
+    !Number.isSafeInteger(endpointAnchor) ||
+    Number(endpointAnchor) < 1 ||
+    !sameCanonicalStatePath(conversation.state_path, statePath) ||
+    path.resolve(stringValue(conversation.event_log_path) ?? "") !==
+      path.resolve(logPath) ||
+    path.resolve(managedSessionStoreDirForConversation(conversation) ?? "") !==
+      path.resolve(storeDir)
+  ) {
+    throw new Error(
+      `verified-dead Turn ${conversation.conversation_id} has no exact accepted submission authority`
+    );
+  }
+  const ledger = loadTerminalBridgeDispatchLedger(terminalControl);
+  const rawReceiptHistory = ledger?.terminal_submission_receipts;
+  const receipts = Array.isArray(rawReceiptHistory)
+    ? rawReceiptHistory.filter((receipt) =>
+        isRecord(receipt) &&
+        stringValue(receipt.message_id) === expectedMessageId
+      )
+    : [];
+  // Parse the entire append-only history as well as selecting the one exact
+  // receipt. A synthesized top-level candidate is not sufficient cleanup
+  // authority for a verified-dead process.
+  const validatedReceiptHistory = terminalLedgerReceiptHistory(ledger);
+  const validatedReceipts = validatedReceiptHistory.filter((receipt) =>
+    stringValue(receipt.message_id) === expectedMessageId
+  );
+  const receipt = receipts[0];
+  const recordMatches = (
+    record: Record<string, any> | undefined,
+    expectedStatus: "agent_accepted" | "resolved"
+  ): boolean => Boolean(
+    record &&
+    record.status === expectedStatus &&
+    stringValue(record.generation_id) === expectedMessageId &&
+    stringValue(record.conversation_id) === conversation.conversation_id &&
+    stringValue(record.session_id) === sessionId &&
+    stringValue(record.turn_id) === turnId &&
+    stringValue(record.message_id) === expectedMessageId &&
+    stringValue(record.request_hash) === requestHash &&
+    sameCanonicalStatePath(record.state_path, statePath) &&
+    path.resolve(stringValue(record.store_dir) ?? "") ===
+      path.resolve(storeDir) &&
+    path.resolve(stringValue(record.event_log_path) ?? "") ===
+      path.resolve(logPath) &&
+    stringValue(record.binding_id) === bindingId &&
+    Number(record.binding_generation) === bindingGeneration &&
+    stringValue(record.native_thread_id) === nativeThreadId &&
+    stringValue(record.executor_kind) ===
+      executorForConversation(conversation).kind &&
+    (stringValue(record.openclaw_session) ?? undefined) ===
+      (stringValue(conversation.openclaw_session) ?? undefined) &&
+    Boolean(record.callback_expected) === Boolean(conversation.gateway_method) &&
+    (stringValue(record.message_type) ?? undefined) ===
+      (stringValue(submission.message_type) ?? undefined) &&
+    (stringValue(record.message_body_hash) ?? undefined) ===
+      (stringValue(submission.message_body_hash) ?? undefined) &&
+    isRecord(record.terminal_endpoint) &&
+    terminalDispatchRecordMatchesControl(record, terminalControl, {
+      requireProcessAnchor: true
+    }) &&
+    terminalDispatchRecordProcessAnchor(record) === endpointAnchor
+  );
+  if (
+    !ledger ||
+    terminalDispatchLedgerLooksLifecycle(ledger) ||
+    !["agent_accepted", "resolved"].includes(String(ledger.status)) ||
+    !recordMatches(
+      ledger,
+      ledger.status === "resolved" ? "resolved" : "agent_accepted"
+    ) ||
+    receipts.length !== 1 ||
+    validatedReceipts.length !== 1 ||
+    canonicalJson(receipts[0]) !== canonicalJson(validatedReceipts[0]) ||
+    !recordMatches(receipt, "agent_accepted") ||
+    (
+      ledger.status === "resolved" &&
+      validTimestampMs(ledger.resolved_at) === undefined
+    )
+  ) {
+    throw new Error(
+      `verified-dead Turn ${conversation.conversation_id} no longer owns one exact terminal dispatch receipt`
+    );
+  }
+  let stateAcceptance: TerminalSubmissionAcceptanceEvidence;
+  let ledgerAcceptance: TerminalSubmissionAcceptanceEvidence;
+  let receiptAcceptance: TerminalSubmissionAcceptanceEvidence;
+  try {
+    stateAcceptance = terminalAcceptanceEvidenceForConversation(
+      conversation,
+      requestText,
+      submission.acceptance_evidence
+    );
+    ledgerAcceptance = terminalAcceptanceEvidenceForConversation(
+      conversation,
+      requestText,
+      ledger.acceptance_evidence
+    );
+    receiptAcceptance = terminalAcceptanceEvidenceForConversation(
+      conversation,
+      requestText,
+      receipt.acceptance_evidence
+    );
+  } catch (error) {
+    throw new Error(
+      `verified-dead Turn ${conversation.conversation_id} has invalid native acceptance evidence: ` +
+      (error instanceof Error ? error.message : String(error))
+    );
+  }
+  if (
+    canonicalJson(stateAcceptance) !== canonicalJson(ledgerAcceptance) ||
+    canonicalJson(stateAcceptance) !== canonicalJson(receiptAcceptance)
+  ) {
+    throw new Error(
+      `verified-dead Turn ${conversation.conversation_id} has conflicting native acceptance receipts`
+    );
+  }
+  return { ledger, resolved: ledger.status === "resolved" };
+}
+
+function resolveVerifiedDeadTerminalBridgeDispatchLedger(options: {
+  terminalControl: TerminalControlRef;
+  conversation: Conversation;
+  storeDir: string;
+  statePath: string;
+  logPath: string;
+  expectedMessageId: string;
+  reason: string;
+}): boolean {
+  const authority = assertVerifiedDeadTerminalBridgeDispatchAuthority(options);
+  if (authority.resolved) {
+    return true;
+  }
+  saveTerminalBridgeDispatchLedger(options.terminalControl, {
+    ...authority.ledger,
+    status: "resolved",
+    resolved_at: cliNow().toISOString(),
+    reason: options.reason
+  });
+  const resolved = assertVerifiedDeadTerminalBridgeDispatchAuthority(options);
+  if (!resolved.resolved) {
+    throw new Error(
+      `verified-dead Turn ${options.conversation.conversation_id} dispatch did not resolve`
+    );
+  }
   return true;
 }
 

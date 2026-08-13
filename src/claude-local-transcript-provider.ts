@@ -20,8 +20,9 @@ import type {
   TerminalThreadLifecycleCandidateValidation,
   TerminalThreadFileToken
 } from "./terminal-agent-adapter.js";
-import type {
-  TerminalSubmissionAcceptanceEvidence
+import {
+  validateTerminalSubmissionAcceptanceEvidence,
+  type TerminalSubmissionAcceptanceEvidence
 } from "./terminal-submission-acceptance.js";
 
 const CLAUDE_TRANSCRIPT_ANCHOR_VERSION = 1;
@@ -64,6 +65,22 @@ export interface DetectClaudeTranscriptCompletionOptions {
   agentRows: readonly ClaudeAgentRow[];
   maxTurnBytes?: number;
 }
+
+export interface ObserveClaudeDeadProcessCompletionOptions
+  extends DetectClaudeTranscriptCompletionOptions {
+  acceptanceEvidence: unknown;
+}
+
+export type ClaudeDeadProcessCompletionObservation =
+  | {
+      status: "present";
+      completion: TerminalCompletionEvidence;
+    }
+  | { status: "absent" }
+  | {
+      status: "unverifiable";
+      reason: string;
+    };
 
 export interface ClaudeHistoricalSessionSummary {
   id: string;
@@ -650,6 +667,63 @@ export function detectClaudeTranscriptCompletion(
 }
 
 /**
+ * Observes completion after the exact bound Claude process is independently
+ * proven dead. Unlike the ordinary live monitor detector, this API separates
+ * a stable, fully inspected transcript with no completion from a transcript
+ * that cannot be inspected or tied back to the durable native-acceptance
+ * receipt. Callers may treat only `absent` as authority for orphan cleanup.
+ */
+export function observeClaudeDeadProcessTranscriptCompletion(
+  request: TerminalDurableCompletionRequest,
+  options: ObserveClaudeDeadProcessCompletionOptions
+): ClaudeDeadProcessCompletionObservation {
+  try {
+    const snapshot = readClaudeTranscriptTurnSnapshot(
+      request,
+      options,
+      "idle",
+      "verified_dead_process"
+    );
+    if (!snapshot) {
+      return {
+        status: "unverifiable",
+        reason: "Claude transcript could not be read with exact dead-process authority"
+      };
+    }
+    const observedAcceptance = acceptanceEvidenceFromSnapshot(snapshot);
+    if (!observedAcceptance) {
+      throw new Error(
+        "the exact accepted Claude prompt is absent from the anchored transcript"
+      );
+    }
+    const persistedAcceptance = validateTerminalSubmissionAcceptanceEvidence(
+      options.acceptanceEvidence,
+      {
+        source: "claude_transcript",
+        nativeThreadId: snapshot.sessionId,
+        requestHash: snapshot.expectedRequestHash
+      }
+    );
+    assertSameClaudeTranscriptAcceptance(
+      persistedAcceptance,
+      observedAcceptance,
+      snapshot
+    );
+    const completion = completionFromRecords(snapshot, {
+      requireVerifiableCompletionSignal: true
+    });
+    return completion
+      ? { status: "present", completion }
+      : { status: "absent" };
+  } catch (error) {
+    return {
+      status: "unverifiable",
+      reason: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+/**
  * Detects native acceptance as soon as Claude appends the unique root user
  * row matching the managed request after the immutable pre-send byte anchor.
  * Unlike completion detection, acceptance does not require the agent to be
@@ -663,6 +737,12 @@ export function detectClaudeTranscriptAcceptance(
   if (!snapshot) {
     return undefined;
   }
+  return acceptanceEvidenceFromSnapshot(snapshot);
+}
+
+function acceptanceEvidenceFromSnapshot(
+  snapshot: ClaudeTranscriptTurnSnapshot
+): ClaudeTranscriptAcceptanceEvidence | undefined {
   const prompt = matchingManagedPrompt(snapshot);
   if (!prompt) {
     return undefined;
@@ -696,6 +776,46 @@ export function detectClaudeTranscriptAcceptance(
   };
 }
 
+function assertSameClaudeTranscriptAcceptance(
+  persisted: TerminalSubmissionAcceptanceEvidence,
+  observed: ClaudeTranscriptAcceptanceEvidence,
+  snapshot: ClaudeTranscriptTurnSnapshot
+): void {
+  const persistedMetadata = isRecord(persisted.metadata)
+    ? persisted.metadata
+    : undefined;
+  const observedMetadata = isRecord(observed.metadata)
+    ? observed.metadata
+    : undefined;
+  const persistedEndOffset = nonNegativeInteger(
+    persistedMetadata?.observed_end_offset_bytes
+  );
+  if (
+    persisted.source !== "claude_transcript" ||
+    persisted.kind !== "native_user_turn" ||
+    persisted.acceptanceId !== observed.acceptanceId ||
+    persisted.acceptedAt !== observed.acceptedAt ||
+    persisted.anchorFingerprint !== observed.anchorFingerprint ||
+    !persistedMetadata ||
+    !observedMetadata ||
+    persistedMetadata.prompt_uuid !== observedMetadata.prompt_uuid ||
+    persistedMetadata.claude_version !== observedMetadata.claude_version ||
+    persistedMetadata.transcript_file_id !==
+      observedMetadata.transcript_file_id ||
+    persistedMetadata.anchor_offset_bytes !==
+      observedMetadata.anchor_offset_bytes ||
+    persistedMetadata.agent_started_at_ms !==
+      observedMetadata.agent_started_at_ms ||
+    persistedEndOffset === undefined ||
+    persistedEndOffset <= snapshot.anchor.offset_bytes ||
+    persistedEndOffset > snapshot.observedEndOffsetBytes
+  ) {
+    throw new Error(
+      "persisted Claude acceptance evidence does not match the exact anchored prompt"
+    );
+  }
+}
+
 /**
  * Detects exactly one unresolved foreground Bash tool use for the current
  * AKK-managed Claude turn. It uses the same anchored, owner-private,
@@ -716,11 +836,18 @@ export function detectClaudeTranscriptPendingApproval(
 function readClaudeTranscriptTurnSnapshot(
   request: TerminalDurableCompletionRequest,
   options: DetectClaudeTranscriptCompletionOptions,
-  requiredAgentStatus?: "idle"
+  requiredAgentStatus?: "idle",
+  readMode: "live_monitor" | "verified_dead_process" = "live_monitor"
 ): ClaudeTranscriptTurnSnapshot | undefined {
+  const unavailable = (reason: string): undefined => {
+    if (readMode === "verified_dead_process") {
+      throw new Error(reason);
+    }
+    return undefined;
+  };
   const anchor = transcriptAnchorFromContext(request.context);
   if (!anchor) {
-    return undefined;
+    return unavailable("Claude transcript anchor is unavailable");
   }
 
   const sessionId = nonEmptyString(request.sessionId);
@@ -740,7 +867,9 @@ function readClaudeTranscriptTurnSnapshot(
     startedAtMs === undefined ||
     capturedAtMs === undefined
   ) {
-    return undefined;
+    return unavailable(
+      "Claude transcript request metadata cannot be verified"
+    );
   }
   if (
     anchor.schema_version !== CLAUDE_TRANSCRIPT_ANCHOR_VERSION ||
@@ -767,18 +896,20 @@ function readClaudeTranscriptTurnSnapshot(
     throw new Error("the Claude process session identity changed after the managed send");
   }
   if (requiredAgentStatus && agent.status !== requiredAgentStatus) {
-    return undefined;
+    return unavailable(
+      `the exact Claude process is ${agent.status}, not ${requiredAgentStatus}`
+    );
   }
 
   const projectsRoot = projectsRootPath(
     path.resolve(options.claudeHome ?? defaultClaudeHome())
   );
   if (!isRealDirectory(projectsRoot)) {
-    return undefined;
+    return unavailable("Claude transcript projects directory is unavailable");
   }
   const opened = openAnchoredTranscript(projectsRoot, anchor);
   if (!opened) {
-    return undefined;
+    return unavailable("the anchored Claude transcript is unavailable");
   }
 
   try {
@@ -794,12 +925,22 @@ function readClaudeTranscriptTurnSnapshot(
 
     const bytesToRead = opened.stat.size - anchor.offset_bytes;
     if (bytesToRead === 0) {
-      return undefined;
+      return unavailable(
+        "the anchored Claude transcript contains no post-send records"
+      );
     }
     const maxTurnBytes = positiveInteger(options.maxTurnBytes) ??
       CLAUDE_TRANSCRIPT_MAX_TURN_BYTES;
     if (bytesToRead > maxTurnBytes) {
       throw new Error("Claude transcript turn exceeded the bounded local read limit");
+    }
+    if (
+      readMode === "verified_dead_process" &&
+      !fileEndsWithNewline(opened.fd, opened.stat.size)
+    ) {
+      throw new Error(
+        "Claude transcript ends with an incomplete JSONL record"
+      );
     }
 
     const records = readCompleteJsonlRecords(
@@ -809,10 +950,14 @@ function readClaudeTranscriptTurnSnapshot(
     );
     const stableStat = fs.fstatSync(opened.fd);
     if (!sameStableTranscriptFile(opened.stat, stableStat)) {
-      return undefined;
+      return unavailable(
+        "Claude transcript changed while dead-process completion was inspected"
+      );
     }
     if (records.length === 0) {
-      return undefined;
+      return unavailable(
+        "Claude transcript contains no complete post-send records"
+      );
     }
     const fileIdentity = `${opened.stat.dev}:${opened.stat.ino}`;
     return {
@@ -864,7 +1009,8 @@ function matchingManagedPrompt(
 }
 
 function completionFromRecords(
-  snapshot: ClaudeTranscriptTurnSnapshot
+  snapshot: ClaudeTranscriptTurnSnapshot,
+  options: { requireVerifiableCompletionSignal?: boolean } = {}
 ): TerminalCompletionEvidence | undefined {
   const {
     records,
@@ -890,10 +1036,35 @@ function completionFromRecords(
     nonEmptyString(record.agentId) === undefined &&
     userPromptText(record) !== undefined
   );
+  if (
+    options.requireVerifiableCompletionSignal === true &&
+    nextHumanPromptIndex >= 0
+  ) {
+    const nextHumanPrompt = records[nextHumanPromptIndex];
+    if (!nextHumanPrompt || uuidValue(nextHumanPrompt.uuid) === undefined) {
+      throw new Error(
+        "Claude transcript next human prompt has no stable UUID"
+      );
+    }
+    assertSupportedRecord(nextHumanPrompt, sessionId, snapshot.cwd);
+  }
   const turnRecords = records.slice(
     promptIndex,
     nextHumanPromptIndex < 0 ? records.length : nextHumanPromptIndex
   );
+  if (
+    options.requireVerifiableCompletionSignal === true &&
+    turnRecords.some((record) =>
+      (
+        ["user", "assistant", "system"].includes(String(record.type)) ||
+        hasTurnCompletionSignal(record)
+      ) && uuidValue(record.uuid) === undefined
+    )
+  ) {
+    throw new Error(
+      "Claude transcript turn contains a completion-relevant record without a stable UUID"
+    );
+  }
   const recordsByUuid = new Map<string, TranscriptRecord>();
   for (const record of turnRecords) {
     const uuid = uuidValue(record.uuid);
@@ -917,18 +1088,29 @@ function completionFromRecords(
     assertSupportedRecord(record, sessionId);
   }
   assertSameClaudeVersion(...descendants);
+  const absentOrUnverifiable = (): undefined => {
+    if (
+      options.requireVerifiableCompletionSignal === true &&
+      descendants.some(hasTurnCompletionSignal)
+    ) {
+      throw new Error(
+        "Claude transcript contains a completion signal without one complete verifiable completion chain"
+      );
+    }
+    return undefined;
+  };
   if (descendants.some((record) =>
     record.isSidechain === true ||
     nonEmptyString(record.agentId) !== undefined ||
     hasUnresolvedBackgroundWork(record)
   )) {
-    return undefined;
+    return absentOrUnverifiable();
   }
   if (hasUnresolvedToolUse(descendants)) {
-    return undefined;
+    return absentOrUnverifiable();
   }
   if (descendants.some(hasBlockingStopSummary)) {
-    return undefined;
+    return absentOrUnverifiable();
   }
 
   const durations = descendantRecords(
@@ -957,7 +1139,7 @@ function completionFromRecords(
       descendantChain(recordsByUuid, promptUuid, record) !== undefined
     );
     if (!failure || failure !== lastDescendant) {
-      return undefined;
+      return absentOrUnverifiable();
     }
 
     assertSupportedRecord(failure, sessionId);
@@ -995,7 +1177,7 @@ function completionFromRecords(
 
   const chain = descendantChain(recordsByUuid, promptUuid, duration);
   if (!chain) {
-    return undefined;
+    return absentOrUnverifiable();
   }
   const finalAssistant = [...chain].reverse().find((record) =>
     record.type === "assistant" &&
@@ -1023,6 +1205,11 @@ function completionFromRecords(
     finalAssistant
   );
   if (!assistantText) {
+    if (options.requireVerifiableCompletionSignal === true) {
+      throw new Error(
+        "Claude completion signal has no verifiable assistant text"
+      );
+    }
     return undefined;
   }
   const promptId = nonEmptyString(prompt.promptId);

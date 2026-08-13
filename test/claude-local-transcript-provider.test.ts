@@ -11,6 +11,7 @@ import {
   detectClaudeTranscriptPendingApproval,
   listClaudeHistoricalSessions,
   listClaudeThreadLifecycleCandidates,
+  observeClaudeDeadProcessTranscriptCompletion,
   revalidateClaudeThreadLifecycleCandidate,
   type ClaudeTranscriptAnchor
 } from "../src/claude-local-transcript-provider.js";
@@ -743,6 +744,158 @@ test("proves Claude native acceptance from one anchored user row regardless of i
   );
   assert.equal(serialized.includes(fixture.workspace), false);
   assert.doesNotMatch(serialized, /\.jsonl|\/projects\//u);
+});
+
+test("dead-process completion treats UUID-less turn records as unverifiable", (t) => {
+  const cases = [
+    {
+      suffix: 31,
+      label: "user",
+      record: {
+        type: "user",
+        message: { role: "user", content: [{ type: "text", text: "malformed" }] }
+      }
+    },
+    {
+      suffix: 32,
+      label: "assistant completion",
+      record: {
+        type: "assistant",
+        message: {
+          role: "assistant",
+          id: uuid(3200),
+          stop_reason: "end_turn",
+          content: [{ type: "text", text: "not attributable" }]
+        }
+      }
+    },
+    {
+      suffix: 33,
+      label: "system",
+      record: { type: "system", subtype: "progress" }
+    }
+  ] as const;
+
+  for (const item of cases) {
+    const fixture = createFixture(t, item.suffix);
+    const request = `Reject UUID-less ${item.label} record`;
+    const anchor = fixture.capture();
+    const promptUuid = uuid(item.suffix * 100);
+    fixture.write([userRecord({
+      uuid: promptUuid,
+      request,
+      timestamp: PROMPT_AT,
+      parentUuid: null,
+      sessionId: fixture.sessionId
+    })]);
+    const acceptance = fixture.detectAcceptance(anchor, request);
+    assert.ok(acceptance);
+    fixture.append([{
+      parentUuid: promptUuid,
+      isSidechain: false,
+      entrypoint: "cli",
+      timestamp: COMPLETED_AT,
+      version: VERSION,
+      ...item.record
+    }]);
+
+    assert.equal(
+      fixture.detect(anchor, request),
+      undefined,
+      "the live detector keeps its prior pending semantics"
+    );
+    const observation = fixture.observeDead(anchor, request, acceptance);
+    assert.equal(observation.status, "unverifiable");
+    assert.match(
+      observation.status === "unverifiable" ? observation.reason : "",
+      /without a stable UUID/u
+    );
+  }
+});
+
+test("dead-process completion treats a UUID-less next human prompt as unverifiable", (t) => {
+  const fixture = createFixture(t, 35);
+  const request = "Do not abandon across an unattributable human boundary";
+  const anchor = fixture.capture();
+  const promptUuid = uuid(3500);
+  fixture.write([userRecord({
+    uuid: promptUuid,
+    request,
+    timestamp: PROMPT_AT,
+    parentUuid: null,
+    sessionId: fixture.sessionId
+  })]);
+  const acceptance = fixture.detectAcceptance(anchor, request);
+  assert.ok(acceptance);
+  fixture.append([{
+    parentUuid: promptUuid,
+    isSidechain: false,
+    entrypoint: "cli",
+    timestamp: COMPLETED_AT,
+    version: VERSION,
+    type: "user",
+    promptId: uuid(3501),
+    message: {
+      role: "user",
+      content: "A human submitted a follow-up prompt"
+    }
+  }]);
+
+  assert.equal(
+    fixture.detect(anchor, request),
+    undefined,
+    "the live detector keeps treating a later human prompt as a turn boundary"
+  );
+  const observation = fixture.observeDead(anchor, request, acceptance);
+  assert.equal(observation.status, "unverifiable");
+  assert.match(
+    observation.status === "unverifiable" ? observation.reason : "",
+    /has no stable UUID/u
+  );
+});
+
+test("dead-process completion treats an incomplete end-turn chain as unverifiable", (t) => {
+  const fixture = createFixture(t, 34);
+  const request = "Do not abandon a partially persisted completion";
+  const anchor = fixture.capture();
+  const promptUuid = uuid(3400);
+  fixture.write([userRecord({
+    uuid: promptUuid,
+    request,
+    timestamp: PROMPT_AT,
+    parentUuid: null,
+    sessionId: fixture.sessionId
+  })]);
+  const acceptance = fixture.detectAcceptance(anchor, request);
+  assert.ok(acceptance);
+  fixture.append([{
+    ...baseRecord(
+      uuid(3401),
+      promptUuid,
+      COMPLETED_AT,
+      fixture.sessionId,
+      VERSION
+    ),
+    type: "assistant",
+    message: {
+      role: "assistant",
+      id: uuid(3499),
+      stop_reason: "end_turn",
+      content: [{ type: "text", text: "Final text persisted before duration." }]
+    }
+  }]);
+
+  assert.equal(
+    fixture.detect(anchor, request),
+    undefined,
+    "the live detector must keep waiting for the canonical duration record"
+  );
+  const observation = fixture.observeDead(anchor, request, acceptance);
+  assert.equal(observation.status, "unverifiable");
+  assert.match(
+    observation.status === "unverifiable" ? observation.reason : "",
+    /completion signal without one complete verifiable completion chain/u
+  );
 });
 
 test("Claude acceptance ignores pre-anchor prompts and waits for a complete matching row", (t) => {
@@ -1663,6 +1816,28 @@ function createFixture(
       claudeHome,
       agentRows
     });
+  const observeDead = (
+    anchor: ClaudeTranscriptAnchor,
+    request: string,
+    acceptanceEvidence: unknown
+  ) => observeClaudeDeadProcessTranscriptCompletion({
+    sessionId,
+    cwd: workspace,
+    requestText: request,
+    requestHash: fingerprint(request),
+    startedAt: STARTED_AT,
+    context: {
+      pid: PID,
+      sessionId,
+      nativeTakeover: {
+        claude_transcript_anchor: anchor
+      }
+    }
+  }, {
+    claudeHome,
+    agentRows,
+    acceptanceEvidence
+  });
   const detectPending = (anchor: ClaudeTranscriptAnchor, request: string) =>
     detectClaudeTranscriptPendingApproval({
       sessionId,
@@ -1698,6 +1873,7 @@ function createFixture(
     normalizeRecords,
     detect,
     detectAcceptance,
+    observeDead,
     detectPending
   };
 }

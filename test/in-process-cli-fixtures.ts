@@ -206,6 +206,7 @@ function terminalTarget(terminal: TerminalEndpointRef): string {
 }
 
 export class MutableTerminalProcessSource implements TerminalProcessSource {
+  readonly completeInventoryAuthority = true as const;
   private snapshots: TerminalProcessSnapshot[];
   readonly calls: Array<{
     includeCwd?: boolean;

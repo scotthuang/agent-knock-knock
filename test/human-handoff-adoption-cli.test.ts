@@ -19,6 +19,7 @@ import {
 import { createConversation } from "../src/protocol.js";
 import {
   terminalBindingFrom,
+  managedSessionBindingToken,
   type ManagedSessionState
 } from "../src/managed-session.js";
 import {
@@ -40,8 +41,17 @@ import {
   type TerminalControlRef
 } from "../src/terminal-agent-adapter.js";
 import { TerminalAgentBridge } from "../src/terminal-agent-bridge.js";
-import { listDeferredForegroundTransfers } from
-  "../src/deferred-foreground-transfer.js";
+import {
+  captureCodexRolloutAcceptanceAnchor,
+  detectCodexRolloutAcceptance
+} from "../src/terminal-submission-acceptance.js";
+import {
+  createDeferredForegroundTransferId,
+  DEFERRED_FOREGROUND_TRANSFER_SCHEMA,
+  DEFERRED_FOREGROUND_TRANSFER_VERSION,
+  listDeferredForegroundTransfers,
+  saveDeferredForegroundTransfer
+} from "../src/deferred-foreground-transfer.js";
 import { createTerminalControlProviderRegistry } from
   "../src/terminal-control-provider.js";
 import {
@@ -1104,6 +1114,1110 @@ test("a cached generic close remains available as Store-only recovery after its 
   }
 });
 
+for (const agent of ["codex", "claude"] as const) {
+  test(`${agent} managed close retires an accepted Turn after its exact bound agent process is verified dead`, async () => {
+    const fixture = createHandoffFixture({
+      agent,
+      ...(agent === "codex"
+        ? { codexInitialNativeThreadId: NATIVE_A }
+        : {})
+    });
+    try {
+      const source = fixture.persistSession({
+        sessionId: `session-dead-${agent}-close-source`,
+        nativeThreadId: NATIVE_A,
+        status: "bound",
+        generation: 1
+      });
+      fixture.setCurrentNativeThreadId(NATIVE_A);
+      let expectedTerminalToken: string | undefined;
+      if (agent === "codex") {
+        const initial = await fixture.listTerminal();
+        expectedTerminalToken = String(
+          initial.available_actions?.send?.arguments
+            ?.expected_terminal_token ?? ""
+        );
+        assert.ok(expectedTerminalToken, JSON.stringify(initial, null, 2));
+      }
+
+      const sent = await fixture.sendToTerminal(
+        "Create a durable managed dispatch before the agent exits.",
+        {},
+        expectedTerminalToken
+      );
+      assert.equal(sent.status, 0, fixture.debug(sent));
+      const sentOutput = JSON.parse(sent.stdout);
+      const turnId = String(sentOutput.conversation?.conversation_id ?? "");
+      assert.ok(turnId, fixture.debug(sent));
+
+      if (agent === "claude") {
+        const messageId = String(
+          sentOutput.conversation?.native_session_takeover
+            ?.terminal_bridge_message_id ?? ""
+        );
+        assert.ok(messageId, fixture.debug(sent));
+        const beforeRawClose = snapshotDirectoryBytes(
+          pathsForConversation(turnId, fixture.storeDir).conversationDir
+        );
+        const rawClose = await fixture.closeRawTerminal(messageId);
+        assert.equal(rawClose.status, 1, fixture.debug(rawClose));
+        assert.match(rawClose.stderr, /owned by AKK conversation/iu);
+        assert.deepEqual(
+          snapshotDirectoryBytes(
+            pathsForConversation(turnId, fixture.storeDir).conversationDir
+          ),
+          beforeRawClose,
+          "raw close must not bypass the managed Turn owner"
+        );
+      }
+
+      const managedSessionPaths = pathsForManagedSession(
+        String(sentOutput.conversation?.session_id ?? source.session_id),
+        fixture.storeDir
+      );
+      const managedSessionBytes = snapshotDirectoryBytes(
+        managedSessionPaths.directory
+      );
+      const literalInputsBeforeClose = fixture.literalInputs();
+      const keyDispatchesBeforeClose = fixture.keyDispatches();
+      fixture.setAgentProcessAbsent();
+
+      const listed = await fixture.listManagedOnly();
+      const unavailableTurn = listed.unavailable_managed_turns?.find(
+        (entry: Record<string, unknown>) => entry.conversation_id === turnId
+      );
+      assert.ok(unavailableTurn, JSON.stringify(listed, null, 2));
+      const cachedClose = unavailableTurn.available_actions?.close;
+      assert.equal(cachedClose?.tool, "agent_knock_knock_close");
+      assert.equal(cachedClose?.arguments?.turn_id, turnId);
+
+      const closed = await fixture.closeTurn(
+        cachedClose.arguments.turn_id,
+        cachedClose.arguments.reason
+      );
+      assert.equal(closed.status, 0, fixture.debug(closed));
+      const closedOutput = JSON.parse(closed.stdout);
+      assert.equal(closedOutput.closed, true);
+      assert.equal(closedOutput.terminal_dispatch_resolved, true);
+
+      const turnAfter = listConversations(fixture.storeDir).find(
+        (candidate) => candidate.conversation_id === turnId
+      );
+      assert.equal(turnAfter?.status, "closed");
+      const processDisposition = (
+        turnAfter as Record<string, any> | undefined
+      )?.terminal_agent_process_disposition;
+      assert.equal(processDisposition?.status, "verified_dead");
+      assert.equal(
+        processDisposition?.proof?.kind,
+        "exact_pid_absent_from_complete_process_inventory"
+      );
+      assert.deepEqual(
+        snapshotDirectoryBytes(managedSessionPaths.directory),
+        managedSessionBytes,
+        "dead-process close must preserve the bound Session evidence"
+      );
+      assert.deepEqual(
+        fixture.literalInputs(),
+        literalInputsBeforeClose,
+        "dead-process close must never inject terminal text"
+      );
+      assert.deepEqual(
+        fixture.keyDispatches(),
+        keyDispatchesBeforeClose,
+        "dead-process close must never dispatch terminal keys"
+      );
+
+      const eventEvidence = fs.readFileSync(
+        String(turnAfter?.event_log_path),
+        "utf8"
+      );
+      const agentPid = agent === "codex" ? 81_001 : 82_001;
+      assert.match(eventEvidence, /terminal_agent_process_verified_dead/u);
+      assert.match(eventEvidence, new RegExp(String(agentPid), "u"));
+      assert.match(
+        eventEvidence,
+        agent === "codex"
+          ? new RegExp(`codex-pid:${agentPid}:birth:`, "u")
+          : new RegExp(
+              `claude-pid:${agentPid}:started:1786339200000`,
+              "u"
+            )
+      );
+      assert.match(eventEvidence, new RegExp(`human-${agent}:0\\.0`, "u"));
+    } finally {
+      fixture.cleanup();
+    }
+  });
+}
+
+test("a managed close fails closed when exact process death cannot be verified", async () => {
+  const fixture = createHandoffFixture({ agent: "claude" });
+  try {
+    const source = fixture.persistSession({
+      sessionId: "session-unverifiable-agent-close-source",
+      nativeThreadId: NATIVE_A,
+      status: "bound",
+      generation: 1
+    });
+    const turn = fixture.persistBlockingTurn(source);
+    fixture.setCurrentNativeThreadId(NATIVE_A);
+
+    const listed = await fixture.listTerminal();
+    const cachedClose = listed.managed?.recent_turn
+      ?.available_actions?.close;
+    assert.equal(cachedClose?.tool, "agent_knock_knock_close");
+
+    const sourcePaths = pathsForManagedSession(
+      source.session_id,
+      fixture.storeDir
+    );
+    const turnPaths = pathsForConversation(
+      turn.conversation_id,
+      fixture.storeDir
+    );
+    const sourceBytes = snapshotDirectoryBytes(sourcePaths.directory);
+    const turnBytes = snapshotDirectoryBytes(turnPaths.conversationDir);
+    fixture.setProcessProbeFailure(
+      new Error("synthetic process inventory probe failed")
+    );
+
+    const rejected = await fixture.closeTurn(
+      cachedClose.arguments.turn_id,
+      cachedClose.arguments.reason
+    );
+    assert.equal(rejected.status, 1, fixture.debug(rejected));
+    assert.match(
+      rejected.stderr,
+      /process inventory probe failed|cannot verify|unverifiable/iu
+    );
+    assert.deepEqual(
+      snapshotDirectoryBytes(sourcePaths.directory),
+      sourceBytes,
+      "an unverifiable process probe must not mutate the Session"
+    );
+    assert.deepEqual(
+      snapshotDirectoryBytes(turnPaths.conversationDir),
+      turnBytes,
+      "an unverifiable process probe must not mutate the Turn or event log"
+    );
+    assert.deepEqual(fixture.literalInputs(), []);
+    assert.equal(fixture.enterCount(), 0);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+function persistExactCodexAcceptanceForDeadProcessTest(options: {
+  fixture: HandoffFixture;
+  turnId: string;
+  request: string;
+  acceptedNativeTurnId: string;
+  trailingPartialJsonl?: string;
+}): { statePath: string; logPath: string } {
+  const statePath = pathsForConversation(
+    options.turnId,
+    options.fixture.storeDir
+  ).statePath;
+  const accepted = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  const takeover = accepted.native_session_takeover;
+  const rollout = takeover?.terminal_agent_rollout;
+  const processUuid = String(takeover?.terminal_agent_process_uuid ?? "");
+  const processBirth = String(takeover?.terminal_agent_process_birth ?? "");
+  const nativeThreadId = String(takeover?.terminal_agent_session_id ?? "");
+  assert.ok(rollout?.path);
+  assert.ok(processUuid);
+  assert.ok(processBirth);
+  assert.ok(nativeThreadId);
+  const exactAnchor = captureCodexRolloutAcceptanceAnchor({
+    nativeThreadId,
+    processUuid,
+    processBirth,
+    mode: "existing",
+    rollout,
+    now: new Date("2026-08-10T12:00:00.100Z")
+  });
+  fs.appendFileSync(
+    rollout.path,
+    [
+      {
+        timestamp: "2026-08-10T12:00:00.200Z",
+        type: "event_msg",
+        payload: {
+          type: "task_started",
+          turn_id: options.acceptedNativeTurnId
+        }
+      },
+      {
+        timestamp: "2026-08-10T12:00:00.300Z",
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: options.request }],
+          internal_chat_message_metadata_passthrough: {
+            turn_id: options.acceptedNativeTurnId
+          }
+        }
+      },
+      {
+        timestamp: "2026-08-10T12:00:00.400Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: options.request }
+      }
+    ].map((record) => JSON.stringify(record)).join("\n") + "\n"
+  );
+  const exactAcceptance = detectCodexRolloutAcceptance({
+    anchor: exactAnchor,
+    currentIdentity: {
+      sessionId: nativeThreadId,
+      processUuid,
+      processBirth,
+      rollout
+    },
+    requestHash: takeover.terminal_bridge_request_hash
+  });
+  assert.ok(exactAcceptance);
+  const messageId = String(takeover.terminal_bridge_message_id ?? "");
+  const exactSubmission = {
+    ...takeover.terminal_bridge_submission,
+    acceptance_evidence: exactAcceptance
+  };
+  const stateReceipts = takeover.terminal_bridge_submission_receipts;
+  assert.equal(
+    stateReceipts.filter(
+      (receipt: Record<string, unknown>) => receipt.message_id === messageId
+    ).length,
+    1
+  );
+  saveState(statePath, {
+    ...accepted,
+    native_session_takeover: {
+      ...takeover,
+      codex_rollout_acceptance_anchor: exactAnchor,
+      terminal_bridge_submission: exactSubmission,
+      terminal_bridge_submission_receipts: stateReceipts.map(
+        (receipt: Record<string, unknown>) =>
+          receipt.message_id === messageId ? exactSubmission : receipt
+      )
+    }
+  });
+
+  const ledgerDir = path.join(
+    options.fixture.root,
+    "runtime",
+    "terminal-dispatch"
+  );
+  const matchingLedgerPaths = fs.readdirSync(ledgerDir)
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => path.join(ledgerDir, name))
+    .filter((candidate) =>
+      JSON.parse(fs.readFileSync(candidate, "utf8")).conversation_id ===
+        options.turnId
+    );
+  assert.equal(matchingLedgerPaths.length, 1);
+  const ledgerPath = matchingLedgerPaths[0];
+  const ledger = JSON.parse(fs.readFileSync(ledgerPath, "utf8"));
+  assert.equal(ledger.status, "agent_accepted");
+  const ledgerReceipts = ledger.terminal_submission_receipts;
+  assert.equal(
+    ledgerReceipts.filter(
+      (receipt: Record<string, unknown>) => receipt.message_id === messageId
+    ).length,
+    1
+  );
+  fs.writeFileSync(ledgerPath, `${JSON.stringify({
+    ...ledger,
+    acceptance_evidence: exactAcceptance,
+    terminal_submission_receipts: ledgerReceipts.map(
+      (receipt: Record<string, unknown>) => receipt.message_id === messageId
+        ? { ...receipt, acceptance_evidence: exactAcceptance }
+        : receipt
+    )
+  }, null, 2)}\n`);
+
+  if (options.trailingPartialJsonl !== undefined) {
+    assert.doesNotMatch(options.trailingPartialJsonl, /\n$/u);
+    fs.appendFileSync(rollout.path, options.trailingPartialJsonl);
+  }
+  return {
+    statePath,
+    logPath: String(accepted.event_log_path)
+  };
+}
+
+test("reconciliation stalls a verified-dead accepted Turn once and keeps it close-only", async () => {
+  const fixture = createHandoffFixture({
+    agent: "codex",
+    codexInitialNativeThreadId: NATIVE_A
+  });
+  const request = "Keep the accepted dispatch as durable orphan evidence.";
+  try {
+    fixture.persistSession({
+      sessionId: "session-dead-agent-reconcile-source",
+      nativeThreadId: NATIVE_A,
+      status: "bound",
+      generation: 1
+    });
+    const listed = await fixture.listTerminal();
+    const expectedTerminalToken = String(
+      listed.available_actions?.send?.arguments?.expected_terminal_token ?? ""
+    );
+    assert.ok(expectedTerminalToken, JSON.stringify(listed, null, 2));
+
+    const sent = await fixture.sendToTerminal(
+      request,
+      {},
+      expectedTerminalToken
+    );
+    assert.equal(sent.status, 0, fixture.debug(sent));
+    const sentOutput = JSON.parse(sent.stdout);
+    const turnId = String(sentOutput.conversation?.conversation_id ?? "");
+    assert.ok(turnId, fixture.debug(sent));
+    const transfers = listDeferredForegroundTransfers(fixture.storeDir)
+      .filter((transfer) => transfer.turn_id === turnId);
+    assert.equal(transfers.length, 1);
+    assert.equal(transfers[0].status, "resolved");
+    assert.equal(transfers[0].input_stage, "agent_accepted");
+
+    const { statePath } = persistExactCodexAcceptanceForDeadProcessTest({
+      fixture,
+      turnId,
+      request,
+      acceptedNativeTurnId: "55555555-5555-4555-8555-555555555555"
+    });
+    const sentState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    assert.equal(sentState.status, "waiting_for_agent");
+    assert.equal(
+      sentState.native_session_takeover?.terminal_bridge_submission?.status,
+      "agent_accepted"
+    );
+    const literalInputsBeforeDeath = fixture.literalInputs();
+    const keyDispatchesBeforeDeath = fixture.keyDispatches();
+    fixture.setAgentProcessAbsent();
+
+    const reconciled = await fixture.reconcileMonitors({
+      terminalMonitorsOnly: true
+    });
+    assert.equal(reconciled.status, 0, fixture.debug(reconciled));
+    const reconciledOutput = JSON.parse(reconciled.stdout);
+    assert.equal(reconciledOutput.launched, 0);
+    assert.equal(reconciledOutput.errors, 0);
+    assert.equal(
+      reconciledOutput.items.some((item: Record<string, unknown>) =>
+        item.conversation_id === turnId &&
+        item.reason === "bound_agent_process_verified_dead"
+      ),
+      true,
+      reconciled.stdout
+    );
+
+    const stalledState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    assert.equal(stalledState.status, "stalled");
+    assert.match(
+      String(stalledState.stalled_reason ?? ""),
+      /bound terminal agent process is verified dead/iu
+    );
+    assert.equal(
+      stalledState.terminal_agent_process_disposition?.status,
+      "verified_dead"
+    );
+    assert.equal(
+      stalledState.terminal_agent_process_disposition?.proof?.kind,
+      "exact_pid_absent_from_complete_process_inventory"
+    );
+    assert.equal(
+      stalledState.terminal_agent_process_disposition
+        ?.completion_observation?.status,
+      "absent"
+    );
+    assert.equal(
+      fs.readFileSync(String(stalledState.event_log_path), "utf8")
+        .trim()
+        .split(/\r?\n/u)
+        .filter(Boolean)
+        .map((line) => JSON.parse(line))
+        .filter((event) =>
+          event.event === "terminal_agent_process_verified_dead"
+        ).length,
+      1
+    );
+    assert.deepEqual(fixture.literalInputs(), literalInputsBeforeDeath);
+    assert.deepEqual(fixture.keyDispatches(), keyDispatchesBeforeDeath);
+
+    const stateAfterFirst = fs.readFileSync(statePath, "utf8");
+    const eventsAfterFirst = fs.readFileSync(
+      String(stalledState.event_log_path),
+      "utf8"
+    );
+    const second = await fixture.reconcileMonitors();
+    assert.equal(second.status, 0, fixture.debug(second));
+    assert.equal(JSON.parse(second.stdout).launched, 0);
+    assert.equal(fs.readFileSync(statePath, "utf8"), stateAfterFirst);
+    assert.equal(
+      fs.readFileSync(String(stalledState.event_log_path), "utf8"),
+      eventsAfterFirst,
+      "repeated reconciliation must not duplicate death evidence"
+    );
+
+    const managedOnly = await fixture.listManagedOnly();
+    const stalledEntry = managedOnly.unavailable_managed_turns?.find(
+      (entry: Record<string, unknown>) => entry.conversation_id === turnId
+    );
+    assert.ok(stalledEntry, JSON.stringify(managedOnly, null, 2));
+    assert.deepEqual(
+      Object.keys(stalledEntry.available_actions),
+      ["status", "close"]
+    );
+    assert.equal(stalledEntry.available_actions.renew, undefined);
+    assert.equal(stalledEntry.available_actions.cancel, undefined);
+
+    const beforeRenew = snapshotDirectoryBytes(
+      pathsForConversation(turnId, fixture.storeDir).conversationDir
+    );
+    const renewed = await fixture.renewTurn(turnId);
+    assert.equal(renewed.status, 1, fixture.debug(renewed));
+    assert.match(
+      renewed.stderr,
+      /bound terminal agent process is verified dead|cannot renew/iu
+    );
+    assert.deepEqual(
+      snapshotDirectoryBytes(
+        pathsForConversation(turnId, fixture.storeDir).conversationDir
+      ),
+      beforeRenew,
+      "renew must not revive a Turn whose exact agent process is dead"
+    );
+
+    fixture.setProcessProbeFailure(
+      new Error("process inventory unavailable after durable death proof")
+    );
+    const closed = await fixture.closeTurn(
+      stalledEntry.available_actions.close.arguments.turn_id,
+      "operator closes the verified-dead orphan"
+    );
+    assert.equal(closed.status, 0, fixture.debug(closed));
+    assert.equal(JSON.parse(closed.stdout).terminal_dispatch_resolved, true);
+    const closedState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    assert.equal(closedState.status, "closed");
+    assert.equal(
+      closedState.terminal_agent_process_disposition?.status,
+      "verified_dead"
+    );
+    assert.equal(
+      fs.readFileSync(String(closedState.event_log_path), "utf8")
+        .trim()
+        .split(/\r?\n/u)
+        .filter(Boolean)
+        .map((line) => JSON.parse(line))
+        .filter((event) =>
+          event.event === "terminal_agent_process_verified_dead"
+        ).length,
+      1,
+      "managed close must reuse the durable proof without a second death event"
+    );
+    assert.deepEqual(fixture.literalInputs(), literalInputsBeforeDeath);
+    assert.deepEqual(fixture.keyDispatches(), keyDispatchesBeforeDeath);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("verified-dead reconciliation resumes after events-before-state crash without duplicate audit", async () => {
+  const fixture = createHandoffFixture({
+    agent: "codex",
+    codexInitialNativeThreadId: NATIVE_A
+  });
+  try {
+    fixture.persistSession({
+      sessionId: "session-dead-agent-events-before-state-crash",
+      nativeThreadId: NATIVE_A,
+      status: "bound",
+      generation: 1
+    });
+    const listed = await fixture.listTerminal();
+    const expectedTerminalToken = String(
+      listed.available_actions?.send?.arguments?.expected_terminal_token ?? ""
+    );
+    assert.ok(expectedTerminalToken, JSON.stringify(listed, null, 2));
+    const sent = await fixture.sendToTerminal(
+      "Persist one death audit across the reconciliation crash seam.",
+      {},
+      expectedTerminalToken
+    );
+    assert.equal(sent.status, 0, fixture.debug(sent));
+    const turnId = String(
+      JSON.parse(sent.stdout).conversation?.conversation_id ?? ""
+    );
+    assert.ok(turnId, fixture.debug(sent));
+    const paths = pathsForConversation(turnId, fixture.storeDir);
+    fixture.setAgentProcessAbsent();
+
+    const crashed = await fixture.reconcileMonitors({
+      terminalMonitorsOnly: true,
+      env: { AKK_TEST_EXIT_AFTER_VERIFIED_DEAD_STALL_EVENTS: "1" }
+    });
+    assert.equal(crashed.status, 0, fixture.debug(crashed));
+    const crashedOutput = JSON.parse(crashed.stdout);
+    assert.equal(crashedOutput.errors, 1);
+    assert.equal(
+      crashedOutput.items.some((item: Record<string, unknown>) =>
+        item.conversation_id === turnId &&
+        item.status === "error" &&
+        /CLI requested exit 86/iu.test(String(item.reason ?? ""))
+      ),
+      true,
+      crashed.stdout
+    );
+    assert.equal(
+      JSON.parse(fs.readFileSync(paths.statePath, "utf8")).status,
+      "waiting_for_agent",
+      "the crash seam fires before the stalled state becomes durable"
+    );
+    const eventsAfterCrash = fs.readFileSync(paths.logPath, "utf8")
+      .trim()
+      .split(/\r?\n/u)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    assert.equal(
+      eventsAfterCrash.filter((event) =>
+        event.event === "terminal_agent_process_verified_dead"
+      ).length,
+      1
+    );
+    assert.equal(
+      eventsAfterCrash.filter((event) =>
+        event.event === "conversation_stalled" &&
+        event.disposition === "verified_dead_agent_process"
+      ).length,
+      1
+    );
+
+    fixture.setAgentProcessIntegrityDrift();
+    const recovered = await fixture.reconcileMonitors({
+      terminalMonitorsOnly: true
+    });
+    assert.equal(recovered.status, 0, fixture.debug(recovered));
+    const recoveredState = JSON.parse(
+      fs.readFileSync(paths.statePath, "utf8")
+    );
+    assert.equal(
+      recoveredState.status,
+      "stalled",
+      fixture.debug(recovered)
+    );
+    assert.equal(
+      recoveredState.terminal_agent_process_disposition?.status,
+      "verified_dead"
+    );
+    const eventsAfterRecovery = fs.readFileSync(paths.logPath, "utf8")
+      .trim()
+      .split(/\r?\n/u)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    assert.equal(
+      eventsAfterRecovery.filter((event) =>
+        event.event === "terminal_agent_process_verified_dead"
+      ).length,
+      1
+    );
+    assert.equal(
+      eventsAfterRecovery.filter((event) =>
+        event.event === "conversation_stalled" &&
+        event.disposition === "verified_dead_agent_process"
+      ).length,
+      1
+    );
+    assert.equal(
+      eventsAfterRecovery.find((event) =>
+        event.event === "terminal_agent_process_verified_dead"
+      )?.evidence_id,
+      eventsAfterRecovery.find((event) =>
+        event.event === "conversation_stalled" &&
+        event.disposition === "verified_dead_agent_process"
+      )?.evidence_id
+    );
+    assert.deepEqual(fixture.literalInputs(), [
+      "Persist one death audit across the reconciliation crash seam."
+    ]);
+    assert.equal(fixture.enterCount(), 1);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("verified-dead close resumes after state-before-ledger crash without a fresh process probe", async () => {
+  const fixture = createHandoffFixture({
+    agent: "codex",
+    codexInitialNativeThreadId: NATIVE_A
+  });
+  const request = "Keep one exact close receipt across its crash seam.";
+  try {
+    fixture.persistSession({
+      sessionId: "session-dead-agent-close-state-crash",
+      nativeThreadId: NATIVE_A,
+      status: "bound",
+      generation: 1
+    });
+    const listed = await fixture.listTerminal();
+    const expectedTerminalToken = String(
+      listed.available_actions?.send?.arguments?.expected_terminal_token ?? ""
+    );
+    assert.ok(expectedTerminalToken, JSON.stringify(listed, null, 2));
+    const sent = await fixture.sendToTerminal(
+      request,
+      {},
+      expectedTerminalToken
+    );
+    assert.equal(sent.status, 0, fixture.debug(sent));
+    const turnId = String(
+      JSON.parse(sent.stdout).conversation?.conversation_id ?? ""
+    );
+    assert.ok(turnId, fixture.debug(sent));
+    const paths = pathsForConversation(turnId, fixture.storeDir);
+    const literalInputsBeforeClose = fixture.literalInputs();
+    const keyDispatchesBeforeClose = fixture.keyDispatches();
+    fixture.setAgentProcessAbsent();
+
+    const crashed = await fixture.closeTurn(
+      turnId,
+      "operator closes the verified-dead process",
+      undefined,
+      { AKK_TEST_EXIT_AFTER_VERIFIED_DEAD_CLOSE_STATE: "1" }
+    );
+    assert.equal(crashed.status, 86, fixture.debug(crashed));
+    const closedBeforeRecovery = JSON.parse(
+      fs.readFileSync(paths.statePath, "utf8")
+    );
+    assert.equal(closedBeforeRecovery.status, "closed");
+    assert.equal(
+      closedBeforeRecovery.terminal_agent_process_disposition?.status,
+      "verified_dead"
+    );
+    assert.equal(fixture.dispatchLedgerForTurn(turnId)?.status, "agent_accepted");
+    const eventsBeforeRecovery = fs.readFileSync(paths.logPath, "utf8")
+      .trim()
+      .split(/\r?\n/u)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    assert.equal(
+      eventsBeforeRecovery.filter((event) =>
+        event.event === "terminal_agent_process_verified_dead"
+      ).length,
+      1
+    );
+    assert.equal(
+      eventsBeforeRecovery.filter((event) =>
+        event.event === "conversation_closed"
+      ).length,
+      0
+    );
+
+    fixture.setProcessProbeFailure(
+      new Error("process inventory unavailable during close recovery")
+    );
+    const recovered = await fixture.closeTurn(
+      turnId,
+      "operator closes the verified-dead process"
+    );
+    assert.equal(recovered.status, 0, fixture.debug(recovered));
+    const recoveredOutput = JSON.parse(recovered.stdout);
+    assert.equal(recoveredOutput.closed, true);
+    assert.equal(recoveredOutput.recovered, true);
+    assert.equal(recoveredOutput.terminal_dispatch_resolved, true);
+    assert.equal(fixture.dispatchLedgerForTurn(turnId)?.status, "resolved");
+    const eventsAfterRecovery = fs.readFileSync(paths.logPath, "utf8")
+      .trim()
+      .split(/\r?\n/u)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    const deathEvents = eventsAfterRecovery.filter((event) =>
+      event.event === "terminal_agent_process_verified_dead"
+    );
+    const closeEvents = eventsAfterRecovery.filter((event) =>
+      event.event === "conversation_closed"
+    );
+    assert.equal(deathEvents.length, 1);
+    assert.equal(closeEvents.length, 1);
+    assert.equal(deathEvents[0].evidence_id, closeEvents[0].evidence_id);
+    assert.deepEqual(fixture.literalInputs(), literalInputsBeforeClose);
+    assert.deepEqual(fixture.keyDispatches(), keyDispatchesBeforeClose);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("exact durable Codex completion wins over verified process death", async () => {
+  const fixture = createHandoffFixture({
+    agent: "codex",
+    codexInitialNativeThreadId: NATIVE_A
+  });
+  const request = "Persist exact completion before the Codex process exits.";
+  try {
+    fixture.persistSession({
+      sessionId: "session-dead-agent-durable-completion",
+      nativeThreadId: NATIVE_A,
+      status: "bound",
+      generation: 1
+    });
+    const listed = await fixture.listTerminal();
+    const expectedTerminalToken = String(
+      listed.available_actions?.send?.arguments?.expected_terminal_token ?? ""
+    );
+    assert.ok(expectedTerminalToken, JSON.stringify(listed, null, 2));
+    const sent = await fixture.sendToTerminal(
+      request,
+      {},
+      expectedTerminalToken
+    );
+    assert.equal(sent.status, 0, fixture.debug(sent));
+    const sentOutput = JSON.parse(sent.stdout);
+    const turnId = String(sentOutput.conversation?.conversation_id ?? "");
+    assert.ok(turnId, fixture.debug(sent));
+    const acceptedNativeTurnId =
+      "44444444-4444-4444-8444-444444444444";
+    const { statePath, logPath } =
+      persistExactCodexAcceptanceForDeadProcessTest({
+        fixture,
+        turnId,
+        request,
+        acceptedNativeTurnId
+      });
+    const accepted = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    const rolloutPath = String(
+      accepted.native_session_takeover?.terminal_agent_rollout?.path ?? ""
+    );
+    assert.ok(rolloutPath);
+    fs.appendFileSync(
+      rolloutPath,
+      `${JSON.stringify({
+        timestamp: "2026-08-10T12:00:00.500Z",
+        type: "event_msg",
+        payload: {
+          type: "task_complete",
+          turn_id: acceptedNativeTurnId,
+          last_agent_message:
+            "The exact result was committed before process exit."
+        }
+      })}\n`
+    );
+
+    const literalInputsBeforeDeath = fixture.literalInputs();
+    const keyDispatchesBeforeDeath = fixture.keyDispatches();
+    fixture.setAgentProcessAbsent();
+    const reconciled = await fixture.reconcileMonitors({
+      terminalMonitorsOnly: true
+    });
+    assert.equal(reconciled.status, 0, fixture.debug(reconciled));
+    const output = JSON.parse(reconciled.stdout);
+    assert.equal(output.launched, 0);
+    assert.equal(output.errors, 0);
+    assert.equal(
+      output.items.some((item: Record<string, unknown>) =>
+        item.conversation_id === turnId &&
+        item.status === "recovered" &&
+        item.reason === "bound_agent_process_dead_completion_recovered"
+      ),
+      true,
+      reconciled.stdout
+    );
+    const completed = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    assert.equal(completed.status, "idle");
+    assert.equal(completed.terminal_agent_process_disposition, undefined);
+    assert.equal(fixture.dispatchLedgerForTurn(turnId)?.status, "resolved");
+    const events = fs.readFileSync(logPath, "utf8");
+    assert.match(events, /terminal_bridge_completion_detected/u);
+    assert.doesNotMatch(events, /terminal_agent_process_verified_dead/u);
+    assert.doesNotMatch(events, /conversation_stalled/u);
+    assert.deepEqual(fixture.literalInputs(), literalInputsBeforeDeath);
+    assert.deepEqual(fixture.keyDispatches(), keyDispatchesBeforeDeath);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("partial Codex rollout stalls with unverifiable completion evidence", async () => {
+  const fixture = createHandoffFixture({
+    agent: "codex",
+    codexInitialNativeThreadId: NATIVE_A
+  });
+  const request = "Do not infer completion from a partial Codex record.";
+  try {
+    fixture.persistSession({
+      sessionId: "session-dead-agent-partial-rollout",
+      nativeThreadId: NATIVE_A,
+      status: "bound",
+      generation: 1
+    });
+    const listed = await fixture.listTerminal();
+    const expectedTerminalToken = String(
+      listed.available_actions?.send?.arguments?.expected_terminal_token ?? ""
+    );
+    assert.ok(expectedTerminalToken, JSON.stringify(listed, null, 2));
+    const sent = await fixture.sendToTerminal(
+      request,
+      {},
+      expectedTerminalToken
+    );
+    assert.equal(sent.status, 0, fixture.debug(sent));
+    const turnId = String(
+      JSON.parse(sent.stdout).conversation?.conversation_id ?? ""
+    );
+    assert.ok(turnId, fixture.debug(sent));
+    const transfers = listDeferredForegroundTransfers(fixture.storeDir)
+      .filter((transfer) => transfer.turn_id === turnId);
+    assert.equal(transfers.length, 1);
+    assert.equal(transfers[0].status, "resolved");
+    assert.equal(transfers[0].input_stage, "agent_accepted");
+
+    const { statePath, logPath } =
+      persistExactCodexAcceptanceForDeadProcessTest({
+        fixture,
+        turnId,
+        request,
+        acceptedNativeTurnId: "66666666-6666-4666-8666-666666666666",
+        trailingPartialJsonl:
+          '{"timestamp":"2026-08-10T12:00:00.500Z","type":"event_msg","payload":{"type":"task_complete"'
+      });
+    const stateBeforeDeath = fs.readFileSync(statePath, "utf8");
+    const eventsBeforeDeath = fs.readFileSync(logPath, "utf8");
+    const literalInputsBeforeDeath = fixture.literalInputs();
+    const keyDispatchesBeforeDeath = fixture.keyDispatches();
+    fixture.setAgentProcessAbsent();
+
+    const reconciled = await fixture.reconcileMonitors({
+      terminalMonitorsOnly: true
+    });
+    assert.equal(reconciled.status, 0, fixture.debug(reconciled));
+    const output = JSON.parse(reconciled.stdout);
+    assert.equal(output.launched, 0);
+    assert.equal(output.errors, 0);
+    assert.equal(
+      output.items.some((item: Record<string, unknown>) =>
+        item.conversation_id === turnId &&
+        item.status === "stalled" &&
+        item.reason ===
+          "bound_agent_process_verified_dead_completion_unverifiable"
+      ),
+      true,
+      reconciled.stdout
+    );
+    assert.notEqual(fs.readFileSync(statePath, "utf8"), stateBeforeDeath);
+    assert.notEqual(fs.readFileSync(logPath, "utf8"), eventsBeforeDeath);
+    const stalled = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    assert.equal(stalled.status, "stalled");
+    assert.match(
+      String(stalled.stalled_reason ?? ""),
+      /bound terminal agent process is verified dead/iu
+    );
+    assert.equal(
+      stalled.terminal_agent_process_disposition?.status,
+      "verified_dead"
+    );
+    assert.equal(
+      stalled.terminal_agent_process_disposition
+        ?.completion_observation?.status,
+      "unverifiable"
+    );
+    const events = fs.readFileSync(logPath, "utf8")
+      .trim()
+      .split(/\r?\n/u)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    assert.equal(
+      events.filter((event) =>
+        event.event === "terminal_agent_process_verified_dead"
+      ).length,
+      1
+    );
+    const stalledEvents = events.filter((event) =>
+      event.event === "conversation_stalled"
+    );
+    assert.equal(stalledEvents.length, 1);
+    assert.equal(stalledEvents[0].completion_observation, "unverifiable");
+    assert.equal(fixture.dispatchLedgerForTurn(turnId)?.status, "agent_accepted");
+    assert.deepEqual(fixture.literalInputs(), literalInputsBeforeDeath);
+    assert.deepEqual(fixture.keyDispatches(), keyDispatchesBeforeDeath);
+
+    const stateAfterFirst = fs.readFileSync(statePath, "utf8");
+    const eventsAfterFirst = fs.readFileSync(logPath, "utf8");
+    const second = await fixture.reconcileMonitors({
+      terminalMonitorsOnly: true
+    });
+    assert.equal(second.status, 0, fixture.debug(second));
+    assert.equal(JSON.parse(second.stdout).launched, 0);
+    assert.equal(fs.readFileSync(statePath, "utf8"), stateAfterFirst);
+    assert.equal(fs.readFileSync(logPath, "utf8"), eventsAfterFirst);
+    assert.equal(fixture.dispatchLedgerForTurn(turnId)?.status, "agent_accepted");
+    assert.deepEqual(fixture.literalInputs(), literalInputsBeforeDeath);
+    assert.deepEqual(fixture.keyDispatches(), keyDispatchesBeforeDeath);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("a dead process does not bypass a nonterminal deferred foreground transfer", async () => {
+  const fixture = createHandoffFixture({
+    agent: "codex",
+    codexInitialNativeThreadId: NATIVE_A
+  });
+  try {
+    const source = fixture.persistSession({
+      sessionId: "session-dead-agent-nonterminal-transfer",
+      nativeThreadId: NATIVE_A,
+      status: "bound",
+      generation: 1
+    });
+    fixture.persistHistoricalTurn(
+      source,
+      "Retain this source Turn while the deferred transfer is prepared."
+    );
+    const sourceTurn = listConversations(fixture.storeDir)[0];
+    assert.ok(sourceTurn);
+    const binding = source.binding;
+    assert.ok(binding?.terminal_endpoint);
+    assert.ok(binding.native_thread_id);
+    assert.ok(binding.native_process.process_uuid);
+    assert.ok(binding.native_process.process_birth);
+    assert.equal(typeof source.revision, "number");
+    const sourceTurnId = String(
+      sourceTurn.turn_id ?? sourceTurn.conversation_id
+    );
+    const preparedAt = String(sourceTurn.updated_at);
+    saveDeferredForegroundTransfer(fixture.storeDir, {
+      schema: DEFERRED_FOREGROUND_TRANSFER_SCHEMA,
+      version: DEFERRED_FOREGROUND_TRANSFER_VERSION,
+      transfer_id: createDeferredForegroundTransferId(),
+      status: "prepared",
+      input_stage: "none",
+      terminal_id: binding.terminal_id,
+      terminal_endpoint: binding.terminal_endpoint,
+      process_pid: binding.native_process.pid,
+      process_uuid: binding.native_process.process_uuid,
+      process_birth: binding.native_process.process_birth,
+      workspace: source.workspace,
+      source_session_id: source.session_id,
+      source_expected_revision: source.revision as number,
+      source_binding_token: managedSessionBindingToken(source),
+      ...(source.last_transition_id
+        ? { source_previous_last_transition_id: source.last_transition_id }
+        : {}),
+      source_before_binding: binding,
+      source_kind: "candidate_rollout_quiescent",
+      source_turn_history: [{
+        turn_id: sourceTurnId,
+        status: "idle",
+        updated_at: preparedAt,
+        binding_id: binding.binding_id,
+        binding_generation: binding.generation,
+        native_thread_id: binding.native_thread_id,
+        turn_fingerprint: createHash("sha256")
+          .update(JSON.stringify(sourceTurn))
+          .digest("hex")
+      }],
+      target_session_id: "session-dead-agent-nonterminal-target",
+      target_expected_revision: null,
+      previous_dispatch_status: "none",
+      previous_dispatch_fingerprint: createHash("sha256")
+        .update("no previous terminal dispatch")
+        .digest("hex"),
+      request_hash: createHash("sha256")
+        .update("deferred close gate fixture")
+        .digest("hex"),
+      dispatcher_pid: process.pid,
+      prepared_at: preparedAt
+    }, { expectedRevision: null });
+    const transfers = listDeferredForegroundTransfers(fixture.storeDir);
+    assert.equal(transfers.length, 1);
+    assert.equal(transfers[0].status, "prepared");
+    assert.equal(transfers[0].input_stage, "none");
+    assert.deepEqual(fixture.literalInputs(), []);
+    assert.equal(fixture.enterCount(), 0);
+
+    fixture.setAgentProcessAbsent();
+    const before = snapshotDirectoryBytes(
+      pathsForConversation(
+        sourceTurn.conversation_id,
+        fixture.storeDir
+      ).conversationDir
+    );
+    const literalInputsBeforeClose = fixture.literalInputs();
+    const keyDispatchesBeforeClose = fixture.keyDispatches();
+    const close = await fixture.closeTurn(
+      sourceTurn.conversation_id,
+      "explicit close must still respect deferred authority"
+    );
+    assert.equal(close.status, 1, fixture.debug(close));
+    assert.match(close.stderr, /deferred foreground transfer/iu);
+    assert.deepEqual(
+      snapshotDirectoryBytes(
+        pathsForConversation(
+          sourceTurn.conversation_id,
+          fixture.storeDir
+        ).conversationDir
+      ),
+      before
+    );
+    assert.deepEqual(fixture.literalInputs(), literalInputsBeforeClose);
+    assert.deepEqual(fixture.keyDispatches(), keyDispatchesBeforeClose);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("a verified-dead agent does not terminate a waiting_for_openclaw callback Turn", async () => {
+  const fixture = createHandoffFixture({ agent: "claude" });
+  try {
+    const source = fixture.persistSession({
+      sessionId: "session-dead-agent-openclaw-callback",
+      nativeThreadId: NATIVE_A,
+      status: "bound",
+      generation: 1
+    });
+    const turn = fixture.persistCallbackTurnWithResolvedLedger(
+      source,
+      "callback_pending"
+    );
+    const statePath = pathsForConversation(
+      turn.conversation_id,
+      fixture.storeDir
+    ).statePath;
+    const waiting = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    saveState(statePath, {
+      ...waiting,
+      status: "waiting_for_openclaw",
+      updated_at: new Date(
+        Date.parse(waiting.updated_at) + 1_000
+      ).toISOString()
+    });
+    fixture.setAgentProcessAbsent();
+
+    const before = snapshotDirectoryBytes(
+      pathsForConversation(turn.conversation_id, fixture.storeDir)
+        .conversationDir
+    );
+    const reconciled = await fixture.reconcileMonitors({
+      terminalMonitorsOnly: true
+    });
+    assert.equal(reconciled.status, 0, fixture.debug(reconciled));
+    const after = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    assert.equal(after.status, "waiting_for_openclaw");
+    assert.equal(after.stalled_reason, undefined);
+    assert.deepEqual(
+      snapshotDirectoryBytes(
+        pathsForConversation(turn.conversation_id, fixture.storeDir)
+          .conversationDir
+      ),
+      before,
+      "callback ownership must remain untouched after coding-agent death"
+    );
+    assert.deepEqual(fixture.literalInputs(), []);
+    assert.equal(fixture.enterCount(), 0);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test("a cached generic close does not treat agent process identity drift as terminal unavailability", async () => {
   const fixture = createHandoffFixture({ agent: "claude" });
   try {
@@ -1818,6 +2932,14 @@ interface HandoffFixture {
   terminalControl: TerminalControlRef;
   persistSession(options: PersistSessionOptions): ManagedSessionState;
   listTerminal(): Promise<Record<string, any>>;
+  listManagedOnly(): Promise<Record<string, any>>;
+  reconcileMonitors(options?: {
+    terminalMonitorsOnly?: boolean;
+    env?: NodeJS.ProcessEnv;
+  }): Promise<InProcessCliResult>;
+  renewTurn(turnId: string): Promise<InProcessCliResult>;
+  monitorTurn(turnId: string): Promise<InProcessCliResult>;
+  dispatchLedgerForTurn(turnId: string): Record<string, any> | undefined;
   sendToTerminal(
     message: string,
     env?: NodeJS.ProcessEnv,
@@ -1837,8 +2959,10 @@ interface HandoffFixture {
   closeTurn(
     turnId: string,
     reason: string | undefined,
-    expectedHandoffToken?: string
+    expectedHandoffToken?: string,
+    env?: NodeJS.ProcessEnv
   ): Promise<InProcessCliResult>;
+  closeRawTerminal(expectedMessageId: string): Promise<InProcessCliResult>;
   persistBlockingTurn(session: ManagedSessionState): ReturnType<
     typeof createConversation
   >;
@@ -1850,7 +2974,9 @@ interface HandoffFixture {
   addActiveOwnerForCurrentThread(): void;
   setCurrentNativeThreadId(nativeThreadId: string): void;
   removeTerminalPane(): void;
+  setAgentProcessAbsent(): void;
   setAgentProcessIntegrityDrift(): void;
+  setProcessProbeFailure(error: Error | undefined): void;
   literalInputs(): string[];
   keyDispatches(): string[][];
   enterCount(): number;
@@ -2125,6 +3251,15 @@ function createHandoffFixture({
       cwd: workspace
     }
   ]);
+  let processProbeFailure: Error | undefined;
+  const listProcessSnapshots =
+    processSource.listProcessSnapshots.bind(processSource);
+  processSource.listProcessSnapshots = (...args) => {
+    if (processProbeFailure) {
+      return Promise.reject(processProbeFailure);
+    }
+    return listProcessSnapshots(...args);
+  };
   const baseProcessSnapshots = [
     {
       pid: panePid,
@@ -2374,6 +3509,69 @@ function createHandoffFixture({
       assert.ok(terminal, result.stdout);
       return terminal;
     },
+    async listManagedOnly() {
+      const result = await runInProcessCli(
+        ["list", "--managed-only", ...storeArgs],
+        dependencies(baseEnv)
+      );
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      return JSON.parse(result.stdout);
+    },
+    reconcileMonitors(options = {}) {
+      return runInProcessCli([
+        "reconcile-monitors",
+        ...storeArgs,
+        ...(options.terminalMonitorsOnly
+          ? ["--terminal-monitors-only"]
+          : []),
+        "--disable-terminal-bridge-monitor"
+      ], dependencies({ ...baseEnv, ...options.env }));
+    },
+    renewTurn(turnId) {
+      return runInProcessCli([
+        "renew",
+        "--turn",
+        turnId,
+        ...commonArgs
+      ], dependencies(baseEnv));
+    },
+    monitorTurn(turnId) {
+      const paths = pathsForConversation(turnId, storeDir);
+      return runInProcessCli([
+        "monitor",
+        "--terminal-bridge",
+        "--state",
+        paths.statePath,
+        "--log",
+        paths.logPath,
+        "--poll-interval-ms",
+        "1",
+        "--agent-timeout-minutes",
+        "60",
+        "--agent-hard-timeout-minutes",
+        "120",
+        ...storeArgs
+      ], dependencies(baseEnv));
+    },
+    dispatchLedgerForTurn(turnId) {
+      const ledgerDir = path.join(runtimeDir, "terminal-dispatch");
+      if (!fs.existsSync(ledgerDir)) {
+        return undefined;
+      }
+      for (const name of fs.readdirSync(ledgerDir)) {
+        if (!name.endsWith(".json")) {
+          continue;
+        }
+        const ledger = JSON.parse(fs.readFileSync(
+          path.join(ledgerDir, name),
+          "utf8"
+        ));
+        if (ledger.conversation_id === turnId) {
+          return ledger;
+        }
+      }
+      return undefined;
+    },
     sendToTerminal(message, env = {}, expectedTerminalToken, messageId) {
       const selectedEnv = { ...baseEnv, ...env };
       return runInProcessCli([
@@ -2414,7 +3612,7 @@ function createHandoffFixture({
         ...commonArgs
       ], dependencies(selectedEnv));
     },
-    closeTurn(turnId, reason, expectedHandoffToken) {
+    closeTurn(turnId, reason, expectedHandoffToken, env = {}) {
       return runInProcessCli([
         "close",
         "--turn",
@@ -2423,6 +3621,16 @@ function createHandoffFixture({
         ...(expectedHandoffToken
           ? ["--expected-handoff-token", expectedHandoffToken]
           : []),
+        ...storeArgs
+      ], dependencies({ ...baseEnv, ...env }));
+    },
+    closeRawTerminal(expectedMessageId) {
+      return runInProcessCli([
+        "close",
+        "--conversation",
+        terminalId,
+        "--expected-message-id",
+        expectedMessageId,
         ...storeArgs
       ], dependencies(baseEnv));
     },
@@ -2529,12 +3737,20 @@ function createHandoffFixture({
     removeTerminalPane() {
       mutablePanes.length = 0;
     },
+    setAgentProcessAbsent() {
+      processSource.setSnapshots(baseProcessSnapshots.filter(
+        (snapshot) => snapshot.pid !== agentPid
+      ));
+    },
     setAgentProcessIntegrityDrift() {
       processSource.setSnapshots(baseProcessSnapshots.map((snapshot) =>
         snapshot.pid === agentPid
           ? { ...snapshot, command: "/usr/bin/sleep 999" }
           : snapshot
       ));
+    },
+    setProcessProbeFailure(error) {
+      processProbeFailure = error;
     },
     literalInputs: () => provider.literalInputs(),
     keyDispatches: () => provider.keyDispatches(),

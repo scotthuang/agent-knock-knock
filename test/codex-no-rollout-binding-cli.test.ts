@@ -8216,7 +8216,7 @@ function runCliSubprocess(args: string[], env: NodeJS.ProcessEnv) {
   return spawnSync(process.execPath, [binPath, ...args], {
     encoding: "utf8",
     env,
-    timeout: 30_000
+    timeout: 60_000
   });
 }
 

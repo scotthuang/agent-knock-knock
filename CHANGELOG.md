@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.12.11 - 2026-08-14
+
+### Fixed
+
+- Allow managed close to retire a Turn when its exact bound Codex or Claude Code process is conclusively absent, without falling into the managed/raw close deadlock.
+- Stop terminal-monitor relaunch loops for verified-dead accepted Turns, while preserving completion-first settlement when the exact rollout or transcript already contains a durable result.
+- Recover verified-dead stall and close transitions idempotently across event/state/ledger crash windows without replaying terminal input.
+
+### Security
+
+- Require a complete process inventory, exact Session and Turn binding generation, canonical terminal endpoint, process incarnation, dispatch ledger, and append-only native-acceptance receipts before dead-process cleanup; malformed, partial, conflicting, or unavailable evidence remains fail-closed.
+- Distinguish durable completion as present, absent, or unverifiable for both Codex rollouts and Claude transcripts. Unverifiable evidence may stop orphan-monitor churn but cannot resolve the dispatch, renew the Turn, or trigger terminal input.
+
+### Changed
+
+- Keep action contract 16 and Store writer protocol 5 unchanged; no new public action or Store authority is introduced.
+
 ## 0.12.10 - 2026-08-13
 
 ### Fixed

@@ -24,6 +24,7 @@ import {
   captureCodexRolloutAcceptanceAnchor,
   detectCodexRolloutAcceptance
 } from "../../src/terminal-submission-acceptance.js";
+import { detectClaudeTranscriptAcceptance } from "../../src/claude-local-transcript-provider.js";
 import { createOpenClawPluginForTest } from "../../src/openclaw-plugin.js";
 import {
   binPath,
@@ -1311,6 +1312,530 @@ test("event polling ignores only an unterminated trailing record", () => {
     assert.throws(
       () => eventCount(logPath, "terminal_bridge_monitor_started"),
       SyntaxError
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+function persistAnchoredClaudePromptAcceptance(options: {
+  statePath: string;
+  ledgerPath: string;
+  claudeHome: string;
+  workspace: string;
+  claudePid: number;
+  claudeSessionId: string;
+  promptUuid: string;
+  promptId: string;
+}): string {
+  const state = JSON.parse(fs.readFileSync(options.statePath, "utf8"));
+  const takeover = state.native_session_takeover;
+  const anchor = takeover.claude_transcript_anchor;
+  assert.equal(anchor.session_id, options.claudeSessionId);
+  assert.equal(anchor.pid, options.claudePid);
+  assert.equal(anchor.file_existed, false);
+  assert.equal(anchor.offset_bytes, 0);
+  const request = String(takeover.terminal_bridge_request_text ?? "");
+  assert.ok(request);
+  const projectDirectory = path.join(
+    options.claudeHome,
+    "projects",
+    options.workspace.replace(/[^A-Za-z0-9]/gu, "-")
+  );
+  fs.mkdirSync(projectDirectory, { recursive: true, mode: 0o700 });
+  const transcriptPath = path.join(
+    projectDirectory,
+    `${options.claudeSessionId}.jsonl`
+  );
+  const promptAt = new Date(Date.parse(anchor.captured_at) + 100).toISOString();
+  fs.writeFileSync(transcriptPath, `${JSON.stringify({
+    uuid: options.promptUuid,
+    parentUuid: null,
+    isSidechain: false,
+    entrypoint: "cli",
+    timestamp: promptAt,
+    cwd: options.workspace,
+    sessionId: options.claudeSessionId,
+    version: "2.1.218",
+    type: "user",
+    promptId: options.promptId,
+    message: { role: "user", content: request }
+  })}\n`, { mode: 0o600 });
+  fs.chmodSync(transcriptPath, 0o600);
+
+  const acceptanceEvidence = detectClaudeTranscriptAcceptance({
+    sessionId: options.claudeSessionId,
+    cwd: String(takeover.source_cwd ?? options.workspace),
+    requestText: request,
+    requestHash: takeover.terminal_bridge_request_hash,
+    startedAt: takeover.terminal_bridge_started_at,
+    context: {
+      pid: options.claudePid,
+      sessionId: options.claudeSessionId,
+      conversation: state,
+      nativeTakeover: takeover
+    }
+  }, {
+    claudeHome: options.claudeHome,
+    agentRows: [claudeAgentRow(
+      options.claudePid,
+      options.claudeSessionId,
+      options.workspace
+    )]
+  });
+  assert.ok(acceptanceEvidence);
+  const messageId = String(takeover.terminal_bridge_message_id ?? "");
+  const submission = takeover.terminal_bridge_submission;
+  assert.equal(submission.status, "agent_accepted");
+  const stateReceipts = takeover.terminal_bridge_submission_receipts;
+  assert.equal(
+    stateReceipts.filter((receipt) => receipt.message_id === messageId).length,
+    1
+  );
+  const exactSubmission = {
+    ...submission,
+    acceptance_evidence: acceptanceEvidence
+  };
+  fs.writeFileSync(options.statePath, `${JSON.stringify({
+    ...state,
+    native_session_takeover: {
+      ...takeover,
+      terminal_bridge_submission: exactSubmission,
+      terminal_bridge_submission_receipts: stateReceipts.map((receipt) =>
+        receipt.message_id === messageId ? exactSubmission : receipt
+      )
+    }
+  }, null, 2)}\n`);
+
+  const ledger = JSON.parse(fs.readFileSync(options.ledgerPath, "utf8"));
+  assert.equal(ledger.status, "agent_accepted");
+  const ledgerReceipts = ledger.terminal_submission_receipts;
+  assert.equal(
+    ledgerReceipts.filter((receipt) => receipt.message_id === messageId).length,
+    1
+  );
+  fs.writeFileSync(options.ledgerPath, `${JSON.stringify({
+    ...ledger,
+    acceptance_evidence: acceptanceEvidence,
+    terminal_submission_receipts: ledgerReceipts.map((receipt) =>
+      receipt.message_id === messageId
+        ? { ...receipt, acceptance_evidence: acceptanceEvidence }
+        : receipt
+    )
+  }, null, 2)}\n`);
+  return transcriptPath;
+}
+
+test("reconcile-monitors stalls a verified-dead Claude Turn without relaunch or input", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-dead-reconcile-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const runtimeDir = path.join(tempDir, ".akk-cli-test-runtime");
+  const claudeHome = path.join(tempDir, ".claude");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const workspace = path.join(tempDir, "workspace");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const terminalTarget = "claude-work:0.0";
+  const claudePid = 42313;
+  const claudeSessionId = "33333333-3333-4333-8333-333333333333";
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(claudeHome, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "❯ ");
+    writeFakeOpenClaw(fakeBinDir, openclawCallsPath);
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `claude-work\t0\t0\t999\tnode\t${workspace}\n`
+    );
+    const task = startManagedClaudeTerminalTask({
+      fakeBinDir,
+      workspace,
+      storeDir,
+      claudeHome,
+      terminalTarget,
+      claudePid,
+      claudeSessionId,
+      message: "Leave this accepted Claude task without a live process"
+    });
+    const ledgerPath = findTerminalDispatchLedgerPath(
+      task.conversation.conversation_id,
+      runtimeDir
+    );
+    assert.equal(JSON.parse(fs.readFileSync(ledgerPath, "utf8")).status, "agent_accepted");
+    persistAnchoredClaudePromptAcceptance({
+      statePath: task.statePath,
+      ledgerPath,
+      claudeHome,
+      workspace,
+      claudePid,
+      claudeSessionId,
+      promptUuid: "00000000-0000-4000-8000-000000000021",
+      promptId: "00000000-0000-4000-8000-000000000221"
+    });
+
+    writeFakeProcessTools(fakeBinDir, [{
+      pid: 998,
+      ppid: 1,
+      command: "zsh",
+      cwd: workspace
+    }]);
+    fs.writeFileSync(tmuxCallsPath, "");
+    const testEnv = {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    };
+    const reconcileArgs = [
+      "reconcile-monitors",
+      "--store-dir",
+      storeDir,
+      "--terminal-monitors-only",
+      "--disable-terminal-bridge-monitor",
+      "--claude-home",
+      claudeHome,
+      "--claude-agents-json",
+      JSON.stringify([claudeAgentRow(claudePid, claudeSessionId, workspace)])
+    ];
+
+    const first = runAgentCli(reconcileArgs, testEnv);
+    assert.equal(first.status, 0, first.stderr || first.stdout);
+    const firstOutput = JSON.parse(first.stdout);
+    assert.equal(firstOutput.launched, 0);
+    assert.equal(firstOutput.errors, 0);
+    assert.equal(
+      firstOutput.items.some((item) =>
+        item.conversation_id === task.conversation.conversation_id &&
+        item.reason === "bound_agent_process_verified_dead"
+      ),
+      true,
+      first.stdout
+    );
+    const stalled = JSON.parse(fs.readFileSync(task.statePath, "utf8"));
+    assert.equal(stalled.status, "stalled");
+    assert.match(
+      String(stalled.stalled_reason ?? ""),
+      /bound terminal agent process is verified dead/iu
+    );
+    assert.equal(stalled.terminal_agent_process_disposition?.status, "verified_dead");
+    assert.equal(
+      readJsonLines(task.logPath).filter((event) =>
+        event.event === "terminal_agent_process_verified_dead"
+      ).length,
+      1
+    );
+    assert.equal(
+      readJsonLines(tmuxCallsPath).filter((call) => call.args[0] === "send-keys").length,
+      0
+    );
+
+    const stateAfterFirst = fs.readFileSync(task.statePath, "utf8");
+    const eventsAfterFirst = fs.readFileSync(task.logPath, "utf8");
+    const second = runAgentCli(reconcileArgs, testEnv);
+    assert.equal(second.status, 0, second.stderr || second.stdout);
+    assert.equal(JSON.parse(second.stdout).launched, 0);
+    assert.equal(fs.readFileSync(task.statePath, "utf8"), stateAfterFirst);
+    assert.equal(fs.readFileSync(task.logPath, "utf8"), eventsAfterFirst);
+    assert.equal(
+      readJsonLines(tmuxCallsPath).filter((call) => call.args[0] === "send-keys").length,
+      0
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("missing Claude transcript stalls with unverifiable completion evidence", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-dead-missing-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const runtimeDir = path.join(tempDir, ".akk-cli-test-runtime");
+  const claudeHome = path.join(tempDir, ".claude");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const workspace = path.join(tempDir, "workspace");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const terminalTarget = "claude-work:0.0";
+  const claudePid = 42315;
+  const claudeSessionId = "55555555-5555-4555-8555-555555555555";
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(claudeHome, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "❯ ");
+    writeFakeOpenClaw(fakeBinDir, openclawCallsPath);
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `claude-work\t0\t0\t999\tnode\t${workspace}\n`
+    );
+    const task = startManagedClaudeTerminalTask({
+      fakeBinDir,
+      workspace,
+      storeDir,
+      claudeHome,
+      terminalTarget,
+      claudePid,
+      claudeSessionId,
+      message: "Keep the orphan unresolved when its transcript disappears"
+    });
+    const ledgerPath = findTerminalDispatchLedgerPath(
+      task.conversation.conversation_id,
+      runtimeDir
+    );
+    const transcriptPath = persistAnchoredClaudePromptAcceptance({
+      statePath: task.statePath,
+      ledgerPath,
+      claudeHome,
+      workspace,
+      claudePid,
+      claudeSessionId,
+      promptUuid: "00000000-0000-4000-8000-000000000031",
+      promptId: "00000000-0000-4000-8000-000000000231"
+    });
+    fs.rmSync(transcriptPath);
+    writeFakeProcessTools(fakeBinDir, [{
+      pid: 998,
+      ppid: 1,
+      command: "zsh",
+      cwd: workspace
+    }]);
+    fs.writeFileSync(tmuxCallsPath, "");
+    const stateBefore = fs.readFileSync(task.statePath, "utf8");
+    const eventsBefore = fs.readFileSync(task.logPath, "utf8");
+    const reconcileArgs = [
+      "reconcile-monitors",
+      "--store-dir",
+      storeDir,
+      "--terminal-monitors-only",
+      "--disable-terminal-bridge-monitor",
+      "--claude-home",
+      claudeHome,
+      "--claude-agents-json",
+      "[]"
+    ];
+    const testEnv = {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    };
+
+    const reconciled = runAgentCli(reconcileArgs, testEnv);
+    assert.equal(reconciled.status, 0, reconciled.stderr || reconciled.stdout);
+    const output = JSON.parse(reconciled.stdout);
+    assert.equal(output.launched, 0);
+    assert.equal(output.errors, 0);
+    assert.equal(
+      output.items.some((item) =>
+        item.conversation_id === task.conversation.conversation_id &&
+        item.status === "stalled" &&
+        item.reason ===
+          "bound_agent_process_verified_dead_completion_unverifiable"
+      ),
+      true,
+      reconciled.stdout
+    );
+    assert.notEqual(fs.readFileSync(task.statePath, "utf8"), stateBefore);
+    assert.notEqual(fs.readFileSync(task.logPath, "utf8"), eventsBefore);
+    const stalled = JSON.parse(fs.readFileSync(task.statePath, "utf8"));
+    assert.equal(stalled.status, "stalled");
+    assert.match(
+      String(stalled.stalled_reason ?? ""),
+      /bound terminal agent process is verified dead/iu
+    );
+    assert.equal(stalled.terminal_agent_process_disposition?.status, "verified_dead");
+    assert.equal(
+      stalled.terminal_agent_process_disposition
+        ?.completion_observation?.status,
+      "unverifiable"
+    );
+    assert.equal(eventCount(task.logPath, "terminal_agent_process_verified_dead"), 1);
+    assert.equal(eventCount(task.logPath, "conversation_stalled"), 1);
+    assert.equal(
+      readJsonLines(task.logPath).find((event) =>
+        event.event === "conversation_stalled"
+      )?.completion_observation,
+      "unverifiable"
+    );
+    assert.equal(JSON.parse(fs.readFileSync(ledgerPath, "utf8")).status, "agent_accepted");
+    assert.equal(
+      readJsonLines(tmuxCallsPath).filter((call) => call.args[0] === "send-keys").length,
+      0
+    );
+
+    const stateAfterFirst = fs.readFileSync(task.statePath, "utf8");
+    const eventsAfterFirst = fs.readFileSync(task.logPath, "utf8");
+    const second = runAgentCli(reconcileArgs, testEnv);
+    assert.equal(second.status, 0, second.stderr || second.stdout);
+    assert.equal(JSON.parse(second.stdout).launched, 0);
+    assert.equal(fs.readFileSync(task.statePath, "utf8"), stateAfterFirst);
+    assert.equal(fs.readFileSync(task.logPath, "utf8"), eventsAfterFirst);
+    assert.equal(JSON.parse(fs.readFileSync(ledgerPath, "utf8")).status, "agent_accepted");
+    assert.equal(
+      readJsonLines(tmuxCallsPath).filter((call) => call.args[0] === "send-keys").length,
+      0
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("durable Claude transcript completion wins over verified process death", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-dead-complete-"));
+  const storeDir = path.join(tempDir, "conversations");
+  const runtimeDir = path.join(tempDir, ".akk-cli-test-runtime");
+  const claudeHome = path.join(tempDir, ".claude");
+  const fakeBinDir = path.join(tempDir, "bin");
+  const workspace = path.join(tempDir, "workspace");
+  const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
+  const openclawCallsPath = path.join(tempDir, "openclaw-calls.ndjson");
+  const screenPath = path.join(tempDir, "screen.txt");
+  const terminalTarget = "claude-work:0.0";
+  const claudePid = 42314;
+  const claudeSessionId = "44444444-4444-4444-8444-444444444444";
+  const request = "Complete this Claude task durably before process exit";
+
+  try {
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(claudeHome, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(screenPath, "❯ ");
+    writeFakeOpenClaw(fakeBinDir, openclawCallsPath);
+    writeFakeTmux(
+      fakeBinDir,
+      tmuxCallsPath,
+      screenPath,
+      `claude-work\t0\t0\t999\tnode\t${workspace}\n`
+    );
+    const task = startManagedClaudeTerminalTask({
+      fakeBinDir,
+      workspace,
+      storeDir,
+      claudeHome,
+      terminalTarget,
+      claudePid,
+      claudeSessionId,
+      message: request
+    });
+    const accepted = JSON.parse(fs.readFileSync(task.statePath, "utf8"));
+    const anchor = accepted.native_session_takeover.claude_transcript_anchor;
+    assert.equal(anchor.session_id, claudeSessionId);
+    assert.equal(anchor.pid, claudePid);
+    assert.equal(anchor.file_existed, false);
+    assert.equal(anchor.offset_bytes, 0);
+
+    const promptAt = new Date(Date.parse(anchor.captured_at) + 100).toISOString();
+    const completedAt = new Date(Date.parse(promptAt) + 100).toISOString();
+    const promptUuid = "00000000-0000-4000-8000-000000000011";
+    const thinkingUuid = "00000000-0000-4000-8000-000000000012";
+    const textUuid = "00000000-0000-4000-8000-000000000013";
+    const durationUuid = "00000000-0000-4000-8000-000000000014";
+    const messageId = "00000000-0000-4000-8000-000000000111";
+    const base = (uuid: string, parentUuid: string | null, timestamp: string) => ({
+      uuid,
+      parentUuid,
+      isSidechain: false,
+      entrypoint: "cli",
+      timestamp,
+      cwd: workspace,
+      sessionId: claudeSessionId,
+      version: "2.1.218"
+    });
+    const ledgerPath = findTerminalDispatchLedgerPath(
+      task.conversation.conversation_id,
+      runtimeDir
+    );
+    const transcriptPath = persistAnchoredClaudePromptAcceptance({
+      statePath: task.statePath,
+      ledgerPath,
+      claudeHome,
+      workspace,
+      claudePid,
+      claudeSessionId,
+      promptUuid,
+      promptId: "00000000-0000-4000-8000-000000000211"
+    });
+    fs.appendFileSync(transcriptPath, [
+      {
+        ...base(thinkingUuid, promptUuid, promptAt),
+        type: "assistant",
+        message: {
+          role: "assistant",
+          id: messageId,
+          stop_reason: "end_turn",
+          content: [{ type: "thinking", thinking: "not returned" }]
+        }
+      },
+      {
+        ...base(textUuid, thinkingUuid, completedAt),
+        type: "assistant",
+        message: {
+          role: "assistant",
+          id: messageId,
+          stop_reason: "end_turn",
+          content: [{ type: "text", text: "Claude completed before exiting." }]
+        }
+      },
+      {
+        ...base(durationUuid, textUuid, completedAt),
+        type: "system",
+        subtype: "turn_duration",
+        durationMs: 100
+      }
+    ].map((record) => JSON.stringify(record)).join("\n") + "\n", { mode: 0o600 });
+    fs.chmodSync(transcriptPath, 0o600);
+
+    writeFakeProcessTools(fakeBinDir, [{
+      pid: 998,
+      ppid: 1,
+      command: "zsh",
+      cwd: workspace
+    }]);
+    fs.writeFileSync(tmuxCallsPath, "");
+    const reconciled = runAgentCli([
+      "reconcile-monitors",
+      "--store-dir",
+      storeDir,
+      "--terminal-monitors-only",
+      "--disable-terminal-bridge-monitor",
+      "--claude-home",
+      claudeHome,
+      "--claude-agents-json",
+      "[]"
+    ], {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    });
+    assert.equal(reconciled.status, 0, reconciled.stderr || reconciled.stdout);
+    const output = JSON.parse(reconciled.stdout);
+    assert.equal(output.launched, 0);
+    assert.equal(output.errors, 0);
+    assert.equal(
+      output.items.some((item) =>
+        item.conversation_id === task.conversation.conversation_id &&
+        item.status === "recovered" &&
+        item.reason === "bound_agent_process_dead_completion_recovered" &&
+        item.delivered === true
+      ),
+      true,
+      reconciled.stdout
+    );
+
+    const completed = JSON.parse(fs.readFileSync(task.statePath, "utf8"));
+    assert.equal(completed.status, "idle");
+    assert.equal(completed.terminal_agent_process_disposition, undefined);
+    assert.equal(
+      JSON.parse(fs.readFileSync(ledgerPath, "utf8")).status,
+      "resolved"
+    );
+    assert.equal(eventCount(task.logPath, "terminal_bridge_completion_detected"), 1);
+    assert.equal(eventCount(task.logPath, "terminal_agent_process_verified_dead"), 0);
+    assert.equal(eventCount(task.logPath, "conversation_stalled"), 0);
+    assert.equal(readJsonLines(openclawCallsPath).length, 1);
+    assert.equal(
+      readJsonLines(tmuxCallsPath).filter((call) => call.args[0] === "send-keys").length,
+      0
     );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
