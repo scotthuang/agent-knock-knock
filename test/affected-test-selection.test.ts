@@ -161,6 +161,29 @@ test("terminal monitor poll policy selects its timeout and recovery parity set",
   );
 });
 
+test("native thread transition policy selects its exact lifecycle parity set", async () => {
+  const selection = await loadSelectionModule();
+  const tiers = loadTiers();
+  const expected = [
+    "test/codex-no-rollout-binding-cli.test.ts",
+    "test/human-handoff-adoption-cli.test.ts",
+    "test/native-thread-lifecycle-cli.test.ts",
+    "test/native-thread-lifecycle-recovery-cli.test.ts"
+  ];
+  assert.deepEqual(
+    selection.selectAffectedTests([
+      "src/native-thread-transition-policy.ts"
+    ], tiers),
+    {
+      mode: "targeted",
+      changedPaths: ["src/native-thread-transition-policy.ts"],
+      integrationFiles: tiers.integration.filter((testPath) =>
+        expected.includes(testPath)
+      )
+    }
+  );
+});
+
 test("an integration test selects itself while fast and documentation changes still use fast only", async () => {
   const selection = await loadSelectionModule();
   const tiers = loadTiers();

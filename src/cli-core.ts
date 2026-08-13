@@ -133,6 +133,16 @@ import {
   isFreshCodexPostProbeScreen
 } from "./native-thread-lifecycle-policy.js";
 import {
+  decideBindingReconciliation,
+  decideNativeThreadTransitionEligibility,
+  decideNativeThreadTransitionFailure,
+  decideResumeCandidateEligibility,
+  decideResumeTargetSession,
+  prepareNativeThreadTransition,
+  reduceNativeThreadTransitionPhase,
+  type ManagedBindingConflictKind
+} from "./native-thread-transition-policy.js";
+import {
   createNativeThreadResumeSnapshot,
   nativeThreadCandidateSnapshotFingerprint,
   nativeThreadResumeSnapshotRowsMatchCandidates,
@@ -6309,12 +6319,6 @@ function managedSessionClaimsLiveTerminalEntry(
     terminalControlsShareIncarnation(binding.terminal_control, liveControl)
   );
 }
-
-type ManagedBindingConflictKind =
-  | "stale_process_incarnation"
-  | "live_external_thread_change"
-  | "provisional_orphan"
-  | "unverifiable";
 
 function listedTerminalProcessIncarnation(
   terminal: Record<string, any>
@@ -16327,14 +16331,12 @@ async function runReconcileBinding(options: Record<string, any>) {
         terminal: finalTerminal,
         identity: finalIdentity
       });
-      if (![
-        "provisional_orphan",
-        "live_external_thread_change"
-      ].includes(String(conflictKind))) {
+      const reconciliationDecision = decideBindingReconciliation(conflictKind);
+      if (reconciliationDecision.action === "reject") {
         throw new Error(
-          conflictKind === "stale_process_incarnation"
+          reconciliationDecision.reason === "stale_process_incarnation"
             ? "the stale process incarnation no longer requires explicit reconciliation; refresh AKK list"
-            : conflictKind === undefined
+            : reconciliationDecision.reason === "already_exact"
               ? "the managed Session now exactly matches the live terminal; no reconciliation is needed"
               : "the managed binding conflict is unverifiable and cannot be detached automatically"
         );
@@ -16497,25 +16499,19 @@ async function runNativeThreadTransition(
         stringValue(options.expectedBindingToken),
         "--expected-binding-token is required"
       );
-      if (!snapshot.bindingTokens.includes(expectedToken)) {
+      const eligibility = decideNativeThreadTransitionEligibility({
+        operation: operation.kind,
+        bindingTokenMatches: snapshot.bindingTokens.includes(expectedToken),
+        capabilityStatus: snapshot.capabilities.status,
+        newThreadSupported: snapshot.capabilities.newThread,
+        resumeExactSupported: snapshot.capabilities.resumeExact
+      });
+      if (eligibility.action === "reject") {
         throw new Error(
-          "terminal binding changed after it was listed; refresh AKK list and retry"
+          eligibility.reason === "binding_token_changed"
+            ? "terminal binding changed after it was listed; refresh AKK list and retry"
+            : snapshot.capabilities.reason
         );
-      }
-      if (snapshot.capabilities.status !== "supported") {
-        throw new Error(snapshot.capabilities.reason);
-      }
-      if (
-        operation.kind === "new_thread" &&
-        snapshot.capabilities.newThread !== true
-      ) {
-        throw new Error(snapshot.capabilities.reason);
-      }
-      if (
-        operation.kind === "resume_thread" &&
-        snapshot.capabilities.resumeExact !== true
-      ) {
-        throw new Error(snapshot.capabilities.reason);
       }
       if (operation.kind === "resume_thread" && operation.selectionSnapshot) {
         const guardedCandidates = await resumableThreadCandidates({
@@ -16654,7 +16650,7 @@ async function runNativeThreadTransition(
           stringValue(options.candidateToken),
           "--candidate-token is required"
         );
-        if (beforeIdentity?.sessionId === operation.nativeThreadId) {
+        if (beforeIdentity.sessionId === operation.nativeThreadId) {
           printJson({
             status: "already_active",
             no_op: true,
@@ -16683,22 +16679,21 @@ async function runNativeThreadTransition(
         const candidate = candidates.find((entry) =>
           entry.native_thread_id === operation.nativeThreadId
         );
-        if (!candidate) {
+        const candidateDecision = decideResumeCandidateEligibility({
+          candidate,
+          expectedCandidateToken
+        });
+        if (candidateDecision.action === "reject") {
           throw new Error(
-            `native thread ${operation.nativeThreadId} is not a verified same-workspace candidate`
+            candidateDecision.reason === "candidate_not_found"
+              ? `native thread ${operation.nativeThreadId} is not a verified same-workspace candidate`
+              : candidateDecision.reason === "candidate_not_resumable"
+                ? `native thread ${operation.nativeThreadId} cannot be resumed: ` +
+                  `${candidate?.unavailable_reason ?? "unavailable"}`
+                : "resume candidate changed after it was listed; refresh resumable threads and retry"
           );
         }
-        if (!candidate.resumable) {
-          throw new Error(
-            `native thread ${operation.nativeThreadId} cannot be resumed: ` +
-            `${candidate.unavailable_reason ?? "unavailable"}`
-          );
-        }
-        if (candidate.candidate_token !== expectedCandidateToken) {
-          throw new Error(
-            "resume candidate changed after it was listed; refresh resumable threads and retry"
-          );
-        }
+        const eligibleCandidate = candidateDecision.candidate;
         resumeCandidateToken = await revalidateNativeThreadCandidate({
           options,
           terminal,
@@ -16706,31 +16701,45 @@ async function runNativeThreadTransition(
           encodedToken: expectedCandidateToken,
           agentVersion: snapshot.version as string
         });
-        if (candidate.managed_session_id) {
+        if (eligibleCandidate.managed_session_id) {
           targetSession = tryLoadManagedSession(
             storeDir,
-            candidate.managed_session_id
+            eligibleCandidate.managed_session_id
           );
           const targetBlockers = managedTurnsForSession(
             storeDir,
-            candidate.managed_session_id
+            eligibleCandidate.managed_session_id
           ).filter((turn) => SESSION_SEND_BLOCKING_STATUSES.has(turn.status));
-          if (targetBlockers.length > 0) {
+          const targetDecision = decideResumeTargetSession({
+            hasUnresolvedTurn: targetBlockers.length > 0,
+            loadedSession: targetSession,
+            boundOwnerConclusivelyInactive: Boolean(
+              targetBlockers.length === 0 && targetSession?.status === "bound" &&
+              managedSessionOwnerIsConclusivelyInactive({
+                session: targetSession,
+                terminal,
+                identity: beforeIdentity
+              })
+            )
+          });
+          if (
+            targetDecision.action === "reject" &&
+            targetDecision.reason === "unresolved_turn"
+          ) {
             throw new Error(
-              `target Session ${candidate.managed_session_id} has unresolved Turn ` +
+              `target Session ${eligibleCandidate.managed_session_id} has unresolved Turn ` +
               `${turnIdForConversation(targetBlockers[0])}`
             );
           }
-          if (targetSession?.status === "bound") {
-            if (!managedSessionOwnerIsConclusivelyInactive({
-              session: targetSession,
-              terminal,
-              identity: beforeIdentity
-            })) {
-              throw new Error(
-                `target Session ${candidate.managed_session_id} is still bound to a live or unverifiable process`
-              );
-            }
+          if (targetDecision.action === "reject") {
+            throw new Error(
+              `target Session ${eligibleCandidate.managed_session_id} is still bound to a live or unverifiable process`
+            );
+          }
+          if (
+            targetDecision.action === "detach_stale_binding" &&
+            targetSession
+          ) {
             const detachedAt = cliNow().toISOString();
             targetSession = saveManagedSession(storeDir, {
               ...targetSession,
@@ -16750,47 +16759,39 @@ async function runNativeThreadTransition(
       const previousLedger = loadTerminalBridgeDispatchLedger(
         terminal.terminalControl
       );
-      let transition: NativeThreadTransition = {
-        schema: "agent-knock-knock/native-thread-transition",
-        version: 1,
-        transition_id: transitionId,
-        operation: operation.kind,
-        status: "prepared",
-        terminal_id: terminal.conversationId,
+      let transition = prepareNativeThreadTransition({
+        transitionId,
+        operation,
+        terminalId: terminal.conversationId,
         agent: terminal.agent,
         workspace: terminal.terminalControl.currentPath ?? cliCwd(),
-        source_session_id: sourceBefore?.session_id,
-        source_expected_revision: sourceBefore
-          ? managedSessionRevision(sourceBefore)
+        source: sourceBefore
+          ? {
+              state: sourceBefore,
+              revision: managedSessionRevision(sourceBefore)
+            }
           : undefined,
-        source_previous_last_transition_id:
-          sourceBefore?.last_transition_id,
-        target_session_id: targetSessionId,
-        target_expected_revision: targetSession
-          ? managedSessionRevision(targetSession)
-          : null,
-        target_native_thread_id:
-          operation.kind === "resume_thread"
-            ? operation.nativeThreadId
-            : undefined,
-        target_candidate_file_identity:
-          terminal.agent === "codex" &&
-          operation.kind === "resume_thread"
+        targetSessionId,
+        target: targetSession
+          ? {
+              state: targetSession,
+              revision: managedSessionRevision(targetSession)
+            }
+          : undefined,
+        candidateFileIdentity:
+          terminal.agent === "codex" && operation.kind === "resume_thread"
             ? codexCandidateFileIdentity(resumeCandidateToken)
             : undefined,
-        before_native_thread_id: beforeIdentity.sessionId,
-        before_process_uuid: beforeIdentity.processUuid as string,
-        before_process_started_at: beforeIdentity.processStartedAt,
-        before_process_birth: beforeIdentity.processBirth,
-        before_process_rollout: beforeIdentity.rollout,
-        before_binding: snapshot.session?.binding,
-        adapter_version: snapshot.version as string,
-        command_fingerprint: nativeThreadCommandFingerprint(
+        beforeIdentity,
+        beforeProcessUuid: beforeIdentity.processUuid as string,
+        beforeBinding: snapshot.session?.binding,
+        adapterVersion: snapshot.version as string,
+        commandFingerprint: nativeThreadCommandFingerprint(
           JSON.stringify(plan.steps)
         ),
-        dispatcher_pid: cliPid(),
-        prepared_at: now.toISOString()
-      };
+        dispatcherPid: cliPid(),
+        preparedAt: now.toISOString()
+      });
       transition = saveNativeThreadTransition(storeDir, transition, {
         expectedRevision: null
       });
@@ -16846,11 +16847,10 @@ async function runNativeThreadTransition(
           }, { expectedRevision: managedSessionRevision(sourceBefore) });
         }
         const dispatchingAt = cliNow().toISOString();
-        transition = {
-          ...transition,
-          status: "dispatching",
-          dispatching_at: dispatchingAt
-        };
+        transition = reduceNativeThreadTransitionPhase(transition, {
+          type: "dispatch_started",
+          at: dispatchingAt
+        });
         transition = saveNativeThreadTransition(storeDir, transition, {
           expectedRevision: nativeThreadTransitionRevision(transition)
         });
@@ -16958,11 +16958,10 @@ async function runNativeThreadTransition(
           }
         );
         const submittedAt = cliNow().toISOString();
-        transition = {
-          ...transition,
-          status: "submitted",
-          submitted_at: submittedAt
-        };
+        transition = reduceNativeThreadTransitionPhase(transition, {
+          type: "submission_recorded",
+          at: submittedAt
+        });
         transition = saveNativeThreadTransition(storeDir, transition, {
           expectedRevision: nativeThreadTransitionRevision(transition)
         });
@@ -17042,12 +17041,11 @@ async function runNativeThreadTransition(
           generation: nextGeneration,
           now: verifiedAt
         });
-        transition = {
-          ...transition,
-          status: "verified",
-          after_binding: targetBinding,
-          verified_at: verifiedAt.toISOString()
-        };
+        transition = reduceNativeThreadTransitionPhase(transition, {
+          type: "target_verified",
+          at: verifiedAt.toISOString(),
+          afterBinding: targetBinding
+        });
         transition = saveNativeThreadTransition(storeDir, transition, {
           expectedRevision: nativeThreadTransitionRevision(transition)
         });
@@ -17088,11 +17086,10 @@ async function runNativeThreadTransition(
           verifiedAt.toISOString()
         );
         const committedAt = cliNow().toISOString();
-        transition = {
-          ...transition,
-          status: "committed",
-          committed_at: committedAt
-        };
+        transition = reduceNativeThreadTransitionPhase(transition, {
+          type: "commit_recorded",
+          at: committedAt
+        });
         transition = saveNativeThreadTransition(storeDir, transition, {
           expectedRevision: nativeThreadTransitionRevision(transition)
         });
@@ -17148,13 +17145,22 @@ async function runNativeThreadTransition(
           storeDir,
           transitionId
         );
-        if (durableTransition.status === "committed") {
+        const failureDecision = decideNativeThreadTransitionFailure({
+          durableStatus: durableTransition.status,
+          inputStarted,
+          errorProvesInputNotStarted:
+            error instanceof TerminalInputNotStartedError
+        });
+        if (
+          failureDecision.action ===
+            "report_committed_bookkeeping_failure"
+        ) {
           throw new Error(
             `native thread transition ${transitionId} committed, but final ` +
             `bookkeeping failed: ${message}`
           );
         }
-        if (durableTransition.status === "verified") {
+        if (failureDecision.action === "require_verified_recovery") {
           saveLifecycleTerminalDispatchLedger(terminal.terminalControl, {
             ...lifecycleLedgerFields(durableTransition, storeDir),
             status: "uncertain",
@@ -17176,16 +17182,12 @@ async function runNativeThreadTransition(
           });
           return;
         }
-        if (
-          !inputStarted &&
-          error instanceof TerminalInputNotStartedError
-        ) {
-          transition = {
-            ...durableTransition,
-            status: "aborted",
-            aborted_at: failedAt,
+        if (failureDecision.action === "abort_before_terminal_input") {
+          transition = reduceNativeThreadTransitionPhase(durableTransition, {
+            type: "aborted_before_input",
+            at: failedAt,
             error: message
-          };
+          });
           transition = saveNativeThreadTransition(storeDir, transition, {
             expectedRevision:
               nativeThreadTransitionRevision(durableTransition)
@@ -17210,13 +17212,11 @@ async function runNativeThreadTransition(
           });
           throw error;
         }
-        transition = {
-          ...durableTransition,
-          status: "uncertain",
-          uncertain_at: failedAt,
-          error: message,
-          do_not_retry: true
-        };
+        transition = reduceNativeThreadTransitionPhase(durableTransition, {
+          type: "outcome_uncertain",
+          at: failedAt,
+          error: message
+        });
         transition = saveNativeThreadTransition(storeDir, transition, {
           expectedRevision:
             nativeThreadTransitionRevision(durableTransition)

@@ -63,6 +63,15 @@
         "test/shards/agent-cli-terminal-send-gates.test.ts"
       ]
     },
+    "native-thread-transition-policy": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/codex-no-rollout-binding-cli.test.ts",
+        "test/human-handoff-adoption-cli.test.ts",
+        "test/native-thread-lifecycle-cli.test.ts",
+        "test/native-thread-lifecycle-recovery-cli.test.ts"
+      ]
+    },
     "openclaw-doctor": {
       "selection": "targeted",
       "integration_tests": [
@@ -236,6 +245,10 @@
     {
       "path": "src/native-thread-resume-snapshot.ts",
       "owner": "lifecycle-core"
+    },
+    {
+      "path": "src/native-thread-transition-policy.ts",
+      "owner": "native-thread-transition-policy"
     },
     {
       "path": "src/openclaw-doctor.ts",

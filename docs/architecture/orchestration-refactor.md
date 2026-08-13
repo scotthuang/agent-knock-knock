@@ -352,6 +352,31 @@ Each callback continues to perform the same observations, compare-before-write
 checks, output, and error text under the same lock scopes. The transaction
 module supplies no effect DSL and cannot construct Store or protocol state.
 
+### Initial native-thread transition policy slice
+
+PR5a introduces `native-thread-transition-policy.ts` as a 297-line pure typed
+decision module. It owns lifecycle capability eligibility, exact resume
+candidate and target-Session decisions, explicit binding-reconciliation
+eligibility, prepared transition construction, the six in-memory transition
+phase projections, and the durable failure-phase priority. `cli-core.ts`
+remains at its 37,873-line ratchet: this first slice moves one authority source
+without using formatting changes to claim a size reduction.
+
+The module has only type dependencies on managed Session/transition state and
+terminal identity. It imports no filesystem, process, terminal-control, Store,
+clock, or lock implementation. The shell still owns every public error string,
+terminal/process observation, token comparison input, clock read, and effect.
+The existing `terminal -> Store writer` lock scope is unchanged. Durable order
+also remains transition `prepared` before lifecycle ledger `prepared`, each
+transition phase CAS before its matching ledger phase, target ownership proof
+before commit, and verified Session commit before transition/ledger resolution.
+
+The focused fast table covers new/resume construction (including null versus
+existing target revision), all six phase events, failure priority, candidate
+and target eligibility, and reconciliation. Affected-test selection binds this
+module to `codex-no-rollout-binding-cli`, `human-handoff-adoption-cli`,
+`native-thread-lifecycle-cli`, and `native-thread-lifecycle-recovery-cli`.
+
 ## Immutable public and safety contracts
 
 The refactor must preserve all of the following unless a separate product issue
