@@ -129,6 +129,18 @@ interface DeliverAgentWaitInput {
   runId: string;
 }
 
+type DeliverAgentWait = (
+  input: DeliverAgentWaitInput
+) => CallbackProcessDelivery;
+
+interface ObserveCallbackAgentRunInput {
+  options: OpenClawCallbackDeliveryOptions;
+  logPath: string;
+  conversation: Conversation;
+  message: AgentMessage;
+  wakeAck: CallbackWakeAcknowledgement;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -305,6 +317,129 @@ function parseAgentWaitResult(
   return payload;
 }
 
+function normalizeCallbackProcessDelivery(
+  result: CallbackSpawnResult
+): CallbackProcessDelivery {
+  if (result.error) {
+    return {
+      status: 1,
+      stdout: result.stdout ?? "",
+      stderr: result.error.message
+    };
+  }
+
+  return {
+    status: result.status ?? 1,
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? ""
+  };
+}
+
+function observeCallbackAgentRun(
+  ports: OpenClawCallbackTransportPorts,
+  deliverAgentWait: DeliverAgentWait,
+  {
+    options,
+    logPath,
+    conversation,
+    message,
+    wakeAck
+  }: ObserveCallbackAgentRunInput
+): Record<string, unknown> {
+  if (["ok", "error", "timeout"].includes(wakeAck.status)) {
+    return {
+      status: wakeAck.status,
+      source: "wake_acknowledgement",
+      observed_at: ports.now().toISOString()
+    };
+  }
+
+  const agentWaitDelivery = deliverAgentWait({
+    openclawBin: options.openclawBin,
+    gatewayUrl: options.gatewayUrl,
+    token: options.token,
+    runId: wakeAck.runId
+  });
+  if (agentWaitDelivery.status !== 0) {
+    ports.recordCallbackProcessDelivery({
+      logPath,
+      conversation,
+      message,
+      event: "callback_agent_wait_delivery",
+      runtimeEvent: "callback_agent_wait_delivery",
+      delivery: agentWaitDelivery,
+      detail: { run_id: wakeAck.runId }
+    });
+    return {
+      status: "unavailable",
+      run_id: wakeAck.runId,
+      observed_at: ports.now().toISOString(),
+      error: cleanProcessText(
+        agentWaitDelivery.stderr ||
+          agentWaitDelivery.stdout ||
+          `agent.wait failed with status ${agentWaitDelivery.status}`
+      )
+    };
+  }
+
+  let waitResult: Record<string, unknown>;
+  try {
+    waitResult = parseAgentWaitResult(
+      agentWaitDelivery.stdout,
+      wakeAck.runId
+    );
+  } catch (error) {
+    ports.recordCallbackProcessDelivery({
+      logPath,
+      conversation,
+      message,
+      event: "callback_agent_wait_delivery",
+      runtimeEvent: "callback_agent_wait_delivery",
+      delivery: agentWaitDelivery,
+      detail: {
+        run_id: wakeAck.runId,
+        observation_error: String(error)
+      }
+    });
+    return {
+      status: "invalid",
+      run_id: wakeAck.runId,
+      observed_at: ports.now().toISOString(),
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+
+  ports.recordCallbackProcessDelivery({
+    logPath,
+    conversation,
+    message,
+    event: "callback_agent_wait_delivery",
+    runtimeEvent: "callback_agent_wait_delivery",
+    delivery: agentWaitDelivery,
+    detail: {
+      run_id: wakeAck.runId,
+      run_status: waitResult.status
+    }
+  });
+  return {
+    status: waitResult.status,
+    run_id: wakeAck.runId,
+    observed_at: ports.now().toISOString(),
+    ...(stringValue(waitResult.error)
+      ? { error: stringValue(waitResult.error) }
+      : {}),
+    ...(stringValue(waitResult.stopReason)
+      ? { stop_reason: stringValue(waitResult.stopReason) }
+      : {}),
+    ...(stringValue(waitResult.timeoutPhase)
+      ? { timeout_phase: stringValue(waitResult.timeoutPhase) }
+      : {}),
+    ...(typeof waitResult.providerStarted === "boolean"
+      ? { provider_started: waitResult.providerStarted }
+      : {})
+  };
+}
+
 export function createOpenClawCallbackTransport(
   ports: OpenClawCallbackTransportPorts
 ): OpenClawCallbackTransport {
@@ -361,19 +496,7 @@ export function createOpenClawCallbackTransport(
       env: openClawGatewayEnvironment(token)
     });
 
-    if (result.error) {
-      return {
-        status: 1,
-        stdout: result.stdout ?? "",
-        stderr: result.error.message
-      };
-    }
-
-    return {
-      status: result.status ?? 1,
-      stdout: result.stdout ?? "",
-      stderr: result.stderr ?? ""
-    };
+    return normalizeCallbackProcessDelivery(result);
   }
 
   function deliverSessionSend({
@@ -403,19 +526,7 @@ export function createOpenClawCallbackTransport(
       env: openClawGatewayEnvironment(token)
     });
 
-    if (result.error) {
-      return {
-        status: 1,
-        stdout: result.stdout ?? "",
-        stderr: result.error.message
-      };
-    }
-
-    return {
-      status: result.status ?? 1,
-      stdout: result.stdout ?? "",
-      stderr: result.stderr ?? ""
-    };
+    return normalizeCallbackProcessDelivery(result);
   }
 
   function deliverChatSend({
@@ -445,19 +556,7 @@ export function createOpenClawCallbackTransport(
       env: openClawGatewayEnvironment(token)
     });
 
-    if (result.error) {
-      return {
-        status: 1,
-        stdout: result.stdout ?? "",
-        stderr: result.error.message
-      };
-    }
-
-    return {
-      status: result.status ?? 1,
-      stdout: result.stdout ?? "",
-      stderr: result.stderr ?? ""
-    };
+    return normalizeCallbackProcessDelivery(result);
   }
 
   function deliverAgentWait({
@@ -492,126 +591,7 @@ export function createOpenClawCallbackTransport(
       env: openClawGatewayEnvironment(token)
     });
 
-    if (result.error) {
-      return {
-        status: 1,
-        stdout: result.stdout ?? "",
-        stderr: result.error.message
-      };
-    }
-
-    return {
-      status: result.status ?? 1,
-      stdout: result.stdout ?? "",
-      stderr: result.stderr ?? ""
-    };
-  }
-
-  function observeCallbackAgentRun({
-    options,
-    logPath,
-    conversation,
-    message,
-    wakeAck
-  }: {
-    options: OpenClawCallbackDeliveryOptions;
-    logPath: string;
-    conversation: Conversation;
-    message: AgentMessage;
-    wakeAck: CallbackWakeAcknowledgement;
-  }): Record<string, unknown> {
-    if (["ok", "error", "timeout"].includes(wakeAck.status)) {
-      return {
-        status: wakeAck.status,
-        source: "wake_acknowledgement",
-        observed_at: ports.now().toISOString()
-      };
-    }
-
-    const agentWaitDelivery = deliverAgentWait({
-      openclawBin: options.openclawBin,
-      gatewayUrl: options.gatewayUrl,
-      token: options.token,
-      runId: wakeAck.runId
-    });
-    if (agentWaitDelivery.status !== 0) {
-      ports.recordCallbackProcessDelivery({
-        logPath,
-        conversation,
-        message,
-        event: "callback_agent_wait_delivery",
-        runtimeEvent: "callback_agent_wait_delivery",
-        delivery: agentWaitDelivery,
-        detail: { run_id: wakeAck.runId }
-      });
-      return {
-        status: "unavailable",
-        run_id: wakeAck.runId,
-        observed_at: ports.now().toISOString(),
-        error: cleanProcessText(
-          agentWaitDelivery.stderr ||
-            agentWaitDelivery.stdout ||
-            `agent.wait failed with status ${agentWaitDelivery.status}`
-        )
-      };
-    }
-
-    let waitResult: Record<string, unknown>;
-    try {
-      waitResult = parseAgentWaitResult(
-        agentWaitDelivery.stdout,
-        wakeAck.runId
-      );
-    } catch (error) {
-      ports.recordCallbackProcessDelivery({
-        logPath,
-        conversation,
-        message,
-        event: "callback_agent_wait_delivery",
-        runtimeEvent: "callback_agent_wait_delivery",
-        delivery: agentWaitDelivery,
-        detail: {
-          run_id: wakeAck.runId,
-          observation_error: String(error)
-        }
-      });
-      return {
-        status: "invalid",
-        run_id: wakeAck.runId,
-        observed_at: ports.now().toISOString(),
-        error: error instanceof Error ? error.message : String(error)
-      };
-    }
-
-    ports.recordCallbackProcessDelivery({
-      logPath,
-      conversation,
-      message,
-      event: "callback_agent_wait_delivery",
-      runtimeEvent: "callback_agent_wait_delivery",
-      delivery: agentWaitDelivery,
-      detail: {
-        run_id: wakeAck.runId,
-        run_status: waitResult.status
-      }
-    });
-    return {
-      status: waitResult.status,
-      run_id: wakeAck.runId,
-      observed_at: ports.now().toISOString(),
-      ...(stringValue(waitResult.error)
-        ? { error: stringValue(waitResult.error) }
-        : {}),
-      ...(stringValue(waitResult.stopReason)
-        ? { stop_reason: stringValue(waitResult.stopReason) }
-        : {}),
-      ...(stringValue(waitResult.timeoutPhase)
-        ? { timeout_phase: stringValue(waitResult.timeoutPhase) }
-        : {}),
-      ...(typeof waitResult.providerStarted === "boolean"
-        ? { provider_started: waitResult.providerStarted }
-        : {})
-    };
+    return normalizeCallbackProcessDelivery(result);
   }
 
   function deliverCallback({
@@ -869,13 +849,17 @@ export function createOpenClawCallbackTransport(
     });
     onProgress?.({ stage: "wake_accepted", injection, wake });
 
-    const runObservation = observeCallbackAgentRun({
-      options,
-      logPath,
-      conversation,
-      message,
-      wakeAck
-    });
+    const runObservation = observeCallbackAgentRun(
+      ports,
+      deliverAgentWait,
+      {
+        options,
+        logPath,
+        conversation,
+        message,
+        wakeAck
+      }
+    );
     const outcome = {
       kind: wakePlan.kind,
       injection,
