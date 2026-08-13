@@ -1,0 +1,248 @@
+{
+  "schema": "agent-knock-knock/production-module-ownership",
+  "version": 1,
+  "architecture": {
+    "cli_core_max_physical_loc": 38005,
+    "cli_core_importers": [
+      "src/cli.ts"
+    ],
+    "allow_import_cycles": []
+  },
+  "domains": {
+    "agent-session-core": {
+      "selection": "full"
+    },
+    "approval-policy": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/shards/agent-cli-monitor-approval-context.test.ts",
+        "test/openclaw-plugin-contract.test.ts"
+      ]
+    },
+    "cli-runtime": {
+      "selection": "full"
+    },
+    "codex-storage": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/codex-store-adapter.test.ts",
+        "test/codex-no-rollout-binding-cli.test.ts",
+        "test/stale-bound-resume-cli.test.ts"
+      ]
+    },
+    "doctor-capabilities": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/cli-ux.test.ts",
+        "test/management-cli.test.ts"
+      ]
+    },
+    "lifecycle-core": {
+      "selection": "full"
+    },
+    "lifecycle-smoke": {
+      "selection": "full"
+    },
+    "openclaw-doctor": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/openclaw-plugin-contract.test.ts",
+        "test/management-cli.test.ts"
+      ]
+    },
+    "openclaw-plugin": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/openclaw-plugin-contract.test.ts",
+        "test/management-cli.test.ts"
+      ]
+    },
+    "runtime-log": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/runtime-log.test.ts"
+      ]
+    },
+    "session-selector": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/delegate-cli.test.ts",
+        "test/session-selector-cli.test.ts",
+        "test/management-cli.test.ts"
+      ]
+    },
+    "state-store": {
+      "selection": "full"
+    },
+    "terminal-agent-core": {
+      "selection": "full"
+    },
+    "terminal-control": {
+      "selection": "full"
+    },
+    "terminal-dispatch-core": {
+      "selection": "full"
+    },
+    "transcript": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/callback-cli.test.ts",
+        "test/cli-ux.test.ts"
+      ]
+    }
+  },
+  "modules": [
+    {
+      "path": "src/agent-session-provider.ts",
+      "owner": "agent-session-core"
+    },
+    {
+      "path": "src/approval-policy.ts",
+      "owner": "approval-policy"
+    },
+    {
+      "path": "src/claude-lifecycle-compatibility.ts",
+      "owner": "lifecycle-core"
+    },
+    {
+      "path": "src/claude-local-transcript-provider.ts",
+      "owner": "agent-session-core"
+    },
+    {
+      "path": "src/claude-terminal-agent-adapter.ts",
+      "owner": "terminal-agent-core"
+    },
+    {
+      "path": "src/cli-core.ts",
+      "owner": "cli-runtime"
+    },
+    {
+      "path": "src/cli.ts",
+      "owner": "cli-runtime"
+    },
+    {
+      "path": "src/codex-lifecycle-compatibility.ts",
+      "owner": "lifecycle-core"
+    },
+    {
+      "path": "src/codex-local-session-provider.ts",
+      "owner": "agent-session-core"
+    },
+    {
+      "path": "src/codex-session-provider.ts",
+      "owner": "agent-session-core"
+    },
+    {
+      "path": "src/codex-store-adapter.ts",
+      "owner": "codex-storage"
+    },
+    {
+      "path": "src/codex-terminal-agent-adapter.ts",
+      "owner": "terminal-agent-core"
+    },
+    {
+      "path": "src/deferred-foreground-transfer.ts",
+      "owner": "lifecycle-core"
+    },
+    {
+      "path": "src/doctor-capabilities.ts",
+      "owner": "doctor-capabilities"
+    },
+    {
+      "path": "src/executors.ts",
+      "owner": "cli-runtime"
+    },
+    {
+      "path": "src/herdr-terminal-control-provider.ts",
+      "owner": "terminal-control"
+    },
+    {
+      "path": "src/live-lifecycle-evidence.ts",
+      "owner": "lifecycle-smoke"
+    },
+    {
+      "path": "src/live-lifecycle-smoke-evidence.ts",
+      "owner": "lifecycle-smoke"
+    },
+    {
+      "path": "src/live-lifecycle-smoke.ts",
+      "owner": "lifecycle-smoke"
+    },
+    {
+      "path": "src/managed-session.ts",
+      "owner": "state-store"
+    },
+    {
+      "path": "src/native-thread-lifecycle-policy.ts",
+      "owner": "lifecycle-core"
+    },
+    {
+      "path": "src/native-thread-resume-snapshot.ts",
+      "owner": "lifecycle-core"
+    },
+    {
+      "path": "src/openclaw-doctor.ts",
+      "owner": "openclaw-doctor"
+    },
+    {
+      "path": "src/openclaw-plugin-helpers.ts",
+      "owner": "openclaw-plugin"
+    },
+    {
+      "path": "src/openclaw-plugin.ts",
+      "owner": "openclaw-plugin"
+    },
+    {
+      "path": "src/protocol.ts",
+      "owner": "state-store"
+    },
+    {
+      "path": "src/runtime-log.ts",
+      "owner": "runtime-log"
+    },
+    {
+      "path": "src/session-selector.ts",
+      "owner": "session-selector"
+    },
+    {
+      "path": "src/session-store.ts",
+      "owner": "state-store"
+    },
+    {
+      "path": "src/store.ts",
+      "owner": "state-store"
+    },
+    {
+      "path": "src/terminal-agent-adapter.ts",
+      "owner": "terminal-agent-core"
+    },
+    {
+      "path": "src/terminal-agent-bridge.ts",
+      "owner": "terminal-dispatch-core"
+    },
+    {
+      "path": "src/terminal-agent-registry.ts",
+      "owner": "terminal-agent-core"
+    },
+    {
+      "path": "src/terminal-control-provider.ts",
+      "owner": "terminal-control"
+    },
+    {
+      "path": "src/terminal-control-ref.ts",
+      "owner": "terminal-control"
+    },
+    {
+      "path": "src/terminal-process-source.ts",
+      "owner": "terminal-control"
+    },
+    {
+      "path": "src/terminal-submission-acceptance.ts",
+      "owner": "terminal-dispatch-core"
+    },
+    {
+      "path": "src/transcript.ts",
+      "owner": "transcript"
+    }
+  ]
+}

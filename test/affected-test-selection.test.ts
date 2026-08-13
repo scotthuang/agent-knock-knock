@@ -26,9 +26,13 @@ test("package exposes the build-once affected-test runner", () => {
     packageJson.scripts["test:affected"],
     "npm run build && node scripts/run-affected-tests.js"
   );
+  assert.equal(
+    packageJson.scripts["validate:architecture"],
+    "node scripts/validate-architecture.js"
+  );
 });
 
-test("affected-test map contains only exact integration-tier manifest entries", async () => {
+test("non-production affected-test map contains only exact integration-tier manifest entries", async () => {
   const selection = await loadSelectionModule();
   const integration = new Set(loadTiers().integration);
   for (const mappedTests of Object.values(selection.targetedIntegrationByPath) as string[][]) {
@@ -91,7 +95,7 @@ test("an integration test selects itself while fast and documentation changes st
   ]);
 });
 
-test("unknown paths and shared CLI, Store, protocol, terminal identity, or lifecycle paths fail closed", async () => {
+test("unknown paths and full production domains fail closed", async () => {
   const selection = await loadSelectionModule();
   const tiers = loadTiers();
   for (const changedPath of [
@@ -108,7 +112,10 @@ test("unknown paths and shared CLI, Store, protocol, terminal identity, or lifec
   ]) {
     const result = selection.selectAffectedTests([changedPath], tiers);
     assert.equal(result.mode, "full", changedPath);
-    assert.match(result.reason, /(?:unmapped changed path|shared core changed)/u);
+    assert.match(
+      result.reason,
+      /(?:unmapped changed path|production module has no owner|production domain requires full suite)/u
+    );
   }
 });
 
@@ -121,7 +128,24 @@ test("a stale targeted mapping fails closed instead of silently dropping integra
   };
   const result = selection.selectAffectedTests(["src/runtime-log.ts"], withoutRuntimeLog);
   assert.equal(result.mode, "full");
-  assert.match(result.reason, /map is stale/u);
+  assert.match(result.reason, /production ownership unavailable/u);
+  assert.match(result.reason, /is not in the integration tier/u);
+});
+
+test("an unavailable production ownership manifest fails closed", async () => {
+  const selection = await loadSelectionModule();
+  const result = selection.selectAffectedTests(
+    ["docs/testing.md"],
+    loadTiers(),
+    {
+      loadProductionOwnership() {
+        throw new Error("missing ownership manifest");
+      }
+    }
+  );
+  assert.equal(result.mode, "full");
+  assert.match(result.reason, /production ownership unavailable/u);
+  assert.match(result.reason, /missing ownership manifest/u);
 });
 
 test("affected-test arguments accept one explicit base and reject ambiguous input", async () => {

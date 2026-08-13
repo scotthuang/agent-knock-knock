@@ -21,6 +21,7 @@
     "test/openclaw-compatibility-metadata.test.ts",
     "test/openclaw-doctor.test.ts",
     "test/openclaw-plugin-helpers.test.ts",
+    "test/production-module-ownership.test.ts",
     "test/protocol.test.ts",
     "test/quickstart-docs.test.ts",
     "test/session-selector.test.ts",

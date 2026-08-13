@@ -1,44 +1,11 @@
 import { spawnSync } from "node:child_process";
+import {
+  loadAndValidateProductionModuleOwnership
+} from "./production-module-ownership.js";
 
-const CODEX_STORAGE_INTEGRATION = [
-  "test/codex-store-adapter.test.ts",
-  "test/codex-no-rollout-binding-cli.test.ts",
-  "test/stale-bound-resume-cli.test.ts"
-];
-
-const OPENCLAW_INTEGRATION = [
-  "test/openclaw-plugin-contract.test.ts",
-  "test/management-cli.test.ts"
-];
-
-// Keep this map deliberately exact. A new production path must make an
-// explicit choice here; otherwise selection falls back to the full suite.
+// Non-production runtime surfaces remain exact here. Production modules use
+// the independently validated ownership manifest below.
 export const targetedIntegrationByPath = Object.freeze({
-  "src/approval-policy.ts": [
-    "test/shards/agent-cli-monitor-approval-context.test.ts",
-    "test/openclaw-plugin-contract.test.ts"
-  ],
-  "src/codex-store-adapter.ts": CODEX_STORAGE_INTEGRATION,
-  "src/doctor-capabilities.ts": [
-    "test/cli-ux.test.ts",
-    "test/management-cli.test.ts"
-  ],
-  "src/openclaw-doctor.ts": [
-    "test/openclaw-plugin-contract.test.ts",
-    "test/management-cli.test.ts"
-  ],
-  "src/openclaw-plugin-helpers.ts": OPENCLAW_INTEGRATION,
-  "src/openclaw-plugin.ts": OPENCLAW_INTEGRATION,
-  "src/runtime-log.ts": ["test/runtime-log.test.ts"],
-  "src/session-selector.ts": [
-    "test/delegate-cli.test.ts",
-    "test/session-selector-cli.test.ts",
-    "test/management-cli.test.ts"
-  ],
-  "src/transcript.ts": [
-    "test/callback-cli.test.ts",
-    "test/cli-ux.test.ts"
-  ],
   "openclaw.plugin.json": [
     "test/openclaw-plugin-contract.test.ts",
     "test/install-openclaw-cli.test.ts"
@@ -46,22 +13,15 @@ export const targetedIntegrationByPath = Object.freeze({
   "scripts/bidirectional-delegate.sh": ["test/delegate-cli.test.ts"]
 });
 
-const sharedCorePaths = new Set([
+const sharedNonProductionPaths = new Set([
   "package.json",
   "package-lock.json",
   "tsconfig.json",
   "test/agent-cli-fixtures.ts",
   "test/test-tiers.json",
-  "src/agent-session-provider.ts",
-  "src/claude-local-transcript-provider.ts",
-  "src/codex-local-session-provider.ts",
-  "src/codex-session-provider.ts",
-  "src/executors.ts",
-  "src/herdr-terminal-control-provider.ts",
-  "src/managed-session.ts",
-  "src/protocol.ts",
-  "src/session-store.ts",
-  "src/store.ts"
+  "config/production-module-ownership.json",
+  "scripts/production-module-ownership.js",
+  "scripts/validate-architecture.js"
 ]);
 
 const knownNonRuntimePaths = new Set([
@@ -81,17 +41,6 @@ const knownNonRuntimePaths = new Set([
   "scripts/run-affected-tests.js"
 ]);
 
-function isSharedCorePath(repositoryPath) {
-  if (sharedCorePaths.has(repositoryPath)) {
-    return true;
-  }
-  if (/^src\/cli(?:[./-]|$)/u.test(repositoryPath)) {
-    return true;
-  }
-  return /^src\/(?:.*lifecycle.*|native-thread-.*|terminal-.*|.*-terminal-agent-adapter)\.ts$/u
-    .test(repositoryPath);
-}
-
 function isKnownNonRuntimePath(repositoryPath) {
   return knownNonRuntimePaths.has(repositoryPath) ||
     /^docs\/.*\.(?:md|png|jpe?g|gif|mp4)$/iu.test(repositoryPath);
@@ -101,19 +50,67 @@ export function normalizeRepositoryPath(changedPath) {
   return String(changedPath).replaceAll("\\", "/").replace(/^(?:\.\/)+/u, "");
 }
 
-export function selectAffectedTests(changedPaths, tiers) {
+export function selectAffectedTests(
+  changedPaths,
+  tiers,
+  { productionOwnership, loadProductionOwnership } = {}
+) {
   const normalizedPaths = [...new Set(changedPaths.map(normalizeRepositoryPath))].sort();
   const fastTests = new Set(tiers.fast);
   const integrationTests = new Set(tiers.integration);
   const selectedIntegration = new Set();
+  let ownership = productionOwnership;
+  try {
+    ownership ??= (loadProductionOwnership ?? loadAndValidateProductionModuleOwnership)({
+      tiers
+    });
+  } catch (error) {
+    return {
+      mode: "full",
+      changedPaths: normalizedPaths,
+      reason: `production ownership unavailable: ` +
+        `${error instanceof Error ? error.message : String(error)}`
+    };
+  }
 
   for (const repositoryPath of normalizedPaths) {
-    if (isSharedCorePath(repositoryPath)) {
+    if (sharedNonProductionPaths.has(repositoryPath)) {
       return {
         mode: "full",
         changedPaths: normalizedPaths,
-        reason: `shared core changed: ${repositoryPath}`
+        reason: `shared test or architecture configuration changed: ${repositoryPath}`
       };
+    }
+
+    if (repositoryPath.startsWith("src/")) {
+      const impact = ownership.modules[repositoryPath];
+      if (!impact) {
+        return {
+          mode: "full",
+          changedPaths: normalizedPaths,
+          reason: `production module has no owner: ${repositoryPath}`
+        };
+      }
+      if (impact.selection === "full") {
+        return {
+          mode: "full",
+          changedPaths: normalizedPaths,
+          reason: `production domain requires full suite: ` +
+            `${impact.owner} (${repositoryPath})`
+        };
+      }
+      for (const testPath of impact.integrationTests) {
+        if (!integrationTests.has(testPath)) {
+          return {
+            mode: "full",
+            changedPaths: normalizedPaths,
+            reason: `production ownership is stale: ${testPath} ` +
+              "is not in the integration tier"
+          };
+        }
+        selectedIntegration.add(testPath);
+      }
+      continue;
     }
 
     if (integrationTests.has(repositoryPath)) {

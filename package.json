@@ -73,6 +73,7 @@
     "build": "npm run clean && tsc -p tsconfig.json",
     "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "validate:architecture": "node scripts/validate-architecture.js",
     "test": "npm run test:full",
     "test:fast": "npm run build && node scripts/run-test-tier.js fast",
     "test:integration": "npm run build && node scripts/run-test-tier.js integration",
