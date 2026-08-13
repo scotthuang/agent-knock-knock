@@ -240,6 +240,11 @@ test("terminal bridge monitor singleton rejects a live owner and reclaims a dead
     assert.equal(reconciledParsed.launched, 1);
     assert.equal(reconciledParsed.items[0]?.reason, "unexpected_exit_recovery");
     const replacementPid = Number(reconciledParsed.items[0]?.monitor_pid);
+    assert.equal(
+      Number.isSafeInteger(replacementPid) && replacementPid > 0,
+      true,
+      `expected a concrete replacement monitor pid, got ${String(replacementPid)}`
+    );
     supervisedMonitorPid = replacementPid;
     await waitForCondition(
       () => eventCount(logPath, "terminal_bridge_monitor_started") === 2,
@@ -262,17 +267,25 @@ test("terminal bridge monitor singleton rejects a live owner and reclaims a dead
     assert.ok(managedBinding);
     const managedRevision = Number(managedSession.revision);
     assert.equal(Number.isSafeInteger(managedRevision), true);
-    fs.writeFileSync(
-      managedSessionPath,
-      `${JSON.stringify({
+    saveManagedSession(
+      storeDir,
+      {
         ...managedSession,
-        revision: managedRevision + 1,
         binding: {
           ...managedBinding,
           binding_id: "binding-issue-93-superseded",
           generation: managedBinding.generation + 1
         }
-      }, null, 2)}\n`
+      },
+      { expectedRevision: managedRevision }
+    );
+    await waitForCondition(
+      () =>
+        eventCount(
+          logPath,
+          "terminal_bridge_monitor_binding_superseded"
+        ) === 1,
+      "the replacement monitor to record binding supersession"
     );
     await waitForPidExit(replacementPid);
     supervisedMonitorPid = undefined;
