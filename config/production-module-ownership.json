@@ -133,22 +133,13 @@
       "selection": "full"
     },
     "terminal-dispatch-ledger": {
-      "selection": "targeted",
-      "integration_tests": [
-        "test/codex-no-rollout-binding-cli.test.ts",
-        "test/human-handoff-adoption-cli.test.ts",
-        "test/native-thread-lifecycle-recovery-cli.test.ts",
-        "test/shards/agent-cli-control-locks.test.ts",
-        "test/shards/agent-cli-dispatch-authority.test.ts",
-        "test/shards/agent-cli-dispatch-recovery.test.ts",
-        "test/shards/agent-cli-receipt-fences.test.ts",
-        "test/shards/agent-cli-terminal-send-gates.test.ts"
-      ]
+      "selection": "full"
     },
     "terminal-dispatch-policy": {
       "selection": "targeted",
       "integration_tests": [
         "test/codex-no-rollout-binding-cli.test.ts",
+        "test/shards/agent-cli-composer-replay.test.ts",
         "test/shards/agent-cli-dispatch-authority.test.ts",
         "test/shards/agent-cli-dispatch-recovery.test.ts",
         "test/shards/agent-cli-session-acceptance.test.ts",
