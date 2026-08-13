@@ -184,6 +184,33 @@ test("native thread transition policy selects its exact lifecycle parity set", a
   );
 });
 
+test("terminal dispatch ledger codec selects its exact persistence parity set", async () => {
+  const selection = await loadSelectionModule();
+  const tiers = loadTiers();
+  const expected = [
+    "test/codex-no-rollout-binding-cli.test.ts",
+    "test/human-handoff-adoption-cli.test.ts",
+    "test/native-thread-lifecycle-recovery-cli.test.ts",
+    "test/shards/agent-cli-control-locks.test.ts",
+    "test/shards/agent-cli-dispatch-authority.test.ts",
+    "test/shards/agent-cli-dispatch-recovery.test.ts",
+    "test/shards/agent-cli-receipt-fences.test.ts",
+    "test/shards/agent-cli-terminal-send-gates.test.ts"
+  ];
+  assert.deepEqual(
+    selection.selectAffectedTests([
+      "src/terminal-dispatch-ledger-codec.ts"
+    ], tiers),
+    {
+      mode: "targeted",
+      changedPaths: ["src/terminal-dispatch-ledger-codec.ts"],
+      integrationFiles: tiers.integration.filter((testPath) =>
+        expected.includes(testPath)
+      )
+    }
+  );
+});
+
 test("terminal dispatch policy selects its exact parity integration set", async () => {
   const selection = await loadSelectionModule();
   const tiers = loadTiers();

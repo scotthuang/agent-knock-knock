@@ -186,15 +186,12 @@ import {
 import {
   associateTerminalEndpointEvidence,
   hasCanonicalTerminalEndpoint,
-  sameTerminalControlEvidenceIncarnation,
   sameTerminalControlIncarnation,
   terminalControlEvidence,
   terminalControlEvidenceMatches,
   terminalEndpointFromControlRef,
-  terminalEndpointIdentityFromEvidence,
   terminalEndpointIdentityKey,
   terminalLegacyRuntimeRoute,
-  sameTerminalEndpointIdentity,
   type TerminalControlEvidence
 } from "./terminal-control-ref.js";
 import { createProductionTerminalAgentRegistry } from "./terminal-agent-registry.js";
@@ -260,6 +257,12 @@ import {
   reduceTerminalMonitorActivityPoll,
   reduceTerminalMonitorCompletionPoll
 } from "./terminal-monitor-poll-policy.js";
+import {
+  constructTerminalDispatchLedgerDocument,
+  decodeTerminalDispatchLedgerDocument,
+  terminalDispatchLedgerLooksLifecycle,
+  terminalDispatchReceiptHistory as terminalLedgerReceiptHistory
+} from "./terminal-dispatch-ledger-codec.js";
 import * as dispatch from "./terminal-dispatch-policy.js";
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 10080;
@@ -275,34 +278,6 @@ const CALLBACK_AGENT_WAIT_CLI_TIMEOUT_MS = 25_000;
 const CALLBACK_AGENT_WAIT_PROCESS_TIMEOUT_MS = 30_000;
 const CALLBACK_ATTEMPT_LEASE_MS = 2 * 60 * 1000;
 const CALLBACK_RETRY_DELAYS_MS = [5000, 15000, 60000, 60000];
-const TERMINAL_LEDGER_RECEIPT_STATUSES = new Set([
-  "text_injected",
-  "enter_dispatched",
-  "submitted",
-  "agent_accepted",
-  "not_accepted",
-  "uncertain",
-  "aborted"
-]);
-const TERMINAL_LEDGER_RECEIPT_IMMUTABLE_FIELDS = [
-  "binding_id",
-  "binding_generation",
-  "native_thread_id",
-  "store_dir",
-  "conversation_id",
-  "session_id",
-  "turn_id",
-  "message_id",
-  "message_type",
-  "message_body_hash",
-  "request_hash",
-  "executor_kind",
-  "openclaw_session",
-  "state_path",
-  "event_log_path",
-  "deferred_foreground_transfer_id"
-] as const;
-
 interface CallbackDeliveryOutcome {
   kind: string;
   injection: Record<string, unknown>;
@@ -29157,40 +29132,15 @@ function loadTerminalBridgeDispatchLedger(
   if (stat.isSymbolicLink() || !stat.isFile()) {
     throw new Error(`terminal dispatch ledger is not a regular file: ${ledgerPath}`);
   }
-  const parsed = JSON.parse(fs.readFileSync(ledgerPath, "utf8"));
-  if (
-    !isRecord(parsed) ||
-    !(parsed.version === 1 || parsed.version === 2)
-  ) {
-    throw new Error(`terminal dispatch ledger is invalid: ${ledgerPath}`);
-  }
-  if (parsed.version === 1) {
-    const control = isRecord(parsed.terminal_control)
-      ? parsed.terminal_control
-      : undefined;
-    if (
-      stringValue(parsed.terminal_key) !==
-        legacyTerminalBridgeRuntimeKey(terminalControl) ||
-      stringValue(control?.target) !== terminalControl.target ||
-      (stringValue(control?.socket_path) ?? undefined) !==
-        terminalControl.socketPath
-    ) {
-      throw new Error(`terminal dispatch ledger is invalid: ${ledgerPath}`);
+  return decodeTerminalDispatchLedgerDocument(
+    fs.readFileSync(ledgerPath, "utf8"),
+    {
+      ledgerPath,
+      terminalControl,
+      legacyTerminalKey: legacyTerminalBridgeRuntimeKey(terminalControl),
+      canonicalTerminalKey: terminalBridgeRuntimeKey(terminalControl)
     }
-  } else {
-    const identity = terminalEndpointIdentityFromEvidence(
-      parsed.terminal_endpoint
-    );
-    if (
-      !identity ||
-      stringValue(parsed.terminal_key) !==
-        terminalBridgeRuntimeKey(terminalControl) ||
-      !sameTerminalEndpointIdentity(identity, terminalControl)
-    ) {
-      throw new Error(`terminal dispatch ledger is invalid: ${ledgerPath}`);
-    }
-  }
-  return parsed;
+  );
 }
 
 function terminalDispatchRecordMatchesControl(
@@ -29330,29 +29280,6 @@ function orphanedTerminalDispatchForRecovery(
   }
 }
 
-function terminalDispatchLedgerLooksLifecycle(
-  ledger: Record<string, any> | undefined
-): boolean {
-  return Boolean(
-    ledger &&
-    (
-      ledger.kind === "lifecycle" ||
-      ledger.transition_id !== undefined ||
-      ledger.operation === "new_thread" ||
-      ledger.operation === "resume_thread" ||
-      ledger.operation === "adopt_external_thread" ||
-      ledger.adapter_version !== undefined ||
-      ledger.command_fingerprint !== undefined ||
-      ledger.target_session_id !== undefined ||
-      ledger.before_native_thread_id !== undefined ||
-      ledger.before_process_uuid !== undefined ||
-      ledger.before_process_started_at !== undefined ||
-      ledger.before_process_birth !== undefined ||
-      ledger.before_process_rollout !== undefined
-    )
-  );
-}
-
 function lifecycleLedgerFields(
   transition: NativeThreadTransition,
   storeDir: string
@@ -29444,191 +29371,6 @@ function saveLifecycleTerminalDispatchLedger(
   saveTerminalBridgeDispatchLedger(terminalControl, ledger);
 }
 
-function terminalLedgerReceiptHistory(
-  ledger: Record<string, any> | undefined
-): Record<string, any>[] {
-  if (!ledger) {
-    return [];
-  }
-  const value = ledger.terminal_submission_receipts;
-  if (value !== undefined && !Array.isArray(value)) {
-    throw new Error("terminal dispatch receipt history is malformed");
-  }
-  const receipts = (Array.isArray(value) ? value : []).map((receipt) => {
-    if (!isRecord(receipt) || !stringValue(receipt.message_id)) {
-      throw new Error("terminal dispatch receipt history is malformed");
-    }
-    return receipt;
-  });
-  const ids = new Set<string>();
-  for (const receipt of receipts) {
-    const id = String(receipt.message_id);
-    if (ids.has(id)) {
-      throw new Error(`terminal dispatch receipt ${id} is duplicated`);
-    }
-    ids.add(id);
-  }
-  const current = terminalLedgerReceiptCandidate(ledger);
-  const currentId = stringValue(current?.message_id);
-  if (!current || !currentId) {
-    return receipts;
-  }
-  const previous = receipts.find((receipt) =>
-    stringValue(receipt.message_id) === currentId
-  );
-  if (!previous) {
-    return [...receipts, current];
-  }
-  // A resolved top-level ledger may already point at a replacement tmux pane.
-  // Resolution cannot strengthen or rebind an existing submission receipt, so
-  // its append-only historical copy remains authoritative.
-  if (ledger.status === "resolved") {
-    return receipts;
-  }
-  const merged = mergeTerminalLedgerReceipt(previous, current);
-  return receipts.map((receipt) =>
-    stringValue(receipt.message_id) === currentId ? merged : receipt
-  );
-}
-
-function terminalLedgerReceiptCandidate(
-  ledger: Record<string, any>
-): Record<string, any> | undefined {
-  const storedStatus = String(ledger.status);
-  const receiptStatus = TERMINAL_LEDGER_RECEIPT_STATUSES.has(storedStatus)
-    ? storedStatus
-    : storedStatus === "resolved" && ledger.agent_accepted_at
-      ? "agent_accepted"
-      : storedStatus === "resolved" && ledger.uncertain_at
-        ? "uncertain"
-        : storedStatus === "resolved" && ledger.not_accepted_at
-          ? "not_accepted"
-          : storedStatus === "resolved" && ledger.aborted_at
-            ? "aborted"
-            : storedStatus === "resolved" && ledger.enter_dispatched_at
-              ? "enter_dispatched"
-              : storedStatus === "resolved" && ledger.submitted_at
-                ? "submitted"
-                : undefined;
-  if (
-    terminalDispatchLedgerLooksLifecycle(ledger) ||
-    !receiptStatus ||
-    !stringValue(ledger.message_id)
-  ) {
-    return undefined;
-  }
-  const {
-    terminal_submission_receipts: _history,
-    terminal_key: _terminalKey,
-    version: _version,
-    ...receipt
-  } = ledger;
-  return { ...receipt, status: receiptStatus };
-}
-
-function mergeTerminalLedgerReceipt(
-  previous: Record<string, any>,
-  next: Record<string, any>
-): Record<string, any> {
-  const messageId = required(
-    stringValue(previous.message_id),
-    "terminal dispatch receipt message id is required"
-  );
-  const safeAbortRetryGeneration = Boolean(
-    previous.status === "aborted" &&
-    previous.safe_to_retry === true &&
-    stringValue(next.message_id) === messageId &&
-    stringValue(next.previous_generation_id) === messageId &&
-    [
-      "text_injected",
-      "enter_dispatched",
-      "submitted",
-      "agent_accepted",
-      "not_accepted",
-      "uncertain",
-      "aborted"
-    ].includes(String(next.status)) &&
-    validTimestampMs(previous.aborted_at) !== undefined &&
-    validTimestampMs(next.prepared_at) !== undefined &&
-    Date.parse(String(next.prepared_at)) >=
-      Date.parse(String(previous.aborted_at))
-  );
-  if (safeAbortRetryGeneration) {
-    // A proved zero-input abort intentionally allows the same OpenClaw
-    // idempotency key to start one fresh Turn/Session generation. The old
-    // Turn and, for v3, its abort_resolved transfer retain that immutable
-    // proof; the terminal-wide singleton receipt advances to the retry so its
-    // different binding/Turn identity cannot collide with the abandoned
-    // zero-input generation.
-    return next;
-  }
-  for (const field of TERMINAL_LEDGER_RECEIPT_IMMUTABLE_FIELDS) {
-    const previousValue = previous[field];
-    const nextValue = next[field];
-    if (
-      previousValue !== undefined &&
-      nextValue !== undefined &&
-      canonicalJson(previousValue) !== canonicalJson(nextValue)
-    ) {
-      throw new Error(
-        `terminal dispatch receipt ${messageId} changed immutable ${field}`
-      );
-    }
-  }
-  const previousControl = isRecord(previous.terminal_control)
-    ? previous.terminal_control
-    : undefined;
-  const nextControl = isRecord(next.terminal_control)
-    ? next.terminal_control
-    : undefined;
-  const previousEvidence = previous.terminal_endpoint ?? previousControl;
-  const nextEvidence = next.terminal_endpoint ?? nextControl;
-  if (
-    previousEvidence !== undefined &&
-    nextEvidence !== undefined &&
-    !sameTerminalControlEvidenceIncarnation(
-      previousEvidence,
-      nextEvidence
-    )
-  ) {
-    throw new Error(
-      `terminal dispatch receipt ${messageId} changed immutable terminal_control`
-    );
-  }
-  if (
-    previous.status === "agent_accepted" &&
-    next.status !== "agent_accepted"
-  ) {
-    return previous;
-  }
-  const previousIsTerminalFailure = [
-    "not_accepted",
-    "uncertain",
-    "aborted"
-  ].includes(String(previous.status)) && previous.safe_to_retry !== true;
-  const nextIsTransportOnly = [
-    "text_injected",
-    "enter_dispatched",
-    "submitted"
-  ].includes(String(next.status));
-  if (previousIsTerminalFailure && nextIsTransportOnly) {
-    return previous;
-  }
-  const merged = { ...next };
-  for (const field of TERMINAL_LEDGER_RECEIPT_IMMUTABLE_FIELDS) {
-    if (merged[field] === undefined && previous[field] !== undefined) {
-      merged[field] = previous[field];
-    }
-  }
-  if (!merged.terminal_control && previousControl) {
-    merged.terminal_control = previousControl;
-  }
-  if (!merged.terminal_endpoint && previous.terminal_endpoint) {
-    merged.terminal_endpoint = previous.terminal_endpoint;
-  }
-  return merged;
-}
-
 function saveTerminalBridgeDispatchLedger(
   terminalControl: TerminalControlRef,
   ledger: Record<string, unknown>
@@ -29668,38 +29410,16 @@ function saveTerminalBridgeDispatchLedger(
   if (fs.existsSync(ledgerPath) && fs.lstatSync(ledgerPath).isSymbolicLink()) {
     throw new Error(`terminal dispatch ledger is a symlink: ${ledgerPath}`);
   }
-  let baseReceiptHistory = terminalLedgerReceiptHistory(previousLedger);
-  for (const incomingReceipt of terminalLedgerReceiptHistory(
-    ledger as Record<string, any>
-  )) {
-    const incomingId = String(incomingReceipt.message_id);
-    const previousReceipt = baseReceiptHistory.find((receipt) =>
-      stringValue(receipt.message_id) === incomingId
-    );
-    const merged = previousReceipt
-      ? mergeTerminalLedgerReceipt(previousReceipt, incomingReceipt)
-      : incomingReceipt;
-    baseReceiptHistory = previousReceipt
-      ? baseReceiptHistory.map((receipt) =>
-          stringValue(receipt.message_id) === incomingId ? merged : receipt
-        )
-      : [...baseReceiptHistory, merged];
-  }
-  const {
-    terminal_submission_receipts: _incomingReceiptHistory,
-    terminal_endpoint: incomingTerminalEndpoint,
-    ...ledgerWithoutReceiptHistory
-  } = ledger;
-  const nextWithoutHistory = {
-    ...ledgerWithoutReceiptHistory,
-    version:
-      hasCanonicalTerminalEndpoint(terminalControl) && !preserveLegacyFormat
-        ? 2
-        : 1,
-    terminal_key: preserveLegacyFormat
+  const useCanonicalFormat =
+    hasCanonicalTerminalEndpoint(terminalControl) && !preserveLegacyFormat;
+  const nextLedger = constructTerminalDispatchLedgerDocument({
+    previousLedger,
+    incomingLedger: ledger,
+    version: useCanonicalFormat ? 2 : 1,
+    terminalKey: preserveLegacyFormat
       ? legacyTerminalBridgeRuntimeKey(terminalControl)
       : terminalBridgeRuntimeKey(terminalControl),
-    terminal_control: {
+    terminalControl: {
       kind: terminalControl.kind,
       target: terminalControl.target,
       socket_path: terminalControl.socketPath ?? null,
@@ -29716,58 +29436,10 @@ function saveTerminalBridgeDispatchLedger(
           }
         : {})
     },
-    ...(hasCanonicalTerminalEndpoint(terminalControl) && !preserveLegacyFormat
-      ? { terminal_endpoint: terminalControlEvidence(terminalControl) }
+    ...(useCanonicalFormat
+      ? { terminalEndpoint: terminalControlEvidence(terminalControl) }
       : {})
-  };
-  // The top-level ledger follows the current tmux pane incarnation, while an
-  // append-only receipt must retain the pane that actually accepted its
-  // input.  Reconciliation may save an old ledger through a newly-created
-  // pane with the same selector, so derive that receipt from the caller's
-  // original control record instead of silently rebinding its proof.
-  const receiptCandidateLedger = isRecord(
-    ledgerWithoutReceiptHistory.terminal_control
-  )
-    ? (() => {
-        const {
-          terminal_endpoint: _derivedTerminalEndpoint,
-          ...nextWithoutDerivedTerminalEndpoint
-        } = nextWithoutHistory;
-        return {
-          ...nextWithoutDerivedTerminalEndpoint,
-          terminal_control: ledgerWithoutReceiptHistory.terminal_control,
-          ...(incomingTerminalEndpoint && !preserveLegacyFormat
-            ? { terminal_endpoint: incomingTerminalEndpoint }
-            : {})
-        };
-      })()
-    : nextWithoutHistory;
-  const nextCandidate = terminalLedgerReceiptCandidate(
-    receiptCandidateLedger
-  );
-  let nextReceiptHistory = baseReceiptHistory;
-  if (nextCandidate) {
-    const messageId = String(nextCandidate.message_id);
-    const previousReceipt = baseReceiptHistory.find((receipt) =>
-      stringValue(receipt.message_id) === messageId
-    );
-    const nextReceipt = previousReceipt
-      ? mergeTerminalLedgerReceipt(previousReceipt, nextCandidate)
-      : nextCandidate;
-    nextReceiptHistory = previousReceipt
-      ? baseReceiptHistory.map((receipt) =>
-          stringValue(receipt.message_id) === messageId
-            ? nextReceipt
-            : receipt
-        )
-      : [...baseReceiptHistory, nextReceipt];
-  }
-  const nextLedger = {
-    ...nextWithoutHistory,
-    ...(nextReceiptHistory.length > 0
-      ? { terminal_submission_receipts: nextReceiptHistory }
-      : {})
-  };
+  });
   const tempPath = `${ledgerPath}.${cliPid()}.${randomUUID()}.tmp`;
   let tempFd: number | undefined;
   try {

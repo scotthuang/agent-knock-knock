@@ -2,7 +2,7 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 37808,
+    "cli_core_max_physical_loc": 37480,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -131,6 +131,19 @@
     },
     "terminal-dispatch-core": {
       "selection": "full"
+    },
+    "terminal-dispatch-ledger": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/codex-no-rollout-binding-cli.test.ts",
+        "test/human-handoff-adoption-cli.test.ts",
+        "test/native-thread-lifecycle-recovery-cli.test.ts",
+        "test/shards/agent-cli-control-locks.test.ts",
+        "test/shards/agent-cli-dispatch-authority.test.ts",
+        "test/shards/agent-cli-dispatch-recovery.test.ts",
+        "test/shards/agent-cli-receipt-fences.test.ts",
+        "test/shards/agent-cli-terminal-send-gates.test.ts"
+      ]
     },
     "terminal-dispatch-policy": {
       "selection": "targeted",
@@ -315,6 +328,10 @@
     {
       "path": "src/terminal-control-ref.ts",
       "owner": "terminal-control"
+    },
+    {
+      "path": "src/terminal-dispatch-ledger-codec.ts",
+      "owner": "terminal-dispatch-ledger"
     },
     {
       "path": "src/terminal-dispatch-policy.ts",

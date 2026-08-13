@@ -377,6 +377,30 @@ and target eligibility, and reconciliation. Affected-test selection binds this
 module to `codex-no-rollout-binding-cli`, `human-handoff-adoption-cli`,
 `native-thread-lifecycle-cli`, and `native-thread-lifecycle-recovery-cli`.
 
+### Initial dispatch-ledger codec slice
+
+PR4b introduces `terminal-dispatch-ledger-codec.ts` as a pure document codec
+and append-only receipt reducer. It owns v1/v2 in-memory document validation,
+lifecycle-document classification, receipt history validation/candidate
+projection/strength-preserving merge, and construction of the next JSON
+document. This lowers `cli-core.ts` from 37,809 to 37,481 physical lines.
+
+The shell still chooses canonical and legacy runtime keys and paths and owns
+every filesystem observation and effect: dual-path conflict checks, symlink and
+regular-file fences, reads, promotion rename, directory fsync, exclusive temp
+creation, chmod, write/fsync, atomic rename, and cleanup. The codec receives
+already-read bytes and precomputed document identity. Native `JSON.parse`
+failures, invalid-ledger text, v1/v2 field presence and insertion order,
+historical terminal-incarnation evidence, immutable receipt fields, strongest
+receipt proof, and the one proven-safe abort retry generation remain unchanged.
+
+Focused tables characterize malformed and duplicate histories, every lifecycle
+discriminator and receipt status, immutable-field and terminal-incarnation
+conflicts, proof downgrade prevention, safe-abort chronology, and v1/v2 JSON
+ordering. The affected integration map covers dispatch authority, recovery,
+receipt fences, terminal send gates, control locks, Codex no-rollout binding,
+handoff adoption, and native lifecycle recovery.
+
 ## Immutable public and safety contracts
 
 The refactor must preserve all of the following unless a separate product issue
