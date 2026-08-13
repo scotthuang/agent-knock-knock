@@ -140,6 +140,27 @@ test("callback outbox policy selects retry, recovery, and plugin parity coverage
   );
 });
 
+test("terminal monitor poll policy selects its timeout and recovery parity set", async () => {
+  const selection = await loadSelectionModule();
+  const tiers = loadTiers();
+  const expected = [
+    "test/shards/agent-cli-claude-callback.test.ts",
+    "test/shards/agent-cli-monitor-recovery.test.ts",
+    "test/shards/agent-cli-monitor-lifecycle.test.ts",
+    "test/shards/agent-cli-session-acceptance.test.ts"
+  ];
+  assert.deepEqual(
+    selection.selectAffectedTests(["src/terminal-monitor-poll-policy.ts"], tiers),
+    {
+      mode: "targeted",
+      changedPaths: ["src/terminal-monitor-poll-policy.ts"],
+      integrationFiles: tiers.integration.filter((testPath) =>
+        expected.includes(testPath)
+      )
+    }
+  );
+});
+
 test("an integration test selects itself while fast and documentation changes still use fast only", async () => {
   const selection = await loadSelectionModule();
   const tiers = loadTiers();

@@ -245,6 +245,11 @@ import {
   reduceCallbackRetryPolicy,
   type CallbackRetryDisposition
 } from "./callback-outbox-policy.js";
+import {
+  decideTerminalMonitorTimeout,
+  reduceTerminalMonitorActivityPoll,
+  reduceTerminalMonitorCompletionPoll
+} from "./terminal-monitor-poll-policy.js";
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 10080;
 const DEFAULT_AGENT_TIMEOUT_MINUTES = 60;
@@ -27561,8 +27566,7 @@ async function runTerminalBridgeMonitorWithLock(
   const preSendScreenFingerprint = stringValue(
     initialNativeTakeover?.["terminal_bridge_pre_send_screen_fingerprint"]
   );
-  let previousScreenFingerprint: string | undefined = preSendScreenFingerprint;
-  let previousDurableFingerprint: string | undefined;
+  let pollPolicyState = { previousScreenFingerprint: preSendScreenFingerprint };
   let persistedActivityReason = stringValue(initialNativeTakeover?.["terminal_bridge_last_activity_reason"]);
   const initialDetectorDiagnostic = isRecord(
     initialNativeTakeover?.["terminal_bridge_detector_diagnostic"]
@@ -27607,7 +27611,6 @@ async function runTerminalBridgeMonitorWithLock(
     lifecycle.startedRecorded = true;
   }
 
-  let idleCompletionFingerprint: string | undefined;
   let bindingCheckDeferredAttempts = 0;
   let bindingCheckFirstDeferredAt: string | undefined;
   while (true) {
@@ -28104,8 +28107,8 @@ async function runTerminalBridgeMonitorWithLock(
       }
     }
     const screenChangedSinceSend = preSendScreenFingerprint !== undefined &&
-      previousScreenFingerprint !== undefined &&
-      previousScreenFingerprint !== preSendScreenFingerprint;
+      pollPolicyState.previousScreenFingerprint !== undefined &&
+      pollPolicyState.previousScreenFingerprint !== preSendScreenFingerprint;
     let poll;
     const expectedUpdatedAt = conversation.updated_at;
     const expectedStatus = conversation.status;
@@ -28328,7 +28331,7 @@ async function runTerminalBridgeMonitorWithLock(
       approval.decision_mode === "keys" &&
       !currentScreenChangedSinceSend
     ) {
-      previousScreenFingerprint = currentScreenFingerprint;
+      pollPolicyState = { ...pollPolicyState, previousScreenFingerprint: currentScreenFingerprint };
       suppressApprovalNotification = true;
       runtimeLog("warn", "claude_screen_approval_not_new", {
         conversation_id: conversation.conversation_id,
@@ -28402,7 +28405,7 @@ async function runTerminalBridgeMonitorWithLock(
         consumedPromptWithoutEvidenceBeforeClear ||
         legacySameConsumedApproval
       ) {
-        previousScreenFingerprint = currentScreenFingerprint;
+        pollPolicyState = { ...pollPolicyState, previousScreenFingerprint: currentScreenFingerprint };
         suppressApprovalNotification = true;
         runtimeLog("info", "claude_consumed_approval_screen_still_visible", {
           conversation_id: conversation.conversation_id,
@@ -28519,7 +28522,7 @@ async function runTerminalBridgeMonitorWithLock(
         }
       });
       if (notification.stale) {
-        previousScreenFingerprint = currentScreenFingerprint;
+        pollPolicyState = { ...pollPolicyState, previousScreenFingerprint: currentScreenFingerprint };
         sleepSync(pollIntervalMs);
         continue;
       }
@@ -28649,7 +28652,7 @@ async function runTerminalBridgeMonitorWithLock(
         }
       });
       if (notification.stale) {
-        previousScreenFingerprint = currentScreenFingerprint;
+        pollPolicyState = { ...pollPolicyState, previousScreenFingerprint: currentScreenFingerprint };
         sleepSync(pollIntervalMs);
         continue;
       }
@@ -28702,9 +28705,7 @@ async function runTerminalBridgeMonitorWithLock(
           ) === fingerprint;
         if (approvalWasConsumed) {
           conversation = afterCallback;
-          previousScreenFingerprint = currentScreenFingerprint;
-          previousDurableFingerprint = undefined;
-          idleCompletionFingerprint = undefined;
+          pollPolicyState = { previousScreenFingerprint: currentScreenFingerprint };
           lastActivityAtMs =
             validTimestampMs(
               afterTakeover?.terminal_bridge_last_activity_at
@@ -28740,12 +28741,6 @@ async function runTerminalBridgeMonitorWithLock(
       return;
     }
 
-    const screenFingerprint = currentScreenFingerprint;
-    const screenChanged = previousScreenFingerprint !== undefined &&
-      screenFingerprint !== undefined &&
-      screenFingerprint !== previousScreenFingerprint;
-    previousScreenFingerprint = screenFingerprint;
-
     const durableCompletion = poll.durableCompletion;
     const durableFingerprint = durableCompletion
       ? terminalBridgeActivityFingerprint(JSON.stringify({
@@ -28755,18 +28750,18 @@ async function runTerminalBridgeMonitorWithLock(
           metadata: durableCompletion.metadata
         }))
       : undefined;
-    const durableChanged = durableFingerprint !== undefined && durableFingerprint !== previousDurableFingerprint;
-    previousDurableFingerprint = durableFingerprint;
-
-    const activityReasons = [
-      terminalStatus.activity_state === "working" ? terminalStatus.activity_reason : undefined,
-      screenChanged ? "terminal screen changed" : undefined,
-      durableChanged ? "durable completion evidence changed" : undefined
-    ].filter((value): value is string => Boolean(value));
-    if (activityReasons.length > 0) {
+    const activityPollDecision = reduceTerminalMonitorActivityPoll({
+      state: pollPolicyState,
+      activityState: terminalStatus.activity_state,
+      activityReason: terminalStatus.activity_reason,
+      screenFingerprint: currentScreenFingerprint,
+      durableFingerprint
+    });
+    pollPolicyState = activityPollDecision.state;
+    if (activityPollDecision.activityReason !== undefined) {
       const observedAtMs = cliNowMs();
       lastActivityAtMs = observedAtMs;
-      const activityReason = activityReasons.join("; ");
+      const activityReason = activityPollDecision.activityReason;
       if (
         persistedActivityReason === undefined ||
         observedAtMs - lastPersistedActivityAtMs >= activityPersistIntervalMs
@@ -28807,9 +28802,13 @@ async function runTerminalBridgeMonitorWithLock(
         }))
         .digest("hex")
       : undefined;
-    const completionStable = completionFingerprint !== undefined && completionFingerprint === idleCompletionFingerprint;
-    idleCompletionFingerprint = completionFingerprint;
-    if (completion && completionStable && completionFingerprint) {
+    const completionPollDecision = reduceTerminalMonitorCompletionPoll({
+      state: pollPolicyState,
+      completionPresent: Boolean(completion),
+      completionFingerprint
+    });
+    pollPolicyState = completionPollDecision.state;
+    if (completion && completionPollDecision.completionStable && completionFingerprint) {
       const preparedCompletion = prepareTerminalBridgeCompletionCallback({
         options,
         statePath,
@@ -28840,7 +28839,7 @@ async function runTerminalBridgeMonitorWithLock(
     // process may exit immediately after committing its final transcript, so
     // only classify the Turn as orphaned after this poll (and an independent
     // durable probe under the mutation locks) both find no completion.
-    if (!completion) {
+    if (completionPollDecision.checkVerifiedDeadAgent) {
       const deadProcessStall = await stallAcceptedTurnForVerifiedDeadAgent({
         options,
         storeDir: pathsForConversationDir(path.dirname(statePath)).storeDir,
@@ -28879,11 +28878,14 @@ async function runTerminalBridgeMonitorWithLock(
 
     // A concrete approval or completion observed on this poll wins over a timeout boundary.
     const nowMs = cliNowMs();
-    if (
-      Number.isFinite(hardTimeoutMinutes) &&
-      hardTimeoutMinutes > 0 &&
-      nowMs - taskStartedAtMs >= hardTimeoutMinutes * 60 * 1000
-    ) {
+    const timeoutDecision = decideTerminalMonitorTimeout({
+      nowMs,
+      taskStartedAtMs,
+      lastActivityAtMs,
+      hardTimeoutMinutes,
+      inactivityTimeoutMinutes: timeoutMinutes
+    });
+    if (timeoutDecision.kind === "hard") {
       appendEvent(logPath, {
         ts: new Date(nowMs).toISOString(),
         conversation_id: conversation.conversation_id,
@@ -28919,31 +28921,29 @@ async function runTerminalBridgeMonitorWithLock(
       return;
     }
 
-    if (Number.isFinite(timeoutMinutes) && timeoutMinutes > 0) {
-      if (nowMs - lastActivityAtMs >= timeoutMinutes * 60 * 1000) {
-        const stalledConversation = markConversationStalled({
-          statePath,
-          logPath,
-          reason: `terminal bridge observed no activity for ${timeoutMinutes} minutes`,
-          detail: {
-            terminal_bridge: true,
-            terminal_control: terminalControl,
-            match: completionMetadata.context_match,
-            terminal_activity_state: terminalStatus.activity_state,
-            last_activity_at: new Date(lastActivityAtMs).toISOString(),
-            inactivity_deadline_at: new Date(lastActivityAtMs + timeoutMinutes * 60 * 1000).toISOString(),
-            agent_timeout_minutes: timeoutMinutes
-          }
-        });
-        printJson({
-          conversation: stalledConversation,
-          monitored: true,
+    if (timeoutDecision.kind === "inactivity") {
+      const stalledConversation = markConversationStalled({
+        statePath,
+        logPath,
+        reason: `terminal bridge observed no activity for ${timeoutMinutes} minutes`,
+        detail: {
           terminal_bridge: true,
-          stalled: true,
-          reason: stalledConversation?.stalled_reason
-        });
-        return;
-      }
+          terminal_control: terminalControl,
+          match: completionMetadata.context_match,
+          terminal_activity_state: terminalStatus.activity_state,
+          last_activity_at: new Date(lastActivityAtMs).toISOString(),
+          inactivity_deadline_at: new Date(timeoutDecision.deadlineAtMs).toISOString(),
+          agent_timeout_minutes: timeoutMinutes
+        }
+      });
+      printJson({
+        conversation: stalledConversation,
+        monitored: true,
+        terminal_bridge: true,
+        stalled: true,
+        reason: stalledConversation?.stalled_reason
+      });
+      return;
     }
 
     sleepSync(pollIntervalMs);

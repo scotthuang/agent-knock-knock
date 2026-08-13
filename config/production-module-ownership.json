@@ -123,6 +123,15 @@
     "terminal-dispatch-core": {
       "selection": "full"
     },
+    "terminal-monitor-policy": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/shards/agent-cli-claude-callback.test.ts",
+        "test/shards/agent-cli-monitor-recovery.test.ts",
+        "test/shards/agent-cli-monitor-lifecycle.test.ts",
+        "test/shards/agent-cli-session-acceptance.test.ts"
+      ]
+    },
     "transcript": {
       "selection": "targeted",
       "integration_tests": [
@@ -283,6 +292,10 @@
     {
       "path": "src/terminal-control-ref.ts",
       "owner": "terminal-control"
+    },
+    {
+      "path": "src/terminal-monitor-poll-policy.ts",
+      "owner": "terminal-monitor-policy"
     },
     {
       "path": "src/terminal-process-source.ts",
