@@ -100,7 +100,6 @@ test("an active managed task blocks a follow-up before tmux input", () => {
     ], testEnv);
     assert.equal(first.status, 0, first.stderr || first.stdout);
     const firstParsed = JSON.parse(first.stdout);
-    const managedSessionId = firstParsed.conversation.session_id;
     const statePath = firstParsed.conversation.state_path;
     const firstMessageId =
       firstParsed.conversation.native_session_takeover
@@ -115,8 +114,8 @@ test("an active managed task blocks a follow-up before tmux input", () => {
     );
     const second = runAgentCli([
       "send",
-      "--session",
-      managedSessionId,
+      "--conversation",
+      rawConversationId,
       "--message",
       "Second managed task",
       "--background",
@@ -229,8 +228,8 @@ test("managed pre-submit setup failure restores the previous boundary and is ret
     );
     const secondArgs = [
       "send",
-      "--session",
-      managedSessionId,
+      "--conversation",
+      rawConversationId,
       "--message",
       "Second managed task",
       "--message-id",
@@ -362,7 +361,24 @@ test("managed pre-submit setup failure restores the previous boundary and is ret
       `${JSON.stringify(secondState, null, 2)}\n`
     );
 
-    const retried = runAgentCli(secondArgs, testEnv);
+    const retryArgs = [
+      "delegate",
+      "--request",
+      "Second managed task",
+      "--message-id",
+      stableRetryMessageId,
+      "--workspace",
+      workspace,
+      "--store-dir",
+      storeDir,
+      "--idle-timeout-minutes",
+      "0",
+      "--openclaw-bin",
+      "/usr/bin/true",
+      ...nativeIdentityArgs,
+      "--disable-terminal-bridge-monitor"
+    ];
+    const retried = runAgentCli(retryArgs, testEnv);
     assert.equal(retried.status, 0, retried.stderr || retried.stdout);
     const retriedParsed = JSON.parse(retried.stdout);
     assert.equal(retriedParsed.delivered, true);
@@ -377,7 +393,7 @@ test("managed pre-submit setup failure restores the previous boundary and is ret
       entersBefore + 1,
       "a same-key retry after a proven pre-tmux abort dispatches Enter exactly once"
     );
-    const replayedRetry = runAgentCli(secondArgs, testEnv);
+    const replayedRetry = runAgentCli(retryArgs, testEnv);
     assert.equal(
       replayedRetry.status,
       0,
@@ -407,8 +423,8 @@ test("managed pre-submit setup failure restores the previous boundary and is ret
     const unsafeMessageId = `msg-openclaw-${"8".repeat(64)}`;
     const unsafeAbort = runAgentCli([
       "send",
-      "--session",
-      managedSessionId,
+      "--conversation",
+      rawConversationId,
       "--message",
       "Third managed task",
       "--message-id",

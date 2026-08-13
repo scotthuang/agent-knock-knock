@@ -239,10 +239,11 @@ test("terminal bridge monitor trusts matching task_complete despite stale workin
       keysBeforeStaleActions
     );
 
+    fs.writeFileSync(screenPath, "› \n");
     const followUp = runAgentCli([
       "send",
-      "--session",
-      parsed.conversation.session_id,
+      "--conversation",
+      rawConversationId,
       "--message",
       "Now summarize the release notes",
       "--background",

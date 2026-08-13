@@ -25,6 +25,20 @@ import {
   pathsForManagedSession,
   saveManagedSession
 } from "../src/session-store.js";
+import type {
+  ActiveAgentSessionIdentity,
+  CodexOpenRootRolloutInventory
+} from "../src/agent-session-provider.js";
+import type {
+  CodexLocalSessionAdapter
+} from "../src/codex-local-session-provider.js";
+import {
+  createTerminalEndpointRef,
+  terminalControlEvidence,
+  tmuxTerminalRouteKey,
+  type TerminalControlRef
+} from "../src/terminal-control-ref.js";
+import { runInProcessCli } from "./in-process-cli-fixtures.js";
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 const testRuntimeDir = fs.mkdtempSync(
@@ -992,7 +1006,7 @@ test("a cross-store terminal owner is visible but never advertised as locally ac
   }
 });
 
-test("multiple idle turns stay terminal history while the pane short ref routes to its managed session", () => {
+test("multiple idle turns stay terminal history while the pane advertises a fenced follow-current send", async () => {
   const tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-selector-cli-terminal-history-")
   );
@@ -1001,19 +1015,47 @@ test("multiple idle turns stay terminal history while the pane short ref routes 
   const terminalTarget = "codex-history:0.0";
   const codexPid = 2222;
   const managedSessionId = "session-selector-history";
+  const stableTerminalIdentity = {
+    serverSocketPath: path.join(tempDir, "tmux-server.sock"),
+    paneId: "%42"
+  };
   const nativeIdentity = codexNativeIdentityFixture({
     workspace,
     codexPid
   });
+  nativeIdentity.processUuid =
+    `codex-pid:${codexPid}:birth:${nativeIdentity.processBirth}`;
+  nativeIdentity.rollout.device = "16777231";
+  nativeIdentity.rollout.inode = String(100_000 + codexPid);
   const runtimeArgs = codexTerminalStaticArgs({
     workspace,
     terminalTarget,
     codexPid,
-    screen: "› Ready for the next task\n\ngpt-5.6-sol high · /repo"
+    screen: "› \u001b[2mReady for the next task\u001b[22m\n\ngpt-5.6-sol high · /repo",
+    ...stableTerminalIdentity
   });
 
   try {
     fs.mkdirSync(workspace, { recursive: true });
+    fs.mkdirSync(path.dirname(nativeIdentity.rollout.path), {
+      recursive: true
+    });
+    fs.writeFileSync(
+      nativeIdentity.rollout.path,
+      `${JSON.stringify({
+        timestamp: "2026-07-28T00:00:00.000Z",
+        type: "session_meta",
+        payload: {
+          id: nativeIdentity.sessionId,
+          cwd: workspace,
+          originator: "codex-tui",
+          source: "cli"
+        }
+      })}\n`
+    );
+    const rolloutStat = fs.statSync(nativeIdentity.rollout.path);
+    nativeIdentity.rollout.device = String(rolloutStat.dev);
+    nativeIdentity.rollout.inode = String(rolloutStat.ino);
     const older = storeConversationFixture({
       storeDir,
       request: "Older completed turn",
@@ -1038,9 +1080,16 @@ test("multiple idle turns stay terminal history while the pane short ref routes 
         workspace
       );
       state.status = "idle";
+      state.gateway_method = undefined;
+      state.gateway_session = undefined;
+      delete state.callback_delivery;
       state.workspace = workspace;
       state.idle_since = timestamp;
       state.updated_at = timestamp;
+      const terminalControl = {
+        ...takeover.terminal_control,
+        ...terminalPane(terminalTarget, workspace)
+      } as TerminalControlRef;
       state.native_session_takeover = {
         ...takeover,
         terminal_agent_pid: codexPid,
@@ -1051,10 +1100,11 @@ test("multiple idle turns stay terminal history while the pane short ref routes 
         terminal_agent_identity_evidence: nativeIdentity.evidence,
         native_session_id:
           `terminal:v2:tmux:codex:${terminalTarget}:${codexPid}`,
-        terminal_control: {
-          ...takeover.terminal_control,
-          ...terminalPane(terminalTarget, workspace)
-        }
+        terminal_control: terminalControl,
+        terminal_endpoint: canonicalTmuxTerminalEndpointEvidence(
+          terminalControl,
+          stableTerminalIdentity
+        )
       };
       saveState(fixture.paths.statePath, state);
     }
@@ -1063,13 +1113,26 @@ test("multiple idle turns stay terminal history while the pane short ref routes 
       loadState(newer.paths.statePath)
     ]);
     saveManagedSession(storeDir, managedSession, { expectedRevision: null });
+    for (const fixture of [older, newer]) {
+      const state = loadState(fixture.paths.statePath);
+      saveState(fixture.paths.statePath, {
+        ...state,
+        terminal_binding_id: managedSession.binding?.binding_id,
+        terminal_binding_generation: managedSession.binding?.generation,
+        native_thread_id: managedSession.binding?.native_thread_id
+      });
+    }
 
-    const listed = runCli([
+    const listed = await runCliWithCodexInventory([
       "list",
       "--store-dir",
       storeDir,
       ...runtimeArgs
-    ]);
+    ], {
+      codexPid,
+      nativeIdentity,
+      workspace
+    });
     assert.equal(listed.terminals.length, 1);
     assert.deepEqual(listed.unavailable_managed_turns, []);
     const terminal = listed.terminals[0];
@@ -1088,9 +1151,18 @@ test("multiple idle turns stay terminal history while the pane short ref routes 
     assert.equal(terminal.managed.turn_count, 2);
     assert.equal(terminal.managed.hidden_turn_count, 1);
     assert.equal("history" in terminal.managed, false);
-    assert.deepEqual(
-      terminal.available_actions.send.arguments,
-      { session_id: managedSessionId }
+    assert.equal(
+      terminal.available_actions.send.arguments.selector,
+      terminal.id
+    );
+    assert.equal(
+      typeof terminal.available_actions.send.arguments
+        .expected_terminal_token,
+      "string"
+    );
+    assert.equal(
+      terminal.available_actions.send.arguments.session_id,
+      undefined
     );
 
     const restarted = runCli([
@@ -1101,7 +1173,8 @@ test("multiple idle turns stay terminal history while the pane short ref routes 
         workspace,
         terminalTarget,
         codexPid: codexPid + 1,
-        screen: "› Ready for the next task\n\ngpt-5.6-sol high · /repo"
+        screen: "› \u001b[2mReady for the next task\u001b[22m\n\ngpt-5.6-sol high · /repo",
+        ...stableTerminalIdentity
       })
     ]);
     assert.equal(
@@ -1121,13 +1194,17 @@ test("multiple idle turns stay terminal history while the pane short ref routes 
       { selector: restarted.terminals[0].id }
     );
 
-    const listedAll = runCli([
+    const listedAll = await runCliWithCodexInventory([
       "list",
       "--all",
       "--store-dir",
       storeDir,
       ...runtimeArgs
-    ]);
+    ], {
+      codexPid,
+      nativeIdentity,
+      workspace
+    });
     const terminalAll = listedAll.terminals[0];
     assert.equal(terminalAll.managed.hidden_turn_count, 0);
     assert.deepEqual(
@@ -1157,10 +1234,18 @@ test("multiple idle turns stay terminal history while the pane short ref routes 
       /not an ordinary send target/u
     );
 
-    const sent = runCli([
+    const followCurrentAction = terminalAll.available_actions.send;
+    assert.equal(followCurrentAction.arguments.selector, terminalAll.id);
+    assert.equal(
+      typeof followCurrentAction.arguments.expected_terminal_token,
+      "string"
+    );
+    const sent = await runCliWithCodexInventory([
       "send",
       "--conversation",
-      terminal.short_ref,
+      String(followCurrentAction.arguments.selector),
+      "--expected-terminal-token",
+      String(followCurrentAction.arguments.expected_terminal_token),
       "--message",
       "Start a new independent turn",
       "--background",
@@ -1176,12 +1261,16 @@ test("multiple idle turns stay terminal history while the pane short ref routes 
       "/usr/bin/true",
       "--disable-terminal-bridge-monitor",
       ...runtimeArgs
-    ]);
+    ], {
+      codexPid,
+      nativeIdentity,
+      workspace
+    });
     assert.equal(
       sent.conversation.native_session_takeover.native_session_id,
       terminal.id
     );
-    assert.equal(sent.session_id, managedSessionId);
+    assert.notEqual(sent.session_id, managedSessionId);
     assert.equal(sent.turn_id, sent.conversation.turn_id);
     assert.notEqual(
       sent.conversation.conversation_id,
@@ -1195,7 +1284,7 @@ test("multiple idle turns stay terminal history while the pane short ref routes 
     const canonicalStatus = runCli([
       "status",
       "--conversation",
-      "only",
+      sent.conversation.conversation_id,
       "--store-dir",
       storeDir,
       ...runtimeArgs
@@ -1375,6 +1464,66 @@ function runCli(args: string[]): Record<string, any> {
   return JSON.parse(result.stdout);
 }
 
+async function runCliWithCodexInventory(
+  args: string[],
+  options: {
+    codexPid: number;
+    nativeIdentity: Record<string, any>;
+    workspace: string;
+  }
+): Promise<Record<string, any>> {
+  const identity = options.nativeIdentity as ActiveAgentSessionIdentity;
+  const root = {
+    ...identity,
+    processUuid: String(identity.processUuid),
+    processBirth: String(identity.processBirth),
+    rollout: identity.rollout!,
+    evidence: "codex_open_root_rollout" as const
+  };
+  const authority = {
+    schema: "agent-knock-knock/codex-open-root-rollout-inventory" as const,
+    version: 1 as const,
+    pid: options.codexPid,
+    processUuid: root.processUuid,
+    processBirth: root.processBirth,
+    cwd: path.resolve(options.workspace),
+    roots: [root] as [typeof root]
+  };
+  const inventory: CodexOpenRootRolloutInventory = {
+    ...authority,
+    status: "resolved",
+    inventoryFingerprint: createHash("sha256")
+      .update(JSON.stringify(authority))
+      .digest("hex")
+  };
+  const adapter: CodexLocalSessionAdapter = {
+    listThreadRows: async () => [],
+    readRollout: async () => undefined,
+    listProcessSnapshots: async () => [],
+    resolveActiveSessionIdentityForPid: async (pid) =>
+      pid === options.codexPid ? identity : undefined,
+    inspectOpenRootRolloutInventoryForPid: async (pid, cwd) => {
+      assert.equal(pid, options.codexPid);
+      assert.equal(path.resolve(cwd ?? options.workspace), authority.cwd);
+      return inventory;
+    }
+  };
+  const result = await runInProcessCli(args, {
+    codexLocalSessionAdapter: adapter,
+    codexProcessBirthForPid: (pid) => {
+      assert.equal(pid, options.codexPid);
+      return String(identity.processBirth);
+    },
+    env: {
+      ...process.env,
+      AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "1",
+      AKK_TEST_TERMINAL_ACCEPTANCE_OUTCOME: "accepted"
+    }
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  return JSON.parse(result.stdout);
+}
+
 function spawnCli(args: string[]) {
   return spawnSync(process.execPath, [binPath, ...args], {
     encoding: "utf8",
@@ -1494,6 +1643,36 @@ function terminalPane(
       : {}),
     ...(stableIdentity.paneId ? { paneId: stableIdentity.paneId } : {})
   };
+}
+
+function canonicalTmuxTerminalEndpointEvidence(
+  terminalControl: TerminalControlRef,
+  stableIdentity: { serverSocketPath: string; paneId: string }
+): Record<string, unknown> {
+  assert.equal(terminalControl.kind, "tmux");
+  const endpointKey = `socket:${stableIdentity.serverSocketPath}`;
+  createTerminalEndpointRef({
+    identity: {
+      providerKind: "tmux",
+      endpointKey,
+      resourceKey: `pane-id:${stableIdentity.paneId}`
+    },
+    route: {
+      routeKey: tmuxTerminalRouteKey(
+        endpointKey,
+        terminalControl.target,
+        terminalControl.socketPath
+      ),
+      label: terminalControl.target,
+      currentCommand: terminalControl.currentCommand,
+      currentPath: terminalControl.currentPath
+    },
+    processAnchorPid: terminalControl.panePid,
+    capabilities: terminalControl.capabilities,
+    providerRef: terminalControl
+  });
+  return terminalControlEvidence(terminalControl) as unknown as
+    Record<string, unknown>;
 }
 
 function terminalBridgeTakeover(

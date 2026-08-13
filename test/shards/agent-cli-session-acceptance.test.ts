@@ -256,32 +256,94 @@ process.exit(7);
   }
 });
 
-test("ordinary sends create distinct turns in one session and respond stays on its turn", () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-session-turn-send-"));
+test("follow-current sends create distinct successor turns and respond stays on its exact turn", () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(fs.realpathSync(os.tmpdir()), "akk-session-turn-send-")
+  );
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
   const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
   const screenPath = path.join(tempDir, "screen.txt");
   const workspace = path.join(tempDir, "workspace");
+  const codexHome = path.join(tempDir, ".codex");
+  const codexSessionsDir = path.join(
+    codexHome,
+    "sessions",
+    "2026",
+    "08",
+    "13"
+  );
   const terminalTarget = `akk-session-turn-${process.pid}:0.1`;
   const codexPid = 33389;
-  const rawTerminalId = `terminal:tmux:${terminalTarget}:${codexPid}`;
+  const rawTerminalId =
+    `terminal:v2:tmux:codex:${terminalTarget}:${codexPid}`;
   const nativeSessionId = "019ee559-7bb8-7fd1-970c-0f7b6978c44e";
-  const originalProcessUuid = `codex-pid:${codexPid}:birth:original`;
+  const processBirth = "Thu Aug 13 01:00:00 2026";
+  const originalProcessUuid =
+    `codex-pid:${codexPid}:birth:${processBirth}`;
   const replacementProcessUuid = `codex-pid:${codexPid}:birth:replacement`;
+  const originalRolloutPath = path.join(
+    codexSessionsDir,
+    `rollout-2026-08-13T01-00-00-${nativeSessionId}.jsonl`
+  );
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
+    fs.mkdirSync(codexSessionsDir, { recursive: true, mode: 0o700 });
     fs.writeFileSync(screenPath, "› \n");
+    fs.writeFileSync(originalRolloutPath, `${JSON.stringify({
+      timestamp: "2026-08-13T01:00:00.000Z",
+      type: "session_meta",
+      payload: {
+        id: nativeSessionId,
+        cwd: workspace,
+        originator: "codex-tui",
+        source: "cli",
+        cli_version: "0.147.0"
+      }
+    })}\n`, { mode: 0o600 });
     writeFakeTmux(
       fakeBinDir,
       tmuxCallsPath,
       screenPath,
       `${terminalTarget.replace(/:\d+$/u, "").replace(/:\d+\.\d+$/u, "")}\t0\t1\t${codexPid}\tnode\t${workspace}\n`
     );
+    const rolloutStat = fs.statSync(originalRolloutPath);
+    fs.writeFileSync(path.join(fakeBinDir, "ps"), `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args.includes("lstart=")) {
+  process.stdout.write(${JSON.stringify(`${processBirth}\n`)});
+} else {
+  process.stdout.write(${JSON.stringify(
+    "  PID  PPID ELAPSED COMMAND\n" +
+    `${codexPid} 1 00:01 codex\n`
+  )});
+}
+`, { mode: 0o755 });
+    fs.writeFileSync(path.join(fakeBinDir, "lsof"), `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args.includes("cwd")) {
+  process.stdout.write(${JSON.stringify(
+    "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\n" +
+    `codex ${codexPid} me cwd DIR 1,18 64 123 ${workspace}\n`
+  )});
+} else if (args.includes("txt")) {
+  process.stdout.write(${JSON.stringify(
+    `p${codexPid}\nftxt\nn/opt/akk-test/releases/0.147.0-aarch64-apple-darwin/bin/codex\n`
+  )});
+} else {
+  process.stdout.write(${JSON.stringify(
+    `p${codexPid}\nf12r\ntREG\nD${rolloutStat.dev}\n` +
+    `i${rolloutStat.ino}\nn${fs.realpathSync(originalRolloutPath)}\n`
+  )});
+}
+`, { mode: 0o755 });
     const testEnv = {
-      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      AKK_TEST_CODEX_ACCEPTANCE_ROLLOUT_PATH: originalRolloutPath,
+      AKK_TEST_TMUX_COMPOSER_FROM_LITERAL: "1",
+      AKK_TEST_TMUX_COMPOSER_AFTER_ENTER: "Working\n"
     };
     const baseCommonArgs = [
       "--background",
@@ -289,7 +351,9 @@ test("ordinary sends create distinct turns in one session and respond stays on i
       storeDir,
       "--openclaw-bin",
       "/usr/bin/true",
-      "--disable-terminal-bridge-monitor"
+      "--disable-terminal-bridge-monitor",
+      "--codex-home",
+      codexHome
     ];
     const identityArgs = (processUuid: string) => codexNativeIdentityArgs({
       pid: codexPid,
@@ -297,10 +361,7 @@ test("ordinary sends create distinct turns in one session and respond stays on i
       processUuid,
       rolloutPath: path.join(tempDir, `${processUuid}.jsonl`)
     });
-    const commonArgs = [
-      ...baseCommonArgs,
-      ...identityArgs(originalProcessUuid)
-    ];
+    const commonArgs = [...baseCommonArgs];
 
     const first = runAgentCli([
       "send",
@@ -329,7 +390,7 @@ test("ordinary sends create distinct turns in one session and respond stays on i
     );
     assert.equal(
       firstParsed.conversation.native_session_takeover.terminal_agent_process_birth,
-      originalProcessUuid
+      processBirth
     );
     assert.equal(
       firstParsed.conversation.native_session_takeover.terminal_agent_rollout.fd,
@@ -342,12 +403,12 @@ test("ordinary sends create distinct turns in one session and respond stays on i
       status: "idle",
       idle_since: new Date().toISOString(),
       callback_delivery: {
-        status: "failed",
+        status: "delivered",
         attempts: 1,
         final_status: "idle",
         preserve_conversation_status: true,
         message: {
-          id: "msg-first-turn-callback-failed",
+          id: "msg-first-turn-callback-delivered",
           ts: new Date().toISOString(),
           conversation_id: firstParsed.turn_id,
           session_id: firstParsed.session_id,
@@ -360,11 +421,32 @@ test("ordinary sends create distinct turns in one session and respond stays on i
           max_rounds: 50,
           body: "First session turn completed.",
           metadata: {}
-        }
+        },
+        delivered_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
       },
       updated_at: new Date().toISOString()
     };
     fs.writeFileSync(firstStatePath, `${JSON.stringify(firstIdle, null, 2)}\n`);
+    const firstClosed = runAgentCli([
+      "close",
+      "--state",
+      firstStatePath,
+      "--store-dir",
+      storeDir,
+      "--reason",
+      "release completed first Turn before follow-current send"
+    ], testEnv);
+    assert.equal(
+      firstClosed.status,
+      0,
+      firstClosed.stderr || firstClosed.stdout
+    );
+    assert.equal(
+      JSON.parse(firstClosed.stdout).terminal_dispatch_resolved,
+      true
+    );
+    fs.writeFileSync(screenPath, "› \n");
 
     const keysBeforeWrongType = readJsonLines(tmuxCallsPath).filter(
       (call) => call.args[0] === "send-keys"
@@ -388,10 +470,30 @@ test("ordinary sends create distinct turns in one session and respond stays on i
       keysBeforeWrongType
     );
 
+    const listedForSecond = runAgentCli([
+      "list",
+      "--store-dir",
+      storeDir,
+      "--codex-home",
+      codexHome
+    ], testEnv);
+    assert.equal(
+      listedForSecond.status,
+      0,
+      listedForSecond.stderr || listedForSecond.stdout
+    );
+    const secondTerminal = JSON.parse(listedForSecond.stdout).terminals[0];
+    const secondAction = secondTerminal.available_actions.send;
+    assert.equal(
+      typeof secondAction.arguments.expected_terminal_token,
+      "string"
+    );
     const second = runAgentCli([
       "send",
-      "--session",
-      firstParsed.session_id,
+      "--conversation",
+      String(secondAction.arguments.selector),
+      "--expected-terminal-token",
+      String(secondAction.arguments.expected_terminal_token),
       "--message",
       "Second session turn",
       "--agent-timeout-minutes",
@@ -402,7 +504,7 @@ test("ordinary sends create distinct turns in one session and respond stays on i
     ], testEnv);
     assert.equal(second.status, 0, second.stderr || second.stdout);
     const secondParsed = JSON.parse(second.stdout);
-    assert.equal(secondParsed.session_id, firstParsed.session_id);
+    assert.notEqual(secondParsed.session_id, firstParsed.session_id);
     assert.notEqual(secondParsed.turn_id, firstParsed.turn_id);
     assert.notEqual(
       secondParsed.conversation.state_path,
@@ -410,14 +512,13 @@ test("ordinary sends create distinct turns in one session and respond stays on i
     );
     assert.equal(
       JSON.parse(fs.readFileSync(firstStatePath, "utf8")).status,
-      "idle"
+      "closed"
     );
     assert.equal(
       fs.readdirSync(storeConversationsDir(storeDir), { withFileTypes: true })
         .filter((entry) => entry.isDirectory()).length,
       2
     );
-
     const entersBeforeRejectedTurn = readJsonLines(tmuxCallsPath).filter((call) =>
       call.args[0] === "send-keys" && call.args.at(-1) === "C-m"
     ).length;
@@ -475,6 +576,7 @@ test("ordinary sends create distinct turns in one session and respond stays on i
       secondStatePath,
       `${JSON.stringify(waitingForOpenClaw, null, 2)}\n`
     );
+    fs.writeFileSync(screenPath, "› \n");
     const stateBeforeWrongOpenClawOwner = fs.readFileSync(
       secondStatePath,
       "utf8"
@@ -620,6 +722,7 @@ test("ordinary sends create distinct turns in one session and respond stays on i
       secondStatePath,
       `${JSON.stringify(waitingForAnotherAnswer, null, 2)}\n`
     );
+    fs.writeFileSync(screenPath, "› \n");
     const secondRespondMessageId = `msg-openclaw-${"f".repeat(64)}`;
     const secondResponse = runAgentCli([
       "respond",

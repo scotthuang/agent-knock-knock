@@ -5,6 +5,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { CodexLocalSessionAdapter } from "../src/codex-local-session-provider.js";
+import type { CodexOpenRootRolloutInventory } from
+  "../src/agent-session-provider.js";
 import { createClaudeTerminalAgentAdapter } from
   "../src/claude-terminal-agent-adapter.js";
 import {
@@ -38,9 +40,15 @@ import {
   type TerminalControlRef
 } from "../src/terminal-agent-adapter.js";
 import { TerminalAgentBridge } from "../src/terminal-agent-bridge.js";
+import { listDeferredForegroundTransfers } from
+  "../src/deferred-foreground-transfer.js";
 import { createTerminalControlProviderRegistry } from
   "../src/terminal-control-provider.js";
-import { terminalLegacyRuntimeRoute } from
+import {
+  createTerminalEndpointRef,
+  terminalEndpointFromControlRef,
+  terminalLegacyRuntimeRoute
+} from
   "../src/terminal-control-ref.js";
 import {
   MutableRecordingTerminalProvider,
@@ -583,7 +591,7 @@ test("Herdr Claude handoff uses the exact listed token and only one task input p
 });
 
 for (const agent of ["codex", "claude"] as const) {
-  test(`${agent} human handoff restores one known detached native Session with its own next generation`, async () => {
+  test(`${agent} human handoff preserves known detached history under v15 routing`, async () => {
     const fixture = createHandoffFixture({ agent });
     try {
       const source = fixture.persistSession({
@@ -601,30 +609,40 @@ for (const agent of ["codex", "claude"] as const) {
       fixture.persistHistoricalTurn(source, `Historical ${agent} source A.`);
       fixture.persistHistoricalTurn(target, `Historical ${agent} target B.`);
 
+      const expectedTerminalToken = agent === "codex"
+        ? String((await fixture.listTerminal()).available_actions?.send
+            ?.arguments?.expected_terminal_token ?? "")
+        : undefined;
+      if (agent === "codex") assert.ok(expectedTerminalToken);
       const sent = await fixture.sendToTerminal(
-        `Continue the known ${agent} history selected by the human.`
+        `Continue the known ${agent} history selected by the human.`,
+        {},
+        expectedTerminalToken
       );
       assert.equal(sent.status, 0, fixture.debug(sent));
       const output = JSON.parse(sent.stdout);
       assert.equal(output.delivered, true, fixture.debug(sent));
-      assert.equal(output.session_id, target.session_id);
+      if (agent === "codex") {
+        assert.notEqual(output.session_id, target.session_id);
+      } else {
+        assert.equal(output.session_id, target.session_id);
+      }
 
-      const sourceAfter = listManagedSessions(fixture.storeDir).find((entry) =>
+      const sessions = listManagedSessions(fixture.storeDir);
+      const sourceAfter = sessions.find((entry) =>
         entry.session_id === source.session_id
       );
-      const targetAfter = listManagedSessions(fixture.storeDir).find((entry) =>
+      const targetAfter = sessions.find((entry) =>
         entry.session_id === target.session_id
+      );
+      const deliveredTarget = sessions.find((entry) =>
+        entry.session_id === output.session_id
       );
       assert.equal(sourceAfter?.status, "detached");
       assert.equal(sourceAfter?.binding?.native_thread_id, NATIVE_A);
-      assert.equal(targetAfter?.status, "bound");
-      assert.equal(targetAfter?.binding?.native_thread_id, NATIVE_B);
-      assert.equal(targetAfter?.binding?.generation, 8);
-      assert.notEqual(
-        targetAfter?.binding?.binding_id,
-        target.binding?.binding_id
-      );
-      assert.equal(targetAfter?.lineage.created_by, "attach");
+      assert.equal(deliveredTarget?.status, "bound");
+      assert.equal(deliveredTarget?.binding?.native_thread_id, NATIVE_B);
+      assert.equal(deliveredTarget?.lineage.created_by, "attach");
       assert.equal(listConversations(fixture.storeDir).length, 3);
       assert.equal(
         listConversations(fixture.storeDir).filter((turn) =>
@@ -636,13 +654,42 @@ for (const agent of ["codex", "claude"] as const) {
         listConversations(fixture.storeDir).filter((turn) =>
           turn.session_id === target.session_id
         ).length,
-        2
+        agent === "codex" ? 1 : 2
       );
-      const transition = fixture.onlyTransition();
-      assert.equal(transition.source_session_id, source.session_id);
-      assert.equal(transition.target_session_id, target.session_id);
-      assert.equal(transition.target_expected_revision, target.revision);
-      assert.equal(transition.status, "committed");
+      if (agent === "codex") {
+        assert.equal(sessions.length, 3);
+        assert.equal(targetAfter?.status, "detached");
+        assert.equal(targetAfter?.binding?.generation, 7);
+        assert.equal(
+          targetAfter?.binding?.binding_id,
+          target.binding?.binding_id
+        );
+        assert.equal(
+          listConversations(fixture.storeDir).filter((turn) =>
+            turn.session_id === output.session_id
+          ).length,
+          1
+        );
+        assert.equal(fixture.transitionCount(), 0);
+        const transfers = listDeferredForegroundTransfers(fixture.storeDir);
+        assert.equal(transfers.length, 1);
+        assert.equal(transfers[0]?.status, "resolved");
+        assert.equal(transfers[0]?.source_session_id, source.session_id);
+        assert.equal(transfers[0]?.target_session_id, output.session_id);
+      } else {
+        assert.equal(sessions.length, 2);
+        assert.equal(targetAfter?.status, "bound");
+        assert.equal(targetAfter?.binding?.generation, 8);
+        assert.notEqual(
+          targetAfter?.binding?.binding_id,
+          target.binding?.binding_id
+        );
+        const transition = fixture.onlyTransition();
+        assert.equal(transition.source_session_id, source.session_id);
+        assert.equal(transition.target_session_id, target.session_id);
+        assert.equal(transition.target_expected_revision, target.revision);
+        assert.equal(transition.status, "committed");
+      }
     } finally {
       fixture.cleanup();
     }
@@ -667,7 +714,7 @@ test("an explicit stale Session send never follows the terminal into the human-s
     assert.equal(rejected.status, 1, fixture.debug(rejected));
     assert.match(
       rejected.stderr,
-      /identity changed|native thread|session transitioned|current context/iu
+      /rollout-backed managed Session|strict session_id|selector plus expected_terminal_token/iu
     );
     assert.equal(
       JSON.stringify(listManagedSessions(fixture.storeDir)[0]),
@@ -1431,14 +1478,25 @@ test("a human-selected native thread active in another process blocks adoption a
       status: "bound",
       generation: 1
     });
+    const listedBeforeOwner = await fixture.listTerminal();
+    const expectedTerminalToken = String(
+      listedBeforeOwner.available_actions?.send?.arguments
+        ?.expected_terminal_token ?? ""
+    );
+    assert.ok(expectedTerminalToken);
     fixture.addActiveOwnerForCurrentThread();
     const before = JSON.stringify(listManagedSessions(fixture.storeDir));
 
     const rejected = await fixture.sendToTerminal(
-      "Do not steal B from its other live process."
+      "Do not steal B from its other live process.",
+      {},
+      expectedTerminalToken
     );
     assert.equal(rejected.status, 1, fixture.debug(rejected));
-    assert.match(rejected.stderr, /active in another codex process|already active/iu);
+    assert.match(
+      rejected.stderr,
+      /active in another codex process|already active|expected terminal token no longer authorizes|refresh AKK list/iu
+    );
     assert.equal(JSON.stringify(listManagedSessions(fixture.storeDir)), before);
     assert.equal(fixture.transitionCount(), 0);
     assert.deepEqual(fixture.literalInputs(), []);
@@ -1515,11 +1573,20 @@ test("Codex drift from B to C at the post-adoption pre-text fence starts no task
       generation: 1
     });
 
-    const rejected = await fixture.sendToTerminal(request);
+    const listed = await fixture.listTerminal();
+    const expectedTerminalToken = String(
+      listed.available_actions?.send?.arguments?.expected_terminal_token ?? ""
+    );
+    assert.ok(expectedTerminalToken);
+    const rejected = await fixture.sendToTerminal(
+      request,
+      {},
+      expectedTerminalToken
+    );
     assert.equal(rejected.status, 1, fixture.debug(rejected));
     assert.match(
       rejected.stderr,
-      /thread changed|identity changed|refresh list/iu
+      /thread changed|identity changed|expected terminal token no longer authorizes|refresh (?:AKK )?list/iu
     );
     assert.equal(fixture.driftTriggered(), true);
     assert.equal(
@@ -1554,7 +1621,16 @@ test("Codex drift from B to C after task text never presses Enter and stays unce
       generation: 1
     });
 
-    const uncertain = await fixture.sendToTerminal(request);
+    const listed = await fixture.listTerminal();
+    const expectedTerminalToken = String(
+      listed.available_actions?.send?.arguments?.expected_terminal_token ?? ""
+    );
+    assert.ok(expectedTerminalToken);
+    const uncertain = await fixture.sendToTerminal(
+      request,
+      {},
+      expectedTerminalToken
+    );
     assert.equal(uncertain.status, 0, fixture.debug(uncertain));
     const output = JSON.parse(uncertain.stdout);
     assert.equal(output.delivered, false);
@@ -1574,11 +1650,14 @@ test("Codex drift from B to C after task text never presses Enter and stays unce
 });
 
 for (const crashHook of [
-  "AKK_TEST_EXIT_AFTER_LIFECYCLE_PREPARED",
-  "AKK_TEST_EXIT_AFTER_LIFECYCLE_VERIFIED"
+  "AKK_TEST_EXIT_AFTER_DEFERRED_SOURCE_RESERVED",
+  "AKK_TEST_EXIT_AFTER_DEFERRED_TARGET_PREPARED"
 ] as const) {
-  test(`Codex human handoff recovers ${crashHook} without replaying adoption or task input`, async () => {
-    const fixture = createHandoffFixture({ agent: "codex" });
+  test(`Codex follow-current recovers ${crashHook} without replaying task input`, async () => {
+    const fixture = createHandoffFixture({
+      agent: "codex",
+      codexInitialNativeThreadId: NATIVE_A
+    });
     const request = `Recover exactly once after ${crashHook}.`;
     const messageId = `message-${crashHook.toLowerCase()}`;
     try {
@@ -1589,29 +1668,59 @@ for (const crashHook of [
         generation: 1
       });
 
+      const listed = await fixture.listTerminal();
+      const expectedTerminalToken = String(
+        listed.available_actions?.send?.arguments?.expected_terminal_token ?? ""
+      );
+      assert.ok(expectedTerminalToken);
       const crashed = await fixture.sendToTerminal(request, {
         [crashHook]: "1"
-      }, undefined, messageId);
+      }, expectedTerminalToken, messageId);
       assert.equal(
         crashed.status,
-        crashHook === "AKK_TEST_EXIT_AFTER_LIFECYCLE_PREPARED" ? 86 : 87,
+        86,
         fixture.debug(crashed)
       );
       assert.deepEqual(fixture.literalInputs(), []);
       assert.equal(fixture.enterCount(), 0);
       assert.equal(listConversations(fixture.storeDir).length, 0);
-      assert.equal(fixture.transitionCount(), 1);
+      assert.equal(fixture.transitionCount(), 0);
+      assert.equal(listDeferredForegroundTransfers(fixture.storeDir).length, 1);
 
+      const staleRecovery = await fixture.sendToTerminal(
+        request,
+        {},
+        expectedTerminalToken,
+        messageId
+      );
+      assert.equal(staleRecovery.status, 1, fixture.debug(staleRecovery));
+      assert.match(
+        staleRecovery.stderr,
+        /fresh exact terminal token|expected terminal token no longer authorizes|refresh AKK list/iu
+      );
+      assert.deepEqual(fixture.literalInputs(), []);
+      const refreshed = await fixture.listTerminal();
+      const refreshedTerminalToken = String(
+        refreshed.available_actions?.send?.arguments?.expected_terminal_token ??
+          ""
+      );
+      assert.ok(refreshedTerminalToken);
       const recovered = await fixture.sendToTerminal(
         request,
         {},
-        undefined,
+        refreshedTerminalToken,
         messageId
       );
       assert.equal(recovered.status, 0, fixture.debug(recovered));
       const recoveredOutput = JSON.parse(recovered.stdout);
       assert.equal(recoveredOutput.delivered, true, fixture.debug(recovered));
-      assert.equal(fixture.onlyTransition().status, "committed");
+      assert.equal(
+        listDeferredForegroundTransfers(fixture.storeDir).some((transfer) =>
+          transfer.status === "resolved" &&
+          transfer.target_session_id === recoveredOutput.session_id
+        ),
+        true
+      );
       assert.equal(
         fixture.literalInputs().filter((input) => input === request).length,
         1
@@ -1625,7 +1734,7 @@ for (const crashHook of [
       assert.equal(
         listManagedSessions(fixture.storeDir).filter((entry) =>
           entry.status === "bound" &&
-          entry.binding?.native_thread_id === NATIVE_B
+          entry.binding?.native_thread_id === NATIVE_A
         ).length,
         1
       );
@@ -1634,6 +1743,9 @@ for (const crashHook of [
         (input) => input === request
       ).length;
       const entersBeforeReplay = fixture.enterCount();
+      const transfersBeforeReplay = listDeferredForegroundTransfers(
+        fixture.storeDir
+      ).length;
       const replayed = await fixture.sendToTerminal(
         request,
         {},
@@ -1646,7 +1758,11 @@ for (const crashHook of [
         taskInputsBeforeReplay
       );
       assert.equal(fixture.enterCount(), entersBeforeReplay);
-      assert.equal(fixture.transitionCount(), 1);
+      assert.equal(fixture.transitionCount(), 0);
+      assert.equal(
+        listDeferredForegroundTransfers(fixture.storeDir).length,
+        transfersBeforeReplay
+      );
     } finally {
       fixture.cleanup();
     }
@@ -1779,6 +1895,13 @@ function committedTransitionExists(storeDir: string): boolean {
     );
 }
 
+function foregroundHandoffReservationExists(storeDir: string): boolean {
+  return committedTransitionExists(storeDir) ||
+    listDeferredForegroundTransfers(storeDir).some((transfer) =>
+      transfer.status !== "prepared"
+    );
+}
+
 function serializedCloseActionsForTurn(
   terminalRow: Record<string, any>,
   turnId: string
@@ -1839,11 +1962,13 @@ function snapshotDirectoryBytes(rootDir: string): Array<[string, string]> {
 function createHandoffFixture({
   agent,
   codexTargetMode = "exact_rollout",
-  codexTaskDrift
+  codexTaskDrift,
+  codexInitialNativeThreadId
 }: {
   agent: FixtureAgent;
   codexTargetMode?: "exact_rollout" | "status_card_only";
   codexTaskDrift?: "before_task_text" | "after_task_text";
+  codexInitialNativeThreadId?: string;
 }): HandoffFixture {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), `akk-human-${agent}-`));
   const storeDir = path.join(root, "store");
@@ -1897,13 +2022,19 @@ function createHandoffFixture({
       "terminal_cancel"
     ]
   };
+  createTerminalEndpointRef({
+    ...terminalEndpointFromControlRef(terminalControl),
+    providerRef: terminalControl
+  });
   const terminalId =
     `terminal:v2:tmux:${agent}:${target}:${agentPid}`;
   const prompt = agent === "codex" ? "Ready\n› " : claudeComposerScreen();
-  let resolverNativeThreadId =
+  let resolverNativeThreadId = codexInitialNativeThreadId ?? (
     agent === "codex" && codexTargetMode === "status_card_only"
       ? NATIVE_A
-      : NATIVE_B;
+      : NATIVE_B
+  );
+  let openRootNativeThreadId = codexInitialNativeThreadId ?? NATIVE_B;
   let pendingText = "";
   let statusProbeCount = 0;
   let driftTriggered = false;
@@ -1939,10 +2070,11 @@ function createHandoffFixture({
         if (
           codexTaskDrift === "before_task_text" &&
           !driftTriggered &&
-          committedTransitionExists(storeDir)
+          foregroundHandoffReservationExists(storeDir)
         ) {
           driftTriggered = true;
           resolverNativeThreadId = NATIVE_C;
+          openRootNativeThreadId = NATIVE_C;
           mutable.setScreen(
             target,
             codexStatusScreen(NATIVE_C, "drift-before-task-text")
@@ -1966,6 +2098,7 @@ function createHandoffFixture({
         ) {
           driftTriggered = true;
           resolverNativeThreadId = NATIVE_C;
+          openRootNativeThreadId = NATIVE_C;
           mutable.setScreen(
             target,
             codexStatusScreen(NATIVE_C, "drift-after-task-text")
@@ -2048,6 +2181,32 @@ function createHandoffFixture({
       evidence: "codex_rollout_fd"
     };
   };
+  const codexOpenRootInventory = (
+    pid: number,
+    cwd = workspace
+  ): CodexOpenRootRolloutInventory => {
+    const identity = codexIdentity(openRootNativeThreadId, pid);
+    const rootIdentity = {
+      ...identity,
+      evidence: "codex_open_root_rollout" as const
+    };
+    const authority = {
+      schema: "agent-knock-knock/codex-open-root-rollout-inventory" as const,
+      version: 1 as const,
+      pid,
+      processUuid: identity.processUuid,
+      processBirth: identity.processBirth,
+      cwd,
+      roots: [rootIdentity] as [typeof rootIdentity]
+    };
+    return {
+      ...authority,
+      status: "resolved",
+      inventoryFingerprint: createHash("sha256")
+        .update(JSON.stringify(authority))
+        .digest("hex")
+    };
+  };
   const codexAdapter: CodexLocalSessionAdapter = {
     async listThreadRows() {
       return [];
@@ -2059,6 +2218,10 @@ function createHandoffFixture({
     },
     async listProcessSnapshots() {
       return processSource.listProcessSnapshots();
+    },
+    async inspectOpenRootRolloutInventoryForPid(pid, cwd) {
+      assert.ok(pid === agentPid || pid === additionalOwnerPid);
+      return codexOpenRootInventory(pid, cwd);
     },
     async resolveActiveSessionIdentityForPid(pid) {
       return pid === agentPid || pid === additionalOwnerPid
@@ -2376,6 +2539,7 @@ function createHandoffFixture({
     },
     setCurrentNativeThreadId(nativeThreadId) {
       resolverNativeThreadId = nativeThreadId;
+      openRootNativeThreadId = nativeThreadId;
       provider.setScreen(
         target,
         agent === "codex"

@@ -486,6 +486,16 @@ if (${JSON.stringify(failSendText)} && args.includes(${JSON.stringify(failSendTe
   process.exit(1);
 }
 if (args[0] === "send-keys" && args.includes("-l")) {
+  const rolloutPath = process.env.AKK_TEST_CODEX_ACCEPTANCE_ROLLOUT_PATH;
+  if (rolloutPath) {
+    fs.writeFileSync(rolloutPath + ".pending-input", args[args.length - 1]);
+  }
+  if (process.env.AKK_TEST_TMUX_COMPOSER_FROM_LITERAL === "1") {
+    fs.writeFileSync(
+      ${JSON.stringify(screenPath ?? "")},
+      "› " + args[args.length - 1]
+    );
+  }
   const gatePath = process.env.AKK_TEST_TMUX_SEND_GATE_PATH;
   if (gatePath) {
     fs.writeFileSync(gatePath + ".entered", "");
@@ -507,6 +517,41 @@ if (
   process.env.AKK_TEST_TMUX_COMPOSER_AFTER_ENTER
 ) {
   fs.writeFileSync(${JSON.stringify(screenPath ?? "")}, process.env.AKK_TEST_TMUX_COMPOSER_AFTER_ENTER);
+}
+if (
+  args[0] === "send-keys" &&
+  args[args.length - 1] === "C-m" &&
+  process.env.AKK_TEST_CODEX_ACCEPTANCE_ROLLOUT_PATH
+) {
+  const rolloutPath = process.env.AKK_TEST_CODEX_ACCEPTANCE_ROLLOUT_PATH;
+  const pendingPath = rolloutPath + ".pending-input";
+  if (fs.existsSync(pendingPath)) {
+    const request = fs.readFileSync(pendingPath, "utf8");
+    const turnId = require("node:crypto").randomUUID();
+    const timestamp = new Date().toISOString();
+    const records = [
+      {
+        timestamp,
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: turnId }
+      },
+      {
+        timestamp,
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: request }],
+          internal_chat_message_metadata_passthrough: { turn_id: turnId }
+        }
+      }
+    ];
+    fs.appendFileSync(
+      rolloutPath,
+      records.map((record) => JSON.stringify(record)).join("\\n") + "\\n"
+    );
+    fs.rmSync(pendingPath, { force: true });
+  }
 }
 if (args[0] === "capture-pane") {
   if (process.env.AKK_TEST_TMUX_CAPTURE_FAIL === "1") {

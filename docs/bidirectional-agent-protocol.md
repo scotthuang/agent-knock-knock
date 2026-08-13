@@ -23,20 +23,20 @@ tmux terminal / verified process incarnation
 
 - The terminal is the physical pane and coding-agent process incarnation.
 - The native session is the continuing context owned by Codex or Claude Code.
-- The AKK `session_id` is the authoritative target for ordinary sends into that context.
+- The AKK `session_id` identifies the continuing context. It is an ordinary-send target only when the current listed action explicitly prefills the `session_exact` scope; a rollout-backed Codex pane instead uses the listed `terminal_follow_current` selector/token action.
 - A `turn_id` identifies exactly one accepted dispatch through its final monitor and callback state.
 - A terminal binding generation identifies one verified terminal-to-native-thread attachment. Native lifecycle transitions advance it even though they create no Turn.
 
-Human-friendly selectors such as `only`, `codex`, `claude`, terminal IDs, and `@short-ref` are list/discovery inputs. They must resolve unambiguously to the authoritative `session_id` used by send or the `turn_id` used by managed controls. An unmanaged raw-terminal row may publish its own exact compatibility selector for status or recovery controls; callers must use only the prefilled action and never construct that selector.
+Human-friendly selectors such as `only`, `codex`, `claude`, terminal IDs, and `@short-ref` are list/discovery inputs. Callers use only the exact current listed send action: either `session_exact` with `session_id`, or `terminal_follow_current` with its full selector and fresh token. A `turn_id` remains the target for managed controls. An unmanaged raw-terminal row may publish its own exact compatibility selector for status or recovery controls; callers must use only the prefilled action and never construct that selector.
 
 ## Turn Flow
 
-1. OpenClaw calls ordinary send with a `session_id` and the user-facing request. Initial discovery may first resolve one eligible Codex or Claude Code terminal into an AKK session.
+1. OpenClaw calls ordinary send using the exact current listed action and the user-facing request. `session_exact` carries `session_id`; `terminal_follow_current` carries the full terminal selector and fresh snapshot token. Initial discovery may first resolve one eligible Codex or Claude Code terminal into an AKK session.
 2. AKK verifies that the session is bound to the expected native session, terminal, and idle coding-agent process.
 3. AKK creates a unique `turn_id`, writes the request to the verified idle pane, and starts a monitor bound to that Turn, pane, process, and message.
 4. The coding agent works in the same terminal that the human can inspect or take over.
 5. AKK sends a structured callback containing both `session_id` and `turn_id` to the originating OpenClaw session when it has reliable approval, completion, cancellation, stall, or failure evidence.
-6. After completion, another ordinary send to the same `session_id` creates a new Turn without clearing the native coding-agent context.
+6. After completion, refresh the terminal list. Another ordinary send through that row's current exact action creates a new Turn without clearing the native coding-agent context.
 
 An ordinary send never targets a completed or historical `turn_id`. If the current Turn is `waiting_for_openclaw` because the coding agent asked a question, OpenClaw uses `respond(turn_id, answer)`; that answer remains inside the same Turn.
 
@@ -57,7 +57,7 @@ Before either transition, AKK requires the exact full `terminal_id`, a fresh com
 
 The lifecycle operation is serialized against send, approval, monitor, cancellation, and recovery work for that pane. AKK records the previous and next native identities, verifies the post-operation identity and idle prompt, creates or reactivates the corresponding AKK Session, and advances the binding generation. It fails closed if any identity or capability evidence is missing or changed. Monitor supervision never reclassifies a historical binding: only a later lifecycle listing may classify one bound historical Session as resumable when its recorded process has conclusively exited, and the resume mutation compare-and-swap detaches that binding before terminal input. Every first-line native slash command is rejected as ordinary task or answer text, including clear/new/resume/status, Codex fork/side-thread commands, and Claude conversation branching; supported context changes must use the lifecycle boundary.
 
-The next ordinary send targets the resulting `session_id` and creates its first new `turn_id`. A callback, monitor, approval, receipt, or recovery action bound to an earlier Session, native identity, terminal incarnation, or binding generation cannot mutate the newly active context.
+For the next ordinary send, refresh `agent_knock_knock_list` and use only the resulting terminal row's advertised action. A `session_exact` action targets the resulting `session_id`; a `terminal_follow_current` action instead preserves that row's full terminal selector and fresh token. Either accepted action creates the context's first new `turn_id`. A callback, monitor, approval, receipt, or recovery action bound to an earlier Session, native identity, terminal incarnation, or binding generation cannot mutate the newly active context.
 
 ## Native Status Inspection
 

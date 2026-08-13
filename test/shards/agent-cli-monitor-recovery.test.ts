@@ -188,7 +188,7 @@ test("terminal bridge monitor singleton rejects a live owner and reclaims a dead
           );
         }),
       "the monitor to observe an actual Store-lock timeout",
-      25_000
+      45_000
     );
     assert.equal(
       first.exitCode,

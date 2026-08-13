@@ -163,8 +163,17 @@ test("raw and managed Codex sends fail closed unless the locked pane is verifiab
       const scenarioEnv = { ...baseEnv, ...scenario.env };
 
       for (const target of [
-        { option: "--conversation", id: rawConversationId },
-        { option: "--session", id: managedSessionId }
+        {
+          option: "--conversation",
+          id: rawConversationId,
+          expected: scenario.expected
+        },
+        {
+          option: "--session",
+          id: managedSessionId,
+          expected:
+            /rollout-backed managed Session.*strict session_id send[\s\S]*refresh AKK list/iu
+        }
       ]) {
         fs.writeFileSync(tmuxCallsPath, "");
         const sendArgs = [
@@ -186,7 +195,7 @@ test("raw and managed Codex sends fail closed unless the locked pane is verifiab
           0,
           `${scenario.name} ${target.id}: ${sent.stderr || sent.stdout}`
         );
-        assert.match(sent.stderr, scenario.expected);
+        assert.match(sent.stderr, target.expected);
         assert.equal(
           readJsonLines(tmuxCallsPath).some((call) => call.args[0] === "send-keys"),
           false,

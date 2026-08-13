@@ -198,15 +198,53 @@ test("B send rejects drafts and wrong status, then materializes only B", async (
     );
     assert.equal(JSON.stringify(rebound).includes(fixture.rolloutPaths.a), false);
 
+    // A follow-current candidate may freeze only released source history. The
+    // first accepted task therefore needs its real callback authority before
+    // close; close alone must not forge a missing callback.
+    const completedAt = new Date().toISOString();
+    const completedTurnPath = turns[0].state_path;
+    assert.ok(completedTurnPath);
+    const completedTurn = JSON.parse(
+      fs.readFileSync(completedTurnPath, "utf8")
+    );
+    fs.writeFileSync(completedTurnPath, `${JSON.stringify({
+      ...completedTurn,
+      status: "idle",
+      idle_since: completedAt,
+      callback_delivery: {
+        status: "delivered",
+        message: {
+          id: "msg-sticky-b-first-callback",
+          ts: completedAt,
+          conversation_id: turns[0].turn_id,
+          session_id: turns[0].session_id,
+          turn_id: turns[0].turn_id,
+          from: "codex",
+          to: "openclaw",
+          type: "done",
+          requires_response: false,
+          round: 1,
+          max_rounds: 50,
+          body: "The first sticky B task completed.",
+          metadata: {}
+        },
+        attempts: 1,
+        status_before_delivery: "idle",
+        final_status: "idle",
+        preserve_conversation_status: true,
+        delivered_at: completedAt,
+        updated_at: completedAt
+      },
+      updated_at: completedAt
+    }, null, 2)}\n`);
+
     const closed = await fixture.close(
       output.turn_id,
       "close first B Turn before companion-root projection"
     );
     assert.equal(closed.status, 0, closed.stderr);
     assert.equal(JSON.parse(closed.stdout).terminal_dispatch_resolved, true);
-    fixture.setScreen(
-      "Ready\n› Summarize recent commits\n\ngpt-5.4 default · 100% left"
-    );
+    fixture.setScreen("Ready\n› \ngpt-5.4 default · 100% left");
     const listed = await fixture.action(["list", "--all", "--terminal-debug"]);
     assert.equal(listed.status, 0, listed.stderr);
     const terminal = JSON.parse(listed.stdout).terminals[0];
@@ -220,39 +258,69 @@ test("B send rejects drafts and wrong status, then materializes only B", async (
       terminal.lifecycle_binding_token,
       managedSessionBindingToken(rebound)
     );
-    assert.equal(
-      terminal.available_actions.send.arguments.session_id,
-      rebound.session_id
+    const followCurrentSend = terminal.available_actions.send;
+    assert.equal(followCurrentSend.arguments.session_id, undefined);
+    assert.equal(followCurrentSend.arguments.selector, fixture.terminalId);
+    assert.match(
+      followCurrentSend.arguments.expected_terminal_token,
+      /^[0-9a-f]{64}$/u
     );
-
-    // This preflight begins with both A and B rollout descriptors open. It
-    // must reuse B as the preferred root and never leak A into Turn/binding.
+    // This preflight begins with both A and B rollout descriptors open. Its
+    // v3 anchor must freeze both candidates, then attribute only the exact
+    // accepting B root to the successor Session.
     fixture.setScreen("Ready\n› ");
-    const second = await fixture.send(
-      rebound.session_id,
-      "Send again while both sticky and target rollouts remain open."
-    );
+    fixture.acceptNextTaskInActiveRollout();
+    const second = await fixture.action([
+      "send",
+      "--conversation",
+      followCurrentSend.arguments.selector,
+      "--expected-terminal-token",
+      followCurrentSend.arguments.expected_terminal_token,
+      "--message",
+      "Send again while both sticky and target rollouts remain open.",
+      "--background",
+      "--disable-terminal-bridge-monitor"
+    ]);
     assert.equal(second.status, 0, second.stderr);
     const secondOutput = JSON.parse(second.stdout);
     assert.notEqual(secondOutput.turn_id, output.turn_id);
+    assert.notEqual(secondOutput.session_id, rebound.session_id);
     const secondTurn = listConversations(fixture.storeDir)
       .find((turn) => turn.turn_id === secondOutput.turn_id);
-    assert.equal(secondTurn?.session_id, rebound.session_id);
+    assert.equal(secondTurn?.session_id, secondOutput.session_id);
     assert.equal(secondTurn?.native_thread_id, STICKY_THREAD_IDS.b);
     assert.deepEqual(
       (secondTurn?.native_session_takeover as Record<string, any>)
         .terminal_agent_rollout,
       fixture.rolloutIdentity("b")
     );
+    const secondTakeover = secondTurn?.native_session_takeover as Record<
+      string,
+      any
+    >;
+    assert.equal(secondTakeover.codex_rollout_acceptance_anchor.version, 3);
+    assert.deepEqual(
+      secondTakeover.codex_rollout_acceptance_anchor.candidate_rollouts
+        .map((candidate: Record<string, any>) => candidate.native_thread_id),
+      [STICKY_THREAD_IDS.a, STICKY_THREAD_IDS.b]
+    );
     assert.equal(
-      JSON.stringify(secondTurn).includes(fixture.rolloutPaths.a),
-      false
+      secondTakeover.terminal_bridge_submission.acceptance_evidence
+        .nativeThreadId,
+      STICKY_THREAD_IDS.b
     );
     const afterSecond = boundSession(fixture);
+    assert.equal(afterSecond.session_id, secondOutput.session_id);
     assert.equal(afterSecond.binding?.native_thread_id, STICKY_THREAD_IDS.b);
     assert.deepEqual(
       afterSecond.binding?.native_process.rollout,
       fixture.rolloutIdentity("b")
+    );
+    assert.equal(
+      listManagedSessions(fixture.storeDir).find((session) =>
+        session.session_id === rebound.session_id
+      )?.status,
+      "detached"
     );
   } finally {
     fixture.cleanup();
@@ -440,7 +508,10 @@ test("an unknown fourth open rollout preserves managed display but only advertis
       "This message must not pass an unknown fourth root rollout."
     );
     assert.equal(rejected.status, 1, rejected.stderr);
-    assert.match(rejected.stderr, /(?:unexpected open root rollout|no longer available)/u);
+    assert.match(
+      rejected.stderr,
+      /cannot use a strict session_id send[\s\S]*selector plus expected_terminal_token/u
+    );
     assert.equal(listConversations(fixture.storeDir).length, turnsBefore);
     assert.equal(fs.readFileSync(statePath, "utf8"), beforeState);
     assert.equal(fixture.literalInputs().length, literalsBefore);

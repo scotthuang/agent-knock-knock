@@ -19,6 +19,8 @@ import {
   probeClaudeThreadLifecycle
 } from "../src/claude-terminal-agent-adapter.js";
 import type { CodexLocalSessionAdapter } from "../src/codex-local-session-provider.js";
+import type { CodexOpenRootRolloutInventory } from
+  "../src/agent-session-provider.js";
 import {
   listManagedSessions,
   loadNativeThreadTransition,
@@ -30,6 +32,10 @@ import type {
   TerminalControlRef,
   TerminalProcessSnapshot
 } from "../src/terminal-agent-adapter.js";
+import {
+  createTerminalEndpointRef,
+  terminalEndpointFromControlRef
+} from "../src/terminal-control-ref.js";
 import {
   MutableRecordingTerminalProvider,
   MutableTerminalProcessSource,
@@ -405,11 +411,23 @@ test("raw terminal send directly rolls a verified crash forward before one Sessi
     ]);
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
     const result = JSON.parse(sent.stdout);
-    assert.equal(result.delivered, true);
-    assert.equal(result.session_id, fixture.targetSessionId);
+    assert.equal(result.delivered, true, sent.stdout);
+    assert.notEqual(result.session_id, fixture.targetSessionId);
     assert.equal(listConversations(fixture.storeDir).length, 1);
-    assert.equal(listManagedSessions(fixture.storeDir).length, 2);
+    const sessions = listManagedSessions(fixture.storeDir);
+    assert.equal(sessions.length, 3);
     assert.equal(fixture.source().status, "detached");
+    assert.equal(
+      sessions.find((session) =>
+        session.session_id === fixture.targetSessionId
+      )?.status,
+      "detached"
+    );
+    assert.equal(
+      sessions.find((session) => session.session_id === result.session_id)
+        ?.status,
+      "bound"
+    );
     assert.equal(
       loadNativeThreadTransition(fixture.storeDir, fixture.transitionId).status,
       "committed"
@@ -704,6 +722,11 @@ function seededCodexRecoveryFixture(
       "terminal_cancel"
     ]
   };
+  const persistedEndpoint = terminalEndpointFromControlRef(terminalControl);
+  createTerminalEndpointRef({
+    ...persistedEndpoint,
+    providerRef: terminalControl
+  });
   const processSnapshots = (): TerminalProcessSnapshot[] => [
     {
       pid: panePid,
@@ -730,6 +753,7 @@ function seededCodexRecoveryFixture(
       : [])
   ];
   const processSource = new MutableTerminalProcessSource(processSnapshots());
+  let pendingTerminalText = "";
   const terminalProvider = new MutableRecordingTerminalProvider({
     panes: [{
       kind: "tmux",
@@ -759,6 +783,7 @@ function seededCodexRecoveryFixture(
           .join("\n");
       },
       sendText(operation, provider) {
+        pendingTerminalText = operation.text;
         if (operation.text === "/status") {
           fs.copyFileSync(screenPath, preProbeScreenPath);
           const composerScreen = fs.existsSync(statusUnchangedPath)
@@ -768,11 +793,19 @@ function seededCodexRecoveryFixture(
           provider.setScreen(target, composerScreen);
           return;
         }
-        fs.writeFileSync(screenPath, "Working\n");
-        provider.setScreen(target, "Working\n");
+        const composer = `Ready\n› ${operation.text}\ngpt-5.6-sol high · /repo`;
+        fs.writeFileSync(screenPath, composer);
+        provider.setScreen(target, composer);
       },
       sendKeys(operation, provider) {
         if (operation.keys.includes("C-m")) {
+          if (pendingTerminalText && pendingTerminalText !== "/status") {
+            pendingTerminalText = "";
+            fs.writeFileSync(screenPath, "Working\n");
+            provider.setScreen(target, "Working\n");
+            return;
+          }
+          pendingTerminalText = "";
           if (fs.existsSync(statusUnchangedPath)) {
             return;
           }
@@ -981,6 +1014,68 @@ function seededCodexRecoveryFixture(
     AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "1",
     AKK_TEST_TERMINAL_ACCEPTANCE_OUTCOME: "accepted"
   };
+  const openRootInventory = (
+    pid: number,
+    cwd = workspace
+  ): CodexOpenRootRolloutInventory => {
+    const selectedId = pid === secondCodexPid
+      ? fs.existsSync(secondOwnerIdPath)
+        ? fs.readFileSync(secondOwnerIdPath, "utf8").trim()
+        : undefined
+      : pid === codexPid
+        ? fs.readFileSync(currentIdPath, "utf8").trim()
+        : undefined;
+    const birth = pid === secondCodexPid
+      ? secondProcessBirth
+      : processBirth;
+    const selectedRolloutPath = selectedId
+      ? openRolloutPaths[selectedId]
+      : undefined;
+    const roots = selectedId && selectedRolloutPath &&
+        fs.existsSync(selectedRolloutPath)
+      ? (() => {
+          const realPath = fs.realpathSync(selectedRolloutPath);
+          const stat = fs.statSync(realPath);
+          return [{
+            sessionId: selectedId,
+            processUuid: `codex-pid:${pid}:birth:${birth}`,
+            processBirth: birth,
+            rollout: {
+              fd: "12u",
+              device: String(stat.dev),
+              inode: String(stat.ino),
+              path: realPath
+            },
+            evidence: "codex_open_root_rollout" as const
+          }];
+        })()
+      : [];
+    const authority = {
+      schema: "agent-knock-knock/codex-open-root-rollout-inventory" as const,
+      version: 1 as const,
+      pid,
+      processUuid: `codex-pid:${pid}:birth:${birth}`,
+      processBirth: birth,
+      cwd,
+      roots
+    };
+    const inventoryFingerprint = createHash("sha256")
+      .update(JSON.stringify(authority))
+      .digest("hex");
+    return roots.length === 1
+      ? {
+          ...authority,
+          status: "resolved",
+          roots: [roots[0]!],
+          inventoryFingerprint
+        }
+      : {
+          ...authority,
+          status: "verified_absent",
+          roots: [],
+          inventoryFingerprint
+        };
+  };
   const codexAdapter: CodexLocalSessionAdapter = {
     async listThreadRows() {
       return [];
@@ -992,6 +1087,9 @@ function seededCodexRecoveryFixture(
     },
     async listProcessSnapshots() {
       return processSource.listProcessSnapshots();
+    },
+    async inspectOpenRootRolloutInventoryForPid(pid, cwd) {
+      return openRootInventory(pid, cwd);
     },
     async resolveActiveSessionIdentityForPid(pid) {
       if (pid === codexPid && fs.existsSync(resolverErrorArmedPath)) {

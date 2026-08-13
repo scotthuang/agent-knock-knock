@@ -141,26 +141,22 @@ test("safe-aborted delegate retries refuse a changed Session binding", () => {
       updated_at: new Date().toISOString()
     }, { expectedRevision: managedSession.revision ?? null });
 
-    const rawRetry = runAgentCli([
-      "send",
-      "--conversation",
-      `terminal:tmux:${terminalTarget}:${codexPid}`,
-      "--message",
-      request,
-      "--message-id",
-      stableMessageId,
-      "--background",
+    const listed = runAgentCli([
+      "list",
       "--store-dir",
       storeDir,
-      "--openclaw-bin",
-      "/usr/bin/true",
-      ...nativeIdentityArgs,
-      "--disable-terminal-bridge-monitor"
+      ...nativeIdentityArgs
     ], testEnv);
-    assert.notEqual(rawRetry.status, 0);
-    assert.match(
-      rawRetry.stderr,
-      /Session binding is no longer current|idempotency key/iu
+    assert.equal(listed.status, 0, listed.stderr || listed.stdout);
+    const listedTerminal = JSON.parse(listed.stdout).terminals.find(
+      (terminal: Record<string, any>) =>
+        terminal.terminal_control?.target === terminalTarget
+    );
+    assert.ok(listedTerminal, listed.stdout);
+    assert.equal(
+      listedTerminal.available_actions.send,
+      undefined,
+      "a changed binding cannot advertise fresh follow-current authority"
     );
 
     const directRetry = runAgentCli([
@@ -180,7 +176,7 @@ test("safe-aborted delegate retries refuse a changed Session binding", () => {
     assert.notEqual(directRetry.status, 0);
     assert.match(
       directRetry.stderr,
-      /Session binding is no longer current|idempotency key/iu
+      /rollout-backed managed Session.*strict session_id send[\s\S]*refresh AKK list/iu
     );
 
     const delegateRetry = runAgentCli(args, testEnv);
@@ -1017,8 +1013,8 @@ test("an uncertain dispatch does not collateral-stall a delivered idle Turn", ()
 
     const uncertain = runAgentCli([
       "send",
-      "--session",
-      firstParsed.session_id,
+      "--conversation",
+      `terminal:tmux:${terminalTarget}:${panePid}`,
       "--message",
       "A newer dispatch with an uncertain acceptance outcome",
       ...commonArgs
@@ -1384,7 +1380,7 @@ test("monitor supervision repairs only an exact legacy idle collateral stall and
     assert.notEqual(managedBlocked.status, 0);
     assert.match(
       managedBlocked.stderr,
-      /terminal .* still has unresolved Turn .*\(stalled\)/u
+      /rollout-backed managed Session.*strict session_id send[\s\S]*refresh AKK list/iu
     );
     assert.deepEqual(
       substantiveStoreSnapshot(),
@@ -1476,10 +1472,6 @@ test("monitor supervision repairs only an exact legacy idle collateral stall and
     assert.equal(after.status, 0, after.stderr || after.stdout);
     const afterTerminal = JSON.parse(after.stdout).terminals[0];
     assert.equal(afterTerminal.blocking_turns, undefined);
-    assert.equal(
-      afterTerminal.available_actions.send.arguments.session_id,
-      firstState.session_id
-    );
 
     const turnsBeforeRepairedSend = listConversations(storeDir).length;
     const inputsBeforeRepairedSend = terminalInputCount();
@@ -1487,8 +1479,8 @@ test("monitor supervision repairs only an exact legacy idle collateral stall and
       "A fresh managed task after exact collateral-stall repair.";
     const sentAfterRepair = runAgentCli([
       "send",
-      "--session",
-      firstState.session_id,
+      "--conversation",
+      `terminal:v2:tmux:codex:${terminalTarget}:${panePid}`,
       "--message",
       repairedMessage,
       ...runtimeSendCommon

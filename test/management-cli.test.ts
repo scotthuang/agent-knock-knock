@@ -101,7 +101,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       hidden_turn_count: 0,
       session_count: 0
     });
-    assert.equal(listed.action_contracts.version, 14);
+    assert.equal(listed.action_contracts.version, 15);
     assert.match(
       listed.action_contracts.instructions.join("\n"),
       /Treat terminals\[\] as the primary resource/u
@@ -120,7 +120,27 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     );
     assert.match(
       listed.action_contracts.instructions.join("\n"),
-      /status-card-only zero-rollout source[\s\S]*quiescent rollout-backed source[\s\S]*supported Codex \/clear foreground hint[\s\S]*released predecessor Turn history[\s\S]*uniquely accepts that exact request[\s\S]*narrow panes do not require \/status[\s\S]*strict session_id send, respond, approve, cancel, native lifecycle, and native_inspect remain unavailable[\s\S]*do not retry automatically[\s\S]*explicitly closed uncertain Turn[\s\S]*exact resolved close ledger[\s\S]*append-only uncertain receipt[\s\S]*close never forges the lost callback[\s\S]*cannot be renewed/u
+      /session_exact[\s\S]*terminal_follow_current/u
+    );
+    assert.match(
+      listed.action_contracts.instructions.join("\n"),
+      /rollout-backed managed Codex pane[\s\S]*exact selector plus expected_terminal_token[\s\S]*one materialized rollout does not prove the current (?:Codex )?TUI foreground thread/u
+    );
+    assert.match(
+      listed.action_contracts.instructions.join("\n"),
+      /complete nonempty pinned open-rollout inventory[\s\S]*one post-anchor rollout uniquely accepts that exact request/u
+    );
+    assert.match(
+      listed.action_contracts.instructions.join("\n"),
+      /\/clear resume hint is diagnostic only/u
+    );
+    assert.match(
+      listed.action_contracts.instructions.join("\n"),
+      /released predecessor Turn history[\s\S]*narrow panes do not require \/status[\s\S]*strict session_id send, respond, approve, cancel, native lifecycle, and native_inspect remain unavailable[\s\S]*do not retry automatically/u
+    );
+    assert.match(
+      listed.action_contracts.instructions.join("\n"),
+      /explicitly closed uncertain Turn[\s\S]*exact resolved close ledger[\s\S]*append-only uncertain receipt[\s\S]*close never forges the lost callback[\s\S]*cannot be renewed/u
     );
     assert.match(
       listed.action_contracts.instructions.join("\n"),
@@ -149,9 +169,9 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       listed.action_contracts.field_semantics.managed.current_turn,
       "the authoritative dispatch-ledger owner, never inferred from history"
     );
-    assert.equal(
+    assert.match(
       listed.action_contracts.field_semantics.managed.session_id,
-      "the continuing agent context and authoritative ordinary-send target"
+      /continuing agent context[\s\S]*ordinary-send target only when (?:the listed send action|available_actions\.send) (?:explicitly )?prefills it[\s\S]*rollout-backed Codex uses selector\/token instead/u
     );
     assert.deepEqual(
       listed.action_contracts.field_semantics.available_actions,
@@ -190,7 +210,11 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     );
     assert.match(
       listed.action_contracts.actions.send.candidate_rollout_deferred_scope,
-      /complete exact candidate inventory[\s\S]*supported \/clear foreground hint[\s\S]*predecessor Turn history stays read-only[\s\S]*unique post-anchor request acceptance[\s\S]*Same-UUID and different-UUID results keep separate Session lineages[\s\S]*never retried blindly[\s\S]*Explicit close[\s\S]*append-only receipt[\s\S]*absent old rollout[\s\S]*never synthesizes callback delivery/u
+      /complete nonempty candidate inventory[\s\S]*one rollout is materialized[\s\S]*does not prove the current TUI foreground thread[\s\S]*predecessor Turn history stays read-only[\s\S]*unique post-anchor request acceptance[\s\S]*\/clear resume hint is diagnostic only[\s\S]*not token or routing authority[\s\S]*Same-UUID and different-UUID results keep separate Session lineages[\s\S]*never retried blindly[\s\S]*Explicit close[\s\S]*append-only receipt[\s\S]*absent old rollout[\s\S]*never synthesizes callback delivery/u
+    );
+    assert.match(
+      listed.action_contracts.actions.send.ordinary_use,
+      /session_id never follows the pane[\s\S]*unavailable for rollout-backed Codex Sessions[\s\S]*selector\/token action[\s\S]*unique exact rollout/u
     );
     assert.deepEqual(
       listed.action_contracts.field_semantics.handoff_decision,
@@ -239,6 +263,19 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     assert.equal(
       listed.action_contracts.actions.send.initial_attach_target_argument,
       "selector"
+    );
+    assert.deepEqual(
+      listed.action_contracts.actions.send.managed_scopes,
+      {
+        session_exact: {
+          target_arguments: ["session_id"],
+          follows_current_terminal: false
+        },
+        terminal_follow_current: {
+          target_arguments: ["selector", "expected_terminal_token"],
+          follows_current_terminal: true
+        }
+      }
     );
     assert.match(
       listed.action_contracts.actions.send.initial_attach_scope,

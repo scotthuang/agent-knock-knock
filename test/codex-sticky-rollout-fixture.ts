@@ -101,6 +101,10 @@ export class StickyRolloutFixture {
   sourceBindingToken: string;
   private readonly exactStatusProbe: boolean;
   private statusProbePending = false;
+  private acceptNextTask = false;
+  private requireNativeAcceptance = false;
+  private pendingAcceptedTaskText: string | undefined;
+  private acceptedTaskSequence = 0;
 
   constructor(options: StickyRolloutFixtureOptions = {}) {
     this.exactStatusProbe = options.exactStatusProbe === true;
@@ -258,6 +262,11 @@ export class StickyRolloutFixture {
     this.provider.setScreen(this.target, screen);
   }
 
+  acceptNextTaskInActiveRollout(): void {
+    this.acceptNextTask = true;
+    this.requireNativeAcceptance = true;
+  }
+
   writeRollout(
     key: "a" | "b" | "c" | "unknown",
     version = "0.146.0"
@@ -299,7 +308,8 @@ export class StickyRolloutFixture {
       env: {
         ...process.env,
         AKK_RUNTIME_DIR: this.runtimeDir,
-        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "1",
+        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE:
+          this.requireNativeAcceptance ? "0" : "1",
         AKK_TEST_TERMINAL_ACCEPTANCE_OUTCOME: "accepted"
       },
       overrides: {
@@ -414,6 +424,11 @@ export class StickyRolloutFixture {
                !fs.existsSync(this.rolloutPaths.c)) {
       this.writeRollout("c");
     }
+    if (this.acceptNextTask) {
+      this.pendingAcceptedTaskText = text;
+      this.setScreen(`Ready\n› ${text}\ngpt-5.6-sol high · /repo`);
+      return;
+    }
     this.setScreen("Working\n");
   }
 
@@ -426,6 +441,45 @@ export class StickyRolloutFixture {
       this.statusProbePending = false;
       this.materializeStatusPanel();
     }
+    if (!keys.includes("C-m") || !this.pendingAcceptedTaskText) {
+      return;
+    }
+    const request = this.pendingAcceptedTaskText;
+    this.pendingAcceptedTaskText = undefined;
+    this.acceptNextTask = false;
+    this.acceptedTaskSequence += 1;
+    const activeKey = (Object.entries(STICKY_THREAD_IDS) as Array<[
+      keyof typeof STICKY_THREAD_IDS,
+      string
+    ]>).find(([, nativeThreadId]) => nativeThreadId === this.activeThreadId)?.[0];
+    if (!activeKey || activeKey === "wrong") {
+      throw new Error("sticky fixture cannot accept a task without an active rollout");
+    }
+    const turnId = `60000000-0000-4000-8000-${String(
+      this.acceptedTaskSequence
+    ).padStart(12, "0")}`;
+    const timestamp = this.clock.now().toISOString();
+    fs.appendFileSync(
+      this.rolloutPaths[activeKey],
+      `${[
+        {
+          timestamp,
+          type: "event_msg",
+          payload: { type: "task_started", turn_id: turnId }
+        },
+        {
+          timestamp,
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: request }],
+            internal_chat_message_metadata_passthrough: { turn_id: turnId }
+          }
+        }
+      ].map((record) => JSON.stringify(record)).join("\n")}\n`
+    );
+    this.setScreen("Working\n");
   }
 
   private materializeStatusPanel(): void {

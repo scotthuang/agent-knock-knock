@@ -45,7 +45,14 @@ test("ClawHub quickstarts reach a first task without a top-level workspace", () 
   assert.match(tmux, /appears once in `terminals\[\]`/u);
   assert.match(tmux, /`managed\.current_turn`/u);
   assert.match(tmux, /`managed\.recent_turn`/u);
-  assert.match(tmux, /`send` action with its prefilled authoritative `session_id`/u);
+  assert.match(
+    tmux,
+    /refresh `\/akk list`[\s\S]*listed `send` action[\s\S]*prefilled arguments unchanged/u
+  );
+  assert.match(
+    tmux,
+    /`session_exact` action carries `session_id`[\s\S]*`terminal_follow_current` action[\s\S]*`selector` plus `expected_terminal_token`/u
+  );
   assert.match(tmux, /`respond` action with its prefilled `turn_id`/u);
   assert.match(tmux, /\/akk threads <exact-terminal-id>/u);
   assert.match(tmux, /previous.*刚才那个/u);
@@ -168,7 +175,23 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
     assert.match(document, /`expected_binding_token`/u);
     assert.match(document, /`native_thread_id`/u);
     assert.match(document, /`candidate_token`/u);
-    assert.match(document, /v14 `action_contracts`/u);
+    assert.match(document, /v15 `action_contracts`/u);
+    assert.match(
+      document,
+      /`session_exact`[\s\S]*`terminal_follow_current`/u
+    );
+    assert.match(
+      document,
+      /complete exact inventory domain[\s\S]{0,400}PID and process birth[\s\S]{0,300}pre-submit byte offset/u
+    );
+    assert.match(
+      document,
+      /`\/clear` resume hint is only an advisory routing and diagnostic signal[\s\S]{0,180}not token, UUID, foreground, rollout, or acceptance authority[\s\S]{0,180}disappearance does not invalidate an otherwise fresh candidate action/u
+    );
+    assert.match(
+      document,
+      /rollout-backed Codex row[\s\S]{0,100}advertises `terminal_follow_current`, not `session_exact`[\s\S]{0,180}cached or direct `session_exact` attempt[\s\S]{0,180}rejects before task text[\s\S]{0,100}never downgrades/u
+    );
     assert.match(document, /status-card-only/u);
     assert.match(document, /manual (?:Codex )?`\/clear`/u);
     assert.match(document, /complete (?:set of exact Codex rollout candidates|open-rollout candidate inventory)/u);

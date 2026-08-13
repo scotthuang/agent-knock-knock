@@ -1981,9 +1981,9 @@ function assertSafeAbortedTerminalRetryBinding({
   storeDir: string;
   terminalControl: TerminalControlRef;
   messageId: string;
-}): void {
+}): ManagedSessionState | undefined {
   if (!(receipt.status === "aborted" && receipt.safe_to_retry === true)) {
-    return;
+    return undefined;
   }
   const sessionId = sessionIdForConversation(owner);
   const managedSession = tryLoadManagedSession(storeDir, sessionId);
@@ -2000,29 +2000,248 @@ function assertSafeAbortedTerminalRetryBinding({
     stringValue(ownerTakeover?.terminal_agent_expected_session_id);
   const ownerAgentPid = Number(ownerTakeover?.terminal_agent_pid);
   if (
-    !managedSession ||
-    managedSession.status !== "bound" ||
-    !binding ||
-    !receiptBindingId ||
-    !Number.isSafeInteger(receiptBindingGeneration) ||
-    !receiptNativeThreadId ||
-    receiptBindingId !== stringValue(owner.terminal_binding_id) ||
-    receiptBindingGeneration !== Number(owner.terminal_binding_generation) ||
-    receiptNativeThreadId !== ownerNativeThreadId ||
-    binding.binding_id !== receiptBindingId ||
-    binding.generation !== receiptBindingGeneration ||
-    binding.native_thread_id !== receiptNativeThreadId ||
-    !Number.isSafeInteger(ownerAgentPid) ||
-    binding.native_process.pid !== ownerAgentPid ||
-    !ownerControl ||
-    !terminalControlsShareIncarnation(ownerControl, terminalControl) ||
-    !terminalControlsShareIncarnation(binding.terminal_control, terminalControl)
+    managedSession &&
+    managedSession.status === "bound" &&
+    binding &&
+    receiptBindingId &&
+    Number.isSafeInteger(receiptBindingGeneration) &&
+    receiptNativeThreadId &&
+    receiptBindingId === stringValue(owner.terminal_binding_id) &&
+    receiptBindingGeneration === Number(owner.terminal_binding_generation) &&
+    receiptNativeThreadId === ownerNativeThreadId &&
+    binding.binding_id === receiptBindingId &&
+    binding.generation === receiptBindingGeneration &&
+    binding.native_thread_id === receiptNativeThreadId &&
+    Number.isSafeInteger(ownerAgentPid) &&
+    binding.native_process.pid === ownerAgentPid &&
+    ownerControl &&
+    terminalControlsShareIncarnation(ownerControl, terminalControl) &&
+    terminalControlsShareIncarnation(binding.terminal_control, terminalControl)
   ) {
+    return managedSession;
+  }
+  const recoveredSource = safeAbortedDeferredRetrySourceSession({
+    owner,
+    receipt,
+    storeDir,
+    terminalControl,
+    messageId
+  });
+  if (!recoveredSource) {
     throw new Error(
       `terminal idempotency key ${messageId} belongs to a safe-aborted Turn ` +
       "whose Session binding is no longer current; no terminal input was sent"
     );
   }
+  return recoveredSource;
+}
+
+function safeAbortedDeferredRetrySourceSession({
+  owner,
+  receipt,
+  storeDir,
+  terminalControl,
+  messageId
+}: {
+  owner: Conversation;
+  receipt: Record<string, any>;
+  storeDir: string;
+  terminalControl: TerminalControlRef;
+  messageId: string;
+}): ManagedSessionState | undefined {
+  const takeover = isRecord(owner.native_session_takeover)
+    ? owner.native_session_takeover
+    : undefined;
+  const transferId = stringValue(takeover?.deferred_foreground_transfer_id);
+  const ownerControl = terminalControlFromTakeover(takeover);
+  if (!transferId || !takeover || !ownerControl) {
+    return undefined;
+  }
+  const transfer = loadDeferredForegroundTransfer(storeDir, transferId);
+  const target = tryLoadManagedSession(storeDir, transfer.target_session_id);
+  const source = tryLoadManagedSession(storeDir, transfer.source_session_id);
+  const submission = terminalBridgeSubmission(owner);
+  const matchingReceipts = terminalBridgeSubmissionReceipts(owner).filter(
+    (candidate) => stringValue(candidate.message_id) === messageId
+  );
+  const canonical = pathsForConversation(owner.conversation_id, storeDir);
+  const targetBinding = transfer.abort_target_after_binding;
+  const sourceBinding = transfer.abort_source_after_binding;
+  const transferDispatchStartedAt = stringValue(
+    transfer.dispatch_started_at
+  );
+  const terminalInputNotStartedAt = stringValue(
+    transfer.terminal_input_not_started_at
+  );
+  const abortedBeforeDispatchIntent =
+    transfer.input_stage === "none" &&
+    transferDispatchStartedAt === undefined &&
+    terminalInputNotStartedAt === undefined;
+  const dispatchIntentProvedNotStarted =
+    transfer.input_stage === "dispatch_started" &&
+    transferDispatchStartedAt !== undefined &&
+    terminalInputNotStartedAt !== undefined &&
+    validTimestampMs(transferDispatchStartedAt) &&
+    validTimestampMs(terminalInputNotStartedAt) &&
+    Date.parse(terminalInputNotStartedAt) >=
+      Date.parse(transferDispatchStartedAt);
+  const forbiddenInputEvidence = [
+    "text_injected_at",
+    "enter_dispatched_at",
+    "submitted_at",
+    "agent_accepted_at",
+    "not_accepted_at",
+    "uncertain_at",
+    "acceptance_evidence"
+  ] as const;
+  if (
+    transfer.version !== 2 ||
+    transfer.status !== "abort_resolved" ||
+    (!abortedBeforeDispatchIntent && !dispatchIntentProvedNotStarted) ||
+    transfer.text_injected_at !== undefined ||
+    transfer.enter_dispatched_at !== undefined ||
+    transfer.agent_accepted_at !== undefined ||
+    transfer.target_session_id !== sessionIdForConversation(owner) ||
+    transfer.turn_id !== turnIdForConversation(owner) ||
+    transfer.turn_id !== owner.conversation_id ||
+    transfer.message_id !== messageId ||
+    transfer.terminal_id !== stringValue(takeover.native_session_id) ||
+    transfer.process_pid !== Number(takeover.terminal_agent_pid) ||
+    transfer.process_uuid !== stringValue(
+      takeover.terminal_agent_process_uuid
+    ) ||
+    transfer.process_birth !== stringValue(
+      takeover.terminal_agent_process_birth
+    ) ||
+    path.resolve(transfer.workspace) !== path.resolve(owner.workspace) ||
+    !terminalControlsShareIncarnation(ownerControl, terminalControl) ||
+    !terminalControlEvidenceMatches(
+      transfer.terminal_endpoint,
+      terminalControl
+    ) ||
+    owner.status !== "failed" ||
+    isRecord(owner.callback_delivery) ||
+    isRecord(owner.terminal_bridge_completion_claim) ||
+    isRecord(takeover.terminal_bridge_completion_claim) ||
+    stringValue(takeover.terminal_bridge_message_id) !== messageId ||
+    stringValue(takeover.terminal_bridge_request_hash) !==
+      transfer.request_hash ||
+    stringValue(takeover.terminal_bridge_request_hash) !==
+      stringValue(receipt.request_hash) ||
+    stringValue(takeover.deferred_foreground_transfer_id) !==
+      transfer.transfer_id ||
+    path.resolve(stringValue(owner.state_path) ?? "") !==
+      path.resolve(canonical.statePath) ||
+    path.resolve(stringValue(owner.event_log_path) ?? "") !==
+      path.resolve(canonical.logPath) ||
+    path.resolve(managedSessionStoreDirForConversation(owner) ?? "") !==
+      path.resolve(storeDir) ||
+    !submission ||
+    matchingReceipts.length !== 1 ||
+    canonicalJson(matchingReceipts[0]) !== canonicalJson(submission) ||
+    canonicalJson(submission) !== canonicalJson(receipt) ||
+    submission.status !== "aborted" ||
+    submission.safe_to_retry !== true ||
+    stringValue(submission.last_proven_stage) !== "prepared" ||
+    !validTimestampMs(submission.prepared_at) ||
+    !validTimestampMs(submission.aborted_at) ||
+    Date.parse(String(submission.aborted_at)) <
+      Date.parse(String(submission.prepared_at)) ||
+    (
+      dispatchIntentProvedNotStarted &&
+      stringValue(submission.aborted_at) !== terminalInputNotStartedAt
+    ) ||
+    forbiddenInputEvidence.some((field) => submission[field] !== undefined) ||
+    stringValue(submission.session_id) !== transfer.target_session_id ||
+    stringValue(submission.turn_id) !== transfer.turn_id ||
+    stringValue(submission.message_id) !== transfer.message_id ||
+    stringValue(submission.request_hash) !== transfer.request_hash ||
+    stringValue(submission.binding_id) !==
+      transfer.target_before_binding?.binding_id ||
+    Number(submission.binding_generation) !==
+      transfer.target_before_binding?.generation ||
+    stringValue(submission.native_thread_id) !== undefined ||
+    !target ||
+    target.status !== "detached" ||
+    target.last_transition_id !== transfer.transfer_id ||
+    target.lineage.transition_id !== transfer.transfer_id ||
+    target.lineage.previous_session_id !== transfer.source_session_id ||
+    transfer.abort_target_after_status !== "detached" ||
+    !targetBinding ||
+    managedSessionRevision(target) !== transfer.abort_target_after_revision ||
+    managedSessionBindingToken(target) !==
+      transfer.abort_target_after_binding_token ||
+    JSON.stringify(target.binding) !== JSON.stringify(targetBinding) ||
+    !source ||
+    source.status !== "bound" ||
+    source.last_transition_id !== transfer.source_previous_last_transition_id ||
+    transfer.abort_source_after_status !== "bound" ||
+    !sourceBinding ||
+    managedSessionRevision(source) !== transfer.abort_source_after_revision ||
+    managedSessionBindingToken(source) !==
+      transfer.abort_source_after_binding_token ||
+    JSON.stringify(source.binding) !== JSON.stringify(sourceBinding) ||
+    JSON.stringify(sourceBinding) !==
+      JSON.stringify(transfer.source_before_binding)
+  ) {
+    return undefined;
+  }
+  const ledger = loadTerminalBridgeDispatchLedger(terminalControl);
+  if (!ledger) {
+    return undefined;
+  }
+  assertDeferredForegroundResolvedZeroInputLedger({
+    storeDir,
+    terminal: { terminalControl },
+    transfer,
+    ledger,
+    statePath: canonical.statePath
+  });
+  if (
+    dispatchIntentProvedNotStarted &&
+    stringValue(ledger.aborted_at) !== terminalInputNotStartedAt
+  ) {
+    return undefined;
+  }
+  return source;
+}
+
+function exactSafeAbortedRecoveredSessionMatches({
+  owner,
+  receipt,
+  storeDir,
+  terminalControl,
+  messageId,
+  expectedSessionId
+}: {
+  owner: Conversation;
+  receipt?: Record<string, any>;
+  storeDir: string;
+  terminalControl: TerminalControlRef;
+  messageId: string;
+  expectedSessionId: string;
+}): boolean {
+  const exactReceipt = receipt ?? (() => {
+    const matches = terminalBridgeSubmissionReceipts(owner).filter(
+      (candidate) => stringValue(candidate.message_id) === messageId
+    );
+    return matches.length === 1 ? matches[0] : undefined;
+  })();
+  if (
+    !exactReceipt ||
+    exactReceipt.status !== "aborted" ||
+    exactReceipt.safe_to_retry !== true
+  ) {
+    return false;
+  }
+  const recoveredSession = assertSafeAbortedTerminalRetryBinding({
+    owner,
+    receipt: exactReceipt,
+    storeDir,
+    terminalControl,
+    messageId
+  });
+  return recoveredSession?.session_id === expectedSessionId;
 }
 
 function stableDelegateTerminalRoute({
@@ -2150,7 +2369,6 @@ function stableDelegateTerminalRoute({
     selected.receipt.status === "aborted" &&
     selected.receipt.safe_to_retry === true
   ) {
-    const sessionId = sessionIdForConversation(selected.owner);
     const ownerControl = terminalControlFromTakeover(
       isRecord(selected.owner.native_session_takeover)
         ? selected.owner.native_session_takeover
@@ -2161,16 +2379,36 @@ function stableDelegateTerminalRoute({
         `terminal idempotency key ${messageId} has no durable terminal route`
       );
     }
-    assertSafeAbortedTerminalRetryBinding({
+    const retrySession = assertSafeAbortedTerminalRetryBinding({
       owner: selected.owner,
       receipt: selected.receipt,
       storeDir,
       terminalControl: ownerControl,
       messageId
     });
+    if (!retrySession) {
+      throw new Error(
+        `terminal idempotency key ${messageId} has no restored retry Session`
+      );
+    }
+    if (
+      retrySession.agent === "codex" &&
+      isCompleteNativeRollout(retrySession.binding?.native_process.rollout)
+    ) {
+      // A safe-aborted retry has proved that the original binding is unchanged,
+      // but one open Codex rollout still does not prove the TUI foreground.
+      // Preserve the stable terminal route so runSend captures fresh implicit
+      // candidate authority and retries through the v3 transfer instead of the
+      // forbidden strict Session path.
+      return {
+        kind: "terminal",
+        conversationId: selected.conversationId,
+        workspace: selected.workspace
+      };
+    }
     return {
       kind: "session",
-      sessionId,
+      sessionId: retrySession.session_id,
       workspace: selected.workspace
     };
   }
@@ -2895,6 +3133,20 @@ function replayExactActiveTerminalSubmission({
   const loadedLedgerOwner = loadedLedger && loadedLedgerMessageId === messageId
     ? loadTerminalDispatchLedgerOwner(loadedLedger)
     : undefined;
+  const loadedLedgerSessionId = stringValue(loadedLedger?.session_id);
+  const loadedLedgerMatchesRecoveredSession = Boolean(
+    expectedSessionId &&
+    loadedLedgerSessionId !== undefined &&
+    loadedLedgerSessionId !== expectedSessionId &&
+    loadedLedgerOwner &&
+    exactSafeAbortedRecoveredSessionMatches({
+      owner: loadedLedgerOwner,
+      storeDir: expectedStoreDir,
+      terminalControl,
+      messageId,
+      expectedSessionId
+    })
+  );
   const expectedMessageBodyHash = createHash("sha256")
     .update(requestText)
     .digest("hex");
@@ -2936,8 +3188,9 @@ function replayExactActiveTerminalSubmission({
       !terminalDispatchRecordMatchesControl(loadedLedger, terminalControl) ||
       (loadedLedgerStoreDir !== undefined &&
         path.resolve(loadedLedgerStoreDir) !== path.resolve(expectedStoreDir)) ||
-      (expectedSessionId && stringValue(loadedLedger.session_id) !== undefined &&
-        stringValue(loadedLedger.session_id) !== expectedSessionId) ||
+      (expectedSessionId && loadedLedgerSessionId !== undefined &&
+        loadedLedgerSessionId !== expectedSessionId &&
+        !loadedLedgerMatchesRecoveredSession) ||
       (expectedTurnId && stringValue(loadedLedger.turn_id) !== undefined &&
         stringValue(loadedLedger.turn_id) !== expectedTurnId) ||
       (expectedStatePath && loadedLedgerStatePath !== undefined &&
@@ -2974,6 +3227,7 @@ function replayExactActiveTerminalSubmission({
   }
   if (
     ledgerReceipt &&
+    !(ledgerReceipt.status === "aborted" && ledgerReceipt.safe_to_retry === true) &&
     (
       loadedLedgerMessageId !== messageId ||
       !["submitted", "enter_dispatched", "agent_accepted"].includes(
@@ -3198,6 +3452,18 @@ function validateStoredTerminalSubmissionMatch({
   const receiptStoreDir = stringValue(receipt.store_dir) ?? ownerStoreDir;
   const receiptSessionId = stringValue(receipt.session_id) ??
     sessionIdForConversation(owner);
+  const receiptMatchesRecoveredSession = Boolean(
+    expectedSessionId &&
+    receiptSessionId !== expectedSessionId &&
+    exactSafeAbortedRecoveredSessionMatches({
+      owner,
+      receipt,
+      storeDir: expectedStoreDir,
+      terminalControl,
+      messageId,
+      expectedSessionId
+    })
+  );
   const receiptTurnId = stringValue(receipt.turn_id) ??
     turnIdForConversation(owner);
   const receiptOpenClawSession = stringValue(receipt.openclaw_session) ??
@@ -3230,7 +3496,8 @@ function validateStoredTerminalSubmissionMatch({
     ) ||
     receiptSessionId !== sessionIdForConversation(owner) ||
     receiptTurnId !== turnIdForConversation(owner) ||
-    (expectedSessionId && receiptSessionId !== expectedSessionId) ||
+    (expectedSessionId && receiptSessionId !== expectedSessionId &&
+      !receiptMatchesRecoveredSession) ||
     (expectedTurnId && receiptTurnId !== expectedTurnId) ||
     (expectedStatePath && !sameCanonicalStatePath(owner.state_path, expectedStatePath)) ||
     (requestedOpenClawSession && receiptOpenClawSession !== requestedOpenClawSession) ||
@@ -3351,13 +3618,29 @@ function replayExactStoredTerminalSubmission({
   const match = matches[0];
   if (!match) {
     for (const { owner, receipt } of validatedMatches) {
-      assertSafeAbortedTerminalRetryBinding({
-        owner,
-        receipt,
-        storeDir: expectedStoreDir,
-        terminalControl,
-        messageId
-      });
+      if (expectedSessionId) {
+        if (!exactSafeAbortedRecoveredSessionMatches({
+          owner,
+          receipt,
+          storeDir: expectedStoreDir,
+          terminalControl,
+          messageId,
+          expectedSessionId
+        })) {
+          throw new Error(
+            `terminal idempotency key ${messageId} does not match its ` +
+            "restored retry Session; no terminal input was sent"
+          );
+        }
+      } else {
+        assertSafeAbortedTerminalRetryBinding({
+          owner,
+          receipt,
+          storeDir: expectedStoreDir,
+          terminalControl,
+          messageId
+        });
+      }
     }
     // A prepared-stage failure with a restored ledger proves that tmux was
     // untouched. The same exact id may therefore start a fresh attempt; all
@@ -5127,6 +5410,17 @@ function terminalFirstListProjection({
       )?.toLowerCase() === deferredCodexSourceNativeThreadId
         ? stringValue(codexLatentClearResumeValue.fingerprint)
         : undefined;
+    if (deferredCodexLatentClearResumeFingerprint) {
+      // The resume hint is useful operational context, but it is not durable
+      // foreground authority: it can scroll away while the latent thread is
+      // still current. Candidate routing and its token rely on the complete
+      // rollout inventory and Store authority below instead.
+      runtimeLog("info", "terminal_codex_latent_clear_hint_observed", {
+        terminal_id: String(terminal.id),
+        source_session_id: deferredCodexSource?.session_id,
+        source_native_thread_id: deferredCodexSourceNativeThreadId
+      });
+    }
     const deferredCodexSourceActiveElsewhere = Boolean(
       deferredCodexSourceNativeThreadId &&
       terminals.some((candidate) =>
@@ -5233,15 +5527,13 @@ function terminalFirstListProjection({
         deferredCodexSource
       )
     );
-    const deferredCodexCandidateRouteNeeded = Boolean(
-      deferredCodexCandidateInventory &&
-      (
-        deferredCodexCandidateInventory.status === "unbound" ||
-        nativeIdentityObservation?.status === "unavailable" ||
-        deferredCodexSource?.binding?.native_process.rollout === undefined ||
-        deferredCodexLatentClearResumeFingerprint !== undefined
-      )
-    );
+    // A complete one-root inventory proves only which rollout files are
+    // materialized, not which logical thread the Codex TUI currently owns.
+    // `/clear` can select a new thread before its rollout exists, so every
+    // otherwise eligible nonempty inventory uses the same post-submission
+    // candidate-set attribution as a multi-root inventory.
+    const deferredCodexCandidateRouteNeeded =
+      deferredCodexCandidateInventory !== undefined;
     const deferredCodexForegroundEligible = Boolean(
       mutationsAllowed &&
       !terminalHasNonterminalDeferredTransfer &&
@@ -5297,8 +5589,6 @@ function terminalFirstListProjection({
             sourceSession: deferredCodexSource,
             dispatchSnapshot: deferredCodexDispatchSnapshot,
             sourceTurnHistory: deferredCodexCandidateSourceTurnHistory,
-            candidateContextFingerprint:
-              deferredCodexLatentClearResumeFingerprint,
             sourceRolloutAuthority:
               deferredCodexSourceRolloutAuthority,
             sourceAbandonmentFingerprint:
@@ -5503,8 +5793,18 @@ function terminalFirstListProjection({
         });
       }
     }
+    const rolloutBackedCodexSession = Boolean(
+      authoritativeSession?.agent === "codex" &&
+      isCompleteNativeRollout(
+        authoritativeSession.binding?.native_process.rollout
+      )
+    );
     const terminalCanAcceptSend =
-      ownership.state === "none" && isRecord(sessionAwareRawActions.send);
+      ownership.state === "none" &&
+      Boolean(
+        deferredCodexForegroundToken ||
+        (!rolloutBackedCodexSession && isRecord(sessionAwareRawActions.send))
+      );
     if (
       ownership.state === "current" &&
       !allRelated.some((conversation) =>
@@ -5580,7 +5880,9 @@ function terminalFirstListProjection({
     const nonOwnerRawActions = authoritativeSession
       ? Object.fromEntries(
           Object.entries(sessionAwareRawActions).filter(
-            ([actionName]) => actionName !== "approve"
+            ([actionName]) =>
+              actionName !== "approve" &&
+              !(rolloutBackedCodexSession && actionName === "send")
           )
         )
       : sessionAwareRawActions;
@@ -5729,6 +6031,7 @@ function terminalFirstListProjection({
               }
             }
         : managedSessionId &&
+            !rolloutBackedCodexSession &&
             sessionBindingMatchesLiveTerminal &&
             isRecord(sessionAwareRawActions.send)
           ? {
@@ -7639,13 +7942,14 @@ function managedListApprovalState(
 
 function listActionContracts() {
   return {
-    version: 14,
+    version: 15,
     instructions: [
       "Treat terminals[] as the primary resource and use only actions present in available_actions, except the snapshot-bound terminals[].handoff_decision.choices.take_over_current.action and an exact terminals[].blocking_turns[].recovery_action. Either nested action requires explicit user confirmation; after it succeeds, refresh list before any follow-current send.",
-      "An existing managed session's ordinary send targets session_id and creates a new turn. A turn id is never an ordinary send target.",
+      "The session_exact scope uses session_id only when it is prefilled by the listed send action. A rollout-backed managed Codex pane instead uses the terminal_follow_current scope with its exact selector plus expected_terminal_token because even one materialized rollout does not prove the current TUI foreground thread. A turn id is never an ordinary send target.",
+      "A user-explicit raw terminal selector, or a uniquely delegated raw send with no selector, may omit expected_terminal_token for convenience. If that terminal already has one rollout-backed managed Codex source, AKK captures an equivalent fresh candidate authority under the terminal and Store locks and still uses the same v3 follow-current transfer; it never degrades to sole-root strict continuation. Unmanaged first attach retains its existing behavior.",
       "Read-only native-thread listing targets an exact terminal_id. Native-thread new/resume mutations also use the listed expected_binding_token and never create a Turn.",
       "Native inspection is a separate terminal action: use only its closed inspection enum and current exact terminal_id/token; AKK status does not execute a native slash command.",
-      "A verified, idle human native-thread switch may expose a terminal-scoped send with expected_terminal_token; that action atomically adopts the live context before creating its Turn. A conclusively ended Codex rollout may expose the same snapshot-bound send only after AKK proves zero current rollout and an exact empty composer; it detaches the ended Session and creates an isolated virgin Session. A status-card-only zero-rollout source, a quiescent rollout-backed source whose complete pinned open-rollout inventory cannot identify one foreground candidate, or a supported Codex /clear foreground hint observed before its new rollout materializes may also expose this exact action. AKK freezes any released predecessor Turn history, submits the ordinary task once, and binds a separate provisional Session only after one post-anchor rollout uniquely accepts that exact request. The accepted UUID may equal or differ from the predecessor without merging their Session lineages, and narrow panes do not require /status. Until that promotion commits, strict session_id send, respond, approve, cancel, native lifecycle, and native_inspect remain unavailable, and the provisional binding has no callback authority. If dispatch, acceptance, or post-submit binding is uncertain, do not retry automatically. An explicitly closed uncertain Turn may authorize only a future candidate send when its exact resolved close ledger, append-only uncertain receipt, frozen Turn history, and complete current rollout inventory prove that the old bound rollout is absent and every candidate is unclaimed; close never forges the lost callback, and uncertain submissions cannot be renewed. Other binding conflicts remain fail-closed and may expose only exact low-level reconcile_binding recovery.",
+      "A verified, idle human native-thread switch may expose a terminal-scoped send with expected_terminal_token; that action atomically adopts the live context before creating its Turn. A conclusively ended Codex rollout may expose the same snapshot-bound send only after AKK proves zero current rollout and an exact empty composer; it detaches the ended Session and creates an isolated virgin Session. A status-card-only zero-rollout source or any otherwise eligible quiescent rollout-backed source with a complete nonempty pinned open-rollout inventory may also expose this exact action. One materialized rollout does not prove the current Codex TUI foreground thread, and a /clear resume hint is diagnostic only. AKK freezes any released predecessor Turn history, submits the ordinary task once, and binds a separate provisional Session only after one post-anchor rollout uniquely accepts that exact request. The accepted UUID may equal or differ from the predecessor without merging their Session lineages, and narrow panes do not require /status. Until that promotion commits, strict session_id send, respond, approve, cancel, native lifecycle, and native_inspect remain unavailable, and the provisional binding has no callback authority. If dispatch, acceptance, or post-submit binding is uncertain, do not retry automatically. An explicitly closed uncertain Turn may authorize only a future candidate send when its exact resolved close ledger, append-only uncertain receipt, frozen predecessor history, and complete current rollout inventory prove that the old bound rollout is absent and every candidate is unclaimed; close never forges the lost callback, and uncertain submissions cannot be renewed. Other binding conflicts remain fail-closed and may expose only exact low-level reconcile_binding recovery.",
       "List resumable threads before resume; use only a complete native_thread_id and the action returned for that candidate.",
       "Use a terminal selector only when explicitly named by the user or prefilled by that terminal row's send action. A handoff action also carries expected_terminal_token; never infer, guess, or reuse either value.",
       "Use respond only for an in-flight turn that is explicitly waiting for OpenClaw.",
@@ -7670,7 +7974,8 @@ function listActionContracts() {
       managed: {
         current_turn: "the authoritative dispatch-ledger owner, never inferred from history",
         recent_turn: "the latest visible non-owning turn in the current managed session",
-        session_id: "the continuing agent context and authoritative ordinary-send target",
+        session_id:
+          "the continuing agent context; it is an ordinary-send target only when the listed send action explicitly prefills it, and rollout-backed Codex uses selector/token instead",
         binding_id: "the immutable terminal-binding generation currently authorized for this Session",
         binding_token: "an optimistic concurrency token required by native-thread mutations",
         history: "older turns, present only with --all"
@@ -7716,8 +8021,18 @@ function listActionContracts() {
         tool: "agent_knock_knock_send",
         target_argument: "session_id",
         initial_attach_target_argument: "selector",
+        managed_scopes: {
+          session_exact: {
+            target_arguments: ["session_id"],
+            follows_current_terminal: false
+          },
+          terminal_follow_current: {
+            target_arguments: ["selector", "expected_terminal_token"],
+            follows_current_terminal: true
+          }
+        },
         initial_attach_scope:
-          "A discovery selector explicitly named by the user, or the selector prefilled by an unmanaged raw-terminal row's available send action; never infer, guess, or reuse one.",
+          "A discovery selector explicitly named by the user, the selector prefilled by an unmanaged raw-terminal row's available send action, or an omitted selector delegated only when exactly one eligible raw pane exists; never infer, guess, or reuse a selector or token. For an already managed rollout-backed Codex pane, an explicit or unique raw delegation without a token internally captures fresh v3 candidate authority under lock; it never becomes a strict Session continuation.",
         required: ["request"],
         optional: [
           "selector",
@@ -7731,9 +8046,9 @@ function listActionContracts() {
         status_card_only_deferred_scope:
           "A zero-Turn Codex status-card binding has no rollout; only its listed selector/token send creates an isolated provisional Session and binds it after exact request acceptance. Until promotion commits, strict managed controls, native lifecycle, native_inspect, and callback authority remain unavailable; an uncertain dispatch, acceptance, or post-submit binding must not be retried automatically.",
         candidate_rollout_deferred_scope:
-          "A quiescent rollout-backed Codex source may use a listed selector/token send when AKK pins the complete exact candidate inventory but cannot prove one foreground UUID, or when a supported /clear foreground hint signals that the sole old rollout is no longer sufficient authority. Released predecessor Turn history stays read-only while a separate provisional Session sends once and waits for one unique post-anchor request acceptance. Same-UUID and different-UUID results keep separate Session lineages; zero, multiple, drifted, or uncertain acceptance is never retried blindly. Explicit close can abandon an uncertain receipt for future-send liveness only while the exact resolved close ledger, append-only receipt, frozen history, absent old rollout, and unclaimed candidate set remain authoritative; it never synthesizes callback delivery.",
+          "A quiescent rollout-backed Codex source uses a listed selector/token send whenever AKK can pin a complete nonempty candidate inventory. Inventory status resolved means only that one rollout is materialized; it does not prove the current TUI foreground thread. Released predecessor Turn history stays read-only while a separate provisional Session sends once and waits for one unique post-anchor request acceptance. A /clear resume hint is diagnostic only and is not token or routing authority. Same-UUID and different-UUID results keep separate Session lineages; zero, multiple, drifted, or uncertain acceptance is never retried blindly. Explicit close can abandon an uncertain receipt for future-send liveness only while the exact resolved close ledger, append-only receipt, frozen history, absent old rollout, and unclaimed candidate set remain authoritative; it never synthesizes callback delivery.",
         ordinary_use:
-          "Create a new managed turn in the exact Session. A live terminal selector can attach an unmanaged pane, adopt one verified human-selected native context, detach a verified-empty Codex source, or replace an eligible status-card/candidate-rollout source after the submitted request proves its unique exact rollout; an explicit session_id never follows the pane."
+          "Create a new managed Turn through the exact action listed for the pane. An explicit session_id never follows the pane and is unavailable for rollout-backed Codex Sessions; their listed selector/token action binds only the unique exact rollout that accepts the submitted request. A user-explicit or uniquely delegated raw send without a token receives the same fresh under-lock candidate authority when it resolves to an already managed rollout-backed Codex source. A live terminal selector can also attach an unmanaged pane, adopt one verified human-selected native context, detach a verified-empty Codex source, or replace an eligible status-card/candidate-rollout source."
       },
       new_thread: {
         tool: "agent_knock_knock_new_thread",
@@ -9959,6 +10274,114 @@ function codexCandidateInventoryHasNoOtherManagedClaim({
   );
 }
 
+function exactReleasedSafeAbortedCandidateTurn({
+  storeDir,
+  session,
+  turn
+}: {
+  storeDir: string;
+  session: ManagedSessionState;
+  turn: Conversation;
+}): boolean {
+  const binding = session.binding;
+  const takeover = isRecord(turn.native_session_takeover)
+    ? turn.native_session_takeover
+    : undefined;
+  const submission = terminalBridgeSubmission(turn);
+  const terminalControl = terminalControlFromTakeover(takeover);
+  const messageId = stringValue(submission?.message_id);
+  const preparedAt = stringValue(submission?.prepared_at);
+  const abortedAt = stringValue(submission?.aborted_at);
+  if (
+    session.status !== "bound" ||
+    session.agent !== "codex" ||
+    !binding ||
+    !isExactNativeThreadId(binding.native_thread_id) ||
+    !TERMINAL_DISPATCH_RELEASE_STATUSES.has(turn.status) ||
+    managedTurnNeedsAttention(turn) ||
+    isRecord(turn.callback_delivery) ||
+    isRecord(turn.terminal_bridge_completion_claim) ||
+    !takeover ||
+    isRecord(takeover.terminal_bridge_completion_claim) ||
+    !submission ||
+    !terminalControl ||
+    !messageId ||
+    submission.status !== "aborted" ||
+    submission.safe_to_retry !== true ||
+    stringValue(submission.last_proven_stage) !== "prepared" ||
+    !preparedAt ||
+    !abortedAt ||
+    !validTimestampMs(preparedAt) ||
+    !validTimestampMs(abortedAt) ||
+    Date.parse(abortedAt) < Date.parse(preparedAt) ||
+    [
+      "text_injected_at",
+      "enter_dispatched_at",
+      "submitted_at",
+      "agent_accepted_at",
+      "not_accepted_at",
+      "uncertain_at",
+      "acceptance_evidence"
+    ].some((field) => submission[field] !== undefined) ||
+    stringValue(takeover.terminal_bridge_message_id) !== messageId ||
+    stringValue(takeover.terminal_bridge_request_hash) !==
+      stringValue(submission.request_hash) ||
+    terminalBridgeRequestFingerprint(
+      stringValue(takeover.terminal_bridge_request_text) ?? ""
+    ) !== stringValue(submission.request_hash) ||
+    executorForConversation(turn).kind !== "codex" ||
+    sessionIdForConversation(turn) !== session.session_id ||
+    stringValue(submission.session_id) !== session.session_id ||
+    stringValue(submission.turn_id) !== turnIdForConversation(turn) ||
+    stringValue(submission.executor_kind) !== "codex" ||
+    stringValue(submission.openclaw_session) !== turn.openclaw_session ||
+    stringValue(turn.terminal_binding_id) !== binding.binding_id ||
+    Number(turn.terminal_binding_generation) !== binding.generation ||
+    stringValue(takeover.terminal_binding_id) !== binding.binding_id ||
+    Number(takeover.terminal_binding_generation) !== binding.generation ||
+    stringValue(submission.binding_id) !== binding.binding_id ||
+    Number(submission.binding_generation) !== binding.generation ||
+    stringValue(turn.native_thread_id) !== binding.native_thread_id ||
+    stringValue(takeover.terminal_agent_session_id) !==
+      binding.native_thread_id ||
+    stringValue(submission.native_thread_id) !== binding.native_thread_id ||
+    Number(takeover.terminal_agent_pid) !== binding.native_process.pid ||
+    stringValue(takeover.terminal_agent_process_uuid) !==
+      binding.native_process.process_uuid ||
+    stringValue(takeover.terminal_agent_process_birth) !==
+      binding.native_process.process_birth ||
+    !terminalControlsShareIncarnation(
+      terminalControl,
+      binding.terminal_control
+    ) ||
+    !terminalControlEvidenceMatches(
+      submission.terminal_endpoint ?? terminalControl,
+      binding.terminal_control
+    ) ||
+    path.resolve(turn.workspace) !== path.resolve(session.workspace)
+  ) {
+    return false;
+  }
+  const canonical = pathsForConversation(turn.conversation_id, storeDir);
+  if (
+    path.resolve(stringValue(turn.state_path) ?? "") !==
+      path.resolve(canonical.statePath) ||
+    path.resolve(stringValue(turn.event_log_path) ?? "") !==
+      path.resolve(canonical.logPath) ||
+    path.resolve(managedSessionStoreDirForConversation(turn) ?? "") !==
+      path.resolve(storeDir) ||
+    path.resolve(stringValue(submission.store_dir) ?? "") !==
+      path.resolve(storeDir)
+  ) {
+    return false;
+  }
+  const matchingReceipts = terminalBridgeSubmissionReceipts(turn).filter(
+    (receipt) => stringValue(receipt.message_id) === messageId
+  );
+  return matchingReceipts.length === 1 &&
+    canonicalJson(matchingReceipts[0]) === canonicalJson(submission);
+}
+
 function deferredCandidateSourceTurnHistory(
   storeDir: string,
   session: ManagedSessionState
@@ -9978,6 +10401,11 @@ function deferredCandidateSourceTurnHistory(
         session,
         turn
       });
+    const safelyAbortedBeforeInput = exactReleasedSafeAbortedCandidateTurn({
+      storeDir,
+      session,
+      turn
+    });
     return (
       !TERMINAL_DISPATCH_RELEASE_STATUSES.has(turn.status) ||
       managedTurnNeedsAttention(turn) ||
@@ -9988,7 +10416,8 @@ function deferredCandidateSourceTurnHistory(
       (
         Boolean(turn.gateway_method) &&
         !callbackDelivered &&
-        !explicitlyAbandonedUncertain
+        !explicitlyAbandonedUncertain &&
+        !safelyAbortedBeforeInput
       ) ||
       stringValue(turn.terminal_binding_id) !== binding.binding_id ||
       Number(turn.terminal_binding_generation) !== binding.generation ||
@@ -10397,7 +10826,6 @@ function deferredCodexForegroundBindingToken({
   dispatchSnapshot,
   candidateInventory,
   sourceTurnHistory,
-  candidateContextFingerprint,
   sourceRolloutAuthority = "present",
   sourceAbandonmentFingerprint
 }: {
@@ -10411,7 +10839,6 @@ function deferredCodexForegroundBindingToken({
   dispatchSnapshot: DeferredCodexForegroundDispatchSnapshot;
   candidateInventory?: CodexOpenRootRolloutInventory;
   sourceTurnHistory?: DeferredForegroundTransferSourceTurnAuthority[];
-  candidateContextFingerprint?: string;
   sourceRolloutAuthority?: DeferredForegroundTransferSourceRolloutAuthority;
   sourceAbandonmentFingerprint?: string;
 }): string {
@@ -10449,16 +10876,11 @@ function deferredCodexForegroundBindingToken({
       source_revision: managedSessionRevision(sourceSession),
       source_binding_token: managedSessionBindingToken(sourceSession),
       terminal_dispatch_snapshot: dispatchSnapshot,
-      observation: candidateContextFingerprint
-        ? "latent_codex_thread_reset"
-        : candidateAuthority
+      observation: candidateAuthority
         ? "exact_open_root_inventory"
         : "verified_absent",
       ...(sourceTurnHistoryFingerprint
         ? { source_turn_history_fingerprint: sourceTurnHistoryFingerprint }
-        : {}),
-      ...(candidateContextFingerprint
-        ? { candidate_context_fingerprint: candidateContextFingerprint }
         : {}),
       ...(candidateAuthority
         ? { source_rollout_authority: sourceRolloutAuthority }
@@ -10921,7 +11343,6 @@ interface DeferredCodexForegroundBindingBoundary {
   processBirth: string;
   previousDispatchSnapshot: DeferredCodexForegroundDispatchSnapshot;
   candidateAcceptanceAnchor?: CodexCandidateSetRolloutAcceptanceAnchor;
-  candidateContextFingerprint?: string;
   sourceKind: DeferredForegroundTransferSourceKind;
   sourceRolloutAuthority: DeferredForegroundTransferSourceRolloutAuthority;
   sourceAbandonmentFingerprint?: string;
@@ -11145,22 +11566,6 @@ async function assertDeferredCodexForegroundBindingBoundary({
       })
     }
   );
-  if (requireEmptyComposer && boundary.candidateContextFingerprint) {
-    const currentContextFingerprint = codexLatentClearResumeFingerprint({
-      screen: status.screen.excerpt,
-      sourceNativeThreadId: source.binding?.native_thread_id,
-      agentVersion: agentVersionForRunningProcess(
-        "codex",
-        boundary.terminal.pid,
-        options
-      )
-    });
-    if (currentContextFingerprint !== boundary.candidateContextFingerprint) {
-      throw new Error(
-        "the Codex /clear foreground hint changed; refresh AKK list before sending"
-      );
-    }
-  }
   if (
     status.reachable !== true ||
     status.approval_state.blocked === true ||
@@ -11187,7 +11592,8 @@ async function prepareDeferredCodexForegroundBinding({
   sourceSession,
   observation,
   candidateInventory,
-  requestText
+  requestText,
+  allowImplicitFreshAuthority = false
 }: {
   options: Record<string, any>;
   terminal: ResolvedTerminalConversation;
@@ -11195,6 +11601,7 @@ async function prepareDeferredCodexForegroundBinding({
   observation: NativeAgentSessionIdentityObservation;
   candidateInventory?: CodexOpenRootRolloutInventory;
   requestText: string;
+  allowImplicitFreshAuthority?: boolean;
 }): Promise<DeferredCodexForegroundBindingBoundary | undefined> {
   const expectedToken = stringValue(options.expectedTerminalToken);
   const candidateMode = Boolean(candidateInventory?.roots.length);
@@ -11202,9 +11609,24 @@ async function prepareDeferredCodexForegroundBinding({
     terminal.agent !== "codex" ||
     !sourceSession?.binding ||
     (observation.status !== "verified_absent" && !candidateMode) ||
-    !expectedToken
+    (!expectedToken && !allowImplicitFreshAuthority)
   ) {
     return undefined;
+  }
+  if (
+    allowImplicitFreshAuthority &&
+    (
+      expectedToken !== undefined ||
+      !candidateMode ||
+      !isCompleteNativeRollout(
+        sourceSession.binding.native_process.rollout
+      )
+    )
+  ) {
+    throw new Error(
+      "implicit Codex candidate authority requires one fresh complete " +
+      "nonempty rollout inventory for a rollout-backed source"
+    );
   }
   const processUuid = sourceSession.binding.native_process.process_uuid;
   const processBirth = sourceSession.binding.native_process.process_birth;
@@ -11252,14 +11674,6 @@ async function prepareDeferredCodexForegroundBinding({
           dispatchSnapshot
         })
       : undefined;
-  const candidateContextFingerprint = candidateMode &&
-      sourceKind === "candidate_rollout_quiescent"
-    ? await observeCodexLatentClearResumeFingerprint({
-        options,
-        terminal,
-        sourceNativeThreadId: sourceSession.binding.native_thread_id
-      })
-    : undefined;
   const exactSource = !workspace
     ? false
     : sourceKind === "candidate_rollout_quiescent"
@@ -11314,16 +11728,27 @@ async function prepareDeferredCodexForegroundBinding({
     sourceSession,
     dispatchSnapshot,
     sourceTurnHistory: candidateSourceTurnHistory,
-    candidateContextFingerprint,
     sourceRolloutAuthority,
     sourceAbandonmentFingerprint,
     ...(candidateMode ? { candidateInventory } : {})
   });
-  if (expectedToken !== token) {
+  if (!allowImplicitFreshAuthority && expectedToken !== token) {
     throw new Error(
       "deferred Codex foreground binding requires the fresh exact terminal " +
       "token advertised by AKK list"
     );
+  }
+  if (allowImplicitFreshAuthority) {
+    runtimeLog("info", "deferred_codex_implicit_candidate_authority", {
+      terminal_id: terminal.conversationId,
+      terminal_target: terminal.terminalControl.target,
+      source_session_id: sourceSession.session_id,
+      inventory_status: candidateInventory?.status,
+      inventory_fingerprint: candidateInventory?.inventoryFingerprint,
+      candidate_count: candidateInventory?.roots.length,
+      authority_scope: "terminal_follow_current",
+      terminal_input_sent: false
+    });
   }
   const targetSessionId = createManagedSessionId();
   const transferId = createDeferredForegroundTransferId();
@@ -11351,9 +11776,6 @@ async function prepareDeferredCodexForegroundBinding({
     ...(sourceAbandonmentFingerprint
       ? { sourceAbandonmentFingerprint }
       : {}),
-    ...(candidateContextFingerprint
-      ? { candidateContextFingerprint }
-      : {}),
     ...(sourceSession.last_transition_id
       ? { sourcePreviousLastTransitionId: sourceSession.last_transition_id }
       : {}),
@@ -11378,17 +11800,18 @@ async function prepareDeferredCodexForegroundBinding({
     terminalControl: terminal.terminalControl,
     excludedManagedSessionId: sourceSession.session_id
   });
-  if (sourceRolloutAuthority === "explicitly_abandoned_predecessor" &&
+  if (
+    candidateInventory &&
     !codexCandidateInventoryHasNoOtherManagedClaim({
-    storeDir,
-    inventory: required(
-      candidateInventory,
-      "Codex candidate inventory is unavailable"
-    ),
-    sourceSessionId: sourceSession.session_id
-    })) {
+      storeDir,
+      inventory: candidateInventory,
+      sourceSessionId: sourceSession.session_id,
+      includeDetached:
+        sourceRolloutAuthority === "explicitly_abandoned_predecessor"
+    })
+  ) {
     throw new Error(
-      "the post-/clear Codex rollout candidate is already claimed by another Session"
+      "a Codex rollout candidate is already claimed by another Session"
     );
   }
   if (
@@ -17368,6 +17791,17 @@ async function runSend(options) {
         rawStoreDir,
         terminalConversation
       );
+      const suppliedExpectedTerminalToken = stringValue(
+        options.expectedTerminalToken
+      );
+      const implicitCodexCandidateAuthority = Boolean(
+        terminalConversation.agent === "codex" &&
+        suppliedExpectedTerminalToken === undefined &&
+        claimedSession?.status === "bound" &&
+        isCompleteNativeRollout(
+          claimedSession.binding?.native_process.rollout
+        )
+      );
       let knownCodexCompanions: CodexAllowedCompanionSet = claimedSession
         ? codexAllowedCompanionSetForManagedSession({
             storeDir: rawStoreDir,
@@ -17391,7 +17825,7 @@ async function runSend(options) {
         | undefined;
       if (
         terminalConversation.agent === "codex" &&
-        stringValue(options.expectedTerminalToken)
+        (suppliedExpectedTerminalToken || implicitCodexCandidateAuthority)
       ) {
         try {
           const inventory = await inspectCodexOpenRootRolloutInventory({
@@ -17403,15 +17837,27 @@ async function runSend(options) {
             deferredCodexCandidateInventory = inventory;
           }
         } catch (error) {
-          if (nativeIdentityObservation.status === "unavailable") {
+          if (
+            implicitCodexCandidateAuthority ||
+            nativeIdentityObservation.status === "unavailable"
+          ) {
             throw new Error(
-              `native Codex identity observation is unavailable and its exact ` +
-              `open-root inventory could not be proven: ${
+              `native Codex foreground attribution requires a fresh complete ` +
+              `open-root inventory: ${
                 error instanceof Error ? error.message : String(error)
               }`
             );
           }
         }
+      }
+      if (
+        implicitCodexCandidateAuthority &&
+        !deferredCodexCandidateInventory
+      ) {
+        throw new Error(
+          "rollout-backed Codex terminal send requires a fresh complete " +
+          "nonempty open-root inventory; refresh AKK list before sending"
+        );
       }
       if (
         nativeIdentityObservation.status === "unavailable" &&
@@ -17426,13 +17872,17 @@ async function runSend(options) {
         nativeIdentityObservation.status === "resolved"
           ? nativeIdentityObservation.identity
           : undefined;
-      const verifiedEmptyHandoff =
-        await maybeDetachVerifiedEmptyCodexSource({
-          options,
-          terminal: terminalConversation,
-          sourceSession: claimedSession,
-          observation: nativeIdentityObservation
-        });
+      // A fresh nonempty inventory is the stronger physical authority for an
+      // implicit candidate send. Do not let an earlier verified-absent
+      // observation divert this path into the token-only empty handoff.
+      const verifiedEmptyHandoff = implicitCodexCandidateAuthority
+        ? undefined
+        : await maybeDetachVerifiedEmptyCodexSource({
+            options,
+            terminal: terminalConversation,
+            sourceSession: claimedSession,
+            observation: nativeIdentityObservation
+          });
       if (verifiedEmptyHandoff) {
         // The old rollout is conclusively closed.  Never carry it forward as
         // a pre-materialization companion for the new virgin Session.
@@ -17444,7 +17894,13 @@ async function runSend(options) {
       let handoff = await maybeAdoptObservedExternalThread({
         options,
         terminal: terminalConversation,
-        sourceSession: claimedSession,
+        // A no-token raw send to an already managed rollout-backed Codex pane
+        // is an internal follow-current delegation, never a sole-root strict
+        // continuation or an external-handoff adoption. The dedicated v3
+        // transfer below owns attribution and lineage.
+        sourceSession: implicitCodexCandidateAuthority
+          ? undefined
+          : claimedSession,
         resolvedIdentity: currentNativeIdentity,
         storeDir: rawStoreDir
       });
@@ -17461,7 +17917,9 @@ async function runSend(options) {
               sourceSession: claimedSession,
               observation: nativeIdentityObservation,
               candidateInventory: deferredCodexCandidateInventory,
-              requestText: String(messageBody)
+              requestText: String(messageBody),
+              allowImplicitFreshAuthority:
+                implicitCodexCandidateAuthority
             })
         : undefined;
       if (deferredCodexForegroundBinding) {
@@ -17470,7 +17928,7 @@ async function runSend(options) {
         currentNativeIdentity = undefined;
         handoff = { identity: undefined, adopted: false };
       } else if (
-        stringValue(options.expectedTerminalToken) &&
+        (suppliedExpectedTerminalToken || implicitCodexCandidateAuthority) &&
         !verifiedEmptyHandoff &&
         !handoff.adopted
       ) {
@@ -17799,6 +18257,23 @@ async function runSend(options) {
   );
   try {
     await withStoreWriterLeaseAsync(storeDir, async () => {
+    const lockedStrictSession = tryLoadManagedSession(storeDir, sessionId);
+    if (
+      lockedStrictSession?.agent === "codex" &&
+      lockedStrictSession.session_id === sessionId &&
+      lockedStrictSession.status === "bound" &&
+      isCompleteNativeRollout(
+        lockedStrictSession.binding?.native_process.rollout
+      )
+    ) {
+      throw new Error(
+        `Codex rollout-backed managed Session ${sessionId} cannot use a ` +
+        "strict session_id send because an open rollout does not prove the " +
+        "current TUI foreground thread. Refresh AKK list and use its exact " +
+        "selector plus expected_terminal_token. No Turn was created and no " +
+        "terminal input was sent."
+      );
+    }
     await recoverLifecycleFenceBeforeMutation({
       options,
       terminal: resolvedTerminal
@@ -17888,11 +18363,6 @@ async function runSend(options) {
         "managed session identity changed while waiting to send; refresh list and retry"
       );
     }
-    await assertStrictCodexSessionHasNoLatentClear({
-      options,
-      terminal: resolvedTerminal,
-      session: currentSession
-    });
     const logicalLockedNativeIdentity = logicalIdentityForManagedSession({
       storeDir,
       session: currentSession,
@@ -27782,6 +28252,34 @@ function mergeTerminalLedgerReceipt(
     stringValue(previous.message_id),
     "terminal dispatch receipt message id is required"
   );
+  const safeAbortRetryGeneration = Boolean(
+    previous.status === "aborted" &&
+    previous.safe_to_retry === true &&
+    stringValue(next.message_id) === messageId &&
+    stringValue(next.previous_generation_id) === messageId &&
+    [
+      "text_injected",
+      "enter_dispatched",
+      "submitted",
+      "agent_accepted",
+      "not_accepted",
+      "uncertain",
+      "aborted"
+    ].includes(String(next.status)) &&
+    validTimestampMs(previous.aborted_at) !== undefined &&
+    validTimestampMs(next.prepared_at) !== undefined &&
+    Date.parse(String(next.prepared_at)) >=
+      Date.parse(String(previous.aborted_at))
+  );
+  if (safeAbortRetryGeneration) {
+    // A proved zero-input abort intentionally allows the same OpenClaw
+    // idempotency key to start one fresh Turn/Session generation. The old
+    // Turn and, for v3, its abort_resolved transfer retain that immutable
+    // proof; the terminal-wide singleton receipt advances to the retry so its
+    // different binding/Turn identity cannot collide with the abandoned
+    // zero-input generation.
+    return next;
+  }
   for (const field of TERMINAL_LEDGER_RECEIPT_IMMUTABLE_FIELDS) {
     const previousValue = previous[field];
     const nextValue = next[field];
@@ -29007,7 +29505,7 @@ function assertDeferredForegroundLedgerAuthority({
   expectedMessageBodyHash
 }: {
   storeDir: string;
-  terminal: ResolvedTerminalConversation;
+  terminal: Pick<ResolvedTerminalConversation, "terminalControl">;
   transfer: DeferredForegroundTransfer;
   ledger: Record<string, any>;
   statePath: string;
@@ -29104,7 +29602,7 @@ function assertDeferredForegroundResolvedZeroInputLedger({
   statePath
 }: {
   storeDir: string;
-  terminal: ResolvedTerminalConversation;
+  terminal: Pick<ResolvedTerminalConversation, "terminalControl">;
   transfer: DeferredForegroundTransfer;
   ledger: Record<string, any>;
   statePath: string;
@@ -31636,84 +32134,6 @@ function codexLatentClearResumeObservation({
       source_native_thread_id: sourceNativeThreadId
     })
   };
-}
-
-function codexLatentClearResumeFingerprint({
-  screen,
-  sourceNativeThreadId,
-  agentVersion
-}: {
-  screen: string | undefined;
-  sourceNativeThreadId: string | undefined;
-  agentVersion: string | undefined;
-}): string | undefined {
-  if (!isExactNativeThreadId(sourceNativeThreadId)) {
-    return undefined;
-  }
-  const observation = codexLatentClearResumeObservation({
-    screen,
-    agentVersion
-  });
-  return observation?.sourceNativeThreadId === sourceNativeThreadId.toLowerCase()
-    ? observation.fingerprint
-    : undefined;
-}
-
-async function observeCodexLatentClearResumeFingerprint({
-  options,
-  terminal,
-  sourceNativeThreadId
-}: {
-  options: Record<string, any>;
-  terminal: ResolvedTerminalConversation;
-  sourceNativeThreadId: string | undefined;
-}): Promise<string | undefined> {
-  if (terminal.agent !== "codex" || !isExactNativeThreadId(sourceNativeThreadId)) {
-    return undefined;
-  }
-  const agentVersion = agentVersionForRunningProcess(
-    "codex",
-    terminal.pid,
-    options
-  );
-  if (!codexLifecycleBehaviorProfile(agentVersion)) {
-    return undefined;
-  }
-  const status = await createTerminalAgentBridge(options).status(
-    "codex",
-    terminal.terminalControl,
-    { runtime: terminalRuntimeForLiveIdentity({ terminal, physicalOnly: true }) }
-  );
-  return codexLatentClearResumeFingerprint({
-    screen: status.screen.excerpt,
-    sourceNativeThreadId,
-    agentVersion
-  });
-}
-
-async function assertStrictCodexSessionHasNoLatentClear({
-  options,
-  terminal,
-  session
-}: {
-  options: Record<string, any>;
-  terminal: ResolvedTerminalConversation;
-  session: ManagedSessionState;
-}): Promise<void> {
-  if (session.agent !== "codex") {
-    return;
-  }
-  const fingerprint = await observeCodexLatentClearResumeFingerprint({
-    options,
-    terminal,
-    sourceNativeThreadId: session.binding?.native_thread_id
-  });
-  if (fingerprint) {
-    throw new Error(
-      "Codex /clear changed the foreground logical thread; refresh AKK list " +
-      "and use its snapshot-bound follow-current send. No task input was sent."
-    );
-  }
 }
 
 function nativeInspectionComposerEmpty(

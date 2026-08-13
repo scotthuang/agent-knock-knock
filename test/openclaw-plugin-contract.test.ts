@@ -2312,7 +2312,9 @@ test("callback delivery uses the grouped OpenClaw session workflow API", async (
   assert.match(doneText, /Session: session-1/u);
   assert.match(doneText, /Turn: turn-2/u);
   assert.match(doneText, /agent_knock_knock_send/u);
-  assert.match(doneText, /session_id: "session-1"/u);
+  assert.match(doneText, /Session "session-1" remains the context label/u);
+  assert.match(doneText, /exact `available_actions\.send`/u);
+  assert.match(doneText, /Do not assume the returned Session is directly sendable/u);
   assert.match(doneText, /agent_knock_knock_status/u);
   assert.match(doneText, /turn_id: "turn-2"/u);
   assert.doesNotMatch(doneText, /follow_up/u);

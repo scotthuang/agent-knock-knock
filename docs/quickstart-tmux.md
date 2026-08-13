@@ -68,7 +68,7 @@ Success returns a managed turn and, when the work finishes, its result. The same
 
 `/akk list` keeps that physical pane as the primary resource: it appears once in `terminals[]` with live `process_state` and `activity_state`. Its managed context follows terminal → native coding-agent session → AKK `session_id` → Turns. AKK places the active Turn under `managed.current_turn`, or the newest retained Turn under `managed.recent_turn`; retained Turns do not occupy or hide the pane.
 
-For another request in the same coding-agent context, use the listed `send` action with its prefilled authoritative `session_id`. Every accepted ordinary send creates a new `turn_id`; a completed Turn is history, not the destination of the next send. Human-friendly selectors such as `codex`, `only`, or `@a1b2c3d4` only help `/akk list` resolve that authoritative session.
+For another request, refresh `/akk list` and use only that terminal row's listed `send` action with its prefilled arguments unchanged. A `session_exact` action carries `session_id`; a `terminal_follow_current` action instead carries the exact terminal `selector` plus `expected_terminal_token`, including for a rollout-backed Codex pane. Add only the new request text. Every accepted ordinary send creates a new `turn_id`; a completed Turn is history, not the destination of the next send. Human-friendly selectors such as `codex`, `only`, or `@a1b2c3d4` help `/akk list` resolve the terminal row; they are not authority to replace its listed action.
 
 If the coding agent asks a question and the active Turn becomes `waiting_for_openclaw`, use the listed `respond` action with its prefilled `turn_id`, or the equivalent form:
 

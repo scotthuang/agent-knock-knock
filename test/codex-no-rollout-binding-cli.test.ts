@@ -1879,26 +1879,30 @@ for (const crashCase of [
         assert.equal(closed.status, 0, closed.stderr || closed.stdout);
         assert.equal(JSON.parse(closed.stdout).closed, true, closed.stdout);
         fs.writeFileSync(fixture.screenPath, "Ready\n› ");
+        // This legacy status-card fixture did not expose an lsof inventory
+        // provider before its first accepted task materialized the rollout.
+        // Subsequent rollout-backed v15 sends require that now-live exact root
+        // to be available through the complete inventory seam.
+        enableFixtureCandidateInventory(fixture, [NATIVE_THREAD_ID]);
 
         const thirdMessage = `Continue after historical ${crashCase.label}.`;
-        const third = runCliSubprocess([
-          "send",
-          "--session",
-          String(JSON.parse(retried.stdout).session_id),
-          "--message",
-          thirdMessage,
-          "--background",
-          "--store-dir",
-          fixture.storeDir,
-          "--codex-home",
-          fs.realpathSync(fixture.codexHome),
-          "--openclaw-bin",
-          "/usr/bin/true",
-          "--disable-terminal-bridge-monitor"
-        ], {
-          ...fixture.environment,
-          AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-        });
+        const thirdAction = await deferredForegroundSendAction(fixture);
+        assert.equal(
+          "session_id" in thirdAction.arguments,
+          false,
+          "rollout-backed Codex must remain terminal-follow-current"
+        );
+        assert.equal(
+          typeof thirdAction.arguments.expected_terminal_token,
+          "string"
+        );
+        const third = runCliSubprocess(
+          deferredForegroundSendArgs(fixture, thirdAction, thirdMessage),
+          {
+            ...fixture.environment,
+            AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
+          }
+        );
         assert.equal(third.status, 0, third.stderr || third.stdout);
         assert.equal(JSON.parse(third.stdout).delivered, true, third.stdout);
         assert.deepEqual(taskInputCalls(fixture).map((call) => call.args), [
@@ -2198,27 +2202,27 @@ for (const historyCase of [
         ], fixture.environment);
         assert.equal(closed.status, 0, closed.stderr || closed.stdout);
         fs.writeFileSync(fixture.screenPath, "Ready\n› ");
+        enableFixtureCandidateInventory(fixture, [NATIVE_THREAD_ID]);
 
         const thirdMessage =
           `Continue after abort receipts with ${historyCase.label}.`;
-        const third = runCliSubprocess([
-          "send",
-          "--session",
-          String(JSON.parse(retried.stdout).session_id),
-          "--message",
-          thirdMessage,
-          "--background",
-          "--store-dir",
-          fixture.storeDir,
-          "--codex-home",
-          fs.realpathSync(fixture.codexHome),
-          "--openclaw-bin",
-          "/usr/bin/true",
-          "--disable-terminal-bridge-monitor"
-        ], {
-          ...fixture.environment,
-          AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-        });
+        const thirdAction = await deferredForegroundSendAction(fixture);
+        assert.equal(
+          "session_id" in thirdAction.arguments,
+          false,
+          "rollout-backed Codex must remain terminal-follow-current"
+        );
+        assert.equal(
+          typeof thirdAction.arguments.expected_terminal_token,
+          "string"
+        );
+        const third = runCliSubprocess(
+          deferredForegroundSendArgs(fixture, thirdAction, thirdMessage),
+          {
+            ...fixture.environment,
+            AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
+          }
+        );
         assert.equal(third.status, 0, third.stderr || third.stdout);
         assert.equal(JSON.parse(third.stdout).delivered, true, third.stdout);
         assert.deepEqual(
@@ -2369,26 +2373,26 @@ test("a missing deferred Turn survives a second crash after its exact ledger abo
     assert.equal(closed.status, 0, closed.stderr || closed.stdout);
     assert.equal(JSON.parse(closed.stdout).closed, true, closed.stdout);
     fs.writeFileSync(fixture.screenPath, "Ready\n› ");
+    enableFixtureCandidateInventory(fixture, [NATIVE_THREAD_ID]);
 
     const thirdMessage = "Continue after the missing-Turn abort receipt.";
-    const third = runCliSubprocess([
-      "send",
-      "--session",
-      String(JSON.parse(retried.stdout).session_id),
-      "--message",
-      thirdMessage,
-      "--background",
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fs.realpathSync(fixture.codexHome),
-      "--openclaw-bin",
-      "/usr/bin/true",
-      "--disable-terminal-bridge-monitor"
-    ], {
-      ...fixture.environment,
-      AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-    });
+    const thirdAction = await deferredForegroundSendAction(fixture);
+    assert.equal(
+      "session_id" in thirdAction.arguments,
+      false,
+      "rollout-backed Codex must remain terminal-follow-current"
+    );
+    assert.equal(
+      typeof thirdAction.arguments.expected_terminal_token,
+      "string"
+    );
+    const third = runCliSubprocess(
+      deferredForegroundSendArgs(fixture, thirdAction, thirdMessage),
+      {
+        ...fixture.environment,
+        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
+      }
+    );
     assert.equal(third.status, 0, third.stderr || third.stdout);
     assert.equal(JSON.parse(third.stdout).delivered, true, third.stdout);
     assert.deepEqual(taskInputCalls(fixture).map((call) => call.args), [
@@ -3865,12 +3869,10 @@ for (const [label, acceptedNativeThreadId] of [
         const transfer = soleDeferredForegroundTransfer(fixture);
         assert.equal(transfer.status, "resolved");
         assert.equal(transfer.source_kind, "status_card_only");
-        const turn = listConversations(fixture.storeDir).find((candidate) =>
-          candidate.turn_id === output.turn_id
+        const anchor = persistedCodexV3AcceptanceAnchor(
+          fixture,
+          String(output.turn_id)
         );
-        const anchor = (turn?.native_session_takeover as
-          Record<string, any>).codex_rollout_acceptance_anchor;
-        assert.equal(anchor.version, 3);
         assert.equal(anchor.candidate_rollouts.length, 1);
         assertSingleTaskInput(fixture, message);
         assert.equal(
@@ -4584,82 +4586,214 @@ for (const acceptanceCase of ["zero", "multiple"] as const) {
   });
 }
 
-test("one exact open root keeps a rollout-backed Session on the strict route", async () => {
-  const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
-  try {
-    enableFixtureCandidateInventory(fixture, [NATIVE_THREAD_ID]);
-    const source = persistExactEndedRolloutSession(
-      fixture,
-      "session-single-exact-root"
-    );
-    const terminal = await listFixtureTerminal(fixture);
-    assert.equal(terminal.management_state, "managed");
-    assert.equal(terminal.managed.session_id, source.session_id);
-    const action = terminal.available_actions.send;
-    assert.ok(action, JSON.stringify(terminal, null, 2));
-    assert.equal(action.arguments.session_id, source.session_id);
-    assert.equal("selector" in action.arguments, false);
-    assert.equal("expected_terminal_token" in action.arguments, false);
-    assert.deepEqual(listDeferredForegroundTransfers(fixture.storeDir), []);
-    assert.deepEqual(taskInputCalls(fixture), []);
-  } finally {
-    fixture.cleanup();
-  }
-});
+for (const identityCase of ["resolved", "unavailable"] as const) {
+  test(`one exact open root uses snapshot-bound candidate send when identity is ${identityCase}`, async () => {
+    const fixture = createNoRolloutFixture({
+      codexVersion: "0.147.0",
+      terminalKind: "herdr",
+      viewportColumns: 55,
+      ttyViewportColumns: 52
+    });
+    const message = `Continue through the ${identityCase} one-root snapshot.`;
+    try {
+      enableFixtureCandidateInventory(fixture, [NATIVE_THREAD_ID]);
+      const source = persistExactEndedRolloutSession(
+        fixture,
+        `session-single-exact-root-${identityCase}`
+      );
+      const sourceBindingId = source.binding?.binding_id;
+      const sourceGeneration = source.binding?.generation;
+      assert.ok(sourceBindingId);
+      assert.ok(sourceGeneration);
+      if (identityCase === "unavailable") {
+        fixture.identityObservationError =
+          "fixture foreground identity is unavailable while inventory is exact";
+      }
 
-test("manual Codex clear routes a sole old root through the snapshot-bound candidate send", async () => {
+      const terminal = await listFixtureTerminal(fixture);
+      assert.equal(
+        terminal.native_agent_identity_observation.status,
+        identityCase
+      );
+      assert.equal(terminal.management_state, "managed");
+      assert.equal(terminal.managed.session_id, source.session_id);
+      const action = terminal.available_actions.send;
+      assert.ok(action, JSON.stringify(terminal, null, 2));
+      assert.equal(action.arguments.selector, fixture.terminalId);
+      assert.equal("session_id" in action.arguments, false);
+      assert.equal(typeof action.arguments.expected_terminal_token, "string");
+      assert.deepEqual(listDeferredForegroundTransfers(fixture.storeDir), []);
+      assert.deepEqual(taskInputCalls(fixture), []);
+
+      fixture.acceptanceNativeThreadIdsOnEnter = [NATIVE_THREAD_ID];
+      const sent = await runCli(
+        deferredForegroundSendArgs(fixture, action, message),
+        {
+          ...fixture.environment,
+          AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
+        }
+      );
+      assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+      const output = JSON.parse(sent.stdout);
+      assert.equal(output.delivery_receipt, "agent_accepted", sent.stdout);
+      assert.notEqual(output.session_id, source.session_id);
+      assert.equal(output.conversation.native_thread_id, NATIVE_THREAD_ID);
+      const transfer = soleDeferredForegroundTransfer(fixture);
+      assert.equal(transfer.status, "resolved");
+      assert.equal(transfer.source_kind, "candidate_rollout_quiescent");
+      assert.equal(transfer.source_rollout_authority ?? "present", "present");
+      const anchor = persistedCodexV3AcceptanceAnchor(
+        fixture,
+        String(output.turn_id)
+      );
+      assert.deepEqual(
+        anchor.candidate_rollouts?.map(
+          (candidate: Record<string, any>) => candidate.native_thread_id
+        ),
+        [NATIVE_THREAD_ID]
+      );
+      assertResolvedSameUuidDeferredTransfer({
+        fixture,
+        sourceSessionId: source.session_id,
+        originalBindingId: sourceBindingId,
+        originalGeneration: sourceGeneration
+      });
+      assert.equal(
+        readTmuxCalls(fixture.tmuxCallsPath).some((call) =>
+          call.args.includes("/status")
+        ),
+        false
+      );
+      assert.deepEqual(fixture.ttyViewportInspectionPids, []);
+      assertSingleTaskInput(fixture, message);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+}
+
+for (const hintCase of ["absent", "aged"] as const) {
+  test(`manual Codex clear adopts the root materialized after Enter when its resume hint is ${hintCase}`, async () => {
+    const fixture = createNoRolloutFixture({
+      codexVersion: "0.147.0",
+      terminalKind: "herdr",
+      viewportColumns: 55,
+      ttyViewportColumns: 52
+    });
+    const message =
+      `Bind the first task after a manual clear with an ${hintCase} hint.`;
+    try {
+      enableFixtureCandidateInventory(fixture, [NATIVE_THREAD_ID]);
+      const source = persistExactEndedRolloutSession(
+        fixture,
+        `session-latent-clear-source-${hintCase}`
+      );
+      if (hintCase === "aged") {
+        const wrappedResumeFirstLine =
+          `To continue this session, run codex resume ${NATIVE_THREAD_ID.slice(0, 9)}`;
+        assert.equal([...wrappedResumeFirstLine].length, 52);
+        fs.writeFileSync(fixture.screenPath, [
+          wrappedResumeFirstLine,
+          NATIVE_THREAD_ID.slice(9),
+          ...Array.from(
+            { length: 30 },
+            (_, index) => `post-clear terminal output line ${index + 1}`
+          ),
+          "› \u001b[2mAsk Codex anything\u001b[0m"
+        ].join("\n"));
+      } else {
+        fs.writeFileSync(
+          fixture.screenPath,
+          "Ready after /clear\n› \u001b[2mAsk Codex anything\u001b[0m"
+        );
+      }
+
+      const listed = await listFixtureTerminal(fixture);
+      assert.equal(
+        listed.native_agent_identity_observation.status,
+        "resolved"
+      );
+      const action = listed.available_actions.send;
+      assert.ok(action, JSON.stringify(listed, null, 2));
+      assert.equal(action.arguments.selector, fixture.terminalId);
+      assert.equal("session_id" in action.arguments, false);
+      assert.equal(typeof action.arguments.expected_terminal_token, "string");
+
+      fixture.acceptanceNativeThreadIdsOnEnter = [EXTERNAL_THREAD_ID];
+      const sent = await runCli(
+        deferredForegroundSendArgs(fixture, action, message),
+        {
+          ...fixture.environment,
+          AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
+        }
+      );
+      assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+      const output = JSON.parse(sent.stdout);
+      assert.equal(output.delivery_receipt, "agent_accepted", sent.stdout);
+      assert.notEqual(output.session_id, source.session_id);
+      assert.equal(output.conversation.native_thread_id, EXTERNAL_THREAD_ID);
+      const transfer = soleDeferredForegroundTransfer(fixture);
+      assert.equal(transfer.status, "resolved");
+      assert.equal(transfer.target_native_thread_id, EXTERNAL_THREAD_ID);
+      assert.equal(transfer.source_rollout_authority ?? "present", "present");
+      const anchor = persistedCodexV3AcceptanceAnchor(
+        fixture,
+        String(output.turn_id)
+      );
+      assert.deepEqual(
+        anchor.candidate_rollouts?.map(
+          (candidate: Record<string, any>) => candidate.native_thread_id
+        ),
+        [NATIVE_THREAD_ID]
+      );
+      assert.equal(
+        loadManagedSession(fixture.storeDir, source.session_id).status,
+        "detached"
+      );
+      assert.equal(
+        readTmuxCalls(fixture.tmuxCallsPath).some((call) =>
+          call.args.includes("/status")
+        ),
+        false
+      );
+      assert.deepEqual(fixture.ttyViewportInspectionPids, []);
+      assertSingleTaskInput(fixture, message);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+}
+
+test("multi-root unavailable identity uses the exact inventory token and binds the sole post-Enter acceptor", async () => {
   const fixture = createNoRolloutFixture({
     codexVersion: "0.147.0",
     terminalKind: "herdr",
     viewportColumns: 55,
     ttyViewportColumns: 52
   });
-  const message = "Bind the first task after a manual clear to its accepting rollout.";
+  const message = "Bind only the root that accepts after this exact inventory anchor.";
   try {
-    enableFixtureCandidateInventory(fixture, [NATIVE_THREAD_ID]);
+    enableFixtureCandidateInventory(fixture, [
+      NATIVE_THREAD_ID,
+      EXTERNAL_THREAD_ID
+    ]);
     const source = persistExactEndedRolloutSession(
       fixture,
-      "session-latent-clear-source"
-    );
-    const wrappedResumeFirstLine =
-      `To continue this session, run codex resume ${NATIVE_THREAD_ID.slice(0, 9)}`;
-    assert.equal([...wrappedResumeFirstLine].length, 52);
-    fs.writeFileSync(
-      fixture.screenPath,
-      `${wrappedResumeFirstLine}\n` +
-      `${NATIVE_THREAD_ID.slice(9)}\n\n` +
-      "› \u001b[2mAsk Codex anything\u001b[0m"
+      "session-multi-root-unavailable-source"
     );
 
-    const strict = await runCli([
-      "send",
-      "--session",
-      source.session_id,
-      "--message",
-      message,
-      "--background",
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome,
-      "--openclaw-bin",
-      "/usr/bin/true",
-      "--disable-terminal-bridge-monitor"
-    ], fixture.environment);
-    assert.equal(strict.status, 1, strict.stdout);
-    assert.match(strict.stderr, /Codex \/clear changed the foreground/iu);
-    assert.deepEqual(taskInputCalls(fixture), []);
-    assert.deepEqual(listConversations(fixture.storeDir), []);
-
-    fixture.identityObservationError =
-      "fixture foreground identity is unavailable after a manual clear";
     const listed = await listFixtureTerminal(fixture);
-    assert.equal(listed.native_agent_identity_observation.status, "unavailable");
+    assert.equal(
+      listed.native_agent_identity_observation.status,
+      "unavailable"
+    );
     const action = listed.available_actions.send;
     assert.ok(action, JSON.stringify(listed, null, 2));
     assert.equal(action.arguments.selector, fixture.terminalId);
+    assert.equal("session_id" in action.arguments, false);
     assert.equal(typeof action.arguments.expected_terminal_token, "string");
-    fixture.acceptanceNativeThreadIdsOnEnter = [EXTERNAL_THREAD_ID];
+
+    fixture.acceptanceNativeThreadIdsOnEnter = [SECOND_EXTERNAL_THREAD_ID];
     const sent = await runCli(
       deferredForegroundSendArgs(fixture, action, message),
       {
@@ -4671,10 +4805,25 @@ test("manual Codex clear routes a sole old root through the snapshot-bound candi
     const output = JSON.parse(sent.stdout);
     assert.equal(output.delivery_receipt, "agent_accepted", sent.stdout);
     assert.notEqual(output.session_id, source.session_id);
-    assert.equal(output.conversation.native_thread_id, EXTERNAL_THREAD_ID);
+    assert.equal(
+      output.conversation.native_thread_id,
+      SECOND_EXTERNAL_THREAD_ID
+    );
     const transfer = soleDeferredForegroundTransfer(fixture);
     assert.equal(transfer.status, "resolved");
-    assert.equal(transfer.target_native_thread_id, EXTERNAL_THREAD_ID);
+    assert.equal(transfer.source_kind, "candidate_rollout_quiescent");
+    assert.equal(transfer.source_rollout_authority ?? "present", "present");
+    assert.equal(transfer.target_native_thread_id, SECOND_EXTERNAL_THREAD_ID);
+    const anchor = persistedCodexV3AcceptanceAnchor(
+      fixture,
+      String(output.turn_id)
+    );
+    assert.deepEqual(
+      anchor.candidate_rollouts?.map(
+        (candidate: Record<string, any>) => candidate.native_thread_id
+      ),
+      [NATIVE_THREAD_ID, EXTERNAL_THREAD_ID]
+    );
     assert.equal(
       loadManagedSession(fixture.storeDir, source.session_id).status,
       "detached"
@@ -4692,6 +4841,733 @@ test("manual Codex clear routes a sole old root through the snapshot-bound candi
   }
 });
 
+for (const routeCase of ["exact_selector", "unique_delegate"] as const) {
+  test(`managed rollout-backed ${routeCase} without a token uses v3 candidate attribution`, async () => {
+    const fixture = createNoRolloutFixture({
+      codexVersion: "0.147.0",
+      terminalKind: "herdr",
+      viewportColumns: 55,
+      ttyViewportColumns: 52
+    });
+    const message = routeCase === "exact_selector"
+      ? "Route this exact raw selector through same-root v3 attribution."
+      : "Route this unique untargeted delegate through fresh-root v3 attribution.";
+    const acceptedNativeThreadId = routeCase === "exact_selector"
+      ? NATIVE_THREAD_ID
+      : EXTERNAL_THREAD_ID;
+    try {
+      enableFixtureCandidateInventory(fixture, [NATIVE_THREAD_ID]);
+      const source = persistExactEndedRolloutSession(
+        fixture,
+        `session-managed-no-token-${routeCase}`
+      );
+      fixture.acceptanceNativeThreadIdsOnEnter = [acceptedNativeThreadId];
+
+      const args = routeCase === "exact_selector"
+        ? [
+            "send",
+            "--conversation",
+            fixture.terminalId,
+            "--message",
+            message,
+            "--background",
+            "--store-dir",
+            fixture.storeDir,
+            "--codex-home",
+            fs.realpathSync(fixture.codexHome),
+            "--openclaw-bin",
+            "/usr/bin/true",
+            "--disable-terminal-bridge-monitor"
+          ]
+        : [
+            "delegate",
+            "--request",
+            message,
+            "--store-dir",
+            fixture.storeDir,
+            "--codex-home",
+            fs.realpathSync(fixture.codexHome),
+            "--openclaw-bin",
+            "/usr/bin/true",
+            "--disable-terminal-bridge-monitor"
+          ];
+      assert.equal(args.includes("--expected-terminal-token"), false);
+      if (routeCase === "unique_delegate") {
+        for (const targetFlag of [
+          "--conversation",
+          "--session",
+          "--agent",
+          "--workspace"
+        ]) {
+          assert.equal(args.includes(targetFlag), false, targetFlag);
+        }
+      }
+      const sent = await runCli(args, {
+        ...fixture.environment,
+        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
+      });
+      assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+      const output = JSON.parse(sent.stdout);
+      assert.equal(output.delivery_receipt, "agent_accepted", sent.stdout);
+      assert.notEqual(output.session_id, source.session_id);
+      assert.equal(
+        output.conversation.native_thread_id,
+        acceptedNativeThreadId
+      );
+      const transfer = soleDeferredForegroundTransfer(fixture);
+      assert.equal(transfer.status, "resolved");
+      assert.equal(transfer.source_kind, "candidate_rollout_quiescent");
+      assert.equal(transfer.source_rollout_authority ?? "present", "present");
+      assert.equal(transfer.target_native_thread_id, acceptedNativeThreadId);
+      const anchor = persistedCodexV3AcceptanceAnchor(
+        fixture,
+        String(output.turn_id)
+      );
+      assert.deepEqual(
+        anchor.candidate_rollouts?.map(
+          (candidate: Record<string, any>) => candidate.native_thread_id
+        ),
+        [NATIVE_THREAD_ID]
+      );
+      assert.equal(
+        loadManagedSession(fixture.storeDir, source.session_id).status,
+        "detached"
+      );
+      assert.equal(
+        loadManagedSession(fixture.storeDir, String(output.session_id))
+          .binding?.native_thread_id,
+        acceptedNativeThreadId
+      );
+      assert.equal(
+        readTmuxCalls(fixture.tmuxCallsPath).some((call) =>
+          call.args.includes("/status")
+        ),
+        false
+      );
+      assert.deepEqual(fixture.ttyViewportInspectionPids, []);
+      assertSingleTaskInput(fixture, message);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+}
+
+async function assertSafeAbortedRolloutDelegateRetry(
+  abortCase: {
+    failureEnv: Record<string, string>;
+    expectedInputStage: "none" | "dispatch_started";
+    failedLiteralAttempt: boolean;
+  }
+): Promise<void> {
+  const fixture = createNoRolloutFixture({
+    codexVersion: "0.147.0",
+    terminalKind: "herdr",
+    viewportColumns: 55,
+    ttyViewportColumns: 52
+  });
+  const message = "Retry this safe-aborted delegate only through fresh v3 authority.";
+  const messageId = `msg-openclaw-${"7".repeat(64)}`;
+  const gatewaySession = "agent:test:safe-aborted-rollout-delegate";
+  const delegateArgs = [
+    "delegate",
+    "--request",
+    message,
+    "--message-id",
+    messageId,
+    "--openclaw-session",
+    gatewaySession,
+    "--gateway-method",
+    "agent-knock-knock.callback",
+    "--gateway-session",
+    gatewaySession,
+    "--store-dir",
+    fixture.storeDir,
+    "--codex-home",
+    fs.realpathSync(fixture.codexHome),
+    "--openclaw-bin",
+    "/usr/bin/true",
+    "--disable-terminal-bridge-monitor"
+  ];
+  try {
+    enableFixtureCandidateInventory(fixture, [NATIVE_THREAD_ID]);
+    const source = persistExactEndedRolloutSession(
+      fixture,
+      "session-safe-aborted-rollout-delegate"
+    );
+    const bindingBefore = source.binding;
+    assert.ok(bindingBefore);
+    const aborted = await runCli(delegateArgs, {
+      ...fixture.environment,
+      AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0",
+      ...abortCase.failureEnv
+    });
+    assert.equal(aborted.status, 0, aborted.stderr || aborted.stdout);
+    const abortedOutput = JSON.parse(aborted.stdout);
+    assert.equal(abortedOutput.delivered, false, aborted.stdout);
+    assert.equal(abortedOutput.submission_outcome, "aborted");
+    assert.equal(abortedOutput.safe_to_retry, true);
+    assert.equal(abortedOutput.do_not_retry, false);
+    assert.equal(abortedOutput.message.id, messageId);
+    assert.notEqual(abortedOutput.session_id, source.session_id);
+
+    const abortTransfer = soleDeferredForegroundTransfer(fixture);
+    assert.equal(abortTransfer.status, "abort_resolved");
+    assert.equal(abortTransfer.input_stage, abortCase.expectedInputStage);
+    assert.equal(abortTransfer.text_injected_at, undefined);
+    assert.equal(abortTransfer.enter_dispatched_at, undefined);
+    assert.equal(abortTransfer.agent_accepted_at, undefined);
+    if (abortCase.failedLiteralAttempt) {
+      assert.ok(abortTransfer.dispatch_started_at);
+      assert.ok(abortTransfer.terminal_input_not_started_at);
+    } else {
+      assert.equal(abortTransfer.dispatch_started_at, undefined);
+      assert.equal(abortTransfer.terminal_input_not_started_at, undefined);
+    }
+    assert.equal(abortTransfer.source_kind, "candidate_rollout_quiescent");
+    assert.equal(
+      abortTransfer.source_rollout_authority ?? "present",
+      "present"
+    );
+    assert.equal(abortTransfer.source_session_id, source.session_id);
+    assert.equal(abortTransfer.target_session_id, abortedOutput.session_id);
+    assert.equal(abortTransfer.abort_source_after_status, "bound");
+    assert.equal(abortTransfer.abort_target_after_status, "detached");
+    assert.ok(abortTransfer.abort_cleanup_completed_at);
+    const sourceAfterAbort = loadManagedSession(
+      fixture.storeDir,
+      source.session_id
+    );
+    assert.equal(sourceAfterAbort.status, "bound");
+    assert.deepEqual(
+      sourceAfterAbort.binding,
+      JSON.parse(JSON.stringify(bindingBefore)),
+      "zero-input cleanup restores the exact persisted status-card binding"
+    );
+    const firstTargetAfterAbort = loadManagedSession(
+      fixture.storeDir,
+      abortTransfer.target_session_id
+    );
+    assert.equal(firstTargetAfterAbort.status, "detached");
+    assert.equal(firstTargetAfterAbort.binding?.native_thread_id, undefined);
+    assert.equal(
+      firstTargetAfterAbort.binding?.native_process.rollout,
+      undefined
+    );
+    const abortedTurnId = String(abortedOutput.turn_id);
+    const abortedTurn = listConversations(fixture.storeDir).find((turn) =>
+      turn.turn_id === abortedTurnId
+    );
+    assert.ok(abortedTurn);
+    assert.equal(abortedTurn.status, "failed");
+    assert.equal(abortedTurn.gateway_method, "agent-knock-knock.callback");
+    assert.equal(abortedTurn.gateway_session, gatewaySession);
+    const abortedSubmission = (
+      abortedTurn.native_session_takeover as Record<string, any>
+    ).terminal_bridge_submission;
+    assert.equal(abortedSubmission.message_id, messageId);
+    assert.equal(abortedSubmission.status, "aborted");
+    assert.equal(abortedSubmission.safe_to_retry, true);
+    assert.ok(abortedSubmission.aborted_at);
+    assert.equal(abortedSubmission.text_injected_at, undefined);
+    assert.equal(abortedSubmission.enter_dispatched_at, undefined);
+    assert.equal(abortedSubmission.submitted_at, undefined);
+    assert.equal(abortedSubmission.agent_accepted_at, undefined);
+    assert.equal(abortedSubmission.acceptance_evidence, undefined);
+    const abortedLedger = readSoleTerminalDispatchLedger(fixture);
+    assert.equal(abortedLedger.status, "resolved");
+    assert.equal(abortedLedger.safe_to_retry, true);
+    assert.equal(abortedLedger.callback_expected, true);
+    assert.equal(abortedLedger.text_injected_at, undefined);
+    assert.equal(abortedLedger.enter_dispatched_at, undefined);
+    assert.equal(abortedLedger.submitted_at, undefined);
+    assert.equal(abortedLedger.agent_accepted_at, undefined);
+    assert.equal(abortedLedger.acceptance_evidence, undefined);
+    if (abortCase.failedLiteralAttempt) {
+      assert.equal(
+        abortTransfer.terminal_input_not_started_at,
+        abortedSubmission.aborted_at
+      );
+      assert.equal(abortedLedger.aborted_at, abortedSubmission.aborted_at);
+      assert.deepEqual(
+        taskInputCalls(fixture, message).map((call) => call.args),
+        [["send-keys", "-t", fixture.inputTarget, "-l", message]]
+      );
+    } else {
+      assert.deepEqual(taskInputCalls(fixture, message), []);
+    }
+    assert.equal(
+      taskInputCalls(fixture, message).filter((call) =>
+        call.args.at(-1) === "C-m"
+      ).length,
+      0
+    );
+
+    fixture.acceptanceNativeThreadIdsOnEnter = [NATIVE_THREAD_ID];
+    const retried = await runCli(delegateArgs, {
+      ...fixture.environment,
+      AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
+    });
+    assert.equal(retried.status, 0, retried.stderr || retried.stdout);
+    const output = JSON.parse(retried.stdout);
+    assert.equal(output.delivery_receipt, "agent_accepted", retried.stdout);
+    assert.equal(output.message.id, messageId);
+    assert.notEqual(output.turn_id, abortedTurnId);
+    assert.notEqual(output.session_id, source.session_id);
+    assert.equal(output.conversation.native_thread_id, NATIVE_THREAD_ID);
+    assert.equal(
+      output.conversation.gateway_method,
+      "agent-knock-knock.callback"
+    );
+    assert.equal(output.conversation.gateway_session, gatewaySession);
+
+    const anchor = persistedCodexV3AcceptanceAnchor(
+      fixture,
+      String(output.turn_id)
+    );
+    assert.deepEqual(
+      anchor.candidate_rollouts.map(
+        (candidate: Record<string, any>) => candidate.native_thread_id
+      ),
+      [NATIVE_THREAD_ID]
+    );
+    const transfers = listDeferredForegroundTransfers(fixture.storeDir);
+    assert.equal(transfers.length, 2, JSON.stringify(transfers, null, 2));
+    const preservedAbort = transfers.find((candidate) =>
+      candidate.transfer_id === abortTransfer.transfer_id
+    );
+    assert.deepEqual(preservedAbort, abortTransfer);
+    const transfer = transfers.find((candidate) =>
+      candidate.turn_id === output.turn_id
+    );
+    assert.ok(transfer, JSON.stringify(transfers, null, 2));
+    assert.equal(transfer.status, "resolved");
+    assert.equal(transfer.source_kind, "candidate_rollout_quiescent");
+    assert.equal(transfer.source_rollout_authority ?? "present", "present");
+    assert.equal(transfer.source_session_id, source.session_id);
+    assert.equal(transfer.target_native_thread_id, NATIVE_THREAD_ID);
+    assert.notEqual(transfer.target_session_id, abortTransfer.target_session_id);
+    assert.equal(
+      loadManagedSession(fixture.storeDir, source.session_id).status,
+      "detached"
+    );
+    assert.equal(
+      loadManagedSession(fixture.storeDir, String(output.session_id))
+        .binding?.native_thread_id,
+      NATIVE_THREAD_ID
+    );
+    assert.equal(
+      readTmuxCalls(fixture.tmuxCallsPath).some((call) =>
+        call.args.includes("/status")
+      ),
+      false
+    );
+    assert.deepEqual(fixture.ttyViewportInspectionPids, []);
+    const finalTaskCalls = taskInputCalls(fixture, message);
+    assert.equal(
+      finalTaskCalls.filter((call) => call.args.at(-1) === "C-m").length,
+      1
+    );
+    assert.equal(
+      finalTaskCalls.filter((call) =>
+        call.args.includes("-l") && call.args.at(-1) === message
+      ).length,
+      abortCase.failedLiteralAttempt ? 2 : 1
+    );
+    assert.deepEqual(finalTaskCalls.slice(-2).map((call) => call.args), [
+      ["send-keys", "-t", fixture.inputTarget, "-l", message],
+      ["send-keys", "-t", fixture.inputTarget, "C-m"]
+    ]);
+  } finally {
+    fixture.cleanup();
+  }
+}
+
+test("safe-aborted unchanged rollout-backed delegate retries the same message id through v3", async () => {
+  await assertSafeAbortedRolloutDelegateRetry({
+    failureEnv: { AKK_TEST_TERMINAL_SETUP_FAILURE: "1" },
+    expectedInputStage: "none",
+    failedLiteralAttempt: false
+  });
+});
+
+test("safe-aborted text-dispatch failure retries the same message id through v3", async () => {
+  await assertSafeAbortedRolloutDelegateRetry({
+    failureEnv: { AKK_TEST_TMUX_TEXT_FAILURE: "1" },
+    expectedInputStage: "dispatch_started",
+    failedLiteralAttempt: true
+  });
+});
+
+async function assertSafeAbortedStatusCardDelegateRetry(
+  abortCase: {
+    failureEnv: Record<string, string>;
+    expectedInputStage: "none" | "dispatch_started";
+    failedLiteralAttempt: boolean;
+  }
+): Promise<void> {
+  const fixture = createNoRolloutFixture({
+    codexVersion: "0.147.0",
+    rolloutInitiallyAbsent: true
+  });
+  const message =
+    "Retry this safe-aborted status-card delegate through its restored source.";
+  const messageId = `msg-openclaw-${"8".repeat(64)}`;
+  const gatewaySession = "agent:test:safe-aborted-status-card-delegate";
+  const delegateArgs = [
+    "delegate",
+    "--request",
+    message,
+    "--message-id",
+    messageId,
+    "--openclaw-session",
+    gatewaySession,
+    "--gateway-method",
+    "agent-knock-knock.callback",
+    "--gateway-session",
+    gatewaySession,
+    "--store-dir",
+    fixture.storeDir,
+    "--codex-home",
+    fs.realpathSync(fixture.codexHome),
+    "--openclaw-bin",
+    "/usr/bin/true",
+    "--disable-terminal-bridge-monitor"
+  ];
+  try {
+    const source = persistStatusCardSession(fixture, LIVE_PROCESS_BIRTH);
+    const bindingBefore = source.binding;
+    assert.ok(bindingBefore);
+    assert.equal(bindingBefore.native_process.rollout, undefined);
+    const action = await deferredForegroundSendAction(fixture);
+    const firstSendArgs = [
+      ...deferredForegroundSendArgs(fixture, action, message),
+      "--message-id",
+      messageId,
+      "--openclaw-session",
+      gatewaySession,
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      gatewaySession
+    ];
+
+    const aborted = await runCli(firstSendArgs, {
+      ...fixture.environment,
+      AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0",
+      ...abortCase.failureEnv
+    });
+    assert.equal(aborted.status, 0, aborted.stderr || aborted.stdout);
+    const abortedOutput = JSON.parse(aborted.stdout);
+    assert.equal(abortedOutput.delivered, false, aborted.stdout);
+    assert.equal(abortedOutput.submission_outcome, "aborted");
+    assert.equal(abortedOutput.safe_to_retry, true);
+    assert.equal(abortedOutput.do_not_retry, false);
+    assert.equal(abortedOutput.message.id, messageId);
+    assert.notEqual(abortedOutput.session_id, source.session_id);
+
+    const abortTransfer = soleDeferredForegroundTransfer(fixture);
+    assert.equal(abortTransfer.status, "abort_resolved");
+    assert.equal(abortTransfer.input_stage, abortCase.expectedInputStage);
+    assert.equal(abortTransfer.source_kind, "status_card_only");
+    assert.equal(abortTransfer.source_session_id, source.session_id);
+    assert.equal(abortTransfer.target_session_id, abortedOutput.session_id);
+    assert.equal(abortTransfer.text_injected_at, undefined);
+    assert.equal(abortTransfer.enter_dispatched_at, undefined);
+    assert.equal(abortTransfer.agent_accepted_at, undefined);
+    assert.equal(abortTransfer.abort_source_after_status, "bound");
+    assert.equal(abortTransfer.abort_target_after_status, "detached");
+    assert.ok(abortTransfer.abort_cleanup_completed_at);
+    if (abortCase.failedLiteralAttempt) {
+      assert.ok(abortTransfer.dispatch_started_at);
+      assert.ok(abortTransfer.terminal_input_not_started_at);
+    } else {
+      assert.equal(abortTransfer.dispatch_started_at, undefined);
+      assert.equal(abortTransfer.terminal_input_not_started_at, undefined);
+    }
+
+    const sourceAfterAbort = loadManagedSession(
+      fixture.storeDir,
+      source.session_id
+    );
+    assert.equal(sourceAfterAbort.status, "bound");
+    assert.deepEqual(
+      sourceAfterAbort.binding,
+      JSON.parse(JSON.stringify(bindingBefore)),
+      "zero-input cleanup restores the exact persisted status-card binding"
+    );
+    const targetAfterAbort = loadManagedSession(
+      fixture.storeDir,
+      abortTransfer.target_session_id
+    );
+    assert.equal(targetAfterAbort.status, "detached");
+    assert.equal(targetAfterAbort.binding?.native_thread_id, undefined);
+    assert.equal(targetAfterAbort.binding?.native_process.rollout, undefined);
+
+    const abortedTurnId = String(abortedOutput.turn_id);
+    const abortedTurn = listConversations(fixture.storeDir).find((turn) =>
+      turn.turn_id === abortedTurnId
+    );
+    assert.ok(abortedTurn);
+    assert.equal(abortedTurn.status, "failed");
+    assert.equal(abortedTurn.session_id, abortTransfer.target_session_id);
+    assert.notEqual(abortedTurn.session_id, source.session_id);
+    assert.equal(abortedTurn.gateway_method, "agent-knock-knock.callback");
+    assert.equal(abortedTurn.gateway_session, gatewaySession);
+    const abortedSubmission = (
+      abortedTurn.native_session_takeover as Record<string, any>
+    ).terminal_bridge_submission;
+    assert.equal(abortedSubmission.message_id, messageId);
+    assert.equal(abortedSubmission.status, "aborted");
+    assert.equal(abortedSubmission.safe_to_retry, true);
+    assert.equal(abortedSubmission.text_injected_at, undefined);
+    assert.equal(abortedSubmission.enter_dispatched_at, undefined);
+    assert.equal(abortedSubmission.agent_accepted_at, undefined);
+    const abortedLedger = readSoleTerminalDispatchLedger(fixture);
+    assert.equal(abortedLedger.status, "resolved");
+    assert.equal(abortedLedger.safe_to_retry, true);
+    assert.equal(abortedLedger.callback_expected, true);
+    assert.equal(abortedLedger.text_injected_at, undefined);
+    assert.equal(abortedLedger.enter_dispatched_at, undefined);
+    assert.equal(abortedLedger.agent_accepted_at, undefined);
+    if (abortCase.failedLiteralAttempt) {
+      assert.equal(
+        abortTransfer.terminal_input_not_started_at,
+        abortedSubmission.aborted_at
+      );
+      assert.equal(abortedLedger.aborted_at, abortedSubmission.aborted_at);
+      assert.deepEqual(
+        taskInputCalls(fixture, message).map((call) => call.args),
+        [["send-keys", "-t", fixture.inputTarget, "-l", message]]
+      );
+    } else {
+      assert.deepEqual(taskInputCalls(fixture, message), []);
+    }
+    assert.equal(
+      taskInputCalls(fixture, message).filter((call) =>
+        call.args.at(-1) === "C-m"
+      ).length,
+      0
+    );
+
+    const retried = await runCli(delegateArgs, {
+      ...fixture.environment,
+      AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
+    });
+    assert.equal(retried.status, 0, retried.stderr || retried.stdout);
+    const output = JSON.parse(retried.stdout);
+    assert.equal(output.delivery_receipt, "agent_accepted", retried.stdout);
+    assert.equal(output.message.id, messageId);
+    assert.notEqual(output.turn_id, abortedTurnId);
+    assert.equal(output.session_id, source.session_id);
+    assert.equal(output.conversation.native_thread_id, NATIVE_THREAD_ID);
+    assert.equal(
+      output.conversation.gateway_method,
+      "agent-knock-knock.callback"
+    );
+    assert.equal(output.conversation.gateway_session, gatewaySession);
+    assert.deepEqual(
+      listDeferredForegroundTransfers(fixture.storeDir),
+      [abortTransfer],
+      "the retry must preserve the completed abort and reuse its restored source"
+    );
+    const refinedSource = loadManagedSession(
+      fixture.storeDir,
+      source.session_id
+    );
+    assert.equal(refinedSource.status, "bound");
+    assert.equal(refinedSource.binding?.native_thread_id, NATIVE_THREAD_ID);
+    assert.ok(refinedSource.binding?.native_process.rollout);
+    assert.equal(
+      loadManagedSession(
+        fixture.storeDir,
+        abortTransfer.target_session_id
+      ).status,
+      "detached"
+    );
+
+    const finalTaskCalls = taskInputCalls(fixture, message);
+    assert.equal(
+      finalTaskCalls.filter((call) => call.args.at(-1) === "C-m").length,
+      2,
+      "status-card retry performs one /status Enter and one task Enter"
+    );
+    assert.equal(
+      readTmuxCalls(fixture.tmuxCallsPath).filter((call) =>
+        call.args.includes("-l") && call.args.at(-1) === "/status"
+      ).length,
+      1,
+      "the restored status-card source is revalidated exactly once"
+    );
+    assert.equal(
+      finalTaskCalls.filter((call) =>
+        call.args.includes("-l") && call.args.at(-1) === message
+      ).length,
+      abortCase.failedLiteralAttempt ? 2 : 1
+    );
+    assert.deepEqual(finalTaskCalls.slice(-2).map((call) => call.args), [
+      ["send-keys", "-t", fixture.inputTarget, "-l", message],
+      ["send-keys", "-t", fixture.inputTarget, "C-m"]
+    ]);
+  } finally {
+    fixture.cleanup();
+  }
+}
+
+test("safe-aborted status-card setup failure retries the same delegate message once", async () => {
+  await assertSafeAbortedStatusCardDelegateRetry({
+    failureEnv: { AKK_TEST_TERMINAL_SETUP_FAILURE: "1" },
+    expectedInputStage: "none",
+    failedLiteralAttempt: false
+  });
+});
+
+test("safe-aborted status-card text failure retries the same delegate message once", async () => {
+  await assertSafeAbortedStatusCardDelegateRetry({
+    failureEnv: { AKK_TEST_TMUX_TEXT_FAILURE: "1" },
+    expectedInputStage: "dispatch_started",
+    failedLiteralAttempt: true
+  });
+});
+
+test("a listed visible clear hint may disappear before token send while exact inventory stays unchanged", async () => {
+  const fixture = createNoRolloutFixture({
+    codexVersion: "0.147.0",
+    terminalKind: "herdr",
+    viewportColumns: 55,
+    ttyViewportColumns: 52
+  });
+  const message = "Use the pinned inventory after the diagnostic clear hint scrolls away.";
+  try {
+    enableFixtureCandidateInventory(fixture, [NATIVE_THREAD_ID]);
+    const source = persistExactEndedRolloutSession(
+      fixture,
+      "session-visible-hint-disappears"
+    );
+    const wrappedResumeFirstLine =
+      `To continue this session, run codex resume ${NATIVE_THREAD_ID.slice(0, 9)}`;
+    assert.equal([...wrappedResumeFirstLine].length, 52);
+    fs.writeFileSync(fixture.screenPath, [
+      wrappedResumeFirstLine,
+      NATIVE_THREAD_ID.slice(9),
+      "",
+      "› \u001b[2mAsk Codex anything\u001b[0m"
+    ].join("\n"));
+
+    const action = await deferredForegroundSendAction(fixture);
+    assert.ok(
+      fixture.runtimeLogs.some((entry) =>
+        entry.event === "terminal_codex_latent_clear_hint_observed" &&
+        entry.fields.source_session_id === source.session_id &&
+        entry.fields.source_native_thread_id === NATIVE_THREAD_ID
+      ),
+      JSON.stringify(fixture.runtimeLogs, null, 2)
+    );
+
+    // The hint is diagnostic and transient. The exact rollout inventory and
+    // every durable source fence remain unchanged between list and send.
+    fs.writeFileSync(
+      fixture.screenPath,
+      "Ready after scrollback advanced\n› \u001b[2mAsk Codex anything\u001b[0m"
+    );
+    fixture.acceptanceNativeThreadIdsOnEnter = [EXTERNAL_THREAD_ID];
+    const sent = await runCli(
+      deferredForegroundSendArgs(fixture, action, message),
+      {
+        ...fixture.environment,
+        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
+      }
+    );
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    const output = JSON.parse(sent.stdout);
+    assert.equal(output.delivery_receipt, "agent_accepted", sent.stdout);
+    assert.equal(output.conversation.native_thread_id, EXTERNAL_THREAD_ID);
+    const transfer = soleDeferredForegroundTransfer(fixture);
+    assert.equal(transfer.status, "resolved");
+    assert.equal(transfer.source_kind, "candidate_rollout_quiescent");
+    assert.equal(transfer.source_rollout_authority ?? "present", "present");
+    assert.equal(transfer.target_native_thread_id, EXTERNAL_THREAD_ID);
+    const anchor = persistedCodexV3AcceptanceAnchor(
+      fixture,
+      String(output.turn_id)
+    );
+    assert.deepEqual(
+      anchor.candidate_rollouts?.map(
+        (candidate: Record<string, any>) => candidate.native_thread_id
+      ),
+      [NATIVE_THREAD_ID]
+    );
+    assert.equal(
+      loadManagedSession(fixture.storeDir, source.session_id).status,
+      "detached"
+    );
+    assert.equal(
+      readTmuxCalls(fixture.tmuxCallsPath).some((call) =>
+        call.args.includes("/status")
+      ),
+      false
+    );
+    assert.deepEqual(fixture.ttyViewportInspectionPids, []);
+    assertSingleTaskInput(fixture, message);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("rollout-backed strict Session send rejects before input and directs callers to refresh list", async () => {
+  const fixture = createNoRolloutFixture({
+    codexVersion: "0.147.0",
+    terminalKind: "herdr",
+    viewportColumns: 55,
+    ttyViewportColumns: 52
+  });
+  try {
+    enableFixtureCandidateInventory(fixture, [NATIVE_THREAD_ID]);
+    const source = persistExactEndedRolloutSession(
+      fixture,
+      "session-rollout-backed-strict-rejected"
+    );
+    const beforeSessions = listManagedSessions(fixture.storeDir);
+    const ledgerDir = path.join(
+      String(fixture.environment.AKK_RUNTIME_DIR),
+      "terminal-dispatch"
+    );
+    const beforeLedgerPaths = fs.existsSync(ledgerDir)
+      ? fs.readdirSync(ledgerDir).sort()
+      : [];
+    const sent = await runCli([
+      "send",
+      "--session",
+      source.session_id,
+      "--message",
+      "A stale strict caller must refresh before this task is injected.",
+      "--background",
+      "--store-dir",
+      fixture.storeDir,
+      "--codex-home",
+      fixture.codexHome,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor"
+    ], fixture.environment);
+    assert.equal(sent.status, 1, sent.stdout);
+    assert.match(sent.stderr, /refresh.*list|list.*selector|follow-current/iu);
+    assert.deepEqual(taskInputCalls(fixture), []);
+    assert.deepEqual(listConversations(fixture.storeDir), []);
+    assert.deepEqual(listDeferredForegroundTransfers(fixture.storeDir), []);
+    assert.deepEqual(listManagedSessions(fixture.storeDir), beforeSessions);
+    assert.deepEqual(
+      fs.existsSync(ledgerDir) ? fs.readdirSync(ledgerDir).sort() : [],
+      beforeLedgerPaths
+    );
+    assert.equal(
+      loadManagedSession(fixture.storeDir, source.session_id).status,
+      "bound"
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test("explicit close of a v1 uncertain clear dispatch restores only future candidate send", async () => {
   const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
   const lostMessage = "This task crosses the latent clear boundary.";
@@ -4701,29 +5577,15 @@ test("explicit close of a v1 uncertain clear dispatch restores only future candi
       fixture,
       "session-closed-latent-clear-source"
     );
-    fixture.acceptanceNativeThreadIdsOnEnter = [EXTERNAL_THREAD_ID];
-    const uncertain = await runCli([
-      "send",
-      "--session",
-      source.session_id,
-      "--message",
-      lostMessage,
-      "--background",
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome,
-      "--openclaw-bin",
-      "/usr/bin/true",
-      "--disable-terminal-bridge-monitor"
-    ], {
-      ...fixture.environment,
-      AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-    });
-    assert.equal(uncertain.status, 0, uncertain.stderr || uncertain.stdout);
-    const uncertainOutput = JSON.parse(uncertain.stdout);
-    assert.equal(uncertainOutput.status, "submission_uncertain");
-    const turnId = String(uncertainOutput.turn_id);
+    // Preserve an exact v0.12.6-era v1 uncertain dispatch as migration input.
+    // New rollout-backed strict sends are rejected before terminal input, so
+    // this recovery proof must not manufacture its predecessor through the
+    // current send path.
+    const turnId = persistLegacyV1UncertainTurn(
+      fixture,
+      source,
+      lostMessage
+    );
     const stalled = listConversations(fixture.storeDir).find((turn) =>
       turn.turn_id === turnId
     );
@@ -4822,16 +5684,14 @@ test("explicit close of a v1 uncertain clear dispatch restores only future candi
       recoveredOutput.conversation.native_thread_id,
       EXTERNAL_THREAD_ID
     );
-    const recoveredConversation = listConversations(fixture.storeDir).find(
-      (turn) => turn.turn_id === recoveredOutput.turn_id
+    const recoveredAnchor = persistedCodexV3AcceptanceAnchor(
+      fixture,
+      String(recoveredOutput.turn_id)
     );
-    assert.ok(recoveredConversation);
-    const recoveredTakeover = recoveredConversation.native_session_takeover as
-      Record<string, any>;
-    assert.equal(recoveredTakeover.codex_rollout_acceptance_anchor?.version, 3);
     assert.deepEqual(
-      recoveredTakeover.codex_rollout_acceptance_anchor?.candidate_rollouts
-        ?.map((candidate: Record<string, any>) => candidate.native_thread_id),
+      recoveredAnchor.candidate_rollouts?.map(
+        (candidate: Record<string, any>) => candidate.native_thread_id
+      ),
       [EXTERNAL_THREAD_ID]
     );
     assert.equal(
@@ -4865,8 +5725,6 @@ test("explicit close of a v1 uncertain clear dispatch restores only future candi
     );
     assert.deepEqual(taskInputCalls(fixture, lostMessage).map((call) => call.args), [
       ["send-keys", "-t", fixture.inputTarget, "-l", lostMessage],
-      ["send-keys", "-t", fixture.inputTarget, "C-m"],
-      ["send-keys", "-t", fixture.inputTarget, "-l", lostMessage],
       ["send-keys", "-t", fixture.inputTarget, "C-m"]
     ]);
   } finally {
@@ -4883,18 +5741,7 @@ test("abandoned predecessor candidate token fails closed when exact authority dr
       fixture,
       "session-abandoned-drift-source"
     );
-    fixture.acceptanceNativeThreadIdsOnEnter = [EXTERNAL_THREAD_ID];
-    const uncertain = await runCli([
-      "send", "--session", source.session_id, "--message", message,
-      "--background", "--store-dir", fixture.storeDir,
-      "--codex-home", fixture.codexHome, "--openclaw-bin", "/usr/bin/true",
-      "--disable-terminal-bridge-monitor"
-    ], {
-      ...fixture.environment,
-      AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-    });
-    assert.equal(uncertain.status, 0, uncertain.stderr || uncertain.stdout);
-    const turnId = JSON.parse(uncertain.stdout).turn_id;
+    const turnId = persistLegacyV1UncertainTurn(fixture, source, message);
     enableFixtureCandidateInventory(fixture, [EXTERNAL_THREAD_ID]);
     fixture.identityObservationError =
       "Codex process has an unexpected open root rollout outside the preferred and exact companion identities";
@@ -4969,17 +5816,7 @@ test("abandoned predecessor does not advertise a candidate already claimed by a 
       fixture,
       "session-abandoned-claimed-source"
     );
-    fixture.acceptanceNativeThreadIdsOnEnter = [EXTERNAL_THREAD_ID];
-    const uncertain = await runCli([
-      "send", "--session", source.session_id, "--message", message,
-      "--background", "--store-dir", fixture.storeDir,
-      "--codex-home", fixture.codexHome, "--openclaw-bin", "/usr/bin/true",
-      "--disable-terminal-bridge-monitor"
-    ], {
-      ...fixture.environment,
-      AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-    });
-    assert.equal(uncertain.status, 0, uncertain.stderr || uncertain.stdout);
+    const turnId = persistLegacyV1UncertainTurn(fixture, source, message);
     enableFixtureCandidateInventory(fixture, [EXTERNAL_THREAD_ID]);
     fixture.identityObservationError = "fixture unavailable foreground";
     fs.writeFileSync(
@@ -4987,7 +5824,7 @@ test("abandoned predecessor does not advertise a candidate already claimed by a 
       "Ready\n› \u001b[2mAsk Codex anything\u001b[0m"
     );
     const closed = await runCli([
-      "close", "--turn", String(JSON.parse(uncertain.stdout).turn_id),
+      "close", "--turn", turnId,
       "--store-dir", fixture.storeDir, "--codex-home", fixture.codexHome
     ], fixture.environment);
     assert.equal(closed.status, 0, closed.stderr || closed.stdout);
@@ -4998,19 +5835,13 @@ test("abandoned predecessor does not advertise a candidate already claimed by a 
     );
     const listed = await listFixtureTerminal(fixture);
     assert.equal(listed.available_actions.send, undefined);
-    assert.deepEqual(
-      taskInputCalls(fixture, message).map((call) => call.args),
-      [
-        ["send-keys", "-t", fixture.inputTarget, "-l", message],
-        ["send-keys", "-t", fixture.inputTarget, "C-m"]
-      ]
-    );
+    assert.deepEqual(taskInputCalls(fixture, message), []);
   } finally {
     fixture.cleanup();
   }
 });
 
-test("closed detached Codex history does not force /status on a narrow strict send", async () => {
+test("closed detached Codex history does not force /status on a narrow candidate send", async () => {
   const fixture = createNoRolloutFixture({
     codexVersion: "0.147.0",
     terminalKind: "herdr",
@@ -5028,6 +5859,10 @@ test("closed detached Codex history does not force /status on a narrow strict se
       fixture,
       "session-single-open-root-with-closed-history"
     );
+    const sourceBindingId = source.binding?.binding_id;
+    const sourceGeneration = source.binding?.generation;
+    assert.ok(sourceBindingId);
+    assert.ok(sourceGeneration);
     const firstHistorical = persistDetachedRolloutCompanion(
       fixture,
       EXTERNAL_THREAD_ID,
@@ -5045,33 +5880,25 @@ test("closed detached Codex history does not force /status on a narrow strict se
     const terminal = await listFixtureTerminal(fixture);
     const action = terminal.available_actions.send;
     assert.ok(action, JSON.stringify(terminal, null, 2));
-    assert.equal(action.arguments.session_id, source.session_id);
-    assert.equal("selector" in action.arguments, false);
-    assert.equal("expected_terminal_token" in action.arguments, false);
+    assert.equal(action.arguments.selector, fixture.terminalId);
+    assert.equal("session_id" in action.arguments, false);
+    assert.equal(typeof action.arguments.expected_terminal_token, "string");
 
-    const sent = await runCli([
-      "send",
-      "--session",
-      source.session_id,
-      "--message",
-      message,
-      "--background",
-      "--store-dir",
-      fixture.storeDir,
-      "--codex-home",
-      fixture.codexHome,
-      "--openclaw-bin",
-      "/usr/bin/true",
-      "--disable-terminal-bridge-monitor"
-    ], {
-      ...fixture.environment,
-      AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-    });
+    fixture.acceptanceNativeThreadIdsOnEnter = [NATIVE_THREAD_ID];
+    const sent = await runCli(
+      deferredForegroundSendArgs(fixture, action, message),
+      {
+        ...fixture.environment,
+        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
+      }
+    );
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
     const output = JSON.parse(sent.stdout);
-    assert.equal(output.session_id, source.session_id);
+    assert.notEqual(output.session_id, source.session_id);
     assert.equal(output.conversation.native_thread_id, NATIVE_THREAD_ID);
-    assert.deepEqual(listDeferredForegroundTransfers(fixture.storeDir), []);
+    const transfer = soleDeferredForegroundTransfer(fixture);
+    assert.equal(transfer.status, "resolved");
+    assert.equal(transfer.source_kind, "candidate_rollout_quiescent");
     assert.equal(
       readTmuxCalls(fixture.tmuxCallsPath).some((call) =>
         call.args.includes("/status")
@@ -5080,14 +5907,22 @@ test("closed detached Codex history does not force /status on a narrow strict se
     );
     assert.deepEqual(fixture.ttyViewportInspectionPids, []);
     assertSingleTaskInput(fixture, message);
-    const persistedTurn = listConversations(fixture.storeDir).find((turn) =>
-      turn.turn_id === output.turn_id
+    const anchor = persistedCodexV3AcceptanceAnchor(
+      fixture,
+      String(output.turn_id)
     );
-    assert.ok(persistedTurn);
-    const anchor = (persistedTurn.native_session_takeover as
-      Record<string, any>).codex_rollout_acceptance_anchor;
-    assert.equal(anchor.version, 1);
-    assert.equal(anchor.mode, "existing");
+    assert.deepEqual(
+      anchor.candidate_rollouts.map(
+        (candidate: Record<string, any>) => candidate.native_thread_id
+      ),
+      [NATIVE_THREAD_ID]
+    );
+    assertResolvedSameUuidDeferredTransfer({
+      fixture,
+      sourceSessionId: source.session_id,
+      originalBindingId: sourceBindingId,
+      originalGeneration: sourceGeneration
+    });
     assert.equal(
       loadManagedSession(fixture.storeDir, firstHistorical.session_id).status,
       "detached"
@@ -5170,24 +6005,75 @@ test("known detached companion roots use the terminal-scoped human-priority rout
   }
 });
 
-test("a blocking Turn suppresses multi-root candidate send while released history does not", async () => {
+test("a non-companion bound candidate claim suppresses present multi-root send and rejects a cached token before input", async () => {
   const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
+  const message = "Do not cross a competing bound candidate claim.";
   try {
     enableFixtureCandidateInventory(fixture, [
       NATIVE_THREAD_ID,
       EXTERNAL_THREAD_ID
     ]);
+    persistExactEndedRolloutSession(
+      fixture,
+      "session-present-multi-root-source"
+    );
+    const cachedAction = await deferredForegroundSendAction(fixture);
+    const detachedClaim = persistDetachedRolloutCompanion(
+      fixture,
+      EXTERNAL_THREAD_ID,
+      "session-competing-bound-candidate"
+    );
+    const {
+      detached_at: _detachedAt,
+      ...claimWithoutDetachedAt
+    } = detachedClaim;
+    saveManagedSession(fixture.storeDir, {
+      ...claimWithoutDetachedAt,
+      status: "bound",
+      updated_at: new Date().toISOString()
+    }, { expectedRevision: detachedClaim.revision as number });
+
+    const listed = await listFixtureTerminal(fixture);
+    assert.equal(listed.available_actions.send, undefined);
+    assert.deepEqual(taskInputCalls(fixture), []);
+    assert.deepEqual(listDeferredForegroundTransfers(fixture.storeDir), []);
+    assert.deepEqual(listConversations(fixture.storeDir), []);
+
+    const rejected = await runCli(
+      deferredForegroundSendArgs(fixture, cachedAction, message),
+      {
+        ...fixture.environment,
+        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
+      }
+    );
+    assert.equal(rejected.status, 1, rejected.stdout);
+    assert.match(
+      rejected.stderr,
+      /multiple bound managed Session claims|candidate.*claimed|authority|refresh/iu
+    );
+    assert.deepEqual(taskInputCalls(fixture), []);
+    assert.deepEqual(listDeferredForegroundTransfers(fixture.storeDir), []);
+    assert.deepEqual(listConversations(fixture.storeDir), []);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("a stalled Turn suppresses one-root candidate send while released history does not", async () => {
+  const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
+  try {
+    enableFixtureCandidateInventory(fixture, [NATIVE_THREAD_ID]);
     const source = persistExactEndedRolloutSession(
       fixture,
       "session-candidate-blocking-turn"
     );
     persistReleasedCandidateSourceTurns(fixture, source);
-    persistBlockingTurn(fixture, source);
+    persistBlockingTurn(fixture, source, "stalled");
     const terminal = await listFixtureTerminal(fixture);
     assert.equal(terminal.available_actions.send, undefined);
     assert.ok(
       terminal.blocking_turns?.some((turn: Record<string, any>) =>
-        turn.status === "waiting_for_agent"
+        turn.status === "stalled"
       ),
       JSON.stringify(terminal, null, 2)
     );
@@ -6513,6 +7399,20 @@ function assertSingleTaskInput(
   ]);
 }
 
+function persistedCodexV3AcceptanceAnchor(
+  fixture: NoRolloutFixture,
+  turnId: string
+): Record<string, any> {
+  const persisted = listConversations(fixture.storeDir).find((turn) =>
+    turn.turn_id === turnId
+  );
+  assert.ok(persisted, `missing persisted Turn ${turnId}`);
+  const takeover = persisted.native_session_takeover as Record<string, any>;
+  const anchor = takeover.codex_rollout_acceptance_anchor;
+  assert.equal(anchor?.version, 3);
+  return anchor;
+}
+
 function assertRecoveredTurnBlocksDuplicate(result: CliTestResult): void {
   assert.equal(result.status, 1, result.stderr || result.stdout);
   assert.match(result.stderr, /unresolved Turn|waiting_for_agent/iu);
@@ -6868,7 +7768,8 @@ function reconcileArguments(
 
 function persistBlockingTurn(
   fixture: NoRolloutFixture,
-  session: ManagedSessionState
+  session: ManagedSessionState,
+  status: "waiting_for_agent" | "stalled" = "waiting_for_agent"
 ): void {
   const now = new Date("2026-08-06T02:31:00.000Z");
   const base = createConversation({
@@ -6881,7 +7782,13 @@ function persistBlockingTurn(
   const paths = pathsForConversation(base.conversation_id, fixture.storeDir);
   saveState(paths.statePath, {
     ...base,
-    status: "waiting_for_agent",
+    status,
+    ...(status === "stalled"
+      ? {
+          stalled_at: now.toISOString(),
+          stalled_reason: "test-only unresolved Codex dispatch"
+        }
+      : {}),
     native_session_takeover: {
       terminal_bridge: true,
       terminal_bridge_message_id: `message-${base.conversation_id}`,
@@ -6895,6 +7802,152 @@ function persistBlockingTurn(
     state_path: paths.statePath,
     updated_at: now.toISOString()
   });
+}
+
+function persistLegacyV1UncertainTurn(
+  fixture: NoRolloutFixture,
+  session: ManagedSessionState,
+  message: string
+): string {
+  const binding = session.binding;
+  assert.ok(binding);
+  assert.ok(binding.native_thread_id);
+  assert.ok(binding.terminal_endpoint);
+  const preparedAt = "2026-08-12T01:33:47.000Z";
+  const textInjectedAt = "2026-08-12T01:33:47.010Z";
+  const enterDispatchedAt = "2026-08-12T01:33:47.020Z";
+  const uncertainAt = "2026-08-12T01:33:47.030Z";
+  const base = createConversation({
+    userRequest: message,
+    sessionId: session.session_id,
+    executorKind: "codex",
+    executorSession: "codex-legacy-v1-uncertain",
+    workspace: session.workspace,
+    now: new Date(preparedAt)
+  });
+  const turnId = base.turn_id;
+  const messageId = `message-${turnId}`;
+  const requestHash = createHash("sha256").update(message).digest("hex");
+  const messageBodyHash = createHash("sha256").update(message).digest("hex");
+  const paths = pathsForConversation(turnId, fixture.storeDir);
+  const submission = {
+    status: "uncertain",
+    session_id: session.session_id,
+    turn_id: turnId,
+    message_id: messageId,
+    binding_id: binding.binding_id,
+    binding_generation: binding.generation,
+    message_type: "task",
+    message_body_hash: messageBodyHash,
+    request_hash: requestHash,
+    executor_kind: "codex",
+    openclaw_session: base.openclaw_session,
+    store_dir: path.resolve(fixture.storeDir),
+    native_thread_id: binding.native_thread_id,
+    terminal_target: fixture.terminalControl.target,
+    terminal_socket_path: fixture.terminalControl.socketPath ?? null,
+    terminal_pane_pid: fixture.terminalControl.panePid,
+    terminal_endpoint: binding.terminal_endpoint,
+    prepared_at: preparedAt,
+    text_injected_at: textInjectedAt,
+    enter_dispatched_at: enterDispatchedAt,
+    uncertain_at: uncertainAt,
+    dispatcher_pid: process.pid,
+    last_proven_stage: "enter_dispatched",
+    error: "legacy v1 acceptance could not attribute the post-clear rollout"
+  };
+  saveState(paths.statePath, {
+    ...base,
+    status: "stalled",
+    stalled_at: uncertainAt,
+    stalled_reason:
+      "terminal submission outcome is uncertain; inspect the shared terminal pane before continuing",
+    terminal_binding_id: binding.binding_id,
+    terminal_binding_generation: binding.generation,
+    native_thread_id: binding.native_thread_id,
+    native_session_takeover: {
+      agent: "codex",
+      terminal_agent_identity_protocol: 1,
+      native_session_id: fixture.terminalId,
+      terminal_agent_pid: fixture.codexPid,
+      terminal_agent_session_id: binding.native_thread_id,
+      terminal_agent_process_uuid: binding.native_process.process_uuid,
+      terminal_agent_process_birth: binding.native_process.process_birth,
+      terminal_agent_rollout: binding.native_process.rollout,
+      terminal_agent_identity_evidence: binding.native_process.evidence,
+      source_cwd: session.workspace,
+      strategy: "terminal_control",
+      terminal_control: fixture.terminalControl,
+      terminal_endpoint: binding.terminal_endpoint,
+      terminal_bridge: true,
+      terminal_bridge_started_at: preparedAt,
+      terminal_bridge_message_id: messageId,
+      terminal_bridge_request_text: message,
+      terminal_bridge_request_hash: requestHash,
+      terminal_bridge_submission: submission,
+      terminal_bridge_submission_receipts: [submission]
+    },
+    store_dir: paths.storeDir,
+    conversation_dir: paths.conversationDir,
+    event_log_path: paths.logPath,
+    state_path: paths.statePath,
+    updated_at: uncertainAt
+  });
+
+  const identity = terminalEndpointIdentityFromEvidence(
+    binding.terminal_endpoint
+  );
+  assert.ok(identity);
+  const terminalKey = createHash("sha256")
+    .update(terminalEndpointIdentityKey(identity))
+    .digest("hex")
+    .slice(0, 20);
+  const ledgerDir = path.join(
+    String(fixture.environment.AKK_RUNTIME_DIR),
+    "terminal-dispatch"
+  );
+  const ledgerPath = path.join(
+    ledgerDir,
+    `terminal-dispatch-${terminalKey}.json`
+  );
+  fs.mkdirSync(ledgerDir, { recursive: true });
+  fs.writeFileSync(ledgerPath, `${JSON.stringify({
+    version: 2,
+    terminal_key: terminalKey,
+    terminal_control: {
+      kind: fixture.terminalControl.kind,
+      target: fixture.terminalControl.target,
+      socket_path: fixture.terminalControl.socketPath ?? null,
+      pane_pid: fixture.terminalControl.panePid ?? null,
+      current_path: fixture.terminalControl.currentPath ?? null
+    },
+    terminal_endpoint: binding.terminal_endpoint,
+    status: "uncertain",
+    generation_id: messageId,
+    conversation_id: turnId,
+    session_id: session.session_id,
+    turn_id: turnId,
+    message_id: messageId,
+    message_type: "task",
+    message_body_hash: messageBodyHash,
+    request_hash: requestHash,
+    executor_kind: "codex",
+    openclaw_session: base.openclaw_session,
+    store_dir: path.resolve(fixture.storeDir),
+    state_path: path.resolve(paths.statePath),
+    event_log_path: path.resolve(paths.logPath),
+    binding_id: binding.binding_id,
+    binding_generation: binding.generation,
+    native_thread_id: binding.native_thread_id,
+    prepared_at: preparedAt,
+    text_injected_at: textInjectedAt,
+    enter_dispatched_at: enterDispatchedAt,
+    uncertain_at: uncertainAt,
+    dispatcher_pid: process.pid,
+    callback_expected: false,
+    error: submission.error
+  }, null, 2)}\n`, { mode: 0o600 });
+  return turnId;
 }
 
 function persistReleasedCandidateSourceTurns(
@@ -7238,6 +8291,26 @@ function createFixtureHerdrProvider(
         const keys = Array.isArray(request.params.keys)
           ? request.params.keys
           : [];
+        if (
+          text !== undefined &&
+          env.AKK_TEST_TMUX_TEXT_FAILURE === "1" &&
+          text !== "/status"
+        ) {
+          fs.appendFileSync(
+            fixture.tmuxCallsPath,
+            `${JSON.stringify({
+              args: ["send-keys", "-t", fixture.target, "-l", text],
+              at: nowMs()
+            })}\n`
+          );
+          return {
+            id: request.id,
+            error: {
+              code: "pane_send_failed",
+              message: "injected Herdr text failure before input"
+            }
+          };
+        }
         const result = text !== undefined
           ? runInProcessTmux(
               fixture,
