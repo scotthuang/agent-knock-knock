@@ -119,6 +119,7 @@ export function validateProductionModuleOwnershipManifest({
       manifest.architecture,
       [
         "cli_core_max_physical_loc",
+        "production_physical_loc",
         "cli_core_importers"
       ],
       "manifest architecture",
@@ -131,6 +132,14 @@ export function validateProductionModuleOwnershipManifest({
       cliCoreMaxPhysicalLoc < 1
     ) {
       errors.push("architecture cli_core_max_physical_loc must be a positive integer");
+    }
+    const productionPhysicalLoc =
+      manifest.architecture.production_physical_loc;
+    if (
+      !Number.isSafeInteger(productionPhysicalLoc) ||
+      productionPhysicalLoc < 1
+    ) {
+      errors.push("architecture production_physical_loc must be a positive integer");
     }
     const cliCoreImporters = manifest.architecture.cli_core_importers;
     if (!Array.isArray(cliCoreImporters)) {
@@ -158,6 +167,7 @@ export function validateProductionModuleOwnershipManifest({
       : [];
     architecture = Object.freeze({
       cliCoreMaxPhysicalLoc,
+      productionPhysicalLoc,
       cliCoreImporters: Object.freeze([...normalizedCliCoreImporters])
     });
   }
@@ -590,12 +600,22 @@ export function validateProductionArchitecture({
   const cliCorePhysicalLoc = cliCoreSource === undefined
     ? undefined
     : physicalLineCount(cliCoreSource);
+  const productionPhysicalLoc = [...sources.values()].reduce(
+    (total, source) => total + physicalLineCount(source),
+    0
+  );
   if (cliCoreSource === undefined) {
     errors.push(`${cliCorePath} is required for architecture validation`);
   } else if (cliCorePhysicalLoc !== ownership.architecture.cliCoreMaxPhysicalLoc) {
     errors.push(
       `${cliCorePath} physical LOC does not match manifest ratchet ` +
       `${ownership.architecture.cliCoreMaxPhysicalLoc} (actual ${cliCorePhysicalLoc})`
+    );
+  }
+  if (productionPhysicalLoc !== ownership.architecture.productionPhysicalLoc) {
+    errors.push(
+      `production physical LOC does not match manifest ratchet ` +
+      `${ownership.architecture.productionPhysicalLoc} (actual ${productionPhysicalLoc})`
     );
   }
 
@@ -643,6 +663,7 @@ export function validateProductionArchitecture({
     ),
     importCycles: cycles.length,
     cliCorePhysicalLoc,
+    productionPhysicalLoc,
     cliCoreImporters: Object.freeze(actualCliCoreImporters)
   });
 }

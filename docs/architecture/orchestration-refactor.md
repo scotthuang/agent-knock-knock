@@ -169,6 +169,10 @@ Required rules:
    consume validated current domain values.
 6. The production import graph must remain acyclic. A cycle is a release
    blocker, not an acceptable transitional state.
+7. Both `cli-core.ts` physical LOC and total `src/**/*.ts` physical LOC are
+   exact ratchets in the ownership manifest. An extraction may lower either
+   value, but cannot silently grow it back; any intentional increase requires
+   an explicit architecture review and manifest diff.
 
 ## Canonical lock order
 

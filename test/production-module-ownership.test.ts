@@ -53,6 +53,10 @@ test("production ownership covers every source module and preserves architecture
     architecture.cliCorePhysicalLoc,
     loadManifest().architecture.cli_core_max_physical_loc
   );
+  assert.equal(
+    architecture.productionPhysicalLoc,
+    loadManifest().architecture.production_physical_loc
+  );
   assert.deepEqual(architecture.cliCoreImporters, ["src/cli.ts"]);
   assert.equal(
     ownershipModule.DYNAMIC_IMPORT_POLICY,
@@ -114,7 +118,7 @@ test("production ownership rejects missing, duplicate, unknown, and stale entrie
   assert.throws(() => validate(cycleEscapeHatch), /unexpected keys: allow_import_cycles/u);
 });
 
-test("architecture checks reject cli-core LOC drift and unapproved reverse imports", async () => {
+test("architecture checks reject production LOC drift and unapproved reverse imports", async () => {
   const ownershipModule = await loadOwnershipModule();
   const ownership = ownershipModule.loadAndValidateProductionModuleOwnership({
     repoRoot,
@@ -123,6 +127,7 @@ test("architecture checks reject cli-core LOC drift and unapproved reverse impor
   const source = (modulePath: string) =>
     fs.readFileSync(path.join(repoRoot, modulePath), "utf8");
   const ratchet = loadManifest().architecture.cli_core_max_physical_loc;
+  const productionRatchet = loadManifest().architecture.production_physical_loc;
 
   assert.throws(
     () => ownershipModule.validateProductionArchitecture({
@@ -163,6 +168,48 @@ test("architecture checks reject cli-core LOC drift and unapproved reverse impor
       ownership,
       repoRoot,
       readSource(modulePath: string) {
+        const original = source(modulePath);
+        return modulePath === "src/runtime-log.ts"
+          ? `${original}// unapproved production growth\n`
+          : original;
+      }
+    }),
+    new RegExp(
+      `production physical LOC does not match manifest ratchet ` +
+      `${productionRatchet} \\(actual ${productionRatchet + 1}\\)`,
+      "u"
+    )
+  );
+
+  assert.throws(
+    () => ownershipModule.validateProductionArchitecture({
+      ownership,
+      repoRoot,
+      readSource(modulePath: string) {
+        const original = source(modulePath);
+        if (modulePath !== "src/runtime-log.ts") {
+          return original;
+        }
+        const lines = original.split(/\r?\n/u);
+        if (lines.at(-1) === "") {
+          lines.pop();
+        }
+        lines.pop();
+        return `${lines.join("\n")}\n`;
+      }
+    }),
+    new RegExp(
+      `production physical LOC does not match manifest ratchet ` +
+      `${productionRatchet} \\(actual ${productionRatchet - 1}\\)`,
+      "u"
+    )
+  );
+
+  assert.throws(
+    () => ownershipModule.validateProductionArchitecture({
+      ownership,
+      repoRoot,
+      readSource(modulePath: string) {
         return modulePath === "src/runtime-log.ts"
           ? 'import "./cli-core.js";\n'
           : source(modulePath);
@@ -176,9 +223,13 @@ test("architecture checks reject cli-core LOC drift and unapproved reverse impor
       ownership,
       repoRoot,
       readSource(modulePath: string) {
-        return modulePath === "src/runtime-log.ts"
-          ? 'const embedded = `\nimport "./cli-core.js";\n`;\n'
-          : source(modulePath);
+        const original = source(modulePath);
+        if (modulePath !== "src/runtime-log.ts") {
+          return original;
+        }
+        const lines = original.split(/\r?\n/u);
+        lines[0] = 'const embedded = `import "./cli-core.js";`;';
+        return lines.join("\n");
       }
     }),
     "import-like fixture text must not create an architecture edge"
