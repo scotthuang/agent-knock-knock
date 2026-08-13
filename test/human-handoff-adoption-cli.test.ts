@@ -609,11 +609,16 @@ for (const agent of ["codex", "claude"] as const) {
       fixture.persistHistoricalTurn(source, `Historical ${agent} source A.`);
       fixture.persistHistoricalTurn(target, `Historical ${agent} target B.`);
 
-      const expectedTerminalToken = agent === "codex"
-        ? String((await fixture.listTerminal()).available_actions?.send
-            ?.arguments?.expected_terminal_token ?? "")
-        : undefined;
-      if (agent === "codex") assert.ok(expectedTerminalToken);
+      let expectedTerminalToken: string | undefined;
+      if (agent === "codex") {
+        const listed = await fixture.listTerminal();
+        assert.equal(listed.handoff_state, "external_handoff_adoptable");
+        expectedTerminalToken = String(
+          listed.available_actions?.send?.arguments
+            ?.expected_terminal_token ?? ""
+        );
+        assert.ok(expectedTerminalToken);
+      }
       const sent = await fixture.sendToTerminal(
         `Continue the known ${agent} history selected by the human.`,
         {},
@@ -622,11 +627,7 @@ for (const agent of ["codex", "claude"] as const) {
       assert.equal(sent.status, 0, fixture.debug(sent));
       const output = JSON.parse(sent.stdout);
       assert.equal(output.delivered, true, fixture.debug(sent));
-      if (agent === "codex") {
-        assert.notEqual(output.session_id, target.session_id);
-      } else {
-        assert.equal(output.session_id, target.session_id);
-      }
+      assert.equal(output.session_id, target.session_id);
 
       const sessions = listManagedSessions(fixture.storeDir);
       const sourceAfter = sessions.find((entry) =>
@@ -643,6 +644,11 @@ for (const agent of ["codex", "claude"] as const) {
       assert.equal(deliveredTarget?.status, "bound");
       assert.equal(deliveredTarget?.binding?.native_thread_id, NATIVE_B);
       assert.equal(deliveredTarget?.lineage.created_by, "attach");
+      assert.equal(deliveredTarget?.binding?.generation, 8);
+      assert.notEqual(
+        deliveredTarget?.binding?.binding_id,
+        target.binding?.binding_id
+      );
       assert.equal(listConversations(fixture.storeDir).length, 3);
       assert.equal(
         listConversations(fixture.storeDir).filter((turn) =>
@@ -654,42 +660,15 @@ for (const agent of ["codex", "claude"] as const) {
         listConversations(fixture.storeDir).filter((turn) =>
           turn.session_id === target.session_id
         ).length,
-        agent === "codex" ? 1 : 2
+        2
       );
-      if (agent === "codex") {
-        assert.equal(sessions.length, 3);
-        assert.equal(targetAfter?.status, "detached");
-        assert.equal(targetAfter?.binding?.generation, 7);
-        assert.equal(
-          targetAfter?.binding?.binding_id,
-          target.binding?.binding_id
-        );
-        assert.equal(
-          listConversations(fixture.storeDir).filter((turn) =>
-            turn.session_id === output.session_id
-          ).length,
-          1
-        );
-        assert.equal(fixture.transitionCount(), 0);
-        const transfers = listDeferredForegroundTransfers(fixture.storeDir);
-        assert.equal(transfers.length, 1);
-        assert.equal(transfers[0]?.status, "resolved");
-        assert.equal(transfers[0]?.source_session_id, source.session_id);
-        assert.equal(transfers[0]?.target_session_id, output.session_id);
-      } else {
-        assert.equal(sessions.length, 2);
-        assert.equal(targetAfter?.status, "bound");
-        assert.equal(targetAfter?.binding?.generation, 8);
-        assert.notEqual(
-          targetAfter?.binding?.binding_id,
-          target.binding?.binding_id
-        );
-        const transition = fixture.onlyTransition();
-        assert.equal(transition.source_session_id, source.session_id);
-        assert.equal(transition.target_session_id, target.session_id);
-        assert.equal(transition.target_expected_revision, target.revision);
-        assert.equal(transition.status, "committed");
-      }
+      assert.equal(sessions.length, 2);
+      assert.equal(targetAfter?.status, "bound");
+      const transition = fixture.onlyTransition();
+      assert.equal(transition.source_session_id, source.session_id);
+      assert.equal(transition.target_session_id, target.session_id);
+      assert.equal(transition.target_expected_revision, target.revision);
+      assert.equal(transition.status, "committed");
     } finally {
       fixture.cleanup();
     }

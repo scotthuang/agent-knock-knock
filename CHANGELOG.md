@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.12.8 - 2026-08-13
+
+### Fixed
+
+- Route every eligible quiescent rollout-backed Codex pane through terminal-follow-current candidate attribution, including single-root and multi-root inventories with resolved or unavailable foreground identity, then bind only the unique post-submit acceptor.
+- Keep the Codex `/clear` resume hint advisory, so a valid fresh candidate action remains usable after the hint scrolls out of view while exact terminal, process, Store, inventory, and composer authority remains unchanged.
+- Restore idempotent retry after a conclusively zero-input candidate-send abort without reusing the abandoned provisional Session or allowing binding drift.
+
+### Changed
+
+- Publish action contract 15. Rollout-backed Codex rows advertise `terminal_follow_current` instead of `session_exact`, and cached direct `session_id` sends reject before task input.
+- Store writer protocol remains 5.
+
+### Security
+
+- Require a complete nonempty open-root inventory, exclusive candidate ownership, exact process and terminal incarnation, frozen source history and dispatch ledger, an idle empty composer, and no blocking Turn before candidate input; stale, incomplete, claimed, or ambiguous state remains fail-closed.
+
 ## 0.12.7 - 2026-08-12
 
 ### Fixed

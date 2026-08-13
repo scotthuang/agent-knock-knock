@@ -34,7 +34,7 @@ import type {
 } from "../src/terminal-agent-adapter.js";
 import {
   createTerminalEndpointRef,
-  terminalEndpointFromControlRef
+  tmuxTerminalRouteKey
 } from "../src/terminal-control-ref.js";
 import {
   MutableRecordingTerminalProvider,
@@ -631,6 +631,7 @@ function seededCodexRecoveryFixture(
   const resolverErrorArmedPath = path.join(root, "resolver-error-armed");
   const secondOwnerIdPath = path.join(root, "second-owner-id.txt");
   const target = "recovery-fixture:0.0";
+  const paneId = "%77";
   const panePid = 72_000;
   const codexPid = 72_001;
   const secondCodexPid = 72_002;
@@ -682,6 +683,7 @@ function seededCodexRecoveryFixture(
     resolverErrorRequestPath,
     resolverErrorArmedPath,
     target,
+    paneId,
     panePid,
     workspace
   });
@@ -722,9 +724,21 @@ function seededCodexRecoveryFixture(
       "terminal_cancel"
     ]
   };
-  const persistedEndpoint = terminalEndpointFromControlRef(terminalControl);
+  const endpointKey = "default-server-route";
   createTerminalEndpointRef({
-    ...persistedEndpoint,
+    identity: {
+      providerKind: "tmux",
+      endpointKey,
+      resourceKey: `pane-id:${paneId}`
+    },
+    route: {
+      routeKey: tmuxTerminalRouteKey(endpointKey, target),
+      label: target,
+      currentCommand: terminalControl.currentCommand,
+      currentPath: terminalControl.currentPath
+    },
+    processAnchorPid: panePid,
+    capabilities: terminalControl.capabilities,
     providerRef: terminalControl
   });
   const processSnapshots = (): TerminalProcessSnapshot[] => [
@@ -762,6 +776,7 @@ function seededCodexRecoveryFixture(
       window: 0,
       pane: 0,
       panePid,
+      paneId,
       currentCommand: "codex",
       currentPath: workspace,
       columns: 100,
@@ -1630,6 +1645,7 @@ function writeRecoveryFakeTmux(options: {
   resolverErrorRequestPath: string;
   resolverErrorArmedPath: string;
   target: string;
+  paneId: string;
   panePid: number;
   workspace: string;
 }): void {
@@ -1639,7 +1655,7 @@ const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(options.callsPath)}, JSON.stringify({ args }) + "\\n");
 if (args[0] === "list-panes") {
   process.stdout.write(${JSON.stringify(
-    `recovery-fixture\t0\t0\t${options.panePid}\tcodex\t${options.workspace}\t\t%77\n`
+    `recovery-fixture\t0\t0\t${options.panePid}\tcodex\t${options.workspace}\t\t${options.paneId}\n`
   )});
   process.exit(0);
 }
