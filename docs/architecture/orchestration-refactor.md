@@ -506,6 +506,81 @@ The completion target remains:
 - zero production import cycles;
 - unchanged black-box public contracts and full release gate.
 
+## Phase 1 review snapshot
+
+This branch is the first bounded delivery for issue #126, not the completion of
+the issue. It establishes enforceable architecture constraints and moves a set
+of behavior-preserving decisions behind typed seams. The dispatch-service
+experiment was explicitly retracted when review found that it owned CLI and
+OpenClaw presentation. PR4 through PR7 therefore remain open work, and this
+phase must not close issue #126.
+
+Measured against `main@ea592a8` on 2026-08-14:
+
+| Metric | Baseline | Phase 1 | Delta |
+| --- | ---: | ---: | ---: |
+| Production physical LOC | 73,792 | 75,848 | +2,056 (+2.79%) |
+| `src/cli-core.ts` physical LOC | 38,005 | 35,608 | -2,397 (-6.31%) |
+| `cli-core.ts` production share | 51.5% | 46.95% | -4.55 pp |
+| Production modules | 38 | 52 | +14 |
+| Production import edges / cycles | 95 / 0 | 130 / 0 | +35 / 0 |
+| Functions over 100 / 200 / 500 LOC | 167 / 57 / 9 | 164 / 58 / 9 | -3 / +1 / 0 |
+| Approximate complexity over 20 | 150 | 143 | -7 |
+| Test TypeScript physical LOC | 71,902 | 76,108 | +4,206 (+5.85%) |
+| Test TypeScript files | 71 | 86 | +15 |
+
+The result is a reduction in orchestration risk concentration, not a reduction
+in total code size. The exact `cli-core.ts` and production totals are ratcheted
+in `config/production-module-ownership.json`; later phases must reduce them
+rather than conceal extraction overhead. The focused test loop remains about
+ten seconds, while the real-process integration tier remains the dominant
+delivery cost.
+
+### Responsibility and dependency movement
+
+| Seam | Responsibility moved inward | I/O, locks, and durable effects deliberately retained outside | Focused proof |
+| --- | --- | --- | --- |
+| Terminal binding authority | Exact binding-match decisions and typed list/mutation observations | Fresh terminal/process sampling and mutation revalidation remain in `cli-core.ts` | authority table tests plus list, lifecycle, handoff, and send integration |
+| Verified-dead agent policy | Process-death proof validation, event replay, stall eligibility, completion tri-state | Process/transcript probes and terminal -> writer -> state orchestration remain in the shell | Codex/Claude completion-wins, fail-closed, deferred-transfer, and crash-replay tests |
+| Canonical mutation shell | Canonical acquisition and reverse release for four migrated paths | Business write ordering remains in each caller; no capability token is advertised | acquisition/release/error-precedence tests and control-lock integration |
+| Dispatch policy and ledger codec | Pure preflight precedence plus v1/v2 decode, construction, receipt merge, and validation | Ledger path selection, no-follow reads, atomic rename/fsync, Store locks, terminal input, and CLI formatting remain in the shell | codec byte/order tests, replay, receipt-fence, send-gate, and recovery tests; codec changes select the full tier |
+| Lifecycle transition policy | Candidate/target classification and transition phase reduction | Terminal observation, transition CAS, deferred transfer, input, and recovery writes remain in the shell | transition tables and lifecycle/recovery integration |
+| Callback policy, transport, and settlement | Retry decisions; Gateway process adapter; delivery progress/success/failure settlement | CLI composition owns the clock, state transaction, retry launcher, output, and callback preparation | retry matrix, exact transport call ordering, settlement write-order tests, and callback integration |
+| Monitor seams | Poll fingerprint/timeout reduction and launch/ownership plans | Poll I/O, supervision process management, state/event writes, callback preparation, and terminal locks remain in the shell | poll/launch tables and monitor recovery/lifecycle/approval integration |
+| Terminal list renderer | Pure managed-Turn and action-contract projection from sampled facts | Store, process, ledger, Session, approval, and token observations remain in `cli-core.ts`; mutation never consumes list authority | exact v16 action order plus list/session/handoff integration |
+| CLI runtime context | Per-execution dependency, output, clock, sleep, exit, and logging context | No business policy or persistent state moved into the runtime | nested and concurrent async-context isolation tests |
+
+The new compile-time direction is
+`cli-core composition -> callback settlement -> callback policy`, while the
+OpenClaw child-process transport independently depends on the callback policy's
+delivery outcome type. Settlement does not import the transport adapter or CLI
+runtime.
+
+### Lock and durable-write parity
+
+No Store, Session, transition, dispatch-ledger, callback-outbox, or public
+protocol version changes in Phase 1. The extraction keeps the existing lock
+scope and durable ordering at each migrated call site. In particular:
+
+- verified-dead reconciliation continues to acquire terminal dispatch lock,
+  Store writer lease, then conversation state lock; callback execution stays
+  outside those locks;
+- callback settlement still executes progress as load -> save -> event,
+  success as load -> save -> event, and failure as load -> retry-monitor launch
+  -> save -> failure event -> monitor event;
+- terminal dispatch still records prepared state/ledger/evidence before input,
+  preserves `text_injected -> enter_dispatched -> agent_accepted`, and never
+  retries an uncertain input;
+- lifecycle transition and deferred-transfer CAS/write/crash boundaries remain
+  in their original shell; and
+- dispatch-ledger filesystem open/no-follow, temporary write, fsync, rename,
+  directory fsync, and cleanup behavior was not moved into a generic repository.
+
+The Phase 1 review gate is architecture validation, typecheck/build, focused
+policy and adapter tests, and one exact-head full test run. Packaging,
+publishing, installation, protocol upgrades, and issue closure are not part of
+this phase.
+
 ## Soft freeze while #126 is active
 
 Until the orchestration milestones finish:
