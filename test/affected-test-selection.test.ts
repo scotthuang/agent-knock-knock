@@ -140,6 +140,31 @@ test("callback outbox policy selects retry, recovery, and plugin parity coverage
   );
 });
 
+test("callback transport selects delivery, recovery, and plugin parity coverage", async () => {
+  const selection = await loadSelectionModule();
+  const tiers = loadTiers();
+  const expected = [
+    "test/callback-cli.test.ts",
+    "test/openclaw-plugin-contract.test.ts",
+    "test/shards/agent-cli-claude-callback.test.ts",
+    "test/shards/agent-cli-monitor-approval-context.test.ts",
+    "test/shards/agent-cli-monitor-lifecycle.test.ts",
+    "test/shards/agent-cli-monitor-recovery.test.ts"
+  ];
+  assert.deepEqual(
+    selection.selectAffectedTests([
+      "src/openclaw-callback-transport.ts"
+    ], tiers),
+    {
+      mode: "targeted",
+      changedPaths: ["src/openclaw-callback-transport.ts"],
+      integrationFiles: tiers.integration.filter((testPath) =>
+        expected.includes(testPath)
+      )
+    }
+  );
+});
+
 test("terminal monitor poll policy selects its timeout and recovery parity set", async () => {
   const selection = await loadSelectionModule();
   const tiers = loadTiers();

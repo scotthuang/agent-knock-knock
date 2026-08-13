@@ -21,6 +21,7 @@
     "test/native-thread-lifecycle-policy.test.ts",
     "test/native-thread-resume-snapshot.test.ts",
     "test/native-thread-transition-policy.test.ts",
+    "test/openclaw-callback-transport.test.ts",
     "test/openclaw-compatibility-metadata.test.ts",
     "test/openclaw-doctor.test.ts",
     "test/openclaw-plugin-helpers.test.ts",

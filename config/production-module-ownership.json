@@ -2,7 +2,7 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 37480,
+    "cli_core_max_physical_loc": 36828,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -19,6 +19,17 @@
       ]
     },
     "callback-outbox": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/callback-cli.test.ts",
+        "test/openclaw-plugin-contract.test.ts",
+        "test/shards/agent-cli-claude-callback.test.ts",
+        "test/shards/agent-cli-monitor-approval-context.test.ts",
+        "test/shards/agent-cli-monitor-lifecycle.test.ts",
+        "test/shards/agent-cli-monitor-recovery.test.ts"
+      ]
+    },
+    "callback-transport": {
       "selection": "targeted",
       "integration_tests": [
         "test/callback-cli.test.ts",
@@ -263,6 +274,10 @@
     {
       "path": "src/native-thread-transition-policy.ts",
       "owner": "native-thread-transition-policy"
+    },
+    {
+      "path": "src/openclaw-callback-transport.ts",
+      "owner": "callback-transport"
     },
     {
       "path": "src/openclaw-doctor.ts",

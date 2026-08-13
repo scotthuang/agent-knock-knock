@@ -253,6 +253,11 @@ import {
   type CallbackRetryDisposition
 } from "./callback-outbox-policy.js";
 import {
+  createOpenClawCallbackTransport,
+  type CallbackDeliveryOutcome,
+  type CallbackProcessDeliveryObservation
+} from "./openclaw-callback-transport.js";
+import {
   decideTerminalMonitorTimeout,
   reduceTerminalMonitorActivityPoll,
   reduceTerminalMonitorCompletionPoll
@@ -272,25 +277,8 @@ const DEFAULT_MONITOR_POLL_INTERVAL_MS = 5000;
 const DEFAULT_TERMINAL_ACCEPTANCE_TIMEOUT_MS = 5000;
 const DEFAULT_TERMINAL_ACCEPTANCE_POLL_INTERVAL_MS = 50;
 const CLAUDE_SCREEN_APPROVAL_TTL_MS = 10 * 60 * 1000;
-const CALLBACK_DELIVERY_TIMEOUT_MS = 30_000;
-const CALLBACK_AGENT_WAIT_TIMEOUT_MS = 20_000;
-const CALLBACK_AGENT_WAIT_CLI_TIMEOUT_MS = 25_000;
-const CALLBACK_AGENT_WAIT_PROCESS_TIMEOUT_MS = 30_000;
 const CALLBACK_ATTEMPT_LEASE_MS = 2 * 60 * 1000;
 const CALLBACK_RETRY_DELAYS_MS = [5000, 15000, 60000, 60000];
-interface CallbackDeliveryOutcome {
-  kind: string;
-  injection: Record<string, unknown>;
-  wake: Record<string, unknown>;
-  run_observation?: Record<string, unknown>;
-}
-
-type CallbackWakeAcknowledgementStatus =
-  | "started"
-  | "in_flight"
-  | "ok"
-  | "error"
-  | "timeout";
 const TERMINAL_BRIDGE_SUPERSEDE_STATUSES = new Set<ConversationStatus>([
   "created",
   "running",
@@ -34963,7 +34951,7 @@ function runPreparedCallback(prepared, { emit = true } = {}) {
   );
   let acceptedDelivery: CallbackDeliveryOutcome | undefined;
   try {
-    const delivery = deliverCallbackToOpenClaw({
+    const delivery = openClawCallbackTransport().deliverCallback({
       options: prepared.options,
       statePath: prepared.statePath,
       logPath: prepared.logPath,
@@ -35397,377 +35385,15 @@ function callbackDeliveryAcceptedAt(callbackDelivery): string | undefined {
     stringValue(injection?.accepted_at);
 }
 
-function deliverCallbackToOpenClaw({
-  options,
-  statePath,
+function recordCallbackProcessDelivery({
   logPath,
   conversation,
   message,
-  onProgress,
-  onAccepted
-}): CallbackDeliveryOutcome {
-  if (!options.gatewayMethod) {
-    throw new Error(
-      "callback delivery requires a configured OpenClaw gateway method"
-    );
-  }
-
-  const delivery = deliverToGatewayMethod({
-    method: options.gatewayMethod,
-    openclawBin: options.openclawBin,
-    gatewayUrl: options.gatewayUrl,
-    token: options.token,
-    sessionKey: options.gatewaySession ?? options.openclawSession ??
-      conversation.openclaw_session,
-    statePath,
-    logPath,
-    conversation,
-    message
-  });
-  if (delivery.status !== 0) {
-    recordCallbackProcessDelivery({
-      logPath,
-      conversation,
-      message,
-      event: "callback_gateway_method_delivery",
-      runtimeEvent: "callback_gateway_method_delivery",
-      delivery,
-      detail: { method: options.gatewayMethod }
-    });
-    throw new Error(
-      delivery.stderr || delivery.stdout ||
-      `gateway method delivery failed with status ${delivery.status}`
-    );
-  }
-
-  const gatewayPayload = parseRequiredGatewayDeliveryPayload(delivery.stdout);
-  const { chatSendParams, sessionSendParams } =
-    parseGatewayCallbackDeliveryPlan(gatewayPayload);
-  const explicitlyEnqueued = typeof gatewayPayload.enqueued === "boolean"
-    ? gatewayPayload.enqueued
-    : undefined;
-  const gatewayHandledWithoutInjection =
-    gatewayPayload.auto_approved === true ||
-    gatewayPayload.approval_already_handled === true;
-  const injectionObservedAt = cliNow().toISOString();
-  let injection: Record<string, unknown> = {
-    status: gatewayHandledWithoutInjection || explicitlyEnqueued === true
-      ? "accepted"
-      : explicitlyEnqueued === false
-        ? "uncertain"
-        : "unconfirmed",
-    enqueued: explicitlyEnqueued,
-    injection_id: stringValue(gatewayPayload.injection_id),
-    ...(gatewayHandledWithoutInjection || explicitlyEnqueued === true
-      ? { accepted_at: injectionObservedAt }
-      : { observed_at: injectionObservedAt }),
-    evidence: gatewayHandledWithoutInjection
-      ? "gateway_handled_callback_without_injection"
-      : explicitlyEnqueued === true
-        ? "next_turn_injection_enqueued"
-        : explicitlyEnqueued === false
-          ? "gateway_ok_but_enqueue_unconfirmed"
-          : "legacy_gateway_ack_without_enqueue_field"
-  };
-
-  const wakePlan = chatSendParams
-    ? {
-        mode: "chat.send",
-        params: chatSendParams,
-        event: "callback_chat_send_delivery",
-        deliver: deliverToChatSend,
-        kind: "gateway_method+chat_send"
-      }
-    : sessionSendParams
-      ? {
-          mode: "sessions.send",
-          params: sessionSendParams,
-          event: "callback_session_send_delivery",
-          deliver: deliverToSessionSend,
-          kind: "gateway_method+sessions_send"
-        }
-      : undefined;
-  const initialWake = wakePlan
-    ? {
-        status: "not_attempted",
-        mode: wakePlan.mode,
-        observed_at: injectionObservedAt
-      }
-    : {
-        status: "not_required",
-        observed_at: injectionObservedAt
-      };
-  if (injection.status === "accepted") {
-    onAccepted?.({
-      kind: wakePlan?.kind ?? "gateway_method",
-      injection,
-      wake: initialWake
-    });
-  }
-  onProgress?.({
-    stage: "gateway_injection",
-    injection
-  });
-  recordCallbackProcessDelivery({
-    logPath,
-    conversation,
-    message,
-    event: "callback_gateway_method_delivery",
-    runtimeEvent: "callback_gateway_method_delivery",
-    delivery,
-    detail: { method: options.gatewayMethod }
-  });
-
-  if (!wakePlan) {
-    if (explicitlyEnqueued === false && !gatewayHandledWithoutInjection) {
-      throw new Error(
-        "gateway callback returned ok but did not confirm that its injection was enqueued"
-      );
-    }
-    if (injection.status === "unconfirmed") {
-      injection = {
-        ...injection,
-        status: "accepted",
-        accepted_at: cliNow().toISOString(),
-        evidence: "legacy_gateway_ok_without_wake_plan"
-      };
-    }
-    const wake = {
-      status: "not_required",
-      accepted_at: cliNow().toISOString()
-    };
-    const outcome = { kind: "gateway_method", injection, wake };
-    onAccepted?.(outcome);
-    onProgress?.({ stage: "wake_not_required", injection, wake });
-    return outcome;
-  }
-
-  const wakeDelivery = wakePlan.deliver({
-    openclawBin: options.openclawBin,
-    gatewayUrl: options.gatewayUrl,
-    token: options.token,
-    params: wakePlan.params
-  });
-  if (wakeDelivery.status !== 0) {
-    const wake = {
-      status: "failed",
-      mode: wakePlan.mode,
-      failed_at: cliNow().toISOString(),
-      error: cleanProcessText(
-        wakeDelivery.stderr || wakeDelivery.stdout ||
-        `wake delivery failed with status ${wakeDelivery.status}`
-      )
-    };
-    const outcome = { kind: wakePlan.kind, injection, wake };
-    if (injection.status === "accepted") {
-      onAccepted?.(outcome);
-    }
-    recordCallbackProcessDelivery({
-      logPath,
-      conversation,
-      message,
-      event: wakePlan.event,
-      runtimeEvent: wakePlan.event,
-      delivery: wakeDelivery
-    });
-    onProgress?.({
-      stage: "wake_failed",
-      injection,
-      wake
-    });
-    if (injection.status === "accepted") {
-      return outcome;
-    }
-    throw new Error(
-      wakeDelivery.stderr || wakeDelivery.stdout ||
-      `callback wake delivery failed with status ${wakeDelivery.status}`
-    );
-  }
-
-  let wakeAck;
-  try {
-    wakeAck = parseChatSendAcknowledgement(
-      wakeDelivery.stdout,
-      String(wakePlan.params.idempotencyKey)
-    );
-  } catch (error) {
-    const wake = {
-      status: "uncertain",
-      mode: wakePlan.mode,
-      observed_at: cliNow().toISOString(),
-      error: error instanceof Error ? error.message : String(error)
-    };
-    const outcome = { kind: wakePlan.kind, injection, wake };
-    if (injection.status === "accepted") {
-      onAccepted?.(outcome);
-    }
-    recordCallbackProcessDelivery({
-      logPath,
-      conversation,
-      message,
-      event: wakePlan.event,
-      runtimeEvent: wakePlan.event,
-      delivery: wakeDelivery,
-      detail: { acknowledgement_error: String(error) }
-    });
-    onProgress?.({
-      stage: "wake_acknowledgement_invalid",
-      injection,
-      wake
-    });
-    if (injection.status === "accepted") {
-      return outcome;
-    }
-    throw error;
-  }
-
-  const wake = {
-    status: "accepted",
-    mode: wakePlan.mode,
-    run_id: wakeAck.runId,
-    acknowledgement_status: wakeAck.status,
-    idempotency_key: String(wakePlan.params.idempotencyKey),
-    accepted_at: cliNow().toISOString()
-  };
-  onAccepted?.({ kind: wakePlan.kind, injection, wake });
-  recordCallbackProcessDelivery({
-    logPath,
-    conversation,
-    message,
-    event: wakePlan.event,
-    runtimeEvent: wakePlan.event,
-    delivery: wakeDelivery,
-    detail: {
-      run_id: wakeAck.runId,
-      run_status: wakeAck.status
-    }
-  });
-  onProgress?.({ stage: "wake_accepted", injection, wake });
-
-  const runObservation = observeCallbackAgentRun({
-    options,
-    logPath,
-    conversation,
-    message,
-    wakeAck
-  });
-  const outcome = {
-    kind: wakePlan.kind,
-    injection,
-    wake,
-    run_observation: runObservation
-  };
-  onAccepted?.(outcome);
-  onProgress?.({
-    stage: "agent_run_observed",
-    injection,
-    wake,
-    run_observation: runObservation
-  });
-  return outcome;
-}
-
-function observeCallbackAgentRun({
-  options,
-  logPath,
-  conversation,
-  message,
-  wakeAck
-}): Record<string, unknown> {
-  if (["ok", "error", "timeout"].includes(wakeAck.status)) {
-    return {
-      status: wakeAck.status,
-      source: "wake_acknowledgement",
-      observed_at: cliNow().toISOString()
-    };
-  }
-
-  const agentWaitDelivery = deliverToAgentWait({
-    openclawBin: options.openclawBin,
-    gatewayUrl: options.gatewayUrl,
-    token: options.token,
-    runId: wakeAck.runId
-  });
-  if (agentWaitDelivery.status !== 0) {
-    recordCallbackProcessDelivery({
-      logPath,
-      conversation,
-      message,
-      event: "callback_agent_wait_delivery",
-      runtimeEvent: "callback_agent_wait_delivery",
-      delivery: agentWaitDelivery,
-      detail: { run_id: wakeAck.runId }
-    });
-    return {
-      status: "unavailable",
-      run_id: wakeAck.runId,
-      observed_at: cliNow().toISOString(),
-      error: cleanProcessText(
-        agentWaitDelivery.stderr || agentWaitDelivery.stdout ||
-        `agent.wait failed with status ${agentWaitDelivery.status}`
-      )
-    };
-  }
-
-  let waitResult;
-  try {
-    waitResult = parseAgentWaitResult(
-      agentWaitDelivery.stdout,
-      wakeAck.runId
-    );
-  } catch (error) {
-    recordCallbackProcessDelivery({
-      logPath,
-      conversation,
-      message,
-      event: "callback_agent_wait_delivery",
-      runtimeEvent: "callback_agent_wait_delivery",
-      delivery: agentWaitDelivery,
-      detail: {
-        run_id: wakeAck.runId,
-        observation_error: String(error)
-      }
-    });
-    return {
-      status: "invalid",
-      run_id: wakeAck.runId,
-      observed_at: cliNow().toISOString(),
-      error: error instanceof Error ? error.message : String(error)
-    };
-  }
-
-  recordCallbackProcessDelivery({
-    logPath,
-    conversation,
-    message,
-    event: "callback_agent_wait_delivery",
-    runtimeEvent: "callback_agent_wait_delivery",
-    delivery: agentWaitDelivery,
-    detail: {
-      run_id: wakeAck.runId,
-      run_status: waitResult.status
-    }
-  });
-  return {
-    status: waitResult.status,
-    run_id: wakeAck.runId,
-    observed_at: cliNow().toISOString(),
-    ...(stringValue(waitResult.error)
-      ? { error: stringValue(waitResult.error) }
-      : {}),
-    ...(stringValue(waitResult.stopReason)
-      ? { stop_reason: stringValue(waitResult.stopReason) }
-      : {}),
-    ...(stringValue(waitResult.timeoutPhase)
-      ? { timeout_phase: stringValue(waitResult.timeoutPhase) }
-      : {}),
-    ...(typeof waitResult.providerStarted === "boolean"
-      ? { provider_started: waitResult.providerStarted }
-      : {})
-  };
-}
-
-function recordCallbackProcessDelivery({ logPath, conversation, message, event, runtimeEvent, delivery, detail = {} }) {
+  event,
+  runtimeEvent,
+  delivery,
+  detail = {}
+}: CallbackProcessDeliveryObservation) {
   appendEvent(logPath, {
     ts: cliNow().toISOString(),
     conversation_id: conversation.conversation_id,
@@ -35787,6 +35413,15 @@ function recordCallbackProcessDelivery({ logPath, conversation, message, event, 
     failure_kind: classifyProcessFailure(delivery),
     stdout: textSummary(delivery.stdout),
     stderr: textSummary(delivery.stderr)
+  });
+}
+
+function openClawCallbackTransport() {
+  return createOpenClawCallbackTransport({
+    now: cliNow,
+    environment: cliEnv,
+    redactConversation: redactCliOutput,
+    recordCallbackProcessDelivery
   });
 }
 
@@ -36670,7 +36305,8 @@ function deliverStalledNotification({ statePath, logPath, conversation, message,
 
   const gatewayToken = conversation.gateway_token;
   const gatewayUrl = gatewayToken ? conversation.gateway_url : undefined;
-  const delivery = deliverToGatewayMethod({
+  const callbackTransport = openClawCallbackTransport();
+  const delivery = callbackTransport.deliverGatewayMethod({
     method: conversation.gateway_method,
     openclawBin: conversation.openclaw_bin,
     gatewayUrl,
@@ -36710,7 +36346,7 @@ function deliverStalledNotification({ statePath, logPath, conversation, message,
     return;
   }
 
-  const chatSendDelivery = deliverToChatSend({
+  const chatSendDelivery = callbackTransport.deliverChatSend({
     openclawBin: conversation.openclaw_bin,
     gatewayUrl,
     token: gatewayToken,
@@ -36924,177 +36560,6 @@ function messageFingerprint(message) {
   });
 }
 
-function deliverToGatewayMethod({ method, openclawBin, gatewayUrl, token, sessionKey, statePath, logPath, conversation, message }) {
-  const args = [
-    "gateway",
-    "call",
-    method,
-    "--params",
-    JSON.stringify({
-      sessionKey,
-      session_id: sessionIdForConversation(conversation),
-      turn_id: turnIdForConversation(conversation),
-      statePath,
-      logPath,
-      conversation: redactCliOutput(conversation),
-      message
-    }),
-    "--json"
-  ];
-
-  if (gatewayUrl) {
-    args.push("--url", gatewayUrl);
-  }
-
-  const result = spawnSync(openclawBin ?? "openclaw", args, {
-    encoding: "utf8",
-    maxBuffer: 1024 * 1024 * 10,
-    timeout: CALLBACK_DELIVERY_TIMEOUT_MS,
-    killSignal: "SIGKILL",
-    env: openClawGatewayEnvironment(token)
-  });
-
-  if (result.error) {
-    return {
-      status: 1,
-      stdout: result.stdout ?? "",
-      stderr: result.error.message
-    };
-  }
-
-  return {
-    status: result.status ?? 1,
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? ""
-  };
-}
-
-function deliverToSessionSend({ openclawBin, gatewayUrl, token, params }) {
-  const args = [
-    "gateway",
-    "call",
-    "sessions.send",
-    "--params",
-    JSON.stringify(params),
-    "--json"
-  ];
-
-  if (gatewayUrl) {
-    args.push("--url", gatewayUrl);
-  }
-
-  const result = spawnSync(openclawBin ?? "openclaw", args, {
-    encoding: "utf8",
-    maxBuffer: 1024 * 1024 * 10,
-    timeout: CALLBACK_DELIVERY_TIMEOUT_MS,
-    killSignal: "SIGKILL",
-    env: openClawGatewayEnvironment(token)
-  });
-
-  if (result.error) {
-    return {
-      status: 1,
-      stdout: result.stdout ?? "",
-      stderr: result.error.message
-    };
-  }
-
-  return {
-    status: result.status ?? 1,
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? ""
-  };
-}
-
-function deliverToChatSend({ openclawBin, gatewayUrl, token, params }) {
-  const args = [
-    "gateway",
-    "call",
-    "chat.send",
-    "--params",
-    JSON.stringify(params),
-    "--json"
-  ];
-
-  if (gatewayUrl) {
-    args.push("--url", gatewayUrl);
-  }
-
-  const result = spawnSync(openclawBin ?? "openclaw", args, {
-    encoding: "utf8",
-    maxBuffer: 1024 * 1024 * 10,
-    timeout: CALLBACK_DELIVERY_TIMEOUT_MS,
-    killSignal: "SIGKILL",
-    env: openClawGatewayEnvironment(token)
-  });
-
-  if (result.error) {
-    return {
-      status: 1,
-      stdout: result.stdout ?? "",
-      stderr: result.error.message
-    };
-  }
-
-  return {
-    status: result.status ?? 1,
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? ""
-  };
-}
-
-function deliverToAgentWait({ openclawBin, gatewayUrl, token, runId }) {
-  const args = [
-    "gateway",
-    "call",
-    "agent.wait",
-    "--params",
-    JSON.stringify({
-      runId,
-      timeoutMs: CALLBACK_AGENT_WAIT_TIMEOUT_MS
-    }),
-    "--json",
-    "--timeout",
-    String(CALLBACK_AGENT_WAIT_CLI_TIMEOUT_MS)
-  ];
-
-  if (gatewayUrl) {
-    args.push("--url", gatewayUrl);
-  }
-
-  const result = spawnSync(openclawBin ?? "openclaw", args, {
-    encoding: "utf8",
-    maxBuffer: 1024 * 1024 * 10,
-    timeout: CALLBACK_AGENT_WAIT_PROCESS_TIMEOUT_MS,
-    killSignal: "SIGKILL",
-    env: openClawGatewayEnvironment(token)
-  });
-
-  if (result.error) {
-    return {
-      status: 1,
-      stdout: result.stdout ?? "",
-      stderr: result.error.message
-    };
-  }
-
-  return {
-    status: result.status ?? 1,
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? ""
-  };
-}
-
-function openClawGatewayEnvironment(token): NodeJS.ProcessEnv {
-  if (!token || token === "<token>") {
-    return cliEnv();
-  }
-  return {
-    ...cliEnv(),
-    OPENCLAW_GATEWAY_TOKEN: token
-  };
-}
-
 function parseArgs(argv) {
   const parsed = {};
   for (let index = 0; index < argv.length; index += 1) {
@@ -37142,123 +36607,6 @@ function parseOptionalJson(text) {
   } catch {
     return undefined;
   }
-}
-
-function parseRequiredGatewayDeliveryPayload(text): Record<string, unknown> {
-  const payload = parseOptionalJson(text);
-  if (!isRecord(payload)) {
-    throw new Error("gateway callback returned malformed JSON");
-  }
-  if (payload.ok !== true) {
-    throw new Error(
-      `gateway callback was not accepted: ${
-        stringValue(payload.error) ?? stringValue(payload.message) ?? "ok was not true"
-      }`
-    );
-  }
-  if (
-    payload.delivery_required !== undefined &&
-    typeof payload.delivery_required !== "boolean"
-  ) {
-    throw new Error("gateway callback returned an invalid delivery_required value");
-  }
-  return payload;
-}
-
-function parseGatewayCallbackDeliveryPlan(payload: Record<string, unknown>): {
-  chatSendParams?: Record<string, unknown>;
-  sessionSendParams?: Record<string, unknown>;
-} {
-  const chatSendParams = isRecord(payload.chat_send) ? payload.chat_send : undefined;
-  const sessionSendParams = isRecord(payload.session_send) ? payload.session_send : undefined;
-  if (chatSendParams && sessionSendParams) {
-    throw new Error("gateway callback returned multiple delivery plans");
-  }
-
-  const deliveryRequired = payload.delivery_required === true;
-  const deliveryExplicitlyNotRequired = payload.delivery_required === false;
-  const deliveryMode = stringValue(payload.delivery_mode);
-  if (deliveryRequired && !chatSendParams && !sessionSendParams) {
-    throw new Error(
-      "gateway callback requires delivery but returned no supported chat_send or session_send plan"
-    );
-  }
-  if (deliveryExplicitlyNotRequired && (chatSendParams || sessionSendParams)) {
-    throw new Error("gateway callback returned a delivery plan without delivery_required");
-  }
-  if (deliveryMode && deliveryMode !== "none") {
-    const expectedMode = chatSendParams ? "chat.send" : sessionSendParams ? "sessions.send" : undefined;
-    if (deliveryMode !== expectedMode) {
-      throw new Error("gateway callback delivery_mode does not match its delivery plan");
-    }
-  }
-  if (deliveryMode === "none" && deliveryRequired) {
-    throw new Error("gateway callback delivery_mode none cannot require delivery");
-  }
-
-  if (chatSendParams) {
-    if (
-      !stringValue(chatSendParams.sessionKey) ||
-      !stringValue(chatSendParams.message) ||
-      !stringValue(chatSendParams.idempotencyKey) ||
-      chatSendParams.deliver !== true
-    ) {
-      throw new Error("gateway callback returned an invalid chat_send delivery plan");
-    }
-  }
-  if (sessionSendParams) {
-    if (
-      !stringValue(sessionSendParams.key) ||
-      !stringValue(sessionSendParams.message) ||
-      !stringValue(sessionSendParams.idempotencyKey)
-    ) {
-      throw new Error("gateway callback returned an invalid session_send delivery plan");
-    }
-  }
-  return { chatSendParams, sessionSendParams };
-}
-
-function parseChatSendAcknowledgement(
-  text,
-  expectedRunId: string
-): { runId: string; status: CallbackWakeAcknowledgementStatus } {
-  const payload = parseOptionalJson(text);
-  if (!isRecord(payload)) {
-    throw new Error("chat.send returned malformed JSON");
-  }
-  const runId = stringValue(payload.runId);
-  const status = stringValue(payload.status);
-  if (!runId) {
-    throw new Error("chat.send acknowledgement is missing runId");
-  }
-  if (runId !== expectedRunId) {
-    throw new Error("chat.send acknowledgement runId does not match its idempotencyKey");
-  }
-  if (
-    !status ||
-    !["started", "in_flight", "ok", "error", "timeout"].includes(status)
-  ) {
-    throw new Error(`chat.send returned unexpected status ${JSON.stringify(status ?? null)}`);
-  }
-  return {
-    runId,
-    status: status as CallbackWakeAcknowledgementStatus
-  };
-}
-
-function parseAgentWaitResult(text, expectedRunId: string): Record<string, unknown> {
-  const payload = parseOptionalJson(text);
-  if (!isRecord(payload)) {
-    throw new Error("agent.wait returned malformed JSON");
-  }
-  if (stringValue(payload.runId) !== expectedRunId) {
-    throw new Error("agent.wait returned a result for a different runId");
-  }
-  const status = stringValue(payload.status);
-  if (!status || !["ok", "error", "timeout", "pending"].includes(status)) {
-    throw new Error(`agent.wait returned unexpected status ${JSON.stringify(status ?? null)}`);
-  }
-  return payload;
 }
 
 function createAgentSessionProvider(agent, options) {
