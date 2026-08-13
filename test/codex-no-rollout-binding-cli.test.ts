@@ -1725,30 +1725,46 @@ for (const [label, acceptedNativeThreadId] of [
   );
 }
 
+/**
+ * Deferred zero-input recovery migration inventory:
+ *
+ * - The four legacy cases below still execute the production reservation,
+ *   Store, dispatch-ledger, cleanup, token-refresh, and later-send paths.
+ * - Three crash points and every recovery/retry step now use the injected
+ *   command boundary. InProcessCliExit represents the deliberate exit only
+ *   after the production crash hook has durably written the same artifacts.
+ * - The first case remains the executable process-crash witness: it proves
+ *   the emitted CLI turns that exact hook into OS exit 86. All state, ledger,
+ *   zero-input, single-input, and historical-liveness assertions stay shared.
+ */
 for (const crashCase of [
   {
     label: "source Session reservation before its transfer receipt",
     hook: "AKK_TEST_EXIT_AFTER_DEFERRED_SOURCE_SESSION_RESERVED",
     expectedStatus: "prepared",
-    addPreparedLedgerWithoutState: false
+    addPreparedLedgerWithoutState: false,
+    retainProcessCrashGolden: true
   },
   {
     label: "source reservation",
     hook: "AKK_TEST_EXIT_AFTER_DEFERRED_SOURCE_RESERVED",
     expectedStatus: "source_reserved",
-    addPreparedLedgerWithoutState: false
+    addPreparedLedgerWithoutState: false,
+    retainProcessCrashGolden: false
   },
   {
     label: "target preparation",
     hook: "AKK_TEST_EXIT_AFTER_DEFERRED_TARGET_PREPARED",
     expectedStatus: "target_prepared",
-    addPreparedLedgerWithoutState: false
+    addPreparedLedgerWithoutState: false,
+    retainProcessCrashGolden: false
   },
   {
     label: "prepared ledger before Turn state",
     hook: "AKK_TEST_EXIT_AFTER_DEFERRED_TARGET_PREPARED",
     expectedStatus: "target_prepared",
-    addPreparedLedgerWithoutState: true
+    addPreparedLedgerWithoutState: true,
+    retainProcessCrashGolden: false
   }
 ] as const) {
   test(
@@ -1764,11 +1780,14 @@ for (const crashCase of [
         const source = persistStatusCardSession(fixture, LIVE_PROCESS_BIRTH);
         const action = await deferredForegroundSendAction(fixture);
         const args = deferredForegroundSendArgs(fixture, action, message);
-        const crashed = runCliSubprocess(args, {
+        const crashEnvironment = {
           ...fixture.environment,
           AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0",
           [crashCase.hook]: "1"
-        });
+        };
+        const crashed = crashCase.retainProcessCrashGolden
+          ? runCliSubprocess(args, crashEnvironment)
+          : await runCli(args, crashEnvironment);
         assert.equal(crashed.status, 86, crashed.stderr || crashed.stdout);
 
         const transfer = soleDeferredForegroundTransfer(fixture);
@@ -1797,7 +1816,7 @@ for (const crashCase of [
         // Recovery runs before terminal-token validation. The reservation is
         // durably aborted and the source restored, but that restoration bumps
         // its Session revision, so the old list token is intentionally stale.
-        const recoveredWithStaleToken = runCliSubprocess(args, {
+        const recoveredWithStaleToken = await runCli(args, {
           ...fixture.environment,
           AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
         });
@@ -1835,7 +1854,7 @@ for (const crashCase of [
           refreshedAction.arguments.expected_terminal_token,
           action.arguments.expected_terminal_token
         );
-        const retried = runCliSubprocess(
+        const retried = await runCli(
           deferredForegroundSendArgs(fixture, refreshedAction, message),
           {
             ...fixture.environment,
@@ -1865,7 +1884,7 @@ for (const crashCase of [
           (candidate) => candidate.user_request === message
         );
         assert.ok(acceptedTurn);
-        const closed = runCliSubprocess([
+        const closed = await runCli([
           "close",
           "--turn",
           String(acceptedTurn.turn_id),
@@ -1896,7 +1915,7 @@ for (const crashCase of [
           typeof thirdAction.arguments.expected_terminal_token,
           "string"
         );
-        const third = runCliSubprocess(
+        const third = await runCli(
           deferredForegroundSendArgs(fixture, thirdAction, thirdMessage),
           {
             ...fixture.environment,
@@ -1926,6 +1945,10 @@ for (const crashCase of [
   );
 }
 
+// These two adjacent historical-ledger variants reuse the same in-process
+// invariant boundary as the matrix above. The retained executable witness
+// already proves exit 86; these cases uniquely prove that zero-input abort and
+// refreshed retry never mutate an exact resolved predecessor ledger.
 for (const crashCase of [
   {
     label: "source Session reservation before receipt",
@@ -1961,7 +1984,7 @@ for (const crashCase of [
 
         const action = await deferredForegroundSendAction(fixture);
         const args = deferredForegroundSendArgs(fixture, action, message);
-        const crashed = runCliSubprocess(args, {
+        const crashed = await runCli(args, {
           ...fixture.environment,
           AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0",
           [crashCase.hook]: "1"
@@ -1986,7 +2009,7 @@ for (const crashCase of [
           conversationsBeforeCrash
         );
 
-        const recoveredWithStaleToken = runCliSubprocess(args, {
+        const recoveredWithStaleToken = await runCli(args, {
           ...fixture.environment,
           AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
         });
@@ -2017,7 +2040,7 @@ for (const crashCase of [
         );
 
         const refreshed = await deferredForegroundSendAction(fixture);
-        const retried = runCliSubprocess(
+        const retried = await runCli(
           deferredForegroundSendArgs(fixture, refreshed, message),
           {
             ...fixture.environment,
