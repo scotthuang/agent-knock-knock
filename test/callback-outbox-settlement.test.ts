@@ -5,7 +5,11 @@ import {
   type CallbackOutboxSettlementStatePort,
   type PreparedCallbackDeliveryClaim
 } from "../src/callback-outbox-settlement.js";
-import { runCliCommandExecution } from "../src/cli-runtime-context.js";
+import {
+  cliNow,
+  cliNowMs,
+  runCliCommandExecution
+} from "../src/cli-runtime-context.js";
 import {
   createConversation,
   createMessage,
@@ -84,6 +88,7 @@ function createHarness({ accepted = false } = {}) {
         return { pid: 5102 };
       }
     },
+    clock: { now: cliNow, nowMs: cliNowMs },
     attemptLeaseMs: 120_000,
     retryDelaysMs: [5_000, 15_000, 60_000, 60_000]
   });

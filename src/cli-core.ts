@@ -34142,9 +34142,8 @@ function callbackOutboxSettlement() {
       save: saveState,
       append: appendEvent
     },
-    retryMonitor: {
-      start: ({ statePath }) => startCallbackRetryMonitor({ statePath })
-    },
+    retryMonitor: { start: startCallbackRetryMonitor },
+    clock: { now: cliNow, nowMs: cliNowMs },
     attemptLeaseMs: CALLBACK_ATTEMPT_LEASE_MS,
     retryDelaysMs: CALLBACK_RETRY_DELAYS_MS
   });

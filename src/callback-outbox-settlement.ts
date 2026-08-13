@@ -3,10 +3,6 @@ import {
 } from "./callback-outbox-policy.js";
 import type { CallbackDeliveryOutcome } from "./openclaw-callback-transport.js";
 import {
-  cliNow,
-  cliNowMs
-} from "./cli-runtime-context.js";
-import {
   normalizeLegacyCallbackStatus,
   type AgentMessage,
   type Conversation
@@ -41,6 +37,7 @@ export interface CallbackRetryMonitorPort {
 export interface CallbackOutboxSettlementPorts {
   state: CallbackOutboxSettlementStatePort;
   retryMonitor: CallbackRetryMonitorPort;
+  clock: { now(): Date; nowMs(): number };
   attemptLeaseMs: number;
   retryDelaysMs: readonly number[];
 }
@@ -62,6 +59,7 @@ export interface SettleAcceptedCallbackInput {
 export function createCallbackOutboxSettlement({
   state,
   retryMonitor,
+  clock,
   attemptLeaseMs,
   retryDelaysMs
 }: CallbackOutboxSettlementPorts) {
@@ -79,7 +77,7 @@ export function createCallbackOutboxSettlement({
           )} acknowledgement`
         );
       }
-      const now = cliNow().toISOString();
+      const now = clock.now().toISOString();
       const { stage, ...fields } = progress;
       state.save(prepared.statePath, {
         ...current,
@@ -88,7 +86,7 @@ export function createCallbackOutboxSettlement({
           ...fields,
           updated_at: now,
           attempt_lease_expires_at: new Date(
-            cliNowMs() + attemptLeaseMs
+            clock.nowMs() + attemptLeaseMs
           ).toISOString()
         }
       });
@@ -115,7 +113,7 @@ export function createCallbackOutboxSettlement({
       const currentDelivery = pendingDeliveryClaim(current, prepared);
       if (!currentDelivery) {
         state.append(prepared.logPath, {
-          ts: cliNow().toISOString(),
+          ts: clock.now().toISOString(),
           conversation_id: current.conversation_id,
           event: "callback_delivery_settle_skipped",
           message_id: prepared.message.id,
@@ -163,7 +161,7 @@ export function createCallbackOutboxSettlement({
       return undefined;
     }
 
-    const deliveredAt = cliNow().toISOString();
+    const deliveredAt = clock.now().toISOString();
     const normalizedConversation = normalizeLegacyCallbackStatus(conversation);
     const settled: Conversation = {
       ...normalizedConversation,
@@ -227,7 +225,7 @@ export function createCallbackOutboxSettlement({
     result: CallbackDeliverySettlementResult;
     recoveredFromAcceptedEvidence: boolean;
   }): Conversation {
-    const deliveredAt = cliNow().toISOString();
+    const deliveredAt = clock.now().toISOString();
     const normalizedCurrent = normalizeLegacyCallbackStatus(current);
     const nextConversation: Conversation = {
       ...normalizedCurrent,
@@ -276,7 +274,7 @@ export function createCallbackOutboxSettlement({
     prepared: PreparedCallbackDeliveryClaim,
     error: unknown
   ): Conversation {
-    const failedAt = cliNow().toISOString();
+    const failedAt = clock.now().toISOString();
     const lastError = error instanceof Error ? error.message : String(error);
     const normalizedCurrent = normalizeLegacyCallbackStatus(current);
     const shouldLaunchRetry = prepared.options.retryPending !== true &&
@@ -289,7 +287,7 @@ export function createCallbackOutboxSettlement({
       ? retryMonitor.start({ statePath: prepared.statePath })
       : undefined;
     const nextAttemptAt = launchedRetryMonitor
-      ? new Date(cliNowMs() + retryDelayMs).toISOString()
+      ? new Date(clock.nowMs() + retryDelayMs).toISOString()
       : undefined;
     const failedConversation: Conversation = {
       ...normalizedCurrent,
@@ -324,7 +322,7 @@ export function createCallbackOutboxSettlement({
     });
     if (launchedRetryMonitor) {
       state.append(prepared.logPath, {
-        ts: cliNow().toISOString(),
+        ts: clock.now().toISOString(),
         conversation_id: current.conversation_id,
         event: "callback_retry_monitor_launched",
         message_id: prepared.message.id,
