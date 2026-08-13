@@ -239,6 +239,12 @@ import {
   type TerminalNativeIdentity as NativeAgentSessionIdentity
 } from "./terminal-binding-authority.js";
 import { withCanonicalMutationLocks } from "./mutation-transaction.js";
+import {
+  beginCallbackRetryPolicy,
+  callbackDeliveryHasAcceptedTransport,
+  reduceCallbackRetryPolicy,
+  type CallbackRetryDisposition
+} from "./callback-outbox-policy.js";
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 10080;
 const DEFAULT_AGENT_TIMEOUT_MINUTES = 60;
@@ -287,19 +293,6 @@ interface CallbackDeliveryOutcome {
   wake: Record<string, unknown>;
   run_observation?: Record<string, unknown>;
 }
-
-type CallbackRetryDisposition =
-  | { state: "retryable"; attempt: number }
-  | {
-      state: "in_flight";
-      attempt: number;
-      attempt_pid?: number;
-      lease_expires_at?: string;
-      next_attempt_at?: string;
-    }
-  | { state: "accepted"; attempt: number }
-  | { state: "exhausted"; attempt: number }
-  | { state: "unavailable"; attempt: number; reason: string };
 
 type CallbackWakeAcknowledgementStatus =
   | "started"
@@ -35695,85 +35688,28 @@ function isRetryableCallbackDelivery(conversation, callbackDelivery): boolean {
 function callbackRetryDisposition(
   callbackDelivery
 ): CallbackRetryDisposition {
-  const attemptValue = Number(callbackDelivery?.attempts ?? 0);
-  const attempt = Number.isSafeInteger(attemptValue) && attemptValue >= 0
-    ? attemptValue
-    : 0;
-  if (
-    !isRecord(callbackDelivery) ||
-    !isRecord(callbackDelivery.message) ||
-    !["pending", "failed"].includes(String(callbackDelivery.status ?? ""))
-  ) {
-    return {
-      state: "unavailable",
-      attempt,
-      reason: "no pending or failed callback outbox is available"
-    };
+  let policy = beginCallbackRetryPolicy(callbackDelivery, {
+    attemptLeaseMs: CALLBACK_ATTEMPT_LEASE_MS,
+    retryDelayCount: CALLBACK_RETRY_DELAYS_MS.length
+  });
+  if (policy.phase === "decided") {
+    return policy.disposition;
   }
-  if (callbackDeliveryHasAcceptedTransport(callbackDelivery)) {
-    return { state: "accepted", attempt };
+  policy = reduceCallbackRetryPolicy(policy, {
+    kind: "process_alive",
+    alive: isProcessAlive(policy.attempt_pid)
+  });
+  if (policy.phase === "decided") {
+    return policy.disposition;
   }
-  if (
-    !Number.isSafeInteger(attemptValue) ||
-    attemptValue < 1
-  ) {
-    return {
-      state: "unavailable",
-      attempt,
-      reason: "callback outbox has invalid attempt metadata"
-    };
+  policy = reduceCallbackRetryPolicy(policy, {
+    kind: "clock",
+    now_ms: cliNowMs()
+  });
+  if (policy.phase !== "decided") {
+    throw new Error("callback retry policy did not reach a decision");
   }
-  if (attemptValue > CALLBACK_RETRY_DELAYS_MS.length) {
-    return { state: "exhausted", attempt };
-  }
-  if (callbackDelivery.status === "failed") {
-    return { state: "retryable", attempt };
-  }
-
-  const attemptPidValue = Number(callbackDelivery.attempt_pid);
-  const attemptPid = Number.isSafeInteger(attemptPidValue) && attemptPidValue > 0
-    ? attemptPidValue
-    : undefined;
-  const leaseExpiresAt = stringValue(
-    callbackDelivery.attempt_lease_expires_at
-  );
-  const leaseExpiresAtMs = validTimestampMs(leaseExpiresAt);
-  const legacyLastAttemptAtMs = validTimestampMs(
-    callbackDelivery.last_attempt_at
-  );
-  const effectiveLeaseExpiresAtMs = leaseExpiresAtMs ??
-    (legacyLastAttemptAtMs === undefined
-      ? undefined
-      : legacyLastAttemptAtMs + CALLBACK_ATTEMPT_LEASE_MS);
-  const liveClaim = attemptPid !== undefined &&
-    isProcessAlive(attemptPid) &&
-    effectiveLeaseExpiresAtMs !== undefined &&
-    effectiveLeaseExpiresAtMs > cliNowMs();
-  if (liveClaim) {
-    return {
-      state: "in_flight",
-      attempt,
-      attempt_pid: attemptPid,
-      lease_expires_at: leaseExpiresAt ??
-        new Date(effectiveLeaseExpiresAtMs).toISOString(),
-      next_attempt_at: stringValue(callbackDelivery.next_attempt_at)
-    };
-  }
-  return { state: "retryable", attempt };
-}
-
-function callbackDeliveryHasAcceptedTransport(callbackDelivery): boolean {
-  if (!isRecord(callbackDelivery)) {
-    return false;
-  }
-  const injection = isRecord(callbackDelivery.injection)
-    ? callbackDelivery.injection
-    : undefined;
-  const wake = isRecord(callbackDelivery.wake)
-    ? callbackDelivery.wake
-    : undefined;
-  return injection?.status === "accepted" ||
-    wake?.status === "accepted";
+  return policy.disposition;
 }
 
 function callbackDeliveryAcceptedAt(callbackDelivery): string | undefined {

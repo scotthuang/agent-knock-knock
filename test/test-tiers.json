@@ -2,6 +2,7 @@
   "fast": [
     "test/affected-test-selection.test.ts",
     "test/approval-policy.test.ts",
+    "test/callback-outbox-policy.test.ts",
     "test/claude-local-transcript-provider.test.ts",
     "test/claude-terminal-agent-adapter.test.ts",
     "test/cli-core.test.ts",
