@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.12.9 - 2026-08-13
+
+### Fixed
+
+- Scope Codex and Claude Code approval fingerprints to one adapter-isolated, exact unredacted prompt region, so unrelated terminal output can continue scrolling across review, authorization, and dispatch reservation without invalidating the same visible request.
+- Normalize managed approval locking to terminal, Store writer, then Turn state order, eliminating the writer/state inversion that could amplify approval delays under concurrent monitor activity.
+- Support the complete Codex 0.147 command, edit, permission, and MCP approval menus, including multi-choice decline/cancel rows and the permission deny shortcut.
+
+### Changed
+
+- Publish action contract 16. Whole-screen digests and excerpts are diagnostic only; v15 approval fingerprints and terminal-scoped approval tokens require a fresh `list` or `status` after upgrade.
+- Store writer protocol remains 5.
+
+### Security
+
+- Revalidate the exact prompt-region digest with terminal, process, action, request, policy, and working-directory authority before approval input; missing, incomplete, duplicated, reordered, spoofed, or changed prompt evidence sends zero keys.
+- Keep raw prompt text local to the adapter and out of status, Store records, tokens, logs, and failure diagnostics; only its SHA-256 digest participates in authorization.
+
 ## 0.12.8 - 2026-08-13
 
 ### Fixed
