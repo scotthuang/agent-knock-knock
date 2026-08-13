@@ -273,6 +273,32 @@ test("terminal dispatch policy selects its exact parity integration set", async 
   );
 });
 
+test("terminal dispatch service selects durable send parity coverage", async () => {
+  const selection = await loadSelectionModule();
+  const tiers = loadTiers();
+  const expected = [
+    "test/codex-no-rollout-binding-cli.test.ts",
+    "test/human-handoff-adoption-cli.test.ts",
+    "test/native-thread-lifecycle-cli.test.ts",
+    "test/native-thread-lifecycle-recovery-cli.test.ts",
+    "test/shards/agent-cli-composer-replay.test.ts",
+    "test/shards/agent-cli-dispatch-authority.test.ts",
+    "test/shards/agent-cli-dispatch-recovery.test.ts",
+    "test/shards/agent-cli-session-acceptance.test.ts",
+    "test/shards/agent-cli-terminal-send-gates.test.ts"
+  ];
+  assert.deepEqual(
+    selection.selectAffectedTests(["src/terminal-dispatch-service.ts"], tiers),
+    {
+      mode: "targeted",
+      changedPaths: ["src/terminal-dispatch-service.ts"],
+      integrationFiles: tiers.integration.filter((testPath) =>
+        expected.includes(testPath)
+      )
+    }
+  );
+});
+
 test("terminal list renderer selects public JSON parity coverage", async () => {
   const selection = await loadSelectionModule();
   const tiers = loadTiers();

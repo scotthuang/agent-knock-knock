@@ -2,7 +2,7 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 35767,
+    "cli_core_max_physical_loc": 35051,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -150,6 +150,20 @@
       "selection": "targeted",
       "integration_tests": [
         "test/codex-no-rollout-binding-cli.test.ts",
+        "test/shards/agent-cli-composer-replay.test.ts",
+        "test/shards/agent-cli-dispatch-authority.test.ts",
+        "test/shards/agent-cli-dispatch-recovery.test.ts",
+        "test/shards/agent-cli-session-acceptance.test.ts",
+        "test/shards/agent-cli-terminal-send-gates.test.ts"
+      ]
+    },
+    "terminal-dispatch-service": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/codex-no-rollout-binding-cli.test.ts",
+        "test/human-handoff-adoption-cli.test.ts",
+        "test/native-thread-lifecycle-cli.test.ts",
+        "test/native-thread-lifecycle-recovery-cli.test.ts",
         "test/shards/agent-cli-composer-replay.test.ts",
         "test/shards/agent-cli-dispatch-authority.test.ts",
         "test/shards/agent-cli-dispatch-recovery.test.ts",
@@ -370,6 +384,10 @@
     {
       "path": "src/terminal-dispatch-policy.ts",
       "owner": "terminal-dispatch-policy"
+    },
+    {
+      "path": "src/terminal-dispatch-service.ts",
+      "owner": "terminal-dispatch-service"
     },
     {
       "path": "src/terminal-list-renderer.ts",
