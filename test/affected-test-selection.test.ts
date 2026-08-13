@@ -63,6 +63,19 @@ test("known source subsystems select exact integration files in manifest order",
       ].includes(testPath))
     }
   );
+  assert.deepEqual(
+    selection.selectAffectedTests([
+      "src/verified-dead-agent-policy.ts"
+    ], tiers),
+    {
+      mode: "targeted",
+      changedPaths: ["src/verified-dead-agent-policy.ts"],
+      integrationFiles: [
+        "test/human-handoff-adoption-cli.test.ts",
+        "test/shards/agent-cli-monitor-recovery.test.ts"
+      ]
+    }
+  );
 });
 
 test("an integration test selects itself while fast and documentation changes still use fast only", async () => {

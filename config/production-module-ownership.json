@@ -56,6 +56,13 @@
         "test/management-cli.test.ts"
       ]
     },
+    "orphan-reconciliation": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/human-handoff-adoption-cli.test.ts",
+        "test/shards/agent-cli-monitor-recovery.test.ts"
+      ]
+    },
     "runtime-log": {
       "selection": "targeted",
       "integration_tests": [
@@ -242,6 +249,10 @@
     {
       "path": "src/transcript.ts",
       "owner": "transcript"
+    },
+    {
+      "path": "src/verified-dead-agent-policy.ts",
+      "owner": "orphan-reconciliation"
     }
   ]
 }

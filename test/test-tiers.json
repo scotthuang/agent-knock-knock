@@ -33,7 +33,8 @@
     "test/terminal-process-source.test.ts",
     "test/terminal-submission-acceptance.test.ts",
     "test/test-tier-manifest.test.ts",
-    "test/transcript.test.ts"
+    "test/transcript.test.ts",
+    "test/verified-dead-agent-policy.test.ts"
   ],
   "integration": [
     "test/claude-native-inspection-cli.test.ts",
