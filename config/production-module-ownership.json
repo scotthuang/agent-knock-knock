@@ -2,8 +2,8 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 35767,
-    "production_physical_loc": 75988,
+    "cli_core_max_physical_loc": 35609,
+    "production_physical_loc": 75830,
     "cli_core_importers": [
       "src/cli.ts"
     ]

@@ -200,6 +200,7 @@ import {
   type TerminalProcessSource
 } from "./terminal-process-source.js";
 import {
+  exactCodexReadyStyledComposerCapture,
   isExactClaudeIdleComposer,
   isExactClaudeNativeInspectionIdleComposer,
   NativeInspectionSubmissionError,
@@ -4562,7 +4563,8 @@ async function terminalControlledListEntry(
         resolvedTerminal,
         { scrollbackLines: 40, preserveEscapes: true }
       );
-      automatedInputComposerReady = codexStyledComposerEmpty(styledScreen);
+      automatedInputComposerReady =
+        exactCodexReadyStyledComposerCapture(styledScreen) !== undefined;
     } catch {
       // Advertising an input action is optional. The action itself repeats the
       // same styled composer proof under the terminal lock before any input.
@@ -8023,20 +8025,6 @@ async function resolveTerminalConversationFromOptions(
   );
 }
 
-function nativeProcessIdentityFrom(
-  pid: number,
-  identity: NativeAgentSessionIdentity | undefined,
-  evidence = identity?.evidence ?? "native_thread_boundary"
-) {
-  return {
-    pid,
-    process_uuid: identity?.processUuid,
-    process_birth: identity?.processBirth,
-    rollout: identity?.rollout,
-    evidence
-  };
-}
-
 function exactLifecycleProcessIdentity(
   terminal: ResolvedTerminalConversation,
   identity: NativeAgentSessionIdentity
@@ -9031,7 +9019,7 @@ async function assertCodexComposerReadyForAutomatedInput({
     resolvedTerminal,
     { scrollbackLines: 40, preserveEscapes: true }
   );
-  if (!codexStyledComposerEmpty(styledScreen)) {
+  if (exactCodexReadyStyledComposerCapture(styledScreen) === undefined) {
     throw new Error(
       "Codex composer contains non-placeholder input; refusing automated terminal input"
     );
@@ -22976,36 +22964,6 @@ function managedTurnsForSession(
     .sort(compareManagedConversationRecency);
 }
 
-function managedTurnsForSessionTarget(
-  storeDir: string,
-  targetId: string
-): Conversation[] {
-  const allTurns = listConversations(storeDir)
-    .filter(isDiscoverableTmuxConversation);
-  const exactTurn = allTurns.find((conversation) =>
-    turnIdForConversation(conversation) === targetId ||
-    conversation.conversation_id === targetId
-  );
-  if (
-    exactTurn &&
-    sessionIdForConversation(exactTurn) !== targetId
-  ) {
-    throw new Error(
-      `turn ${targetId} is an execution identity, not an ordinary send target; ` +
-      `send to session ${sessionIdForConversation(exactTurn)} instead`
-    );
-  }
-  const turns = allTurns
-    .filter((conversation) =>
-      sessionIdForConversation(conversation) === targetId
-    )
-    .sort(compareManagedConversationRecency);
-  if (turns.length === 0) {
-    throw new Error(`managed session ${targetId} was not found`);
-  }
-  return turns;
-}
-
 function assertManagedSessionCanStartTurn(turns: Conversation[]): void {
   const blocking = turns.filter((conversation) =>
     SESSION_SEND_BLOCKING_STATUSES.has(conversation.status)
@@ -23018,41 +22976,6 @@ function assertManagedSessionCanStartTurn(turns: Conversation[]): void {
       "respond to it if it is waiting for OpenClaw, cancel it, or close it before sending another turn"
     );
   }
-}
-
-function reusableManagedSessionTurnForTerminal({
-  options,
-  terminalConversation,
-  currentNativeIdentity
-}: {
-  options: Record<string, any>;
-  terminalConversation: ResolvedTerminalConversation;
-  currentNativeIdentity: NativeAgentSessionIdentity | undefined;
-}): Conversation | undefined {
-  const matches = listConversations(storeDirFromOptions(options))
-    .filter(isDiscoverableTmuxConversation)
-    .filter((conversation) =>
-      managedTurnMatchesResolvedTerminal(
-        conversation,
-        terminalConversation,
-        currentNativeIdentity
-      )
-    );
-  const sessions = new Map<string, Conversation[]>();
-  for (const turn of matches) {
-    const sessionId = sessionIdForConversation(turn);
-    const group = sessions.get(sessionId) ?? [];
-    group.push(turn);
-    sessions.set(sessionId, group);
-  }
-  if (sessions.size > 1) {
-    throw new Error(
-      `terminal ${terminalConversation.terminalControl.target} matches multiple ` +
-      "managed sessions; send to an explicit session_id from AKK list"
-    );
-  }
-  const group = [...sessions.values()][0];
-  return group?.sort(compareManagedConversationRecency)[0];
 }
 
 function managedTurnMatchesResolvedTerminal(
@@ -32368,87 +32291,6 @@ function codexComposerEmpty(screen: string | undefined): boolean {
     .slice(-8)
     .filter((line) => /^[›»](?:\s|$)/u.test(line.trimEnd()));
   return composers.length === 1 && /^[›»]\s*$/u.test(composers[0].trimEnd());
-}
-
-function codexStyledComposerEmpty(screen: string | undefined): boolean {
-  const lines = String(screen ?? "").split(/\r?\n/u);
-  const withoutEscapes = (line: string): string =>
-    line.replace(
-      /\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/gu,
-      ""
-    );
-  while (
-    lines.length > 0 &&
-    withoutEscapes(lines[lines.length - 1]).trim() === ""
-  ) {
-    lines.pop();
-  }
-  const composerLine = [...lines.slice(-12)].reverse().find((line) =>
-    /^[›»](?:\s|$)/u.test(
-      withoutEscapes(line).trimEnd()
-    )
-  );
-  if (composerLine === undefined) {
-    return false;
-  }
-  let dim = false;
-  const visible: Array<{ character: string; dim: boolean }> = [];
-  for (let index = 0; index < composerLine.length;) {
-    if (composerLine[index] === "\x1b") {
-      const escape = /^(?:\x1B\[([0-9;]*)m|\x1B\][^\x07]*(?:\x07|\x1B\\))/u
-        .exec(composerLine.slice(index));
-      if (escape) {
-        if (escape[1] !== undefined) {
-          const codes = escape[1] === ""
-            ? [0]
-            : escape[1].split(";").map((value) => Number(value));
-          for (let codeIndex = 0; codeIndex < codes.length; codeIndex += 1) {
-            const code = codes[codeIndex];
-            if (
-              [38, 48, 58].includes(code) &&
-              codes[codeIndex + 1] === 2
-            ) {
-              codeIndex += 4;
-              continue;
-            }
-            if (
-              [38, 48, 58].includes(code) &&
-              codes[codeIndex + 1] === 5
-            ) {
-              codeIndex += 2;
-              continue;
-            }
-            if (code === 0 || code === 22) {
-              dim = false;
-            } else if (code === 2) {
-              dim = true;
-            }
-          }
-        }
-        index += escape[0].length;
-        continue;
-      }
-    }
-    const codePoint = composerLine.codePointAt(index);
-    if (codePoint === undefined) {
-      break;
-    }
-    const character = String.fromCodePoint(codePoint);
-    visible.push({ character, dim });
-    index += character.length;
-  }
-  const promptIndex = visible.findIndex(({ character }) =>
-    character === "›" || character === "»"
-  );
-  if (promptIndex < 0) {
-    return false;
-  }
-  const content = visible.slice(promptIndex + 1)
-    .filter(({ character }) => !/^\s$/u.test(character));
-  // Codex renders its replace-on-type suggestion entirely with SGR dim. Real
-  // composer input is normal intensity. Treat only an empty line or a fully
-  // dim placeholder as safe for an automated slash command/message.
-  return content.length === 0 || content.every((entry) => entry.dim);
 }
 
 function claudeComposerVisible(screen: string | undefined): boolean {

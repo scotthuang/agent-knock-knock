@@ -2849,7 +2849,7 @@ function stripTerminalEscapeSequences(value: string): string {
   );
 }
 
-function exactCodexReadyStyledComposerCapture(
+export function exactCodexReadyStyledComposerCapture(
   screen: string
 ): { digest: string } | undefined {
   const lines = screen.replace(/\r\n?/gu, "\n").split("\n");
