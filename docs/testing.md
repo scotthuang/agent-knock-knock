@@ -167,7 +167,7 @@ that remains black-box:
 | Late callback after Turn release | Reject before state or event mutation | Emitted callback argv/stdout/exit goldens |
 | Corrupted event log | Fail closed on Store validation | Emitted callback error projection |
 | Failed question notification | Preserve `waiting_for_openclaw` and failed outbox state | Fake OpenClaw Gateway child failure |
-| Close after failed delivery | Keep the failed outbox retryable and immutable | Real close/retry executables and Gateway child |
+| Close after failed delivery | Keep the failed outbox retryable and immutable | Gateway child plus separate executable concurrency witnesses |
 | Reused message ID with changed payload | Reject payload mutation under an existing claim | Retained callback executable helper |
 | Explicit Gateway URL/token retry | Persist authentication while redacting public state | Fake OpenClaw environment and argv |
 | Automatic transient retry | Preserve retry state and monitor scheduling | Real retry-monitor and Gateway children |
@@ -275,6 +275,50 @@ The machine-readable `terminal-dispatch-policy` and
 policy/acceptance invariants and to retained real-process witnesses for argv,
 OS exit, terminal input, crash recovery, locks, concurrency, monitor PID,
 Gateway transport, and Store writer fencing.
+
+## #126 callback normal-command in-process migration
+
+The fifth migration slice routes all 20 successful invocations that formerly
+shared the generic synchronous callback CLI helper through `runInProcessCli`,
+and therefore through the production `parseCliCommand` to `executeCliCommand`
+path. The 13 affected tests and all 160 assertion call sites remain. Nine tests
+become async; four were already async.
+
+| Former normal callback cases | Invocations | Imported service invariant | Retained real boundary |
+| --- | ---: | --- | --- |
+| Record-only creation and duplicate suppression | 3 | Message identity, Turn identity, event persistence, and idempotency | Concurrent duplicate CLI processes |
+| Direct Gateway delivery and legacy identity derivation | 2 | Gateway payload projection, token redaction, and legacy Session/Turn fallback | Production fake-OpenClaw child processes |
+| Close, retry, rebinding, and persisted authentication | 7 | Immutable outbox, close-state preservation, binding generation, and URL/token routing | Gateway success/failure helpers and the close-during-delivery child |
+| Startup reconciliation and accepted-wake settlement | 4 | Retry-monitor launch/reconciliation and no-redelivery settlement | Real detached retry-monitor and Gateway children |
+| `chat.send`, `agent.wait`, legacy plan, and `sessions.send` delivery | 4 | Accepted delivery plans, run observation, exact argv, and event recording | Production Gateway child-process transport |
+
+Environment overlays remain scoped by the CLI async-local runtime. `PATH` and
+Gateway-token overrides reach the production OpenClaw transport through
+`cliEnv()`, while the transport continues to start the fake Gateway executable
+itself. The tests do not mutate `process.env`, change cwd, observe the outer CLI
+PID, or assert OS exit. The close-during-delivery and callback-retry competition
+tests still use separate real CLI processes where process identity and file
+competition are the behavior under test.
+
+The in-process `callback` and `retry-callback` commands in this slice complete
+their delivered or accepted settlement before returning. Reconciliation only
+persists the PID of the real retry-monitor child it launches; it does not claim
+an attempt for the in-process caller. No migrated case waits for an outer CLI
+`attempt_pid` to die, while the manual in-flight and winner/loser lease cases
+remain on their existing imported-failure and real-process paths.
+
+Four explicit callback CLI startup sites remain: Gateway failure and success
+helpers, the asynchronous concurrency helper, and the direct retry loser. They
+perform 9, 6, 4, and 1 dynamic CLI starts respectively in this file. The
+generic helper removes exactly 20 outer CLI starts without removing any
+Gateway or retry-monitor start. `test/runtime-log.test.ts` also remains
+process-backed because it proves the executable wrapper's `cli_start` and
+`cli_finish` records, default `AKK_LOG_DIR` environment routing, and redaction.
+
+The static metric moves from 31 to 30 included startup sites (`cli_process` 21
+to 20); all 10 fake-Node sites remain. The machine-readable
+`callback-cli-in-process` witness records the moved normal-command cases, while
+`callback-cli-boundary` now names the retained winner/loser executable race.
 
 ## #108 performance record
 

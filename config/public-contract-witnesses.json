@@ -152,6 +152,12 @@
       "id": "callback-cli-boundary",
       "path": "test/callback-cli.test.ts",
       "tier": "integration",
+      "needle": "concurrent callback retries claim one attempt and report the winner in flight"
+    },
+    {
+      "id": "callback-cli-in-process",
+      "path": "test/callback-cli.test.ts",
+      "tier": "integration",
       "needle": "callback records a structured Claude message before delivery"
     },
     {
@@ -448,7 +454,7 @@
       "id": "callback-outbox",
       "invariant": "Imported callback commands preserve message identity, Session binding authority, attempt authority, transport acceptance, and settlement ordering; retained executable and Gateway witnesses preserve argv, exit, concurrency, and child-process delivery boundaries.",
       "old_executable_witnesses": [
-        "callback-cli-boundary",
+        "callback-cli-in-process",
         "claude-callback-boundary",
         "turn-session-binding-in-process"
       ],
