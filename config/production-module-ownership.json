@@ -2,8 +2,8 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 34487,
-    "production_physical_loc": 75633,
+    "cli_core_max_physical_loc": 34324,
+    "production_physical_loc": 75625,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -17,6 +17,14 @@
       "integration_tests": [
         "test/shards/agent-cli-monitor-approval-context.test.ts",
         "test/openclaw-plugin-contract.test.ts"
+      ]
+    },
+    "binding-reconciliation": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/codex-no-rollout-binding-cli.test.ts",
+        "test/native-thread-lifecycle-recovery-cli.test.ts",
+        "test/shards/agent-cli-control-locks.test.ts"
       ]
     },
     "callback-outbox": {
@@ -388,6 +396,10 @@
     {
       "path": "src/terminal-binding-authority.ts",
       "owner": "terminal-binding-authority"
+    },
+    {
+      "path": "src/terminal-binding-reconciliation-service.ts",
+      "owner": "binding-reconciliation"
     },
     {
       "path": "src/terminal-control-provider.ts",

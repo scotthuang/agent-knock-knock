@@ -2,7 +2,7 @@ type Awaitable<Value> = Value | PromiseLike<Value>;
 type ScopeKind = "terminal" | "storeWriter" | "state";
 export type CanonicalMutationResource<Value = unknown> = Readonly<{ key: string; value: Value }>;
 type ScopeResources = Readonly<Record<ScopeKind, CanonicalMutationResource>>;
-type LockResources = Readonly<Pick<ScopeResources, "terminal" | "storeWriter"> & Partial<ScopeResources>>;
+export type CanonicalMutationResources = Readonly<Pick<ScopeResources, "terminal" | "storeWriter"> & Partial<ScopeResources>>;
 declare const mutationScopeBrand: unique symbol;
 type MutationScope<Kind extends ScopeKind> = Readonly<{ [mutationScopeBrand]: Kind }>;
 export type CanonicalMutationScopes = Readonly<{
@@ -11,7 +11,7 @@ export type CanonicalMutationScopes = Readonly<{
 }>;
 export type CanonicalStateMutationScopes = CanonicalMutationScopes & Readonly<{ state: MutationScope<"state"> }>;
 export type CanonicalMutationLockPorts = Readonly<{
-  resources: LockResources;
+  resources: CanonicalMutationResources;
   acquireTerminal: () => Awaitable<() => void>;
   withStoreWriter: <Result>(operation: () => Promise<Result>) => Promise<Result>;
   acquireState?: () => Awaitable<() => void>;
@@ -72,7 +72,7 @@ export function capabilityGatedRepositoryPairOperation<
   };
 }
 type ScopesForPorts<Ports> = Ports extends { acquireState: () => unknown } ? CanonicalStateMutationScopes : CanonicalMutationScopes;
-type ResourcesForPorts<Ports> = Ports extends { acquireState: () => unknown } ? ScopeResources : LockResources;
+type ResourcesForPorts<Ports> = Ports extends { acquireState: () => unknown } ? ScopeResources : CanonicalMutationResources;
 /** Acquire terminal -> writer -> optional state and release in reverse. */
 export async function withCanonicalMutationLocks<Result, Ports extends CanonicalMutationLockPorts>(
   ports: Ports, operation: (
