@@ -792,6 +792,56 @@ timeout`, so work performed by persistence or the death probe can cross a
 deadline without deferring the timeout by one poll. Application orchestration
 and those effect ports remain the follow-on monitor service milestone.
 
+## Native-thread lifecycle query slice
+
+The first native-thread lifecycle application slice moves only read-side
+candidate discovery, active-owner observation, exact candidate-token
+revalidation, restorable-origin eligibility, and previous-thread projection
+behind `NativeThreadLifecycleQueryPorts`. New-thread and resume-thread mutation,
+handoff, verified-empty recovery, reconciliation, dispatch recovery, selection
+snapshot persistence, and public JSON presentation remain in `cli-core.ts`.
+The query service has no transaction, lock, capability, Store-save, snapshot-save,
+terminal-input, recovery, or presenter port.
+
+Measured against exact head `ceb1e2fbb9ffa65af139182b36ea0bd527f4fe1e`,
+the slice reduces `src/cli-core.ts` from 31,321 to 30,775 physical lines (-546)
+and changes total production TypeScript from 76,474 to 76,569 (+95). The query
+service is 495 physical lines. No function reaches 500 lines; architecture
+validation retains the hard approximate-complexity ceiling of 50. The
+production import graph remains acyclic and the module has one targeted
+ownership domain, `native-thread-lifecycle-query`, with five retained lifecycle
+integration witnesses.
+
+The default approximate-complexity target remains 20. The reviewed cohesive
+exceptions are `activeNativeThreadOwners` (93 LOC/c28),
+`verifiedPreviousResumeCandidate` (68 LOC/c24), and
+`decodeThreadCandidateToken` (38 LOC/c21); all remain below 100 LOC and c50.
+
+The composition root implements the read port with frozen method-only adapters.
+It continues to own filesystem/process observation, terminal and agent adapters,
+Store path selection, selection snapshot writes, clock sampling, and public JSON.
+Store path selection is lazy and memoized at the first Store observation; token
+revalidation that fails before a Store read cannot resolve or inspect that path.
+Candidate observation preserves `active process ownership -> managed Session
+observation -> exact running version -> provider discovery`. Invalid UUID and
+Store-authority errors precede terminal scanning; an active external owner
+precedes managed-Session conflict observation. Version failure never calls the
+candidate provider. Candidate tokens retain baseline `JSON.stringify` byte and
+key-order semantics; no canonicalization was introduced. Their codec, candidate
+sorting, committed-previous policy, and pure snapshot assertions live in the
+adapter-neutral `native-thread-resume-snapshot-policy.ts`, so importing the
+query service cannot load snapshot filesystem persistence.
+
+The direct fast table locks version short-circuit, observation order,
+deduplication and sorting, exact token mismatch precedence and bytes, Store then
+terminal ownership error priority, and one exact committed-transition read for
+the previous resume candidate. Snapshot assertion traces additionally lock lazy
+cwd and clock callbacks, terminal-evidence order, fingerprint-before-row
+short-circuiting, ordered-row equality, and rollout `JSON.stringify` field-order
+sensitivity. Since this slice writes nothing, it adds no durable-write or crash
+window; the existing core snapshot write and lifecycle mutation/recovery
+witnesses remain authoritative until the separate mutation application slice.
+
 ## Soft freeze while #126 is active
 
 Until the orchestration milestones finish:

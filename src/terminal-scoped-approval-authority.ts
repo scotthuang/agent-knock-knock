@@ -8,7 +8,7 @@ import {
 import {
   sessionIdForConversation, turnIdForConversation, type Conversation
 } from "./protocol.js";
-import { terminalActionFingerprint } from "./native-thread-resume-snapshot.js";
+import { terminalActionFingerprint } from "./native-thread-resume-snapshot-policy.js";
 import type { TerminalDispatchLedgerDocument } from "./terminal-dispatch-ledger-codec.js";
 import {
   hasCanonicalTerminalEndpoint, sameTerminalControlIncarnation,
