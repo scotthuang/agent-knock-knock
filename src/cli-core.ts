@@ -47,6 +47,7 @@ import {
 } from "./codex-local-session-provider.js";
 import { CodexStoreAdapter } from "./codex-store-adapter.js";
 import { buildConversationTrace } from "./conversation-trace.js";
+import { canonicalJson } from "./canonical-json.js";
 import {
   isRecord,
   nonBlankString as stringValue
@@ -34729,19 +34730,6 @@ function exactLoggedMessageForRecovery(events, message): boolean {
     );
   }
   return true;
-}
-
-function canonicalJson(value): string {
-  if (Array.isArray(value)) {
-    return `[${value.map(canonicalJson).join(",")}]`;
-  }
-  if (isRecord(value)) {
-    return `{${Object.keys(value)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "undefined";
 }
 
 function messageFingerprint(message) {
