@@ -6,6 +6,10 @@ import {
   type AgentMessage,
   type Conversation
 } from "./protocol.js";
+import {
+  isRecord,
+  nonBlankString as stringValue
+} from "./value-guards.js";
 
 const CALLBACK_DELIVERY_TIMEOUT_MS = 30_000;
 const CALLBACK_AGENT_WAIT_TIMEOUT_MS = 20_000;
@@ -135,15 +139,6 @@ interface ObserveCallbackAgentRunInput {
   wakeAck: CallbackWakeAcknowledgement;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim().length > 0
-    ? value
-    : undefined;
-}
 
 function cleanProcessText(text: unknown): string | undefined {
   const value = String(text ?? "").trim();

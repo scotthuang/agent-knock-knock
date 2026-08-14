@@ -10,6 +10,7 @@ import {
   supportedClaudeLifecycleVersions
 } from "./claude-lifecycle-compatibility.js";
 import { redactString } from "./runtime-log.js";
+import { isRecord } from "./value-guards.js";
 import type {
   TerminalCompletionEvidence,
   TerminalDurableCompletionRequest,
@@ -2146,8 +2147,4 @@ function uuidValue(value: unknown): string | undefined {
 
 function nonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value : undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

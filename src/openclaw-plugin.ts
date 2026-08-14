@@ -10,6 +10,10 @@ import {
   executorDefinitionForKind
 } from "./executors.js";
 import {
+  isRecord,
+  nonBlankString as stringValue
+} from "./value-guards.js";
+import {
   AKK_CALLBACK_METHOD,
   akkUsageText,
   buildAkkCommandCliArgs,
@@ -2792,14 +2796,6 @@ function pushOptional(args, flag, value) {
   if (value !== undefined && value !== "") {
     args.push(flag, value);
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function stringValue(value) {
-  return typeof value === "string" && value.trim() ? value : undefined;
 }
 
 function numberString(value) {

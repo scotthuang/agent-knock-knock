@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import { createConnection } from "node:net";
 import path from "node:path";
+import { isRecord } from "./value-guards.js";
 import {
   TerminalControlInputNotSentError,
   TerminalControlUnavailableError,
@@ -1830,10 +1831,6 @@ function stringArray(value: unknown): string[] | undefined {
   return Array.isArray(value) && value.every((item) => typeof item === "string")
     ? [...value]
     : undefined;
-}
-
-function isRecord(value: unknown): value is JsonRecord {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function describeError(error: unknown): string {

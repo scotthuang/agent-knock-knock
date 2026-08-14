@@ -5,6 +5,10 @@ import {
   type TerminalControlRef
 } from "./terminal-control-ref.js";
 import type { TerminalSubmissionAcceptanceEvidence } from "./terminal-submission-acceptance.js";
+import {
+  isRecord,
+  nonBlankString as stringValue
+} from "./value-guards.js";
 
 export type TerminalDispatchLedgerDocument = Record<string, unknown>;
 export type TerminalDispatchReceipt = Record<string, unknown>;
@@ -461,14 +465,4 @@ function required<T>(value: T | undefined, message: string): T {
     throw new Error(message);
   }
   return value;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim().length > 0
-    ? value
-    : undefined;
 }

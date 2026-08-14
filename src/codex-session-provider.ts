@@ -3,6 +3,7 @@ import type {
   ActiveTerminalProcess,
   TerminalProcessSnapshot
 } from "./terminal-agent-adapter.js";
+import { nonBlankString as stringValue } from "./value-guards.js";
 
 export type CodexSessionCapability = "full" | "metadata_only" | "unavailable";
 export type CodexProcessKind = "codex_cli";
@@ -441,10 +442,6 @@ function cleanText(text: string | undefined): string | undefined {
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() ? value : undefined;
 }
 
 function numberValue(value: unknown): number | undefined {

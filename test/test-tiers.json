@@ -49,6 +49,7 @@
     "test/terminal-submission-acceptance.test.ts",
     "test/test-tier-manifest.test.ts",
     "test/transcript.test.ts",
+    "test/value-guards.test.ts",
     "test/verified-dead-agent-policy.test.ts"
   ],
   "integration": [

@@ -47,6 +47,10 @@ import { CodexLocalSessionProvider, type CodexLocalSessionAdapter } from "./code
 import { CodexStoreAdapter } from "./codex-store-adapter.js";
 import { buildConversationTrace } from "./conversation-trace.js";
 import {
+  isRecord,
+  nonBlankString as stringValue
+} from "./value-guards.js";
+import {
   createDeferredForegroundTransferId,
   listDeferredForegroundTransfers,
   loadDeferredForegroundTransfer,
@@ -34959,14 +34963,6 @@ function required(value, message) {
   }
 
   return value;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function stringValue(value) {
-  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
 }
 
 function parseOptionalJson(text) {

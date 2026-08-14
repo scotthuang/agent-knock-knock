@@ -1,3 +1,8 @@
+import {
+  nonBlankString as stringValue,
+  recordValue
+} from "./value-guards.js";
+
 export interface CallbackDeliveryOutcome {
   kind: string;
   injection: Record<string, unknown>;
@@ -176,17 +181,6 @@ function decided(
   return { phase: "decided", disposition };
 }
 
-function recordValue(value: unknown): Record<string, unknown> | undefined {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined;
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim().length > 0
-    ? value
-    : undefined;
-}
 
 function validTimestampMs(value: unknown): number | undefined {
   const parsed = Date.parse(String(value ?? ""));

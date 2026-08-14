@@ -3,6 +3,10 @@ import {
   isExactNativeThreadId,
   type ManagedSessionState
 } from "./managed-session.js";
+import {
+  nonBlankString as stringValue,
+  recordValue
+} from "./value-guards.js";
 
 export interface TerminalNativeRolloutIdentity {
   fd: string;
@@ -351,16 +355,4 @@ function completeRollout(value: unknown): value is TerminalNativeRolloutIdentity
 
 function statusCardEvidence(evidence: string): boolean {
   return evidence.split("+").includes("codex_status_card");
-}
-
-function recordValue(value: unknown): Record<string, unknown> | undefined {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined;
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim().length > 0
-    ? value
-    : undefined;
 }
