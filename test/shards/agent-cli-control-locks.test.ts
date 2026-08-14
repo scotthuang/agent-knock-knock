@@ -61,7 +61,7 @@ import {
   readJsonLines
 } from "../agent-cli-fixtures.js";
 
-test("managed terminal send cannot overwrite a concurrent terminal cancellation", async () => {
+test("managed terminal send cannot overwrite a concurrent terminal cancellation", async (t) => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-send-cancel-race-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -105,7 +105,8 @@ test("managed terminal send cannot overwrite a concurrent terminal cancellation"
       `${tmuxSession}\t0\t1\t33389\tnode\t${workspace}\n`
     );
     const testEnv = {
-      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      AKK_SUBPROCESS_EVIDENCE_TEST_NAME: t.name
     };
     const managed = await runAgentCliInProcess([
       "send",

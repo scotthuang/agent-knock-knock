@@ -30,10 +30,10 @@
     "current": {
       "counts": {
         "cli_process": 18,
-        "fake_node_process": 10,
-        "other_process_or_adapter": 12
+        "fake_node_process": 20,
+        "other_process_or_adapter": 13
       },
-      "included_total": 28
+      "included_total": 38
     },
     "final_threshold": {
       "required": false,

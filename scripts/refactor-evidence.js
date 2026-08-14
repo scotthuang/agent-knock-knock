@@ -7,6 +7,9 @@ import {
 import {
   loadAndValidateProductionModuleOwnership
 } from "./production-module-ownership.js";
+import {
+  loadDynamicSubprocessEvidenceConfig
+} from "./subprocess-dynamic-evidence.js";
 
 export const TEST_EVIDENCE_MANIFEST_PATH =
   "config/refactor-test-evidence.json";
@@ -1003,5 +1006,6 @@ export function loadAndValidateRefactorEvidence({ repoRoot, tiers }) {
     repoRoot,
     tiers
   });
-  return { testEvidence, publicContracts };
+  const dynamicSubprocess = loadDynamicSubprocessEvidenceConfig({ repoRoot });
+  return { dynamicSubprocess, testEvidence, publicContracts };
 }

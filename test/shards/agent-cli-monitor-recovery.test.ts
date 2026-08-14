@@ -60,7 +60,7 @@ import {
   readJsonLines
 } from "../agent-cli-fixtures.js";
 
-test("terminal bridge monitor singleton rejects a live owner and reclaims a dead owner", async () => {
+test("terminal bridge monitor singleton rejects a live owner and reclaims a dead owner", async (t) => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-monitor-singleton-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -93,7 +93,8 @@ test("terminal bridge monitor singleton rejects a live owner and reclaims a dead
     );
     const testEnv = {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
-      AKK_LOG_DIR: runtimeLogDir
+      AKK_LOG_DIR: runtimeLogDir,
+      AKK_SUBPROCESS_EVIDENCE_TEST_NAME: t.name
     };
     const sent = await runAgentCliInProcess([
       "send",

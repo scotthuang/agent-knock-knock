@@ -15,6 +15,7 @@ try {
   });
   const subprocess = evidence.testEvidence.subprocess;
   const replay = evidence.testEvidence.affectedReplay;
+  const dynamicSubprocess = evidence.dynamicSubprocess;
   process.stdout.write(`${JSON.stringify({
     ok: true,
     subprocess_startup_sites: {
@@ -24,6 +25,15 @@ try {
       target_maximum_percent: subprocess.targetMaximumPercent,
       final_threshold_required: subprocess.targetRequired,
       target_met: subprocess.targetMet
+    },
+    dynamic_subprocess_starts: {
+      baseline_revision: dynamicSubprocess.baseline.revision,
+      baseline_outer_cli_starts: "measured_by_full_runtime_attestation",
+      target_maximum_percent:
+        dynamicSubprocess.final_threshold.maximum_percent_of_baseline,
+      retained_boundary_count: dynamicSubprocess.retained_boundaries.length,
+      runtime_attestation_command:
+        "node scripts/measure-subprocess-dynamic-evidence.js"
     },
     affected_selector_replay: {
       scenario_count: replay.scenario_count,

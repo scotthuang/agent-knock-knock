@@ -1591,33 +1591,36 @@ for (const [label, acceptedNativeThreadId] of [
 for (const crashCase of [
   {
     label: "source Session reservation before its transfer receipt",
+    testName: "zero-input deferred source Session reservation before its transfer receipt recovery aborts safely before one refreshed retry",
     hook: "AKK_TEST_EXIT_AFTER_DEFERRED_SOURCE_SESSION_RESERVED",
     expectedStatus: "prepared",
     addPreparedLedgerWithoutState: false
   },
   {
     label: "source reservation",
+    testName: "zero-input deferred source reservation recovery aborts safely before one refreshed retry",
     hook: "AKK_TEST_EXIT_AFTER_DEFERRED_SOURCE_RESERVED",
     expectedStatus: "source_reserved",
     addPreparedLedgerWithoutState: false
   },
   {
     label: "target preparation",
+    testName: "zero-input deferred target preparation recovery aborts safely before one refreshed retry",
     hook: "AKK_TEST_EXIT_AFTER_DEFERRED_TARGET_PREPARED",
     expectedStatus: "target_prepared",
     addPreparedLedgerWithoutState: false
   },
   {
     label: "prepared ledger before Turn state",
+    testName: "zero-input deferred prepared ledger before Turn state recovery aborts safely before one refreshed retry",
     hook: "AKK_TEST_EXIT_AFTER_DEFERRED_TARGET_PREPARED",
     expectedStatus: "target_prepared",
     addPreparedLedgerWithoutState: true
   }
 ] as const) {
   test(
-    `zero-input deferred ${crashCase.label} recovery aborts safely before ` +
-      "one refreshed retry",
-    async () => {
+    crashCase.testName,
+    async (t) => {
       const fixture = createNoRolloutFixture({
         codexVersion: "0.147.0",
         rolloutInitiallyAbsent: true
@@ -1630,6 +1633,7 @@ for (const crashCase of [
         const crashEnvironment = {
           ...fixture.environment,
           AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0",
+          AKK_SUBPROCESS_EVIDENCE_TEST_NAME: t.name,
           [crashCase.hook]: "1"
         };
         const crashed = runCliSubprocess(args, crashEnvironment);

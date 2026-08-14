@@ -367,7 +367,7 @@ test("modern Claude send requires a session id and process-incarnation timestamp
   }
 });
 
-test("raw background send durably prepares its terminal submission before tmux accepts it", async () => {
+test("raw background send durably prepares its terminal submission before tmux accepts it", async (t) => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-submit-prepare-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -411,7 +411,8 @@ test("raw background send durably prepares its terminal submission before tmux a
       "--disable-terminal-bridge-monitor"
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
-      AKK_TEST_TMUX_SEND_GATE_PATH: tmuxGatePath
+      AKK_TEST_TMUX_SEND_GATE_PATH: tmuxGatePath,
+      AKK_SUBPROCESS_EVIDENCE_TEST_NAME: t.name
     });
 
     await waitForCondition(

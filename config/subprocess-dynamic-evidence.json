@@ -1,0 +1,127 @@
+{
+  "schema": "agent-knock-knock/dynamic-subprocess-evidence",
+  "version": 1,
+  "measurement": {
+    "kind": "preloaded_process_tree_runtime_trace",
+    "tier": "full",
+    "concurrency": 4,
+    "drain_poll_ms": 50,
+    "drain_timeout_ms": 30000,
+    "runner": "scripts/run-test-tier.js",
+    "preload": "scripts/subprocess-dynamic-hook.cjs",
+    "dependency_lock": "package-lock.json"
+  },
+  "baseline": {
+    "revision": "ea592a88d7af4a709e7a7a1b989dd29e61932935"
+  },
+  "final_threshold": {
+    "maximum_percent_of_baseline": 40
+  },
+  "retained_boundaries": [
+    {
+      "id": "argv_exit",
+      "path": "test/cli-ux.test.ts",
+      "needle": "doctor exits non-zero when required package files are missing",
+      "requirements": [
+        {
+          "kind": "outer_cli_argv",
+          "action": "doctor",
+          "required_options": [
+            "--openclaw-bin",
+            "--timeout-ms"
+          ],
+          "minimum": 1
+        },
+        {
+          "kind": "outer_cli_nonzero_exit",
+          "minimum": 1
+        }
+      ]
+    },
+    {
+      "id": "claude_adapter",
+      "path": "test/shards/agent-cli-composer-replay.test.ts",
+      "needle": "raw background send durably prepares its terminal submission before tmux accepts it",
+      "requirements": [
+        {
+          "kind": "command_start",
+          "command": "claude",
+          "minimum": 1
+        }
+      ]
+    },
+    {
+      "id": "crash",
+      "path": "test/codex-no-rollout-binding-cli.test.ts",
+      "needle": "zero-input deferred source Session reservation before its transfer receipt recovery aborts safely before one refreshed retry",
+      "requirements": [
+        {
+          "kind": "outer_cli_exit_code",
+          "code": 86,
+          "minimum": 1
+        }
+      ]
+    },
+    {
+      "id": "gateway",
+      "path": "test/callback-cli.test.ts",
+      "needle": "concurrent callback retries claim one attempt and report the winner in flight",
+      "requirements": [
+        {
+          "kind": "command_start",
+          "command": "openclaw",
+          "minimum": 1
+        }
+      ]
+    },
+    {
+      "id": "lock",
+      "path": "test/shards/agent-cli-control-locks.test.ts",
+      "needle": "managed terminal send cannot overwrite a concurrent terminal cancellation",
+      "requirements": [
+        {
+          "kind": "outer_cli_overlap",
+          "minimum_concurrent": 2
+        }
+      ]
+    },
+    {
+      "id": "pid",
+      "path": "test/shards/agent-cli-monitor-recovery.test.ts",
+      "needle": "terminal bridge monitor singleton rejects a live owner and reclaims a dead owner",
+      "requirements": [
+        {
+          "kind": "outer_cli_live_pid",
+          "minimum": 1
+        },
+        {
+          "kind": "outer_cli_signal",
+          "signal": "SIGKILL",
+          "minimum": 1
+        }
+      ]
+    },
+    {
+      "id": "terminal_adapters",
+      "path": "test/shards/agent-cli-composer-replay.test.ts",
+      "needle": "raw background send durably prepares its terminal submission before tmux accepts it",
+      "requirements": [
+        {
+          "kind": "command_start",
+          "command": "tmux",
+          "minimum": 1
+        },
+        {
+          "kind": "command_start",
+          "command": "ps",
+          "minimum": 1
+        },
+        {
+          "kind": "command_start",
+          "command": "lsof",
+          "minimum": 1
+        }
+      ]
+    }
+  ]
+}

@@ -1312,7 +1312,7 @@ test("manual callback retry reports the exact automatic attempt in flight", asyn
   }
 });
 
-test("concurrent callback retries claim one attempt and report the winner in flight", async () => {
+test("concurrent callback retries claim one attempt and report the winner in flight", async (t) => {
   const storeDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-callback-retry-cas-")
   );
@@ -1384,11 +1384,15 @@ console.log(JSON.stringify({ ok: true }));
     });
     appendEvent(created.paths.logPath, messageEvent(message));
 
+    const evidenceEnvironment = {
+      ...process.env,
+      AKK_SUBPROCESS_EVIDENCE_TEST_NAME: t.name
+    };
     const winnerPromise = runCliAsync([
       "retry-callback",
       "--state",
       created.paths.statePath
-    ]);
+    ], evidenceEnvironment);
     const claimed = await waitForCallbackDeliveryState(
       created.paths.statePath,
       "pending",
@@ -1403,7 +1407,7 @@ console.log(JSON.stringify({ ok: true }));
       "retry-callback",
       "--state",
       created.paths.statePath
-    ], { encoding: "utf8" });
+    ], { encoding: "utf8", env: evidenceEnvironment });
     assert.notEqual(loser.status, 0);
     assert.match(loser.stderr, /attempt 2[^\n]*in flight/iu);
 
@@ -2353,9 +2357,13 @@ interface CliAsyncResult {
   stderr: string;
 }
 
-function runCliAsync(args): Promise<CliAsyncResult> {
+function runCliAsync(
+  args,
+  env: NodeJS.ProcessEnv = process.env
+): Promise<CliAsyncResult> {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [binPath, ...args], {
+      env,
       stdio: ["ignore", "pipe", "pipe"]
     });
     let stdout = "";
