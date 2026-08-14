@@ -3,15 +3,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import { createConversation } from "../src/protocol.js";
 import {
   appendEvent,
   pathsForConversation,
   saveState
 } from "../src/store.js";
+import { runInProcessCli } from "./in-process-cli-fixtures.js";
 
-const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 const testRuntimeDir = fs.mkdtempSync(
   path.join(os.tmpdir(), "akk-management-cli-runtime-")
 );
@@ -20,7 +19,7 @@ process.on("exit", () => {
   fs.rmSync(testRuntimeDir, { recursive: true, force: true });
 });
 
-test("status --trace preserves the bounded redacted executor-log view", () => {
+test("status --trace preserves the bounded redacted executor-log view", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-status-trace-"));
   const storeDir = path.join(tempDir, "store");
   try {
@@ -54,7 +53,7 @@ test("status --trace preserves the bounded redacted executor-log view", () => {
       output_path: outputPath
     });
 
-    const status = runCli([
+    const status = await runCli([
       "status",
       "--state",
       paths.statePath,
@@ -74,7 +73,7 @@ test("status --trace preserves the bounded redacted executor-log view", () => {
   }
 });
 
-test("list exposes physical tmux terminals with the terminal-first action contract", () => {
+test("list exposes physical tmux terminals with the terminal-first action contract", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-list-groups-"));
   const storeDir = path.join(tempDir, "conversations");
   const nativeWorkspace = path.join(tempDir, "native");
@@ -89,7 +88,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
   try {
     fs.mkdirSync(nativeWorkspace, { recursive: true });
     fs.mkdirSync(tmuxWorkspace, { recursive: true });
-    const listed = runCli([
+    const listed = await runCli([
       "list",
       "--store-dir",
       storeDir,
@@ -471,7 +470,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     assert.equal(approvalActions.close, undefined);
     assert.equal(listed.terminal_scan.terminal_count, 1);
 
-    const debugListed = runCli([
+    const debugListed = await runCli([
       "list",
       "--store-dir",
       storeDir,
@@ -510,7 +509,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       1
     );
 
-    const managedOnly = runCli([
+    const managedOnly = await runCli([
       "list",
       "--store-dir",
       storeDir,
@@ -533,7 +532,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
   }
 });
 
-test("list keeps same-named targets from distinct tmux servers", () => {
+test("list keeps same-named targets from distinct tmux servers", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-list-multi-tmux-"));
   const storeDir = path.join(tempDir, "conversations");
   const firstWorkspace = path.join(tempDir, "first");
@@ -542,7 +541,7 @@ test("list keeps same-named targets from distinct tmux servers", () => {
   try {
     fs.mkdirSync(firstWorkspace, { recursive: true });
     fs.mkdirSync(secondWorkspace, { recursive: true });
-    const listed = runCli([
+    const listed = await runCli([
       "list",
       "--store-dir",
       storeDir,
@@ -600,7 +599,7 @@ test("list keeps same-named targets from distinct tmux servers", () => {
   }
 });
 
-test("list exposes terminal-controlled Codex working activity state", () => {
+test("list exposes terminal-controlled Codex working activity state", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-list-activity-"));
   const storeDir = path.join(tempDir, "conversations");
   const workspace = path.join(tempDir, "workspace");
@@ -612,7 +611,7 @@ test("list exposes terminal-controlled Codex working activity state", () => {
 
   try {
     fs.mkdirSync(workspace, { recursive: true });
-    const listed = runCli([
+    const listed = await runCli([
       "list",
       "--store-dir",
       storeDir,
@@ -658,7 +657,7 @@ test("list exposes terminal-controlled Codex working activity state", () => {
   }
 });
 
-test("list recognizes the current Codex composer marker and keeps unknown screens fail closed", () => {
+test("list recognizes the current Codex composer marker and keeps unknown screens fail closed", async () => {
   const tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-list-current-codex-composer-")
   );
@@ -685,7 +684,7 @@ test("list recognizes the current Codex composer marker and keeps unknown screen
 
   try {
     fs.mkdirSync(workspace, { recursive: true });
-    const idle = runCli([
+    const idle = await runCli([
       "list",
       "--store-dir",
       storeDir,
@@ -714,7 +713,7 @@ test("list recognizes the current Codex composer marker and keeps unknown screen
     );
     assert.equal(idleEntry.available_actions.cancel, undefined);
 
-    const unknown = runCli([
+    const unknown = await runCli([
       "list",
       "--store-dir",
       storeDir,
@@ -743,7 +742,7 @@ test("list recognizes the current Codex composer marker and keeps unknown screen
   }
 });
 
-test("list never advertises raw Claude approval or ambiguous cancellation", () => {
+test("list never advertises raw Claude approval or ambiguous cancellation", async () => {
   const tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-list-raw-claude-approval-")
   );
@@ -764,7 +763,7 @@ test("list never advertises raw Claude approval or ambiguous cancellation", () =
 
   try {
     fs.mkdirSync(workspace, { recursive: true });
-    const listed = runCli([
+    const listed = await runCli([
       "list",
       "--store-dir",
       storeDir,
@@ -813,7 +812,7 @@ test("list never advertises raw Claude approval or ambiguous cancellation", () =
   }
 });
 
-test("list discovers Claude and Codex tmux sessions from static runtime snapshots", () => {
+test("list discovers Claude and Codex tmux sessions from static runtime snapshots", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-list-claude-tmux-"));
   const storeDir = path.join(tempDir, "conversations");
   const codexWorkspace = path.join(tempDir, "codex-workspace");
@@ -822,7 +821,7 @@ test("list discovers Claude and Codex tmux sessions from static runtime snapshot
   try {
     fs.mkdirSync(codexWorkspace, { recursive: true });
     fs.mkdirSync(claudeWorkspace, { recursive: true });
-    const listed = runCli([
+    const listed = await runCli([
       "list",
       "--store-dir",
       storeDir,
@@ -917,12 +916,8 @@ test("list discovers Claude and Codex tmux sessions from static runtime snapshot
   }
 });
 
-function runCli(args: string[]) {
-  const result = spawnSync(process.execPath, [binPath, ...args], {
-    encoding: "utf8",
-    env: process.env
-  });
-
+async function runCli(args: string[]) {
+  const result = await runInProcessCli(args, { env: { ...process.env } });
   assert.equal(result.status, 0, result.stderr || result.stdout);
   return JSON.parse(result.stdout);
 }

@@ -43,7 +43,7 @@
       "witnesses": [
         "cli-core-import-boundary",
         "cli-output-boundary",
-        "management-list-boundary",
+        "management-list-in-process",
         "store-protocol-cli-boundary"
       ]
     },
@@ -69,7 +69,7 @@
       ],
       "witnesses": [
         "action-v16-unit",
-        "management-list-boundary",
+        "management-list-in-process",
         "openclaw-plugin-boundary"
       ]
     },
@@ -269,7 +269,13 @@
       "needle": "transition eligibility preserves binding and capability gate priority"
     },
     {
-      "id": "management-list-boundary",
+      "id": "management-list-executable-boundary",
+      "path": "test/store-protocol-cli.test.ts",
+      "tier": "integration",
+      "needle": "standalone list and status leave persisted conversation files and runtime untouched"
+    },
+    {
+      "id": "management-list-in-process",
       "path": "test/management-cli.test.ts",
       "tier": "integration",
       "needle": "list exposes physical tmux terminals with the terminal-first action contract"
@@ -341,7 +347,13 @@
       "needle": "OpenClaw runtime registrations match the published manifest"
     },
     {
-      "id": "session-selector-boundary",
+      "id": "session-authority-unit",
+      "path": "test/session-store.test.ts",
+      "tier": "fast",
+      "needle": "protocol 3 missing Session state fails closed instead of returning a Turn fallback"
+    },
+    {
+      "id": "session-selector-in-process",
       "path": "test/session-selector-cli.test.ts",
       "tier": "integration",
       "needle": "CLI omission and short refs resolve one actionable managed session"
@@ -395,6 +407,12 @@
       "needle": "raw and managed Codex sends fail closed unless the locked pane is verifiably idle"
     },
     {
+      "id": "turn-session-binding-in-process",
+      "path": "test/turn-session-binding-cli.test.ts",
+      "tier": "integration",
+      "needle": "protocol-3 terminal callback fails closed when its Session state is missing"
+    },
+    {
       "id": "verified-dead-unit",
       "path": "test/verified-dead-agent-policy.test.ts",
       "tier": "fast",
@@ -404,15 +422,17 @@
   "migration_witnesses": [
     {
       "id": "callback-outbox",
-      "invariant": "Imported callback commands preserve message identity, attempt authority, transport acceptance, and settlement ordering; retained executable and Gateway witnesses preserve argv, exit, concurrency, and child-process delivery boundaries.",
+      "invariant": "Imported callback commands preserve message identity, Session binding authority, attempt authority, transport acceptance, and settlement ordering; retained executable and Gateway witnesses preserve argv, exit, concurrency, and child-process delivery boundaries.",
       "old_executable_witnesses": [
         "callback-cli-boundary",
-        "claude-callback-boundary"
+        "claude-callback-boundary",
+        "turn-session-binding-in-process"
       ],
       "service_invariant_witnesses": [
         "callback-policy-unit",
         "callback-settlement-unit",
-        "callback-transport-unit"
+        "callback-transport-unit",
+        "session-authority-unit"
       ],
       "retained_boundary_witnesses": [
         "callback-cli-boundary",
@@ -434,7 +454,7 @@
         "cli-core-import-boundary",
         "cli-output-boundary",
         "cli-runtime-log-redaction-boundary",
-        "management-list-boundary"
+        "management-list-executable-boundary"
       ]
     },
     {
@@ -491,14 +511,17 @@
     },
     {
       "id": "terminal-binding-authority",
-      "invariant": "Imported native ownership commands preserve exact cross-process and cross-Store binding decisions while retained executable mutations perform fresh observations before terminal input.",
+      "invariant": "Imported ownership, selector, and callback commands preserve exact cross-process, cross-Store, Session-generation, and canonical binding decisions while retained executable mutations perform fresh observations before terminal input.",
       "old_executable_witnesses": [
         "codex-binding-boundary",
         "handoff-boundary",
         "native-ownership-in-process",
-        "terminal-send-boundary"
+        "session-selector-in-process",
+        "terminal-send-boundary",
+        "turn-session-binding-in-process"
       ],
       "service_invariant_witnesses": [
+        "session-authority-unit",
         "terminal-binding-unit"
       ],
       "retained_boundary_witnesses": [
@@ -541,18 +564,19 @@
     },
     {
       "id": "terminal-list-renderer",
-      "invariant": "The pure renderer preserves action-contract v16 ordering, exact selectors, and read-only projection for CLI and OpenClaw.",
+      "invariant": "The imported command service and pure renderer preserve action-contract v16 ordering, exact selectors, ambiguity failures, and read-only projection for CLI and OpenClaw.",
       "old_executable_witnesses": [
-        "management-list-boundary",
-        "session-selector-boundary"
+        "management-list-in-process",
+        "session-selector-in-process"
       ],
       "service_invariant_witnesses": [
         "action-v16-unit"
       ],
       "retained_boundary_witnesses": [
-        "management-list-boundary",
+        "codex-binding-boundary",
+        "management-list-executable-boundary",
         "openclaw-plugin-boundary",
-        "session-selector-boundary"
+        "terminal-send-boundary"
       ]
     },
     {

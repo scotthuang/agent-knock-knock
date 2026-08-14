@@ -216,6 +216,32 @@ They still prove exact argv, version parsing, executable permissions, timeout,
 non-zero exit, missing executable, and malformed-output behavior; only their
 tier classification changed.
 
+## #126 management, selector, and Session-binding in-process migration
+
+The third migration slice removes the outer CLI process from 50 normal command
+invocation expressions across 24 tests while preserving all 298 assertion call
+sites. `management-cli` and `session-selector-cli` now exercise the executable's
+same `parseCliCommand` to `executeCliCommand` path for list, status, selector,
+static-terminal, and synthetic-acceptance behavior. The six record-only
+`turn-session-binding-cli` callbacks use that path for Session authority checks.
+
+| Former executable cases | Imported service invariant | Retained real boundary |
+| --- | --- | --- |
+| Ten management list/status invocations | Exact JSON projection, trace redaction, static terminal observation, and action-contract v16 | Standalone executable list/status in `store-protocol-cli`, copied-distribution CLI output/exit |
+| Thirty-four selector, status, send, respond, and approve invocations | Deterministic ambiguity failures, canonical ownership, cross-Store fencing, and exact selector/token routing | Codex binding and terminal-send executable suites with real terminal observation/input |
+| Six record-only callback binding invocations | Protocol-3 Session presence, generation, process evidence, route-rename, and protocol-2 compatibility | Callback executable argv/exit, Gateway, retry, and concurrency suites |
+
+The static metric removes one CLI startup site from each migrated file, moving
+the evidence from 37 to 34 included sites (`cli_process` 27 to 24). All 10
+fake-Node sites remain. Writer-protocol mismatch and fake-tmux observation in
+`store-protocol-cli`, callback Gateway/concurrency, Store crash and migration,
+terminal input, lock competition, monitor PID, and OS-exit witnesses remain
+process-backed.
+
+The machine-readable `callback-outbox`, `terminal-binding-authority`, and
+`terminal-list-renderer` mappings tie each former executable family to its fast
+service invariant and to a separate retained real-process witness.
+
 ## #108 performance record
 
 The pre-refactor maintainer baseline was 48 files / 683 tests / about 573

@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import {
   applyMessageToConversation,
   createConversation,
@@ -27,8 +26,8 @@ import {
   storeSessionsDir
 } from "../src/store.js";
 import type { TerminalControlRef } from "../src/terminal-agent-adapter.js";
+import { runInProcessCli } from "./in-process-cli-fixtures.js";
 
-const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 const nativeThreadId = "11111111-1111-4111-8111-111111111111";
 const processUuid = "codex-pid:42001:birth:fixture";
 const rollout = {
@@ -38,10 +37,10 @@ const rollout = {
   path: "/tmp/akk-turn-session-binding-rollout.jsonl"
 };
 
-test("protocol-3 terminal callback fails closed when its Session state is missing", () => {
+test("protocol-3 terminal callback fails closed when its Session state is missing", async () => {
   const fixture = createCallbackTurnFixture({ terminal: true });
   try {
-    const result = runCallback(fixture.conversation);
+    const result = await runCallback(fixture.conversation);
     assert.notEqual(result.status, 0);
     assert.match(
       result.stderr,
@@ -56,13 +55,13 @@ test("protocol-3 terminal callback fails closed when its Session state is missin
   }
 });
 
-test("a quarantined migrated terminal Session cannot authorize its legacy Turn", () => {
+test("a quarantined migrated terminal Session cannot authorize its legacy Turn", async () => {
   const fixture = createCallbackTurnFixture({
     terminal: true,
     sessionStatus: "quarantined"
   });
   try {
-    const result = runCallback(fixture.conversation);
+    const result = await runCallback(fixture.conversation);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /Session binding generation is no longer current/u);
   } finally {
@@ -70,14 +69,14 @@ test("a quarantined migrated terminal Session cannot authorize its legacy Turn",
   }
 });
 
-test("a migrated terminal Session cannot authorize a Turn with different process evidence", () => {
+test("a migrated terminal Session cannot authorize a Turn with different process evidence", async () => {
   const fixture = createCallbackTurnFixture({
     terminal: true,
     sessionStatus: "bound",
     bindingProcessUuid: "codex-pid:42001:birth:different"
   });
   try {
-    const result = runCallback(fixture.conversation);
+    const result = await runCallback(fixture.conversation);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /Session binding generation is no longer current/u);
   } finally {
@@ -85,13 +84,13 @@ test("a migrated terminal Session cannot authorize a Turn with different process
   }
 });
 
-test("an exact protocol-2 terminal Turn is materialized before its callback", () => {
+test("an exact protocol-2 terminal Turn is materialized before its callback", async () => {
   const fixture = createCallbackTurnFixture({
     terminal: true,
     predecessorStore: true
   });
   try {
-    const result = runCallback(fixture.conversation);
+    const result = await runCallback(fixture.conversation);
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const parsed = JSON.parse(result.stdout);
     assert.equal(parsed.conversation.status, "idle");
@@ -102,14 +101,14 @@ test("an exact protocol-2 terminal Turn is materialized before its callback", ()
   }
 });
 
-test("a migrated canonical Turn remains authorized after a tmux route rename", () => {
+test("a migrated canonical Turn remains authorized after a tmux route rename", async () => {
   const fixture = createCallbackTurnFixture({
     terminal: true,
     sessionStatus: "bound",
     bindingRouteRename: true
   });
   try {
-    const result = runCallback(fixture.conversation);
+    const result = await runCallback(fixture.conversation);
     assert.equal(result.status, 0, result.stderr || result.stdout);
     assert.equal(JSON.parse(result.stdout).conversation.status, "idle");
   } finally {
@@ -117,10 +116,10 @@ test("a migrated canonical Turn remains authorized after a tmux route rename", (
   }
 });
 
-test("a non-terminal delegated Turn keeps callback compatibility without Session state", () => {
+test("a non-terminal delegated Turn keeps callback compatibility without Session state", async () => {
   const fixture = createCallbackTurnFixture({ terminal: false });
   try {
-    const result = runCallback(fixture.conversation);
+    const result = await runCallback(fixture.conversation);
     assert.equal(result.status, 0, result.stderr || result.stdout);
     assert.equal(JSON.parse(result.stdout).conversation.status, "idle");
   } finally {
@@ -309,8 +308,7 @@ function createCallbackTurnFixture({
 }
 
 function runCallback(conversation: Conversation) {
-  return spawnSync(process.execPath, [
-    binPath,
+  return runInProcessCli([
     "callback",
     "--state",
     conversation.state_path!,
@@ -323,7 +321,6 @@ function runCallback(conversation: Conversation) {
       body: "Binding guard callback"
     })
   ], {
-    encoding: "utf8",
     env: {
       ...process.env,
       AKK_RUNTIME_DIR: path.join(
