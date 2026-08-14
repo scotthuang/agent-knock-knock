@@ -1,0 +1,254 @@
+{
+  "schema": "agent-knock-knock/orchestration-refactor-baseline",
+  "version": 1,
+  "snapshot": {
+    "git_commit": "ea592a88d7af4a709e7a7a1b989dd29e61932935",
+    "git_tag": "v0.12.11",
+    "package_version": "0.12.11",
+    "measured_on": "2026-08-14"
+  },
+  "scope": {
+    "production_glob": "src/**/*.ts",
+    "production_files": 38,
+    "excluded": [
+      "test/**",
+      "scripts/**",
+      "dist/**",
+      "templates/**",
+      "node_modules/**"
+    ]
+  },
+  "measurement_method": {
+    "physical_loc": "wc -l over checked-in production TypeScript files",
+    "ast_parser": "project top-level TypeScript compiler API 7.0.2",
+    "functions": "functions, methods, accessors, constructors, function expressions, and arrow functions with bodies",
+    "approximate_complexity": "1 + if/loop/case/catch/conditional-expression/logical-and/logical-or/nullish-coalescing; nested function bodies excluded",
+    "dependency_cycles": "relative production TypeScript imports and exports resolved with the project TypeScript AST and depth-first cycle detection",
+    "test_profiles": "AKK_TEST_CONCURRENCY=4 npm run test:profile -- <fast|integration> --output <path>"
+  },
+  "production": {
+    "physical_loc": 73792,
+    "functions_with_bodies": 2449,
+    "files_over_1000_loc": 16,
+    "functions_over_100_loc": 167,
+    "functions_over_200_loc": 57,
+    "functions_over_500_loc": 9,
+    "functions_complexity_over_20": 150,
+    "relative_internal_import_declarations": 97,
+    "dependency_cycles": 0
+  },
+  "cli_core": {
+    "path": "src/cli-core.ts",
+    "physical_loc": 38005,
+    "production_loc_percent": 51.5,
+    "functions_with_bodies": 913,
+    "functions_over_100_loc": 116,
+    "functions_over_200_loc": 43,
+    "functions_over_500_loc": 8,
+    "functions_complexity_over_20": 98,
+    "import_declarations": 37,
+    "distinct_internal_modules_imported": 30,
+    "record_string_any_type_references": 246,
+    "functions_receiving_options": 152,
+    "untyped_options_parameters": 63,
+    "record_any_options_parameters": 82,
+    "distinct_options_properties": 117,
+    "options_property_accesses": 363,
+    "durable_mutation_calls": 204,
+    "lock_or_writer_lease_acquisition_calls": 91
+  },
+  "largest_functions": [
+    {
+      "path": "src/cli-core.ts",
+      "name": "runTerminalControlSend",
+      "start_line": 19838,
+      "physical_loc": 1886,
+      "approximate_complexity": 242
+    },
+    {
+      "path": "src/cli-core.ts",
+      "name": "runTerminalBridgeMonitorWithLock",
+      "start_line": 27647,
+      "physical_loc": 1444,
+      "approximate_complexity": 203
+    },
+    {
+      "path": "src/cli-core.ts",
+      "name": "terminalFirstListProjection",
+      "start_line": 4931,
+      "physical_loc": 1283,
+      "approximate_complexity": 1,
+      "note": "Contains a 1162-line terminal projection callback with approximate complexity 302."
+    },
+    {
+      "path": "src/cli-core.ts",
+      "name": "terminalFirstListProjection terminal callback",
+      "start_line": 4998,
+      "physical_loc": 1162,
+      "approximate_complexity": 302
+    },
+    {
+      "path": "src/deferred-foreground-transfer.ts",
+      "name": "assertDeferredForegroundTransfer",
+      "start_line": 211,
+      "physical_loc": 834,
+      "approximate_complexity": 190
+    },
+    {
+      "path": "src/cli-core.ts",
+      "name": "runNativeThreadTransition",
+      "start_line": 16516,
+      "physical_loc": 812,
+      "approximate_complexity": 1,
+      "note": "Contains a 790-line transaction callback with approximate complexity 79."
+    },
+    {
+      "path": "src/cli-core.ts",
+      "name": "runNativeThreadTransition transaction callback",
+      "start_line": 16534,
+      "physical_loc": 790,
+      "approximate_complexity": 79
+    },
+    {
+      "path": "src/cli-core.ts",
+      "name": "runSend",
+      "start_line": 18077,
+      "physical_loc": 721,
+      "approximate_complexity": 28
+    },
+    {
+      "path": "src/cli-core.ts",
+      "name": "runApprove",
+      "start_line": 19041,
+      "physical_loc": 635,
+      "approximate_complexity": 33
+    }
+  ],
+  "other_large_files": [
+    { "path": "src/terminal-agent-bridge.ts", "physical_loc": 3521 },
+    { "path": "src/openclaw-plugin.ts", "physical_loc": 2834 },
+    { "path": "src/claude-local-transcript-provider.ts", "physical_loc": 2153 },
+    { "path": "src/store.ts", "physical_loc": 1909 },
+    { "path": "src/herdr-terminal-control-provider.ts", "physical_loc": 1841 },
+    { "path": "src/live-lifecycle-evidence.ts", "physical_loc": 1838 },
+    { "path": "src/terminal-submission-acceptance.ts", "physical_loc": 1747 },
+    { "path": "src/codex-store-adapter.ts", "physical_loc": 1737 },
+    { "path": "src/claude-terminal-agent-adapter.ts", "physical_loc": 1695 },
+    { "path": "src/deferred-foreground-transfer.ts", "physical_loc": 1684 },
+    { "path": "src/managed-session.ts", "physical_loc": 1582 },
+    { "path": "src/live-lifecycle-smoke.ts", "physical_loc": 1526 },
+    { "path": "src/terminal-control-provider.ts", "physical_loc": 1421 },
+    { "path": "src/codex-terminal-agent-adapter.ts", "physical_loc": 1335 },
+    { "path": "src/openclaw-plugin-helpers.ts", "physical_loc": 1073 }
+  ],
+  "test_inventory": {
+    "typescript_files": 71,
+    "physical_loc": 71902,
+    "v0_12_11_release_baseline_tests": 1038,
+    "note": "The physical LOC includes both test/*.ts and test/shards/*.ts. The release baseline count is recorded from the v0.12.11 release gate."
+  },
+  "test_performance_baseline": {
+    "environment": {
+      "node": "v24.18.0",
+      "platform": "darwin",
+      "arch": "arm64",
+      "cpu_count": 10,
+      "concurrency": 4
+    },
+    "fast": {
+      "files": 33,
+      "tests": 576,
+      "runs_ms": [8684.173, 8696.722, 8854.166],
+      "median_ms": 8696.722,
+      "successful_runs": 3,
+      "failed_runs": 0
+    },
+    "integration": {
+      "files": 35,
+      "tests": 462,
+      "runs_ms": [922009.545, 985746.683],
+      "successful_runs": 1,
+      "failed_runs": 1,
+      "failure": {
+        "test": "terminal bridge monitor singleton rejects a live owner and reclaims a dead owner",
+        "reason": "timed out waiting for the replacement monitor to record binding supersession"
+      },
+      "largest_file": {
+        "path": "test/codex-no-rollout-binding-cli.test.ts",
+        "tests": 97,
+        "runs_ms": [921811.095, 985556.986]
+      },
+      "note": "Both runs used the clean ea592a8 worktree with no concurrent repository tests. The mixed result records a pre-refactor timing flake rather than reporting a false all-green baseline."
+    },
+    "combined_full": {
+      "tests": 1038,
+      "profiled_separately": true,
+      "note": "Fast and integration tiers were profiled separately so the integration flake and dominant file remain visible. A post-change combined full run remains a merge gate."
+    }
+  },
+  "persistence_contract": {
+    "store_format_version": 1,
+    "store_writer_protocol": 5,
+    "store_session_authority_protocol": 3,
+    "managed_session_schema": "agent-knock-knock/session",
+    "managed_session_version": 1,
+    "native_thread_transition_schema": "agent-knock-knock/native-thread-transition",
+    "native_thread_transition_version": 1,
+    "deferred_foreground_transfer_schema": "agent-knock-knock/deferred-foreground-transfer",
+    "deferred_foreground_transfer_versions_readable": [1, 2]
+  },
+  "public_contract": {
+    "npm_package": "@scotthuang/agent-knock-knock",
+    "executable": "agent-knock-knock",
+    "openclaw_plugin_id": "agent-knock-knock",
+    "openclaw_slash_command": "akk",
+    "openclaw_tool_count": 14,
+    "openclaw_tools": [
+      "agent_knock_knock_list",
+      "agent_knock_knock_list_resumable_threads",
+      "agent_knock_knock_native_inspect",
+      "agent_knock_knock_new_thread",
+      "agent_knock_knock_reconcile_binding",
+      "agent_knock_knock_resume_thread",
+      "agent_knock_knock_status",
+      "agent_knock_knock_send",
+      "agent_knock_knock_respond",
+      "agent_knock_knock_renew",
+      "agent_knock_knock_retry_callback",
+      "agent_knock_knock_cancel",
+      "agent_knock_knock_close",
+      "agent_knock_knock_approve"
+    ],
+    "imported_facade_functions": [
+      "parseCliCommand",
+      "executeCliCommand"
+    ]
+  },
+  "target_constraints": {
+    "cli_core_max_physical_loc": 8000,
+    "new_function_default_max_physical_loc": 100,
+    "new_function_default_max_approximate_complexity": 20,
+    "hard_function_max_physical_loc_without_exception": 500,
+    "hard_function_max_approximate_complexity_without_exception": 50,
+    "production_dependency_cycles": 0,
+    "canonical_lock_order": [
+      "terminal_dispatch_lock",
+      "store_writer_lease",
+      "conversation_state_lock"
+    ]
+  },
+  "known_lock_order_exceptions": [
+    {
+      "path": "src/cli-core.ts",
+      "name": "runTerminalControlSend",
+      "start_line": 19838,
+      "detail": "Recursive held-lock flags can express terminal -> state -> writer."
+    },
+    {
+      "path": "src/cli-core.ts",
+      "name": "runTerminalControlCancel",
+      "start_line": 26274,
+      "detail": "Acquires terminal, then conversation state, then enters the Store writer lease."
+    }
+  ]
+}
