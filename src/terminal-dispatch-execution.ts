@@ -29,7 +29,7 @@ import {
   codexCompanionsExcludingPreferred,
   codexCompanionsPresentInOpenRootInventory,
   isCodexStatusCardEvidence,
-  nativeIdentityMatchesStoredTurn,
+  nativeAgentIdentityMatchesTurn,
   processIncarnationRelationship,
   withCodexCompanionFences,
   type CodexAllowedCompanionSet,
@@ -61,6 +61,7 @@ export {
   managedSessionRevision,
   nativeThreadTransitionRevision
 } from "./managed-session.js";
+export { nativeAgentIdentityMatchesTurn };
 export {
   codexIdentityFence,
   isCompleteNativeRollout,
@@ -695,46 +696,6 @@ export function terminalSubmissionPayload(payload: string): string {
     );
   }
   return payload.trimEnd();
-}
-
-export function nativeAgentIdentityMatchesTurn(
-  conversation: Conversation,
-  currentIdentity: TerminalNativeIdentity | undefined
-): boolean {
-  const takeover = isRecord(conversation.native_session_takeover)
-    ? conversation.native_session_takeover
-    : undefined;
-  const sessionId = nonBlankString(takeover?.terminal_agent_session_id);
-  const processUuid = nonBlankString(takeover?.terminal_agent_process_uuid);
-  const processBirth = nonBlankString(takeover?.terminal_agent_process_birth);
-  const rollout = takeover?.terminal_agent_rollout;
-  const strict = Number(takeover?.terminal_agent_identity_protocol) === 1;
-  const agent = executorForConversation(conversation).kind;
-  return nativeIdentityMatchesStoredTurn({
-    strictNativeIdentity: strict,
-    agent,
-    storedSessionId: sessionId,
-    storedProcessUuid: processUuid,
-    storedProcessBirth: processBirth,
-    get storedRollout() {
-      return isRecord(rollout)
-        ? {
-            get fd() {
-              return nonBlankString(rollout.fd);
-            },
-            get device() {
-              return nonBlankString(rollout.device);
-            },
-            get inode() {
-              return nonBlankString(rollout.inode);
-            },
-            get path() {
-              return nonBlankString(rollout.path);
-            }
-          }
-        : undefined;
-    }
-  }, currentIdentity);
 }
 
 export class TerminalDispatchExecutionService {

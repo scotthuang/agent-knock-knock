@@ -2,8 +2,8 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 23124,
-    "production_physical_loc": 84241,
+    "cli_core_max_physical_loc": 20051,
+    "production_physical_loc": 84907,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -248,6 +248,15 @@
         "test/shards/agent-cli-dispatch-recovery.test.ts",
         "test/shards/agent-cli-session-acceptance.test.ts",
         "test/shards/agent-cli-terminal-send-gates.test.ts"
+      ]
+    },
+    "terminal-list-application": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/delegate-cli.test.ts",
+        "test/human-handoff-adoption-cli.test.ts",
+        "test/management-cli.test.ts",
+        "test/session-selector-cli.test.ts"
       ]
     },
     "terminal-list-renderer": {
@@ -618,6 +627,10 @@
       "owner": "terminal-dispatch-application"
     },
     {
+      "path": "src/terminal-list-cli-adapter.ts",
+      "owner": "terminal-list-application"
+    },
+    {
       "path": "src/terminal-list-renderer.ts",
       "owner": "terminal-list-renderer"
     },
@@ -650,12 +663,20 @@
       "owner": "terminal-monitor-policy"
     },
     {
+      "path": "src/terminal-process-facts.ts",
+      "owner": "terminal-control"
+    },
+    {
       "path": "src/terminal-process-source.ts",
       "owner": "terminal-control"
     },
     {
       "path": "src/terminal-scoped-approval-authority.ts",
       "owner": "terminal-scoped-approval-authority"
+    },
+    {
+      "path": "src/terminal-selector-projection-service.ts",
+      "owner": "terminal-list-application"
     },
     {
       "path": "src/terminal-submission-acceptance.ts",

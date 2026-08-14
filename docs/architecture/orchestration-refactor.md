@@ -1345,6 +1345,74 @@ five retained targeted integration witnesses are Codex no-rollout binding,
 dispatch authority, dispatch recovery, Session acceptance, and terminal send
 gates.
 
+## Terminal list and selector CLI facade
+
+The terminal-list slice moves raw Store, managed-Session, managed-Turn,
+terminal/process, dispatch-ledger, and approval observations out of
+`cli-core.ts` into `terminal-list-cli-adapter.ts`. The adapter owns only CLI
+composition and infrastructure projection. Existing terminal action,
+authority, binding, dispatch, approval, and list-renderer modules remain the
+unique decision owners; the facade does not copy their reducers, tokens,
+identity classifiers, conflict precedence, or approval rules.
+
+The exported facade has five cohesive, explicitly typed dependency groups:
+reconciliation, terminal discovery, Store observation, authority observation,
+and policy configuration. `cli-core.ts` constructs one local facade and routes
+list and selector work through it. Each facade call installs its own immutable
+dependency set in an async-local execution context. There is no mutable module
+configuration or catch-all `(...args: any[]) => any` runtime port, and the only
+runtime export from the adapter is `createTerminalListCliFacade`.
+
+The direct concurrency witness runs facade A's reconciled `runList` and facade
+B's selector discovery concurrently, pauses both across independent awaits,
+then releases B before A. The observed post-await callbacks remain B's process
+source and A's idle reconciler respectively. After both Promises settle, a
+second selector call through each facade still observes its own marker. This
+locks the per-execution dependency isolation and factory-only entry boundary.
+
+Selector candidate projection is the I/O-free
+`terminal-selector-projection-service.ts`; it accepts typed entry facts and one
+typed active-status policy. Process elapsed parsing has one I/O-free canonical
+owner in `terminal-process-facts.ts`; the process-source adapter compatibility
+re-exports it, while the selector service never imports the process-source
+module or its `node:child_process` edge. Managed-Session revision is read
+directly from `managed-session.ts`. Native Turn identity matching has one
+neutral implementation in `terminal-authority-policy.ts`, shared by list and
+dispatch; the dispatch module keeps only a compatibility re-export.
+
+Measured against exact head `29219e4f98a6057924feb37ed05a9982e7310695`,
+the slice reduces `src/cli-core.ts` from 23,124 to 20,051 physical lines
+(-3,073) and changes production TypeScript from 84,241 to 84,907 (+666). The
+transparent typed-facade overhead is 21.67% of the core movement. The graph
+changes from 90 modules and 417 static import edges to 93 modules and 446
+edges, with zero cycles before and after. The terminal-list owner has two
+modules and four targeted integration witnesses. The preceding deferred
+foreground slice retains its eight-module ownership mapping unchanged.
+
+The stacked composition preserves the deferred foreground authority,
+preparation, application, and recovery services as the only owners of their
+state machines. Its existing authority-adapter ports now call the terminal-list
+facade for managed-Turn attention, transition state, and terminal-incarnation
+blocking facts; no old inline deferred reducer was restored during the rebase.
+
+The infrastructure adapter is a reviewed exception to the preferred
+100-line/complexity-20 function target because its staged observation
+functions preserve existing Store/terminal/error priority and getter
+short-circuits. Its maximum function span is the 298-line/c43 binding
+observation, and its highest conservative approximate complexity is c44 in the
+139-line handoff observation. Public rendering is 256/c42, terminal discovery
+entry composition is 227/c39, and scoped approval resolution is 221/c36. All
+remain below the hard 500-line/c50 boundary. The pure selector service peaks at
+42/c11 and the process fact parser at 24/c9.
+
+Direct fast proofs preserve exact selector JSON bytes and key insertion order,
+mutation-disabled lazy `available_actions` reads, approval fallback getter
+order and action target, canonical native-identity getter order, and concurrent
+facade isolation. Focused list, delegate, Session-selector, action projection,
+and process-source witnesses retain Store/terminal/error priority, the second
+Session lookup on mismatch, stale-list versus fresh-mutation separation, and
+public token bytes.
+
 ## Soft freeze while #126 is active
 
 Until the orchestration milestones finish:

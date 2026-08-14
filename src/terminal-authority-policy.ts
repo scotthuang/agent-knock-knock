@@ -3,6 +3,10 @@ import path from "node:path";
 import type { CodexOpenRootRolloutInventory } from "./agent-session-provider.js";
 import type { ExecutorKind } from "./executors.js";
 import {
+  executorForConversation,
+  type Conversation
+} from "./protocol.js";
+import {
   humanObservedHandoffBindingToken,
   isExactNativeThreadId,
   managedSessionBindingToken,
@@ -323,6 +327,47 @@ export function nativeIdentityMatchesStoredTurn(
     storedRollout,
     currentIdentity?.rollout
   );
+}
+
+/** Project one stored Turn into the canonical native-identity matcher. */
+export function nativeAgentIdentityMatchesTurn(
+  conversation: Conversation,
+  currentIdentity: TerminalNativeIdentity | undefined
+): boolean {
+  const takeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const sessionId = nonBlankString(takeover?.terminal_agent_session_id);
+  const processUuid = nonBlankString(takeover?.terminal_agent_process_uuid);
+  const processBirth = nonBlankString(takeover?.terminal_agent_process_birth);
+  const rollout = takeover?.terminal_agent_rollout;
+  const strict = Number(takeover?.terminal_agent_identity_protocol) === 1;
+  const agent = executorForConversation(conversation).kind;
+  return nativeIdentityMatchesStoredTurn({
+    strictNativeIdentity: strict,
+    agent,
+    storedSessionId: sessionId,
+    storedProcessUuid: processUuid,
+    storedProcessBirth: processBirth,
+    get storedRollout() {
+      return isRecord(rollout)
+        ? {
+            get fd() {
+              return nonBlankString(rollout.fd);
+            },
+            get device() {
+              return nonBlankString(rollout.device);
+            },
+            get inode() {
+              return nonBlankString(rollout.inode);
+            },
+            get path() {
+              return nonBlankString(rollout.path);
+            }
+          }
+        : undefined;
+    }
+  }, currentIdentity);
 }
 
 export function exactBoundCodexSendSource(facts: {

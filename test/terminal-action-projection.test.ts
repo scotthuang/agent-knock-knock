@@ -14,6 +14,7 @@ import {
   activeTurnHandoffDecisionToken,
   classifyManagedBindingConflict,
   deferredCodexForegroundBindingToken,
+  nativeAgentIdentityMatchesTurn,
   nativeIdentityMatchesStoredTurn,
   processIncarnationRelationship,
   terminalControlAliasMatches,
@@ -23,8 +24,6 @@ import {
   type StoredTurnNativeIdentityFacts,
   type TerminalNativeIdentity
 } from "../src/terminal-authority-policy.js";
-import { nativeAgentIdentityMatchesTurn } from
-  "../src/terminal-dispatch-execution.js";
 import {
   decideTerminalSendAuthority as decideFreshMutationSendAuthority
 } from "../src/terminal-dispatch-policy.js";
