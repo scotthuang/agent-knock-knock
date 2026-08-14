@@ -548,6 +548,7 @@ delivery cost.
 | Callback policy, transport, and settlement | Retry decisions; Gateway process adapter; delivery progress/success/failure settlement | CLI composition owns the clock, state transaction, retry launcher, output, and callback preparation | retry matrix, exact transport call ordering, settlement write-order tests, and callback integration |
 | Monitor seams | Poll fingerprint/timeout reduction and launch/ownership plans | Poll I/O, supervision process management, state/event writes, callback preparation, and terminal locks remain in the shell | poll/launch tables and monitor recovery/lifecycle/approval integration |
 | Terminal list renderer | Pure managed-Turn and action-contract projection from sampled facts | Store, process, ledger, Session, approval, and token observations remain in `cli-core.ts`; mutation never consumes list authority | exact v16 action order plus list/session/handoff integration |
+| Conversation trace | Bounded executor-log parsing, secret redaction, and monitor-event projection | Status routing and conversation/event loading remain in `cli-core.ts`; the module performs only the existing optional read of the selected output log | exact parser/redaction/fallback unit tests plus management CLI integration |
 | CLI runtime context | Per-execution dependency, output, clock, sleep, exit, and logging context | No business policy or persistent state moved into the runtime | nested and concurrent async-context isolation tests |
 
 The new compile-time direction is

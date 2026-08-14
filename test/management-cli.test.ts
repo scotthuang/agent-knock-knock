@@ -4,6 +4,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { createConversation } from "../src/protocol.js";
+import {
+  appendEvent,
+  pathsForConversation,
+  saveState
+} from "../src/store.js";
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 const testRuntimeDir = fs.mkdtempSync(
@@ -12,6 +18,60 @@ const testRuntimeDir = fs.mkdtempSync(
 process.env.AKK_RUNTIME_DIR = testRuntimeDir;
 process.on("exit", () => {
   fs.rmSync(testRuntimeDir, { recursive: true, force: true });
+});
+
+test("status --trace preserves the bounded redacted executor-log view", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-status-trace-"));
+  const storeDir = path.join(tempDir, "store");
+  try {
+    const base = createConversation({
+      userRequest: "inspect the trace",
+      executorKind: "codex",
+      executorSession: "codex-trace",
+      workspace: tempDir,
+      now: new Date("2026-08-14T00:00:00.000Z")
+    });
+    const paths = pathsForConversation(base.conversation_id, storeDir);
+    const conversation = {
+      ...base,
+      store_dir: paths.storeDir,
+      conversation_dir: paths.conversationDir,
+      event_log_path: paths.logPath,
+      state_path: paths.statePath
+    };
+    saveState(paths.statePath, conversation);
+    const outputPath = path.join(paths.conversationDir, "codex-output.log");
+    fs.writeFileSync(outputPath, [
+      "[thinking] private reasoning",
+      "[tool] shell --token private-token (completed)",
+      "output:",
+      "password=private-value",
+      "[done] completed"
+    ].join("\n"));
+    appendEvent(paths.logPath, {
+      event: "executor_launch",
+      conversation_id: conversation.conversation_id,
+      output_path: outputPath
+    });
+
+    const status = runCli([
+      "status",
+      "--state",
+      paths.statePath,
+      "--trace"
+    ]);
+    assert.equal(status.trace.source, "executor_output_log");
+    assert.equal(status.trace.output_path, outputPath);
+    assert.equal(status.trace.thinking_redacted_count, 1);
+    assert.deepEqual(status.trace.agent_messages, [
+      { kind: "thinking", body: "[redacted]" }
+    ]);
+    assert.equal(status.trace.tool_calls[0].name, "shell --token <redacted>");
+    assert.equal(status.trace.tool_calls[0].output_preview, "password=<redacted>");
+    assert.doesNotMatch(JSON.stringify(status.trace), /private-token|private-value/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("list exposes physical tmux terminals with the terminal-first action contract", () => {
