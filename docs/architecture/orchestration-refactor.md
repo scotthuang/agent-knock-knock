@@ -1246,6 +1246,105 @@ proves that neither `adapter` nor `legacy` survives projection. Existing
 lifecycle recovery, human handoff, no-rollout, lifecycle, and ownership
 integration witnesses remain the retained black-box boundary set.
 
+## Deferred Codex foreground application and recovery
+
+This slice moves the complete deferred Codex foreground application vertical
+out of `cli-core.ts`: preparation and fresh-authority publication; source
+reservation and target preparation; dispatch begin/stage advancement;
+zero-input abort and rollback; accepted commit and resolution; uncertain
+settlement; and prepared, accepted, and committed crash recovery. The typed
+implementation is split across the application, preparation, and recovery
+services plus their CLI adapters, a data-only boundary module, and the
+invocation-scoped repository capability. Observed handoff, native-thread
+lifecycle recovery, ordinary dispatch, monitor/callback behavior, public
+presentation, and raw terminal I/O remain outside this vertical.
+
+Measured against exact head
+`257950022ea40e343808ef68c903c6f874497a09`, the slice reduces
+`src/cli-core.ts` from 26,095 to 23,124 physical lines (-2,971, -11.39%) and
+changes total production TypeScript from 81,427 to 84,241 (+2,814, +3.46%).
+Typed production overhead is 94.7% of core movement, leaving 157 lines of
+positive movement margin. The production graph has 90 modules, 417 static
+import edges, and zero cycles.
+
+Across the eight new production modules, the TypeScript AST inventory contains
+219 functions. No function reaches the default 100 LOC/c20 review threshold;
+the maxima are 92 LOC and c19. Consequently there is no 500 LOC/c50 hard-gate
+exception. Application and preparation each expose three typed port groups;
+recovery exposes four. No service imports CLI core, Node filesystem/process
+APIs, raw JSON/lock helpers, a presenter, `ResolvedTerminalConversation`,
+`TerminalAgentAdapter`, or the concrete capability adapter. The service-side
+repository scope is a narrow interface in `deferred-foreground-boundary.ts`;
+its implementation is module-private and can only be obtained through the
+production terminal/writer or terminal/writer/state binders.
+
+The preparation request receives a projected terminal object with exactly
+`conversationId`, `agent`, `pid`, optional `workspace`, `target`, `resourceKey`,
+optional endpoint evidence, and `canonicalEndpoint`. The returned application
+boundary contains only those terminal facts and immutable transfer/session,
+process-incarnation, dispatch-snapshot, rollout-authority, and CAS facts. The
+resolved terminal, concrete control, adapter, legacy marker, Store directory,
+Turn paths, and terminal transport methods remain captured in CLI adapter
+closures. Runtime `Object.keys` witnesses fix the request, terminal-facts, and
+boundary shapes and reject `adapter` or `terminalControl` leakage. A stable
+data-only projection carries the source-reserved and target-prepared revisions
+and binding tokens through verification, dispatch, commit, and resolution;
+the associated broad terminal remains only in the CLI adapter.
+
+The capability binder authenticates one active terminal -> Store writer ->
+optional Turn state transaction before repository use. Terminal incarnation
+and resource key, absolute canonical Store key/value, `state.json` membership
+under that Store, matching `events.ndjson`, and state resource key/value are
+checked before I/O. Null, object, relative, cross-Store, wrong-key,
+wrong-process, wrong-log, and released-scope cases fail with ordinary errors
+before repository access. The concrete scope is not exported, and every scope
+method repeats the active-scope gate; retained scopes therefore expire when the
+transaction callback returns. Recovery asserts the transfer, projected
+terminal, and Turn route immediately after candidate selection and carries the
+same scope through every transfer/Session/state/ledger adapter operation. The
+PR172 lifecycle-recovery service retains ownership of its state machine and
+invokes this deferred service through its existing `recoverDeferred` port with
+the same active terminal and writer scopes/resources.
+
+### Application, CAS, and recovery order
+
+The extraction preserves these Store, Turn, ledger, and terminal-evidence
+orders:
+
+| Path | Exact effect and CAS order retained |
+| --- | --- |
+| Fresh preparation | process incarnation -> fresh rollout/dispatch observation -> fresh binding token -> target/transfer IDs -> canonical boundary revalidation -> exclusive ownership -> unresolved-transfer list (source identity or terminal id + endpoint; PID is not collision authority) -> request hash -> dispatcher pid -> clock -> transfer create with expected revision `null` |
+| Stale list token | process incarnation -> fresh observation -> freshly derived token -> reject; no ID generation, ownership check, list, hash, clock, or write |
+| Reservation | transfer load/authority -> fresh source verification -> source Session `bound -> transitioning` CAS -> crash point -> transfer `prepared -> source_reserved` CAS -> crash point -> transfer `source_reserved -> target_prepared` CAS with canonical Turn path -> crash point -> target Session create with expected revision `null` |
+| Dispatch evidence | target/source receipt checks -> transfer `target_prepared -> dispatch_started` CAS -> transfer `dispatch_started -> text_injected` CAS -> transfer `text_injected -> enter_dispatched` CAS; each write consumes the immediately loaded transfer revision |
+| Zero-input abort | possible-input guard first -> aborted transfer CAS -> target detach Session CAS -> source restore Session CAS -> `abort_resolved` transfer CAS. Before current-terminal recovery, every Store-authoritative aborted intent is finalized under the existing writer scope without pane/PID/cwd checks or a Turn-state lock, then transfers are listed again and filtered to the current terminal. Recovery with a prepared Turn first persists the aborted Turn receipt, then the resolved safe-to-retry ledger receipt, then performs those transfer/Session CAS writes |
+| Accepted commit | transfer/source/target reads and exact authority -> ownership -> optional same-thread source scrub Session CAS -> target accepted Session CAS -> committed transfer CAS -> source detach Session CAS -> target bind Session CAS -> exclusive-owner revalidation -> resolved transfer CAS |
+| Uncertain | authority and dispatch-start fence -> clock(s) -> one transfer CAS carrying `do_not_retry: true`; no Session rollback and no terminal retry |
+| Committed recovery | transfer/Turn/target/ledger authority -> exact acceptance observation -> accepted Turn state write -> accepted ledger write -> crash point -> source/target/transfer resolution CAS -> accepted Turn identity assertion |
+| Possible-input recovery | exact Turn/ledger authority -> one acceptance observation. Durable zero-input proof may enter the abort path; otherwise no abort or rollback is callable. A v3 pending candidate returns without replay, while older pending or observation failure reloads durable transfer authority, records uncertainty at most once, and fails closed |
+
+Turn acceptance remains stronger than later Session and ledger bookkeeping. In
+accepted recovery the accepted Turn state is written before Session/transfer
+commit and the accepted ledger is written only after the resolved Session
+authority and Turn identity checks. If later bookkeeping fails, the accepted
+Turn is retained and the failure path records stalled/uncertain durable
+evidence; terminal input is never replayed. All transfer writes use explicit
+revision CAS, Session writes use the immediately observed managed-Session
+revision, target creation uses `null`, and no list token is reused as mutation
+authority: mutation always re-observes the canonical post-lock terminal and
+binding authority.
+
+Four fast direct files provide the fake-port order, route, capability, and
+transition tables. They cover stale-token revalidation, request/boundary
+runtime shape, revision/clock order, possible-input never-abort behavior,
+single-observation recovery, durable reload before uncertainty, status routing,
+multiple-candidate rejection before state scope, cross-terminal abort cleanup
+before fresh matching, stable reservation-boundary CAS facts, canonical resource failures,
+non-public scope construction, and every-method released-scope failure. The
+five retained targeted integration witnesses are Codex no-rollout binding,
+dispatch authority, dispatch recovery, Session acceptance, and terminal send
+gates.
+
 ## Soft freeze while #126 is active
 
 Until the orchestration milestones finish:

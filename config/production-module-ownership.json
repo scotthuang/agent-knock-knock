@@ -2,8 +2,8 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 26095,
-    "production_physical_loc": 81427,
+    "cli_core_max_physical_loc": 23124,
+    "production_physical_loc": 84241,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -62,6 +62,16 @@
       "selection": "targeted",
       "integration_tests": [
         "test/management-cli.test.ts"
+      ]
+    },
+    "deferred-foreground-application": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/codex-no-rollout-binding-cli.test.ts",
+        "test/shards/agent-cli-dispatch-authority.test.ts",
+        "test/shards/agent-cli-dispatch-recovery.test.ts",
+        "test/shards/agent-cli-session-acceptance.test.ts",
+        "test/shards/agent-cli-terminal-send-gates.test.ts"
       ]
     },
     "doctor-capabilities": {
@@ -382,6 +392,38 @@
     {
       "path": "src/conversation-trace.ts",
       "owner": "conversation-trace"
+    },
+    {
+      "path": "src/deferred-foreground-application-service.ts",
+      "owner": "deferred-foreground-application"
+    },
+    {
+      "path": "src/deferred-foreground-authority-cli-adapter.ts",
+      "owner": "deferred-foreground-application"
+    },
+    {
+      "path": "src/deferred-foreground-boundary.ts",
+      "owner": "deferred-foreground-application"
+    },
+    {
+      "path": "src/deferred-foreground-capability.ts",
+      "owner": "deferred-foreground-application"
+    },
+    {
+      "path": "src/deferred-foreground-preparation-cli-adapter.ts",
+      "owner": "deferred-foreground-application"
+    },
+    {
+      "path": "src/deferred-foreground-preparation-service.ts",
+      "owner": "deferred-foreground-application"
+    },
+    {
+      "path": "src/deferred-foreground-recovery-cli-adapter.ts",
+      "owner": "deferred-foreground-application"
+    },
+    {
+      "path": "src/deferred-foreground-recovery-service.ts",
+      "owner": "deferred-foreground-application"
     },
     {
       "path": "src/deferred-foreground-transfer.ts",
