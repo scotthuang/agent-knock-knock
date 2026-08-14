@@ -77,16 +77,11 @@ import {
   createMessage,
   effectiveTurnStatus,
   executorForConversation,
-  extractStructuredMessage,
-  isTurnPhaseStatus,
-  normalizeLegacyCallbackStatus,
-  parseMessageJson,
   resolveExecutor,
   sessionIdForConversation,
   turnIdForConversation,
   type Conversation,
-  type ConversationStatus,
-  type TurnPhaseStatus
+  type ConversationStatus
 } from "./protocol.js";
 import {
   EXECUTOR_KINDS,
@@ -283,12 +278,12 @@ import {
   capabilityGatedRepositoryPairOperation, withCanonicalMutationLocks
 } from "./mutation-transaction.js";
 import {
-  beginCallbackRetryPolicy,
-  reduceCallbackRetryPolicy,
-  type CallbackDeliveryOutcome,
-  type CallbackRetryDisposition
-} from "./callback-outbox-policy.js";
-import { createCallbackOutboxSettlement } from "./callback-outbox-settlement.js";
+  createCallbackOutboxService,
+  deterministicTerminalCallbackMessageId,
+  terminalBridgeCompletionFingerprint,
+  type CallbackPreparationOptions,
+  type PreparedCallback
+} from "./callback-outbox-service.js";
 import {
   createOpenClawCallbackTransport,
   type CallbackProcessDeliveryObservation
@@ -4033,7 +4028,8 @@ function managedTurnListActionFacts(
   const retryCallbackEligible = Boolean(
     conversation &&
     conversation.legacy_callback_status_error === undefined &&
-    callbackRetryDisposition(callbackDelivery).state === "retryable"
+    callbackOutboxService().retryDisposition(callbackDelivery).state ===
+      "retryable"
   );
   return {
     terminalBridgeReady,
@@ -15738,28 +15734,6 @@ function markTerminalBridgeApprovalPromptCleared({
   });
 }
 
-function terminalBridgeApprovalCallbackIdentity(conversation): {
-  id: string;
-  now: Date;
-} {
-  const nativeTakeover = isRecord(conversation?.native_session_takeover)
-    ? conversation.native_session_takeover
-    : undefined;
-  const approval = isRecord(nativeTakeover?.terminal_bridge_approval)
-    ? nativeTakeover.terminal_bridge_approval
-    : undefined;
-  const id = stringValue(approval?.callback_message_id);
-  const timestamp = stringValue(approval?.callback_message_ts);
-  const timestampMs = validTimestampMs(timestamp);
-  if (!id || timestampMs === undefined) {
-    throw new Error("terminal approval notification has no stable callback identity");
-  }
-  return {
-    id,
-    now: new Date(timestampMs)
-  };
-}
-
 function prepareManagedSend({
   options,
   statePath,
@@ -22252,149 +22226,12 @@ async function reconcileMonitors(
   };
 }
 
-function prepareCallbackDeliveryReconciliation({
-  statePath,
-  logPath,
-  delayMs
-}: {
+function prepareCallbackDeliveryReconciliation(input: {
   statePath: string;
   logPath: string;
   delayMs?: unknown;
 }) {
-  const releaseStateLock = acquireFileLock(`${statePath}.lock`);
-  try {
-    const conversation = loadState(statePath);
-    const legacyStatusError = stringValue(
-      conversation.legacy_callback_status_error
-    );
-    if (legacyStatusError) {
-      return {
-        handled: true as const,
-        conversationId: conversation.conversation_id,
-        status: "skipped",
-        reason: "legacy_callback_status_ambiguous",
-        diagnostic: legacyStatusError
-      };
-    }
-    const callbackDelivery = isRecord(conversation.callback_delivery)
-      ? conversation.callback_delivery
-      : undefined;
-    if (
-      !["pending", "failed"].includes(
-        String(callbackDelivery?.status ?? "")
-      )
-    ) {
-      return {
-        handled: false as const
-      };
-    }
-    const storeDir = pathsForConversationDir(path.dirname(statePath)).storeDir;
-    assertConversationHasNoNonterminalDeferredForegroundTransfer({
-      storeDir,
-      conversation,
-      action: "reconcile callback delivery for"
-    });
-
-    const conversationId = stringValue(conversation.conversation_id) ?? "unknown";
-    const attempts = Number(callbackDelivery?.attempts ?? 0);
-    if (
-      !["pending", "failed"].includes(String(callbackDelivery?.status ?? "")) ||
-      !isRecord(callbackDelivery?.message)
-    ) {
-      return {
-        handled: true as const,
-        conversationId,
-        status: "skipped",
-        reason: "callback_delivery_metadata_missing"
-      };
-    }
-    const disposition = callbackRetryDisposition(callbackDelivery);
-    if (disposition.state === "accepted") {
-      const settled = callbackOutboxSettlement().settleAcceptedWhileLocked({
-        conversation,
-        statePath,
-        logPath,
-        expectedMessageId: stringValue(callbackDelivery.message.id),
-        reason: "startup_reconciliation_observed_accepted_transport"
-      });
-      return {
-        handled: true as const,
-        conversationId,
-        status: settled ? "recovered" : "skipped",
-        reason: settled
-          ? "callback_delivery_accepted_recovered"
-          : "callback_delivery_changed_before_recovery"
-      };
-    }
-    if (disposition.state === "in_flight") {
-      return {
-        handled: true as const,
-        conversationId,
-        status: "already_running",
-        reason: "callback_delivery_attempt_in_flight",
-        attempt: disposition.attempt,
-        attemptPid: disposition.attempt_pid,
-        leaseExpiresAt: disposition.lease_expires_at,
-        nextAttemptAt: disposition.next_attempt_at
-      };
-    }
-    if (disposition.state === "exhausted") {
-      return {
-        handled: true as const,
-        conversationId,
-        status: "skipped",
-        reason: "callback_delivery_retries_exhausted"
-      };
-    }
-    if (disposition.state !== "retryable") {
-      return {
-        handled: true as const,
-        conversationId,
-        status: "skipped",
-        reason: disposition.reason
-      };
-    }
-
-    const configuredDelayMs = Number(delayMs);
-    const retryDelayMs = Number.isFinite(configuredDelayMs) &&
-      configuredDelayMs >= 0
-      ? configuredDelayMs
-      : CALLBACK_RETRY_DELAYS_MS[Math.max(0, attempts - 1)];
-    const retryMonitor = startCallbackRetryMonitor({
-      statePath,
-      delayMs: retryDelayMs
-    });
-    const launchedAt = cliNow().toISOString();
-    const nextAttemptAt = new Date(cliNowMs() + retryDelayMs).toISOString();
-    const nextConversation = {
-      ...conversation,
-      callback_delivery: {
-        ...callbackDelivery,
-        retry_monitor_pid: retryMonitor.pid ?? null,
-        next_attempt_at: nextAttemptAt,
-        updated_at: launchedAt
-      }
-    };
-    saveState(statePath, nextConversation);
-    appendEvent(logPath, {
-      ts: launchedAt,
-      conversation_id: conversationId,
-      event: "callback_retry_monitor_launched",
-      message_id: callbackDelivery.message.id,
-      pid: retryMonitor.pid ?? null,
-      next_attempt_at: nextAttemptAt,
-      reason: "startup_reconciliation"
-    });
-    return {
-      handled: true as const,
-      conversationId,
-      status: "launched",
-      reason: "callback_delivery_reconciliation",
-      monitorPid: retryMonitor.pid
-    };
-  } finally {
-    releaseStateLock();
-  }
+  return callbackOutboxService().reconcileDelivery(input);
 }
 
 function terminalBridgeReconciliationEligibility(conversation) {
@@ -23402,7 +23239,7 @@ function settleLocalTerminalBridgeCompletionClaim({
             conversationId: conversation.conversation_id,
             terminalMessageId,
             completionFingerprint,
-            outcome
+            outcome: outcome!
           }) !== callbackMessageId
         ) {
           throw new Error(
@@ -24693,109 +24530,10 @@ function startCallbackRetryMonitor({
 
 function runCallbackRetryMonitor(options) {
   const statePath = expandHome(required(options.state, "--state is required"));
-  const initialDelayMs = Math.max(
-    0,
-    Number.isFinite(Number(options.callbackRetryDelayMs))
-      ? Number(options.callbackRetryDelayMs)
-      : CALLBACK_RETRY_DELAYS_MS[0]
-  );
-  sleepSync(initialDelayMs);
-
-  while (true) {
-    const conversation = loadState(statePath);
-    if (stringValue(conversation.legacy_callback_status_error)) {
-      return;
-    }
-    const callbackDelivery = isRecord(conversation.callback_delivery)
-      ? conversation.callback_delivery
-      : undefined;
-    const attempts = Number(callbackDelivery?.attempts ?? 0);
-    if (
-      !callbackDelivery ||
-      !isRecord(callbackDelivery.message) ||
-      !["pending", "failed"].includes(String(callbackDelivery.status ?? ""))
-    ) {
-      return;
-    }
-    const disposition = callbackRetryDisposition(callbackDelivery);
-    if (disposition.state === "accepted") {
-      settleAcceptedCallbackDelivery({
-        statePath,
-        logPath: logPathForStatePath(statePath),
-        expectedMessageId: stringValue(callbackDelivery.message.id),
-        reason: "retry_monitor_observed_accepted_transport"
-      });
-      return;
-    }
-    if (disposition.state === "in_flight") {
-      sleepSync(1000);
-      continue;
-    }
-    if (disposition.state !== "retryable") {
-      return;
-    }
-
-    const gatewayRoute = resolveCallbackGatewayRoute(
-      {
-        gatewayUrl: callbackDelivery.gateway_url,
-        token: callbackDelivery.gateway_token
-      },
-      {
-        gatewayUrl: conversation.gateway_url,
-        token: conversation.gateway_token
-      }
-    );
-    try {
-      runCallbackTransaction({
-        statePath,
-        messageJson: JSON.stringify(callbackDelivery.message),
-        gatewayMethod: stringValue(callbackDelivery.gateway_method) ?? conversation.gateway_method,
-        gatewaySession: stringValue(callbackDelivery.gateway_session) ?? conversation.gateway_session,
-        openclawSession: conversation.openclaw_session,
-        openclawBin: stringValue(callbackDelivery.openclaw_bin) ?? conversation.openclaw_bin,
-        gatewayUrl: gatewayRoute.gatewayUrl,
-        token: gatewayRoute.token,
-        closeTerminalBridgeOnDone: callbackDelivery.close_terminal_bridge_on_done === true,
-        retryPending: true,
-        disableCallbackRetry: true
-      });
-      return;
-    } catch {
-      // The failed attempt is persisted before the next bounded retry.
-    }
-
-    const latest = loadState(statePath);
-    if (stringValue(latest.legacy_callback_status_error)) {
-      return;
-    }
-    const latestDelivery = isRecord(latest.callback_delivery)
-      ? latest.callback_delivery
-      : undefined;
-    const latestAttempts = Number(latestDelivery?.attempts ?? 0);
-    const latestDisposition = callbackRetryDisposition(latestDelivery);
-    if (latestDisposition.state === "accepted") {
-      settleAcceptedCallbackDelivery({
-        statePath,
-        logPath: logPathForStatePath(statePath),
-        expectedMessageId: isRecord(latestDelivery?.message)
-          ? stringValue(latestDelivery.message.id)
-          : undefined,
-        reason: "retry_monitor_observed_accepted_transport"
-      });
-      return;
-    }
-    if (
-      !latestDelivery ||
-      !isRecord(latestDelivery.message) ||
-      latestDisposition.state !== "retryable" ||
-      latestAttempts > CALLBACK_RETRY_DELAYS_MS.length ||
-      latestAttempts <= attempts
-    ) {
-      return;
-    }
-    const delayMs = CALLBACK_RETRY_DELAYS_MS[Math.max(0, latestAttempts - 1)];
-    sleepSync(delayMs);
-  }
+  return callbackOutboxService().runRetryMonitor({
+    statePath,
+    initialDelayMs: options.callbackRetryDelayMs
+  });
 }
 
 function runTerminalBridgeMonitorHandoff(options) {
@@ -26035,15 +25773,13 @@ async function runTerminalBridgeMonitorWithLock(
           messageId: currentMessageId
         },
         onRecorded: (notificationConversation, notificationContext) => {
-          const callbackIdentity =
-            terminalBridgeApprovalCallbackIdentity(notificationConversation);
-          const callbackMessage = createMessage({
+          return callbackOutboxService().prepareApprovalNotification({
+            options: { ...options, statePath },
+            statePath,
+            logPath,
             conversation: notificationConversation,
-            id: callbackIdentity.id,
-            from: executor.actor,
-            to: "openclaw",
+            actor: executor.actor,
             type: "blocked",
-            requiresResponse: true,
             body: [
               `${executor.display_name} is waiting at a permission state that AKK cannot safely approve.`,
               approvalReason,
@@ -26059,38 +25795,9 @@ async function runTerminalBridgeMonitorWithLock(
               terminal_status: terminalStatus,
               approval_fingerprint: fingerprint
             },
-            now: callbackIdentity.now
+            recoverMissingOutbox:
+              notificationContext?.recoverMissingOutbox === true
           });
-          if (notificationConversation.gateway_method) {
-            return {
-              callbackMessage,
-              prepared: prepareLockedCallback({
-                ...options,
-                statePath,
-                log: logPath,
-                messageJson: JSON.stringify(callbackMessage),
-                gatewayMethod: notificationConversation.gateway_method,
-                gatewaySession: notificationConversation.gateway_session,
-                openclawSession: notificationConversation.openclaw_session,
-                openclawBin: notificationConversation.openclaw_bin,
-                gatewayUrl: stringValue(notificationConversation.gateway_token)
-                  ? notificationConversation.gateway_url
-                  : undefined,
-                token: stringValue(notificationConversation.gateway_token),
-                preserveMessageId: true,
-                trackCallbackDelivery: true,
-                preserveCallbackStatus: true,
-                callbackDeliveryKind: "approval_notification",
-                recoverMissingOutbox:
-                  notificationContext?.recoverMissingOutbox === true,
-                conversationOverride: notificationConversation
-              })
-            };
-          }
-          return {
-            callbackMessage,
-            delivered: false
-          };
         }
       });
       if (notification.stale) {
@@ -26158,15 +25865,13 @@ async function runTerminalBridgeMonitorWithLock(
           messageId: currentMessageId
         },
         onRecorded: (notificationConversation, notificationContext) => {
-          const callbackIdentity =
-            terminalBridgeApprovalCallbackIdentity(notificationConversation);
-          const callbackMessage = createMessage({
+          return callbackOutboxService().prepareApprovalNotification({
+            options: { ...options, statePath },
+            statePath,
+            logPath,
             conversation: notificationConversation,
-            id: callbackIdentity.id,
-            from: executor.actor,
-            to: "openclaw",
+            actor: executor.actor,
             type: "question",
-            requiresResponse: true,
             body: terminalBridgeApprovalInstructions({
               conversation: notificationConversation,
               terminalControl,
@@ -26189,38 +25894,9 @@ async function runTerminalBridgeMonitorWithLock(
               approve_tool: "agent_knock_knock_approve",
               deny_tool: "agent_knock_knock_cancel"
             },
-            now: callbackIdentity.now
+            recoverMissingOutbox:
+              notificationContext?.recoverMissingOutbox === true
           });
-          if (notificationConversation.gateway_method) {
-            return {
-              callbackMessage,
-              prepared: prepareLockedCallback({
-                ...options,
-                statePath,
-                log: logPath,
-                messageJson: JSON.stringify(callbackMessage),
-                gatewayMethod: notificationConversation.gateway_method,
-                gatewaySession: notificationConversation.gateway_session,
-                openclawSession: notificationConversation.openclaw_session,
-                openclawBin: notificationConversation.openclaw_bin,
-                gatewayUrl: stringValue(notificationConversation.gateway_token)
-                  ? notificationConversation.gateway_url
-                  : undefined,
-                token: stringValue(notificationConversation.gateway_token),
-                preserveMessageId: true,
-                trackCallbackDelivery: true,
-                preserveCallbackStatus: true,
-                callbackDeliveryKind: "approval_notification",
-                recoverMissingOutbox:
-                  notificationContext?.recoverMissingOutbox === true,
-                conversationOverride: notificationConversation
-              })
-            };
-          }
-          return {
-            callbackMessage,
-            delivered: false
-          };
         }
       });
       if (notification.stale) {
@@ -26358,21 +26034,11 @@ async function runTerminalBridgeMonitorWithLock(
 
     const completion = poll.completion;
     const completionMetadata = isRecord(completion?.metadata) ? completion.metadata : {};
-    const completionMatch = completion
-      ? stringValue(completionMetadata.match) ??
-        (completion.source === "screen" ? "terminal_screen" : "durable_completion")
-      : undefined;
     const completionFingerprint = completion
-      ? createHash("sha256")
-        .update(JSON.stringify({
-          text: completion.text,
-          timestamp: completion.timestamp,
-          match: completionMatch,
-          source: completion.source,
-          id: completion.id,
-          message_id: currentMessageId
-        }))
-        .digest("hex")
+      ? terminalBridgeCompletionFingerprint({
+          completion,
+          terminalMessageId: currentMessageId
+        })
       : undefined;
     const completionPollDecision = reduceTerminalMonitorCompletionPoll({
       state: pollPolicyState,
@@ -31112,45 +30778,6 @@ function terminalBridgeRequestFingerprint(value): string | undefined {
   return text ? createHash("sha256").update(text).digest("hex") : undefined;
 }
 
-function deterministicTerminalCallbackMessageId({
-  conversationId,
-  terminalMessageId,
-  completionFingerprint,
-  outcome
-}): string {
-  const digest = createHash("sha256")
-    .update(JSON.stringify({
-      conversation_id: conversationId,
-      terminal_message_id: terminalMessageId,
-      completion_fingerprint: completionFingerprint,
-      outcome
-    }))
-    .digest("hex")
-    .slice(0, 32);
-  return `msg-terminal-${digest}`;
-}
-
-function terminalBridgeCompletionFingerprint({
-  completion,
-  terminalMessageId
-}: {
-  completion: TerminalCompletionEvidence;
-  terminalMessageId?: string;
-}): string {
-  const metadata = isRecord(completion.metadata) ? completion.metadata : {};
-  const match = stringValue(metadata.match) ??
-    (completion.source === "screen" ? "terminal_screen" : "durable_completion");
-  return createHash("sha256")
-    .update(JSON.stringify({
-      text: completion.text,
-      timestamp: completion.timestamp,
-      match,
-      source: completion.source,
-      id: completion.id,
-      message_id: terminalMessageId
-    }))
-    .digest("hex");
-}
 
 function prepareTerminalBridgeCompletionCallback(args) {
   const storeDir = pathsForConversationDir(
@@ -31180,242 +30807,20 @@ function prepareTerminalBridgeCompletionCallbackWithLocksHeld({
   terminalMessageId,
   completion,
   allowSupersedeRecovery = false,
-  completionFingerprint = terminalBridgeCompletionFingerprint({
-    completion,
-    terminalMessageId
-  })
+  completionFingerprint = undefined
 }) {
-  const completionMetadata = isRecord(completion.metadata) ? completion.metadata : {};
-  const completionMatch = stringValue(completionMetadata.match) ??
-    (completion.source === "screen" ? "terminal_screen" : "durable_completion");
-  const completionOutcome = completion.outcome === "failure" ? "failure" : "success";
-  const callbackMessageId = deterministicTerminalCallbackMessageId({
-    conversationId: conversation.conversation_id,
-    terminalMessageId,
-    completionFingerprint,
-    outcome: completionOutcome
-  });
-  const claim = claimTerminalBridgeCompletion({
+  return callbackOutboxService().prepareTerminalCompletion({
+    options: { ...options, statePath },
     statePath,
     logPath,
+    conversationId: conversation.conversation_id,
+    actor: executor.actor,
+    terminalControl,
     terminalMessageId,
-    completionFingerprint,
-    completionId: completion.id,
-    callbackMessageId,
-    outcome: completionOutcome,
-    allowSupersedeRecovery
+    completion,
+    allowSupersedeRecovery,
+    completionFingerprint
   });
-  if (!claim.claimed) {
-    return claim;
-  }
-
-  let claimedConversation = claim.conversation;
-  let claimReleased = false;
-  try {
-    appendEvent(logPath, {
-      ts: cliNow().toISOString(),
-      conversation_id: claimedConversation.conversation_id,
-      event: "terminal_bridge_completion_detected",
-      terminal_control: terminalControl,
-      match: completionMatch,
-      completion_source: completion.source,
-      completion_outcome: completionOutcome,
-      completion_id: completion.id,
-      terminal_session: completionMetadata.session,
-      context_match: completionMetadata.context_match,
-      assistant_timestamp: completion.timestamp,
-      rollout_turn_id: completion.source === "durable" ? completion.id : undefined,
-      terminal_bridge_message_id: terminalMessageId,
-      callback_message_id: callbackMessageId
-    });
-    const callbackMessage = {
-      ...createMessage({
-        conversation: claimedConversation,
-        from: executor.actor,
-        to: "openclaw",
-        type: completionOutcome === "failure" ? "error" : "done",
-        requiresResponse: false,
-        body: completion.text,
-        metadata: {
-          source: "terminal_bridge",
-          terminal_control: terminalControl,
-          ...completionMetadata,
-          completion_source: completion.source,
-          completion_outcome: completionOutcome,
-          completion_id: completion.id,
-          terminal_session: completionMetadata.session,
-          confidence: completion.confidence,
-          match: completionMatch,
-          assistant_timestamp: completion.timestamp,
-          rollout_turn_id: completion.source === "durable" ? completion.id : undefined,
-          terminal_bridge_message_id: terminalMessageId
-        }
-      }),
-      id: callbackMessageId
-    };
-    const prepared = prepareLockedCallback({
-      ...options,
-      statePath,
-      log: logPath,
-      closeTerminalBridgeOnDone: false,
-      trackCallbackDelivery: true,
-      recoverTerminalCompletion: claim.resumed === true,
-      allowTerminalCompletionRecoveryStatus: allowSupersedeRecovery,
-      preserveMessageId: true,
-      messageJson: JSON.stringify(callbackMessage),
-      gatewayMethod: claimedConversation.gateway_method,
-      gatewaySession: claimedConversation.gateway_session,
-      openclawSession: claimedConversation.openclaw_session,
-      openclawBin: claimedConversation.openclaw_bin,
-      gatewayUrl: stringValue(claimedConversation.gateway_token)
-        ? claimedConversation.gateway_url
-        : undefined,
-      token: stringValue(claimedConversation.gateway_token),
-      recordOnly: !stringValue(claimedConversation.gateway_method)
-    });
-    if (
-      prepared.outcome === "record_only" &&
-      cliEnv().AKK_TEST_EXIT_AFTER_LOCAL_COMPLETION_STATE === "1"
-    ) {
-      // The final Turn phase, completion claim, detection event, and local
-      // message are durable. Startup reconciliation must finish the terminal
-      // ledger without manufacturing a callback outbox or replaying input.
-      cliExit(86);
-    }
-    claim.release();
-    claimReleased = true;
-    if (!resolveTerminalBridgeDispatchLedger(terminalControl, {
-      conversation: claimedConversation,
-      expectedMessageId: terminalMessageId,
-      reason: "terminal bridge task reached durable completion"
-    })) {
-      throw new Error(
-        `terminal completion ${claimedConversation.conversation_id} ` +
-        "changed before its dispatch ledger could be settled"
-      );
-    }
-    return {
-      claimed: true as const,
-      conversation: claimedConversation,
-      prepared,
-      callbackMessageId
-    };
-  } finally {
-    if (!claimReleased) {
-      claim.release();
-    }
-  }
-}
-
-function claimTerminalBridgeCompletion({
-  statePath,
-  logPath,
-  terminalMessageId,
-  completionFingerprint,
-  completionId,
-  callbackMessageId,
-  outcome,
-  allowSupersedeRecovery = false
-}) {
-  const release = acquireFileLock(`${statePath}.lock`);
-  try {
-    const conversation = loadState(statePath);
-    const nativeTakeover = isRecord(conversation.native_session_takeover)
-      ? conversation.native_session_takeover
-      : {};
-    if (
-      !isWaitingForAgent(conversation.status) &&
-      !(
-        allowSupersedeRecovery &&
-        TERMINAL_BRIDGE_SUPERSEDE_STATUSES.has(conversation.status)
-      )
-    ) {
-      release();
-      return {
-        claimed: false as const,
-        conversation,
-        reason: "conversation_no_longer_waiting"
-      };
-    }
-    if (stringValue(nativeTakeover.terminal_bridge_message_id) !== terminalMessageId) {
-      release();
-      return {
-        claimed: false as const,
-        conversation,
-        reason: "terminal_bridge_task_replaced"
-      };
-    }
-    const existing = isRecord(nativeTakeover.terminal_bridge_completion_claim)
-      ? nativeTakeover.terminal_bridge_completion_claim
-      : undefined;
-    if (existing) {
-      if (
-        existing.callback_message_id === callbackMessageId &&
-        existing.terminal_bridge_message_id === terminalMessageId &&
-        existing.completion_fingerprint === completionFingerprint &&
-        existing.outcome === outcome
-      ) {
-        appendEvent(logPath, {
-          ts: cliNow().toISOString(),
-          conversation_id: conversation.conversation_id,
-          event: "terminal_bridge_completion_claim_resumed",
-          terminal_bridge_message_id: terminalMessageId,
-          completion_fingerprint: completionFingerprint,
-          callback_message_id: callbackMessageId,
-          outcome
-        });
-        return {
-          claimed: true as const,
-          resumed: true as const,
-          conversation,
-          release
-        };
-      }
-      release();
-      return {
-        claimed: false as const,
-        conversation,
-        reason: "terminal_bridge_completion_claim_conflict"
-      };
-    }
-
-    const claimedAt = cliNow().toISOString();
-    const claimedConversation = {
-      ...conversation,
-      native_session_takeover: {
-        ...nativeTakeover,
-        terminal_bridge_completion_claim: {
-          terminal_bridge_message_id: terminalMessageId,
-          completion_fingerprint: completionFingerprint,
-          completion_id: completionId,
-          callback_message_id: callbackMessageId,
-          outcome,
-          claimed_at: claimedAt
-        }
-      },
-      updated_at: claimedAt
-    };
-    saveState(statePath, claimedConversation);
-    appendEvent(logPath, {
-      ts: claimedAt,
-      conversation_id: conversation.conversation_id,
-      event: "terminal_bridge_completion_claimed",
-      terminal_bridge_message_id: terminalMessageId,
-      completion_fingerprint: completionFingerprint,
-      completion_id: completionId,
-      callback_message_id: callbackMessageId,
-      outcome
-    });
-    return {
-      claimed: true as const,
-      resumed: false as const,
-      conversation: claimedConversation,
-      release
-    };
-  } catch (error) {
-    release();
-    throw error;
-  }
 }
 
 function terminalBridgeActivityPersistIntervalMs(timeoutMinutes: number, pollIntervalMs: number): number {
@@ -31771,128 +31176,26 @@ function runCallback(options) {
 }
 
 function runRetryCallback(options) {
-  const { conversation, statePath, logPath } = loadConversationFromOptions(options);
-  const retryStoreDir = pathsForConversationDir(path.dirname(statePath)).storeDir;
-  withStoreWriterLease(retryStoreDir, () => {
+  const { conversation, statePath, logPath } =
+    loadConversationFromOptions(options);
+  const storeDir = pathsForConversationDir(path.dirname(statePath)).storeDir;
+  withStoreWriterLease(storeDir, () => {
     const fresh = loadState(statePath);
     assertConversationHasNoNonterminalDeferredForegroundTransfer({
-      storeDir: retryStoreDir,
+      storeDir,
       conversation: fresh,
       action: "retry callback for"
     });
   });
-  const callbackDelivery = isRecord(conversation.callback_delivery)
-    ? conversation.callback_delivery
-    : undefined;
-  const legacyStatusError = stringValue(
-    conversation.legacy_callback_status_error
-  );
-  if (legacyStatusError) {
-    throw new Error(
-      `cannot retry callback for ${conversation.conversation_id}; ` +
-      `legacy Turn phase is ambiguous: ${legacyStatusError}`
-    );
-  }
-  const disposition = callbackRetryDisposition(callbackDelivery);
-  if (disposition.state === "accepted") {
-    const recovered = settleAcceptedCallbackDelivery({
-      statePath,
-      logPath,
-      expectedMessageId: isRecord(callbackDelivery?.message)
-        ? stringValue(callbackDelivery.message.id)
-        : undefined,
-      reason: "manual_retry_observed_accepted_transport"
-    });
-    if (recovered) {
-      emitPreparedCallbackResult({
-        delivered: true,
-        duplicate: false,
-        conversation: recovered,
-        message: callbackDelivery?.message,
-        delivery: "accepted_transport_recovered"
-      });
-      return;
-    }
-    throw new Error(
-      `cannot retry callback for ${conversation.conversation_id}; ` +
-      "callback delivery changed while accepted transport was being recovered"
-    );
-  }
-  if (disposition.state === "in_flight") {
-    throw new Error(
-      `cannot retry callback for ${conversation.conversation_id}; callback ` +
-      `attempt ${disposition.attempt} is in flight` +
-      (disposition.attempt_pid === undefined
-        ? ""
-        : ` (pid ${disposition.attempt_pid})`) +
-      (disposition.lease_expires_at
-        ? ` with lease until ${disposition.lease_expires_at}`
-        : "") +
-      (disposition.next_attempt_at
-        ? `; automatic retry is scheduled for ${disposition.next_attempt_at}`
-        : "")
-    );
-  }
-  if (disposition.state === "exhausted") {
-    throw new Error(
-      `cannot retry callback for ${conversation.conversation_id}; callback ` +
-      `delivery retries are exhausted after attempt ${disposition.attempt}`
-    );
-  }
-  if (disposition.state !== "retryable") {
-    throw new Error(
-      `cannot retry callback for ${conversation.conversation_id}; ` +
-      disposition.reason
-    );
-  }
-  if (!callbackDelivery || !isRecord(callbackDelivery.message)) {
-    throw new Error(`cannot retry callback for ${conversation.conversation_id}; pending callback is missing`);
-  }
-
-  const gatewayRoute = resolveCallbackGatewayRoute(
-    {
-      gatewayUrl: options.gatewayUrl,
-      token: options.token
-    },
-    {
-      gatewayUrl: callbackDelivery.gateway_url,
-      token: callbackDelivery.gateway_token
-    },
-    {
-      gatewayUrl: conversation.gateway_url,
-      token: conversation.gateway_token
-    }
-  );
-  runCallbackTransaction({
-    ...options,
+  const outcome = callbackOutboxService().retry({
+    options: { ...options, statePath },
+    conversation,
     statePath,
-    messageJson: JSON.stringify(callbackDelivery.message),
-    gatewayMethod: stringValue(callbackDelivery.gateway_method) ?? conversation.gateway_method,
-    gatewaySession: stringValue(callbackDelivery.gateway_session) ?? conversation.gateway_session,
-    openclawSession: conversation.openclaw_session,
-    openclawBin: stringValue(callbackDelivery.openclaw_bin) ?? conversation.openclaw_bin,
-    gatewayUrl: gatewayRoute.gatewayUrl,
-    token: gatewayRoute.token,
-    closeTerminalBridgeOnDone: callbackDelivery.close_terminal_bridge_on_done === true,
-    retryPending: true
+    logPath
   });
-}
-
-function resolveCallbackGatewayRoute(...candidates) {
-  for (const candidate of candidates) {
-    const token = stringValue(candidate?.token);
-    if (!token || token === "<token>") {
-      continue;
-    }
-    return {
-      gatewayUrl: stringValue(candidate?.gatewayUrl),
-      token
-    };
+  if (outcome.kind === "recovered") {
+    emitPreparedCallbackResult(outcome.result);
   }
-  return {
-    gatewayUrl: undefined,
-    token: undefined
-  };
 }
 
 function runCallbackTransaction(options) {
@@ -31911,305 +31214,90 @@ function runCallbackTransaction(options) {
   return runPreparedCallback(prepared);
 }
 
-function prepareLockedCallback(options) {
-  const messageInput = required(options.messageJson, "--message-json is required");
-  const logPath = expandHome(options.log ?? logPathForStatePath(options.statePath));
-  const loadedConversation = isRecord(options.conversationOverride)
-    ? options.conversationOverride
-    : loadState(options.statePath);
-  const conversation = normalizeLegacyCallbackStatus(
-    loadedConversation as Conversation
-  );
-  const callbackStoreDir = pathsForConversationDir(
-    path.dirname(options.statePath)
-  ).storeDir;
-  assertConversationHasNoNonterminalDeferredForegroundTransfer({
-    storeDir: callbackStoreDir,
-    conversation,
-    action: "prepare callback for"
-  });
-  const executor = executorForConversation(conversation);
-  const persistedGatewayRoute = resolveCallbackGatewayRoute({
-    gatewayUrl: options.gatewayUrl,
-    token: options.token
-  });
-  const message = options.retryPending === true || options.preserveMessageId === true
-    ? parseMessageJson(messageInput)
-    : extractStructuredMessage({
-        conversation,
-        input: messageInput,
-        defaultFrom: executor.actor,
-        defaultTo: "openclaw"
-      });
-  if (message.conversation_id !== conversation.conversation_id) {
-    throw new Error(
-      `message.conversation_id ${message.conversation_id} does not match conversation ${conversation.conversation_id}`
-    );
-  }
-
-  const existingEvents = readExistingEvents(logPath);
-  const callbackDelivery = isRecord(conversation.callback_delivery)
-    ? conversation.callback_delivery
-    : undefined;
-  const persistedDeliveryMessage = isRecord(callbackDelivery?.message)
-    ? callbackDelivery.message
-    : undefined;
-  const sameDeliveryMessageId =
-    persistedDeliveryMessage?.id === message.id;
-  const sameDeliveryMessage = sameDeliveryMessageId &&
-    canonicalJson(persistedDeliveryMessage) === canonicalJson(message);
-  if (sameDeliveryMessageId && !sameDeliveryMessage) {
-    throw new Error(
-      `callback message ${message.id} conflicts with its persisted immutable outbox payload`
-    );
-  }
-  const inheritedDelivery = sameDeliveryMessage
-    ? callbackDelivery
-    : undefined;
-  const retryingPending = options.retryPending === true &&
-    sameDeliveryMessage &&
-    callbackRetryDisposition(inheritedDelivery).state === "retryable";
-  if (
-    options.retryPending === true &&
-    sameDeliveryMessage &&
-    !retryingPending
-  ) {
-    const disposition = callbackRetryDisposition(inheritedDelivery);
-    if (disposition.state === "in_flight") {
-      throw new Error(
-        `callback attempt ${disposition.attempt} is already in flight` +
-        (disposition.attempt_pid === undefined
-          ? ""
-          : ` (pid ${disposition.attempt_pid})`) +
-        (disposition.lease_expires_at
-          ? ` with lease until ${disposition.lease_expires_at}`
-          : "")
-      );
-    }
-    if (disposition.state === "accepted") {
-      throw new Error(
-        "callback transport was already accepted and must be settled, not retried"
-      );
-    }
-    if (disposition.state === "exhausted") {
-      throw new Error(
-        `callback retries are exhausted after attempt ${disposition.attempt}`
-      );
-    }
-    throw new Error(
-      disposition.state === "unavailable"
-        ? disposition.reason
-        : "callback delivery is not retryable"
-    );
-  }
-  const duplicateMessage = isDuplicateMessage(existingEvents, message);
-  const recoveryMessageAlreadyLogged = options.recoverMissingOutbox === true
-    ? exactLoggedMessageForRecovery(existingEvents, message)
-    : false;
-  const recoveringMissingOutbox =
-    options.recoverMissingOutbox === true &&
-    (
-      !isRecord(callbackDelivery?.message) ||
-      callbackDelivery.message.id !== message.id
-    );
-  if (
-    !retryingPending &&
-    !recoveryMessageAlreadyLogged &&
-    !sameDeliveryMessage
-  ) {
-    assertTurnBindingCurrent(conversation, "accept callback for");
-  }
-  if (
-    TERMINAL_DISPATCH_RELEASE_STATUSES.has(effectiveTurnStatus(conversation)) &&
-    !duplicateMessage
-  ) {
-    throw new Error(
-      `refusing late callback ${message.id} for released Turn ` +
-      `${turnIdForConversation(conversation)} (${conversation.status})`
-    );
-  }
-  const recoveringTerminalCompletion = options.recoverTerminalCompletion === true &&
-    duplicateMessage &&
-    (
-      isWaitingForAgent(conversation.status) ||
-      (
-        options.allowTerminalCompletionRecoveryStatus === true &&
-        TERMINAL_BRIDGE_SUPERSEDE_STATUSES.has(conversation.status)
-      )
-    );
-  if (
-    duplicateMessage &&
-    !retryingPending &&
-    !recoveringTerminalCompletion &&
-    !recoveringMissingOutbox
-  ) {
-    runtimeLog("info", "callback_duplicate", {
-      conversation_id: conversation.conversation_id,
-      agent: executor.kind,
-      executor_session: executor.session,
-      from: message.from,
-      type: message.type,
-      round: message.round,
-      state_path: options.statePath,
-      event_log_path: logPath
-    });
-    return {
-      outcome: "duplicate" as const,
-      conversation,
-      message,
-      logPath
-    };
-  }
-
-  const closeTerminalBridgeOnDone = message.type === "done" &&
-    options.closeTerminalBridgeOnDone === true;
-  // Callback transport is an outbox concern. It never owns the semantic Turn
-  // phase, including retries of records written by the legacy coupled model.
-  const preserveConversationStatus = true;
-  const trackCallbackDelivery = closeTerminalBridgeOnDone ||
-    options.trackCallbackDelivery === true ||
-    inheritedDelivery?.track_delivery === true ||
-    preserveConversationStatus;
-  const requiresDelivery = options.recordOnly !== true;
-  const deliveryAttempt = Number(inheritedDelivery?.attempts ?? 0) + 1;
-  const deliveryAttemptId = randomUUID();
-  let nextConversation: Conversation = retryingPending
-    ? conversation
-    : applyMessageToConversation(conversation, message);
-  if (closeTerminalBridgeOnDone) {
-    const closedAt = cliNow().toISOString();
-    nextConversation = {
-      ...nextConversation,
-      status: "closed",
-      closed_at: nextConversation.closed_at ?? closedAt,
-      close_reason: nextConversation.close_reason ??
-        "terminal bridge task completed",
-      updated_at: closedAt
-    };
-    delete nextConversation.idle_since;
-  }
-  const storedFinalStatus = stringValue(inheritedDelivery?.final_status);
-  const finalStatus: TurnPhaseStatus = storedFinalStatus &&
-    isTurnPhaseStatus(storedFinalStatus)
-    ? storedFinalStatus
-    : effectiveTurnStatus(nextConversation);
-  const callbackRetryDelayMs = CALLBACK_RETRY_DELAYS_MS[
-    Math.min(CALLBACK_RETRY_DELAYS_MS.length - 1, Math.max(0, deliveryAttempt - 1))
-  ];
-  const callbackWatchdog = trackCallbackDelivery &&
-    requiresDelivery &&
-    options.recordOnly !== true &&
-    !retryingPending &&
-    options.disableCallbackRetry !== true &&
-    deliveryAttempt <= CALLBACK_RETRY_DELAYS_MS.length
-    ? startCallbackRetryMonitor({
-        statePath: options.statePath,
-        delayMs: callbackRetryDelayMs
-      })
-    : undefined;
-  if (
-    !retryingPending &&
-    !recoveringTerminalCompletion &&
-    !(recoveringMissingOutbox && recoveryMessageAlreadyLogged)
-  ) {
-    appendEvent(logPath, messageEvent(message));
-  }
-  if (trackCallbackDelivery && requiresDelivery) {
-    const now = cliNow().toISOString();
-    nextConversation = {
-      ...nextConversation,
-      callback_delivery: {
-        status: "pending",
-        message,
-        attempts: deliveryAttempt,
-        attempt_id: deliveryAttemptId,
-        attempt_pid: cliPid(),
-        attempt_lease_expires_at: new Date(
-          cliNowMs() + CALLBACK_ATTEMPT_LEASE_MS
-        ).toISOString(),
-        created_at: stringValue(inheritedDelivery?.created_at) ?? now,
-        last_attempt_at: now,
-        updated_at: now,
-        gateway_method: options.gatewayMethod,
-        gateway_session: options.gatewaySession ?? options.openclawSession ?? conversation.openclaw_session,
-        gateway_url: persistedGatewayRoute.gatewayUrl,
-        openclaw_bin: options.openclawBin ?? conversation.openclaw_bin,
-        close_terminal_bridge_on_done: closeTerminalBridgeOnDone,
-        track_delivery: true,
-        final_status: finalStatus,
-        preserve_conversation_status: true,
-        kind: stringValue(options.callbackDeliveryKind) ??
-          stringValue(inheritedDelivery?.kind),
-        ...(callbackWatchdog
-          ? {
-              retry_monitor_pid: callbackWatchdog.pid ?? null,
-              next_attempt_at: new Date(cliNowMs() + callbackRetryDelayMs).toISOString()
-            }
-          : {})
+function callbackOutboxService() {
+  return createCallbackOutboxService({
+    state: {
+      load: loadState,
+      save: saveState,
+      readEvents: readExistingEvents,
+      append: appendEvent,
+      appendMessage: (logPath, message) => {
+        appendEvent(logPath, messageEvent(message));
+      },
+      assertWriterCompatible: assertStoreWriterCompatible,
+      withTransaction: (statePath, operation) => {
+        const releaseLock = acquireFileLock(`${statePath}.lock`);
+        try {
+          return operation();
+        } finally {
+          releaseLock();
+        }
+      },
+      storeDirForStatePath: (statePath) =>
+        pathsForConversationDir(path.dirname(statePath)).storeDir,
+      logPathForStatePath
+    },
+    authority: {
+      assertNoDeferredTransfer:
+        assertConversationHasNoNonterminalDeferredForegroundTransfer,
+      assertBindingCurrent: assertTurnBindingCurrent,
+      isDispatchReleased: (conversation) =>
+        TERMINAL_DISPATCH_RELEASE_STATUSES.has(
+          effectiveTurnStatus(conversation)
+        ),
+      isWaitingForAgent,
+      isTerminalBridgeSupersedeStatus: (status) =>
+        TERMINAL_BRIDGE_SUPERSEDE_STATUSES.has(status)
+    },
+    retry: {
+      startMonitor: startCallbackRetryMonitor,
+      isProcessAlive,
+      attemptLeaseMs: CALLBACK_ATTEMPT_LEASE_MS,
+      delaysMs: CALLBACK_RETRY_DELAYS_MS
+    },
+    runtime: {
+      now: cliNow,
+      nowMs: cliNowMs,
+      pid: cliPid,
+      log: runtimeLog,
+      textSummary,
+      sleepSync,
+      crashCheckpoint: () => {
+        if (cliEnv().AKK_TEST_EXIT_AFTER_LOCAL_COMPLETION_STATE === "1") {
+          cliExit(86);
+        }
       }
-    };
-    appendEvent(logPath, {
-      ts: now,
-      conversation_id: conversation.conversation_id,
-      event: retryingPending ? "callback_delivery_retry_started" : "callback_delivery_pending",
-      message_id: message.id,
-      attempt: deliveryAttempt
-    });
-    if (callbackWatchdog) {
-      appendEvent(logPath, {
-        ts: cliNow().toISOString(),
-        conversation_id: conversation.conversation_id,
-        event: "callback_retry_monitor_launched",
-        message_id: message.id,
-        pid: callbackWatchdog.pid ?? null,
-        next_attempt_at: isRecord(nextConversation.callback_delivery)
-          ? nextConversation.callback_delivery.next_attempt_at
-          : undefined
-      });
+    },
+    delivery: {
+      deliver: (input) => openClawCallbackTransport().deliverCallback(input),
+      runTransaction: runCallbackTransaction
+    },
+    terminal: {
+      resolveCompletionDispatch: ({
+        terminalControl,
+        conversation,
+        expectedMessageId,
+        reason
+      }) => resolveTerminalBridgeDispatchLedger(terminalControl, {
+        conversation,
+        expectedMessageId,
+        reason
+      })
     }
-  }
-  saveState(options.statePath, nextConversation);
-  runtimeLog("info", "callback_received", {
-    conversation_id: conversation.conversation_id,
-    agent: executor.kind,
-    executor_session: executor.session,
-    from: message.from,
-    type: message.type,
-    round: message.round,
-    status: nextConversation.status,
-    requires_response: message.requires_response,
-    state_path: options.statePath,
-      event_log_path: logPath,
-      message: textSummary(message.body)
   });
+}
 
-  if (options.recordOnly) {
-    runtimeLog("info", "callback_recorded_only", {
-      conversation_id: conversation.conversation_id,
-      status: nextConversation.status
-    });
-    return {
-      outcome: "record_only" as const,
-      conversation: nextConversation,
-      message,
-      logPath
-    };
-  }
-
-  return {
-    outcome: "deliver" as const,
+function prepareLockedCallback(
+  options: CallbackPreparationOptions
+): PreparedCallback {
+  required(options.messageJson, "--message-json is required");
+  const logPath = expandHome(
+    options.log ?? logPathForStatePath(options.statePath)
+  );
+  return callbackOutboxService().prepare({
     options,
-    statePath: options.statePath,
-    logPath,
-    conversation: nextConversation,
-    message,
-    trackCallbackDelivery,
-    preserveConversationStatus,
-    closeTerminalBridgeOnDone,
-    finalStatus,
-    deliveryAttempt,
-    deliveryAttemptId
-  };
+    logPath
+  });
 }
 
 function emitPreparedCallbackResult(result): void {
@@ -32224,186 +31312,11 @@ function emitPreparedCallbackResult(result): void {
 }
 
 function runPreparedCallback(prepared, { emit = true } = {}) {
-  if (prepared.outcome === "duplicate") {
-    const result = {
-      delivered: false,
-      duplicate: true,
-      conversation: prepared.conversation,
-      message: prepared.message
-    };
-    if (emit) {
-      emitPreparedCallbackResult(result);
-    }
-    return result;
+  const result = callbackOutboxService().runPrepared(prepared);
+  if (emit) {
+    emitPreparedCallbackResult(result);
   }
-  if (prepared.outcome === "record_only") {
-    const result = {
-      delivered: false,
-      duplicate: false,
-      conversation: prepared.conversation,
-      message: prepared.message
-    };
-    if (emit) {
-      emitPreparedCallbackResult(result);
-    }
-    return result;
-  }
-
-  assertStoreWriterCompatible(
-    pathsForConversationDir(path.dirname(prepared.statePath)).storeDir
-  );
-  let acceptedDelivery: CallbackDeliveryOutcome | undefined;
-  try {
-    const delivery = openClawCallbackTransport().deliverCallback({
-      options: prepared.options,
-      statePath: prepared.statePath,
-      logPath: prepared.logPath,
-      conversation: prepared.conversation,
-      message: prepared.message,
-      onProgress: prepared.trackCallbackDelivery
-        ? (progress) => persistPreparedCallbackDeliveryProgress(
-            prepared,
-            progress
-          )
-        : undefined,
-      onAccepted: (accepted) => {
-        acceptedDelivery = accepted;
-      }
-    });
-    const deliveredConversation = prepared.trackCallbackDelivery
-      ? settlePreparedCallbackDelivery(prepared, {
-          delivered: true,
-          delivery
-        })
-      : loadState(prepared.statePath);
-    const result = {
-      delivered: true,
-      duplicate: false,
-      conversation: deliveredConversation,
-      message: prepared.message,
-      delivery: delivery.kind
-    };
-    if (emit) {
-      emitPreparedCallbackResult(result);
-    }
-    return result;
-  } catch (error) {
-    if (acceptedDelivery) {
-      const acceptedAfterError: CallbackDeliveryOutcome = {
-        ...acceptedDelivery,
-        run_observation: acceptedDelivery.run_observation ?? {
-          status: "unavailable",
-          source: "post_acceptance_error",
-          observed_at: cliNow().toISOString(),
-          error: error instanceof Error ? error.message : String(error)
-        }
-      };
-      const settled = prepared.trackCallbackDelivery
-        ? settlePreparedCallbackDelivery(prepared, {
-            delivered: true,
-            delivery: acceptedAfterError
-          })
-        : loadState(prepared.statePath);
-      const result = {
-        delivered: true,
-        duplicate: false,
-        conversation: settled,
-        message: prepared.message,
-        delivery: acceptedAfterError.kind
-      };
-      if (emit) {
-        emitPreparedCallbackResult(result);
-      }
-      return result;
-    }
-    if (prepared.trackCallbackDelivery) {
-      const settled = settlePreparedCallbackDelivery(prepared, {
-        delivered: false,
-        error
-      });
-      const settledDelivery = isRecord(settled.callback_delivery)
-        ? settled.callback_delivery
-        : undefined;
-      if (settledDelivery?.status === "delivered") {
-        const result = {
-          delivered: true,
-          duplicate: false,
-          conversation: settled,
-          message: prepared.message,
-          delivery: "accepted_before_observation_error"
-        };
-        if (emit) {
-          emitPreparedCallbackResult(result);
-        }
-        return result;
-      }
-    }
-    throw error;
-  }
-}
-
-function callbackOutboxSettlement() {
-  return createCallbackOutboxSettlement({
-    state: {
-      withStateTransaction: (statePath, operation) => {
-        const releaseLock = acquireFileLock(`${statePath}.lock`);
-        try {
-          return operation();
-        } finally {
-          releaseLock();
-        }
-      },
-      load: loadState,
-      save: saveState,
-      append: appendEvent
-    },
-    retryMonitor: { start: startCallbackRetryMonitor },
-    clock: { now: cliNow, nowMs: cliNowMs },
-    attemptLeaseMs: CALLBACK_ATTEMPT_LEASE_MS,
-    retryDelaysMs: CALLBACK_RETRY_DELAYS_MS
-  });
-}
-
-function persistPreparedCallbackDeliveryProgress(
-  prepared,
-  progress: Record<string, unknown>
-): void {
-  callbackOutboxSettlement().persistDeliveryProgress(prepared, progress);
-}
-
-function settlePreparedCallbackDelivery(prepared, result) {
-  return callbackOutboxSettlement().settleDelivery(prepared, result);
-}
-
-function settleAcceptedCallbackDelivery(options) {
-  return callbackOutboxSettlement().settleAccepted(options);
-}
-
-function callbackRetryDisposition(
-  callbackDelivery
-): CallbackRetryDisposition {
-  let policy = beginCallbackRetryPolicy(callbackDelivery, {
-    attemptLeaseMs: CALLBACK_ATTEMPT_LEASE_MS,
-    retryDelayCount: CALLBACK_RETRY_DELAYS_MS.length
-  });
-  if (policy.phase === "decided") {
-    return policy.disposition;
-  }
-  policy = reduceCallbackRetryPolicy(policy, {
-    kind: "process_alive",
-    alive: isProcessAlive(policy.attempt_pid)
-  });
-  if (policy.phase === "decided") {
-    return policy.disposition;
-  }
-  policy = reduceCallbackRetryPolicy(policy, {
-    kind: "clock",
-    now_ms: cliNowMs()
-  });
-  if (policy.phase !== "decided") {
-    throw new Error("callback retry policy did not reach a decision");
-  }
-  return policy.disposition;
+  return result;
 }
 
 function recordCallbackProcessDelivery({
@@ -32661,7 +31574,7 @@ function summarizeConversation(conversation) {
     ? conversation.callback_delivery
     : undefined;
   const callbackDisposition = callbackDelivery
-    ? callbackRetryDisposition(callbackDelivery)
+    ? callbackOutboxService().retryDisposition(callbackDelivery)
     : undefined;
   return {
     session_id: sessionIdForConversation(conversation),
@@ -33292,52 +32205,6 @@ function reconcileIdleConversations(
   };
 }
 
-function isDuplicateMessage(events, message) {
-  return events.some((event) => {
-    if (event.event !== "message") {
-      return false;
-    }
-
-    const existing = event.message ?? event;
-    if (existing.id && existing.id === message.id) {
-      return true;
-    }
-
-    return messageFingerprint(existing) === messageFingerprint(message);
-  });
-}
-
-function exactLoggedMessageForRecovery(events, message): boolean {
-  const matchingId = events
-    .filter((event) => event.event === "message")
-    .map((event) => event.message ?? event)
-    .filter((existing) => existing.id === message.id);
-  if (matchingId.length === 0) {
-    return false;
-  }
-  if (
-    matchingId.length !== 1 ||
-    canonicalJson(matchingId[0]) !== canonicalJson(message)
-  ) {
-    throw new Error(
-      `callback recovery message ${message.id} conflicts with its logged payload`
-    );
-  }
-  return true;
-}
-
-function messageFingerprint(message) {
-  return JSON.stringify({
-    session_id: message.session_id,
-    turn_id: message.turn_id,
-    conversation_id: message.conversation_id,
-    from: message.from,
-    to: message.to,
-    type: message.type,
-    requires_response: message.requires_response,
-    body: message.body
-  });
-}
 
 function parseArgs(argv) {
   const parsed = {};

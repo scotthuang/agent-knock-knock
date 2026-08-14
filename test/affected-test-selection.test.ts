@@ -113,12 +113,11 @@ test("terminal binding authority selects its exact parity integration set", asyn
   );
 });
 
-test("callback outbox policy selects retry, recovery, and plugin parity coverage", async () => {
+test("callback outbox policy selects retry, approval, and monitor recovery coverage", async () => {
   const selection = await loadSelectionModule();
   const tiers = loadTiers();
   const expected = [
     "test/callback-cli.test.ts",
-    "test/openclaw-plugin-contract.test.ts",
     "test/shards/agent-cli-claude-callback.test.ts",
     "test/shards/agent-cli-monitor-approval-context.test.ts",
     "test/shards/agent-cli-monitor-lifecycle.test.ts",
@@ -144,7 +143,6 @@ test("callback transport selects delivery, recovery, and plugin parity coverage"
     "test/openclaw-plugin-contract.test.ts",
     "test/shards/agent-cli-claude-callback.test.ts",
     "test/shards/agent-cli-monitor-approval-context.test.ts",
-    "test/shards/agent-cli-monitor-lifecycle.test.ts",
     "test/shards/agent-cli-monitor-recovery.test.ts"
   ];
   assert.deepEqual(

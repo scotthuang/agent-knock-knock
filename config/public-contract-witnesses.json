@@ -167,6 +167,12 @@
       "needle": "durable callback evidence decides without requesting runtime observations"
     },
     {
+      "id": "callback-service-unit",
+      "path": "test/callback-outbox-service.test.ts",
+      "tier": "fast",
+      "needle": "terminal completion holds the state claim through outbox preparation"
+    },
+    {
       "id": "callback-settlement-unit",
       "path": "test/callback-outbox-settlement.test.ts",
       "tier": "fast",
@@ -466,6 +472,7 @@
       ],
       "service_invariant_witnesses": [
         "callback-policy-unit",
+        "callback-service-unit",
         "callback-settlement-unit",
         "callback-transport-unit",
         "session-authority-unit"
