@@ -9,8 +9,8 @@ import type {
   CanonicalStateMutationScopes
 } from "./mutation-transaction.js";
 import type { AgentMessage, Conversation, Executor } from "./protocol.js";
-import type { ResolvedTerminalConversation } from
-  "./terminal-agent-bridge.js";
+import type { ExecutorKind } from "./executors.js";
+import type { TerminalControlRef } from "./terminal-agent-adapter.js";
 import type { CodexPreMaterializationIdentity } from
   "./terminal-authority-policy.js";
 import type { BoundTerminalDispatchRoute } from
@@ -23,8 +23,15 @@ export interface DeferredCodexForegroundDispatchSnapshot {
   fingerprint: string;
 }
 
+export interface TerminalDispatchTerminal {
+  conversationId: string;
+  agent: ExecutorKind;
+  pid: number;
+  terminalControl: TerminalControlRef;
+}
+
 export interface VerifiedEmptyCodexHandoffBoundary {
-  terminal: ResolvedTerminalConversation;
+  terminal: TerminalDispatchTerminal;
   detachedSourceSessionId: string;
   detachedSourceRevision: number;
   detachedSourceBindingToken: string;
@@ -33,7 +40,7 @@ export interface VerifiedEmptyCodexHandoffBoundary {
 }
 
 export interface DeferredCodexForegroundBindingBoundary {
-  terminal: ResolvedTerminalConversation;
+  terminal: TerminalDispatchTerminal;
   transferId: string;
   targetSessionId: string;
   sourceSessionId: string;
@@ -73,7 +80,7 @@ export interface TerminalControlSendRequest {
   allowedPreMaterializationIdentity?: CodexPreMaterializationIdentity;
   allowedAdditionalIdentities?: CodexPreMaterializationIdentity[];
   observedHandoff?: {
-    terminal: ResolvedTerminalConversation;
+    terminal: TerminalDispatchTerminal;
     transition: NativeThreadTransition;
   };
   verifiedEmptyCodexHandoff?: VerifiedEmptyCodexHandoffBoundary;

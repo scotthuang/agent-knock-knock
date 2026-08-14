@@ -1437,6 +1437,105 @@ recording tests lock acquisition/write/close/release order, live-owner timeout
 cleanup, dead-owner reclaim-before-retry, and descriptor close-before-error
 propagation. No file-lock behavior or error precedence changes.
 
+## Ordinary terminal command CLI facade
+
+The ordinary-command slice moves send, respond, approve, exclusive replay,
+and dispatch composition out of `cli-core.ts` into
+`terminal-command-cli-adapter.ts`. Cancel, renew, close, monitor, lifecycle,
+callback, and deferred-foreground state machines remain with their existing
+owners. The adapter composes the existing terminal-dispatch execution,
+application, capability, receipt, deferred-foreground, terminal-list, and
+file-lock factories; it does not introduce a second reducer or authority
+decision.
+
+The only runtime export is `createTerminalCommandCliFacade`. Each invocation
+runs with an immutable dependency set in async-local context, so concurrently
+awaiting facades cannot observe one another's ports. The emitted command-facade
+declaration contains neither `any`, `Record<..., any>`, nor
+`ResolvedTerminalConversation`. Every callback has explicit parameters and
+results. `TerminalDispatchTerminal` is only a structural, CLI-infrastructure
+carrier for `conversationId`, `agent`, `pid`, and `terminalControl`; it does
+not claim to remove extra properties from the runtime object. The existing
+`TerminalControlSendRequest` options record and concrete deferred adapters are
+infra-local legacy bridges, not business-service requests.
+
+Every actual deferred business-service request still crosses the explicit
+`projectDeferredForegroundTerminalFacts()` literal projection. The direct
+preparation-service witness fixes the request and boundary `Object.keys`, and
+proves that neither `adapter` nor `terminalControl` crosses that boundary.
+Terminal-dispatch execution receives typed facts and ports, while dispatch
+application and capability receive authenticated routes/repositories; none of
+the three receives the concrete terminal carrier.
+
+Measured against exact parent
+`921636a4a86da8d565c659bdcbb64021ac112366`, the slice reduces
+`src/cli-core.ts` from 19,901 to 16,350 physical lines (-3,551) and changes
+production TypeScript from 84,949 to 86,473 lines (+1,524). Typed production
+overhead is 42.92 percent of core movement, leaving 2,027 lines of movement
+margin. The production graph has 46 domains, 95 modules, 482 static import
+edges, and zero cycles. `cli-core.ts` retains one production importer. The
+ordinary-command owner has one module and exactly five focused integration
+witnesses.
+
+The extraction preserves three critical transaction shapes. Replay validates
+ledger receipt history before active-ledger authority, validates every stored
+match (including getters and conflicting safe-abort receipts) before filtering
+retryable zero-input receipts, validates the durable log body, and presents
+inside the canonical mutation callback. Transport failure may call the
+zero-input reducer only when no text timestamp exists and the error is
+`TerminalInputNotStartedError`; every possible-input failure instead records
+uncertainty, emits `do_not_retry`, and presents the uncertain receipt. Managed
+approval holds the terminal lock across observation, reservation, key
+dispatch, durable resolution, monitor handoff, and JSON presentation. Its
+state lock is released before monitor launch as before, while a failed
+`beforeKeyDispatch` leaves the reserved uncertain marker and sends no key.
+
+The following infrastructure functions are reviewed exceptions to the
+preferred 100-line/c20 target. Counts use the same conservative physical-span
+and nested-function-excluding complexity method as this document; every entry
+remains below the hard 500-line/c50 gate.
+
+| Function or nested stage | LOC / approximate complexity |
+| --- | ---: |
+| `runManagedApprovalDispatch` | 486 / c2 |
+| `runRawTerminalSend` | 443 / c2 |
+| raw-send canonical mutation callback | 419 / c45 |
+| `runApprovalWithStateLock` | 393 / c30 |
+| `replayExactActiveTerminalSubmission` | 276 / c41 |
+| `runManagedSessionSend` | 265 / c21 |
+| `resolveTerminalDispatchSubmissionOwner` | 261 / c43 |
+| `prepareTerminalControlSend` | 255 / c42 |
+| `runTurnResponse` | 223 / c11 |
+| `replayExactStoredTerminalSubmission` | 188 / c22 |
+| managed-send mutation callback | 186 / c21 |
+| `runApprove` | 177 / c32 |
+| respond outer mutation callback | 164 / c1 |
+| `runTerminalConversationApprove` | 162 / c10 |
+| respond state callback | 153 / c22 |
+| `validateStoredTerminalSubmissionMatch` | 150 / c28 |
+| `createTerminalDispatchRuntime` | 148 / c4 |
+| approval `beforeKeyDispatch` callback | 132 / c31 |
+| `runTerminalControlSend` | 105 / c9 |
+| `runTerminalDispatchTransport` | 106 / c7 |
+| raw-send state callback | 103 / c4 |
+
+The evidence map deliberately reuses the direct tests of the unique dispatch
+owners instead of copying their state machines into facade tests:
+
+| Contract | Direct proof | Focused real-CLI proof |
+| --- | --- | --- |
+| Factory-only typed ports and await isolation | `terminal-command-cli-adapter.test.ts` fake-port trace | all five owner files exercise the bound production factory |
+| Replay receipt/log bytes, getter validation, error priority, and locked presentation | facade compiled-wiring proof; `terminal-dispatch-receipt.test.ts` exact bytes | `agent-cli-composer-replay.test.ts` exact output/log body and no second Enter |
+| Possible input never becomes zero-input retry | facade failure-wiring proof; `terminal-dispatch-application.test.ts` text-progress table; `terminal-dispatch-execution.test.ts` one-Enter table | `agent-cli-dispatch-authority.test.ts` retryable pre-input versus uncertain post-input receipts |
+| Approval uncertain reservation and terminal-lock lifetime | facade lock-wiring proof; `terminal-agent-bridge.test.ts` reservation/callback/no-key order | `agent-cli-claude-callback.test.ts` and `agent-cli-control-locks.test.ts` |
+| Native acceptance and dispatch-owner authority | execution/application fake-port tables | `agent-cli-session-acceptance.test.ts` |
+| Runtime stripping at the service boundary | `deferred-foreground-preparation-service.test.ts` exact request/boundary keys | the Session-acceptance witness traverses the same production projection |
+
+The five selected focused files are composer replay, dispatch authority,
+control locks, Claude callback, and Session acceptance. They cover replay,
+send/possible-input, approval, lock order, and native acceptance without adding
+lifecycle, close, monitor, or callback ownership to this facade.
+
 ## Soft freeze while #126 is active
 
 Until the orchestration milestones finish:

@@ -19,10 +19,10 @@ import { loadManagedSession } from "./session-store.js";
 import {
   exactCodexCandidateInventoryForDeferredSend
 } from "./terminal-authority-policy.js";
-import type { DeferredCodexForegroundBindingBoundary } from
-  "./terminal-dispatch-composition.js";
-import type { ResolvedTerminalConversation } from
-  "./terminal-agent-bridge.js";
+import type {
+  DeferredCodexForegroundBindingBoundary,
+  TerminalDispatchTerminal
+} from "./terminal-dispatch-composition.js";
 import {
   hasCanonicalTerminalEndpoint,
   terminalControlEvidence,
@@ -49,7 +49,7 @@ const deferredForegroundProjectionByConcrete = new WeakMap<
 >();
 
 export function projectDeferredForegroundTerminalFacts(
-  terminal: ResolvedTerminalConversation
+  terminal: TerminalDispatchTerminal
 ): DeferredForegroundTerminalFacts {
   const canonicalEndpoint = hasCanonicalTerminalEndpoint(
     terminal.terminalControl
@@ -70,7 +70,7 @@ export function projectDeferredForegroundTerminalFacts(
 
 export function deferredForegroundTransferMatchesTerminal(
   transfer: DeferredForegroundTransfer,
-  terminal: ResolvedTerminalConversation
+  terminal: TerminalDispatchTerminal
 ): boolean {
   return transfer.terminal_id === terminal.conversationId &&
     terminalControlEvidenceMatches(
@@ -111,7 +111,7 @@ export function deferredForegroundBoundaryProjection(
 
 export function deferredForegroundConcreteBoundary(
   boundary: DeferredForegroundBindingBoundary,
-  terminal: ResolvedTerminalConversation
+  terminal: TerminalDispatchTerminal
 ): DeferredCodexForegroundBindingBoundary {
   const projected = projectDeferredForegroundTerminalFacts(terminal);
   if (
