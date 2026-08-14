@@ -33,7 +33,7 @@ test("package wires the standalone and architecture refactor evidence gates", ()
   assert.match(architectureValidator, /loadAndValidateRefactorEvidence/u);
 });
 
-test("frozen Phase 1 evidence reproduces startup counts and historical selection", async () => {
+test("Phase 1 evidence reproduces startup counts and historical selection", async () => {
   const evidenceModule = await loadEvidenceModule();
   const evidence = evidenceModule.loadAndValidateRefactorEvidence({
     repoRoot,
@@ -41,14 +41,14 @@ test("frozen Phase 1 evidence reproduces startup counts and historical selection
   });
 
   assert.equal(evidence.testEvidence.subprocess.baselineIncluded, 48);
-  assert.equal(evidence.testEvidence.subprocess.currentIncluded, 48);
-  assert.equal(evidence.testEvidence.subprocess.reductionBasisPoints, 0);
+  assert.equal(evidence.testEvidence.subprocess.currentIncluded, 40);
+  assert.equal(evidence.testEvidence.subprocess.reductionBasisPoints, 1667);
   assert.equal(evidence.testEvidence.subprocess.targetRequired, false);
   assert.equal(evidence.testEvidence.subprocess.targetMet, false);
   assert.deepEqual(
     evidence.testEvidence.subprocess.currentCounts,
     {
-      cli_process: 38,
+      cli_process: 30,
       fake_node_process: 10,
       other_process_or_adapter: 10
     }

@@ -154,6 +154,33 @@ force-exit the runner to improve a benchmark. Split independent file workers,
 inject clocks/providers where semantics permit it, and retain thin real-process
 coverage for process, WAL/checkpoint, fs-lock, and lifecycle boundaries.
 
+## #126 callback in-process migration
+
+Eight once-per-file executable starts in `test/callback-cli.test.ts` now use the
+same `parseCliCommand` to `executeCliCommand` path imported by the executable.
+Their original assertions remain in place. The migration maps each former
+black-box case to the service invariant it exercises and the process boundary
+that remains black-box:
+
+| Former executable case | Imported service invariant | Retained real boundary |
+| --- | --- | --- |
+| Late callback after Turn release | Reject before state or event mutation | Emitted callback argv/stdout/exit goldens |
+| Corrupted event log | Fail closed on Store validation | Emitted callback error projection |
+| Failed question notification | Preserve `waiting_for_openclaw` and failed outbox state | Fake OpenClaw Gateway child failure |
+| Close after failed delivery | Keep the failed outbox retryable and immutable | Real close/retry executables and Gateway child |
+| Reused message ID with changed payload | Reject payload mutation under an existing claim | Retained callback executable helper |
+| Explicit Gateway URL/token retry | Persist authentication while redacting public state | Fake OpenClaw environment and argv |
+| Automatic transient retry | Preserve retry state and monitor scheduling | Real retry-monitor and Gateway children |
+| Manual retry during automatic attempt | Report the exact live lease without mutation | Concurrent winner/loser CLI processes |
+
+The dynamic callback test path therefore starts eight fewer CLI processes. The
+reproducible static evidence moves from 48 to 40 included startup sites
+(`cli_process` 38 to 30), while all 10 fake-Node startup sites remain. The
+machine-readable `callback-outbox` migration in
+`config/public-contract-witnesses.json` ties the old executable witnesses to
+the callback policy, settlement, and transport service invariants and to the
+retained CLI, Claude, and OpenClaw boundaries.
+
 ## #108 performance record
 
 The pre-refactor maintainer baseline was 48 files / 683 tests / about 573

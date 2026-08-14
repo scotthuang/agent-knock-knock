@@ -19,6 +19,10 @@ import {
   saveState
 } from "../src/store.js";
 import type { TerminalControlRef } from "../src/terminal-agent-adapter.js";
+import {
+  runInProcessCli,
+  type InProcessCliResult
+} from "./in-process-cli-fixtures.js";
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 
@@ -116,7 +120,7 @@ test("callback does not record duplicate structured messages", () => {
   }
 });
 
-test("a unique late callback cannot reopen a released turn", () => {
+test("a unique late callback cannot reopen a released turn", async () => {
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-late-"));
 
   try {
@@ -135,8 +139,7 @@ test("a unique late callback cannot reopen a released turn", () => {
     const stateBefore = fs.readFileSync(created.paths.statePath, "utf8");
     const logBefore = fs.readFileSync(created.paths.logPath, "utf8");
 
-    const result = spawnSync(process.execPath, [
-      binPath,
+    const result = await runImportedCli([
       "callback",
       "--state",
       created.paths.statePath,
@@ -156,7 +159,7 @@ test("a unique late callback cannot reopen a released turn", () => {
         body: "Late completion must not reopen the Turn.",
         metadata: {}
       })
-    ], { encoding: "utf8" });
+    ]);
 
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /refusing late callback .* released Turn/u);
@@ -167,7 +170,7 @@ test("a unique late callback cannot reopen a released turn", () => {
   }
 });
 
-test("callback refuses to write to a corrupted event log", () => {
+test("callback refuses to write to a corrupted event log", async () => {
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-"));
 
   try {
@@ -177,8 +180,7 @@ test("callback refuses to write to a corrupted event log", () => {
     );
     fs.writeFileSync(created.paths.logPath, JSON.stringify({ event: "conversation_created" }, null, 2), "utf8");
 
-    const result = spawnSync(process.execPath, [
-      binPath,
+    const result = await runImportedCli([
       "callback",
       "--state",
       created.paths.statePath,
@@ -190,9 +192,7 @@ test("callback refuses to write to a corrupted event log", () => {
         type: "progress",
         body: "This should fail."
       })
-    ], {
-      encoding: "utf8"
-    });
+    ]);
 
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /invalid NDJSON at line 1|event log is not valid NDJSON at line 1/);
@@ -345,7 +345,7 @@ console.log(JSON.stringify({ ok: true }));
   }
 });
 
-test("a failed question notification keeps the Turn waiting_for_openclaw", () => {
+test("a failed question notification keeps the Turn waiting_for_openclaw", async () => {
   const storeDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-callback-question-failed-")
   );
@@ -368,8 +368,7 @@ process.exit(1);
       "Keep question phase independent from transport",
       { agent: "codex", openclawSession: "agent:main:main" }
     );
-    const result = spawnSync(process.execPath, [
-      binPath,
+    const result = await runImportedCli([
       "callback",
       "--state",
       created.paths.statePath,
@@ -387,7 +386,7 @@ process.exit(1);
         type: "question",
         body: "Which release channel should I use?"
       })
-    ], { encoding: "utf8" });
+    ]);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /question callback channel unavailable/u);
 
@@ -465,7 +464,7 @@ console.log(JSON.stringify({ ok: true }));
   }
 });
 
-test("closing a Turn does not abandon its failed callback outbox", () => {
+test("closing a Turn does not abandon its failed callback outbox", async () => {
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-retry-"));
   const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-openclaw-retry-"));
   const allowDeliveryPath = path.join(fakeBinDir, "allow-delivery");
@@ -524,8 +523,7 @@ console.log(JSON.stringify({ ok: true }));
       body: "Finished exactly once.",
       metadata: {}
     };
-    const failed = spawnSync(process.execPath, [
-      binPath,
+    const failed = await runImportedCli([
       "callback",
       "--state",
       created.paths.statePath,
@@ -539,12 +537,8 @@ console.log(JSON.stringify({ ok: true }));
       "--message-json",
       JSON.stringify(message)
     ], {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        AKK_GATEWAY_TOKEN: "",
-        OPENCLAW_GATEWAY_TOKEN: ""
-      }
+      AKK_GATEWAY_TOKEN: "",
+      OPENCLAW_GATEWAY_TOKEN: ""
     });
     assert.notEqual(failed.status, 0);
     assert.match(failed.stderr, /gateway temporarily unavailable/);
@@ -709,7 +703,7 @@ process.exit(1);
   }
 });
 
-test("a claimed callback message id cannot be reused with a different payload", () => {
+test("a claimed callback message id cannot be reused with a different payload", async () => {
   const storeDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-callback-immutable-outbox-")
   );
@@ -749,8 +743,7 @@ process.exit(1);
       body: "A different payload must not inherit the old callback claim."
     };
 
-    const tampered = spawnSync(process.execPath, [
-      binPath,
+    const tampered = await runImportedCli([
       "callback",
       "--state",
       created.paths.statePath,
@@ -764,7 +757,7 @@ process.exit(1);
       "--preserve-message-id",
       "--message-json",
       JSON.stringify(tamperedMessage)
-    ], { encoding: "utf8" });
+    ]);
     assert.notEqual(tampered.status, 0);
     assert.match(
       tampered.stderr,
@@ -930,7 +923,7 @@ console.log(JSON.stringify({ ok: true }));
   }
 });
 
-test("callback retry preserves a persisted explicit Gateway URL and token pair", () => {
+test("callback retry preserves a persisted explicit Gateway URL and token pair", async () => {
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-authenticated-retry-"));
   const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-openclaw-authenticated-retry-"));
   const allowDeliveryPath = path.join(fakeBinDir, "allow-delivery");
@@ -977,8 +970,7 @@ console.log(JSON.stringify({ ok: true }));
       gateway_url: gatewayUrl,
       gateway_token: gatewayToken
     });
-    const failed = spawnSync(process.execPath, [
-      binPath,
+    const failed = await runImportedCli([
       "callback",
       "--state",
       created.paths.statePath,
@@ -997,12 +989,8 @@ console.log(JSON.stringify({ ok: true }));
       "--message-json",
       JSON.stringify({ from: "codex", to: "openclaw", type: "done", body: "Finished." })
     ], {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        AKK_GATEWAY_TOKEN: "",
-        OPENCLAW_GATEWAY_TOKEN: ""
-      }
+      AKK_GATEWAY_TOKEN: "",
+      OPENCLAW_GATEWAY_TOKEN: ""
     });
     assert.notEqual(failed.status, 0);
     assert.match(failed.stderr, /gateway temporarily unavailable/);
@@ -1202,8 +1190,7 @@ console.log(JSON.stringify({ ok: true }));
       ...JSON.parse(fs.readFileSync(created.paths.statePath, "utf8")),
       gateway_url: configuredGatewayUrl
     });
-    const failed = spawnSync(process.execPath, [
-      binPath,
+    const failed = await runImportedCli([
       "callback",
       "--state",
       created.paths.statePath,
@@ -1217,12 +1204,8 @@ console.log(JSON.stringify({ ok: true }));
       "--message-json",
       JSON.stringify({ from: "codex", to: "openclaw", type: "done", body: "Auto retry result." })
     ], {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        AKK_GATEWAY_TOKEN: "",
-        OPENCLAW_GATEWAY_TOKEN: ""
-      }
+      AKK_GATEWAY_TOKEN: "",
+      OPENCLAW_GATEWAY_TOKEN: ""
     });
     assert.notEqual(failed.status, 0);
 
@@ -1264,7 +1247,7 @@ console.log(JSON.stringify({ ok: true }));
   }
 });
 
-test("manual callback retry reports the exact automatic attempt in flight", () => {
+test("manual callback retry reports the exact automatic attempt in flight", async () => {
   const storeDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-callback-retry-in-flight-")
   );
@@ -1315,12 +1298,11 @@ test("manual callback retry reports the exact automatic attempt in flight", () =
     appendEvent(created.paths.logPath, messageEvent(message));
     const stateBefore = fs.readFileSync(created.paths.statePath, "utf8");
 
-    const result = spawnSync(process.execPath, [
-      binPath,
+    const result = await runImportedCli([
       "retry-callback",
       "--state",
       created.paths.statePath
-    ], { encoding: "utf8" });
+    ]);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /attempt 2[^\n]*in flight/iu);
     assert.match(result.stderr, new RegExp(escapeRegExp(nextAttemptAt), "u"));
@@ -2321,6 +2303,15 @@ function readJsonLines(filePath) {
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function runImportedCli(
+  args: readonly string[],
+  env: NodeJS.ProcessEnv = {}
+): Promise<InProcessCliResult> {
+  return runInProcessCli(args, {
+    env: { ...process.env, ...env }
+  });
 }
 
 function runCli(args, env = {}) {
