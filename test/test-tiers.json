@@ -11,6 +11,7 @@
     "test/codex-local-session-provider.test.ts",
     "test/codex-session-provider.test.ts",
     "test/codex-sticky-rollout-lifecycle-core.test.ts",
+    "test/conversation-trace.test.ts",
     "test/deferred-foreground-transfer.test.ts",
     "test/durable-json-file.test.ts",
     "test/doctor-capabilities.test.ts",
