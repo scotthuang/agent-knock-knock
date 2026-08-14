@@ -213,6 +213,28 @@ export function managedSessionBindingToken(
   return legacyManagedSessionBindingToken(state);
 }
 
+export function managedSessionRevision(state: ManagedSessionState): number {
+  const revision = Number(state.revision);
+  if (!Number.isSafeInteger(revision) || revision < 1) {
+    throw new Error(
+      `managed Session ${state.session_id} has no valid Store revision`
+    );
+  }
+  return revision;
+}
+
+export function nativeThreadTransitionRevision(
+  transition: NativeThreadTransition
+): number {
+  const revision = Number(transition.revision);
+  if (!Number.isSafeInteger(revision) || revision < 1) {
+    throw new Error(
+      `native thread transition ${transition.transition_id} has no valid Store revision`
+    );
+  }
+  return revision;
+}
+
 export function legacyManagedSessionBindingToken(
   state: Pick<ManagedSessionState, "session_id" | "status" | "binding">
 ): string {

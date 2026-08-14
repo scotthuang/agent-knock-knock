@@ -24,6 +24,68 @@ export interface TerminalNativeIdentity {
   evidence: string;
 }
 
+/** Exact adapter-neutral fence for one materialized native identity. */
+export interface TerminalNativeIdentityFence {
+  sessionId: string;
+  processUuid: string;
+  processBirth: string;
+  rollout: TerminalNativeRolloutIdentity;
+}
+
+export function isCompleteNativeRollout(
+  value: unknown
+): value is TerminalNativeRolloutIdentity {
+  const rollout = recordValue(value);
+  return Boolean(
+    rollout &&
+    stringValue(rollout.fd) &&
+    stringValue(rollout.device) &&
+    stringValue(rollout.inode) &&
+    stringValue(rollout.path)
+  );
+}
+
+export function terminalNativeIdentityFence(
+  identity: TerminalNativeIdentity | undefined
+): TerminalNativeIdentityFence | undefined {
+  const sessionId = stringValue(identity?.sessionId);
+  const processUuid = stringValue(identity?.processUuid);
+  const processBirth = stringValue(identity?.processBirth);
+  return sessionId && processUuid && processBirth &&
+      isCompleteNativeRollout(identity?.rollout)
+    ? {
+        sessionId,
+        processUuid,
+        processBirth,
+        rollout: identity.rollout
+      }
+    : undefined;
+}
+
+export function terminalNativeIdentityMatchesFence(
+  identity: TerminalNativeIdentity | TerminalNativeIdentityFence | undefined,
+  expected: TerminalNativeIdentityFence | undefined
+): boolean {
+  const identitySessionId = stringValue(identity?.sessionId);
+  const identityProcessUuid = stringValue(identity?.processUuid);
+  const identityProcessBirth = stringValue(identity?.processBirth);
+  const expectedSessionId = stringValue(expected?.sessionId);
+  const expectedProcessUuid = stringValue(expected?.processUuid);
+  const expectedProcessBirth = stringValue(expected?.processBirth);
+  return Boolean(
+    identity && expected &&
+    identitySessionId && identitySessionId === expectedSessionId &&
+    identityProcessUuid && identityProcessUuid === expectedProcessUuid &&
+    identityProcessBirth && identityProcessBirth === expectedProcessBirth &&
+    isCompleteNativeRollout(identity.rollout) &&
+    isCompleteNativeRollout(expected.rollout) &&
+    identity.rollout.fd === expected.rollout.fd &&
+    identity.rollout.device === expected.rollout.device &&
+    identity.rollout.inode === expected.rollout.inode &&
+    identity.rollout.path === expected.rollout.path
+  );
+}
+
 export type TerminalNativeIdentityObservation =
   | {
       status: "resolved";
@@ -82,7 +144,7 @@ export function terminalObservationFromListEntry(
   agent: ExecutorKind
 ): TerminalObservation {
   const liveThreadId = stringValue(terminal.native_agent_session_id);
-  const liveRollout = completeRollout(terminal.native_agent_rollout)
+  const liveRollout = isCompleteNativeRollout(terminal.native_agent_rollout)
     ? terminal.native_agent_rollout
     : undefined;
   let nativeIdentity: TerminalNativeIdentityObservation;
@@ -340,7 +402,7 @@ function codexOpenRootRolloutMatchesBinding(
   if (
     session.agent !== "codex" ||
     !binding?.native_thread_id ||
-    !completeRollout(boundRollout) ||
+    !isCompleteNativeRollout(boundRollout) ||
     !inventory
   ) {
     return false;
@@ -380,8 +442,8 @@ export function exactRolloutMatches(
   right: TerminalNativeRolloutIdentity | undefined
 ): boolean {
   return Boolean(
-    completeRollout(left) &&
-    completeRollout(right) &&
+    isCompleteNativeRollout(left) &&
+    isCompleteNativeRollout(right) &&
     left.fd === right.fd &&
     left.device === right.device &&
     left.inode === right.inode &&
@@ -396,7 +458,7 @@ export function candidateSourceRootAuthorityMatches(
   authority: "present" | "explicitly_abandoned_predecessor"
 ): boolean {
   const sourceId = exactThreadId(sourceThreadId);
-  if (!sourceId || !completeRollout(sourceRollout)) return false;
+  if (!sourceId || !isCompleteNativeRollout(sourceRollout)) return false;
   const sameSource = (root: TerminalCodexOpenRootIdentity): boolean =>
     root.sessionId.toLowerCase() === sourceId;
   return authority === "explicitly_abandoned_predecessor"
@@ -407,16 +469,6 @@ export function candidateSourceRootAuthorityMatches(
     : roots.some((root) =>
         sameSource(root) && exactRolloutMatches(root.rollout, sourceRollout)
       );
-}
-
-function completeRollout(value: unknown): value is TerminalNativeRolloutIdentity {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const rollout = value as Partial<TerminalNativeRolloutIdentity>;
-  return [rollout.fd, rollout.device, rollout.inode, rollout.path].every(
-    (field) => typeof field === "string" && field.trim().length > 0
-  );
 }
 
 function statusCardEvidence(evidence: string): boolean {

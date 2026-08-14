@@ -20,6 +20,9 @@ import type {
 import { parseTerminalConversationId } from "./terminal-agent-adapter.js";
 import {
   decideTerminalBindingMatch,
+  isCompleteNativeRollout,
+  terminalNativeIdentityFence as codexIdentityFence,
+  terminalNativeIdentityMatchesFence as nativeIdentityMatchesCodexPreMaterialization,
   terminalObservationFromResolvedIdentity,
   type TerminalNativeIdentity
 } from "./terminal-binding-authority.js";
@@ -44,6 +47,16 @@ import {
   type TerminalSubmissionAcceptanceEvidence
 } from "./terminal-submission-facts.js";
 import { isRecord, nonBlankString } from "./value-guards.js";
+
+export {
+  managedSessionRevision,
+  nativeThreadTransitionRevision
+} from "./managed-session.js";
+export {
+  codexIdentityFence,
+  isCompleteNativeRollout,
+  nativeIdentityMatchesCodexPreMaterialization
+};
 
 export type CodexPreMaterializationIdentity = NonNullable<
   TerminalRuntimeIdentity["allowedPreMaterializationNativeIdentity"]
@@ -347,20 +360,6 @@ export function codexCompanionsPresentInOpenRootInventory(
   return { primary: present[0], additional: present.slice(1) };
 }
 
-export function codexIdentityFence(
-  identity: TerminalNativeIdentity | undefined
-): CodexPreMaterializationIdentity | undefined {
-  return identity?.processUuid && identity.processBirth &&
-      isCompleteNativeRollout(identity.rollout)
-    ? {
-        sessionId: identity.sessionId,
-        processUuid: identity.processUuid,
-        processBirth: identity.processBirth,
-        rollout: identity.rollout
-      }
-    : undefined;
-}
-
 export function isCodexStatusCardEvidence(evidence: string): boolean {
   return evidence.split("+").includes("codex_status_card");
 }
@@ -582,29 +581,6 @@ export function terminalRuntimeIdentityBase(
   };
 }
 
-export function managedSessionRevision(state: ManagedSessionState): number {
-  const revision = Number(state.revision);
-  if (!Number.isSafeInteger(revision) || revision < 1) {
-    throw new Error(
-      "managed Session " + state.session_id + " has no valid Store revision"
-    );
-  }
-  return revision;
-}
-
-export function nativeThreadTransitionRevision(
-  transition: NativeThreadTransition
-): number {
-  const revision = Number(transition.revision);
-  if (!Number.isSafeInteger(revision) || revision < 1) {
-    throw new Error(
-      "native thread transition " + transition.transition_id +
-      " has no valid Store revision"
-    );
-  }
-  return revision;
-}
-
 export function migratedTerminalBindingMatches(input: {
   session: ManagedSessionState;
   agent: ExecutorKind;
@@ -788,32 +764,6 @@ export function terminalSubmissionPayload(payload: string): string {
     );
   }
   return payload.trimEnd();
-}
-
-export function isCompleteNativeRollout(value: unknown): value is {
-  fd: string;
-  device: string;
-  inode: string;
-  path: string;
-} {
-  return isRecord(value) &&
-    Boolean(nonBlankString(value.fd)) &&
-    Boolean(nonBlankString(value.device)) &&
-    Boolean(nonBlankString(value.inode)) &&
-    Boolean(nonBlankString(value.path));
-}
-
-export function nativeIdentityMatchesCodexPreMaterialization(
-  identity: TerminalNativeIdentity | undefined,
-  expected: CodexPreMaterializationIdentity | undefined
-): boolean {
-  return Boolean(
-    identity && expected &&
-    identity.sessionId === expected.sessionId &&
-    identity.processUuid === expected.processUuid &&
-    identity.processBirth === expected.processBirth &&
-    sameRollout(identity.rollout, expected.rollout)
-  );
 }
 
 export function nativeAgentIdentityMatchesTurn(

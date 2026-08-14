@@ -2,8 +2,8 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 29281,
-    "production_physical_loc": 77792,
+    "cli_core_max_physical_loc": 28610,
+    "production_physical_loc": 78388,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -110,6 +110,16 @@
         "test/human-handoff-adoption-cli.test.ts",
         "test/native-thread-lifecycle-cli.test.ts",
         "test/native-thread-lifecycle-recovery-cli.test.ts"
+      ]
+    },
+    "native-thread-transition-settlement": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/codex-no-rollout-binding-cli.test.ts",
+        "test/codex-sticky-rollout-lifecycle-cli.test.ts",
+        "test/native-thread-lifecycle-cli.test.ts",
+        "test/native-thread-lifecycle-recovery-cli.test.ts",
+        "test/native-thread-ownership-cli.test.ts"
       ]
     },
     "openclaw-doctor": {
@@ -402,6 +412,18 @@
     {
       "path": "src/native-thread-transition-policy.ts",
       "owner": "native-thread-transition-policy"
+    },
+    {
+      "path": "src/native-thread-transition-resource-adapter.ts",
+      "owner": "native-thread-transition-settlement"
+    },
+    {
+      "path": "src/native-thread-transition-settlement-service.ts",
+      "owner": "native-thread-transition-settlement"
+    },
+    {
+      "path": "src/native-thread-transition-verification-adapter.ts",
+      "owner": "native-thread-transition-settlement"
     },
     {
       "path": "src/openclaw-callback-transport.ts",

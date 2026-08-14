@@ -574,7 +574,7 @@ test("lifecycle builder calls retain their exact adjacent ledger CAS", () => {
     const cas = /expectedTransitionId:\s*([^,}\n]+)(?:,\s*expectedStatus:\s*"([^"]+)")?/u
       .exec(section);
     return [phase, cas?.[1].trim(), cas?.[2]];
-  });
+  }).filter(([phase]) => phase !== undefined);
   assert.deepEqual(actual, [
     ["prepared", "null", undefined],
     ["verified", "transitionId", "prepared"],
@@ -583,10 +583,6 @@ test("lifecycle builder calls retain their exact adjacent ledger CAS", () => {
     ["command_prepared", "null", undefined],
     ["command_dispatching", "transitionId", "prepared"],
     ["command_submitted", "transitionId", "dispatching"],
-    ["command_resolved", "transitionId", "submitted"],
-    ["uncertain_reason_error", "transitionId", undefined],
-    ["resolved", "transitionId", undefined],
-    ["uncertain_error_reason", "transitionId", undefined],
     ["rebuild", "null", undefined],
     ["resolved", "transition.transition_id", undefined],
     ["verified", "transition.transition_id", "prepared"],
@@ -598,6 +594,27 @@ test("lifecycle builder calls retain their exact adjacent ledger CAS", () => {
     ["uncertain", "transitionId", undefined],
     ["resolved", "transition.transition_id", undefined],
     ["resolved_with_binding", "transition.transition_id", undefined]
+  ]);
+
+  const settlementSource = readFileSync(
+    "src/native-thread-transition-settlement-service.ts",
+    "utf8"
+  );
+  const settlementStarts = [
+    ...settlementSource.matchAll(/ports\.persistence\.saveLedger\(/gu)
+  ].map((match) => match.index);
+  const settlementActual = settlementStarts.map((start, index) => {
+    const section = settlementSource.slice(start, settlementStarts[index + 1]);
+    const phase = /phase: "([^"]+)"/u.exec(section)?.[1];
+    const cas = /expectedTransitionId:\s*([^,}\n]+)(?:,\s*expectedStatus:\s*"([^"]+)")?/u
+      .exec(section);
+    return [phase, cas?.[1].trim(), cas?.[2]];
+  });
+  assert.deepEqual(settlementActual, [
+    ["command_resolved", "transition.transition_id", "submitted"],
+    ["uncertain_reason_error", "request.transitionId", undefined],
+    ["resolved", "request.transitionId", undefined],
+    ["uncertain_error_reason", "request.transitionId", undefined]
   ]);
 });
 
