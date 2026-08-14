@@ -10,26 +10,27 @@ import {
   pathsForConversation,
   saveState
 } from "../src/store.js";
+import { runInProcessCli } from "./in-process-cli-fixtures.js";
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 const packageRoot = path.resolve(path.dirname(binPath), "../..");
 
-test("global help exits successfully", () => {
+test("global help exits successfully", async () => {
   for (const argument of ["--help", "-h", "help"]) {
-    const result = runCliRaw([argument]);
+    const result = await runCliRaw([argument]);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /^Usage:/);
     assert.match(result.stdout, /agent-knock-knock --version/);
   }
 });
 
-test("global version prints the package version and exits successfully", () => {
+test("global version prints the package version and exits successfully", async () => {
   const expectedVersion = JSON.parse(
     fs.readFileSync(path.join(packageRoot, "package.json"), "utf8")
   ).version;
 
   for (const argument of ["--version", "-v", "version"]) {
-    const result = runCliRaw([argument]);
+    const result = await runCliRaw([argument]);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout.trim(), expectedVersion);
   }
@@ -68,7 +69,7 @@ test("doctor exits non-zero when required package files are missing", () => {
   }
 });
 
-test("doctor rejects an OpenClaw binary that exists but cannot run", () => {
+test("doctor rejects an OpenClaw binary that exists but cannot run", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-doctor-runtime-"));
   const fakeOpenClaw = path.join(tempDir, "openclaw");
 
@@ -82,7 +83,7 @@ exit 9
       "utf8"
     );
     fs.chmodSync(fakeOpenClaw, 0o755);
-    const result = runCliRaw([
+    const result = await runCliRaw([
       "doctor",
       "--openclaw-bin",
       fakeOpenClaw,
@@ -101,7 +102,7 @@ exit 9
   }
 });
 
-test("CLI output redacts legacy Gateway credentials", () => {
+test("CLI output redacts legacy Gateway credentials", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-cli-redaction-"));
   const storeDir = path.join(tempDir, "conversations");
   const gatewayToken = "gateway-token-that-must-not-reach-stdout";
@@ -126,7 +127,7 @@ test("CLI output redacts legacy Gateway credentials", () => {
     };
     saveState(statePath, state);
 
-    const status = runCliRaw([
+    const status = await runCliRaw([
       "status",
       "--conversation",
       state.conversation_id,
@@ -183,8 +184,6 @@ function storeConversationFixture(storeDir: string, request: string) {
   return { conversation: storedConversation, paths };
 }
 
-function runCliRaw(args: string[]) {
-  return spawnSync(process.execPath, [binPath, ...args], {
-    encoding: "utf8"
-  });
+function runCliRaw(args: readonly string[]) {
+  return runInProcessCli(args, { env: { ...process.env } });
 }

@@ -188,7 +188,13 @@
       "id": "cli-output-boundary",
       "path": "test/cli-ux.test.ts",
       "tier": "integration",
-      "needle": "CLI output redacts legacy Gateway credentials"
+      "needle": "doctor exits non-zero when required package files are missing"
+    },
+    {
+      "id": "cli-runtime-log-redaction-boundary",
+      "path": "test/runtime-log.test.ts",
+      "tier": "integration",
+      "needle": "CLI runtime logs do not leak secrets from stored task state"
     },
     {
       "id": "cli-runtime-unit",
@@ -323,6 +329,12 @@
       "needle": "paired repositories inject the exact terminal and Store resources"
     },
     {
+      "id": "native-ownership-in-process",
+      "path": "test/native-thread-ownership-cli.test.ts",
+      "tier": "integration",
+      "needle": "raw pane-B attach cannot duplicate a native thread actively owned by pane A"
+    },
+    {
       "id": "openclaw-plugin-boundary",
       "path": "test/openclaw-plugin-contract.test.ts",
       "tier": "integration",
@@ -410,7 +422,7 @@
     },
     {
       "id": "cli-runtime",
-      "invariant": "The executable owns argv, stdout, and exit while concurrent and nested facade executions retain isolated dependencies and JSON output.",
+      "invariant": "Imported help, version, doctor, and redaction commands preserve parser, output, and environment semantics while retained executable witnesses preserve argv, stdout, OS exit, and runtime-log redaction.",
       "old_executable_witnesses": [
         "cli-core-import-boundary",
         "cli-output-boundary"
@@ -421,6 +433,7 @@
       "retained_boundary_witnesses": [
         "cli-core-import-boundary",
         "cli-output-boundary",
+        "cli-runtime-log-redaction-boundary",
         "management-list-boundary"
       ]
     },
@@ -478,10 +491,11 @@
     },
     {
       "id": "terminal-binding-authority",
-      "invariant": "List projection and mutation authorization share exact binding decisions while mutation performs a fresh purpose-built observation before input.",
+      "invariant": "Imported native ownership commands preserve exact cross-process and cross-Store binding decisions while retained executable mutations perform fresh observations before terminal input.",
       "old_executable_witnesses": [
         "codex-binding-boundary",
         "handoff-boundary",
+        "native-ownership-in-process",
         "terminal-send-boundary"
       ],
       "service_invariant_witnesses": [

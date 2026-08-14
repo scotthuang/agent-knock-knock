@@ -181,6 +181,32 @@ machine-readable `callback-outbox` migration in
 the callback policy, settlement, and transport service invariants and to the
 retained CLI, Claude, and OpenClaw boundaries.
 
+## #126 CLI UX and native-ownership in-process migration
+
+The second migration slice routes 21 normal invocations through
+`parseCliCommand` and `executeCliCommand`: eight help, version, doctor, and
+redaction invocations plus thirteen native-ownership sends. The test and
+assertion inventories are unchanged.
+
+| Former executable cases | Imported service invariant | Retained real boundary |
+| --- | --- | --- |
+| Help and version aliases | Exact parser aliases, stdout bytes, and success status | CLI import isolation and copied-distribution doctor executable |
+| Runnable-doctor failure and public redaction | Probe result projection and secret-free JSON | Copied-distribution doctor argv/stdout/OS-exit plus real-CLI runtime-log redaction |
+| Codex and Claude native ownership sends | Exact PID/UUID, Store, binding-generation, and stale-ledger authority | Codex attach, handoff, lifecycle recovery, and terminal-send executable suites |
+
+The static metric removes the two direct native-ownership startup sites and the
+shared normal CLI UX startup site, moving the current evidence from 40 to 37
+included sites (`cli_process` 30 to 27). All fake-Node sites remain. Claude
+native inspection was also audited, but remains executable-backed because its
+PATH-scoped `ps` and `tmux` discovery is not equivalent through the current
+in-process dependency seam. Crash injection, OS exit, process competition,
+file-lock, monitor-PID, nested Gateway approval, updater, and terminal-process
+witnesses in `agent-cli-fixtures.ts` remain process-backed.
+
+The machine-readable `cli-runtime` and `terminal-binding-authority` mappings in
+`config/public-contract-witnesses.json` connect the migrated cases to focused
+service invariants and retained executable witnesses.
+
 ## #108 performance record
 
 The pre-refactor maintainer baseline was 48 files / 683 tests / about 573

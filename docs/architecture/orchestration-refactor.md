@@ -617,12 +617,13 @@ static subprocess-startup call sites in `test/**/*.ts` for the immutable
 `v0.12.11` baseline and the current tree. The included metric is CLI-process
 plus fake-Node-process startup sites; other adapter/process calls are reported
 separately. This is a deterministic source metric, not a claim about dynamic
-process executions in one test run. Eight normal and recovery callback cases
-now invoke the imported command service, reducing the current value to 40 of 48
-baseline sites (16.67% reduction). The 60% reduction target is still explicitly
-reported as not met. Its `final_threshold.required` flag remains `false` while
-#126 is in progress; the final milestone flips it to `true`, at which point an
-unmet target is a hard validation failure.
+process executions in one test run. Eight callback cases plus the normal CLI UX
+and native-ownership slice now invoke the imported command service, reducing
+the current value to 37 of 48 baseline sites (22.92% reduction). The 60%
+reduction target is still explicitly reported as not met. Its
+`final_threshold.required` flag remains `false` while #126 is in progress; the
+final milestone flips it to `true`, at which point an unmet target is a hard
+validation failure.
 
 Second, the manifest freezes the exact changed paths and subjects of ten
 pre-`v0.12.11` product/test commits and replays them through the current
