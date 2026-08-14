@@ -842,6 +842,43 @@ sensitivity. Since this slice writes nothing, it adds no durable-write or crash
 window; the existing core snapshot write and lifecycle mutation/recovery
 witnesses remain authoritative until the separate mutation application slice.
 
+## Terminal monitor startup eligibility policy
+
+Startup, handoff, and locked launch preparation now share one pure staged
+eligibility policy. The policy owns candidate priority and exact reason text for
+terminal-bridge identity, dispatch authority, blocking submission, runtime
+identity, deferred-transfer acceptance, and deadline metadata. Its generator
+yields only the next typed observation, so the CLI composition root does not
+touch terminal control, the dispatch ledger, Store path authority, runtime
+identity, or a deferred transfer until every earlier candidate has passed.
+The policy has no ports, filesystem or process access, locks, mutation, or CLI
+presentation.
+
+Measured against exact head `8e5c636604845d42f4f0e0af28b36621974e75b6`,
+the extraction reduces `src/cli-core.ts` from 30,775 to 30,640 physical lines
+(-135) and changes total production TypeScript from 76,569 to 76,649 (+80).
+The new policy is 195 physical lines. Its 135-line staged reducer has approximate
+complexity 48: this is a reviewed transparent exception to the preferred 100/20 target,
+while remaining below the hard 500/50 gate. Keeping the precedence in one
+reducer makes every short circuit directly table-testable without concealing
+branches in I/O adapters. The shared, I/O-free `terminal-submission-facts.ts`
+owns the submission projection and typed Codex anchor codec; its 99-line
+validator has approximate complexity 49, a reviewed transparent exception to
+the preferred complexity-20 target and still below the hard gate. All other
+new functions are below 15 lines and complexity 5.
+
+The composition root remains the sole owner of terminal-control decoding,
+dispatch-ledger and deferred-transfer reads, Store path derivation and symlink
+validation, runtime identity observation, locks, mutation, monitor launch, and
+public JSON/log presentation. Observation order remains `bridge/status ->
+message -> terminal control -> dispatch ledger -> conversation state path ->
+Store derivation -> submission -> runtime -> Store derivation -> deferred
+transfer -> deadline`. In particular, non-terminal and inactive candidates
+never derive a Store, while a malformed Store path still fails before an
+already-invalid dispatch ledger is classified, preserving the prior error
+precedence. Dispatch `state_path` is not observed until the earlier ledger,
+message, control, conversation, Session, and Turn predicates have passed.
+
 ## Soft freeze while #126 is active
 
 Until the orchestration milestones finish:

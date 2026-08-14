@@ -2,8 +2,8 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 30775,
-    "production_physical_loc": 76569,
+    "cli_core_max_physical_loc": 30640,
+    "production_physical_loc": 76649,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -239,6 +239,16 @@
       "integration_tests": [
         "test/codex-no-rollout-binding-cli.test.ts",
         "test/shards/agent-cli-control-locks.test.ts"
+      ]
+    },
+    "terminal-submission-facts": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/codex-no-rollout-binding-cli.test.ts",
+        "test/shards/agent-cli-dispatch-recovery.test.ts",
+        "test/shards/agent-cli-monitor-recovery.test.ts",
+        "test/shards/agent-cli-session-acceptance.test.ts",
+        "test/shards/agent-cli-terminal-send-gates.test.ts"
       ]
     },
     "transcript": {
@@ -498,6 +508,10 @@
       "owner": "terminal-monitor-policy"
     },
     {
+      "path": "src/terminal-monitor-reconciliation-eligibility.ts",
+      "owner": "terminal-monitor-policy"
+    },
+    {
       "path": "src/terminal-process-source.ts",
       "owner": "terminal-control"
     },
@@ -508,6 +522,10 @@
     {
       "path": "src/terminal-submission-acceptance.ts",
       "owner": "terminal-dispatch-core"
+    },
+    {
+      "path": "src/terminal-submission-facts.ts",
+      "owner": "terminal-submission-facts"
     },
     {
       "path": "src/transcript.ts",

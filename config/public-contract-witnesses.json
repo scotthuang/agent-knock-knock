@@ -323,6 +323,12 @@
       "needle": "approval decision table preserves clear, suppression, question, and error precedence"
     },
     {
+      "id": "monitor-eligibility-unit",
+      "path": "test/terminal-monitor-reconciliation-eligibility.test.ts",
+      "tier": "fast",
+      "needle": "startup monitor eligibility preserves candidate priority and lazy short circuits"
+    },
+    {
       "id": "monitor-lifecycle-boundary",
       "path": "test/shards/agent-cli-monitor-lifecycle.test.ts",
       "tier": "integration",
@@ -545,6 +551,7 @@
       ],
       "service_invariant_witnesses": [
         "monitor-decision-unit",
+        "monitor-eligibility-unit",
         "monitor-poll-unit",
         "monitor-seams-unit"
       ],

@@ -7,6 +7,20 @@ import type {
   CodexOpenRootRolloutInventory
 } from "./agent-session-provider.js";
 import type { TerminalCompletionEvidence } from "./terminal-agent-adapter.js";
+import {
+  exactNativeThreadId, fingerprint, normalizedRolloutIdentity, parsedInteger,
+  requiredString, sha256Value, validTimestamp,
+  validateCodexRolloutAcceptanceAnchor,
+  type CodexCandidateSetRolloutAcceptanceAnchor, type CodexRolloutAcceptanceAnchor,
+  type CodexRolloutIdentity
+} from "./terminal-submission-facts.js";
+export { validateCodexRolloutAcceptanceAnchor };
+export type {
+  CodexBoundRolloutAcceptanceAnchor, CodexCandidateRolloutAcceptanceAnchorEntry,
+  CodexCandidateSetRolloutAcceptanceAnchor, CodexRolloutAcceptanceAnchor,
+  CodexRolloutIdentity,
+  CodexVirginRolloutAcceptanceAnchor
+} from "./terminal-submission-facts.js";
 
 export interface TerminalSubmissionAcceptanceEvidence {
   source: "codex_rollout" | "claude_transcript";
@@ -19,82 +33,6 @@ export interface TerminalSubmissionAcceptanceEvidence {
   evidenceFingerprint: string;
   metadata?: Record<string, string | number>;
 }
-
-export interface CodexRolloutIdentity {
-  fd: string;
-  device: string;
-  inode: string;
-  path: string;
-}
-
-interface CodexRolloutAcceptanceAnchorBase {
-  schema: "agent-knock-knock/codex-rollout-acceptance-anchor";
-  process_uuid: string;
-  process_birth: string;
-  captured_at: string;
-  file_existed: boolean;
-  offset_bytes: number;
-  anchor_fingerprint: string;
-}
-
-export interface CodexBoundRolloutAcceptanceAnchor
-  extends CodexRolloutAcceptanceAnchorBase {
-  version: 1;
-  native_thread_id: string;
-  mode: "existing" | "pre_materialization";
-  rollout?: CodexRolloutIdentity;
-  expected_empty_native_session?: true;
-}
-
-/**
- * A process-bound anchor for a genuinely virgin Codex TUI. Codex does not
- * assign a native thread UUID or open a rollout until its first prompt is
- * submitted, so the UUID cannot safely be named before transport. The exact
- * process incarnation is still pinned here; acceptance must additionally
- * prove the newly materialized UUID, rollout, and request hash.
- */
-export interface CodexVirginRolloutAcceptanceAnchor
-  extends CodexRolloutAcceptanceAnchorBase {
-  version: 2;
-  mode: "pre_materialization";
-  native_thread_id?: never;
-  native_thread_binding: "post_submission";
-  file_existed: false;
-  offset_bytes: 0;
-  rollout?: never;
-  expected_empty_native_session: true;
-}
-
-export interface CodexCandidateRolloutAcceptanceAnchorEntry {
-  native_thread_id: string;
-  rollout: CodexRolloutIdentity;
-  offset_bytes: number;
-}
-
-/**
- * A process-bound pre-submit snapshot for a terminal whose open-root
- * inventory is exact but cannot name one foreground root. Existing roots are
- * fenced at their byte offsets; roots opened after capture are admitted only
- * with a fresh exact session_meta header. No candidate is selected by mtime.
- */
-export interface CodexCandidateSetRolloutAcceptanceAnchor
-  extends CodexRolloutAcceptanceAnchorBase {
-  version: 3;
-  mode: "candidate_set";
-  native_thread_binding: "post_submission";
-  file_existed: false;
-  offset_bytes: 0;
-  zero_file_baseline: boolean;
-  inventory_pid: number;
-  inventory_cwd?: string;
-  inventory_fingerprint: string;
-  candidate_rollouts: CodexCandidateRolloutAcceptanceAnchorEntry[];
-}
-
-export type CodexRolloutAcceptanceAnchor =
-  | CodexBoundRolloutAcceptanceAnchor
-  | CodexVirginRolloutAcceptanceAnchor
-  | CodexCandidateSetRolloutAcceptanceAnchor;
 
 export type CodexCandidateSetRolloutAcceptanceResult =
   | {
@@ -307,8 +245,6 @@ export function terminalSubmissionReplayReceipt(options: {
 const CODEX_ACCEPTANCE_MAX_BYTES = 16 * 1024 * 1024;
 const CODEX_COMPLETION_MAX_BYTES = 256 * 1024 * 1024;
 const CODEX_COMPLETION_MAX_TEXT_LENGTH = 4000;
-const NATIVE_THREAD_ID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const NO_FOLLOW_FLAG = typeof fs.constants.O_NOFOLLOW === "number"
   ? fs.constants.O_NOFOLLOW
   : 0;
@@ -1425,109 +1361,6 @@ function assertVirginRolloutHeader(options: {
   }
 }
 
-export function validateCodexRolloutAcceptanceAnchor(
-  value: CodexRolloutAcceptanceAnchor
-): CodexRolloutAcceptanceAnchor {
-  if (
-    !isRecord(value) ||
-    value.schema !== "agent-knock-knock/codex-rollout-acceptance-anchor" ||
-    (value.version !== 1 && value.version !== 2 && value.version !== 3) ||
-    !["existing", "pre_materialization", "candidate_set"].includes(
-      String(value.mode)
-    ) ||
-    !Number.isSafeInteger(value.offset_bytes) ||
-    value.offset_bytes < 0 ||
-    typeof value.file_existed !== "boolean"
-  ) {
-    throw new Error("Codex rollout acceptance anchor is invalid");
-  }
-  if (value.version === 1) {
-    exactNativeThreadId(value.native_thread_id);
-    if ("native_thread_binding" in value) {
-      throw new Error("bound Codex acceptance anchor has deferred binding state");
-    }
-  } else if (value.version === 2 && (
-    value.mode !== "pre_materialization" ||
-    value.native_thread_binding !== "post_submission" ||
-    "native_thread_id" in value
-  )) {
-    throw new Error("virgin Codex acceptance anchor is inconsistent");
-  } else if (value.version === 3 && (
-    value.mode !== "candidate_set" ||
-    value.native_thread_binding !== "post_submission" ||
-    "native_thread_id" in value ||
-    value.file_existed !== false ||
-    value.offset_bytes !== 0 ||
-    typeof value.zero_file_baseline !== "boolean" ||
-    !Number.isSafeInteger(value.inventory_pid) ||
-    value.inventory_pid <= 1 ||
-    (
-      value.inventory_cwd !== undefined &&
-      !path.isAbsolute(value.inventory_cwd)
-    ) ||
-    !/^[0-9a-f]{64}$/u.test(String(value.inventory_fingerprint)) ||
-    !Array.isArray(value.candidate_rollouts) ||
-    value.candidate_rollouts.length > 128 ||
-    value.zero_file_baseline !== (value.candidate_rollouts.length === 0)
-  )) {
-    throw new Error("candidate-set Codex acceptance anchor is inconsistent");
-  }
-  requiredString(value.process_uuid, "Codex process UUID");
-  requiredString(value.process_birth, "Codex process birth");
-  if (!validTimestamp(value.captured_at)) {
-    throw new Error("Codex acceptance capture timestamp is invalid");
-  }
-  sha256Value(value.anchor_fingerprint, "Codex acceptance anchor fingerprint");
-  const { anchor_fingerprint: _fingerprint, ...base } = value;
-  if (fingerprint(base) !== value.anchor_fingerprint) {
-    throw new Error("Codex rollout acceptance anchor fingerprint does not match");
-  }
-  if (value.version === 3) {
-    const seenThreads = new Set<string>();
-    const seenFiles = new Set<string>();
-    for (const candidate of value.candidate_rollouts) {
-      if (!isRecord(candidate)) {
-        throw new Error("Codex candidate-set rollout entry is invalid");
-      }
-      const nativeThreadId = exactNativeThreadId(
-        candidate.native_thread_id
-      );
-      const rollout = normalizedRolloutIdentity(candidate.rollout);
-      if (
-        !Number.isSafeInteger(candidate.offset_bytes) ||
-        candidate.offset_bytes < 0 ||
-        seenThreads.has(nativeThreadId) ||
-        seenFiles.has(`${rollout.device}:${rollout.inode}`)
-      ) {
-        throw new Error("Codex candidate-set rollout entries are ambiguous");
-      }
-      seenThreads.add(nativeThreadId);
-      seenFiles.add(`${rollout.device}:${rollout.inode}`);
-    }
-    return value;
-  }
-  const rollout = "rollout" in value ? value.rollout : undefined;
-  if (
-    value.file_existed !== (value.mode === "existing") ||
-    value.file_existed !== Boolean(rollout)
-  ) {
-    throw new Error("Codex rollout acceptance anchor file state is inconsistent");
-  }
-  if (value.mode === "existing" && rollout) {
-    normalizedRolloutIdentity(rollout);
-    if (value.expected_empty_native_session !== undefined) {
-      throw new Error("existing Codex acceptance anchor has pre-materialization state");
-    }
-  } else if (
-    value.offset_bytes !== 0 ||
-    rollout !== undefined ||
-    value.expected_empty_native_session !== true
-  ) {
-    throw new Error("Codex pre-materialization acceptance anchor is inconsistent");
-  }
-  return value;
-}
-
 function validateCodexOpenRootInventoryForAcceptance(
   value: CodexOpenRootRolloutInventory
 ): CodexOpenRootRolloutInventory {
@@ -1669,20 +1502,6 @@ function sameStableFile(left: fs.Stats, right: fs.Stats): boolean {
     left.ctimeMs === right.ctimeMs;
 }
 
-function normalizedRolloutIdentity(
-  value: CodexRolloutIdentity
-): CodexRolloutIdentity {
-  const normalized = {
-    fd: requiredString(value.fd, "Codex rollout descriptor"),
-    device: requiredString(value.device, "Codex rollout device"),
-    inode: requiredString(value.inode, "Codex rollout inode"),
-    path: requiredString(value.path, "Codex rollout path")
-  };
-  parsedInteger(normalized.device);
-  parsedInteger(normalized.inode);
-  return normalized;
-}
-
 function sameRolloutIdentity(
   left: CodexRolloutIdentity,
   right: CodexRolloutIdentity
@@ -1693,53 +1512,14 @@ function sameRolloutIdentity(
     left.path === right.path;
 }
 
-function exactNativeThreadId(value: unknown): string {
-  const text = requiredString(value, "Codex native thread ID").toLowerCase();
-  if (!NATIVE_THREAD_ID_PATTERN.test(text)) {
-    throw new Error("Codex native thread ID is not an exact UUID");
-  }
-  return text;
-}
-
-function parsedInteger(value: string): bigint {
-  try {
-    return BigInt(value);
-  } catch {
-    throw new Error("Codex rollout file identity is not numeric");
-  }
-}
-
-function sha256Value(value: unknown, label: string): string {
-  const text = requiredString(value, label).toLowerCase();
-  if (!/^[0-9a-f]{64}$/u.test(text)) {
-    throw new Error(`${label} is not a SHA-256 value`);
-  }
-  return text;
-}
-
-function requiredString(value: unknown, label: string): string {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw new Error(`${label} is unavailable`);
-  }
-  return value.trim();
-}
-
 function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0
     ? value.trim()
     : undefined;
 }
 
-function validTimestamp(value: unknown): boolean {
-  return typeof value === "string" && Number.isFinite(Date.parse(value));
-}
-
 function fingerprintText(value: string): string {
   return createHash("sha256").update(value).digest("hex");
-}
-
-function fingerprint(value: unknown): string {
-  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
 function isRecord(value: unknown): value is Record<string, any> {
