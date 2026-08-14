@@ -10,6 +10,7 @@ import {
   terminalEndpointFromControlRef,
   terminalEndpointIdentityKey
 } from "./terminal-control-ref.js";
+import { canonicalJson } from "./canonical-json.js";
 import {
   isRecord,
   nonBlankString as stringValue
@@ -526,17 +527,4 @@ function terminalControlIncarnationSelectorKey(
 function validTimestampMs(value: unknown): number | undefined {
   const parsed = Date.parse(String(value ?? ""));
   return Number.isFinite(parsed) ? parsed : undefined;
-}
-
-function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map(canonicalJson).join(",")}]`;
-  }
-  if (isRecord(value)) {
-    return `{${Object.keys(value)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "undefined";
 }
