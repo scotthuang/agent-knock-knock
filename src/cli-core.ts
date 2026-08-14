@@ -363,7 +363,6 @@ import {
 import {
   createCallbackOutboxService,
   deterministicTerminalCallbackMessageId,
-  terminalBridgeCompletionFingerprint,
   type CallbackPreparationOptions,
   type PreparedCallback
 } from "./callback-outbox-service.js";
@@ -373,22 +372,29 @@ import {
 } from "./openclaw-callback-transport.js";
 import {
   claudeTranscriptApprovalIdentity,
-  decideTerminalMonitorAfterEffectsTimeout,
-  decideTerminalMonitorApproval,
   decideTerminalMonitorVerifiedDeadCompletion as decideVerifiedDeadAgentCompletion,
-  reduceTerminalMonitorDecision,
-  terminalMonitorActivityFingerprint as terminalBridgeActivityFingerprint,
   terminalMonitorActivityPersistIntervalMs as terminalBridgeActivityPersistIntervalMs,
   terminalMonitorApprovalCandidate as terminalBridgeApprovalCandidate,
-  terminalMonitorApprovalEffectOrder,
-  terminalMonitorApprovalFingerprint as terminalBridgeApprovalFingerprint,
   terminalMonitorDeadlineAt as deadlineAt,
   terminalMonitorScreenFingerprint as terminalBridgeScreenFingerprint,
-  validTerminalMonitorTimestampMs as validTimestampMs,
-  type TerminalMonitorNextAction
+  validTerminalMonitorTimestampMs as validTimestampMs
 } from "./terminal-monitor-decision-policy.js";
 import * as monitorLaunch from "./terminal-monitor-launch-plan.js";
 import * as monitorOwner from "./terminal-monitor-ownership-policy.js";
+import {
+  runTerminalMonitor as runTerminalMonitorService,
+  runTerminalMonitorWithStoreDeferral,
+  type TerminalMonitorServicePorts
+} from "./terminal-monitor-application-service.js";
+import {
+  pollTerminalMonitor,
+  presentTerminalMonitor,
+  reconcileMonitorAcceptance,
+  recordMonitorApprovalNotification,
+  recoverPreparedMonitorSubmission,
+  terminalMonitorStoreLeaseTimeout,
+  terminalMonitorStoreOperationTimeout
+} from "./terminal-monitor-cli-adapter.js";
 import { terminalMonitorReconciliationEligibility as monitorEligibility } from
   "./terminal-monitor-reconciliation-eligibility.js";
 import {
@@ -20987,122 +20993,37 @@ async function runTerminalBridgeMonitor(options) {
   }
 
   const lifecycle = { startedRecorded: false };
-  let storeDeferredAttempts = 0;
-  let storeFirstDeferredAt: string | undefined;
   try {
-    while (true) {
-      try {
-        if (storeDeferredAttempts > 0) {
-          const resumedAt = cliNow().toISOString();
-          const resumedConversation = loadState(statePath);
-          const resumedTakeover = isRecord(
-            resumedConversation.native_session_takeover
-          )
-            ? resumedConversation.native_session_takeover
-            : undefined;
-          if (
-            stringValue(resumedTakeover?.terminal_bridge_message_id) !==
-            terminalMessageId
-          ) {
-            runtimeLog("info", "terminal_bridge_monitor_finished", {
-              conversation_id: resumedConversation.conversation_id,
-              terminal_bridge_message_id: terminalMessageId,
-              reason: "terminal_bridge_generation_replaced_during_store_deferral"
-            });
-            printJson({
-              conversation: resumedConversation,
-              monitored: true,
-              terminal_bridge: true,
-              completed: false,
-              reason: "terminal_bridge_generation_replaced"
-            });
-            return;
-          }
-          appendEvent(logPath, {
-            ts: resumedAt,
-            conversation_id: resumedConversation.conversation_id,
-            event: "terminal_bridge_monitor_store_operation_deferred",
-            terminal_bridge_message_id: terminalMessageId,
-            error_code: "AKK_STORE_LOCK_TIMEOUT",
-            first_deferred_at: storeFirstDeferredAt,
-            resumed_at: resumedAt,
-            attempts: storeDeferredAttempts,
-            outcome: "resumed"
-          });
-          runtimeLog("info", "terminal_bridge_monitor_store_operation_resumed", {
-            conversation_id: resumedConversation.conversation_id,
-            terminal_bridge_message_id: terminalMessageId,
-            attempts: storeDeferredAttempts,
-            first_deferred_at: storeFirstDeferredAt
-          });
-          storeDeferredAttempts = 0;
-          storeFirstDeferredAt = undefined;
+    await runTerminalMonitorWithStoreDeferral({
+      initialConversation: conversation,
+      terminalMessageId,
+      run: () => runTerminalBridgeMonitorWithLock(
+        options,
+        lifecycle,
+        terminalMessageId
+      ),
+      ports: {
+        state: {
+          load: () => loadState(statePath),
+          appendEvent: (event) => appendEvent(logPath, event)
+        },
+        authority: {
+          terminalControl: (candidate) => terminalControlFromTakeover(
+            isRecord(candidate.native_session_takeover)
+              ? candidate.native_session_takeover
+              : undefined
+          ),
+          bindingSuperseded: (error) => error instanceof TurnBindingSupersededError
+            ? { code: error.code, message: error.message }
+            : undefined,
+          storeOperationTimeout: terminalMonitorStoreOperationTimeout
+        },
+        runtime: monitorRuntimePort(),
+        presentation: {
+          emit: (result) => presentTerminalMonitor(result, printJson)
         }
-        await runTerminalBridgeMonitorWithLock(
-          options,
-          lifecycle,
-          terminalMessageId
-        );
-        return;
-      } catch (error) {
-        if (error instanceof TurnBindingSupersededError) {
-          runtimeLog("warn", "terminal_bridge_monitor_binding_superseded", {
-            conversation_id: conversation.conversation_id,
-            terminal_target: terminalControlFromTakeover(nativeTakeover)?.target,
-            reason: error.message
-          });
-          try {
-            appendEvent(logPath, {
-              ts: cliNow().toISOString(),
-              conversation_id: conversation.conversation_id,
-              event: "terminal_bridge_monitor_binding_superseded",
-              terminal_control: terminalControlFromTakeover(nativeTakeover),
-              error_code: error.code,
-              reason: error.message
-            });
-          } catch (diagnosticError) {
-            runtimeLog("warn", "terminal_bridge_monitor_diagnostic_write_failed", {
-              conversation_id: conversation.conversation_id,
-              terminal_target: terminalControlFromTakeover(nativeTakeover)?.target,
-              diagnostic_event: "terminal_bridge_monitor_binding_superseded",
-              reason: diagnosticError instanceof Error
-                ? diagnosticError.message
-                : String(diagnosticError)
-            });
-          }
-          printJson({
-            conversation,
-            monitored: true,
-            terminal_bridge: true,
-            completed: false,
-            reason: "session_binding_superseded",
-            detail: error.message
-          });
-          return;
-        } else if (!isStoreMutationLockTimeout(error)) {
-          throw error;
-        }
-        storeDeferredAttempts += 1;
-        storeFirstDeferredAt ??= cliNow().toISOString();
-        const retryInMs = Math.min(
-          5_000,
-          250 * (2 ** Math.min(5, storeDeferredAttempts - 1))
-        );
-        runtimeLog("warn", "terminal_bridge_monitor_store_operation_deferred", {
-          conversation_id: conversation.conversation_id,
-          terminal_bridge_message_id: terminalMessageId,
-          error_code: isRecord(error)
-            ? stringValue(error.code) ?? "LOCK_TIMEOUT"
-            : "LOCK_TIMEOUT",
-          lock_kind: error instanceof StoreLockTimeoutError
-            ? error.lockKind
-            : "conversation",
-          attempt: storeDeferredAttempts,
-          retry_in_ms: retryInMs
-        });
-        sleepSync(retryInMs);
       }
-    }
+    });
   } finally {
     monitorLock.release();
   }
@@ -21115,1200 +21036,262 @@ async function runTerminalBridgeMonitorWithLock(
 ) {
   const statePath = expandHome(required(options.state, "--state is required"));
   const logPath = expandHome(options.log ?? logPathForStatePath(statePath));
-  const pollIntervalMs = Math.max(50, Number(options.pollIntervalMs ?? DEFAULT_MONITOR_POLL_INTERVAL_MS));
-
-  let conversation = await migrateLegacyTerminalAgentIdentity({
+  const pollIntervalMs = Math.max(
+    50,
+    Number(options.pollIntervalMs ?? DEFAULT_MONITOR_POLL_INTERVAL_MS)
+  );
+  const initialConversation = await migrateLegacyTerminalAgentIdentity({
     conversation: loadState(statePath),
     statePath,
     logPath,
     options
   });
-  const initialNativeTakeover = isRecord(conversation.native_session_takeover)
-    ? conversation.native_session_takeover
+  const initialTakeover = isRecord(initialConversation.native_session_takeover)
+    ? initialConversation.native_session_takeover
     : undefined;
-  if (
-    stringValue(initialNativeTakeover?.terminal_bridge_message_id) !==
-    expectedTerminalMessageId
-  ) {
-    runtimeLog("info", "terminal_bridge_monitor_finished", {
-      conversation_id: conversation.conversation_id,
-      terminal_bridge_message_id: expectedTerminalMessageId,
-      reason: "terminal_bridge_generation_replaced_before_monitor_restart"
-    });
-    printJson({
-      conversation,
-      monitored: true,
-      terminal_bridge: true,
-      completed: false,
-      reason: "terminal_bridge_generation_replaced"
-    });
-    return;
-  }
-  const timeoutMinutes = Number(
-    options.agentTimeoutMinutes ??
-      initialNativeTakeover?.["terminal_bridge_inactivity_timeout_minutes"] ??
-      DEFAULT_AGENT_TIMEOUT_MINUTES
-  );
-  const hardTimeoutMinutes = positiveMinutes(
-    options.agentHardTimeoutMinutes ??
-      initialNativeTakeover?.["terminal_bridge_hard_timeout_minutes"] ??
-      DEFAULT_AGENT_HARD_TIMEOUT_MINUTES,
-    "--agent-hard-timeout-minutes"
-  );
-  const monitorStartedAtMs = cliNowMs();
-  const monitorMessageId = expectedTerminalMessageId;
-  const taskStartedAtMs = validTimestampMs(initialNativeTakeover?.["terminal_bridge_started_at"]) ?? monitorStartedAtMs;
-  let lastActivityAtMs = validTimestampMs(initialNativeTakeover?.["terminal_bridge_last_activity_at"]) ?? taskStartedAtMs;
-  let lastPersistedActivityAtMs = lastActivityAtMs;
-  const activityPersistIntervalMs = terminalBridgeActivityPersistIntervalMs(timeoutMinutes, pollIntervalMs);
-  const preSendScreenFingerprint = stringValue(
-    initialNativeTakeover?.["terminal_bridge_pre_send_screen_fingerprint"]
-  );
-  let pollPolicyState = { previousScreenFingerprint: preSendScreenFingerprint };
-  let persistedActivityReason = stringValue(initialNativeTakeover?.["terminal_bridge_last_activity_reason"]);
-  const initialDetectorDiagnostic = isRecord(
-    initialNativeTakeover?.["terminal_bridge_detector_diagnostic"]
-  )
-    ? initialNativeTakeover.terminal_bridge_detector_diagnostic
-    : undefined;
-  let persistedDetectorDiagnosticFingerprint = stringValue(
-    initialDetectorDiagnostic?.fingerprint
-  );
-  let persistedDetectorDiagnosticStatus = stringValue(
-    initialDetectorDiagnostic?.status
-  );
-  const executor = executorForConversation(conversation);
-  const terminalBridge = createTerminalAgentBridge(options);
-  if (!lifecycle.startedRecorded) {
-    appendEvent(logPath, {
-      ts: cliNow().toISOString(),
-      conversation_id: conversation.conversation_id,
-      event: "terminal_bridge_monitor_started",
-      monitor_pid: cliPid(),
-      executor,
-      agent_timeout_minutes: timeoutMinutes,
-      agent_hard_timeout_minutes: hardTimeoutMinutes,
-      poll_interval_ms: pollIntervalMs,
-      task_started_at: new Date(taskStartedAtMs).toISOString(),
-      last_activity_at: new Date(lastActivityAtMs).toISOString(),
-      inactivity_deadline_at: timeoutMinutes > 0
-        ? new Date(lastActivityAtMs + timeoutMinutes * 60 * 1000).toISOString()
-        : null,
-      hard_deadline_at: hardTimeoutMinutes > 0
-        ? new Date(taskStartedAtMs + hardTimeoutMinutes * 60 * 1000).toISOString()
-        : null
-    });
-    runtimeLog("info", "terminal_bridge_monitor_started", {
-      conversation_id: conversation.conversation_id,
-      monitor_pid: cliPid(),
-      agent: executor.kind,
-      executor_session: executor.session,
-      agent_timeout_minutes: timeoutMinutes,
-      agent_hard_timeout_minutes: hardTimeoutMinutes
-    });
-    lifecycle.startedRecorded = true;
-  }
-
-  let bindingCheckDeferredAttempts = 0;
-  let bindingCheckFirstDeferredAt: string | undefined;
-  while (true) {
-    conversation = loadState(statePath);
-    if (!isWaitingForAgent(conversation.status)) {
-      runtimeLog("info", "terminal_bridge_monitor_finished", {
-        conversation_id: conversation.conversation_id,
-        status: conversation.status,
-        reason: "conversation_no_longer_waiting"
-      });
-      printJson({
-        conversation,
-        monitored: true,
-        terminal_bridge: true,
-        completed: false,
-        reason: "conversation_no_longer_waiting"
-      });
-      return;
-    }
-
-    let nativeTakeover = isRecord(conversation.native_session_takeover)
-      ? conversation.native_session_takeover
-      : undefined;
-    const currentMessageId = stringValue(nativeTakeover?.["terminal_bridge_message_id"]);
-    if (monitorMessageId && currentMessageId !== monitorMessageId) {
-      appendEvent(logPath, {
-        ts: cliNow().toISOString(),
-        conversation_id: conversation.conversation_id,
-        event: "terminal_bridge_monitor_superseded",
-        monitor_message_id: monitorMessageId,
-        current_message_id: currentMessageId
-      });
-      printJson({
-        conversation,
-        monitored: true,
-        terminal_bridge: true,
-        completed: false,
-        reason: "terminal_bridge_task_replaced"
-      });
-      return;
-    }
-    const terminalControl = terminalControlFromTakeover(nativeTakeover);
-    if (!terminalControl || nativeTakeover?.["terminal_bridge"] !== true) {
-      const stalledConversation = markConversationStalled({
-        statePath,
-        logPath,
-        reason: "terminal bridge monitor could not find terminal bridge metadata",
-        detail: {
-          terminal_bridge: true
-        }
-      });
-      printJson({
-        conversation: stalledConversation,
-        monitored: true,
-        terminal_bridge: true,
-        stalled: true,
-        reason: stalledConversation?.stalled_reason
-      });
-      return;
-    }
-    const submission = terminalBridgeSubmission(conversation);
-    if (
-      currentMessageId &&
-      submission &&
-      stringValue(submission.message_id) === currentMessageId
-    ) {
-      const submissionStatus = stringValue(submission.status);
-      if (
-        submissionStatus === "text_injected" ||
-        submissionStatus === "enter_dispatched"
-      ) {
-        const dispatcherPid = Number(submission.dispatcher_pid);
-        if (
-          Number.isSafeInteger(dispatcherPid) &&
-          dispatcherPid > 1 &&
-          isProcessAlive(dispatcherPid)
-        ) {
-          sleepSync(pollIntervalMs);
-          continue;
-        }
-        if (submissionStatus === "text_injected") {
-          conversation = markTerminalAcceptanceUncertain({
-            conversation,
-            statePath,
-            logPath,
-            terminalControl,
-            reason:
-              "terminal dispatcher exited after text injection but before Enter dispatch was durably proven"
-          });
-          printJson({
-            conversation,
-            monitored: true,
-            terminal_bridge: true,
-            completed: false,
-            submission_outcome: "uncertain",
-            delivery_receipt: "text_injected",
-            do_not_retry: true,
-            reason:
-              "text was injected but native submission was not proven; inspect the composer"
-          });
-          return;
-        }
-
-        const releaseTerminalLock = acquireTerminalBridgeSendLock(
-          storeDirFromOptions(options),
-          terminalControl,
-          { timeoutMs: 30000 }
-        );
-        try {
-          const reconciliation = await reconcileTerminalAcceptanceInMonitor({
-            options,
-            conversation,
-            statePath,
-            logPath,
-            terminalControl,
-            executor,
-            terminalBridge
-          });
-          if (reconciliation.outcome === "accepted") {
-            conversation = reconciliation.conversation;
-            continue;
-          }
-          if (reconciliation.outcome === "not_accepted") {
-            printJson({
-              conversation: reconciliation.conversation,
-              monitored: true,
-              terminal_bridge: true,
-              completed: false,
-              submission_outcome: "not_accepted",
-              delivery_receipt: "enter_dispatched",
-              do_not_retry: true,
-              reason:
-                "the exact managed draft remains in the terminal composer"
-            });
-            return;
-          }
-        } catch (error) {
-          if (isStoreMutationLockTimeout(error)) {
-            throw error;
-          }
-          const reason = error instanceof Error ? error.message : String(error);
-          conversation = markTerminalAcceptanceUncertain({
-            conversation,
-            statePath,
-            logPath,
-            terminalControl,
-            reason
-          });
-          printJson({
-            conversation,
-            monitored: true,
-            terminal_bridge: true,
-            completed: false,
-            submission_outcome: "uncertain",
-            delivery_receipt: "enter_dispatched",
-            do_not_retry: true,
-            reason
-          });
-          return;
-        } finally {
-          releaseTerminalLock();
-        }
-        sleepSync(pollIntervalMs);
-        continue;
-      }
-      if (submissionStatus === "prepared") {
-        const dispatcherPid = Number(submission.dispatcher_pid);
-        if (
-          Number.isSafeInteger(dispatcherPid) &&
-          dispatcherPid > 1 &&
-          isProcessAlive(dispatcherPid)
-        ) {
-          sleepSync(pollIntervalMs);
-          continue;
-        }
-
-        const releaseTerminalLock = acquireTerminalBridgeSendLock(
-          storeDirFromOptions(options),
-          terminalControl,
-          { timeoutMs: 30000 }
-        );
-        try {
-          const writerStoreDir = pathsForConversationDir(
-            path.dirname(statePath)
-          ).storeDir;
-          await withStoreWriterLeaseAsync(writerStoreDir, async () => {
-            const dispatchLedger =
-              loadTerminalBridgeDispatchLedger(terminalControl);
-            const releaseStateLock = acquireFileLock(`${statePath}.lock`);
-            try {
-            const current = loadState(statePath);
-            const currentSubmission = terminalBridgeSubmission(current);
-            const currentTakeover = isRecord(current.native_session_takeover)
-              ? current.native_session_takeover
-              : undefined;
-            const expectedMessageId = stringValue(
-              currentTakeover?.terminal_bridge_message_id
-            );
-            if (
-              expectedMessageId === currentMessageId &&
-              stringValue(currentSubmission?.message_id) === currentMessageId &&
-              currentSubmission?.status === "prepared"
-            ) {
-              const requestText = String(
-                currentTakeover?.terminal_bridge_request_text ??
-                  current.user_request ??
-                  ""
-              );
-              if (
-                dispatchLedger &&
-                ["submitted", "agent_accepted"].includes(
-                  String(dispatchLedger.status)
-                ) &&
-                stringValue(dispatchLedger.message_id) === currentMessageId
-              ) {
-                const submittedAt =
-                  stringValue(dispatchLedger.agent_accepted_at) ??
-                  stringValue(dispatchLedger.submitted_at) ??
-                  cliNow().toISOString();
-                const recoveredStatus = dispatchLedger.status === "agent_accepted"
-                  ? "agent_accepted" as const
-                  : "submitted" as const;
-                const submittedConversation = withTerminalBridgeSubmission({
-                  conversation: current,
-                  messageId: currentMessageId,
-                  requestText,
-                  status: recoveredStatus,
-                  preparedAt:
-                    stringValue(currentSubmission.prepared_at) ??
-                    submittedAt,
-                  ...(recoveredStatus === "agent_accepted"
-                    ? {
-                        agentAcceptedAt: submittedAt,
-                        acceptanceEvidence: dispatchLedger.acceptance_evidence
-                      }
-                    : { submittedAt })
-                });
-                saveState(statePath, submittedConversation);
-                conversation = submittedConversation;
-              } else {
-                const uncertainAt = cliNow().toISOString();
-                const uncertainConversation = withTerminalBridgeSubmission({
-                  conversation: {
-                    ...current,
-                    status: "stalled" as const,
-                    stalled_at: uncertainAt,
-                    stalled_reason:
-                      "terminal dispatcher exited before AKK could prove the terminal submission",
-                    updated_at: uncertainAt
-                  },
-                  messageId: currentMessageId,
-                  requestText,
-                  status: "uncertain",
-                  preparedAt:
-                    stringValue(currentSubmission.prepared_at) ??
-                    uncertainAt,
-                  uncertainAt,
-                  error:
-                    "the terminal dispatcher exited before AKK could persist a submitted receipt"
-                });
-                if (
-                  !dispatchLedger ||
-                  stringValue(dispatchLedger.message_id) === currentMessageId
-                ) {
-                  saveTerminalBridgeDispatchLedger(terminalControl, {
-                    ...(dispatchLedger ?? {}),
-                    status: "uncertain",
-                    generation_id: currentMessageId,
-                    conversation_id:
-                      uncertainConversation.conversation_id,
-                    message_id: currentMessageId,
-                    request_hash:
-                      terminalBridgeRequestFingerprint(requestText),
-                    prepared_at:
-                      stringValue(currentSubmission.prepared_at) ??
-                      uncertainAt,
-                    uncertain_at: uncertainAt,
-                    dispatcher_pid:
-                      Number.isSafeInteger(dispatcherPid) &&
-                      dispatcherPid > 1
-                        ? dispatcherPid
-                        : null,
-                    state_path: statePath,
-                    event_log_path: logPath,
-                    callback_expected: Boolean(
-                      uncertainConversation.gateway_method
-                    ),
-                    reason:
-                      "dispatcher_exited_before_submitted_receipt"
-                  });
-                }
-                saveState(statePath, uncertainConversation);
-                appendEvent(logPath, {
-                  ts: uncertainAt,
-                  conversation_id:
-                    uncertainConversation.conversation_id,
-                  event: "terminal_message_submit_uncertain",
-                  message_id: currentMessageId,
-                  reason:
-                    "dispatcher_exited_before_submitted_receipt",
-                  dispatcher_pid:
-                    Number.isSafeInteger(dispatcherPid) &&
-                    dispatcherPid > 1
-                      ? dispatcherPid
-                      : null,
-                  do_not_retry: true
-                });
-                conversation = uncertainConversation;
-              }
-            } else {
-              conversation = current;
-            }
-            } finally {
-              releaseStateLock();
-            }
-            if (
-              terminalBridgeSubmission(conversation)?.status === "uncertain"
-            ) {
-              stallOtherTerminalBridgeConversationsForUncertainDispatch({
-                storeDir: writerStoreDir,
-                terminalControl,
-                currentConversationId: conversation.conversation_id,
-                uncertainMessageId: currentMessageId
-              });
-            }
-          });
-        } finally {
-          releaseTerminalLock();
-        }
-
-        const afterSubmission = terminalBridgeSubmission(conversation);
-        if (
-          stringValue(afterSubmission?.message_id) === currentMessageId &&
-          ["submitted", "agent_accepted"].includes(
-            String(afterSubmission?.status)
-          )
-        ) {
-          continue;
-        }
-        printJson({
-          conversation,
-          monitored: true,
-          terminal_bridge: true,
-          completed: false,
-          submission_outcome:
-            stringValue(afterSubmission?.status) ?? "uncertain",
-          do_not_retry: true,
-          reason:
-            "terminal submission outcome is not proven; inspect the shared terminal pane before deciding how to continue"
-        });
-        return;
-      }
-      if (
-        submissionStatus === "not_accepted" ||
-        submissionStatus === "uncertain" ||
-        submissionStatus === "aborted"
-      ) {
-        const abortedSafeToRetry =
-          submissionStatus === "aborted" &&
-          submission.safe_to_retry === true;
-        printJson({
-          conversation,
-          monitored: true,
-          terminal_bridge: true,
-          completed: false,
-          submission_outcome: submissionStatus,
-          do_not_retry: !abortedSafeToRetry,
-          safe_to_retry: abortedSafeToRetry,
-          reason:
-            submissionStatus === "not_accepted"
-              ? "the exact terminal draft was not accepted; automatic retry is disabled"
-              : submissionStatus === "uncertain"
-                ? "terminal submission outcome is uncertain; automatic completion and approval attribution are disabled"
-                : abortedSafeToRetry
-                  ? "terminal submission was durably aborted before terminal input"
-                  : "terminal submission was aborted but safe retry was not durably proven"
-        });
-        return;
-      }
-      if (
-        submissionStatus !== "submitted" &&
-        submissionStatus !== "agent_accepted"
-      ) {
-        printJson({
-          conversation,
-          monitored: true,
-          terminal_bridge: true,
-          completed: false,
-          reason: "terminal_submission_status_invalid"
-        });
-        return;
-      }
-    }
-    try {
-      assertTurnBindingCurrent(conversation, "monitor");
-    } catch (error) {
-      if (error instanceof StoreLockTimeoutError) {
-        bindingCheckDeferredAttempts += 1;
-        bindingCheckFirstDeferredAt ??= cliNow().toISOString();
-        const backoffMs = Math.min(
-          5_000,
-          250 * (2 ** Math.min(5, bindingCheckDeferredAttempts - 1))
-        );
-        runtimeLog("warn", "terminal_bridge_monitor_binding_check_deferred", {
-          conversation_id: conversation.conversation_id,
-          terminal_target: terminalControl.target,
-          error_code: error.code,
-          lock_kind: error.lockKind,
-          attempt: bindingCheckDeferredAttempts,
-          retry_in_ms: backoffMs
-        });
-        sleepSync(backoffMs);
-        continue;
-      }
-      if (!(error instanceof TurnBindingSupersededError)) {
-        runtimeLog("error", "terminal_bridge_monitor_binding_check_failed", {
-          conversation_id: conversation.conversation_id,
-          terminal_target: terminalControl.target,
-          error_code: isRecord(error) ? stringValue(error.code) : undefined,
-          reason: error instanceof Error ? error.message : String(error)
-        });
-      }
-      throw error;
-    }
-    if (bindingCheckDeferredAttempts > 0) {
-      const resumedAt = cliNow().toISOString();
-      try {
-        appendEvent(logPath, {
-          ts: resumedAt,
-          conversation_id: conversation.conversation_id,
-          event: "terminal_bridge_monitor_binding_check_deferred",
-          terminal_control: terminalControl,
-          error_code: "AKK_STORE_LOCK_TIMEOUT",
-          lock_kind: "writer",
-          first_deferred_at: bindingCheckFirstDeferredAt,
-          resumed_at: resumedAt,
-          attempts: bindingCheckDeferredAttempts,
-          outcome: "resumed"
-        });
-        runtimeLog("info", "terminal_bridge_monitor_binding_check_resumed", {
-          conversation_id: conversation.conversation_id,
-          terminal_target: terminalControl.target,
-          attempts: bindingCheckDeferredAttempts,
-          first_deferred_at: bindingCheckFirstDeferredAt
-        });
-        bindingCheckDeferredAttempts = 0;
-        bindingCheckFirstDeferredAt = undefined;
-      } catch (error) {
-        if (!(error instanceof StoreLockTimeoutError)) {
-          throw error;
-        }
-        runtimeLog("warn", "terminal_bridge_monitor_diagnostic_write_deferred", {
-          conversation_id: conversation.conversation_id,
-          terminal_target: terminalControl.target,
-          error_code: error.code,
-          lock_kind: error.lockKind
-        });
-        sleepSync(Math.max(250, pollIntervalMs));
-        continue;
-      }
-    }
-    const screenChangedSinceSend = preSendScreenFingerprint !== undefined &&
-      pollPolicyState.previousScreenFingerprint !== undefined &&
-      pollPolicyState.previousScreenFingerprint !== preSendScreenFingerprint;
-    let poll;
-    const expectedUpdatedAt = conversation.updated_at;
-    const expectedStatus = conversation.status;
-    const releaseTerminalPollLock = acquireTerminalBridgeSendLock(
-      storeDirFromOptions(options),
-      terminalControl,
-      { timeoutMs: 30000 }
-    );
-    try {
-      let dispatchLedger = reconcilePreparedTerminalDispatchLedger(
-        terminalControl,
-        loadTerminalBridgeDispatchLedger(terminalControl)
+  let terminalBridge: TerminalAgentBridge | undefined;
+  const bridge = () => terminalBridge ??= createTerminalAgentBridge(options);
+  await runTerminalMonitorService({
+    initialConversation,
+    expectedTerminalMessageId,
+    lifecycle,
+    configuration: () => {
+      const timeoutMinutes = Number(
+        options.agentTimeoutMinutes ??
+          initialTakeover?.terminal_bridge_inactivity_timeout_minutes ??
+          DEFAULT_AGENT_TIMEOUT_MINUTES
       );
-      const durableSubmission = terminalBridgeSubmission(conversation);
-      if (
-        dispatchLedger?.status === "prepared" &&
-        stringValue(dispatchLedger.message_id) === currentMessageId &&
-        durableSubmission &&
-        ["submitted", "agent_accepted"].includes(
-          String(durableSubmission.status)
-        ) &&
-        stringValue(durableSubmission.message_id) === currentMessageId
-      ) {
-        const submittedAt =
-          stringValue(durableSubmission.agent_accepted_at) ??
-          stringValue(durableSubmission.submitted_at) ??
-          cliNow().toISOString();
-        saveTerminalBridgeDispatchLedger(terminalControl, {
-          ...dispatchLedger,
-          status: durableSubmission.status,
-          ...(durableSubmission.status === "agent_accepted"
-            ? {
-                agent_accepted_at: submittedAt,
-                acceptance_evidence:
-                  durableSubmission.acceptance_evidence
-              }
-            : { submitted_at: submittedAt }),
-          reason:
-            "recovered from the durable conversation submission receipt"
-        });
-        dispatchLedger =
-          loadTerminalBridgeDispatchLedger(terminalControl);
-      }
-      if (dispatchLedger) {
-        const ledgerStatus = stringValue(dispatchLedger.status);
-        const ledgerMessageId = stringValue(dispatchLedger.message_id);
-        if (
-          !["submitted", "agent_accepted"].includes(ledgerStatus ?? "") ||
-          ledgerMessageId !== currentMessageId
-        ) {
-          appendEvent(logPath, {
-            ts: cliNow().toISOString(),
-            conversation_id: conversation.conversation_id,
-            event: "terminal_bridge_monitor_dispatch_fenced",
-            monitor_message_id: currentMessageId,
-            dispatch_message_id: ledgerMessageId,
-            dispatch_status: ledgerStatus
-          });
-          printJson({
-            conversation,
-            monitored: true,
-            terminal_bridge: true,
-            completed: false,
-            submission_outcome:
-              ledgerStatus === "uncertain"
-                ? "uncertain"
-                : undefined,
-            do_not_retry: ledgerStatus === "uncertain",
-            reason:
-              ledgerStatus === "prepared" ||
-              ledgerStatus === "uncertain"
-                ? "terminal_dispatch_not_proven"
-                : "terminal_bridge_generation_replaced"
-          });
-          return;
-        }
-      }
-
-      const lockedConversation = loadState(statePath);
-      const lockedTakeover = isRecord(
-        lockedConversation.native_session_takeover
-      )
-        ? lockedConversation.native_session_takeover
-        : undefined;
-      const lockedControl =
-        terminalControlFromTakeover(lockedTakeover);
-      if (
-        lockedConversation.status !== expectedStatus ||
-        lockedConversation.updated_at !== expectedUpdatedAt ||
-        stringValue(lockedTakeover?.terminal_bridge_message_id) !==
-          currentMessageId ||
-        !lockedControl ||
-        !terminalControlsShareIncarnation(lockedControl, terminalControl)
-      ) {
-        conversation = lockedConversation;
-        continue;
-      }
-
-      const requestText = String(
-        lockedTakeover?.terminal_bridge_request_text ??
-          lockedConversation.user_request ??
-          ""
+      const hardTimeoutMinutes = positiveMinutes(
+        options.agentHardTimeoutMinutes ??
+          initialTakeover?.terminal_bridge_hard_timeout_minutes ??
+          DEFAULT_AGENT_HARD_TIMEOUT_MINUTES,
+        "--agent-hard-timeout-minutes"
       );
-      const terminalRuntime = terminalRuntimeIdentityForConversation(
-        lockedConversation,
-        terminalControl
-      );
-      poll = await terminalBridge.monitorPoll({
-        agent: executor.kind,
-        terminalControl,
-        screenOptions: {
-          scrollbackLines: Number(options.scrollbackLines ?? 120),
-          requestText,
-          screenChangedSinceSend,
-          runtime: terminalRuntime
-        },
-        durableRequest: terminalDurableRequestForConversation(
-          lockedConversation,
-          terminalControl
-        )
-      });
-    } finally {
-      releaseTerminalPollLock();
-    }
-    const terminalStatus = poll.status;
-    const detectorLimitation = stringValue(
-      terminalStatus.capability_limitation
-    );
-    const detectorDiagnosticFingerprint = detectorLimitation
-      ? terminalBridgeActivityFingerprint(detectorLimitation)
-      : undefined;
-    const detectorDiagnosticChanged = detectorLimitation
-      ? detectorDiagnosticFingerprint !== persistedDetectorDiagnosticFingerprint ||
-        persistedDetectorDiagnosticStatus !== "limited"
-      : persistedDetectorDiagnosticStatus === "limited";
-    if (detectorDiagnosticChanged) {
-      try {
-        const diagnostic = persistTerminalBridgeDetectorDiagnostic({
+      return {
+        pollIntervalMs,
+        timeoutMinutes,
+        hardTimeoutMinutes,
+        activityPersistIntervalMs:
+          terminalBridgeActivityPersistIntervalMs(timeoutMinutes, pollIntervalMs)
+      };
+    },
+    ports: terminalMonitorServicePorts({
+      options,
+      statePath,
+      logPath,
+      terminalBridge: bridge
+    })
+  });
+}
+
+function monitorRuntimePort(): TerminalMonitorServicePorts["runtime"] {
+  return {
+    now: cliNow,
+    nowMs: cliNowMs,
+    pid: cliPid,
+    sleep: sleepSync,
+    log: runtimeLog,
+    exitAfterApprovalCallback: () =>
+      cliEnv().AKK_TEST_EXIT_AFTER_APPROVAL_CALLBACK_DELIVERED === "1",
+    exit: (code) => cliExit(code)
+  };
+}
+
+function terminalMonitorServicePorts({
+  options,
+  statePath,
+  logPath,
+  terminalBridge
+}: {
+  options: CliCommandOptions;
+  statePath: string;
+  logPath: string;
+  terminalBridge(): TerminalAgentBridge;
+}): TerminalMonitorServicePorts {
+  let resolvedStoreDir: string | undefined;
+  const storeDir = () => resolvedStoreDir ??=
+    pathsForConversationDir(path.dirname(statePath)).storeDir;
+  return {
+    state: {
+      load: () => loadState(statePath),
+      appendEvent: (event) => appendEvent(logPath, event),
+      markStalled: (reason, detail) => {
+        const conversation = markConversationStalled({
           statePath,
           logPath,
-          expectedConversationId: conversation.conversation_id,
-          expectedMessageId: currentMessageId,
-          limitation: detectorLimitation,
-          fingerprint: detectorDiagnosticFingerprint
+          reason,
+          detail
         });
-        if (diagnostic.diagnostic) {
-          conversation = diagnostic.conversation;
-          nativeTakeover = isRecord(conversation.native_session_takeover)
-            ? conversation.native_session_takeover
-            : undefined;
-          persistedDetectorDiagnosticFingerprint = stringValue(
-            diagnostic.diagnostic?.fingerprint
-          );
-          persistedDetectorDiagnosticStatus = stringValue(
-            diagnostic.diagnostic?.status
-          );
+        if (!conversation) {
+          throw new Error("terminal monitor stall transaction returned no conversation");
         }
-      } catch (error) {
-        if (!(error instanceof StoreLockTimeoutError)) {
-          throw error;
-        }
-        runtimeLog("warn", "terminal_bridge_detector_diagnostic_deferred", {
-          conversation_id: conversation.conversation_id,
-          terminal_target: terminalControl.target,
-          error_code: error.code,
-          lock_kind: error.lockKind
-        });
-        sleepSync(Math.max(250, pollIntervalMs));
-        continue;
-      }
-    }
-    const approval = terminalStatus.approval_state;
-    const currentScreenFingerprint =
-      stringValue(terminalStatus?.screen?.digest) ??
-      terminalBridgeScreenFingerprint(terminalStatus?.screen?.excerpt);
-    const currentScreenChangedSinceSend =
-      preSendScreenFingerprint !== undefined &&
-      currentScreenFingerprint !== undefined &&
-      currentScreenFingerprint !== preSendScreenFingerprint;
-    const claudePermissionVisible =
-      executor.kind === "claude" &&
-      isRecord(approval) &&
-      approval.blocked === true &&
-      approval.prompt_kind === "claude_permission";
-    const approvalObservationFingerprint = claudePermissionVisible
-      ? terminalBridgeApprovalFingerprint({ terminalControl, terminalStatus })
-      : undefined;
-    const approvalDecision = decideTerminalMonitorApproval({
-      executorKind: executor.kind,
-      executorDisplayName: executor.display_name,
-      terminalReachable: terminalStatus.reachable,
-      approval,
-      nativeTakeover,
-      currentMessageId,
-      currentScreenFingerprint,
-      currentScreenChangedSinceSend,
-      observedFingerprint: approvalObservationFingerprint,
-      transcriptIdentity: claudePermissionVisible
-        ? claudeTranscriptApprovalIdentity(approval)
-        : undefined
-    });
-    if (approvalDecision.markPromptCleared) {
-      const cleared = markTerminalBridgeApprovalPromptCleared({
+        return conversation;
+      },
+      persistActivity: (input) => persistTerminalBridgeActivity({
+        ...input,
         statePath,
-        logPath,
-        expectedConversationId: conversation.conversation_id,
-        expectedMessageId: currentMessageId
-      });
-      if (cleared.marked) {
-        conversation = cleared.conversation;
-        nativeTakeover = isRecord(conversation.native_session_takeover)
+        logPath
+      }),
+      persistDetectorDiagnostic: (input) =>
+        persistTerminalBridgeDetectorDiagnostic({
+          ...input,
+          statePath,
+          logPath
+        }),
+      markApprovalPromptCleared: (input) =>
+        markTerminalBridgeApprovalPromptCleared({
+          expectedConversationId: input.expectedConversationId,
+          expectedMessageId: input.expectedMessageId,
+          statePath,
+          logPath
+        }),
+      recordApprovalNotification: (input) =>
+        recordMonitorApprovalNotification({
+          ...input,
+          ports: {
+            record: (request) => {
+              const result = recordTerminalBridgeApprovalNotification({
+                terminalControl: request.terminalControl,
+                terminalStatus: request.terminalStatus,
+                fingerprint: request.fingerprint,
+                expectedConversation: request.expectedConversation,
+                onRecorded: request.onRecorded,
+                statePath,
+                logPath
+              });
+              return { ...result, conversation: result.conversation as Conversation };
+            },
+            prepare: (request) =>
+              callbackOutboxService().prepareApprovalNotification({
+                options: { ...options, statePath },
+                statePath,
+                logPath,
+                ...request
+              }),
+            approvalInstructions: terminalBridgeApprovalInstructions,
+            approvalCandidate: terminalBridgeApprovalCandidate
+          }
+        })
+    },
+    authority: {
+      initialize: () => { terminalBridge(); },
+      terminalControl: (conversation) => {
+        const takeover = isRecord(conversation.native_session_takeover)
           ? conversation.native_session_takeover
           : undefined;
-      }
-    }
-    for (const suppression of approvalDecision.suppressions) {
-      pollPolicyState = {
-        ...pollPolicyState,
-        previousScreenFingerprint: currentScreenFingerprint
-      };
-      if (suppression.kind === "screen_not_new") {
-        runtimeLog("warn", "claude_screen_approval_not_new", {
-          conversation_id: conversation.conversation_id,
-          terminal_target: terminalControl.target,
-          reason:
-            "permission screen is not proven to have changed since the managed send"
-        });
-      } else {
-        runtimeLog("info", "claude_consumed_approval_screen_still_visible", {
-          conversation_id: conversation.conversation_id,
-          terminal_target: terminalControl.target,
-          fingerprint: suppression.fingerprint,
-          screen_digest: suppression.screenDigest,
-          reason: suppression.reason
-        });
-      }
-    }
-    if (approvalDecision.notification.kind !== "none") {
-      const question = approvalDecision.notification.kind === "question";
-      const effectOrder = terminalMonitorApprovalEffectOrder(
-        question ? "question" : "error"
-      );
-      const approvalReason = approvalDecision.notification.kind === "error"
-        ? approvalDecision.notification.reason
-        : undefined;
-      let approvalFingerprint = effectOrder[0] === "fingerprint"
-        ? terminalBridgeApprovalFingerprint({ terminalControl, terminalStatus })
-        : undefined;
-      appendEvent(logPath, question
-        ? {
-            ts: cliNow().toISOString(),
-            conversation_id: conversation.conversation_id,
-            event: "terminal_bridge_approval_detected",
-            terminal_control: terminalControl,
-            activity_state: terminalStatus.activity_state,
-            activity_reason: terminalStatus.activity_reason,
-            fingerprint: approvalFingerprint
-          }
-        : {
-            ts: cliNow().toISOString(),
-            conversation_id: conversation.conversation_id,
-            event: "terminal_bridge_approval_not_approvable",
-            terminal_control: terminalControl,
-            activity_state: terminalStatus.activity_state,
-            reason: approvalReason
-          });
-      if (effectOrder[1] === "fingerprint") {
-        approvalFingerprint = terminalBridgeApprovalFingerprint({
-          terminalControl,
-          terminalStatus
-        });
-      }
-      const notification = recordTerminalBridgeApprovalNotification({
-        statePath,
-        logPath,
-        terminalControl,
-        terminalStatus,
-        fingerprint: approvalFingerprint,
-        expectedConversation: {
-          conversationId: conversation.conversation_id,
-          status: conversation.status,
-          updatedAt: conversation.updated_at,
-          messageId: currentMessageId
-        },
-        onRecorded: (notificationConversation, notificationContext) => {
-          return callbackOutboxService().prepareApprovalNotification({
-            options: { ...options, statePath },
-            statePath,
-            logPath,
-            conversation: notificationConversation,
-            actor: executor.actor,
-            type: question ? "question" : "blocked",
-            body: question
-              ? terminalBridgeApprovalInstructions({
-                  conversation: notificationConversation,
-                  terminalControl,
-                  terminalStatus
-                })
-              : [
-                  `${executor.display_name} is waiting at a permission state that AKK cannot safely approve.`,
-                  approvalReason,
-                  "",
-                  `Conversation: ${notificationConversation.conversation_id}`,
-                  `Terminal: ${terminalControl.target}`,
-                  "Review and resolve this dialog in the terminal manually. AKK intentionally sends no key when the request identity cannot be revalidated."
-                ].join("\n"),
-            metadata: question
-              ? {
-                  source: "terminal_bridge",
-                  reason: "approval_required",
-                  terminal_control: terminalControl,
-                  terminal_status: terminalStatus,
-                  approval_fingerprint: approvalFingerprint,
-                  approval_candidate: terminalBridgeApprovalCandidate({
-                    executorKind: executor.kind,
-                    terminalControl,
-                    terminalStatus,
-                    fingerprint: approvalFingerprint
-                  }),
-                  approve_command:
-                    `AKK approve ${notificationConversation.conversation_id} --expected-approval-fingerprint ${approvalFingerprint}`,
-                  deny_command:
-                    `AKK cancel ${notificationConversation.conversation_id}`,
-                  approve_tool: "agent_knock_knock_approve",
-                  deny_tool: "agent_knock_knock_cancel"
-                }
-              : {
-                  source: "terminal_bridge",
-                  reason: "approval_not_approvable",
-                  terminal_control: terminalControl,
-                  terminal_status: terminalStatus,
-                  approval_fingerprint: approvalFingerprint
-                },
-            recoverMissingOutbox:
-              notificationContext?.recoverMissingOutbox === true
-          });
-        }
-      });
-      if (notification.stale) {
-        pollPolicyState = {
-          ...pollPolicyState,
-          previousScreenFingerprint: currentScreenFingerprint
-        };
-        sleepSync(pollIntervalMs);
-        continue;
-      }
-      if (notification.duplicate) {
-        printJson({
-          conversation: notification.conversation,
-          monitored: true,
-          terminal_bridge: true,
-          awaiting_approval: true,
-          ...(!question ? { approvable: false } : {}),
-          duplicate: true,
-          ...(!question ? { reason: approvalReason } : {}),
-          terminal_control: terminalControl,
-          terminal_status: terminalStatus
-        });
-        return;
-      }
-      if (notification.recorded?.prepared) {
-        if (!question) {
-          runPreparedCallback(notification.recorded.prepared);
-          return;
-        }
-        const callbackResult = runPreparedCallback(
-          notification.recorded.prepared,
-          { emit: false }
-        );
-        if (
-          callbackResult.delivered === true &&
-          cliEnv()
-            .AKK_TEST_EXIT_AFTER_APPROVAL_CALLBACK_DELIVERED === "1"
-        ) {
-          appendEvent(logPath, {
-            ts: cliNow().toISOString(),
-            conversation_id: conversation.conversation_id,
-            event:
-              "terminal_bridge_test_exit_after_approval_callback_delivered",
-            terminal_control: terminalControl,
-            fingerprint: approvalFingerprint
-          });
-          cliExit(86);
-        }
-        const afterCallback = loadState(statePath);
-        const afterTakeover = isRecord(afterCallback.native_session_takeover)
-          ? afterCallback.native_session_takeover
-          : undefined;
-        const approvalWasConsumed =
-          isWaitingForAgent(afterCallback.status) &&
-          afterTakeover?.terminal_bridge_approval === undefined &&
-          stringValue(afterTakeover?.terminal_bridge_message_id) ===
-            currentMessageId &&
-          stringValue(
-            afterTakeover?.terminal_bridge_last_approval_message_id
-          ) === currentMessageId &&
-          stringValue(
-            afterTakeover?.terminal_bridge_last_approval_fingerprint
-          ) === approvalFingerprint;
-        if (approvalWasConsumed) {
-          conversation = afterCallback;
-          pollPolicyState = {
-            previousScreenFingerprint: currentScreenFingerprint
-          };
-          lastActivityAtMs =
-            validTimestampMs(
-              afterTakeover?.terminal_bridge_last_activity_at
-            ) ?? cliNowMs();
-          lastPersistedActivityAtMs = lastActivityAtMs;
-          persistedActivityReason = stringValue(
-            afterTakeover?.terminal_bridge_last_activity_reason
-          );
-          appendEvent(logPath, {
-            ts: cliNow().toISOString(),
-            conversation_id: conversation.conversation_id,
-            event: "terminal_bridge_monitor_continued_after_approval",
-            terminal_control: terminalControl,
-            fingerprint: approvalFingerprint
-          });
-          sleepSync(pollIntervalMs);
-          continue;
-        }
-        emitPreparedCallbackResult(callbackResult);
-        return;
-      }
-      printJson({
-        conversation: notification.conversation,
-        monitored: true,
-        terminal_bridge: true,
-        awaiting_approval: true,
-        ...(!question ? { approvable: false } : {}),
-        delivered: false,
-        message: notification.recorded?.callbackMessage,
-        reason: "gateway_method_missing",
-        terminal_control: terminalControl,
-        terminal_status: terminalStatus
-      });
-      return;
-    }
-    const durableCompletion = poll.durableCompletion;
-    const durableFingerprint = durableCompletion
-      ? terminalBridgeActivityFingerprint(JSON.stringify({
-          text: durableCompletion.text,
-          timestamp: durableCompletion.timestamp,
-          id: durableCompletion.id,
-          metadata: durableCompletion.metadata
-        }))
-      : undefined;
-    const completion = poll.completion;
-    const completionMetadata = isRecord(completion?.metadata)
-      ? completion.metadata
-      : {};
-    const completionFingerprint = completion
-      ? terminalBridgeCompletionFingerprint({
-          completion,
-          terminalMessageId: currentMessageId
-        })
-      : undefined;
-    const monitorDecision = reduceTerminalMonitorDecision({
-      state: pollPolicyState,
-      activityState: terminalStatus.activity_state,
-      activityReason: terminalStatus.activity_reason,
-      screenFingerprint: currentScreenFingerprint,
-      durableFingerprint,
-      completionPresent: Boolean(completion),
-      completionFingerprint
-    });
-    pollPolicyState = monitorDecision.state;
-    const activityPollDecision = monitorDecision.activity;
-    if (activityPollDecision.activityReason !== undefined) {
-      const observedAtMs = cliNowMs();
-      lastActivityAtMs = observedAtMs;
-      const activityReason = activityPollDecision.activityReason;
-      if (
-        persistedActivityReason === undefined ||
-        observedAtMs - lastPersistedActivityAtMs >= activityPersistIntervalMs
-      ) {
-        conversation = persistTerminalBridgeActivity({
-          conversation,
+        return terminalControlFromTakeover(takeover);
+      },
+      submission: terminalBridgeSubmission,
+      isWaitingForAgent,
+      isProcessAlive,
+      markAcceptanceUncertain: (input) =>
+        markTerminalAcceptanceUncertain({
+          ...input,
+          statePath,
+          logPath
+        }),
+      reconcileAcceptance: (input) => reconcileMonitorAcceptance({
+        terminalControl: input.terminalControl,
+        acquireTerminal: (control) => acquireTerminalBridgeSendLock(
+          storeDirFromOptions(options), control, { timeoutMs: 30000 }
+        ),
+        reconcile: () => reconcileTerminalAcceptanceInMonitor({
+          ...input,
+          options,
           statePath,
           logPath,
-          observedAtMs,
-          reason: activityReason,
-          activityState: terminalStatus.activity_state,
-          timeoutMinutes,
-          hardTimeoutMinutes
-        });
-        lastPersistedActivityAtMs = observedAtMs;
-        persistedActivityReason = activityReason;
-        if (!isWaitingForAgent(conversation.status)) {
-          continue;
+          terminalBridge: terminalBridge()
+        }),
+        apply: input.apply,
+        recover: input.recover
+      }),
+      recoverPreparedSubmission: (input) =>
+        recoverPreparedMonitorSubmission({
+          ...input,
+          statePath,
+          logPath,
+          ports: {
+            acquireTerminal: (control) => acquireTerminalBridgeSendLock(
+              storeDirFromOptions(options), control, { timeoutMs: 30000 }
+            ),
+            withWriter: (use) => withStoreWriterLeaseAsync(storeDir(), use),
+            acquireState: () => acquireFileLock(`${statePath}.lock`),
+            loadConversation: () => loadState(statePath),
+            loadLedger: loadTerminalBridgeDispatchLedger,
+            saveLedger: saveTerminalBridgeDispatchLedger,
+            saveConversation: (conversation) => saveState(statePath, conversation),
+            submission: terminalBridgeSubmission,
+            applySubmission: withTerminalBridgeSubmission,
+            requestFingerprint: terminalBridgeRequestFingerprint,
+            now: cliNow,
+            appendEvent: (event) => appendEvent(logPath, event),
+            stallCollateral: (request) => {
+              stallOtherTerminalBridgeConversationsForUncertainDispatch({
+                storeDir: storeDir(),
+                ...request
+              });
+            }
+          }
+        }),
+      assertBindingCurrent: (conversation) =>
+        assertTurnBindingCurrent(conversation, "monitor"),
+      bindingSuperseded: (error) => error instanceof TurnBindingSupersededError
+        ? { code: error.code, message: error.message }
+        : undefined,
+      storeOperationTimeout: terminalMonitorStoreOperationTimeout,
+      storeLeaseTimeout: terminalMonitorStoreLeaseTimeout,
+      poll: (input) => pollTerminalMonitor({
+        ...input,
+        terminalBridge: terminalBridge(),
+        scrollbackLines: Number(options.scrollbackLines ?? 120),
+        ports: {
+          acquireTerminal: (control) => acquireTerminalBridgeSendLock(
+            storeDirFromOptions(options), control, { timeoutMs: 30000 }
+          ),
+          reconcileLedger: reconcilePreparedTerminalDispatchLedger,
+          loadLedger: loadTerminalBridgeDispatchLedger,
+          saveLedger: saveTerminalBridgeDispatchLedger,
+          submission: terminalBridgeSubmission,
+          loadConversation: () => loadState(statePath),
+          terminalControl: (conversation) => terminalControlFromTakeover(
+            isRecord(conversation.native_session_takeover)
+              ? conversation.native_session_takeover
+              : undefined
+          ),
+          sameIncarnation: terminalControlsShareIncarnation,
+          runtime: terminalRuntimeIdentityForConversation,
+          durableRequest: terminalDurableRequestForConversation,
+          appendEvent: (event) => appendEvent(logPath, event),
+          now: cliNow
         }
-      }
+      })
+    },
+    callbacks: {
+      prepareCompletion: (input) =>
+        prepareTerminalBridgeCompletionCallback({
+          options,
+          statePath,
+          logPath,
+          ...input
+        }),
+      verifiedDead: (input) =>
+        stallAcceptedTurnForVerifiedDeadAgent({
+          options,
+          storeDir: storeDir(),
+          statePath,
+          logPath,
+          expectedConversationId: input.conversationId,
+          expectedMessageId: input.messageId
+        }),
+      run: (prepared, callbackOptions) =>
+        runPreparedCallback(prepared, callbackOptions),
+      emit: emitPreparedCallbackResult
+    },
+    runtime: monitorRuntimePort(),
+    presentation: {
+      emit: (result) => presentTerminalMonitor(result, printJson)
     }
-
-    const nextAction: TerminalMonitorNextAction = monitorDecision.next;
-    if (completion && nextAction.kind === "complete") {
-      const preparedCompletion = prepareTerminalBridgeCompletionCallback({
-        options,
-        statePath,
-        logPath,
-        conversation,
-        executor,
-        terminalControl,
-        terminalMessageId: currentMessageId,
-        completion,
-        completionFingerprint: nextAction.completionFingerprint
-      });
-      if (!preparedCompletion.claimed) {
-        printJson({
-          conversation: preparedCompletion.conversation,
-          monitored: true,
-          terminal_bridge: true,
-          completed: false,
-          duplicate: true,
-          reason: preparedCompletion.reason
-        });
-        return;
-      }
-      runPreparedCallback(preparedCompletion.prepared);
-      return;
-    }
-
-    // Durable completion wins over process-death cleanup. A coding-agent
-    // process may exit immediately after committing its final transcript, so
-    // only classify the Turn as orphaned after this poll (and an independent
-    // durable probe under the mutation locks) both find no completion.
-    if (nextAction.kind === "verify_dead") {
-      const deadProcessStall = await stallAcceptedTurnForVerifiedDeadAgent({
-        options,
-        storeDir: pathsForConversationDir(path.dirname(statePath)).storeDir,
-        statePath,
-        logPath,
-        expectedConversationId: conversation.conversation_id,
-        expectedMessageId: currentMessageId
-      });
-      if (deadProcessStall.completionPreparation) {
-        const completionPreparation = deadProcessStall.completionPreparation;
-        if (!completionPreparation.claimed) {
-          printJson({
-            conversation: completionPreparation.conversation,
-            monitored: true,
-            terminal_bridge: true,
-            completed: false,
-            duplicate: true,
-            reason: completionPreparation.reason
-          });
-          return;
-        }
-        runPreparedCallback(completionPreparation.prepared);
-        return;
-      }
-      if (deadProcessStall.stalled) {
-        printJson({
-          conversation: deadProcessStall.conversation,
-          monitored: true,
-          terminal_bridge: true,
-          stalled: true,
-          reason: deadProcessStall.reason
-        });
-        return;
-      }
-    }
-
-    // A concrete approval or completion observed on this poll wins over a timeout boundary.
-    const nowMs = cliNowMs();
-    const timeoutAction = decideTerminalMonitorAfterEffectsTimeout({
-      nowMs,
-      taskStartedAtMs,
-      lastActivityAtMs,
-      hardTimeoutMinutes,
-      inactivityTimeoutMinutes: timeoutMinutes
-    });
-    if (timeoutAction.kind === "hard_timeout") {
-      appendEvent(logPath, {
-        ts: new Date(nowMs).toISOString(),
-        conversation_id: conversation.conversation_id,
-        event: "terminal_bridge_hard_timeout_reached",
-        terminal_control: terminalControl,
-        task_started_at: new Date(taskStartedAtMs).toISOString(),
-        hard_deadline_at: new Date(taskStartedAtMs + hardTimeoutMinutes * 60 * 1000).toISOString(),
-        agent_hard_timeout_minutes: hardTimeoutMinutes,
-        last_activity_at: new Date(lastActivityAtMs).toISOString(),
-        terminal_activity_state: terminalStatus.activity_state
-      });
-      const stalledConversation = markConversationStalled({
-        statePath,
-        logPath,
-        reason: `terminal bridge reached its hard lifetime of ${hardTimeoutMinutes} minutes`,
-        detail: {
-          terminal_bridge: true,
-          terminal_control: terminalControl,
-          task_started_at: new Date(taskStartedAtMs).toISOString(),
-          last_activity_at: new Date(lastActivityAtMs).toISOString(),
-          agent_hard_timeout_minutes: hardTimeoutMinutes,
-          terminal_activity_state: terminalStatus.activity_state
-        }
-      });
-      printJson({
-        conversation: stalledConversation,
-        monitored: true,
-        terminal_bridge: true,
-        stalled: true,
-        hard_timeout: true,
-        reason: stalledConversation?.stalled_reason
-      });
-      return;
-    }
-
-    if (timeoutAction.kind === "inactivity_timeout") {
-      const stalledConversation = markConversationStalled({
-        statePath,
-        logPath,
-        reason: `terminal bridge observed no activity for ${timeoutMinutes} minutes`,
-        detail: {
-          terminal_bridge: true,
-          terminal_control: terminalControl,
-          match: completionMetadata.context_match,
-          terminal_activity_state: terminalStatus.activity_state,
-          last_activity_at: new Date(lastActivityAtMs).toISOString(),
-          inactivity_deadline_at: new Date(timeoutAction.deadlineAtMs).toISOString(),
-          agent_timeout_minutes: timeoutMinutes
-        }
-      });
-      printJson({
-        conversation: stalledConversation,
-        monitored: true,
-        terminal_bridge: true,
-        stalled: true,
-        reason: stalledConversation?.stalled_reason
-      });
-      return;
-    }
-
-    sleepSync(pollIntervalMs);
-  }
+  };
 }
 
 function activeTerminalBridgeMonitorOwner(

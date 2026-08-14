@@ -58,6 +58,7 @@
     "test/terminal-dispatch-policy.test.ts",
     "test/terminal-dispatch-receipt.test.ts",
     "test/terminal-list-renderer.test.ts",
+    "test/terminal-monitor-application-service.test.ts",
     "test/terminal-monitor-decision-policy.test.ts",
     "test/terminal-monitor-reconciliation-eligibility.test.ts",
     "test/terminal-monitor-poll-policy.test.ts",
