@@ -2,8 +2,8 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 34988,
-    "production_physical_loc": 75674,
+    "cli_core_max_physical_loc": 34536,
+    "production_physical_loc": 75633,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -202,6 +202,13 @@
         "test/shards/agent-cli-monitor-lifecycle.test.ts",
         "test/shards/agent-cli-monitor-recovery.test.ts",
         "test/shards/agent-cli-session-acceptance.test.ts"
+      ]
+    },
+    "terminal-scoped-approval-authority": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/codex-no-rollout-binding-cli.test.ts",
+        "test/shards/agent-cli-control-locks.test.ts"
       ]
     },
     "transcript": {
@@ -427,6 +434,10 @@
     {
       "path": "src/terminal-process-source.ts",
       "owner": "terminal-control"
+    },
+    {
+      "path": "src/terminal-scoped-approval-authority.ts",
+      "owner": "terminal-scoped-approval-authority"
     },
     {
       "path": "src/terminal-submission-acceptance.ts",

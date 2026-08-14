@@ -266,6 +266,12 @@ import {
   terminalObservationFromResolvedIdentity,
   type TerminalNativeIdentity as NativeAgentSessionIdentity
 } from "./terminal-binding-authority.js";
+import {
+  decideTerminalScopedCodexApprovalAuthority,
+  terminalScopedCodexApprovalPromptSnapshot,
+  type TerminalScopedCodexApprovalBoundary,
+  type TerminalScopedCodexApprovalPromptSnapshot
+} from "./terminal-scoped-approval-authority.js";
 import { withCanonicalMutationLocks } from "./mutation-transaction.js";
 import {
   beginCallbackRetryPolicy,
@@ -296,6 +302,7 @@ import {
   decodeTerminalDispatchLedgerDocument,
   terminalDispatchLedgerLooksLifecycle,
   terminalDispatchReceiptHistory as terminalLedgerReceiptHistory,
+  type TerminalDispatchLedgerDocument,
   type TerminalOrdinaryDispatchIdentityFields,
   type TerminalOrdinaryDispatchPhaseFields,
   type TerminalOrdinaryDispatchPostCallbackFields,
@@ -5429,7 +5436,7 @@ function terminalFirstListProjection({
           ownership.state === "conflict" &&
             discoveredOwnership.state === "current" &&
             ledger
-            ? terminalScopedCodexApprovalBoundaryFromSnapshot({
+            ? terminalScopedCodexApprovalBoundary({
                 storeDir,
                 terminal,
                 owner: discoveredOwnership.conversation,
@@ -5439,7 +5446,7 @@ function terminalFirstListProjection({
               })
             : ownership.state === "none" &&
                 discoveredOwnership.state === "none"
-              ? terminalScopedCodexApprovalWithoutDispatchOwnerBoundary({
+              ? terminalScopedCodexApprovalBoundary({
                   storeDir,
                   terminal,
                   session: authoritativeSession,
@@ -6362,540 +6369,81 @@ function localTerminalDispatchOwnership(
   };
 }
 
-type TerminalScopedCodexApprovalPromptSnapshot = {
-  fingerprint: string;
-  keys: string[];
-  requestId: string | null;
-  digest: string;
-};
-
-type TerminalScopedCodexApprovalAuthority =
-  | {
-      kind: "current_dispatch_owner";
-      owner: Conversation;
-      session: ManagedSessionState;
-      ledger: Record<string, any>;
+function terminalScopedCodexApprovalBoundary({
+  storeDir, terminal, session, ledger, approval, owner
+}: {
+  storeDir: string; terminal: unknown; session: ManagedSessionState;
+  ledger?: TerminalDispatchLedgerDocument;
+  approval?: TerminalScopedCodexApprovalPromptSnapshot;
+  owner?: Conversation;
+}): TerminalScopedCodexApprovalBoundary {
+  const terminalRecord = isRecord(terminal) ? terminal : {};
+  const terminalControl = isRecord(terminalRecord.terminal_control)
+    ? terminalRecord.terminal_control as unknown as TerminalControlRef
+    : undefined;
+  const control = terminalControl as TerminalControlRef;
+  const terminalId = String(terminalRecord.id);
+  const relatedBoundSessionIds = () =>
+    listManagedSessions(storeDir)
+      .filter((candidate) =>
+        candidate.status === "bound" &&
+        candidate.agent === "codex" &&
+        candidate.binding?.native_process.pid === Number(terminalRecord.pid) &&
+        terminalControlsShareIncarnation(candidate.binding?.terminal_control, terminalControl)
+      )
+      .map((candidate) => candidate.session_id);
+  const blockingTurnIds = () =>
+    terminalIncarnationBlockingTurns(storeDir, control)
+      .map((turn) => turnIdForConversation(turn));
+  const hasDeferredRecovery = () =>
+    listDeferredForegroundTransfers(storeDir).some((transfer) =>
+      !["resolved", "abort_resolved"].includes(transfer.status) &&
+      (transfer.source_session_id === session.session_id ||
+       transfer.target_session_id === session.session_id ||
+       (transfer.terminal_id === terminalId &&
+        terminalControlEvidenceMatches(transfer.terminal_endpoint, control)))
+    );
+  const commonChecks = {
+    relatedBoundSessionIds, blockingTurnIds,
+    hasNativeTransition: () =>
+      managedSessionHasAnyNativeTransition(storeDir, session),
+    hasDeferredRecovery,
+    ledgerMatchesTerminal: () =>
+      terminalDispatchRecordMatchesControl(ledger, control)
+  };
+  if (owner && ledger) {
+    return decideTerminalScopedCodexApprovalAuthority({
+      kind: "current_dispatch_owner", storeDir, terminal, owner, session,
+      ledger, approval,
+      checks: {
+        ...commonChecks,
+        assertDispatchOwner: () => assertManagedTerminalDispatchOwner({
+          storeDir, conversation: owner, terminalControl: control, action: "approve"
+        }),
+        ownerMatchesNativeIdentity: (identity) =>
+          nativeAgentIdentityMatchesTurn(owner, identity
+            ? { ...identity, evidence: "terminal_scoped_approval" }
+            : undefined)
+      }
+    });
+  }
+  return decideTerminalScopedCodexApprovalAuthority({
+    kind: "managed_session_no_dispatch_owner", storeDir, terminal, session,
+    ledger, approval,
+    checks: {
+      ...commonChecks,
+      dispatchOwnershipIsNone: () =>
+        terminalDispatchOwnership(control).state === "none",
+      hasOrphanedDispatch: () =>
+        Boolean(orphanedTerminalDispatchForRecovery(control))
     }
-  | {
-      kind: "managed_session_no_dispatch_owner";
-      session: ManagedSessionState;
-      ledger?: Record<string, any>;
-    };
-
-type TerminalScopedCodexApprovalBoundary = {
-  authority: TerminalScopedCodexApprovalAuthority;
-  approval: TerminalScopedCodexApprovalPromptSnapshot;
-  token: string;
-};
+  });
+}
 
 type TerminalScopedCodexApprovalResolution =
   | { state: "unmanaged" }
   | { state: "eligible"; boundary: TerminalScopedCodexApprovalBoundary }
   | { state: "blocked"; reason: string };
-
-function terminalScopedCodexApprovalObservation(
-  terminal: Record<string, any>
-): Record<string, unknown> | undefined {
-  const observation = isRecord(terminal.native_agent_identity_observation)
-    ? terminal.native_agent_identity_observation
-    : undefined;
-  const status = stringValue(observation?.status);
-  if (!status || !["resolved", "verified_absent", "unavailable"].includes(status)) {
-    return undefined;
-  }
-  if (status !== "resolved") {
-    return { status };
-  }
-  const rollout = isRecord(terminal.native_agent_rollout)
-    ? terminal.native_agent_rollout
-    : undefined;
-  return {
-    status,
-    session_id: stringValue(terminal.native_agent_session_id) ?? null,
-    process_uuid: stringValue(terminal.native_agent_process_uuid) ?? null,
-    process_birth: stringValue(terminal.native_agent_process_birth) ?? null,
-    rollout: isCompleteNativeRollout(rollout)
-      ? {
-          fd: rollout.fd,
-          device: rollout.device,
-          inode: rollout.inode,
-          path: rollout.path
-        }
-      : null
-  };
-}
-
-function terminalScopedCodexApprovalPromptSnapshot(
-  approvalState: unknown
-): TerminalScopedCodexApprovalPromptSnapshot | undefined {
-  if (!isRecord(approvalState) || approvalState.approvable !== true) {
-    return undefined;
-  }
-  const fingerprint = stringValue(approvalState.fingerprint);
-  const rawKeys = Array.isArray(approvalState.keys)
-    ? approvalState.keys
-    : stringValue(approvalState.key)
-      ? [approvalState.key]
-      : [];
-  const keys = rawKeys.filter(
-    (value): value is string => typeof value === "string" && value.length > 0
-  );
-  if (
-    !fingerprint ||
-    !/^[0-9a-f]{64}$/u.test(fingerprint) ||
-    keys.length === 0 ||
-    keys.length !== rawKeys.length ||
-    stringValue(approvalState.decision_mode) !== "keys"
-  ) {
-    return undefined;
-  }
-  const requestId = stringValue(approvalState.request_id) ?? null;
-  return {
-    fingerprint,
-    keys,
-    requestId,
-    digest: terminalActionFingerprint({
-      version: 1,
-      kind: "terminal_scoped_codex_approval_prompt",
-      fingerprint,
-      keys,
-      request_id: requestId
-    })
-  };
-}
-
-function terminalScopedCodexApprovalToken({
-  storeDir,
-  terminal,
-  authority,
-  approval
-}: {
-  storeDir: string;
-  terminal: Record<string, any>;
-  authority: TerminalScopedCodexApprovalAuthority;
-  approval: TerminalScopedCodexApprovalPromptSnapshot;
-}): string {
-  const terminalControl = terminal.terminal_control as TerminalControlRef;
-  const workspace = stringValue(terminal.workspace ?? terminal.cwd) as string;
-  const processUuid = stringValue(terminal.native_agent_process_uuid) as string;
-  const processBirth = stringValue(terminal.native_agent_process_birth) as string;
-  const terminalToken = unmanagedTerminalBindingToken({
-    terminalId: String(terminal.id),
-    terminalControl,
-    agent: "codex",
-    pid: Number(terminal.pid),
-    workspace,
-    processUuid,
-    processBirth
-  });
-  const session = authority.session;
-  const owner = authority.kind === "current_dispatch_owner"
-    ? authority.owner
-    : undefined;
-  const takeover = owner && isRecord(owner.native_session_takeover)
-    ? owner.native_session_takeover
-    : undefined;
-  const ledger = authority.ledger;
-  return createHash("sha256")
-    .update(JSON.stringify({
-      version: 2,
-      kind: "terminal_scoped_codex_manual_approval",
-      store_dir: path.resolve(storeDir),
-      terminal_token: terminalToken,
-      observation: terminalScopedCodexApprovalObservation(terminal),
-      authority: authority.kind,
-      owner_session_id: session.session_id,
-      owner_session_revision: managedSessionRevision(session),
-      owner_binding_token: managedSessionBindingToken(session),
-      owner_turn_id: owner ? turnIdForConversation(owner) : null,
-      owner_turn_status: owner?.status ?? null,
-      owner_turn_updated_at: owner?.updated_at ?? null,
-      owner_message_id:
-        stringValue(takeover?.terminal_bridge_message_id) ?? null,
-      dispatch_snapshot: ledger
-        ? {
-            status: stringValue(ledger.status),
-            fingerprint: terminalActionFingerprint(ledger)
-          }
-        : { status: "none", fingerprint: null },
-      approval_snapshot_digest: approval.digest,
-      approval_fingerprint: approval.fingerprint,
-      approval_keys: approval.keys,
-      approval_request_id: approval.requestId
-    }))
-    .digest("hex");
-}
-
-function terminalScopedCodexApprovalBoundaryFromSnapshot({
-  storeDir,
-  terminal,
-  owner,
-  session,
-  ledger,
-  approval
-}: {
-  storeDir: string;
-  terminal: Record<string, any>;
-  owner: Conversation;
-  session: ManagedSessionState;
-  ledger: Record<string, any>;
-  approval?: TerminalScopedCodexApprovalPromptSnapshot;
-}): TerminalScopedCodexApprovalBoundary {
-  const terminalControl = isRecord(terminal.terminal_control)
-    ? terminal.terminal_control as unknown as TerminalControlRef
-    : undefined;
-  const binding = session.binding;
-  const workspace = stringValue(terminal.workspace ?? terminal.cwd);
-  const processUuid = stringValue(terminal.native_agent_process_uuid);
-  const processBirth = stringValue(terminal.native_agent_process_birth);
-  const observation = terminalScopedCodexApprovalObservation(terminal);
-  if (
-    terminal.agent !== "codex" ||
-    !terminalControl ||
-    !hasCanonicalTerminalEndpoint(terminalControl) ||
-    !Number.isSafeInteger(Number(terminal.pid)) ||
-    Number(terminal.pid) <= 1 ||
-    !workspace ||
-    !processUuid ||
-    !processBirth ||
-    !observation ||
-    !approval
-  ) {
-    throw new Error(
-      "terminal-scoped Codex approval requires an exact terminal and process incarnation"
-    );
-  }
-  if (
-    session.status !== "bound" ||
-    session.agent !== "codex" ||
-    !binding ||
-    binding.native_process.pid !== Number(terminal.pid) ||
-    binding.native_process.process_uuid !== processUuid ||
-    binding.native_process.process_birth !== processBirth ||
-    !terminalControlAliasMatches(
-      binding.terminal_id,
-      binding.terminal_control,
-      terminal.id,
-      terminalControl
-    ) ||
-    !terminalControlsShareIncarnation(binding.terminal_control, terminalControl) ||
-    path.resolve(session.workspace) !== path.resolve(workspace) ||
-    sessionIdForConversation(owner) !== session.session_id ||
-    !["waiting_for_agent", "waiting_for_openclaw"].includes(owner.status)
-  ) {
-    throw new Error(
-      "terminal-scoped Codex approval has no single current managed owner"
-    );
-  }
-  const relatedBoundSessions = listManagedSessions(storeDir).filter((candidate) =>
-    candidate.status === "bound" &&
-    candidate.agent === "codex" &&
-    candidate.binding?.native_process.pid === Number(terminal.pid) &&
-    terminalControlsShareIncarnation(
-      candidate.binding?.terminal_control,
-      terminalControl
-    )
-  );
-  if (
-    relatedBoundSessions.length !== 1 ||
-    relatedBoundSessions[0].session_id !== session.session_id
-  ) {
-    throw new Error(
-      "terminal-scoped Codex approval has ambiguous managed Session ownership"
-    );
-  }
-  const blockingTurns = terminalIncarnationBlockingTurns(
-    storeDir,
-    terminalControl
-  );
-  if (
-    blockingTurns.length !== 1 ||
-    turnIdForConversation(blockingTurns[0]) !== turnIdForConversation(owner)
-  ) {
-    throw new Error(
-      "terminal-scoped Codex approval has collateral unresolved Turn state"
-    );
-  }
-  if (
-    managedSessionHasAnyNativeTransition(storeDir, session) ||
-    listDeferredForegroundTransfers(storeDir).some((transfer) =>
-      !["resolved", "abort_resolved"].includes(transfer.status) &&
-      (
-        transfer.source_session_id === session.session_id ||
-        transfer.target_session_id === session.session_id ||
-        (
-          transfer.terminal_id === String(terminal.id) &&
-          terminalControlEvidenceMatches(
-            transfer.terminal_endpoint,
-            terminalControl
-          )
-        )
-      )
-    )
-  ) {
-    throw new Error(
-      "terminal-scoped Codex approval is blocked by managed recovery state"
-    );
-  }
-  assertManagedTerminalDispatchOwner({
-    storeDir,
-    conversation: owner,
-    terminalControl,
-    action: "approve"
-  });
-  if (
-    !terminalDispatchRecordMatchesControl(ledger, terminalControl) ||
-    !["submitted", "agent_accepted"].includes(String(ledger.status))
-  ) {
-    throw new Error(
-      `terminal-scoped Codex approval cannot use ${String(ledger.status)} dispatch ownership`
-    );
-  }
-  const observedSessionId = stringValue(terminal.native_agent_session_id);
-  const statusCardSessionId = stringValue(
-    terminal.native_agent_status_card_session_id
-  );
-  for (const knownSessionId of [observedSessionId, statusCardSessionId]) {
-    if (
-      knownSessionId &&
-      knownSessionId.toLowerCase() !==
-        String(binding.native_thread_id ?? "").toLowerCase()
-    ) {
-      throw new Error(
-        "terminal-scoped Codex approval observed a different native thread"
-      );
-    }
-  }
-  if (
-    observedSessionId &&
-    (
-      stringValue(terminal.native_agent_process_uuid) !==
-        binding.native_process.process_uuid ||
-      stringValue(terminal.native_agent_process_birth) !==
-        binding.native_process.process_birth ||
-      (
-        binding.native_process.rollout &&
-        !exactNativeRolloutMatches(
-          binding.native_process.rollout,
-          isRecord(terminal.native_agent_rollout)
-            ? terminal.native_agent_rollout as any
-            : undefined
-        )
-      )
-    )
-  ) {
-    throw new Error(
-      "terminal-scoped Codex approval observed a changed native rollout incarnation"
-    );
-  }
-  const currentIdentity = observedSessionId
-    ? {
-        sessionId: observedSessionId,
-        processUuid,
-        processBirth,
-        rollout: isRecord(terminal.native_agent_rollout)
-          ? terminal.native_agent_rollout as any
-          : undefined,
-        evidence: "terminal_scoped_approval"
-      }
-    : undefined;
-  if (nativeAgentIdentityMatchesTurn(owner, currentIdentity)) {
-    throw new Error(
-      "the Codex managed identity is exact; use the managed Turn approval action"
-    );
-  }
-  return {
-    authority: {
-      kind: "current_dispatch_owner",
-      owner,
-      session,
-      ledger
-    },
-    approval,
-    token: terminalScopedCodexApprovalToken({
-      storeDir,
-      terminal,
-      authority: {
-        kind: "current_dispatch_owner",
-        owner,
-        session,
-        ledger
-      },
-      approval
-    })
-  };
-}
-
-function terminalScopedCodexApprovalWithoutDispatchOwnerBoundary({
-  storeDir,
-  terminal,
-  session,
-  ledger,
-  approval
-}: {
-  storeDir: string;
-  terminal: Record<string, any>;
-  session: ManagedSessionState;
-  ledger?: Record<string, any>;
-  approval?: TerminalScopedCodexApprovalPromptSnapshot;
-}): TerminalScopedCodexApprovalBoundary {
-  const terminalControl = isRecord(terminal.terminal_control)
-    ? terminal.terminal_control as unknown as TerminalControlRef
-    : undefined;
-  const binding = session.binding;
-  const workspace = stringValue(terminal.workspace ?? terminal.cwd);
-  const processUuid = stringValue(terminal.native_agent_process_uuid);
-  const processBirth = stringValue(terminal.native_agent_process_birth);
-  const observation = terminalScopedCodexApprovalObservation(terminal);
-  if (
-    terminal.agent !== "codex" ||
-    !terminalControl ||
-    !hasCanonicalTerminalEndpoint(terminalControl) ||
-    !Number.isSafeInteger(Number(terminal.pid)) ||
-    Number(terminal.pid) <= 1 ||
-    !workspace ||
-    !processUuid ||
-    !processBirth ||
-    !observation ||
-    !approval
-  ) {
-    throw new Error(
-      "terminal-scoped Codex approval requires an exact terminal, process, and prompt incarnation"
-    );
-  }
-  if (
-    session.status !== "bound" ||
-    session.agent !== "codex" ||
-    !binding ||
-    !isExactNativeThreadId(binding.native_thread_id) ||
-    binding.native_process.pid !== Number(terminal.pid) ||
-    binding.native_process.process_uuid !== processUuid ||
-    binding.native_process.process_birth !== processBirth ||
-    !terminalControlAliasMatches(
-      binding.terminal_id,
-      binding.terminal_control,
-      terminal.id,
-      terminalControl
-    ) ||
-    !terminalControlsShareIncarnation(binding.terminal_control, terminalControl) ||
-    path.resolve(session.workspace) !== path.resolve(workspace)
-  ) {
-    throw new Error(
-      "terminal-scoped Codex approval has no single exact managed Session"
-    );
-  }
-  const relatedBoundSessions = listManagedSessions(storeDir).filter((candidate) =>
-    candidate.status === "bound" &&
-    candidate.agent === "codex" &&
-    candidate.binding?.native_process.pid === Number(terminal.pid) &&
-    terminalControlsShareIncarnation(
-      candidate.binding?.terminal_control,
-      terminalControl
-    )
-  );
-  if (
-    relatedBoundSessions.length !== 1 ||
-    relatedBoundSessions[0].session_id !== session.session_id
-  ) {
-    throw new Error(
-      "terminal-scoped Codex approval has ambiguous managed Session ownership"
-    );
-  }
-  if (terminalDispatchOwnership(terminalControl).state !== "none") {
-    throw new Error(
-      "terminal-scoped Codex approval acquired a current or conflicted dispatch owner"
-    );
-  }
-  if (
-    ledger &&
-    (
-      ledger.status !== "resolved" ||
-      !terminalDispatchRecordMatchesControl(ledger, terminalControl)
-    )
-  ) {
-    throw new Error(
-      `terminal-scoped Codex approval cannot use ${String(ledger.status)} dispatch ownership`
-    );
-  }
-  if (terminalIncarnationBlockingTurns(storeDir, terminalControl).length > 0) {
-    throw new Error(
-      "terminal-scoped Codex approval has unresolved managed Turn state"
-    );
-  }
-  if (
-    managedSessionHasAnyNativeTransition(storeDir, session) ||
-    orphanedTerminalDispatchForRecovery(terminalControl) ||
-    listDeferredForegroundTransfers(storeDir).some((transfer) =>
-      !["resolved", "abort_resolved"].includes(transfer.status) &&
-      (
-        transfer.source_session_id === session.session_id ||
-        transfer.target_session_id === session.session_id ||
-        (
-          transfer.terminal_id === String(terminal.id) &&
-          terminalControlEvidenceMatches(
-            transfer.terminal_endpoint,
-            terminalControl
-          )
-        )
-      )
-    )
-  ) {
-    throw new Error(
-      "terminal-scoped Codex approval is blocked by managed recovery state"
-    );
-  }
-  const observedSessionId = stringValue(terminal.native_agent_session_id);
-  const statusCardSessionId = stringValue(
-    terminal.native_agent_status_card_session_id
-  );
-  for (const knownSessionId of [observedSessionId, statusCardSessionId]) {
-    if (
-      knownSessionId &&
-      knownSessionId.toLowerCase() !== binding.native_thread_id.toLowerCase()
-    ) {
-      throw new Error(
-        "terminal-scoped Codex approval observed a different native thread"
-      );
-    }
-  }
-  if (
-    observedSessionId &&
-    (
-      stringValue(terminal.native_agent_process_uuid) !==
-        binding.native_process.process_uuid ||
-      stringValue(terminal.native_agent_process_birth) !==
-        binding.native_process.process_birth ||
-      (
-        binding.native_process.rollout &&
-        !exactNativeRolloutMatches(
-          binding.native_process.rollout,
-          isRecord(terminal.native_agent_rollout)
-            ? terminal.native_agent_rollout as any
-            : undefined
-        )
-      )
-    )
-  ) {
-    throw new Error(
-      "terminal-scoped Codex approval observed a changed native rollout incarnation"
-    );
-  }
-  const authority: TerminalScopedCodexApprovalAuthority = {
-    kind: "managed_session_no_dispatch_owner",
-    session,
-    ...(ledger ? { ledger } : {})
-  };
-  return {
-    authority,
-    approval,
-    token: terminalScopedCodexApprovalToken({
-      storeDir,
-      terminal,
-      authority,
-      approval
-    })
-  };
-}
 
 async function resolveTerminalScopedCodexApproval({
   options,
@@ -7067,7 +6615,7 @@ async function resolveTerminalScopedCodexApproval({
     if (owner && ownerSession && ledger) {
       return {
         state: "eligible",
-        boundary: terminalScopedCodexApprovalBoundaryFromSnapshot({
+        boundary: terminalScopedCodexApprovalBoundary({
           storeDir,
           terminal: terminalSnapshot,
           owner,
@@ -7101,7 +6649,7 @@ async function resolveTerminalScopedCodexApproval({
     }
     return {
       state: "eligible",
-      boundary: terminalScopedCodexApprovalWithoutDispatchOwnerBoundary({
+      boundary: terminalScopedCodexApprovalBoundary({
         storeDir,
         terminal: terminalSnapshot,
         session: matchingSessions[0],

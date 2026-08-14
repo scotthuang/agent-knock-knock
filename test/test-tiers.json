@@ -48,6 +48,7 @@
     "test/terminal-monitor-poll-policy.test.ts",
     "test/terminal-monitor-seams.test.ts",
     "test/terminal-process-source.test.ts",
+    "test/terminal-scoped-approval-authority.test.ts",
     "test/terminal-submission-acceptance.test.ts",
     "test/test-tier-manifest.test.ts",
     "test/transcript.test.ts",
