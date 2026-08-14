@@ -1,4 +1,5 @@
 import type { Conversation } from "./protocol.js";
+import { isRecord } from "./value-guards.js";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -40,10 +41,6 @@ export interface DetachedTerminalMonitorPlan {
 
 export interface TerminalBridgeMonitorLaunchPlan
   extends DetachedTerminalMonitorPlan, TerminalMonitorTimeoutPlan {}
-
-function isRecord(value: unknown): value is JsonRecord {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;

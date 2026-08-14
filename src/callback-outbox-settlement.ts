@@ -7,6 +7,10 @@ import {
   type AgentMessage,
   type Conversation
 } from "./protocol.js";
+import {
+  nonBlankString as stringValue,
+  recordValue
+} from "./value-guards.js";
 
 export interface PreparedCallbackDeliveryClaim {
   options: {
@@ -361,16 +365,4 @@ function callbackDeliveryAcceptedAt(
 ): string | undefined {
   return stringValue(recordValue(callbackDelivery.wake)?.accepted_at) ??
     stringValue(recordValue(callbackDelivery.injection)?.accepted_at);
-}
-
-function recordValue(value: unknown): Record<string, unknown> | undefined {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined;
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim().length > 0
-    ? value
-    : undefined;
 }

@@ -1,4 +1,8 @@
 import { randomUUID } from "node:crypto";
+import {
+  isRecord,
+  nonBlankString as stringValue
+} from "./value-guards.js";
 
 export type LifecycleSmokeAgent = "codex" | "claude";
 export type LifecycleSmokeStatus = "passed" | "failed" | "uncertain";
@@ -1496,16 +1500,6 @@ function nonNegativeInteger(
     abort(errorCode);
   }
   return result;
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() !== ""
-    ? value
-    : undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function abort(errorCode: LifecycleSmokeErrorCode): never {

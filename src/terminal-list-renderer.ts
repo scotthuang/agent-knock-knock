@@ -3,6 +3,10 @@ import {
   managedSessionBindingToken,
   type ManagedSessionState
 } from "./managed-session.js";
+import {
+  isRecord,
+  nonBlankString as stringValue
+} from "./value-guards.js";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -670,14 +674,4 @@ function isWaitingForAgent(status: unknown): boolean {
   return ["created", "running", "waiting_for_agent", "cancelling"].some(
     (terminalStatus) => terminalStatus === status
   );
-}
-
-function isRecord(value: unknown): value is JsonRecord {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim().length > 0
-    ? value
-    : undefined;
 }

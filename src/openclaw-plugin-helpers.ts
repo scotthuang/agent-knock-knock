@@ -1,4 +1,5 @@
 import path from "node:path";
+import { recordValue } from "./value-guards.js";
 
 export const AKK_CALLBACK_METHOD = "agent-knock-knock.callback";
 export type AkkResumeSelection =
@@ -972,12 +973,6 @@ function arrayValue(value: unknown): Record<string, unknown>[] {
         item !== null && typeof item === "object" && !Array.isArray(item)
       )
     : [];
-}
-
-function recordValue(value: unknown): Record<string, unknown> | undefined {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined;
 }
 
 function finiteNumber(value: unknown): number | undefined {

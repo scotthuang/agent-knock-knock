@@ -10,6 +10,10 @@ import {
   terminalEndpointFromControlRef,
   terminalEndpointIdentityKey
 } from "./terminal-control-ref.js";
+import {
+  isRecord,
+  nonBlankString as stringValue
+} from "./value-guards.js";
 
 export type VerifiedDeadTerminalAgentProcessProof = {
   kind: "exact_pid_absent_from_complete_process_inventory";
@@ -522,16 +526,6 @@ function terminalControlIncarnationSelectorKey(
 function validTimestampMs(value: unknown): number | undefined {
   const parsed = Date.parse(String(value ?? ""));
   return Number.isFinite(parsed) ? parsed : undefined;
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim().length > 0
-    ? value
-    : undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function canonicalJson(value: unknown): string {

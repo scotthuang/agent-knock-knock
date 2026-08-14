@@ -7,6 +7,7 @@ import {
   type ExecutorKind,
   resolveExecutor
 } from "./executors.js";
+import { isRecord } from "./value-guards.js";
 
 export type MessageType = "task" | "question" | "answer" | "progress" | "blocked" | "done" | "error" | "control";
 /**
@@ -709,10 +710,6 @@ function requiredMessageType(value: unknown): MessageType {
     throw new Error(`invalid message type: ${String(value)}`);
   }
   return value;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function assertConversationIdentityShape(
