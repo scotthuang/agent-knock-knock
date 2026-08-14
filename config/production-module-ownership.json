@@ -2,8 +2,8 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 27319,
-    "production_physical_loc": 80554,
+    "cli_core_max_physical_loc": 26095,
+    "production_physical_loc": 81427,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -101,6 +101,16 @@
         "test/native-thread-lifecycle-cli.test.ts",
         "test/native-thread-ownership-cli.test.ts",
         "test/stale-bound-resume-cli.test.ts"
+      ]
+    },
+    "native-thread-lifecycle-recovery": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/codex-no-rollout-binding-cli.test.ts",
+        "test/human-handoff-adoption-cli.test.ts",
+        "test/native-thread-lifecycle-cli.test.ts",
+        "test/native-thread-lifecycle-recovery-cli.test.ts",
+        "test/native-thread-ownership-cli.test.ts"
       ]
     },
     "native-thread-transition-policy": {
@@ -424,6 +434,14 @@
     {
       "path": "src/native-thread-lifecycle-query-service.ts",
       "owner": "native-thread-lifecycle-query"
+    },
+    {
+      "path": "src/native-thread-lifecycle-recovery-adapter.ts",
+      "owner": "native-thread-lifecycle-recovery"
+    },
+    {
+      "path": "src/native-thread-lifecycle-recovery-service.ts",
+      "owner": "native-thread-lifecycle-recovery"
     },
     {
       "path": "src/native-thread-resume-snapshot-policy.ts",

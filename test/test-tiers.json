@@ -27,6 +27,7 @@
     "test/mutation-transaction.test.ts",
     "test/native-thread-lifecycle-policy.test.ts",
     "test/native-thread-lifecycle-query-service.test.ts",
+    "test/native-thread-lifecycle-recovery-service.test.ts",
     "test/native-thread-resume-snapshot.test.ts",
     "test/native-thread-transition-policy.test.ts",
     "test/native-thread-transition-resource-adapter.test.ts",

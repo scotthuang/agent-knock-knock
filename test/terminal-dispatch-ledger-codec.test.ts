@@ -565,7 +565,7 @@ test("lifecycle phase builder preserves every legacy key and JSON byte", () => {
   }
 });
 
-test("lifecycle builder calls retain their exact adjacent ledger CAS", () => {
+test("lifecycle builder and scoped save calls retain their exact adjacent CAS", () => {
   const source = readFileSync("src/cli-core.ts", "utf8");
   const starts = [...source.matchAll(/lifecycleLedger\(/gu)].map((match) => match.index);
   const actual = starts.map((start, index) => {
@@ -582,7 +582,24 @@ test("lifecycle builder calls retain their exact adjacent ledger CAS", () => {
     ["uncertain", "transitionId", undefined],
     ["command_prepared", "null", undefined],
     ["command_dispatching", "transitionId", "prepared"],
-    ["command_submitted", "transitionId", "dispatching"],
+    ["command_submitted", "transitionId", "dispatching"]
+  ]);
+
+  const recoverySource = readFileSync(
+    "src/native-thread-lifecycle-recovery-service.ts",
+    "utf8"
+  );
+  const recoveryStarts = [
+    ...recoverySource.matchAll(/ports\.ledger\.save\(/gu)
+  ].map((match) => match.index);
+  const recoveryActual = recoveryStarts.map((start, index) => {
+    const section = recoverySource.slice(start, recoveryStarts[index + 1]);
+    const phase = /phase: "([^"]+)"/u.exec(section)?.[1];
+    const cas = /expectedTransitionId:\s*([^,}\n]+)(?:,\s*expectedStatus:\s*"([^"]+)")?/u
+      .exec(section);
+    return [phase, cas?.[1].trim(), cas?.[2]];
+  });
+  assert.deepEqual(recoveryActual, [
     ["rebuild", "null", undefined],
     ["resolved", "transition.transition_id", undefined],
     ["verified", "transition.transition_id", "prepared"],
@@ -595,6 +612,11 @@ test("lifecycle builder calls retain their exact adjacent ledger CAS", () => {
     ["resolved", "transition.transition_id", undefined],
     ["resolved_with_binding", "transition.transition_id", undefined]
   ]);
+  const rebuildStart = recoverySource.indexOf(
+    "const rebuilt = ports.ledger.build"
+  );
+  assert.notEqual(rebuildStart, -1);
+  assert.ok(rebuildStart < recoveryStarts[0]);
 
   const settlementSource = readFileSync(
     "src/native-thread-transition-settlement-service.ts",

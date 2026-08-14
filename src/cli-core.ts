@@ -128,9 +128,6 @@ import {
   type NativeThreadTransition
 } from "./managed-session.js";
 import {
-  classifyCodexLifecyclePostcondition
-} from "./native-thread-lifecycle-policy.js";
-import {
   assertNativeThreadHasExclusiveOwnership as assertNativeThreadHasExclusiveOwnershipFromQuery,
   assertRestorableOriginSessionRelationship as assertRestorableOriginSessionRelationshipFromQuery,
   previousCommittedResumeCandidate as previousCommittedResumeCandidateFromQuery,
@@ -150,6 +147,22 @@ import {
   settleVerifiedNativeThreadTransition,
   type NativeThreadTransitionSettlementPorts
 } from "./native-thread-transition-settlement-service.js";
+import {
+  reconcileLifecycleDispatchLedger as reconcileLifecycleDispatchLedgerService,
+  recoverLifecycleFenceBeforeMutation as recoverLifecycleFenceBeforeMutationService,
+  type CodexCompanionSet as LifecycleRecoveryCodexCompanionSet,
+  type NativeThreadLifecycleRecoveryAuthority,
+  type NativeThreadLifecycleRecoveryPorts
+} from "./native-thread-lifecycle-recovery-service.js";
+import {
+  claudeComposerEmpty,
+  claudeComposerVisible,
+  codexComposerEmpty,
+  codexComposerVisible,
+  createNativeThreadLifecycleRecoveryProbeAdapter,
+  lifecycleRecoveryRuntime,
+  lifecycleRecoveryTerminalFacts
+} from "./native-thread-lifecycle-recovery-adapter.js";
 import {
   nativeThreadTransitionResourceBoundOperation
 } from "./native-thread-transition-resource-adapter.js";
@@ -226,7 +239,6 @@ import {
 } from "./terminal-process-source.js";
 import {
   exactCodexReadyStyledComposerCapture,
-  isExactClaudeIdleComposer,
   isExactClaudeNativeInspectionIdleComposer,
   NativeInspectionSubmissionError,
   TerminalAgentBridge,
@@ -504,6 +516,14 @@ const DEFERRED_INPUT_EVIDENCE_FIELDS = ["dispatch_started_at", ...TERMINAL_INPUT
 const FINAL_DEFERRED_TRANSFER_STATUSES = new Set(["resolved", "abort_resolved"]);
 const gateRepository = capabilityGatedRepositoryOperation;
 const gateRepositoryPair = capabilityGatedRepositoryPairOperation;
+const authenticateLifecycleRecoveryResources = gateRepositoryPair(
+  ["terminal", "storeWriter"] as const,
+  ["terminal", "storeWriter"] as const,
+  (terminalControl: TerminalControlRef, storeDir: string) => ({
+    terminalControl,
+    storeDir
+  })
+);
 const mutationConversationStore = Object.freeze({
   load: gateRepository(["state"], "state", (resource: { statePath: string }) => loadState(resource.statePath)),
   save: gateRepository(["storeWriter", "state"], "state", (resource: { statePath: string }, state: Conversation) => saveState(resource.statePath, state)),
@@ -516,14 +536,8 @@ const mutationDispatchLedger = Object.freeze({
   reconcileIncarnation: gateRepository(["terminal", "storeWriter"], "terminal",
     (terminalControl: TerminalControlRef) => resolveTerminalDispatchLedgerPaneIncarnation(
       terminalControl, loadTerminalBridgeDispatchLedger(terminalControl))),
-  reconcile: gateRepositoryPair(
-    ["terminal", "storeWriter"], ["terminal", "storeWriter"],
-    reconcileLifecycleDispatchLedger
-  ),
-  beforeMutation: gateRepositoryPair(
-    ["terminal", "storeWriter"], ["terminal", "storeWriter"],
-    recoverLifecycleFenceBeforeMutation
-  )
+  reconcile: reconcileLifecycleDispatchLedgerScoped,
+  beforeMutation: recoverLifecycleFenceBeforeMutationScoped
 });
 const mutationManagedSessions = Object.freeze({
   load: gateRepository(["storeWriter"], "storeWriter", loadManagedSession),
@@ -12540,6 +12554,369 @@ type NativeThreadTransitionOperation =
       selectionSnapshot?: NativeThreadResumeSnapshot;
     };
 
+async function freshLifecycleRecoveryTerminal(
+  scopes: CanonicalMutationScopes,
+  resources: CanonicalMutationResources,
+  options: Record<string, any>,
+  capturedTerminal: ResolvedTerminalConversation
+): Promise<Readonly<{
+  terminal: ResolvedTerminalConversation;
+  storeDir: string;
+}>> {
+  const active = authenticateLifecycleRecoveryResources(scopes, resources);
+  const terminal = await createTerminalAgentBridge(options).resolveStoredTerminal(
+    capturedTerminal.agent,
+    capturedTerminal.pid,
+    active.terminalControl,
+    { pid: capturedTerminal.pid }
+  );
+  assertSameNativeInspectionTerminal(
+    capturedTerminal,
+    terminal,
+    "while waiting for lifecycle recovery"
+  );
+  if (
+    !terminalControlsShareIncarnation(
+      active.terminalControl,
+      terminal.terminalControl
+    )
+  ) {
+    throw new Error(
+      "terminal process incarnation changed while waiting for lifecycle recovery"
+    );
+  }
+  return { terminal, storeDir: active.storeDir };
+}
+
+function nativeThreadLifecycleRecoveryPorts({
+  options,
+  terminal,
+  storeDir
+}: {
+  options: Record<string, any>;
+  terminal: ResolvedTerminalConversation;
+  storeDir: string;
+}): NativeThreadLifecycleRecoveryPorts {
+  const scoped = <Args extends unknown[], Result>(operation: (
+    freshControl: TerminalControlRef,
+    canonicalStoreDir: string,
+    ...args: Args
+  ) => Result) => nativeThreadTransitionResourceBoundOperation({
+    freshTerminal: terminal.terminalControl,
+    capturedStoreDir: storeDir
+  }, operation);
+  const scopedStore = <Args extends unknown[], Result>(operation: (
+    canonicalStoreDir: string,
+    ...args: Args
+  ) => Result) => scoped((
+    _freshControl,
+    canonicalStoreDir,
+    ...args: Args
+  ) => operation(canonicalStoreDir, ...args));
+  const freshTerminal = (freshControl: TerminalControlRef) => ({
+    ...terminal,
+    terminalControl: freshControl
+  });
+  const canonicalOptions = (canonicalStoreDir: string) =>
+    Object.freeze({ ...options, storeDir: canonicalStoreDir });
+  const recoveryProbe = createNativeThreadLifecycleRecoveryProbeAdapter({
+    agent: terminal.agent,
+    lifecycle: terminal.adapter,
+    createBridge: (canonicalStoreDir) =>
+      createTerminalAgentBridge(canonicalOptions(canonicalStoreDir)),
+    runtime: (freshControl, context) => lifecycleRecoveryRuntime(
+      terminalRuntimeForLiveIdentity({
+        terminal: freshTerminal(freshControl),
+        expectedEmptyNativeSession: context.kind === "codex_recovery",
+        physicalOnly: context.kind === "physical"
+      }),
+      context
+    ),
+    loadClaudeRows: (canonicalStoreDir) => loadClaudeAgentRows(
+      canonicalOptions(canonicalStoreDir),
+      { required: true }
+    )
+  });
+  const ledgerDocument = (
+    freshControl: TerminalControlRef,
+    canonicalStoreDir: string,
+    transition: NativeThreadTransition,
+    phase: Parameters<typeof lifecycleLedger>[2]
+  ) => lifecycleLedger(
+    transition,
+    canonicalStoreDir,
+    phase.phase === "rebuild"
+      ? { ...phase, control: freshControl }
+      : phase
+  );
+  return {
+    authority: {
+      bind: scoped((freshControl) => ({ terminalControl: freshControl }))
+    },
+    persistence: {
+      listNativeThreadTransitions: scopedStore(listNativeThreadTransitions),
+      loadManagedSession: scopedStore(loadManagedSession),
+      tryLoadManagedSession: scopedStore(tryLoadManagedSession),
+      loadNativeThreadTransition: scopedStore(loadNativeThreadTransition),
+      saveManagedSession: scopedStore(saveManagedSession),
+      saveNativeThreadTransition: scopedStore(saveNativeThreadTransition),
+      commitVerified: scopedStore(commitVerifiedLifecycleTransition),
+      loadLedger: scoped((freshControl) =>
+        loadTerminalBridgeDispatchLedger(freshControl)),
+      buildLedger: scoped((
+        freshControl,
+        canonicalStoreDir,
+        transition,
+        phase
+      ) => ledgerDocument(
+        freshControl,
+        canonicalStoreDir,
+        transition,
+        phase
+      )),
+      saveLedger: scoped((
+        freshControl,
+        canonicalStoreDir,
+        transition,
+        phase,
+        expectation
+      ) => {
+        const ledger = ledgerDocument(
+          freshControl,
+          canonicalStoreDir,
+          transition,
+          phase
+        );
+        if (ledger.store_dir !== canonicalStoreDir) {
+          throw new Error(
+            "lifecycle recovery ledger Store differs from its writer capability"
+          );
+        }
+        saveLifecycleTerminalDispatchLedger(
+          freshControl,
+          ledger,
+          expectation
+        );
+      }),
+      saveFailClosedLedger: scoped((
+        freshControl,
+        _canonicalStoreDir,
+        ledger,
+        transitionId,
+        now,
+        reason
+      ) => saveLifecycleTerminalDispatchLedger(freshControl, {
+        ...ledger,
+        kind: "lifecycle",
+        generation_id: transitionId,
+        transition_id: transitionId,
+        status: "uncertain",
+        uncertain_at: now,
+        reason: reason.slice(0, 2000)
+      }, { expectedTransitionId: transitionId }))
+    },
+    terminal: {
+      recoverDeferred: scoped((freshControl, canonicalStoreDir) =>
+        withStoreWriterLeaseAsync(canonicalStoreDir, () =>
+          recoverDeferredCodexForegroundTransferWhileWriterLease({
+            options: canonicalOptions(canonicalStoreDir),
+            terminal: freshTerminal(freshControl),
+            storeDir: canonicalStoreDir
+          })
+        )),
+      sameTerminalIncarnation: scoped((freshControl, _storeDir, right) =>
+        terminalControlsShareIncarnation(freshControl, right)),
+      aliasMatches: scoped((
+        freshControl,
+        _storeDir,
+        storedTerminalId,
+        storedControl,
+        currentTerminalId
+      ) => terminalControlAliasMatches(
+        storedTerminalId,
+        storedControl,
+        currentTerminalId,
+        freshControl
+      )),
+      workspaceMatches: scoped((freshControl, _storeDir, expected) =>
+        matchesConfiguredWorkspace(expected, freshControl.currentPath)),
+      resolveIdentity: scoped((
+        freshControl,
+        canonicalStoreDir,
+        preferredSessionId,
+        companions: LifecycleRecoveryCodexCompanionSet
+      ) => resolveCurrentNativeAgentSessionIdentity({
+        options: canonicalOptions(canonicalStoreDir),
+        agent: terminal.agent,
+        pid: terminal.pid,
+        cwd: freshControl.currentPath,
+        preferredSessionId,
+        allowedCompanionIdentity: companions.primary,
+        allowedAdditionalIdentities: companions.additional
+      })),
+      observeExternalHandoff: scoped((
+        freshControl,
+        canonicalStoreDir,
+        sourceSession,
+        resolvedIdentity
+      ) => observedExternalHandoffIdentity({
+        options: canonicalOptions(canonicalStoreDir),
+        terminal: freshTerminal(freshControl),
+        sourceSession,
+        resolvedIdentity
+      }).then((observed) => observed.identity)),
+      assertExclusive: scoped((
+        freshControl,
+        canonicalStoreDir,
+        nativeThreadId,
+        excludedManagedSessionId
+      ) => assertNativeThreadHasExclusiveOwnership({
+        options: canonicalOptions(canonicalStoreDir),
+        agent: terminal.agent,
+        currentPid: terminal.pid,
+        nativeThreadId,
+        storeDir: canonicalStoreDir,
+        terminalControl: freshControl,
+        excludedManagedSessionId
+      })),
+      assertTargetExclusive: scoped((
+        freshControl,
+        canonicalStoreDir,
+        transition
+      ) => assertLifecycleTargetHasExclusiveOwnership({
+        options: canonicalOptions(canonicalStoreDir),
+        terminal: freshTerminal(freshControl),
+        transition,
+        storeDir: canonicalStoreDir
+      })),
+      exactIdentity: scoped((freshControl, _storeDir, identity) =>
+        exactLifecycleProcessIdentity(freshTerminal(freshControl), identity)),
+      isProcessAlive: scoped((_freshControl, _storeDir, pid) =>
+        isProcessAlive(pid)),
+      recordedStoreMatches: scoped((
+        _freshControl,
+        canonicalStoreDir,
+        recordedStoreDir
+      ) => path.resolve(recordedStoreDir) === canonicalStoreDir),
+      recordMatchesControl: scoped((freshControl, _storeDir, ledger) =>
+        terminalDispatchRecordMatchesControl(ledger, freshControl)),
+      runningVersion: scoped((_freshControl, canonicalStoreDir) =>
+        agentVersionForRunningProcess(
+          terminal.agent,
+          terminal.pid,
+          canonicalOptions(canonicalStoreDir)
+        )),
+      probeThreadLifecycle: scoped((_freshControl, _storeDir, version) =>
+        recoveryProbe.probe(version)),
+      planThreadLifecycle: scoped((_freshControl, _storeDir, operation, facts) =>
+        recoveryProbe.plan(operation, facts)),
+      observeThreadLifecycle: scoped((freshControl, canonicalStoreDir, request) =>
+        recoveryProbe.observe(freshControl, canonicalStoreDir, request)),
+      prepareProbeBridge: scoped((_freshControl, canonicalStoreDir) =>
+        recoveryProbe.prepare(canonicalStoreDir)),
+      status: scoped((freshControl, _storeDir, context, scrollbackLines) =>
+        recoveryProbe.status(freshControl, context, scrollbackLines)),
+      clearInputLine: scoped((freshControl, _storeDir, context) =>
+        recoveryProbe.clearInputLine(freshControl, context)),
+      submitCodexStatusProbe: scoped((
+        freshControl,
+        _storeDir,
+        version,
+        context
+      ) => recoveryProbe.submitCodexStatusProbe(
+        freshControl,
+        version,
+        context
+      )),
+      assertResumedCodexCandidate: scoped((
+        _freshControl,
+        _storeDir,
+        identity,
+        expected
+      ) => assertResumedCodexRolloutMatchesCandidate(identity, expected)),
+      codexKnownRoots: scoped((
+        freshControl,
+        canonicalStoreDir,
+        transition
+      ) => codexKnownRootSetForLifecycleTransition({
+        storeDir: canonicalStoreDir,
+        terminal: freshTerminal(freshControl),
+        transition
+      })),
+      codexCompanionsExcludingPreferred: scoped((
+        _freshControl,
+        _storeDir,
+        roots,
+        preferredSessionId
+      ) => codexCompanionsExcludingPreferred(roots, preferredSessionId)),
+      codexProcessBirth: scoped(() =>
+        codexProcessBirthForLifecycle(terminal.pid)),
+      nativeIdentityMatches: scoped((
+        _freshControl,
+        _storeDir,
+        identity,
+        expected
+      ) => nativeIdentityMatchesCodexPreMaterialization(identity, expected))
+    },
+    runtime: {
+      now: cliNow,
+      sleep: cliSleep
+    }
+  };
+}
+
+async function recoverLifecycleFenceBeforeMutationScoped(
+  scopes: CanonicalMutationScopes,
+  resources: CanonicalMutationResources,
+  options: Record<string, any>,
+  capturedTerminal: ResolvedTerminalConversation
+): Promise<void> {
+  const fresh = await freshLifecycleRecoveryTerminal(
+    scopes,
+    resources,
+    options,
+    capturedTerminal
+  );
+  const serviceTerminal = lifecycleRecoveryTerminalFacts(fresh.terminal);
+  await recoverLifecycleFenceBeforeMutationService(
+    { terminal: serviceTerminal },
+    scopes,
+    resources,
+    nativeThreadLifecycleRecoveryPorts({
+      options,
+      terminal: fresh.terminal,
+      storeDir: fresh.storeDir
+    })
+  );
+}
+
+async function reconcileLifecycleDispatchLedgerScoped(
+  scopes: CanonicalMutationScopes,
+  resources: CanonicalMutationResources,
+  options: Record<string, any>,
+  capturedTerminal: ResolvedTerminalConversation,
+  ledger: TerminalDispatchLedgerDocument,
+  authority: NativeThreadLifecycleRecoveryAuthority = { kind: "automatic" }
+): Promise<TerminalDispatchLedgerDocument> {
+  const fresh = await freshLifecycleRecoveryTerminal(
+    scopes,
+    resources,
+    options,
+    capturedTerminal
+  );
+  const serviceTerminal = lifecycleRecoveryTerminalFacts(fresh.terminal);
+  return reconcileLifecycleDispatchLedgerService(
+    { terminal: serviceTerminal, ledger, authority },
+    scopes,
+    resources,
+    nativeThreadLifecycleRecoveryPorts({
+      options,
+      terminal: fresh.terminal,
+      storeDir: fresh.storeDir
+    })
+  );
+}
+
 function nativeThreadTransitionSettlementPorts({
   options,
   operation,
@@ -23775,1430 +24152,6 @@ async function recoverDeferredCodexForegroundTransferWhileWriterLease({
   );
 }
 
-async function recoverLifecycleFenceBeforeMutation(
-  terminalControl: TerminalControlRef,
-  storeDir: string,
-  options: Record<string, any>,
-  terminal: ResolvedTerminalConversation
-): Promise<void> {
-  if (terminal.terminalControl !== terminalControl) {
-    terminal = { ...terminal, terminalControl };
-  }
-  await withStoreWriterLeaseAsync(storeDir, () =>
-    recoverDeferredCodexForegroundTransferWhileWriterLease({
-      options, terminal, storeDir
-    })
-  );
-  let ledger = loadTerminalBridgeDispatchLedger(terminalControl);
-  if (!ledger || ledger.status === "resolved") {
-    ledger = rebuildObservedHandoffLedgerFromTransition({
-      options,
-      terminal,
-      storeDir,
-      previousLedger: ledger
-    });
-    if (!ledger) {
-      return;
-    }
-  }
-  if (!terminalDispatchLedgerLooksLifecycle(ledger)) {
-    return;
-  }
-  if (ledger.kind !== "lifecycle") {
-    throw new Error(
-      `terminal ${terminal.terminalControl.target} has a malformed lifecycle ` +
-      "dispatch fence; no Session or Turn was created and manual recovery is required"
-    );
-  }
-  const recovered = await reconcileLifecycleDispatchLedger(
-    terminalControl,
-    storeDir,
-    options,
-    terminal,
-    ledger
-  );
-  if (recovered.status !== "resolved") {
-    throw new Error(
-      `terminal ${terminal.terminalControl.target} has unresolved lifecycle ` +
-      `transition ${stringValue(recovered.transition_id) ?? "with invalid identity"} ` +
-      `(${String(recovered.status)}: ` +
-      `${stringValue(recovered.reason) ?? "recovery evidence unavailable"}); ` +
-      "refresh AKK list and use its exact " +
-      "expected-transition-id recovery action"
-    );
-  }
-}
-
-function rebuildObservedHandoffLedgerFromTransition({
-  options,
-  terminal,
-  storeDir,
-  previousLedger
-}: {
-  options: Record<string, any>;
-  terminal: ResolvedTerminalConversation;
-  storeDir: string;
-  previousLedger?: Record<string, any>;
-}): Record<string, any> | undefined {
-  const candidates = listNativeThreadTransitions(storeDir).filter(
-    (transition) =>
-      transition.operation === "adopt_external_thread" &&
-      transition.origin === "human_observed" &&
-      transition.terminal_input_sent === false &&
-      ["prepared", "verified"].includes(transition.status) &&
-      transition.agent === terminal.agent &&
-      transition.before_binding?.native_process.pid === terminal.pid &&
-      terminalControlAliasMatches(
-        transition.terminal_id,
-        transition.before_binding?.terminal_control,
-        terminal.conversationId,
-        terminal.terminalControl
-      ) &&
-      matchesConfiguredWorkspace(
-        transition.workspace,
-        terminal.terminalControl.currentPath
-      )
-  );
-  if (candidates.length === 0) {
-    return undefined;
-  }
-  if (candidates.length !== 1) {
-    throw new Error(
-      `terminal ${terminal.terminalControl.target} has multiple unresolved ` +
-      "human-observed handoff transitions; refusing to infer one ledger owner"
-    );
-  }
-  const transition = candidates[0];
-  if (
-    previousLedger?.status === "resolved" &&
-    stringValue(previousLedger.transition_id) === transition.transition_id
-  ) {
-    throw new Error(
-      `human-observed handoff transition ${transition.transition_id} is ` +
-      "unresolved but its terminal ledger is already resolved"
-    );
-  }
-  const rebuilt = lifecycleLedger(transition, storeDir,
-    { phase: "rebuild", control: terminal.terminalControl, previous: previousLedger });
-  // Validate the complete transition/terminal/adapter relationship before
-  // replacing a missing or older resolved ledger.  Rebuilding a fence is a
-  // Store-side recovery operation only and never sends terminal input.
-  assertLifecycleLedgerMatchesTransition({
-    options,
-    terminal,
-    ledger: rebuilt,
-    transition,
-    storeDir
-  });
-  saveLifecycleTerminalDispatchLedger(terminal.terminalControl, rebuilt, {
-    expectedTransitionId: null
-  });
-  return loadTerminalBridgeDispatchLedger(
-    terminal.terminalControl
-  ) as Record<string, any>;
-}
-
-async function recoverPreparedObservedHandoff({
-  options,
-  terminal,
-  ledger,
-  transition,
-  storeDir,
-  now
-}: {
-  options: Record<string, any>;
-  terminal: ResolvedTerminalConversation;
-  ledger: Record<string, any>;
-  transition: NativeThreadTransition;
-  storeDir: string;
-  now: string;
-}): Promise<NativeThreadTransition> {
-  if (
-    transition.operation !== "adopt_external_thread" ||
-    transition.status !== "prepared" ||
-    ledger.status !== "prepared" ||
-    !transition.source_session_id ||
-    transition.source_expected_revision === undefined ||
-    !transition.before_binding ||
-    !transition.target_native_thread_id
-  ) {
-    return transition;
-  }
-  let source = loadManagedSession(storeDir, transition.source_session_id);
-  if (
-    source.status === "bound" &&
-    source.revision === transition.source_expected_revision &&
-    JSON.stringify(source.binding) === JSON.stringify(transition.before_binding)
-  ) {
-    source = saveManagedSession(storeDir, {
-      ...source,
-      status: "transitioning",
-      last_transition_id: transition.transition_id,
-      updated_at: now
-    }, { expectedRevision: managedSessionRevision(source) });
-  } else if (
-    source.status !== "transitioning" ||
-    source.last_transition_id !== transition.transition_id ||
-    source.revision !== transition.source_expected_revision + 1 ||
-    JSON.stringify(source.binding) !== JSON.stringify(transition.before_binding)
-  ) {
-    throw new Error("human-observed handoff source changed before recovery");
-  }
-  const before = transition.before_binding;
-  const resolved = await resolveCurrentNativeAgentSessionIdentity({
-    options,
-    agent: terminal.agent,
-    pid: terminal.pid,
-    cwd: terminal.terminalControl.currentPath,
-    preferredSessionId: transition.target_native_thread_id,
-    allowedCompanionIdentity: codexIdentityFence({
-      sessionId: transition.before_native_thread_id,
-      processUuid: transition.before_process_uuid,
-      processBirth: transition.before_process_birth,
-      rollout: transition.before_process_rollout,
-      evidence: before.native_process.evidence
-    }),
-    allowedAdditionalIdentities: []
-  });
-  const observed = await observedExternalHandoffIdentity({
-    options,
-    terminal,
-    sourceSession: source,
-    resolvedIdentity: resolved
-  });
-  const liveId = observed.identity?.sessionId.toLowerCase();
-  if (liveId === transition.before_native_thread_id.toLowerCase()) {
-    transition = saveNativeThreadTransition(storeDir, {
-      ...transition,
-      status: "aborted",
-      aborted_at: now,
-      error: "recovery observed the exact source native thread"
-    }, { expectedRevision: nativeThreadTransitionRevision(transition) });
-    restorePreparedLifecycleSource(storeDir, transition, now);
-    saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
-      lifecycleLedger(transition, storeDir, {
-        phase: "resolved", at: now,
-        reason: "human-observed handoff rolled back to its exact source"
-      }), { expectedTransitionId: transition.transition_id });
-    return transition;
-  }
-  if (
-    !observed.identity ||
-    liveId !== transition.target_native_thread_id.toLowerCase()
-  ) {
-    throw new Error(
-      "human-observed handoff recovery found neither its exact source nor target"
-    );
-  }
-  const target = tryLoadManagedSession(storeDir, transition.target_session_id);
-  if ((target?.revision ?? null) !== transition.target_expected_revision) {
-    throw new Error("human-observed handoff target changed before recovery");
-  }
-  await assertNativeThreadHasExclusiveOwnership({
-    options,
-    agent: terminal.agent,
-    currentPid: terminal.pid,
-    nativeThreadId: transition.target_native_thread_id,
-    storeDir,
-    terminalControl: terminal.terminalControl,
-    excludedManagedSessionId: target?.session_id
-  });
-  const exact = exactLifecycleProcessIdentity(terminal, observed.identity);
-  const afterBinding = terminalBindingFrom({
-    terminalId: terminal.conversationId,
-    terminalControl: terminal.terminalControl,
-    pid: terminal.pid,
-    nativeThreadId: transition.target_native_thread_id,
-    processUuid: exact.processUuid,
-    processBirth: exact.processBirth,
-    rollout: exact.rollout,
-    evidence: `${exact.evidence}+human_observed_recovery`,
-    generation: (target?.binding?.generation ?? 0) + 1,
-    now: new Date(now)
-  });
-  transition = saveNativeThreadTransition(storeDir, {
-    ...transition,
-    status: "verified",
-    verified_at: now,
-    after_binding: afterBinding
-  }, { expectedRevision: nativeThreadTransitionRevision(transition) });
-  saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
-    lifecycleLedger(transition, storeDir, { phase: "verified", binding: before }), {
-    expectedTransitionId: transition.transition_id,
-    expectedStatus: "prepared"
-  });
-  return transition;
-}
-
-async function reconcileLifecycleDispatchLedger(
-  terminalControl: TerminalControlRef,
-  lockedStoreDir: string,
-  options: Record<string, any>,
-  terminal: ResolvedTerminalConversation,
-  ledger: Record<string, any>,
-  authority:
-    | { kind: "automatic" }
-    | { kind: "manual"; expectedTransitionId: string } = {
-      kind: "automatic"
-    }
-): Promise<Record<string, any>> {
-  if (terminal.terminalControl !== terminalControl) terminal = { ...terminal, terminalControl };
-  if (ledger.status === "resolved") {
-    return ledger;
-  }
-  const dispatcherPid = Number(ledger.dispatcher_pid);
-  if (
-    authority.kind === "automatic" &&
-    Number.isSafeInteger(dispatcherPid) &&
-    dispatcherPid > 1 &&
-    isProcessAlive(dispatcherPid)
-  ) {
-    return ledger;
-  }
-  const recordedStoreDir = stringValue(ledger.store_dir);
-  const transitionId = stringValue(ledger.transition_id);
-  if (
-    !recordedStoreDir ||
-    !transitionId ||
-    stringValue(ledger.generation_id) !== transitionId ||
-    (
-      authority.kind === "manual" &&
-      authority.expectedTransitionId !== transitionId
-    )
-  ) {
-    return ledger;
-  }
-  const storeDir = path.resolve(lockedStoreDir);
-  options = Object.freeze({ ...options, storeDir });
-  if (path.resolve(recordedStoreDir) !== storeDir) {
-    return failClosedLifecycleLedger({
-      terminal, ledger,
-      reason: "native thread transition belongs to another Store"
-    });
-  }
-  let transition: NativeThreadTransition;
-  try {
-    transition = loadNativeThreadTransition(storeDir, transitionId);
-  } catch (error) {
-    return failClosedLifecycleLedger({
-      terminal,
-      ledger,
-      reason:
-        `native thread transition state is unavailable: ` +
-        `${error instanceof Error ? error.message : String(error)}`
-    });
-  }
-  const now = cliNow().toISOString();
-  try {
-    assertLifecycleLedgerMatchesTransition({
-      options,
-      terminal,
-      ledger,
-      transition,
-      storeDir
-    });
-    if (
-      transition.operation === "adopt_external_thread" &&
-      transition.status === "verified" &&
-      ledger.status === "prepared"
-    ) {
-      saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
-        lifecycleLedger(transition, storeDir, {
-          phase: "verified_with_previous", binding: transition.before_binding,
-          previousGenerationId: stringValue(ledger.previous_generation_id)
-        }), {
-        expectedTransitionId: transition.transition_id,
-        expectedStatus: "prepared"
-      });
-      ledger = loadTerminalBridgeDispatchLedger(
-        terminal.terminalControl
-      ) as Record<string, any>;
-    }
-    if (
-      transition.operation === "adopt_external_thread" &&
-      transition.status === "prepared"
-    ) {
-      transition = await recoverPreparedObservedHandoff({
-        options,
-        terminal,
-        ledger,
-        transition,
-        storeDir,
-        now
-      });
-      if (["aborted", "committed"].includes(transition.status)) {
-        return loadTerminalBridgeDispatchLedger(
-          terminal.terminalControl
-        ) as Record<string, any>;
-      }
-    }
-    if (transition.status === "prepared" && ledger.status === "prepared") {
-      await assertNativeThreadHasExclusiveOwnership({
-        options,
-        agent: transition.agent,
-        currentPid: terminal.pid,
-        nativeThreadId: transition.before_native_thread_id,
-        storeDir,
-        terminalControl: terminal.terminalControl,
-        excludedManagedSessionId: transition.source_session_id
-      });
-      restorePreparedLifecycleSource(storeDir, transition, now);
-      transition = saveNativeThreadTransition(storeDir, {
-        ...transition,
-        status: "aborted",
-        aborted_at: now,
-        error: "dispatcher exited before lifecycle input began"
-      }, {
-        expectedRevision: nativeThreadTransitionRevision(transition)
-      });
-      saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
-        lifecycleLedger(transition, storeDir, {
-          phase: "resolved", at: now,
-          reason:
-            "lifecycle dispatcher exited while durably prepared; no terminal input was possible"
-        }), { expectedTransitionId: transitionId });
-      return loadTerminalBridgeDispatchLedger(
-        terminal.terminalControl
-      ) as Record<string, any>;
-    }
-    if (transition.status === "verified") {
-      await verifyRecoveredLifecycleAfterBinding({
-        options,
-        terminal,
-        transition
-      });
-      await assertLifecycleTargetHasExclusiveOwnership({
-        options,
-        terminal,
-        transition,
-        storeDir
-      });
-      const savedTarget = commitVerifiedLifecycleTransition(
-        storeDir,
-        transition,
-        now
-      );
-      transition = saveNativeThreadTransition(storeDir, {
-        ...transition,
-        status: "committed",
-        committed_at: now
-      }, {
-        expectedRevision: nativeThreadTransitionRevision(transition)
-      });
-      saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
-        lifecycleLedger(transition, storeDir, {
-          phase: "resolved_with_binding", at: now,
-          binding: savedTarget.binding,
-          reason: "revalidated and rolled forward a verified native thread transition"
-        }), { expectedTransitionId: transitionId });
-      return loadTerminalBridgeDispatchLedger(
-        terminal.terminalControl
-      ) as Record<string, any>;
-    }
-    if (transition.status === "committed") {
-      await verifyRecoveredLifecycleAfterBinding({
-        options,
-        terminal,
-        transition
-      });
-      await assertLifecycleTargetHasExclusiveOwnership({
-        options,
-        terminal,
-        transition,
-        storeDir
-      });
-      assertCommittedLifecycleTarget(storeDir, transition);
-      saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
-        lifecycleLedger(transition, storeDir, {
-          phase: "resolved_with_binding", at: now,
-          binding: transition.after_binding,
-          reason: "revalidated an already committed native thread transition"
-        }), { expectedTransitionId: transitionId });
-      return loadTerminalBridgeDispatchLedger(
-        terminal.terminalControl
-      ) as Record<string, any>;
-    }
-    if (transition.status === "aborted") {
-      await assertNativeThreadHasExclusiveOwnership({
-        options,
-        agent: transition.agent,
-        currentPid: terminal.pid,
-        nativeThreadId: transition.before_native_thread_id,
-        storeDir,
-        terminalControl: terminal.terminalControl,
-        excludedManagedSessionId: transition.source_session_id
-      });
-      restorePreparedLifecycleSource(storeDir, transition, now);
-      saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
-        lifecycleLedger(transition, storeDir, {
-          phase: "resolved", at: now,
-          reason: "native thread transition is already aborted"
-        }), { expectedTransitionId: transitionId });
-      return loadTerminalBridgeDispatchLedger(
-        terminal.terminalControl
-      ) as Record<string, any>;
-    }
-    if (["dispatching", "submitted"].includes(transition.status)) {
-      transition = saveNativeThreadTransition(storeDir, {
-        ...transition,
-        status: "uncertain",
-        uncertain_at: now,
-        error:
-          "lifecycle dispatcher exited after terminal input may have started",
-        do_not_retry: true
-      }, {
-        expectedRevision: nativeThreadTransitionRevision(transition)
-      });
-    }
-    if (transition.status === "uncertain" && authority.kind === "manual") {
-      return await reconcileUncertainLifecycleTransition({
-        options,
-        terminal,
-        ledger,
-        transition,
-        storeDir,
-        now
-      });
-    }
-    quarantineLifecycleSource(storeDir, transition, now,
-      "native thread lifecycle dispatcher exited after terminal input may have started");
-    saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
-      lifecycleLedger(transition, storeDir, {
-        phase: "uncertain", at: transition.uncertain_at ?? now,
-        reason: "lifecycle dispatcher exited after terminal input may have started"
-      }), { expectedTransitionId: transitionId });
-    return loadTerminalBridgeDispatchLedger(
-      terminal.terminalControl
-    ) as Record<string, any>;
-  } catch (error) {
-    quarantineLifecycleSource(storeDir, transition, now,
-      "native thread lifecycle recovery evidence did not match the live terminal");
-    return failClosedLifecycleLedger({
-      terminal,
-      ledger,
-      reason:
-        `native thread lifecycle recovery failed closed: ` +
-        `${error instanceof Error ? error.message : String(error)}`
-    });
-  }
-}
-
-function assertLifecycleLedgerMatchesTransition({
-  options,
-  terminal,
-  ledger,
-  transition,
-  storeDir
-}: {
-  options: Record<string, any>;
-  terminal: ResolvedTerminalConversation;
-  ledger: Record<string, any>;
-  transition: NativeThreadTransition;
-  storeDir: string;
-}): void {
-  const operationTarget = transition.operation === "new_thread"
-    ? undefined
-    : transition.target_native_thread_id;
-  const ledgerControl = isRecord(ledger.terminal_control)
-    ? ledger.terminal_control
-    : undefined;
-  const allowedLedgerStatuses: Record<
-    NativeThreadTransition["status"],
-    readonly string[]
-  > = {
-    prepared: ["prepared", "uncertain"],
-    dispatching: ["prepared", "dispatching", "uncertain"],
-    submitted: ["dispatching", "submitted", "uncertain"],
-    uncertain: ["dispatching", "submitted", "uncertain"],
-    verified: transition.operation === "adopt_external_thread"
-      ? ["prepared", "verified", "uncertain"]
-      : ["submitted", "verified", "uncertain"],
-    committed: transition.operation === "adopt_external_thread"
-      ? ["verified", "uncertain"]
-      : ["submitted", "verified", "uncertain"],
-    aborted: transition.reconciled_outcome === "before"
-      ? ["dispatching", "submitted", "uncertain"]
-      : ["prepared", "dispatching"]
-  };
-  if (
-    ledger.kind !== "lifecycle" ||
-    stringValue(ledger.transition_id) !== transition.transition_id ||
-    stringValue(ledger.generation_id) !== transition.transition_id ||
-    stringValue(ledger.operation) !== transition.operation ||
-    stringValue(ledger.origin) !== transition.origin ||
-    ledger.terminal_input_sent !== transition.terminal_input_sent ||
-    stringValue(ledger.terminal_id) !== transition.terminal_id ||
-    stringValue(ledger.agent) !== transition.agent ||
-    stringValue(ledger.workspace) !== transition.workspace ||
-    stringValue(ledger.source_session_id) !== transition.source_session_id ||
-    stringValue(ledger.target_session_id) !== transition.target_session_id ||
-    stringValue(ledger.target_native_thread_id) !== operationTarget ||
-    JSON.stringify(ledger.target_candidate_file_identity ?? null) !==
-      JSON.stringify(transition.target_candidate_file_identity ?? null) ||
-    stringValue(ledger.before_native_thread_id) !==
-      transition.before_native_thread_id ||
-    !isExactNativeThreadId(transition.before_native_thread_id) ||
-    stringValue(ledger.before_process_uuid) !==
-      transition.before_process_uuid ||
-    (
-      ledger.before_process_started_at === undefined
-        ? undefined
-        : Number(ledger.before_process_started_at)
-    ) !== transition.before_process_started_at ||
-    stringValue(ledger.before_process_birth) !==
-      transition.before_process_birth ||
-    JSON.stringify(ledger.before_process_rollout ?? null) !==
-      JSON.stringify(transition.before_process_rollout ?? null) ||
-    Number(ledger.dispatcher_pid) !== transition.dispatcher_pid ||
-    stringValue(ledger.prepared_at) !== transition.prepared_at ||
-    !allowedLedgerStatuses[transition.status].includes(String(ledger.status)) ||
-    (
-      transition.status === "aborted" &&
-      transition.reconciled_outcome === undefined &&
-      !["prepared", "dispatching"].includes(String(ledger.status))
-    ) ||
-    stringValue(ledger.adapter_version) !== transition.adapter_version ||
-    stringValue(ledger.command_fingerprint) !== transition.command_fingerprint ||
-    path.resolve(storeDir) !== path.resolve(storeDirFromOptions(options)) ||
-    terminal.agent !== transition.agent ||
-    !terminalDispatchRecordMatchesControl(
-      ledger,
-      terminal.terminalControl
-    ) ||
-    terminal.pid !== transition.before_binding?.native_process.pid &&
-      transition.before_binding !== undefined ||
-    !terminalControlsShareIncarnation(
-      terminal.terminalControl,
-      transition.before_binding?.terminal_control ?? terminal.terminalControl
-    ) ||
-    (
-      transition.before_binding !== undefined &&
-      !terminalControlAliasMatches(
-        transition.terminal_id,
-        transition.before_binding.terminal_control,
-        terminal.conversationId,
-        terminal.terminalControl
-      )
-    ) ||
-    !matchesConfiguredWorkspace(
-      transition.workspace,
-      terminal.terminalControl.currentPath
-    ) ||
-    JSON.stringify(ledger.binding ?? null) !==
-      JSON.stringify(transition.before_binding ?? null)
-  ) {
-    throw new Error("lifecycle ledger, transition, and live terminal identities disagree");
-  }
-  const currentVersion = agentVersionForRunningProcess(
-    terminal.agent,
-    terminal.pid,
-    options
-  );
-  const adapter = createRuntimeTerminalAgentRegistry(options)
-    .require(terminal.agent);
-  const capability = adapter.probeThreadLifecycle?.(currentVersion);
-  if (transition.operation === "adopt_external_thread") {
-    if (
-      currentVersion !== transition.adapter_version ||
-      capability?.status !== "supported" ||
-      transition.origin !== "human_observed" ||
-      transition.terminal_input_sent !== false ||
-      transition.command_fingerprint !== HUMAN_OBSERVED_HANDOFF_FINGERPRINT
-    ) {
-      throw new Error(
-        "human-observed handoff adapter profile changed during recovery"
-      );
-    }
-    return;
-  }
-  const operation = transition.operation === "resume_thread"
-    ? {
-        kind: "resume_thread" as const,
-        nativeThreadId: transition.target_native_thread_id as string
-      }
-    : { kind: "new_thread" as const };
-  const plan = capability?.status === "supported"
-    ? adapter.planThreadLifecycle?.(operation, capability)
-    : undefined;
-  if (
-    currentVersion !== transition.adapter_version ||
-    !plan ||
-    nativeThreadCommandFingerprint(JSON.stringify(plan.steps)) !==
-      transition.command_fingerprint
-  ) {
-    throw new Error("lifecycle adapter version or command plan changed during recovery");
-  }
-}
-
-async function verifyRecoveredLifecycleAfterBinding({
-  options,
-  terminal,
-  transition
-}: {
-  options: Record<string, any>;
-  terminal: ResolvedTerminalConversation;
-  transition: NativeThreadTransition;
-}): Promise<void> {
-  const binding = transition.after_binding;
-  if (
-    !binding ||
-    !binding.native_thread_id ||
-    binding.native_process.pid !== terminal.pid ||
-    !terminalControlAliasMatches(
-      binding.terminal_id,
-      binding.terminal_control,
-      terminal.conversationId,
-      terminal.terminalControl
-    )
-  ) {
-    throw new Error("verified after_binding no longer matches the terminal or pid");
-  }
-  if (transition.operation === "adopt_external_thread") {
-    if (
-      transition.origin !== "human_observed" ||
-      transition.terminal_input_sent !== false ||
-      !transition.source_session_id ||
-      !transition.before_binding
-    ) {
-      throw new Error("human-observed handoff recovery evidence is incomplete");
-    }
-    const storeDir = storeDirFromOptions(options);
-    const source = loadManagedSession(storeDir, transition.source_session_id);
-    const resolved = await resolveCurrentNativeAgentSessionIdentity({
-      options,
-      agent: terminal.agent,
-      pid: terminal.pid,
-      cwd: terminal.terminalControl.currentPath,
-      preferredSessionId: binding.native_thread_id,
-      allowedCompanionIdentity: codexIdentityFence({
-        sessionId: transition.before_native_thread_id,
-        processUuid: transition.before_process_uuid,
-        processBirth: transition.before_process_birth,
-        rollout: transition.before_process_rollout,
-        evidence: transition.before_binding.native_process.evidence
-      }),
-      allowedAdditionalIdentities: []
-    });
-    const observed = await observedExternalHandoffIdentity({
-      options,
-      terminal,
-      sourceSession: source,
-      resolvedIdentity: resolved
-    });
-    if (!observed.identity) {
-      throw new Error(
-        "human-observed handoff target identity is unavailable during recovery"
-      );
-    }
-    const exact = exactLifecycleProcessIdentity(terminal, observed.identity);
-    if (
-      exact.sessionId.toLowerCase() !== binding.native_thread_id.toLowerCase() ||
-      exact.processUuid !== binding.native_process.process_uuid ||
-      exact.processBirth !== binding.native_process.process_birth ||
-      JSON.stringify(exact.rollout ?? null) !==
-        JSON.stringify(binding.native_process.rollout ?? null)
-    ) {
-      throw new Error(
-        "human-observed handoff target identity changed during recovery"
-      );
-    }
-    return;
-  }
-  const bridge = createTerminalAgentBridge(options);
-  const status = await bridge.status(
-    terminal.agent,
-    terminal.terminalControl,
-    { runtime: terminalRuntimeForLiveIdentity({ terminal, physicalOnly: true }) }
-  );
-  if (
-    !status.reachable ||
-    status.activity_state !== "idle" ||
-    status.approval_state.blocked
-  ) {
-    throw new Error("live terminal is not at a verified idle prompt during recovery");
-  }
-  let identity: NativeAgentSessionIdentity | undefined;
-  if (terminal.agent === "claude") {
-    identity = await probeManualClaudeLifecycleRecoveryIdentity({
-      options,
-      terminal,
-      transition,
-      clearInput: false
-    });
-  } else if (binding.native_process.rollout) {
-    // Resolver failures are unknown evidence, never permission to fall back to
-    // a possibly stale status card.
-    const knownRoots = codexKnownRootSetForLifecycleTransition({
-      storeDir: storeDirFromOptions(options),
-      terminal,
-      transition
-    });
-    const companions = codexCompanionsExcludingPreferred(
-      knownRoots,
-      binding.native_thread_id
-    );
-    identity = await resolveCurrentNativeAgentSessionIdentity({
-      options,
-      agent: terminal.agent,
-      pid: terminal.pid,
-      cwd: terminal.terminalControl.currentPath,
-      preferredSessionId: binding.native_thread_id,
-      allowedCompanionIdentity: companions.primary,
-      allowedAdditionalIdentities: companions.additional
-    });
-    if (!identity) {
-      throw new Error(
-        "Codex rollout identity is unavailable during verified recovery"
-      );
-    }
-    identity = exactLifecycleProcessIdentity(terminal, identity);
-  } else {
-    identity = await probeManualCodexLifecycleRecoveryIdentity({
-      options,
-      terminal,
-      transition,
-      clearInput: false
-    });
-  }
-  if (identity.sessionId !== binding.native_thread_id) {
-    throw new Error("live native thread does not match verified after_binding");
-  }
-  if (terminal.agent === "codex") {
-    if (
-      binding.native_process.process_birth !== identity.processBirth ||
-      binding.native_process.process_uuid !== identity.processUuid
-    ) {
-      throw new Error("Codex process incarnation changed during lifecycle recovery");
-    }
-  } else if (
-    !identity.processUuid ||
-    binding.native_process.process_uuid !== identity.processUuid
-  ) {
-    throw new Error("Claude process incarnation changed during lifecycle recovery");
-  }
-  const rollout = binding.native_process.rollout;
-  if (
-    rollout &&
-    (
-      rollout.fd !== identity?.rollout?.fd ||
-      rollout.device !== identity.rollout.device ||
-      rollout.inode !== identity.rollout.inode ||
-      rollout.path !== identity.rollout.path
-    )
-  ) {
-    throw new Error("native rollout incarnation changed during lifecycle recovery");
-  }
-  if (
-    terminal.agent === "codex" &&
-    transition.operation === "resume_thread"
-  ) {
-    assertResumedCodexRolloutMatchesCandidate(
-      identity,
-      transition.target_candidate_file_identity
-    );
-  }
-}
-
-async function reconcileUncertainLifecycleTransition({
-  options,
-  terminal,
-  transition,
-  storeDir,
-  now
-}: {
-  options: Record<string, any>;
-  terminal: ResolvedTerminalConversation;
-  ledger: Record<string, any>;
-  transition: NativeThreadTransition;
-  storeDir: string;
-  now: string;
-}): Promise<Record<string, any>> {
-  if (transition.operation === "adopt_external_thread") {
-    throw new Error(
-      "uncertain human-observed handoff remains quarantined because recovery cannot send terminal input"
-    );
-  }
-  const live = terminal.agent === "claude"
-    ? await probeManualClaudeLifecycleRecoveryIdentity({
-        options,
-        terminal,
-        transition,
-        clearInput: !transition.submitted_at
-      })
-    : await probeManualCodexLifecycleRecoveryIdentity({
-        options,
-        terminal,
-        transition,
-        clearInput: !transition.submitted_at
-      });
-  assertManualLifecycleProcessIncarnation(transition, live);
-
-  if (live.sessionId === transition.before_native_thread_id) {
-    assertLifecycleRolloutMatches(
-      transition.before_process_rollout,
-      live.rollout,
-      "before-thread rollout"
-    );
-    await assertNativeThreadHasExclusiveOwnership({
-      options,
-      agent: transition.agent,
-      currentPid: terminal.pid,
-      nativeThreadId: transition.before_native_thread_id,
-      storeDir,
-      terminalControl: terminal.terminalControl,
-      excludedManagedSessionId: transition.source_session_id
-    });
-    transition = saveNativeThreadTransition(storeDir, {
-      ...transition,
-      status: "aborted",
-      aborted_at: now,
-      reconciled_outcome: "before",
-      reconciled_at: now,
-      error:
-        "operator-authorized recovery observed the exact before-thread identity"
-    }, { expectedRevision: nativeThreadTransitionRevision(transition) });
-    restorePreparedLifecycleSource(storeDir, transition, now);
-    saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
-      lifecycleLedger(transition, storeDir, {
-        phase: "resolved", at: now,
-        reason: "operator-authorized recovery observed exact before identity and rolled back"
-      }), { expectedTransitionId: transition.transition_id });
-    return loadTerminalBridgeDispatchLedger(
-      terminal.terminalControl
-    ) as Record<string, any>;
-  }
-
-  if (
-    !["resume_thread", "adopt_external_thread"].includes(
-      transition.operation
-    ) ||
-    live.sessionId !== transition.target_native_thread_id
-  ) {
-    throw new Error(
-      "fresh native thread identity matches neither the recorded before identity " +
-      "nor a durably known exact after identity"
-    );
-  }
-  if (
-    transition.operation === "resume_thread" &&
-    terminal.agent === "codex" &&
-    !live.rollout
-  ) {
-    throw new Error(
-      "Codex resume recovery requires an exact live rollout incarnation"
-    );
-  }
-  if (
-    transition.operation === "resume_thread" &&
-    terminal.agent === "codex"
-  ) {
-    assertResumedCodexRolloutMatchesCandidate(
-      live,
-      transition.target_candidate_file_identity
-    );
-  }
-  const targetAtPrepare = tryLoadManagedSession(
-    storeDir,
-    transition.target_session_id
-  );
-  if (
-    (targetAtPrepare?.revision ?? null) !== transition.target_expected_revision
-  ) {
-    throw new Error(
-      "lifecycle target Session changed before manual roll-forward"
-    );
-  }
-  const verifiedAt = new Date(now);
-  const afterBinding = terminalBindingFrom({
-    terminalId: terminal.conversationId,
-    terminalControl: terminal.terminalControl,
-    pid: terminal.pid,
-    nativeThreadId: live.sessionId,
-    processUuid: live.processUuid,
-    processBirth: live.processBirth,
-    rollout: live.rollout,
-    evidence: `${live.evidence}+operator_recovery`,
-    generation: (targetAtPrepare?.binding?.generation ?? 0) + 1,
-    now: verifiedAt
-  });
-  transition = saveNativeThreadTransition(storeDir, {
-    ...transition,
-    status: "verified",
-    submitted_at: transition.submitted_at ?? now,
-    verified_at: now,
-    after_binding: afterBinding,
-    reconciled_outcome: "after",
-    reconciled_at: now,
-    error: undefined,
-    do_not_retry: undefined
-  }, { expectedRevision: nativeThreadTransitionRevision(transition) });
-  await assertLifecycleTargetHasExclusiveOwnership({
-    options,
-    terminal,
-    transition,
-    storeDir
-  });
-  const savedTarget = commitVerifiedLifecycleTransition(
-    storeDir,
-    transition,
-    now
-  );
-  transition = saveNativeThreadTransition(storeDir, {
-    ...transition,
-    status: "committed",
-    committed_at: now
-  }, { expectedRevision: nativeThreadTransitionRevision(transition) });
-  saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
-    lifecycleLedger(transition, storeDir, {
-      phase: "resolved_with_binding", at: now,
-      binding: savedTarget.binding,
-      reason: "operator-authorized recovery observed exact after identity and rolled forward"
-    }), { expectedTransitionId: transition.transition_id });
-  return loadTerminalBridgeDispatchLedger(
-    terminal.terminalControl
-  ) as Record<string, any>;
-}
-
-async function probeManualClaudeLifecycleRecoveryIdentity({
-  options,
-  terminal,
-  transition,
-  clearInput = true
-}: {
-  options: Record<string, any>;
-  terminal: ResolvedTerminalConversation;
-  transition: NativeThreadTransition;
-  clearInput?: boolean;
-}): Promise<NativeAgentSessionIdentity> {
-  const startedAt = transition.before_process_started_at;
-  if (!startedAt) {
-    throw new Error(
-      "Claude manual lifecycle recovery lacks prepare-time process incarnation"
-    );
-  }
-  const bridge = createTerminalAgentBridge(options);
-  const physicalRuntime = terminalRuntimeForLiveIdentity({
-    terminal,
-    physicalOnly: true
-  });
-  const initialRows = loadClaudeAgentRows(options, { required: true });
-  const initialObservation = terminal.adapter.observeThreadLifecycle?.({
-    operation: transition.operation === "resume_thread"
-      ? {
-          kind: "resume_thread",
-          nativeThreadId: transition.target_native_thread_id as string
-        }
-      : { kind: "new_thread" },
-    phase: "before",
-    pid: terminal.pid,
-    processStartedAt: startedAt,
-    cwd: transition.workspace,
-    agentRows: initialRows
-  });
-  const initialStatus = await bridge.status(
-    terminal.agent,
-    terminal.terminalControl,
-    { runtime: physicalRuntime }
-  );
-  if (
-    initialObservation?.status !== "observed" ||
-    initialObservation.idle !== true ||
-    !isExactNativeThreadId(initialObservation.nativeThreadId) ||
-    !initialStatus.reachable ||
-    initialStatus.approval_state.blocked ||
-    (
-      clearInput
-        ? (
-            initialStatus.activity_state === "working" ||
-            initialStatus.activity_state === "awaiting_approval" ||
-            !claudeComposerVisible(initialStatus.screen.excerpt)
-          )
-        : (
-            initialStatus.activity_state !== "idle" ||
-            !claudeComposerEmpty(initialStatus.screen.excerpt)
-          )
-    )
-  ) {
-    throw new Error(
-      "manual lifecycle recovery requires one exact idle Claude process and composer"
-    );
-  }
-  const processUuid = `claude-pid:${terminal.pid}:started:${startedAt}`;
-  if (processUuid !== transition.before_process_uuid) {
-    throw new Error(
-      "Claude process incarnation changed before manual lifecycle recovery"
-    );
-  }
-  if (clearInput) {
-    await bridge.clearInputLine(
-      terminal.agent,
-      terminal.terminalControl,
-      { runtime: physicalRuntime }
-    );
-  }
-
-  let stableSessionId: string | undefined;
-  let stableCount = 0;
-  let lastReason = "no exact idle Claude agents observation was available";
-  for (let attempt = 0; attempt < 12; attempt += 1) {
-    const rows = loadClaudeAgentRows(options, { required: true });
-    const observed = terminal.adapter.observeThreadLifecycle?.({
-      operation: transition.operation === "resume_thread"
-        ? {
-            kind: "resume_thread",
-            nativeThreadId: transition.target_native_thread_id as string
-          }
-        : { kind: "new_thread" },
-      phase: "before",
-      pid: terminal.pid,
-      processStartedAt: startedAt,
-      cwd: transition.workspace,
-      agentRows: rows
-    });
-    const status = await bridge.status(
-      terminal.agent,
-      terminal.terminalControl,
-      { runtime: physicalRuntime }
-    );
-    if (
-      observed?.status === "observed" &&
-      observed.idle === true &&
-      isExactNativeThreadId(observed.nativeThreadId) &&
-      status.reachable &&
-      status.activity_state === "idle" &&
-      !status.approval_state.blocked &&
-      claudeComposerEmpty(status.screen.excerpt)
-    ) {
-      if (stableSessionId === observed.nativeThreadId) {
-        stableCount += 1;
-      } else {
-        stableSessionId = observed.nativeThreadId;
-        stableCount = 1;
-      }
-      if (stableCount >= 2) {
-        return {
-          sessionId: observed.nativeThreadId,
-          processStartedAt: startedAt,
-          processUuid,
-          evidence: observed.evidence ?? "claude_agents_exact_pid"
-        };
-      }
-      lastReason = "only one stable Claude agents observation was available";
-    } else {
-      stableSessionId = undefined;
-      stableCount = 0;
-      lastReason =
-        observed?.reason ??
-        "Claude process or terminal was not exact, idle, and unblocked";
-    }
-    await cliSleep(100);
-  }
-  throw new Error(
-    `Claude manual lifecycle recovery identity was not stable: ${lastReason}`
-  );
-}
-
-async function probeManualCodexLifecycleRecoveryIdentity({
-  options,
-  terminal,
-  transition,
-  clearInput = true
-}: {
-  options: Record<string, any>;
-  terminal: ResolvedTerminalConversation;
-  transition: NativeThreadTransition;
-  clearInput?: boolean;
-}): Promise<NativeAgentSessionIdentity> {
-  if (terminal.agent !== "codex") {
-    throw new Error(
-      "manual uncertain lifecycle recovery currently requires Codex exact-status evidence"
-    );
-  }
-  const bridge = createTerminalAgentBridge(options);
-  const recoveryKnownRoots = codexKnownRootSetForLifecycleTransition({
-    storeDir: storeDirFromOptions(options),
-    terminal,
-    transition
-  });
-  const recoveryPreferredSessionId = transition.operation === "resume_thread"
-    ? transition.target_native_thread_id as string
-    : transition.after_binding?.native_thread_id ??
-      transition.before_native_thread_id;
-  const recoveryCompanions = codexCompanionsExcludingPreferred(
-    recoveryKnownRoots,
-    recoveryPreferredSessionId
-  );
-  const recoveryRuntime = withCodexCompanionFences({
-    ...terminalRuntimeForLiveIdentity({
-      terminal,
-      expectedEmptyNativeSession: true
-    }),
-    nativeProcessUuid: transition.before_process_uuid,
-    nativeProcessBirth: transition.before_process_birth,
-    expectedNativeSessionId: recoveryPreferredSessionId
-  }, recoveryCompanions);
-  // Before any recovery key is sent, prove that every open root is either the
-  // exact expected before/after thread or a complete managed companion. This
-  // turns an unknown third root into a poisoned recovery instead of allowing
-  // C-u or /status to act on an unowned foreground context.
-  await resolveCurrentNativeAgentSessionIdentity({
-    options,
-    agent: terminal.agent,
-    pid: terminal.pid,
-    cwd: terminal.terminalControl.currentPath,
-    preferredSessionId: recoveryPreferredSessionId,
-    allowedCompanionIdentity: recoveryCompanions.primary,
-    allowedAdditionalIdentities: recoveryCompanions.additional
-  });
-  const initial = await bridge.status(
-    terminal.agent,
-    terminal.terminalControl,
-    { runtime: recoveryRuntime }
-  );
-  if (
-    !initial.reachable ||
-    initial.approval_state.blocked ||
-    (
-      clearInput
-        ? (
-            initial.activity_state === "working" ||
-            initial.activity_state === "awaiting_approval" ||
-            !codexComposerVisible(initial.screen.excerpt)
-          )
-        : (
-            initial.activity_state !== "idle" ||
-            !codexComposerVisible(initial.screen.excerpt) ||
-            !codexComposerEmpty(initial.screen.excerpt)
-          )
-    )
-  ) {
-    throw new Error(
-      "manual lifecycle recovery requires a reachable non-working Codex composer"
-    );
-  }
-  const birthBeforeClear = codexProcessBirthForLifecycle(terminal.pid);
-  const processUuidBeforeClear =
-    `codex-pid:${terminal.pid}:birth:${birthBeforeClear}`;
-  if (
-    birthBeforeClear !== transition.before_process_birth ||
-    processUuidBeforeClear !== transition.before_process_uuid
-  ) {
-    throw new Error(
-      "Codex process incarnation changed before manual lifecycle recovery"
-    );
-  }
-
-  // A dispatcher can die after sendText() but before Enter. Explicit close is
-  // the operator authority to clear that unsubmitted composer before probing.
-  let cleared:
-    Awaited<ReturnType<TerminalAgentBridge["status"]>> | undefined = initial;
-  if (clearInput) {
-    await bridge.clearInputLine(
-      terminal.agent,
-      terminal.terminalControl,
-      { runtime: recoveryRuntime }
-    );
-    cleared = undefined;
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      const candidate = await bridge.status(
-        terminal.agent,
-        terminal.terminalControl,
-        { runtime: recoveryRuntime }
-      );
-      if (
-        candidate.reachable &&
-        candidate.activity_state === "idle" &&
-        !candidate.approval_state.blocked &&
-        codexComposerEmpty(candidate.screen.excerpt)
-      ) {
-        cleared = candidate;
-        break;
-      }
-      await cliSleep(50);
-    }
-  }
-  if (!cleared?.screen.digest) {
-    throw new Error("Codex composer did not become empty after recovery clear-line");
-  }
-  const agentVersion = agentVersionForRunningProcess(
-    terminal.agent,
-    terminal.pid,
-    options
-  );
-  if (!agentVersion) {
-    throw new Error(
-      "Codex lifecycle recovery /status requires the exact running version before terminal input"
-    );
-  }
-  const submission = await bridge.submitCodexStatusProbe(
-    terminal.terminalControl,
-    agentVersion,
-    { runtime: recoveryRuntime }
-  );
-  const baselineDigest = submission.observationBaselineDigest;
-
-  let stable: NativeAgentSessionIdentity | undefined;
-  let stableCount = 0;
-  let lastObservationReason = "no fresh idle status screen was captured";
-  for (let attempt = 0; attempt < 12; attempt += 1) {
-    const status = await bridge.status(
-      terminal.agent,
-      terminal.terminalControl,
-      {
-        runtime: recoveryRuntime,
-        scrollbackLines: submission.observationScrollbackLines
-      }
-    );
-    if (
-      status.reachable &&
-      status.activity_state === "idle" &&
-      !status.approval_state.blocked &&
-      status.screen.digest &&
-      status.screen.digest !== baselineDigest
-    ) {
-      const observed = terminal.adapter.observeThreadLifecycle?.({
-        operation: { kind: "new_thread" },
-        phase: "before",
-        screen: status.screen.excerpt ?? ""
-      });
-      if (
-        observed?.status === "observed" &&
-        isExactNativeThreadId(observed.nativeThreadId)
-      ) {
-        let resolved: NativeAgentSessionIdentity | undefined;
-        try {
-          const companions = codexCompanionsExcludingPreferred(
-            recoveryKnownRoots,
-            observed.nativeThreadId
-          );
-          resolved = await resolveCurrentNativeAgentSessionIdentity({
-            options,
-            agent: terminal.agent,
-            pid: terminal.pid,
-            cwd: terminal.terminalControl.currentPath,
-            preferredSessionId: observed.nativeThreadId,
-            allowedCompanionIdentity: companions.primary,
-            allowedAdditionalIdentities: companions.additional
-          });
-        } catch (error) {
-          throw new Error(
-            `Codex resolver failed during manual lifecycle recovery: ${
-              error instanceof Error ? error.message : String(error)
-            }`
-          );
-        }
-        const matchedKnownBefore = [
-          recoveryKnownRoots.primary,
-          ...recoveryKnownRoots.additional
-        ].find((candidate) =>
-          nativeIdentityMatchesCodexPreMaterialization(
-            resolved,
-            candidate
-          )
-        );
-        const observedRecordedBefore =
-          observed.nativeThreadId === transition.before_native_thread_id;
-        const recordedBeforeFence = transition.before_process_rollout
-          ? {
-              sessionId: transition.before_native_thread_id,
-              processUuid: transition.before_process_uuid,
-              processBirth: transition.before_process_birth as string,
-              rollout: transition.before_process_rollout
-            }
-          : undefined;
-        const postconditionEvidence = observedRecordedBefore
-          ? recordedBeforeFence
-            ? nativeIdentityMatchesCodexPreMaterialization(
-                resolved,
-                recordedBeforeFence
-              )
-              ? "matching_after"
-              : "invalid"
-            : resolved === undefined || matchedKnownBefore
-              ? "no_rollout"
-              : "invalid"
-          : classifyCodexLifecyclePostcondition({
-              operation: transition.operation === "resume_thread"
-                ? "resume_thread"
-                : "new_thread",
-              parsedNativeThreadId: observed.nativeThreadId,
-              observationSucceeded: true,
-              observedIdentity: resolved,
-              beforeIdentity: matchedKnownBefore ?? {
-                sessionId: transition.before_native_thread_id,
-                processUuid: transition.before_process_uuid,
-                processBirth: transition.before_process_birth,
-                rollout: transition.before_process_rollout
-              }
-            });
-        if (postconditionEvidence === "invalid") {
-          throw new Error(
-            "Codex status card and rollout resolver disagree during recovery"
-          );
-        }
-        const sanitized = postconditionEvidence === "matching_after"
-          ? resolved
-          : {
-              sessionId: observed.nativeThreadId,
-              processUuid: transition.before_process_uuid,
-              processBirth: transition.before_process_birth,
-              evidence: observed.evidence ?? "codex_status_card"
-            };
-        const exact = exactLifecycleProcessIdentity(terminal, {
-          ...sanitized,
-          sessionId: observed.nativeThreadId,
-          evidence: observed.evidence ?? "codex_status_card"
-        });
-        const key = JSON.stringify({
-          sessionId: exact.sessionId,
-          processUuid: exact.processUuid,
-          processBirth: exact.processBirth,
-          rollout: exact.rollout ?? null
-        });
-        const priorKey = stable
-          ? JSON.stringify({
-              sessionId: stable.sessionId,
-              processUuid: stable.processUuid,
-              processBirth: stable.processBirth,
-              rollout: stable.rollout ?? null
-            })
-          : undefined;
-        if (priorKey === key) {
-          stableCount += 1;
-        } else {
-          stable = exact;
-          stableCount = 1;
-        }
-        if (stableCount >= 2) {
-          return exact;
-        }
-        lastObservationReason =
-          "only one stable status/process observation was available";
-      } else {
-        lastObservationReason =
-          observed?.reason ?? "Codex status card did not expose one exact UUID";
-        stable = undefined;
-        stableCount = 0;
-      }
-    } else {
-      lastObservationReason =
-        "terminal status was not fresh, idle, reachable, and unblocked";
-    }
-    await cliSleep(100);
-  }
-  throw new Error(
-    "fresh Codex /status did not produce a stable exact lifecycle identity: " +
-    lastObservationReason
-  );
-}
-
-function codexComposerVisible(screen: string | undefined): boolean {
-  return String(screen ?? "")
-    .split(/\r?\n/u)
-    .slice(-8)
-    .some((line) => /^[›»](?:\s|$)/u.test(line.trimEnd()));
-}
-
 interface CodexLatentClearResumeObservation {
   sourceNativeThreadId: string;
   fingerprint: string;
@@ -25300,183 +24253,6 @@ async function assertNativeInspectionComposerReadyForAutomatedInput({
       "Claude composer contains input or is not at the exact idle frame; refusing automated terminal input"
     );
   }
-}
-
-function codexComposerEmpty(screen: string | undefined): boolean {
-  const composers = String(screen ?? "")
-    .split(/\r?\n/u)
-    .slice(-8)
-    .filter((line) => /^[›»](?:\s|$)/u.test(line.trimEnd()));
-  return composers.length === 1 && /^[›»]\s*$/u.test(composers[0].trimEnd());
-}
-
-function claudeComposerVisible(screen: string | undefined): boolean {
-  const lines = String(screen ?? "").split(/\r?\n/u);
-  while (lines.length > 0 && lines.at(-1)?.trim() === "") {
-    lines.pop();
-  }
-  return lines
-    .slice(-8)
-    .some((line) => /^\s*❯(?:\s|$)/u.test(line));
-}
-
-function claudeComposerEmpty(screen: string | undefined): boolean {
-  return isExactClaudeIdleComposer(String(screen ?? ""));
-}
-
-function assertManualLifecycleProcessIncarnation(
-  transition: NativeThreadTransition,
-  live: NativeAgentSessionIdentity
-): void {
-  if (
-    live.processUuid !== transition.before_process_uuid ||
-    live.processStartedAt !== transition.before_process_started_at ||
-    live.processBirth !== transition.before_process_birth
-  ) {
-    throw new Error(
-      "live process incarnation does not match lifecycle prepare evidence"
-    );
-  }
-}
-
-function assertLifecycleRolloutMatches(
-  expected: NativeAgentSessionIdentity["rollout"] | undefined,
-  actual: NativeAgentSessionIdentity["rollout"] | undefined,
-  label: string
-): void {
-  if (
-    expected &&
-    (
-      expected.device !== actual?.device ||
-      expected.inode !== actual?.inode ||
-      expected.path !== actual?.path
-    )
-  ) {
-    throw new Error(`${label} changed during lifecycle recovery`);
-  }
-}
-
-function restorePreparedLifecycleSource(
-  storeDir: string,
-  transition: NativeThreadTransition,
-  now: string
-): void {
-  if (transition.target_session_id !== transition.source_session_id) {
-    const target = tryLoadManagedSession(storeDir, transition.target_session_id);
-    if (
-      (target?.revision ?? null) !== transition.target_expected_revision ||
-      (
-        target?.status === "bound" &&
-        target.last_transition_id === transition.transition_id
-      )
-    ) {
-      throw new Error(
-        "lifecycle target Session changed before before-identity rollback"
-      );
-    }
-  }
-  if (!transition.source_session_id) {
-    return;
-  }
-  const source = tryLoadManagedSession(storeDir, transition.source_session_id);
-  if (!source || transition.source_expected_revision === undefined) {
-    throw new Error("prepared lifecycle source Session is unavailable");
-  }
-  if (
-    source.status === "bound" &&
-    JSON.stringify(source.binding) === JSON.stringify(transition.before_binding) &&
-    source.last_transition_id === transition.source_previous_last_transition_id
-  ) {
-    return;
-  }
-  if (
-    Number(source.revision) <= transition.source_expected_revision ||
-    !["transitioning", "quarantined"].includes(source.status) ||
-    source.last_transition_id !== transition.transition_id ||
-    JSON.stringify(source.binding) !== JSON.stringify(transition.before_binding)
-  ) {
-    throw new Error("prepared lifecycle source Session changed before recovery");
-  }
-  saveManagedSession(storeDir, {
-    ...source,
-    status: "bound",
-    quarantine_reason: undefined,
-    last_transition_id: transition.source_previous_last_transition_id,
-    updated_at: now
-  }, { expectedRevision: managedSessionRevision(source) });
-}
-
-function assertCommittedLifecycleTarget(
-  storeDir: string,
-  transition: NativeThreadTransition
-): void {
-  const target = tryLoadManagedSession(storeDir, transition.target_session_id);
-  if (
-    !target ||
-    target.status !== "bound" ||
-    target.last_transition_id !== transition.transition_id ||
-    JSON.stringify(target.binding) !== JSON.stringify(transition.after_binding)
-  ) {
-    throw new Error("committed lifecycle target Session is missing or mismatched");
-  }
-}
-
-function quarantineLifecycleSource(
-  storeDir: string,
-  transition: NativeThreadTransition,
-  now: string,
-  reason: string
-): void {
-  if (!transition.source_session_id) {
-    return;
-  }
-  const source = tryLoadManagedSession(storeDir, transition.source_session_id);
-  if (
-    !source?.binding ||
-    source.last_transition_id !== transition.transition_id ||
-    source.status === "quarantined" ||
-    source.status === "detached"
-  ) {
-    return;
-  }
-  saveManagedSession(storeDir, {
-    ...source,
-    status: "quarantined",
-    quarantine_reason: reason,
-    updated_at: now
-  }, { expectedRevision: managedSessionRevision(source) });
-}
-
-function failClosedLifecycleLedger({
-  terminal,
-  ledger,
-  reason
-}: {
-  terminal: ResolvedTerminalConversation;
-  ledger: Record<string, any>;
-  reason: string;
-}): Record<string, any> {
-  const transitionId = stringValue(ledger.transition_id);
-  if (!transitionId) {
-    return ledger;
-  }
-  const now = cliNow().toISOString();
-  try {
-    saveLifecycleTerminalDispatchLedger(terminal.terminalControl, {
-      ...ledger,
-      kind: "lifecycle",
-      generation_id: transitionId,
-      transition_id: transitionId,
-      status: "uncertain",
-      uncertain_at: now,
-      reason: reason.slice(0, 2000)
-    }, { expectedTransitionId: transitionId });
-  } catch {
-    return ledger;
-  }
-  return loadTerminalBridgeDispatchLedger(
-    terminal.terminalControl
-  ) as Record<string, any>;
 }
 
 function restoreTerminalBridgeDispatchLedger({
