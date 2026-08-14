@@ -2,8 +2,8 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 34278,
-    "production_physical_loc": 75600,
+    "cli_core_max_physical_loc": 33872,
+    "production_physical_loc": 75599,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -76,6 +76,15 @@
     },
     "durable-json-file": {
       "selection": "full"
+    },
+    "install-doctor": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/cli-ux.test.ts",
+        "test/doctor-capabilities-process.test.ts",
+        "test/install-doctor-command-adapter.test.ts",
+        "test/install-openclaw-cli.test.ts"
+      ]
     },
     "lifecycle-core": {
       "selection": "full"
@@ -258,6 +267,10 @@
       "owner": "terminal-agent-core"
     },
     {
+      "path": "src/cli-command-runtime.ts",
+      "owner": "cli-runtime"
+    },
+    {
       "path": "src/cli-core.ts",
       "owner": "cli-runtime"
     },
@@ -312,6 +325,10 @@
     {
       "path": "src/herdr-terminal-control-provider.ts",
       "owner": "terminal-control"
+    },
+    {
+      "path": "src/install-doctor-command-adapter.ts",
+      "owner": "install-doctor"
     },
     {
       "path": "src/live-lifecycle-evidence.ts",
