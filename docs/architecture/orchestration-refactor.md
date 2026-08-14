@@ -996,6 +996,79 @@ key-mismatched terminal/writer resources, captured-Store mismatch, and released
 scopes. Adapter cases pin Codex probe/companion ordering, Claude rows-before-status
 ordering, and the no-revalidation callback's original synchronous invocation.
 
+## Terminal list and action authority projection
+
+The terminal-list milestone gives list projection and fresh mutation
+preparation one canonical send-authority reducer. `terminal-action-projection.ts`
+owns Session-claim conflict precedence, dispatch/Session conflict composition,
+send authority, safe action selection, management facts, and handoff/recovery
+projection. `terminal-authority-policy.ts` owns provider-neutral terminal and
+process-incarnation facts, managed-binding conflict classification, Codex
+companion fences, exact deferred-source authority, stored Turn identity, and
+the byte-sensitive verified-empty, deferred-foreground, observed-handoff, and
+active-Turn token codecs. Both modules are typed and have no filesystem,
+process, lock, CLI-option, concrete-adapter, or public-JSON input boundary.
+The adapter-neutral complete-rollout predicate, identity fence and matcher from
+the lifecycle slice remain canonical in `terminal-binding-authority.ts`;
+authority policy directly imports and re-exports them. That module also owns
+the single status-card predicate and neutral binding-conflict/candidate helpers.
+PR4C's dispatch execution service imports those identity decisions from binding
+authority and its process-incarnation and companion decisions from authority
+policy, so production has one implementation for each decision and no cycle.
+
+Measured against exact lifecycle head
+`10b2b9c60a8f5635961156bf9951472ea5542a48`, this slice reduces
+`src/cli-core.ts` from 28,610 to 28,336 physical lines (-274) and changes total
+production TypeScript from 78,388 to 79,308 (+920).
+The overhead is reported rather than hidden by compact formatting: it is the
+explicit typed observation handoff needed to keep Store and terminal reads in
+the composition root while making each authority stage independently bounded
+and testable. The production graph has 78 modules, 307 static import edges, and
+zero cycles. Targeted ownership is split honestly across
+`terminal-action-projection` and `terminal-authority-policy` with five retained
+integration witnesses each; the pre-existing binding-authority and
+dispatch-policy owners are also reduced to five witnesses each.
+
+The old 1,162-line terminal projection callback is now a sequence of bounded
+stages. The final TypeScript AST spans are binding observation 298 lines,
+verified-empty authority 97, deferred-source authority 77, deferred action
+authority 106, handoff authority 139, terminal-scoped approval authority 96,
+authority composition 23, public rendering 256, and the outer list projection
+144.
+No touched or extracted function reaches the hard 500-line boundary. The
+TypeScript AST approximate-complexity maximum across the touched and extracted
+production functions is 48, below the hard approximate-complexity-50 gate.
+Binding observation, deferred action authority, handoff authority, and
+public rendering are reviewed exceptions to the preferred 100-line and/or
+complexity-20 targets: further splitting them would duplicate the staged facts
+or move Store reads across a safety short circuit.
+
+The composition root continues to own deferred-transfer, managed-Session,
+managed-Turn, transition, and dispatch-ledger reads; terminal/process
+collection; Codex inventory and identity observation; terminal-scoped approval
+boundary I/O; runtime logging; and the final public JSON shell. The staged calls
+preserve the old left-to-right read order. In particular, a Session-authority
+conflict never reads the dispatch owner's Session id, a genuine mismatch keeps
+the old two `sessionIdForConversation` calls, and every unresolved-transition
+read remains behind the same verified-empty, reconcile, external-handoff, or
+active-Turn preconditions. Listed tokens remain stale snapshots; mutation paths
+repeat fresh observation and invoke the same canonical send reducer before a
+side effect. Blocking Turn statuses do not inspect callback delivery, current
+approval actions are retargeted before reading the live terminal approval
+state, and stored native rollout fields remain unread until all earlier Turn
+identity exits have passed.
+
+Direct fast proofs compare the old and new `JSON.stringify` action bytes and
+key order, verified-empty and deferred v2/v5 token hashes, active-Turn handoff
+hashes, conflict precedence with lazy managed-Turn facts, selector alias and
+process-incarnation behavior, and list-snapshot versus fresh-mutation send
+decisions. Getter-backed fixtures make the three lazy-read fences executable,
+and ordinary fixtures compare canonical results with the previous decisions.
+Existing binding-authority, dispatch-policy, list-renderer, and
+terminal-send boundary witnesses remain in place; this slice changes no action
+name, action order, error string, token field order, Store format, or public
+contract version.
+
 ## Soft freeze while #126 is active
 
 Until the orchestration milestones finish:

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 import {
-  isExactNativeThreadId, managedSessionBindingToken,
+  isExactNativeThreadId, managedSessionBindingToken, managedSessionRevision,
   unmanagedTerminalBindingToken,
   type ManagedSessionState, type ManagedTerminalBinding
 } from "./managed-session.js";
@@ -401,11 +401,4 @@ function nativeRollout(value: unknown): NativeRollout | undefined {
   return fd && device && inode && rolloutPath
     ? { fd, device, inode, path: rolloutPath }
     : undefined;
-}
-function managedSessionRevision(session: ManagedSessionState): number {
-  const revision = Number(session.revision);
-  if (!Number.isSafeInteger(revision) || revision < 1) {
-    throw new Error(`managed Session ${session.session_id} has no valid Store revision`);
-  }
-  return revision;
 }

@@ -561,6 +561,44 @@ export function safeUnavailableManagedTurnActions(actionsValue: JsonRecord): Jso
   return actions;
 }
 
+export function renderHistoricalManagedTurn(
+  managedTurn: JsonRecord
+): JsonRecord {
+  const availableActions = isRecord(managedTurn.available_actions)
+    ? managedTurn.available_actions
+    : {};
+  return {
+    ...managedTurn,
+    available_actions: safeUnavailableManagedTurnActions(availableActions)
+  };
+}
+
+export function renderCurrentManagedTurn(
+  managedTurn: JsonRecord,
+  facts: {
+    isCodex: boolean;
+    ownerId: string;
+    rawApproval?: JsonRecord;
+    terminalApprovalState?: () => JsonRecord | undefined;
+  }
+): JsonRecord {
+  if (!facts.rawApproval || !facts.isCodex) return managedTurn;
+  const approve = retargetConversationAction(facts.rawApproval, facts.ownerId);
+  const terminalApprovalState = facts.terminalApprovalState?.();
+  return {
+    ...managedTurn,
+    ...(terminalApprovalState
+      ? { approval_state: terminalApprovalState }
+      : {}),
+    available_actions: {
+      ...(isRecord(managedTurn.available_actions)
+        ? managedTurn.available_actions
+        : {}),
+      approve
+    }
+  };
+}
+
 export function readOnlyListActions(actionsValue: JsonRecord): JsonRecord {
   return isRecord(actionsValue.status)
     ? { status: actionsValue.status }

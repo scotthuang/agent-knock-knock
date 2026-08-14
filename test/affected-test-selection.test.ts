@@ -96,9 +96,6 @@ test("terminal binding authority selects its exact parity integration set", asyn
     "test/human-handoff-adoption-cli.test.ts",
     "test/native-thread-lifecycle-cli.test.ts",
     "test/native-thread-lifecycle-recovery-cli.test.ts",
-    "test/session-selector-cli.test.ts",
-    "test/shards/agent-cli-session-acceptance.test.ts",
-    "test/shards/agent-cli-terminal-send-gates.test.ts",
     "test/stale-bound-resume-cli.test.ts"
   ];
   assert.deepEqual(
@@ -111,6 +108,45 @@ test("terminal binding authority selects its exact parity integration set", asyn
       )
     }
   );
+});
+
+test("terminal list authority domains select at most five exact witnesses", async () => {
+  const selection = await loadSelectionModule();
+  const tiers = loadTiers();
+  const fixtures = [
+    {
+      changedPath: "src/terminal-action-projection.ts",
+      expected: [
+        "test/human-handoff-adoption-cli.test.ts",
+        "test/management-cli.test.ts",
+        "test/session-selector-cli.test.ts",
+        "test/shards/agent-cli-session-acceptance.test.ts",
+        "test/shards/agent-cli-terminal-send-gates.test.ts"
+      ]
+    },
+    {
+      changedPath: "src/terminal-authority-policy.ts",
+      expected: [
+        "test/codex-no-rollout-binding-cli.test.ts",
+        "test/human-handoff-adoption-cli.test.ts",
+        "test/session-selector-cli.test.ts",
+        "test/shards/agent-cli-session-acceptance.test.ts",
+        "test/shards/agent-cli-terminal-send-gates.test.ts"
+      ]
+    }
+  ];
+  for (const fixture of fixtures) {
+    assert.deepEqual(
+      selection.selectAffectedTests([fixture.changedPath], tiers),
+      {
+        mode: "targeted",
+        changedPaths: [fixture.changedPath],
+        integrationFiles: tiers.integration.filter((testPath) =>
+          fixture.expected.includes(testPath)
+        )
+      }
+    );
+  }
 });
 
 test("callback outbox policy selects retry, approval, and monitor recovery coverage", async () => {
@@ -321,7 +357,6 @@ test("terminal dispatch policy selects its exact parity integration set", async 
   const selection = await loadSelectionModule();
   const tiers = loadTiers();
   const expected = [
-    "test/codex-no-rollout-binding-cli.test.ts",
     "test/shards/agent-cli-composer-replay.test.ts",
     "test/shards/agent-cli-dispatch-authority.test.ts",
     "test/shards/agent-cli-dispatch-recovery.test.ts",
