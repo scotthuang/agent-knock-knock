@@ -272,7 +272,7 @@ import {
   type TerminalScopedCodexApprovalBoundary,
   type TerminalScopedCodexApprovalPromptSnapshot
 } from "./terminal-scoped-approval-authority.js";
-import { capabilityGatedRepositoryOperation, withCanonicalMutationLocks } from "./mutation-transaction.js";
+import { canonicalMutationResource, capabilityGatedRepositoryOperation, withCanonicalMutationLocks } from "./mutation-transaction.js";
 import {
   beginCallbackRetryPolicy,
   reduceCallbackRetryPolicy,
@@ -357,33 +357,39 @@ const TERMINAL_INPUT_EVIDENCE_FIELDS = [
 ] as const;
 const gateRepository = capabilityGatedRepositoryOperation;
 const mutationConversationStore = Object.freeze({
-  load: gateRepository(["state"], loadState),
-  save: gateRepository(["storeWriter", "state"], saveState),
-  appendEvent: gateRepository(["storeWriter", "state"], appendEvent)
+  load: gateRepository(["state"], "state", (resource) => loadState(resource.statePath)),
+  save: gateRepository(["storeWriter", "state"], "state", (resource, state: Conversation) => saveState(resource.statePath, state)),
+  appendEvent: gateRepository(["storeWriter", "state"], "state", (resource, event: Parameters<typeof appendEvent>[1]) => appendEvent(resource.logPath, event))
 });
 const mutationDispatchLedger = Object.freeze({
-  load: gateRepository(["terminal"], loadTerminalBridgeDispatchLedger),
-  save: gateRepository(["terminal", "storeWriter"], saveTerminalBridgeDispatchLedger),
-  resolve: gateRepository(["terminal", "storeWriter"], resolveTerminalBridgeDispatchLedger),
-  reconcile: gateRepository(["terminal", "storeWriter"], reconcileLifecycleDispatchLedger)
+  load: gateRepository(["terminal"], "terminal", loadTerminalBridgeDispatchLedger),
+  save: gateRepository(["terminal", "storeWriter"], "terminal", saveTerminalBridgeDispatchLedger),
+  resolve: gateRepository(["terminal", "storeWriter"], "terminal", resolveTerminalBridgeDispatchLedger),
+  reconcileIncarnation: gateRepository(["terminal", "storeWriter"], "terminal",
+    (terminalControl: TerminalControlRef) => resolveTerminalDispatchLedgerPaneIncarnation(
+      terminalControl, loadTerminalBridgeDispatchLedger(terminalControl))),
+  reconcile: gateRepository(["terminal", "storeWriter"], "terminal", reconcileLifecycleDispatchLedger)
 });
 const mutationManagedSessions = Object.freeze({
-  load: gateRepository(["storeWriter"], loadManagedSession),
-  save: gateRepository(["storeWriter"], saveManagedSession)
+  load: gateRepository(["storeWriter"], "storeWriter", loadManagedSession),
+  save: gateRepository(["storeWriter"], "storeWriter", saveManagedSession)
 });
 function terminalWriterMutationLocks(storeDir: string, terminalControl: TerminalControlRef) {
   return {
-    acquireTerminal: () =>
-      acquireTerminalBridgeSendLock(storeDir, terminalControl, { timeoutMs: 30000 }),
-    withStoreWriter: <Result>(operation: () => Promise<Result>) =>
-      withStoreWriterLeaseAsync(storeDir, operation)
+    resources: {
+      terminal: canonicalMutationResource(terminalBridgeRuntimeKey(terminalControl), terminalControl),
+      storeWriter: canonicalMutationResource(path.resolve(storeDir), storeDir)
+    },
+    acquireTerminal: () => acquireTerminalBridgeSendLock(storeDir, terminalControl, { timeoutMs: 30000 }),
+    withStoreWriter: <Result>(operation: () => Promise<Result>) => withStoreWriterLeaseAsync(storeDir, operation)
   };
 }
-function terminalWriterStateMutationLocks(
-  storeDir: string, terminalControl: TerminalControlRef, statePath: string
-) {
+function terminalWriterStateMutationLocks(storeDir: string, terminalControl: TerminalControlRef, statePath: string, logPath: string) {
+  const locks = terminalWriterMutationLocks(storeDir, terminalControl);
   return {
-    ...terminalWriterMutationLocks(storeDir, terminalControl),
+    ...locks,
+    resources: { ...locks.resources, state: canonicalMutationResource(
+      path.resolve(statePath), Object.freeze({ statePath, logPath })) },
     acquireState: () => acquireFileLock(`${statePath}.lock`)
   };
 }
@@ -14750,7 +14756,7 @@ async function runReconcileBinding(options: Record<string, any>) {
   );
   return withCanonicalMutationLocks(terminalWriterMutationLocks(
     storeDir, initiallyResolved.terminalControl
-  ), async (scopes) => {
+  ), async (scopes, resources) => {
       const terminal = await resolveLifecycleTerminal(options);
       if (
         terminal.pid !== initiallyResolved.pid ||
@@ -14773,7 +14779,9 @@ async function runReconcileBinding(options: Record<string, any>) {
           "the terminal acquired an unresolved dispatch after the binding conflict was listed; refresh AKK list"
         );
       }
-      const session = mutationManagedSessions.load(scopes, storeDir, conflictingSessionId);
+      const session = mutationManagedSessions.load(
+        scopes, resources, conflictingSessionId
+      );
       if (
         session.revision !== expectedSessionRevision ||
         !managedSessionBindingTokens(session).includes(expectedBindingToken)
@@ -14879,7 +14887,7 @@ async function runReconcileBinding(options: Record<string, any>) {
         );
       }
       const finalSession = mutationManagedSessions.load(
-        scopes, storeDir, conflictingSessionId
+        scopes, resources, conflictingSessionId
       );
       if (
         finalSession.revision !== expectedSessionRevision ||
@@ -14906,7 +14914,7 @@ async function runReconcileBinding(options: Record<string, any>) {
         );
       }
       const reconciledAt = cliNow().toISOString();
-      const detached = mutationManagedSessions.save(scopes, storeDir, {
+      const detached = mutationManagedSessions.save(scopes, resources, {
         ...finalSession,
         status: "detached",
         detached_at: reconciledAt,
@@ -24241,8 +24249,7 @@ function settleLocalTerminalBridgeCompletionClaim({
             reason: "local_terminal_completion_already_settled"
           };
         }
-        if (!resolveTerminalBridgeDispatchLedger({
-          terminalControl,
+        if (!resolveTerminalBridgeDispatchLedger(terminalControl, {
           conversation,
           expectedMessageId: terminalMessageId,
           reason: "callbackless terminal bridge task reached durable completion"
@@ -24605,9 +24612,11 @@ async function runObservedHandoffClose({
     { pid: initialSource.binding.native_process.pid }
   );
   await withCanonicalMutationLocks(terminalWriterStateMutationLocks(
-    storeDir, terminal.terminalControl, statePath
-  ), async (scopes) => {
-        const conversation = mutationConversationStore.load(scopes, statePath);
+    storeDir, terminal.terminalControl, statePath, logPath
+  ), async (scopes, resources) => {
+        const conversation = mutationConversationStore.load(
+          scopes, resources
+        );
         const turnId = turnIdForConversation(conversation);
         if (
           conversation.conversation_id !== initialConversation.conversation_id ||
@@ -24618,7 +24627,9 @@ async function runObservedHandoffClose({
             "active handoff Turn changed after it was listed; refresh AKK list"
           );
         }
-        const source = mutationManagedSessions.load(scopes, storeDir, sourceSessionId);
+        const source = mutationManagedSessions.load(
+          scopes, resources, sourceSessionId
+        );
         if (
           source.status !== "bound" ||
           !source.binding ||
@@ -24698,7 +24709,9 @@ async function runObservedHandoffClose({
         const expectedMessageId = stringValue(
           takeover?.terminal_bridge_message_id
         ) ?? stringValue(terminalBridgeSubmission(conversation)?.message_id);
-        const ledger = mutationDispatchLedger.load(scopes, terminal.terminalControl);
+        const ledger = mutationDispatchLedger.load(
+          scopes, resources
+        );
         const exactDispatchGeneration = Boolean(
           expectedMessageId &&
           ledger &&
@@ -24737,10 +24750,10 @@ async function runObservedHandoffClose({
           disposition: "superseded_by_human_context_switch",
           updated_at: now
         };
-        mutationConversationStore.save(scopes, statePath, closed);
+        mutationConversationStore.save(scopes, resources, closed);
         const dispatchResolved = expectedMessageId
-          ? mutationDispatchLedger.resolve(scopes, {
-              terminalControl: terminal.terminalControl,
+          ? mutationDispatchLedger.resolve(
+              scopes, resources, {
               conversation: closed,
               expectedMessageId,
               reason: "Turn superseded by a verified human context switch"
@@ -24751,7 +24764,7 @@ async function runObservedHandoffClose({
             "active handoff dispatch changed during close; inspect before retrying"
           );
         }
-        mutationConversationStore.appendEvent(scopes, logPath, {
+        mutationConversationStore.appendEvent(scopes, resources, {
           ts: now,
           conversation_id: conversation.conversation_id,
           event: "conversation_closed",
@@ -24974,8 +24987,7 @@ async function runClose(options) {
                 expectedMessageId: verifiedDeadMessageId as string,
                 reason: "conversation explicitly closed by request"
               })
-            : resolveTerminalBridgeDispatchLedger({
-                terminalControl: currentTerminalControl,
+            : resolveTerminalBridgeDispatchLedger(currentTerminalControl, {
                 conversation: closed,
                 expectedMessageId: stringValue(
                   currentTakeover?.terminal_bridge_message_id
@@ -25194,10 +25206,9 @@ async function runTerminalDispatchClose({
   const storeDir = storeDirFromOptions(options);
   return withCanonicalMutationLocks(
     terminalWriterMutationLocks(storeDir, terminalControl),
-    async (scopes) => {
-    let ledger = resolveTerminalDispatchLedgerPaneIncarnation(
-      terminalControl,
-      mutationDispatchLedger.load(scopes, terminalControl)
+    async (scopes, resources) => {
+    let ledger = mutationDispatchLedger.reconcileIncarnation(
+      scopes, resources
     );
     if (!ledger || ledger.status === "resolved") {
       throw new Error(
@@ -25280,6 +25291,7 @@ async function runTerminalDispatchClose({
       }
       ledger = await mutationDispatchLedger.reconcile(
         scopes,
+        resources,
         options,
         terminalConversation,
         ledger,
@@ -25348,7 +25360,7 @@ async function runTerminalDispatchClose({
     const reason =
       stringValue(options.reason) ??
       "terminal dispatch explicitly resolved after operator inspection";
-    mutationDispatchLedger.save(scopes, terminalControl, {
+    mutationDispatchLedger.save(scopes, resources, {
       ...ledger,
       status: "resolved",
       resolved_at: resolvedAt,
@@ -29895,6 +29907,7 @@ async function recoverLifecycleFenceBeforeMutation({
     );
   }
   const recovered = await reconcileLifecycleDispatchLedger(
+    terminal.terminalControl,
     options,
     terminal,
     ledger
@@ -30136,6 +30149,7 @@ async function recoverPreparedObservedHandoff({
 }
 
 async function reconcileLifecycleDispatchLedger(
+  terminalControl: TerminalControlRef,
   options: Record<string, any>,
   terminal: ResolvedTerminalConversation,
   ledger: Record<string, any>,
@@ -30145,6 +30159,7 @@ async function reconcileLifecycleDispatchLedger(
       kind: "automatic"
     }
 ): Promise<Record<string, any>> {
+  if (terminal.terminalControl !== terminalControl) terminal = { ...terminal, terminalControl };
   if (ledger.status === "resolved") {
     return ledger;
   }
@@ -31707,13 +31722,9 @@ function restoreTerminalBridgeDispatchLedger({
   });
 }
 
-function resolveTerminalBridgeDispatchLedger({
-  terminalControl,
-  conversation,
-  expectedMessageId,
-  reason
-}: {
-  terminalControl: TerminalControlRef;
+function resolveTerminalBridgeDispatchLedger(
+  terminalControl: TerminalControlRef,
+  { conversation, expectedMessageId, reason }: {
   conversation: Conversation;
   expectedMessageId?: string;
   reason: string;
@@ -32132,8 +32143,7 @@ function prepareTerminalBridgeCompletionCallbackWithLocksHeld({
     }
     claim.release();
     claimReleased = true;
-    if (!resolveTerminalBridgeDispatchLedger({
-      terminalControl,
+    if (!resolveTerminalBridgeDispatchLedger(terminalControl, {
       conversation: claimedConversation,
       expectedMessageId: terminalMessageId,
       reason: "terminal bridge task reached durable completion"

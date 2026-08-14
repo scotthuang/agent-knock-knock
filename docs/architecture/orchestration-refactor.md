@@ -196,8 +196,11 @@ the left while it already holds a lock to the right.
 The transaction shell creates fresh opaque terminal, Store-writer, and optional
 conversation-state scopes for every invocation. Capability-gated repositories
 validate that every required scope is authentic, active, and belongs to the
-same transaction. Scopes expire before lock release begins, so a leaked scope
-cannot authorize a later write. Boolean parameters such as
+same transaction and exact canonical terminal, Store, or state resource.
+Repositories take their raw target from the verified frozen resource handle,
+so a caller cannot pair a valid scope with a different path or terminal.
+Scopes expire before lock release begins, so a leaked scope cannot authorize a
+later write. Boolean parameters such as
 `terminalSendLockHeld`, `terminalStateLockHeld`, and `storeWriterLeaseHeld` must
 not be reproduced in new services.
 
@@ -361,8 +364,9 @@ authenticity and lifetime, not these records or effects.
 Each callback continues to perform the same observations, compare-before-write
 checks, output, and error text under the same lock scopes. Handoff close routes
 its fresh Turn/Session/ledger loads, state save, ledger resolution, and event
-append through the gated repositories. Dispatch close routes its ledger load
-and resolution/reconciliation writes through them; binding reconciliation uses
+append through the gated repositories. Dispatch close routes its
+pane-incarnation load/resolution and later reconciliation writes through them;
+binding reconciliation uses
 the managed-Session adapter for its fresh reads and CAS detach. The transaction
 module supplies no effect DSL and cannot construct Store or protocol state.
 
@@ -552,7 +556,7 @@ delivery cost.
 | --- | --- | --- | --- |
 | Terminal binding authority | Exact binding-match decisions and typed list/mutation observations | Fresh terminal/process sampling and mutation revalidation remain in `cli-core.ts` | authority table tests plus list, lifecycle, handoff, and send integration |
 | Verified-dead agent policy | Process-death proof validation, event replay, stall eligibility, completion tri-state | Process/transcript probes and terminal -> writer -> state orchestration remain in the shell | Codex/Claude completion-wins, fail-closed, deferred-transfer, and crash-replay tests |
-| Canonical mutation kernel | Canonical acquisition/release plus fresh terminal, writer, and optional state capabilities for four migrated paths | Business write ordering and raw filesystem/JSON adapters remain in composition | authenticity, lifetime, cross-transaction, lock-order, error-precedence, and control-lock tests |
+| Canonical mutation kernel | Canonical acquisition/release plus fresh resource-bound terminal, writer, and optional state capabilities for four migrated paths | Business write ordering and raw filesystem/JSON adapters remain in composition | authenticity, lifetime, wrong-resource, cross-transaction, lock-order, error-precedence, and control-lock tests |
 | Dispatch policy, zero-input abort reducer, and ledger codec | Pure preflight/abort precedence plus v1/v2 decode, construction, receipt merge, and validation | Ledger path selection, no-follow reads, atomic rename/fsync, Store locks, terminal input, and CLI formatting remain in the shell | reducer tables, codec byte/order tests, replay, receipt-fence, send-gate, and recovery tests; codec changes select the full tier |
 | Lifecycle transition policy | Candidate/target classification and transition phase reduction | Terminal observation, transition CAS, deferred transfer, input, and recovery writes remain in the shell | transition tables and lifecycle/recovery integration |
 | Callback policy, transport, and settlement | Retry decisions; Gateway process adapter; delivery progress/success/failure settlement | CLI composition owns the clock, state transaction, retry launcher, output, and callback preparation | retry matrix, exact transport call ordering, settlement write-order tests, and callback integration |

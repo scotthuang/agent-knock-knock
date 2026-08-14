@@ -1,39 +1,45 @@
 type Awaitable<Value> = Value | PromiseLike<Value>;
 type ScopeKind = "terminal" | "storeWriter" | "state";
+export type CanonicalMutationResource<Value = any> = Readonly<{ key: string; value: Value }>;
+type ScopeResources = Readonly<Record<ScopeKind, CanonicalMutationResource>>;
+type LockResources = Readonly<Pick<ScopeResources, "terminal" | "storeWriter"> & Partial<ScopeResources>>;
 declare const mutationScopeBrand: unique symbol;
-
 type MutationScope<Kind extends ScopeKind> = Readonly<{ [mutationScopeBrand]: Kind }>;
-export type TerminalMutationScope = MutationScope<"terminal">;
-export type StoreWriterMutationScope = MutationScope<"storeWriter">;
-export type StateMutationScope = MutationScope<"state">;
 export type CanonicalMutationScopes = Readonly<{
-  terminal: TerminalMutationScope;
-  storeWriter: StoreWriterMutationScope;
-  state?: StateMutationScope;
+  terminal: MutationScope<"terminal">; storeWriter: MutationScope<"storeWriter">;
+  state?: MutationScope<"state">;
 }>;
-export type CanonicalStateMutationScopes = CanonicalMutationScopes &
-  Readonly<{ state: StateMutationScope }>;
+export type CanonicalStateMutationScopes = CanonicalMutationScopes & Readonly<{ state: MutationScope<"state"> }>;
 export type CanonicalMutationLockPorts = Readonly<{
+  resources: LockResources;
   acquireTerminal: () => Awaitable<() => void>;
   withStoreWriter: <Result>(operation: () => Promise<Result>) => Promise<Result>;
   acquireState?: () => Awaitable<() => void>;
 }>;
-
-const scopeRecords = new WeakMap<object, Readonly<{ kind: ScopeKind; transaction: object }>>();
-
-function createScope<Kind extends ScopeKind>(transaction: object, kind: Kind) {
-  const value = Object.freeze({}) as MutationScope<Kind>;
-  scopeRecords.set(value, { kind, transaction });
-  return value;
+const scopeRecords = new WeakMap<object, Readonly<{ kind: ScopeKind; transaction: object; resource: CanonicalMutationResource }>>();
+export function canonicalMutationResource<Value>(key: string, value: Value) { return Object.freeze({ key, value }); }
+function createScope<Kind extends ScopeKind>(transaction: object, kind: Kind, resource: CanonicalMutationResource) {
+  const scope = Object.freeze({}) as MutationScope<Kind>;
+  scopeRecords.set(scope, { kind, transaction, resource });
+  return scope;
 }
-
 function expireScope(scope: MutationScope<ScopeKind>): void { scopeRecords.delete(scope); }
-
-function assertActiveScopes(scopes: Partial<CanonicalStateMutationScopes>, required: readonly ScopeKind[]): void {
+async function withAcquiredScope<Result, Kind extends ScopeKind>(
+  transaction: object, kind: Kind, resource: CanonicalMutationResource, acquire: () => Awaitable<() => void>,
+  operation: (scope: MutationScope<Kind>) => Promise<Result>
+): Promise<Result> {
+  const release = await acquire();
+  const scope = createScope(transaction, kind, resource);
+  try { return await operation(scope); }
+  finally { expireScope(scope); release(); }
+}
+function assertActiveScopes(
+  scopes: Partial<CanonicalStateMutationScopes>, resources: Partial<ScopeResources>,
+  required: readonly ScopeKind[]): void {
   let transaction: object | undefined;
   for (const kind of required) {
     const record = scopes[kind] && scopeRecords.get(scopes[kind]);
-    if (!record || record.kind !== kind) {
+    if (!record || record.kind !== kind || record.resource !== resources[kind]) {
       throw new Error(`mutation repository requires active authentic ${kind} scope`);
     }
     if (transaction && transaction !== record.transaction) {
@@ -42,50 +48,35 @@ function assertActiveScopes(scopes: Partial<CanonicalStateMutationScopes>, requi
     transaction = record.transaction;
   }
 }
-
-type ScopesFor<Kinds extends readonly ScopeKind[]> =
-  Pick<CanonicalStateMutationScopes, Kinds[number]>;
+type ScopesFor<Kinds extends readonly ScopeKind[]> = Pick<CanonicalStateMutationScopes, Kinds[number]>;
 export function capabilityGatedRepositoryOperation<
-  const Required extends readonly ScopeKind[], Args extends unknown[], Result
->(required: Required, operation: (...args: Args) => Result) {
-  const requiredScopes = Object.freeze([...required]);
-  return (scopes: ScopesFor<Required>, ...args: Args): Result => {
-    assertActiveScopes(scopes, requiredScopes);
-    return operation(...args);
+  const Required extends readonly ScopeKind[], Bound extends Required[number], Args extends unknown[], Result>(
+  required: Required, bound: Bound,
+  operation: (resource: ScopeResources[Bound]["value"], ...args: Args) => Result) {
+  return (scopes: ScopesFor<Required>, resources: Pick<ScopeResources, Required[number]>, ...args: Args) => {
+    assertActiveScopes(scopes, resources, required);
+    return operation(resources[bound].value, ...args);
   };
 }
-
-type ScopesForPorts<Ports> = Ports extends { acquireState: () => unknown }
-  ? CanonicalStateMutationScopes : CanonicalMutationScopes;
+type ScopesForPorts<Ports> = Ports extends { acquireState: () => unknown } ? CanonicalStateMutationScopes : CanonicalMutationScopes;
+type ResourcesForPorts<Ports> = Ports extends { acquireState: () => unknown } ? ScopeResources : LockResources;
 /** Acquire terminal -> writer -> optional state and release in reverse. */
 export async function withCanonicalMutationLocks<Result, Ports extends CanonicalMutationLockPorts>(
-  ports: Ports,
-  operation: (scopes: ScopesForPorts<Ports>) => Promise<Result>
+  ports: Ports, operation: (
+    scopes: ScopesForPorts<Ports>, resources: ResourcesForPorts<Ports>) => Promise<Result>
 ): Promise<Result> {
   const transaction = {};
-  const releaseTerminal = await ports.acquireTerminal();
-  const terminal = createScope(transaction, "terminal");
-  try {
-    return await ports.withStoreWriter(async () => {
-      const storeWriter = createScope(transaction, "storeWriter");
+  return withAcquiredScope(transaction, "terminal", ports.resources.terminal, ports.acquireTerminal, (terminal) =>
+    ports.withStoreWriter(async () => {
+      const storeWriter = createScope(transaction, "storeWriter", ports.resources.storeWriter);
+      const invoke = (state?: MutationScope<"state">) => operation(
+        { terminal, storeWriter, ...(state ? { state } : {}) } as ScopesForPorts<Ports>, ports.resources as ResourcesForPorts<Ports>
+      );
       try {
-        if (!ports.acquireState) {
-          return await operation({ terminal, storeWriter } as ScopesForPorts<Ports>);
-        }
-        const releaseState = await ports.acquireState();
-        const state = createScope(transaction, "state");
-        try {
-          return await operation({ terminal, storeWriter, state } as ScopesForPorts<Ports>);
-        } finally {
-          expireScope(state);
-          releaseState();
-        }
-      } finally {
-        expireScope(storeWriter);
-      }
-    });
-  } finally {
-    expireScope(terminal);
-    releaseTerminal();
-  }
+        if (!ports.acquireState) return await invoke();
+        const stateResource = ports.resources.state;
+        if (!stateResource) throw new Error("state mutation lock requires a canonical resource");
+        return await withAcquiredScope(transaction, "state", stateResource, ports.acquireState, invoke);
+      } finally { expireScope(storeWriter); }
+    }));
 }

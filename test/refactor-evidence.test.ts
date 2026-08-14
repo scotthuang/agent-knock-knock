@@ -75,7 +75,7 @@ test("frozen Phase 1 evidence reproduces startup counts and historical selection
 
   assert.deepEqual(evidence.publicContracts, {
     contractCount: 4,
-      witnessCount: 39,
+    witnessCount: 41,
     migrationCount: 10,
     openclawToolCount: 14,
     storeProtocolCount: 5
