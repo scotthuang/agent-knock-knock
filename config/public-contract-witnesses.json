@@ -299,10 +299,28 @@
       "needle": "normal monitor plan preserves exact argv, timeout precedence, and safe env"
     },
     {
+      "id": "mutation-capability-unit",
+      "path": "test/mutation-transaction.test.ts",
+      "tier": "fast",
+      "needle": "every transaction receives fresh unforgeable scopes that expire"
+    },
+    {
+      "id": "mutation-incarnation-capability-unit",
+      "path": "test/mutation-transaction.test.ts",
+      "tier": "fast",
+      "needle": "pane-incarnation reconciliation writes only for its exact locked resources"
+    },
+    {
       "id": "mutation-lock-unit",
       "path": "test/mutation-transaction.test.ts",
       "tier": "fast",
       "needle": "mutation lock shell acquires canonically and releases in reverse"
+    },
+    {
+      "id": "mutation-resource-capability-unit",
+      "path": "test/mutation-transaction.test.ts",
+      "tier": "fast",
+      "needle": "paired repositories inject the exact terminal and Store resources"
     },
     {
       "id": "openclaw-plugin-boundary",
@@ -443,12 +461,15 @@
     },
     {
       "id": "mutation-lock-shell",
-      "invariant": "Migrated mutations acquire terminal, writer, then state locks and release in reverse without weakening durable write ownership.",
+      "invariant": "Migrated mutations acquire terminal, writer, then state locks; gated repositories reject forged, expired, wrong-kind, wrong-resource, or cross-transaction scopes without weakening durable write ownership.",
       "old_executable_witnesses": [
         "control-lock-boundary"
       ],
       "service_invariant_witnesses": [
-        "mutation-lock-unit"
+        "mutation-capability-unit",
+        "mutation-incarnation-capability-unit",
+        "mutation-lock-unit",
+        "mutation-resource-capability-unit"
       ],
       "retained_boundary_witnesses": [
         "control-lock-boundary",

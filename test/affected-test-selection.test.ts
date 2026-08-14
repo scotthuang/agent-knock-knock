@@ -79,15 +79,11 @@ test("known source subsystems select exact integration files in manifest order",
   assert.deepEqual(
     selection.selectAffectedTests(["src/mutation-transaction.ts"], tiers),
     {
-      mode: "targeted",
+      mode: "full",
       changedPaths: ["src/mutation-transaction.ts"],
-      integrationFiles: [
-        "test/codex-no-rollout-binding-cli.test.ts",
-        "test/human-handoff-adoption-cli.test.ts",
-        "test/shards/agent-cli-control-locks.test.ts",
-        "test/shards/agent-cli-dispatch-recovery.test.ts",
-        "test/shards/agent-cli-terminal-send-gates.test.ts"
-      ]
+      reason:
+        "production domain requires full suite: mutation-transaction " +
+        "(src/mutation-transaction.ts)"
     }
   );
 });
