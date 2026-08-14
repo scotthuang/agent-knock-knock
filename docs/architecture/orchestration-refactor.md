@@ -835,6 +835,63 @@ timeout`, so work performed by persistence or the death probe can cross a
 deadline without deferring the timeout by one poll. Application orchestration
 and those effect ports remain the follow-on monitor service milestone.
 
+## Terminal monitor application service
+
+The monitor application milestone moves the singleton-owned retry loop and the
+complete locked monitor state machine behind five typed port groups: state,
+authority, callbacks, runtime, and presentation. The service owns initialization,
+submission reconciliation, binding deferral, observation application, approval
+continuation, activity persistence, stable completion, verified-dead fallback,
+and timeout routing. It composes the canonical monitor decision and poll policies;
+it does not import `cli-core.ts`, filesystem or process modules, raw lock or JSON
+persistence implementations, a callback transport, or a public JSON presenter.
+
+Measured against exact head
+`b637c012cfa87315380c150405a3384d653ac847`, the extraction reduces
+`src/cli-core.ts` from 28,336 to 27,319 physical lines (-1,017). Total
+production TypeScript changes from 79,308 to 80,554 lines (+1,246, 122.52
+percent of the core reduction). The transparent overhead is the 1,583-line
+typed application boundary, the 680-line CLI adapter and presenter boundary,
+and their direct trace types; no unrelated deletion or compressed formatting is
+used to hide that cost. Every new function remains within the preferred
+100-line/complexity-20 target. The largest is the 98-line/c20 public-result
+presenter; the largest service function is the 89-line/c11 approval application,
+and the service complexity maximum is c13. The production import graph remains
+acyclic.
+
+`cli-core.ts` still resolves the exact state and event paths, acquires the
+singleton owner, and supplies the concrete terminal, Store-writer and Turn-state
+lock functions. It also supplies state/event/ledger repositories, live process
+and death probes, terminal observation, callback transport construction, clock
+and crash hooks, and the public JSON/log writer. The CLI adapter accepts only
+those invocation-local capabilities, applies them in the legacy lock order, and
+cannot manufacture a path, Store, terminal route, or lock.
+
+The application order remains `initialize -> submission reconciliation -> poll
+-> detector/approval -> activity -> stable completion -> independent verified
+death -> fresh clock -> timeout`. A completion persisted immediately before
+process exit therefore still wins over orphan cleanup, and work performed by a
+death probe can cross a deadline without postponing timeout classification by
+one poll. Approval effects keep their intentional asymmetry: question is
+`fingerprint -> event -> record`, while an unapprovable/evidence error is
+`event -> fingerprint -> record`. Stale notifications sleep and retry without
+callback execution; duplicates present without delivery; a consumed question
+callback resumes the same generation; callback and completion claims remain
+outside the Turn-state lock exactly as before.
+
+Direct fast traces prove live-dispatcher PID gating before terminal I/O, two-poll
+completion stability, exactly one status/screen snapshot per poll with the legacy
+completion-metadata read order, death-before-fresh-clock ordering, both approval
+effect orders, executor-to-callback actor mapping, prepared-recovery release
+order (`state -> writer -> terminal`), and zero terminal I/O on a fresh-state
+retry. Acceptance errors and not-accepted/fenced presentations remain inside
+the terminal send lock; pending acceptance releases that lock before backoff.
+The retained lifecycle, approval and
+recovery shards provide 21 executable boundary cases for singleton ownership,
+Store-lock deferral, callback concurrency, detector diagnostics, durable
+completion, verified death, timeout, duplicate settlement, handoff and monitor
+relaunch behavior.
+
 ## Native-thread lifecycle query slice
 
 The first native-thread lifecycle application slice moves only read-side
