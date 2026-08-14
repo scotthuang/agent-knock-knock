@@ -4,9 +4,63 @@ import {
   terminalEndpointIdentityFromEvidence,
   type TerminalControlRef
 } from "./terminal-control-ref.js";
+import type { TerminalSubmissionAcceptanceEvidence } from "./terminal-submission-acceptance.js";
 
 export type TerminalDispatchLedgerDocument = Record<string, unknown>;
 export type TerminalDispatchReceipt = Record<string, unknown>;
+
+export type TerminalOrdinaryDispatchStatus =
+  "prepared" | "text_injected" | "enter_dispatched" |
+  "agent_accepted" | "not_accepted" |
+  // Legacy submitted proves only that the terminal accepted Enter dispatch.
+  "submitted" | "uncertain" | "aborted";
+
+export type TerminalOrdinaryDispatchIdentityFields = Record<
+  "generation_id" | "conversation_id" | "session_id" | "turn_id" |
+    "message_id" | "request_hash" | "prepared_at",
+  string
+> & { status: TerminalOrdinaryDispatchStatus; message_type: "task" | "answer" };
+
+export interface TerminalOrdinaryDispatchPhaseFields {
+  text_injected_at?: string;
+  enter_dispatched_at?: string;
+  agent_accepted_at?: string;
+  acceptance_evidence?: TerminalSubmissionAcceptanceEvidence;
+  not_accepted_at?: string;
+  uncertain_at?: string;
+  error?: { length: number; preview?: string };
+}
+
+export type TerminalOrdinaryDispatchPostCallbackFields =
+  Pick<TerminalOrdinaryDispatchPhaseFields, "error"> &
+  { native_identity_status?: "unresolved_after_submit" };
+
+export interface ConstructTerminalOrdinaryDispatchLedgerOptions {
+  bindingFields: TerminalDispatchLedgerDocument;
+  identityFields: TerminalOrdinaryDispatchIdentityFields;
+  phaseFields?: TerminalOrdinaryDispatchPhaseFields;
+  dispatcherPid: number | null;
+  statePath: string;
+  eventLogPath: string;
+  callbackExpected: boolean;
+  postCallbackFields?: TerminalOrdinaryDispatchPostCallbackFields;
+  previousGenerationId?: string;
+}
+
+/** Order one ordinary dispatch write without performing persistence. */
+export const constructTerminalOrdinaryDispatchLedger = (
+  options: ConstructTerminalOrdinaryDispatchLedgerOptions
+): TerminalDispatchLedgerDocument => ({
+  ...options.bindingFields,
+  ...options.identityFields,
+  ...(options.phaseFields ?? {}),
+  dispatcher_pid: options.dispatcherPid,
+  state_path: options.statePath,
+  event_log_path: options.eventLogPath,
+  callback_expected: options.callbackExpected,
+  ...(options.postCallbackFields ?? {}),
+  previous_generation_id: options.previousGenerationId
+});
 
 const RECEIPT_STATUSES = new Set([
   "text_injected",

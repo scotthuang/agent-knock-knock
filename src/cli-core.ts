@@ -280,9 +280,14 @@ import * as monitorLaunch from "./terminal-monitor-launch-plan.js";
 import * as monitorOwner from "./terminal-monitor-ownership-policy.js";
 import {
   constructTerminalDispatchLedgerDocument,
+  constructTerminalOrdinaryDispatchLedger,
   decodeTerminalDispatchLedgerDocument,
   terminalDispatchLedgerLooksLifecycle,
-  terminalDispatchReceiptHistory as terminalLedgerReceiptHistory
+  terminalDispatchReceiptHistory as terminalLedgerReceiptHistory,
+  type TerminalOrdinaryDispatchIdentityFields,
+  type TerminalOrdinaryDispatchPhaseFields,
+  type TerminalOrdinaryDispatchPostCallbackFields,
+  type TerminalOrdinaryDispatchStatus as TerminalBridgeSubmissionStatus
 } from "./terminal-dispatch-ledger-codec.js";
 import * as dispatch from "./terminal-dispatch-policy.js";
 import {
@@ -2584,17 +2589,6 @@ function withTerminalBridgeState({
     updated_at: startedAt
   };
 }
-
-type TerminalBridgeSubmissionStatus =
-  | "prepared"
-  | "text_injected"
-  | "enter_dispatched"
-  | "agent_accepted"
-  | "not_accepted"
-  // Legacy `submitted` proves only that tmux accepted the Enter dispatch.
-  | "submitted"
-  | "uncertain"
-  | "aborted";
 
 function withTerminalBridgeSubmission({
   conversation,
@@ -19444,27 +19438,43 @@ async function runTerminalControlSend({
     status: "prepared",
     preparedAt: bridgeStartedAt
   });
+  const previousGenerationId =
+    stringValue(previousDispatchLedger?.generation_id) ??
+    stringValue(previousDispatchLedger?.message_id);
+  const saveOrdinaryDispatchLedger = (
+    current: Conversation,
+    status: TerminalOrdinaryDispatchIdentityFields["status"],
+    phaseFields: TerminalOrdinaryDispatchPhaseFields = {},
+    dispatcherPid: number | null = cliPid(),
+    postCallbackFields: TerminalOrdinaryDispatchPostCallbackFields = {},
+    callbackExpected = Boolean(current.gateway_method)
+  ) => saveTerminalBridgeDispatchLedger(
+    terminalControl,
+    constructTerminalOrdinaryDispatchLedger({
+      bindingFields: terminalBindingLedgerFields(current),
+      identityFields: {
+        status,
+        generation_id: message.id,
+        conversation_id: current.conversation_id,
+        session_id: sessionIdForConversation(current),
+        turn_id: turnIdForConversation(current),
+        message_id: message.id,
+        message_type: message.type,
+        request_hash: terminalRequestHash,
+        prepared_at: bridgeStartedAt
+      },
+      phaseFields,
+      dispatcherPid,
+      statePath,
+      eventLogPath: logPath,
+      callbackExpected,
+      postCallbackFields,
+      previousGenerationId
+    })
+  );
 
   try {
-    saveTerminalBridgeDispatchLedger(terminalControl, {
-      ...terminalBindingLedgerFields(preparedConversation),
-      status: "prepared",
-      generation_id: message.id,
-      conversation_id: preparedConversation.conversation_id,
-      session_id: sessionIdForConversation(preparedConversation),
-      turn_id: turnIdForConversation(preparedConversation),
-      message_id: message.id,
-      message_type: message.type,
-      request_hash: terminalRequestHash,
-      prepared_at: bridgeStartedAt,
-      dispatcher_pid: cliPid(),
-      state_path: statePath,
-      event_log_path: logPath,
-      callback_expected: Boolean(preparedConversation.gateway_method),
-      previous_generation_id:
-        stringValue(previousDispatchLedger?.generation_id) ??
-        stringValue(previousDispatchLedger?.message_id)
-    });
+    saveOrdinaryDispatchLedger(preparedConversation, "prepared");
   } catch (error) {
     try {
       if (!abortDeferredPreInputBeforeTransport()) {
@@ -19816,26 +19826,9 @@ async function runTerminalControlSend({
           enterDispatchedAt
         });
         saveState(statePath, stagedConversation);
-        saveTerminalBridgeDispatchLedger(terminalControl, {
-          ...terminalBindingLedgerFields(stagedConversation),
-          status: event.stage,
-          generation_id: message.id,
-          conversation_id: stagedConversation.conversation_id,
-          session_id: sessionIdForConversation(stagedConversation),
-          turn_id: turnIdForConversation(stagedConversation),
-          message_id: message.id,
-          message_type: message.type,
-          request_hash: terminalRequestHash,
-          prepared_at: bridgeStartedAt,
+        saveOrdinaryDispatchLedger(stagedConversation, event.stage, {
           ...(textInjectedAt ? { text_injected_at: textInjectedAt } : {}),
-          ...(enterDispatchedAt ? { enter_dispatched_at: enterDispatchedAt } : {}),
-          dispatcher_pid: cliPid(),
-          state_path: statePath,
-          event_log_path: logPath,
-          callback_expected: Boolean(stagedConversation.gateway_method),
-          previous_generation_id:
-            stringValue(previousDispatchLedger?.generation_id) ??
-            stringValue(previousDispatchLedger?.message_id)
+          ...(enterDispatchedAt ? { enter_dispatched_at: enterDispatchedAt } : {})
         });
         if (deferredCodexForegroundBinding) {
           advanceDeferredCodexForegroundTransferInputStage({
@@ -20146,30 +20139,14 @@ async function runTerminalControlSend({
             reason: bindingReason
           });
         }
-        saveTerminalBridgeDispatchLedger(terminalControl, {
-          ...terminalBindingLedgerFields(unfencedConversation),
-          status: "uncertain",
-          generation_id: message.id,
-          conversation_id: unfencedConversation.conversation_id,
-          session_id: sessionIdForConversation(unfencedConversation),
-          turn_id: turnIdForConversation(unfencedConversation),
-          message_id: message.id,
-          message_type: message.type,
-          request_hash: terminalRequestHash,
-          prepared_at: bridgeStartedAt,
+        saveOrdinaryDispatchLedger(unfencedConversation, "uncertain", {
           text_injected_at: textInjectedAt,
           enter_dispatched_at: enterDispatchedAt,
-          uncertain_at: bindingFailedAt,
-          dispatcher_pid: cliPid(),
-          state_path: statePath,
-          event_log_path: logPath,
-          callback_expected: false,
+          uncertain_at: bindingFailedAt
+        }, undefined, {
           native_identity_status: "unresolved_after_submit",
-          error: textSummary(bindingReason),
-          previous_generation_id:
-            stringValue(previousDispatchLedger?.generation_id) ??
-            stringValue(previousDispatchLedger?.message_id)
-        });
+          error: textSummary(bindingReason)
+        }, false);
         saveState(statePath, unfencedConversation);
         appendEvent(logPath, {
           ts: bindingFailedAt,
@@ -20280,17 +20257,7 @@ async function runTerminalControlSend({
       if (cliEnv().AKK_TEST_FINAL_TERMINAL_LEDGER_FAILURE === "1") {
         throw new Error("injected final terminal ledger persistence failure");
       }
-      saveTerminalBridgeDispatchLedger(terminalControl, {
-        ...terminalBindingLedgerFields(deliveredConversation),
-        status: terminalStatus,
-        generation_id: message.id,
-        conversation_id: deliveredConversation.conversation_id,
-        session_id: sessionIdForConversation(deliveredConversation),
-        turn_id: turnIdForConversation(deliveredConversation),
-        message_id: message.id,
-        message_type: message.type,
-        request_hash: terminalRequestHash,
-        prepared_at: bridgeStartedAt,
+      saveOrdinaryDispatchLedger(deliveredConversation, terminalStatus, {
         text_injected_at: textInjectedAt,
         enter_dispatched_at: enterDispatchedAt,
         ...(acceptanceResult.outcome === "agent_accepted"
@@ -20307,15 +20274,8 @@ async function runTerminalControlSend({
               uncertain_at: acceptanceResolvedAt,
               error: textSummary(acceptanceResult.reason)
             }
-          : {}),
-        dispatcher_pid: null,
-        state_path: statePath,
-        event_log_path: logPath,
-        callback_expected: Boolean(deliveredConversation.gateway_method),
-        previous_generation_id:
-          stringValue(previousDispatchLedger?.generation_id) ??
-          stringValue(previousDispatchLedger?.message_id)
-      });
+          : {})
+      }, null);
     } catch (error) {
       // State is the durable proof authority. Once a valid native ACK has
       // committed there, a lagging ledger is bookkeeping debt and must never
@@ -20565,29 +20525,11 @@ async function runTerminalControlSend({
           : "prepared"
     });
     try {
-      saveTerminalBridgeDispatchLedger(terminalControl, {
-        ...terminalBindingLedgerFields(uncertainConversation),
-        status: "uncertain",
-        generation_id: message.id,
-        conversation_id: uncertainConversation.conversation_id,
-        session_id: sessionIdForConversation(uncertainConversation),
-        turn_id: turnIdForConversation(uncertainConversation),
-        message_id: message.id,
-        message_type: message.type,
-        request_hash: terminalRequestHash,
-        prepared_at: bridgeStartedAt,
+      saveOrdinaryDispatchLedger(uncertainConversation, "uncertain", {
         ...(textInjectedAt ? { text_injected_at: textInjectedAt } : {}),
         ...(enterDispatchedAt ? { enter_dispatched_at: enterDispatchedAt } : {}),
-        uncertain_at: uncertainAt,
-        dispatcher_pid: cliPid(),
-        state_path: statePath,
-        event_log_path: logPath,
-        callback_expected: Boolean(uncertainConversation.gateway_method),
-        error: textSummary(errorMessage),
-        previous_generation_id:
-          stringValue(previousDispatchLedger?.generation_id) ??
-          stringValue(previousDispatchLedger?.message_id)
-      });
+        uncertain_at: uncertainAt
+      }, undefined, { error: textSummary(errorMessage) });
       saveState(statePath, uncertainConversation);
       appendEvent(logPath, {
         ts: uncertainAt,
