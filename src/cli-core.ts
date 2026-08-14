@@ -239,10 +239,9 @@ import {
   type VerifiedDeadTerminalAgentProcessProof
 } from "./verified-dead-agent-policy.js";
 import {
-  evaluateDoctorCapabilities,
-  runDoctorCapabilityProbes
-} from "./doctor-capabilities.js";
-import { runOpenClawChainDiagnostics } from "./openclaw-doctor.js";
+  runDoctor,
+  runInstallOpenClaw
+} from "./install-doctor-command-adapter.js";
 import {
   resolveSessionSelector,
   sessionShortRef,
@@ -316,6 +315,16 @@ import {
   type TerminalOrdinaryDispatchStatus as TerminalBridgeSubmissionStatus
 } from "./terminal-dispatch-ledger-codec.js";
 import * as dispatch from "./terminal-dispatch-policy.js";
+import {
+  cleanProcessText,
+  expandHome,
+  packageRootDir,
+  positiveMilliseconds,
+  redactCliOutput,
+  resolveExecutable,
+  resolveOptionalExecutable,
+  writeCliJson as printJson
+} from "./cli-command-runtime.js";
 import {
   cliCwd,
   cliDependencies,
@@ -451,7 +460,6 @@ const SESSION_SEND_BLOCKING_STATUSES = new Set<ConversationStatus>([
 ]);
 const TERMINAL_BRIDGE_UNCERTAIN_COLLATERAL_STALL_REASON =
   "a newer terminal submission has an uncertain outcome; inspect the shared terminal pane before continuing";
-const MINIMUM_NODE_VERSION = "22.19.0";
 const PRIVATE_LOCK_FILE_MODE = 0o600;
 const NO_FOLLOW_FLAG = typeof fs.constants.O_NOFOLLOW === "number"
   ? fs.constants.O_NOFOLLOW
@@ -589,108 +597,6 @@ function preflightStoreWriter(commandName, options): void {
   assertStoreWriterCompatible(storeDir);
 }
 
-function runInstallOpenClaw(options) {
-  const root = packageRootDir();
-  const skillOnly = options.skillOnly === true;
-  if (options.workspace !== undefined) {
-    throw new Error(
-      "--workspace was removed from install-openclaw; AKK now discovers verified terminal panes across workspaces. Configure autoApprove.rules[].workspaces only for trusted automatic approvals."
-    );
-  }
-  if (options.defaultAgent !== undefined) {
-    throw new Error(
-      "--default-agent was removed; AKK now selects the only eligible idle terminal pane"
-    );
-  }
-  if (options.mode !== undefined) {
-    throw new Error("--mode was removed; Agent Knock Knock discovers supported terminal providers automatically");
-  }
-  if (skillOnly && options.verify === true) {
-    throw new Error(
-      "--skill-only cannot be combined with --verify"
-    );
-  }
-
-  const needsOpenClaw = !skillOnly || options.noRestart !== true || options.verify === true;
-  const openclawBin = needsOpenClaw
-    ? options.openclawBin ?? resolveExecutable("openclaw")
-    : options.openclawBin;
-  const skillSource = path.join(root, "templates", "openclaw-skills", "agent-knock-knock", "SKILL.md");
-  const skillDest = expandHome(options.skillPath ?? "~/.openclaw/skills/agent-knock-knock/SKILL.md");
-  const steps: Array<Record<string, unknown>> = [];
-
-  if (!skillOnly) {
-    const pluginInstall = installOpenClawPlugin(openclawBin, root);
-    steps.push({
-      name: "plugin_installed",
-      path: root,
-      mode: pluginInstall.mode
-    });
-
-    const configOperations: Array<{ path: string; value: unknown }> = [
-      {
-        path: "plugins.entries.agent-knock-knock.enabled",
-        value: true
-      },
-    ];
-    runCheckedCommand(
-      openclawBin,
-      ["config", "set", "--batch-json", JSON.stringify(configOperations)],
-      { label: "openclaw config set" }
-    );
-    steps.push({
-      name: "plugin_configured",
-      plugin: "agent-knock-knock",
-      updated: configOperations.map((operation) => operation.path)
-    });
-  }
-
-  fs.mkdirSync(path.dirname(skillDest), { recursive: true });
-  fs.copyFileSync(skillSource, skillDest);
-  steps.push({
-    name: "skill_installed",
-    path: skillDest
-  });
-
-  if (options.noRestart !== true) {
-    runCheckedCommand(openclawBin, ["gateway", "restart"], {
-      label: "openclaw gateway restart"
-    });
-    steps.push({
-      name: "gateway_restarted"
-    });
-  }
-
-  const pendingRestart = !skillOnly && options.noRestart === true;
-  const verification = options.verify === true
-    ? buildDoctorReport({
-        ...options,
-        openclawBin
-      })
-    : undefined;
-  const ready = verification
-    ? verification.ok === true && !pendingRestart
-    : false;
-  const nextActions = installNextActions({
-    pendingRestart,
-    verification
-  });
-
-  printJson({
-    installed: true,
-    ready,
-    pending_restart: pendingRestart,
-    mode: skillOnly ? "skill_only" : "full",
-    execution_mode: "terminal_provider",
-    terminal_providers: ["tmux", "herdr"],
-    package_root: root,
-    openclaw_bin: openclawBin ?? null,
-    steps,
-    ...(verification ? { verification } : {}),
-    next_actions: nextActions
-  });
-}
-
 function canonicalWorkspace(value: unknown): string {
   const requested = path.resolve(String(required(value, "--workspace is required")));
   let canonical: string;
@@ -747,208 +653,6 @@ function assertConfiguredWorkspace(
       `refusing ${subject}; workspace ${candidate} does not match expected workspace ${configured}`
     );
   }
-}
-
-function installNextActions({
-  pendingRestart,
-  verification
-}: {
-  pendingRestart: boolean;
-  verification?: Record<string, any>;
-}): Array<{ action: string; command: string }> {
-  if (pendingRestart) {
-    return [
-      {
-        action: "apply_plugin_changes",
-        command: "openclaw gateway restart"
-      },
-      {
-        action: "verify",
-        command: "agent-knock-knock doctor"
-      }
-    ];
-  }
-
-  if (verification && verification.ok !== true) {
-    const chain = isRecord(verification.openclaw) ? verification.openclaw : {};
-    const checks = Array.isArray(chain.checks) ? chain.checks : [];
-    const remediation = checks.flatMap((check) =>
-      isRecord(check) && Array.isArray(check.remediation)
-        ? check.remediation.filter((command): command is string => typeof command === "string")
-        : []
-    );
-    return [...new Set(remediation)].map((command) => ({
-      action: "repair",
-      command
-    }));
-  }
-
-  if (!verification) {
-    return [{
-      action: "verify",
-      command: "agent-knock-knock doctor"
-    }];
-  }
-
-  return [{
-    action: "start_shared_terminal",
-    command: "tmux new -s akk-work -c \"$PWD\" codex # use claude instead when preferred"
-  }];
-}
-
-function installOpenClawPlugin(openclawBin, root) {
-  const linked = spawnSync(openclawBin, ["plugins", "install", "--link", root], {
-    encoding: "utf8",
-    maxBuffer: 1024 * 1024 * 10
-  });
-  if (linked.error) {
-    throw new Error(`openclaw plugins install failed to start: ${linked.error.message}`);
-  }
-  if (linked.status === 0) {
-    return { mode: "linked" };
-  }
-
-  const failure = cleanProcessText(linked.stderr || linked.stdout)
-    ?? `openclaw plugins install exited with status ${linked.status}`;
-  const canRetryWithForce = /plugin already exists:/i.test(failure) ||
-    /install cancelled;\s*rerun with --force\b/i.test(failure);
-  if (!canRetryWithForce) {
-    throw new Error(failure);
-  }
-
-  runCheckedCommand(openclawBin, ["plugins", "install", "--force", root], {
-    label: "openclaw plugins replace"
-  });
-  return { mode: "replaced" };
-}
-
-function runDoctor(options) {
-  const report = buildDoctorReport(options);
-  printJson(report);
-  if (!report.ok) {
-    setCliExitCode(1);
-  }
-}
-
-function buildDoctorReport(options): Record<string, any> {
-  if (options.mode !== undefined) {
-    throw new Error("--mode was removed; Agent Knock Knock checks supported terminal providers automatically");
-  }
-  if (options.workspace !== undefined) {
-    throw new Error(
-      "--workspace was removed from doctor; AKK now discovers verified terminal panes across workspaces"
-    );
-  }
-  const timeoutMs = options.timeoutMs === undefined
-    ? undefined
-    : positiveMilliseconds(options.timeoutMs, "--timeout-ms");
-  const openclawBin = String(options.openclawBin ?? resolveOptionalExecutable("openclaw"));
-  const executables = {
-    openclaw: openclawBin,
-    ...(options.tmuxBin ? { tmux: String(options.tmuxBin) } : {}),
-    herdr: String(options.herdrBin ?? resolveOptionalExecutable("herdr")),
-    ...(options.codexBin ? { codex: String(options.codexBin) } : {}),
-    ...(options.claudeBin ? { claude: String(options.claudeBin) } : {})
-  };
-  const checks = [
-    {
-      command: "node",
-      status: "ok" as const,
-      available: true,
-      executable: process.execPath,
-      version: process.versions.node,
-      version_supported: versionAtLeast(process.versions.node, MINIMUM_NODE_VERSION),
-      minimum_version: MINIMUM_NODE_VERSION
-    },
-    ...runDoctorCapabilityProbes(
-      {
-        ...(timeoutMs === undefined ? {} : { timeoutMs }),
-        executables
-      }
-    )
-  ];
-  const root = packageRootDir();
-  const packageFiles = [
-    "dist/src/cli.js",
-    "dist/src/cli-core.js",
-    "dist/src/openclaw-plugin.js",
-    "templates/openclaw-skills/agent-knock-knock/SKILL.md",
-    "openclaw.plugin.json"
-  ].map((relativePath) => {
-    const filePath = path.join(root, relativePath);
-    return {
-      path: filePath,
-      exists: fs.existsSync(filePath)
-    };
-  });
-  const capabilities = evaluateDoctorCapabilities(checks);
-  const filesOk = packageFiles.every((check) => check.exists);
-  const openclaw = runOpenClawChainDiagnostics({
-    openclawBin,
-    ...(timeoutMs === undefined ? {} : { timeoutMs })
-  });
-  const ok =
-    capabilities.readiness === "ready" &&
-    filesOk &&
-    openclaw.ready;
-  return {
-    ok,
-    readiness: ok
-      ? "ready"
-      : capabilities.readiness === "not_ready"
-        ? "not_ready"
-        : "partially_ready",
-    selected_mode: capabilities.available_transports[0] ?? "terminal_provider",
-    available_transports: capabilities.available_transports,
-    live_terminal: {
-      checked: false,
-      required_for_install_readiness: false,
-      detail:
-        "Installation readiness checks tmux or exact-version Herdr and at least one supported CLI. " +
-        "AKK verifies a live eligible pane when delegation begins."
-    },
-    package_root: root,
-    checks,
-    package_files: packageFiles,
-    capabilities: {
-      tmux: capabilities.tmux,
-      herdr: capabilities.herdr
-    },
-    openclaw,
-    notes: [
-      `Node.js ${MINIMUM_NODE_VERSION}+ and OpenClaw are required.`,
-      "AKK supports Codex and Claude Code through shared tmux or local Herdr terminals.",
-      "Doctor does not require a live coding-agent pane; delegation discovers and verifies one at send time.",
-      "Claude terminal completion is hook-free and fails closed unless the local transcript schema is verified.",
-      "Herdr support is exact-version gated to 0.8.0/protocol 19 and uses local Unix sockets."
-    ]
-  };
-}
-
-function positiveMilliseconds(value: unknown, optionName: string): number {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new Error(`${optionName} must be a positive number`);
-  }
-  return Math.ceil(parsed);
-}
-
-function versionAtLeast(version: string, minimum: string): boolean {
-  const parsed = version.split(".").slice(0, 3).map((part) => Number.parseInt(part, 10));
-  const required = minimum.split(".").slice(0, 3).map((part) => Number.parseInt(part, 10));
-  if (
-    parsed.length !== 3 ||
-    required.length !== 3 ||
-    [...parsed, ...required].some((part) => !Number.isInteger(part) || part < 0)
-  ) {
-    return false;
-  }
-  for (let index = 0; index < 3; index += 1) {
-    if (parsed[index] !== required[index]) {
-      return parsed[index] > required[index];
-    }
-  }
-  return true;
 }
 
 async function listActiveSessionsWithTerminalControl(
@@ -32376,50 +32080,6 @@ async function loadCodexTerminalContexts({ nativeTakeover, options }) {
   return matches;
 }
 
-function resolveExecutable(command) {
-  if (command.includes(path.sep)) {
-    return command;
-  }
-
-  const paths = executableSearchPaths();
-  for (const dir of paths) {
-    const candidate = path.join(dir, command);
-    try {
-      fs.accessSync(candidate, fs.constants.X_OK);
-      return candidate;
-    } catch {
-      // Continue searching PATH.
-    }
-  }
-
-  throw new Error(`executable not found on PATH: ${command}`);
-}
-
-function executableSearchPaths() {
-  const home = cliEnv().HOME;
-  return [
-    ...(cliEnv().PATH ?? "").split(path.delimiter).filter(Boolean),
-    ...(home ? [
-      path.join(home, ".npm-global", "bin"),
-      path.join(home, ".local", "bin")
-    ] : []),
-    "/opt/homebrew/bin",
-    "/usr/local/bin"
-  ];
-}
-
-function resolveOptionalExecutable(command) {
-  try {
-    return resolveExecutable(command);
-  } catch {
-    return command;
-  }
-}
-
-function packageRootDir() {
-  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-}
-
 /**
  * Detached monitors must re-enter through the executable wrapper. The command
  * implementation lives beside it in cli-core.js, but importing that module is
@@ -32433,21 +32093,6 @@ function printVersion() {
   const packageJsonPath = path.join(packageRootDir(), "package.json");
   const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
   writeCliStdout(`${packageJson.version}\n`);
-}
-
-function runCheckedCommand(command, args, { label }) {
-  const result = spawnSync(command, args, {
-    encoding: "utf8",
-    maxBuffer: 1024 * 1024 * 10
-  });
-  if (result.error) {
-    throw new Error(`${label} failed to start: ${result.error.message}`);
-  }
-  if (result.status !== 0) {
-    throw new Error(cleanProcessText(result.stderr || result.stdout || `${label} exited with status ${result.status}`));
-  }
-
-  return result;
 }
 
 function runTranscript(options) {
@@ -34135,57 +33780,6 @@ function parseJsonOption(value, optionName) {
   } catch (error) {
     throw new Error(`${optionName} must be valid JSON: ${error.message}`);
   }
-}
-
-function expandHome(filePath) {
-  if (filePath === "~") {
-    return cliEnv().HOME;
-  }
-
-  if (filePath?.startsWith("~/")) {
-    return `${cliEnv().HOME}${filePath.slice(1)}`;
-  }
-
-  return filePath;
-}
-
-function printJson(value) {
-  writeCliStdout(`${JSON.stringify(redactCliOutput(value), null, 2)}\n`);
-}
-
-function redactCliOutput(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map((item) => redactCliOutput(item));
-  }
-  if (isRecord(value)) {
-    return Object.fromEntries(
-      Object.entries(value).flatMap(([key, item]) => {
-        if (key === "gateway_token" || key === "gatewayToken") {
-          return [];
-        }
-        if (
-          key === "claude_transcript_anchor" ||
-          key === "claudeTranscriptAnchor" ||
-          key === "codex_rollout_acceptance_anchor" ||
-          key === "codexRolloutAcceptanceAnchor" ||
-          key === "claude_home" ||
-          key === "claudeHome"
-        ) {
-          return [];
-        }
-        if ((key === "callback_command" || key === "callbackCommand") && typeof item === "string") {
-          return [[key, redactString(item)]];
-        }
-        return [[key, redactCliOutput(item)]];
-      })
-    );
-  }
-  return value;
-}
-
-function cleanProcessText(text) {
-  const value = String(text ?? "").trim();
-  return value ? value.slice(0, 2000) : undefined;
 }
 
 function textSummary(text, maxLength = 240) {

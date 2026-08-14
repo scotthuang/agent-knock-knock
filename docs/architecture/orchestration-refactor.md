@@ -572,6 +572,7 @@ delivery cost.
 | Terminal list renderer | Pure managed-Turn and action-contract projection from sampled facts | Store, process, ledger, Session, approval, and token observations remain in `cli-core.ts`; mutation never consumes list authority | exact v16 action order plus list/session/handoff integration |
 | Conversation trace | Bounded executor-log parsing, secret redaction, and monitor-event projection | Status routing and conversation/event loading remain in `cli-core.ts`; the module performs only the existing optional read of the selected output log | exact parser/redaction/fallback unit tests plus management CLI integration |
 | CLI runtime context | Per-execution dependency, output, clock, sleep, exit, and logging context | No business policy or persistent state moved into the runtime | nested and concurrent async-context isolation tests |
+| Install and doctor adapters | OpenClaw plugin install/configure/restart/verify ordering plus typed doctor report composition | The shared CLI command runtime retains PATH/HOME lookup, package-root resolution, output redaction, and async-local exit/output authority; terminal, lifecycle, and dispatch logic are not imported | direct argv/effect-order, exact JSON bytes/key-order, exit-code, PATH/HOME isolation, and retained CLI boundary tests |
 
 The new compile-time direction is
 `cli-core composition -> callback settlement -> callback policy`, while the
