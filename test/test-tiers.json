@@ -30,6 +30,7 @@
     "test/production-module-ownership.test.ts",
     "test/protocol.test.ts",
     "test/quickstart-docs.test.ts",
+    "test/refactor-evidence.test.ts",
     "test/session-selector.test.ts",
     "test/session-store.test.ts",
     "test/terminal-agent-adapter.test.ts",

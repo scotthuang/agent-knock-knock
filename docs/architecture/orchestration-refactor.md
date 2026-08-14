@@ -581,6 +581,49 @@ policy and adapter tests, and one exact-head full test run. Packaging,
 publishing, installation, protocol upgrades, and issue closure are not part of
 this phase.
 
+### Reproducible refactor evidence guard
+
+Run the local, non-integration evidence gate with:
+
+```sh
+npm run validate:refactor-evidence
+```
+
+`config/refactor-test-evidence.json` freezes two review inputs. First, it counts
+static subprocess-startup call sites in `test/**/*.ts` for the immutable
+`v0.12.11` baseline and the current tree. The included metric is CLI-process
+plus fake-Node-process startup sites; other adapter/process calls are reported
+separately. This is a deterministic source metric, not a claim about dynamic
+process executions in one test run. The current value is 48 of 48 baseline
+sites (0% reduction), so the 60% reduction target is explicitly reported as
+not met. Its `final_threshold.required` flag remains `false` while #126 is in
+progress; the final milestone flips it to `true`, at which point an unmet target
+is a hard validation failure.
+
+Second, the manifest freezes the exact changed paths and subjects of ten
+pre-`v0.12.11` product/test commits and replays them through the current
+affected-test selector. The current selector falls back to the full tier for 9
+of 10 changes (90%); the completion target is at most 2 of 10. The validator
+fails if Git history, a frozen path list, the measured count, or a replay result
+drifts without an explicit manifest review. An unmet completion target is
+reported but does not make this Phase 1 evidence-recording command fail. This
+target has the same `final_threshold.required` switch for the final milestone.
+
+`config/public-contract-witnesses.json` is the machine-readable compatibility
+inventory. It pins the package executable and facade, CLI commands/JSON
+witnesses, list action contract v16, all 14 OpenClaw tools, Store format 1 and
+writer protocols 1 through 5, and ten mappings from old executable tests to
+focused service invariants and retained boundary witnesses. Every authority and
+witness path must exist, each witness must remain in its declared test tier and
+contain its named assertion, and unknown or missing manifest fields fail
+closed.
+
+`npm run validate:architecture` invokes the same evidence guard after the
+ownership/import/LOC checks. Intentional contract or evidence changes therefore
+require a reviewed manifest diff; changing only a number to conceal a failed
+measurement does not pass because the validator reproduces it from source and
+Git history.
+
 ## Soft freeze while #126 is active
 
 Until the orchestration milestones finish:
