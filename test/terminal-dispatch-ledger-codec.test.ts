@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -6,6 +7,7 @@ import {
   constructTerminalOrdinaryDispatchLedger,
   decodeTerminalDispatchLedgerDocument,
   mergeTerminalDispatchReceipt,
+  nativeThreadLifecycleLedger,
   terminalDispatchLedgerLooksLifecycle,
   terminalDispatchReceiptCandidate,
   terminalDispatchReceiptHistory,
@@ -17,6 +19,10 @@ import {
   terminalControlEvidence,
   type TerminalControlRef
 } from "../src/terminal-control-ref.js";
+import type {
+  ManagedTerminalBinding,
+  NativeThreadTransition
+} from "../src/managed-session.js";
 
 const tmuxControl: TerminalControlRef = {
   kind: "tmux",
@@ -217,6 +223,382 @@ test("lifecycle predicate recognizes every legacy lifecycle discriminator", () =
     terminalDispatchLedgerLooksLifecycle({ operation: "close_thread" }),
     false
   );
+});
+
+test("lifecycle phase builder preserves every legacy key and JSON byte", () => {
+  const beforeBinding: ManagedTerminalBinding = {
+    binding_id: "binding-before",
+    generation: 3,
+    terminal_id: "terminal-1",
+    terminal_control: tmuxControl,
+    native_thread_id: "thread-before",
+    native_process: {
+      pid: 111,
+      process_uuid: "process-before",
+      process_birth: "birth-before",
+      rollout: {
+        fd: "7",
+        device: "10",
+        inode: "20",
+        path: "/rollout/before.jsonl"
+      },
+      evidence: "codex_rollout_fd"
+    },
+    bound_at: "2026-08-14T00:00:00.000Z",
+    last_verified_at: "2026-08-14T00:00:01.000Z"
+  };
+  const afterBinding: ManagedTerminalBinding = {
+    ...beforeBinding,
+    binding_id: "binding-after",
+    generation: 4,
+    native_thread_id: "thread-after"
+  };
+  const transition: NativeThreadTransition = {
+    schema: "agent-knock-knock/native-thread-transition",
+    version: 1,
+    transition_id: "transition-1",
+    operation: "resume_thread",
+    status: "verified",
+    terminal_id: "terminal-1",
+    agent: "codex",
+    workspace: "/workspace",
+    source_session_id: "session-before",
+    source_expected_revision: 2,
+    target_session_id: "session-after",
+    target_expected_revision: null,
+    target_native_thread_id: "thread-after",
+    target_candidate_file_identity: {
+      path: "/rollout/after.jsonl",
+      device: "10",
+      inode: "21"
+    },
+    before_native_thread_id: "thread-before",
+    before_process_uuid: "process-before",
+    before_process_started_at: 1_723_590_000_000,
+    before_process_birth: "birth-before",
+    before_process_rollout: beforeBinding.native_process.rollout,
+    before_binding: beforeBinding,
+    after_binding: afterBinding,
+    adapter_version: "codex/1",
+    command_fingerprint: "command-hash",
+    dispatcher_pid: 222,
+    prepared_at: "2026-08-14T00:00:02.000Z",
+    dispatching_at: "2026-08-14T00:00:03.000Z",
+    submitted_at: "2026-08-14T00:00:04.000Z",
+    verified_at: "2026-08-14T00:00:05.000Z"
+  };
+  const storeDir = "/store";
+  const previousLedger = {
+    generation_id: "previous-generation",
+    message_id: "previous-message"
+  };
+  const error = { length: 9, preview: "transition" };
+  const base = {
+    kind: "lifecycle",
+    generation_id: transition.transition_id,
+    transition_id: transition.transition_id,
+    operation: transition.operation,
+    origin: transition.origin,
+    terminal_input_sent: transition.terminal_input_sent,
+    terminal_id: transition.terminal_id,
+    agent: transition.agent,
+    workspace: transition.workspace,
+    adapter_version: transition.adapter_version,
+    command_fingerprint: transition.command_fingerprint,
+    source_session_id: transition.source_session_id,
+    target_session_id: transition.target_session_id,
+    target_native_thread_id: transition.target_native_thread_id,
+    target_candidate_file_identity: transition.target_candidate_file_identity,
+    native_thread_id: transition.after_binding?.native_thread_id ??
+      transition.before_native_thread_id,
+    before_native_thread_id: transition.before_native_thread_id,
+    before_process_uuid: transition.before_process_uuid,
+    before_process_started_at: transition.before_process_started_at,
+    before_process_birth: transition.before_process_birth,
+    before_process_rollout: transition.before_process_rollout,
+    store_dir: storeDir,
+    prepared_at: transition.prepared_at,
+    dispatching_at: transition.dispatching_at,
+    submitted_at: transition.submitted_at,
+    verified_at: transition.verified_at,
+    dispatcher_pid: transition.dispatcher_pid,
+    binding: transition.before_binding
+  };
+  const terminalFields = {
+    terminal_id: transition.terminal_id,
+    agent: transition.agent,
+    workspace: transition.workspace,
+    adapter_version: transition.adapter_version,
+    command_fingerprint: transition.command_fingerprint
+  };
+  const targetFields = {
+    source_session_id: transition.source_session_id,
+    target_session_id: transition.target_session_id,
+    target_native_thread_id: transition.target_native_thread_id,
+    target_candidate_file_identity: transition.target_candidate_file_identity
+  };
+  const beforeFields = {
+    before_native_thread_id: transition.before_native_thread_id,
+    before_process_uuid: transition.before_process_uuid,
+    before_process_started_at: transition.before_process_started_at,
+    before_process_birth: transition.before_process_birth,
+    before_process_rollout: transition.before_process_rollout
+  };
+  const identityFields = {
+    kind: "lifecycle",
+    generation_id: transition.transition_id,
+    transition_id: transition.transition_id
+  };
+  const commandPrepared = {
+    status: "prepared",
+    ...identityFields,
+    operation: transition.operation,
+    ...terminalFields,
+    ...targetFields,
+    ...beforeFields,
+    store_dir: storeDir,
+    prepared_at: transition.prepared_at,
+    dispatcher_pid: transition.dispatcher_pid,
+    binding: transition.before_binding,
+    previous_generation_id: previousLedger.generation_id
+  };
+  const commandInFlight = (status: "dispatching" | "submitted") => ({
+    status,
+    ...identityFields,
+    ...terminalFields,
+    operation: transition.operation,
+    ...targetFields,
+    ...beforeFields,
+    store_dir: storeDir,
+    prepared_at: transition.prepared_at,
+    [`${status}_at`]: transition[`${status}_at`],
+    dispatcher_pid: transition.dispatcher_pid,
+    binding: transition.before_binding,
+    previous_generation_id: previousLedger.generation_id
+  });
+  const herdrControl: TerminalControlRef = {
+    kind: "herdr",
+    target: "default:w1:p1",
+    socketPath: "/tmp/herdr.sock",
+    session: "default",
+    workspaceId: "w1",
+    tabId: "w1:t1",
+    paneId: "w1:p1",
+    terminalId: "term_0123456789abcd",
+    panePid: 333,
+    currentPath: "/workspace",
+    capabilities: []
+  };
+  const terminalControlFields = (value: TerminalControlRef) => ({
+    kind: value.kind,
+    target: value.target,
+    socket_path: value.socketPath ?? null,
+    pane_pid: value.panePid ?? null,
+    current_path: value.currentPath ?? null
+  });
+  const cases = [
+    {
+      name: "prepared",
+      actual: nativeThreadLifecycleLedger(transition, storeDir, {
+        phase: "prepared", previous: previousLedger,
+        targetNativeThreadId: "thread-selected"
+      }),
+      expected: {
+        ...base,
+        status: "prepared",
+        target_native_thread_id: "thread-selected",
+        previous_generation_id: previousLedger.generation_id
+      }
+    },
+    {
+      name: "verified",
+      actual: nativeThreadLifecycleLedger(transition, storeDir, {
+        phase: "verified", binding: afterBinding
+      }),
+      expected: { ...base, status: "verified", binding: afterBinding }
+    },
+    {
+      name: "verified with previous generation",
+      actual: nativeThreadLifecycleLedger(transition, storeDir, {
+        phase: "verified_with_previous", binding: beforeBinding,
+        previousGenerationId: "retained-generation"
+      }),
+      expected: {
+        ...base,
+        status: "verified",
+        binding: beforeBinding,
+        previous_generation_id: "retained-generation"
+      }
+    },
+    {
+      name: "resolved",
+      actual: nativeThreadLifecycleLedger(transition, storeDir, {
+        phase: "resolved", at: "resolved-at", reason: "resolved-reason"
+      }),
+      expected: {
+        ...base, status: "resolved", resolved_at: "resolved-at",
+        reason: "resolved-reason"
+      }
+    },
+    {
+      name: "resolved with binding",
+      actual: nativeThreadLifecycleLedger(transition, storeDir, {
+        phase: "resolved_with_binding", at: "resolved-at",
+        binding: afterBinding, reason: "resolved-reason"
+      }),
+      expected: {
+        ...base, status: "resolved", resolved_at: "resolved-at",
+        binding: afterBinding, reason: "resolved-reason"
+      }
+    },
+    {
+      name: "uncertain reason",
+      actual: nativeThreadLifecycleLedger(transition, storeDir, {
+        phase: "uncertain", at: "uncertain-at", reason: "uncertain-reason"
+      }),
+      expected: {
+        ...base, status: "uncertain", uncertain_at: "uncertain-at",
+        reason: "uncertain-reason"
+      }
+    },
+    {
+      name: "uncertain reason then error",
+      actual: nativeThreadLifecycleLedger(transition, storeDir, {
+        phase: "uncertain_reason_error", at: "uncertain-at",
+        reason: "uncertain-reason", error
+      }),
+      expected: {
+        ...base, status: "uncertain", uncertain_at: "uncertain-at",
+        reason: "uncertain-reason", error
+      }
+    },
+    {
+      name: "uncertain error then reason",
+      actual: nativeThreadLifecycleLedger(transition, storeDir, {
+        phase: "uncertain_error_reason", at: "uncertain-at",
+        error, reason: "uncertain-reason"
+      }),
+      expected: {
+        ...base, status: "uncertain", uncertain_at: "uncertain-at",
+        error, reason: "uncertain-reason"
+      }
+    },
+    {
+      name: "rebuild without canonical endpoint",
+      actual: nativeThreadLifecycleLedger(transition, storeDir, {
+        phase: "rebuild", control: tmuxControl, previous: previousLedger
+      }),
+      expected: {
+        ...base,
+        status: transition.status,
+        binding: transition.before_binding,
+        terminal_control: terminalControlFields(tmuxControl),
+        previous_generation_id: previousLedger.generation_id
+      }
+    },
+    {
+      name: "rebuild with canonical endpoint",
+      actual: nativeThreadLifecycleLedger(transition, storeDir, {
+        phase: "rebuild", control: herdrControl, previous: previousLedger
+      }),
+      expected: {
+        ...base,
+        status: transition.status,
+        binding: transition.before_binding,
+        terminal_control: terminalControlFields(herdrControl),
+        terminal_endpoint: terminalControlEvidence(herdrControl),
+        previous_generation_id: previousLedger.generation_id
+      }
+    },
+    {
+      name: "command prepared",
+      actual: nativeThreadLifecycleLedger(transition, storeDir, {
+        phase: "command_prepared", previous: previousLedger
+      }),
+      expected: commandPrepared
+    },
+    {
+      name: "command dispatching",
+      actual: nativeThreadLifecycleLedger(transition, storeDir, {
+        phase: "command_dispatching", previous: previousLedger
+      }),
+      expected: commandInFlight("dispatching")
+    },
+    {
+      name: "command submitted",
+      actual: nativeThreadLifecycleLedger(transition, storeDir, {
+        phase: "command_submitted", previous: previousLedger
+      }),
+      expected: commandInFlight("submitted")
+    },
+    {
+      name: "command resolved",
+      actual: nativeThreadLifecycleLedger(transition, storeDir, {
+        phase: "command_resolved", at: "resolved-at",
+        binding: afterBinding, reason: "resolved-reason"
+      }),
+      expected: {
+        status: "resolved",
+        ...identityFields,
+        ...terminalFields,
+        operation: transition.operation,
+        ...targetFields,
+        target_native_thread_id: afterBinding.native_thread_id,
+        store_dir: storeDir,
+        prepared_at: transition.prepared_at,
+        submitted_at: transition.submitted_at,
+        verified_at: transition.verified_at,
+        resolved_at: "resolved-at",
+        dispatcher_pid: transition.dispatcher_pid,
+        binding: afterBinding,
+        reason: "resolved-reason"
+      }
+    }
+  ];
+  for (const current of cases) {
+    assert.deepEqual(Object.keys(current.actual), Object.keys(current.expected), current.name);
+    assert.equal(
+      `${JSON.stringify(current.actual, null, 2)}\n`,
+      `${JSON.stringify(current.expected, null, 2)}\n`,
+      current.name
+    );
+  }
+});
+
+test("lifecycle builder calls retain their exact adjacent ledger CAS", () => {
+  const source = readFileSync("src/cli-core.ts", "utf8");
+  const starts = [...source.matchAll(/lifecycleLedger\(/gu)].map((match) => match.index);
+  const actual = starts.map((start, index) => {
+    const section = source.slice(start, starts[index + 1]);
+    const phase = /phase: "([^"]+)"/u.exec(section)?.[1];
+    const cas = /expectedTransitionId:\s*([^,}\n]+)(?:,\s*expectedStatus:\s*"([^"]+)")?/u
+      .exec(section);
+    return [phase, cas?.[1].trim(), cas?.[2]];
+  });
+  assert.deepEqual(actual, [
+    ["prepared", "null", undefined],
+    ["verified", "transitionId", "prepared"],
+    ["resolved_with_binding", "transitionId", "verified"],
+    ["uncertain", "transitionId", undefined],
+    ["command_prepared", "null", undefined],
+    ["command_dispatching", "transitionId", "prepared"],
+    ["command_submitted", "transitionId", "dispatching"],
+    ["command_resolved", "transitionId", "submitted"],
+    ["uncertain_reason_error", "transitionId", undefined],
+    ["resolved", "transitionId", undefined],
+    ["uncertain_error_reason", "transitionId", undefined],
+    ["rebuild", "null", undefined],
+    ["resolved", "transition.transition_id", undefined],
+    ["verified", "transition.transition_id", "prepared"],
+    ["verified_with_previous", "transition.transition_id", "prepared"],
+    ["resolved", "transitionId", undefined],
+    ["resolved_with_binding", "transitionId", undefined],
+    ["resolved_with_binding", "transitionId", undefined],
+    ["resolved", "transitionId", undefined],
+    ["uncertain", "transitionId", undefined],
+    ["resolved", "transition.transition_id", undefined],
+    ["resolved_with_binding", "transition.transition_id", undefined]
+  ]);
 });
 
 test("receipt candidate preserves direct statuses and strips document metadata", () => {

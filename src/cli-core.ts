@@ -309,6 +309,7 @@ import {
   constructTerminalDispatchLedgerDocument,
   constructTerminalOrdinaryDispatchLedger,
   decodeTerminalDispatchLedgerDocument,
+  nativeThreadLifecycleLedger as lifecycleLedger,
   terminalDispatchLedgerLooksLifecycle,
   terminalDispatchReceiptHistory as terminalLedgerReceiptHistory,
   type TerminalDispatchLedgerDocument,
@@ -11672,14 +11673,10 @@ async function maybeAdoptObservedExternalThread({
   ) {
     cliExit(88);
   }
-  saveLifecycleTerminalDispatchLedger(terminal.terminalControl, {
-    ...lifecycleLedgerFields(transition, storeDir),
-    status: "prepared",
-    target_native_thread_id: targetNativeThreadId,
-    previous_generation_id:
-      stringValue(previousLedger?.generation_id) ??
-      stringValue(previousLedger?.message_id)
-  }, { expectedTransitionId: null });
+  saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
+    lifecycleLedger(transition, storeDir,
+      { phase: "prepared", previous: previousLedger, targetNativeThreadId }),
+    { expectedTransitionId: null });
   if (cliEnv().AKK_TEST_EXIT_AFTER_LIFECYCLE_PREPARED === "1") {
     cliExit(86);
   }
@@ -11743,11 +11740,8 @@ async function maybeAdoptObservedExternalThread({
     ) {
       cliExit(89);
     }
-    saveLifecycleTerminalDispatchLedger(terminal.terminalControl, {
-      ...lifecycleLedgerFields(transition, storeDir),
-      status: "verified",
-      binding: sourceBinding
-    }, {
+    saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
+      lifecycleLedger(transition, storeDir, { phase: "verified", binding: sourceBinding }), {
       expectedTransitionId: transitionId,
       expectedStatus: "prepared"
     });
@@ -11764,13 +11758,12 @@ async function maybeAdoptObservedExternalThread({
       status: "committed",
       committed_at: cliNow().toISOString()
     }, { expectedRevision: nativeThreadTransitionRevision(transition) });
-    saveLifecycleTerminalDispatchLedger(terminal.terminalControl, {
-      ...lifecycleLedgerFields(transition, storeDir),
-      status: "resolved",
-      resolved_at: cliNow().toISOString(),
-      binding: committedTarget.binding,
-      reason: "verified human-observed native thread handoff committed"
-    }, {
+    saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
+      lifecycleLedger(transition, storeDir, {
+        phase: "resolved_with_binding", at: cliNow().toISOString(),
+        binding: committedTarget.binding,
+        reason: "verified human-observed native thread handoff committed"
+      }), {
       expectedTransitionId: transitionId,
       expectedStatus: "verified"
     });
@@ -11807,12 +11800,11 @@ async function maybeAdoptObservedExternalThread({
       quarantine_reason: "human-observed handoff could not be revalidated",
       updated_at: failedAt
     }, { expectedRevision: managedSessionRevision(sourceTransitioning) });
-    saveLifecycleTerminalDispatchLedger(terminal.terminalControl, {
-      ...lifecycleLedgerFields(uncertain, storeDir),
-      status: "uncertain",
-      uncertain_at: failedAt,
-      reason: "human-observed handoff could not be revalidated"
-    }, { expectedTransitionId: transitionId });
+    saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
+      lifecycleLedger(uncertain, storeDir, {
+        phase: "uncertain", at: failedAt,
+        reason: "human-observed handoff could not be revalidated"
+      }), { expectedTransitionId: transitionId });
     throw error;
   }
 }
@@ -14771,38 +14763,9 @@ async function runNativeThreadTransition(
       transition = saveNativeThreadTransition(storeDir, transition, {
         expectedRevision: null
       });
-      saveLifecycleTerminalDispatchLedger(terminal.terminalControl, {
-        status: "prepared",
-        kind: "lifecycle",
-        generation_id: transitionId,
-        transition_id: transitionId,
-        operation: operation.kind,
-        terminal_id: transition.terminal_id,
-        agent: transition.agent,
-        workspace: transition.workspace,
-        adapter_version: transition.adapter_version,
-        command_fingerprint: transition.command_fingerprint,
-        source_session_id: sourceBefore?.session_id,
-        target_session_id: targetSessionId,
-        target_native_thread_id:
-          operation.kind === "resume_thread"
-            ? operation.nativeThreadId
-            : undefined,
-        target_candidate_file_identity:
-          transition.target_candidate_file_identity,
-        before_native_thread_id: transition.before_native_thread_id,
-        before_process_uuid: transition.before_process_uuid,
-        before_process_started_at: transition.before_process_started_at,
-        before_process_birth: transition.before_process_birth,
-        before_process_rollout: transition.before_process_rollout,
-        store_dir: storeDir,
-        prepared_at: now.toISOString(),
-        dispatcher_pid: cliPid(),
-        binding: snapshot.session?.binding,
-        previous_generation_id:
-          stringValue(previousLedger?.generation_id) ??
-          stringValue(previousLedger?.message_id)
-      }, {
+      saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
+        lifecycleLedger(transition, storeDir,
+          { phase: "command_prepared", previous: previousLedger }), {
         expectedTransitionId: null
       });
 
@@ -14830,39 +14793,9 @@ async function runNativeThreadTransition(
         transition = saveNativeThreadTransition(storeDir, transition, {
           expectedRevision: nativeThreadTransitionRevision(transition)
         });
-        saveLifecycleTerminalDispatchLedger(terminal.terminalControl, {
-          status: "dispatching",
-          kind: "lifecycle",
-          generation_id: transitionId,
-          transition_id: transitionId,
-          terminal_id: transition.terminal_id,
-          agent: transition.agent,
-          workspace: transition.workspace,
-          adapter_version: transition.adapter_version,
-          command_fingerprint: transition.command_fingerprint,
-          operation: operation.kind,
-          source_session_id: snapshot.session?.session_id,
-          target_session_id: targetSessionId,
-          target_native_thread_id:
-            operation.kind === "resume_thread"
-              ? operation.nativeThreadId
-              : undefined,
-          target_candidate_file_identity:
-            transition.target_candidate_file_identity,
-          before_native_thread_id: transition.before_native_thread_id,
-          before_process_uuid: transition.before_process_uuid,
-          before_process_started_at: transition.before_process_started_at,
-          before_process_birth: transition.before_process_birth,
-          before_process_rollout: transition.before_process_rollout,
-          store_dir: storeDir,
-          prepared_at: transition.prepared_at,
-          dispatching_at: dispatchingAt,
-          dispatcher_pid: cliPid(),
-          binding: snapshot.session?.binding,
-          previous_generation_id:
-            stringValue(previousLedger?.generation_id) ??
-            stringValue(previousLedger?.message_id)
-        }, {
+        saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
+          lifecycleLedger(transition, storeDir,
+            { phase: "command_dispatching", previous: previousLedger }), {
           expectedTransitionId: transitionId,
           expectedStatus: "prepared"
         });
@@ -14941,39 +14874,9 @@ async function runNativeThreadTransition(
         transition = saveNativeThreadTransition(storeDir, transition, {
           expectedRevision: nativeThreadTransitionRevision(transition)
         });
-        saveLifecycleTerminalDispatchLedger(terminal.terminalControl, {
-          status: "submitted",
-          kind: "lifecycle",
-          generation_id: transitionId,
-          transition_id: transitionId,
-          terminal_id: transition.terminal_id,
-          agent: transition.agent,
-          workspace: transition.workspace,
-          adapter_version: transition.adapter_version,
-          command_fingerprint: transition.command_fingerprint,
-          operation: operation.kind,
-          source_session_id: snapshot.session?.session_id,
-          target_session_id: targetSessionId,
-          target_native_thread_id:
-            operation.kind === "resume_thread"
-              ? operation.nativeThreadId
-              : undefined,
-          target_candidate_file_identity:
-            transition.target_candidate_file_identity,
-          before_native_thread_id: transition.before_native_thread_id,
-          before_process_uuid: transition.before_process_uuid,
-          before_process_started_at: transition.before_process_started_at,
-          before_process_birth: transition.before_process_birth,
-          before_process_rollout: transition.before_process_rollout,
-          store_dir: storeDir,
-          prepared_at: transition.prepared_at,
-          submitted_at: submittedAt,
-          dispatcher_pid: cliPid(),
-          binding: snapshot.session?.binding,
-          previous_generation_id:
-            stringValue(previousLedger?.generation_id) ??
-            stringValue(previousLedger?.message_id)
-        }, {
+        saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
+          lifecycleLedger(transition, storeDir,
+            { phase: "command_submitted", previous: previousLedger }), {
           expectedTransitionId: transitionId,
           expectedStatus: "dispatching"
         });
@@ -15069,31 +14972,11 @@ async function runNativeThreadTransition(
         transition = saveNativeThreadTransition(storeDir, transition, {
           expectedRevision: nativeThreadTransitionRevision(transition)
         });
-        saveLifecycleTerminalDispatchLedger(terminal.terminalControl, {
-          status: "resolved",
-          kind: "lifecycle",
-          generation_id: transitionId,
-          transition_id: transitionId,
-          terminal_id: transition.terminal_id,
-          agent: transition.agent,
-          workspace: transition.workspace,
-          adapter_version: transition.adapter_version,
-          command_fingerprint: transition.command_fingerprint,
-          operation: operation.kind,
-          source_session_id: sourceBefore?.session_id,
-          target_session_id: targetSessionId,
-          target_native_thread_id: afterIdentity.sessionId,
-          target_candidate_file_identity:
-            transition.target_candidate_file_identity,
-          store_dir: storeDir,
-          prepared_at: transition.prepared_at,
-          submitted_at: transition.submitted_at,
-          verified_at: transition.verified_at,
-          resolved_at: committedAt,
-          dispatcher_pid: cliPid(),
-          binding: targetBinding,
-          reason: "native thread transition committed"
-        }, {
+        saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
+          lifecycleLedger(transition, storeDir, {
+            phase: "command_resolved", at: committedAt,
+            binding: targetBinding, reason: "native thread transition committed"
+          }), {
           expectedTransitionId: transitionId,
           expectedStatus: "submitted"
         });
@@ -15137,14 +15020,13 @@ async function runNativeThreadTransition(
           );
         }
         if (failureDecision.action === "require_verified_recovery") {
-          saveLifecycleTerminalDispatchLedger(terminal.terminalControl, {
-            ...lifecycleLedgerFields(durableTransition, storeDir),
-            status: "uncertain",
-            uncertain_at: failedAt,
-            reason:
-              "verified lifecycle commit was interrupted; recovery must revalidate before roll-forward",
-            error: textSummary(message)
-          }, {
+          saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
+            lifecycleLedger(durableTransition, storeDir, {
+              phase: "uncertain_reason_error", at: failedAt,
+              reason:
+                "verified lifecycle commit was interrupted; recovery must revalidate before roll-forward",
+              error: textSummary(message)
+            }), {
             expectedTransitionId: transitionId
           });
           printJson({
@@ -15178,12 +15060,11 @@ async function runNativeThreadTransition(
               expectedRevision: managedSessionRevision(sourceTransitioning)
             });
           }
-          saveLifecycleTerminalDispatchLedger(terminal.terminalControl, {
-            ...lifecycleLedgerFields(transition, storeDir),
-            status: "resolved",
-            resolved_at: failedAt,
-            reason: "native thread transition aborted before terminal input"
-          }, {
+          saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
+            lifecycleLedger(transition, storeDir, {
+              phase: "resolved", at: failedAt,
+              reason: "native thread transition aborted before terminal input"
+            }), {
             expectedTransitionId: transitionId
           });
           throw error;
@@ -15209,13 +15090,12 @@ async function runNativeThreadTransition(
             expectedRevision: managedSessionRevision(sourceTransitioning)
           });
         }
-        saveLifecycleTerminalDispatchLedger(terminal.terminalControl, {
-          ...lifecycleLedgerFields(transition, storeDir),
-          status: "uncertain",
-          uncertain_at: failedAt,
-          error: textSummary(message),
-          reason: "native thread transition could not be verified"
-        }, {
+        saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
+          lifecycleLedger(transition, storeDir, {
+            phase: "uncertain_error_reason", at: failedAt,
+            error: textSummary(message),
+            reason: "native thread transition could not be verified"
+          }), {
           expectedTransitionId: transitionId
         });
         printJson({
@@ -26964,45 +26844,6 @@ function orphanedTerminalDispatchForRecovery(
   }
 }
 
-function lifecycleLedgerFields(
-  transition: NativeThreadTransition,
-  storeDir: string
-): Record<string, unknown> {
-  return {
-    kind: "lifecycle",
-    generation_id: transition.transition_id,
-    transition_id: transition.transition_id,
-    operation: transition.operation,
-    origin: transition.origin,
-    terminal_input_sent: transition.terminal_input_sent,
-    terminal_id: transition.terminal_id,
-    agent: transition.agent,
-    workspace: transition.workspace,
-    adapter_version: transition.adapter_version,
-    command_fingerprint: transition.command_fingerprint,
-    source_session_id: transition.source_session_id,
-    target_session_id: transition.target_session_id,
-    target_native_thread_id: transition.target_native_thread_id,
-    target_candidate_file_identity:
-      transition.target_candidate_file_identity,
-    native_thread_id:
-      transition.after_binding?.native_thread_id ??
-      transition.before_native_thread_id,
-    before_native_thread_id: transition.before_native_thread_id,
-    before_process_uuid: transition.before_process_uuid,
-    before_process_started_at: transition.before_process_started_at,
-    before_process_birth: transition.before_process_birth,
-    before_process_rollout: transition.before_process_rollout,
-    store_dir: storeDir,
-    prepared_at: transition.prepared_at,
-    dispatching_at: transition.dispatching_at,
-    submitted_at: transition.submitted_at,
-    verified_at: transition.verified_at,
-    dispatcher_pid: transition.dispatcher_pid,
-    binding: transition.before_binding
-  };
-}
-
 function saveLifecycleTerminalDispatchLedger(
   terminalControl: TerminalControlRef,
   ledger: Record<string, unknown>,
@@ -29299,28 +29140,8 @@ function rebuildObservedHandoffLedgerFromTransition({
       "unresolved but its terminal ledger is already resolved"
     );
   }
-  const rebuilt = {
-    ...lifecycleLedgerFields(transition, storeDir),
-    status: transition.status,
-    binding: transition.before_binding,
-    terminal_control: {
-      kind: terminal.terminalControl.kind,
-      target: terminal.terminalControl.target,
-      socket_path: terminal.terminalControl.socketPath ?? null,
-      pane_pid: terminal.terminalControl.panePid ?? null,
-      current_path: terminal.terminalControl.currentPath ?? null
-    },
-    ...(hasCanonicalTerminalEndpoint(terminal.terminalControl)
-      ? {
-          terminal_endpoint: terminalControlEvidence(
-            terminal.terminalControl
-          )
-        }
-      : {}),
-    previous_generation_id:
-      stringValue(previousLedger?.generation_id) ??
-      stringValue(previousLedger?.message_id)
-  };
+  const rebuilt = lifecycleLedger(transition, storeDir,
+    { phase: "rebuild", control: terminal.terminalControl, previous: previousLedger });
   // Validate the complete transition/terminal/adapter relationship before
   // replacing a missing or older resolved ledger.  Rebuilding a fence is a
   // Store-side recovery operation only and never sends terminal input.
@@ -29416,12 +29237,11 @@ async function recoverPreparedObservedHandoff({
       error: "recovery observed the exact source native thread"
     }, { expectedRevision: nativeThreadTransitionRevision(transition) });
     restorePreparedLifecycleSource(storeDir, transition, now);
-    saveLifecycleTerminalDispatchLedger(terminal.terminalControl, {
-      ...lifecycleLedgerFields(transition, storeDir),
-      status: "resolved",
-      resolved_at: now,
-      reason: "human-observed handoff rolled back to its exact source"
-    }, { expectedTransitionId: transition.transition_id });
+    saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
+      lifecycleLedger(transition, storeDir, {
+        phase: "resolved", at: now,
+        reason: "human-observed handoff rolled back to its exact source"
+      }), { expectedTransitionId: transition.transition_id });
     return transition;
   }
   if (
@@ -29464,11 +29284,8 @@ async function recoverPreparedObservedHandoff({
     verified_at: now,
     after_binding: afterBinding
   }, { expectedRevision: nativeThreadTransitionRevision(transition) });
-  saveLifecycleTerminalDispatchLedger(terminal.terminalControl, {
-    ...lifecycleLedgerFields(transition, storeDir),
-    status: "verified",
-    binding: before
-  }, {
+  saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
+    lifecycleLedger(transition, storeDir, { phase: "verified", binding: before }), {
     expectedTransitionId: transition.transition_id,
     expectedStatus: "prepared"
   });
@@ -29547,13 +29364,11 @@ async function reconcileLifecycleDispatchLedger(
       transition.status === "verified" &&
       ledger.status === "prepared"
     ) {
-      saveLifecycleTerminalDispatchLedger(terminal.terminalControl, {
-        ...lifecycleLedgerFields(transition, storeDir),
-        status: "verified",
-        binding: transition.before_binding,
-        previous_generation_id:
-          stringValue(ledger.previous_generation_id)
-      }, {
+      saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
+        lifecycleLedger(transition, storeDir, {
+          phase: "verified_with_previous", binding: transition.before_binding,
+          previousGenerationId: stringValue(ledger.previous_generation_id)
+        }), {
         expectedTransitionId: transition.transition_id,
         expectedStatus: "prepared"
       });
@@ -29598,13 +29413,12 @@ async function reconcileLifecycleDispatchLedger(
       }, {
         expectedRevision: nativeThreadTransitionRevision(transition)
       });
-      saveLifecycleTerminalDispatchLedger(terminal.terminalControl, {
-        ...lifecycleLedgerFields(transition, storeDir),
-        status: "resolved",
-        resolved_at: now,
-        reason:
-          "lifecycle dispatcher exited while durably prepared; no terminal input was possible"
-      }, { expectedTransitionId: transitionId });
+      saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
+        lifecycleLedger(transition, storeDir, {
+          phase: "resolved", at: now,
+          reason:
+            "lifecycle dispatcher exited while durably prepared; no terminal input was possible"
+        }), { expectedTransitionId: transitionId });
       return loadTerminalBridgeDispatchLedger(
         terminal.terminalControl
       ) as Record<string, any>;
@@ -29633,13 +29447,12 @@ async function reconcileLifecycleDispatchLedger(
       }, {
         expectedRevision: nativeThreadTransitionRevision(transition)
       });
-      saveLifecycleTerminalDispatchLedger(terminal.terminalControl, {
-        ...lifecycleLedgerFields(transition, storeDir),
-        status: "resolved",
-        resolved_at: now,
-        binding: savedTarget.binding,
-        reason: "revalidated and rolled forward a verified native thread transition"
-      }, { expectedTransitionId: transitionId });
+      saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
+        lifecycleLedger(transition, storeDir, {
+          phase: "resolved_with_binding", at: now,
+          binding: savedTarget.binding,
+          reason: "revalidated and rolled forward a verified native thread transition"
+        }), { expectedTransitionId: transitionId });
       return loadTerminalBridgeDispatchLedger(
         terminal.terminalControl
       ) as Record<string, any>;
@@ -29657,13 +29470,12 @@ async function reconcileLifecycleDispatchLedger(
         storeDir
       });
       assertCommittedLifecycleTarget(storeDir, transition);
-      saveLifecycleTerminalDispatchLedger(terminal.terminalControl, {
-        ...lifecycleLedgerFields(transition, storeDir),
-        status: "resolved",
-        resolved_at: now,
-        binding: transition.after_binding,
-        reason: "revalidated an already committed native thread transition"
-      }, { expectedTransitionId: transitionId });
+      saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
+        lifecycleLedger(transition, storeDir, {
+          phase: "resolved_with_binding", at: now,
+          binding: transition.after_binding,
+          reason: "revalidated an already committed native thread transition"
+        }), { expectedTransitionId: transitionId });
       return loadTerminalBridgeDispatchLedger(
         terminal.terminalControl
       ) as Record<string, any>;
@@ -29679,12 +29491,11 @@ async function reconcileLifecycleDispatchLedger(
         excludedManagedSessionId: transition.source_session_id
       });
       restorePreparedLifecycleSource(storeDir, transition, now);
-      saveLifecycleTerminalDispatchLedger(terminal.terminalControl, {
-        ...lifecycleLedgerFields(transition, storeDir),
-        status: "resolved",
-        resolved_at: now,
-        reason: "native thread transition is already aborted"
-      }, { expectedTransitionId: transitionId });
+      saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
+        lifecycleLedger(transition, storeDir, {
+          phase: "resolved", at: now,
+          reason: "native thread transition is already aborted"
+        }), { expectedTransitionId: transitionId });
       return loadTerminalBridgeDispatchLedger(
         terminal.terminalControl
       ) as Record<string, any>;
@@ -29713,13 +29524,11 @@ async function reconcileLifecycleDispatchLedger(
     }
     quarantineLifecycleSource(storeDir, transition, now,
       "native thread lifecycle dispatcher exited after terminal input may have started");
-    saveLifecycleTerminalDispatchLedger(terminal.terminalControl, {
-      ...lifecycleLedgerFields(transition, storeDir),
-      status: "uncertain",
-      uncertain_at: transition.uncertain_at ?? now,
-      reason:
-        "lifecycle dispatcher exited after terminal input may have started"
-    }, { expectedTransitionId: transitionId });
+    saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
+      lifecycleLedger(transition, storeDir, {
+        phase: "uncertain", at: transition.uncertain_at ?? now,
+        reason: "lifecycle dispatcher exited after terminal input may have started"
+      }), { expectedTransitionId: transitionId });
     return loadTerminalBridgeDispatchLedger(
       terminal.terminalControl
     ) as Record<string, any>;
@@ -30111,13 +29920,11 @@ async function reconcileUncertainLifecycleTransition({
         "operator-authorized recovery observed the exact before-thread identity"
     }, { expectedRevision: nativeThreadTransitionRevision(transition) });
     restorePreparedLifecycleSource(storeDir, transition, now);
-    saveLifecycleTerminalDispatchLedger(terminal.terminalControl, {
-      ...lifecycleLedgerFields(transition, storeDir),
-      status: "resolved",
-      resolved_at: now,
-      reason:
-        "operator-authorized recovery observed exact before identity and rolled back"
-    }, { expectedTransitionId: transition.transition_id });
+    saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
+      lifecycleLedger(transition, storeDir, {
+        phase: "resolved", at: now,
+        reason: "operator-authorized recovery observed exact before identity and rolled back"
+      }), { expectedTransitionId: transition.transition_id });
     return loadTerminalBridgeDispatchLedger(
       terminal.terminalControl
     ) as Record<string, any>;
@@ -30203,14 +30010,12 @@ async function reconcileUncertainLifecycleTransition({
     status: "committed",
     committed_at: now
   }, { expectedRevision: nativeThreadTransitionRevision(transition) });
-  saveLifecycleTerminalDispatchLedger(terminal.terminalControl, {
-    ...lifecycleLedgerFields(transition, storeDir),
-    status: "resolved",
-    resolved_at: now,
-    binding: savedTarget.binding,
-    reason:
-      "operator-authorized recovery observed exact after identity and rolled forward"
-  }, { expectedTransitionId: transition.transition_id });
+  saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
+    lifecycleLedger(transition, storeDir, {
+      phase: "resolved_with_binding", at: now,
+      binding: savedTarget.binding,
+      reason: "operator-authorized recovery observed exact after identity and rolled forward"
+    }), { expectedTransitionId: transition.transition_id });
   return loadTerminalBridgeDispatchLedger(
     terminal.terminalControl
   ) as Record<string, any>;
