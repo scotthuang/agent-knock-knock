@@ -3,27 +3,19 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import {
+  runInProcessCli,
+  VirtualClock
+} from "./in-process-cli-fixtures.js";
 
-const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 const testRuntimeDir = fs.mkdtempSync(
   path.join(os.tmpdir(), "akk-delegate-cli-runtime-")
 );
-const delegateFakeBinDir = path.join(testRuntimeDir, "bin");
-fs.mkdirSync(delegateFakeBinDir, { recursive: true });
-fs.writeFileSync(path.join(delegateFakeBinDir, "ps"), `#!/usr/bin/env node
-const args = process.argv.slice(2);
-if (args.includes("lstart=")) {
-  const pid = args[args.indexOf("-p") + 1] ?? "unknown";
-  process.stdout.write("fixture-process-birth-" + pid + "\\n");
-}
-`, { mode: 0o755 });
-process.env.AKK_RUNTIME_DIR = testRuntimeDir;
 process.on("exit", () => {
   fs.rmSync(testRuntimeDir, { recursive: true, force: true });
 });
 
-test("delegate routes asynchronously to the only idle matching tmux pane", () => {
+test("delegate routes asynchronously to the only idle matching tmux pane", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-delegate-tmux-"));
   const workspace = path.join(tempDir, "workspace");
   const otherWorkspace = path.join(tempDir, "other-workspace");
@@ -32,7 +24,7 @@ test("delegate routes asynchronously to the only idle matching tmux pane", () =>
   try {
     fs.mkdirSync(workspace, { recursive: true });
     fs.mkdirSync(otherWorkspace, { recursive: true });
-    const result = runDelegate([
+    const result = await runDelegate([
       "--agent",
       "codex",
       "--request",
@@ -113,7 +105,7 @@ test("delegate routes asynchronously to the only idle matching tmux pane", () =>
   }
 });
 
-test("a recreated pane keeps the prior receipt immutable while accepting a new delegate", () => {
+test("a recreated pane keeps the prior receipt immutable while accepting a new delegate", async () => {
   const tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-delegate-recreated-pane-")
   );
@@ -163,7 +155,7 @@ test("a recreated pane keeps the prior receipt immutable while accepting a new d
 
   try {
     fs.mkdirSync(workspace, { recursive: true });
-    const first = send({
+    const first = await send({
       request: "First pane incarnation",
       storeDir: path.join(tempDir, "first-store"),
       codexPid: 6101,
@@ -171,7 +163,7 @@ test("a recreated pane keeps the prior receipt immutable while accepting a new d
     });
     assert.equal(first.status, 0, first.stderr || first.stdout);
 
-    const second = send({
+    const second = await send({
       request: "Replacement pane incarnation",
       storeDir: path.join(tempDir, "second-store"),
       codexPid: 6102,
@@ -188,13 +180,13 @@ test("a recreated pane keeps the prior receipt immutable while accepting a new d
   }
 });
 
-test("delegate without an agent selects the only idle supported pane", () => {
+test("delegate without an agent selects the only idle supported pane", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-delegate-any-agent-"));
   const workspace = path.join(tempDir, "workspace");
 
   try {
     fs.mkdirSync(workspace, { recursive: true });
-    const result = runDelegate([
+    const result = await runDelegate([
       "--request",
       "Review the tmux-only delegate flow",
       "--workspace",
@@ -232,13 +224,13 @@ test("delegate without an agent selects the only idle supported pane", () => {
   }
 });
 
-test("delegate without --workspace routes to the only idle pane in its own cwd", () => {
+test("delegate without --workspace routes to the only idle pane in its own cwd", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-delegate-any-workspace-"));
   const paneWorkspace = path.join(tempDir, "pane-workspace");
 
   try {
     fs.mkdirSync(paneWorkspace, { recursive: true });
-    const result = runDelegate([
+    const result = await runDelegate([
       "--request",
       "Review the pane workspace without a global workspace filter",
       "--store-dir",
@@ -278,13 +270,13 @@ test("delegate without --workspace routes to the only idle pane in its own cwd",
   }
 });
 
-test("delegate without an agent gives setup guidance when no idle pane exists", () => {
+test("delegate without an agent gives setup guidance when no idle pane exists", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-delegate-no-pane-"));
   const workspace = path.join(tempDir, "workspace");
 
   try {
     fs.mkdirSync(workspace, { recursive: true });
-    const result = runDelegate([
+    const result = await runDelegate([
       "--request",
       "Implement the requested change",
       "--workspace",
@@ -308,7 +300,7 @@ test("delegate without an agent gives setup guidance when no idle pane exists", 
   }
 });
 
-test("bare delegate without --workspace fails closed across idle pane workspaces", () => {
+test("bare delegate without --workspace fails closed across idle pane workspaces", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-delegate-cross-workspace-"));
   const firstWorkspace = path.join(tempDir, "first-workspace");
   const secondWorkspace = path.join(tempDir, "second-workspace");
@@ -316,7 +308,7 @@ test("bare delegate without --workspace fails closed across idle pane workspaces
   try {
     fs.mkdirSync(firstWorkspace, { recursive: true });
     fs.mkdirSync(secondWorkspace, { recursive: true });
-    const result = runDelegate([
+    const result = await runDelegate([
       "--request",
       "Do not guess which project should receive this task",
       "--store-dir",
@@ -375,13 +367,13 @@ test("bare delegate without --workspace fails closed across idle pane workspaces
   }
 });
 
-test("delegate fails closed when multiple idle matching tmux panes exist", () => {
+test("delegate fails closed when multiple idle matching tmux panes exist", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-delegate-ambiguous-"));
   const workspace = path.join(tempDir, "workspace");
 
   try {
     fs.mkdirSync(workspace, { recursive: true });
-    const result = runDelegate([
+    const result = await runDelegate([
       "--agent",
       "codex",
       "--request",
@@ -439,7 +431,7 @@ test("delegate fails closed when multiple idle matching tmux panes exist", () =>
   }
 });
 
-test("an exact short selector can send across cwd without --workspace", () => {
+test("an exact short selector can send across cwd without --workspace", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-send-cross-workspace-"));
   const firstWorkspace = path.join(tempDir, "first-workspace");
   const selectedWorkspace = path.join(tempDir, "selected-workspace");
@@ -484,7 +476,7 @@ test("an exact short selector can send across cwd without --workspace", () => {
         "codex-selected:0.0": "› "
       }
     });
-    const listed = runCli("list", [
+    const listed = await runCli("list", [
       "--store-dir",
       storeDir,
       ...runtimeArgs
@@ -496,7 +488,7 @@ test("an exact short selector can send across cwd without --workspace", () => {
     );
     assert.match(selected?.short_ref ?? "", /^@[0-9a-f]{10}$/u);
 
-    const sent = runCli("send", [
+    const sent = await runCli("send", [
       "--conversation",
       selected.short_ref,
       "--message",
@@ -517,13 +509,13 @@ test("an exact short selector can send across cwd without --workspace", () => {
   }
 });
 
-test("delegate without an agent fails closed across mixed idle panes", () => {
+test("delegate without an agent fails closed across mixed idle panes", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-delegate-mixed-ambiguous-"));
   const workspace = path.join(tempDir, "workspace");
 
   try {
     fs.mkdirSync(workspace, { recursive: true });
-    const result = runDelegate([
+    const result = await runDelegate([
       "--request",
       "Implement the requested change",
       "--workspace",
@@ -580,7 +572,7 @@ test("delegate without an agent fails closed across mixed idle panes", () => {
   }
 });
 
-test("explicit selectors cannot send outside the configured workspace", () => {
+test("explicit selectors cannot send outside the configured workspace", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-send-workspace-boundary-"));
   const workspace = path.join(tempDir, "workspace");
   const otherWorkspace = path.join(tempDir, "other-workspace");
@@ -619,7 +611,7 @@ test("explicit selectors cannot send outside the configured workspace", () => {
     fs.mkdirSync(workspace, { recursive: true });
     fs.mkdirSync(otherWorkspace, { recursive: true });
 
-    const agentSelector = runCli("send", [
+    const agentSelector = await runCli("send", [
       "--conversation",
       "codex",
       ...commonArgs
@@ -630,7 +622,7 @@ test("explicit selectors cannot send outside the configured workspace", () => {
       /no actionable sessions|does not match|unknown session selector/iu
     );
 
-    const fullId = runCli("send", [
+    const fullId = await runCli("send", [
       "--conversation",
       "terminal:v2:tmux:codex:codex-other:0.0:5102",
       ...commonArgs
@@ -641,7 +633,7 @@ test("explicit selectors cannot send outside the configured workspace", () => {
       /workspace|no longer available/iu
     );
 
-    const mismatchedIdentity = runCli("send", [
+    const mismatchedIdentity = await runCli("send", [
       "--conversation",
       "terminal:v2:tmux:codex:codex-other:0.0:5102",
       "--message",
@@ -682,14 +674,21 @@ function runDelegate(args: string[]) {
 }
 
 function runCli(command: string, args: string[]) {
-  return spawnSync(process.execPath, [binPath, command, ...args], {
-    encoding: "utf8",
+  const clock = new VirtualClock();
+  return runInProcessCli([command, ...args], {
+    cwd: process.cwd(),
     env: {
       ...process.env,
-      PATH: `${delegateFakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      AKK_RUNTIME_DIR: testRuntimeDir,
       AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "1",
       AKK_TEST_TERMINAL_ACCEPTANCE_OUTCOME: "accepted"
-    }
+    },
+    codexProcessBirthForPid: (pid) => `fixture-process-birth-${pid}`,
+    now: clock.now,
+    monotonicNowMs: clock.nowMs,
+    sleep: clock.sleep,
+    sleepSync: clock.sleepSync,
+    runtimeLog() {}
   });
 }
 
