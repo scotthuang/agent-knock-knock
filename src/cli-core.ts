@@ -218,7 +218,6 @@ import {
 } from "./approval-policy.js";
 import {
   decideAcceptedTurnDeadAgentStall,
-  decideVerifiedDeadAgentCompletion,
   decideVerifiedDeadAgentProcess,
   isVerifiedDeadAgentProcessDisposition,
   reconcileVerifiedDeadAgentAuthority,
@@ -289,10 +288,21 @@ import {
   type CallbackProcessDeliveryObservation
 } from "./openclaw-callback-transport.js";
 import {
-  decideTerminalMonitorTimeout,
-  reduceTerminalMonitorActivityPoll,
-  reduceTerminalMonitorCompletionPoll
-} from "./terminal-monitor-poll-policy.js";
+  claudeTranscriptApprovalIdentity,
+  decideTerminalMonitorAfterEffectsTimeout,
+  decideTerminalMonitorApproval,
+  decideTerminalMonitorVerifiedDeadCompletion as decideVerifiedDeadAgentCompletion,
+  reduceTerminalMonitorDecision,
+  terminalMonitorActivityFingerprint as terminalBridgeActivityFingerprint,
+  terminalMonitorActivityPersistIntervalMs as terminalBridgeActivityPersistIntervalMs,
+  terminalMonitorApprovalCandidate as terminalBridgeApprovalCandidate,
+  terminalMonitorApprovalEffectOrder,
+  terminalMonitorApprovalFingerprint as terminalBridgeApprovalFingerprint,
+  terminalMonitorDeadlineAt as deadlineAt,
+  terminalMonitorScreenFingerprint as terminalBridgeScreenFingerprint,
+  validTerminalMonitorTimestampMs as validTimestampMs,
+  type TerminalMonitorNextAction
+} from "./terminal-monitor-decision-policy.js";
 import * as monitorLaunch from "./terminal-monitor-launch-plan.js";
 import * as monitorOwner from "./terminal-monitor-ownership-policy.js";
 import {
@@ -15335,67 +15345,6 @@ async function terminalStatusForControl(
   });
 }
 
-function terminalBridgeApprovalFingerprint({ terminalControl, terminalStatus }) {
-  const approval = isRecord(terminalStatus?.approval_state) ? terminalStatus.approval_state : {};
-  const adapterFingerprint = stringValue(approval.fingerprint);
-  if (adapterFingerprint) {
-    return adapterFingerprint;
-  }
-  if (
-    approval.approvable === true &&
-    (stringValue(approval.decision_mode) ?? "keys") === "keys"
-  ) {
-    return undefined;
-  }
-  const endpoint = terminalEndpointFromControlRef(terminalControl);
-  const processAnchorPid = Number(endpoint.processAnchorPid);
-  if (!Number.isSafeInteger(processAnchorPid) || processAnchorPid <= 1) {
-    throw new Error(
-      "terminal approval fingerprint requires a stable process anchor"
-    );
-  }
-  const screen = isRecord(terminalStatus?.screen) ? terminalStatus.screen : {};
-  return createHash("sha256")
-    .update(JSON.stringify({
-      terminal_identity: terminalEndpointIdentityKey(endpoint),
-      process_anchor_pid: processAnchorPid,
-      keys: approval.keys ?? (approval.key ? [approval.key] : undefined),
-      label: approval.label,
-      prompt_kind: approval.prompt_kind,
-      command: approval.command,
-      tool_name: approval.tool_name,
-      request_detail: approval.request_detail,
-      excerpt: screen.excerpt
-    }))
-    .digest("hex");
-}
-
-function claudeTranscriptApprovalIdentity(approvalState): {
-  requestId: string;
-  evidenceFingerprint: string;
-} | undefined {
-  const policyEvidence = isRecord(approvalState?.policy_evidence)
-    ? approvalState.policy_evidence
-    : undefined;
-  const requestId = stringValue(policyEvidence?.request_id);
-  const evidenceFingerprint = stringValue(
-    policyEvidence?.evidence_fingerprint
-  );
-  if (
-    policyEvidence?.source !== "claude_transcript" ||
-    policyEvidence?.kind !== "run_command" ||
-    !requestId ||
-    !evidenceFingerprint ||
-    !/^[0-9a-f]{64}$/u.test(evidenceFingerprint)
-  ) {
-    return undefined;
-  }
-  return {
-    requestId,
-    evidenceFingerprint
-  };
-}
-
 function assertSafeTerminalSend(
   agent: ExecutorKind,
   terminalStatus
@@ -25591,35 +25540,36 @@ async function runTerminalBridgeMonitorWithLock(
       }
     }
     const approval = terminalStatus.approval_state;
-    const currentScreenFingerprint = stringValue(terminalStatus?.screen?.digest) ??
+    const currentScreenFingerprint =
+      stringValue(terminalStatus?.screen?.digest) ??
       terminalBridgeScreenFingerprint(terminalStatus?.screen?.excerpt);
-    const currentScreenChangedSinceSend = preSendScreenFingerprint !== undefined &&
+    const currentScreenChangedSinceSend =
+      preSendScreenFingerprint !== undefined &&
       currentScreenFingerprint !== undefined &&
       currentScreenFingerprint !== preSendScreenFingerprint;
-    const currentClaudePermissionVisible =
+    const claudePermissionVisible =
       executor.kind === "claude" &&
       isRecord(approval) &&
       approval.blocked === true &&
       approval.prompt_kind === "claude_permission";
-    const lastApprovalMessageMatches =
-      currentMessageId !== undefined &&
-      currentMessageId ===
-      stringValue(nativeTakeover?.terminal_bridge_last_approval_message_id);
-    const lastApprovalPromptCleared =
-      validTimestampMs(
-        nativeTakeover?.terminal_bridge_last_approval_prompt_cleared_at
-      ) !== undefined;
-    if (
-      executor.kind === "claude" &&
-      terminalStatus.reachable === true &&
-      approval.scanned === true &&
-      !currentClaudePermissionVisible &&
-      lastApprovalMessageMatches &&
-      !lastApprovalPromptCleared &&
-      validTimestampMs(
-        nativeTakeover?.terminal_bridge_approval_resolved_at
-      ) !== undefined
-    ) {
+    const approvalObservationFingerprint = claudePermissionVisible
+      ? terminalBridgeApprovalFingerprint({ terminalControl, terminalStatus })
+      : undefined;
+    const approvalDecision = decideTerminalMonitorApproval({
+      executorKind: executor.kind,
+      executorDisplayName: executor.display_name,
+      terminalReachable: terminalStatus.reachable,
+      approval,
+      nativeTakeover,
+      currentMessageId,
+      currentScreenFingerprint,
+      currentScreenChangedSinceSend,
+      observedFingerprint: approvalObservationFingerprint,
+      transcriptIdentity: claudePermissionVisible
+        ? claudeTranscriptApprovalIdentity(approval)
+        : undefined
+    });
+    if (approvalDecision.markPromptCleared) {
       const cleared = markTerminalBridgeApprovalPromptCleared({
         statePath,
         logPath,
@@ -25633,139 +25583,69 @@ async function runTerminalBridgeMonitorWithLock(
           : undefined;
       }
     }
-    let suppressApprovalNotification = false;
-    if (
-      executor.kind === "claude" &&
-      isRecord(approval) &&
-      approval.approvable === true &&
-      approval.decision_mode === "keys" &&
-      !currentScreenChangedSinceSend
-    ) {
-      pollPolicyState = { ...pollPolicyState, previousScreenFingerprint: currentScreenFingerprint };
-      suppressApprovalNotification = true;
-      runtimeLog("warn", "claude_screen_approval_not_new", {
-        conversation_id: conversation.conversation_id,
-        terminal_target: terminalControl.target,
-        reason: "permission screen is not proven to have changed since the managed send"
-      });
-    }
-    if (currentClaudePermissionVisible) {
-      const observedFingerprint = terminalBridgeApprovalFingerprint({
-        terminalControl,
-        terminalStatus
-      });
-      const currentTranscriptIdentity =
-        claudeTranscriptApprovalIdentity(approval);
-      const lastApprovalRequestId = stringValue(
-        nativeTakeover?.terminal_bridge_last_approval_request_id
-      );
-      const lastApprovalEvidenceFingerprint = stringValue(
-        nativeTakeover
-          ?.terminal_bridge_last_approval_evidence_fingerprint
-      );
-      const lastApprovalScreenDigest = stringValue(
-        nativeTakeover?.terminal_bridge_last_approval_screen_digest
-      );
-      const sameConsumedTranscriptRequest =
-        lastApprovalMessageMatches &&
-        currentTranscriptIdentity !== undefined &&
-        (
-          (
-            lastApprovalRequestId !== undefined &&
-            currentTranscriptIdentity.requestId === lastApprovalRequestId
-          ) ||
-          (
-            lastApprovalEvidenceFingerprint !== undefined &&
-            currentTranscriptIdentity.evidenceFingerprint ===
-              lastApprovalEvidenceFingerprint
-          )
-        );
-      const promptClearWasObserved =
-        validTimestampMs(
-          nativeTakeover?.terminal_bridge_last_approval_prompt_cleared_at
-        ) !== undefined;
-      const sameUnrepaintedConsumedScreen =
-        lastApprovalMessageMatches &&
-        currentTranscriptIdentity === undefined &&
-        !promptClearWasObserved &&
-        lastApprovalScreenDigest !== undefined &&
-        currentScreenFingerprint === lastApprovalScreenDigest;
-      const consumedPromptWithoutEvidenceBeforeClear =
-        lastApprovalMessageMatches &&
-        currentTranscriptIdentity === undefined &&
-        !promptClearWasObserved &&
-        stringValue(
-          nativeTakeover?.terminal_bridge_last_approval_fingerprint
-        ) !== undefined;
-      const legacySameConsumedApproval =
-        lastApprovalMessageMatches &&
-        !lastApprovalRequestId &&
-        !lastApprovalEvidenceFingerprint &&
-        !promptClearWasObserved &&
-        (
-          sameUnrepaintedConsumedScreen ||
-          observedFingerprint ===
-            stringValue(
-              nativeTakeover?.terminal_bridge_last_approval_fingerprint
-            )
-        );
-      if (
-        sameConsumedTranscriptRequest ||
-        sameUnrepaintedConsumedScreen ||
-        consumedPromptWithoutEvidenceBeforeClear ||
-        legacySameConsumedApproval
-      ) {
-        pollPolicyState = { ...pollPolicyState, previousScreenFingerprint: currentScreenFingerprint };
-        suppressApprovalNotification = true;
+    for (const suppression of approvalDecision.suppressions) {
+      pollPolicyState = {
+        ...pollPolicyState,
+        previousScreenFingerprint: currentScreenFingerprint
+      };
+      if (suppression.kind === "screen_not_new") {
+        runtimeLog("warn", "claude_screen_approval_not_new", {
+          conversation_id: conversation.conversation_id,
+          terminal_target: terminalControl.target,
+          reason:
+            "permission screen is not proven to have changed since the managed send"
+        });
+      } else {
         runtimeLog("info", "claude_consumed_approval_screen_still_visible", {
           conversation_id: conversation.conversation_id,
           terminal_target: terminalControl.target,
-          fingerprint: observedFingerprint,
-          screen_digest: currentScreenFingerprint,
-          reason: sameConsumedTranscriptRequest
-            ? "same_transcript_request"
-            : sameUnrepaintedConsumedScreen
-              ? "same_unrepainted_screen"
-              : legacySameConsumedApproval
-                ? "legacy_consumed_approval"
-                : "prompt_not_observed_cleared"
+          fingerprint: suppression.fingerprint,
+          screen_digest: suppression.screenDigest,
+          reason: suppression.reason
         });
       }
     }
-    const approvalPromptEvidenceUnavailable =
-      isRecord(approval) &&
-      approval.blocked === true &&
-      approval.approvable === true &&
-      (stringValue(approval.decision_mode) ?? "keys") === "keys" &&
-      !stringValue(approval.fingerprint);
-    if (
-      !suppressApprovalNotification &&
-      isRecord(approval) &&
-      approval.blocked === true &&
-      (
-        approval.approvable !== true ||
-        approvalPromptEvidenceUnavailable
-      )
-    ) {
-      const approvalReason = approvalPromptEvidenceUnavailable
-        ? `${executor.display_name} approval prompt lacks exact prompt-region evidence`
-        : stringValue(approval.reason) ??
-          "Claude Code permission state cannot be safely resolved through AKK";
-      appendEvent(logPath, {
-        ts: cliNow().toISOString(),
-        conversation_id: conversation.conversation_id,
-        event: "terminal_bridge_approval_not_approvable",
-        terminal_control: terminalControl,
-        activity_state: terminalStatus.activity_state,
-        reason: approvalReason
-      });
-      const fingerprint = terminalBridgeApprovalFingerprint({ terminalControl, terminalStatus });
+    if (approvalDecision.notification.kind !== "none") {
+      const question = approvalDecision.notification.kind === "question";
+      const effectOrder = terminalMonitorApprovalEffectOrder(
+        question ? "question" : "error"
+      );
+      const approvalReason = approvalDecision.notification.kind === "error"
+        ? approvalDecision.notification.reason
+        : undefined;
+      let approvalFingerprint = effectOrder[0] === "fingerprint"
+        ? terminalBridgeApprovalFingerprint({ terminalControl, terminalStatus })
+        : undefined;
+      appendEvent(logPath, question
+        ? {
+            ts: cliNow().toISOString(),
+            conversation_id: conversation.conversation_id,
+            event: "terminal_bridge_approval_detected",
+            terminal_control: terminalControl,
+            activity_state: terminalStatus.activity_state,
+            activity_reason: terminalStatus.activity_reason,
+            fingerprint: approvalFingerprint
+          }
+        : {
+            ts: cliNow().toISOString(),
+            conversation_id: conversation.conversation_id,
+            event: "terminal_bridge_approval_not_approvable",
+            terminal_control: terminalControl,
+            activity_state: terminalStatus.activity_state,
+            reason: approvalReason
+          });
+      if (effectOrder[1] === "fingerprint") {
+        approvalFingerprint = terminalBridgeApprovalFingerprint({
+          terminalControl,
+          terminalStatus
+        });
+      }
       const notification = recordTerminalBridgeApprovalNotification({
         statePath,
         logPath,
         terminalControl,
         terminalStatus,
-        fingerprint,
+        fingerprint: approvalFingerprint,
         expectedConversation: {
           conversationId: conversation.conversation_id,
           status: conversation.status,
@@ -25779,29 +25659,58 @@ async function runTerminalBridgeMonitorWithLock(
             logPath,
             conversation: notificationConversation,
             actor: executor.actor,
-            type: "blocked",
-            body: [
-              `${executor.display_name} is waiting at a permission state that AKK cannot safely approve.`,
-              approvalReason,
-              "",
-              `Conversation: ${notificationConversation.conversation_id}`,
-              `Terminal: ${terminalControl.target}`,
-              "Review and resolve this dialog in the terminal manually. AKK intentionally sends no key when the request identity cannot be revalidated."
-            ].join("\n"),
-            metadata: {
-              source: "terminal_bridge",
-              reason: "approval_not_approvable",
-              terminal_control: terminalControl,
-              terminal_status: terminalStatus,
-              approval_fingerprint: fingerprint
-            },
+            type: question ? "question" : "blocked",
+            body: question
+              ? terminalBridgeApprovalInstructions({
+                  conversation: notificationConversation,
+                  terminalControl,
+                  terminalStatus
+                })
+              : [
+                  `${executor.display_name} is waiting at a permission state that AKK cannot safely approve.`,
+                  approvalReason,
+                  "",
+                  `Conversation: ${notificationConversation.conversation_id}`,
+                  `Terminal: ${terminalControl.target}`,
+                  "Review and resolve this dialog in the terminal manually. AKK intentionally sends no key when the request identity cannot be revalidated."
+                ].join("\n"),
+            metadata: question
+              ? {
+                  source: "terminal_bridge",
+                  reason: "approval_required",
+                  terminal_control: terminalControl,
+                  terminal_status: terminalStatus,
+                  approval_fingerprint: approvalFingerprint,
+                  approval_candidate: terminalBridgeApprovalCandidate({
+                    executorKind: executor.kind,
+                    terminalControl,
+                    terminalStatus,
+                    fingerprint: approvalFingerprint
+                  }),
+                  approve_command:
+                    `AKK approve ${notificationConversation.conversation_id} --expected-approval-fingerprint ${approvalFingerprint}`,
+                  deny_command:
+                    `AKK cancel ${notificationConversation.conversation_id}`,
+                  approve_tool: "agent_knock_knock_approve",
+                  deny_tool: "agent_knock_knock_cancel"
+                }
+              : {
+                  source: "terminal_bridge",
+                  reason: "approval_not_approvable",
+                  terminal_control: terminalControl,
+                  terminal_status: terminalStatus,
+                  approval_fingerprint: approvalFingerprint
+                },
             recoverMissingOutbox:
               notificationContext?.recoverMissingOutbox === true
           });
         }
       });
       if (notification.stale) {
-        pollPolicyState = { ...pollPolicyState, previousScreenFingerprint: currentScreenFingerprint };
+        pollPolicyState = {
+          ...pollPolicyState,
+          previousScreenFingerprint: currentScreenFingerprint
+        };
         sleepSync(pollIntervalMs);
         continue;
       }
@@ -25811,112 +25720,19 @@ async function runTerminalBridgeMonitorWithLock(
           monitored: true,
           terminal_bridge: true,
           awaiting_approval: true,
-          approvable: false,
+          ...(!question ? { approvable: false } : {}),
           duplicate: true,
-          reason: approvalReason,
+          ...(!question ? { reason: approvalReason } : {}),
           terminal_control: terminalControl,
           terminal_status: terminalStatus
         });
         return;
       }
       if (notification.recorded?.prepared) {
-        runPreparedCallback(notification.recorded.prepared);
-        return;
-      }
-      printJson({
-        conversation: notification.conversation,
-        monitored: true,
-        terminal_bridge: true,
-        awaiting_approval: true,
-        approvable: false,
-        delivered: false,
-        message: notification.recorded?.callbackMessage,
-        reason: "gateway_method_missing",
-        terminal_control: terminalControl,
-        terminal_status: terminalStatus
-      });
-      return;
-    }
-    if (
-      !suppressApprovalNotification &&
-      isRecord(approval) &&
-      approval.blocked === true
-    ) {
-      const fingerprint = terminalBridgeApprovalFingerprint({ terminalControl, terminalStatus });
-      appendEvent(logPath, {
-        ts: cliNow().toISOString(),
-        conversation_id: conversation.conversation_id,
-        event: "terminal_bridge_approval_detected",
-        terminal_control: terminalControl,
-        activity_state: terminalStatus.activity_state,
-        activity_reason: terminalStatus.activity_reason,
-        fingerprint
-      });
-      const notification = recordTerminalBridgeApprovalNotification({
-        statePath,
-        logPath,
-        terminalControl,
-        terminalStatus,
-        fingerprint,
-        expectedConversation: {
-          conversationId: conversation.conversation_id,
-          status: conversation.status,
-          updatedAt: conversation.updated_at,
-          messageId: currentMessageId
-        },
-        onRecorded: (notificationConversation, notificationContext) => {
-          return callbackOutboxService().prepareApprovalNotification({
-            options: { ...options, statePath },
-            statePath,
-            logPath,
-            conversation: notificationConversation,
-            actor: executor.actor,
-            type: "question",
-            body: terminalBridgeApprovalInstructions({
-              conversation: notificationConversation,
-              terminalControl,
-              terminalStatus
-            }),
-            metadata: {
-              source: "terminal_bridge",
-              reason: "approval_required",
-              terminal_control: terminalControl,
-              terminal_status: terminalStatus,
-              approval_fingerprint: fingerprint,
-              approval_candidate: terminalBridgeApprovalCandidate({
-                executor,
-                terminalControl,
-                terminalStatus,
-                fingerprint
-              }),
-              approve_command: `AKK approve ${notificationConversation.conversation_id} --expected-approval-fingerprint ${fingerprint}`,
-              deny_command: `AKK cancel ${notificationConversation.conversation_id}`,
-              approve_tool: "agent_knock_knock_approve",
-              deny_tool: "agent_knock_knock_cancel"
-            },
-            recoverMissingOutbox:
-              notificationContext?.recoverMissingOutbox === true
-          });
+        if (!question) {
+          runPreparedCallback(notification.recorded.prepared);
+          return;
         }
-      });
-      if (notification.stale) {
-        pollPolicyState = { ...pollPolicyState, previousScreenFingerprint: currentScreenFingerprint };
-        sleepSync(pollIntervalMs);
-        continue;
-      }
-      if (notification.duplicate) {
-        printJson({
-          conversation: notification.conversation,
-          monitored: true,
-          terminal_bridge: true,
-          awaiting_approval: true,
-          duplicate: true,
-          terminal_control: terminalControl,
-          terminal_status: terminalStatus
-        });
-        return;
-      }
-      if (notification.recorded?.prepared) {
         const callbackResult = runPreparedCallback(
           notification.recorded.prepared,
           { emit: false }
@@ -25932,7 +25748,7 @@ async function runTerminalBridgeMonitorWithLock(
             event:
               "terminal_bridge_test_exit_after_approval_callback_delivered",
             terminal_control: terminalControl,
-            fingerprint
+            fingerprint: approvalFingerprint
           });
           cliExit(86);
         }
@@ -25950,10 +25766,12 @@ async function runTerminalBridgeMonitorWithLock(
           ) === currentMessageId &&
           stringValue(
             afterTakeover?.terminal_bridge_last_approval_fingerprint
-          ) === fingerprint;
+          ) === approvalFingerprint;
         if (approvalWasConsumed) {
           conversation = afterCallback;
-          pollPolicyState = { previousScreenFingerprint: currentScreenFingerprint };
+          pollPolicyState = {
+            previousScreenFingerprint: currentScreenFingerprint
+          };
           lastActivityAtMs =
             validTimestampMs(
               afterTakeover?.terminal_bridge_last_activity_at
@@ -25967,7 +25785,7 @@ async function runTerminalBridgeMonitorWithLock(
             conversation_id: conversation.conversation_id,
             event: "terminal_bridge_monitor_continued_after_approval",
             terminal_control: terminalControl,
-            fingerprint
+            fingerprint: approvalFingerprint
           });
           sleepSync(pollIntervalMs);
           continue;
@@ -25980,6 +25798,7 @@ async function runTerminalBridgeMonitorWithLock(
         monitored: true,
         terminal_bridge: true,
         awaiting_approval: true,
+        ...(!question ? { approvable: false } : {}),
         delivered: false,
         message: notification.recorded?.callbackMessage,
         reason: "gateway_method_missing",
@@ -25988,7 +25807,6 @@ async function runTerminalBridgeMonitorWithLock(
       });
       return;
     }
-
     const durableCompletion = poll.durableCompletion;
     const durableFingerprint = durableCompletion
       ? terminalBridgeActivityFingerprint(JSON.stringify({
@@ -25998,14 +25816,27 @@ async function runTerminalBridgeMonitorWithLock(
           metadata: durableCompletion.metadata
         }))
       : undefined;
-    const activityPollDecision = reduceTerminalMonitorActivityPoll({
+    const completion = poll.completion;
+    const completionMetadata = isRecord(completion?.metadata)
+      ? completion.metadata
+      : {};
+    const completionFingerprint = completion
+      ? terminalBridgeCompletionFingerprint({
+          completion,
+          terminalMessageId: currentMessageId
+        })
+      : undefined;
+    const monitorDecision = reduceTerminalMonitorDecision({
       state: pollPolicyState,
       activityState: terminalStatus.activity_state,
       activityReason: terminalStatus.activity_reason,
       screenFingerprint: currentScreenFingerprint,
-      durableFingerprint
+      durableFingerprint,
+      completionPresent: Boolean(completion),
+      completionFingerprint
     });
-    pollPolicyState = activityPollDecision.state;
+    pollPolicyState = monitorDecision.state;
+    const activityPollDecision = monitorDecision.activity;
     if (activityPollDecision.activityReason !== undefined) {
       const observedAtMs = cliNowMs();
       lastActivityAtMs = observedAtMs;
@@ -26032,21 +25863,8 @@ async function runTerminalBridgeMonitorWithLock(
       }
     }
 
-    const completion = poll.completion;
-    const completionMetadata = isRecord(completion?.metadata) ? completion.metadata : {};
-    const completionFingerprint = completion
-      ? terminalBridgeCompletionFingerprint({
-          completion,
-          terminalMessageId: currentMessageId
-        })
-      : undefined;
-    const completionPollDecision = reduceTerminalMonitorCompletionPoll({
-      state: pollPolicyState,
-      completionPresent: Boolean(completion),
-      completionFingerprint
-    });
-    pollPolicyState = completionPollDecision.state;
-    if (completion && completionPollDecision.completionStable && completionFingerprint) {
+    const nextAction: TerminalMonitorNextAction = monitorDecision.next;
+    if (completion && nextAction.kind === "complete") {
       const preparedCompletion = prepareTerminalBridgeCompletionCallback({
         options,
         statePath,
@@ -26056,7 +25874,7 @@ async function runTerminalBridgeMonitorWithLock(
         terminalControl,
         terminalMessageId: currentMessageId,
         completion,
-        completionFingerprint
+        completionFingerprint: nextAction.completionFingerprint
       });
       if (!preparedCompletion.claimed) {
         printJson({
@@ -26077,7 +25895,7 @@ async function runTerminalBridgeMonitorWithLock(
     // process may exit immediately after committing its final transcript, so
     // only classify the Turn as orphaned after this poll (and an independent
     // durable probe under the mutation locks) both find no completion.
-    if (completionPollDecision.checkVerifiedDeadAgent) {
+    if (nextAction.kind === "verify_dead") {
       const deadProcessStall = await stallAcceptedTurnForVerifiedDeadAgent({
         options,
         storeDir: pathsForConversationDir(path.dirname(statePath)).storeDir,
@@ -26116,14 +25934,14 @@ async function runTerminalBridgeMonitorWithLock(
 
     // A concrete approval or completion observed on this poll wins over a timeout boundary.
     const nowMs = cliNowMs();
-    const timeoutDecision = decideTerminalMonitorTimeout({
+    const timeoutAction = decideTerminalMonitorAfterEffectsTimeout({
       nowMs,
       taskStartedAtMs,
       lastActivityAtMs,
       hardTimeoutMinutes,
       inactivityTimeoutMinutes: timeoutMinutes
     });
-    if (timeoutDecision.kind === "hard") {
+    if (timeoutAction.kind === "hard_timeout") {
       appendEvent(logPath, {
         ts: new Date(nowMs).toISOString(),
         conversation_id: conversation.conversation_id,
@@ -26159,7 +25977,7 @@ async function runTerminalBridgeMonitorWithLock(
       return;
     }
 
-    if (timeoutDecision.kind === "inactivity") {
+    if (timeoutAction.kind === "inactivity_timeout") {
       const stalledConversation = markConversationStalled({
         statePath,
         logPath,
@@ -26170,7 +25988,7 @@ async function runTerminalBridgeMonitorWithLock(
           match: completionMetadata.context_match,
           terminal_activity_state: terminalStatus.activity_state,
           last_activity_at: new Date(lastActivityAtMs).toISOString(),
-          inactivity_deadline_at: new Date(timeoutDecision.deadlineAtMs).toISOString(),
+          inactivity_deadline_at: new Date(timeoutAction.deadlineAtMs).toISOString(),
           agent_timeout_minutes: timeoutMinutes
         }
       });
@@ -26186,29 +26004,6 @@ async function runTerminalBridgeMonitorWithLock(
 
     sleepSync(pollIntervalMs);
   }
-}
-
-function validTimestampMs(value): number | undefined {
-  const parsed = Date.parse(String(value ?? ""));
-  return Number.isFinite(parsed) ? parsed : undefined;
-}
-
-function deadlineAt(startedAt, timeoutMinutes: number): string | undefined {
-  const startedAtMs = validTimestampMs(startedAt);
-  return startedAtMs !== undefined && Number.isFinite(timeoutMinutes) && timeoutMinutes > 0
-    ? new Date(startedAtMs + timeoutMinutes * 60 * 1000).toISOString()
-    : undefined;
-}
-
-function terminalBridgeActivityFingerprint(value): string | undefined {
-  const text = stringValue(value);
-  return text ? createHash("sha256").update(text).digest("hex") : undefined;
-}
-
-function terminalBridgeScreenFingerprint(value): string | undefined {
-  return typeof value === "string"
-    ? createHash("sha256").update(value).digest("hex")
-    : undefined;
 }
 
 function activeTerminalBridgeMonitorOwner(
@@ -30823,13 +30618,6 @@ function prepareTerminalBridgeCompletionCallbackWithLocksHeld({
   });
 }
 
-function terminalBridgeActivityPersistIntervalMs(timeoutMinutes: number, pollIntervalMs: number): number {
-  if (!Number.isFinite(timeoutMinutes) || timeoutMinutes <= 0) {
-    return 5 * 60 * 1000;
-  }
-  return Math.max(pollIntervalMs, Math.min(timeoutMinutes * 30 * 1000, 5 * 60 * 1000));
-}
-
 function persistTerminalBridgeActivity({
   conversation,
   statePath,
@@ -31023,46 +30811,6 @@ function persistTerminalBridgeDetectorDiagnostic({
       releaseLock();
     }
   });
-}
-
-function terminalBridgeApprovalCandidate({ executor, terminalControl, terminalStatus, fingerprint }) {
-  const approval = isRecord(terminalStatus?.approval_state) ? terminalStatus.approval_state : {};
-  if (approval.approvable !== true) {
-    return undefined;
-  }
-  const policyEvidence = isRecord(approval.policy_evidence)
-    ? approval.policy_evidence
-    : undefined;
-  const localClaudeEvidence =
-    executor.kind === "claude" &&
-    policyEvidence?.source === "claude_transcript" &&
-    policyEvidence?.kind === "run_command";
-  return {
-    agent: executor.kind,
-    kind: localClaudeEvidence
-      ? "run_command"
-      : stringValue(approval.prompt_kind) ?? "unknown",
-    command: localClaudeEvidence ? undefined : stringValue(approval.command),
-    tool_name: stringValue(approval.tool_name),
-    request_detail: stringValue(approval.request_detail),
-    cwd: stringValue(approval.cwd) ?? terminalControl.currentPath,
-    fingerprint,
-    terminal_target: terminalControl.target,
-    decision_mode: stringValue(approval.decision_mode),
-    ...(localClaudeEvidence
-      ? {
-          command_source: "executor_local",
-          policy_evidence: {
-            source: "claude_transcript",
-            kind: "run_command",
-            command_sha256: stringValue(policyEvidence.command_sha256),
-            evidence_fingerprint:
-              stringValue(policyEvidence.evidence_fingerprint),
-            request_id: stringValue(policyEvidence.request_id)
-          }
-        }
-      : {})
-  };
 }
 
 async function loadCodexTerminalContexts({ nativeTakeover, options }) {

@@ -49,6 +49,7 @@
     "test/terminal-dispatch-ledger-codec.test.ts",
     "test/terminal-dispatch-policy.test.ts",
     "test/terminal-list-renderer.test.ts",
+    "test/terminal-monitor-decision-policy.test.ts",
     "test/terminal-monitor-poll-policy.test.ts",
     "test/terminal-monitor-seams.test.ts",
     "test/terminal-process-source.test.ts",

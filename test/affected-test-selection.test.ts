@@ -159,25 +159,28 @@ test("callback transport selects delivery, recovery, and plugin parity coverage"
   );
 });
 
-test("terminal monitor poll policy selects its timeout and recovery parity set", async () => {
+test("terminal monitor decision and poll policies select their parity set", async () => {
   const selection = await loadSelectionModule();
   const tiers = loadTiers();
   const expected = [
     "test/shards/agent-cli-claude-callback.test.ts",
     "test/shards/agent-cli-monitor-recovery.test.ts",
     "test/shards/agent-cli-monitor-lifecycle.test.ts",
-    "test/shards/agent-cli-session-acceptance.test.ts"
+    "test/shards/agent-cli-session-acceptance.test.ts",
+    "test/shards/agent-cli-monitor-approval-context.test.ts"
   ];
-  assert.deepEqual(
-    selection.selectAffectedTests(["src/terminal-monitor-poll-policy.ts"], tiers),
-    {
+  for (const changedPath of [
+    "src/terminal-monitor-decision-policy.ts",
+    "src/terminal-monitor-poll-policy.ts"
+  ]) {
+    assert.deepEqual(selection.selectAffectedTests([changedPath], tiers), {
       mode: "targeted",
-      changedPaths: ["src/terminal-monitor-poll-policy.ts"],
+      changedPaths: [changedPath],
       integrationFiles: tiers.integration.filter((testPath) =>
         expected.includes(testPath)
       )
-    }
-  );
+    });
+  }
 });
 
 test("terminal monitor supervision seams select launch and recovery parity", async () => {

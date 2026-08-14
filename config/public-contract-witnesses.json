@@ -305,6 +305,12 @@
       "needle": "terminal approval notification releases the state lock during callback delivery and preserves concurrent close"
     },
     {
+      "id": "monitor-decision-unit",
+      "path": "test/terminal-monitor-decision-policy.test.ts",
+      "tier": "fast",
+      "needle": "approval decision table preserves clear, suppression, question, and error precedence"
+    },
+    {
       "id": "monitor-lifecycle-boundary",
       "path": "test/shards/agent-cli-monitor-lifecycle.test.ts",
       "tier": "integration",
@@ -526,6 +532,7 @@
         "monitor-recovery-boundary"
       ],
       "service_invariant_witnesses": [
+        "monitor-decision-unit",
         "monitor-poll-unit",
         "monitor-seams-unit"
       ],

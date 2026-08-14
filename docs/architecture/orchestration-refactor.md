@@ -568,7 +568,7 @@ delivery cost.
 | Dispatch policy, zero-input abort reducer, and ledger codec | Pure preflight/abort precedence plus v1/v2 decode, construction, receipt merge, and validation | Ledger path selection, no-follow reads, atomic rename/fsync, Store locks, terminal input, and CLI formatting remain in the shell | reducer tables, codec byte/order tests, replay, receipt-fence, send-gate, and recovery tests; codec changes select the full tier |
 | Lifecycle transition policy | Candidate/target classification and transition phase reduction | Terminal observation, transition CAS, deferred transfer, input, and recovery writes remain in the shell | transition tables and lifecycle/recovery integration |
 | Callback policy, transport, and settlement | Retry decisions; Gateway process adapter; delivery progress/success/failure settlement | CLI composition owns the clock, state transaction, retry launcher, output, and callback preparation | retry matrix, exact transport call ordering, settlement write-order tests, and callback integration |
-| Monitor seams | Poll fingerprint/timeout reduction and launch/ownership plans | Poll I/O, supervision process management, state/event writes, callback preparation, and terminal locks remain in the shell | poll/launch tables and monitor recovery/lifecycle/approval integration |
+| Monitor seams | Approval clearing/suppression/notification, activity/completion/death/timeout decisions, fingerprint facts, and launch/ownership plans | Poll I/O, supervision process management, state/event writes, callback preparation, and terminal locks remain in the shell | decision/poll/launch tables and monitor recovery/lifecycle/approval integration |
 | Terminal list renderer | Pure managed-Turn and action-contract projection from sampled facts | Store, process, ledger, Session, approval, and token observations remain in `cli-core.ts`; mutation never consumes list authority | exact v16 action order plus list/session/handoff integration |
 | Conversation trace | Bounded executor-log parsing, secret redaction, and monitor-event projection | Status routing and conversation/event loading remain in `cli-core.ts`; the module performs only the existing optional read of the selected output log | exact parser/redaction/fallback unit tests plus management CLI integration |
 | CLI runtime context | Per-execution dependency, output, clock, sleep, exit, and logging context | No business policy or persistent state moved into the runtime | nested and concurrent async-context isolation tests |
@@ -695,6 +695,39 @@ completion claim success/conflict and lock release, stable approval identity,
 and the no-Gateway branch. Existing policy, settlement, transport, callback,
 Claude, approval, monitor lifecycle, monitor recovery, and OpenClaw contract
 witnesses remain the black-box boundary set.
+
+## Terminal monitor decision policy
+
+The monitor decision milestone moves one pure policy boundary out of the CLI
+composition root. It owns completion-first poll reduction, approval prompt
+clearing, question/error classification, every consumed-prompt suppression,
+verified-dead completion classification, post-effect timeout classification,
+activity cadence, and stable approval/activity/screen identity facts. It
+directly composes the existing poll and verified-dead policies and performs no
+I/O, locking, process access, callback delivery, or CLI presentation.
+
+Measured against exact head `e62a79cc94428ddb9a5c264600f259ca4d05ee0c`,
+the extraction reduces `src/cli-core.ts` from 32,398 to 32,146 physical lines
+(-252) and changes total production TypeScript from 75,934 to 76,076 (+142).
+The 42-line excess over the preferred +100 budget is the reviewed, explicit
+typed decision surface and direct proofability; no formatting compression or
+unrelated responsibility movement is used. The 394-line module remains below
+the 500-line hard boundary, every new function remains below 100 physical
+lines, and the hard approximate-complexity maximum is 27. The approval reducer
+(67/27) and consumed-approval classifier (58/23) are transparent exceptions to
+the default complexity-20 target: their branch tables stay cohesive and direct
+tests lock every precedence path.
+
+The composition root still owns terminal singleton, Store-writer and state
+locks; terminal observation and input adapters; process launch and death
+probing; state/event/outbox writes; callback continuation; clocks and sleeping;
+and public JSON/log presentation. Approval effects retain their asymmetric
+durable order: question follows `fingerprint -> event -> record`, while an
+unapprovable or evidence error follows `event -> fingerprint -> record`.
+Polling retains `activity -> completion -> verified-dead -> fresh clock ->
+timeout`, so work performed by persistence or the death probe can cross a
+deadline without deferring the timeout by one poll. Application orchestration
+and those effect ports remain the follow-on monitor service milestone.
 
 ## Soft freeze while #126 is active
 
