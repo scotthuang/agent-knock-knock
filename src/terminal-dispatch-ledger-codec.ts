@@ -1,9 +1,15 @@
 import {
+  hasCanonicalTerminalEndpoint,
   sameTerminalControlEvidenceIncarnation,
   sameTerminalEndpointIdentity,
+  terminalControlEvidence,
   terminalEndpointIdentityFromEvidence,
   type TerminalControlRef
 } from "./terminal-control-ref.js";
+import type {
+  ManagedTerminalBinding,
+  NativeThreadTransition
+} from "./managed-session.js";
 import type { TerminalSubmissionAcceptanceEvidence } from "./terminal-submission-acceptance.js";
 import { canonicalJson } from "./canonical-json.js";
 import {
@@ -66,6 +72,145 @@ export const constructTerminalOrdinaryDispatchLedger = (
   ...(options.postCallbackFields ?? {}),
   previous_generation_id: options.previousGenerationId
 });
+
+const LIFECYCLE_IDENTITY_KEYS = ["kind", "generation_id", "transition_id"] as const;
+const LIFECYCLE_TERMINAL_KEYS = [
+  "terminal_id", "agent", "workspace", "adapter_version", "command_fingerprint"
+] as const;
+const LIFECYCLE_TARGET_KEYS = [
+  "source_session_id", "target_session_id", "target_native_thread_id",
+  "target_candidate_file_identity"
+] as const;
+const LIFECYCLE_BEFORE_KEYS = [
+  "before_native_thread_id", "before_process_uuid", "before_process_started_at",
+  "before_process_birth", "before_process_rollout"
+] as const;
+const LIFECYCLE_BASE_KEYS = [
+  ...LIFECYCLE_IDENTITY_KEYS, "operation", "origin", "terminal_input_sent",
+  ...LIFECYCLE_TERMINAL_KEYS, ...LIFECYCLE_TARGET_KEYS, "native_thread_id",
+  ...LIFECYCLE_BEFORE_KEYS, "store_dir", "prepared_at", "dispatching_at",
+  "submitted_at", "verified_at", "dispatcher_pid", "binding"
+] as const;
+
+const lifecycleFields = (
+  transition: NativeThreadTransition, storeDir: string, keys: readonly string[]
+): TerminalDispatchLedgerDocument => {
+  const values: TerminalDispatchLedgerDocument = {
+    ...transition,
+    kind: "lifecycle",
+    generation_id: transition.transition_id,
+    transition_id: transition.transition_id,
+    native_thread_id: transition.after_binding?.native_thread_id ??
+      transition.before_native_thread_id,
+    store_dir: storeDir,
+    binding: transition.before_binding
+  };
+  return Object.fromEntries(keys.map((key) => [key, values[key]]));
+};
+
+type LifecycleLedgerError = NonNullable<TerminalOrdinaryDispatchPhaseFields["error"]>;
+type LifecycleBinding = ManagedTerminalBinding | undefined;
+type PreviousLifecycleLedger = TerminalDispatchLedgerDocument | undefined;
+const previousLifecycleGenerationId = (ledger: PreviousLifecycleLedger): string | undefined =>
+  stringValue(ledger?.generation_id) ?? stringValue(ledger?.message_id);
+type NativeThreadLifecycleLedgerPhase =
+  | { phase: "prepared"; previous: PreviousLifecycleLedger; targetNativeThreadId: string }
+  | { phase: "verified"; binding: LifecycleBinding }
+  | { phase: "verified_with_previous"; binding: LifecycleBinding; previousGenerationId?: string }
+  | { phase: "resolved" | "uncertain"; at: string; reason: string }
+  | { phase: "resolved_with_binding"; at: string; binding: LifecycleBinding; reason: string }
+  | { phase: "uncertain_reason_error"; at: string; reason: string; error: LifecycleLedgerError }
+  | { phase: "uncertain_error_reason"; at: string; error: LifecycleLedgerError; reason: string }
+  | { phase: "rebuild"; control: TerminalControlRef; previous: PreviousLifecycleLedger }
+  | { phase: "command_prepared" | "command_dispatching" | "command_submitted";
+      previous: PreviousLifecycleLedger }
+  | { phase: "command_resolved"; at: string; binding: ManagedTerminalBinding; reason: string };
+
+function lifecycleCommandLedger(
+  transition: NativeThreadTransition,
+  storeDir: string,
+  phase: Extract<NativeThreadLifecycleLedgerPhase, { phase: `command_${string}` }>
+): TerminalDispatchLedgerDocument {
+  const status = phase.phase.slice("command_".length);
+  if (phase.phase === "command_resolved") {
+    const keys = [
+      ...LIFECYCLE_IDENTITY_KEYS, ...LIFECYCLE_TERMINAL_KEYS, "operation",
+      ...LIFECYCLE_TARGET_KEYS, "store_dir", "prepared_at", "submitted_at", "verified_at"
+    ] as const;
+    return Object.assign({ status }, lifecycleFields(transition, storeDir, keys), {
+      target_native_thread_id: phase.binding.native_thread_id,
+      resolved_at: phase.at, dispatcher_pid: transition.dispatcher_pid,
+      binding: phase.binding, reason: phase.reason
+    });
+  }
+  const keys = phase.phase === "command_prepared"
+    ? [
+        ...LIFECYCLE_IDENTITY_KEYS, "operation", ...LIFECYCLE_TERMINAL_KEYS,
+        ...LIFECYCLE_TARGET_KEYS, ...LIFECYCLE_BEFORE_KEYS, "store_dir", "prepared_at",
+        "dispatcher_pid", "binding"
+      ] as const
+    : [
+        ...LIFECYCLE_IDENTITY_KEYS, ...LIFECYCLE_TERMINAL_KEYS, "operation",
+        ...LIFECYCLE_TARGET_KEYS, ...LIFECYCLE_BEFORE_KEYS, "store_dir", "prepared_at",
+        `${status}_at`, "dispatcher_pid", "binding"
+      ] as const;
+  return Object.assign({ status }, lifecycleFields(transition, storeDir, keys), {
+    previous_generation_id: previousLifecycleGenerationId(phase.previous)
+  });
+}
+
+/** Pure phase builder; persistence and lifecycle CAS remain with the caller. */
+export function nativeThreadLifecycleLedger(
+  transition: NativeThreadTransition,
+  storeDir: string,
+  phase: NativeThreadLifecycleLedgerPhase
+): TerminalDispatchLedgerDocument {
+  const base = lifecycleFields(transition, storeDir, LIFECYCLE_BASE_KEYS);
+  const append = (...entries: ReadonlyArray<readonly [string, unknown]>) =>
+    Object.assign({ ...base }, Object.fromEntries(entries));
+  switch (phase.phase) {
+    case "prepared":
+      return append(
+        ["status", "prepared"], ["target_native_thread_id", phase.targetNativeThreadId],
+        ["previous_generation_id", previousLifecycleGenerationId(phase.previous)]
+      );
+    case "verified":
+      return append(["status", "verified"], ["binding", phase.binding]);
+    case "verified_with_previous":
+      return append(["status", "verified"], ["binding", phase.binding],
+        ["previous_generation_id", phase.previousGenerationId]);
+    case "resolved":
+    case "uncertain":
+      return append(["status", phase.phase], [`${phase.phase}_at`, phase.at],
+        ["reason", phase.reason]);
+    case "resolved_with_binding":
+      return append(["status", "resolved"], ["resolved_at", phase.at],
+        ["binding", phase.binding], ["reason", phase.reason]);
+    case "uncertain_reason_error":
+      return append(["status", "uncertain"], ["uncertain_at", phase.at],
+        ["reason", phase.reason], ["error", phase.error]);
+    case "uncertain_error_reason":
+      return append(["status", "uncertain"], ["uncertain_at", phase.at],
+        ["error", phase.error], ["reason", phase.reason]);
+    case "rebuild":
+      return append(
+        ["status", transition.status], ["binding", transition.before_binding],
+        ["terminal_control", {
+          kind: phase.control.kind,
+          target: phase.control.target,
+          socket_path: phase.control.socketPath ?? null,
+          pane_pid: phase.control.panePid ?? null,
+          current_path: phase.control.currentPath ?? null
+        }],
+        ...(hasCanonicalTerminalEndpoint(phase.control)
+          ? [["terminal_endpoint", terminalControlEvidence(phase.control)]] as const
+          : []),
+        ["previous_generation_id", previousLifecycleGenerationId(phase.previous)]
+      );
+    default:
+      return lifecycleCommandLedger(transition, storeDir, phase);
+  }
+}
 
 const RECEIPT_STATUSES = new Set([
   "text_injected",
