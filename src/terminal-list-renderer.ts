@@ -1,4 +1,8 @@
 import { sessionShortRef } from "./session-selector.js";
+import {
+  managedSessionBindingToken,
+  type ManagedSessionState
+} from "./managed-session.js";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -479,6 +483,144 @@ export function renderAvailableListActions(
     };
   }
   return actions;
+}
+
+const CURRENT_TURN_ACTIONS = [
+  "status", "respond", "approve", "cancel", "renew", "retry_callback"
+] as const;
+
+export function currentTerminalActions(currentTurn: JsonRecord | undefined): JsonRecord {
+  if (!currentTurn || !isRecord(currentTurn.available_actions)) {
+    return {};
+  }
+  const actions: JsonRecord = {};
+  for (const action of CURRENT_TURN_ACTIONS) {
+    if (isRecord(currentTurn.available_actions[action])) {
+      actions[action] = currentTurn.available_actions[action];
+    }
+  }
+  return actions;
+}
+
+export function safeTerminalActionsDuringConflict(rawActions: JsonRecord): JsonRecord {
+  const actions: JsonRecord = {};
+  for (const action of ["status", "close"] as const) {
+    if (isRecord(rawActions[action])) {
+      actions[action] = rawActions[action];
+    }
+  }
+  return actions;
+}
+
+export function sendActionForManagedSession(action: JsonRecord, sessionId: string): JsonRecord {
+  const { selector: _selector, ...existingArguments } = isRecord(action.arguments)
+    ? action.arguments
+    : {};
+  return {
+    ...action,
+    arguments: {
+      ...existingArguments,
+      session_id: sessionId
+    }
+  };
+}
+
+export function actionsForManagedSessionBinding(
+  actions: JsonRecord,
+  session: ManagedSessionState
+): JsonRecord {
+  const token = managedSessionBindingToken(session);
+  const next = { ...actions };
+  for (const actionName of ["new_thread", "resume_thread", "native_inspect"] as const) {
+    const action = isRecord(next[actionName]) ? next[actionName] : undefined;
+    if (!action) {
+      continue;
+    }
+    next[actionName] = {
+      ...action,
+      arguments: {
+        ...(isRecord(action.arguments) ? action.arguments : {}),
+        expected_binding_token: token
+      }
+    };
+  }
+  return next;
+}
+
+export function safeUnavailableManagedTurnActions(actionsValue: JsonRecord): JsonRecord {
+  const actions: JsonRecord = {};
+  for (const action of ["status", "retry_callback", "close"] as const) {
+    if (isRecord(actionsValue[action])) {
+      actions[action] = actionsValue[action];
+    }
+  }
+  return actions;
+}
+
+export function readOnlyListActions(actionsValue: JsonRecord): JsonRecord {
+  return isRecord(actionsValue.status)
+    ? { status: actionsValue.status }
+    : {};
+}
+
+export function readOnlyManagedTurn(managedTurn: JsonRecord): JsonRecord {
+  return {
+    ...managedTurn,
+    available_actions: readOnlyListActions(
+      isRecord(managedTurn.available_actions)
+        ? managedTurn.available_actions
+        : {}
+    )
+  };
+}
+
+export function withoutGenericHandoffSourceClose(
+  managedTurn: JsonRecord,
+  blockingHandoffTurnIds: ReadonlySet<string>
+): JsonRecord {
+  const conversationId = stringValue(managedTurn.conversation_id);
+  if (!conversationId || !blockingHandoffTurnIds.has(conversationId)) {
+    return managedTurn;
+  }
+  const availableActions = isRecord(managedTurn.available_actions)
+    ? managedTurn.available_actions
+    : {};
+  const { close: _genericClose, ...safeActions } = availableActions;
+  return {
+    ...managedTurn,
+    available_actions: safeActions
+  };
+}
+
+export function retargetConversationAction(
+  action: JsonRecord,
+  conversationId: string
+): JsonRecord {
+  const beforeCall = isRecord(action.before_call)
+    ? action.before_call
+    : undefined;
+  return {
+    ...action,
+    arguments: {
+      ...(isRecord(action.arguments) ? action.arguments : {}),
+      turn_id: conversationId,
+      conversation_id: undefined
+    },
+    ...(beforeCall
+      ? {
+          before_call: {
+            ...beforeCall,
+            arguments: {
+              ...(isRecord(beforeCall.arguments)
+                ? beforeCall.arguments
+                : {}),
+              turn_id: conversationId,
+              conversation_id: undefined
+            }
+          }
+        }
+      : {})
+  };
 }
 
 function renderCancelListAction(
