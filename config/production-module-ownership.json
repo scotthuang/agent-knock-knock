@@ -2,8 +2,8 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 20051,
-    "production_physical_loc": 84907,
+    "cli_core_max_physical_loc": 19901,
+    "production_physical_loc": 84949,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -84,6 +84,16 @@
     },
     "durable-json-file": {
       "selection": "full"
+    },
+    "file-lock-infrastructure": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/callback-cli.test.ts",
+        "test/native-thread-lifecycle-recovery-cli.test.ts",
+        "test/shards/agent-cli-control-locks.test.ts",
+        "test/shards/agent-cli-dispatch-recovery.test.ts",
+        "test/shards/agent-cli-monitor-recovery.test.ts"
+      ]
     },
     "install-doctor": {
       "selection": "targeted",
@@ -449,6 +459,10 @@
     {
       "path": "src/executors.ts",
       "owner": "cli-runtime"
+    },
+    {
+      "path": "src/file-lock-cli-adapter.ts",
+      "owner": "file-lock-infrastructure"
     },
     {
       "path": "src/herdr-terminal-control-provider.ts",

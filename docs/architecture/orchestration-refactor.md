@@ -1412,6 +1412,30 @@ facade isolation. Focused list, delegate, Session-selector, action projection,
 and process-source witnesses retain Store/terminal/error priority, the second
 Session lookup on mismatch, stale-list versus fresh-mutation separation, and
 public token bytes.
+## Generic CLI file-lock infrastructure
+
+The synchronous generic file-lock protocol now lives in
+`file-lock-cli-adapter.ts`. The adapter owns only exclusive private-file
+creation, stale-owner probing, reclaim-guard cleanup, token-matched release,
+and legacy owner decoding. Store leases, terminal routing, lifecycle ledgers,
+monitor ownership, callback policy, and deferred-transfer decisions remain in
+their existing owners.
+
+The factory receives typed clock, PID, sleep, nonce, process-signal, and
+filesystem ports and retains no mutable global configuration. `cli-core.ts`
+binds its existing async-local clock/PID/sleep functions once; those functions
+still resolve the active command context at each lock call. All 28 acquisition
+call sites keep the same lock path, timeout/retry options, returned release
+closure, and surrounding `try`/`finally` order. The one stale probe and one
+owner read also retain their previous query inputs and results.
+
+Against exact parent `59983e63c8e5569d27e6396dc0961433e3a6ec34`, the move
+reduces `cli-core.ts` from 20,051 to 19,901 physical lines (-150). The new
+infrastructure module is 192 lines, so production grows from 84,907 to 84,949
+(+42, below both the 50-line target and the 150-line core movement). Direct
+recording tests lock acquisition/write/close/release order, live-owner timeout
+cleanup, dead-owner reclaim-before-retry, and descriptor close-before-error
+propagation. No file-lock behavior or error precedence changes.
 
 ## Soft freeze while #126 is active
 

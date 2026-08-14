@@ -23,6 +23,7 @@
     "test/durable-json-file.test.ts",
     "test/doctor-capabilities.test.ts",
     "test/executors.test.ts",
+    "test/file-lock-cli-adapter.test.ts",
     "test/herdr-terminal-control-provider.test.ts",
     "test/live-lifecycle-evidence.test.ts",
     "test/live-lifecycle-smoke-evidence.test.ts",
