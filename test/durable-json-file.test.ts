@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  atomicReplacePrivateJsonFile,
   atomicSaveJsonFile,
   readJsonFileNoFollow
 } from "../src/durable-json-file.js";
@@ -77,5 +78,77 @@ test("atomic replacement refuses a symbolic-link destination", () => {
       /record state file must be a regular file/u
     );
     assert.equal(fs.readFileSync(target, "utf8"), "{}\n");
+  });
+});
+
+test("low-level replacement preserves exact bytes, mode, temporary path, and order", () => {
+  withTempDirectory((root) => {
+    const filePath = path.join(root, "ledger.json");
+    const temporaryPath = `${filePath}.4242.fixed.tmp`;
+    fs.writeFileSync(filePath, "old\n", "utf8");
+    const order: string[] = [];
+
+    atomicReplacePrivateJsonFile(filePath, {
+      status: "prepared",
+      generation_id: "generation-1"
+    }, {
+      temporaryPath,
+      beforeRename: () => {
+        order.push("before_rename");
+        assert.deepEqual(fs.readdirSync(root).sort(), [
+          "ledger.json",
+          "ledger.json.4242.fixed.tmp"
+        ]);
+        assert.equal(fs.readFileSync(filePath, "utf8"), "old\n");
+        assert.equal(
+          fs.readFileSync(temporaryPath, "utf8"),
+          '{\n  "status": "prepared",\n  "generation_id": "generation-1"\n}\n'
+        );
+        assert.equal(fs.statSync(temporaryPath).mode & 0o777, 0o600);
+      },
+      cleanupTemporary: (candidate) => {
+        order.push("cleanup");
+        assert.equal(candidate, temporaryPath);
+        assert.equal(fs.existsSync(candidate), false);
+        fs.rmSync(candidate, { force: true });
+      }
+    });
+
+    assert.deepEqual(order, ["before_rename", "cleanup"]);
+    assert.equal(
+      fs.readFileSync(filePath, "utf8"),
+      '{\n  "status": "prepared",\n  "generation_id": "generation-1"\n}\n'
+    );
+    assert.equal(fs.statSync(filePath).mode & 0o777, 0o600);
+  });
+});
+
+test("low-level replacement cleans its exact temp when beforeRename fails", () => {
+  withTempDirectory((root) => {
+    const filePath = path.join(root, "ledger.json");
+    const temporaryPath = `${filePath}.4242.failed.tmp`;
+    fs.writeFileSync(filePath, "old\n", "utf8");
+    const order: string[] = [];
+
+    assert.throws(
+      () => atomicReplacePrivateJsonFile(filePath, { status: "prepared" }, {
+        temporaryPath,
+        beforeRename: () => {
+          order.push("before_rename");
+          throw new Error("destination changed before rename");
+        },
+        cleanupTemporary: (candidate) => {
+          order.push("cleanup");
+          assert.equal(candidate, temporaryPath);
+          assert.equal(fs.existsSync(candidate), true);
+          fs.rmSync(candidate, { force: true });
+        }
+      }),
+      new Error("destination changed before rename")
+    );
+
+    assert.deepEqual(order, ["before_rename", "cleanup"]);
+    assert.equal(fs.readFileSync(filePath, "utf8"), "old\n");
+    assert.equal(fs.existsSync(temporaryPath), false);
   });
 });

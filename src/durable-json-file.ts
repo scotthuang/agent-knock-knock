@@ -16,6 +16,12 @@ export interface AtomicJsonFileOptions {
   fsyncNewDirectoryParent?: boolean;
 }
 
+export interface AtomicPrivateJsonReplaceOptions {
+  temporaryPath: string;
+  beforeRename?: () => void;
+  cleanupTemporary: (temporaryPath: string) => void;
+}
+
 /** Atomically replace one private JSON record without following symlinks. */
 export function atomicSaveJsonFile(
   filePath: string,
@@ -39,14 +45,35 @@ export function atomicSaveJsonFile(
   assertRealDirectory(directory, options.directoryLabel);
   assertRegularOrAbsent(filePath, options.fileLabel);
 
-  const tempPath = path.join(
+  const temporaryPath = path.join(
     directory,
     `.${path.basename(filePath)}.${process.pid}.${randomUUID()}.tmp`
   );
+  atomicReplacePrivateJsonFile(filePath, value, {
+    temporaryPath,
+    beforeRename: () => assertRegularOrAbsent(filePath, options.fileLabel),
+    cleanupTemporary: () => {
+      try {
+        fs.unlinkSync(temporaryPath);
+      } catch (error) {
+        if (!isNodeError(error, "ENOENT")) {
+          throw error;
+        }
+      }
+    }
+  });
+}
+
+/** Replace one private JSON file after its caller validates path policy. */
+export function atomicReplacePrivateJsonFile(
+  filePath: string,
+  value: unknown,
+  options: AtomicPrivateJsonReplaceOptions
+): void {
   let fd: number | undefined;
   try {
     fd = fs.openSync(
-      tempPath,
+      options.temporaryPath,
       fs.constants.O_CREAT |
         fs.constants.O_EXCL |
         fs.constants.O_WRONLY |
@@ -58,21 +85,15 @@ export function atomicSaveJsonFile(
     fs.fsyncSync(fd);
     fs.closeSync(fd);
     fd = undefined;
-    assertRegularOrAbsent(filePath, options.fileLabel);
-    fs.renameSync(tempPath, filePath);
+    options.beforeRename?.();
+    fs.renameSync(options.temporaryPath, filePath);
     fs.chmodSync(filePath, PRIVATE_FILE_MODE);
-    fsyncDirectory(directory);
+    fsyncDirectory(path.dirname(filePath));
   } finally {
     if (fd !== undefined) {
       fs.closeSync(fd);
     }
-    try {
-      fs.unlinkSync(tempPath);
-    } catch (error) {
-      if (!isNodeError(error, "ENOENT")) {
-        throw error;
-      }
-    }
+    options.cleanupTemporary(options.temporaryPath);
   }
 }
 
@@ -115,7 +136,7 @@ function assertRegularOrAbsent(value: string, label: string): void {
   }
 }
 
-function fsyncDirectory(directory: string): void {
+export function fsyncDirectory(directory: string): void {
   let fd: number | undefined;
   try {
     fd = fs.openSync(directory, fs.constants.O_RDONLY | NO_FOLLOW_FLAG);
