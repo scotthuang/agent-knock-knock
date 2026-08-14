@@ -32,6 +32,10 @@ try {
     refactor_evidence: {
       subprocess_current_sites:
         evidence.testEvidence.subprocess.currentIncluded,
+      dynamic_subprocess_baseline_revision:
+        evidence.dynamicSubprocess.baseline.revision,
+      dynamic_subprocess_target_maximum_percent:
+        evidence.dynamicSubprocess.final_threshold.maximum_percent_of_baseline,
       affected_replay_full_count:
         evidence.testEvidence.affectedReplay.full_count,
       public_contract_witnesses: evidence.publicContracts.witnessCount

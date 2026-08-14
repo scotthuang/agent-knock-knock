@@ -371,6 +371,101 @@ baseline. The adapter runner raises the diagnostic-only
 `other_process_or_adapter` count from 11 to 12 while deleting the synchronous
 CLI startup site. No production source changes are part of this slice.
 
+## #126 dynamic subprocess reduction attestation
+
+The static call-site count above remains a cheap architecture diagnostic. It
+is not the final proof for the requirement to remove at least 60% of redundant
+outer CLI starts: one helper can execute a call site many times, and moving a
+`spawn` into another helper must not improve the result.
+
+Run the final same-machine process-tree attestation from a clean worktree:
+
+```sh
+node scripts/measure-subprocess-dynamic-evidence.js \
+  --output /tmp/akk-subprocess-evidence.json
+```
+
+This command performs no install and uses no network service. It verifies that
+`package-lock.json` is byte-identical at current HEAD and the immutable
+`ea592a88d7af4a709e7a7a1b989dd29e61932935` baseline, creates a detached
+temporary baseline worktree, links the already-present `node_modules`, builds
+both revisions, and runs the full tier at concurrency four once per revision.
+Both full runs must pass; a partial or failed run is not accepted as evidence.
+
+`scripts/subprocess-dynamic-hook.cjs` is preloaded before the test workers. It
+patches every standard `node:child_process` start entry point, synchronizes the
+patched CommonJS exports into ESM named imports, and propagates the preload and
+run identity even when a caller supplies an explicit stripped `env`. Every
+launch also propagates one random, non-secret call ID into the child boot, so
+synchronous launches are associated directly without scanning PIDs created by
+other concurrent workers. Nested
+implementations such as `exec` calling `execFile` emit one record for the real
+child rather than two wrapper records, and `util.promisify.custom` remains
+usable.
+
+The attestation runs each full tier in one new POSIX process group. The hook
+records every explicitly detached child as another process-group root. After
+the direct runner exits, measurement waits on the kernel until the runner group
+and every recorded detached group are empty; a shell that exits after forking a
+background descendant therefore cannot create an unobserved quiet gap. Trace
+files are read twice only after all groups are empty, and any live group fails
+closed at the configured 30-second timeout. This local attestation consequently
+supports macOS and Linux and fails closed on Windows. The baseline completion
+finishes before current measurement starts, and the current completion finishes
+before either trace is summarized. The final
+count comes from observed CLI process boots and their process ancestry, not
+from source locations. Moving a start behind a shared Node helper, shell, or
+another call expression therefore does not make that start disappear. A
+targeted CLI start without its corresponding boot, or a CLI boot without an
+originating test, makes the attestation fail closed.
+
+The denominator is the observed full-tree count at the immutable baseline;
+the 233-call shared `runAgentCli` migration inventory is only one family and is
+not misreported as the global baseline. Current HEAD must be at most 40% of the
+same observed baseline (at least a 60% reduction). The report
+contains only command basenames, CLI actions, option names, counts, status or
+signal outcomes, and test paths; message bodies, tokens, environment values,
+and raw argv are never recorded.
+
+The reduction gate is paired with retained real-process checks so deleting or
+reclassifying necessary coverage cannot satisfy it. The current full trace
+must still demonstrate:
+
+- real doctor argv and non-zero OS exit;
+- a crash-injected CLI exit with status 86;
+- overlapping CLI processes for Store/terminal lock competition;
+- a live child PID and a `SIGKILL` monitor-recovery boundary;
+- real fake-Gateway (`openclaw`) execution; and
+- real `tmux`, `ps`, `lsof`, and `claude` adapter subprocesses.
+
+Each retained observation is tied at runtime to its explicitly scoped,
+allowlisted `TestContext.name`. The canonical path and exact test name in
+`config/subprocess-dynamic-evidence.json` are immutable validation inputs, not
+replaceable substring hints. Multiple argv,
+exit, signal, or live-PID requirements on one boundary must be satisfied by the
+same observed CLI process; unrelated children in the same file cannot be
+combined into a passing witness. Multi-command adapter boundaries likewise
+require every command beneath one outer CLI process, so separate tests in the
+same source file cannot be combined into a passing case. Boundaries sharing one
+canonical test name also share one command group. The retained Claude and
+terminal-adapter witness is the raw background send case, where one outer CLI
+process owns every observed `claude`, `tmux`, `ps`, and `lsof` child. The normal
+fast evidence test validates that immutable configuration and executes a real
+process-group probe in which an exited shell leaves a delayed 1.5-second
+background CLI with an explicit stripped environment. A second CJS/ESM matrix
+covers every sync and async launch API plus promisified `execFile`, exact
+call-ID deduplication, and stripped-environment propagation; an overlapping
+sync/concurrent-writer probe prevents shared-trace PID inference from returning.
+Those probes transparently
+add ten fake-Node source sites to the diagnostic scope, so its included count
+is now 38 of 48 (`cli_process` 18 and `fake_node_process` 20);
+one fork probe is classified separately as `other_process_or_adapter`, and the
+dynamic full-tree ratio, not these measurement-only probes, is the final 60% gate.
+It validates the already-active preload without recursively starting its probe
+while the outer dynamic attestation runs, avoiding a measurement of the
+measurement itself. The expensive two-revision full attestation remains an
+explicit final/local gate rather than running inside ordinary fast tests.
+
 ## #108 performance record
 
 The pre-refactor maintainer baseline was 48 files / 683 tests / about 573

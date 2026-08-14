@@ -36,7 +36,7 @@ test("global version prints the package version and exits successfully", async (
   }
 });
 
-test("doctor exits non-zero when required package files are missing", () => {
+test("doctor exits non-zero when required package files are missing", (t) => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-doctor-failure-"));
   const copiedDistDir = path.join(tempDir, "dist", "src");
 
@@ -53,7 +53,13 @@ test("doctor exits non-zero when required package files are missing", () => {
         "--timeout-ms",
         "100"
       ],
-      { encoding: "utf8" }
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          AKK_SUBPROCESS_EVIDENCE_TEST_NAME: t.name
+        }
+      }
     );
 
     assert.notEqual(result.status, 0);

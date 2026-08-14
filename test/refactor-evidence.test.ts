@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -9,6 +11,14 @@ const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 async function loadEvidenceModule() {
   return import(
     pathToFileURL(path.join(repoRoot, "scripts", "refactor-evidence.js")).href
+  );
+}
+
+async function loadDynamicEvidenceModule() {
+  return import(
+    pathToFileURL(
+      path.join(repoRoot, "scripts", "subprocess-dynamic-evidence.js")
+    ).href
   );
 }
 
@@ -41,16 +51,16 @@ test("Phase 1 evidence reproduces startup counts and historical selection", asyn
   });
 
   assert.equal(evidence.testEvidence.subprocess.baselineIncluded, 48);
-  assert.equal(evidence.testEvidence.subprocess.currentIncluded, 28);
-  assert.equal(evidence.testEvidence.subprocess.reductionBasisPoints, 4167);
+  assert.equal(evidence.testEvidence.subprocess.currentIncluded, 38);
+  assert.equal(evidence.testEvidence.subprocess.reductionBasisPoints, 2083);
   assert.equal(evidence.testEvidence.subprocess.targetRequired, false);
   assert.equal(evidence.testEvidence.subprocess.targetMet, false);
   assert.deepEqual(
     evidence.testEvidence.subprocess.currentCounts,
     {
       cli_process: 18,
-      fake_node_process: 10,
-      other_process_or_adapter: 12
+      fake_node_process: 20,
+      other_process_or_adapter: 13
     }
   );
 
@@ -80,6 +90,747 @@ test("Phase 1 evidence reproduces startup counts and historical selection", asyn
     openclawToolCount: 14,
     storeProtocolCount: 5
   });
+});
+
+test("dynamic subprocess evidence freezes the real full-tree measurement and retained boundaries", async () => {
+  const evidenceModule = await loadDynamicEvidenceModule();
+  const config = evidenceModule.loadDynamicSubprocessEvidenceConfig({ repoRoot });
+
+  assert.equal(
+    config.baseline.revision,
+    "ea592a88d7af4a709e7a7a1b989dd29e61932935"
+  );
+  assert.deepEqual(Object.keys(config.baseline), ["revision"]);
+  assert.equal(config.measurement.tier, "full");
+  assert.equal(config.measurement.drain_poll_ms, 50);
+  assert.equal(config.measurement.drain_timeout_ms, 30_000);
+  assert.equal("drain_quiescence_ms" in config.measurement, false);
+  assert.equal(config.final_threshold.maximum_percent_of_baseline, 40);
+  assert.deepEqual(
+    config.retained_boundaries.map((boundary: { id: string }) => boundary.id),
+    [
+      "argv_exit",
+      "claude_adapter",
+      "crash",
+      "gateway",
+      "lock",
+      "pid",
+      "terminal_adapters"
+    ]
+  );
+
+  for (const field of ["path", "needle"] as const) {
+    const mutated = structuredClone(config.retained_boundaries);
+    mutated[1][field] = field === "path"
+      ? "test/callback-cli.test.ts"
+      : "CLI reports a multilingual multiline draft left in Codex after one Enter";
+    assert.throws(() => evidenceModule.validateRetainedBoundaries(mutated, {
+      repoRoot,
+      integrationTests: new Set(loadTiers().integration)
+    }), /must keep its canonical path and test name/u);
+  }
+
+  assert.equal(
+    evidenceModule.repositoryContainsPath(`${repoRoot}${path.sep}`, path.join(repoRoot, "evidence.json")),
+    true
+  );
+  assert.equal(
+    evidenceModule.repositoryContainsPath(repoRoot, path.join(path.dirname(repoRoot), "outside-evidence.json")),
+    false
+  );
+  const containmentDirectory = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-evidence-output-containment-")
+  );
+  try {
+    const repositoryLink = path.join(containmentDirectory, "repository-link");
+    fs.symlinkSync(repoRoot, repositoryLink, "dir");
+    assert.equal(
+      evidenceModule.repositoryContainsPath(
+        repoRoot,
+        path.join(repositoryLink, "evidence.json")
+      ),
+      true
+    );
+  } finally {
+    fs.rmSync(containmentDirectory, { recursive: true, force: true });
+  }
+});
+
+test("dynamic subprocess comparison enforces the 60% gate and every retained process kind", async () => {
+  const evidenceModule = await loadDynamicEvidenceModule();
+  const config = evidenceModule.loadDynamicSubprocessEvidenceConfig({ repoRoot });
+  const witnessName = (id: string) => config.retained_boundaries.find(
+    (boundary: { id: string }) => boundary.id === id
+  ).needle;
+  const detail = (overrides: Record<string, unknown>) => ({
+    action: "status",
+    argumentCount: 1,
+    childPid: 10,
+    end: 200,
+    exitCode: 0,
+    method: "spawn",
+    optionNames: [],
+    originTest: "test/unused.test.ts",
+    originTestName: null,
+    signal: null,
+    start: 100,
+    ...overrides
+  });
+  const currentSummary = {
+    outerCliStarts: 5,
+    targetWithoutBoot: 0,
+    unattributedCliStarts: 0,
+    outerCliDetails: [
+      detail({
+        action: "doctor",
+        exitCode: 1,
+        optionNames: ["--openclaw-bin", "--timeout-ms"],
+        originTest: "test/cli-ux.test.ts",
+        originTestName: witnessName("argv_exit")
+      }),
+      detail({
+        exitCode: 86,
+        originTest: "test/codex-no-rollout-binding-cli.test.ts",
+        originTestName: witnessName("crash")
+      }),
+      detail({
+        childPid: 11,
+        end: 400,
+        originTest: "test/shards/agent-cli-control-locks.test.ts",
+        originTestName: witnessName("lock"),
+        start: 250
+      }),
+      detail({
+        childPid: 12,
+        end: 350,
+        originTest: "test/shards/agent-cli-control-locks.test.ts",
+        originTestName: witnessName("lock"),
+        start: 300
+      }),
+      detail({
+        childPid: 13,
+        originTest: "test/shards/agent-cli-monitor-recovery.test.ts",
+        originTestName: witnessName("pid"),
+        signal: "SIGKILL"
+      })
+    ],
+    processStarts: [
+      ["openclaw", "test/callback-cli.test.ts", witnessName("gateway")],
+      ["claude", "test/shards/agent-cli-composer-replay.test.ts", witnessName("claude_adapter")],
+      ["tmux", "test/shards/agent-cli-composer-replay.test.ts", witnessName("terminal_adapters")],
+      ["ps", "test/shards/agent-cli-composer-replay.test.ts", witnessName("terminal_adapters")],
+      ["lsof", "test/shards/agent-cli-composer-replay.test.ts", witnessName("terminal_adapters")]
+    ].map(([command, originTest, originTestName]) => ({
+      command,
+      originTest,
+      originTestName,
+      outerCliPid: 1_000,
+      targetRole: "other"
+    }))
+  };
+  const result = evidenceModule.compareDynamicSubprocessEvidence({
+    baselineSummary: {
+      outerCliStarts: 13,
+      targetWithoutBoot: 0,
+      unattributedCliStarts: 0
+    },
+    config,
+    currentSummary
+  });
+  assert.equal(result.currentOuterCliStarts, 5);
+  assert.equal(result.reductionBasisPoints, 6154);
+  assert.equal(result.retainedBoundaries.every(
+    (boundary: { met: boolean }) => boundary.met
+  ), true);
+
+  assert.throws(() => evidenceModule.compareDynamicSubprocessEvidence({
+    baselineSummary: {
+      outerCliStarts: 10,
+      targetWithoutBoot: 0,
+      unattributedCliStarts: 0
+    },
+    config,
+    currentSummary
+  }), /requires current <= 40% of baseline/u);
+
+  assert.throws(() => evidenceModule.compareDynamicSubprocessEvidence({
+    baselineSummary: {
+      outerCliStarts: 13,
+      targetWithoutBoot: 0,
+      unattributedCliStarts: 0
+    },
+    config,
+    currentSummary: {
+      ...currentSummary,
+      processStarts: currentSummary.processStarts.filter(
+        (start) => start.command !== "lsof"
+      )
+    }
+  }), /retained boundaries are missing: claude_adapter, terminal_adapters/u);
+
+  const splitClaudeAndTerminal = structuredClone(currentSummary);
+  splitClaudeAndTerminal.processStarts.find(
+    (start) => start.command === "claude"
+  )!.outerCliPid = 2_000;
+  assert.throws(() => evidenceModule.compareDynamicSubprocessEvidence({
+    baselineSummary: {
+      outerCliStarts: 13,
+      targetWithoutBoot: 0,
+      unattributedCliStarts: 0
+    },
+    config,
+    currentSummary: splitClaudeAndTerminal
+  }), /retained boundaries are missing: claude_adapter, terminal_adapters/u);
+
+  const splitAdapterCase = structuredClone(currentSummary);
+  splitAdapterCase.processStarts.find(
+    (start) => start.command === "lsof"
+  )!.outerCliPid = 2_000;
+  assert.throws(() => evidenceModule.compareDynamicSubprocessEvidence({
+    baselineSummary: {
+      outerCliStarts: 13,
+      targetWithoutBoot: 0,
+      unattributedCliStarts: 0
+    },
+    config,
+    currentSummary: splitAdapterCase
+  }), /retained boundaries are missing: claude_adapter, terminal_adapters/u);
+
+  const splitArgvAndExit = structuredClone(currentSummary);
+  splitArgvAndExit.outerCliDetails[0].exitCode = 0;
+  splitArgvAndExit.outerCliDetails.push(detail({
+    action: "status",
+    exitCode: 1,
+    originTest: "test/cli-ux.test.ts",
+    originTestName: witnessName("argv_exit")
+  }));
+  splitArgvAndExit.outerCliStarts += 1;
+  assert.throws(() => evidenceModule.compareDynamicSubprocessEvidence({
+    baselineSummary: {
+      outerCliStarts: 15,
+      targetWithoutBoot: 0,
+      unattributedCliStarts: 0
+    },
+    config,
+    currentSummary: splitArgvAndExit
+  }), /retained boundaries are missing: argv_exit/u);
+
+  const wrongRuntimeTest = structuredClone(currentSummary);
+  for (const start of wrongRuntimeTest.processStarts.filter(
+    (candidate) => candidate.originTest ===
+      "test/shards/agent-cli-composer-replay.test.ts"
+  )) {
+    start.originTestName =
+      "CLI reports a multilingual multiline draft left in Codex after one Enter";
+  }
+  assert.throws(() => evidenceModule.compareDynamicSubprocessEvidence({
+    baselineSummary: {
+      outerCliStarts: 13,
+      targetWithoutBoot: 0,
+      unattributedCliStarts: 0
+    },
+    config,
+    currentSummary: wrongRuntimeTest
+  }), /retained boundaries are missing: claude_adapter, terminal_adapters/u);
+});
+
+test("dynamic completion includes a delayed shell descendant with a stripped env", async () => {
+  if (process.env.AKK_SUBPROCESS_EVIDENCE_RUN_ID) {
+    assert.ok(process.env.AKK_SUBPROCESS_EVIDENCE_PRELOAD);
+    return;
+  }
+  const evidenceModule = await loadDynamicEvidenceModule();
+  const traceDirectory = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-subprocess-evidence-probe-")
+  );
+  const preloadPath = path.join(
+    repoRoot,
+    "scripts",
+    "subprocess-dynamic-hook.cjs"
+  );
+  const cliPath = path.join(repoRoot, "dist", "src", "cli.js");
+  const runId = `probe-${process.pid}-${Date.now()}`;
+  const witnessName = "dynamic shell descendant evidence probe";
+  const delayedCli = `(sleep 1.5; ${JSON.stringify(process.execPath)} ` +
+    `${JSON.stringify(cliPath)} --version >/dev/null 2>&1) &`;
+  const helper = `
+const { spawn } = require("node:child_process");
+const delayed = spawn(
+  "/bin/sh",
+  ["-c", ${JSON.stringify(delayedCli)}],
+  { detached: true, stdio: "ignore", env: { PATH: process.env.PATH } }
+);
+delayed.unref();
+`;
+
+  try {
+    const preloadOption = `--require=${preloadPath}`;
+    const child = spawn(process.execPath, ["-e", helper], {
+      detached: true,
+      stdio: ["ignore", "ignore", "pipe"],
+      env: {
+        ...process.env,
+        AKK_SUBPROCESS_EVIDENCE_DIR: traceDirectory,
+        AKK_SUBPROCESS_EVIDENCE_ROOT: repoRoot,
+        AKK_SUBPROCESS_EVIDENCE_RUN_ID: runId,
+        AKK_SUBPROCESS_EVIDENCE_PRELOAD: preloadPath,
+        AKK_SUBPROCESS_EVIDENCE_ORIGIN_TEST:
+          "test/refactor-evidence.test.ts",
+        AKK_SUBPROCESS_EVIDENCE_TEST_NAME: witnessName,
+        NODE_OPTIONS: [process.env.NODE_OPTIONS, preloadOption]
+          .filter(Boolean)
+          .join(" ")
+      }
+    });
+    assert.ok(child.pid);
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    const status = await new Promise<number | null>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("exit", resolve);
+    });
+    assert.equal(status, 0, stderr);
+
+    const completionStartedAt = Date.now();
+    const events = await evidenceModule.waitForDynamicSubprocessTreeCompletion({
+      traceDirectory,
+      runId,
+      rootProcessGroup: child.pid,
+      pollMs: 10,
+      timeoutMs: 5_000
+    });
+    assert.ok(Date.now() - completionStartedAt >= 1_200);
+    const summary = evidenceModule.summarizeDynamicSubprocessTrace(events, {
+      runId
+    });
+    assert.equal(summary.outerCliStarts, 1);
+    assert.equal(summary.nestedCliStarts, 0);
+    assert.equal(summary.targetedCliStarts, 0);
+    assert.equal(summary.targetWithoutBoot, 0);
+    assert.equal(summary.unattributedCliStarts, 0);
+    assert.deepEqual(summary.outerCliByAction, { "--version": 1 });
+    assert.deepEqual(summary.outerCliByTest, {
+      "test/refactor-evidence.test.ts": 1
+    });
+    assert.equal(summary.outerCliDetails[0].originTestName, witnessName);
+
+    const tampered = structuredClone(events);
+    tampered[0].raw_argv = ["forbidden", "plaintext"];
+    assert.throws(
+      () => evidenceModule.summarizeDynamicSubprocessTrace(tampered, { runId }),
+      /unexpected keys: raw_argv/u
+    );
+    const tamperedName = structuredClone(events);
+    tamperedName[0].origin_test_name = "secret-token-must-not-enter-trace";
+    assert.throws(
+      () => evidenceModule.summarizeDynamicSubprocessTrace(tamperedName, { runId }),
+      /origin_test_name is not allowlisted/u
+    );
+
+    const secretTestName = "secret-token-must-not-enter-trace";
+    const rejected = spawnSync(process.execPath, ["-e", ""], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        AKK_SUBPROCESS_EVIDENCE_DIR: traceDirectory,
+        AKK_SUBPROCESS_EVIDENCE_ROOT: repoRoot,
+        AKK_SUBPROCESS_EVIDENCE_RUN_ID: runId,
+        AKK_SUBPROCESS_EVIDENCE_PRELOAD: preloadPath,
+        AKK_SUBPROCESS_EVIDENCE_TEST_NAME: secretTestName,
+        NODE_OPTIONS: `--require=${preloadPath}`
+      }
+    });
+    assert.notEqual(rejected.status, 0);
+    assert.doesNotMatch(rejected.stderr, new RegExp(secretTestName, "u"));
+    assert.doesNotMatch(
+      fs.readdirSync(traceDirectory).map((name) =>
+        fs.readFileSync(path.join(traceDirectory, name), "utf8")
+      ).join("\n"),
+      new RegExp(secretTestName, "u")
+    );
+  } finally {
+    fs.rmSync(traceDirectory, { recursive: true, force: true });
+  }
+});
+
+test("dynamic completion waits for detached process groups and fails closed", async () => {
+  const evidenceModule = await loadDynamicEvidenceModule();
+  const traceDirectory = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-subprocess-drain-probe-")
+  );
+  const runId = `drain-${process.pid}-${Date.now()}`;
+  const originTest = "test/refactor-evidence.test.ts";
+  const parentPid = 910_001;
+  const childPid = 910_002;
+  const rootProcessGroup = 910_000;
+  const callId = `${parentPid}:1:deadbeef`;
+  const event = (overrides: Record<string, unknown>) => ({
+    schema: "agent-knock-knock/subprocess-trace",
+    version: 1,
+    run_id: runId,
+    pid: parentPid,
+    ppid: 1,
+    timestamp_ms: 1,
+    origin_test: originTest,
+    origin_test_name: null,
+    ...overrides
+  });
+  const parentBoot = event({
+    event: "process_boot",
+    entry: "dist/test/refactor-evidence.test.js",
+    role: "test",
+    parent_call_id: null,
+    action: null,
+    argument_count: 0,
+    option_names: []
+  });
+  const childStart = event({
+    event: "process_start",
+    call_id: callId,
+    method: "spawn",
+    detached: true,
+    started: true,
+    child_pid: childPid,
+    duration_ms: 1,
+    target_role: "cli",
+    command: "node",
+    action: "--version",
+    argument_count: 2,
+    option_names: [],
+    exit_code: null,
+    signal: null,
+    error_code: null
+  });
+  const childBoot = event({
+    event: "process_boot",
+    pid: childPid,
+    ppid: parentPid,
+    timestamp_ms: 2,
+    entry: "dist/src/cli.js",
+    role: "cli",
+    parent_call_id: callId,
+    action: "--version",
+    argument_count: 1,
+    option_names: []
+  });
+  const write = (pid: number, events: unknown[]) => {
+    fs.writeFileSync(
+      path.join(traceDirectory, `trace-${pid}.ndjson`),
+      `${events.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+      { encoding: "utf8", mode: 0o600 }
+    );
+  };
+
+  try {
+    write(parentPid, [parentBoot, childStart]);
+    write(childPid, [childBoot]);
+    const aliveGroups = new Set([childPid]);
+    let now = 0;
+    let sleeps = 0;
+    const events = await evidenceModule.waitForDynamicSubprocessTreeCompletion({
+      traceDirectory,
+      runId,
+      rootProcessGroup,
+      pollMs: 10,
+      timeoutMs: 100,
+      isProcessGroupAlive: (pid: number) => aliveGroups.has(pid),
+      now: () => now,
+      sleep: async (milliseconds: number) => {
+        now += milliseconds;
+        sleeps += 1;
+        if (sleeps === 2) {
+          aliveGroups.delete(childPid);
+        }
+      }
+    });
+    const summary = evidenceModule.summarizeDynamicSubprocessTrace(events, {
+      runId
+    });
+    assert.equal(summary.outerCliStarts, 1);
+    assert.equal(summary.targetWithoutBoot, 0);
+    assert.equal(sleeps, 2);
+
+    let timeoutNow = 0;
+    await assert.rejects(
+      evidenceModule.waitForDynamicSubprocessTreeCompletion({
+        traceDirectory,
+        runId,
+        rootProcessGroup,
+        pollMs: 10,
+        timeoutMs: 30,
+        isProcessGroupAlive: (pid: number) => pid === childPid,
+        now: () => timeoutNow,
+        sleep: async (milliseconds: number) => {
+          timeoutNow += milliseconds;
+        }
+      }),
+      /did not complete before timeout; live process groups: 910002/u
+    );
+  } finally {
+    fs.rmSync(traceDirectory, { recursive: true, force: true });
+  }
+});
+
+test("dynamic preload records one real child for every CJS and ESM launch API", async () => {
+  if (process.env.AKK_SUBPROCESS_EVIDENCE_RUN_ID) {
+    assert.ok(process.env.AKK_SUBPROCESS_EVIDENCE_PRELOAD);
+    return;
+  }
+  const evidenceModule = await loadDynamicEvidenceModule();
+  const temporaryDirectory = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-subprocess-method-probe-")
+  );
+  const traceDirectory = path.join(temporaryDirectory, "trace");
+  const forkTarget = path.join(temporaryDirectory, "fork-target.cjs");
+  const preloadPath = path.join(
+    repoRoot,
+    "scripts",
+    "subprocess-dynamic-hook.cjs"
+  );
+  const cliPath = path.join(repoRoot, "dist", "src", "cli.js");
+  const runId = `methods-${process.pid}-${Date.now()}`;
+  fs.mkdirSync(traceDirectory);
+  fs.writeFileSync(forkTarget, "\"use strict\";\n", {
+    encoding: "utf8",
+    mode: 0o600
+  });
+  const commonBody = String.raw`
+const stripped = { PATH: process.env.PATH };
+const empty = ["-e", ""];
+const command = JSON.stringify(process.execPath) + " -e \\\"\\\"";
+const cliCommand = JSON.stringify(process.execPath) + " " +
+  JSON.stringify(${JSON.stringify(cliPath)}) + " --version";
+const wait = (child) => new Promise((resolve, reject) => {
+  child.once("error", reject);
+  child.once("exit", (code, signal) => {
+    if (code === 0 && signal === null) resolve();
+    else reject(new Error("child failed: " + code + "/" + signal));
+  });
+});
+const callback = (start) => new Promise((resolve, reject) => {
+  start((error) => error ? reject(error) : resolve());
+});
+const run = async () => {
+  const syncSpawn = childProcess.spawnSync(process.execPath, empty, { env: stripped });
+  if (syncSpawn.status !== 0 || !syncSpawn.pid) throw new Error("spawnSync failed");
+  childProcess.execFileSync(process.execPath, empty, { env: stripped });
+  childProcess.execSync(cliCommand, { env: stripped });
+  const promisedExecFile = promisify(childProcess.execFile);
+  const promised = promisedExecFile(process.execPath, empty, { env: stripped });
+  if (!promised.child || !promised.child.pid) {
+    throw new Error("promisified execFile lost its child process");
+  }
+  await Promise.all([
+    wait(childProcess.spawn(process.execPath, empty, { env: stripped })),
+    callback((done) => childProcess.execFile(
+      process.execPath, empty, { env: stripped }, done
+    )),
+    callback((done) => childProcess.exec(command, { env: stripped }, done)),
+    wait(childProcess.fork(
+      process.env.AKK_EVIDENCE_FORK_TARGET,
+      [],
+      { env: stripped, silent: true }
+    )),
+    promised
+  ]);
+};
+await run();
+`;
+  const cjsHelper = `
+const childProcess = require("node:child_process");
+const { promisify } = require("node:util");
+(async () => {${commonBody}})().catch((error) => {
+  process.stderr.write(String(error && error.stack || error));
+  process.exitCode = 1;
+});
+`;
+  const esmHelper = `
+import * as childProcess from "node:child_process";
+import { promisify } from "node:util";
+${commonBody}
+`;
+  const environment = {
+    ...process.env,
+    AKK_EVIDENCE_FORK_TARGET: forkTarget,
+    AKK_SUBPROCESS_EVIDENCE_DIR: traceDirectory,
+    AKK_SUBPROCESS_EVIDENCE_ROOT: repoRoot,
+    AKK_SUBPROCESS_EVIDENCE_RUN_ID: runId,
+    AKK_SUBPROCESS_EVIDENCE_PRELOAD: preloadPath,
+    AKK_SUBPROCESS_EVIDENCE_ORIGIN_TEST: "test/refactor-evidence.test.ts",
+    NODE_OPTIONS: [
+      process.env.NODE_OPTIONS,
+      `--require=${preloadPath}`
+    ].filter(Boolean).join(" ")
+  };
+
+  try {
+    for (const [label, arguments_] of [
+      ["CJS", ["-e", cjsHelper]],
+      ["ESM", ["--input-type=module", "-e", esmHelper]]
+    ] as const) {
+      const result = spawnSync(process.execPath, arguments_, {
+        encoding: "utf8",
+        env: environment,
+        timeout: 20_000
+      });
+      assert.equal(result.status, 0, `${label}: ${result.stderr}`);
+    }
+    const events = evidenceModule.readDynamicSubprocessTrace(
+      traceDirectory,
+      runId
+    );
+    const starts = events.filter((event: { event: string }) =>
+      event.event === "process_start"
+    );
+    assert.equal(starts.length, 16);
+    assert.equal(new Set(starts.map((event: { call_id: string }) =>
+      event.call_id
+    )).size, 16);
+    const childBoots = events.filter((event: {
+      event: string;
+      parent_call_id: string | null;
+    }) => event.event === "process_boot" && event.parent_call_id !== null);
+    assert.equal(childBoots.length, 16);
+    assert.equal(
+      new Set(childBoots.map((event: { parent_call_id: string }) =>
+        event.parent_call_id
+      )).size,
+      16,
+      "every API call must own one directly correlated child boot"
+    );
+    assert.equal(starts.every((event: {
+      started: boolean;
+    }) => event.started), true);
+    const concreteChildPids = starts.flatMap((event: {
+      child_pid: number | null;
+    }) => event.child_pid === null ? [] : [event.child_pid]);
+    assert.equal(concreteChildPids.length, 12);
+    assert.equal(new Set(concreteChildPids).size, 12);
+    assert.deepEqual(
+      Object.fromEntries([...new Set(starts.map((event: { method: string }) =>
+        event.method
+      ))].sort().map((method) => [
+        method,
+        starts.filter((event: { method: string }) => event.method === method)
+          .length
+      ])),
+      {
+        exec: 2,
+        execFile: 4,
+        execFileSync: 2,
+        execSync: 2,
+        fork: 2,
+        spawn: 2,
+        spawnSync: 2
+      }
+    );
+    const summary = evidenceModule.summarizeDynamicSubprocessTrace(events, {
+      runId
+    });
+    assert.equal(summary.processStartCount, 16);
+    assert.equal(summary.processBootCount, 18);
+    assert.equal(summary.targetedCliStarts, 2);
+    assert.equal(summary.targetWithoutBoot, 0);
+    assert.equal(summary.outerCliStarts, 2);
+    assert.equal(summary.outerCliDetails.every((detail: { method: string }) =>
+      detail.method === "execSync"
+    ), true);
+  } finally {
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test("sync launch correlation is isolated from concurrent trace writers", async () => {
+  if (process.env.AKK_SUBPROCESS_EVIDENCE_RUN_ID) {
+    assert.ok(process.env.AKK_SUBPROCESS_EVIDENCE_PRELOAD);
+    return;
+  }
+  const evidenceModule = await loadDynamicEvidenceModule();
+  const temporaryDirectory = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-subprocess-sync-correlation-")
+  );
+  const traceDirectory = path.join(temporaryDirectory, "trace");
+  const readyPath = path.join(temporaryDirectory, "ready");
+  const preloadPath = path.join(
+    repoRoot,
+    "scripts",
+    "subprocess-dynamic-hook.cjs"
+  );
+  const cliPath = path.join(repoRoot, "dist", "src", "cli.js");
+  const runId = `sync-correlation-${process.pid}-${Date.now()}`;
+  fs.mkdirSync(traceDirectory);
+  const environment = {
+    ...process.env,
+    AKK_SUBPROCESS_EVIDENCE_DIR: traceDirectory,
+    AKK_SUBPROCESS_EVIDENCE_ROOT: repoRoot,
+    AKK_SUBPROCESS_EVIDENCE_RUN_ID: runId,
+    AKK_SUBPROCESS_EVIDENCE_PRELOAD: preloadPath,
+    AKK_SUBPROCESS_EVIDENCE_ORIGIN_TEST: "test/refactor-evidence.test.ts",
+    NODE_OPTIONS: `--require=${preloadPath}`
+  };
+  const command = `sleep 0.5; ${JSON.stringify(process.execPath)} ` +
+    `${JSON.stringify(cliPath)} --version >/dev/null`;
+  const helper = `
+const fs = require("node:fs");
+const { execSync } = require("node:child_process");
+fs.writeFileSync(${JSON.stringify(readyPath)}, "ready");
+execSync(${JSON.stringify(command)}, { env: { PATH: process.env.PATH } });
+`;
+  const waitForChild = (child: ReturnType<typeof spawn>) =>
+    new Promise<void>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("exit", (code, signal) => {
+        if (code === 0 && signal === null) resolve();
+        else reject(new Error(`child failed: ${String(code)}/${String(signal)}`));
+      });
+    });
+
+  try {
+    const synchronous = spawn(process.execPath, ["-e", helper], {
+      env: environment,
+      stdio: "ignore"
+    });
+    const deadline = Date.now() + 5_000;
+    while (!fs.existsSync(readyPath) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(fs.existsSync(readyPath), true);
+    assert.equal(synchronous.exitCode, null);
+    const concurrent = spawn(
+      process.execPath,
+      ["-e", "setTimeout(() => {}, 120)"],
+      { env: environment, stdio: "ignore" }
+    );
+    await Promise.all([waitForChild(synchronous), waitForChild(concurrent)]);
+
+    const events = evidenceModule.readDynamicSubprocessTrace(
+      traceDirectory,
+      runId
+    );
+    const syncStart = events.find((event: {
+      event: string;
+      method?: string;
+    }) => event.event === "process_start" && event.method === "execSync");
+    assert.ok(syncStart);
+    assert.equal(syncStart.child_pid, null);
+    const matchingBoots = events.filter((event: {
+      event: string;
+      parent_call_id?: string | null;
+    }) => event.event === "process_boot" &&
+      event.parent_call_id === syncStart.call_id);
+    assert.equal(matchingBoots.length, 1);
+    const summary = evidenceModule.summarizeDynamicSubprocessTrace(events, {
+      runId
+    });
+    assert.equal(summary.targetWithoutBoot, 0);
+    assert.equal(summary.outerCliStarts, 1);
+    assert.equal(summary.outerCliDetails[0].method, "execSync");
+  } finally {
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
 });
 
 test("one required flag turns an unmet final threshold into a hard failure", async () => {
