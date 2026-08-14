@@ -62,6 +62,7 @@
       "selection": "targeted",
       "integration_tests": [
         "test/cli-ux.test.ts",
+        "test/doctor-capabilities-process.test.ts",
         "test/management-cli.test.ts"
       ]
     },

@@ -207,6 +207,15 @@ The machine-readable `cli-runtime` and `terminal-binding-authority` mappings in
 `config/public-contract-witnesses.json` connect the migrated cases to focused
 service invariants and retained executable witnesses.
 
+### Doctor capability boundary tier
+
+Doctor capability evaluation and invalid-timeout policy remain in the fast
+tier. The four tests that intentionally execute fake Node and shell programs
+live in `test/doctor-capabilities-process.test.ts` in the integration tier.
+They still prove exact argv, version parsing, executable permissions, timeout,
+non-zero exit, missing executable, and malformed-output behavior; only their
+tier classification changed.
+
 ## #108 performance record
 
 The pre-refactor maintainer baseline was 48 files / 683 tests / about 573
