@@ -14,10 +14,11 @@ import {
   detectCodexBoundRolloutCompletion,
   detectCodexCandidateSetRolloutAcceptance,
   detectCodexRolloutAcceptance,
-  terminalSubmissionReplayReceipt,
   validateTerminalSubmissionAcceptanceEvidence,
   type CodexRolloutIdentity
 } from "../src/terminal-submission-acceptance.js";
+import { terminalSubmissionReplayReceipt } from
+  "../src/terminal-dispatch-receipt.js";
 
 const SESSION_ID = "019ee559-7bb8-7fd1-970c-0f7b6978c44e";
 const REQUEST = "请检查第一行\nThen verify the second line.";

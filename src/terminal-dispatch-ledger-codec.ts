@@ -12,7 +12,7 @@ import type {
   NativeThreadTransition
 } from "./managed-session.js";
 import type { TerminalSubmissionAcceptanceEvidence } from
-  "./terminal-submission-acceptance.js";
+  "./terminal-submission-facts.js";
 import { canonicalJson } from "./canonical-json.js";
 import {
   isRecord,

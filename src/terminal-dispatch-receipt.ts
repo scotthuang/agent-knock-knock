@@ -14,11 +14,11 @@ import {
 } from "./terminal-control-ref.js";
 import type { TerminalOrdinaryDispatchStatus } from
   "./terminal-dispatch-ledger-codec.js";
-import { terminalBridgeSubmission } from "./terminal-submission-facts.js";
 import {
+  terminalBridgeSubmission,
   validateTerminalSubmissionAcceptanceEvidence,
   type TerminalSubmissionAcceptanceEvidence
-} from "./terminal-submission-acceptance.js";
+} from "./terminal-submission-facts.js";
 import {
   isRecord,
   nonBlankString,
@@ -326,6 +326,59 @@ export function terminalAcceptanceEvidenceExpectation(
     nativeThreadId,
     requestHash
   };
+}
+
+export function terminalSubmissionReplayReceipt(options: {
+  proofLevel: "submitted" | "enter_dispatched" | "agent_accepted";
+  evidence?: unknown;
+  expected: {
+    source: TerminalSubmissionAcceptanceEvidence["source"];
+    nativeThreadId: string;
+    requestHash: string;
+  };
+}): {
+  replayed: true;
+  delivered: boolean;
+  status: "async_pending" | "submission_pending_acceptance" |
+    "submission_uncertain";
+  submission_outcome: "agent_accepted" | "pending_acceptance" | "uncertain";
+  delivery_receipt: "agent_accepted" | "enter_dispatched" | "submitted";
+  do_not_retry?: true;
+  evidence_error?: string;
+} {
+  if (options.proofLevel !== "agent_accepted") {
+    return {
+      replayed: true,
+      delivered: false,
+      status: "submission_pending_acceptance",
+      submission_outcome: "pending_acceptance",
+      delivery_receipt: options.proofLevel,
+      do_not_retry: true
+    };
+  }
+  try {
+    validateTerminalSubmissionAcceptanceEvidence(
+      options.evidence,
+      options.expected
+    );
+    return {
+      replayed: true,
+      delivered: true,
+      status: "async_pending",
+      submission_outcome: "agent_accepted",
+      delivery_receipt: "agent_accepted"
+    };
+  } catch (error) {
+    return {
+      replayed: true,
+      delivered: false,
+      status: "submission_uncertain",
+      submission_outcome: "uncertain",
+      delivery_receipt: "enter_dispatched",
+      do_not_retry: true,
+      evidence_error: error instanceof Error ? error.message : String(error)
+    };
+  }
 }
 
 function storedTerminalBridgeSubmissionReceipts(

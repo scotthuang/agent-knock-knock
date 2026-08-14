@@ -2,8 +2,8 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 30640,
-    "production_physical_loc": 76649,
+    "cli_core_max_physical_loc": 29281,
+    "production_physical_loc": 77792,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -476,12 +476,28 @@
       "owner": "terminal-dispatch-application"
     },
     {
+      "path": "src/terminal-dispatch-capability.ts",
+      "owner": "terminal-dispatch-application"
+    },
+    {
+      "path": "src/terminal-dispatch-composition.ts",
+      "owner": "terminal-dispatch-core"
+    },
+    {
+      "path": "src/terminal-dispatch-execution.ts",
+      "owner": "terminal-dispatch-application"
+    },
+    {
       "path": "src/terminal-dispatch-ledger-codec.ts",
       "owner": "terminal-dispatch-ledger"
     },
     {
       "path": "src/terminal-dispatch-policy.ts",
       "owner": "terminal-dispatch-policy"
+    },
+    {
+      "path": "src/terminal-dispatch-presenter.ts",
+      "owner": "terminal-dispatch-application"
     },
     {
       "path": "src/terminal-dispatch-receipt.ts",

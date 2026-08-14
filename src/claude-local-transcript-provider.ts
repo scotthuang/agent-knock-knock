@@ -24,7 +24,7 @@ import type {
 import {
   validateTerminalSubmissionAcceptanceEvidence,
   type TerminalSubmissionAcceptanceEvidence
-} from "./terminal-submission-acceptance.js";
+} from "./terminal-submission-facts.js";
 
 const CLAUDE_TRANSCRIPT_ANCHOR_VERSION = 1;
 const CLAUDE_TRANSCRIPT_MAX_TURN_BYTES = 64 * 1024 * 1024;

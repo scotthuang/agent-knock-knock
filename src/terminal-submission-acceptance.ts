@@ -11,58 +11,28 @@ import {
   exactNativeThreadId, fingerprint, normalizedRolloutIdentity, parsedInteger,
   requiredString, sha256Value, validTimestamp,
   validateCodexRolloutAcceptanceAnchor,
-  type CodexCandidateSetRolloutAcceptanceAnchor, type CodexRolloutAcceptanceAnchor,
-  type CodexRolloutIdentity
+  validateTerminalSubmissionAcceptanceEvidence,
+  type CaptureCodexRolloutAcceptanceAnchorOptions,
+  type CodexCandidateSetRolloutAcceptanceAnchor,
+  type CodexCandidateSetRolloutAcceptanceRequest,
+  type CodexCandidateSetRolloutAcceptanceResult,
+  type CodexRolloutAcceptanceAnchor,
+  type CodexRolloutAcceptanceIdentity,
+  type CodexRolloutAcceptanceRequest,
+  type CodexRolloutIdentity,
+  type TerminalSubmissionAcceptanceEvidence
 } from "./terminal-submission-facts.js";
-export { validateCodexRolloutAcceptanceAnchor };
+export {
+  validateCodexRolloutAcceptanceAnchor,
+  validateTerminalSubmissionAcceptanceEvidence
+};
 export type {
   CodexBoundRolloutAcceptanceAnchor, CodexCandidateRolloutAcceptanceAnchorEntry,
   CodexCandidateSetRolloutAcceptanceAnchor, CodexRolloutAcceptanceAnchor,
-  CodexRolloutIdentity,
+  CodexCandidateSetRolloutAcceptanceResult, CodexRolloutAcceptanceIdentity,
+  CodexRolloutIdentity, TerminalSubmissionAcceptanceEvidence,
   CodexVirginRolloutAcceptanceAnchor
 } from "./terminal-submission-facts.js";
-
-export interface TerminalSubmissionAcceptanceEvidence {
-  source: "codex_rollout" | "claude_transcript";
-  kind: "native_user_turn";
-  nativeThreadId: string;
-  requestHash: string;
-  acceptanceId: string;
-  acceptedAt?: string;
-  anchorFingerprint: string;
-  evidenceFingerprint: string;
-  metadata?: Record<string, string | number>;
-}
-
-export type CodexCandidateSetRolloutAcceptanceResult =
-  | {
-      status: "accepted";
-      identity: CodexOpenRootRolloutIdentity;
-      evidence: TerminalSubmissionAcceptanceEvidence;
-    }
-  | {
-      status: "pending";
-      inspected_candidates: number;
-      exact_matches: number;
-      incomplete_candidates?: number;
-    }
-  | {
-      status: "uncertain";
-      code:
-        | "multiple_exact_request_acceptances"
-        | "candidate_inventory_changed"
-        | "candidate_scan_invalid";
-      reason: string;
-      inspected_candidates: number;
-      exact_matches: number;
-    };
-
-export interface CodexRolloutAcceptanceIdentity {
-  sessionId: string;
-  processUuid?: string;
-  processBirth?: string;
-  rollout?: CodexRolloutIdentity;
-}
 
 export type CodexBoundRolloutCompletionCode =
   | "completion_found"
@@ -111,165 +81,12 @@ export type CodexBoundRolloutCompletionResult =
       diagnostics: CodexBoundRolloutCompletionDiagnostics;
     };
 
-export function validateTerminalSubmissionAcceptanceEvidence(
-  value: unknown,
-  expected: {
-    source: TerminalSubmissionAcceptanceEvidence["source"];
-    nativeThreadId: string;
-    requestHash: string;
-  }
-): TerminalSubmissionAcceptanceEvidence {
-  if (!isRecord(value)) {
-    throw new Error("native acceptance evidence is unavailable");
-  }
-  const allowedKeys = new Set([
-    "source",
-    "kind",
-    "nativeThreadId",
-    "requestHash",
-    "acceptanceId",
-    "acceptedAt",
-    "anchorFingerprint",
-    "evidenceFingerprint",
-    "metadata"
-  ]);
-  if (Object.keys(value).some((key) => !allowedKeys.has(key))) {
-    throw new Error("native acceptance evidence contains unsupported fields");
-  }
-  if (value.source !== expected.source || value.kind !== "native_user_turn") {
-    throw new Error("native acceptance evidence has the wrong agent or kind");
-  }
-  if (
-    requiredString(value.nativeThreadId, "native acceptance thread") !==
-      requiredString(expected.nativeThreadId, "expected native acceptance thread") ||
-    sha256Value(value.requestHash, "native acceptance request hash") !==
-      sha256Value(expected.requestHash, "expected native acceptance request hash")
-  ) {
-    throw new Error("native acceptance evidence does not match the exact request binding");
-  }
-  requiredString(value.acceptanceId, "native acceptance id");
-  sha256Value(value.anchorFingerprint, "native acceptance anchor fingerprint");
-  sha256Value(value.evidenceFingerprint, "native acceptance evidence fingerprint");
-  if (value.acceptedAt !== undefined && !validTimestamp(value.acceptedAt)) {
-    throw new Error("native acceptance evidence timestamp is invalid");
-  }
-  if (value.metadata !== undefined) {
-    if (!isRecord(value.metadata)) {
-      throw new Error("native acceptance evidence metadata is invalid");
-    }
-    const allowedMetadata = value.source === "codex_rollout"
-      ? new Set([
-          "turn_id",
-          "anchor_offset_bytes",
-          "observed_end_offset_bytes"
-        ])
-      : new Set([
-          "prompt_uuid",
-          "claude_version",
-          "transcript_file_id",
-          "anchor_offset_bytes",
-          "observed_end_offset_bytes",
-          "agent_started_at_ms"
-        ]);
-    for (const [key, item] of Object.entries(value.metadata)) {
-      if (
-        !allowedMetadata.has(key) ||
-        !(
-          typeof item === "string" ||
-          (typeof item === "number" && Number.isFinite(item))
-        )
-      ) {
-        throw new Error("native acceptance evidence metadata is not allowlisted");
-      }
-    }
-  }
-  const { evidenceFingerprint, ...base } = value;
-  if (fingerprint(base) !== evidenceFingerprint) {
-    throw new Error("native acceptance evidence fingerprint does not match");
-  }
-  return value as unknown as TerminalSubmissionAcceptanceEvidence;
-}
-
-export function terminalSubmissionReplayReceipt(options: {
-  proofLevel: "submitted" | "enter_dispatched" | "agent_accepted";
-  evidence?: unknown;
-  expected: {
-    source: TerminalSubmissionAcceptanceEvidence["source"];
-    nativeThreadId: string;
-    requestHash: string;
-  };
-}): {
-  replayed: true;
-  delivered: boolean;
-  status: "async_pending" | "submission_pending_acceptance" | "submission_uncertain";
-  submission_outcome: "agent_accepted" | "pending_acceptance" | "uncertain";
-  delivery_receipt: "agent_accepted" | "enter_dispatched" | "submitted";
-  do_not_retry?: true;
-  evidence_error?: string;
-} {
-  if (options.proofLevel !== "agent_accepted") {
-    return {
-      replayed: true,
-      delivered: false,
-      status: "submission_pending_acceptance",
-      submission_outcome: "pending_acceptance",
-      delivery_receipt: options.proofLevel,
-      do_not_retry: true
-    };
-  }
-  try {
-    validateTerminalSubmissionAcceptanceEvidence(
-      options.evidence,
-      options.expected
-    );
-    return {
-      replayed: true,
-      delivered: true,
-      status: "async_pending",
-      submission_outcome: "agent_accepted",
-      delivery_receipt: "agent_accepted"
-    };
-  } catch (error) {
-    return {
-      replayed: true,
-      delivered: false,
-      status: "submission_uncertain",
-      submission_outcome: "uncertain",
-      delivery_receipt: "enter_dispatched",
-      do_not_retry: true,
-      evidence_error: error instanceof Error ? error.message : String(error)
-    };
-  }
-}
-
 const CODEX_ACCEPTANCE_MAX_BYTES = 16 * 1024 * 1024;
 const CODEX_COMPLETION_MAX_BYTES = 256 * 1024 * 1024;
 const CODEX_COMPLETION_MAX_TEXT_LENGTH = 4000;
 const NO_FOLLOW_FLAG = typeof fs.constants.O_NOFOLLOW === "number"
   ? fs.constants.O_NOFOLLOW
   : 0;
-
-type CaptureCodexRolloutAcceptanceAnchorOptions = {
-  processUuid: string;
-  processBirth: string;
-  now?: Date;
-} & (
-  | {
-      nativeThreadId: string;
-      mode: "existing";
-      rollout: CodexRolloutIdentity;
-    }
-  | {
-      nativeThreadId: string;
-      mode: "pre_materialization";
-      expectedEmptyNativeSession: true;
-    }
-  | {
-      nativeThreadId?: undefined;
-      mode: "pre_materialization";
-      expectedEmptyNativeSession: true;
-    }
-);
 
 export function captureCodexRolloutAcceptanceAnchor(
   options: CaptureCodexRolloutAcceptanceAnchorOptions
@@ -415,11 +232,8 @@ export function detectCodexCandidateSetRolloutAcceptance({
   anchor: anchorValue,
   currentInventory: inventoryValue,
   requestHash: requestHashValue
-}: {
-  anchor: CodexCandidateSetRolloutAcceptanceAnchor;
-  currentInventory: CodexOpenRootRolloutInventory;
-  requestHash: string;
-}): CodexCandidateSetRolloutAcceptanceResult {
+}: CodexCandidateSetRolloutAcceptanceRequest):
+CodexCandidateSetRolloutAcceptanceResult {
   const anchor = validateCodexRolloutAcceptanceAnchor(anchorValue);
   if (anchor.version !== 3) {
     throw new Error("Codex candidate-set acceptance requires a version 3 anchor");
@@ -562,11 +376,9 @@ export function detectCodexCandidateSetRolloutAcceptance({
   };
 }
 
-export function detectCodexRolloutAcceptance(options: {
-  anchor: CodexRolloutAcceptanceAnchor;
-  currentIdentity: CodexRolloutAcceptanceIdentity;
-  requestHash: string;
-}): TerminalSubmissionAcceptanceEvidence | undefined {
+export function detectCodexRolloutAcceptance(
+  options: CodexRolloutAcceptanceRequest
+): TerminalSubmissionAcceptanceEvidence | undefined {
   const anchor = validateCodexRolloutAcceptanceAnchor(options.anchor);
   if (anchor.version === 3) {
     throw new Error(
