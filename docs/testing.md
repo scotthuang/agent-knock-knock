@@ -320,6 +320,26 @@ to 20); all 10 fake-Node sites remain. The machine-readable
 `callback-cli-in-process` witness records the moved normal-command cases, while
 `callback-cli-boundary` now names the retained winner/loser executable race.
 
+## #126 composer not-accepted in-process migration
+
+The sixth migration slice routes the multilingual Codex composer
+not-accepted command through `runInProcessCli`, and therefore through the same
+production `parseCliCommand` to `executeCliCommand` path. The test still uses
+the real tmux adapter executable, preserves the exact multiline composer after
+paste and after Enter, disables synthetic acceptance, and asserts that AKK
+dispatches exactly one `C-m`. Its durable not-accepted receipt, close recovery,
+and public JSON assertions are unchanged; only the outer Node CLI wrapper is
+removed. The explicitly injected process runner remains a visible
+`other_process_or_adapter` site and still starts the fake tmux, `ps`, and
+`lsof` executables with the command-scoped environment.
+
+This removes one real CLI startup site without moving or hiding a spawn. The
+static evidence becomes 29 included sites (`cli_process` 19 plus the unchanged
+10 fake-Node sites), a 39.58% reduction from the frozen 48-site baseline. The
+machine-readable `terminal-composer-in-process` witness records the imported
+command invariant, while raw/managed send, receipt-fence, crash, lock,
+acceptance, and terminal-input executable witnesses remain process-backed.
+
 ## #108 performance record
 
 The pre-refactor maintainer baseline was 48 files / 683 tests / about 573

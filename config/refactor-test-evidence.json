@@ -29,11 +29,11 @@
     },
     "current": {
       "counts": {
-        "cli_process": 20,
+        "cli_process": 19,
         "fake_node_process": 10,
-        "other_process_or_adapter": 10
+        "other_process_or_adapter": 11
       },
-      "included_total": 30
+      "included_total": 29
     },
     "final_threshold": {
       "required": false,

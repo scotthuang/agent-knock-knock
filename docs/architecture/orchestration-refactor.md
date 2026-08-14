@@ -621,7 +621,10 @@ separately. This is a deterministic source metric, not a claim about dynamic
 process executions in one test run. The initial eight callback cases, the CLI
 UX, native-ownership, management, selector, Session-binding, deterministic
 dispatch-admission, and 20 normal callback invocations now use the imported
-command service, reducing the current value to 30 of 48 baseline sites (37.5%
+command service. The multilingual composer not-accepted witness now uses the
+same imported command service while retaining the real tmux adapter and its
+exactly-one-Enter assertion. Together these migrations reduce the current
+value to 29 of 48 baseline sites (39.58%
 reduction). The 60%
 reduction target is still explicitly reported as not met. Its
 `final_threshold.required` flag remains `false` while #126 is in progress; the

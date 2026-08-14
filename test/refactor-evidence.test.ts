@@ -41,16 +41,16 @@ test("Phase 1 evidence reproduces startup counts and historical selection", asyn
   });
 
   assert.equal(evidence.testEvidence.subprocess.baselineIncluded, 48);
-  assert.equal(evidence.testEvidence.subprocess.currentIncluded, 30);
-  assert.equal(evidence.testEvidence.subprocess.reductionBasisPoints, 3750);
+  assert.equal(evidence.testEvidence.subprocess.currentIncluded, 29);
+  assert.equal(evidence.testEvidence.subprocess.reductionBasisPoints, 3958);
   assert.equal(evidence.testEvidence.subprocess.targetRequired, false);
   assert.equal(evidence.testEvidence.subprocess.targetMet, false);
   assert.deepEqual(
     evidence.testEvidence.subprocess.currentCounts,
     {
-      cli_process: 20,
+      cli_process: 19,
       fake_node_process: 10,
-      other_process_or_adapter: 10
+      other_process_or_adapter: 11
     }
   );
 
@@ -75,7 +75,7 @@ test("Phase 1 evidence reproduces startup counts and historical selection", asyn
 
   assert.deepEqual(evidence.publicContracts, {
     contractCount: 4,
-    witnessCount: 51,
+    witnessCount: 52,
     migrationCount: 10,
     openclawToolCount: 14,
     storeProtocolCount: 5
