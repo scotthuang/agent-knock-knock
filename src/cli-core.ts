@@ -272,7 +272,10 @@ import {
   type TerminalScopedCodexApprovalBoundary,
   type TerminalScopedCodexApprovalPromptSnapshot
 } from "./terminal-scoped-approval-authority.js";
-import { canonicalMutationResource, capabilityGatedRepositoryOperation, withCanonicalMutationLocks } from "./mutation-transaction.js";
+import {
+  canonicalMutationResource, capabilityGatedRepositoryOperation,
+  capabilityGatedRepositoryPairOperation, withCanonicalMutationLocks
+} from "./mutation-transaction.js";
 import {
   beginCallbackRetryPolicy,
   reduceCallbackRetryPolicy,
@@ -355,11 +358,14 @@ const TERMINAL_INPUT_EVIDENCE_FIELDS = [
   "uncertain_at",
   "acceptance_evidence"
 ] as const;
+const DEFERRED_INPUT_EVIDENCE_FIELDS = ["dispatch_started_at", ...TERMINAL_INPUT_EVIDENCE_FIELDS] as const;
+const FINAL_DEFERRED_TRANSFER_STATUSES = new Set(["resolved", "abort_resolved"]);
 const gateRepository = capabilityGatedRepositoryOperation;
+const gateRepositoryPair = capabilityGatedRepositoryPairOperation;
 const mutationConversationStore = Object.freeze({
-  load: gateRepository(["state"], "state", (resource) => loadState(resource.statePath)),
-  save: gateRepository(["storeWriter", "state"], "state", (resource, state: Conversation) => saveState(resource.statePath, state)),
-  appendEvent: gateRepository(["storeWriter", "state"], "state", (resource, event: Parameters<typeof appendEvent>[1]) => appendEvent(resource.logPath, event))
+  load: gateRepository(["state"], "state", (resource: { statePath: string }) => loadState(resource.statePath)),
+  save: gateRepository(["storeWriter", "state"], "state", (resource: { statePath: string }, state: Conversation) => saveState(resource.statePath, state)),
+  appendEvent: gateRepository(["storeWriter", "state"], "state", (resource: { logPath: string }, event: Parameters<typeof appendEvent>[1]) => appendEvent(resource.logPath, event))
 });
 const mutationDispatchLedger = Object.freeze({
   load: gateRepository(["terminal"], "terminal", loadTerminalBridgeDispatchLedger),
@@ -368,20 +374,28 @@ const mutationDispatchLedger = Object.freeze({
   reconcileIncarnation: gateRepository(["terminal", "storeWriter"], "terminal",
     (terminalControl: TerminalControlRef) => resolveTerminalDispatchLedgerPaneIncarnation(
       terminalControl, loadTerminalBridgeDispatchLedger(terminalControl))),
-  reconcile: gateRepository(["terminal", "storeWriter"], "terminal", reconcileLifecycleDispatchLedger)
+  reconcile: gateRepositoryPair(
+    ["terminal", "storeWriter"], ["terminal", "storeWriter"],
+    reconcileLifecycleDispatchLedger
+  ),
+  beforeMutation: gateRepositoryPair(
+    ["terminal", "storeWriter"], ["terminal", "storeWriter"],
+    recoverLifecycleFenceBeforeMutation
+  )
 });
 const mutationManagedSessions = Object.freeze({
   load: gateRepository(["storeWriter"], "storeWriter", loadManagedSession),
   save: gateRepository(["storeWriter"], "storeWriter", saveManagedSession)
 });
 function terminalWriterMutationLocks(storeDir: string, terminalControl: TerminalControlRef) {
+  const canonicalStoreDir = path.resolve(storeDir);
   return {
     resources: {
       terminal: canonicalMutationResource(terminalBridgeRuntimeKey(terminalControl), terminalControl),
-      storeWriter: canonicalMutationResource(path.resolve(storeDir), storeDir)
+      storeWriter: canonicalMutationResource(canonicalStoreDir, canonicalStoreDir)
     },
-    acquireTerminal: () => acquireTerminalBridgeSendLock(storeDir, terminalControl, { timeoutMs: 30000 }),
-    withStoreWriter: <Result>(operation: () => Promise<Result>) => withStoreWriterLeaseAsync(storeDir, operation)
+    acquireTerminal: () => acquireTerminalBridgeSendLock(canonicalStoreDir, terminalControl, { timeoutMs: 30000 }),
+    withStoreWriter: <Result>(operation: () => Promise<Result>) => withStoreWriterLeaseAsync(canonicalStoreDir, operation)
   };
 }
 function terminalWriterStateMutationLocks(storeDir: string, terminalControl: TerminalControlRef, statePath: string, logPath: string) {
@@ -3948,7 +3962,7 @@ function reconcileTerminalBridgeCollateralStalls(
       .filter((transfer) =>
         transfer.version === 2 &&
         transfer.source_kind === "candidate_rollout_quiescent" &&
-        !["resolved", "abort_resolved"].includes(transfer.status)
+        !FINAL_DEFERRED_TRANSFER_STATUSES.has(transfer.status)
       )
       .flatMap((transfer) =>
         (transfer.source_turn_history ?? []).map((turn) => turn.turn_id)
@@ -4687,7 +4701,7 @@ function terminalFirstListProjection({
   const nonterminalDeferredTransfers = listDeferredForegroundTransfers(
     storeDir
   ).filter((transfer) =>
-    !["resolved", "abort_resolved"].includes(transfer.status)
+    !FINAL_DEFERRED_TRANSFER_STATUSES.has(transfer.status)
   );
   const nonterminalDeferredTransferIds = new Set(
     nonterminalDeferredTransfers.map((transfer) => transfer.transfer_id)
@@ -6423,7 +6437,7 @@ function terminalScopedCodexApprovalBoundary({
       .map((turn) => turnIdForConversation(turn));
   const hasDeferredRecovery = () =>
     listDeferredForegroundTransfers(storeDir).some((transfer) =>
-      !["resolved", "abort_resolved"].includes(transfer.status) &&
+      !FINAL_DEFERRED_TRANSFER_STATUSES.has(transfer.status) &&
       (transfer.source_session_id === session.session_id ||
        transfer.target_session_id === session.session_id ||
        (transfer.terminal_id === terminalId &&
@@ -10720,7 +10734,7 @@ async function prepareDeferredCodexForegroundBinding({
   }
   const existingTransfer = listDeferredForegroundTransfers(storeDir).find(
     (candidate) =>
-      !["resolved", "abort_resolved"].includes(candidate.status) &&
+      !FINAL_DEFERRED_TRANSFER_STATUSES.has(candidate.status) &&
       (
         candidate.source_session_id === sourceSession.session_id ||
         (
@@ -14770,7 +14784,7 @@ async function runReconcileBinding(options: Record<string, any>) {
           "terminal identity changed while waiting to reconcile its binding; refresh AKK list"
         );
       }
-      await recoverLifecycleFenceBeforeMutation({ options, terminal });
+      await mutationDispatchLedger.beforeMutation(scopes, resources, options, terminal);
       const dispatchOwnership = terminalDispatchOwnership(
         terminal.terminalControl
       );
@@ -15028,16 +15042,12 @@ async function runNativeThreadTransition(
         nativeThreadId: string;
         selectionSnapshot?: NativeThreadResumeSnapshot;
       }
-) {
+  ) {
   const initiallyResolved = await resolveLifecycleTerminal(options);
   const storeDir = storeDirFromOptions(options);
-  const releaseTerminalLock = acquireTerminalBridgeSendLock(
-    storeDir,
-    initiallyResolved.terminalControl,
-    { timeoutMs: 30000 }
-  );
-  try {
-    return await withStoreWriterLeaseAsync(storeDir, async () => {
+  return withCanonicalMutationLocks(terminalWriterMutationLocks(
+    storeDir, initiallyResolved.terminalControl
+  ), async (scopes, resources) => {
       const terminal = await resolveLifecycleTerminal(options);
       if (
         terminal.pid !== initiallyResolved.pid ||
@@ -15055,7 +15065,7 @@ async function runNativeThreadTransition(
         assertResumeSnapshotMatchesTerminal(operation.selectionSnapshot, terminal);
         assertResumeSnapshotActionFingerprint(operation.selectionSnapshot, terminal);
       }
-      await recoverLifecycleFenceBeforeMutation({ options, terminal });
+      await mutationDispatchLedger.beforeMutation(scopes, resources, options, terminal);
       if (operation.kind === "resume_thread" && operation.selectionSnapshot) {
         // Recovery may resolve or otherwise rewrite a durable dispatch fence.
         // A snapshot created before that mutation is stale even when the
@@ -15824,10 +15834,7 @@ async function runNativeThreadTransition(
           reason: message
         });
       }
-    });
-  } finally {
-    releaseTerminalLock();
-  }
+  });
 }
 
 async function runStatus(options) {
@@ -16612,17 +16619,11 @@ async function runSend(options) {
       );
     }
     const rawStoreDir = storeDirFromOptions(options);
-    const releaseTerminalLock = acquireTerminalBridgeSendLock(
-      rawStoreDir,
-      terminalConversation.terminalControl,
-      { timeoutMs: 30000 }
-    );
-    try {
-      await withStoreWriterLeaseAsync(rawStoreDir, async () => {
-      await recoverLifecycleFenceBeforeMutation({
-        options,
-        terminal: terminalConversation
-      });
+    await withCanonicalMutationLocks(terminalWriterMutationLocks(
+      rawStoreDir, terminalConversation.terminalControl
+    ), async (scopes, resources) => {
+      await mutationDispatchLedger.beforeMutation(
+        scopes, resources, options, terminalConversation);
       // Upgrade legacy Stores before resolving their Session authority. The
       // protocol migration, rather than mutable Turn recency, is the only code
       // allowed to materialize Session records from existing Turns.
@@ -17026,10 +17027,7 @@ async function runSend(options) {
       } finally {
         releaseStateLock();
       }
-      });
-    } finally {
-      releaseTerminalLock();
-    }
+    });
     return;
   }
 
@@ -17103,13 +17101,9 @@ async function runSend(options) {
       `session ${sessionId} is not attached to a live terminal`
     );
   }
-  const releaseTerminalLock = acquireTerminalBridgeSendLock(
-    storeDir,
-    resolvedTerminal.terminalControl,
-    { timeoutMs: 30000 }
-  );
-  try {
-    await withStoreWriterLeaseAsync(storeDir, async () => {
+  await withCanonicalMutationLocks(terminalWriterMutationLocks(
+    storeDir, resolvedTerminal.terminalControl
+  ), async (scopes, resources) => {
     const lockedStrictSession = tryLoadManagedSession(storeDir, sessionId);
     if (
       lockedStrictSession?.agent === "codex" &&
@@ -17127,10 +17121,8 @@ async function runSend(options) {
         "terminal input was sent."
       );
     }
-    await recoverLifecycleFenceBeforeMutation({
-      options,
-      terminal: resolvedTerminal
-    });
+    await mutationDispatchLedger.beforeMutation(
+      scopes, resources, options, resolvedTerminal);
     // A protocol-1/2 Store materializes authoritative Session records as one
     // atomic migration. Once protocol 3 is active, a missing Session is corrupt
     // state and must not be reconstructed from whichever Turn looks newest.
@@ -17294,10 +17286,7 @@ async function runSend(options) {
     } finally {
       releaseStateLock();
     }
-    });
-  } finally {
-    releaseTerminalLock();
-  }
+  });
 }
 
 async function runRespond(options) {
@@ -20773,7 +20762,7 @@ async function reconcileTerminalAcceptanceInMonitor({
       terminalControl,
       { pid }
     );
-    if (!["resolved", "abort_resolved"].includes(transfer.status)) {
+    if (!FINAL_DEFERRED_TRANSFER_STATUSES.has(transfer.status)) {
       await recoverDeferredCodexForegroundTransferBeforeMutation({
         options: {
           ...options,
@@ -20786,7 +20775,7 @@ async function reconcileTerminalAcceptanceInMonitor({
         deferredTransferId
       );
       conversation = loadState(statePath);
-      if (!["resolved", "abort_resolved"].includes(transfer.status)) {
+      if (!FINAL_DEFERRED_TRANSFER_STATUSES.has(transfer.status)) {
         return { outcome: "pending" };
       }
     }
@@ -22733,10 +22722,7 @@ async function reconcileMonitors(
           storeDir,
           deferredTransferId
         );
-        if (![
-          "resolved",
-          "abort_resolved"
-        ].includes(deferredTransfer.status)) {
+        if (!FINAL_DEFERRED_TRANSFER_STATUSES.has(deferredTransfer.status)) {
           const deferredControl = terminalControlFromTakeover(initialTakeover);
           const deferredPid = Number(initialTakeover?.terminal_agent_pid);
           if (
@@ -22776,10 +22762,7 @@ async function reconcileMonitors(
             storeDir,
             deferredTransferId
           );
-          if (![
-            "resolved",
-            "abort_resolved"
-          ].includes(refreshedTransfer.status)) {
+          if (!FINAL_DEFERRED_TRANSFER_STATUSES.has(refreshedTransfer.status)) {
             const pendingSubmission = terminalBridgeSubmission(
               initialConversation
             );
@@ -22828,7 +22811,7 @@ async function reconcileMonitors(
         : undefined;
       if (
         !reconciledTransfer ||
-        ["resolved", "abort_resolved"].includes(reconciledTransfer.status)
+        FINAL_DEFERRED_TRANSFER_STATUSES.has(reconciledTransfer.status)
       ) {
         assertTurnBindingCurrent(initialConversation, "reconcile monitor for");
       }
@@ -23241,7 +23224,7 @@ function terminalBridgeReconciliationEligibility(conversation) {
     : undefined;
   if (
     deferredTransfer &&
-    !["resolved", "abort_resolved"].includes(deferredTransfer.status)
+    !FINAL_DEFERRED_TRANSFER_STATUSES.has(deferredTransfer.status)
   ) {
     const anchor = validateCodexRolloutAcceptanceAnchor(
       nativeTakeover.codex_rollout_acceptance_anchor
@@ -25257,9 +25240,7 @@ async function runTerminalDispatchClose({
           "does not match its exact Store/terminal transfer"
         );
       }
-      if (!["resolved", "abort_resolved"].includes(
-        transfer.status
-      )) {
+      if (!FINAL_DEFERRED_TRANSFER_STATUSES.has(transfer.status)) {
         throw new Error(
           `terminal ${terminalControl.target} dispatch is fenced by deferred ` +
           `foreground transfer ${transfer.transfer_id} (${transfer.status}); ` +
@@ -27964,7 +27945,7 @@ function assertConversationHasNoNonterminalDeferredForegroundTransfer({
     (candidate) =>
       candidate.version === 2 &&
       candidate.source_kind === "candidate_rollout_quiescent" &&
-      !["resolved", "abort_resolved"].includes(candidate.status) &&
+      !FINAL_DEFERRED_TRANSFER_STATUSES.has(candidate.status) &&
       (candidate.source_turn_history ?? []).some(
         (sourceTurn) => sourceTurn.turn_id === turnId
       )
@@ -27985,7 +27966,7 @@ function assertConversationHasNoNonterminalDeferredForegroundTransfer({
     return;
   }
   const transfer = loadDeferredForegroundTransfer(storeDir, transferId);
-  if (!["resolved", "abort_resolved"].includes(transfer.status)) {
+  if (!FINAL_DEFERRED_TRANSFER_STATUSES.has(transfer.status)) {
     throw new Error(
       `cannot ${action} Turn ${turnIdForConversation(conversation)} while ` +
       `deferred foreground transfer ${transfer.transfer_id} is ` +
@@ -28007,7 +27988,7 @@ function assertTerminalHasNoNonterminalDeferredForegroundTransfer({
 }): void {
   const transfer = listDeferredForegroundTransfers(storeDir).find(
     (candidate) =>
-      !["resolved", "abort_resolved"].includes(candidate.status) &&
+      !FINAL_DEFERRED_TRANSFER_STATUSES.has(candidate.status) &&
       candidate.process_pid === pid &&
       terminalControlEvidenceMatches(
         candidate.terminal_endpoint,
@@ -28874,16 +28855,6 @@ function assertDeferredForegroundResolvedZeroInputLedger({
   });
   const abortedAt = stringValue(ledger.aborted_at);
   const resolvedAt = stringValue(ledger.resolved_at);
-  const forbiddenEvidence = [
-    "dispatch_started_at",
-    "text_injected_at",
-    "enter_dispatched_at",
-    "submitted_at",
-    "agent_accepted_at",
-    "not_accepted_at",
-    "uncertain_at",
-    "acceptance_evidence"
-  ] as const;
   if (
     ledger.status !== "resolved" ||
     ledger.safe_to_retry !== true ||
@@ -28892,7 +28863,7 @@ function assertDeferredForegroundResolvedZeroInputLedger({
     !Number.isFinite(Date.parse(abortedAt)) ||
     !Number.isFinite(Date.parse(resolvedAt)) ||
     Date.parse(resolvedAt) < Date.parse(abortedAt) ||
-    forbiddenEvidence.some((field) => ledger[field] !== undefined)
+    DEFERRED_INPUT_EVIDENCE_FIELDS.some((field) => ledger[field] !== undefined)
   ) {
     throw new Error(
       `deferred foreground transfer ${transfer.transfer_id} resolved ledger ` +
@@ -28935,7 +28906,7 @@ function assertDeferredForegroundResolvedZeroInputLedger({
     ownReceipt.safe_to_retry !== true ||
     stringValue(ownReceipt.aborted_at) !== abortedAt ||
     stringValue(ownReceipt.resolved_at) !== resolvedAt ||
-    forbiddenEvidence.some((field) => ownReceipt[field] !== undefined)
+    DEFERRED_INPUT_EVIDENCE_FIELDS.some((field) => ownReceipt[field] !== undefined)
   ) {
     throw new Error(
       `deferred foreground transfer ${transfer.transfer_id} append-only ` +
@@ -29721,6 +29692,7 @@ async function recoverDeferredCodexForegroundTransferWhileWriterLease({
   terminal: ResolvedTerminalConversation;
   storeDir: string;
 }): Promise<void> {
+  options = Object.freeze({ ...options, storeDir });
   let transfers = listDeferredForegroundTransfers(storeDir);
   // An abort intent is Store authority: it is finalized without consulting a
   // live pane, PID, cwd, or process birth. Once the exact cleanup receipt is
@@ -29875,22 +29847,26 @@ async function recoverDeferredCodexForegroundTransferWhileWriterLease({
   );
 }
 
-async function recoverLifecycleFenceBeforeMutation({
-  options,
-  terminal
-}: {
-  options: Record<string, any>;
-  terminal: ResolvedTerminalConversation;
-}): Promise<void> {
-  await recoverDeferredCodexForegroundTransferBeforeMutation({
-    options,
-    terminal
-  });
-  let ledger = loadTerminalBridgeDispatchLedger(terminal.terminalControl);
+async function recoverLifecycleFenceBeforeMutation(
+  terminalControl: TerminalControlRef,
+  storeDir: string,
+  options: Record<string, any>,
+  terminal: ResolvedTerminalConversation
+): Promise<void> {
+  if (terminal.terminalControl !== terminalControl) {
+    terminal = { ...terminal, terminalControl };
+  }
+  await withStoreWriterLeaseAsync(storeDir, () =>
+    recoverDeferredCodexForegroundTransferWhileWriterLease({
+      options, terminal, storeDir
+    })
+  );
+  let ledger = loadTerminalBridgeDispatchLedger(terminalControl);
   if (!ledger || ledger.status === "resolved") {
     ledger = rebuildObservedHandoffLedgerFromTransition({
       options,
       terminal,
+      storeDir,
       previousLedger: ledger
     });
     if (!ledger) {
@@ -29907,7 +29883,8 @@ async function recoverLifecycleFenceBeforeMutation({
     );
   }
   const recovered = await reconcileLifecycleDispatchLedger(
-    terminal.terminalControl,
+    terminalControl,
+    storeDir,
     options,
     terminal,
     ledger
@@ -29927,13 +29904,14 @@ async function recoverLifecycleFenceBeforeMutation({
 function rebuildObservedHandoffLedgerFromTransition({
   options,
   terminal,
+  storeDir,
   previousLedger
 }: {
   options: Record<string, any>;
   terminal: ResolvedTerminalConversation;
+  storeDir: string;
   previousLedger?: Record<string, any>;
 }): Record<string, any> | undefined {
-  const storeDir = storeDirFromOptions(options);
   const candidates = listNativeThreadTransitions(storeDir).filter(
     (transition) =>
       transition.operation === "adopt_external_thread" &&
@@ -30150,6 +30128,7 @@ async function recoverPreparedObservedHandoff({
 
 async function reconcileLifecycleDispatchLedger(
   terminalControl: TerminalControlRef,
+  lockedStoreDir: string,
   options: Record<string, any>,
   terminal: ResolvedTerminalConversation,
   ledger: Record<string, any>,
@@ -30172,10 +30151,10 @@ async function reconcileLifecycleDispatchLedger(
   ) {
     return ledger;
   }
-  const storeDir = stringValue(ledger.store_dir);
+  const recordedStoreDir = stringValue(ledger.store_dir);
   const transitionId = stringValue(ledger.transition_id);
   if (
-    !storeDir ||
+    !recordedStoreDir ||
     !transitionId ||
     stringValue(ledger.generation_id) !== transitionId ||
     (
@@ -30184,6 +30163,14 @@ async function reconcileLifecycleDispatchLedger(
     )
   ) {
     return ledger;
+  }
+  const storeDir = path.resolve(lockedStoreDir);
+  options = Object.freeze({ ...options, storeDir });
+  if (path.resolve(recordedStoreDir) !== storeDir) {
+    return failClosedLifecycleLedger({
+      terminal, ledger,
+      reason: "native thread transition belongs to another Store"
+    });
   }
   let transition: NativeThreadTransition;
   try {
@@ -34107,7 +34094,7 @@ function reconcileIdleConversations(
       .filter((transfer) =>
         transfer.version === 2 &&
         transfer.source_kind === "candidate_rollout_quiescent" &&
-        !["resolved", "abort_resolved"].includes(transfer.status)
+        !FINAL_DEFERRED_TRANSFER_STATUSES.has(transfer.status)
       )
       .flatMap((transfer) =>
         (transfer.source_turn_history ?? []).map((turn) => turn.turn_id)

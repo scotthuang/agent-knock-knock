@@ -1,6 +1,6 @@
 type Awaitable<Value> = Value | PromiseLike<Value>;
 type ScopeKind = "terminal" | "storeWriter" | "state";
-export type CanonicalMutationResource<Value = any> = Readonly<{ key: string; value: Value }>;
+export type CanonicalMutationResource<Value = unknown> = Readonly<{ key: string; value: Value }>;
 type ScopeResources = Readonly<Record<ScopeKind, CanonicalMutationResource>>;
 type LockResources = Readonly<Pick<ScopeResources, "terminal" | "storeWriter"> & Partial<ScopeResources>>;
 declare const mutationScopeBrand: unique symbol;
@@ -50,12 +50,25 @@ function assertActiveScopes(
 }
 type ScopesFor<Kinds extends readonly ScopeKind[]> = Pick<CanonicalStateMutationScopes, Kinds[number]>;
 export function capabilityGatedRepositoryOperation<
-  const Required extends readonly ScopeKind[], Bound extends Required[number], Args extends unknown[], Result>(
+  const Required extends readonly ScopeKind[], Bound extends Required[number], Resource, Args extends unknown[], Result>(
   required: Required, bound: Bound,
-  operation: (resource: ScopeResources[Bound]["value"], ...args: Args) => Result) {
+  operation: (resource: Resource, ...args: Args) => Result) {
   return (scopes: ScopesFor<Required>, resources: Pick<ScopeResources, Required[number]>, ...args: Args) => {
     assertActiveScopes(scopes, resources, required);
-    return operation(resources[bound].value, ...args);
+    return operation(resources[bound].value as Resource, ...args);
+  };
+}
+export function capabilityGatedRepositoryPairOperation<
+  const Required extends readonly ScopeKind[], First extends Required[number], Second extends Required[number],
+  FirstResource, SecondResource, Args extends unknown[], Result>(required: Required, bound: readonly [First, Second],
+  operation: (first: FirstResource, second: SecondResource, ...args: Args) => Result) {
+  return (scopes: ScopesFor<Required>, resources: Pick<ScopeResources, Required[number]>, ...args: Args) => {
+    assertActiveScopes(scopes, resources, required);
+    return operation(
+      resources[bound[0]].value as FirstResource,
+      resources[bound[1]].value as SecondResource,
+      ...args
+    );
   };
 }
 type ScopesForPorts<Ports> = Ports extends { acquireState: () => unknown } ? CanonicalStateMutationScopes : CanonicalMutationScopes;

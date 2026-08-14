@@ -354,6 +354,11 @@ authenticity and lifetime, not these records or effects.
 | Terminal dispatch-ledger load / save / resolve / reconcile | terminal / terminal + writer | existing runtime-ledger filesystem and lifecycle reconciliation functions |
 | Managed Session load / CAS save | writer | existing Session repository functions |
 
+Lifecycle recovery and reconciliation receive both the exact locked terminal
+and canonical Store path from a paired repository capability. A recorded
+`store_dir` is comparison evidence only: a mismatch fails closed before any
+transition read, quarantine, Session write, or lifecycle-ledger resolution.
+
 | Operation | Held lock scopes | Durable writes and existing order | Terminal input | Crash/retry direction |
 | --- | --- | --- | --- | --- |
 | `runReconcileBinding` | terminal -> writer | one managed Session CAS detach at the listed revision | definitely zero | before CAS, refresh and reauthorize; after CAS, detached is final and a stale token cannot retry |
@@ -369,6 +374,9 @@ pane-incarnation load/resolution and later reconciliation writes through them;
 binding reconciliation uses
 the managed-Session adapter for its fresh reads and CAS detach. The transaction
 module supplies no effect DSL and cannot construct Store or protocol state.
+Native-transition and raw/managed-send entry points use the same paired
+capability for lifecycle-fence recovery; unrelated dispatch and lifecycle
+writes remain in their existing shells for their later service milestones.
 
 ### Initial native-thread transition policy slice
 

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   canonicalMutationResource,
   capabilityGatedRepositoryOperation,
+  capabilityGatedRepositoryPairOperation,
   withCanonicalMutationLocks,
   type CanonicalMutationLockPorts,
   type CanonicalMutationScopes,
@@ -208,6 +209,48 @@ test("repository adapters reject authentic scopes for another resource", async (
       /requires active authentic state scope/u
     );
   });
+});
+
+test("paired repositories inject the exact terminal and Store resources", async () => {
+  const writes: string[] = [];
+  const reconcile = capabilityGatedRepositoryPairOperation(
+    ["terminal", "storeWriter"] as const,
+    ["terminal", "storeWriter"] as const,
+    (terminal: string, storeDir: string, transitionId: string) => {
+      writes.push(`${terminal}:${storeDir}:${transitionId}`);
+    }
+  );
+
+  const { ports } = fixture({ withState: false });
+  let leaked: CanonicalMutationScopes | undefined;
+  await withCanonicalMutationLocks(ports, async (scopes, resources) => {
+    leaked = scopes;
+    reconcile(scopes, resources, "transition-1");
+    assert.throws(
+      () => reconcile(scopes, {
+        ...resources,
+        terminal: OTHER_RESOURCES.terminal
+      }, "transition-2"),
+      /requires active authentic terminal scope/u
+    );
+    assert.throws(
+      () => reconcile(scopes, {
+        ...resources,
+        storeWriter: OTHER_RESOURCES.storeWriter
+      }, "transition-3"),
+      /requires active authentic storeWriter scope/u
+    );
+  });
+
+  assert.deepEqual(writes, ["terminal-1:/store:transition-1"]);
+  assert.throws(
+    () => reconcile(
+      leaked as CanonicalMutationScopes,
+      TEST_RESOURCES.resources,
+      "transition-4"
+    ),
+    /requires active authentic terminal scope/u
+  );
 });
 
 test("pane-incarnation reconciliation writes only for its exact locked resources", async () => {

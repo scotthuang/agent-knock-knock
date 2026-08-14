@@ -320,7 +320,7 @@
       "id": "mutation-resource-capability-unit",
       "path": "test/mutation-transaction.test.ts",
       "tier": "fast",
-      "needle": "repository adapters reject authentic scopes for another resource"
+      "needle": "paired repositories inject the exact terminal and Store resources"
     },
     {
       "id": "openclaw-plugin-boundary",
