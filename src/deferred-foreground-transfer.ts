@@ -2,6 +2,12 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import {
+  assertRealDirectory,
+  atomicSaveJsonFile,
+  isNodeError,
+  readJsonFileNoFollow
+} from "./durable-json-file.js";
+import {
   assertManagedSessionId,
   assertManagedSessionState,
   isExactNativeThreadId,
@@ -25,10 +31,6 @@ export const DEFERRED_FOREGROUND_TRANSFER_VERSION = 2 as const;
 export const DEFERRED_FOREGROUND_TRANSFER_LEGACY_VERSION = 1 as const;
 
 const TRANSFER_STATE_FILE = "state.json";
-const PRIVATE_FILE_MODE = 0o600;
-const NO_FOLLOW_FLAG = typeof fs.constants.O_NOFOLLOW === "number"
-  ? fs.constants.O_NOFOLLOW
-  : 0;
 
 export type DeferredForegroundTransferStatus =
   | "prepared"
@@ -1447,66 +1449,16 @@ function assertBinding(value: unknown, label: string): void {
 }
 
 function atomicSaveJson(filePath: string, value: unknown): void {
-  const root = path.dirname(path.dirname(filePath));
-  const directory = path.dirname(filePath);
-  ensureDir(root);
-  assertRealDirectory(root, "deferred foreground transfer root");
-  ensureDir(directory);
-  assertRealDirectory(directory, "deferred foreground transfer directory");
-  assertRegularOrAbsent(filePath, "deferred foreground transfer state");
-  const tempPath = path.join(
-    directory,
-    `.${path.basename(filePath)}.${process.pid}.${randomUUID()}.tmp`
-  );
-  let fd: number | undefined;
-  try {
-    fd = fs.openSync(
-      tempPath,
-      fs.constants.O_CREAT |
-        fs.constants.O_EXCL |
-        fs.constants.O_WRONLY |
-        NO_FOLLOW_FLAG,
-      PRIVATE_FILE_MODE
-    );
-    fs.fchmodSync(fd, PRIVATE_FILE_MODE);
-    fs.writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-    fs.fsyncSync(fd);
-    fs.closeSync(fd);
-    fd = undefined;
-    assertRegularOrAbsent(filePath, "deferred foreground transfer state");
-    fs.renameSync(tempPath, filePath);
-    fs.chmodSync(filePath, PRIVATE_FILE_MODE);
-    fsyncDirectory(directory);
-  } finally {
-    if (fd !== undefined) {
-      fs.closeSync(fd);
-    }
-    try {
-      fs.unlinkSync(tempPath);
-    } catch (error) {
-      if (!isNodeError(error, "ENOENT")) {
-        throw error;
-      }
-    }
-  }
+  atomicSaveJsonFile(filePath, value, {
+    rootLabel: "deferred foreground transfer root",
+    directoryLabel: "deferred foreground transfer directory",
+    fileLabel: "deferred foreground transfer state",
+    ensureDirectory: ensureDir
+  });
 }
 
 function readJsonFile(filePath: string, label: string): unknown {
-  assertRealDirectory(path.dirname(path.dirname(filePath)), `${label} root`);
-  assertRealDirectory(path.dirname(filePath), `${label} directory`);
-  const stat = fs.lstatSync(filePath);
-  if (stat.isSymbolicLink() || !stat.isFile()) {
-    throw new Error(`${label} must be a regular file: ${filePath}`);
-  }
-  const fd = fs.openSync(filePath, fs.constants.O_RDONLY | NO_FOLLOW_FLAG);
-  try {
-    if (!fs.fstatSync(fd).isFile()) {
-      throw new Error(`${label} must be a regular file: ${filePath}`);
-    }
-    return JSON.parse(fs.readFileSync(fd, "utf8"));
-  } finally {
-    fs.closeSync(fd);
-  }
+  return readJsonFileNoFollow(filePath, label);
 }
 
 function assertExpectedRevision(value: unknown): asserts value is number | null {
@@ -1547,45 +1499,6 @@ function assertContained(candidate: string, root: string, label: string): void {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
   if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
     throw new Error(`${label} escapes its Store root`);
-  }
-}
-
-function assertRealDirectory(directory: string, label: string): void {
-  const stat = fs.lstatSync(directory);
-  if (stat.isSymbolicLink() || !stat.isDirectory()) {
-    throw new Error(`${label} must be a real directory: ${directory}`);
-  }
-}
-
-function assertRegularOrAbsent(filePath: string, label: string): void {
-  try {
-    const stat = fs.lstatSync(filePath);
-    if (stat.isSymbolicLink() || !stat.isFile()) {
-      throw new Error(`${label} must be a regular file: ${filePath}`);
-    }
-  } catch (error) {
-    if (!isNodeError(error, "ENOENT")) {
-      throw error;
-    }
-  }
-}
-
-function fsyncDirectory(directory: string): void {
-  let fd: number | undefined;
-  try {
-    fd = fs.openSync(directory, fs.constants.O_RDONLY | NO_FOLLOW_FLAG);
-    fs.fsyncSync(fd);
-  } catch (error) {
-    const code = error instanceof Error
-      ? (error as NodeJS.ErrnoException).code
-      : undefined;
-    if (!["EINVAL", "ENOTSUP", "EPERM", "EISDIR"].includes(String(code))) {
-      throw error;
-    }
-  } finally {
-    if (fd !== undefined) {
-      fs.closeSync(fd);
-    }
   }
 }
 
@@ -1648,11 +1561,6 @@ function isPositiveSafeInteger(value: unknown): value is number {
 
 function isRecord(value: unknown): value is Record<string, any> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function isNodeError(error: unknown, code: string): boolean {
-  return error instanceof Error &&
-    (error as NodeJS.ErrnoException).code === code;
 }
 
 const TRANSFER_STATUSES = new Set<DeferredForegroundTransferStatus>([
