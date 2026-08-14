@@ -24,9 +24,13 @@ import {
   captureCodexRolloutAcceptanceAnchor,
   detectCodexRolloutAcceptance
 } from "../../src/terminal-submission-acceptance.js";
+import {
+  createTerminalControlProviderRegistry,
+  TmuxTerminalControlProvider
+} from "../../src/terminal-control-provider.js";
+import { SystemTerminalProcessSource } from "../../src/terminal-process-source.js";
 import { createOpenClawPluginForTest } from "../../src/openclaw-plugin.js";
 import {
-  binPath,
   cwd,
   sessionId,
   rolloutPath,
@@ -58,8 +62,9 @@ import {
   findTerminalDispatchLedgerPath,
   readJsonLines
 } from "../agent-cli-fixtures.js";
+import { runInProcessCli } from "../in-process-cli-fixtures.js";
 
-test("CLI reports a multilingual multiline draft left in Codex after one Enter", () => {
+test("CLI reports a multilingual multiline draft left in Codex after one Enter", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-multiline-not-accepted-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -101,7 +106,7 @@ test("CLI reports a multilingual multiline draft left in Codex after one Enter",
       screenPath,
       `${tmuxSession}\t0\t1\t${pid}\tnode\t${workspace}\n`
     );
-    const result = spawnSync(process.execPath, [binPath,
+    const args = [
       "send",
       "--conversation",
       `terminal:tmux:${target}:${pid}`,
@@ -129,16 +134,37 @@ test("CLI reports a multilingual multiline draft left in Codex after one Enter",
           }
         }
       })
-    ], {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
-        AKK_RUNTIME_DIR: runtimeDir,
-        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0",
-        AKK_TEST_TMUX_COMPOSER_AFTER_PASTE: exactComposer,
-        AKK_TEST_TMUX_COMPOSER_AFTER_ENTER: composerAfterEnter
-      }
+    ];
+    const commandEnvironment = {
+      ...process.env,
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      AKK_RUNTIME_DIR: runtimeDir,
+      AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0",
+      AKK_TEST_TMUX_COMPOSER_AFTER_PASTE: exactComposer,
+      AKK_TEST_TMUX_COMPOSER_AFTER_ENTER: composerAfterEnter
+    };
+    const runCommand = (command: string, commandArgs: string[]) => {
+      const completed = spawnSync(command, commandArgs, {
+        encoding: "utf8",
+        env: commandEnvironment
+      });
+      return {
+        status: completed.status,
+        stdout: completed.stdout ?? "",
+        stderr: completed.stderr ?? "",
+        ...(completed.error ? { error: completed.error } : {})
+      };
+    };
+    const result = await runInProcessCli(args, {
+      env: commandEnvironment,
+      terminalControlProviderRegistry: createTerminalControlProviderRegistry([
+        new TmuxTerminalControlProvider({
+          commands: ["tmux"],
+          runCommand,
+          socketPaths: []
+        })
+      ]),
+      terminalProcessSource: new SystemTerminalProcessSource({ runCommand })
     });
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const parsed = JSON.parse(result.stdout);

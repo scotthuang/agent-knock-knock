@@ -431,6 +431,12 @@
       "needle": "list observation adapter preserves resolved and no-identity evidence"
     },
     {
+      "id": "terminal-composer-in-process",
+      "path": "test/shards/agent-cli-composer-replay.test.ts",
+      "tier": "integration",
+      "needle": "CLI reports a multilingual multiline draft left in Codex after one Enter"
+    },
+    {
       "id": "terminal-send-boundary",
       "path": "test/shards/agent-cli-terminal-send-gates.test.ts",
       "tier": "integration",
@@ -586,6 +592,7 @@
         "delegate-routing-in-process",
         "dispatch-authority-boundary",
         "native-command-guard-in-process",
+        "terminal-composer-in-process",
         "terminal-send-boundary"
       ],
       "service_invariant_witnesses": [
