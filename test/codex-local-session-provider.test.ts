@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { CodexLocalSessionProvider, type CodexLocalSessionAdapter } from "../src/codex-local-session-provider.js";
+import {
+  CodexLocalSessionProvider,
+  InlineCodexLocalSessionAdapter,
+  type CodexLocalSessionAdapter
+} from "../src/codex-local-session-provider.js";
 import type { CodexProcessSnapshot, CodexThreadRow } from "../src/codex-session-provider.js";
 
 const SESSION_ID = "019ee559-7bb8-7fd1-970c-0f7b6978c44e";
@@ -108,6 +112,67 @@ test("Codex local session provider finds sessions through the facade only", asyn
   assert.equal((await provider.getSession(SESSION_ID))?.cwd, "/repo/project");
   assert.equal(await provider.getSession("missing"), undefined);
   assert.equal(await provider.getForkContext({ sessionId: "missing" }), undefined);
+});
+
+test("inline Codex adapter preserves process batches and exact fixture identities", async () => {
+  const first = [{ pid: 101, command: `codex resume ${SESSION_ID}` }];
+  const second = [{ pid: 102, command: `codex resume ${SESSION_ID}` }];
+  const adapter = new InlineCodexLocalSessionAdapter({
+    threads: [{ id: SESSION_ID, cwd: "/repo/project" }],
+    processes: [first, second],
+    rollouts: { "/rollout.jsonl": "row\n" },
+    activeSessionIdentities: {
+      "101": {
+        session_id: SESSION_ID,
+        process_uuid: "process-uuid",
+        process_birth: "process-birth",
+        rollout: {
+          fd: "7",
+          device: "1",
+          inode: "2",
+          path: "/rollout.jsonl"
+        },
+        evidence: "exact_fixture"
+      }
+    }
+  });
+
+  assert.deepEqual(await adapter.listThreadRows(), [{
+    id: SESSION_ID,
+    cwd: "/repo/project"
+  }]);
+  assert.equal(await adapter.readRollout("/rollout.jsonl"), "row\n");
+  assert.equal(await adapter.readRollout("/missing"), undefined);
+  assert.deepEqual(await adapter.listProcessSnapshots(), first);
+  assert.deepEqual(await adapter.listProcessSnapshots(), second);
+  assert.deepEqual(await adapter.listProcessSnapshots(), second);
+  assert.deepEqual(await adapter.resolveActiveSessionIdentityForPid(101), {
+    sessionId: SESSION_ID,
+    processUuid: "process-uuid",
+    processBirth: "process-birth",
+    rollout: {
+      fd: "7",
+      device: "1",
+      inode: "2",
+      path: "/rollout.jsonl"
+    },
+    evidence: "exact_fixture"
+  });
+});
+
+test("inline Codex adapter ignores invalid identity fixtures", async () => {
+  const adapter = new InlineCodexLocalSessionAdapter({
+    activeSessionIdentities: {
+      "1": { sessionId: SESSION_ID },
+      "2": { sessionId: "   " },
+      invalid: { sessionId: SESSION_ID },
+      "3": null
+    }
+  });
+
+  assert.equal(await adapter.resolveActiveSessionIdentityForPid(1), undefined);
+  assert.equal(await adapter.resolveActiveSessionIdentityForPid(2), undefined);
+  assert.equal(await adapter.resolveActiveSessionIdentityForPid(3), undefined);
 });
 
 class FakeCodexAdapter implements CodexLocalSessionAdapter {

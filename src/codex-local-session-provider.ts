@@ -16,6 +16,10 @@ import {
   type CodexThreadRow,
   type ForkContextPackage
 } from "./codex-session-provider.js";
+import {
+  isRecord,
+  nonBlankString
+} from "./value-guards.js";
 
 export interface CodexLocalSessionAdapter {
   listThreadRows(): Promise<CodexThreadRow[]>;
@@ -32,6 +36,94 @@ export interface CodexLocalSessionAdapter {
     pid: number,
     cwd?: string
   ): Promise<CodexOpenRootRolloutInventory>;
+}
+
+export class InlineCodexLocalSessionAdapter implements CodexLocalSessionAdapter {
+  private readonly threads: CodexThreadRow[];
+  private readonly processes: CodexProcessSnapshot[];
+  private readonly processBatches: CodexProcessSnapshot[][];
+  private processBatchIndex = 0;
+  private readonly rollouts: Map<string, string>;
+  private readonly activeSessionIdentities: Map<number, ActiveAgentSessionIdentity>;
+
+  constructor({
+    threads,
+    processes,
+    rollouts,
+    activeSessionIdentities
+  }: {
+    threads?: CodexThreadRow[];
+    processes?: CodexProcessSnapshot[] | CodexProcessSnapshot[][];
+    rollouts?: Record<string, string>;
+    activeSessionIdentities?: Record<string, unknown>;
+  }) {
+    this.threads = Array.isArray(threads) ? threads : [];
+    this.processBatches = Array.isArray(processes?.[0])
+      ? processes as CodexProcessSnapshot[][]
+      : [];
+    this.processes = Array.isArray(processes) && !Array.isArray(processes[0])
+      ? processes as CodexProcessSnapshot[]
+      : [];
+    this.rollouts = new Map(Object.entries(rollouts ?? {}));
+    this.activeSessionIdentities = new Map(
+      Object.entries(activeSessionIdentities ?? {}).flatMap(([pidValue, value]) => {
+        const pid = Number(pidValue);
+        if (!Number.isSafeInteger(pid) || pid <= 1 || !isRecord(value)) {
+          return [];
+        }
+        const sessionId = nonBlankString(value.sessionId ?? value.session_id);
+        if (!sessionId) {
+          return [];
+        }
+        const processUuid = nonBlankString(value.processUuid ?? value.process_uuid);
+        const processBirth = nonBlankString(value.processBirth ?? value.process_birth);
+        const rollout = isRecord(value.rollout) &&
+            nonBlankString(value.rollout.fd) &&
+            nonBlankString(value.rollout.device) &&
+            nonBlankString(value.rollout.inode) &&
+            nonBlankString(value.rollout.path)
+          ? {
+              fd: nonBlankString(value.rollout.fd) as string,
+              device: nonBlankString(value.rollout.device) as string,
+              inode: nonBlankString(value.rollout.inode) as string,
+              path: nonBlankString(value.rollout.path) as string
+            }
+          : undefined;
+        return [[pid, {
+          sessionId,
+          ...(processUuid ? { processUuid } : {}),
+          ...(processBirth ? { processBirth } : {}),
+          ...(rollout ? { rollout } : {}),
+          evidence: nonBlankString(value.evidence) ?? "static_exact_fixture"
+        }]];
+      })
+    );
+  }
+
+  async listThreadRows(): Promise<CodexThreadRow[]> {
+    return this.threads;
+  }
+
+  async readRollout(rolloutPath: string): Promise<string | undefined> {
+    return this.rollouts.get(rolloutPath);
+  }
+
+  async listProcessSnapshots(): Promise<CodexProcessSnapshot[]> {
+    if (this.processBatches.length > 0) {
+      const batch = this.processBatches[
+        Math.min(this.processBatchIndex, this.processBatches.length - 1)
+      ];
+      this.processBatchIndex += 1;
+      return batch;
+    }
+    return this.processes;
+  }
+
+  async resolveActiveSessionIdentityForPid(
+    pid: number
+  ): Promise<ActiveAgentSessionIdentity | undefined> {
+    return this.activeSessionIdentities.get(pid);
+  }
 }
 
 export class CodexLocalSessionProvider implements CodingAgentSessionProvider {

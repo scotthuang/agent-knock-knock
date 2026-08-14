@@ -6,8 +6,6 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 import type {
   ActiveCodexProcess,
-  CodexProcessSnapshot,
-  CodexThreadRow,
   ForkContextPackage
 } from "./codex-session-provider.js";
 import {
@@ -43,7 +41,10 @@ import {
   validateCodexRolloutAcceptanceAnchor,
   validateTerminalSubmissionAcceptanceEvidence
 } from "./terminal-submission-acceptance.js";
-import { CodexLocalSessionProvider, type CodexLocalSessionAdapter } from "./codex-local-session-provider.js";
+import {
+  CodexLocalSessionProvider,
+  InlineCodexLocalSessionAdapter
+} from "./codex-local-session-provider.js";
 import { CodexStoreAdapter } from "./codex-store-adapter.js";
 import { buildConversationTrace } from "./conversation-trace.js";
 import {
@@ -400,106 +401,6 @@ class TurnBindingSupersededError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "TurnBindingSupersededError";
-  }
-}
-
-class InlineCodexSessionAdapter implements CodexLocalSessionAdapter {
-  private readonly threads: CodexThreadRow[];
-  private readonly processes: CodexProcessSnapshot[];
-  private readonly processBatches: CodexProcessSnapshot[][];
-  private processBatchIndex = 0;
-  private readonly rollouts: Map<string, string>;
-  private readonly activeSessionIdentities: Map<
-    number,
-    NativeAgentSessionIdentity
-  >;
-
-  constructor({
-    threads,
-    processes,
-    rollouts,
-    activeSessionIdentities
-  }: {
-    threads?: CodexThreadRow[];
-    processes?: CodexProcessSnapshot[] | CodexProcessSnapshot[][];
-    rollouts?: Record<string, string>;
-    activeSessionIdentities?: Record<string, unknown>;
-  }) {
-    this.threads = Array.isArray(threads) ? threads : [];
-    this.processBatches = Array.isArray(processes?.[0])
-      ? processes as CodexProcessSnapshot[][]
-      : [];
-    this.processes = Array.isArray(processes) && !Array.isArray(processes[0]) ? processes as CodexProcessSnapshot[] : [];
-    this.rollouts = new Map(Object.entries(rollouts ?? {}));
-    this.activeSessionIdentities = new Map(
-      Object.entries(activeSessionIdentities ?? {}).flatMap(([pidValue, value]) => {
-        const pid = Number(pidValue);
-        if (!Number.isSafeInteger(pid) || pid <= 1 || !isRecord(value)) {
-          return [];
-        }
-        const sessionId = stringValue(value.sessionId ?? value.session_id);
-        if (!sessionId) {
-          return [];
-        }
-        return [[pid, {
-          sessionId,
-          ...(stringValue(value.processUuid ?? value.process_uuid)
-            ? {
-                processUuid: stringValue(
-                  value.processUuid ?? value.process_uuid
-                )
-              }
-            : {}),
-          ...(stringValue(value.processBirth ?? value.process_birth)
-            ? {
-                processBirth: stringValue(
-                  value.processBirth ?? value.process_birth
-                )
-              }
-            : {}),
-          ...(isRecord(value.rollout) &&
-              stringValue(value.rollout.fd) &&
-              stringValue(value.rollout.device) &&
-              stringValue(value.rollout.inode) &&
-              stringValue(value.rollout.path)
-            ? {
-                rollout: {
-                  fd: stringValue(value.rollout.fd) as string,
-                  device: stringValue(value.rollout.device) as string,
-                  inode: stringValue(value.rollout.inode) as string,
-                  path: stringValue(value.rollout.path) as string
-                }
-              }
-            : {}),
-          evidence:
-            stringValue(value.evidence) ?? "static_exact_fixture"
-        }]];
-      })
-    );
-  }
-
-  async listThreadRows(): Promise<CodexThreadRow[]> {
-    return this.threads;
-  }
-
-  async readRollout(rolloutPath: string): Promise<string | undefined> {
-    return this.rollouts.get(rolloutPath);
-  }
-
-  async listProcessSnapshots(): Promise<CodexProcessSnapshot[]> {
-    if (this.processBatches.length > 0) {
-      const batch = this.processBatches[Math.min(this.processBatchIndex, this.processBatches.length - 1)];
-      this.processBatchIndex += 1;
-      return batch;
-    }
-
-    return this.processes;
-  }
-
-  async resolveActiveSessionIdentityForPid(
-    pid: number
-  ): Promise<NativeAgentSessionIdentity | undefined> {
-    return this.activeSessionIdentities.get(pid);
   }
 }
 
@@ -34997,7 +34898,7 @@ function createAgentSessionProvider(agent, options) {
     options.rolloutsJson ||
     options.codexActiveSessionIdentitiesJson
   ) {
-    return new CodexLocalSessionProvider(new InlineCodexSessionAdapter({
+    return new CodexLocalSessionProvider(new InlineCodexLocalSessionAdapter({
       threads: parseJsonOption(options.threadsJson, "--threads-json"),
       processes: parseJsonOption(options.processesJson, "--processes-json"),
       rollouts: parseJsonOption(options.rolloutsJson, "--rollouts-json"),
