@@ -267,6 +267,33 @@ test("zero-input dispatch abort selects its three exact parity witnesses", async
   );
 });
 
+test("dispatch application selects application and receipt parity witnesses", async () => {
+  const selection = await loadSelectionModule();
+  const tiers = loadTiers();
+  const expected = [
+    "test/codex-no-rollout-binding-cli.test.ts",
+    "test/shards/agent-cli-dispatch-recovery.test.ts",
+    "test/shards/agent-cli-receipt-fences.test.ts",
+    "test/shards/agent-cli-session-acceptance.test.ts",
+    "test/shards/agent-cli-terminal-send-gates.test.ts"
+  ];
+  for (const changedPath of [
+    "src/terminal-dispatch-application.ts",
+    "src/terminal-dispatch-receipt.ts"
+  ]) {
+    assert.deepEqual(
+      selection.selectAffectedTests([changedPath], tiers),
+      {
+        mode: "targeted",
+        changedPaths: [changedPath],
+        integrationFiles: tiers.integration.filter((testPath) =>
+          expected.includes(testPath)
+        )
+      }
+    );
+  }
+});
+
 test("terminal dispatch policy selects its exact parity integration set", async () => {
   const selection = await loadSelectionModule();
   const tiers = loadTiers();

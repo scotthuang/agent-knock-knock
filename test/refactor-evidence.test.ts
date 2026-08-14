@@ -75,7 +75,7 @@ test("Phase 1 evidence reproduces startup counts and historical selection", asyn
 
   assert.deepEqual(evidence.publicContracts, {
     contractCount: 4,
-    witnessCount: 54,
+    witnessCount: 56,
     migrationCount: 10,
     openclawToolCount: 14,
     storeProtocolCount: 5
