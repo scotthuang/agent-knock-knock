@@ -4,7 +4,6 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import {
   terminalBindingFrom,
   type ManagedSessionState
@@ -15,15 +14,18 @@ import {
 } from "../src/session-store.js";
 import { ensureStoreWritable, listConversations } from "../src/store.js";
 import type { TerminalControlRef } from "../src/terminal-agent-adapter.js";
+import {
+  runInProcessCli,
+  type InProcessCliResult
+} from "./in-process-cli-fixtures.js";
 
-const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 const NATIVE_THREAD_ID = "44444444-4444-4444-8444-444444444444";
 
-test("raw pane-B attach cannot duplicate a native thread actively owned by pane A", () => {
+test("raw pane-B attach cannot duplicate a native thread actively owned by pane A", async () => {
   const fixture = createOwnershipFixture({ includeOwnerProcess: true });
   try {
     persistOwnerSession(fixture, "bound");
-    const sent = fixture.send("pane-b must not receive this task");
+    const sent = await fixture.send("pane-b must not receive this task");
     assert.equal(sent.status, 1, String(sent.stderr || sent.stdout));
     assert.match(
       String(sent.stderr),
@@ -36,13 +38,13 @@ test("raw pane-B attach cannot duplicate a native thread actively owned by pane 
   }
 });
 
-test("an unrelated-workspace virgin Codex process does not block exact ownership", () => {
+test("an unrelated-workspace virgin Codex process does not block exact ownership", async () => {
   const fixture = createOwnershipFixture({
     includeOwnerProcess: false,
     unknownProcessWorkspace: "different"
   });
   try {
-    const sent = fixture.send("an unrelated virgin process is not an owner");
+    const sent = await fixture.send("an unrelated virgin process is not an owner");
     assert.equal(sent.status, 0, String(sent.stderr || sent.stdout));
     assert.equal(JSON.parse(String(sent.stdout)).delivered, true);
     assert.equal(listManagedSessions(fixture.storeDir).length, 1);
@@ -51,13 +53,13 @@ test("an unrelated-workspace virgin Codex process does not block exact ownership
   }
 });
 
-test("a same-workspace Codex process without exact identity blocks ownership", () => {
+test("a same-workspace Codex process without exact identity blocks ownership", async () => {
   const fixture = createOwnershipFixture({
     includeOwnerProcess: false,
     unknownProcessWorkspace: "same"
   });
   try {
-    const sent = fixture.send("same-workspace unknown ownership must fail closed");
+    const sent = await fixture.send("same-workspace unknown ownership must fail closed");
     assert.equal(sent.status, 1, String(sent.stderr || sent.stdout));
     assert.match(String(sent.stderr), /ownership is unverifiable/u);
     assert.equal(listManagedSessions(fixture.storeDir).length, 0);
@@ -68,13 +70,13 @@ test("a same-workspace Codex process without exact identity blocks ownership", (
 });
 
 for (const unknownProcessWorkspace of ["missing", "nonexistent"] as const) {
-  test(`a Codex process with ${unknownProcessWorkspace} cwd fails ownership closed`, () => {
+  test(`a Codex process with ${unknownProcessWorkspace} cwd fails ownership closed`, async () => {
     const fixture = createOwnershipFixture({
       includeOwnerProcess: false,
       unknownProcessWorkspace
     });
     try {
-      const sent = fixture.send(
+      const sent = await fixture.send(
         `${unknownProcessWorkspace} cwd cannot prove a different workspace`
       );
       assert.equal(sent.status, 1, String(sent.stderr || sent.stdout));
@@ -87,13 +89,13 @@ for (const unknownProcessWorkspace of ["missing", "nonexistent"] as const) {
   });
 }
 
-test("an exact same-UUID owner is rejected even from another workspace", () => {
+test("an exact same-UUID owner is rejected even from another workspace", async () => {
   const fixture = createOwnershipFixture({
     includeOwnerProcess: true,
     ownerProcessWorkspace: "different"
   });
   try {
-    const sent = fixture.send("exact ownership remains global");
+    const sent = await fixture.send("exact ownership remains global");
     assert.equal(sent.status, 1, String(sent.stderr || sent.stdout));
     assert.match(String(sent.stderr), /already active in another codex process/u);
     assert.equal(listManagedSessions(fixture.storeDir).length, 0);
@@ -103,7 +105,7 @@ test("an exact same-UUID owner is rejected even from another workspace", () => {
   }
 });
 
-test("ambiguous Claude rows retain every exact UUID as a global owner", () => {
+test("ambiguous Claude rows retain every exact UUID as a global owner", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-native-owner-"));
   const storeDir = path.join(root, "store");
   const runtimeDir = path.join(root, "runtime");
@@ -118,8 +120,7 @@ test("ambiguous Claude rows retain every exact UUID as a global owner", () => {
   try {
     fs.mkdirSync(workspace, { recursive: true });
     fs.mkdirSync(otherWorkspace, { recursive: true });
-    const sent = spawnSync(process.execPath, [
-      binPath,
+    const sent = await runInProcessCli([
       "send",
       "--conversation",
       terminalId,
@@ -188,8 +189,6 @@ test("ambiguous Claude rows retain every exact UUID as a global owner", () => {
       "/usr/bin/true",
       "--disable-terminal-bridge-monitor"
     ], {
-      encoding: "utf8",
-      timeout: 30_000,
       env: { ...process.env, AKK_RUNTIME_DIR: runtimeDir }
     });
 
@@ -205,11 +204,11 @@ test("ambiguous Claude rows retain every exact UUID as a global owner", () => {
   }
 });
 
-test("raw attach reuses one detached native-thread Session with a fresh binding", () => {
+test("raw attach reuses one detached native-thread Session with a fresh binding", async () => {
   const fixture = createOwnershipFixture({ includeOwnerProcess: false });
   try {
     const detached = persistOwnerSession(fixture, "detached");
-    const sent = fixture.send("continue the detached native thread");
+    const sent = await fixture.send("continue the detached native thread");
     assert.equal(sent.status, 0, String(sent.stderr || sent.stdout));
     const output = JSON.parse(String(sent.stdout));
     assert.equal(output.delivered, true);
@@ -232,14 +231,14 @@ test("raw attach reuses one detached native-thread Session with a fresh binding"
   }
 });
 
-test("resolved pane authority prevents the same native thread from crossing Stores", () => {
+test("resolved pane authority prevents the same native thread from crossing Stores", async () => {
   const fixture = createOwnershipFixture({ includeOwnerProcess: false });
   try {
     const authorityStore = path.join(fixture.root, "authority-store-a");
     ensureStoreWritable(authorityStore);
     fixture.seedResolvedAuthority(authorityStore);
 
-    const sent = fixture.send("store B must not steal store A authority");
+    const sent = await fixture.send("store B must not steal store A authority");
     assert.equal(sent.status, 1, String(sent.stderr || sent.stdout));
     assert.match(String(sent.stderr), /authoritative in another Store/u);
     assert.equal(listManagedSessions(fixture.storeDir).length, 0);
@@ -249,7 +248,7 @@ test("resolved pane authority prevents the same native thread from crossing Stor
   }
 });
 
-test("resolved authority from another Store does not block a changed native thread", () => {
+test("resolved authority from another Store does not block a changed native thread", async () => {
   const fixture = createOwnershipFixture({ includeOwnerProcess: false });
   try {
     const authorityStore = path.join(fixture.root, "authority-store-a");
@@ -261,7 +260,7 @@ test("resolved authority from another Store does not block a changed native thre
       "submitted"
     );
 
-    const sent = fixture.send("the native identity changed, so Store B may attach");
+    const sent = await fixture.send("the native identity changed, so Store B may attach");
     assert.equal(sent.status, 0, String(sent.stderr || sent.stdout));
     assert.equal(JSON.parse(String(sent.stdout)).delivered, true);
     assert.equal(listManagedSessions(fixture.storeDir).length, 1);
@@ -274,18 +273,18 @@ test("resolved authority from another Store does not block a changed native thre
   }
 });
 
-test("a submitted waiting owner in Store A blocks Store B before Session creation", () => {
+test("a submitted waiting owner in Store A blocks Store B before Session creation", async () => {
   const fixture = createOwnershipFixture({ includeOwnerProcess: false });
   try {
     const ownerStore = path.join(fixture.root, "submitted-owner-store-a");
-    const accepted = fixture.sendToStore(
+    const accepted = await fixture.sendToStore(
       ownerStore,
       "Store A owns the submitted terminal task"
     );
     assert.equal(accepted.status, 0, String(accepted.stderr || accepted.stdout));
     assert.equal(JSON.parse(String(accepted.stdout)).delivered, true);
 
-    const rejected = fixture.sendToStore(
+    const rejected = await fixture.sendToStore(
       fixture.storeDir,
       "Store B must not create a duplicate Session"
     );
@@ -309,7 +308,7 @@ test("a submitted waiting owner in Store A blocks Store B before Session creatio
   }
 });
 
-test("a stale pane ledger still preserves same-UUID Store authority", () => {
+test("a stale pane ledger still preserves same-UUID Store authority", async () => {
   const fixture = createOwnershipFixture({ includeOwnerProcess: false });
   try {
     const staleStore = path.join(fixture.root, "stale-pane-store-a");
@@ -321,7 +320,7 @@ test("a stale pane ledger still preserves same-UUID Store authority", () => {
       "submitted"
     );
 
-    const sent = fixture.send("the native UUID remains owned across pane restart");
+    const sent = await fixture.send("the native UUID remains owned across pane restart");
     assert.equal(sent.status, 1, String(sent.stderr || sent.stdout));
     assert.match(String(sent.stderr), /authoritative in another Store/u);
     assert.equal(listManagedSessions(fixture.storeDir).length, 0);
@@ -344,8 +343,8 @@ interface OwnershipFixture {
     panePid?: number,
     status?: "resolved" | "submitted"
   ): void;
-  sendToStore(storeDir: string, message: string): ReturnType<typeof spawnSync>;
-  send(message: string): ReturnType<typeof spawnSync>;
+  sendToStore(storeDir: string, message: string): Promise<InProcessCliResult>;
+  send(message: string): Promise<InProcessCliResult>;
   cleanup(): void;
 }
 
@@ -474,8 +473,7 @@ function createOwnershipFixture({
     "--disable-terminal-bridge-monitor"
   ];
   const sendToStore = (selectedStoreDir: string, message: string) =>
-    spawnSync(process.execPath, [
-      binPath,
+    runInProcessCli([
       "send",
       "--conversation",
       currentTerminalId,
@@ -486,8 +484,6 @@ function createOwnershipFixture({
       selectedStoreDir,
       ...commonArgs
     ], {
-      encoding: "utf8",
-      timeout: 30_000,
       env: {
         ...process.env,
         AKK_RUNTIME_DIR: runtimeDir,
