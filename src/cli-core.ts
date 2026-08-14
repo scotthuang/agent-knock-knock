@@ -63,6 +63,10 @@ import {
   type DeferredForegroundTransferSourceRolloutAuthority,
   type DeferredForegroundTransferSourceTurnAuthority
 } from "./deferred-foreground-transfer.js";
+import {
+  atomicReplacePrivateJsonFile,
+  fsyncDirectory
+} from "./durable-json-file.js";
 import type {
   CodexOpenRootRolloutInventory
 } from "./agent-session-provider.js";
@@ -27524,7 +27528,7 @@ function saveTerminalBridgeDispatchLedger(
       );
     }
     fs.renameSync(legacyLedgerPath, canonicalLedgerPath);
-    fsyncTerminalBridgeDirectory(path.dirname(canonicalLedgerPath));
+    fsyncDirectory(path.dirname(canonicalLedgerPath));
     ledgerPath = canonicalLedgerPath;
   }
   const preserveLegacyFormat = !hasCanonicalTerminalEndpoint(terminalControl);
@@ -27562,61 +27566,11 @@ function saveTerminalBridgeDispatchLedger(
       ? { terminalEndpoint: terminalControlEvidence(terminalControl) }
       : {})
   });
-  const tempPath = `${ledgerPath}.${cliPid()}.${randomUUID()}.tmp`;
-  let tempFd: number | undefined;
-  try {
-    tempFd = fs.openSync(
-      tempPath,
-      fs.constants.O_CREAT |
-        fs.constants.O_EXCL |
-        fs.constants.O_WRONLY |
-        NO_FOLLOW_FLAG,
-      0o600
-    );
-    fs.fchmodSync(tempFd, 0o600);
-    fs.writeFileSync(
-      tempFd,
-      `${JSON.stringify(nextLedger, null, 2)}\n`,
-      "utf8"
-    );
-    fs.fsyncSync(tempFd);
-    fs.closeSync(tempFd);
-    tempFd = undefined;
-    fs.renameSync(tempPath, ledgerPath);
-    fs.chmodSync(ledgerPath, 0o600);
-    fsyncTerminalBridgeDirectory(path.dirname(ledgerPath));
-  } finally {
-    if (tempFd !== undefined) {
-      fs.closeSync(tempFd);
-    }
-    fs.rmSync(tempPath, { force: true });
-  }
-}
-
-function fsyncTerminalBridgeDirectory(directory: string): void {
-  let fd: number | undefined;
-  try {
-    fd = fs.openSync(
-      directory,
-      fs.constants.O_RDONLY | NO_FOLLOW_FLAG
-    );
-    fs.fsyncSync(fd);
-  } catch (error) {
-    const code = error instanceof Error
-      ? (error as NodeJS.ErrnoException).code
-      : undefined;
-    if (
-      !["EINVAL", "ENOTSUP", "EPERM", "EISDIR"].includes(
-        String(code)
-      )
-    ) {
-      throw error;
-    }
-  } finally {
-    if (fd !== undefined) {
-      fs.closeSync(fd);
-    }
-  }
+  const temporaryPath = `${ledgerPath}.${cliPid()}.${randomUUID()}.tmp`;
+  atomicReplacePrivateJsonFile(ledgerPath, nextLedger, {
+    temporaryPath,
+    cleanupTemporary: () => fs.rmSync(temporaryPath, { force: true })
+  });
 }
 
 function resolveTerminalDispatchLedgerPaneIncarnation(
