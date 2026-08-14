@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   applyMessageToConversation,
@@ -40,7 +39,6 @@ import {
 } from "../src/terminal-control-ref.js";
 import { runInProcessCli } from "./in-process-cli-fixtures.js";
 
-const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 const testRuntimeDir = fs.mkdtempSync(
   path.join(os.tmpdir(), "akk-selector-cli-runtime-")
 );
@@ -49,7 +47,7 @@ process.on("exit", () => {
   fs.rmSync(testRuntimeDir, { recursive: true, force: true });
 });
 
-test("CLI omission and short refs resolve one actionable managed session", () => {
+test("CLI omission and short refs resolve one actionable managed session", async () => {
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-selector-cli-only-"));
 
   try {
@@ -58,7 +56,12 @@ test("CLI omission and short refs resolve one actionable managed session", () =>
       request: "Review the selector",
       agent: "codex"
     });
-    const listed = runCli(["list", "--managed-only", "--store-dir", storeDir]);
+    const listed = await runCli([
+      "list",
+      "--managed-only",
+      "--store-dir",
+      storeDir
+    ]);
     assert.deepEqual(listed.terminals, []);
     assert.equal(listed.unavailable_managed_turns.length, 1);
     const managedTurn = listed.unavailable_managed_turns[0];
@@ -73,13 +76,18 @@ test("CLI omission and short refs resolve one actionable managed session", () =>
       ["status", "close"]
     );
 
-    const implicit = runCli(["status", "--managed-only", "--store-dir", storeDir]);
+    const implicit = await runCli([
+      "status",
+      "--managed-only",
+      "--store-dir",
+      storeDir
+    ]);
     assert.equal(
       implicit.summary.conversation_id,
       created.conversation.conversation_id
     );
 
-    const short = runCli([
+    const short = await runCli([
       "status",
       "--conversation",
       managedTurn.short_ref,
@@ -96,7 +104,7 @@ test("CLI omission and short refs resolve one actionable managed session", () =>
   }
 });
 
-test("unavailable managed turns expose only pane-independent actions", () => {
+test("unavailable managed turns expose only pane-independent actions", async () => {
   const cases = [
     {
       status: "waiting_for_agent",
@@ -166,7 +174,7 @@ test("unavailable managed turns expose only pane-independent actions", () => {
       }
       saveState(created.paths.statePath, state);
 
-      const listed = runCli([
+      const listed = await runCli([
         "list",
         "--all",
         "--managed-only",
@@ -209,7 +217,7 @@ test("unavailable managed turns expose only pane-independent actions", () => {
   }
 });
 
-test("unavailable managed Claude turns never advertise terminal approval", () => {
+test("unavailable managed Claude turns never advertise terminal approval", async () => {
   const cases = [
     {
       name: "waiting for agent",
@@ -298,7 +306,7 @@ test("unavailable managed Claude turns never advertise terminal approval", () =>
       };
       saveState(created.paths.statePath, state);
 
-      const listed = runCli([
+      const listed = await runCli([
         "list",
         "--managed-only",
         "--store-dir",
@@ -316,7 +324,7 @@ test("unavailable managed Claude turns never advertise terminal approval", () =>
   }
 });
 
-test("CLI latest is deterministic and omission fails closed on ambiguity", () => {
+test("CLI latest is deterministic and omission fails closed on ambiguity", async () => {
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-selector-cli-latest-"));
 
   try {
@@ -333,7 +341,7 @@ test("CLI latest is deterministic and omission fails closed on ambiguity", () =>
     updateTimestamp(older.conversation.state_path, "2026-07-28T01:00:00.000Z");
     updateTimestamp(newer.conversation.state_path, "2026-07-28T02:00:00.000Z");
 
-    const latest = runCli([
+    const latest = await runCli([
       "status",
       "--conversation",
       "latest",
@@ -346,7 +354,7 @@ test("CLI latest is deterministic and omission fails closed on ambiguity", () =>
       newer.conversation.conversation_id
     );
 
-    const ambiguous = spawnCli([
+    const ambiguous = await runCliResult([
       "status",
       "--managed-only",
       "--store-dir",
@@ -362,7 +370,7 @@ test("CLI latest is deterministic and omission fails closed on ambiguity", () =>
   }
 });
 
-test("legacy unsupported executors do not break live terminal short refs", () => {
+test("legacy unsupported executors do not break live terminal short refs", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-selector-cli-legacy-"));
   const storeDir = path.join(tempDir, "store");
   const workspace = path.join(tempDir, "workspace");
@@ -458,7 +466,7 @@ test("legacy unsupported executors do not break live terminal short refs", () =>
       event_log_path: acpxCodexPaths.logPath
     } as any);
 
-    const managedOnly = runCli([
+    const managedOnly = await runCli([
       "list",
       "--reconcile",
       "--all",
@@ -474,7 +482,7 @@ test("legacy unsupported executors do not break live terminal short refs", () =>
     assert.equal("delegated" in managedOnly, false);
     assert.equal("tasks" in managedOnly, false);
 
-    const listed = runCli([
+    const listed = await runCli([
       "list",
       "--all",
       "--store-dir",
@@ -485,7 +493,7 @@ test("legacy unsupported executors do not break live terminal short refs", () =>
     assert.equal(listed.terminals.length, 1);
     assert.match(listed.terminals[0].short_ref, /^@[0-9a-f]{10}$/u);
 
-    const sent = runCli([
+    const sent = await runCli([
       "send",
       "--conversation",
       listed.terminals[0].short_ref,
@@ -515,7 +523,7 @@ test("legacy unsupported executors do not break live terminal short refs", () =>
   }
 });
 
-test("an unsupported legacy record without a dispatch ledger does not hide its tmux pane", () => {
+test("an unsupported legacy record without a dispatch ledger does not hide its tmux pane", async () => {
   const tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-selector-cli-legacy-owner-")
   );
@@ -572,7 +580,7 @@ test("an unsupported legacy record without a dispatch ledger does not hide its t
       event_log_path: legacyPaths.logPath
     } as any);
 
-    const listed = runCli([
+    const listed = await runCli([
       "list",
       "--all",
       "--store-dir",
@@ -597,7 +605,7 @@ test("an unsupported legacy record without a dispatch ledger does not hide its t
     );
     assert.deepEqual(listed.unavailable_managed_turns, []);
 
-    const sent = runCli([
+    const sent = await runCli([
       "send",
       "--conversation",
       "only",
@@ -630,7 +638,7 @@ test("an unsupported legacy record without a dispatch ledger does not hide its t
   }
 });
 
-test("CLI keeps an owned terminal visible and routes its canonical actions to the ledger owner", () => {
+test("CLI keeps an owned terminal visible and routes its canonical actions to the ledger owner", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-selector-cli-managed-pane-"));
   const storeDir = path.join(tempDir, "conversations");
   const workspace = path.join(tempDir, "workspace");
@@ -645,7 +653,7 @@ test("CLI keeps an owned terminal visible and routes its canonical actions to th
 
   try {
     fs.mkdirSync(workspace, { recursive: true });
-    const sent = runCli([
+    const sent = await runCli([
       "send",
       "--conversation",
       `terminal:v2:tmux:codex:${terminalTarget}:${codexPid}`,
@@ -668,7 +676,7 @@ test("CLI keeps an owned terminal visible and routes its canonical actions to th
     const managedId = sent.conversation.conversation_id;
     assert.notEqual(managedId, sent.conversation.native_session_takeover.native_session_id);
 
-    const listed = runCli([
+    const listed = await runCli([
       "list",
       "--store-dir",
       storeDir,
@@ -694,7 +702,7 @@ test("CLI keeps an owned terminal visible and routes its canonical actions to th
     );
     assert.deepEqual(listed.unavailable_managed_turns, []);
 
-    const approvalListed = runCli([
+    const approvalListed = await runCli([
       "list",
       "--store-dir",
       storeDir,
@@ -729,7 +737,7 @@ test("CLI keeps an owned terminal visible and routes its canonical actions to th
       { turn_id: managedId }
     );
 
-    const restartedListed = runCli([
+    const restartedListed = await runCli([
       "list",
       "--store-dir",
       storeDir,
@@ -752,7 +760,7 @@ test("CLI keeps an owned terminal visible and routes its canonical actions to th
       ["status"]
     );
 
-    const status = runCli([
+    const status = await runCli([
       "status",
       "--conversation",
       "only",
@@ -769,7 +777,7 @@ test("CLI keeps an owned terminal visible and routes its canonical actions to th
   }
 });
 
-test("a canonical managed owner survives a tmux route rename without rebinding", () => {
+test("a canonical managed owner survives a tmux route rename without rebinding", async () => {
   const tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-selector-cli-managed-route-rename-")
   );
@@ -791,7 +799,7 @@ test("a canonical managed owner survives a tmux route rename without rebinding",
 
   try {
     fs.mkdirSync(workspace, { recursive: true });
-    const sent = runCli([
+    const sent = await runCli([
       "send",
       "--conversation",
       `terminal:v2:tmux:codex:${originalTarget}:${codexPid}`,
@@ -869,7 +877,7 @@ test("a canonical managed owner survives a tmux route rename without rebinding",
       `${JSON.stringify(legacyLedger, null, 2)}\n`
     );
 
-    const responded = runCli([
+    const responded = await runCli([
       "respond",
       "--turn",
       managedId,
@@ -900,7 +908,7 @@ test("a canonical managed owner survives a tmux route rename without rebinding",
       serverSocketPath,
       paneId
     });
-    const listed = runCli([
+    const listed = await runCli([
       "list",
       "--store-dir",
       storeDir,
@@ -919,7 +927,7 @@ test("a canonical managed owner survives a tmux route rename without rebinding",
       { turn_id: managedId }
     );
 
-    const status = runCli([
+    const status = await runCli([
       "status",
       "--conversation",
       "only",
@@ -937,7 +945,7 @@ test("a canonical managed owner survives a tmux route rename without rebinding",
   }
 });
 
-test("a cross-store terminal owner is visible but never advertised as locally actionable", () => {
+test("a cross-store terminal owner is visible but never advertised as locally actionable", async () => {
   const tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-selector-cli-cross-store-owner-")
   );
@@ -955,7 +963,7 @@ test("a cross-store terminal owner is visible but never advertised as locally ac
 
   try {
     fs.mkdirSync(workspace, { recursive: true });
-    const sent = runCli([
+    const sent = await runCli([
       "send",
       "--conversation",
       `terminal:v2:tmux:codex:${terminalTarget}:${codexPid}`,
@@ -971,7 +979,7 @@ test("a cross-store terminal owner is visible but never advertised as locally ac
     ]);
     const ownerId = sent.conversation.conversation_id;
 
-    const listed = runCli([
+    const listed = await runCli([
       "list",
       "--store-dir",
       observerStoreDir,
@@ -991,7 +999,7 @@ test("a cross-store terminal owner is visible but never advertised as locally ac
       { conversation_id: terminal.id }
     );
 
-    const status = runCli([
+    const status = await runCli([
       "status",
       "--conversation",
       "only",
@@ -1165,7 +1173,7 @@ test("multiple idle turns stay terminal history while the pane advertises a fenc
       undefined
     );
 
-    const restarted = runCli([
+    const restarted = await runCli([
       "list",
       "--store-dir",
       storeDir,
@@ -1216,7 +1224,7 @@ test("multiple idle turns stay terminal history while the pane advertises a fenc
       undefined
     );
 
-    const rejectedTurnTarget = spawnCli([
+    const rejectedTurnTarget = await runCliResult([
       "send",
       "--session",
       newer.conversation.turn_id,
@@ -1281,7 +1289,7 @@ test("multiple idle turns stay terminal history while the pane advertises a fenc
       newer.conversation.conversation_id
     );
 
-    const canonicalStatus = runCli([
+    const canonicalStatus = await runCli([
       "status",
       "--conversation",
       sent.conversation.conversation_id,
@@ -1294,7 +1302,7 @@ test("multiple idle turns stay terminal history while the pane advertises a fenc
       sent.conversation.conversation_id
     );
 
-    const historicalStatus = runCli([
+    const historicalStatus = await runCli([
       "status",
       "--conversation",
       terminalAll.managed.history[0].short_ref,
@@ -1311,7 +1319,7 @@ test("multiple idle turns stay terminal history while the pane advertises a fenc
   }
 });
 
-test("CLI approve only and short refs stay on the managed Claude approval path", () => {
+test("CLI approve only and short refs stay on the managed Claude approval path", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-selector-cli-managed-approve-"));
   const storeDir = path.join(tempDir, "conversations");
   const claudeHome = path.join(tempDir, ".claude");
@@ -1348,7 +1356,7 @@ test("CLI approve only and short refs stay on the managed Claude approval path",
   try {
     fs.mkdirSync(claudeHome, { recursive: true, mode: 0o700 });
     fs.mkdirSync(workspace, { recursive: true });
-    const sent = runCli([
+    const sent = await runCli([
       "send",
       "--conversation",
       `terminal:v2:tmux:claude:${terminalTarget}:${claudePid}`,
@@ -1371,7 +1379,7 @@ test("CLI approve only and short refs stay on the managed Claude approval path",
       ...sendRuntimeArgs
     ]);
     const managedId = sent.conversation.conversation_id;
-    const listed = runCli([
+    const listed = await runCli([
       "list",
       "--managed-only",
       "--store-dir",
@@ -1382,7 +1390,7 @@ test("CLI approve only and short refs stay on the managed Claude approval path",
     assert.equal(managedTurn.conversation_id, managedId);
 
     for (const selector of ["only", managedTurn.short_ref]) {
-      const approved = runCli([
+      const approved = await runCli([
         "approve",
         "--conversation",
         selector,
@@ -1458,8 +1466,8 @@ function storeConversationFixture(options: {
   return { conversation, paths };
 }
 
-function runCli(args: string[]): Record<string, any> {
-  const result = spawnCli(args);
+async function runCli(args: string[]): Promise<Record<string, any>> {
+  const result = await runCliResult(args);
   assert.equal(result.status, 0, result.stderr || result.stdout);
   return JSON.parse(result.stdout);
 }
@@ -1524,9 +1532,8 @@ async function runCliWithCodexInventory(
   return JSON.parse(result.stdout);
 }
 
-function spawnCli(args: string[]) {
-  return spawnSync(process.execPath, [binPath, ...args], {
-    encoding: "utf8",
+function runCliResult(args: string[]) {
+  return runInProcessCli(args, {
     env: {
       ...process.env,
       AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "1",
