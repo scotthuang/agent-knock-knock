@@ -60,6 +60,7 @@ import {
   atomicReplacePrivateJsonFile,
   fsyncDirectory
 } from "./durable-json-file.js";
+import { createFileLockCliAdapter } from "./file-lock-cli-adapter.js";
 import type {
   CodexOpenRootRolloutInventory
 } from "./agent-session-provider.js";
@@ -453,6 +454,16 @@ import {
 
 export type { CliCommandExecutionResult };
 
+const cliFileLock = createFileLockCliAdapter({
+  now: cliNow,
+  nowMs: cliNowMs,
+  pid: cliPid,
+  sleepSync
+});
+const acquireFileLock = cliFileLock.acquire;
+const staleFileLock = cliFileLock.stale;
+const readFileLockOwner = cliFileLock.owner;
+
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 10080;
 const DEFAULT_AGENT_TIMEOUT_MINUTES = 60;
 const DEFAULT_AGENT_HARD_TIMEOUT_MINUTES = 720;
@@ -665,10 +676,6 @@ const SESSION_SEND_BLOCKING_STATUSES = new Set<ConversationStatus>([
 ]);
 const TERMINAL_BRIDGE_UNCERTAIN_COLLATERAL_STALL_REASON =
   "a newer terminal submission has an uncertain outcome; inspect the shared terminal pane before continuing";
-const PRIVATE_LOCK_FILE_MODE = 0o600;
-const NO_FOLLOW_FLAG = typeof fs.constants.O_NOFOLLOW === "number"
-  ? fs.constants.O_NOFOLLOW
-  : 0;
 const SESSION_SELECTOR_COMMANDS = new Set([
   "status",
   "send",
@@ -19012,166 +19019,9 @@ function openClawCallbackTransport() {
   });
 }
 
-function acquireFileLock(lockPath, { timeoutMs = 5000, retryMs = 50 } = {}) {
-  const started = cliNowMs();
-  const token = randomUUID();
-
-  while (true) {
-    let fd: number | undefined;
-    try {
-      fd = fs.openSync(
-        lockPath,
-        fs.constants.O_CREAT |
-          fs.constants.O_EXCL |
-          fs.constants.O_WRONLY |
-          NO_FOLLOW_FLAG,
-        PRIVATE_LOCK_FILE_MODE
-      );
-      fs.fchmodSync(fd, PRIVATE_LOCK_FILE_MODE);
-      fs.writeFileSync(
-        fd,
-        `${JSON.stringify({
-          pid: cliPid(),
-          token,
-          created_at: cliNow().toISOString()
-        })}\n`,
-        "utf8"
-      );
-      fs.fsyncSync(fd);
-      fs.closeSync(fd);
-      fd = undefined;
-      return () => releaseFileLock(lockPath, token);
-    } catch (error) {
-      if (fd !== undefined) {
-        fs.closeSync(fd);
-      }
-      if (!isRecord(error) || error.code !== "EEXIST") {
-        throw error;
-      }
-      if (reclaimStaleFileLock(lockPath)) {
-        continue;
-      }
-      if (cliNowMs() - started >= timeoutMs) {
-        throw Object.assign(
-          new Error(`timed out waiting for file lock: ${lockPath}`),
-          { code: "LOCK_TIMEOUT" }
-        );
-      }
-      sleepSync(retryMs);
-    }
-  }
-}
-
 function isStoreMutationLockTimeout(error: unknown): boolean {
   return error instanceof StoreLockTimeoutError ||
     (isRecord(error) && error.code === "LOCK_TIMEOUT");
-}
-
-function staleFileLock(lockPath: string): boolean {
-  try {
-    const stat = fs.lstatSync(lockPath);
-    if (stat.isSymbolicLink() || !stat.isFile()) {
-      throw new Error(`file lock must be a regular file, not a symlink: ${lockPath}`);
-    }
-    const owner = readFileLockOwner(lockPath);
-    if (owner.pid !== undefined) {
-      try {
-        process.kill(owner.pid, 0);
-        return false;
-      } catch (error) {
-        return isRecord(error) && error.code === "ESRCH";
-      }
-    }
-    return cliNowMs() - stat.mtimeMs > 30_000;
-  } catch (error) {
-    return isRecord(error) && error.code === "ENOENT";
-  }
-}
-
-function reclaimStaleFileLock(lockPath: string): boolean {
-  const reclaimPath = `${lockPath}.reclaim`;
-  let reclaimFd: number | undefined;
-  try {
-    reclaimFd = fs.openSync(
-      reclaimPath,
-      fs.constants.O_CREAT |
-        fs.constants.O_EXCL |
-        fs.constants.O_WRONLY |
-        NO_FOLLOW_FLAG,
-      PRIVATE_LOCK_FILE_MODE
-    );
-    fs.fchmodSync(reclaimFd, PRIVATE_LOCK_FILE_MODE);
-    fs.writeFileSync(reclaimFd, `${cliPid()}\n`, "utf8");
-    fs.fsyncSync(reclaimFd);
-  } catch (error) {
-    if (reclaimFd !== undefined) {
-      fs.closeSync(reclaimFd);
-    }
-    if (isRecord(error) && error.code === "EEXIST") {
-      return false;
-    }
-    throw error;
-  }
-
-  try {
-    if (!staleFileLock(lockPath)) {
-      return false;
-    }
-    try {
-      fs.unlinkSync(lockPath);
-      return true;
-    } catch (error) {
-      return isRecord(error) && error.code === "ENOENT";
-    }
-  } finally {
-    fs.closeSync(reclaimFd);
-    try {
-      fs.unlinkSync(reclaimPath);
-    } catch (error) {
-      if (!isRecord(error) || error.code !== "ENOENT") {
-        throw error;
-      }
-    }
-  }
-}
-
-function releaseFileLock(lockPath: string, token: string): void {
-  try {
-    if (readFileLockOwner(lockPath).token !== token) {
-      return;
-    }
-    fs.unlinkSync(lockPath);
-  } catch (error) {
-    if (!isRecord(error) || error.code !== "ENOENT") {
-      throw error;
-    }
-  }
-}
-
-function readFileLockOwner(lockPath: string): { pid?: number; token?: string } {
-  try {
-    const text = fs.readFileSync(lockPath, "utf8").trim();
-    try {
-      const owner = JSON.parse(text);
-      if (isRecord(owner)) {
-        const pid = Number(owner.pid);
-        return {
-          pid: Number.isSafeInteger(pid) && pid > 1 ? pid : undefined,
-          token: stringValue(owner.token)
-        };
-      }
-    } catch {
-      // Legacy locks contained only the owner PID.
-    }
-    const legacyPid = Number(text);
-    return {
-      pid: Number.isSafeInteger(legacyPid) && legacyPid > 1
-        ? legacyPid
-        : undefined
-    };
-  } catch {
-    return {};
-  }
 }
 
 function readExistingEvents(logPath) {
