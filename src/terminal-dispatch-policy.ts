@@ -66,6 +66,86 @@ export interface TerminalDispatchReplayAcceptance {
   readonly invalid: boolean;
 }
 
+export type TerminalDispatchLedgerAuthority =
+  | "absent"
+  | "unreadable"
+  | "resolved"
+  | "stale_process_incarnation"
+  | "inactive_status"
+  | "active";
+
+export type TerminalDispatchOwnerAuthority =
+  | "unavailable"
+  | "released"
+  | "terminal_mismatch"
+  | "generation_mismatch"
+  | "current";
+
+export function decideTerminalDispatchOwnership(
+  ledger: TerminalDispatchLedgerAuthority,
+  owner?: TerminalDispatchOwnerAuthority
+) {
+  if (ledger === "unreadable") {
+    return { state: "conflict" as const, code: "ledger_unreadable" as const };
+  }
+  if (ledger !== "active") return { state: "none" as const, basis: ledger };
+  if (!owner) return { state: "needs_owner" as const };
+  if (owner === "unavailable") {
+    return { state: "conflict", code: "owner_unavailable" } as const;
+  }
+  if (owner === "released") {
+    return { state: "none" as const, basis: "released_owner" as const };
+  }
+  if (owner === "terminal_mismatch") {
+    return {
+      state: "conflict" as const,
+      code: "owner_terminal_mismatch" as const
+    };
+  }
+  return owner === "current"
+    ? { state: "current" as const }
+    : {
+        state: "conflict" as const,
+        code: "owner_generation_mismatch" as const
+      };
+}
+
+export interface TerminalSendAuthorityFacts {
+  readonly ownership: "none" | "current" | "conflict";
+  readonly verifiedEmpty?: boolean;
+  readonly externalHandoff?: boolean;
+  readonly deferred?: boolean;
+  readonly deferredToken?: string;
+  readonly externalToken?: string;
+  readonly verifiedEmptyToken?: string;
+  readonly managedSendSessionId?: string;
+}
+
+export function decideTerminalSendAuthority(facts: TerminalSendAuthorityFacts) {
+  if (facts.ownership === "current") return { mode: "current" as const };
+  const verifiedEmpty = facts.verifiedEmpty ??
+    facts.verifiedEmptyToken !== undefined;
+  const externalHandoff = facts.externalHandoff ??
+    facts.externalToken !== undefined;
+  const deferred = facts.deferred ?? facts.deferredToken !== undefined;
+  const conflictMode = verifiedEmpty
+    ? { mode: "verified_empty" as const, token: facts.verifiedEmptyToken }
+    : externalHandoff
+      ? { mode: "external_handoff" as const, token: facts.externalToken }
+      : deferred
+        ? { mode: "deferred" as const, token: facts.deferredToken }
+        : undefined;
+  if (facts.ownership === "conflict") {
+    return conflictMode ?? { mode: "conflict" as const };
+  }
+  if (deferred) {
+    return { mode: "deferred" as const, token: facts.deferredToken };
+  }
+  return facts.managedSendSessionId
+    ? { mode: "managed" as const, sessionId: facts.managedSendSessionId }
+    : { mode: "raw" as const };
+}
+
 /**
  * Preserve the legacy lazy Store read: only an ordinary active receipt status
  * reaches owner loading, and an unresolved lifecycle ledger wins first.

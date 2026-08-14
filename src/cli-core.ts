@@ -147,8 +147,7 @@ import {
   decideResumeCandidateEligibility,
   decideResumeTargetSession,
   prepareNativeThreadTransition,
-  reduceNativeThreadTransitionPhase,
-  type ManagedBindingConflictKind
+  reduceNativeThreadTransitionPhase
 } from "./native-thread-transition-policy.js";
 import {
   createNativeThreadResumeSnapshot,
@@ -263,9 +262,13 @@ import {
   type AvailableListActionFacts
 } from "./terminal-list-renderer.js";
 import {
+  candidateSourceRootAuthorityMatches,
+  classifyTerminalBindingConflict,
   decideTerminalBindingMatch,
+  exactRolloutMatches,
   terminalObservationFromListEntry,
   terminalObservationFromResolvedIdentity,
+  type ManagedBindingConflictKind,
   type TerminalNativeIdentity as NativeAgentSessionIdentity
 } from "./terminal-binding-authority.js";
 import {
@@ -4743,15 +4746,25 @@ function terminalFirstListProjection({
     )
       ? terminal.native_agent_identity_observation
       : undefined;
-    const verifiedEmptyProcessUuid = stringValue(
+    const codexProcessUuid = stringValue(
       terminal.native_agent_process_uuid
     );
-    const verifiedEmptyProcessBirth = stringValue(
+    const codexProcessBirth = stringValue(
       terminal.native_agent_process_birth
     );
-    const verifiedEmptyWorkspace = stringValue(
+    const codexWorkspace = stringValue(
       terminal.workspace ?? terminal.cwd
     );
+    const codexSendAuthorityContext = terminalControl
+      ? {
+          terminalId: String(terminal.id),
+          terminalControl,
+          pid: Number(terminal.pid),
+          workspace: codexWorkspace,
+          liveProcessUuid: codexProcessUuid,
+          liveProcessBirth: codexProcessBirth
+        }
+      : undefined;
     const verifiedEmptySourceNativeThreadId = stringValue(
       soleBindingConflict?.session.binding?.native_thread_id
     )?.toLowerCase();
@@ -4780,17 +4793,14 @@ function terminalFirstListProjection({
       matchingSessions.length === 0 &&
       soleBindingConflict?.kind === "unverifiable" &&
       nativeIdentityObservation?.status === "verified_absent" &&
-      verifiedEmptyProcessUuid &&
-      verifiedEmptyProcessBirth &&
-      verifiedEmptyWorkspace &&
-      exactBoundCodexSourceForVerifiedEmptyHandoff({
-        session: soleBindingConflict.session,
-        terminalId: String(terminal.id),
-        terminalControl,
-        pid: Number(terminal.pid),
-        workspace: verifiedEmptyWorkspace,
-        processUuid: verifiedEmptyProcessUuid,
-        processBirth: verifiedEmptyProcessBirth
+      codexSendAuthorityContext &&
+      codexProcessUuid &&
+      codexProcessBirth &&
+      codexWorkspace &&
+      exactBoundCodexSendSource({
+        kind: "verified_empty",
+        sourceSession: soleBindingConflict.session,
+        context: codexSendAuthorityContext
       }) &&
       ["idle", "unknown"].includes(String(terminal.activity_state)) &&
       automatedInputComposerReady === true &&
@@ -4809,18 +4819,18 @@ function terminalFirstListProjection({
     );
     const verifiedEmptyCodexSnapshotToken =
       verifiedEmptyCodexHandoffEligible &&
-      terminalControl &&
+      codexSendAuthorityContext &&
       soleBindingConflict &&
-      verifiedEmptyProcessUuid &&
-      verifiedEmptyProcessBirth &&
-      verifiedEmptyWorkspace
+      codexProcessUuid &&
+      codexProcessBirth &&
+      codexWorkspace
         ? verifiedEmptyCodexHandoffToken({
             terminalId: String(terminal.id),
-            terminalControl,
+            terminalControl: codexSendAuthorityContext.terminalControl,
             pid: Number(terminal.pid),
-            workspace: verifiedEmptyWorkspace,
-            processUuid: verifiedEmptyProcessUuid,
-            processBirth: verifiedEmptyProcessBirth,
+            workspace: codexWorkspace,
+            processUuid: codexProcessUuid,
+            processBirth: codexProcessBirth,
             sourceSession: soleBindingConflict.session
           })
         : undefined;
@@ -4847,15 +4857,6 @@ function terminalFirstListProjection({
         )
       ? authoritativeSession ?? abandonedConflictSource
       : undefined;
-    const deferredCodexProcessUuid = stringValue(
-      terminal.native_agent_process_uuid
-    );
-    const deferredCodexProcessBirth = stringValue(
-      terminal.native_agent_process_birth
-    );
-    const deferredCodexWorkspace = stringValue(
-      terminal.workspace ?? terminal.cwd
-    );
     const deferredCodexSourceNativeThreadId = stringValue(
       deferredCodexSource?.binding?.native_thread_id
     )?.toLowerCase();
@@ -4886,110 +4887,23 @@ function terminalFirstListProjection({
           deferredCodexSourceNativeThreadId
       )
     );
-    const deferredCodexDispatchSnapshot = terminalControl
-      ? tryDeferredCodexForegroundDispatchSnapshot(terminalControl)
+    const deferredCodexAuthority = codexSendAuthorityContext
+      ? observeDeferredCodexAuthority({
+          mode: "list",
+          storeDir,
+          context: codexSendAuthorityContext,
+          sourceSession: deferredCodexSource,
+          candidateInventory: deferredCodexCandidateInventory,
+          abandonment: abandonedConflictSource
+            ? "missing_rollout"
+            : "never",
+          requireUnclaimedCandidate: true
+        })
       : undefined;
-    const deferredCodexCandidateSourceTurnHistory =
-      deferredCodexCandidateInventory &&
-        deferredCodexSource?.binding?.native_process.rollout
-        ? deferredCandidateSourceTurnHistory(
-            storeDir,
-            deferredCodexSource
-          )
-        : undefined;
-    const deferredCodexSourceRolloutPresent = Boolean(
-      deferredCodexCandidateInventory &&
-      deferredCodexSource?.binding?.native_process.rollout &&
-      deferredCodexCandidateInventory.roots.some((root) =>
-        root.sessionId.toLowerCase() ===
-          deferredCodexSource.binding?.native_thread_id?.toLowerCase() &&
-        exactNativeRolloutMatches(
-          root.rollout,
-          deferredCodexSource.binding!.native_process.rollout!
-        )
-      )
-    );
-    const deferredCodexSourceRolloutAuthority:
-      DeferredForegroundTransferSourceRolloutAuthority =
-        abandonedConflictSource && !deferredCodexSourceRolloutPresent
-          ? "explicitly_abandoned_predecessor"
-          : "present";
-    const deferredCodexSourceAbandonmentFingerprint =
-      deferredCodexSourceRolloutAuthority ===
-          "explicitly_abandoned_predecessor" &&
-        deferredCodexSource &&
-        deferredCodexCandidateSourceTurnHistory &&
-        deferredCodexDispatchSnapshot
-        ? explicitlyAbandonedCandidateSourceFingerprint({
-            storeDir,
-            session: deferredCodexSource,
-            sourceTurnHistory: deferredCodexCandidateSourceTurnHistory,
-            dispatchSnapshot: deferredCodexDispatchSnapshot
-          })
-        : undefined;
-    const deferredCodexStatusCardSourceEligible = Boolean(
-      deferredCodexSource &&
-      terminalControl &&
-      deferredCodexProcessUuid &&
-      deferredCodexProcessBirth &&
-      deferredCodexWorkspace &&
-      exactBoundCodexStatusCardSourceForDeferredSend({
-        session: deferredCodexSource,
-        terminalId: String(terminal.id),
-        terminalControl,
-        pid: Number(terminal.pid),
-        workspace: deferredCodexWorkspace,
-        processUuid: deferredCodexProcessUuid,
-        processBirth: deferredCodexProcessBirth
-      }) &&
-      managedTurnsForSession(
-        storeDir,
-        deferredCodexSource.session_id
-      ).length === 0 &&
-      !deferredCodexSource.last_transition_id &&
-      !managedSessionHasAnyNativeTransition(storeDir, deferredCodexSource)
-    );
-    const deferredCodexCandidateSourceEligible = Boolean(
-      deferredCodexSource &&
-      terminalControl &&
-      deferredCodexProcessUuid &&
-      deferredCodexProcessBirth &&
-      deferredCodexWorkspace &&
-      deferredCodexCandidateInventory &&
-      deferredCodexCandidateSourceTurnHistory &&
-      exactBoundCodexCandidateSourceForDeferredSend({
-        session: deferredCodexSource,
-        terminalId: String(terminal.id),
-        terminalControl,
-        pid: Number(terminal.pid),
-        workspace: deferredCodexWorkspace,
-        processUuid: deferredCodexProcessUuid,
-        processBirth: deferredCodexProcessBirth,
-        inventory: deferredCodexCandidateInventory,
-        sourceRolloutAuthority: deferredCodexSourceRolloutAuthority
-      }) &&
-      (deferredCodexSourceRolloutAuthority === "present" ||
-        Boolean(deferredCodexSourceAbandonmentFingerprint)) &&
-      codexCandidateInventoryHasNoOtherManagedClaim({
-        storeDir,
-        inventory: deferredCodexCandidateInventory,
-        sourceSessionId: deferredCodexSource.session_id,
-        includeDetached:
-          deferredCodexSourceRolloutAuthority ===
-            "explicitly_abandoned_predecessor"
-      }) &&
-      candidateSourceTransitionHistoryIsTerminal(
-        storeDir,
-        deferredCodexSource
-      )
-    );
-    // A complete one-root inventory proves only which rollout files are
-    // materialized, not which logical thread the Codex TUI currently owns.
-    // `/clear` can select a new thread before its rollout exists, so every
-    // otherwise eligible nonempty inventory uses the same post-submission
-    // candidate-set attribution as a multi-root inventory.
-    const deferredCodexCandidateRouteNeeded =
-      deferredCodexCandidateInventory !== undefined;
+    const deferredCodexSourceRolloutAuthority =
+      deferredCodexAuthority?.sourceRolloutAuthority ?? "present";
+    const deferredCodexDispatchSnapshot =
+      deferredCodexAuthority?.dispatchSnapshot;
     const deferredCodexForegroundEligible = Boolean(
       mutationsAllowed &&
       !terminalHasNonterminalDeferredTransfer &&
@@ -5006,16 +4920,10 @@ function terminalFirstListProjection({
           matchingSessions.length === 0 &&
           conflictingBoundSessionClaims.length === 1)
       ) &&
-      deferredCodexProcessUuid &&
-      deferredCodexProcessBirth &&
-      deferredCodexWorkspace &&
-      (
-        deferredCodexStatusCardSourceEligible ||
-        (
-          deferredCodexCandidateRouteNeeded &&
-          deferredCodexCandidateSourceEligible
-        )
-      ) &&
+      codexProcessUuid &&
+      codexProcessBirth &&
+      codexWorkspace &&
+      deferredCodexAuthority?.exactSource &&
       terminalBlockingTurns.length === 0 &&
       terminal.orphaned_terminal_dispatch === undefined &&
       deferredCodexDispatchSnapshot &&
@@ -5031,24 +4939,24 @@ function terminalFirstListProjection({
       deferredCodexForegroundEligible &&
       deferredCodexSource &&
       terminalControl &&
-      deferredCodexProcessUuid &&
-      deferredCodexProcessBirth &&
-      deferredCodexWorkspace &&
+      codexProcessUuid &&
+      codexProcessBirth &&
+      codexWorkspace &&
       deferredCodexDispatchSnapshot
         ? deferredCodexForegroundBindingToken({
             terminalId: String(terminal.id),
             terminalControl,
             pid: Number(terminal.pid),
-            workspace: deferredCodexWorkspace,
-            processUuid: deferredCodexProcessUuid,
-            processBirth: deferredCodexProcessBirth,
+            workspace: codexWorkspace,
+            processUuid: codexProcessUuid,
+            processBirth: codexProcessBirth,
             sourceSession: deferredCodexSource,
             dispatchSnapshot: deferredCodexDispatchSnapshot,
-            sourceTurnHistory: deferredCodexCandidateSourceTurnHistory,
+            sourceTurnHistory: deferredCodexAuthority?.sourceTurnHistory,
             sourceRolloutAuthority:
               deferredCodexSourceRolloutAuthority,
             sourceAbandonmentFingerprint:
-              deferredCodexSourceAbandonmentFingerprint,
+              deferredCodexAuthority?.sourceAbandonmentFingerprint,
             ...(deferredCodexCandidateInventory
               ? { candidateInventory: deferredCodexCandidateInventory }
               : {})
@@ -5406,83 +5314,68 @@ function terminalFirstListProjection({
         : {}),
       ...(includeAll ? { history } : {})
     };
+    const sendAuthority = dispatch.decideTerminalSendAuthority({
+      ownership: ownership.state,
+      verifiedEmptyToken: verifiedEmptyCodexSnapshotToken,
+      externalToken: externalHandoffAdoptable
+        ? externalHandoffSnapshotToken
+        : undefined,
+      deferredToken: ownership.state !== "conflict" ||
+          deferredCodexSourceRolloutAuthority ===
+            "explicitly_abandoned_predecessor"
+        ? deferredCodexForegroundToken
+        : undefined,
+      managedSendSessionId:
+        managedSessionId &&
+          !rolloutBackedCodexSession &&
+          sessionBindingMatchesLiveTerminal &&
+          isRecord(sessionAwareRawActions.send)
+          ? managedSessionId
+          : undefined
+    });
+    const tokenSendAction = sendAuthority.mode === "external_handoff"
+      ? rawSendAction
+      : sendAuthority.mode === "verified_empty" ||
+          sendAuthority.mode === "deferred"
+        ? verifiedEmptyRawSendAction
+        : undefined;
+    const authoritativeSendAction =
+      sendAuthority.mode === "managed" && isRecord(sessionAwareRawActions.send)
+        ? sendActionForManagedSession(
+            sessionAwareRawActions.send,
+            sendAuthority.sessionId
+          )
+        : tokenSendAction &&
+            "token" in sendAuthority &&
+            sendAuthority.token
+          ? {
+              ...tokenSendAction,
+              arguments: {
+                ...(isRecord(tokenSendAction.arguments)
+                  ? tokenSendAction.arguments
+                  : {}),
+                expected_terminal_token: sendAuthority.token
+              }
+            }
+          : undefined;
     const baseAvailableActions = ownership.state === "current"
       ? currentTerminalActions(currentTurn)
       : ownership.state === "conflict"
         ? {
             ...safeTerminalActionsDuringConflict(sessionAwareRawActions),
-            ...(deferredCodexForegroundToken &&
-                deferredCodexSourceRolloutAuthority ===
-                  "explicitly_abandoned_predecessor"
-              ? {
-                  send: {
-                    ...verifiedEmptyRawSendAction,
-                    arguments: {
-                      ...(isRecord(verifiedEmptyRawSendAction.arguments)
-                        ? verifiedEmptyRawSendAction.arguments
-                        : {}),
-                      expected_terminal_token: deferredCodexForegroundToken
-                    }
-                  }
-                }
-              : {}),
-            ...(externalHandoffAdoptable
-              ? {
-                  send: {
-                    ...rawSendAction,
-                    arguments: {
-                      ...(isRecord(rawSendAction.arguments)
-                        ? rawSendAction.arguments
-                        : {}),
-                      expected_terminal_token:
-                        externalHandoffSnapshotToken
-                    }
-                  }
-                }
-              : {}),
-            ...(verifiedEmptyCodexSnapshotToken
-              ? {
-                  send: {
-                    ...verifiedEmptyRawSendAction,
-                    arguments: {
-                      ...(isRecord(verifiedEmptyRawSendAction.arguments)
-                        ? verifiedEmptyRawSendAction.arguments
-                        : {}),
-                      expected_terminal_token:
-                        verifiedEmptyCodexSnapshotToken
-                    }
-                  }
-                }
+            ...(authoritativeSendAction
+              ? { send: authoritativeSendAction }
               : {}),
             ...(reconcileBindingAction
               ? { reconcile_binding: reconcileBindingAction }
               : {})
           }
-        : deferredCodexForegroundToken
-          ? {
-              ...nonOwnerRawActions,
-              send: {
-                ...verifiedEmptyRawSendAction,
-                arguments: {
-                  ...(isRecord(verifiedEmptyRawSendAction.arguments)
-                    ? verifiedEmptyRawSendAction.arguments
-                    : {}),
-                  expected_terminal_token: deferredCodexForegroundToken
-                }
-              }
-            }
-        : managedSessionId &&
-            !rolloutBackedCodexSession &&
-            sessionBindingMatchesLiveTerminal &&
-            isRecord(sessionAwareRawActions.send)
-          ? {
-              ...nonOwnerRawActions,
-              send: sendActionForManagedSession(
-                sessionAwareRawActions.send,
-                managedSessionId
-              )
-            }
-          : nonOwnerRawActions;
+        : {
+            ...nonOwnerRawActions,
+            ...(authoritativeSendAction
+              ? { send: authoritativeSendAction }
+              : {})
+          };
     const availableActions = terminalScopedCodexApprovalAction
       ? {
           ...baseAvailableActions,
@@ -5800,48 +5693,28 @@ function managedBindingConflictKindForLiveTerminalEntry({
   ) {
     return "unverifiable";
   }
-  const statusCardThreadId = stringValue(
-    terminal.native_agent_status_card_session_id
-  );
-  const liveNativeThreadId = stringValue(
-    terminal.native_agent_session_id
-  );
-  if (
-    isExactNativeThreadId(binding.native_thread_id) &&
-    isExactNativeThreadId(statusCardThreadId) &&
-    binding.native_thread_id.toLowerCase() !==
-      statusCardThreadId.toLowerCase()
-  ) {
-    return relationship === "same" &&
-        isExactNativeThreadId(liveNativeThreadId) &&
-        (
-          liveNativeThreadId.toLowerCase() ===
-            statusCardThreadId.toLowerCase() ||
-          liveNativeThreadId.toLowerCase() ===
-            binding.native_thread_id.toLowerCase()
-        )
-      ? "live_external_thread_change"
-      : "unverifiable";
-  }
-  if (
-    session.lineage.created_by === "attach" &&
-    !session.last_transition_id &&
-    !binding.native_thread_id &&
-    !binding.native_process.rollout &&
-    managedTurnsForSession(storeDir, session.session_id).length === 0
-  ) {
-    return "provisional_orphan";
-  }
-  if (
-    relationship === "same" &&
-    isExactNativeThreadId(binding.native_thread_id) &&
-    isExactNativeThreadId(liveNativeThreadId) &&
-    binding.native_thread_id.toLowerCase() !==
-      liveNativeThreadId.toLowerCase()
-  ) {
-    return "live_external_thread_change";
-  }
-  return "unverifiable";
+  return classifyTerminalBindingConflict({
+    session,
+    processRelationship: relationship,
+    liveNativeThreadId: stringValue(terminal.native_agent_session_id),
+    statusCardNativeThreadId: stringValue(
+      terminal.native_agent_status_card_session_id
+    ),
+    managedTurnCount: provisionalManagedBindingTurnCount(storeDir, session)
+  });
+}
+
+function provisionalManagedBindingTurnCount(
+  storeDir: string,
+  session: ManagedSessionState
+): number | undefined {
+  const binding = session.binding;
+  return binding && session.lineage.created_by === "attach" &&
+      !session.last_transition_id &&
+      !binding.native_thread_id &&
+      !binding.native_process.rollout
+    ? managedTurnsForSession(storeDir, session.session_id).length
+    : undefined;
 }
 
 function managedSessionHasUnresolvedNativeTransition(
@@ -6003,67 +5876,67 @@ function terminalDispatchOwnership(
   try {
     ledger = loadTerminalBridgeDispatchLedger(terminalControl);
   } catch (error) {
+    const decision = dispatch.decideTerminalDispatchOwnership("unreadable");
     return {
       state: "conflict",
       conflict: {
-        reason: error instanceof Error ? error.message : String(error),
+        reason: decision.code === "ledger_unreadable"
+          ? error instanceof Error ? error.message : String(error)
+          : "terminal dispatch ledger is unreadable",
         recovery: "inspect the shared terminal pane before performing a side effect"
       }
     };
   }
-  if (!ledger || ledger.status === "resolved") {
-    return { state: "none" };
-  }
-  if (
-    terminalDispatchRecordMatchesControl(ledger, terminalControl, {
-      requireProcessAnchor: false
-    }) &&
-    !terminalDispatchRecordMatchesControl(ledger, terminalControl)
-  ) {
-    return { state: "none" };
-  }
-  if (!ACTIVE_TERMINAL_DISPATCH_STATUSES.has(String(ledger.status))) {
-    return { state: "none" };
-  }
+  const ledgerAuthority: dispatch.TerminalDispatchLedgerAuthority = !ledger
+    ? "absent"
+    : ledger.status === "resolved"
+      ? "resolved"
+      : terminalDispatchRecordMatchesControl(ledger, terminalControl, {
+          requireProcessAnchor: false
+        }) && !terminalDispatchRecordMatchesControl(ledger, terminalControl)
+        ? "stale_process_incarnation"
+        : ACTIVE_TERMINAL_DISPATCH_STATUSES.has(String(ledger.status))
+          ? "active"
+          : "inactive_status";
+  let decision = dispatch.decideTerminalDispatchOwnership(ledgerAuthority);
+  if (decision.state === "none" || !ledger) return { state: "none" };
   const owner = loadTerminalDispatchLedgerOwner(ledger);
-  if (!owner) {
-    return {
-      state: "conflict",
-      conflict: terminalDispatchConflict(ledger, "dispatch owner state is unavailable")
-    };
-  }
-  if (TERMINAL_DISPATCH_RELEASE_STATUSES.has(owner.status)) {
-    return { state: "none" };
-  }
-  const ownerTerminalControl = terminalControlForManagedConversation(owner);
-  if (!terminalControlsShareIncarnation(ownerTerminalControl, terminalControl)) {
-    return {
-      state: "conflict",
-      conflict: terminalDispatchConflict(
-        ledger,
-        "dispatch owner does not reference this terminal pane incarnation"
-      )
-    };
-  }
-  const ownerTakeover = isRecord(owner.native_session_takeover)
-    ? owner.native_session_takeover
-    : undefined;
   const ledgerMessageId = stringValue(ledger.message_id);
-  const ownerMessageId = stringValue(ownerTakeover?.terminal_bridge_message_id);
-  if (
-    ACTIVE_TERMINAL_DISPATCH_STATUSES.has(String(ledger.status)) &&
-    ledgerMessageId &&
-    ownerMessageId !== ledgerMessageId
-  ) {
-    return {
-      state: "conflict",
-      conflict: terminalDispatchConflict(
-        ledger,
-        "dispatch generation does not match the owner state"
-      )
-    };
+  const ownerAuthority: dispatch.TerminalDispatchOwnerAuthority = !owner
+    ? "unavailable"
+    : TERMINAL_DISPATCH_RELEASE_STATUSES.has(owner.status)
+      ? "released"
+      : !terminalControlsShareIncarnation(
+          terminalControlForManagedConversation(owner),
+          terminalControl
+        )
+        ? "terminal_mismatch"
+        : ledgerMessageId && stringValue(
+          isRecord(owner.native_session_takeover)
+            ? owner.native_session_takeover.terminal_bridge_message_id
+            : undefined
+        ) !== ledgerMessageId
+          ? "generation_mismatch"
+          : "current";
+  decision = dispatch.decideTerminalDispatchOwnership(
+    ledgerAuthority,
+    ownerAuthority
+  );
+  if (decision.state === "none") return { state: "none" };
+  if (decision.state === "current" && owner) {
+    return { state: "current", conversation: owner };
   }
-  return { state: "current", conversation: owner };
+  const reason = decision.state === "conflict" &&
+      decision.code === "owner_terminal_mismatch"
+    ? "dispatch owner does not reference this terminal pane incarnation"
+    : decision.state === "conflict" &&
+        decision.code === "owner_generation_mismatch"
+      ? "dispatch generation does not match the owner state"
+      : "dispatch owner state is unavailable";
+  return {
+    state: "conflict",
+    conflict: terminalDispatchConflict(ledger, reason)
+  };
 }
 
 function terminalDispatchConflict(
@@ -8368,15 +8241,6 @@ function managedBindingConflictKindForResolvedTerminal({
   })) {
     return "stale_process_incarnation";
   }
-  if (
-    session.lineage.created_by === "attach" &&
-    !session.last_transition_id &&
-    !binding.native_thread_id &&
-    !binding.native_process.rollout &&
-    managedTurnsForSession(storeDir, session.session_id).length === 0
-  ) {
-    return "provisional_orphan";
-  }
   const incarnation = resolvedTerminalProcessIncarnation(terminal, identity);
   const relationship = processIncarnationRelationship({
     binding,
@@ -8384,16 +8248,12 @@ function managedBindingConflictKindForResolvedTerminal({
     liveProcessUuid: incarnation.processUuid,
     liveProcessBirth: incarnation.processBirth
   });
-  if (
-    relationship === "same" &&
-    isExactNativeThreadId(binding.native_thread_id) &&
-    isExactNativeThreadId(identity?.sessionId) &&
-    binding.native_thread_id.toLowerCase() !==
-      identity.sessionId.toLowerCase()
-  ) {
-    return "live_external_thread_change";
-  }
-  return "unverifiable";
+  return classifyTerminalBindingConflict({
+    session,
+    processRelationship: relationship,
+    liveNativeThreadId: identity?.sessionId,
+    managedTurnCount: provisionalManagedBindingTurnCount(storeDir, session)
+  });
 }
 
 function soleBoundManagedSessionClaimForTerminal(
@@ -8608,93 +8468,13 @@ const HUMAN_OBSERVED_HANDOFF_FINGERPRINT =
     "adopt_external_thread:human_observed:no_terminal_input:v1"
   );
 
-function exactBoundCodexSourceForVerifiedEmptyHandoff({
-  session,
-  terminalId,
-  terminalControl,
-  pid,
-  workspace,
-  processUuid,
-  processBirth
-}: {
-  session: ManagedSessionState;
+interface CodexSendAuthorityContext {
   terminalId: string;
   terminalControl: TerminalControlRef;
   pid: number;
   workspace?: string;
-  processUuid?: string;
-  processBirth?: string;
-}): boolean {
-  const binding = session.binding;
-  return Boolean(
-    session.agent === "codex" &&
-    session.status === "bound" &&
-    binding &&
-    isExactNativeThreadId(binding.native_thread_id) &&
-    isCompleteNativeRollout(binding.native_process.rollout) &&
-    binding.native_process.process_uuid &&
-    binding.native_process.process_birth &&
-    binding.native_process.pid === pid &&
-    terminalControlAliasMatches(
-      binding.terminal_id,
-      binding.terminal_control,
-      terminalId,
-      terminalControl
-    ) &&
-    workspace &&
-    path.resolve(session.workspace) === path.resolve(workspace) &&
-    processIncarnationRelationship({
-      binding,
-      livePid: pid,
-      liveProcessUuid: processUuid,
-      liveProcessBirth: processBirth
-    }) === "same"
-  );
-}
-
-function exactBoundCodexStatusCardSourceForDeferredSend({
-  session,
-  terminalId,
-  terminalControl,
-  pid,
-  workspace,
-  processUuid,
-  processBirth
-}: {
-  session: ManagedSessionState;
-  terminalId: string;
-  terminalControl: TerminalControlRef;
-  pid: number;
-  workspace?: string;
-  processUuid?: string;
-  processBirth?: string;
-}): boolean {
-  const binding = session.binding;
-  return Boolean(
-    session.agent === "codex" &&
-    session.status === "bound" &&
-    binding &&
-    isExactNativeThreadId(binding.native_thread_id) &&
-    !binding.native_process.rollout &&
-    isCodexStatusCardEvidence(binding.native_process.evidence) &&
-    binding.native_process.process_uuid &&
-    binding.native_process.process_birth &&
-    binding.native_process.pid === pid &&
-    terminalControlAliasMatches(
-      binding.terminal_id,
-      binding.terminal_control,
-      terminalId,
-      terminalControl
-    ) &&
-    workspace &&
-    path.resolve(session.workspace) === path.resolve(workspace) &&
-    processIncarnationRelationship({
-      binding,
-      livePid: pid,
-      liveProcessUuid: processUuid,
-      liveProcessBirth: processBirth
-    }) === "same"
-  );
+  liveProcessUuid?: string;
+  liveProcessBirth?: string;
 }
 
 function exactCodexCandidateInventoryForDeferredSend({
@@ -8723,7 +8503,7 @@ function exactCodexCandidateInventoryForDeferredSend({
   );
   const sourceRolloutPresent = Boolean(
     sourceRollout && inventory.roots.some((root) =>
-      exactNativeRolloutMatches(root.rollout, sourceRollout)
+      exactRolloutMatches(root.rollout, sourceRollout)
     )
   );
   return Boolean(
@@ -8743,68 +8523,74 @@ function exactCodexCandidateInventoryForDeferredSend({
   );
 }
 
-function exactBoundCodexCandidateSourceForDeferredSend({
-  session,
-  terminalId,
-  terminalControl,
-  pid,
-  workspace,
-  processUuid,
-  processBirth,
-  inventory,
-  sourceRolloutAuthority = "present"
-}: {
-  session: ManagedSessionState;
-  terminalId: string;
-  terminalControl: TerminalControlRef;
-  pid: number;
-  workspace: string;
-  processUuid: string;
-  processBirth: string;
-  inventory: CodexOpenRootRolloutInventory;
-  sourceRolloutAuthority?: DeferredForegroundTransferSourceRolloutAuthority;
-}): boolean {
+type ExactBoundCodexSendSourceFacts = {
+  sourceSession: ManagedSessionState;
+  context: CodexSendAuthorityContext;
+} & (
+  | { kind: "verified_empty" | "status_card" }
+  | {
+      kind: "candidate";
+      inventory: CodexOpenRootRolloutInventory;
+      sourceRolloutAuthority?: DeferredForegroundTransferSourceRolloutAuthority;
+    }
+);
+
+function exactBoundCodexSendSource(
+  facts: ExactBoundCodexSendSourceFacts
+): boolean {
+  const session = facts.sourceSession;
+  const context = facts.context;
   const binding = session.binding;
   const sourceNativeThreadId = binding?.native_thread_id;
   const sourceRollout = binding?.native_process.rollout;
-  const inventoryRoot = inventory.roots.find((root) =>
-    root.sessionId.toLowerCase() === sourceNativeThreadId?.toLowerCase()
-  );
+  const candidate = facts.kind === "candidate" ? facts : undefined;
+  const sourceRolloutAuthority = candidate?.sourceRolloutAuthority ?? "present";
+  const exactSourceEvidence = facts.kind === "verified_empty"
+    ? isCompleteNativeRollout(sourceRollout)
+    : facts.kind === "status_card"
+      ? Boolean(binding && !sourceRollout &&
+          isCodexStatusCardEvidence(binding.native_process.evidence))
+      : Boolean(candidate && candidateSourceRootAuthorityMatches(
+          candidate.inventory.roots, sourceNativeThreadId, sourceRollout,
+          sourceRolloutAuthority
+        ));
   return Boolean(
     session.agent === "codex" &&
     session.status === "bound" &&
     binding &&
     isExactNativeThreadId(sourceNativeThreadId) &&
-    isCompleteNativeRollout(sourceRollout) &&
-    (sourceRolloutAuthority === "explicitly_abandoned_predecessor"
-      ? inventoryRoot === undefined &&
-        !inventory.roots.some((root) =>
-          exactNativeRolloutMatches(root.rollout, sourceRollout)
-        )
-      : inventoryRoot !== undefined &&
-        exactNativeRolloutMatches(inventoryRoot.rollout, sourceRollout)) &&
+    exactSourceEvidence &&
+    (facts.kind === "candidate" ||
+      binding.native_process.process_uuid &&
+      binding.native_process.process_birth) &&
+    binding.native_process.pid === context.pid &&
     terminalControlAliasMatches(
       binding.terminal_id,
       binding.terminal_control,
-      terminalId,
-      terminalControl
+      context.terminalId,
+      context.terminalControl
     ) &&
-    path.resolve(session.workspace) === path.resolve(workspace) &&
+    context.workspace &&
+    path.resolve(session.workspace) === path.resolve(context.workspace) &&
     processIncarnationRelationship({
       binding,
-      livePid: pid,
-      liveProcessUuid: processUuid,
-      liveProcessBirth: processBirth
-    }) === "same" &&
-    exactCodexCandidateInventoryForDeferredSend({
-      inventory,
-      sourceSession: session,
-      pid,
-      workspace,
-      processUuid,
-      processBirth,
-      sourceRolloutAuthority
-    })
+      livePid: context.pid,
+      liveProcessUuid: context.liveProcessUuid,
+      liveProcessBirth: context.liveProcessBirth
+    }) === "same" && (
+      !candidate ||
+      context.liveProcessUuid &&
+      context.liveProcessBirth &&
+      exactCodexCandidateInventoryForDeferredSend({
+        inventory: candidate.inventory,
+        sourceSession: session,
+        pid: context.pid,
+        workspace: context.workspace,
+        processUuid: context.liveProcessUuid,
+        processBirth: context.liveProcessBirth,
+        sourceRolloutAuthority
+      })
+    )
   );
 }
 
@@ -9585,6 +9371,152 @@ function tryDeferredCodexForegroundDispatchSnapshot(
   }
 }
 
+type DeferredCodexAuthorityMode =
+  | "list"
+  | "prepare"
+  | "boundary_bound"
+  | "boundary_transitioning";
+
+interface DeferredCodexAuthorityObservation {
+  sourceKind: DeferredForegroundTransferSourceKind;
+  sourceRolloutAuthority: DeferredForegroundTransferSourceRolloutAuthority;
+  sourceTurnHistory?: DeferredForegroundTransferSourceTurnAuthority[];
+  dispatchSnapshot?: DeferredCodexForegroundDispatchSnapshot;
+  sourceAbandonmentFingerprint?: string;
+  exactSource: boolean;
+}
+
+function observeDeferredCodexAuthority({
+  mode,
+  storeDir,
+  context,
+  sourceSession,
+  candidateInventory,
+  abandonment,
+  fixedSourceRolloutAuthority,
+  fixedDispatchSnapshot,
+  sourceRevision,
+  sourceBindingToken,
+  requireUnclaimedCandidate = false
+}: {
+  mode: DeferredCodexAuthorityMode;
+  storeDir: string;
+  context: CodexSendAuthorityContext;
+  sourceSession?: ManagedSessionState;
+  candidateInventory?: CodexOpenRootRolloutInventory;
+  abandonment: "never" | "missing_rollout" | "missing_inventory_rollout";
+  fixedSourceRolloutAuthority?: DeferredForegroundTransferSourceRolloutAuthority;
+  fixedDispatchSnapshot?: DeferredCodexForegroundDispatchSnapshot;
+  sourceRevision?: number;
+  sourceBindingToken?: string;
+  requireUnclaimedCandidate?: boolean;
+}): DeferredCodexAuthorityObservation | undefined {
+  let dispatchSnapshot = fixedDispatchSnapshot;
+  if (mode === "list") {
+    dispatchSnapshot = tryDeferredCodexForegroundDispatchSnapshot(
+      context.terminalControl
+    );
+  }
+  const binding = sourceSession?.binding;
+  if (!sourceSession || !binding) return undefined;
+  const sourceKind: DeferredForegroundTransferSourceKind =
+    binding.native_process.rollout
+      ? "candidate_rollout_quiescent"
+      : "status_card_only";
+  const candidateHistoryNeeded = sourceKind ===
+      "candidate_rollout_quiescent" &&
+    (mode !== "list" || candidateInventory !== undefined);
+  const sourceTurnHistory = candidateHistoryNeeded
+    ? mode === "boundary_transitioning"
+      ? frozenCandidateSourceTurnHistory(storeDir, sourceSession)
+      : deferredCandidateSourceTurnHistory(storeDir, sourceSession)
+    : undefined;
+  if (mode === "prepare") {
+    dispatchSnapshot = deferredCodexForegroundDispatchSnapshot(
+      context.terminalControl
+    );
+  }
+  const sourceRollout = binding.native_process.rollout;
+  const explicitlyAbandoned =
+    sourceKind === "candidate_rollout_quiescent" &&
+    (
+      abandonment === "missing_rollout" ||
+      (abandonment === "missing_inventory_rollout" && candidateInventory)
+    ) &&
+    candidateSourceRootAuthorityMatches(
+      candidateInventory?.roots ?? [],
+      binding.native_thread_id,
+      sourceRollout,
+      "explicitly_abandoned_predecessor"
+    );
+  const sourceRolloutAuthority = fixedSourceRolloutAuthority ??
+    (explicitlyAbandoned ? "explicitly_abandoned_predecessor" : "present");
+  const sourceAbandonmentFingerprint =
+    sourceRolloutAuthority === "explicitly_abandoned_predecessor" &&
+      sourceTurnHistory && dispatchSnapshot
+      ? explicitlyAbandonedCandidateSourceFingerprint({
+          storeDir,
+          session: sourceSession,
+          sourceTurnHistory,
+          dispatchSnapshot,
+          sourceRevision,
+          sourceBindingToken,
+          ...(mode === "boundary_transitioning"
+            ? {
+                ledgerOverride: loadTerminalBridgeDispatchLedger(
+                  context.terminalControl
+                ),
+                requireResolvedTopLevel: false
+              }
+            : {})
+        })
+      : undefined;
+  let exactSource = false;
+  if (sourceKind === "status_card_only") {
+    exactSource = Boolean(
+      exactBoundCodexSendSource({
+        kind: "status_card",
+        sourceSession,
+        context
+      }) &&
+      managedTurnsForSession(storeDir, sourceSession.session_id).length === 0 &&
+      !sourceSession.last_transition_id &&
+      !managedSessionHasAnyNativeTransition(storeDir, sourceSession)
+    );
+  } else if (candidateInventory && sourceTurnHistory) {
+    const exactCandidate = (): boolean => exactBoundCodexSendSource({
+      kind: "candidate",
+      sourceSession,
+      context,
+      inventory: candidateInventory,
+      sourceRolloutAuthority
+    });
+    const sourceAuthority = sourceRolloutAuthority === "present" ||
+      Boolean(sourceAbandonmentFingerprint);
+    exactSource = mode === "prepare"
+      ? candidateSourceTransitionHistoryIsTerminal(storeDir, sourceSession) &&
+        exactCandidate() && sourceAuthority
+      : exactCandidate() && sourceAuthority &&
+        (!requireUnclaimedCandidate ||
+          codexCandidateInventoryHasNoOtherManagedClaim({
+            storeDir,
+            inventory: candidateInventory,
+            sourceSessionId: sourceSession.session_id,
+            includeDetached:
+              sourceRolloutAuthority === "explicitly_abandoned_predecessor"
+          })) &&
+        candidateSourceTransitionHistoryIsTerminal(storeDir, sourceSession);
+  }
+  return {
+    sourceKind,
+    sourceRolloutAuthority,
+    sourceTurnHistory,
+    dispatchSnapshot,
+    sourceAbandonmentFingerprint,
+    exactSource
+  };
+}
+
 function verifiedEmptyCodexHandoffToken({
   terminalId,
   terminalControl,
@@ -9664,19 +9596,22 @@ async function assertVerifiedEmptyCodexHandoffBoundary({
   }
   const liveIncarnation = codexProcessIncarnationForPid(terminal.pid);
   if (
-    !exactBoundCodexSourceForVerifiedEmptyHandoff({
-      session: {
+    !exactBoundCodexSendSource({
+      kind: "verified_empty",
+      sourceSession: {
         ...currentSource,
         // The exact source binding remains authoritative after the monotonic
         // detach; only the Session status changes.
         status: "bound"
       },
-      terminalId: terminal.conversationId,
-      terminalControl: terminal.terminalControl,
-      pid: terminal.pid,
-      workspace: terminal.terminalControl.currentPath,
-      processUuid: liveIncarnation.processUuid,
-      processBirth: liveIncarnation.processBirth
+      context: {
+        terminalId: terminal.conversationId,
+        terminalControl: terminal.terminalControl,
+        pid: terminal.pid,
+        workspace: terminal.terminalControl.currentPath,
+        liveProcessUuid: liveIncarnation.processUuid,
+        liveProcessBirth: liveIncarnation.processBirth
+      }
     })
   ) {
     throw new Error(
@@ -9774,14 +9709,17 @@ async function maybeDetachVerifiedEmptyCodexSource({
     !processUuid ||
     !processBirth ||
     !workspace ||
-    !exactBoundCodexSourceForVerifiedEmptyHandoff({
-      session: sourceSession,
-      terminalId: terminal.conversationId,
-      terminalControl: terminal.terminalControl,
-      pid: terminal.pid,
-      workspace,
-      processUuid: liveIncarnation.processUuid,
-      processBirth: liveIncarnation.processBirth
+    !exactBoundCodexSendSource({
+      kind: "verified_empty",
+      sourceSession,
+      context: {
+        terminalId: terminal.conversationId,
+        terminalControl: terminal.terminalControl,
+        pid: terminal.pid,
+        workspace,
+        liveProcessUuid: liveIncarnation.processUuid,
+        liveProcessBirth: liveIncarnation.processBirth
+      }
     })
   ) {
     return undefined;
@@ -10008,78 +9946,46 @@ async function assertDeferredCodexForegroundBindingBoundary({
     status: "bound",
     last_transition_id: boundary.sourcePreviousLastTransitionId
   };
+  const authority = observeDeferredCodexAuthority({
+    mode: expectedSourceStatus === "bound"
+      ? "boundary_bound"
+      : "boundary_transitioning",
+    storeDir,
+    context: {
+      terminalId: boundary.terminal.conversationId,
+      terminalControl: boundary.terminal.terminalControl,
+      pid: boundary.terminal.pid,
+      workspace: boundary.terminal.terminalControl.currentPath,
+      liveProcessUuid: boundary.processUuid,
+      liveProcessBirth: boundary.processBirth
+    },
+    sourceSession: sourceAsBound,
+    candidateInventory: candidateInventoryForBoundary,
+    abandonment: "never",
+    fixedSourceRolloutAuthority: boundary.sourceRolloutAuthority,
+    fixedDispatchSnapshot: boundary.previousDispatchSnapshot,
+    sourceRevision: boundary.sourceBoundRevision,
+    sourceBindingToken: boundary.sourceBoundBindingToken
+  });
   if (boundary.sourceKind === "status_card_only") {
-    if (
-      !exactBoundCodexStatusCardSourceForDeferredSend({
-        session: sourceAsBound,
-        terminalId: boundary.terminal.conversationId,
-        terminalControl: boundary.terminal.terminalControl,
-        pid: boundary.terminal.pid,
-        workspace: boundary.terminal.terminalControl.currentPath,
-        processUuid: boundary.processUuid,
-        processBirth: boundary.processBirth
-      }) ||
-      managedTurnsForSession(storeDir, source.session_id).length !== 0 ||
-      boundary.sourcePreviousLastTransitionId !== undefined ||
-      managedSessionHasAnyNativeTransition(storeDir, sourceAsBound)
-    ) {
+    if (!authority?.exactSource) {
       throw new Error(
         "the deferred Codex foreground source is no longer an isolated status-card binding"
       );
     }
   } else {
-    const history = expectedSourceStatus === "bound"
-      ? deferredCandidateSourceTurnHistory(storeDir, sourceAsBound)
-      : frozenCandidateSourceTurnHistory(storeDir, sourceAsBound);
-    const currentAbandonmentFingerprint =
-      boundary.sourceRolloutAuthority ===
-          "explicitly_abandoned_predecessor" &&
-        history
-        ? explicitlyAbandonedCandidateSourceFingerprint({
-            storeDir,
-            session: sourceAsBound,
-            sourceTurnHistory: history,
-            dispatchSnapshot: boundary.previousDispatchSnapshot,
-            sourceRevision: boundary.sourceBoundRevision,
-            sourceBindingToken: boundary.sourceBoundBindingToken,
-            ...(expectedSourceStatus === "transitioning"
-              ? {
-                  ledgerOverride: loadTerminalBridgeDispatchLedger(
-                    boundary.terminal.terminalControl
-                  ),
-                  requireResolvedTopLevel: false
-                }
-              : {})
-          })
-        : undefined;
     if (
       !boundary.candidateAcceptanceAnchor ||
-      !history ||
-      JSON.stringify(history) !== JSON.stringify(boundary.sourceTurnHistory) ||
-      !exactBoundCodexCandidateSourceForDeferredSend({
-        session: sourceAsBound,
-        terminalId: boundary.terminal.conversationId,
-        terminalControl: boundary.terminal.terminalControl,
-        pid: boundary.terminal.pid,
-        workspace: required(
-          boundary.terminal.terminalControl.currentPath,
-          "deferred Codex terminal workspace is unavailable"
-        ),
-        processUuid: boundary.processUuid,
-        processBirth: boundary.processBirth,
-        inventory: required(
-          candidateInventoryForBoundary,
-          "deferred Codex candidate inventory is unavailable"
-        ),
-        sourceRolloutAuthority: boundary.sourceRolloutAuthority
-      }) ||
+      !authority?.sourceTurnHistory ||
+      JSON.stringify(authority.sourceTurnHistory) !==
+        JSON.stringify(boundary.sourceTurnHistory) ||
+      !authority.exactSource ||
       (boundary.sourceRolloutAuthority ===
           "explicitly_abandoned_predecessor" &&
         (!boundary.sourceAbandonmentFingerprint ||
-          currentAbandonmentFingerprint !==
+          authority.sourceAbandonmentFingerprint !==
             boundary.sourceAbandonmentFingerprint ||
-          boundary.previousDispatchSnapshot.status !== "resolved")) ||
-      !candidateSourceTransitionHistoryIsTerminal(storeDir, sourceAsBound)
+          boundary.previousDispatchSnapshot.status !== "resolved"))
     ) {
       throw new Error(
         "the deferred Codex candidate source history or rollout authority changed"
@@ -10183,91 +10089,45 @@ async function prepareDeferredCodexForegroundBinding({
   const workspace = terminal.terminalControl.currentPath;
   const liveIncarnation = codexProcessIncarnationForPid(terminal.pid);
   const storeDir = storeDirFromOptions(options);
-  const sourceKind: DeferredForegroundTransferSourceKind =
-    sourceSession.binding.native_process.rollout
-      ? "candidate_rollout_quiescent"
-      : "status_card_only";
-  const candidateSourceTurnHistory = sourceKind ===
-      "candidate_rollout_quiescent"
-    ? deferredCandidateSourceTurnHistory(storeDir, sourceSession)
-    : undefined;
-  const dispatchSnapshot = deferredCodexForegroundDispatchSnapshot(
-    terminal.terminalControl
-  );
-  const sourceRolloutPresent = Boolean(
-    candidateInventory &&
-    sourceSession.binding.native_process.rollout &&
-    candidateInventory.roots.some((root) =>
-      root.sessionId.toLowerCase() ===
-        sourceSession.binding?.native_thread_id?.toLowerCase() &&
-      exactNativeRolloutMatches(
-        root.rollout,
-        sourceSession.binding!.native_process.rollout!
-      )
-    )
-  );
-  const sourceRolloutAuthority:
-    DeferredForegroundTransferSourceRolloutAuthority =
-      sourceKind === "candidate_rollout_quiescent" &&
-        candidateInventory &&
-        sourceSession.binding.native_process.rollout &&
-        !sourceRolloutPresent
-        ? "explicitly_abandoned_predecessor"
-        : "present";
-  const sourceAbandonmentFingerprint =
-    sourceRolloutAuthority === "explicitly_abandoned_predecessor" &&
-      candidateSourceTurnHistory
-      ? explicitlyAbandonedCandidateSourceFingerprint({
-          storeDir,
-          session: sourceSession,
-          sourceTurnHistory: candidateSourceTurnHistory,
-          dispatchSnapshot
-        })
-      : undefined;
-  const exactSource = !workspace
-    ? false
-    : sourceKind === "candidate_rollout_quiescent"
-      ? candidateInventory !== undefined &&
-        candidateSourceTurnHistory !== undefined &&
-        candidateSourceTransitionHistoryIsTerminal(storeDir, sourceSession) &&
-        exactBoundCodexCandidateSourceForDeferredSend({
-          session: sourceSession,
-          terminalId: terminal.conversationId,
-          terminalControl: terminal.terminalControl,
-          pid: terminal.pid,
-          workspace,
-          processUuid: liveIncarnation.processUuid,
-          processBirth: liveIncarnation.processBirth,
-          inventory: candidateInventory,
-          sourceRolloutAuthority
-        })
-      : exactBoundCodexStatusCardSourceForDeferredSend({
-          session: sourceSession,
-          terminalId: terminal.conversationId,
-          terminalControl: terminal.terminalControl,
-          pid: terminal.pid,
-          workspace,
-          processUuid: liveIncarnation.processUuid,
-          processBirth: liveIncarnation.processBirth
-        }) &&
-        managedTurnsForSession(storeDir, sourceSession.session_id).length === 0 &&
-        !sourceSession.last_transition_id &&
-        !managedSessionHasAnyNativeTransition(storeDir, sourceSession);
+  const authority = observeDeferredCodexAuthority({
+    mode: "prepare",
+    storeDir,
+    context: {
+      terminalId: terminal.conversationId,
+      terminalControl: terminal.terminalControl,
+      pid: terminal.pid,
+      workspace,
+      liveProcessUuid: liveIncarnation.processUuid,
+      liveProcessBirth: liveIncarnation.processBirth
+    },
+    sourceSession,
+    candidateInventory,
+    abandonment: "missing_inventory_rollout"
+  });
   if (
     !processUuid ||
     !processBirth ||
     !workspace ||
     !hasCanonicalTerminalEndpoint(terminal.terminalControl) ||
-    !exactSource
+    !authority?.exactSource ||
+    !authority.dispatchSnapshot
   ) {
     return undefined;
   }
   if (
-    sourceRolloutAuthority === "explicitly_abandoned_predecessor" &&
-    !sourceAbandonmentFingerprint
+    authority.sourceRolloutAuthority ===
+        "explicitly_abandoned_predecessor" &&
+    !authority.sourceAbandonmentFingerprint
   ) {
     return undefined;
   }
+  const {
+    sourceKind,
+    sourceRolloutAuthority,
+    sourceAbandonmentFingerprint,
+    sourceTurnHistory: candidateSourceTurnHistory,
+    dispatchSnapshot
+  } = authority;
   const token = deferredCodexForegroundBindingToken({
     terminalId: terminal.conversationId,
     terminalControl: terminal.terminalControl,
@@ -11037,7 +10897,7 @@ function isExactDeferredAcceptedTarget({
     after.native_process.pid === transfer.process_pid &&
     after.native_process.process_uuid === identity.processUuid &&
     after.native_process.process_birth === identity.processBirth &&
-    exactNativeRolloutMatches(after.native_process.rollout, identity.rollout)
+    exactRolloutMatches(after.native_process.rollout, identity.rollout)
   );
 }
 
@@ -16310,15 +16170,23 @@ async function runSend(options) {
                 implicitCodexCandidateAuthority
             })
         : undefined;
-      if (deferredCodexForegroundBinding) {
+      const freshSendAuthority = dispatch.decideTerminalSendAuthority({
+        ownership: "conflict",
+        verifiedEmpty: Boolean(verifiedEmptyHandoff),
+        externalHandoff: handoff.adopted,
+        deferred: Boolean(deferredCodexForegroundBinding)
+      });
+      if (
+        freshSendAuthority.mode === "deferred" &&
+        deferredCodexForegroundBinding
+      ) {
         claimedSession = undefined;
         knownCodexCompanions = { additional: [] };
         currentNativeIdentity = undefined;
         handoff = { identity: undefined, adopted: false };
       } else if (
         (suppliedExpectedTerminalToken || implicitCodexCandidateAuthority) &&
-        !verifiedEmptyHandoff &&
-        !handoff.adopted
+        freshSendAuthority.mode === "conflict"
       ) {
         throw new Error(
           "the expected terminal token no longer authorizes the current " +
@@ -19762,20 +19630,6 @@ type VirginCodexBindingRecovery = {
   state: "not_applicable" | "already_bound" | "pending" | "recovered";
 };
 
-function exactNativeRolloutMatches(
-  left: unknown,
-  right: NativeAgentSessionIdentity["rollout"]
-): boolean {
-  return Boolean(
-    isCompleteNativeRollout(left) &&
-    right &&
-    left.fd === right.fd &&
-    left.device === right.device &&
-    left.inode === right.inode &&
-    left.path === right.path
-  );
-}
-
 /**
  * Finish the one monotonic binding transaction that a process crash may split
  * after a virgin Codex Turn has durably dispatched Enter.  This is deliberately
@@ -19960,12 +19814,12 @@ async function recoverVirginCodexPostSubmissionBinding({
           !isCompleteNativeRollout(identity.rollout) ||
           (preferredSessionId && identity.sessionId !== preferredSessionId) ||
           (turnNativeThreadId &&
-            !exactNativeRolloutMatches(
+            !exactRolloutMatches(
               takeover?.terminal_agent_rollout,
               identity.rollout
             )) ||
           (sessionNativeThreadId &&
-            !exactNativeRolloutMatches(
+            !exactRolloutMatches(
               binding.native_process.rollout,
               identity.rollout
             ))
@@ -20012,7 +19866,7 @@ async function recoverVirginCodexPostSubmissionBinding({
               identity.processUuid ||
             persistedSession.binding.native_process.process_birth !==
               identity.processBirth ||
-            !exactNativeRolloutMatches(
+            !exactRolloutMatches(
               persistedSession.binding.native_process.rollout,
               identity.rollout
             )

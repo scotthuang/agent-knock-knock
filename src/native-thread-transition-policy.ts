@@ -12,7 +12,11 @@ import type {
   NativeThreadCandidate,
   NativeThreadTransition
 } from "./managed-session.js";
-import type { TerminalNativeIdentity } from "./terminal-binding-authority.js";
+import type {
+  ManagedBindingConflictKind,
+  TerminalNativeIdentity
+} from "./terminal-binding-authority.js";
+export type { ManagedBindingConflictKind } from "./terminal-binding-authority.js";
 
 export type NativeThreadCommandOperation = "new_thread" | "resume_thread";
 
@@ -102,12 +106,6 @@ export function decideResumeTargetSession(input: {
   }
   return { action: "detach_stale_binding" };
 }
-
-export type ManagedBindingConflictKind =
-  | "stale_process_incarnation"
-  | "live_external_thread_change"
-  | "provisional_orphan"
-  | "unverifiable";
 
 export type BindingReconciliationDecision =
   | { action: "detach_conflicting_binding" }
