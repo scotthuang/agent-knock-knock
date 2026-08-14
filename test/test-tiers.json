@@ -12,6 +12,7 @@
     "test/codex-session-provider.test.ts",
     "test/codex-sticky-rollout-lifecycle-core.test.ts",
     "test/deferred-foreground-transfer.test.ts",
+    "test/durable-json-file.test.ts",
     "test/doctor-capabilities.test.ts",
     "test/executors.test.ts",
     "test/herdr-terminal-control-provider.test.ts",

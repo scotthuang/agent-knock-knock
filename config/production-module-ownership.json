@@ -3,7 +3,7 @@
   "version": 1,
   "architecture": {
     "cli_core_max_physical_loc": 35456,
-    "production_physical_loc": 75838,
+    "production_physical_loc": 75787,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -58,6 +58,9 @@
         "test/cli-ux.test.ts",
         "test/management-cli.test.ts"
       ]
+    },
+    "durable-json-file": {
+      "selection": "full"
     },
     "lifecycle-core": {
       "selection": "full"
@@ -263,6 +266,10 @@
     {
       "path": "src/doctor-capabilities.ts",
       "owner": "doctor-capabilities"
+    },
+    {
+      "path": "src/durable-json-file.ts",
+      "owner": "durable-json-file"
     },
     {
       "path": "src/executors.ts",

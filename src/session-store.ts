@@ -1,6 +1,11 @@
-import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import {
+  assertRealDirectory,
+  atomicSaveJsonFile,
+  isNodeError,
+  readJsonFileNoFollow
+} from "./durable-json-file.js";
 import {
   assertManagedSessionId,
   assertManagedSessionState,
@@ -18,10 +23,6 @@ import {
   withStoreWriterLease
 } from "./store.js";
 
-const PRIVATE_FILE_MODE = 0o600;
-const NO_FOLLOW_FLAG = typeof fs.constants.O_NOFOLLOW === "number"
-  ? fs.constants.O_NOFOLLOW
-  : 0;
 const SESSIONS_DIRECTORY = "sessions";
 const TRANSITIONS_DIRECTORY = "transitions";
 const SESSION_STATE_FILE = "state.json";
@@ -679,74 +680,18 @@ function assertExpectedRevision(value: unknown): asserts value is number | null 
 }
 
 function atomicSaveJson(filePath: string, value: unknown): void {
-  const recordRoot = path.dirname(path.dirname(filePath));
-  const recordDirectory = path.dirname(filePath);
-  const rootExisted = fs.existsSync(recordRoot);
-  ensureDir(recordRoot);
-  assertRealDirectory(recordRoot, "record root");
-  if (!rootExisted) {
-    fsyncDirectory(path.dirname(recordRoot));
-  }
-  const recordDirectoryExisted = fs.existsSync(recordDirectory);
-  ensureDir(recordDirectory);
-  if (!recordDirectoryExisted) {
-    fsyncDirectory(recordRoot);
-  }
-  assertRealDirectory(recordDirectory, "record directory");
-  assertRegularOrAbsent(filePath, "record state file");
-  const tempPath = path.join(
-    path.dirname(filePath),
-    `.${path.basename(filePath)}.${process.pid}.${randomUUID()}.tmp`
-  );
-  let fd: number | undefined;
-  try {
-    fd = fs.openSync(
-      tempPath,
-      fs.constants.O_CREAT |
-        fs.constants.O_EXCL |
-        fs.constants.O_WRONLY |
-        NO_FOLLOW_FLAG,
-      PRIVATE_FILE_MODE
-    );
-    fs.fchmodSync(fd, PRIVATE_FILE_MODE);
-    fs.writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-    fs.fsyncSync(fd);
-    fs.closeSync(fd);
-    fd = undefined;
-    assertRegularOrAbsent(filePath, "record state file");
-    fs.renameSync(tempPath, filePath);
-    fs.chmodSync(filePath, PRIVATE_FILE_MODE);
-    fsyncDirectory(path.dirname(filePath));
-  } finally {
-    if (fd !== undefined) {
-      fs.closeSync(fd);
-    }
-    try {
-      fs.unlinkSync(tempPath);
-    } catch (error) {
-      if (!isNodeError(error, "ENOENT")) {
-        throw error;
-      }
-    }
-  }
+  atomicSaveJsonFile(filePath, value, {
+    rootLabel: "record root",
+    directoryLabel: "record directory",
+    fileLabel: "record state file",
+    ensureDirectory: ensureDir,
+    fsyncNewRootParent: true,
+    fsyncNewDirectoryParent: true
+  });
 }
 
 function readJsonFile(filePath: string, label: string): unknown {
-  assertRealDirectory(path.dirname(path.dirname(filePath)), `${label} root`);
-  assertRealDirectory(path.dirname(filePath), `${label} directory`);
-  const stat = fs.lstatSync(filePath);
-  if (stat.isSymbolicLink() || !stat.isFile()) {
-    throw new Error(`${label} must be a regular file: ${filePath}`);
-  }
-  const fd = fs.openSync(filePath, fs.constants.O_RDONLY | NO_FOLLOW_FLAG);
-  try {
-    if (!fs.fstatSync(fd).isFile()) {
-      throw new Error(`${label} must be a regular file: ${filePath}`);
-    }
-    return JSON.parse(fs.readFileSync(fd, "utf8"));
-  } finally {
-    fs.closeSync(fd);
-  }
+  return readJsonFileNoFollow(filePath, label);
 }
 
 function validateRecordId(value: string, label: string): void {
@@ -776,50 +721,4 @@ function assertContained(
   ) {
     throw new Error(`${label} escapes its Store root: ${candidate}`);
   }
-}
-
-function assertRealDirectory(value: string, label: string): void {
-  const stat = fs.lstatSync(value);
-  if (stat.isSymbolicLink() || !stat.isDirectory()) {
-    throw new Error(`${label} must be a real directory: ${value}`);
-  }
-}
-
-function assertRegularOrAbsent(value: string, label: string): void {
-  try {
-    const stat = fs.lstatSync(value);
-    if (stat.isSymbolicLink() || !stat.isFile()) {
-      throw new Error(`${label} must be a regular file: ${value}`);
-    }
-  } catch (error) {
-    if (!isNodeError(error, "ENOENT")) {
-      throw error;
-    }
-  }
-}
-
-function fsyncDirectory(directory: string): void {
-  let fd: number | undefined;
-  try {
-    fd = fs.openSync(directory, fs.constants.O_RDONLY | NO_FOLLOW_FLAG);
-    fs.fsyncSync(fd);
-  } catch (error) {
-    const code = isNodeError(error) ? error.code : undefined;
-    if (!["EINVAL", "ENOTSUP", "EPERM", "EISDIR"].includes(String(code))) {
-      throw error;
-    }
-  } finally {
-    if (fd !== undefined) {
-      fs.closeSync(fd);
-    }
-  }
-}
-
-function isNodeError(
-  error: unknown,
-  code?: string
-): error is NodeJS.ErrnoException {
-  return error instanceof Error &&
-    "code" in error &&
-    (code === undefined || (error as NodeJS.ErrnoException).code === code);
 }
