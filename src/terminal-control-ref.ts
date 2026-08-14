@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 /**
  * Provider-neutral terminal identity and routing primitives.
  *
@@ -594,6 +596,20 @@ export function terminalLegacyRuntimeRoute(
     target: terminalControl.target,
     socket_path: terminalControl.socketPath ?? null
   };
+}
+
+/** Stable runtime resource key shared by terminal locks and capabilities. */
+export function terminalRuntimeResourceKey(
+  terminalControl: TerminalControlRef,
+  options: { legacy?: boolean } = {}
+): string {
+  const identity = !options.legacy && hasCanonicalTerminalEndpoint(terminalControl)
+    ? terminalEndpointIdentityKey(terminalControl)
+    : JSON.stringify(terminalLegacyRuntimeRoute(terminalControl));
+  return createHash("sha256")
+    .update(identity)
+    .digest("hex")
+    .slice(0, 20);
 }
 
 export function terminalControlWithCapabilities(

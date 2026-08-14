@@ -5,8 +5,10 @@ import {
   capabilityGatedRepositoryOperation,
   capabilityGatedRepositoryPairOperation,
   withCanonicalMutationLocks,
+  withCanonicalStateMutationLock,
   type CanonicalMutationLockPorts,
   type CanonicalMutationScopes,
+  type CanonicalStateMutationResources,
   type CanonicalStateMutationScopes
 } from "../src/mutation-transaction.js";
 
@@ -92,6 +94,92 @@ test("mutation transaction skips only the absent state scope", async () => {
     "release writer",
     "release terminal"
   ]);
+});
+
+test("dynamic state scope extends one active terminal-writer transaction", async () => {
+  const { events, ports } = fixture({ withState: false });
+  let leaked: CanonicalStateMutationScopes | undefined;
+  let leakedResources: CanonicalStateMutationResources | undefined;
+  const save = capabilityGatedRepositoryOperation(
+    ["storeWriter", "state"] as const,
+    "state",
+    (resource: { statePath: string }, status: string) => {
+      events.push(`save ${resource.statePath} ${status}`);
+    }
+  );
+  await withCanonicalMutationLocks(ports, async (scopes, resources) => {
+    events.push("outer operation");
+    await withCanonicalStateMutationLock(
+      scopes,
+      resources,
+      {
+        resource: TEST_RESOURCES.resources.state,
+        acquire: () => {
+          events.push("acquire state");
+          return () => events.push("release state");
+        }
+      },
+      async (stateScopes, stateResources) => {
+        leaked = stateScopes;
+        leakedResources = stateResources;
+        save(stateScopes, stateResources, "prepared");
+      }
+    );
+    assert.throws(
+      () => save(
+        leaked as CanonicalStateMutationScopes,
+        leakedResources as CanonicalStateMutationResources,
+        "late"
+      ),
+      /requires active authentic state scope/u
+    );
+  });
+  assert.deepEqual(events, [
+    "acquire terminal",
+    "acquire writer",
+    "outer operation",
+    "acquire state",
+    "save state.json prepared",
+    "release state",
+    "release writer",
+    "release terminal"
+  ]);
+});
+
+test("dynamic state scope rejects wrong or mixed outer resources", async () => {
+  const first = fixture({ withState: false });
+  const second = fixture({ withState: false });
+  await withCanonicalMutationLocks(first.ports, async (outer, resources) => {
+    await assert.rejects(
+      withCanonicalStateMutationLock(
+        outer,
+        { ...resources, terminal: OTHER_RESOURCES.terminal },
+        {
+          resource: TEST_RESOURCES.resources.state,
+          acquire: () => () => undefined
+        },
+        async () => undefined
+      ),
+      /requires active authentic terminal scope/u
+    );
+    await withCanonicalMutationLocks(second.ports, async (inner) => {
+      await assert.rejects(
+        withCanonicalStateMutationLock(
+          {
+            terminal: outer.terminal,
+            storeWriter: inner.storeWriter
+          },
+          resources,
+          {
+            resource: TEST_RESOURCES.resources.state,
+            acquire: () => () => undefined
+          },
+          async () => undefined
+        ),
+        /scopes belong to different transactions/u
+      );
+    });
+  });
 });
 
 test("every transaction receives fresh unforgeable scopes that expire", async () => {

@@ -2,13 +2,18 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 
-import { createConversation, type Conversation } from "../src/protocol.js";
-import type { EventRecord } from "../src/store.js";
+import {
+  createConversation,
+  type AgentMessage,
+  type Conversation
+} from "../src/protocol.js";
+import { messageEvent } from "../src/store.js";
 import type { TerminalControlRef } from "../src/terminal-agent-adapter.js";
 import { TerminalInputNotStartedError } from
   "../src/terminal-agent-bridge.js";
 import {
   TerminalDispatchApplication,
+  type TerminalDispatchAuditEvent,
   type TerminalDispatchApplicationPorts
 } from "../src/terminal-dispatch-application.js";
 import type { TerminalDispatchLedgerDocument } from
@@ -50,6 +55,7 @@ interface HarnessOptions {
   failEvent?: string;
   failRestore?: boolean;
   failureError?: Error;
+  recordRawAttachmentAfterSend?: boolean;
   rollbackResult?: boolean;
   receiptTerminalControl?: TerminalControlRef;
 }
@@ -122,7 +128,7 @@ function createHarness(options: HarnessOptions = {}) {
   const order: string[] = [];
   const states: Conversation[] = [];
   const ledgers: TerminalDispatchLedgerDocument[] = [];
-  const events: EventRecord[] = [];
+  const events: TerminalDispatchAuditEvent[] = [];
   let stagedConversation = prepared;
   let textInjectedAt: string | undefined;
   let enterDispatchedAt: string | undefined;
@@ -175,6 +181,9 @@ function createHarness(options: HarnessOptions = {}) {
         }
         events.push(event);
       },
+      appendPreparedMessage() {
+        order.push("event:message_created");
+      },
       log(_level, event) {
         order.push(`log:${event}`);
       },
@@ -205,8 +214,8 @@ function createHarness(options: HarnessOptions = {}) {
     previousGenerationId: "message-previous",
     dispatcherPid: 4102,
     storeDir: "/store/session-a",
-    recordMessageAfterSend: false,
-    recordRawAttachmentAfterSend: false,
+    recordRawAttachmentAfterSend:
+      options.recordRawAttachmentAfterSend ?? false,
     ledgerBindingFields: () => ({
       binding_id: "binding-a",
       binding_generation: 7,
@@ -359,6 +368,55 @@ test("prepared failures restore the ledger then roll back before input", () => {
     "state:prepared",
     "restore:prepared state persistence failed before terminal input:not-started",
     "rollback"
+  ]);
+});
+
+test("malformed prepared event aborts once before raw-attach bookkeeping", () => {
+  const harness = createHarness({ recordRawAttachmentAfterSend: true });
+  harness.application.persistPrepared();
+  harness.order.length = 0;
+  let validations = 0;
+  const malformed = {
+    id: "message-malformed",
+    conversation_id: "turn-a",
+    session_id: "session-a",
+    turn_id: "turn-a",
+    ts: PREPARED_AT,
+    from: "openclaw",
+    to: "codex",
+    type: "task",
+    requires_response: true,
+    round: 0,
+    body: ""
+  } as AgentMessage;
+  let observed: unknown;
+  try {
+    harness.application.recordPreparedBookkeeping(
+      true,
+      false,
+      () => {
+        validations += 1;
+        harness.order.push("validate:message-event");
+        messageEvent(malformed);
+      }
+    );
+  } catch (error) {
+    observed = error;
+    harness.application.recordZeroInputAbort({
+      failureKind: "setup",
+      error,
+      abortedAt: RESOLVED_AT
+    });
+  }
+  assert.match(String(observed), /message.body must be a non-empty string/u);
+  assert.equal(validations, 1);
+  assert.deepEqual(harness.order, [
+    "validate:message-event",
+    "restore:terminal submission aborted before terminal input:not-started",
+    "rollback",
+    "state:aborted",
+    "event:terminal_message_submit_aborted",
+    "log:terminal_message_submit_aborted"
   ]);
 });
 

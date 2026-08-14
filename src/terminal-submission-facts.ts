@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
+import type {
+  CodexOpenRootRolloutIdentity,
+  CodexOpenRootRolloutInventory
+} from "./agent-session-provider.js";
 import { isRecord, type UnknownRecord } from "./value-guards.js";
 
 export interface CodexRolloutIdentity {
@@ -64,6 +68,136 @@ export type CodexRolloutAcceptanceAnchor =
   | CodexBoundRolloutAcceptanceAnchor
   | CodexVirginRolloutAcceptanceAnchor
   | CodexCandidateSetRolloutAcceptanceAnchor;
+
+export type CaptureCodexRolloutAcceptanceAnchorOptions = {
+  processUuid: string;
+  processBirth: string;
+  now?: Date;
+} & (
+  | { nativeThreadId: string; mode: "existing"; rollout: CodexRolloutIdentity }
+  | {
+      nativeThreadId?: string;
+      mode: "pre_materialization";
+      expectedEmptyNativeSession: true;
+    }
+);
+
+export interface CodexCandidateSetRolloutAcceptanceRequest {
+  anchor: CodexCandidateSetRolloutAcceptanceAnchor;
+  currentInventory: CodexOpenRootRolloutInventory;
+  requestHash: string;
+}
+
+export type CodexCandidateSetRolloutAcceptanceResult =
+  | {
+      status: "accepted";
+      identity: CodexOpenRootRolloutIdentity;
+      evidence: TerminalSubmissionAcceptanceEvidence;
+    }
+  | {
+      status: "pending";
+      inspected_candidates: number;
+      exact_matches: number;
+      incomplete_candidates?: number;
+    }
+  | {
+      status: "uncertain";
+      code: "multiple_exact_request_acceptances" |
+        "candidate_inventory_changed" | "candidate_scan_invalid";
+      reason: string;
+      inspected_candidates: number;
+      exact_matches: number;
+    };
+
+export interface CodexRolloutAcceptanceIdentity {
+  sessionId: string;
+  processUuid?: string;
+  processBirth?: string;
+  rollout?: CodexRolloutIdentity;
+}
+
+export interface CodexRolloutAcceptanceRequest {
+  anchor: CodexRolloutAcceptanceAnchor;
+  currentIdentity: CodexRolloutAcceptanceIdentity;
+  requestHash: string;
+}
+
+export interface TerminalSubmissionAcceptanceEvidence {
+  source: "codex_rollout" | "claude_transcript";
+  kind: "native_user_turn";
+  nativeThreadId: string;
+  requestHash: string;
+  acceptanceId: string;
+  acceptedAt?: string;
+  anchorFingerprint: string;
+  evidenceFingerprint: string;
+  metadata?: Record<string, string | number>;
+}
+
+export function validateTerminalSubmissionAcceptanceEvidence(
+  value: unknown,
+  expected: {
+    source: TerminalSubmissionAcceptanceEvidence["source"];
+    nativeThreadId: string;
+    requestHash: string;
+  }
+): TerminalSubmissionAcceptanceEvidence {
+  if (!isRecord(value)) {
+    throw new Error("native acceptance evidence is unavailable");
+  }
+  const allowedKeys = new Set([
+    "source", "kind", "nativeThreadId", "requestHash", "acceptanceId",
+    "acceptedAt", "anchorFingerprint", "evidenceFingerprint", "metadata"
+  ]);
+  if (Object.keys(value).some((key) => !allowedKeys.has(key))) {
+    throw new Error("native acceptance evidence contains unsupported fields");
+  }
+  if (value.source !== expected.source || value.kind !== "native_user_turn") {
+    throw new Error("native acceptance evidence has the wrong agent or kind");
+  }
+  if (
+    requiredString(value.nativeThreadId, "native acceptance thread") !==
+      requiredString(expected.nativeThreadId, "expected native acceptance thread") ||
+    sha256Value(value.requestHash, "native acceptance request hash") !==
+      sha256Value(expected.requestHash, "expected native acceptance request hash")
+  ) {
+    throw new Error("native acceptance evidence does not match the exact request binding");
+  }
+  requiredString(value.acceptanceId, "native acceptance id");
+  sha256Value(value.anchorFingerprint, "native acceptance anchor fingerprint");
+  sha256Value(value.evidenceFingerprint, "native acceptance evidence fingerprint");
+  if (value.acceptedAt !== undefined && !validTimestamp(value.acceptedAt)) {
+    throw new Error("native acceptance evidence timestamp is invalid");
+  }
+  if (value.metadata !== undefined) {
+    if (!isRecord(value.metadata)) {
+      throw new Error("native acceptance evidence metadata is invalid");
+    }
+    const allowedMetadata = value.source === "codex_rollout"
+      ? new Set([
+          "turn_id", "anchor_offset_bytes", "observed_end_offset_bytes"
+        ])
+      : new Set([
+          "prompt_uuid", "claude_version", "transcript_file_id",
+          "anchor_offset_bytes", "observed_end_offset_bytes",
+          "agent_started_at_ms"
+        ]);
+    for (const [key, item] of Object.entries(value.metadata)) {
+      if (
+        !allowedMetadata.has(key) ||
+        !(typeof item === "string" ||
+          (typeof item === "number" && Number.isFinite(item)))
+      ) {
+        throw new Error("native acceptance evidence metadata is not allowlisted");
+      }
+    }
+  }
+  const { evidenceFingerprint, ...base } = value;
+  if (fingerprint(base) !== evidenceFingerprint) {
+    throw new Error("native acceptance evidence fingerprint does not match");
+  }
+  return value as unknown as TerminalSubmissionAcceptanceEvidence;
+}
 
 const NATIVE_THREAD_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;

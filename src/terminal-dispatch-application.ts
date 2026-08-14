@@ -4,7 +4,6 @@ import {
   type Conversation,
   type Executor
 } from "./protocol.js";
-import type { EventRecord } from "./store.js";
 import type { TerminalControlRef } from "./terminal-agent-adapter.js";
 import {
   reduceTerminalZeroInputAbort,
@@ -24,7 +23,7 @@ import {
   type TerminalBridgeSubmissionMutation
 } from "./terminal-dispatch-receipt.js";
 import type { TerminalSubmissionAcceptanceEvidence } from
-  "./terminal-submission-acceptance.js";
+  "./terminal-submission-facts.js";
 import { isRecord, nonBlankString } from "./value-guards.js";
 
 
@@ -32,6 +31,27 @@ export interface TerminalDispatchMessage {
   id: string;
   type: "task" | "answer";
   body: string;
+}
+
+export interface TerminalDispatchAuditEvent {
+  ts: string;
+  conversation_id: string;
+  event: string;
+  message_id?: string;
+  executor?: Executor;
+  terminal_control?: TerminalControlRef;
+  source_conversation_id?: string;
+  agent?: Executor["kind"];
+  request_hash?: string;
+  dispatcher_pid?: number;
+  error?: ReturnType<typeof textSummary>;
+  delivered?: boolean;
+  do_not_retry?: boolean;
+  delivery_receipt?: TerminalOrdinaryDispatchStatus;
+  safe_to_retry?: boolean;
+  terminal_input_started?: false;
+  message?: ReturnType<typeof textSummary>;
+  payload?: ReturnType<typeof textSummary>;
 }
 
 export type TerminalDispatchAcceptance =
@@ -58,7 +78,6 @@ export interface TerminalDispatchApplicationContext {
   previousGenerationId?: string;
   dispatcherPid: number;
   storeDir?: string;
-  recordMessageAfterSend: boolean;
   recordRawAttachmentAfterSend: boolean;
   ledgerBindingFields(
     conversation: Conversation
@@ -82,7 +101,8 @@ export interface TerminalDispatchApplicationPorts {
     restore(reason: string, terminalInputNotStartedAt?: string): void;
   };
   audit: {
-    append(event: EventRecord): void;
+    append(event: TerminalDispatchAuditEvent): void;
+    appendPreparedMessage(): void;
     log(
       level: "info" | "warn" | "error",
       event: string,
@@ -126,7 +146,7 @@ type TerminalSubmissionProgressFields = Pick<
 interface TerminalDispatchStageRecords {
   state: Conversation;
   ledger: TerminalDispatchLedgerDocument;
-  event: EventRecord;
+  event: TerminalDispatchAuditEvent;
 }
 
 /**
@@ -166,9 +186,11 @@ export class TerminalDispatchApplication {
   }
 
   recordPreparedBookkeeping(
-    messageEvent: EventRecord | undefined,
-    injectFailure = false
+    recordPreparedEvent: boolean,
+    injectFailure = false,
+    validatePreparedEvent?: () => void
   ): void {
+    validatePreparedEvent?.();
     if (injectFailure) {
       throw new Error("injected terminal setup failure before terminal input");
     }
@@ -197,8 +219,8 @@ export class TerminalDispatchApplication {
         event_log_path: this.#context.eventLogPath
       });
     }
-    if (this.#context.recordMessageAfterSend && messageEvent) {
-      this.#ports.audit.append(messageEvent);
+    if (recordPreparedEvent) {
+      this.#ports.audit.appendPreparedMessage();
       this.#ports.audit.log("info", "message_created", {
         conversation_id: conversation.conversation_id,
         agent: this.#context.executor.kind,
@@ -661,8 +683,8 @@ export class TerminalDispatchApplication {
   #event(
     at: string,
     event: string,
-    fields: { [key: string]: unknown } = {}
-  ): EventRecord {
+    fields: Partial<TerminalDispatchAuditEvent> = {}
+  ): TerminalDispatchAuditEvent {
     return {
       ts: at,
       conversation_id: this.#stagedConversation.conversation_id,

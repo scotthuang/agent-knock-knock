@@ -484,11 +484,54 @@ The owner map selects exactly recovery, receipt-fence, session-acceptance,
 terminal-send, and Codex virgin-binding integration suites. Dispatch-authority
 remains a core lock/authority boundary rather than an application owner.
 
-PR4C must reuse this seam and keep combined PR4B1/PR4C production overhead at
-or below 400 lines. Before changing lock order, PR4C must introduce canonical
-mutation scopes and gated repositories, then independently prove the new lock
-order and error-priority behavior. A capability flag, raw repository escape,
-or application-owned lock is not a substitute for those prerequisites.
+### PR4C canonical dispatch transaction and execution seam
+
+PR4C reuses the PR4B1 application seam as the only implementation of durable
+dispatch ordering. Measured against exact head
+`7a7987f038ac2d96f6c8dca22dcc07db4d8f1e6c`, it lowers `cli-core.ts` from
+30,640 to 29,281 physical lines (-1,359). Total production grows from 76,649
+to 77,792 lines (+1,143, 84.11 percent of the core reduction). The reviewed
+increase beyond the iteration budget is the exact-resource repair: authentic
+cross-Store state scopes, canonical terminal/writer key-value pairs, malformed
+resources, raw-attach rollback, and
+post-input Session/deferred writes now fail closed before their repository I/O.
+The largest remaining dispatch entry stage is 477 lines with approximate
+complexity 34;
+all new and split functions remain below 500 lines and complexity 50.
+
+Ordinary terminal dispatch now acquires the canonical terminal resource, then
+the exact Store writer, and derives any Turn-state scope from that same live
+transaction. The state callback is awaited and the capability expires when it
+returns. Both the dynamic send path and the static writer/state helper reject a
+wrong Store, wrong event log, mixed transaction, released scope, or forged
+resource before lock acquisition or filesystem I/O. Application repositories
+consume those exact active capabilities for every state, ledger, event, and
+rollback operation; they accept no free Store, path, terminal, or lock handle.
+
+`terminal-dispatch-execution.ts` owns preflight, transport lifecycle, native
+identity, acceptance, and authority orchestration behind five typed port
+groups: clock, native observation, acceptance, terminal proof, and Turn
+authority. Codex anchor capture/detection and Claude transcript detection are
+implemented by the core-owned adapter; the service has no filesystem, Store,
+raw-lock, public-JSON presenter, or concrete terminal-bridge dependency. Its
+direct fake-port tables lock short-circuit order, exactly one Enter stage,
+before/after-text failure classification, late acceptance and bounded pending
+results, native identity outcomes, and Turn revalidation.
+
+Raw terminal input, public CLI/OpenClaw JSON, acceptance adapter construction,
+and authority composition remain in `cli-core.ts`. The 82-line
+`terminal-dispatch-composition.ts` file is explicitly a temporary CLI
+infrastructure type bridge owned by `terminal-dispatch-core`, not an
+application service: it still names a concrete resolved terminal type and the
+legacy `Record<string, any>` options bag. PR7 must eliminate that bridge while
+moving the remaining composition facade; neither type is exposed by the PR4C
+execution, application, or capability services.
+
+The `terminal-dispatch-application` owner retains exactly five affected
+integration witnesses: Codex no-rollout binding, dispatch recovery, receipt
+fences, session acceptance, and terminal send gates. Focused direct tables also
+prove the canonical resource identities and the preserved PR4B1 durable write
+and error-priority sequences without introducing a second state machine.
 
 ## Immutable public and safety contracts
 

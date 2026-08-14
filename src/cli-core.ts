@@ -33,7 +33,6 @@ import {
   detectCodexBoundRolloutCompletion,
   detectCodexCandidateSetRolloutAcceptance,
   detectCodexRolloutAcceptance,
-  terminalSubmissionReplayReceipt,
   type CodexCandidateSetRolloutAcceptanceAnchor,
   type CodexRolloutAcceptanceAnchor,
   type TerminalSubmissionAcceptanceEvidence,
@@ -201,7 +200,7 @@ import {
   terminalControlEvidenceMatches,
   terminalEndpointFromControlRef,
   terminalEndpointIdentityKey,
-  terminalLegacyRuntimeRoute,
+  terminalRuntimeResourceKey,
   type TerminalControlEvidence
 } from "./terminal-control-ref.js";
 import { createProductionTerminalAgentRegistry } from "./terminal-agent-registry.js";
@@ -282,8 +281,25 @@ import {
 import { reconcileTerminalBinding } from "./terminal-binding-reconciliation-service.js";
 import {
   canonicalMutationResource, capabilityGatedRepositoryOperation,
-  capabilityGatedRepositoryPairOperation, withCanonicalMutationLocks
+  capabilityGatedRepositoryPairOperation, withCanonicalMutationLocks,
+  withCanonicalStateMutationLock,
+  type CanonicalMutationResources,
+  type CanonicalMutationScopes,
+  type CanonicalStateMutationResources,
+  type CanonicalStateMutationScopes
 } from "./mutation-transaction.js";
+import {
+  assertTerminalDispatchRouteMatches,
+  bindTerminalDispatchCapabilities,
+  bindTerminalDispatchRoute,
+  terminalDispatchStateLockPath,
+  terminalDispatchStateMutationResource,
+  terminalDispatchStateResourceForStore,
+  withExactTerminalDispatchRoute,
+  type BoundTerminalDispatchRoute,
+  type TerminalDispatchCapabilityRepositories,
+  type TerminalDispatchStateResource
+} from "./terminal-dispatch-capability.js";
 import {
   createCallbackOutboxService,
   deterministicTerminalCallbackMessageId,
@@ -326,6 +342,52 @@ import {
 } from "./terminal-dispatch-ledger-codec.js";
 import * as dispatch from "./terminal-dispatch-policy.js";
 import * as dispatchApplication from "./terminal-dispatch-application.js";
+import type {
+  DeferredCodexForegroundBindingBoundary,
+  DeferredCodexForegroundDispatchSnapshot,
+  TerminalControlSendRequest,
+  VerifiedEmptyCodexHandoffBoundary
+} from "./terminal-dispatch-composition.js";
+import {
+  TerminalDispatchExecutionService,
+  assertManagedSessionCanStartTurnPolicy,
+  codexCompanionsExcludingPreferred,
+  codexCompanionsPresentInOpenRootInventory,
+  codexIdentityFence,
+  codexKnownBeforeIdentityForTransition,
+  codexLingeringIdentityMatches,
+  isCompleteNativeRollout,
+  isCodexStatusCardEvidence,
+  logicalManagedSessionIdentity,
+  managedBindingMatchesLiveTerminal,
+  managedSessionRevision,
+  managedSessionOwnerIsInactive,
+  managedTurnMatchesTerminal,
+  migratedTerminalBindingMatches,
+  nativeAgentIdentityMatchesTurn,
+  nativeIdentityMatchesCodexPreMaterialization,
+  nativeThreadTransitionRevision,
+  processIncarnationRelationship,
+  resolvedTerminalProcessIncarnation as resolvedTerminalProcessIncarnationPolicy,
+  selectBoundManagedSessionForTerminal,
+  selectSoleBoundManagedSessionClaim,
+  terminalSubmissionPayload,
+  terminalRuntimeForLiveIdentity as terminalRuntimeForLiveIdentityPolicy,
+  terminalRuntimeIdentityBase,
+  withCodexCompanionFences,
+  type CodexAllowedCompanionSet,
+  type CodexPreMaterializationIdentity,
+  type NativeAgentSessionIdentityObservation,
+  type NativeIdentityResolutionRequest,
+  type ProcessIncarnationRelationship
+} from "./terminal-dispatch-execution.js";
+import {
+  presentTerminalCompleted,
+  presentTerminalDispatchReplay,
+  presentTerminalIdentityFailure,
+  presentTerminalUncertain,
+  presentTerminalZeroInputAbort as renderTerminalZeroInputAbort
+} from "./terminal-dispatch-presenter.js";
 import * as dispatchReceipt from "./terminal-dispatch-receipt.js";
 import {
   cleanProcessText,
@@ -425,12 +487,107 @@ function terminalWriterMutationLocks(storeDir: string, terminalControl: Terminal
 }
 function terminalWriterStateMutationLocks(storeDir: string, terminalControl: TerminalControlRef, statePath: string, logPath: string) {
   const locks = terminalWriterMutationLocks(storeDir, terminalControl);
+  const stateResource = terminalDispatchStateResourceForStore(
+    storeDir, statePath, logPath
+  );
   return {
-    ...locks,
-    resources: { ...locks.resources, state: canonicalMutationResource(
-      path.resolve(statePath), Object.freeze({ statePath, logPath })) },
-    acquireState: () => acquireFileLock(`${statePath}.lock`)
+    ...locks, resources: {
+      ...locks.resources,
+      state: stateResource
+    },
+    acquireState: () => acquireFileLock(
+      terminalDispatchStateLockPath(stateResource)
+    )
   };
+}
+function withTerminalDispatchStateScope<Result>(
+  scopes: CanonicalMutationScopes,
+  resources: CanonicalMutationResources,
+  statePath: string,
+  logPath: string,
+  operation: (
+    scopes: CanonicalStateMutationScopes,
+    resources: CanonicalStateMutationResources
+  ) => Promise<Result>
+): Promise<Result> {
+  const stateResource = terminalDispatchStateMutationResource(
+    scopes, resources, statePath, logPath
+  );
+  return withCanonicalStateMutationLock(
+    scopes,
+    resources,
+    {
+      resource: stateResource,
+      acquire: () => acquireFileLock(
+        terminalDispatchStateLockPath(stateResource)
+      )
+    },
+    operation
+  );
+}
+
+function terminalDispatchCapabilityRepositories({
+  previousLedger,
+  preparedMessageEvent,
+  restoreDeferred,
+  rollbackBeforeInput
+}: {
+  previousLedger: TerminalDispatchLedgerDocument | undefined;
+  preparedMessageEvent(): Parameters<typeof appendEvent>[1];
+  restoreDeferred(
+    route: BoundTerminalDispatchRoute,
+    terminalInputNotStartedAt?: string
+  ): boolean;
+  rollbackBeforeInput(route: BoundTerminalDispatchRoute): boolean;
+}): TerminalDispatchCapabilityRepositories {
+  return Object.freeze({
+    state: {
+      save(scopes, resources, conversation) {
+        const route = bindTerminalDispatchRoute(scopes, resources);
+        saveState(route.statePath, conversation);
+      }
+    },
+    ledger: {
+      save(scopes, resources, ledger, phase) {
+        const route = bindTerminalDispatchRoute(scopes, resources);
+        if (
+          phase === "final" &&
+          cliEnv().AKK_TEST_FINAL_TERMINAL_LEDGER_FAILURE === "1"
+        ) {
+          throw new Error(
+            "injected final terminal ledger persistence failure"
+          );
+        }
+        saveTerminalBridgeDispatchLedger(route.terminalControl, ledger);
+      },
+      restore(scopes, resources, reason, terminalInputNotStartedAt) {
+        const route = bindTerminalDispatchRoute(scopes, resources);
+        if (restoreDeferred(route, terminalInputNotStartedAt)) {
+          return;
+        }
+        restoreTerminalBridgeDispatchLedger({
+          terminalControl: route.terminalControl,
+          previousLedger,
+          reason
+        });
+      }
+    },
+    audit: {
+      append(scopes, resources, event) {
+        const route = bindTerminalDispatchRoute(scopes, resources);
+        appendEvent(route.logPath, { ...event });
+      },
+      appendPreparedMessage(scopes, resources) {
+        const route = bindTerminalDispatchRoute(scopes, resources);
+        appendEvent(route.logPath, preparedMessageEvent());
+      }
+    },
+    rollbackBeforeInput(scopes, resources) {
+      return rollbackBeforeInput(
+        bindTerminalDispatchRoute(scopes, resources)
+      );
+    }
+  });
 }
 const TERMINAL_BRIDGE_SUPERSEDE_STATUSES = new Set<ConversationStatus>([
   "created",
@@ -511,7 +668,6 @@ export interface ParsedCliCommand {
   command?: string;
   options: CliCommandOptions;
 }
-
 
 class TurnBindingSupersededError extends Error {
   readonly code = "AKK_TURN_BINDING_SUPERSEDED";
@@ -932,10 +1088,7 @@ function detectExactBoundCodexCompletion({
   if (submission?.status !== "agent_accepted") {
     return { handled: false };
   }
-  const exactRequired = requiresExactBoundCodexCompletion(
-    conversation,
-    options
-  );
+  const exactRequired = requiresExactBoundCodexCompletion(conversation);
   if (!exactRequired) {
     return { handled: false };
   }
@@ -1006,8 +1159,7 @@ function detectExactBoundCodexCompletion({
 }
 
 function requiresExactBoundCodexCompletion(
-  conversation: Record<string, any>,
-  options: Record<string, any>
+  conversation: Record<string, any>
 ): boolean {
   const nativeTakeover = isRecord(conversation.native_session_takeover)
     ? conversation.native_session_takeover
@@ -1022,7 +1174,7 @@ function requiresExactBoundCodexCompletion(
     submission.acceptance_evidence.source === "codex_rollout";
   const modernProductionTurn =
     Number(nativeTakeover?.terminal_agent_identity_protocol) === 1 &&
-    !allowsSyntheticTerminalAcceptance(options);
+    cliEnv().AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE !== "1";
   return hasExactArtifacts || modernProductionTurn;
 }
 
@@ -1118,7 +1270,7 @@ function createTerminalAgentBridge(
               runtime?.allowedAdditionalNativeIdentities
           })
         : undefined;
-      assertNativeAgentIdentityForRuntime({
+      terminalDispatchExecution(options).assertRuntimeIdentity({
         runtime,
         currentIdentity: currentNativeIdentity,
         agent,
@@ -1315,65 +1467,10 @@ function refineTerminalTurnEndpoint({
 }
 
 function terminalRuntimeIdentityForConversation(
-  conversation,
+  conversation: Conversation,
   terminalControl: TerminalControlRef
 ): TerminalRuntimeIdentity {
-  const nativeTakeover = isRecord(conversation?.native_session_takeover)
-    ? conversation.native_session_takeover
-    : undefined;
-  const nativeSessionId = stringValue(nativeTakeover?.native_session_id);
-  const terminalIdentity = parseTerminalConversationId(nativeSessionId);
-  const explicitSessionId = stringValue(nativeTakeover?.terminal_agent_session_id) ??
-    (terminalIdentity ? undefined : nativeSessionId);
-  const nativeRollout = isRecord(nativeTakeover?.terminal_agent_rollout)
-    ? nativeTakeover.terminal_agent_rollout
-    : undefined;
-  const strictNativeIdentity =
-    Number(nativeTakeover?.terminal_agent_identity_protocol) === 1;
-  const expectedNativeSessionId = stringValue(
-    nativeTakeover?.terminal_agent_expected_session_id
-  );
-  const requireNativeProcessUuid =
-    strictNativeIdentity && executorForConversation(conversation).kind === "claude";
-  const requireNativeRolloutIdentity =
-    strictNativeIdentity && executorForConversation(conversation).kind === "codex";
-  const runtime: TerminalRuntimeIdentity = {
-    pid: Number.isInteger(Number(nativeTakeover?.terminal_agent_pid))
-      ? Number(nativeTakeover?.terminal_agent_pid)
-      : terminalIdentity?.pid,
-    sessionId: explicitSessionId,
-    nativeSessionId: stringValue(nativeTakeover?.terminal_agent_session_id),
-    nativeProcessUuid: stringValue(
-      nativeTakeover?.terminal_agent_process_uuid
-    ),
-    nativeProcessBirth: stringValue(
-      nativeTakeover?.terminal_agent_process_birth
-    ),
-    requireNativeProcessUuid,
-    requireNativeRolloutIdentity,
-    ...(nativeRollout
-      ? {
-          nativeRollout: {
-            fd: String(nativeRollout.fd ?? ""),
-            device: String(nativeRollout.device ?? ""),
-            inode: String(nativeRollout.inode ?? ""),
-            path: String(nativeRollout.path ?? "")
-          }
-        }
-      : {}),
-    expectedEmptyNativeSession:
-      strictNativeIdentity &&
-      !stringValue(nativeTakeover?.terminal_agent_session_id),
-    expectedNativeSessionId:
-      strictNativeIdentity &&
-      !stringValue(nativeTakeover?.terminal_agent_session_id)
-        ? expectedNativeSessionId
-        : undefined,
-    cwd: stringValue(nativeTakeover?.source_cwd) ?? terminalControl.currentPath,
-    conversationId: stringValue(conversation?.conversation_id),
-    messageId: stringValue(nativeTakeover?.terminal_bridge_message_id),
-    terminalTarget: terminalControl.target
-  };
+  const runtime = terminalRuntimeIdentityBase(conversation, terminalControl);
   if (executorForConversation(conversation).kind !== "codex") {
     return runtime;
   }
@@ -2482,7 +2579,7 @@ function replayExactActiveTerminalSubmission({
     | "submitted"
     | "enter_dispatched"
     | "agent_accepted";
-  const replayReceipt = terminalSubmissionReplayReceipt({
+  const replayReceipt = dispatchReceipt.terminalSubmissionReplayReceipt({
     proofLevel,
     evidence: ledger.acceptance_evidence,
     expected: {
@@ -2849,7 +2946,7 @@ function replayExactStoredTerminalSubmission({
     | "submitted"
     | "enter_dispatched"
     | "agent_accepted";
-  const replayReceipt = terminalSubmissionReplayReceipt({
+  const replayReceipt = dispatchReceipt.terminalSubmissionReplayReceipt({
     proofLevel,
     evidence: receipt.acceptance_evidence,
     expected: {
@@ -6640,11 +6737,6 @@ function codexProcessIncarnationForPid(pid: number): {
   };
 }
 
-type ProcessIncarnationRelationship =
-  | "same"
-  | "different"
-  | "unverifiable";
-
 type DurableCompletionBeforeDeadStallObservation =
   VerifiedDeadAgentCompletionObservation<TerminalCompletionEvidence>;
 
@@ -6669,7 +6761,7 @@ function observeExactCodexDeadProcessRolloutCompletion({
     : undefined;
   if (
     submission?.status !== "agent_accepted" ||
-    !requiresExactBoundCodexCompletion(conversation, options) ||
+    !requiresExactBoundCodexCompletion(conversation) ||
     acceptanceEvidence?.source !== "codex_rollout" ||
     !anchor
   ) {
@@ -6948,115 +7040,27 @@ async function observeBoundTerminalAgentProcess({
   }
 }
 
-function processIncarnationRelationship({
-  binding,
-  livePid,
-  liveProcessUuid,
-  liveProcessBirth
-}: {
-  binding: ManagedTerminalBinding;
-  livePid: number;
-  liveProcessUuid?: string;
-  liveProcessBirth?: string;
-}): ProcessIncarnationRelationship {
-  if (binding.native_process.pid !== livePid) {
-    return "different";
-  }
-  const comparisons: boolean[] = [];
-  if (binding.native_process.process_uuid && liveProcessUuid) {
-    comparisons.push(
-      binding.native_process.process_uuid === liveProcessUuid
-    );
-  }
-  if (binding.native_process.process_birth && liveProcessBirth) {
-    comparisons.push(
-      binding.native_process.process_birth === liveProcessBirth
-    );
-  }
-  if (comparisons.length === 0) {
-    return "unverifiable";
-  }
-  if (comparisons.every(Boolean)) {
-    return "same";
-  }
-  if (comparisons.every((value) => !value)) {
-    return "different";
-  }
-  return "unverifiable";
-}
-
 function resolvedTerminalProcessIncarnation(
   terminal: Pick<ResolvedTerminalConversation, "agent" | "pid">,
   identity?: NativeAgentSessionIdentity
 ): { processUuid?: string; processBirth?: string } {
-  if (
-    terminal.agent !== "codex" ||
-    (identity?.processUuid && identity.processBirth)
-  ) {
-    return {
-      processUuid: identity?.processUuid,
-      processBirth: identity?.processBirth
-    };
-  }
-  try {
-    const incarnation = codexProcessIncarnationForPid(terminal.pid);
-    return {
-      processUuid: identity?.processUuid ?? incarnation.processUuid,
-      processBirth: identity?.processBirth ?? incarnation.processBirth
-    };
-  } catch {
-    return {
-      processUuid: identity?.processUuid,
-      processBirth: identity?.processBirth
-    };
-  }
+  return resolvedTerminalProcessIncarnationPolicy({
+    terminal,
+    identity,
+    codexProcessIncarnation: codexProcessIncarnationForPid
+  });
 }
 
-function managedSessionOwnerIsConclusivelyInactive({
-  session,
-  terminal,
-  identity
-}: {
+function managedSessionOwnerIsConclusivelyInactive(input: {
   session: ManagedSessionState;
   terminal: Pick<ResolvedTerminalConversation, "agent" | "pid">;
   identity?: NativeAgentSessionIdentity;
 }): boolean {
-  const binding = session.binding;
-  if (!binding) {
-    return false;
-  }
-  if (binding.native_process.pid !== terminal.pid) {
-    if (!isProcessAlive(binding.native_process.pid)) {
-      return true;
-    }
-    if (session.agent !== "codex") {
-      return false;
-    }
-    try {
-      const ownerIncarnation = codexProcessIncarnationForPid(
-        binding.native_process.pid
-      );
-      return processIncarnationRelationship({
-        binding,
-        livePid: binding.native_process.pid,
-        liveProcessUuid: ownerIncarnation.processUuid,
-        liveProcessBirth: ownerIncarnation.processBirth
-      }) === "different";
-    } catch {
-      return false;
-    }
-  }
-  const incarnation = resolvedTerminalProcessIncarnation(terminal, identity);
-  return processIncarnationRelationship({
-    binding,
-    livePid: terminal.pid,
-    liveProcessUuid: incarnation.processUuid,
-    liveProcessBirth: incarnation.processBirth
-  }) === "different";
-}
-
-function isCodexStatusCardEvidence(evidence: string): boolean {
-  return evidence.split("+").includes("codex_status_card");
+  return managedSessionOwnerIsInactive({
+    ...input,
+    isProcessAlive,
+    codexProcessIncarnation: codexProcessIncarnationForPid
+  });
 }
 
 function codexKnownBeforeIdentityForManagedSession({
@@ -7068,54 +7072,19 @@ function codexKnownBeforeIdentityForManagedSession({
   session: ManagedSessionState;
   requireNewThread?: boolean;
 }): NativeAgentSessionIdentity | undefined {
-  const binding = session.binding;
-  if (
-    session.agent !== "codex" ||
-    session.status !== "bound" ||
-    !binding?.native_thread_id ||
-    !binding.native_process.process_uuid ||
-    !binding.native_process.process_birth ||
-    !session.last_transition_id
-  ) {
-    return undefined;
-  }
-  let transition: NativeThreadTransition;
+  let transition: NativeThreadTransition | undefined;
   try {
-    transition = loadNativeThreadTransition(storeDir, session.last_transition_id);
+    transition = session.last_transition_id
+      ? loadNativeThreadTransition(storeDir, session.last_transition_id)
+      : undefined;
   } catch {
     return undefined;
   }
-  const after = transition.after_binding;
-  if (
-    transition.status !== "committed" ||
-    (requireNewThread && ![
-      "new_thread",
-      "adopt_external_thread"
-    ].includes(transition.operation)) ||
-    transition.target_session_id !== session.session_id ||
-    !after ||
-    after.binding_id !== binding.binding_id ||
-    after.generation !== binding.generation ||
-    after.native_thread_id !== binding.native_thread_id ||
-    !transition.before_native_thread_id ||
-    transition.before_native_thread_id === binding.native_thread_id ||
-    !transition.before_process_uuid ||
-    !transition.before_process_birth ||
-    !isCompleteNativeRollout(transition.before_process_rollout) ||
-    transition.before_process_uuid !== binding.native_process.process_uuid ||
-    transition.before_process_birth !== binding.native_process.process_birth
-  ) {
-    return undefined;
-  }
-  return {
-    sessionId: transition.before_native_thread_id,
-    processUuid: transition.before_process_uuid,
-    processBirth: transition.before_process_birth,
-    rollout: transition.before_process_rollout,
-    evidence: transition.operation === "new_thread"
-      ? "committed_new_thread_before_identity"
-      : "committed_resume_thread_before_identity"
-  };
+  return codexKnownBeforeIdentityForTransition({
+    session,
+    transition,
+    requireNewThread
+  });
 }
 
 function codexLingeringBeforeIdentityMatchesSession({
@@ -7127,26 +7096,14 @@ function codexLingeringBeforeIdentityMatchesSession({
   session: ManagedSessionState;
   identity?: NativeAgentSessionIdentity;
 }): boolean {
-  const binding = session.binding;
-  if (
-    session.agent !== "codex" ||
-    session.status !== "bound" ||
-    !binding?.native_thread_id ||
-    binding.native_process.rollout ||
-    !isCodexStatusCardEvidence(binding.native_process.evidence) ||
-    !identity
-  ) {
-    return false;
-  }
-  const beforeIdentity = codexKnownBeforeIdentityForManagedSession({
+  if (!codexKnownBeforeIdentityForManagedSession({
     storeDir,
     session,
     requireNewThread: true
-  });
-  if (!beforeIdentity) {
+  })) {
     return false;
   }
-  let transition: NativeThreadTransition;
+  let transition: NativeThreadTransition | undefined;
   try {
     transition = loadNativeThreadTransition(
       storeDir,
@@ -7155,28 +7112,15 @@ function codexLingeringBeforeIdentityMatchesSession({
   } catch {
     return false;
   }
-  const after = transition.after_binding;
-  if (
-    transition.status !== "committed" ||
-    !["new_thread", "adopt_external_thread"].includes(
-      transition.operation
-    ) ||
-    transition.target_session_id !== session.session_id ||
-    !after ||
-    after.binding_id !== binding.binding_id ||
-    after.generation !== binding.generation ||
-    after.native_thread_id !== binding.native_thread_id ||
-    after.native_process.rollout
-  ) {
-    return false;
-  }
-  const companions = codexAllowedCompanionSetForManagedSession({
-    storeDir,
-    session
+  return codexLingeringIdentityMatches({
+    session,
+    identity,
+    transition,
+    companions: codexAllowedCompanionSetForManagedSession({
+      storeDir,
+      session
+    })
   });
-  return [companions.primary, ...companions.additional].some((candidate) =>
-    nativeIdentityMatchesCodexPreMaterialization(identity, candidate)
-  );
 }
 
 function logicalIdentityForManagedSession({
@@ -7188,42 +7132,16 @@ function logicalIdentityForManagedSession({
   session: ManagedSessionState;
   observedIdentity?: NativeAgentSessionIdentity;
 }): NativeAgentSessionIdentity | undefined {
-  const binding = session.binding;
-  if (!binding?.native_thread_id) {
-    return observedIdentity;
-  }
-  const statusCardOnly =
-    session.agent === "codex" &&
-    isCodexStatusCardEvidence(binding.native_process.evidence) &&
-    Boolean(binding.native_process.process_uuid) &&
-    Boolean(binding.native_process.process_birth) &&
-    (
-      observedIdentity === undefined ||
+  return logicalManagedSessionIdentity({
+    session,
+    observedIdentity,
+    lingeringBeforeMatches: Boolean(observedIdentity &&
       codexLingeringBeforeIdentityMatchesSession({
         storeDir,
         session,
         identity: observedIdentity
-      })
-    );
-  if (!statusCardOnly) {
-    return observedIdentity;
-  }
-  return {
-    sessionId: binding.native_thread_id,
-    processUuid: binding.native_process.process_uuid,
-    processBirth: binding.native_process.process_birth,
-    rollout: binding.native_process.rollout,
-    evidence: binding.native_process.evidence
-  };
-}
-
-type CodexPreMaterializationIdentity = NonNullable<
-  TerminalRuntimeIdentity["allowedPreMaterializationNativeIdentity"]
->;
-
-interface CodexAllowedCompanionSet {
-  primary?: CodexPreMaterializationIdentity;
-  additional: CodexPreMaterializationIdentity[];
+      }))
+  });
 }
 
 function codexAllowedCompanionIdentityForManagedSession({
@@ -7233,23 +7151,10 @@ function codexAllowedCompanionIdentityForManagedSession({
   storeDir: string;
   session: ManagedSessionState;
 }): CodexPreMaterializationIdentity | undefined {
-  const identity = codexKnownBeforeIdentityForManagedSession({
+  return codexIdentityFence(codexKnownBeforeIdentityForManagedSession({
     storeDir,
     session
-  });
-  if (
-    !identity?.processUuid ||
-    !identity.processBirth ||
-    !isCompleteNativeRollout(identity.rollout)
-  ) {
-    return undefined;
-  }
-  return {
-    sessionId: identity.sessionId,
-    processUuid: identity.processUuid,
-    processBirth: identity.processBirth,
-    rollout: identity.rollout
-  };
+  }));
 }
 
 function codexAllowedCompanionSetForManagedSession({
@@ -7322,25 +7227,6 @@ function codexAllowedCompanionSetForManagedSession({
   return { primary: selectedPrimary, additional };
 }
 
-function codexCompanionsPresentInOpenRootInventory(
-  companions: CodexAllowedCompanionSet,
-  inventory: CodexOpenRootRolloutInventory
-): CodexAllowedCompanionSet {
-  const present = [companions.primary, ...companions.additional].filter(
-    (candidate): candidate is CodexPreMaterializationIdentity =>
-      Boolean(
-        candidate &&
-        inventory.roots.some((root) =>
-          nativeIdentityMatchesCodexPreMaterialization(root, candidate)
-        )
-      )
-  );
-  return {
-    primary: present[0],
-    additional: present.slice(1)
-  };
-}
-
 function codexManagedIdentityResolutionContext({
   storeDir,
   terminal
@@ -7374,35 +7260,6 @@ function codexManagedIdentityResolutionContext({
     preferredSessionId: companions.primary
       ? claimedSession?.binding?.native_thread_id
       : undefined
-  };
-}
-
-function codexIdentityFence(
-  identity: NativeAgentSessionIdentity | undefined
-): CodexPreMaterializationIdentity | undefined {
-  if (
-    !identity?.processUuid ||
-    !identity.processBirth ||
-    !isCompleteNativeRollout(identity.rollout)
-  ) {
-    return undefined;
-  }
-  return {
-    sessionId: identity.sessionId,
-    processUuid: identity.processUuid,
-    processBirth: identity.processBirth,
-    rollout: identity.rollout
-  };
-}
-
-function withCodexCompanionFences(
-  runtime: TerminalRuntimeIdentity,
-  companions: CodexAllowedCompanionSet
-): TerminalRuntimeIdentity {
-  return {
-    ...runtime,
-    allowedPreMaterializationNativeIdentity: companions.primary,
-    allowedAdditionalNativeIdentities: companions.additional
   };
 }
 
@@ -7498,20 +7355,6 @@ function codexKnownRootSetForLifecycleTransition({
   };
 }
 
-function codexCompanionsExcludingPreferred(
-  roots: CodexAllowedCompanionSet,
-  preferredSessionId: string
-): CodexAllowedCompanionSet {
-  const allowed = [roots.primary, ...roots.additional].filter(
-    (candidate): candidate is CodexPreMaterializationIdentity =>
-      Boolean(candidate && candidate.sessionId !== preferredSessionId)
-  );
-  return {
-    primary: allowed[0],
-    additional: allowed.slice(1)
-  };
-}
-
 function codexPreMaterializationIdentityForManagedSession({
   storeDir,
   session,
@@ -7521,41 +7364,14 @@ function codexPreMaterializationIdentityForManagedSession({
   session: ManagedSessionState;
   observedIdentity?: NativeAgentSessionIdentity;
 }): CodexPreMaterializationIdentity | undefined {
-  if (
-    !observedIdentity?.processUuid ||
-    !observedIdentity.processBirth ||
-    !isCompleteNativeRollout(observedIdentity.rollout) ||
-    !codexLingeringBeforeIdentityMatchesSession({
+  if (!codexLingeringBeforeIdentityMatchesSession({
       storeDir,
       session,
       identity: observedIdentity
-    })
-  ) {
+    })) {
     return undefined;
   }
-  return {
-    sessionId: observedIdentity.sessionId,
-    processUuid: observedIdentity.processUuid,
-    processBirth: observedIdentity.processBirth,
-    rollout: observedIdentity.rollout
-  };
-}
-
-function nativeIdentityMatchesCodexPreMaterialization(
-  identity: NativeAgentSessionIdentity | undefined,
-  expected: CodexPreMaterializationIdentity | undefined
-): boolean {
-  return Boolean(
-    identity &&
-    expected &&
-    identity.sessionId === expected.sessionId &&
-    identity.processUuid === expected.processUuid &&
-    identity.processBirth === expected.processBirth &&
-    identity.rollout?.fd === expected.rollout.fd &&
-    identity.rollout?.device === expected.rollout.device &&
-    identity.rollout?.inode === expected.rollout.inode &&
-    identity.rollout?.path === expected.rollout.path
-  );
+  return codexIdentityFence(observedIdentity);
 }
 
 async function assertCodexComposerReadyForAutomatedInput({
@@ -7660,43 +7476,16 @@ async function verifyCodexPendingManagedSendStatus({
   }
 }
 
-function terminalRuntimeForLiveIdentity({
-  terminal,
-  identity,
-  expectedEmptyNativeSession = false,
-  physicalOnly = false
-}: {
+function terminalRuntimeForLiveIdentity(input: {
   terminal: ResolvedTerminalConversation;
   identity?: NativeAgentSessionIdentity;
   expectedEmptyNativeSession?: boolean;
   physicalOnly?: boolean;
 }): TerminalRuntimeIdentity {
-  const codexIncarnation =
-    !physicalOnly &&
-    expectedEmptyNativeSession &&
-    terminal.agent === "codex"
-      ? codexProcessIncarnationForPid(terminal.pid)
-      : undefined;
-  return {
-    pid: terminal.pid,
-    nativeSessionId: physicalOnly ? undefined : identity?.sessionId,
-    nativeProcessUuid: physicalOnly
-      ? undefined
-      : identity?.processUuid ?? codexIncarnation?.processUuid,
-    nativeProcessBirth: physicalOnly
-      ? undefined
-      : identity?.processBirth ?? codexIncarnation?.processBirth,
-    nativeRollout: physicalOnly ? undefined : identity?.rollout,
-    requireNativeProcessUuid:
-      !physicalOnly && terminal.agent === "claude" && !expectedEmptyNativeSession,
-    requireNativeRolloutIdentity:
-      !physicalOnly && terminal.agent === "codex" && !expectedEmptyNativeSession,
-    expectedEmptyNativeSession: physicalOnly
-      ? false
-      : expectedEmptyNativeSession,
-    cwd: terminal.terminalControl.currentPath,
-    terminalTarget: terminal.terminalControl.target
-  };
+  return terminalRuntimeForLiveIdentityPolicy({
+    ...input,
+    codexProcessIncarnation: codexProcessIncarnationForPid
+  });
 }
 
 type ResolvedTerminalClaim = Pick<ResolvedTerminalConversation,
@@ -7731,15 +7520,13 @@ function bindingMatchesLiveTerminal(
     return false;
   }
   const binding = session.binding!;
-
   let processIncarnation = {
     processUuid: identity?.processUuid,
     processBirth: identity?.processBirth
   };
   if (!identity) {
     if (
-      terminal.agent !== "codex" ||
-      !binding.native_thread_id ||
+      terminal.agent !== "codex" || !binding.native_thread_id ||
       !isCodexStatusCardEvidence(binding.native_process.evidence) ||
       !binding.native_process.process_uuid ||
       !binding.native_process.process_birth
@@ -7752,35 +7539,19 @@ function bindingMatchesLiveTerminal(
       return false;
     }
   }
-
-  const observation = terminalObservationFromResolvedIdentity({
-    agent: terminal.agent,
-    pid: terminal.pid,
+  return managedBindingMatchesLiveTerminal({
+    session,
+    terminal,
     identity,
-    processIncarnation
+    processIncarnation,
+    claimMatches: true,
+    codexLingeringBeforeMatches: () =>
+      codexLingeringBeforeIdentityMatchesSession({
+        storeDir,
+        session,
+        identity
+      })
   });
-  const evidence = {
-    terminalAliasMatches: true,
-    workspaceMatches: true
-  };
-  let decision = decideTerminalBindingMatch(session, observation, evidence);
-  if (
-    decision.state === "not_exact" &&
-    decision.reason === "native_identity_mismatch" &&
-    session.agent === "codex" &&
-    identity
-  ) {
-    decision = decideTerminalBindingMatch(session, observation, {
-      ...evidence,
-      codexLingeringBeforeMatches:
-        codexLingeringBeforeIdentityMatchesSession({
-          storeDir,
-          session,
-          identity
-        })
-    });
-  }
-  return decision.state === "exact";
 }
 
 function boundManagedSessionForTerminal({
@@ -7792,59 +7563,31 @@ function boundManagedSessionForTerminal({
   terminal: ResolvedTerminalConversation;
   identity?: NativeAgentSessionIdentity;
 }): ManagedSessionState | undefined {
-  const sessions = listManagedSessions(storeDir);
-  const unresolved = sessions.filter((session) =>
-    ["transitioning", "quarantined"].includes(session.status) &&
-    session.binding &&
-    session.agent === terminal.agent &&
-    terminalControlAliasMatches(
-      session.binding.terminal_id,
-      session.binding.terminal_control,
-      terminal.conversationId,
-      terminal.terminalControl
-    )
-  );
-  if (unresolved.length > 0) {
-    throw new Error(
-      `terminal ${terminal.terminalControl.target} is still claimed by ` +
-      `${unresolved[0].status} managed Session ${unresolved[0].session_id}` +
-      (unresolved[0].last_transition_id
-        ? ` (${unresolved[0].last_transition_id})`
-        : "") +
-      "; complete lifecycle recovery before attaching or sending"
-    );
-  }
-  const exact = sessions.filter((session) =>
-    bindingMatchesLiveTerminal(session, terminal, identity, storeDir)
-  );
-  if (exact.length > 1) {
-    throw new Error(
-      `terminal ${terminal.terminalControl.target} matches multiple managed Session bindings`
-    );
-  }
-  const conflicting = sessions.filter((session) =>
-    session.status === "bound" &&
-    session.binding &&
-    session.agent === terminal.agent &&
-    terminalControlsShareIncarnation(
-      session.binding.terminal_control,
-      terminal.terminalControl
-    ) &&
-    session.binding.native_process.pid === terminal.pid &&
-    !managedSessionOwnerIsConclusivelyInactive({
+  return selectBoundManagedSessionForTerminal({
+    sessions: listManagedSessions(storeDir),
+    agent: terminal.agent,
+    pid: terminal.pid,
+    terminalTarget: terminal.terminalControl.target,
+    aliasMatches: (session) => Boolean(session.binding &&
+      terminalControlAliasMatches(
+        session.binding.terminal_id,
+        session.binding.terminal_control,
+        terminal.conversationId,
+        terminal.terminalControl
+      )),
+    exactMatches: (session) =>
+      bindingMatchesLiveTerminal(session, terminal, identity, storeDir),
+    sameIncarnation: (session) => Boolean(session.binding &&
+      terminalControlsShareIncarnation(
+        session.binding.terminal_control,
+        terminal.terminalControl
+      )),
+    ownerIsInactive: (session) => managedSessionOwnerIsConclusivelyInactive({
       session,
       terminal,
       identity
-    }) &&
-    !exact.includes(session)
-  );
-  if (conflicting.length > 0) {
-    throw new Error(
-      `terminal ${terminal.terminalControl.target} changed native thread outside AKK; ` +
-      "its managed binding must be reconciled explicitly before control"
-    );
-  }
-  return exact[0];
+    })
+  });
 }
 
 function managedBindingConflictKindForResolvedTerminal({
@@ -7891,19 +7634,14 @@ function soleBoundManagedSessionClaimForTerminal(
   storeDir: string,
   terminal: ResolvedTerminalClaim
 ): ManagedSessionState | undefined {
-  const claims = listManagedSessions(storeDir).filter((session) =>
-    managedSessionClaimsResolvedTerminal(session, terminal) &&
-    !managedSessionOwnerIsConclusivelyInactive({
-      session,
-      terminal
-    })
-  );
-  if (claims.length > 1) {
-    throw new Error(
-      `terminal ${terminal.terminalControl.target} has multiple bound managed Session claims`
-    );
-  }
-  return claims[0];
+  return selectSoleBoundManagedSessionClaim({
+    sessions: listManagedSessions(storeDir),
+    terminalTarget: terminal.terminalControl.target,
+    claims: (session) =>
+      managedSessionClaimsResolvedTerminal(session, terminal),
+    ownerIsInactive: (session) =>
+      managedSessionOwnerIsConclusivelyInactive({ session, terminal })
+  });
 }
 
 function createBoundManagedSession({
@@ -8863,11 +8601,6 @@ function deferredCodexForegroundBindingToken({
     .digest("hex");
 }
 
-interface DeferredCodexForegroundDispatchSnapshot {
-  status: "none" | "resolved";
-  fingerprint: string;
-}
-
 function deferredCodexForegroundDispatchSnapshot(
   terminalControl: TerminalControlRef
 ): DeferredCodexForegroundDispatchSnapshot {
@@ -9187,15 +8920,6 @@ function verifiedEmptyCodexHandoffToken({
     .digest("hex");
 }
 
-interface VerifiedEmptyCodexHandoffBoundary {
-  terminal: ResolvedTerminalConversation;
-  detachedSourceSessionId: string;
-  detachedSourceRevision: number;
-  detachedSourceBindingToken: string;
-  processUuid: string;
-  processBirth: string;
-}
-
 async function assertVerifiedEmptyCodexHandoffBoundary({
   options,
   terminal,
@@ -9449,28 +9173,6 @@ async function assertVerifiedEmptyCodexTransportBoundary({
     requireNoDispatch: false,
     requireEmptyComposer
   });
-}
-
-interface DeferredCodexForegroundBindingBoundary {
-  terminal: ResolvedTerminalConversation;
-  transferId: string;
-  targetSessionId: string;
-  sourceSessionId: string;
-  sourceBoundRevision: number;
-  sourceBoundBindingToken: string;
-  processUuid: string;
-  processBirth: string;
-  previousDispatchSnapshot: DeferredCodexForegroundDispatchSnapshot;
-  candidateAcceptanceAnchor?: CodexCandidateSetRolloutAcceptanceAnchor;
-  sourceKind: DeferredForegroundTransferSourceKind;
-  sourceRolloutAuthority: DeferredForegroundTransferSourceRolloutAuthority;
-  sourceAbandonmentFingerprint?: string;
-  sourceTurnHistory?: DeferredForegroundTransferSourceTurnAuthority[];
-  sourcePreviousLastTransitionId?: string;
-  sourceReservedRevision?: number;
-  sourceReservedBindingToken?: string;
-  targetPreparedRevision?: number;
-  targetPreparedBindingToken?: string;
 }
 
 async function assertDeferredCodexForegroundBindingBoundary({
@@ -10018,19 +9720,62 @@ function assertDeferredForegroundTransferMatchesBoundary({
   }
 }
 
+function terminalDispatchStoreDirForDeferredRoute({
+  options,
+  boundary,
+  route
+}: {
+  options: Record<string, any>;
+  boundary: DeferredCodexForegroundBindingBoundary;
+  route?: BoundTerminalDispatchRoute;
+}): string {
+  if (!route) {
+    return storeDirFromOptions(options);
+  }
+  return withExactTerminalDispatchRoute(route, {
+    terminalControl: boundary.terminal.terminalControl,
+    terminalKey: terminalBridgeRuntimeKey(
+      boundary.terminal.terminalControl
+    ),
+    storeDir: storeDirFromOptions(options),
+    statePath: route.statePath,
+    logPath: route.logPath
+  }, (exactRoute) => exactRoute.storeDir);
+}
+
+function assertDeferredTransferMatchesTerminalDispatchRoute(
+  transfer: DeferredForegroundTransfer,
+  route?: BoundTerminalDispatchRoute
+): void {
+  if (
+    route &&
+    transfer.state_path !== undefined &&
+    !sameCanonicalStatePath(transfer.state_path, route.statePath)
+  ) {
+    throw new Error(
+      "deferred foreground transfer escaped its exact terminal dispatch Turn"
+    );
+  }
+}
+
 function abortDeferredCodexForegroundTransferBeforeInput({
   options,
   boundary,
   reason,
-  terminalInputNotStartedAt
+  terminalInputNotStartedAt,
+  route
 }: {
   options: Record<string, any>;
   boundary: DeferredCodexForegroundBindingBoundary;
   reason: string;
   terminalInputNotStartedAt?: string;
+  route?: BoundTerminalDispatchRoute;
 }): void {
-  const storeDir = storeDirFromOptions(options);
+  const storeDir = terminalDispatchStoreDirForDeferredRoute({
+    options, boundary, route
+  });
   let transfer = loadDeferredForegroundTransfer(storeDir, boundary.transferId);
+  assertDeferredTransferMatchesTerminalDispatchRoute(transfer, route);
   assertDeferredForegroundTransferMatchesBoundary({ transfer, boundary });
   if (transfer.status === "abort_resolved") {
     return;
@@ -10228,7 +9973,8 @@ async function reserveDeferredCodexForegroundTransfer({
   targetSession,
   messageId,
   turnId,
-  statePath
+  statePath,
+  route
 }: {
   options: Record<string, any>;
   boundary: DeferredCodexForegroundBindingBoundary;
@@ -10236,12 +9982,21 @@ async function reserveDeferredCodexForegroundTransfer({
   messageId: string;
   turnId: string;
   statePath: string;
+  route: BoundTerminalDispatchRoute;
 }): Promise<{
   createdSession: ManagedSessionState;
-  rollback: () => void;
+  rollback: (route: BoundTerminalDispatchRoute) => void;
 }> {
-  const storeDir = storeDirFromOptions(options);
+  const storeDir = terminalDispatchStoreDirForDeferredRoute({
+    options, boundary, route
+  });
+  if (!sameCanonicalStatePath(statePath, route.statePath)) {
+    throw new Error(
+      "deferred foreground reservation escaped its exact terminal dispatch Turn"
+    );
+  }
   let transfer = loadDeferredForegroundTransfer(storeDir, boundary.transferId);
+  assertDeferredTransferMatchesTerminalDispatchRoute(transfer, route);
   assertDeferredForegroundTransferMatchesBoundary({ transfer, boundary });
   if (transfer.status !== "prepared" || transfer.input_stage !== "none") {
     throw new Error(
@@ -10332,18 +10087,23 @@ async function reserveDeferredCodexForegroundTransfer({
   });
     return {
       createdSession,
-      rollback: () => abortDeferredCodexForegroundTransferBeforeInput({
-        options,
-        boundary,
-        reason: "terminal input was proved not to have started"
-      })
+      rollback: (rollbackRoute) => {
+        assertTerminalDispatchRouteMatches(rollbackRoute, route);
+        abortDeferredCodexForegroundTransferBeforeInput({
+          options,
+          boundary,
+          reason: "terminal input was proved not to have started",
+          route: rollbackRoute
+        });
+      }
     };
   } catch (error) {
     try {
       abortDeferredCodexForegroundTransferBeforeInput({
         options,
         boundary,
-        reason: error instanceof Error ? error.message : String(error)
+        reason: error instanceof Error ? error.message : String(error),
+        route
       });
     } catch (abortError) {
       throw new Error(
@@ -10388,15 +10148,20 @@ function advanceDeferredCodexForegroundTransferInputStage({
   options,
   boundary,
   stage,
-  at
+  at,
+  route
 }: {
   options: Record<string, any>;
   boundary: DeferredCodexForegroundBindingBoundary;
   stage: "text_injected" | "enter_dispatched";
   at: string;
+  route: BoundTerminalDispatchRoute;
 }): DeferredForegroundTransfer {
-  const storeDir = storeDirFromOptions(options);
+  const storeDir = terminalDispatchStoreDirForDeferredRoute({
+    options, boundary, route
+  });
   let transfer = loadDeferredForegroundTransfer(storeDir, boundary.transferId);
+  assertDeferredTransferMatchesTerminalDispatchRoute(transfer, route);
   assertDeferredForegroundTransferMatchesBoundary({ transfer, boundary });
   assertDeferredForegroundTargetPreparedAuthority({ storeDir, transfer });
   const source = loadManagedSession(storeDir, transfer.source_session_id);
@@ -10448,14 +10213,19 @@ function advanceDeferredCodexForegroundTransferInputStage({
 function beginDeferredCodexForegroundTransferDispatch({
   options,
   boundary,
-  at
+  at,
+  route
 }: {
   options: Record<string, any>;
   boundary: DeferredCodexForegroundBindingBoundary;
   at: string;
+  route: BoundTerminalDispatchRoute;
 }): DeferredForegroundTransfer {
-  const storeDir = storeDirFromOptions(options);
+  const storeDir = terminalDispatchStoreDirForDeferredRoute({
+    options, boundary, route
+  });
   let transfer = loadDeferredForegroundTransfer(storeDir, boundary.transferId);
+  assertDeferredTransferMatchesTerminalDispatchRoute(transfer, route);
   assertDeferredForegroundTransferMatchesBoundary({ transfer, boundary });
   assertDeferredForegroundTargetPreparedAuthority({ storeDir, transfer });
   if (transfer.status !== "target_prepared" || transfer.input_stage !== "none") {
@@ -10536,15 +10306,20 @@ async function commitDeferredCodexForegroundBinding({
   options,
   boundary,
   identity,
-  acceptedAt
+  acceptedAt,
+  route
 }: {
   options: Record<string, any>;
   boundary: DeferredCodexForegroundBindingBoundary;
   identity: NativeAgentSessionIdentity;
   acceptedAt: string;
+  route?: BoundTerminalDispatchRoute;
 }): Promise<ManagedSessionState> {
-  const storeDir = storeDirFromOptions(options);
+  const storeDir = terminalDispatchStoreDirForDeferredRoute({
+    options, boundary, route
+  });
   let transfer = loadDeferredForegroundTransfer(storeDir, boundary.transferId);
+  assertDeferredTransferMatchesTerminalDispatchRoute(transfer, route);
   assertDeferredForegroundTransferMatchesBoundary({ transfer, boundary });
   assertFrozenExplicitlyAbandonedPredecessorAuthority({
     storeDir,
@@ -10689,19 +10464,25 @@ async function commitDeferredCodexForegroundBinding({
   }
   return resolveCommittedDeferredCodexForegroundTransfer({
     options,
-    boundary
+    boundary,
+    route
   });
 }
 
 async function resolveCommittedDeferredCodexForegroundTransfer({
   options,
-  boundary
+  boundary,
+  route
 }: {
   options: Record<string, any>;
   boundary: DeferredCodexForegroundBindingBoundary;
+  route?: BoundTerminalDispatchRoute;
 }): Promise<ManagedSessionState> {
-  const storeDir = storeDirFromOptions(options);
+  const storeDir = terminalDispatchStoreDirForDeferredRoute({
+    options, boundary, route
+  });
   let transfer = loadDeferredForegroundTransfer(storeDir, boundary.transferId);
+  assertDeferredTransferMatchesTerminalDispatchRoute(transfer, route);
   assertDeferredForegroundTransferMatchesBoundary({ transfer, boundary });
   if (transfer.status === "resolved") {
     const resolvedTarget = loadManagedSession(storeDir, transfer.target_session_id);
@@ -10850,14 +10631,19 @@ async function resolveCommittedDeferredCodexForegroundTransfer({
 function markDeferredCodexForegroundTransferUncertain({
   options,
   boundary,
-  reason
+  reason,
+  route
 }: {
   options: Record<string, any>;
   boundary: DeferredCodexForegroundBindingBoundary;
   reason: string;
+  route?: BoundTerminalDispatchRoute;
 }): DeferredForegroundTransfer {
-  const storeDir = storeDirFromOptions(options);
+  const storeDir = terminalDispatchStoreDirForDeferredRoute({
+    options, boundary, route
+  });
   let transfer = loadDeferredForegroundTransfer(storeDir, boundary.transferId);
+  assertDeferredTransferMatchesTerminalDispatchRoute(transfer, route);
   assertDeferredForegroundTransferMatchesBoundary({ transfer, boundary });
   if (["committed", "resolved", "uncertain"].includes(transfer.status)) {
     return transfer;
@@ -14858,7 +14644,7 @@ async function runSend(options) {
   // slash commands before resolving or mutating any Session/Turn state so a
   // caller cannot bypass lifecycle capabilities, CAS tokens, transition
   // recovery, or binding-generation updates by writing directly to tmux.
-  assertOrdinaryTerminalPayloadDoesNotInvokeNativeLifecycle(messageBody);
+  terminalSubmissionPayload(messageBody);
   if (options.agentHardTimeoutMinutes !== undefined) {
     positiveMinutes(options.agentHardTimeoutMinutes, "--agent-hard-timeout-minutes");
   }
@@ -15215,54 +15001,63 @@ async function runSend(options) {
       });
       ensureStoreWritable(managed.conversation.store_dir);
       ensureDir(path.dirname(managed.statePath));
-      const releaseStateLock = acquireFileLock(`${managed.statePath}.lock`);
-      try {
+      await withTerminalDispatchStateScope(
+        scopes,
+        resources,
+        managed.statePath,
+        managed.logPath,
+        async (dispatchScopes, dispatchResources) => {
         await runTerminalControlSend({
+          transaction: {
+            scopes: dispatchScopes,
+            resources: dispatchResources
+          },
           options,
           conversation: managed.conversation,
           nextConversation: managed.nextConversation,
-          statePath: managed.statePath,
-          logPath: managed.logPath,
           executor: managed.executor,
           message: managed.message,
-          terminalControl: terminalConversation.terminalControl,
-          terminalSendLockHeld: true,
-          terminalStateLockHeld: true,
-          storeWriterLeaseHeld: true,
           recordMessageAfterSend: true,
           recordRawAttachmentAfterSend: reusableTurn === undefined,
           onTerminalPreflightVerified: pendingRawAttachSessionCreate
-              ? async () => {
+              ? async (route) => {
+                const exactRoute = withExactTerminalDispatchRoute(route, {
+                  terminalControl: terminalConversation.terminalControl,
+                  terminalKey: terminalBridgeRuntimeKey(
+                    terminalConversation.terminalControl
+                  ),
+                  storeDir: rawStoreDir,
+                  statePath: managed.statePath,
+                  logPath: managed.logPath
+                }, (boundRoute) => boundRoute);
                 let createdSession: ManagedSessionState;
-                try {
-                  if (deferredCodexForegroundBinding) {
-                    const reserved =
-                      await reserveDeferredCodexForegroundTransfer({
-                        options,
-                        boundary: deferredCodexForegroundBinding,
-                        targetSession:
-                          pendingRawAttachSessionCreate as ManagedSessionState,
-                        messageId: managed.message.id,
-                        turnId: turnIdForConversation(managed.conversation),
-                        statePath: managed.statePath
-                      });
-                    createdSession = reserved.createdSession;
-                    managedSession = createdSession;
-                    pendingRawAttachSessionCreate = undefined;
-                    return reserved.rollback;
-                  }
-                  createdSession = saveManagedSession(rawStoreDir,
-                    pendingRawAttachSessionCreate as ManagedSessionState, {
-                      expectedRevision: null
+                if (deferredCodexForegroundBinding) {
+                  const reserved =
+                    await reserveDeferredCodexForegroundTransfer({
+                      options,
+                      boundary: deferredCodexForegroundBinding,
+                      targetSession:
+                        pendingRawAttachSessionCreate as ManagedSessionState,
+                      messageId: managed.message.id,
+                      turnId: turnIdForConversation(managed.conversation),
+                      statePath: exactRoute.statePath,
+                      route: exactRoute
                     });
-                } catch (error) {
-                  throw error;
+                  createdSession = reserved.createdSession;
+                  managedSession = createdSession;
+                  pendingRawAttachSessionCreate = undefined;
+                  return reserved.rollback;
                 }
+                createdSession = saveManagedSession(exactRoute.storeDir,
+                  pendingRawAttachSessionCreate as ManagedSessionState, {
+                    expectedRevision: null
+                  });
                 managedSession = createdSession;
                 pendingRawAttachSessionCreate = undefined;
-                return () => {
+                return (rollbackRoute) => {
+                  assertTerminalDispatchRouteMatches(rollbackRoute, route);
                   const current = loadManagedSession(
-                    rawStoreDir,
+                    rollbackRoute.storeDir,
                     createdSession.session_id
                   );
                   if (
@@ -15276,7 +15071,7 @@ async function runSend(options) {
                     );
                   }
                   const detachedAt = cliNow().toISOString();
-                  managedSession = saveManagedSession(rawStoreDir, {
+                  managedSession = saveManagedSession(rollbackRoute.storeDir, {
                     ...current,
                     status: "detached",
                     detached_at: detachedAt,
@@ -15299,9 +15094,8 @@ async function runSend(options) {
           verifiedEmptyCodexHandoff: verifiedEmptyHandoff?.boundary,
           deferredCodexForegroundBinding
         });
-      } finally {
-        releaseStateLock();
-      }
+        }
+      );
     });
     return;
   }
@@ -15540,27 +15334,28 @@ async function runSend(options) {
     });
     ensureStoreWritable(managed.conversation.store_dir);
     ensureDir(path.dirname(managed.statePath));
-    const releaseStateLock = acquireFileLock(`${managed.statePath}.lock`);
-    try {
+    await withTerminalDispatchStateScope(
+      scopes,
+      resources,
+      managed.statePath,
+      managed.logPath,
+      async (dispatchScopes, dispatchResources) => {
       await runTerminalControlSend({
+        transaction: {
+          scopes: dispatchScopes,
+          resources: dispatchResources
+        },
         options,
         conversation: managed.conversation,
         nextConversation: managed.nextConversation,
-        statePath: managed.statePath,
-        logPath: managed.logPath,
         executor: managed.executor,
         message: managed.message,
-        terminalControl: resolvedTerminal.terminalControl,
-        terminalSendLockHeld: true,
-        terminalStateLockHeld: true,
-        storeWriterLeaseHeld: true,
         recordMessageAfterSend: true,
         allowedPreMaterializationIdentity,
         allowedAdditionalIdentities
       });
-    } finally {
-      releaseStateLock();
-    }
+      }
+    );
   });
 }
 
@@ -15632,18 +15427,18 @@ async function runTurnResponse({ options, messageBody }) {
   const responseStoreDir = pathsForConversationDir(
     path.dirname(statePath)
   ).storeDir;
-  const releaseTerminalLock = acquireTerminalBridgeSendLock(
-    responseStoreDir,
-    terminalControl,
-    { timeoutMs: 30000 }
-  );
-  try {
-    await withStoreWriterLeaseAsync(responseStoreDir, async () => {
+  await withCanonicalMutationLocks(
+    terminalWriterMutationLocks(responseStoreDir, terminalControl),
+    async (scopes, resources) => {
       // Legacy identity migration may write the Turn, so keep it inside the
       // canonical terminal -> Store writer -> state ordering as well.
       await migrateLegacyTerminalAgentIdentity({ ...loaded, options });
-      const releaseStateLock = acquireFileLock(`${statePath}.lock`);
-      try {
+      await withTerminalDispatchStateScope(
+        scopes,
+        resources,
+        statePath,
+        logPath,
+        async (dispatchScopes, dispatchResources) => {
         let lockedConversation = loadState(statePath);
         let lockedTakeover = isRecord(
           lockedConversation.native_session_takeover
@@ -15779,17 +15574,15 @@ async function runTurnResponse({ options, messageBody }) {
             DEFAULT_AGENT_HARD_TIMEOUT_MINUTES
         };
         await runTerminalControlSend({
+          transaction: {
+            scopes: dispatchScopes,
+            resources: dispatchResources
+          },
           options: responseOptions,
           conversation: prepared.conversation,
           nextConversation: prepared.nextConversation,
-          statePath,
-          logPath,
           executor: prepared.executor,
           message: prepared.message,
-          terminalControl: currentTerminalControl,
-          terminalSendLockHeld: true,
-          terminalStateLockHeld: true,
-          storeWriterLeaseHeld: true,
           recordMessageAfterSend: true,
           allowedPreMaterializationIdentity:
             responseCodexCompanions.primary,
@@ -15797,13 +15590,10 @@ async function runTurnResponse({ options, messageBody }) {
             responseCodexCompanions.additional,
           continuingTurnResponse: true
         });
-      } finally {
-        releaseStateLock();
-      }
-    });
-  } finally {
-    releaseTerminalLock();
-  }
+        }
+      );
+    }
+  );
 }
 
 async function runApprove(options) {
@@ -16603,148 +16393,31 @@ async function runTerminalConversationApprove({
   }
 }
 
-async function runTerminalControlSend({
-  options,
-  conversation,
-  nextConversation,
-  statePath,
-  logPath,
-  executor,
-  message,
-  terminalControl,
-  terminalSendLockHeld = false,
-  terminalStateLockHeld = false,
-  storeWriterLeaseHeld = false,
-  recordMessageAfterSend = false,
-  recordRawAttachmentAfterSend = false,
-  onTerminalPreflightVerified = undefined as
-    (() => Promise<(() => void) | void> | (() => void) | void) | undefined,
-  allowedPreMaterializationIdentity = undefined as
-    CodexPreMaterializationIdentity | undefined,
-  allowedAdditionalIdentities = [] as CodexPreMaterializationIdentity[],
-  observedHandoff = undefined as
-    | {
-        terminal: ResolvedTerminalConversation;
-        transition: NativeThreadTransition;
-      }
-    | undefined,
-  verifiedEmptyCodexHandoff = undefined as
-    VerifiedEmptyCodexHandoffBoundary | undefined,
-  deferredCodexForegroundBinding = undefined as
-    DeferredCodexForegroundBindingBoundary | undefined,
-  continuingTurnResponse = false
-}) {
+async function prepareTerminalControlSend(
+  request: TerminalControlSendRequest
+) {
+  const {
+    transaction, options, conversation, nextConversation, executor, message,
+    recordRawAttachmentAfterSend = false,
+    allowedPreMaterializationIdentity,
+    allowedAdditionalIdentities = [],
+    verifiedEmptyCodexHandoff,
+    deferredCodexForegroundBinding,
+    continuingTurnResponse = false
+  } = request;
   const bridge = terminalBridgeEnabled(conversation);
-  if (!terminalSendLockHeld) {
-    const releaseTerminalLock = acquireTerminalBridgeSendLock(
-      storeDirFromOptions(options),
-      terminalControl,
-      { timeoutMs: 30000 }
-    );
-    try {
-      return await runTerminalControlSend({
-        options,
-        conversation,
-        nextConversation,
-        statePath,
-        logPath,
-        executor,
-        message,
-        terminalControl,
-        terminalSendLockHeld: true,
-        terminalStateLockHeld,
-        storeWriterLeaseHeld,
-        recordMessageAfterSend,
-        recordRawAttachmentAfterSend,
-        onTerminalPreflightVerified,
-        allowedPreMaterializationIdentity,
-        allowedAdditionalIdentities,
-        observedHandoff,
-        verifiedEmptyCodexHandoff,
-        deferredCodexForegroundBinding,
-        continuingTurnResponse
-      });
-    } finally {
-      releaseTerminalLock();
-    }
-  }
-  if (bridge && !terminalStateLockHeld) {
-    const releaseStateLock = acquireFileLock(`${statePath}.lock`);
-    try {
-      const currentConversation = loadState(statePath);
-      const currentTakeover = isRecord(currentConversation.native_session_takeover)
-        ? currentConversation.native_session_takeover
-        : undefined;
-      const currentControl = terminalControlFromTakeover(currentTakeover);
-      if (
-        currentConversation.conversation_id !== nextConversation.conversation_id ||
-        currentConversation.updated_at !== nextConversation.updated_at ||
-        currentConversation.status !== nextConversation.status ||
-        currentConversation.response_rounds_used !== nextConversation.response_rounds_used ||
-        !terminalControlsShareIncarnation(currentControl, terminalControl)
-      ) {
-        throw new Error(
-          "conversation changed while waiting to send to the terminal; refresh status and retry"
-        );
-      }
-      return await runTerminalControlSend({
-        options,
-        conversation: currentConversation,
-        nextConversation: currentConversation,
-        statePath,
-        logPath,
-        executor,
-        message,
-        terminalControl,
-        terminalSendLockHeld: true,
-        terminalStateLockHeld: true,
-        storeWriterLeaseHeld,
-        recordMessageAfterSend,
-        recordRawAttachmentAfterSend,
-        onTerminalPreflightVerified,
-        allowedPreMaterializationIdentity,
-        allowedAdditionalIdentities,
-        observedHandoff,
-        verifiedEmptyCodexHandoff,
-        deferredCodexForegroundBinding,
-        continuingTurnResponse
-      });
-    } finally {
-      releaseStateLock();
-    }
-  }
-
-  if (!storeWriterLeaseHeld) {
-    const writerStoreDir = pathsForConversationDir(
-      path.dirname(statePath)
-    ).storeDir;
-    return await withStoreWriterLeaseAsync(writerStoreDir, async () =>
-      runTerminalControlSend({
-        options,
-        conversation,
-        nextConversation,
-        statePath,
-        logPath,
-        executor,
-        message,
-        terminalControl,
-        terminalSendLockHeld: true,
-        terminalStateLockHeld,
-        storeWriterLeaseHeld: true,
-        recordMessageAfterSend,
-        recordRawAttachmentAfterSend,
-        onTerminalPreflightVerified,
-        allowedPreMaterializationIdentity,
-        allowedAdditionalIdentities,
-        observedHandoff,
-        verifiedEmptyCodexHandoff,
-        deferredCodexForegroundBinding,
-        continuingTurnResponse
-      })
-    );
-  }
-
+  const route = bindTerminalDispatchRoute(
+    transaction.scopes,
+    transaction.resources
+  );
+  const {
+    terminalControl,
+    storeDir: lockedStoreDir,
+    statePath,
+    logPath
+  } = route;
   const terminalBridge = createTerminalAgentBridge(options);
+  const execution = terminalDispatchExecution(options, terminalBridge);
   const bridgeStartedAt = cliNow().toISOString();
   const agentTimeoutMinutes = Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES);
   const agentHardTimeoutMinutes = positiveMinutes(
@@ -16756,6 +16429,13 @@ async function runTerminalControlSend({
     terminalBridgeRequestFingerprint(terminalPayload),
     "terminal request hash is unavailable"
   );
+  const presentationContext = { message, executor, terminalControl };
+  const presentationPorts = {
+    write: printJson,
+    budget: budgetAction,
+    nextAction: openClawYieldNextAction,
+    summarize: textSummary
+  };
   let previousDispatchLedger =
     resolveTerminalDispatchLedgerPaneIncarnation(
       terminalControl,
@@ -16764,164 +16444,34 @@ async function runTerminalControlSend({
   previousDispatchLedger = reconcilePreparedTerminalDispatchLedger(
     terminalControl, previousDispatchLedger
   );
-  const previousDispatchFacts = {
-    status: stringValue(previousDispatchLedger?.status),
-    lifecycle: terminalDispatchLedgerLooksLifecycle(previousDispatchLedger),
-    transitionId: stringValue(previousDispatchLedger?.transition_id),
-    ownerConversationId: stringValue(previousDispatchLedger?.conversation_id)
-  };
-  const previousDispatchOwner = dispatch.terminalDispatchPreflightRequiresOwner(
-    previousDispatchFacts
+  const previousDispatchLifecycle =
+    terminalDispatchLedgerLooksLifecycle(previousDispatchLedger);
+  const previousDispatchOwner = execution.preflightRequiresOwner(
+    previousDispatchLedger, previousDispatchLifecycle
   )
     ? loadTerminalDispatchLedgerOwner(previousDispatchLedger!)
     : undefined;
-  const ownerReleased = Boolean(
-    previousDispatchOwner && TERMINAL_DISPATCH_RELEASE_STATUSES.has(
-      previousDispatchOwner.status
-    )
-  );
-  const continuingSameTurn = Boolean(
-    previousDispatchOwner &&
-    continuingTurnResponse &&
-    sessionIdForConversation(previousDispatchOwner) ===
-      sessionIdForConversation(conversation) &&
-    turnIdForConversation(previousDispatchOwner) ===
-      turnIdForConversation(conversation) &&
-    sameCanonicalStatePath(previousDispatchLedger!.state_path, statePath)
-  );
-  const exactDispatchReplay = Boolean(
-    previousDispatchOwner && !ownerReleased && !continuingSameTurn &&
-    stringValue(previousDispatchLedger!.request_hash) === terminalRequestHash &&
-    stringValue(previousDispatchLedger!.conversation_id) ===
-      conversation.conversation_id &&
-    stringValue(previousDispatchLedger!.message_id) === message.id &&
-    sameCanonicalStatePath(previousDispatchLedger!.state_path, statePath)
-  );
-  const dispatchPreflight = dispatch.decideTerminalDispatchPreflight({
-    ledger: previousDispatchFacts,
-    owner: previousDispatchOwner
-      ? {
-          conversationId: previousDispatchOwner.conversation_id,
-          status: previousDispatchOwner.status,
-          released: ownerReleased,
-          continuingSameTurn,
-          exactReplay: exactDispatchReplay
-        }
-      : undefined
+  const dispatchPreflight = execution.evaluatePreflight({
+    ledger: previousDispatchLedger,
+    owner: previousDispatchOwner,
+    conversation,
+    requestHash: terminalRequestHash,
+    requestText: terminalPayload,
+    messageId: message.id,
+    terminalTarget: terminalControl.target,
+    ledgerLifecycle: previousDispatchLifecycle,
+    statePathMatches: Boolean(previousDispatchOwner &&
+      sameCanonicalStatePath(previousDispatchLedger!.state_path, statePath)),
+    continuingTurnResponse
   });
-  if (dispatchPreflight.action === "reject") {
-    if (dispatchPreflight.reason === "unresolved_lifecycle") {
-      throw new Error(
-        `terminal ${terminalControl.target} has unresolved lifecycle transition ` +
-        `${dispatchPreflight.transitionId ?? "with invalid identity"}; ` +
-        "refresh AKK list and use its exact recovery action"
-      );
-    }
-    if (dispatchPreflight.reason === "terminal_level_dispatch") {
-      throw new Error(
-        `terminal ${terminalControl.target} has a terminal-level ` +
-        `${String(dispatchPreflight.status)} dispatch owned by ` +
-        `${dispatchPreflight.ownerConversationId ?? "an unknown conversation"}; ` +
-        "inspect the shared terminal pane and explicitly close that AKK conversation before retrying"
-      );
-    }
-    if (dispatchPreflight.reason === "owner_unavailable") {
-      throw new Error(
-        `terminal ${terminalControl.target} has a submitted dispatch whose ` +
-        "owner state is unavailable; inspect the shared terminal pane and repair " +
-        "or explicitly resolve that conversation before sending another task"
-      );
-    }
-    throw new Error(
-      `terminal ${terminalControl.target} is still owned by active AKK ` +
-      `conversation ${dispatchPreflight.ownerConversationId} ` +
-      `(${dispatchPreflight.ownerStatus}); wait for its callback, cancel it, ` +
-      "or explicitly close it before sending a different task"
-    );
-  }
   if (dispatchPreflight.action === "replay") {
-    const owner = previousDispatchOwner!;
-    const replayReceipt = terminalSubmissionReplayReceipt({
-      proofLevel: dispatchPreflight.proofLevel,
-      evidence: previousDispatchLedger!.acceptance_evidence,
-      expected: terminalAcceptanceEvidenceExpectation(owner, terminalPayload)
-    });
-    const replayAcceptance = dispatch.decideTerminalDispatchReplayAcceptance({
-      delivered: replayReceipt.delivered,
-      submissionOutcome: replayReceipt.submission_outcome
-    });
-    const accepted = replayAcceptance.accepted;
-    const acceptanceInvalid = replayAcceptance.invalid;
-    const receiptConversationId =
-      stringValue(previousDispatchLedger?.conversation_id) ??
-      owner.conversation_id;
-    const receiptSessionId = sessionIdForConversation(owner);
-    const receiptTurnId = turnIdForConversation(owner);
-    const receiptMessageId =
-      stringValue(previousDispatchLedger?.message_id) ?? message.id;
-    printJson({
-      session_id: receiptSessionId,
-      turn_id: receiptTurnId,
-      conversation: owner,
-      message: {
-        ...message,
-        id: receiptMessageId,
-        conversation_id: receiptConversationId,
-        session_id: receiptSessionId,
-        turn_id: receiptTurnId,
-        metadata: {
-          ...(isRecord(message.metadata) ? message.metadata : {}),
-          task_id: receiptConversationId,
-          session_id: receiptSessionId,
-          turn_id: receiptTurnId
-        }
-      },
-      delivered: replayReceipt.delivered,
-      status: replayReceipt.status,
-      submission_outcome: replayReceipt.submission_outcome,
-      background: true,
-      callback_expected: !acceptanceInvalid && Boolean(
-        owner.gateway_method ?? previousDispatchLedger?.callback_expected
-      ),
-      terminal_control: terminalControl,
-      executor,
-      replayed: replayReceipt.replayed,
-      delivery_receipt: replayReceipt.delivery_receipt,
-      ...(replayReceipt.do_not_retry
-        ? { do_not_retry: replayReceipt.do_not_retry }
-        : {}),
-      reason: accepted
-        ? "AKK replayed the durable native acceptance receipt for an identical active terminal request and did not send terminal input again."
-        : acceptanceInvalid
-          ? `AKK refused to replay an invalid native acceptance receipt (${replayReceipt.evidence_error ?? "evidence validation failed"}); no terminal input was sent.`
-          : "AKK replayed the original transport-level receipt without upgrading it to native acceptance and did not send terminal input again.",
-      openclaw_next_action: accepted
-        ? openClawYieldNextAction({
-            conversationId: receiptConversationId,
-            sessionId: receiptSessionId,
-            turnId: receiptTurnId,
-            source: "terminal_control",
-            callbackExpected: Boolean(
-              owner.gateway_method ??
-                previousDispatchLedger?.callback_expected
-            )
-          })
-        : {
-            action: "inspect",
-            conversation_id: receiptConversationId,
-            session_id: receiptSessionId,
-            turn_id: receiptTurnId,
-            do_not_retry: true,
-            reason: acceptanceInvalid
-              ? "The stored native acceptance evidence is invalid; inspect and explicitly close this Turn."
-              : "Only terminal transport is proven; wait for native acceptance or inspect the shared pane."
-          }
-    });
+    presentTerminalDispatchReplay(dispatchPreflight, presentationContext,
+      presentationPorts);
     return;
   }
   if (bridge) {
     assertNoUnresolvedTerminalBridgeSubmission(
-      storeDirFromOptions(options),
+      lockedStoreDir,
       terminalControl,
       conversation.conversation_id,
       terminalPayload
@@ -16937,8 +16487,7 @@ async function runTerminalControlSend({
   const currentNativeIdentity = deferredCodexForegroundBinding
       ?.candidateAcceptanceAnchor
     ? undefined
-    : await resolveCurrentNativeAgentSessionIdentity({
-        options,
+    : await execution.resolveCurrentNativeIdentity({
         agent: executor.kind,
         pid: terminalAgentPid,
         cwd: terminalControl.currentPath,
@@ -16971,7 +16520,7 @@ async function runTerminalControlSend({
       );
     }
   } else {
-    assertNativeAgentIdentityForTurn({
+    execution.assertTurnIdentity({
       conversation,
       currentIdentity: currentNativeIdentity,
       operation: "send to"
@@ -17050,8 +16599,7 @@ async function runTerminalControlSend({
       preSendScreenFingerprint = stringValue(status.screen.digest) ??
         terminalBridgeScreenFingerprint(status.screen.excerpt);
       if (executor.kind === "codex") {
-        codexRolloutAcceptanceAnchor = captureCodexAcceptanceAnchorForSend({
-          options,
+        codexRolloutAcceptanceAnchor = execution.captureCodexAcceptanceAnchor({
           currentIdentity: currentNativeIdentity,
           expectedNativeThreadId: expectedManagedNativeThreadId,
           boundProcessUuid: stringValue(
@@ -17087,46 +16635,357 @@ async function runTerminalControlSend({
       }`
     );
   }
+  return {
+    route, bridge, terminalControl, lockedStoreDir, statePath, logPath,
+    terminalBridge, execution, bridgeStartedAt,
+    agentTimeoutMinutes, agentHardTimeoutMinutes,
+    terminalPayload, terminalRequestHash,
+    presentationContext, presentationPorts, previousDispatchLedger,
+    sendTakeover, terminalAgentPid, needsPostSendNativeBinding, preSendRuntime,
+    preSendScreenFingerprint, codexRolloutAcceptanceAnchor,
+    claudeTranscriptAnchor, claudeHome
+  };
+}
+
+type PreparedTerminalControlSend = NonNullable<Awaited<
+  ReturnType<typeof prepareTerminalControlSend>
+>>;
+async function resolveTerminalDispatchSubmissionOwner(
+  prepared: PreparedTerminalControlSend,
+  request: TerminalControlSendRequest,
+  application: dispatchApplication.TerminalDispatchApplication,
+  stagedConversation: Conversation
+) {
+  const {
+    options, executor, allowedPreMaterializationIdentity,
+    allowedAdditionalIdentities = [],
+    deferredCodexForegroundBinding: deferredBinding
+  } = request;
+  const {
+    execution, needsPostSendNativeBinding,
+    codexRolloutAcceptanceAnchor: acceptanceAnchor,
+    terminalControl, terminalAgentPid, sendTakeover, terminalRequestHash,
+    route
+  } = prepared;
+  const ready = (conversation: Conversation, pending = false) => ({
+    conversation, deferredCandidateBindingPending: pending
+  });
+  if (!needsPostSendNativeBinding) {
+    return ready(stagedConversation);
+  }
+  let boundIdentity: NativeAgentSessionIdentity | undefined;
+  let boundConversation: Conversation | undefined;
+  let bindingError: string | undefined;
+  try {
+    if (
+      deferredBinding &&
+      cliEnv().AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE !== "1" &&
+      ![2, 3].includes(Number(acceptanceAnchor?.version))
+    ) {
+      throw new Error(
+        "deferred Codex foreground binding requires a virgin rollout acceptance anchor"
+      );
+    }
+    boundIdentity = await execution.pollNativeIdentity({
+      executor: executor.kind,
+      terminalControl,
+      pid: terminalAgentPid,
+      expectedSessionId: stringValue(
+        sendTakeover?.terminal_agent_expected_session_id
+      ),
+      allowedPreMaterializationIdentity,
+      allowedAdditionalIdentities,
+      ...(deferredBinding &&
+          acceptanceAnchor &&
+          [2, 3].includes(acceptanceAnchor.version)
+        ? {
+            requiredCodexAcceptance: {
+              anchor: acceptanceAnchor,
+              requestHash: terminalRequestHash
+            },
+            attempts: Math.max(1, Math.ceil(
+              DEFAULT_TERMINAL_ACCEPTANCE_TIMEOUT_MS /
+                DEFAULT_TERMINAL_ACCEPTANCE_POLL_INTERVAL_MS
+            )),
+            delayMs: DEFAULT_TERMINAL_ACCEPTANCE_POLL_INTERVAL_MS
+          }
+        : {})
+    });
+  } catch (error) {
+    bindingError = error instanceof Error ? error.message : String(error);
+  }
+  if (boundIdentity) {
+    try {
+      if (
+        acceptanceAnchor &&
+        (
+          boundIdentity.processUuid !==
+            acceptanceAnchor.process_uuid ||
+          boundIdentity.processBirth !==
+            acceptanceAnchor.process_birth
+        )
+      ) {
+        throw new Error(
+          "Codex process incarnation changed while its native thread materialized"
+        );
+      }
+      const expectedNativeThreadId = stringValue(
+        sendTakeover?.terminal_agent_expected_session_id
+      );
+      if (
+        expectedNativeThreadId &&
+        boundIdentity.sessionId !== expectedNativeThreadId
+      ) {
+        throw new Error(
+          `native agent created thread ${boundIdentity.sessionId}, expected ` +
+          `${expectedNativeThreadId}`
+        );
+      }
+      boundConversation = execution.withNativeIdentity(
+        stagedConversation, boundIdentity
+      );
+      const bindingStoreDir =
+        managedSessionStoreDirForConversation(boundConversation);
+      const bindingStatePath = stringValue(boundConversation.state_path);
+      if (!bindingStoreDir || !bindingStatePath) {
+        throw new Error("managed Session Store is unavailable before native identity commit");
+      }
+      const identityRoute = withExactTerminalDispatchRoute(route, {
+        terminalControl,
+        terminalKey: terminalBridgeRuntimeKey(terminalControl),
+        storeDir: bindingStoreDir,
+        statePath: bindingStatePath,
+        logPath: path.join(path.dirname(bindingStatePath), "events.ndjson")
+      }, (exactRoute) => exactRoute);
+      if (deferredBinding) {
+        await commitDeferredCodexForegroundBinding({
+          options,
+          boundary: deferredBinding,
+          identity: boundIdentity,
+          acceptedAt: cliNow().toISOString(),
+          route: identityRoute
+        });
+      } else {
+        await assertNativeThreadHasExclusiveOwnership({
+          options,
+          agent: executor.kind,
+          currentPid: terminalAgentPid,
+          nativeThreadId: boundIdentity.sessionId,
+          storeDir: identityRoute.storeDir,
+          terminalControl,
+          excludedManagedSessionId: sessionIdForConversation(boundConversation)
+        });
+        persistManagedSessionNativeIdentity({
+          conversation: boundConversation,
+          terminalControl,
+          identity: boundIdentity,
+          storeDir: identityRoute.storeDir
+        });
+      }
+      if (
+        acceptanceAnchor?.version === 2 &&
+        cliEnv().AKK_TEST_EXIT_AFTER_VIRGIN_SESSION_BINDING === "1"
+      ) {
+        cliExit(86);
+      }
+      // Persist the observed identity before the full Turn-vs-Session check:
+      // the provisional Turn and Session initially share only a binding id.
+      execution.assertTurnIdentity({
+        conversation: boundConversation,
+        currentIdentity: boundIdentity,
+        operation: "bind"
+      });
+    } catch (error) {
+      bindingError = error instanceof Error ? error.message : String(error);
+      boundIdentity = undefined;
+      boundConversation = undefined;
+    }
+  }
+  if (!boundIdentity && deferredBinding) {
+    try {
+      const deferredStoreDir = terminalDispatchStoreDirForDeferredRoute({
+        options,
+        boundary: deferredBinding,
+        route
+      });
+      const transfer = loadDeferredForegroundTransfer(
+        deferredStoreDir, deferredBinding.transferId
+      );
+      assertDeferredTransferMatchesTerminalDispatchRoute(transfer, route);
+      if (["committed", "resolved"].includes(transfer.status)) {
+        const recoveredTarget =
+          await resolveCommittedDeferredCodexForegroundTransfer({
+            options,
+            boundary: deferredBinding,
+            route
+          });
+        const binding = recoveredTarget.binding;
+        if (
+          !binding?.native_thread_id ||
+          !binding.native_process.process_uuid ||
+          !binding.native_process.process_birth ||
+          !isCompleteNativeRollout(binding.native_process.rollout)
+        ) {
+          throw new Error("resolved deferred target lacks exact native identity");
+        }
+        const recoveredIdentity: NativeAgentSessionIdentity = {
+          sessionId: binding.native_thread_id,
+          processUuid: binding.native_process.process_uuid,
+          processBirth: binding.native_process.process_birth,
+          rollout: binding.native_process.rollout,
+          evidence: binding.native_process.evidence
+        };
+        const recoveredConversation = execution.withNativeIdentity(
+          stagedConversation, recoveredIdentity
+        );
+        execution.assertTurnIdentity({
+          conversation: recoveredConversation,
+          currentIdentity: recoveredIdentity,
+          operation: "recover deferred foreground binding for"
+        });
+        boundIdentity = recoveredIdentity;
+        boundConversation = recoveredConversation;
+      }
+    } catch (error) {
+      bindingError = error instanceof Error ? error.message : String(error);
+      boundIdentity = undefined;
+      boundConversation = undefined;
+    }
+  }
+  if (boundIdentity && boundConversation) {
+    return ready(boundConversation);
+  }
+  if (
+    deferredBinding &&
+    acceptanceAnchor?.version === 3 &&
+    bindingError === undefined
+  ) {
+    return ready(stagedConversation, true);
+  }
+  const bindingReason = bindingError
+    ? `AKK dispatched terminal input but could not verify the new native agent session: ${bindingError}`
+    : "AKK dispatched terminal input but no exact native agent session appeared within the binding window";
+  if (deferredBinding) {
+    try {
+      markDeferredCodexForegroundTransferUncertain({
+        options,
+        boundary: deferredBinding,
+        reason: bindingReason,
+        route
+      });
+    } catch (error) {
+      runtimeLog("error", "deferred_codex_foreground_uncertain_persist_failed", {
+        transfer_id: deferredBinding.transferId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+  return {
+    conversation: application.applyIdentityFailure(
+      cliNow().toISOString(),
+      bindingReason,
+      deferredBinding
+        ? undefined
+        : (current) => quarantineManagedSessionBinding({
+            conversation: current,
+            reason: bindingReason,
+            storeDir: route.storeDir
+          })
+    ),
+    failureReason: bindingReason
+  };
+}
+
+async function runTerminalControlSend(
+  request: TerminalControlSendRequest
+): Promise<void> {
+  const {
+    transaction, options, conversation, nextConversation, executor, message,
+    recordMessageAfterSend = false,
+    recordRawAttachmentAfterSend = false,
+    onTerminalPreflightVerified,
+    allowedPreMaterializationIdentity,
+    allowedAdditionalIdentities = [],
+    observedHandoff,
+    verifiedEmptyCodexHandoff,
+    deferredCodexForegroundBinding
+  } = request;
+  const prepared = await prepareTerminalControlSend(request);
+  if (!prepared) {
+    return;
+  }
+  const {
+    route, bridge, terminalControl, lockedStoreDir, statePath, logPath,
+    terminalBridge, execution, bridgeStartedAt, agentTimeoutMinutes,
+    agentHardTimeoutMinutes, terminalPayload, terminalRequestHash,
+    presentationContext, presentationPorts, previousDispatchLedger,
+    sendTakeover, terminalAgentPid,
+    needsPostSendNativeBinding, preSendRuntime, preSendScreenFingerprint,
+    codexRolloutAcceptanceAnchor, claudeTranscriptAnchor, claudeHome
+  } = prepared;
   // A newly discovered raw terminal may not have an authoritative Session
   // yet. Commit that Session only after every pre-input terminal and native
   // acceptance check has passed, but before the Turn or dispatch ledger can
   // become durable. This prevents a failed virgin attach from leaving a
   // zero-identity `bound` Session that fences every later control action.
-  let rollbackPreTransportAttach = await onTerminalPreflightVerified?.();
-  const rollbackRawAttachBeforeTransport = (): boolean => {
+  if (deferredCodexForegroundBinding) {
+    terminalDispatchStoreDirForDeferredRoute({
+      options,
+      boundary: deferredCodexForegroundBinding,
+      route
+    });
+  }
+  let rollbackPreTransportAttach =
+    await onTerminalPreflightVerified?.(route);
+  const rollbackRawAttachBeforeTransport = (
+    route: BoundTerminalDispatchRoute
+  ): boolean => {
     if (!rollbackPreTransportAttach) {
       return true;
     }
     const rollback = rollbackPreTransportAttach;
     rollbackPreTransportAttach = undefined;
     try {
-      rollback();
+      rollback(route);
       return true;
     } catch (error) {
       runtimeLog("error", "raw_attach_pre_transport_rollback_failed", {
         conversation_id: conversation.conversation_id,
-        terminal_target: terminalControl.target,
+        terminal_target: route.terminalControl.target,
         error: error instanceof Error ? error.message : String(error)
       });
       return false;
     }
   };
   const abortDeferredPreInputBeforeTransport = (
+    route: BoundTerminalDispatchRoute,
     terminalInputNotStartedAt?: string
   ): boolean => {
     if (!deferredCodexForegroundBinding) {
       return false;
     }
-    if (!terminalStateLockHeld) {
-      throw new Error(
-        "deferred Codex pre-input abort requires the exact Turn state lock"
-      );
-    }
-    const deferredStoreDir = storeDirFromOptions(options);
+    const deferredStoreDir = terminalDispatchStoreDirForDeferredRoute({
+      options,
+      boundary: deferredCodexForegroundBinding,
+      route
+    });
     const transfer = loadDeferredForegroundTransfer(
       deferredStoreDir,
       deferredCodexForegroundBinding.transferId
     );
+    assertDeferredTransferMatchesTerminalDispatchRoute(transfer, route);
+    if (
+      terminalBridgeRuntimeKey(route.terminalControl) !==
+        terminalBridgeRuntimeKey(
+          deferredCodexForegroundBinding.terminal.terminalControl
+        ) ||
+      (transfer.state_path !== undefined &&
+        !sameCanonicalStatePath(transfer.state_path, route.statePath))
+    ) {
+      throw new Error(
+        "deferred Codex pre-input abort escaped its exact mutation resources"
+      );
+    }
     const durableTerminalInputNotStartedAt =
       terminalInputNotStartedAt === undefined || transfer.input_stage === "none"
         ? undefined
@@ -17142,7 +17001,10 @@ async function runTerminalControlSend({
             })();
     abortPreparedDeferredForegroundTurn({
       storeDir: deferredStoreDir,
-      terminal: deferredCodexForegroundBinding.terminal,
+      terminal: {
+        ...deferredCodexForegroundBinding.terminal,
+        terminalControl: route.terminalControl
+      },
       transfer,
       boundary: deferredCodexForegroundBinding,
       stateLockHeld: true,
@@ -17154,10 +17016,12 @@ async function runTerminalControlSend({
     rollbackPreTransportAttach = undefined;
     return true;
   };
+  const terminalMessage = message as typeof message &
+    dispatchApplication.TerminalDispatchMessage;
   const bridgeConversation = bridge
     ? dispatchReceipt.withTerminalBridgeState({
         conversation: nextConversation,
-        message,
+        message: terminalMessage,
         requestText: terminalPayload,
         startedAt: bridgeStartedAt,
         agentTimeoutMinutes,
@@ -17172,7 +17036,7 @@ async function runTerminalControlSend({
   const preparedConversation = withTerminalBridgeSubmission({
     conversation: bridgeConversation,
     messageId: message.id,
-    messageType: message.type,
+    messageType: terminalMessage.type,
     messageBody: String(message.body),
     requestText: terminalPayload,
     status: "prepared",
@@ -17181,6 +17045,7 @@ async function runTerminalControlSend({
   const previousGenerationId =
     stringValue(previousDispatchLedger?.generation_id) ??
     stringValue(previousDispatchLedger?.message_id);
+  let preparedMessageEvent: Parameters<typeof appendEvent>[1] | undefined;
   let bookkeepingWarning: string | undefined;
   const recordPostTransportBookkeepingFailure = (
     phase: string,
@@ -17195,14 +17060,45 @@ async function runTerminalControlSend({
       error: warning
     });
   };
+  const { applicationPorts } = bindTerminalDispatchCapabilities({
+    scopes: transaction.scopes,
+    resources: transaction.resources,
+    repositories: terminalDispatchCapabilityRepositories({
+      previousLedger: previousDispatchLedger,
+      preparedMessageEvent: () => {
+        if (!preparedMessageEvent) {
+          throw new Error("prepared message event was not validated");
+        }
+        return preparedMessageEvent;
+      },
+      restoreDeferred: abortDeferredPreInputBeforeTransport,
+      rollbackBeforeInput: rollbackRawAttachBeforeTransport
+    }),
+    local: {
+      synchronizeStageProgress: (current, stage, at) => {
+        stagedConversation = current;
+        textInjectedAt = stage === "text_injected" ? at : textInjectedAt;
+        enterDispatchedAt = stage === "enter_dispatched"
+          ? at
+          : enterDispatchedAt;
+      },
+      audit: {
+        log: runtimeLog,
+        recordBookkeepingFailure: recordPostTransportBookkeepingFailure,
+        recordPersistenceFailure: (phase, error, current) => {
+          runtimeLog("error", phase, {
+            conversation_id: current.conversation_id,
+            terminal_target: terminalControl.target,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+      }
+    }
+  });
   const application = new dispatchApplication.TerminalDispatchApplication({
     originalConversation: conversation,
     preparedConversation,
-    message: {
-      id: message.id,
-      type: message.type,
-      body: String(message.body)
-    },
+    message: terminalMessage,
     executor,
     terminalControl,
     receiptTerminalControl: terminalControlFromTakeover(
@@ -17217,129 +17113,35 @@ async function runTerminalControlSend({
     eventLogPath: logPath,
     previousGenerationId,
     dispatcherPid: cliPid(),
-    storeDir: managedSessionStoreDirForConversation(preparedConversation),
-    recordMessageAfterSend,
+    storeDir: lockedStoreDir,
     recordRawAttachmentAfterSend,
     ledgerBindingFields: terminalBindingLedgerFields
-  }, {
-    synchronizeStageProgress: (current, stage, at) => {
-      stagedConversation = current;
-      textInjectedAt = stage === "text_injected" ? at : textInjectedAt;
-      enterDispatchedAt = stage === "enter_dispatched" ? at : enterDispatchedAt;
-    },
-    state: {
-      save: (current) => saveState(statePath, current)
-    },
-    ledger: {
-      save: (ledger, phase) => {
-        if (
-          phase === "final" &&
-          cliEnv().AKK_TEST_FINAL_TERMINAL_LEDGER_FAILURE === "1"
-        ) {
-          throw new Error(
-            "injected final terminal ledger persistence failure"
-          );
-        }
-        saveTerminalBridgeDispatchLedger(terminalControl, ledger);
-      },
-      restore: (reason, terminalInputNotStartedAt) => {
-        if (!abortDeferredPreInputBeforeTransport(terminalInputNotStartedAt)) {
-          restoreTerminalBridgeDispatchLedger({
-            terminalControl,
-            previousLedger: previousDispatchLedger,
-            reason
-          });
-        }
-      }
-    },
-    audit: {
-      append: (event) => appendEvent(logPath, event),
-      log: runtimeLog,
-      recordBookkeepingFailure: recordPostTransportBookkeepingFailure,
-      recordPersistenceFailure: (phase, error, current) => {
-        runtimeLog("error", phase, {
-          conversation_id: current.conversation_id,
-          terminal_target: terminalControl.target,
-          error: error instanceof Error ? error.message : String(error)
-        });
-      }
-    },
-    rollbackBeforeInput: rollbackRawAttachBeforeTransport
-  });
+  }, applicationPorts);
   application.persistPrepared();
   let bridgeMonitor:
     | ReturnType<typeof startTerminalBridgeMonitorForConversation>
     | undefined;
-  const presentTerminalZeroInputAbort = (
-    failure: dispatchApplication.RecordedTerminalZeroInputAbort
-  ): void => {
-    const { outcome, reportedConversation, receiptConversation } = failure;
-    const setupFailure = outcome.failureKind === "setup";
-    const blocker = outcome.disposition === "inspect"
-      ? outcome.blocker
-      : undefined;
-    const reason = setupFailure
-      ? outcome.safeToRetry
-        ? "AKK failed before terminal input; this terminal submission was not sent and may be retried."
-        : blocker === "dispatch_ledger_restore"
-          ? "AKK failed before terminal input but could not restore the terminal dispatch ledger; inspect and close the conversation before retrying."
-          : blocker === "raw_attach_rollback"
-            ? "AKK failed before terminal input but could not detach the provisional raw-attach Session; inspect its exact binding before retrying."
-            : "AKK failed before terminal input but could not persist the aborted receipt; inspect the conversation before retrying."
-      : outcome.safeToRetry
-        ? "AKK proved that terminal input never started; this submission may be retried."
-        : "AKK proved terminal input never started but could not make every abort receipt and Session rollback durable; inspect before retrying.";
-    const nextReason = setupFailure
-      ? outcome.safeToRetry
-        ? "The failure occurred before any terminal input."
-        : blocker === "dispatch_ledger_restore"
-          ? "The terminal ledger could not be restored automatically."
-          : blocker === "raw_attach_rollback"
-            ? "The provisional raw-attach Session could not be detached automatically."
-            : "The aborted receipt could not be made durable."
-      : outcome.safeToRetry
-        ? "The terminal transport failed before any input operation succeeded."
-        : "The pre-input failure could not be fully reconciled in durable state.";
-    printJson({
-      session_id: sessionIdForConversation(receiptConversation),
-      turn_id: turnIdForConversation(receiptConversation),
-      conversation: reportedConversation,
-      message,
-      delivered: false,
-      status: "submission_aborted",
-      submission_outcome: "aborted",
-      background: true,
-      callback_expected: false,
-      terminal_control: terminalControl,
-      monitor_pid: bridgeMonitor?.pid ?? null,
-      executor,
-      safe_to_retry: outcome.safeToRetry,
-      do_not_retry: !outcome.safeToRetry,
-      reason,
-      openclaw_next_action: {
-        action: outcome.safeToRetry ? "retry" : "inspect",
-        conversation_id: receiptConversation.conversation_id,
-        session_id: sessionIdForConversation(reportedConversation),
-        turn_id: turnIdForConversation(reportedConversation),
-        safe_to_retry: outcome.safeToRetry,
-        do_not_retry: !outcome.safeToRetry,
-        reason: nextReason
-      }
-    });
-  };
   try {
+    // Preserve legacy argument-evaluation priority inside the setup catch:
+    // validate once before raw-attach bookkeeping, then let the gated
+    // repository consume only this cached immutable event.
     application.recordPreparedBookkeeping(
-      recordMessageAfterSend ? messageEvent(message) : undefined,
-      cliEnv().AKK_TEST_TERMINAL_SETUP_FAILURE === "1"
+      recordMessageAfterSend,
+      cliEnv().AKK_TEST_TERMINAL_SETUP_FAILURE === "1",
+      recordMessageAfterSend
+        ? () => {
+            preparedMessageEvent = messageEvent(terminalMessage);
+          }
+        : undefined
     );
   } catch (error) {
-    presentTerminalZeroInputAbort(application.recordZeroInputAbort({
+    renderTerminalZeroInputAbort(application.recordZeroInputAbort({
       failureKind: "setup",
       error,
       abortedAt: cliNow().toISOString(),
       injectStatePersistenceFailure:
         cliEnv().AKK_TEST_ABORTED_STATE_PERSISTENCE_FAILURE === "1"
-    }));
+    }), presentationContext, presentationPorts, bridgeMonitor?.pid);
     return;
   }
 
@@ -17350,111 +17152,69 @@ async function runTerminalControlSend({
   let acceptanceResult: dispatchApplication.TerminalDispatchAcceptance |
     undefined;
   try {
-    await terminalBridge.send(executor.kind, terminalControl, terminalPayload, {
-      runtime: preSendRuntime,
-      requireExactComposerBeforeEnter:
-        observedHandoff !== undefined ||
-        verifiedEmptyCodexHandoff !== undefined ||
-        deferredCodexForegroundBinding !== undefined,
-      beforeText: observedHandoff
-        ? async () => {
-            await assertObservedHandoffTransportBoundary({
-              options,
-              terminal: observedHandoff.terminal,
-              transition: observedHandoff.transition,
-              requireEmptyComposer: true
-            });
-          }
-        : verifiedEmptyCodexHandoff
-          ? async () => {
-              await assertVerifiedEmptyCodexTransportBoundary({
-                options,
-                boundary: verifiedEmptyCodexHandoff,
-                requireEmptyComposer: true
-              });
+    const transportLifecycle = execution.transportLifecycle({
+      ...(observedHandoff
+        ? {
+            observedHandoff: {
+              verify: (requireEmptyComposer) =>
+                assertObservedHandoffTransportBoundary({
+                  options,
+                  terminal: observedHandoff.terminal,
+                  transition: observedHandoff.transition,
+                  requireEmptyComposer
+                })
             }
-          : deferredCodexForegroundBinding
-            ? async () => {
-              await assertDeferredCodexForegroundBindingBoundary({
+          }
+        : {}),
+      ...(verifiedEmptyCodexHandoff
+        ? {
+            verifiedEmptyHandoff: {
+              verify: (requireEmptyComposer) =>
+                assertVerifiedEmptyCodexTransportBoundary({
+                  options,
+                  boundary: verifiedEmptyCodexHandoff,
+                  requireEmptyComposer
+                })
+            }
+          }
+        : {}),
+      ...(deferredCodexForegroundBinding
+        ? {
+            deferredBinding: {
+              verify: (requireEmptyComposer) =>
+                assertDeferredCodexForegroundBindingBoundary({
                   options,
                   boundary: deferredCodexForegroundBinding,
                   expectedSourceStatus: "transitioning",
                   requireNoDispatch: false,
-                  requireEmptyComposer: true
-                });
-                beginDeferredCodexForegroundTransferDispatch({
-                  options,
-                  boundary: deferredCodexForegroundBinding,
-                  at: cliNow().toISOString()
-                });
-              }
-            : undefined,
-      beforeEnter: observedHandoff
-        ? async () => {
-            await assertObservedHandoffTransportBoundary({
-              options,
-              terminal: observedHandoff.terminal,
-              transition: observedHandoff.transition,
-              requireEmptyComposer: false
-            });
-          }
-        : verifiedEmptyCodexHandoff
-          ? async () => {
-              await assertVerifiedEmptyCodexTransportBoundary({
+                  requireEmptyComposer
+                }),
+              begin: (at) => beginDeferredCodexForegroundTransferDispatch({
                 options,
-                boundary: verifiedEmptyCodexHandoff,
-                requireEmptyComposer: false
-              });
-            }
-          : deferredCodexForegroundBinding
-            ? async () => {
-                await assertDeferredCodexForegroundBindingBoundary({
+                boundary: deferredCodexForegroundBinding,
+                at,
+                route
+              }),
+              advance: (stage, at) =>
+                advanceDeferredCodexForegroundTransferInputStage({
                   options,
                   boundary: deferredCodexForegroundBinding,
-                  expectedSourceStatus: "transitioning",
-                  requireNoDispatch: false,
-                  requireEmptyComposer: false
-                });
-              }
-            : undefined,
-      async onTransportStage({ stage }) {
-        const stageAt = cliNow().toISOString();
-        await application.recordTransportStage(stage, stageAt, async () => {
-          if (deferredCodexForegroundBinding) {
-            advanceDeferredCodexForegroundTransferInputStage({
-              options,
-              boundary: deferredCodexForegroundBinding,
-              stage,
-              at: stageAt
-            });
+                  stage,
+                  at,
+                  route
+                })
+            }
           }
-          if (stage === "text_injected" && observedHandoff) {
-            await assertObservedHandoffTransportBoundary({
-              options,
-              terminal: observedHandoff.terminal,
-              transition: observedHandoff.transition,
-              requireEmptyComposer: false
-            });
-          }
-          if (stage === "text_injected" && verifiedEmptyCodexHandoff) {
-            await assertVerifiedEmptyCodexTransportBoundary({
-              options,
-              boundary: verifiedEmptyCodexHandoff,
-              requireEmptyComposer: false
-            });
-          }
-          if (stage === "text_injected" && deferredCodexForegroundBinding) {
-            await assertDeferredCodexForegroundBindingBoundary({
-              options,
-              boundary: deferredCodexForegroundBinding,
-              expectedSourceStatus: "transitioning",
-              requireNoDispatch: false,
-              requireEmptyComposer: false
-            });
-          }
-        });
-      }
+        : {}),
+      recordStage: (stage, at, afterDurable) =>
+        application.recordTransportStage(stage, at, afterDurable)
     });
+    await terminalBridge.send(
+      executor.kind,
+      terminalControl,
+      terminalPayload,
+      { runtime: preSendRuntime, ...transportLifecycle }
+    );
     if (!enterDispatchedAt) {
       throw new Error("terminal bridge returned without an enter_dispatched receipt");
     }
@@ -17464,276 +17224,45 @@ async function runTerminalControlSend({
     ) {
       cliExit(86);
     }
-    let submittedBase = stagedConversation;
-    let deferredCandidateBindingPending = false;
-    if (needsPostSendNativeBinding) {
-      let boundIdentity: NativeAgentSessionIdentity | undefined;
-      let boundConversation: Conversation | undefined;
-      let bindingError: string | undefined;
-      try {
-        if (
-          deferredCodexForegroundBinding &&
-          !allowsSyntheticTerminalAcceptance(options) &&
-          ![2, 3].includes(Number(codexRolloutAcceptanceAnchor?.version))
-        ) {
-          throw new Error(
-            "deferred Codex foreground binding requires a virgin rollout acceptance anchor"
-          );
-        }
-        boundIdentity = await pollNativeAgentSessionIdentity({
-          options,
-          executor,
-          terminalControl,
-          pid: terminalAgentPid,
-          expectedSessionId: stringValue(
-            sendTakeover?.terminal_agent_expected_session_id
-          ),
-          allowedPreMaterializationIdentity,
-          allowedAdditionalIdentities,
-          ...(deferredCodexForegroundBinding &&
-              codexRolloutAcceptanceAnchor &&
-              [2, 3].includes(codexRolloutAcceptanceAnchor.version)
-            ? {
-                requiredCodexAcceptance: {
-                  anchor: codexRolloutAcceptanceAnchor,
-                  requestHash: terminalRequestHash
-                },
-                attempts: Math.max(
-                  1,
-                  Math.ceil(
-                    DEFAULT_TERMINAL_ACCEPTANCE_TIMEOUT_MS /
-                      DEFAULT_TERMINAL_ACCEPTANCE_POLL_INTERVAL_MS
-                  )
-                ),
-                delayMs: DEFAULT_TERMINAL_ACCEPTANCE_POLL_INTERVAL_MS
-              }
-            : {})
-        });
-      } catch (error) {
-        bindingError = error instanceof Error ? error.message : String(error);
-      }
-      if (boundIdentity) {
-        try {
-          if (
-            codexRolloutAcceptanceAnchor &&
-            (
-              boundIdentity.processUuid !==
-                codexRolloutAcceptanceAnchor.process_uuid ||
-              boundIdentity.processBirth !==
-                codexRolloutAcceptanceAnchor.process_birth
-            )
-          ) {
-            throw new Error(
-              "Codex process incarnation changed while its native " +
-              "thread materialized"
-            );
-          }
-          const expectedNativeThreadId = stringValue(
-            sendTakeover?.terminal_agent_expected_session_id
-          );
-          if (
-            expectedNativeThreadId &&
-            boundIdentity.sessionId !== expectedNativeThreadId
-          ) {
-            throw new Error(
-              `native agent created thread ${boundIdentity.sessionId}, expected ` +
-              `${expectedNativeThreadId}`
-            );
-          }
-          boundConversation = withNativeAgentSessionIdentity(
-            stagedConversation,
-            boundIdentity
-          );
-          const bindingStoreDir = managedSessionStoreDirForConversation(
-            boundConversation
-          );
-          if (!bindingStoreDir) {
-            throw new Error(
-              "managed Session Store is unavailable before native identity commit"
-            );
-          }
-          if (deferredCodexForegroundBinding) {
-            await commitDeferredCodexForegroundBinding({
-              options,
-              boundary: deferredCodexForegroundBinding,
-              identity: boundIdentity,
-              acceptedAt: cliNow().toISOString()
-            });
-          } else {
-            await assertNativeThreadHasExclusiveOwnership({
-              options,
-              agent: executor.kind,
-              currentPid: terminalAgentPid,
-              nativeThreadId: boundIdentity.sessionId,
-              storeDir: bindingStoreDir,
-              terminalControl,
-              excludedManagedSessionId:
-                sessionIdForConversation(boundConversation)
-            });
-            persistManagedSessionNativeIdentity({
-              conversation: boundConversation,
-              terminalControl,
-              identity: boundIdentity
-            });
-          }
-          if (
-            codexRolloutAcceptanceAnchor?.version === 2 &&
-            cliEnv().AKK_TEST_EXIT_AFTER_VIRGIN_SESSION_BINDING === "1"
-          ) {
-            cliExit(86);
-          }
-          // A virgin terminal Turn and its Session start with the same
-          // provisional binding id/generation before Codex has materialized a
-          // native thread.  Persist the observed identity as a monotonic
-          // refinement of that binding before the full Turn-vs-Session check;
-          // otherwise the Turn carries the new UUID while the Session still
-          // (briefly) has none and is incorrectly rejected as stale.
-          assertNativeAgentIdentityForTurn({
-            conversation: boundConversation,
-            currentIdentity: boundIdentity,
-            operation: "bind"
-          });
-        } catch (error) {
-          bindingError = error instanceof Error ? error.message : String(error);
-          boundIdentity = undefined;
-          boundConversation = undefined;
-        }
-      }
-      if (!boundIdentity && deferredCodexForegroundBinding) {
-        try {
-          const transfer = loadDeferredForegroundTransfer(
-            storeDirFromOptions(options),
-            deferredCodexForegroundBinding.transferId
-          );
-          if (["committed", "resolved"].includes(transfer.status)) {
-            const recoveredTarget =
-              await resolveCommittedDeferredCodexForegroundTransfer({
-                options,
-                boundary: deferredCodexForegroundBinding
-              });
-            const binding = recoveredTarget.binding;
-            if (
-              !binding?.native_thread_id ||
-              !binding.native_process.process_uuid ||
-              !binding.native_process.process_birth ||
-              !isCompleteNativeRollout(binding.native_process.rollout)
-            ) {
-              throw new Error(
-                "resolved deferred target lacks exact native identity"
-              );
-            }
-            const recoveredIdentity: NativeAgentSessionIdentity = {
-              sessionId: binding.native_thread_id,
-              processUuid: binding.native_process.process_uuid,
-              processBirth: binding.native_process.process_birth,
-              rollout: binding.native_process.rollout,
-              evidence: binding.native_process.evidence
-            };
-            const recoveredConversation = withNativeAgentSessionIdentity(
-              stagedConversation,
-              recoveredIdentity
-            );
-            // A committed transfer proves Session ownership, but it cannot
-            // silently substitute for the Turn's exact staged binding.  Only
-            // publish the recovered identity to the normal acceptance path
-            // after the same Turn-vs-Session/native assertion used by the
-            // primary commit path succeeds.
-            assertNativeAgentIdentityForTurn({
-              conversation: recoveredConversation,
-              currentIdentity: recoveredIdentity,
-              operation: "recover deferred foreground binding for"
-            });
-            boundIdentity = recoveredIdentity;
-            boundConversation = recoveredConversation;
-          }
-        } catch (error) {
-          bindingError = error instanceof Error ? error.message : String(error);
-          boundIdentity = undefined;
-          boundConversation = undefined;
-        }
-      }
-      if (!boundIdentity) {
-        if (
-          deferredCodexForegroundBinding &&
-          codexRolloutAcceptanceAnchor?.version === 3 &&
-          bindingError === undefined
-        ) {
-          // The exact candidate inventory is still stable but Codex has not
-          // materialized the request in any root yet. Enter is durable; keep
-          // the transfer fenced at dispatch_started and let the monitor or a
-          // later dedicated recovery finish the UUID binding without replay.
-          deferredCandidateBindingPending = true;
-          submittedBase = stagedConversation;
-        } else {
-        const bindingFailedAt = cliNow().toISOString();
-        const bindingReason = bindingError
-          ? `AKK dispatched terminal input but could not verify the new native agent session: ${bindingError}`
-          : "AKK dispatched terminal input but no exact native agent session appeared within the binding window";
-        if (deferredCodexForegroundBinding) {
-          try {
-            markDeferredCodexForegroundTransferUncertain({
-              options,
-              boundary: deferredCodexForegroundBinding,
-              reason: bindingReason
-            });
-          } catch (error) {
-            runtimeLog("error", "deferred_codex_foreground_uncertain_persist_failed", {
-              transfer_id: deferredCodexForegroundBinding.transferId,
-              error: error instanceof Error ? error.message : String(error)
-            });
-          }
-        }
-        const unfencedConversation = application.applyIdentityFailure(
-          bindingFailedAt,
-          bindingReason,
-          deferredCodexForegroundBinding
-            ? undefined
-            : (current) => quarantineManagedSessionBinding({
-                conversation: current,
-                reason: bindingReason
-              })
-        );
-        printJson({
-          session_id: sessionIdForConversation(unfencedConversation),
-          turn_id: turnIdForConversation(unfencedConversation),
-          conversation: unfencedConversation,
-          message,
-          delivered: false,
-          status: "submission_uncertain",
-          submission_outcome: "uncertain",
-          background: true,
-          callback_expected: false,
-          terminal_control: terminalControl,
-          monitor_pid: bridgeMonitor?.pid ?? null,
-          executor,
-          delivery_receipt: "enter_dispatched",
-          do_not_retry: true,
-          reason: bindingReason,
-          openclaw_next_action: {
-            action: "inspect",
-            conversation_id: unfencedConversation.conversation_id,
-            session_id: sessionIdForConversation(unfencedConversation),
-            turn_id: turnIdForConversation(unfencedConversation),
-            do_not_retry: true,
-            reason:
-              "The input was submitted, but AKK could not fence later side effects to an exact native session. Inspect the pane and close this Turn before continuing."
-          }
-        });
-        return;
-        }
-      }
-      if (!deferredCandidateBindingPending) {
-        submittedBase = boundConversation as Conversation;
-      }
+    const submissionOwner = await resolveTerminalDispatchSubmissionOwner(
+      prepared,
+      request,
+      application,
+      stagedConversation
+    );
+    if ("failureReason" in submissionOwner) {
+      presentTerminalIdentityFailure(
+        submissionOwner.conversation,
+        submissionOwner.failureReason,
+        presentationContext,
+        presentationPorts,
+        bridgeMonitor?.pid
+      );
+      return;
     }
+    const submittedBase = submissionOwner.conversation;
+    const deferredCandidateBindingPending =
+      submissionOwner.deferredCandidateBindingPending;
+    const acceptanceTimeoutMs = deferredCandidateBindingPending
+      ? undefined
+      : positiveMilliseconds(
+          options.terminalAcceptanceTimeoutMs ??
+            DEFAULT_TERMINAL_ACCEPTANCE_TIMEOUT_MS,
+          "--terminal-acceptance-timeout-ms"
+        );
     acceptanceResult = deferredCandidateBindingPending
       ? { outcome: "pending_acceptance" }
-      : await pollTerminalSubmissionAcceptance({
-          options,
+      : await execution.pollAcceptance({
           executor: executor.kind,
           conversation: submittedBase,
           terminalControl,
-          terminalBridge
+          timeoutMs: acceptanceTimeoutMs!,
+          pollIntervalMs: Math.max(10, Math.min(
+            acceptanceTimeoutMs!,
+            Number(options.terminalAcceptancePollIntervalMs ??
+              DEFAULT_TERMINAL_ACCEPTANCE_POLL_INTERVAL_MS)
+          )),
+          scrollbackLines: Number(options.scrollbackLines ?? 240)
         });
     deliveredConversation = application.applyAcceptance(
       submittedBase,
@@ -17773,11 +17302,11 @@ async function runTerminalControlSend({
       !textInjectedAt &&
       error instanceof TerminalInputNotStartedError
     ) {
-      presentTerminalZeroInputAbort(application.recordZeroInputAbort({
+      renderTerminalZeroInputAbort(application.recordZeroInputAbort({
         failureKind: "transport",
         error,
         abortedAt: cliNow().toISOString()
-      }));
+      }), presentationContext, presentationPorts, bridgeMonitor?.pid);
       return;
     }
     const uncertainAt = cliNow().toISOString();
@@ -17787,7 +17316,8 @@ async function runTerminalControlSend({
         markDeferredCodexForegroundTransferUncertain({
           options,
           boundary: deferredCodexForegroundBinding,
-          reason: errorMessage
+          reason: errorMessage,
+          route
         });
       } catch (transferError) {
         runtimeLog("error", "deferred_codex_foreground_uncertain_persist_failed", {
@@ -17804,7 +17334,7 @@ async function runTerminalControlSend({
     );
     const stalledConversationIds =
       stallOtherTerminalBridgeConversationsForUncertainDispatch({
-        storeDir: storeDirFromOptions(options),
+        storeDir: lockedStoreDir,
         terminalControl,
         currentConversationId: uncertainConversation.conversation_id,
         uncertainMessageId: message.id
@@ -17817,42 +17347,17 @@ async function runTerminalControlSend({
       do_not_retry: true,
       stalled_conversation_ids: stalledConversationIds
     });
-    printJson({
-      session_id: sessionIdForConversation(uncertainConversation),
-      turn_id: turnIdForConversation(uncertainConversation),
+    presentTerminalUncertain({
       conversation: uncertainConversation,
-      message,
-      delivered: false,
-      status: "submission_uncertain",
-      submission_outcome: "uncertain",
-      background: true,
-      callback_expected: Boolean(uncertainConversation.gateway_method),
-      terminal_control: terminalControl,
-      monitor_pid: bridgeMonitor?.pid ?? null,
-      executor,
-      do_not_retry: true,
-      stalled_conversation_ids: stalledConversationIds,
-      reason:
-        enterDispatchedAt
-          ? "AKK dispatched Enter but native acceptance or its exact identity became uncertain. Do not retry automatically; inspect this conversation and pane."
-          : textInjectedAt
-            ? "AKK injected text but could not prove that Enter was dispatched. Do not retry automatically; inspect this conversation and pane."
-            : "AKK could not prove that terminal input remained untouched. Inspect this conversation before retrying.",
-      openclaw_next_action: {
-        action: "inspect",
-        conversation_id: uncertainConversation.conversation_id,
-        session_id: sessionIdForConversation(uncertainConversation),
-        turn_id: turnIdForConversation(uncertainConversation),
-        do_not_retry: true,
-        reason:
-          "The terminal submission outcome is uncertain. Inspect AKK status and the shared terminal pane before deciding whether to close or continue."
-      }
-    });
+      stalledConversationIds,
+      textInjected: textInjectedAt !== undefined,
+      enterDispatched: enterDispatchedAt !== undefined,
+      monitorPid: bridgeMonitor?.pid
+    }, presentationContext, presentationPorts);
     return;
   }
 
   const nativeAccepted = acceptanceResult?.outcome === "agent_accepted";
-  const acceptancePending = acceptanceResult?.outcome === "pending_acceptance";
   const postSubmissionWarning = application.recordPostSubmissionBookkeeping(
     deliveredConversation,
     nativeAccepted,
@@ -17861,195 +17366,100 @@ async function runTerminalControlSend({
   if (postSubmissionWarning !== undefined) {
     bookkeepingWarning = postSubmissionWarning;
   }
-  printJson({
-    session_id: sessionIdForConversation(deliveredConversation),
-    turn_id: turnIdForConversation(deliveredConversation),
+  presentTerminalCompleted({
     conversation: deliveredConversation,
-    message,
-    delivered: nativeAccepted,
-    status: nativeAccepted
-      ? "async_pending"
-      : acceptancePending
-        ? "submission_pending_acceptance"
-        : acceptanceResult?.outcome === "not_accepted"
-          ? "submission_not_accepted"
-          : "submission_uncertain",
-    submission_outcome: acceptanceResult?.outcome,
-    background: true,
-    callback_expected: Boolean(
-      deliveredConversation.gateway_method &&
-      (nativeAccepted || acceptancePending)
-    ),
-    terminal_control: terminalControl,
-    monitor_pid: bridgeMonitor?.pid ?? null,
-    executor,
-    budget: budgetAction(deliveredConversation),
-    delivery_receipt: nativeAccepted
-      ? "agent_accepted"
-      : acceptancePending
-        ? "enter_dispatched"
-        : acceptanceResult?.outcome,
-    ...(!nativeAccepted ? { do_not_retry: true } : {}),
-    ...(bookkeepingWarning
-      ? {
-          bookkeeping_warning: textSummary(bookkeepingWarning)
+    acceptance: acceptanceResult,
+    monitorPid: bridgeMonitor?.pid,
+    bookkeepingWarning
+  }, presentationContext, presentationPorts);
+}
+
+function terminalDispatchExecution(
+  options: Record<string, any>,
+  bridge?: TerminalAgentBridge
+): TerminalDispatchExecutionService {
+  return new TerminalDispatchExecutionService(
+    cliEnv().AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE === "1"
+      ? cliEnv().AKK_TEST_TERMINAL_ACCEPTANCE_OUTCOME ?? "accepted"
+      : undefined,
+    {
+    clock: {
+      now: cliNow,
+      nowMs: cliNowMs,
+      sleep: cliSleep
+    },
+    native: {
+      resolveCodex: ({
+        pid,
+        cwd,
+        preferredSessionId,
+        allowedCompanionIdentity,
+        allowedAdditionalIdentities
+      }) => createAgentSessionProvider("codex", options)
+        .resolveActiveSessionIdentityForPid(
+          pid,
+          cwd,
+          preferredSessionId,
+          allowedCompanionIdentity
+            ? {
+                ...allowedCompanionIdentity,
+                evidence: "managed_transition_before_identity"
+              }
+            : undefined,
+          allowedAdditionalIdentities?.map((identity) => ({
+            ...identity,
+            evidence: "managed_transition_ancestor_identity"
+          }))
+        ),
+      async inspectCodexOpenRoots(pid, cwd) {
+        const provider = createAgentSessionProvider("codex", options);
+        if (!provider.inspectOpenRootRolloutInventoryForPid) {
+          throw new Error(
+            "Codex open-root rollout inventory inspection is unavailable"
+          );
         }
-      : {}),
-    openclaw_next_action: nativeAccepted
-      ? openClawYieldNextAction({
-          conversationId: deliveredConversation.conversation_id,
-          sessionId: sessionIdForConversation(deliveredConversation),
-          turnId: turnIdForConversation(deliveredConversation),
-          source: "terminal_control",
-          callbackExpected: Boolean(deliveredConversation.gateway_method)
-        })
-      : {
-          action: acceptancePending ? "wait_for_acceptance" : "inspect",
-          conversation_id: deliveredConversation.conversation_id,
-          session_id: sessionIdForConversation(deliveredConversation),
-          turn_id: turnIdForConversation(deliveredConversation),
-          do_not_retry: true,
-          reason: acceptancePending
-            ? "Terminal transport is proven and the background monitor is still waiting for native acceptance."
-            : acceptanceResult?.outcome === "not_accepted"
-              ? "The exact draft is still present; inspect the composer and do not send a duplicate."
-              : "Native acceptance evidence became uncertain; inspect the shared pane."
-        }
-  });
-}
-
-function terminalSubmissionPayload(payload: string): string {
-  assertOrdinaryTerminalPayloadDoesNotInvokeNativeLifecycle(payload);
-  return payload.trimEnd();
-}
-
-function allowsSyntheticTerminalAcceptance(
-  _options: Record<string, any>
-): boolean {
-  return cliEnv().AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE === "1";
-}
-
-function syntheticTerminalAcceptanceEvidence({
-  options,
-  executor,
-  conversation,
-  requestHash
-}: {
-  options: Record<string, any>;
-  executor: ExecutorKind;
-  conversation: Conversation;
-  requestHash: string;
-}): TerminalSubmissionAcceptanceEvidence | undefined {
-  if (!allowsSyntheticTerminalAcceptance(options)) {
-    return undefined;
-  }
-  const outcome = cliEnv().AKK_TEST_TERMINAL_ACCEPTANCE_OUTCOME ?? "accepted";
-  if (outcome === "pending" || outcome === "not_accepted") {
-    return undefined;
-  }
-  if (outcome === "identity_drift" || outcome === "uncertain") {
-    throw new Error("injected terminal acceptance identity drift");
-  }
-  if (outcome !== "accepted") {
-    throw new Error(`unsupported injected terminal acceptance outcome ${outcome}`);
-  }
-  const nativeTakeover = isRecord(conversation.native_session_takeover)
-    ? conversation.native_session_takeover
-    : undefined;
-  const nativeThreadId = stringValue(
-    nativeTakeover?.terminal_agent_session_id
-  ) ?? stringValue(nativeTakeover?.terminal_agent_expected_session_id) ??
-    sessionIdForConversation(conversation);
-  const evidenceBase = {
-    source: executor === "codex"
-      ? "codex_rollout" as const
-      : "claude_transcript" as const,
-    kind: "native_user_turn" as const,
-    nativeThreadId,
-    requestHash,
-    acceptanceId: `test-${turnIdForConversation(conversation)}`,
-    anchorFingerprint: createHash("sha256")
-      .update(`test-anchor:${nativeThreadId}:${requestHash}`)
-      .digest("hex")
-  };
-  return {
-    ...evidenceBase,
-    evidenceFingerprint: createHash("sha256")
-      .update(JSON.stringify(evidenceBase))
-      .digest("hex")
-  };
-}
-
-function captureCodexAcceptanceAnchorForSend({
-  options,
-  currentIdentity,
-  expectedNativeThreadId,
-  boundProcessUuid,
-  boundProcessBirth,
-  allowedPreMaterializationIdentity,
-  needsPostSendNativeBinding,
-  candidateSetAnchor
-}: {
-  options: Record<string, any>;
-  currentIdentity?: NativeAgentSessionIdentity;
-  expectedNativeThreadId?: string;
-  boundProcessUuid?: string;
-  boundProcessBirth?: string;
-  allowedPreMaterializationIdentity?: CodexPreMaterializationIdentity;
-  needsPostSendNativeBinding: boolean;
-  candidateSetAnchor?: CodexCandidateSetRolloutAcceptanceAnchor;
-}): CodexRolloutAcceptanceAnchor | undefined {
-  if (allowsSyntheticTerminalAcceptance(options)) {
-    return undefined;
-  }
-  if (candidateSetAnchor) {
-    return candidateSetAnchor;
-  }
-  const nativeThreadId = needsPostSendNativeBinding
-    ? expectedNativeThreadId
-    : currentIdentity?.sessionId;
-  const processUuid = currentIdentity?.processUuid ??
-    allowedPreMaterializationIdentity?.processUuid ??
-    boundProcessUuid;
-  const processBirth = currentIdentity?.processBirth ??
-    allowedPreMaterializationIdentity?.processBirth ??
-    boundProcessBirth;
-  if (!processUuid || !processBirth) {
-    throw new Error(
-      "Codex native acceptance anchor requires an exact process incarnation"
-    );
-  }
-  if (!nativeThreadId && !needsPostSendNativeBinding) {
-    throw new Error(
-      "Codex native acceptance anchor requires an exact thread"
-    );
-  }
-  if (!needsPostSendNativeBinding && currentIdentity?.rollout) {
-    return captureCodexRolloutAcceptanceAnchor({
-      nativeThreadId: nativeThreadId as string,
-      processUuid,
-      processBirth,
-      now: cliNow(),
-      mode: "existing",
-      rollout: currentIdentity.rollout
-    });
-  }
-  return nativeThreadId
-    ? captureCodexRolloutAcceptanceAnchor({
-        nativeThreadId,
-        processUuid,
-        processBirth,
-        now: cliNow(),
-        mode: "pre_materialization",
-        expectedEmptyNativeSession: true
-      })
-    : captureCodexRolloutAcceptanceAnchor({
-        processUuid,
-        processBirth,
-        now: cliNow(),
-        mode: "pre_materialization",
-        expectedEmptyNativeSession: true
-      });
+        return provider.inspectOpenRootRolloutInventoryForPid(pid, cwd);
+      },
+      claudeRows: () => loadClaudeAgentRows(options, { required: true }),
+      codexProcessIncarnation: codexProcessIncarnationForPid
+    },
+    acceptance: {
+      captureCodex: captureCodexRolloutAcceptanceAnchor,
+      detectCodexCandidates: detectCodexCandidateSetRolloutAcceptance,
+      detectBoundCodex: detectCodexRolloutAcceptance,
+      detectClaude: (conversation, terminalControl) =>
+        detectClaudeTranscriptAcceptance(
+          terminalDurableRequestForConversation(
+            conversation,
+            terminalControl
+          ),
+          {
+            claudeHome: expandHome(options.claudeHome),
+            agentRows: loadClaudeAgentRows(options)
+          }
+        )
+    },
+    terminal: {
+      proveExactDraftStillPresent: (input) =>
+        (bridge ?? createTerminalAgentBridge(options))
+          .proveExactDraftStillPresent(
+            input.executor,
+            input.terminalControl,
+            input.requestText,
+            {
+              scrollbackLines: input.scrollbackLines,
+              runtime: terminalRuntimeIdentityForConversation(
+                input.conversation,
+                input.terminalControl
+              )
+            }
+          )
+    },
+    authority: {
+      assertTurnCurrent: assertTurnBindingCurrent
+    }
+    }
+  );
 }
 
 type VirginCodexBindingRecovery = {
@@ -18284,7 +17694,8 @@ async function recoverVirginCodexPostSubmissionBinding({
           const persistedSession = persistManagedSessionNativeIdentity({
             conversation: current,
             terminalControl,
-            identity
+            identity,
+            storeDir
           });
           if (
             persistedSession?.binding?.native_thread_id !==
@@ -18346,188 +17757,14 @@ async function recoverVirginCodexPostSubmissionBinding({
 
 async function detectTerminalSubmissionAcceptance({
   options,
-  executor,
-  conversation,
-  terminalControl
+  ...request
 }: {
   options: Record<string, any>;
   executor: ExecutorKind;
   conversation: Conversation;
   terminalControl: TerminalControlRef;
 }): Promise<TerminalSubmissionAcceptanceEvidence | undefined> {
-  const nativeTakeover = isRecord(conversation.native_session_takeover)
-    ? conversation.native_session_takeover
-    : undefined;
-  const requestHash = stringValue(
-    nativeTakeover?.terminal_bridge_request_hash
-  );
-  if (!requestHash) {
-    throw new Error("terminal acceptance request hash is unavailable");
-  }
-  assertTurnBindingCurrent(conversation, "monitor");
-  const synthetic = syntheticTerminalAcceptanceEvidence({
-    options,
-    executor,
-    conversation,
-    requestHash
-  });
-  if (synthetic) {
-    return synthetic;
-  }
-  if (allowsSyntheticTerminalAcceptance(options)) {
-    return undefined;
-  }
-
-  if (executor === "codex") {
-    const anchor = nativeTakeover?.codex_rollout_acceptance_anchor;
-    if (!isRecord(anchor)) {
-      throw new Error("Codex rollout acceptance anchor is unavailable");
-    }
-    const pid = Number(nativeTakeover?.terminal_agent_pid);
-    const validatedAnchor = validateCodexRolloutAcceptanceAnchor(
-      anchor as unknown as CodexRolloutAcceptanceAnchor
-    );
-    if (validatedAnchor.version === 3) {
-      const inventory = await inspectCodexOpenRootRolloutInventory({
-        options,
-        pid,
-        cwd: terminalControl.currentPath
-      });
-      const result = detectCodexCandidateSetRolloutAcceptance({
-        anchor: validatedAnchor,
-        currentInventory: inventory,
-        requestHash
-      });
-      if (result.status === "accepted") {
-        return result.evidence;
-      }
-      if (result.status === "uncertain") {
-        throw new Error(
-          `Codex candidate-set acceptance is uncertain (${result.code}): ` +
-          result.reason
-        );
-      }
-      return undefined;
-    }
-    const currentIdentity = await resolveCurrentNativeAgentSessionIdentity({
-      options,
-      agent: "codex",
-      pid,
-      cwd: terminalControl.currentPath,
-      preferredSessionId: stringValue(anchor.native_thread_id)
-    });
-    if (!currentIdentity) {
-      return undefined;
-    }
-    return detectCodexRolloutAcceptance({
-      anchor: validatedAnchor,
-      currentIdentity,
-      requestHash
-    });
-  }
-
-  const claudeEvidence = detectClaudeTranscriptAcceptance(
-    terminalDurableRequestForConversation(conversation, terminalControl),
-    {
-      claudeHome: expandHome(options.claudeHome),
-      agentRows: loadClaudeAgentRows(options)
-    }
-  );
-  if (!claudeEvidence) {
-    return undefined;
-  }
-  return claudeEvidence;
-}
-
-async function pollTerminalSubmissionAcceptance({
-  options,
-  executor,
-  conversation,
-  terminalControl,
-  terminalBridge
-}: {
-  options: Record<string, any>;
-  executor: ExecutorKind;
-  conversation: Conversation;
-  terminalControl: TerminalControlRef;
-  terminalBridge: TerminalAgentBridge;
-}): Promise<dispatchApplication.TerminalDispatchAcceptance> {
-  const timeoutMs = positiveMilliseconds(
-    options.terminalAcceptanceTimeoutMs ??
-      DEFAULT_TERMINAL_ACCEPTANCE_TIMEOUT_MS,
-    "--terminal-acceptance-timeout-ms"
-  );
-  const pollIntervalMs = Math.max(
-    10,
-    Math.min(
-      timeoutMs,
-      Number(options.terminalAcceptancePollIntervalMs ??
-        DEFAULT_TERMINAL_ACCEPTANCE_POLL_INTERVAL_MS)
-    )
-  );
-  const deadline = cliNowMs() + timeoutMs;
-  while (true) {
-    try {
-      const evidence = await detectTerminalSubmissionAcceptance({
-        options,
-        executor,
-        conversation,
-        terminalControl
-      });
-      if (evidence) {
-        return { outcome: "agent_accepted", evidence };
-      }
-    } catch (error) {
-      return {
-        outcome: "uncertain",
-        reason: error instanceof Error ? error.message : String(error)
-      };
-    }
-    if (cliNowMs() >= deadline) {
-      break;
-    }
-    await cliSleep(pollIntervalMs);
-  }
-
-  if (
-    allowsSyntheticTerminalAcceptance(options) &&
-    cliEnv().AKK_TEST_TERMINAL_ACCEPTANCE_OUTCOME === "not_accepted"
-  ) {
-    return {
-      outcome: "not_accepted",
-      reason: "the exact managed draft remains in the terminal composer"
-    };
-  }
-  try {
-    const requestText = String(
-      isRecord(conversation.native_session_takeover)
-        ? conversation.native_session_takeover.terminal_bridge_request_text ?? ""
-        : ""
-    );
-    if (
-      await terminalBridge.proveExactDraftStillPresent(
-        executor,
-        terminalControl,
-        requestText,
-        {
-          scrollbackLines: Number(options.scrollbackLines ?? 240),
-          runtime: terminalRuntimeIdentityForConversation(
-            conversation,
-            terminalControl
-          )
-        }
-      )
-    ) {
-      return {
-        outcome: "not_accepted",
-        reason: "the exact managed draft remains in the terminal composer"
-      };
-    }
-  } catch {
-    // Native acceptance evidence remains authoritative. A best-effort draft
-    // inspection failure does not turn a bounded no-ACK into an identity claim.
-  }
-  return { outcome: "pending_acceptance" };
+  return terminalDispatchExecution(options).detectAcceptance(request);
 }
 
 async function reconcileTerminalAcceptanceInMonitor({
@@ -18987,40 +18224,6 @@ function markTerminalAcceptanceUncertain({
   });
 }
 
-function assertOrdinaryTerminalPayloadDoesNotInvokeNativeLifecycle(
-  payload: string
-): void {
-  const firstEffectiveLine = String(payload)
-    .split(/\r\n?|\n/u)
-    .find((line) => line.trim().length > 0)
-    ?.trimStart();
-  const reserved = /^\/([a-z][a-z0-9_-]*)(?=\s|$)/iu.exec(
-    firstEffectiveLine ?? ""
-  );
-  if (!reserved) {
-    return;
-  }
-  throw new Error(
-    `ordinary send/respond cannot invoke native slash command /${reserved[1].toLowerCase()}; ` +
-    "use an advertised dedicated native action when one exists, or enter " +
-    "the unsupported native command manually in the terminal UI"
-  );
-}
-
-type NativeAgentSessionIdentityObservation =
-  | {
-      status: "resolved";
-      identity: NativeAgentSessionIdentity;
-    }
-  | {
-      status: "verified_absent";
-      evidence: "native_identity_resolver_verified_absent";
-    }
-  | {
-      status: "unavailable";
-      reason: string;
-    };
-
 async function inspectCodexOpenRootRolloutInventory({
   options,
   pid,
@@ -19030,385 +18233,30 @@ async function inspectCodexOpenRootRolloutInventory({
   pid: number;
   cwd?: string;
 }): Promise<CodexOpenRootRolloutInventory> {
-  const provider = createAgentSessionProvider("codex", options);
-  if (!provider.inspectOpenRootRolloutInventoryForPid) {
-    throw new Error(
-      "Codex open-root rollout inventory inspection is unavailable"
-    );
-  }
-  return provider.inspectOpenRootRolloutInventoryForPid(pid, cwd);
-}
-
-function isCompleteNativeRollout(value: unknown): value is {
-  fd: string;
-  device: string;
-  inode: string;
-  path: string;
-} {
-  return isRecord(value) &&
-    Boolean(stringValue(value.fd)) &&
-    Boolean(stringValue(value.device)) &&
-    Boolean(stringValue(value.inode)) &&
-    Boolean(stringValue(value.path));
+  return terminalDispatchExecution(options)
+    .inspectCodexOpenRootInventory(pid, cwd);
 }
 
 async function resolveCurrentNativeAgentSessionIdentity({
   options,
-  agent,
-  pid,
-  cwd,
-  preferredSessionId,
-  allowedCompanionIdentity,
-  allowedAdditionalIdentities
-}: {
+  ...request
+}: NativeIdentityResolutionRequest & {
   options: Record<string, any>;
-  agent: ExecutorKind;
-  pid: number;
-  cwd?: string;
-  preferredSessionId?: string;
-  allowedCompanionIdentity?: CodexPreMaterializationIdentity;
-  allowedAdditionalIdentities?: readonly CodexPreMaterializationIdentity[];
 }): Promise<NativeAgentSessionIdentity | undefined> {
-  if (agent === "codex") {
-    return createAgentSessionProvider("codex", options)
-      .resolveActiveSessionIdentityForPid(
-        pid,
-        cwd,
-        preferredSessionId,
-        allowedCompanionIdentity
-          ? {
-              ...allowedCompanionIdentity,
-              evidence: "managed_transition_before_identity"
-            }
-          : undefined,
-        allowedAdditionalIdentities?.map((identity) => ({
-          ...identity,
-          evidence: "managed_transition_ancestor_identity"
-        }))
-      );
-  }
-  const rows = loadClaudeAgentRows(options, { required: true })
-    .filter((row) => row.pid === pid);
-  if (rows.length === 0) {
-    return undefined;
-  }
-  const sessionIds = [...new Set(
-    rows.map((row) => stringValue(row.sessionId)).filter(
-      (value): value is string => value !== undefined
-    )
-  )];
-  if (sessionIds.length > 1) {
-    throw new Error(
-      `Claude process ${pid} has conflicting exact session identities`
-    );
-  }
-  const sessionId = sessionIds[0];
-  if (!sessionId) {
-    throw new Error(
-      `Claude process ${pid} is visible but its exact sessionId is unavailable`
-    );
-  }
-  const startedAtValues = [...new Set(
-    rows
-      .map((row) => Number(row.startedAt))
-      .filter((value) => Number.isSafeInteger(value) && value > 0)
-  )];
-  if (startedAtValues.length > 1) {
-    throw new Error(
-      `Claude process ${pid} has conflicting process-incarnation timestamps`
-    );
-  }
-  const startedAt = startedAtValues[0];
-  if (!startedAt) {
-    throw new Error(
-      `Claude process ${pid} is visible but its process-incarnation startedAt is unavailable`
-    );
-  }
-  return {
-    sessionId,
-    processStartedAt: startedAt,
-    processUuid: `claude-pid:${pid}:started:${startedAt}`,
-    evidence: "claude_agents_exact_pid"
-  };
+  return terminalDispatchExecution(options).resolveCurrentNativeIdentity(
+    request
+  );
 }
 
-/**
- * Preserve the security-significant difference between a successful native
- * identity probe that found no current Session and a probe that could not be
- * completed.  `undefined` from the Codex provider is authoritative only after
- * both the process-incarnation and open-rollout inspections succeeded.
- */
 async function observeCurrentNativeAgentSessionIdentity(
-  request: Parameters<typeof resolveCurrentNativeAgentSessionIdentity>[0]
+  request: NativeIdentityResolutionRequest & {
+    options: Record<string, any>;
+  }
 ): Promise<NativeAgentSessionIdentityObservation> {
-  try {
-    const identity = await resolveCurrentNativeAgentSessionIdentity(request);
-    return identity
-      ? { status: "resolved", identity }
-      : {
-          status: "verified_absent",
-          evidence: "native_identity_resolver_verified_absent"
-        };
-  } catch (error) {
-    return {
-      status: "unavailable",
-      reason: error instanceof Error ? error.message : String(error)
-    };
-  }
-}
-
-function nativeAgentIdentityMatchesTurn(
-  conversation: Conversation,
-  currentIdentity: NativeAgentSessionIdentity | undefined
-): boolean {
-  const takeover = isRecord(conversation.native_session_takeover)
-    ? conversation.native_session_takeover
-    : undefined;
-  const storedSessionId = stringValue(takeover?.terminal_agent_session_id);
-  const storedProcessUuid = stringValue(
-    takeover?.terminal_agent_process_uuid
+  const { options, ...resolution } = request;
+  return terminalDispatchExecution(options).observeCurrentNativeIdentity(
+    resolution
   );
-  const storedProcessBirth = stringValue(
-    takeover?.terminal_agent_process_birth
-  );
-  const storedRollout = isRecord(takeover?.terminal_agent_rollout)
-    ? takeover.terminal_agent_rollout
-    : undefined;
-  const strictNativeIdentity =
-    Number(takeover?.terminal_agent_identity_protocol) === 1;
-  const strictClaudeTurn =
-    strictNativeIdentity && executorForConversation(conversation).kind === "claude";
-  const strictCodexTurn =
-    strictNativeIdentity && executorForConversation(conversation).kind === "codex";
-  if (
-    strictNativeIdentity &&
-    (!storedSessionId || !currentIdentity?.sessionId)
-  ) {
-    return false;
-  }
-  if (
-    strictClaudeTurn &&
-    (
-      !storedProcessUuid ||
-      !currentIdentity?.processUuid ||
-      storedProcessUuid !== currentIdentity.processUuid
-    )
-  ) {
-    return false;
-  }
-  if (
-    strictCodexTurn &&
-    (
-      !storedProcessUuid ||
-      !storedProcessBirth ||
-      !isCompleteNativeRollout(storedRollout) ||
-      !currentIdentity?.processUuid ||
-      !currentIdentity.processBirth ||
-      !isCompleteNativeRollout(currentIdentity.rollout)
-    )
-  ) {
-    return false;
-  }
-  if (storedSessionId && storedSessionId !== currentIdentity?.sessionId) {
-    return false;
-  }
-  if (
-    storedProcessUuid &&
-    storedProcessUuid !== currentIdentity?.processUuid
-  ) {
-    return false;
-  }
-  if (
-    storedProcessBirth &&
-    storedProcessBirth !== currentIdentity?.processBirth
-  ) {
-    return false;
-  }
-  if (
-    storedRollout &&
-    (
-      stringValue(storedRollout.fd) !== currentIdentity?.rollout?.fd ||
-      stringValue(storedRollout.device) !== currentIdentity?.rollout?.device ||
-      stringValue(storedRollout.inode) !== currentIdentity?.rollout?.inode ||
-      stringValue(storedRollout.path) !== currentIdentity?.rollout?.path
-    )
-  ) {
-    return false;
-  }
-  return true;
-}
-
-function assertNativeAgentIdentityForRuntime({
-  runtime,
-  currentIdentity,
-  agent,
-  pid
-}: {
-  runtime?: TerminalRuntimeIdentity;
-  currentIdentity: NativeAgentSessionIdentity | undefined;
-  agent: ExecutorKind;
-  pid: number;
-}): void {
-  if (runtime?.expectedEmptyNativeSession === true) {
-    if (
-      agent === "codex" &&
-      (
-        runtime.expectedNativeSessionId ||
-        runtime.nativeProcessUuid ||
-        runtime.nativeProcessBirth
-      )
-    ) {
-      if (!runtime.nativeProcessUuid || !runtime.nativeProcessBirth) {
-        throw new Error(
-          `native ${agent} process incarnation cannot be verified for process ${pid}; ` +
-          "refresh list before controlling the terminal"
-        );
-      }
-      let incarnation: ReturnType<typeof codexProcessIncarnationForPid>;
-      try {
-        incarnation = codexProcessIncarnationForPid(pid);
-      } catch (error) {
-        throw new Error(
-          `native ${agent} process incarnation cannot be verified for process ${pid}; ` +
-          `${error instanceof Error ? error.message : String(error)}`
-        );
-      }
-      if (
-        incarnation.processUuid !== runtime.nativeProcessUuid ||
-        incarnation.processBirth !== runtime.nativeProcessBirth
-      ) {
-        throw new Error(
-          `native ${agent} process incarnation changed for process ${pid}; ` +
-          "refresh list before controlling the terminal"
-        );
-      }
-    }
-    if (!currentIdentity) {
-      return;
-    }
-    if (
-      runtime.expectedNativeSessionId &&
-      currentIdentity.sessionId === runtime.expectedNativeSessionId &&
-      (
-        !runtime.nativeProcessUuid ||
-        currentIdentity.processUuid === runtime.nativeProcessUuid
-      ) &&
-      (
-        !runtime.nativeProcessBirth ||
-        currentIdentity.processBirth === runtime.nativeProcessBirth
-      ) &&
-      (
-        !runtime.nativeRollout ||
-        (
-          currentIdentity.rollout?.fd === runtime.nativeRollout.fd &&
-          currentIdentity.rollout?.device === runtime.nativeRollout.device &&
-          currentIdentity.rollout?.inode === runtime.nativeRollout.inode &&
-          currentIdentity.rollout?.path === runtime.nativeRollout.path
-        )
-      )
-    ) {
-      // A native CLI may materialize the anticipated thread as soon as tmux
-      // pastes the task, before AKK sends Enter. The bridge has already
-      // revalidated the exact pane and process; accept only the UUID that the
-      // committed Session binding predicted, never an arbitrary new thread.
-      return;
-    }
-    const exactManagedCompanion = [
-      runtime.allowedPreMaterializationNativeIdentity,
-      ...(runtime.allowedAdditionalNativeIdentities ?? [])
-    ].find((candidate) =>
-      candidate?.sessionId !== runtime.expectedNativeSessionId &&
-      candidate?.processUuid === runtime.nativeProcessUuid &&
-      candidate?.processBirth === runtime.nativeProcessBirth &&
-      nativeIdentityMatchesCodexPreMaterialization(
-        currentIdentity,
-        candidate
-      )
-    );
-    if (
-      agent === "codex" &&
-      runtime.expectedNativeSessionId &&
-      exactManagedCompanion
-    ) {
-      return;
-    }
-    throw new Error(
-      `native ${agent} session appeared for process ${pid} during terminal control`
-    );
-  }
-  if (
-    runtime?.requireNativeRolloutIdentity === true &&
-    (
-      !runtime.nativeSessionId ||
-      !runtime.nativeProcessUuid ||
-      !runtime.nativeProcessBirth ||
-      !isCompleteNativeRollout(runtime.nativeRollout) ||
-      !currentIdentity?.sessionId ||
-      !currentIdentity.processUuid ||
-      !currentIdentity.processBirth ||
-      !isCompleteNativeRollout(currentIdentity.rollout)
-    )
-  ) {
-    throw new Error(
-      `native ${agent} rollout incarnation cannot be verified for process ${pid}; ` +
-      "refresh list before controlling the terminal"
-    );
-  }
-  if (
-    runtime?.requireNativeProcessUuid === true &&
-    (
-      !runtime.nativeProcessUuid ||
-      !currentIdentity?.processUuid ||
-      currentIdentity.processUuid !== runtime.nativeProcessUuid
-    )
-  ) {
-    throw new Error(
-      `native ${agent} process incarnation cannot be verified for process ${pid}; ` +
-      "refresh list before controlling the terminal"
-    );
-  }
-  if (
-    runtime?.nativeProcessStartedAt !== undefined &&
-    (
-      !Number.isSafeInteger(runtime.nativeProcessStartedAt) ||
-      Number(runtime.nativeProcessStartedAt) <= 0 ||
-      currentIdentity?.processStartedAt !== runtime.nativeProcessStartedAt
-    )
-  ) {
-    throw new Error(
-      `native ${agent} process start changed for process ${pid}; ` +
-      "refresh list before controlling the terminal"
-    );
-  }
-  if (!runtime?.nativeSessionId) {
-    return;
-  }
-  const expectedRollout = runtime.nativeRollout;
-  if (
-    currentIdentity?.sessionId !== runtime.nativeSessionId ||
-    (
-      runtime.nativeProcessUuid &&
-      currentIdentity?.processUuid !== runtime.nativeProcessUuid
-    ) ||
-    (
-      runtime.nativeProcessBirth &&
-      currentIdentity?.processBirth !== runtime.nativeProcessBirth
-    ) ||
-    (
-      expectedRollout &&
-      (
-        currentIdentity?.rollout?.fd !== expectedRollout.fd ||
-        currentIdentity?.rollout?.device !== expectedRollout.device ||
-        currentIdentity?.rollout?.inode !== expectedRollout.inode ||
-        currentIdentity?.rollout?.path !== expectedRollout.path
-      )
-    )
-  ) {
-    throw new Error(
-      `native ${agent} session identity changed for process ${pid}; ` +
-      "refresh list before controlling the terminal"
-    );
-  }
 }
 
 function assertNativeAgentIdentityForTurn({
@@ -19420,38 +18268,11 @@ function assertNativeAgentIdentityForTurn({
   currentIdentity: NativeAgentSessionIdentity | undefined;
   operation: string;
 }): void {
-  assertTurnBindingCurrent(conversation, operation);
-  if (nativeAgentIdentityMatchesTurn(conversation, currentIdentity)) {
-    return;
-  }
-  const takeover = isRecord(conversation.native_session_takeover)
-    ? conversation.native_session_takeover
-    : undefined;
-  const strictClaudeTurn = Boolean(
-    Number(takeover?.terminal_agent_identity_protocol) === 1 &&
-    executorForConversation(conversation).kind === "claude"
-  );
-  const storedProcessUuid = stringValue(
-    takeover?.terminal_agent_process_uuid
-  );
-  if (
-    strictClaudeTurn &&
-    (!storedProcessUuid || !currentIdentity?.processUuid)
-  ) {
-    throw new Error(
-      `cannot ${operation} Turn ${turnIdForConversation(conversation)}: ` +
-      "native Claude process incarnation cannot be verified; this Claude CLI " +
-      "must report both sessionId and startedAt before AKK can control it"
-    );
-  }
-  const expected = stringValue(takeover?.terminal_agent_session_id) ??
-    "unavailable";
-  const observed = currentIdentity?.sessionId ?? "unverifiable";
-  throw new Error(
-    `cannot ${operation} Turn ${turnIdForConversation(conversation)}: native ` +
-    `agent session identity changed or cannot be verified ` +
-    `(expected ${expected}, observed ${observed})`
-  );
+  terminalDispatchExecution({}).assertTurnIdentity({
+    conversation,
+    currentIdentity,
+    operation
+  });
 }
 
 function assertTurnBindingCurrent(
@@ -19540,99 +18361,43 @@ function migratedTerminalTurnMatchesSessionBinding({
   turnNativeThreadId?: string;
 }): boolean {
   const binding = session.binding;
-  const agent = executorForConversation(conversation).kind;
   const terminalId = stringValue(takeover.native_session_id);
-  const pid = Number(takeover.terminal_agent_pid);
-  if (
-    session.status !== "bound" ||
-    !binding ||
-    !binding.native_thread_id ||
-    session.agent !== agent ||
-    path.resolve(session.workspace) !== path.resolve(conversation.workspace) ||
-    !terminalId ||
-    !terminalControlAliasMatches(
-      terminalId,
-      terminalControl,
-      binding.terminal_id,
-      binding.terminal_control
-    ) ||
-    !terminalControlsShareIncarnation(binding.terminal_control, terminalControl) ||
-    !Number.isSafeInteger(pid) ||
-    binding.native_process.pid !== pid ||
-    !turnNativeThreadId ||
-    binding.native_thread_id !== turnNativeThreadId
-  ) {
-    return false;
-  }
-
-  const turnProcessUuid = stringValue(takeover.terminal_agent_process_uuid);
-  const turnProcessBirth = stringValue(takeover.terminal_agent_process_birth);
-  const turnRollout = isRecord(takeover.terminal_agent_rollout)
-    ? takeover.terminal_agent_rollout
-    : undefined;
-  const bindingProcess = binding.native_process;
-  const optionalProcessUuidMatches =
-    !turnProcessUuid && !bindingProcess.process_uuid ||
-    Boolean(
-      turnProcessUuid &&
-      bindingProcess.process_uuid &&
-      turnProcessUuid === bindingProcess.process_uuid
-    );
-  const optionalProcessBirthMatches =
-    !turnProcessBirth && !bindingProcess.process_birth ||
-    Boolean(
-      turnProcessBirth &&
-      bindingProcess.process_birth &&
-      turnProcessBirth === bindingProcess.process_birth
-    );
-  const optionalRolloutMatches =
-    !turnRollout && !bindingProcess.rollout ||
-    Boolean(
-      turnRollout &&
-      bindingProcess.rollout &&
-      stringValue(turnRollout.fd) === bindingProcess.rollout.fd &&
-      stringValue(turnRollout.device) === bindingProcess.rollout.device &&
-      stringValue(turnRollout.inode) === bindingProcess.rollout.inode &&
-      stringValue(turnRollout.path) === bindingProcess.rollout.path
-    );
-  if (
-    !optionalProcessUuidMatches ||
-    !optionalProcessBirthMatches ||
-    !optionalRolloutMatches
-  ) {
-    return false;
-  }
-  return agent === "claude"
-    ? Boolean(turnProcessUuid && bindingProcess.process_uuid)
-    : Boolean(
-        turnProcessBirth &&
-        bindingProcess.process_birth &&
-        isCompleteNativeRollout(turnRollout) &&
-        bindingProcess.rollout
-      );
+  return migratedTerminalBindingMatches({
+    session,
+    agent: executorForConversation(conversation).kind,
+    workspaceMatches:
+      path.resolve(session.workspace) === path.resolve(conversation.workspace),
+    terminalId,
+    terminalAliasMatches: Boolean(binding && terminalId &&
+      terminalControlAliasMatches(
+        terminalId,
+        terminalControl,
+        binding.terminal_id,
+        binding.terminal_control
+      )),
+    terminalIncarnationMatches: Boolean(binding &&
+      terminalControlsShareIncarnation(
+        binding.terminal_control,
+        terminalControl
+      )),
+    pid: Number(takeover.terminal_agent_pid),
+    nativeThreadId: turnNativeThreadId,
+    processUuid: stringValue(takeover.terminal_agent_process_uuid),
+    processBirth: stringValue(takeover.terminal_agent_process_birth),
+    rollout: isRecord(takeover.terminal_agent_rollout)
+      ? takeover.terminal_agent_rollout
+      : undefined
+  });
 }
 
 function withNativeAgentSessionIdentity(
   conversation: Conversation,
   identity: NativeAgentSessionIdentity
 ): Conversation {
-  const takeover = isRecord(conversation.native_session_takeover)
-    ? conversation.native_session_takeover
-    : {};
-  return {
-    ...conversation,
-    native_thread_id: identity.sessionId,
-    native_session_takeover: {
-      ...takeover,
-      terminal_agent_identity_protocol: 1,
-      terminal_agent_session_id: identity.sessionId,
-      terminal_agent_process_uuid: identity.processUuid,
-      terminal_agent_process_birth: identity.processBirth,
-      terminal_agent_rollout: identity.rollout,
-      terminal_agent_identity_evidence: identity.evidence,
-      terminal_agent_identity_bound_at: cliNow().toISOString()
-    }
-  };
+  return terminalDispatchExecution({}).withNativeIdentity(
+    conversation,
+    identity
+  );
 }
 
 function managedSessionStoreDirForConversation(
@@ -19646,28 +18411,6 @@ function managedSessionStoreDirForConversation(
   return statePath
     ? pathsForConversationDir(path.dirname(statePath)).storeDir
     : undefined;
-}
-
-function managedSessionRevision(state: ManagedSessionState): number {
-  const revision = Number(state.revision);
-  if (!Number.isSafeInteger(revision) || revision < 1) {
-    throw new Error(
-      `managed Session ${state.session_id} has no valid Store revision`
-    );
-  }
-  return revision;
-}
-
-function nativeThreadTransitionRevision(
-  transition: NativeThreadTransition
-): number {
-  const revision = Number(transition.revision);
-  if (!Number.isSafeInteger(revision) || revision < 1) {
-    throw new Error(
-      `native thread transition ${transition.transition_id} has no valid Store revision`
-    );
-  }
-  return revision;
 }
 
 function refineManagedSessionNativeIdentity({
@@ -19741,20 +18484,33 @@ function refineManagedSessionNativeIdentity({
 function persistManagedSessionNativeIdentity({
   conversation,
   terminalControl,
-  identity
+  identity,
+  storeDir
 }: {
   conversation: Conversation;
   terminalControl: TerminalControlRef;
   identity: NativeAgentSessionIdentity;
+  storeDir: string;
 }): ManagedSessionState | undefined {
   const bindingId = stringValue(conversation.terminal_binding_id);
   const bindingGeneration = Number(conversation.terminal_binding_generation);
-  const storeDir = managedSessionStoreDirForConversation(conversation);
-  if (!bindingId || !Number.isSafeInteger(bindingGeneration) || !storeDir) {
+  const conversationStoreDir =
+    managedSessionStoreDirForConversation(conversation);
+  if (
+    !bindingId ||
+    !Number.isSafeInteger(bindingGeneration) ||
+    !conversationStoreDir
+  ) {
     return undefined;
   }
+  const canonicalStoreDir = path.resolve(storeDir);
+  if (path.resolve(conversationStoreDir) !== canonicalStoreDir) {
+    throw new Error(
+      "managed Session native identity escaped its exact Store writer"
+    );
+  }
   const sessionId = sessionIdForConversation(conversation);
-  const current = tryLoadManagedSession(storeDir, sessionId);
+  const current = tryLoadManagedSession(canonicalStoreDir, sessionId);
   if (
     !current ||
     current.status !== "bound" ||
@@ -19797,26 +18553,39 @@ function persistManagedSessionNativeIdentity({
     },
     updated_at: now
   };
-  return saveManagedSession(storeDir, next, {
+  return saveManagedSession(canonicalStoreDir, next, {
     expectedRevision: managedSessionRevision(current)
   });
 }
 
 function quarantineManagedSessionBinding({
   conversation,
-  reason
+  reason,
+  storeDir
 }: {
   conversation: Conversation;
   reason: string;
+  storeDir: string;
 }): void {
   const bindingId = stringValue(conversation.terminal_binding_id);
   const bindingGeneration = Number(conversation.terminal_binding_generation);
-  const storeDir = managedSessionStoreDirForConversation(conversation);
-  if (!bindingId || !Number.isSafeInteger(bindingGeneration) || !storeDir) {
+  const conversationStoreDir =
+    managedSessionStoreDirForConversation(conversation);
+  if (
+    !bindingId ||
+    !Number.isSafeInteger(bindingGeneration) ||
+    !conversationStoreDir
+  ) {
     return;
   }
+  const canonicalStoreDir = path.resolve(storeDir);
+  if (path.resolve(conversationStoreDir) !== canonicalStoreDir) {
+    throw new Error(
+      "managed Session quarantine escaped its exact Store writer"
+    );
+  }
   const current = tryLoadManagedSession(
-    storeDir,
+    canonicalStoreDir,
     sessionIdForConversation(conversation)
   );
   if (
@@ -19827,7 +18596,7 @@ function quarantineManagedSessionBinding({
     return;
   }
   const now = cliNow().toISOString();
-  saveManagedSession(storeDir, {
+  saveManagedSession(canonicalStoreDir, {
     ...current,
     status: "quarantined",
     quarantine_reason: reason.slice(0, 2000),
@@ -19835,109 +18604,6 @@ function quarantineManagedSessionBinding({
   }, {
     expectedRevision: managedSessionRevision(current)
   });
-}
-
-async function pollNativeAgentSessionIdentity({
-  options,
-  executor,
-  terminalControl,
-  pid,
-  expectedSessionId,
-  allowedPreMaterializationIdentity,
-  allowedAdditionalIdentities = [],
-  requiredCodexAcceptance,
-  attempts = 40,
-  delayMs = 50
-}: {
-  options: Record<string, any>;
-  executor: { kind: ExecutorKind };
-  terminalControl: TerminalControlRef;
-  pid: number;
-  expectedSessionId?: string;
-  allowedPreMaterializationIdentity?: CodexPreMaterializationIdentity;
-  allowedAdditionalIdentities?: CodexPreMaterializationIdentity[];
-  requiredCodexAcceptance?: {
-    anchor: CodexRolloutAcceptanceAnchor;
-    requestHash: string;
-  };
-  attempts?: number;
-  delayMs?: number;
-}): Promise<NativeAgentSessionIdentity | undefined> {
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    if (requiredCodexAcceptance?.anchor.version === 3) {
-      const inventory = await inspectCodexOpenRootRolloutInventory({
-        options,
-        pid,
-        cwd: terminalControl.currentPath
-      });
-      const result = detectCodexCandidateSetRolloutAcceptance({
-        anchor: requiredCodexAcceptance.anchor,
-        currentInventory: inventory,
-        requestHash: requiredCodexAcceptance.requestHash
-      });
-      if (result.status === "accepted") {
-        return result.identity;
-      }
-      if (result.status === "uncertain") {
-        throw new Error(
-          `Codex candidate-set acceptance is uncertain (${result.code}): ` +
-          result.reason
-        );
-      }
-      if (attempt + 1 < attempts) {
-        await cliSleep(delayMs);
-      }
-      continue;
-    }
-    const identity = await resolveCurrentNativeAgentSessionIdentity({
-      options,
-      agent: executor.kind,
-      pid,
-      cwd: terminalControl.currentPath,
-      preferredSessionId: allowedPreMaterializationIdentity
-        ? expectedSessionId
-        : undefined,
-      allowedCompanionIdentity: allowedPreMaterializationIdentity,
-      allowedAdditionalIdentities
-    });
-    if (identity) {
-      if (!expectedSessionId || identity.sessionId === expectedSessionId) {
-        if (requiredCodexAcceptance) {
-          const acceptance = detectCodexRolloutAcceptance({
-            anchor: requiredCodexAcceptance.anchor,
-            currentIdentity: identity,
-            requestHash: requiredCodexAcceptance.requestHash
-          });
-          if (!acceptance) {
-            if (attempt + 1 < attempts) {
-              await cliSleep(delayMs);
-            }
-            continue;
-          }
-        }
-        return identity;
-      }
-      if (
-        nativeIdentityMatchesCodexPreMaterialization(
-          identity,
-          allowedPreMaterializationIdentity
-        )
-      ) {
-        if (attempt + 1 < attempts) {
-          await cliSleep(delayMs);
-        }
-        continue;
-      }
-      throw new Error(
-        `native agent materialized unexpected thread ${identity.sessionId}; ` +
-        `expected ${expectedSessionId}`
-      );
-    }
-    if (attempt + 1 < attempts) {
-      await cliSleep(delayMs);
-    }
-  }
-  return undefined;
 }
 
 function managedTurnsForSession(
@@ -19952,53 +18618,39 @@ function managedTurnsForSession(
     .sort(compareManagedConversationRecency);
 }
 
-function assertManagedSessionCanStartTurn(turns: Conversation[]): void {
-  const blocking = turns.filter((conversation) =>
-    SESSION_SEND_BLOCKING_STATUSES.has(conversation.status)
+function assertManagedSessionCanStartTurn(
+  turns: Conversation[]
+): void {
+  assertManagedSessionCanStartTurnPolicy(
+    turns,
+    (conversation) => SESSION_SEND_BLOCKING_STATUSES.has(conversation.status)
   );
-  if (blocking.length > 0) {
-    const owner = blocking[0];
-    throw new Error(
-      `session ${sessionIdForConversation(owner)} already has active turn ` +
-      `${turnIdForConversation(owner)} (${owner.status}); wait for its callback, ` +
-      "respond to it if it is waiting for OpenClaw, cancel it, or close it before sending another turn"
-    );
-  }
 }
 
 function managedTurnMatchesResolvedTerminal(
   conversation: Conversation,
-  terminalConversation: ResolvedTerminalConversation,
-  currentNativeIdentity?: NativeAgentSessionIdentity
+  terminal: ResolvedTerminalConversation,
+  currentIdentity?: NativeAgentSessionIdentity
 ): boolean {
   const takeover = isRecord(conversation.native_session_takeover)
     ? conversation.native_session_takeover
     : undefined;
   const storedControl = terminalControlFromTakeover(takeover);
-  const storedTerminalIdentity = parseTerminalConversationId(
-    stringValue(takeover?.native_session_id)
-  );
-  const currentTerminalIdentity = parseTerminalConversationId(
-    terminalConversation.conversationId
-  );
-  return Boolean(
-    storedControl &&
-    storedTerminalIdentity &&
-    currentTerminalIdentity &&
-    executorForConversation(conversation).kind === terminalConversation.agent &&
-    storedTerminalIdentity.agent === currentTerminalIdentity.agent &&
-    storedTerminalIdentity.pid === currentTerminalIdentity.pid &&
-    Number(takeover?.terminal_agent_pid) === terminalConversation.pid &&
-    nativeAgentIdentityMatchesTurn(conversation, currentNativeIdentity) &&
-    terminalControlsShareIncarnation(
-      storedControl,
-      terminalConversation.terminalControl
-    ) &&
-    matchesConfiguredWorkspace(
+  return managedTurnMatchesTerminal({
+    conversation,
+    terminal,
+    currentIdentity,
+    storedControlExists: storedControl !== undefined,
+    terminalIncarnationMatches: Boolean(storedControl &&
+      terminalControlsShareIncarnation(
+        storedControl,
+        terminal.terminalControl
+      )),
+    workspaceMatches: matchesConfiguredWorkspace(
       conversation.workspace,
-      terminalConversation.terminalControl.currentPath
+      terminal.terminalControl.currentPath
     )
-  );
+  });
 }
 
 function createManagedTerminalTurn({
@@ -24602,22 +23254,13 @@ function terminalBridgeRuntimeDir(): string {
 }
 
 function terminalBridgeRuntimeKey(terminalControl): string {
-  if (hasCanonicalTerminalEndpoint(terminalControl as TerminalControlRef)) {
-    return createHash("sha256")
-      .update(terminalEndpointIdentityKey(terminalControl as TerminalControlRef))
-      .digest("hex")
-      .slice(0, 20);
-  }
-  return legacyTerminalBridgeRuntimeKey(terminalControl as TerminalControlRef);
+  return terminalRuntimeResourceKey(terminalControl as TerminalControlRef);
 }
 
 function legacyTerminalBridgeRuntimeKey(
   terminalControl: TerminalControlRef
 ): string {
-  return createHash("sha256")
-    .update(JSON.stringify(terminalLegacyRuntimeRoute(terminalControl)))
-    .digest("hex")
-    .slice(0, 20);
+  return terminalRuntimeResourceKey(terminalControl, { legacy: true });
 }
 
 function terminalBridgeDispatchLedgerPath(
@@ -25686,9 +24329,7 @@ function loadDeferredForegroundTurnAuthority({
   const anchor = takeover?.codex_rollout_acceptance_anchor;
   let validatedAnchor: CodexRolloutAcceptanceAnchor | undefined;
   try {
-    validatedAnchor = validateCodexRolloutAcceptanceAnchor(
-      anchor as CodexRolloutAcceptanceAnchor
-    );
+    validatedAnchor = validateCodexRolloutAcceptanceAnchor(anchor);
   } catch {
     validatedAnchor = undefined;
   }
