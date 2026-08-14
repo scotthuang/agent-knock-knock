@@ -1,0 +1,292 @@
+{
+  "schema": "agent-knock-knock/refactor-test-evidence",
+  "version": 1,
+  "subprocess_startup_sites": {
+    "measurement": {
+      "kind": "static_source_call_sites",
+      "source_scope": "test/**/*.ts containing a node:child_process import",
+      "call_expressions": [
+        "execFile",
+        "execFileSync",
+        "fork",
+        "spawn",
+        "spawnSync"
+      ],
+      "lookahead_characters": 500,
+      "included_categories": [
+        "cli_process",
+        "fake_node_process"
+      ]
+    },
+    "baseline": {
+      "revision": "ea592a88d7af4a709e7a7a1b989dd29e61932935",
+      "counts": {
+        "cli_process": 38,
+        "fake_node_process": 10,
+        "other_process_or_adapter": 10
+      },
+      "included_total": 48
+    },
+    "current": {
+      "counts": {
+        "cli_process": 38,
+        "fake_node_process": 10,
+        "other_process_or_adapter": 10
+      },
+      "included_total": 48
+    },
+    "final_threshold": {
+      "required": false,
+      "maximum_percent_of_baseline": 40
+    }
+  },
+  "affected_selector_replay": {
+    "final_threshold": {
+      "required": false,
+      "maximum_full_fallback_count": 2
+    },
+    "expected": {
+      "scenario_count": 10,
+      "full_count": 9,
+      "targeted_count": 1,
+      "full_rate_basis_points": 9000
+    },
+    "scenarios": [
+      {
+        "commit": "579b38249c31d7d426424ced761f0ed901c318ea",
+        "subject": "feat(handoff): absorb verified human thread switches (#125)",
+        "paths": [
+          "README.md",
+          "src/cli-core.ts",
+          "src/managed-session.ts",
+          "src/openclaw-plugin.ts",
+          "src/session-store.ts",
+          "src/terminal-agent-bridge.ts",
+          "templates/openclaw-skills/agent-knock-knock/SKILL.md",
+          "test/codex-no-rollout-binding-cli.test.ts",
+          "test/human-handoff-adoption-cli.test.ts",
+          "test/management-cli.test.ts",
+          "test/native-thread-lifecycle-recovery-cli.test.ts",
+          "test/openclaw-plugin-contract.test.ts",
+          "test/quickstart-docs.test.ts",
+          "test/terminal-agent-bridge.test.ts",
+          "test/test-tiers.json"
+        ],
+        "expected": {
+          "mode": "full"
+        }
+      },
+      {
+        "commit": "0901fd93a9f04d8c452d98dcaa6871c9bab5464a",
+        "subject": "fix(handoff): recover cleared agent contexts (#127)",
+        "paths": [
+          "src/cli-core.ts",
+          "src/terminal-agent-bridge.ts",
+          "test/codex-no-rollout-binding-cli.test.ts",
+          "test/human-handoff-adoption-cli.test.ts",
+          "test/management-cli.test.ts",
+          "test/native-thread-lifecycle-recovery-cli.test.ts",
+          "test/terminal-agent-bridge.test.ts"
+        ],
+        "expected": {
+          "mode": "full"
+        }
+      },
+      {
+        "commit": "0c4004b412bdfa4a2575a57b16f3119b2fc47782",
+        "subject": "fix(herdr): harden status probes and recover collateral stalls (#128)",
+        "paths": [
+          "README.md",
+          "src/cli-core.ts",
+          "src/herdr-terminal-control-provider.ts",
+          "src/openclaw-plugin.ts",
+          "src/terminal-agent-bridge.ts",
+          "src/terminal-control-provider.ts",
+          "templates/openclaw-skills/agent-knock-knock/SKILL.md",
+          "test/codex-no-rollout-binding-cli.test.ts",
+          "test/codex-sticky-rollout-fixture.ts",
+          "test/codex-sticky-rollout-lifecycle-cli.test.ts",
+          "test/codex-sticky-rollout-lifecycle-core.test.ts",
+          "test/herdr-terminal-control-provider.test.ts",
+          "test/human-handoff-adoption-cli.test.ts",
+          "test/management-cli.test.ts",
+          "test/native-thread-lifecycle-cli.test.ts",
+          "test/native-thread-lifecycle-recovery-cli.test.ts",
+          "test/quickstart-docs.test.ts",
+          "test/shards/agent-cli-claude-callback.test.ts",
+          "test/shards/agent-cli-control-locks.test.ts",
+          "test/shards/agent-cli-dispatch-authority.test.ts",
+          "test/shards/agent-cli-dispatch-recovery.test.ts",
+          "test/terminal-agent-bridge.test.ts",
+          "test/terminal-control-provider.test.ts"
+        ],
+        "expected": {
+          "mode": "full"
+        }
+      },
+      {
+        "commit": "d9e1a4cacde8e9cc65b44dd6bfae27ad2a877033",
+        "subject": "fix(codex): bind narrow first tasks after submission (#130)",
+        "paths": [
+          "README.md",
+          "src/cli-core.ts",
+          "src/deferred-foreground-transfer.ts",
+          "src/session-store.ts",
+          "src/store.ts",
+          "templates/openclaw-skills/agent-knock-knock/SKILL.md",
+          "test/codex-no-rollout-binding-cli.test.ts",
+          "test/deferred-foreground-transfer.test.ts",
+          "test/management-cli.test.ts",
+          "test/quickstart-docs.test.ts",
+          "test/store.test.ts",
+          "test/test-tiers.json",
+          "test/turn-session-binding-cli.test.ts"
+        ],
+        "expected": {
+          "mode": "full"
+        }
+      },
+      {
+        "commit": "d0804039b5e1efd35ca1c716eb85019e48e7380f",
+        "subject": "feat: prioritize human terminal actions (#131)",
+        "paths": [
+          "README.md",
+          "src/agent-session-provider.ts",
+          "src/cli-core.ts",
+          "src/codex-local-session-provider.ts",
+          "src/codex-store-adapter.ts",
+          "src/deferred-foreground-transfer.ts",
+          "src/openclaw-plugin.ts",
+          "src/store.ts",
+          "src/terminal-submission-acceptance.ts",
+          "templates/openclaw-skills/agent-knock-knock/SKILL.md",
+          "test/codex-no-rollout-binding-cli.test.ts",
+          "test/codex-sticky-rollout-lifecycle-core.test.ts",
+          "test/codex-store-adapter.test.ts",
+          "test/deferred-foreground-transfer.test.ts",
+          "test/management-cli.test.ts",
+          "test/openclaw-plugin-contract.test.ts",
+          "test/quickstart-docs.test.ts",
+          "test/shards/agent-cli-control-locks.test.ts",
+          "test/shards/agent-cli-monitor-recovery.test.ts",
+          "test/store.test.ts",
+          "test/terminal-submission-acceptance.test.ts"
+        ],
+        "expected": {
+          "mode": "full"
+        }
+      },
+      {
+        "commit": "9af911357b8c0442ba91ce197029941ddbc29ba1",
+        "subject": "fix(handoff): recover Codex after manual clear",
+        "paths": [
+          "README.md",
+          "src/cli-core.ts",
+          "src/deferred-foreground-transfer.ts",
+          "templates/openclaw-skills/agent-knock-knock/SKILL.md",
+          "test/codex-no-rollout-binding-cli.test.ts",
+          "test/deferred-foreground-transfer.test.ts",
+          "test/management-cli.test.ts",
+          "test/quickstart-docs.test.ts",
+          "test/shards/agent-cli-claude-callback.test.ts",
+          "test/shards/agent-cli-composer-replay.test.ts",
+          "test/shards/agent-cli-monitor-lifecycle.test.ts",
+          "test/store.test.ts"
+        ],
+        "expected": {
+          "mode": "full"
+        }
+      },
+      {
+        "commit": "5eaada87ddfb3f86afae8370140822f05e440466",
+        "subject": "fix(codex): route managed sends through follow-current",
+        "paths": [
+          "README.md",
+          "docs/bidirectional-agent-protocol.md",
+          "docs/openclaw-session-turn-delivery-requirement.md",
+          "docs/quickstart-tmux.md",
+          "src/cli-core.ts",
+          "src/openclaw-plugin.ts",
+          "templates/openclaw-skills/agent-knock-knock/SKILL.md",
+          "test/agent-cli-fixtures.ts",
+          "test/codex-no-rollout-binding-cli.test.ts",
+          "test/codex-sticky-rollout-fixture.ts",
+          "test/codex-sticky-rollout-lifecycle-core.test.ts",
+          "test/human-handoff-adoption-cli.test.ts",
+          "test/management-cli.test.ts",
+          "test/native-thread-lifecycle-recovery-cli.test.ts",
+          "test/openclaw-plugin-contract.test.ts",
+          "test/quickstart-docs.test.ts",
+          "test/session-selector-cli.test.ts",
+          "test/shards/agent-cli-dispatch-authority.test.ts",
+          "test/shards/agent-cli-dispatch-recovery.test.ts",
+          "test/shards/agent-cli-monitor-lifecycle.test.ts",
+          "test/shards/agent-cli-monitor-recovery.test.ts",
+          "test/shards/agent-cli-session-acceptance.test.ts",
+          "test/shards/agent-cli-terminal-send-gates.test.ts"
+        ],
+        "expected": {
+          "mode": "full"
+        }
+      },
+      {
+        "commit": "13ffc6df417c5fefa3360c58415de92ed6844a8a",
+        "subject": "fix(approval): scope authorization to prompt evidence",
+        "paths": [
+          "README.md",
+          "docs/bidirectional-agent-protocol.md",
+          "src/claude-terminal-agent-adapter.ts",
+          "src/cli-core.ts",
+          "src/codex-terminal-agent-adapter.ts",
+          "src/terminal-agent-adapter.ts",
+          "src/terminal-agent-bridge.ts",
+          "templates/openclaw-skills/agent-knock-knock/SKILL.md",
+          "test/claude-terminal-agent-adapter.test.ts",
+          "test/codex-no-rollout-binding-cli.test.ts",
+          "test/management-cli.test.ts",
+          "test/quickstart-docs.test.ts",
+          "test/terminal-agent-adapter.test.ts",
+          "test/terminal-agent-bridge.test.ts"
+        ],
+        "expected": {
+          "mode": "full"
+        }
+      },
+      {
+        "commit": "95bbed33d62bae946bb5163f4478141cdecf3acc",
+        "subject": "test: keep restart fixture time monotonic",
+        "paths": [
+          "test/codex-no-rollout-binding-cli.test.ts"
+        ],
+        "expected": {
+          "mode": "targeted",
+          "integration_files": [
+            "test/codex-no-rollout-binding-cli.test.ts"
+          ]
+        }
+      },
+      {
+        "commit": "ad0679f1f89c0ff713bee6d11bc7116d27d10a6e",
+        "subject": "fix: recover turns after bound agent process death",
+        "paths": [
+          "CHANGELOG.md",
+          "package-lock.json",
+          "package.json",
+          "src/claude-local-transcript-provider.ts",
+          "src/cli-core.ts",
+          "src/terminal-process-source.ts",
+          "test/claude-local-transcript-provider.test.ts",
+          "test/codex-no-rollout-binding-cli.test.ts",
+          "test/codex-store-adapter.test.ts",
+          "test/human-handoff-adoption-cli.test.ts",
+          "test/in-process-cli-fixtures.ts",
+          "test/shards/agent-cli-monitor-recovery.test.ts",
+          "test/terminal-process-source.test.ts"
+        ],
+        "expected": {
+          "mode": "full"
+        }
+      }
+    ]
+  }
+}

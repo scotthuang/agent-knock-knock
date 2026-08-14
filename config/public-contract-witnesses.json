@@ -1,0 +1,539 @@
+{
+  "schema": "agent-knock-knock/public-contract-witnesses",
+  "version": 1,
+  "contracts": {
+    "cli_json": {
+      "package_name": "@scotthuang/agent-knock-knock",
+      "executable": "agent-knock-knock",
+      "facade_exports": [
+        "parseCliCommand",
+        "executeCliCommand"
+      ],
+      "commands": [
+        "delegate",
+        "list",
+        "status",
+        "send",
+        "new-thread",
+        "clear-thread",
+        "list-resumable-threads",
+        "threads",
+        "native-inspect",
+        "native-status",
+        "resume-thread",
+        "reconcile-binding",
+        "respond",
+        "approve",
+        "cancel",
+        "renew",
+        "reconcile-monitors",
+        "close",
+        "transcript",
+        "install-openclaw",
+        "doctor",
+        "callback",
+        "retry-callback",
+        "monitor"
+      ],
+      "authority_paths": [
+        "package.json",
+        "src/cli-core.ts",
+        "src/cli.ts"
+      ],
+      "witnesses": [
+        "cli-core-import-boundary",
+        "cli-output-boundary",
+        "management-list-boundary",
+        "store-protocol-cli-boundary"
+      ]
+    },
+    "list_action": {
+      "version": 16,
+      "actions": [
+        "send",
+        "new_thread",
+        "list_resumable_threads",
+        "native_inspect",
+        "resume_thread",
+        "reconcile_binding",
+        "respond",
+        "status",
+        "approve",
+        "cancel",
+        "renew",
+        "retry_callback",
+        "close"
+      ],
+      "authority_paths": [
+        "src/terminal-list-renderer.ts"
+      ],
+      "witnesses": [
+        "action-v16-unit",
+        "management-list-boundary",
+        "openclaw-plugin-boundary"
+      ]
+    },
+    "openclaw_tools": {
+      "plugin_id": "agent-knock-knock",
+      "slash_command": "akk",
+      "tools": [
+        "agent_knock_knock_list",
+        "agent_knock_knock_list_resumable_threads",
+        "agent_knock_knock_native_inspect",
+        "agent_knock_knock_new_thread",
+        "agent_knock_knock_reconcile_binding",
+        "agent_knock_knock_resume_thread",
+        "agent_knock_knock_status",
+        "agent_knock_knock_send",
+        "agent_knock_knock_respond",
+        "agent_knock_knock_renew",
+        "agent_knock_knock_retry_callback",
+        "agent_knock_knock_cancel",
+        "agent_knock_knock_close",
+        "agent_knock_knock_approve"
+      ],
+      "authority_paths": [
+        "openclaw.plugin.json",
+        "src/openclaw-plugin.ts"
+      ],
+      "witnesses": [
+        "openclaw-plugin-boundary"
+      ]
+    },
+    "store_protocols": {
+      "format_version": 1,
+      "current_writer_protocol": 5,
+      "session_authority_protocol": 3,
+      "upgradeable_writer_protocols": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "authority_paths": [
+        "src/session-store.ts",
+        "src/store.ts"
+      ],
+      "protocol_witnesses": [
+        {
+          "protocol": 1,
+          "witness": "store-protocol-1-boundary"
+        },
+        {
+          "protocol": 2,
+          "witness": "store-protocol-2-boundary"
+        },
+        {
+          "protocol": 3,
+          "witness": "store-protocol-3-boundary"
+        },
+        {
+          "protocol": 4,
+          "witness": "store-protocol-4-boundary"
+        },
+        {
+          "protocol": 5,
+          "witness": "store-protocol-5-boundary"
+        }
+      ],
+      "witnesses": [
+        "store-protocol-cli-boundary"
+      ]
+    }
+  },
+  "witnesses": [
+    {
+      "id": "action-v16-unit",
+      "path": "test/terminal-list-renderer.test.ts",
+      "tier": "fast",
+      "needle": "the public action contract remains v16 with stable action ordering"
+    },
+    {
+      "id": "callback-cli-boundary",
+      "path": "test/callback-cli.test.ts",
+      "tier": "integration",
+      "needle": "callback records a structured Claude message before delivery"
+    },
+    {
+      "id": "callback-policy-unit",
+      "path": "test/callback-outbox-policy.test.ts",
+      "tier": "fast",
+      "needle": "durable callback evidence decides without requesting runtime observations"
+    },
+    {
+      "id": "callback-settlement-unit",
+      "path": "test/callback-outbox-settlement.test.ts",
+      "tier": "fast",
+      "needle": "callback progress preserves lock, save, then event order"
+    },
+    {
+      "id": "callback-transport-unit",
+      "path": "test/openclaw-callback-transport.test.ts",
+      "tier": "fast",
+      "needle": "gateway method preserves payload, redaction, process limits, and token env"
+    },
+    {
+      "id": "claude-callback-boundary",
+      "path": "test/shards/agent-cli-claude-callback.test.ts",
+      "tier": "integration",
+      "needle": "hookless Claude Gateway auto approval keeps the original monitor through completion"
+    },
+    {
+      "id": "cli-core-import-boundary",
+      "path": "test/cli-core-import.test.ts",
+      "tier": "integration",
+      "needle": "importing the CLI core does not inspect argv, emit output, or exit"
+    },
+    {
+      "id": "cli-output-boundary",
+      "path": "test/cli-ux.test.ts",
+      "tier": "integration",
+      "needle": "CLI output redacts legacy Gateway credentials"
+    },
+    {
+      "id": "cli-runtime-unit",
+      "path": "test/cli-runtime-context.test.ts",
+      "tier": "fast",
+      "needle": "CLI runtime contexts isolate interleaved command dependencies and output"
+    },
+    {
+      "id": "codex-binding-boundary",
+      "path": "test/codex-no-rollout-binding-cli.test.ts",
+      "tier": "integration",
+      "needle": "virgin raw Codex attach atomically refines the Session and Turn binding after send"
+    },
+    {
+      "id": "control-lock-boundary",
+      "path": "test/shards/agent-cli-control-locks.test.ts",
+      "tier": "integration",
+      "needle": "managed terminal send cannot overwrite a concurrent terminal cancellation"
+    },
+    {
+      "id": "dispatch-authority-boundary",
+      "path": "test/shards/agent-cli-dispatch-authority.test.ts",
+      "tier": "integration",
+      "needle": "an active managed task blocks a follow-up before tmux input"
+    },
+    {
+      "id": "dispatch-ledger-unit",
+      "path": "test/terminal-dispatch-ledger-codec.test.ts",
+      "tier": "fast",
+      "needle": "decode accepts exact v1 route documents"
+    },
+    {
+      "id": "dispatch-policy-unit",
+      "path": "test/terminal-dispatch-policy.test.ts",
+      "tier": "fast",
+      "needle": "owner reads remain lazy behind lifecycle and receipt-status precedence"
+    },
+    {
+      "id": "dispatch-receipt-boundary",
+      "path": "test/shards/agent-cli-receipt-fences.test.ts",
+      "tier": "integration",
+      "needle": "terminal receipt fingerprints preserve exact whitespace"
+    },
+    {
+      "id": "dispatch-recovery-boundary",
+      "path": "test/shards/agent-cli-dispatch-recovery.test.ts",
+      "tier": "integration",
+      "needle": "safe-aborted delegate retries refuse a changed Session binding"
+    },
+    {
+      "id": "handoff-boundary",
+      "path": "test/human-handoff-adoption-cli.test.ts",
+      "tier": "integration",
+      "needle": "a terminal-scoped Codex send adopts an exact unknown human-switched thread"
+    },
+    {
+      "id": "lifecycle-boundary",
+      "path": "test/native-thread-lifecycle-cli.test.ts",
+      "tier": "integration",
+      "needle": "verified lifecycle target conflict preserves source and later rolls forward without duplicate command, Session, or Turn"
+    },
+    {
+      "id": "lifecycle-recovery-boundary",
+      "path": "test/native-thread-lifecycle-recovery-cli.test.ts",
+      "tier": "integration",
+      "needle": "black-box Codex recovery clears a dispatching composer and rolls exact-before back without replay"
+    },
+    {
+      "id": "lifecycle-transition-unit",
+      "path": "test/native-thread-transition-policy.test.ts",
+      "tier": "fast",
+      "needle": "transition eligibility preserves binding and capability gate priority"
+    },
+    {
+      "id": "management-list-boundary",
+      "path": "test/management-cli.test.ts",
+      "tier": "integration",
+      "needle": "list exposes physical tmux terminals with the terminal-first action contract"
+    },
+    {
+      "id": "monitor-approval-boundary",
+      "path": "test/shards/agent-cli-monitor-approval-context.test.ts",
+      "tier": "integration",
+      "needle": "terminal approval notification releases the state lock during callback delivery and preserves concurrent close"
+    },
+    {
+      "id": "monitor-lifecycle-boundary",
+      "path": "test/shards/agent-cli-monitor-lifecycle.test.ts",
+      "tier": "integration",
+      "needle": "terminal bridge monitor trusts matching task_complete despite stale working screen text"
+    },
+    {
+      "id": "monitor-poll-unit",
+      "path": "test/terminal-monitor-poll-policy.test.ts",
+      "tier": "fast",
+      "needle": "activity polling retains fingerprint memory and orders reasons"
+    },
+    {
+      "id": "monitor-recovery-boundary",
+      "path": "test/shards/agent-cli-monitor-recovery.test.ts",
+      "tier": "integration",
+      "needle": "terminal bridge monitor singleton rejects a live owner and reclaims a dead owner"
+    },
+    {
+      "id": "monitor-seams-unit",
+      "path": "test/terminal-monitor-seams.test.ts",
+      "tier": "fast",
+      "needle": "normal monitor plan preserves exact argv, timeout precedence, and safe env"
+    },
+    {
+      "id": "mutation-lock-unit",
+      "path": "test/mutation-transaction.test.ts",
+      "tier": "fast",
+      "needle": "mutation lock shell acquires canonically and releases in reverse"
+    },
+    {
+      "id": "openclaw-plugin-boundary",
+      "path": "test/openclaw-plugin-contract.test.ts",
+      "tier": "integration",
+      "needle": "OpenClaw runtime registrations match the published manifest"
+    },
+    {
+      "id": "session-selector-boundary",
+      "path": "test/session-selector-cli.test.ts",
+      "tier": "integration",
+      "needle": "CLI omission and short refs resolve one actionable managed session"
+    },
+    {
+      "id": "store-protocol-1-boundary",
+      "path": "test/store.test.ts",
+      "tier": "integration",
+      "needle": "an empty protocol 1 Store is reported upgradeable and upgrades in place"
+    },
+    {
+      "id": "store-protocol-2-boundary",
+      "path": "test/store.test.ts",
+      "tier": "integration",
+      "needle": "protocol 2 migration materializes one hashed Session before publishing the current protocol"
+    },
+    {
+      "id": "store-protocol-3-boundary",
+      "path": "test/store.test.ts",
+      "tier": "integration",
+      "needle": "protocol 3 upgrades to the current writer fence by atomically publishing only the manifest"
+    },
+    {
+      "id": "store-protocol-4-boundary",
+      "path": "test/store.test.ts",
+      "tier": "integration",
+      "needle": "non-empty protocol 4 upgrades to protocol 5 without rewriting Turn or Session state"
+    },
+    {
+      "id": "store-protocol-5-boundary",
+      "path": "test/store.test.ts",
+      "tier": "integration",
+      "needle": "protocol 5 fences candidate source history until transfer cleanup is terminal"
+    },
+    {
+      "id": "store-protocol-cli-boundary",
+      "path": "test/store-protocol-cli.test.ts",
+      "tier": "integration",
+      "needle": "send fails closed on writer protocol mismatch before invoking tmux"
+    },
+    {
+      "id": "terminal-binding-unit",
+      "path": "test/terminal-binding-authority.test.ts",
+      "tier": "fast",
+      "needle": "list observation adapter preserves resolved and no-identity evidence"
+    },
+    {
+      "id": "terminal-send-boundary",
+      "path": "test/shards/agent-cli-terminal-send-gates.test.ts",
+      "tier": "integration",
+      "needle": "raw and managed Codex sends fail closed unless the locked pane is verifiably idle"
+    },
+    {
+      "id": "verified-dead-unit",
+      "path": "test/verified-dead-agent-policy.test.ts",
+      "tier": "fast",
+      "needle": "stored process-death authority fails closed on every mutable binding class"
+    }
+  ],
+  "migration_witnesses": [
+    {
+      "id": "callback-outbox",
+      "invariant": "Callback message identity, attempt authority, transport acceptance, and settlement ordering remain monotonic and isolated from Turn phase.",
+      "old_executable_witnesses": [
+        "callback-cli-boundary",
+        "claude-callback-boundary"
+      ],
+      "service_invariant_witnesses": [
+        "callback-policy-unit",
+        "callback-settlement-unit",
+        "callback-transport-unit"
+      ],
+      "retained_boundary_witnesses": [
+        "callback-cli-boundary",
+        "claude-callback-boundary",
+        "openclaw-plugin-boundary"
+      ]
+    },
+    {
+      "id": "cli-runtime",
+      "invariant": "The executable owns argv, stdout, and exit while concurrent and nested facade executions retain isolated dependencies and JSON output.",
+      "old_executable_witnesses": [
+        "cli-core-import-boundary",
+        "cli-output-boundary"
+      ],
+      "service_invariant_witnesses": [
+        "cli-runtime-unit"
+      ],
+      "retained_boundary_witnesses": [
+        "cli-core-import-boundary",
+        "cli-output-boundary",
+        "management-list-boundary"
+      ]
+    },
+    {
+      "id": "lifecycle-transition",
+      "invariant": "Native new, resume, adoption, and recovery preserve exact identity, CAS, zero-input abort, and no-replay uncertainty boundaries.",
+      "old_executable_witnesses": [
+        "handoff-boundary",
+        "lifecycle-boundary",
+        "lifecycle-recovery-boundary"
+      ],
+      "service_invariant_witnesses": [
+        "lifecycle-transition-unit"
+      ],
+      "retained_boundary_witnesses": [
+        "handoff-boundary",
+        "lifecycle-boundary",
+        "lifecycle-recovery-boundary"
+      ]
+    },
+    {
+      "id": "monitor-seams",
+      "invariant": "Monitor observation, decision, supervision, recovery, approval, and completion preserve snapshot ownership and never replay terminal input.",
+      "old_executable_witnesses": [
+        "monitor-approval-boundary",
+        "monitor-lifecycle-boundary",
+        "monitor-recovery-boundary"
+      ],
+      "service_invariant_witnesses": [
+        "monitor-poll-unit",
+        "monitor-seams-unit"
+      ],
+      "retained_boundary_witnesses": [
+        "monitor-approval-boundary",
+        "monitor-lifecycle-boundary",
+        "monitor-recovery-boundary"
+      ]
+    },
+    {
+      "id": "mutation-lock-shell",
+      "invariant": "Migrated mutations acquire terminal, writer, then state locks and release in reverse without weakening durable write ownership.",
+      "old_executable_witnesses": [
+        "control-lock-boundary"
+      ],
+      "service_invariant_witnesses": [
+        "mutation-lock-unit"
+      ],
+      "retained_boundary_witnesses": [
+        "control-lock-boundary",
+        "dispatch-recovery-boundary"
+      ]
+    },
+    {
+      "id": "terminal-binding-authority",
+      "invariant": "List projection and mutation authorization share exact binding decisions while mutation performs a fresh purpose-built observation before input.",
+      "old_executable_witnesses": [
+        "codex-binding-boundary",
+        "handoff-boundary",
+        "terminal-send-boundary"
+      ],
+      "service_invariant_witnesses": [
+        "terminal-binding-unit"
+      ],
+      "retained_boundary_witnesses": [
+        "codex-binding-boundary",
+        "handoff-boundary",
+        "lifecycle-recovery-boundary",
+        "terminal-send-boundary"
+      ]
+    },
+    {
+      "id": "terminal-dispatch-ledger",
+      "invariant": "Ledger decoding, receipt strengthening, immutable identity, crash recovery, and uncertain no-retry behavior remain compatible for v1 and v2 records.",
+      "old_executable_witnesses": [
+        "dispatch-receipt-boundary",
+        "dispatch-recovery-boundary"
+      ],
+      "service_invariant_witnesses": [
+        "dispatch-ledger-unit"
+      ],
+      "retained_boundary_witnesses": [
+        "dispatch-receipt-boundary",
+        "dispatch-recovery-boundary"
+      ]
+    },
+    {
+      "id": "terminal-dispatch-policy",
+      "invariant": "Dispatch authorization preserves lifecycle and ownership precedence before exact composer input and one Enter.",
+      "old_executable_witnesses": [
+        "dispatch-authority-boundary",
+        "terminal-send-boundary"
+      ],
+      "service_invariant_witnesses": [
+        "dispatch-policy-unit"
+      ],
+      "retained_boundary_witnesses": [
+        "dispatch-authority-boundary",
+        "dispatch-recovery-boundary",
+        "terminal-send-boundary"
+      ]
+    },
+    {
+      "id": "terminal-list-renderer",
+      "invariant": "The pure renderer preserves action-contract v16 ordering, exact selectors, and read-only projection for CLI and OpenClaw.",
+      "old_executable_witnesses": [
+        "management-list-boundary",
+        "session-selector-boundary"
+      ],
+      "service_invariant_witnesses": [
+        "action-v16-unit"
+      ],
+      "retained_boundary_witnesses": [
+        "management-list-boundary",
+        "openclaw-plugin-boundary",
+        "session-selector-boundary"
+      ]
+    },
+    {
+      "id": "verified-dead-agent",
+      "invariant": "Only exact immutable process-death authority may stall or close an eligible Turn, and durable completion always wins.",
+      "old_executable_witnesses": [
+        "handoff-boundary",
+        "monitor-recovery-boundary"
+      ],
+      "service_invariant_witnesses": [
+        "verified-dead-unit"
+      ],
+      "retained_boundary_witnesses": [
+        "handoff-boundary",
+        "monitor-recovery-boundary"
+      ]
+    }
+  ]
+}
