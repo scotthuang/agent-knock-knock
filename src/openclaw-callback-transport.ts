@@ -1,5 +1,9 @@
 import { spawnSync } from "node:child_process";
-import type { CallbackDeliveryOutcome } from "./callback-outbox-policy.js";
+import type {
+  CallbackDeliveryOptions,
+  CallbackDeliveryOutcome,
+  DeliverCallbackInput
+} from "./callback-outbox-policy.js";
 import {
   sessionIdForConversation,
   turnIdForConversation,
@@ -71,24 +75,8 @@ export interface OpenClawCallbackTransportPorts {
   spawnSync?: CallbackSpawnSync;
 }
 
-export interface OpenClawCallbackDeliveryOptions {
-  gatewayMethod?: string;
-  openclawBin?: string;
-  gatewayUrl?: string;
-  token?: string;
-  gatewaySession?: string;
-  openclawSession?: string;
-}
-
-export interface DeliverOpenClawCallbackInput {
-  options: OpenClawCallbackDeliveryOptions;
-  statePath: string;
-  logPath: string;
-  conversation: Conversation;
-  message: AgentMessage;
-  onProgress?: (progress: Record<string, unknown>) => void;
-  onAccepted?: (outcome: CallbackDeliveryOutcome) => void;
-}
+export type OpenClawCallbackDeliveryOptions = CallbackDeliveryOptions;
+export type DeliverOpenClawCallbackInput = DeliverCallbackInput;
 
 export interface DeliverGatewayMethodInput {
   method: string;

@@ -2,12 +2,32 @@ import {
   nonBlankString as stringValue,
   recordValue
 } from "./value-guards.js";
+import type { AgentMessage, Conversation } from "./protocol.js";
 
 export interface CallbackDeliveryOutcome {
   kind: string;
   injection: Record<string, unknown>;
   wake: Record<string, unknown>;
   run_observation?: Record<string, unknown>;
+}
+
+export interface CallbackDeliveryOptions {
+  gatewayMethod?: string;
+  openclawBin?: string;
+  gatewayUrl?: string;
+  token?: string;
+  gatewaySession?: string;
+  openclawSession?: string;
+}
+
+export interface DeliverCallbackInput {
+  options: CallbackDeliveryOptions;
+  statePath: string;
+  logPath: string;
+  conversation: Conversation;
+  message: AgentMessage;
+  onProgress?: (progress: Record<string, unknown>) => void;
+  onAccepted?: (outcome: CallbackDeliveryOutcome) => void;
 }
 
 export type CallbackRetryDisposition =

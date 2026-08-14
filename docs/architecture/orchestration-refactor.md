@@ -655,6 +655,47 @@ require a reviewed manifest diff; changing only a number to conceal a failed
 measurement does not pass because the validator reproduces it from source and
 Git history.
 
+## Callback/outbox application service
+
+The callback milestone now has one typed application boundary for generic
+callback preparation and execution, retry classification and monitoring,
+startup reconciliation, terminal-completion outbox preparation, and approval
+notification outbox preparation. The service composes the existing pure retry
+policy, OpenClaw delivery contract, and settlement service; it does not import
+`cli-core.ts`, filesystem or process adapters, CLI presentation, or raw locks.
+The OpenClaw child-process transport implements the policy-owned delivery
+contract rather than exporting an infrastructure type back into the service.
+
+Measured against its exact pre-extraction head, this vertical moves 1,133
+physical lines out of `cli-core.ts` while adding 387 physical production lines
+overall. The reviewed overhead is the explicit typed port/result surface and
+the direct service boundary; it is not hidden by unrelated cleanup or compact
+formatting. The hard maxima are 396 physical lines and approximate complexity
+32, below the 500/50 gates. The preparation span (277/32, including its nested
+persistence phase), persistence phase (145/30), reconciliation callback
+(129/20), and terminal-completion preparation (131/8) remain reviewed
+exceptions to the default 100/20 target so their durable short-circuit and write
+order stays visible. The production import graph remains acyclic.
+
+The composition root still owns terminal and Store-writer locks, state-lock
+implementation, Store/path resolution, JSON/event persistence adapters, retry
+process launch, clock/process observation, Gateway transport construction, and
+all public JSON. Terminal completion preserves state-lock scope across claim,
+detected/message/outbox writes, and the record-only crash checkpoint, releases
+that lock before settling the terminal dispatch ledger, and never replays
+terminal input. Approval persistence still records the stable message id and
+timestamp before invoking the service; the service either prepares that exact
+message id or returns the same message without an outbox when no Gateway route
+exists. Delivery settlement retains progress `load -> save -> event`, success
+`load -> save -> event`, and failure `load -> retry-monitor -> save -> events`
+ordering through the existing settlement service.
+
+Direct fast proofs cover fresh/duplicate/non-retryable outbox preparation,
+completion claim success/conflict and lock release, stable approval identity,
+and the no-Gateway branch. Existing policy, settlement, transport, callback,
+Claude, approval, monitor lifecycle, monitor recovery, and OpenClaw contract
+witnesses remain the black-box boundary set.
+
 ## Soft freeze while #126 is active
 
 Until the orchestration milestones finish:

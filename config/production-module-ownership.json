@@ -2,8 +2,8 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 33531,
-    "production_physical_loc": 75547,
+    "cli_core_max_physical_loc": 32398,
+    "production_physical_loc": 75934,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -31,7 +31,6 @@
       "selection": "targeted",
       "integration_tests": [
         "test/callback-cli.test.ts",
-        "test/openclaw-plugin-contract.test.ts",
         "test/shards/agent-cli-claude-callback.test.ts",
         "test/shards/agent-cli-monitor-approval-context.test.ts",
         "test/shards/agent-cli-monitor-lifecycle.test.ts",
@@ -45,7 +44,6 @@
         "test/openclaw-plugin-contract.test.ts",
         "test/shards/agent-cli-claude-callback.test.ts",
         "test/shards/agent-cli-monitor-approval-context.test.ts",
-        "test/shards/agent-cli-monitor-lifecycle.test.ts",
         "test/shards/agent-cli-monitor-recovery.test.ts"
       ]
     },
@@ -244,6 +242,10 @@
     },
     {
       "path": "src/callback-outbox-policy.ts",
+      "owner": "callback-outbox"
+    },
+    {
+      "path": "src/callback-outbox-service.ts",
       "owner": "callback-outbox"
     },
     {
