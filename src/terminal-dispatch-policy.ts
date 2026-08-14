@@ -110,41 +110,11 @@ export function decideTerminalDispatchOwnership(
       };
 }
 
-export interface TerminalSendAuthorityFacts {
-  readonly ownership: "none" | "current" | "conflict";
-  readonly verifiedEmpty?: boolean;
-  readonly externalHandoff?: boolean;
-  readonly deferred?: boolean;
-  readonly deferredToken?: string;
-  readonly externalToken?: string;
-  readonly verifiedEmptyToken?: string;
-  readonly managedSendSessionId?: string;
-}
-
-export function decideTerminalSendAuthority(facts: TerminalSendAuthorityFacts) {
-  if (facts.ownership === "current") return { mode: "current" as const };
-  const verifiedEmpty = facts.verifiedEmpty ??
-    facts.verifiedEmptyToken !== undefined;
-  const externalHandoff = facts.externalHandoff ??
-    facts.externalToken !== undefined;
-  const deferred = facts.deferred ?? facts.deferredToken !== undefined;
-  const conflictMode = verifiedEmpty
-    ? { mode: "verified_empty" as const, token: facts.verifiedEmptyToken }
-    : externalHandoff
-      ? { mode: "external_handoff" as const, token: facts.externalToken }
-      : deferred
-        ? { mode: "deferred" as const, token: facts.deferredToken }
-        : undefined;
-  if (facts.ownership === "conflict") {
-    return conflictMode ?? { mode: "conflict" as const };
-  }
-  if (deferred) {
-    return { mode: "deferred" as const, token: facts.deferredToken };
-  }
-  return facts.managedSendSessionId
-    ? { mode: "managed" as const, sessionId: facts.managedSendSessionId }
-    : { mode: "raw" as const };
-}
+export {
+  decideTerminalSendAuthority,
+  type TerminalSendAuthority,
+  type TerminalSendAuthorityFacts
+} from "./terminal-action-projection.js";
 
 /**
  * Preserve the legacy lazy Store read: only an ordinary active receipt status

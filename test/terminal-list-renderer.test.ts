@@ -6,6 +6,7 @@ import {
   listActionContracts,
   readOnlyManagedTurn,
   renderAvailableListActions,
+  renderCurrentManagedTurn,
   renderManagedTurnListEntry,
   retargetConversationAction,
   safeTerminalActionsDuringConflict,
@@ -239,5 +240,34 @@ test("approval and handoff action rewrites preserve nested command shape", () =>
   assert.equal(
     withoutGenericHandoffSourceClose(managedTurn, new Set()),
     managedTurn
+  );
+});
+
+test("current approval retargets before reading terminal approval state", () => {
+  let retargeted = false;
+  const rawApproval = {
+    tool: "agent_knock-knock_approve",
+    get arguments() {
+      retargeted = true;
+      return { conversation_id: "terminal-1" };
+    }
+  };
+  const rendered = renderCurrentManagedTurn({
+    conversation_id: "turn-1",
+    available_actions: { status: { tool: "status" } }
+  }, {
+    isCodex: true,
+    ownerId: "turn-1",
+    rawApproval,
+    terminalApprovalState: () => {
+      assert.equal(retargeted, true);
+      return { blocked: true };
+    }
+  });
+  assert.deepEqual(rendered.approval_state, { blocked: true });
+  assert.deepEqual(
+    (rendered.available_actions as Record<string, Record<string, unknown>>)
+      .approve.arguments,
+    { conversation_id: undefined, turn_id: "turn-1" }
   );
 });

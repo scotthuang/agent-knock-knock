@@ -12,7 +12,7 @@ import type { AgentMessage, Conversation, Executor } from "./protocol.js";
 import type { ResolvedTerminalConversation } from
   "./terminal-agent-bridge.js";
 import type { CodexPreMaterializationIdentity } from
-  "./terminal-dispatch-execution.js";
+  "./terminal-authority-policy.js";
 import type { BoundTerminalDispatchRoute } from
   "./terminal-dispatch-capability.js";
 import type { CodexCandidateSetRolloutAcceptanceAnchor } from

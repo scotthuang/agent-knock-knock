@@ -2,8 +2,8 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 28610,
-    "production_physical_loc": 78388,
+    "cli_core_max_physical_loc": 28336,
+    "production_physical_loc": 79308,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -160,8 +160,28 @@
     "state-store": {
       "selection": "full"
     },
+    "terminal-action-projection": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/human-handoff-adoption-cli.test.ts",
+        "test/management-cli.test.ts",
+        "test/session-selector-cli.test.ts",
+        "test/shards/agent-cli-session-acceptance.test.ts",
+        "test/shards/agent-cli-terminal-send-gates.test.ts"
+      ]
+    },
     "terminal-agent-core": {
       "selection": "full"
+    },
+    "terminal-authority-policy": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/codex-no-rollout-binding-cli.test.ts",
+        "test/human-handoff-adoption-cli.test.ts",
+        "test/session-selector-cli.test.ts",
+        "test/shards/agent-cli-session-acceptance.test.ts",
+        "test/shards/agent-cli-terminal-send-gates.test.ts"
+      ]
     },
     "terminal-binding-authority": {
       "selection": "targeted",
@@ -170,9 +190,6 @@
         "test/human-handoff-adoption-cli.test.ts",
         "test/native-thread-lifecycle-cli.test.ts",
         "test/native-thread-lifecycle-recovery-cli.test.ts",
-        "test/session-selector-cli.test.ts",
-        "test/shards/agent-cli-session-acceptance.test.ts",
-        "test/shards/agent-cli-terminal-send-gates.test.ts",
         "test/stale-bound-resume-cli.test.ts"
       ]
     },
@@ -206,7 +223,6 @@
     "terminal-dispatch-policy": {
       "selection": "targeted",
       "integration_tests": [
-        "test/codex-no-rollout-binding-cli.test.ts",
         "test/shards/agent-cli-composer-replay.test.ts",
         "test/shards/agent-cli-dispatch-authority.test.ts",
         "test/shards/agent-cli-dispatch-recovery.test.ts",
@@ -462,6 +478,10 @@
       "owner": "state-store"
     },
     {
+      "path": "src/terminal-action-projection.ts",
+      "owner": "terminal-action-projection"
+    },
+    {
       "path": "src/terminal-agent-adapter.ts",
       "owner": "terminal-agent-core"
     },
@@ -472,6 +492,10 @@
     {
       "path": "src/terminal-agent-registry.ts",
       "owner": "terminal-agent-core"
+    },
+    {
+      "path": "src/terminal-authority-policy.ts",
+      "owner": "terminal-authority-policy"
     },
     {
       "path": "src/terminal-binding-authority.ts",

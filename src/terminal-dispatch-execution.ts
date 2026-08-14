@@ -10,7 +10,6 @@ import {
 } from "./protocol.js";
 import type {
   ManagedSessionState,
-  ManagedTerminalBinding,
   NativeThreadTransition
 } from "./managed-session.js";
 import type {
@@ -26,6 +25,16 @@ import {
   terminalObservationFromResolvedIdentity,
   type TerminalNativeIdentity
 } from "./terminal-binding-authority.js";
+import {
+  codexCompanionsExcludingPreferred,
+  codexCompanionsPresentInOpenRootInventory,
+  isCodexStatusCardEvidence,
+  nativeIdentityMatchesStoredTurn,
+  processIncarnationRelationship,
+  withCodexCompanionFences,
+  type CodexAllowedCompanionSet,
+  type ProcessIncarnationRelationship
+} from "./terminal-authority-policy.js";
 import type { TerminalDispatchAcceptance } from
   "./terminal-dispatch-application.js";
 import type { TerminalDispatchLedgerDocument } from
@@ -61,7 +70,6 @@ export {
 export type CodexPreMaterializationIdentity = NonNullable<
   TerminalRuntimeIdentity["allowedPreMaterializationNativeIdentity"]
 >;
-
 export type NativeAgentSessionIdentityObservation =
   | { status: "resolved"; identity: TerminalNativeIdentity }
   | {
@@ -196,44 +204,6 @@ interface RuntimeIdentityAssertion {
   pid: number;
 }
 
-export interface CodexAllowedCompanionSet {
-  primary?: CodexPreMaterializationIdentity;
-  additional: CodexPreMaterializationIdentity[];
-}
-
-export type ProcessIncarnationRelationship =
-  | "same"
-  | "different"
-  | "unverifiable";
-
-export function processIncarnationRelationship(input: {
-  binding: ManagedTerminalBinding;
-  livePid: number;
-  liveProcessUuid?: string;
-  liveProcessBirth?: string;
-}): ProcessIncarnationRelationship {
-  if (input.binding.native_process.pid !== input.livePid) {
-    return "different";
-  }
-  const comparisons = [
-    input.binding.native_process.process_uuid && input.liveProcessUuid
-      ? input.binding.native_process.process_uuid === input.liveProcessUuid
-      : undefined,
-    input.binding.native_process.process_birth && input.liveProcessBirth
-      ? input.binding.native_process.process_birth === input.liveProcessBirth
-      : undefined
-  ].filter((value): value is boolean => value !== undefined);
-  if (comparisons.length === 0) {
-    return "unverifiable";
-  }
-  if (comparisons.every(Boolean)) {
-    return "same";
-  }
-  return comparisons.every((value) => !value)
-    ? "different"
-    : "unverifiable";
-}
-
 export function resolvedTerminalProcessIncarnation(input: {
   terminal: { agent: ExecutorKind; pid: number };
   identity?: TerminalNativeIdentity;
@@ -347,23 +317,6 @@ export function managedBindingMatchesLiveTerminal(input: {
   return decision.state === "exact";
 }
 
-export function codexCompanionsPresentInOpenRootInventory(
-  companions: CodexAllowedCompanionSet,
-  inventory: CodexOpenRootRolloutInventory
-): CodexAllowedCompanionSet {
-  const present = [companions.primary, ...companions.additional].filter(
-    (candidate): candidate is CodexPreMaterializationIdentity =>
-      Boolean(candidate && inventory.roots.some((root) =>
-        nativeIdentityMatchesCodexPreMaterialization(root, candidate)
-      ))
-  );
-  return { primary: present[0], additional: present.slice(1) };
-}
-
-export function isCodexStatusCardEvidence(evidence: string): boolean {
-  return evidence.split("+").includes("codex_status_card");
-}
-
 export function codexKnownBeforeIdentityForTransition(input: {
   session: ManagedSessionState;
   transition?: NativeThreadTransition;
@@ -463,28 +416,6 @@ export function logicalManagedSessionIdentity(input: {
         evidence: binding.native_process.evidence
       }
     : input.observedIdentity;
-}
-
-export function withCodexCompanionFences(
-  runtime: TerminalRuntimeIdentity,
-  companions: CodexAllowedCompanionSet
-): TerminalRuntimeIdentity {
-  return {
-    ...runtime,
-    allowedPreMaterializationNativeIdentity: companions.primary,
-    allowedAdditionalNativeIdentities: companions.additional
-  };
-}
-
-export function codexCompanionsExcludingPreferred(
-  roots: CodexAllowedCompanionSet,
-  preferredSessionId: string
-): CodexAllowedCompanionSet {
-  const allowed = [roots.primary, ...roots.additional].filter(
-    (candidate): candidate is CodexPreMaterializationIdentity =>
-      Boolean(candidate && candidate.sessionId !== preferredSessionId)
-  );
-  return { primary: allowed[0], additional: allowed.slice(1) };
 }
 
 export function terminalRuntimeForLiveIdentity(input: {
@@ -779,27 +710,31 @@ export function nativeAgentIdentityMatchesTurn(
   const rollout = takeover?.terminal_agent_rollout;
   const strict = Number(takeover?.terminal_agent_identity_protocol) === 1;
   const agent = executorForConversation(conversation).kind;
-  if (strict && (!sessionId || !currentIdentity?.sessionId)) {
-    return false;
-  }
-  if (
-    strict && agent === "claude" &&
-    (!processUuid || processUuid !== currentIdentity?.processUuid)
-  ) {
-    return false;
-  }
-  if (
-    strict && agent === "codex" &&
-    (!processUuid || !processBirth || !isCompleteNativeRollout(rollout) ||
-      !currentIdentity?.processUuid || !currentIdentity.processBirth ||
-      !isCompleteNativeRollout(currentIdentity.rollout))
-  ) {
-    return false;
-  }
-  return (!sessionId || sessionId === currentIdentity?.sessionId) &&
-    (!processUuid || processUuid === currentIdentity?.processUuid) &&
-    (!processBirth || processBirth === currentIdentity?.processBirth) &&
-    (!isRecord(rollout) || sameRollout(rollout, currentIdentity?.rollout));
+  return nativeIdentityMatchesStoredTurn({
+    strictNativeIdentity: strict,
+    agent,
+    storedSessionId: sessionId,
+    storedProcessUuid: processUuid,
+    storedProcessBirth: processBirth,
+    get storedRollout() {
+      return isRecord(rollout)
+        ? {
+            get fd() {
+              return nonBlankString(rollout.fd);
+            },
+            get device() {
+              return nonBlankString(rollout.device);
+            },
+            get inode() {
+              return nonBlankString(rollout.inode);
+            },
+            get path() {
+              return nonBlankString(rollout.path);
+            }
+          }
+        : undefined;
+    }
+  }, currentIdentity);
 }
 
 export class TerminalDispatchExecutionService {

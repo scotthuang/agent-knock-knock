@@ -249,8 +249,10 @@ export function classifyTerminalBindingConflict(facts: {
   const boundThreadId = exactThreadId(binding.native_thread_id);
   const liveThreadId = exactThreadId(facts.liveNativeThreadId);
   const statusCardThreadId = exactThreadId(facts.statusCardNativeThreadId);
-  if (boundThreadId && statusCardThreadId &&
-    boundThreadId !== statusCardThreadId) {
+  if (
+    boundThreadId && statusCardThreadId &&
+    boundThreadId !== statusCardThreadId
+  ) {
     return processRelationship === "same" && (
       liveThreadId === statusCardThreadId || liveThreadId === boundThreadId
     ) ? "live_external_thread_change" : "unverifiable";
@@ -362,7 +364,7 @@ export function decideTerminalBindingMatch(
     session.agent === "codex" &&
     Boolean(binding.native_thread_id) &&
     !binding.native_process.rollout &&
-    statusCardEvidence(binding.native_process.evidence)
+    isCodexStatusCardEvidence(binding.native_process.evidence)
   ) {
     return { state: "exact", basis: "codex_lingering_before" };
   }
@@ -427,7 +429,7 @@ function codexStatusCardProcessMatchesBinding(
   return Boolean(
     session.agent === "codex" &&
     binding?.native_thread_id &&
-    statusCardEvidence(binding.native_process.evidence) &&
+    isCodexStatusCardEvidence(binding.native_process.evidence) &&
     binding.native_process.process_uuid &&
     binding.native_process.process_birth &&
     binding.native_process.process_uuid ===
@@ -471,6 +473,6 @@ export function candidateSourceRootAuthorityMatches(
       );
 }
 
-function statusCardEvidence(evidence: string): boolean {
+export function isCodexStatusCardEvidence(evidence: string): boolean {
   return evidence.split("+").includes("codex_status_card");
 }
