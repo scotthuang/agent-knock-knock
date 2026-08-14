@@ -285,6 +285,11 @@ import {
 import * as monitorLaunch from "./terminal-monitor-launch-plan.js";
 import * as monitorOwner from "./terminal-monitor-ownership-policy.js";
 import {
+  reduceTerminalZeroInputAbort,
+  type TerminalZeroInputAbortOutcome,
+  type TerminalZeroInputFailureKind
+} from "./terminal-dispatch-abort.js";
+import {
   constructTerminalDispatchLedgerDocument,
   constructTerminalOrdinaryDispatchLedger,
   decodeTerminalDispatchLedgerDocument,
@@ -19414,6 +19419,212 @@ async function runTerminalControlSend({
   let bridgeMonitor:
     | ReturnType<typeof startTerminalBridgeMonitorForConversation>
     | undefined;
+  type RecordedTerminalZeroInputAbort = {
+    outcome: TerminalZeroInputAbortOutcome;
+    reportedConversation: Conversation;
+    receiptConversation: Conversation;
+  };
+  const recordTerminalZeroInputAbort = ({
+    failureKind,
+    error
+  }: {
+    failureKind: TerminalZeroInputFailureKind;
+    error: unknown;
+  }): RecordedTerminalZeroInputAbort => {
+    const transportFailure = failureKind === "transport";
+    const abortedAt = cliNow().toISOString();
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    let dispatchLedgerRestored = true;
+    try {
+      if (!abortDeferredPreInputBeforeTransport(
+        transportFailure ? abortedAt : undefined
+      )) {
+        restoreTerminalBridgeDispatchLedger({
+          terminalControl,
+          previousLedger: previousDispatchLedger,
+          reason: transportFailure
+            ? "terminal transport was proved not to have started"
+            : "terminal submission aborted before terminal input"
+        });
+      }
+    } catch (ledgerError) {
+      dispatchLedgerRestored = false;
+      runtimeLog("error", "terminal_dispatch_ledger_restore_failed", {
+        conversation_id: conversation.conversation_id,
+        terminal_target: terminalControl.target,
+        error: ledgerError instanceof Error
+          ? ledgerError.message
+          : String(ledgerError)
+      });
+    }
+    const rawAttachRolledBack = rollbackRawAttachBeforeTransport();
+    const durableAbortCanBeRetryable =
+      dispatchLedgerRestored && rawAttachRolledBack;
+    const failureBase: Conversation = recordRawAttachmentAfterSend
+      ? {
+          ...preparedConversation,
+          status: "failed",
+          failed_at: abortedAt,
+          failure_reason: transportFailure
+            ? "terminal transport failed before terminal input"
+            : "terminal submission setup failed before terminal input"
+        }
+      : {
+          ...preparedConversation,
+          status: conversation.status,
+          ...(conversation.idle_since
+            ? { idle_since: conversation.idle_since }
+            : {})
+        };
+    const submissionFields = {
+      messageId: message.id,
+      messageType: message.type,
+      messageBody: String(message.body),
+      requestText: terminalPayload,
+      status: "aborted" as const,
+      preparedAt: bridgeStartedAt,
+      abortedAt,
+      error: errorMessage
+    };
+    const abortedConversation = withTerminalBridgeSubmission({
+      conversation: failureBase,
+      ...submissionFields,
+      safeToRetry: durableAbortCanBeRetryable
+    });
+    let abortedStatePersisted = false;
+    try {
+      if (
+        !transportFailure &&
+        cliEnv().AKK_TEST_ABORTED_STATE_PERSISTENCE_FAILURE === "1"
+      ) {
+        throw new Error(
+          "injected aborted submission state persistence failure"
+        );
+      }
+      saveState(statePath, abortedConversation);
+      abortedStatePersisted = true;
+    } catch (persistenceError) {
+      runtimeLog("error", "terminal_message_submit_aborted_persist_failed", {
+        conversation_id: abortedConversation.conversation_id,
+        terminal_target: terminalControl.target,
+        error: persistenceError instanceof Error
+          ? persistenceError.message
+          : String(persistenceError)
+      });
+    }
+    const outcome = reduceTerminalZeroInputAbort({
+      failureKind,
+      dispatchLedgerRestored,
+      rawAttachRolledBack,
+      abortedStatePersisted
+    });
+    const reportConversation = () => outcome.safeToRetry
+      ? abortedConversation
+      : withTerminalBridgeSubmission({
+          conversation: abortedConversation,
+          ...submissionFields,
+          safeToRetry: false
+        });
+    let reportedConversation = transportFailure
+      ? reportConversation()
+      : undefined;
+    try {
+      appendEvent(logPath, {
+        ts: abortedAt,
+        conversation_id: abortedConversation.conversation_id,
+        event: "terminal_message_submit_aborted",
+        message_id: message.id,
+        executor,
+        terminal_control: terminalControl,
+        error: textSummary(errorMessage),
+        safe_to_retry: outcome.safeToRetry,
+        ...(transportFailure ? { terminal_input_started: false } : {})
+      });
+    } catch (persistenceError) {
+      runtimeLog("error", "terminal_message_submit_aborted_event_failed", {
+        conversation_id: abortedConversation.conversation_id,
+        terminal_target: terminalControl.target,
+        error: persistenceError instanceof Error
+          ? persistenceError.message
+          : String(persistenceError)
+      });
+    }
+    reportedConversation ??= reportConversation();
+    runtimeLog("error", "terminal_message_submit_aborted", {
+      conversation_id: abortedConversation.conversation_id,
+      terminal_target: terminalControl.target,
+      error: errorMessage,
+      safe_to_retry: outcome.safeToRetry,
+      ...(transportFailure ? { terminal_input_started: false } : {}),
+      dispatch_ledger_restored: dispatchLedgerRestored,
+      aborted_state_persisted: abortedStatePersisted,
+      raw_attach_rolled_back: rawAttachRolledBack
+    });
+    return {
+      outcome,
+      reportedConversation,
+      receiptConversation: transportFailure
+        ? reportedConversation
+        : abortedConversation
+    };
+  };
+  const presentTerminalZeroInputAbort = (
+    failure: RecordedTerminalZeroInputAbort
+  ): void => {
+    const { outcome, reportedConversation, receiptConversation } = failure;
+    const setupFailure = outcome.failureKind === "setup";
+    const blocker = outcome.disposition === "inspect"
+      ? outcome.blocker
+      : undefined;
+    const reason = setupFailure
+      ? outcome.safeToRetry
+        ? "AKK failed before terminal input; this terminal submission was not sent and may be retried."
+        : blocker === "dispatch_ledger_restore"
+          ? "AKK failed before terminal input but could not restore the terminal dispatch ledger; inspect and close the conversation before retrying."
+          : blocker === "raw_attach_rollback"
+            ? "AKK failed before terminal input but could not detach the provisional raw-attach Session; inspect its exact binding before retrying."
+            : "AKK failed before terminal input but could not persist the aborted receipt; inspect the conversation before retrying."
+      : outcome.safeToRetry
+        ? "AKK proved that terminal input never started; this submission may be retried."
+        : "AKK proved terminal input never started but could not make every abort receipt and Session rollback durable; inspect before retrying.";
+    const nextReason = setupFailure
+      ? outcome.safeToRetry
+        ? "The failure occurred before any terminal input."
+        : blocker === "dispatch_ledger_restore"
+          ? "The terminal ledger could not be restored automatically."
+          : blocker === "raw_attach_rollback"
+            ? "The provisional raw-attach Session could not be detached automatically."
+            : "The aborted receipt could not be made durable."
+      : outcome.safeToRetry
+        ? "The terminal transport failed before any input operation succeeded."
+        : "The pre-input failure could not be fully reconciled in durable state.";
+    printJson({
+      session_id: sessionIdForConversation(receiptConversation),
+      turn_id: turnIdForConversation(receiptConversation),
+      conversation: reportedConversation,
+      message,
+      delivered: false,
+      status: "submission_aborted",
+      submission_outcome: "aborted",
+      background: true,
+      callback_expected: false,
+      terminal_control: terminalControl,
+      monitor_pid: bridgeMonitor?.pid ?? null,
+      executor,
+      safe_to_retry: outcome.safeToRetry,
+      do_not_retry: !outcome.safeToRetry,
+      reason,
+      openclaw_next_action: {
+        action: outcome.safeToRetry ? "retry" : "inspect",
+        conversation_id: receiptConversation.conversation_id,
+        session_id: sessionIdForConversation(reportedConversation),
+        turn_id: turnIdForConversation(reportedConversation),
+        safe_to_retry: outcome.safeToRetry,
+        do_not_retry: !outcome.safeToRetry,
+        reason: nextReason
+      }
+    });
+  };
   try {
     if (
       cliEnv().AKK_TEST_TERMINAL_SETUP_FAILURE === "1"
@@ -19469,160 +19680,10 @@ async function runTerminalControlSend({
     });
 
   } catch (error) {
-    const abortedAt = cliNow().toISOString();
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    let dispatchLedgerRestored = true;
-    try {
-      if (!abortDeferredPreInputBeforeTransport()) {
-        restoreTerminalBridgeDispatchLedger({
-          terminalControl,
-          previousLedger: previousDispatchLedger,
-          reason: "terminal submission aborted before terminal input"
-        });
-      }
-    } catch (ledgerError) {
-      dispatchLedgerRestored = false;
-      runtimeLog("error", "terminal_dispatch_ledger_restore_failed", {
-        conversation_id: conversation.conversation_id,
-        terminal_target: terminalControl.target,
-        error: ledgerError instanceof Error
-          ? ledgerError.message
-          : String(ledgerError)
-      });
-    }
-    const rawAttachRolledBack = rollbackRawAttachBeforeTransport();
-    const durableAbortCanBeRetryable =
-      dispatchLedgerRestored && rawAttachRolledBack;
-    const failureBase = recordRawAttachmentAfterSend
-      ? {
-          ...preparedConversation,
-          status: "failed" as const,
-          failed_at: abortedAt,
-          failure_reason:
-            "terminal submission setup failed before terminal input"
-        }
-      : {
-          ...preparedConversation,
-          status: conversation.status,
-          ...(conversation.idle_since
-            ? { idle_since: conversation.idle_since }
-            : {})
-        };
-    const abortedConversation = withTerminalBridgeSubmission({
-      conversation: failureBase,
-      messageId: message.id,
-      messageType: message.type,
-      messageBody: String(message.body),
-      requestText: terminalPayload,
-      status: "aborted",
-      preparedAt: bridgeStartedAt,
-      abortedAt,
-      error: errorMessage,
-      safeToRetry: durableAbortCanBeRetryable
-    });
-    let abortedStatePersisted = false;
-    try {
-      if (
-        cliEnv().AKK_TEST_ABORTED_STATE_PERSISTENCE_FAILURE === "1"
-      ) {
-        throw new Error(
-          "injected aborted submission state persistence failure"
-        );
-      }
-      saveState(statePath, abortedConversation);
-      abortedStatePersisted = true;
-    } catch (persistenceError) {
-      runtimeLog("error", "terminal_message_submit_aborted_persist_failed", {
-        conversation_id: abortedConversation.conversation_id,
-        terminal_target: terminalControl.target,
-        error: persistenceError instanceof Error
-          ? persistenceError.message
-          : String(persistenceError)
-      });
-    }
-    const safeToRetry =
-      durableAbortCanBeRetryable && abortedStatePersisted;
-    try {
-      appendEvent(logPath, {
-        ts: abortedAt,
-        conversation_id: abortedConversation.conversation_id,
-        event: "terminal_message_submit_aborted",
-        message_id: message.id,
-        executor,
-        terminal_control: terminalControl,
-        error: textSummary(errorMessage),
-        safe_to_retry: safeToRetry
-      });
-    } catch (persistenceError) {
-      runtimeLog("error", "terminal_message_submit_aborted_event_failed", {
-        conversation_id: abortedConversation.conversation_id,
-        terminal_target: terminalControl.target,
-        error: persistenceError instanceof Error
-          ? persistenceError.message
-        : String(persistenceError)
-      });
-    }
-    const reportedAbortedConversation = safeToRetry
-      ? abortedConversation
-      : withTerminalBridgeSubmission({
-          conversation: abortedConversation,
-          messageId: message.id,
-          messageType: message.type,
-          messageBody: String(message.body),
-          requestText: terminalPayload,
-          status: "aborted",
-          preparedAt: bridgeStartedAt,
-          abortedAt,
-          error: errorMessage,
-          safeToRetry: false
-        });
-    runtimeLog("error", "terminal_message_submit_aborted", {
-      conversation_id: abortedConversation.conversation_id,
-      terminal_target: terminalControl.target,
-      error: errorMessage,
-      safe_to_retry: safeToRetry,
-      dispatch_ledger_restored: dispatchLedgerRestored,
-      aborted_state_persisted: abortedStatePersisted,
-      raw_attach_rolled_back: rawAttachRolledBack
-    });
-    printJson({
-      session_id: sessionIdForConversation(abortedConversation),
-      turn_id: turnIdForConversation(abortedConversation),
-      conversation: reportedAbortedConversation,
-      message,
-      delivered: false,
-      status: "submission_aborted",
-      submission_outcome: "aborted",
-      background: true,
-      callback_expected: false,
-      terminal_control: terminalControl,
-      monitor_pid: bridgeMonitor?.pid ?? null,
-      executor,
-      safe_to_retry: safeToRetry,
-      do_not_retry: !safeToRetry,
-      reason: safeToRetry
-        ? "AKK failed before terminal input; this terminal submission was not sent and may be retried."
-        : !dispatchLedgerRestored
-          ? "AKK failed before terminal input but could not restore the terminal dispatch ledger; inspect and close the conversation before retrying."
-          : !rawAttachRolledBack
-            ? "AKK failed before terminal input but could not detach the provisional raw-attach Session; inspect its exact binding before retrying."
-          : "AKK failed before terminal input but could not persist the aborted receipt; inspect the conversation before retrying.",
-      openclaw_next_action: {
-        action: safeToRetry ? "retry" : "inspect",
-        conversation_id: abortedConversation.conversation_id,
-        session_id: sessionIdForConversation(reportedAbortedConversation),
-        turn_id: turnIdForConversation(reportedAbortedConversation),
-        safe_to_retry: safeToRetry,
-        do_not_retry: !safeToRetry,
-        reason: safeToRetry
-          ? "The failure occurred before any terminal input."
-          : !dispatchLedgerRestored
-            ? "The terminal ledger could not be restored automatically."
-            : !rawAttachRolledBack
-              ? "The provisional raw-attach Session could not be detached automatically."
-            : "The aborted receipt could not be made durable."
-      }
-    });
+    presentTerminalZeroInputAbort(recordTerminalZeroInputAbort({
+      failureKind: "setup",
+      error
+    }));
     return;
   }
 
@@ -20242,147 +20303,10 @@ async function runTerminalControlSend({
       !textInjectedAt &&
       error instanceof TerminalInputNotStartedError
     ) {
-      const abortedAt = cliNow().toISOString();
-      const errorMessage = error.message;
-      let dispatchLedgerRestored = true;
-      try {
-        if (!abortDeferredPreInputBeforeTransport(abortedAt)) {
-          restoreTerminalBridgeDispatchLedger({
-            terminalControl,
-            previousLedger: previousDispatchLedger,
-            reason: "terminal transport was proved not to have started"
-          });
-        }
-      } catch (ledgerError) {
-        dispatchLedgerRestored = false;
-        runtimeLog("error", "terminal_dispatch_ledger_restore_failed", {
-          conversation_id: conversation.conversation_id,
-          terminal_target: terminalControl.target,
-          error: ledgerError instanceof Error
-            ? ledgerError.message
-            : String(ledgerError)
-        });
-      }
-      const rawAttachRolledBack = rollbackRawAttachBeforeTransport();
-      const durableAbortCanBeRetryable =
-        dispatchLedgerRestored && rawAttachRolledBack;
-      const failureBase = recordRawAttachmentAfterSend
-        ? {
-            ...preparedConversation,
-            status: "failed" as const,
-            failed_at: abortedAt,
-            failure_reason:
-              "terminal transport failed before terminal input"
-          }
-        : {
-            ...preparedConversation,
-            status: conversation.status,
-            ...(conversation.idle_since
-              ? { idle_since: conversation.idle_since }
-              : {})
-          };
-      const abortedConversation = withTerminalBridgeSubmission({
-        conversation: failureBase,
-        messageId: message.id,
-        messageType: message.type,
-        messageBody: String(message.body),
-        requestText: terminalPayload,
-        status: "aborted",
-        preparedAt: bridgeStartedAt,
-        abortedAt,
-        error: errorMessage,
-        safeToRetry: durableAbortCanBeRetryable
-      });
-      let abortedStatePersisted = false;
-      try {
-        saveState(statePath, abortedConversation);
-        abortedStatePersisted = true;
-      } catch (persistenceError) {
-        runtimeLog("error", "terminal_message_submit_aborted_persist_failed", {
-          conversation_id: abortedConversation.conversation_id,
-          terminal_target: terminalControl.target,
-          error: persistenceError instanceof Error
-            ? persistenceError.message
-            : String(persistenceError)
-        });
-      }
-      const safeToRetry =
-        durableAbortCanBeRetryable && abortedStatePersisted;
-      const reportedConversation = safeToRetry
-        ? abortedConversation
-        : withTerminalBridgeSubmission({
-            conversation: abortedConversation,
-            messageId: message.id,
-            messageType: message.type,
-            messageBody: String(message.body),
-            requestText: terminalPayload,
-            status: "aborted",
-            preparedAt: bridgeStartedAt,
-            abortedAt,
-            error: errorMessage,
-            safeToRetry: false
-          });
-      try {
-        appendEvent(logPath, {
-          ts: abortedAt,
-          conversation_id: abortedConversation.conversation_id,
-          event: "terminal_message_submit_aborted",
-          message_id: message.id,
-          executor,
-          terminal_control: terminalControl,
-          error: textSummary(errorMessage),
-          safe_to_retry: safeToRetry,
-          terminal_input_started: false
-        });
-      } catch (persistenceError) {
-        runtimeLog("error", "terminal_message_submit_aborted_event_failed", {
-          conversation_id: abortedConversation.conversation_id,
-          terminal_target: terminalControl.target,
-          error: persistenceError instanceof Error
-            ? persistenceError.message
-            : String(persistenceError)
-        });
-      }
-      runtimeLog("error", "terminal_message_submit_aborted", {
-        conversation_id: abortedConversation.conversation_id,
-        terminal_target: terminalControl.target,
-        error: errorMessage,
-        safe_to_retry: safeToRetry,
-        terminal_input_started: false,
-        dispatch_ledger_restored: dispatchLedgerRestored,
-        aborted_state_persisted: abortedStatePersisted,
-        raw_attach_rolled_back: rawAttachRolledBack
-      });
-      printJson({
-        session_id: sessionIdForConversation(reportedConversation),
-        turn_id: turnIdForConversation(reportedConversation),
-        conversation: reportedConversation,
-        message,
-        delivered: false,
-        status: "submission_aborted",
-        submission_outcome: "aborted",
-        background: true,
-        callback_expected: false,
-        terminal_control: terminalControl,
-        monitor_pid: bridgeMonitor?.pid ?? null,
-        executor,
-        safe_to_retry: safeToRetry,
-        do_not_retry: !safeToRetry,
-        reason: safeToRetry
-          ? "AKK proved that terminal input never started; this submission may be retried."
-          : "AKK proved terminal input never started but could not make every abort receipt and Session rollback durable; inspect before retrying.",
-        openclaw_next_action: {
-          action: safeToRetry ? "retry" : "inspect",
-          conversation_id: reportedConversation.conversation_id,
-          session_id: sessionIdForConversation(reportedConversation),
-          turn_id: turnIdForConversation(reportedConversation),
-          safe_to_retry: safeToRetry,
-          do_not_retry: !safeToRetry,
-          reason: safeToRetry
-            ? "The terminal transport failed before any input operation succeeded."
-            : "The pre-input failure could not be fully reconciled in durable state."
-        }
-      });
+      presentTerminalZeroInputAbort(recordTerminalZeroInputAbort({
+        failureKind: "transport",
+        error
+      }));
       return;
     }
     const uncertainAt = cliNow().toISOString();

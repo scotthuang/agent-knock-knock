@@ -250,6 +250,26 @@ test("terminal dispatch ledger codec retains the full persistence gate", async (
   );
 });
 
+test("zero-input dispatch abort selects its three exact parity witnesses", async () => {
+  const selection = await loadSelectionModule();
+  const tiers = loadTiers();
+  const expected = [
+    "test/codex-no-rollout-binding-cli.test.ts",
+    "test/shards/agent-cli-dispatch-authority.test.ts",
+    "test/shards/agent-cli-dispatch-recovery.test.ts"
+  ];
+  assert.deepEqual(
+    selection.selectAffectedTests(["src/terminal-dispatch-abort.ts"], tiers),
+    {
+      mode: "targeted",
+      changedPaths: ["src/terminal-dispatch-abort.ts"],
+      integrationFiles: tiers.integration.filter((testPath) =>
+        expected.includes(testPath)
+      )
+    }
+  );
+});
+
 test("terminal dispatch policy selects its exact parity integration set", async () => {
   const selection = await loadSelectionModule();
   const tiers = loadTiers();
