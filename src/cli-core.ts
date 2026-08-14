@@ -26483,7 +26483,41 @@ async function runTerminalBridgeMonitor(options) {
         );
         return;
       } catch (error) {
-        if (!isStoreMutationLockTimeout(error)) {
+        if (error instanceof TurnBindingSupersededError) {
+          runtimeLog("warn", "terminal_bridge_monitor_binding_superseded", {
+            conversation_id: conversation.conversation_id,
+            terminal_target: terminalControlFromTakeover(nativeTakeover)?.target,
+            reason: error.message
+          });
+          try {
+            appendEvent(logPath, {
+              ts: cliNow().toISOString(),
+              conversation_id: conversation.conversation_id,
+              event: "terminal_bridge_monitor_binding_superseded",
+              terminal_control: terminalControlFromTakeover(nativeTakeover),
+              error_code: error.code,
+              reason: error.message
+            });
+          } catch (diagnosticError) {
+            runtimeLog("warn", "terminal_bridge_monitor_diagnostic_write_failed", {
+              conversation_id: conversation.conversation_id,
+              terminal_target: terminalControlFromTakeover(nativeTakeover)?.target,
+              diagnostic_event: "terminal_bridge_monitor_binding_superseded",
+              reason: diagnosticError instanceof Error
+                ? diagnosticError.message
+                : String(diagnosticError)
+            });
+          }
+          printJson({
+            conversation,
+            monitored: true,
+            terminal_bridge: true,
+            completed: false,
+            reason: "session_binding_superseded",
+            detail: error.message
+          });
+          return;
+        } else if (!isStoreMutationLockTimeout(error)) {
           throw error;
         }
         storeDeferredAttempts += 1;
@@ -27009,7 +27043,6 @@ async function runTerminalBridgeMonitorWithLock(
     try {
       assertTurnBindingCurrent(conversation, "monitor");
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
       if (error instanceof StoreLockTimeoutError) {
         bindingCheckDeferredAttempts += 1;
         bindingCheckFirstDeferredAt ??= cliNow().toISOString();
@@ -27033,43 +27066,10 @@ async function runTerminalBridgeMonitorWithLock(
           conversation_id: conversation.conversation_id,
           terminal_target: terminalControl.target,
           error_code: isRecord(error) ? stringValue(error.code) : undefined,
-          reason
-        });
-        throw error;
-      }
-      runtimeLog("warn", "terminal_bridge_monitor_binding_superseded", {
-        conversation_id: conversation.conversation_id,
-        terminal_target: terminalControl.target,
-        reason
-      });
-      try {
-        appendEvent(logPath, {
-          ts: cliNow().toISOString(),
-          conversation_id: conversation.conversation_id,
-          event: "terminal_bridge_monitor_binding_superseded",
-          terminal_control: terminalControl,
-          error_code: error.code,
-          reason
-        });
-      } catch (diagnosticError) {
-        runtimeLog("warn", "terminal_bridge_monitor_diagnostic_write_failed", {
-          conversation_id: conversation.conversation_id,
-          terminal_target: terminalControl.target,
-          diagnostic_event: "terminal_bridge_monitor_binding_superseded",
-          reason: diagnosticError instanceof Error
-            ? diagnosticError.message
-            : String(diagnosticError)
+          reason: error instanceof Error ? error.message : String(error)
         });
       }
-      printJson({
-        conversation,
-        monitored: true,
-        terminal_bridge: true,
-        completed: false,
-        reason: "session_binding_superseded",
-        detail: reason
-      });
-      return;
+      throw error;
     }
     if (bindingCheckDeferredAttempts > 0) {
       const resumedAt = cliNow().toISOString();
