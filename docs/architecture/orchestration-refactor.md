@@ -427,6 +427,69 @@ ordering. The affected integration map covers dispatch authority, recovery,
 receipt fences, terminal send gates, control locks, Codex no-rollout binding,
 handoff adoption, and native lifecycle recovery.
 
+### PR4B1 dispatch receipt and application seam
+
+PR4B1 introduces `terminal-dispatch-receipt.ts` for pure terminal bridge state
+and append-only receipt construction and `terminal-dispatch-application.ts` as
+a typed application seam for already-authorized ordinary dispatch writes. It
+composes the existing ordinary-ledger codec and zero-input abort reducer behind
+five local responsibility groups: irreversible-stage synchronization, state,
+ledger, domain audit, and pre-input rollback. It imports no CLI option type,
+raw JSON or filesystem adapter, lock implementation, terminal transport,
+acceptance poller, native binding authority, or public presenter.
+
+Measured against exact head `22a379e60329d19ed884264b532106149116726d`,
+this seam lowers `cli-core.ts` from 32,146 to 31,321 physical lines. The
+492-line receipt module and 731-line application module bring total production
+from 76,076 to 76,474 lines, a reviewed 398-line typed-boundary overhead. The
+largest new function is the 164-line receipt reducer; the largest application
+method is the 118-line zero-input abort method. All new functions remain below
+the hard 500-line and approximate-complexity-50 gates.
+
+PR4B1 deliberately preserves the legacy fallback lock acquisition order:
+terminal send lock, Turn-state lock, then Store-writer lease. The composition
+root continues to own those locks and supplies raw state, ledger, event,
+rollback, clock, and crash-hook adapters. Application ports are invoked only
+inside that existing scope and do not expose lock handles or repositories. The
+stage synchronization port only copies the staged conversation and irreversible
+stage timestamp into local core catch variables before state, ledger, or
+deferred/handoff effects; it performs no I/O and cannot escape the invocation.
+
+The composition root also retains terminal input and Enter, acceptance
+observation and polling, deferred-transfer and native-binding authority,
+collateral stalling, and every CLI/OpenClaw JSON result. Only durable object
+construction and ordered application moved:
+
+- prepared remains ledger then state; either failure restores the prior ledger,
+  rolls back the provisional raw attach, and rethrows before terminal input;
+- each transport stage remains state then ledger, followed by the core-owned
+  deferred/handoff boundary, then a best-effort domain event; its irreversible
+  progress is synchronized to the core immediately before those effects;
+- native identity failure remains core quarantine/deferred marking, ledger,
+  state, event, log; generic uncertainty remains ledger, state, event before
+  core collateral stalling and presentation;
+- final acceptance remains state, best-effort final ledger, then best-effort
+  event, so a lagging ledger cannot downgrade the strongest state receipt; and
+- zero input remains deferred abort or ledger restore, raw rollback, best-effort
+  aborted state, the shared abort reducer, best-effort event, then domain log.
+
+Direct fast proofs compare `Object.keys` and newline-terminated pretty JSON
+bytes for the bridge state, prepared receipt, and final ledger. They also lock
+the write sequences above, text-stage state/ledger/boundary failures carrying a
+`TerminalInputNotStartedError` without being reclassified as zero input,
+final-ledger failure behavior, immutable receipt history, and the intentional
+authority difference where setup presentation uses the initially constructed
+aborted receipt while transport presentation uses the reducer-reported receipt.
+The owner map selects exactly recovery, receipt-fence, session-acceptance,
+terminal-send, and Codex virgin-binding integration suites. Dispatch-authority
+remains a core lock/authority boundary rather than an application owner.
+
+PR4C must reuse this seam and keep combined PR4B1/PR4C production overhead at
+or below 400 lines. Before changing lock order, PR4C must introduce canonical
+mutation scopes and gated repositories, then independently prove the new lock
+order and error-priority behavior. A capability flag, raw repository escape,
+or application-owned lock is not a substitute for those prerequisites.
+
 ## Immutable public and safety contracts
 
 The refactor must preserve all of the following unless a separate product issue

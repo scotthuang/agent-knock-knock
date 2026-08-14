@@ -233,6 +233,12 @@
       "needle": "delegate routes asynchronously to the only idle matching tmux pane"
     },
     {
+      "id": "dispatch-application-unit",
+      "path": "test/terminal-dispatch-application.test.ts",
+      "tier": "fast",
+      "needle": "dispatch application preserves ledger/state/stage/final order and bytes"
+    },
+    {
       "id": "dispatch-authority-boundary",
       "path": "test/shards/agent-cli-dispatch-authority.test.ts",
       "tier": "integration",
@@ -255,6 +261,12 @@
       "path": "test/shards/agent-cli-receipt-fences.test.ts",
       "tier": "integration",
       "needle": "terminal receipt fingerprints preserve exact whitespace"
+    },
+    {
+      "id": "dispatch-receipt-unit",
+      "path": "test/terminal-dispatch-receipt.test.ts",
+      "tier": "fast",
+      "needle": "prepared receipt preserves exact Object.keys and durable state bytes"
     },
     {
       "id": "dispatch-recovery-boundary",
@@ -590,7 +602,9 @@
         "static-terminal-acceptance-in-process"
       ],
       "service_invariant_witnesses": [
+        "dispatch-application-unit",
         "dispatch-ledger-unit",
+        "dispatch-receipt-unit",
         "terminal-acceptance-unit"
       ],
       "retained_boundary_witnesses": [

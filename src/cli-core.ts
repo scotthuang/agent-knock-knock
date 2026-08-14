@@ -306,24 +306,16 @@ import {
 import * as monitorLaunch from "./terminal-monitor-launch-plan.js";
 import * as monitorOwner from "./terminal-monitor-ownership-policy.js";
 import {
-  reduceTerminalZeroInputAbort,
-  type TerminalZeroInputAbortOutcome,
-  type TerminalZeroInputFailureKind
-} from "./terminal-dispatch-abort.js";
-import {
   constructTerminalDispatchLedgerDocument,
-  constructTerminalOrdinaryDispatchLedger,
   decodeTerminalDispatchLedgerDocument,
   nativeThreadLifecycleLedger as lifecycleLedger,
   terminalDispatchLedgerLooksLifecycle,
   terminalDispatchReceiptHistory as terminalLedgerReceiptHistory,
-  type TerminalDispatchLedgerDocument,
-  type TerminalOrdinaryDispatchIdentityFields,
-  type TerminalOrdinaryDispatchPhaseFields,
-  type TerminalOrdinaryDispatchPostCallbackFields,
-  type TerminalOrdinaryDispatchStatus as TerminalBridgeSubmissionStatus
+  type TerminalDispatchLedgerDocument
 } from "./terminal-dispatch-ledger-codec.js";
 import * as dispatch from "./terminal-dispatch-policy.js";
+import * as dispatchApplication from "./terminal-dispatch-application.js";
+import * as dispatchReceipt from "./terminal-dispatch-receipt.js";
 import {
   cleanProcessText,
   expandHome,
@@ -2236,312 +2228,25 @@ function ensureTerminalBridgeMonitorAfterApproval({
   };
 }
 
-function terminalBridgeEnabled(conversation): boolean {
-  const nativeTakeover = isRecord(conversation.native_session_takeover)
-    ? conversation.native_session_takeover
+const terminalBridgeEnabled = dispatchReceipt.terminalBridgeEnabled;
+
+function withTerminalBridgeSubmission(
+  mutation: dispatchReceipt.TerminalBridgeSubmissionMutation
+): Conversation {
+  const takeover = isRecord(mutation.conversation.native_session_takeover)
+    ? mutation.conversation.native_session_takeover
     : undefined;
-  return nativeTakeover?.["terminal_bridge"] === true;
+  return dispatchReceipt.applyTerminalBridgeSubmission(mutation, {
+    dispatcherPid: cliPid(),
+    storeDir: managedSessionStoreDirForConversation(mutation.conversation),
+    terminalControl: terminalControlFromTakeover(takeover)
+  });
 }
 
-function withTerminalBridgeState({
-  conversation,
-  message,
-  requestText,
-  startedAt,
-  agentTimeoutMinutes,
-  agentHardTimeoutMinutes,
-  preSendScreenFingerprint,
-  codexRolloutAcceptanceAnchor,
-  claudeTranscriptAnchor,
-  claudeHome
-}) {
-  const nativeTakeover = isRecord(conversation.native_session_takeover)
-    ? conversation.native_session_takeover
-    : {};
-  return {
-    ...conversation,
-    native_session_takeover: {
-      ...nativeTakeover,
-      terminal_bridge: true,
-      terminal_bridge_started_at: startedAt,
-      terminal_bridge_message_id: message.id,
-      terminal_bridge_request_text: requestText,
-      terminal_bridge_request_hash: terminalBridgeRequestFingerprint(requestText),
-      terminal_bridge_pre_send_screen_fingerprint: preSendScreenFingerprint,
-      codex_rollout_acceptance_anchor: codexRolloutAcceptanceAnchor,
-      claude_transcript_anchor: claudeTranscriptAnchor,
-      claude_home: claudeHome,
-      terminal_bridge_completion_claim: undefined,
-      terminal_bridge_approval_dispatch: undefined,
-      terminal_bridge_detector_diagnostic: undefined,
-      terminal_bridge_monitor_lock_version: monitorOwner.LOCK_VERSION,
-      terminal_bridge_monitor_started_at: startedAt,
-      terminal_bridge_last_activity_at: startedAt,
-      terminal_bridge_inactivity_timeout_minutes: agentTimeoutMinutes,
-      terminal_bridge_hard_timeout_minutes: agentHardTimeoutMinutes,
-      terminal_bridge_inactivity_deadline_at: deadlineAt(startedAt, agentTimeoutMinutes),
-      terminal_bridge_hard_deadline_at: deadlineAt(startedAt, agentHardTimeoutMinutes)
-    },
-    updated_at: startedAt
-  };
-}
-
-function withTerminalBridgeSubmission({
-  conversation,
-  messageId,
-  messageType,
-  messageBody,
-  requestText,
-  status,
-  preparedAt,
-  textInjectedAt,
-  enterDispatchedAt,
-  agentAcceptedAt,
-  notAcceptedAt,
-  submittedAt,
-  uncertainAt,
-  abortedAt,
-  error,
-  acceptanceEvidence,
-  lastProvenStage,
-  safeToRetry
-}: {
-  conversation: Conversation;
-  messageId: string;
-  messageType?: "task" | "answer";
-  messageBody?: string;
-  requestText: string;
-  status: TerminalBridgeSubmissionStatus;
-  preparedAt: string;
-  textInjectedAt?: string;
-  enterDispatchedAt?: string;
-  agentAcceptedAt?: string;
-  notAcceptedAt?: string;
-  submittedAt?: string;
-  uncertainAt?: string;
-  abortedAt?: string;
-  error?: string;
-  acceptanceEvidence?: TerminalSubmissionAcceptanceEvidence;
-  lastProvenStage?: "prepared" | "text_injected" | "enter_dispatched" | "agent_accepted";
-  safeToRetry?: boolean;
-}): Conversation {
-  const nativeTakeover = isRecord(conversation.native_session_takeover)
-    ? conversation.native_session_takeover
-    : {};
-  const previousSubmission = isRecord(nativeTakeover.terminal_bridge_submission)
-    ? nativeTakeover.terminal_bridge_submission
-    : undefined;
-  const receiptsValue = nativeTakeover.terminal_bridge_submission_receipts;
-  if (receiptsValue !== undefined && !Array.isArray(receiptsValue)) {
-    throw new Error("terminal submission receipt history is malformed");
-  }
-  const storedReceipts = (Array.isArray(receiptsValue) ? receiptsValue : [])
-    .map((value) => {
-      if (!isRecord(value) || !stringValue(value.message_id)) {
-        throw new Error("terminal submission receipt history is malformed");
-      }
-      return value;
-    });
-  const storedReceiptIds = new Set<string>();
-  for (const receipt of storedReceipts) {
-    const receiptId = String(receipt.message_id);
-    if (storedReceiptIds.has(receiptId)) {
-      throw new Error(`terminal submission receipt ${receiptId} is duplicated`);
-    }
-    storedReceiptIds.add(receiptId);
-  }
-  // A v0.10.1 Turn has only the latest singleton receipt. Seed it into the
-  // append-only history before recording a later response so upgrading cannot
-  // erase the only proof that an older message was already dispatched.
-  const previousSubmissionId = stringValue(previousSubmission?.message_id);
-  const previousReceipts = previousSubmissionId &&
-    !storedReceiptIds.has(previousSubmissionId)
-    ? [...storedReceipts, previousSubmission as Record<string, any>]
-    : storedReceipts;
-  const matchingReceipts = previousReceipts.filter((receipt) =>
-    stringValue(receipt.message_id) === messageId
-  );
-  if (matchingReceipts.length > 1) {
-    throw new Error(`terminal submission receipt ${messageId} is duplicated`);
-  }
-  const previousReceipt = matchingReceipts[0];
-  const previousGenerationSubmission =
-    stringValue(previousSubmission?.message_id) === messageId
-      ? previousSubmission
-      : undefined;
-  if (
-    previousReceipt &&
-    previousGenerationSubmission &&
-    canonicalJson(previousReceipt) !== canonicalJson(previousGenerationSubmission)
-  ) {
-    throw new Error(
-      `terminal submission receipt ${messageId} conflicts with its current generation`
-    );
-  }
-  const durableMessageType = messageType ??
-    (stringValue(previousReceipt?.message_type) === "answer"
-      ? "answer"
-      : stringValue(previousReceipt?.message_type) === "task"
-        ? "task"
-        : stringValue(previousGenerationSubmission?.message_type) === "answer"
-          ? "answer"
-          : stringValue(previousGenerationSubmission?.message_type) === "task"
-            ? "task"
-            : undefined);
-  const messageBodyHash = messageBody !== undefined
-    ? createHash("sha256").update(messageBody).digest("hex")
-    : stringValue(previousReceipt?.message_body_hash) ??
-      stringValue(previousGenerationSubmission?.message_body_hash);
-  const previousDispatcherPid = Number(
-    previousGenerationSubmission?.dispatcher_pid
-  );
-  const dispatcherPid = status === "prepared" ||
-    !Number.isSafeInteger(previousDispatcherPid) ||
-    previousDispatcherPid <= 1
-    ? cliPid()
-    : previousDispatcherPid;
-  const provenStage = lastProvenStage ?? terminalSubmissionLastProvenStage(
-    status,
-    stringValue(previousGenerationSubmission?.last_proven_stage)
-  );
-  const validatedAcceptanceEvidence = status === "agent_accepted"
-    ? terminalAcceptanceEvidenceForConversation(
-        conversation,
-        requestText,
-        acceptanceEvidence
-      )
-    : undefined;
-  const storedControl = terminalControlFromTakeover(nativeTakeover);
-  const requestHash = terminalBridgeRequestFingerprint(requestText);
-  const candidateImmutableReceiptFields = {
-    session_id: sessionIdForConversation(conversation),
-    turn_id: turnIdForConversation(conversation),
-    message_id: messageId,
-    binding_id: stringValue(conversation.terminal_binding_id),
-    binding_generation: Number.isSafeInteger(
-      Number(conversation.terminal_binding_generation)
-    )
-      ? Number(conversation.terminal_binding_generation)
-      : undefined,
-    ...(durableMessageType ? { message_type: durableMessageType } : {}),
-    ...(messageBodyHash ? { message_body_hash: messageBodyHash } : {}),
-    request_hash: requestHash,
-    executor_kind: executorForConversation(conversation).kind,
-    openclaw_session: conversation.openclaw_session,
-    store_dir: managedSessionStoreDirForConversation(conversation),
-    native_thread_id:
-      stringValue(conversation.native_thread_id) ??
-      stringValue(nativeTakeover.terminal_agent_session_id) ??
-      stringValue(nativeTakeover.terminal_agent_expected_session_id),
-    terminal_target: storedControl?.target,
-    terminal_socket_path: storedControl?.socketPath ?? null,
-    terminal_pane_pid: storedControl?.panePid,
-    terminal_endpoint:
-      storedControl && hasCanonicalTerminalEndpoint(storedControl)
-        ? terminalControlEvidence(storedControl)
-        : previousReceipt?.terminal_endpoint
-  };
-  const immutableReceiptFields = Object.fromEntries(
-    Object.entries(candidateImmutableReceiptFields).map(([key, value]) => [
-      key,
-      value === undefined && previousReceipt?.[key] !== undefined
-        ? previousReceipt[key]
-        : value
-    ])
-  );
-  if (previousReceipt) {
-    for (const [key, value] of Object.entries(candidateImmutableReceiptFields)) {
-      if (
-        previousReceipt[key] !== undefined &&
-        value !== undefined &&
-        canonicalJson(previousReceipt[key]) !== canonicalJson(value)
-      ) {
-        throw new Error(
-          `terminal submission receipt ${messageId} changed immutable ${key}`
-        );
-      }
-    }
-  }
-  const nextSubmission = {
-    status,
-    ...immutableReceiptFields,
-    prepared_at: preparedAt,
-    dispatcher_pid: dispatcherPid,
-    last_proven_stage: provenStage,
-    ...(textInjectedAt ? { text_injected_at: textInjectedAt } : {}),
-    ...(enterDispatchedAt ? { enter_dispatched_at: enterDispatchedAt } : {}),
-    ...(agentAcceptedAt ? { agent_accepted_at: agentAcceptedAt } : {}),
-    ...(notAcceptedAt ? { not_accepted_at: notAcceptedAt } : {}),
-    ...(submittedAt ? { submitted_at: submittedAt } : {}),
-    ...(uncertainAt ? { uncertain_at: uncertainAt } : {}),
-    ...(abortedAt ? { aborted_at: abortedAt } : {}),
-    ...(error ? { error: textSummary(error) } : {}),
-    ...(safeToRetry !== undefined ? { safe_to_retry: safeToRetry } : {}),
-    ...(validatedAcceptanceEvidence
-      ? { acceptance_evidence: validatedAcceptanceEvidence }
-      : {})
-  };
-  const nextReceipts = previousReceipt
-    ? previousReceipts.map((receipt) =>
-        stringValue(receipt.message_id) === messageId
-          ? nextSubmission
-          : receipt
-      )
-    : [...previousReceipts, nextSubmission];
-  return {
-    ...conversation,
-    native_session_takeover: {
-      ...nativeTakeover,
-      terminal_bridge_submission: nextSubmission,
-      terminal_bridge_submission_receipts: nextReceipts
-    },
-    updated_at:
-      agentAcceptedAt ?? notAcceptedAt ?? uncertainAt ?? abortedAt ??
-      enterDispatchedAt ?? textInjectedAt ?? submittedAt ?? preparedAt
-  };
-}
-
-function terminalAcceptanceEvidenceForConversation(
-  conversation: Conversation,
-  requestText: string,
-  evidence: unknown
-): TerminalSubmissionAcceptanceEvidence {
-  return validateTerminalSubmissionAcceptanceEvidence(
-    evidence,
-    terminalAcceptanceEvidenceExpectation(conversation, requestText)
-  );
-}
-
-function terminalAcceptanceEvidenceExpectation(
-  conversation: Conversation,
-  requestText: string
-): {
-  source: TerminalSubmissionAcceptanceEvidence["source"];
-  nativeThreadId: string;
-  requestHash: string;
-} {
-  const nativeTakeover = isRecord(conversation.native_session_takeover)
-    ? conversation.native_session_takeover
-    : undefined;
-  const executor = executorForConversation(conversation).kind;
-  const nativeThreadId = stringValue(conversation.native_thread_id) ??
-    stringValue(nativeTakeover?.terminal_agent_session_id) ??
-    stringValue(nativeTakeover?.terminal_agent_expected_session_id);
-  if (!nativeThreadId) {
-    throw new Error(
-      "native acceptance evidence cannot be bound without an exact native thread"
-    );
-  }
-  const requestHash = terminalBridgeRequestFingerprint(requestText);
-  if (!requestHash) {
-    throw new Error("native acceptance evidence has no exact request hash");
-  }
-  return {
-    source: executor === "codex" ? "codex_rollout" : "claude_transcript",
-    nativeThreadId,
-    requestHash
-  };
-}
+const terminalAcceptanceEvidenceForConversation =
+  dispatchReceipt.terminalAcceptanceEvidenceForConversation;
+const terminalAcceptanceEvidenceExpectation =
+  dispatchReceipt.terminalAcceptanceEvidenceExpectation;
 
 function replayExactActiveTerminalSubmission({
   options,
@@ -3204,93 +2909,11 @@ function replayExactStoredTerminalSubmission({
   return true;
 }
 
-function terminalSubmissionLastProvenStage(
-  status: TerminalBridgeSubmissionStatus,
-  previous?: string
-): "prepared" | "text_injected" | "enter_dispatched" | "agent_accepted" {
-  if (status === "agent_accepted") {
-    return "agent_accepted";
-  }
-  if (
-    status === "enter_dispatched" ||
-    status === "submitted" ||
-    status === "not_accepted"
-  ) {
-    return "enter_dispatched";
-  }
-  if (
-    status === "uncertain" &&
-    ["prepared", "text_injected", "enter_dispatched", "agent_accepted"].includes(
-      previous ?? ""
-    )
-  ) {
-    return previous as "prepared" | "text_injected" | "enter_dispatched" | "agent_accepted";
-  }
-  return status === "text_injected" ? "text_injected" : "prepared";
-}
-
-function terminalBridgeSubmission(
-  conversation
-): Record<string, any> | undefined {
-  const nativeTakeover = isRecord(conversation?.native_session_takeover)
-    ? conversation.native_session_takeover
-    : undefined;
-  return isRecord(nativeTakeover?.terminal_bridge_submission)
-    ? nativeTakeover.terminal_bridge_submission
-    : undefined;
-}
-
-function terminalBridgeSubmissionReceipts(
-  conversation: Conversation
-): Record<string, any>[] {
-  const nativeTakeover = isRecord(conversation.native_session_takeover)
-    ? conversation.native_session_takeover
-    : undefined;
-  const historyValue = nativeTakeover?.terminal_bridge_submission_receipts;
-  if (historyValue !== undefined && !Array.isArray(historyValue)) {
-    throw new Error("terminal submission receipt history is malformed");
-  }
-  const receipts = (Array.isArray(historyValue) ? historyValue : []).map(
-    (value) => {
-      if (!isRecord(value) || !stringValue(value.message_id)) {
-        throw new Error("terminal submission receipt history is malformed");
-      }
-      return value;
-    }
-  );
-  const ids = new Set<string>();
-  for (const receipt of receipts) {
-    const id = String(receipt.message_id);
-    if (ids.has(id)) {
-      throw new Error(`terminal submission receipt ${id} is duplicated`);
-    }
-    ids.add(id);
-  }
-  const current = terminalBridgeSubmission(conversation);
-  const currentId = stringValue(current?.message_id);
-  if (current && currentId && ids.has(currentId)) {
-    const historical = receipts.find((receipt) =>
-      stringValue(receipt.message_id) === currentId
-    );
-    if (!historical || canonicalJson(historical) !== canonicalJson(current)) {
-      throw new Error(
-        `terminal submission receipt ${currentId} conflicts with its current generation`
-      );
-    }
-  }
-  return current && currentId && !ids.has(currentId)
-    ? [...receipts, current]
-    : receipts;
-}
-
-function unresolvedTerminalBridgeSubmission(conversation): Record<string, any> | undefined {
-  const submission = terminalBridgeSubmission(conversation);
-  return submission &&
-    ["prepared", "text_injected", "enter_dispatched", "not_accepted", "uncertain"]
-      .includes(String(submission.status))
-    ? submission
-    : undefined;
-}
+const terminalBridgeSubmission = dispatchReceipt.terminalBridgeSubmission;
+const terminalBridgeSubmissionReceipts =
+  dispatchReceipt.terminalBridgeSubmissionReceipts;
+const unresolvedTerminalBridgeSubmission =
+  dispatchReceipt.unresolvedTerminalBridgeSubmission;
 
 function assertNoUnresolvedTerminalBridgeSubmission(
   storeDir: string,
@@ -18085,13 +17708,14 @@ async function runTerminalControlSend({
     return true;
   };
   const bridgeConversation = bridge
-    ? withTerminalBridgeState({
+    ? dispatchReceipt.withTerminalBridgeState({
         conversation: nextConversation,
         message,
         requestText: terminalPayload,
         startedAt: bridgeStartedAt,
         agentTimeoutMinutes,
         agentHardTimeoutMinutes,
+        monitorLockVersion: monitorOwner.LOCK_VERSION,
         preSendScreenFingerprint,
         codexRolloutAcceptanceAnchor,
         claudeTranscriptAnchor,
@@ -18110,224 +17734,97 @@ async function runTerminalControlSend({
   const previousGenerationId =
     stringValue(previousDispatchLedger?.generation_id) ??
     stringValue(previousDispatchLedger?.message_id);
-  const saveOrdinaryDispatchLedger = (
-    current: Conversation,
-    status: TerminalOrdinaryDispatchIdentityFields["status"],
-    phaseFields: TerminalOrdinaryDispatchPhaseFields = {},
-    dispatcherPid: number | null = cliPid(),
-    postCallbackFields: TerminalOrdinaryDispatchPostCallbackFields = {},
-    callbackExpected = Boolean(current.gateway_method)
-  ) => saveTerminalBridgeDispatchLedger(
+  let bookkeepingWarning: string | undefined;
+  const recordPostTransportBookkeepingFailure = (
+    phase: string,
+    error: unknown
+  ): void => {
+    const warning = error instanceof Error ? error.message : String(error);
+    bookkeepingWarning ??= warning;
+    runtimeLog("warn", "terminal_message_post_transport_bookkeeping_failed", {
+      conversation_id: conversation.conversation_id,
+      terminal_target: terminalControl.target,
+      phase,
+      error: warning
+    });
+  };
+  const application = new dispatchApplication.TerminalDispatchApplication({
+    originalConversation: conversation,
+    preparedConversation,
+    message: {
+      id: message.id,
+      type: message.type,
+      body: String(message.body)
+    },
+    executor,
     terminalControl,
-    constructTerminalOrdinaryDispatchLedger({
-      bindingFields: terminalBindingLedgerFields(current),
-      identityFields: {
-        status,
-        generation_id: message.id,
-        conversation_id: current.conversation_id,
-        session_id: sessionIdForConversation(current),
-        turn_id: turnIdForConversation(current),
-        message_id: message.id,
-        message_type: message.type,
-        request_hash: terminalRequestHash,
-        prepared_at: bridgeStartedAt
+    receiptTerminalControl: terminalControlFromTakeover(
+      isRecord(preparedConversation.native_session_takeover)
+        ? preparedConversation.native_session_takeover
+        : undefined
+    ),
+    requestText: terminalPayload,
+    requestHash: terminalRequestHash,
+    preparedAt: bridgeStartedAt,
+    statePath,
+    eventLogPath: logPath,
+    previousGenerationId,
+    dispatcherPid: cliPid(),
+    storeDir: managedSessionStoreDirForConversation(preparedConversation),
+    recordMessageAfterSend,
+    recordRawAttachmentAfterSend,
+    ledgerBindingFields: terminalBindingLedgerFields
+  }, {
+    synchronizeStageProgress: (current, stage, at) => {
+      stagedConversation = current;
+      textInjectedAt = stage === "text_injected" ? at : textInjectedAt;
+      enterDispatchedAt = stage === "enter_dispatched" ? at : enterDispatchedAt;
+    },
+    state: {
+      save: (current) => saveState(statePath, current)
+    },
+    ledger: {
+      save: (ledger, phase) => {
+        if (
+          phase === "final" &&
+          cliEnv().AKK_TEST_FINAL_TERMINAL_LEDGER_FAILURE === "1"
+        ) {
+          throw new Error(
+            "injected final terminal ledger persistence failure"
+          );
+        }
+        saveTerminalBridgeDispatchLedger(terminalControl, ledger);
       },
-      phaseFields,
-      dispatcherPid,
-      statePath,
-      eventLogPath: logPath,
-      callbackExpected,
-      postCallbackFields,
-      previousGenerationId
-    })
-  );
-
-  try {
-    saveOrdinaryDispatchLedger(preparedConversation, "prepared");
-  } catch (error) {
-    try {
-      if (!abortDeferredPreInputBeforeTransport()) {
-        restoreTerminalBridgeDispatchLedger({
-          terminalControl,
-          previousLedger: previousDispatchLedger,
-          reason: "prepared ledger persistence failed before terminal input"
+      restore: (reason, terminalInputNotStartedAt) => {
+        if (!abortDeferredPreInputBeforeTransport(terminalInputNotStartedAt)) {
+          restoreTerminalBridgeDispatchLedger({
+            terminalControl,
+            previousLedger: previousDispatchLedger,
+            reason
+          });
+        }
+      }
+    },
+    audit: {
+      append: (event) => appendEvent(logPath, event),
+      log: runtimeLog,
+      recordBookkeepingFailure: recordPostTransportBookkeepingFailure,
+      recordPersistenceFailure: (phase, error, current) => {
+        runtimeLog("error", phase, {
+          conversation_id: current.conversation_id,
+          terminal_target: terminalControl.target,
+          error: error instanceof Error ? error.message : String(error)
         });
       }
-    } finally {
-      rollbackRawAttachBeforeTransport();
-    }
-    throw error;
-  }
-  try {
-    saveState(statePath, preparedConversation);
-  } catch (error) {
-    try {
-      if (!abortDeferredPreInputBeforeTransport()) {
-        restoreTerminalBridgeDispatchLedger({
-          terminalControl,
-          previousLedger: previousDispatchLedger,
-          reason: "prepared state persistence failed before terminal input"
-        });
-      }
-    } finally {
-      rollbackRawAttachBeforeTransport();
-    }
-    throw error;
-  }
+    },
+    rollbackBeforeInput: rollbackRawAttachBeforeTransport
+  });
+  application.persistPrepared();
   let bridgeMonitor:
     | ReturnType<typeof startTerminalBridgeMonitorForConversation>
     | undefined;
-  type RecordedTerminalZeroInputAbort = {
-    outcome: TerminalZeroInputAbortOutcome;
-    reportedConversation: Conversation;
-    receiptConversation: Conversation;
-  };
-  const recordTerminalZeroInputAbort = ({
-    failureKind,
-    error
-  }: {
-    failureKind: TerminalZeroInputFailureKind;
-    error: unknown;
-  }): RecordedTerminalZeroInputAbort => {
-    const transportFailure = failureKind === "transport";
-    const abortedAt = cliNow().toISOString();
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    let dispatchLedgerRestored = true;
-    try {
-      if (!abortDeferredPreInputBeforeTransport(
-        transportFailure ? abortedAt : undefined
-      )) {
-        restoreTerminalBridgeDispatchLedger({
-          terminalControl,
-          previousLedger: previousDispatchLedger,
-          reason: transportFailure
-            ? "terminal transport was proved not to have started"
-            : "terminal submission aborted before terminal input"
-        });
-      }
-    } catch (ledgerError) {
-      dispatchLedgerRestored = false;
-      runtimeLog("error", "terminal_dispatch_ledger_restore_failed", {
-        conversation_id: conversation.conversation_id,
-        terminal_target: terminalControl.target,
-        error: ledgerError instanceof Error
-          ? ledgerError.message
-          : String(ledgerError)
-      });
-    }
-    const rawAttachRolledBack = rollbackRawAttachBeforeTransport();
-    const durableAbortCanBeRetryable =
-      dispatchLedgerRestored && rawAttachRolledBack;
-    const failureBase: Conversation = recordRawAttachmentAfterSend
-      ? {
-          ...preparedConversation,
-          status: "failed",
-          failed_at: abortedAt,
-          failure_reason: transportFailure
-            ? "terminal transport failed before terminal input"
-            : "terminal submission setup failed before terminal input"
-        }
-      : {
-          ...preparedConversation,
-          status: conversation.status,
-          ...(conversation.idle_since
-            ? { idle_since: conversation.idle_since }
-            : {})
-        };
-    const submissionFields = {
-      messageId: message.id,
-      messageType: message.type,
-      messageBody: String(message.body),
-      requestText: terminalPayload,
-      status: "aborted" as const,
-      preparedAt: bridgeStartedAt,
-      abortedAt,
-      error: errorMessage
-    };
-    const abortedConversation = withTerminalBridgeSubmission({
-      conversation: failureBase,
-      ...submissionFields,
-      safeToRetry: durableAbortCanBeRetryable
-    });
-    let abortedStatePersisted = false;
-    try {
-      if (
-        !transportFailure &&
-        cliEnv().AKK_TEST_ABORTED_STATE_PERSISTENCE_FAILURE === "1"
-      ) {
-        throw new Error(
-          "injected aborted submission state persistence failure"
-        );
-      }
-      saveState(statePath, abortedConversation);
-      abortedStatePersisted = true;
-    } catch (persistenceError) {
-      runtimeLog("error", "terminal_message_submit_aborted_persist_failed", {
-        conversation_id: abortedConversation.conversation_id,
-        terminal_target: terminalControl.target,
-        error: persistenceError instanceof Error
-          ? persistenceError.message
-          : String(persistenceError)
-      });
-    }
-    const outcome = reduceTerminalZeroInputAbort({
-      failureKind,
-      dispatchLedgerRestored,
-      rawAttachRolledBack,
-      abortedStatePersisted
-    });
-    const reportConversation = () => outcome.safeToRetry
-      ? abortedConversation
-      : withTerminalBridgeSubmission({
-          conversation: abortedConversation,
-          ...submissionFields,
-          safeToRetry: false
-        });
-    let reportedConversation = transportFailure
-      ? reportConversation()
-      : undefined;
-    try {
-      appendEvent(logPath, {
-        ts: abortedAt,
-        conversation_id: abortedConversation.conversation_id,
-        event: "terminal_message_submit_aborted",
-        message_id: message.id,
-        executor,
-        terminal_control: terminalControl,
-        error: textSummary(errorMessage),
-        safe_to_retry: outcome.safeToRetry,
-        ...(transportFailure ? { terminal_input_started: false } : {})
-      });
-    } catch (persistenceError) {
-      runtimeLog("error", "terminal_message_submit_aborted_event_failed", {
-        conversation_id: abortedConversation.conversation_id,
-        terminal_target: terminalControl.target,
-        error: persistenceError instanceof Error
-          ? persistenceError.message
-          : String(persistenceError)
-      });
-    }
-    reportedConversation ??= reportConversation();
-    runtimeLog("error", "terminal_message_submit_aborted", {
-      conversation_id: abortedConversation.conversation_id,
-      terminal_target: terminalControl.target,
-      error: errorMessage,
-      safe_to_retry: outcome.safeToRetry,
-      ...(transportFailure ? { terminal_input_started: false } : {}),
-      dispatch_ledger_restored: dispatchLedgerRestored,
-      aborted_state_persisted: abortedStatePersisted,
-      raw_attach_rolled_back: rawAttachRolledBack
-    });
-    return {
-      outcome,
-      reportedConversation,
-      receiptConversation: transportFailure
-        ? reportedConversation
-        : abortedConversation
-    };
-  };
   const presentTerminalZeroInputAbort = (
-    failure: RecordedTerminalZeroInputAbort
+    failure: dispatchApplication.RecordedTerminalZeroInputAbort
   ): void => {
     const { outcome, reportedConversation, receiptConversation } = failure;
     const setupFailure = outcome.failureKind === "setup";
@@ -18384,63 +17881,17 @@ async function runTerminalControlSend({
     });
   };
   try {
-    if (
+    application.recordPreparedBookkeeping(
+      recordMessageAfterSend ? messageEvent(message) : undefined,
       cliEnv().AKK_TEST_TERMINAL_SETUP_FAILURE === "1"
-    ) {
-      throw new Error(
-        "injected terminal setup failure before terminal input"
-      );
-    }
-    if (recordRawAttachmentAfterSend) {
-      const sourceConversationId = stringValue(
-        isRecord(conversation.native_session_takeover)
-          ? conversation.native_session_takeover.native_session_id
-          : undefined
-      );
-      appendEvent(logPath, {
-        ts: bridgeStartedAt,
-        conversation_id: conversation.conversation_id,
-        event: "raw_terminal_session_attached",
-        source_conversation_id: sourceConversationId,
-        agent: executor.kind,
-        terminal_control: terminalControl,
-        executor
-      });
-      runtimeLog("info", "raw_terminal_session_attached", {
-        conversation_id: conversation.conversation_id,
-        source_conversation_id: sourceConversationId,
-        terminal_target: terminalControl.target,
-        state_path: statePath,
-        event_log_path: logPath
-      });
-    }
-    if (recordMessageAfterSend) {
-      appendEvent(logPath, messageEvent(message));
-      runtimeLog("info", "message_created", {
-        conversation_id: conversation.conversation_id,
-        agent: executor.kind,
-        executor_session: executor.session,
-        message_type: message.type,
-        state_path: statePath,
-        event_log_path: logPath,
-        message: textSummary(message.body)
-      });
-    }
-    appendEvent(logPath, {
-      ts: bridgeStartedAt,
-      conversation_id: conversation.conversation_id,
-      event: "terminal_message_submit_prepared",
-      message_id: message.id,
-      executor,
-      terminal_control: terminalControl,
-      request_hash: terminalBridgeRequestFingerprint(terminalPayload),
-      dispatcher_pid: cliPid()
-    });
-
+    );
   } catch (error) {
-    presentTerminalZeroInputAbort(recordTerminalZeroInputAbort({
+    presentTerminalZeroInputAbort(application.recordZeroInputAbort({
       failureKind: "setup",
-      error
+      error,
+      abortedAt: cliNow().toISOString(),
+      injectStatePersistenceFailure:
+        cliEnv().AKK_TEST_ABORTED_STATE_PERSISTENCE_FAILURE === "1"
     }));
     return;
   }
@@ -18449,21 +17900,8 @@ async function runTerminalControlSend({
   let stagedConversation = preparedConversation;
   let textInjectedAt: string | undefined;
   let enterDispatchedAt: string | undefined;
-  let acceptanceResult: TerminalAcceptancePollResult | undefined;
-  let bookkeepingWarning: string | undefined;
-  const recordPostTransportBookkeepingFailure = (
-    phase: string,
-    error: unknown
-  ): void => {
-    const message = error instanceof Error ? error.message : String(error);
-    bookkeepingWarning ??= message;
-    runtimeLog("warn", "terminal_message_post_transport_bookkeeping_failed", {
-      conversation_id: stagedConversation.conversation_id,
-      terminal_target: terminalControl.target,
-      phase,
-      error: message
-    });
-  };
+  let acceptanceResult: dispatchApplication.TerminalDispatchAcceptance |
+    undefined;
   try {
     await terminalBridge.send(executor.kind, terminalControl, terminalPayload, {
       runtime: preSendRuntime,
@@ -18532,74 +17970,42 @@ async function runTerminalControlSend({
                 });
               }
             : undefined,
-      async onTransportStage(event) {
+      async onTransportStage({ stage }) {
         const stageAt = cliNow().toISOString();
-        if (event.stage === "text_injected") {
-          textInjectedAt = stageAt;
-        } else {
-          enterDispatchedAt = stageAt;
-        }
-        stagedConversation = withTerminalBridgeSubmission({
-          conversation: stagedConversation,
-          messageId: message.id,
-          messageType: message.type,
-          messageBody: String(message.body),
-          requestText: terminalPayload,
-          status: event.stage,
-          preparedAt: bridgeStartedAt,
-          textInjectedAt,
-          enterDispatchedAt
-        });
-        saveState(statePath, stagedConversation);
-        saveOrdinaryDispatchLedger(stagedConversation, event.stage, {
-          ...(textInjectedAt ? { text_injected_at: textInjectedAt } : {}),
-          ...(enterDispatchedAt ? { enter_dispatched_at: enterDispatchedAt } : {})
-        });
-        if (deferredCodexForegroundBinding) {
-          advanceDeferredCodexForegroundTransferInputStage({
-            options,
-            boundary: deferredCodexForegroundBinding,
-            stage: event.stage,
-            at: stageAt
-          });
-        }
-        if (event.stage === "text_injected" && observedHandoff) {
-          await assertObservedHandoffTransportBoundary({
-            options,
-            terminal: observedHandoff.terminal,
-            transition: observedHandoff.transition,
-            requireEmptyComposer: false
-          });
-        }
-        if (event.stage === "text_injected" && verifiedEmptyCodexHandoff) {
-          await assertVerifiedEmptyCodexTransportBoundary({
-            options,
-            boundary: verifiedEmptyCodexHandoff,
-            requireEmptyComposer: false
-          });
-        }
-        if (event.stage === "text_injected" && deferredCodexForegroundBinding) {
-          await assertDeferredCodexForegroundBindingBoundary({
-            options,
-            boundary: deferredCodexForegroundBinding,
+        await application.recordTransportStage(stage, stageAt, async () => {
+          if (deferredCodexForegroundBinding) {
+            advanceDeferredCodexForegroundTransferInputStage({
+              options,
+              boundary: deferredCodexForegroundBinding,
+              stage,
+              at: stageAt
+            });
+          }
+          if (stage === "text_injected" && observedHandoff) {
+            await assertObservedHandoffTransportBoundary({
+              options,
+              terminal: observedHandoff.terminal,
+              transition: observedHandoff.transition,
+              requireEmptyComposer: false
+            });
+          }
+          if (stage === "text_injected" && verifiedEmptyCodexHandoff) {
+            await assertVerifiedEmptyCodexTransportBoundary({
+              options,
+              boundary: verifiedEmptyCodexHandoff,
+              requireEmptyComposer: false
+            });
+          }
+          if (stage === "text_injected" && deferredCodexForegroundBinding) {
+            await assertDeferredCodexForegroundBindingBoundary({
+              options,
+              boundary: deferredCodexForegroundBinding,
               expectedSourceStatus: "transitioning",
-            requireNoDispatch: false,
-            requireEmptyComposer: false
-          });
-        }
-        try {
-          appendEvent(logPath, {
-            ts: stageAt,
-            conversation_id: stagedConversation.conversation_id,
-            event: `terminal_message_${event.stage}`,
-            message_id: message.id,
-            executor,
-            terminal_control: terminalControl,
-            request_hash: terminalRequestHash
-          });
-        } catch (error) {
-          recordPostTransportBookkeepingFailure(event.stage, error);
-        }
+              requireNoDispatch: false,
+              requireEmptyComposer: false
+            });
+          }
+        });
       }
     });
     if (!enterDispatchedAt) {
@@ -18830,68 +18236,16 @@ async function runTerminalControlSend({
             });
           }
         }
-        const unfencedBase = {
-          ...stagedConversation,
-          status: "stalled" as const,
-          stalled_at: bindingFailedAt,
-          stalled_reason: bindingReason,
-          native_session_takeover: {
-            ...(isRecord(stagedConversation.native_session_takeover)
-              ? stagedConversation.native_session_takeover
-              : {}),
-            terminal_agent_identity_status: "unresolved_after_submit",
-            terminal_agent_identity_error: textSummary(bindingReason)
-          },
-          updated_at: bindingFailedAt
-        };
-        const unfencedConversation = withTerminalBridgeSubmission({
-          conversation: unfencedBase,
-          messageId: message.id,
-          messageType: message.type,
-          messageBody: String(message.body),
-          requestText: terminalPayload,
-          status: "uncertain",
-          preparedAt: bridgeStartedAt,
-          textInjectedAt,
-          enterDispatchedAt,
-          uncertainAt: bindingFailedAt,
-          error: bindingReason,
-          lastProvenStage: "enter_dispatched"
-        });
-        if (!deferredCodexForegroundBinding) {
-          quarantineManagedSessionBinding({
-            conversation: unfencedConversation,
-            reason: bindingReason
-          });
-        }
-        saveOrdinaryDispatchLedger(unfencedConversation, "uncertain", {
-          text_injected_at: textInjectedAt,
-          enter_dispatched_at: enterDispatchedAt,
-          uncertain_at: bindingFailedAt
-        }, undefined, {
-          native_identity_status: "unresolved_after_submit",
-          error: textSummary(bindingReason)
-        }, false);
-        saveState(statePath, unfencedConversation);
-        appendEvent(logPath, {
-          ts: bindingFailedAt,
-          conversation_id: unfencedConversation.conversation_id,
-          event: "terminal_agent_identity_binding_failed",
-          message_id: message.id,
-          executor,
-          terminal_control: terminalControl,
-          error: textSummary(bindingReason),
-          delivered: false,
-          do_not_retry: true
-        });
-        runtimeLog("error", "terminal_agent_identity_binding_failed", {
-          conversation_id: unfencedConversation.conversation_id,
-          agent: executor.kind,
-          terminal_target: terminalControl.target,
-          error: bindingReason,
-          delivered: false,
-          do_not_retry: true
-        });
+        const unfencedConversation = application.applyIdentityFailure(
+          bindingFailedAt,
+          bindingReason,
+          deferredCodexForegroundBinding
+            ? undefined
+            : (current) => quarantineManagedSessionBinding({
+                conversation: current,
+                reason: bindingReason
+              })
+        );
         printJson({
           session_id: sessionIdForConversation(unfencedConversation),
           turn_id: turnIdForConversation(unfencedConversation),
@@ -18934,100 +18288,11 @@ async function runTerminalControlSend({
           terminalControl,
           terminalBridge
         });
-    const acceptanceResolvedAt = cliNow().toISOString();
-    const terminalStatus: TerminalBridgeSubmissionStatus =
-      acceptanceResult.outcome === "pending_acceptance"
-        ? "enter_dispatched"
-        : acceptanceResult.outcome;
-    const outcomeBase =
-      acceptanceResult.outcome === "not_accepted" ||
-      acceptanceResult.outcome === "uncertain"
-        ? {
-            ...submittedBase,
-            status: "stalled" as const,
-            stalled_at: acceptanceResolvedAt,
-            stalled_reason: acceptanceResult.reason,
-            updated_at: acceptanceResolvedAt
-          }
-        : submittedBase;
-    deliveredConversation = withTerminalBridgeSubmission({
-      conversation: outcomeBase,
-      messageId: message.id,
-      messageType: message.type,
-      messageBody: String(message.body),
-      requestText: terminalPayload,
-      status: terminalStatus,
-      preparedAt: bridgeStartedAt,
-      textInjectedAt,
-      enterDispatchedAt,
-      ...(acceptanceResult.outcome === "agent_accepted"
-        ? {
-            agentAcceptedAt: acceptanceResolvedAt,
-            acceptanceEvidence: acceptanceResult.evidence
-          }
-        : {}),
-      ...(acceptanceResult.outcome === "not_accepted"
-        ? { notAcceptedAt: acceptanceResolvedAt }
-        : {}),
-      ...(acceptanceResult.outcome === "uncertain"
-        ? {
-            uncertainAt: acceptanceResolvedAt,
-            error: acceptanceResult.reason,
-            lastProvenStage: "enter_dispatched" as const
-          }
-        : {})
-    });
-    saveState(statePath, deliveredConversation);
-    try {
-      if (cliEnv().AKK_TEST_FINAL_TERMINAL_LEDGER_FAILURE === "1") {
-        throw new Error("injected final terminal ledger persistence failure");
-      }
-      saveOrdinaryDispatchLedger(deliveredConversation, terminalStatus, {
-        text_injected_at: textInjectedAt,
-        enter_dispatched_at: enterDispatchedAt,
-        ...(acceptanceResult.outcome === "agent_accepted"
-          ? {
-              agent_accepted_at: acceptanceResolvedAt,
-              acceptance_evidence: acceptanceResult.evidence
-            }
-          : {}),
-        ...(acceptanceResult.outcome === "not_accepted"
-          ? { not_accepted_at: acceptanceResolvedAt }
-          : {}),
-        ...(acceptanceResult.outcome === "uncertain"
-          ? {
-              uncertain_at: acceptanceResolvedAt,
-              error: textSummary(acceptanceResult.reason)
-            }
-          : {})
-      }, null);
-    } catch (error) {
-      // State is the durable proof authority. Once a valid native ACK has
-      // committed there, a lagging ledger is bookkeeping debt and must never
-      // overwrite that strongest proof with `uncertain`.
-      recordPostTransportBookkeepingFailure(
-        "final_terminal_ledger",
-        error
-      );
-    }
-    try {
-      appendEvent(logPath, {
-        ts: acceptanceResolvedAt,
-        conversation_id: deliveredConversation.conversation_id,
-        event: acceptanceResult.outcome === "agent_accepted"
-          ? "terminal_message_agent_accepted"
-          : acceptanceResult.outcome === "pending_acceptance"
-            ? "terminal_message_acceptance_pending"
-            : `terminal_message_${acceptanceResult.outcome}`,
-        message_id: message.id,
-        executor,
-        terminal_control: terminalControl,
-        delivery_receipt: terminalStatus,
-        do_not_retry: acceptanceResult.outcome !== "agent_accepted"
-      });
-    } catch (error) {
-      recordPostTransportBookkeepingFailure(terminalStatus, error);
-    }
+    deliveredConversation = application.applyAcceptance(
+      submittedBase,
+      acceptanceResult,
+      cliNow().toISOString()
+    ).conversation;
     if (
       bridge &&
       (acceptanceResult.outcome === "agent_accepted" ||
@@ -19061,9 +18326,10 @@ async function runTerminalControlSend({
       !textInjectedAt &&
       error instanceof TerminalInputNotStartedError
     ) {
-      presentTerminalZeroInputAbort(recordTerminalZeroInputAbort({
+      presentTerminalZeroInputAbort(application.recordZeroInputAbort({
         failureKind: "transport",
-        error
+        error,
+        abortedAt: cliNow().toISOString()
       }));
       return;
     }
@@ -19085,59 +18351,10 @@ async function runTerminalControlSend({
         });
       }
     }
-    const failureBase = stagedConversation;
-    const stalledFailureBase = {
-      ...failureBase,
-      status: "stalled" as const,
-      stalled_at: uncertainAt,
-      stalled_reason:
-        "terminal submission outcome is uncertain; inspect the shared terminal pane before continuing",
-      updated_at: uncertainAt
-    };
-    const uncertainConversation = withTerminalBridgeSubmission({
-      conversation: stalledFailureBase,
-      messageId: message.id,
-      messageType: message.type,
-      messageBody: String(message.body),
-      requestText: terminalPayload,
-      status: "uncertain",
-      preparedAt: bridgeStartedAt,
-      textInjectedAt,
-      enterDispatchedAt,
+    const uncertainConversation = application.applyUncertain(
       uncertainAt,
-      error: errorMessage,
-      lastProvenStage: enterDispatchedAt
-        ? "enter_dispatched"
-        : textInjectedAt
-          ? "text_injected"
-          : "prepared"
-    });
-    try {
-      saveOrdinaryDispatchLedger(uncertainConversation, "uncertain", {
-        ...(textInjectedAt ? { text_injected_at: textInjectedAt } : {}),
-        ...(enterDispatchedAt ? { enter_dispatched_at: enterDispatchedAt } : {}),
-        uncertain_at: uncertainAt
-      }, undefined, { error: textSummary(errorMessage) });
-      saveState(statePath, uncertainConversation);
-      appendEvent(logPath, {
-        ts: uncertainAt,
-        conversation_id: uncertainConversation.conversation_id,
-        event: "terminal_message_submit_uncertain",
-        message_id: message.id,
-        executor,
-        terminal_control: terminalControl,
-        error: textSummary(errorMessage),
-        do_not_retry: true
-      });
-    } catch (persistenceError) {
-      runtimeLog("error", "terminal_message_submit_uncertain_persist_failed", {
-        conversation_id: uncertainConversation.conversation_id,
-        terminal_target: terminalControl.target,
-        error: persistenceError instanceof Error
-          ? persistenceError.message
-          : String(persistenceError)
-      });
-    }
+      error
+    );
     const stalledConversationIds =
       stallOtherTerminalBridgeConversationsForUncertainDispatch({
         storeDir: storeDirFromOptions(options),
@@ -19189,44 +18406,13 @@ async function runTerminalControlSend({
 
   const nativeAccepted = acceptanceResult?.outcome === "agent_accepted";
   const acceptancePending = acceptanceResult?.outcome === "pending_acceptance";
-  try {
-    appendEvent(logPath, {
-      ts: cliNow().toISOString(),
-      conversation_id: conversation.conversation_id,
-      event: "terminal_message_send",
-      executor,
-      terminal_control: terminalControl,
-      message: textSummary(message.body),
-      payload: textSummary(terminalPayload)
-    });
-    runtimeLog("info", "terminal_message_send", {
-      conversation_id: conversation.conversation_id,
-      agent: executor.kind,
-      terminal_target: terminalControl.target,
-      message: textSummary(message.body),
-      payload: textSummary(terminalPayload)
-    });
-  } catch (error) {
-    bookkeepingWarning =
-      error instanceof Error ? error.message : String(error);
-    runtimeLog("warn", "terminal_message_post_submit_bookkeeping_failed", {
-      conversation_id: deliveredConversation.conversation_id,
-      terminal_target: terminalControl.target,
-      error: bookkeepingWarning,
-      delivered: nativeAccepted
-    });
-    try {
-      appendEvent(logPath, {
-        ts: cliNow().toISOString(),
-        conversation_id: deliveredConversation.conversation_id,
-        event: "terminal_message_post_submit_bookkeeping_failed",
-        terminal_control: terminalControl,
-        error: textSummary(bookkeepingWarning),
-        delivered: nativeAccepted
-      });
-    } catch {
-      // The durable submitted receipt remains authoritative even if the event log is unavailable.
-    }
+  const postSubmissionWarning = application.recordPostSubmissionBookkeeping(
+    deliveredConversation,
+    nativeAccepted,
+    () => cliNow().toISOString()
+  );
+  if (postSubmissionWarning !== undefined) {
+    bookkeepingWarning = postSubmissionWarning;
   }
   printJson({
     session_id: sessionIdForConversation(deliveredConversation),
@@ -19289,15 +18475,6 @@ function terminalSubmissionPayload(payload: string): string {
   assertOrdinaryTerminalPayloadDoesNotInvokeNativeLifecycle(payload);
   return payload.trimEnd();
 }
-
-type TerminalAcceptancePollResult =
-  | {
-      outcome: "agent_accepted";
-      evidence: TerminalSubmissionAcceptanceEvidence;
-    }
-  | { outcome: "pending_acceptance" }
-  | { outcome: "not_accepted"; reason: string }
-  | { outcome: "uncertain"; reason: string };
 
 function allowsSyntheticTerminalAcceptance(
   _options: Record<string, any>
@@ -19827,7 +19004,7 @@ async function pollTerminalSubmissionAcceptance({
   conversation: Conversation;
   terminalControl: TerminalControlRef;
   terminalBridge: TerminalAgentBridge;
-}): Promise<TerminalAcceptancePollResult> {
+}): Promise<dispatchApplication.TerminalDispatchAcceptance> {
   const timeoutMs = positiveMilliseconds(
     options.terminalAcceptanceTimeoutMs ??
       DEFAULT_TERMINAL_ACCEPTANCE_TIMEOUT_MS,
@@ -30568,10 +29745,8 @@ function resolveVerifiedDeadTerminalBridgeDispatchLedger(options: {
   return true;
 }
 
-function terminalBridgeRequestFingerprint(value): string | undefined {
-  const text = String(value ?? "");
-  return text ? createHash("sha256").update(text).digest("hex") : undefined;
-}
+const terminalBridgeRequestFingerprint =
+  dispatchReceipt.terminalBridgeRequestFingerprint;
 
 
 function prepareTerminalBridgeCompletionCallback(args) {
