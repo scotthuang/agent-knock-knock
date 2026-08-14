@@ -4,7 +4,6 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn, spawnSync } from "node:child_process";
 import {
   ensureStoreWritable,
   listConversations,
@@ -25,8 +24,8 @@ import {
   detectCodexRolloutAcceptance
 } from "../../src/terminal-submission-acceptance.js";
 import { createOpenClawPluginForTest } from "../../src/openclaw-plugin.js";
+import { runInProcessCli } from "../in-process-cli-fixtures.js";
 import {
-  binPath,
   cwd,
   sessionId,
   rolloutPath,
@@ -1109,7 +1108,7 @@ test("monitor keeps a durable late native ACK when later bookkeeping fails", asy
   }
 });
 
-test("static terminal fixtures cannot synthesize native acceptance without explicit opt-in", () => {
+test("static terminal fixtures cannot synthesize native acceptance without explicit opt-in", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-no-implicit-acceptance-"));
   const storeDir = path.join(tempDir, "conversations");
   const workspace = path.join(tempDir, "workspace");
@@ -1124,7 +1123,7 @@ test("static terminal fixtures cannot synthesize native acceptance without expli
       { mode: 0o600 }
     );
     const rolloutStat = fs.statSync(rolloutPath);
-    const result = spawnSync(process.execPath, [binPath,
+    const result = await runInProcessCli([
       "send",
       "--conversation",
       `terminal:v2:tmux:codex:${target}:${pid}`,
@@ -1168,12 +1167,12 @@ test("static terminal fixtures cannot synthesize native acceptance without expli
         }
       })
     ], {
-      encoding: "utf8",
       env: {
         ...process.env,
         AKK_RUNTIME_DIR: path.join(tempDir, "runtime"),
         AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0"
-      }
+      },
+      runtimeLog() {}
     });
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const parsed = JSON.parse(result.stdout);

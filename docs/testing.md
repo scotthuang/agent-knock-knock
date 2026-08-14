@@ -242,6 +242,40 @@ The machine-readable `callback-outbox`, `terminal-binding-authority`, and
 `terminal-list-renderer` mappings tie each former executable family to its fast
 service invariant and to a separate retained real-process witness.
 
+## #126 deterministic dispatch-admission in-process migration
+
+The fourth migration slice removes 27 outer CLI process starts across 23 tests
+while preserving all 63 assertion call sites in those cases. The commands still
+enter through `parseCliCommand` and `executeCliCommand`; only the redundant Node
+executable boundary is removed.
+
+| Former executable cases | Imported service invariant | Retained real boundary |
+| --- | --- | --- |
+| Ten delegate routing tests (14 invocations) | Deterministic agent, workspace, pane-incarnation, and exact-selector routing over the production static terminal/process adapters | Dispatch-authority, recovery, and terminal-send executable suites |
+| Twelve native slash-command guard cases | Every ordinary send/respond alias rejects before Store creation or terminal input | Native lifecycle and lifecycle-recovery crash/terminal executables |
+| One static-fixture acceptance case | Synthetic transport cannot become native acceptance without the explicit opt-in | Session-acceptance, receipt-fence, and terminal-send executable suites |
+
+The delegate fixture continues to use the production
+`StaticTerminalProcessSource` selected by `--processes-json`. Its former fake
+`ps` executable supplied only a deterministic Codex process-birth string and
+was not a PATH-discovery assertion, so the imported command now injects that
+same typed observation directly. PATH-scoped process discovery remains covered
+by its dedicated executable tests. Environment, cwd, clock, output, and exit
+state are scoped through the CLI async-local runtime; no test mutates process
+globals.
+
+The static metric removes one CLI startup site from each migrated file, moving
+the evidence from 34 to 31 included sites (`cli_process` 24 to 21). All 10
+fake-Node sites remain. Test tiers are unchanged: these filesystem and terminal
+component cases remain in the integration tier even though their redundant
+outer executable was removed.
+
+The machine-readable `terminal-dispatch-policy` and
+`terminal-dispatch-ledger` mappings connect the imported cases to focused
+policy/acceptance invariants and to retained real-process witnesses for argv,
+OS exit, terminal input, crash recovery, locks, concurrency, monitor PID,
+Gateway transport, and Store writer fencing.
+
 ## #108 performance record
 
 The pre-refactor maintainer baseline was 48 files / 683 tests / about 573

@@ -215,6 +215,12 @@
       "needle": "managed terminal send cannot overwrite a concurrent terminal cancellation"
     },
     {
+      "id": "delegate-routing-in-process",
+      "path": "test/delegate-cli.test.ts",
+      "tier": "integration",
+      "needle": "delegate routes asynchronously to the only idle matching tmux pane"
+    },
+    {
       "id": "dispatch-authority-boundary",
       "path": "test/shards/agent-cli-dispatch-authority.test.ts",
       "tier": "integration",
@@ -335,6 +341,12 @@
       "needle": "paired repositories inject the exact terminal and Store resources"
     },
     {
+      "id": "native-command-guard-in-process",
+      "path": "test/native-lifecycle-command-guard-cli.test.ts",
+      "tier": "integration",
+      "needle": "cannot bypass the native lifecycle ledger"
+    },
+    {
       "id": "native-ownership-in-process",
       "path": "test/native-thread-ownership-cli.test.ts",
       "tier": "integration",
@@ -357,6 +369,12 @@
       "path": "test/session-selector-cli.test.ts",
       "tier": "integration",
       "needle": "CLI omission and short refs resolve one actionable managed session"
+    },
+    {
+      "id": "static-terminal-acceptance-in-process",
+      "path": "test/shards/agent-cli-session-acceptance.test.ts",
+      "tier": "integration",
+      "needle": "static terminal fixtures cannot synthesize native acceptance without explicit opt-in"
     },
     {
       "id": "store-protocol-1-boundary",
@@ -393,6 +411,12 @@
       "path": "test/store-protocol-cli.test.ts",
       "tier": "integration",
       "needle": "send fails closed on writer protocol mismatch before invoking tmux"
+    },
+    {
+      "id": "terminal-acceptance-unit",
+      "path": "test/terminal-submission-acceptance.test.ts",
+      "tier": "fast",
+      "needle": "durable replay preserves exact native proof and never upgrades legacy transport"
     },
     {
       "id": "terminal-binding-unit",
@@ -533,24 +557,29 @@
     },
     {
       "id": "terminal-dispatch-ledger",
-      "invariant": "Ledger decoding, receipt strengthening, immutable identity, crash recovery, and uncertain no-retry behavior remain compatible for v1 and v2 records.",
+      "invariant": "Ledger decoding, receipt strengthening, immutable identity, static-fixture acceptance policy, crash recovery, and uncertain no-retry behavior remain compatible for v1 and v2 records.",
       "old_executable_witnesses": [
         "dispatch-receipt-boundary",
-        "dispatch-recovery-boundary"
+        "dispatch-recovery-boundary",
+        "static-terminal-acceptance-in-process"
       ],
       "service_invariant_witnesses": [
-        "dispatch-ledger-unit"
+        "dispatch-ledger-unit",
+        "terminal-acceptance-unit"
       ],
       "retained_boundary_witnesses": [
         "dispatch-receipt-boundary",
-        "dispatch-recovery-boundary"
+        "dispatch-recovery-boundary",
+        "terminal-send-boundary"
       ]
     },
     {
       "id": "terminal-dispatch-policy",
-      "invariant": "Dispatch authorization preserves lifecycle and ownership precedence before exact composer input and one Enter.",
+      "invariant": "Imported delegate selection and native-command admission preserve lifecycle and ownership precedence before exact composer input and one Enter.",
       "old_executable_witnesses": [
+        "delegate-routing-in-process",
         "dispatch-authority-boundary",
+        "native-command-guard-in-process",
         "terminal-send-boundary"
       ],
       "service_invariant_witnesses": [

@@ -3,9 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
-
-const binPath = new URL("../src/cli.js", import.meta.url).pathname;
+import { runInProcessCli } from "./in-process-cli-fixtures.js";
 
 for (const scenario of [
   {
@@ -142,23 +140,22 @@ for (const scenario of [
     command: "/future-native-command"
   }
 ] as const) {
-  test(`${scenario.name} cannot bypass the native lifecycle ledger`, () => {
+  test(`${scenario.name} cannot bypass the native lifecycle ledger`, async () => {
     const root = fs.mkdtempSync(
       path.join(os.tmpdir(), "akk-native-command-guard-")
     );
     const storeDir = path.join(root, "store");
     try {
-      const result = spawnSync(process.execPath, [
-        binPath,
+      const result = await runInProcessCli([
         ...scenario.args,
         "--store-dir",
         storeDir
       ], {
-        encoding: "utf8",
         env: {
           ...process.env,
           AKK_RUNTIME_DIR: path.join(root, "runtime")
-        }
+        },
+        runtimeLog() {}
       });
       assert.equal(result.status, 1, result.stdout);
       assert.match(

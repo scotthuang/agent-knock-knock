@@ -618,9 +618,9 @@ static subprocess-startup call sites in `test/**/*.ts` for the immutable
 plus fake-Node-process startup sites; other adapter/process calls are reported
 separately. This is a deterministic source metric, not a claim about dynamic
 process executions in one test run. Eight callback cases plus the CLI UX,
-native-ownership, management, selector, and Session-binding slices now invoke
-the imported command service, reducing the current value to 34 of 48 baseline
-sites (29.17% reduction). The 60%
+native-ownership, management, selector, Session-binding, and deterministic
+dispatch-admission slices now invoke the imported command service, reducing
+the current value to 31 of 48 baseline sites (35.42% reduction). The 60%
 reduction target is still explicitly reported as not met. Its
 `final_threshold.required` flag remains `false` while #126 is in progress; the
 final milestone flips it to `true`, at which point an unmet target is a hard
