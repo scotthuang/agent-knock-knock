@@ -5,16 +5,18 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  collisionSafeNativeThreadShortIds,
   createNativeThreadResumeSnapshot,
   loadNativeThreadResumeSnapshot,
+  resolveNativeThreadResumeSelection,
+  saveNativeThreadResumeSnapshot
+} from "../src/native-thread-resume-snapshot.js";
+import {
+  collisionSafeNativeThreadShortIds,
   nativeThreadCandidateSnapshotFingerprint,
   nativeThreadResumeSnapshotRowsMatchCandidates,
-  resolveNativeThreadResumeSelection,
-  saveNativeThreadResumeSnapshot,
   sortNativeThreadCandidates,
   verifiedPreviousResumeCandidate
-} from "../src/native-thread-resume-snapshot.js";
+} from "../src/native-thread-resume-snapshot-policy.js";
 import type {
   ManagedSessionState,
   ManagedTerminalBinding,

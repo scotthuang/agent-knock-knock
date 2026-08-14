@@ -8,7 +8,7 @@ import {
   type ManagedSessionState
 } from "../src/managed-session.js";
 import type { Conversation } from "../src/protocol.js";
-import { terminalActionFingerprint } from "../src/native-thread-resume-snapshot.js";
+import { terminalActionFingerprint } from "../src/native-thread-resume-snapshot-policy.js";
 import {
   decideTerminalScopedCodexApprovalAuthority,
   terminalScopedCodexApprovalPromptSnapshot

@@ -19,13 +19,12 @@ import {
 } from "./claude-terminal-agent-adapter.js";
 import {
   captureClaudeTranscriptAnchor,
+  createClaudeThreadLifecycleCandidateProvider,
   defaultClaudeHome,
   detectClaudeTranscriptAcceptance,
   detectClaudeTranscriptCompletion,
   detectClaudeTranscriptPendingApproval,
-  listClaudeThreadLifecycleCandidates,
   observeClaudeDeadProcessTranscriptCompletion,
-  revalidateClaudeThreadLifecycleCandidate,
   type ClaudeTranscriptAnchor
 } from "./claude-local-transcript-provider.js";
 import {
@@ -132,10 +131,17 @@ import {
 import {
   classifyCodexLifecyclePostcondition,
   codexIdentityVerifiesLifecyclePostcondition,
-  evaluateResumeCandidateAvailability,
-  hasStrongCodexLifecycleIdentity,
   isFreshCodexPostProbeScreen
 } from "./native-thread-lifecycle-policy.js";
+import {
+  assertNativeThreadHasExclusiveOwnership as assertNativeThreadHasExclusiveOwnershipFromQuery,
+  assertRestorableOriginSessionRelationship as assertRestorableOriginSessionRelationshipFromQuery,
+  previousCommittedResumeCandidate as previousCommittedResumeCandidateFromQuery,
+  requireRestorableLifecycleOrigin as requireRestorableLifecycleOriginFromQuery,
+  resumableNativeThreadCandidates,
+  revalidateNativeThreadCandidate as revalidateNativeThreadCandidateFromQuery,
+  type NativeThreadLifecycleQueryPorts
+} from "./native-thread-lifecycle-query-service.js";
 import {
   decideNativeThreadTransitionEligibility,
   decideNativeThreadTransitionFailure,
@@ -146,15 +152,17 @@ import {
 } from "./native-thread-transition-policy.js";
 import {
   createNativeThreadResumeSnapshot,
-  nativeThreadCandidateSnapshotFingerprint,
-  nativeThreadResumeSnapshotRowsMatchCandidates,
   resolveNativeThreadResumeSelection,
-  saveNativeThreadResumeSnapshot,
-  sortNativeThreadCandidates,
-  terminalActionFingerprint,
-  verifiedPreviousResumeCandidate,
-  type NativeThreadResumeSnapshot
+  saveNativeThreadResumeSnapshot
 } from "./native-thread-resume-snapshot.js";
+import {
+  assertResumeSnapshotActionFingerprint,
+  assertResumeSnapshotCandidates,
+  assertResumeSnapshotMatchesTerminal,
+  assertResumeSnapshotNotExpired,
+  terminalActionFingerprint,
+  type NativeThreadResumeSnapshot
+} from "./native-thread-resume-snapshot-policy.js";
 import {
   listNativeThreadTransitions,
   listManagedSessions,
@@ -11798,142 +11806,63 @@ async function resolveLifecycleTerminal(
   return terminal;
 }
 
-async function activeNativeThreadOwners({
-  options,
-  agent,
-  currentPid,
-  workspace
-}: {
-  options: Record<string, any>;
-  agent: ExecutorKind;
-  currentPid: number;
-  workspace?: string;
-}): Promise<{
-  owners: Map<string, number[]>;
-  uncertaintyReasons: string[];
-}> {
-  const owners = new Map<string, number[]>();
-  const uncertaintyReasons: string[] = [];
-  const couldShareWorkspace = (candidate: unknown): boolean =>
-    verifiedWorkspaceRelationship(workspace, candidate) !== "different";
-  if (agent === "claude") {
-    const rowsByPid = new Map<number, ClaudeAgentRow[]>();
-    for (const row of loadClaudeAgentRows(options, { required: true })) {
-      const pid = Number(row.pid);
-      if (!Number.isSafeInteger(pid) || pid <= 1) {
-        uncertaintyReasons.push("Claude agents JSON contains an invalid process identity");
-        continue;
-      }
-      if (pid === currentPid) {
-        continue;
-      }
-      const rows = rowsByPid.get(pid) ?? [];
-      rows.push(row);
-      rowsByPid.set(pid, rows);
-    }
-    for (const [pid, rows] of rowsByPid) {
-      const sessionIds = [...new Set(rows.flatMap((row): string[] => {
-        const sessionId = stringValue(row.sessionId)?.toLowerCase();
-        return sessionId && isExactNativeThreadId(sessionId)
-          ? [sessionId]
-          : [];
-      }))];
-      for (const sessionId of sessionIds) {
-        const current = owners.get(sessionId) ?? [];
-        if (!current.includes(pid)) {
-          current.push(pid);
-        }
-        owners.set(sessionId, current);
-      }
-      if (rows.length !== 1 || sessionIds.length > 1) {
-        if (rows.some((row) => couldShareWorkspace(row.cwd))) {
-          uncertaintyReasons.push(
-            `Claude process ${pid} has ambiguous agents JSON ownership`
-          );
-        }
-        continue;
-      }
-      const sessionId = sessionIds[0];
-      if (!sessionId) {
-        if (
-          (rows[0].kind === undefined || rows[0].kind === "interactive") &&
-          couldShareWorkspace(rows[0].cwd)
-        ) {
-          uncertaintyReasons.push(
-            `Claude process ${pid} has no exact native thread identity`
-          );
-        }
-        continue;
-      }
-      // Exact rows were recorded before ambiguity/absence checks so an owner
-      // remains global even when Claude emits duplicate or conflicting rows.
-    }
-    return { owners, uncertaintyReasons };
-  }
-
-  const adapter = createRuntimeTerminalAgentRegistry(options).require(agent);
-  const snapshots = await createTerminalProcessSource(options)
-    .listProcessSnapshots(
-      (snapshot) => adapter.classifyProcess(snapshot) !== undefined,
-      { includeCwd: true, includeAncestors: true }
-    );
-  const processes = snapshots.flatMap((snapshot): ActiveTerminalProcess[] => {
-    const classified = adapter.classifyProcess(snapshot);
-    return classified ? [{ ...classified, agent }] : [];
-  });
-  for (const processSnapshot of rootActiveProcesses(processes)) {
-    if (processSnapshot.pid === currentPid) {
-      continue;
-    }
-    try {
-      const identity = await resolveCurrentNativeAgentSessionIdentity({
-        options,
-        agent,
-        pid: processSnapshot.pid,
-        // Exact open-rollout ownership is global. Passing the process cwd here
-        // would reject a thread resumed explicitly from another directory and
-        // could hide a real duplicate owner from this scan.
-        cwd: undefined
+function nativeThreadLifecycleQueryPorts(
+  options: Record<string, any>
+): NativeThreadLifecycleQueryPorts {
+  let resolvedStoreDir: string | undefined;
+  const storeDir = (): string =>
+    resolvedStoreDir ??= storeDirFromOptions(options);
+  return Object.freeze({
+    cwd: cliCwd,
+    listManagedSessions: () => listManagedSessions(storeDir()),
+    loadNativeThreadTransition: (transitionId) =>
+      loadNativeThreadTransition(storeDir(), transitionId),
+    blockingTurns: (sessionId) => managedTurnsForSession(storeDir(), sessionId)
+      .filter((turn) => SESSION_SEND_BLOCKING_STATUSES.has(turn.status))
+      .map((turn) => ({
+        turnId: turnIdForConversation(turn),
+        status: turn.status
+      })),
+    assertStoreAuthority: (terminalControl, nativeThreadId) =>
+      assertTerminalNativeThreadStoreAuthority({
+        terminalControl,
+        nativeThreadId,
+        storeDir: storeDir()
+      }),
+    runningVersion: (terminal) => agentVersionForRunningProcess(
+      terminal.agent,
+      terminal.pid,
+      options
+    ),
+    candidateProvider: (agent) => agent === "codex"
+      ? codexThreadLifecycleProvider(options)
+      : createClaudeThreadLifecycleCandidateProvider({
+          claudeHome: expandHome(options.claudeHome)
+        }),
+    sessionOwnerIsConclusivelyInactive: (session, terminal, identity) =>
+      managedSessionOwnerIsConclusivelyInactive({
+        session,
+        terminal,
+        identity
+      }),
+    rootActiveProcesses: async (agent) => {
+      const adapter = createRuntimeTerminalAgentRegistry(options).require(agent);
+      const snapshots = await createTerminalProcessSource(options)
+        .listProcessSnapshots(
+          (snapshot) => adapter.classifyProcess(snapshot) !== undefined,
+          { includeCwd: true, includeAncestors: true }
+        );
+      const processes = snapshots.flatMap((snapshot): ActiveTerminalProcess[] => {
+        const classified = adapter.classifyProcess(snapshot);
+        return classified ? [{ ...classified, agent }] : [];
       });
-      if (!identity?.sessionId) {
-        if (couldShareWorkspace(processSnapshot.cwd)) {
-          uncertaintyReasons.push(
-            `Codex process ${processSnapshot.pid} has no exact native thread identity`
-          );
-        }
-        continue;
-      }
-      if (!isExactNativeThreadId(identity.sessionId)) {
-        if (couldShareWorkspace(processSnapshot.cwd)) {
-          uncertaintyReasons.push(
-            `Codex process ${processSnapshot.pid} has no exact native thread identity`
-          );
-        }
-        continue;
-      }
-      const nativeThreadId = identity.sessionId.toLowerCase();
-      const current = owners.get(nativeThreadId) ?? [];
-      current.push(processSnapshot.pid);
-      owners.set(nativeThreadId, current);
-      if (
-        !hasStrongCodexLifecycleIdentity(identity) &&
-        couldShareWorkspace(processSnapshot.cwd)
-      ) {
-        uncertaintyReasons.push(
-          `Codex process ${processSnapshot.pid} has an incomplete native process identity`
-        );
-      }
-    } catch (error) {
-      if (couldShareWorkspace(processSnapshot.cwd)) {
-        uncertaintyReasons.push(
-          `Codex process ${processSnapshot.pid} ownership is unverifiable: ${
-            error instanceof Error ? error.message : String(error)
-          }`
-        );
-      }
-    }
-  }
-  return { owners, uncertaintyReasons };
+      return rootActiveProcesses(processes);
+    },
+    resolveProcessIdentity: (agent, pid, cwd) =>
+      resolveCurrentNativeAgentSessionIdentity({ options, agent, pid, cwd }),
+    loadClaudeAgentRows: () => loadClaudeAgentRows(options, { required: true }),
+    workspaceRelationship: verifiedWorkspaceRelationship
+  });
 }
 
 function verifiedWorkspaceRelationship(
@@ -11982,49 +11911,14 @@ async function assertNativeThreadHasExclusiveOwnership({
   excludedManagedSessionId?: string;
   allowedManagedSessionIds?: string[];
 }): Promise<void> {
-  const normalizedNativeThreadId = nativeThreadId.toLowerCase();
-  if (!isExactNativeThreadId(normalizedNativeThreadId)) {
-    throw new Error("native thread ownership requires an exact thread UUID");
-  }
-  assertTerminalNativeThreadStoreAuthority({
+  await assertNativeThreadHasExclusiveOwnershipFromQuery({
     terminalControl,
-    nativeThreadId: normalizedNativeThreadId,
-    storeDir
-  });
-  const activeOwnerScan = await activeNativeThreadOwners({
-    options,
     agent,
     currentPid,
-    workspace: stringValue(terminalControl.currentPath)
-  });
-  const otherOwnerPids =
-    activeOwnerScan.owners.get(normalizedNativeThreadId) ?? [];
-  if (otherOwnerPids.length > 0) {
-    throw new Error(
-      `native thread ${normalizedNativeThreadId} is already active in another ` +
-      `${agent} process (${otherOwnerPids.join(", ")})`
-    );
-  }
-  if (activeOwnerScan.uncertaintyReasons.length > 0) {
-    throw new Error(
-      `native thread ownership is unverifiable: ${
-        activeOwnerScan.uncertaintyReasons.join("; ")
-      }`
-    );
-  }
-
-  const conflictingSessions = listManagedSessions(storeDir).filter((session) =>
-    session.session_id !== excludedManagedSessionId &&
-    !allowedManagedSessionIds.includes(session.session_id) &&
-    session.agent === agent &&
-    session.binding?.native_thread_id?.toLowerCase() === normalizedNativeThreadId
-  );
-  if (conflictingSessions.length > 0) {
-    throw new Error(
-      `native thread ${normalizedNativeThreadId} is already claimed by managed Session ` +
-      conflictingSessions.map((session) => session.session_id).join(", ")
-    );
-  }
+    nativeThreadId,
+    excludedManagedSessionId,
+    allowedManagedSessionIds
+  }, nativeThreadLifecycleQueryPorts({ ...options, storeDir }));
 }
 
 async function assertLifecycleTargetHasExclusiveOwnership({
@@ -12065,348 +11959,6 @@ async function assertLifecycleTargetHasExclusiveOwnership({
     terminalControl: terminal.terminalControl,
     excludedManagedSessionId: transition.target_session_id
   });
-}
-
-async function resumableThreadCandidates({
-  options,
-  terminal,
-  currentIdentity
-}: {
-  options: Record<string, any>;
-  terminal: ResolvedTerminalConversation;
-  currentIdentity?: NativeAgentSessionIdentity;
-}): Promise<NativeThreadCandidate[]> {
-  const workspace = path.resolve(
-    terminal.terminalControl.currentPath ?? cliCwd()
-  );
-  const activeOwnerScan = await activeNativeThreadOwners({
-    options,
-    agent: terminal.agent,
-    currentPid: terminal.pid,
-    workspace
-  });
-  const managedByNativeId = new Map<string, ManagedSessionState[]>();
-  for (const session of listManagedSessions(storeDirFromOptions(options))) {
-    if (
-      session.agent !== terminal.agent ||
-      !session.binding?.native_thread_id
-    ) {
-      continue;
-    }
-    const nativeThreadId = session.binding.native_thread_id.toLowerCase();
-    const group = managedByNativeId.get(nativeThreadId) ?? [];
-    group.push(session);
-    managedByNativeId.set(nativeThreadId, group);
-  }
-
-  const agentVersion = agentVersionForRunningProcess(
-    terminal.agent,
-    terminal.pid,
-    options
-  );
-  if (!agentVersion) {
-    throw new Error(
-      `cannot list resumable ${terminal.agent} threads without the exact running version`
-    );
-  }
-  const candidateRequest = { cwd: workspace, agentVersion };
-  const verifiedCandidates = terminal.agent === "codex"
-    ? await codexThreadLifecycleProvider(options)
-        .listThreadLifecycleCandidates(candidateRequest)
-    : listClaudeThreadLifecycleCandidates({
-        ...candidateRequest,
-        claudeHome: expandHome(options.claudeHome)
-      });
-  const base = verifiedCandidates.map((candidate) => ({
-    native_thread_id: candidate.nativeThreadId,
-    candidate_token: encodeThreadCandidateToken(candidate.candidateToken),
-    agent: terminal.agent,
-    workspace,
-    title: candidate.title,
-    preview: candidate.preview,
-    updated_at_ms: candidate.updatedAtMs,
-    archived: false
-  }));
-
-  const deduplicated = new Map<string, typeof base[number]>();
-  for (const candidate of base) {
-    if (isExactNativeThreadId(candidate.native_thread_id)) {
-      deduplicated.set(candidate.native_thread_id.toLowerCase(), {
-        ...candidate,
-        native_thread_id: candidate.native_thread_id.toLowerCase()
-      });
-    }
-  }
-  return sortNativeThreadCandidates([...deduplicated.values()]
-    .map((candidate): NativeThreadCandidate => {
-      const nativeThreadId = candidate.native_thread_id;
-      const managed = managedByNativeId.get(nativeThreadId) ?? [];
-      const activeElsewhere =
-        (activeOwnerScan.owners.get(nativeThreadId)?.length ?? 0) > 0;
-      const current = currentIdentity?.sessionId.toLowerCase() === nativeThreadId;
-      const archived = candidate.archived === true;
-      const availability = evaluateResumeCandidateAvailability({
-        hasCandidateToken: Boolean(candidate.candidate_token),
-        current,
-        activeElsewhere,
-        activeOwnershipUnverifiable:
-          activeOwnerScan.uncertaintyReasons.length > 0,
-        managedSessionCount: managed.length,
-        managedSessionStatus:
-          managed.length === 1 ? managed[0].status : undefined,
-        managedSessionBindingInactive:
-          managed.length === 1 &&
-          managed[0].status === "bound" &&
-          Boolean(managed[0].binding) &&
-          managedSessionOwnerIsConclusivelyInactive({
-            session: managed[0],
-            terminal,
-            identity: currentIdentity
-          }),
-        managedSessionWorkspaceMatches:
-          managed.length === 1
-            ? path.resolve(managed[0].workspace) === workspace
-            : undefined,
-        archived
-      });
-      return {
-        ...candidate,
-        native_thread_id: nativeThreadId,
-        active_elsewhere: activeElsewhere,
-        managed_session_id: managed.length === 1
-          ? managed[0].session_id
-          : undefined,
-        resumable: availability.resumable,
-        unavailable_reason: availability.unavailableReason,
-        updated_at: Number.isFinite(candidate.updated_at_ms)
-          ? new Date(Number(candidate.updated_at_ms)).toISOString()
-          : undefined
-      };
-    }));
-}
-
-function encodeThreadCandidateToken(
-  token: TerminalThreadLifecycleCandidateToken
-): string {
-  return Buffer.from(JSON.stringify(token), "utf8").toString("base64url");
-}
-
-function decodeThreadCandidateToken(
-  value: string
-): TerminalThreadLifecycleCandidateToken {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
-  } catch {
-    throw new Error("--candidate-token is not a valid AKK candidate token");
-  }
-  if (
-    !isRecord(parsed) ||
-    parsed.schema !== "agent-knock-knock/thread-candidate-token" ||
-    !(parsed.version === 1 || parsed.version === 2) ||
-    !["codex", "claude"].includes(String(parsed.agent)) ||
-    !isExactNativeThreadId(parsed.nativeThreadId) ||
-    !stringValue(parsed.cwd) ||
-    !["codex_rollout", "claude_transcript"].includes(String(parsed.source)) ||
-    !stringValue(parsed.agentVersion) ||
-    (
-      parsed.version === 1
-        ? parsed.sourceAgentVersion !== undefined
-        : (
-            !stringValue(parsed.sourceAgentVersion) ||
-            parsed.sourceAgentVersion === parsed.agentVersion
-          )
-    ) ||
-    !isRecord(parsed.fileToken) ||
-    !stringValue(parsed.fileToken.path) ||
-    !stringValue(parsed.fileToken.device) ||
-    !stringValue(parsed.fileToken.inode) ||
-    !Number.isSafeInteger(Number(parsed.fileToken.size)) ||
-    !Number.isFinite(Number(parsed.fileToken.mtimeMs)) ||
-    !stringValue(parsed.metadataFingerprint)
-  ) {
-    throw new Error("--candidate-token has an invalid AKK candidate schema");
-  }
-  return parsed as unknown as TerminalThreadLifecycleCandidateToken;
-}
-
-async function revalidateNativeThreadCandidate({
-  options,
-  terminal,
-  nativeThreadId,
-  encodedToken,
-  agentVersion
-}: {
-  options: Record<string, any>;
-  terminal: ResolvedTerminalConversation;
-  nativeThreadId: string;
-  encodedToken: string;
-  agentVersion: string;
-}): Promise<TerminalThreadLifecycleCandidateToken> {
-  const token = decodeThreadCandidateToken(encodedToken);
-  const workspace = path.resolve(
-    terminal.terminalControl.currentPath ?? cliCwd()
-  );
-  if (
-    token.agent !== terminal.agent ||
-    token.nativeThreadId !== nativeThreadId ||
-    path.resolve(token.cwd) !== workspace ||
-    token.agentVersion !== agentVersion
-  ) {
-    throw new Error(
-      "the resume candidate token does not match this terminal, workspace, agent version, or native thread"
-    );
-  }
-  const request = { cwd: workspace, agentVersion };
-  const validation = terminal.agent === "codex"
-    ? await codexThreadLifecycleProvider(options)
-        .revalidateThreadLifecycleCandidate(token, request)
-    : revalidateClaudeThreadLifecycleCandidate(token, {
-        ...request,
-        claudeHome: expandHome(options.claudeHome)
-      });
-  if (validation.status !== "valid") {
-    throw new Error(
-      `resume candidate changed or became unsafe after discovery: ` +
-      `${validation.reason ?? validation.status}`
-    );
-  }
-  return token;
-}
-
-function assertRestorableOriginSessionRelationship({
-  agent,
-  nativeThreadId,
-  currentSession,
-  storeDir
-}: {
-  agent: ExecutorKind;
-  nativeThreadId: string;
-  currentSession?: ManagedSessionState;
-  storeDir: string;
-}): void {
-  const claimingSessions = listManagedSessions(storeDir).filter((session) =>
-    session.agent === agent &&
-    session.binding?.native_thread_id?.toLowerCase() === nativeThreadId
-  );
-  if (currentSession) {
-    if (
-      claimingSessions.length !== 1 ||
-      claimingSessions[0].session_id !== currentSession.session_id
-    ) {
-      throw new Error(
-        "the current native thread is not owned exclusively by its source Session"
-      );
-    }
-    const blockingTurns = managedTurnsForSession(
-      storeDir,
-      currentSession.session_id
-    ).filter((turn) => SESSION_SEND_BLOCKING_STATUSES.has(turn.status));
-    if (blockingTurns.length > 0) {
-      throw new Error(
-        `the source Session has unresolved Turn ` +
-        turnIdForConversation(blockingTurns[0])
-      );
-    }
-    return;
-  }
-  if (claimingSessions.length !== 0) {
-    throw new Error(
-      "the unmanaged native thread is already claimed by a managed Session"
-    );
-  }
-}
-
-async function requireRestorableLifecycleOrigin({
-  options,
-  terminal,
-  currentIdentity,
-  currentSession,
-  storeDir,
-  agentVersion
-}: {
-  options: Record<string, any>;
-  terminal: ResolvedTerminalConversation;
-  currentIdentity: NativeAgentSessionIdentity;
-  currentSession?: ManagedSessionState;
-  storeDir: string;
-  agentVersion: string;
-}): Promise<string> {
-  const nativeThreadId = currentIdentity.sessionId.toLowerCase();
-  const failure =
-    "--require-restorable-origin could not prove that the current native " +
-    "thread is a unique persisted resume candidate";
-  try {
-    if (!isExactNativeThreadId(nativeThreadId)) {
-      throw new Error("the current native thread identity is not exact");
-    }
-    assertRestorableOriginSessionRelationship({
-      agent: terminal.agent,
-      nativeThreadId,
-      currentSession,
-      storeDir
-    });
-    await assertNativeThreadHasExclusiveOwnership({
-      options,
-      agent: terminal.agent,
-      currentPid: terminal.pid,
-      nativeThreadId,
-      storeDir,
-      terminalControl: terminal.terminalControl,
-      excludedManagedSessionId: currentSession?.session_id
-    });
-
-    const candidates = await resumableThreadCandidates({
-      options,
-      terminal,
-      currentIdentity
-    });
-    const exactCandidates = candidates.filter((candidate) =>
-      candidate.native_thread_id === nativeThreadId
-    );
-    if (exactCandidates.length !== 1) {
-      throw new Error(
-        `expected one exact candidate for ${nativeThreadId}, found ` +
-        String(exactCandidates.length)
-      );
-    }
-    const candidate = exactCandidates[0];
-    const encodedToken = stringValue(candidate.candidate_token);
-    if (!encodedToken) {
-      throw new Error("the exact candidate has no revalidation token");
-    }
-    if (candidate.active_elsewhere !== false) {
-      throw new Error("the exact candidate is active in another process");
-    }
-    if (
-      candidate.resumable !== false ||
-      candidate.unavailable_reason !== "already_active"
-    ) {
-      throw new Error(
-        "the exact candidate is not the currently active native thread"
-      );
-    }
-    if (
-      (candidate.managed_session_id ?? undefined) !==
-      currentSession?.session_id
-    ) {
-      throw new Error(
-        "the exact candidate does not have the source Session relationship"
-      );
-    }
-    await revalidateNativeThreadCandidate({
-      options,
-      terminal,
-      nativeThreadId,
-      encodedToken,
-      agentVersion
-    });
-    return encodedToken;
-  } catch (error) {
-    throw new Error(
-      `${failure}: ${error instanceof Error ? error.message : String(error)}`
-    );
-  }
 }
 
 function sameFilesystemDevice(left: string, right: string): boolean {
@@ -12554,11 +12106,10 @@ async function runListResumableThreads(options) {
   ) {
     throw new Error(snapshot.capabilities.reason);
   }
-  const candidates = await resumableThreadCandidates({
-    options,
+  const candidates = await resumableNativeThreadCandidates({
     terminal,
     currentIdentity: snapshot.identity
-  });
+  }, nativeThreadLifecycleQueryPorts(options));
   const storeDir = storeDirFromOptions(options);
   const workspace = path.resolve(
     terminal.terminalControl.currentPath ?? cliCwd()
@@ -12602,12 +12153,11 @@ async function runListResumableThreads(options) {
     },
     requires_user_intent: true
   });
-  const previousCandidate = previousCommittedResumeCandidate({
-    storeDir,
+  const previousCandidate = previousCommittedResumeCandidateFromQuery({
     terminal,
     currentSession: snapshot.session,
     candidates
-  });
+  }, nativeThreadLifecycleQueryPorts({ ...options, storeDir }));
   const previousSnapshotRow = previousCandidate
     ? snapshotRows.get(previousCandidate.native_thread_id)
     : undefined;
@@ -13348,39 +12898,6 @@ async function runNativeInspect(options: Record<string, any>) {
   }
 }
 
-function previousCommittedResumeCandidate({
-  storeDir,
-  terminal,
-  currentSession,
-  candidates
-}: {
-  storeDir: string;
-  terminal: ResolvedTerminalConversation;
-  currentSession?: ManagedSessionState;
-  candidates: NativeThreadCandidate[];
-}): NativeThreadCandidate | undefined {
-  if (!currentSession?.last_transition_id) {
-    return undefined;
-  }
-  let transition: NativeThreadTransition;
-  try {
-    transition = loadNativeThreadTransition(
-      storeDir,
-      currentSession.last_transition_id
-    );
-  } catch {
-    return undefined;
-  }
-  return verifiedPreviousResumeCandidate({
-    terminalId: terminal.conversationId,
-    agent: terminal.agent,
-    workspace: terminal.terminalControl.currentPath ?? cliCwd(),
-    currentSession,
-    transition,
-    candidates
-  });
-}
-
 async function waitForVerifiedThreadTransition({
   options,
   terminal,
@@ -13858,8 +13375,11 @@ async function runResumeThread(options) {
     shortId: stringValue(options.selectionShortId),
     selectionHandle: stringValue(options.selectionHandle)
   });
-  assertResumeSnapshotMatchesTerminal(selection.snapshot, terminal);
-  assertResumeSnapshotActionFingerprint(selection.snapshot, terminal);
+  assertResumeSnapshotMatchesTerminal(selection.snapshot, terminal, cliCwd);
+  assertResumeSnapshotActionFingerprint(
+    selection.snapshot,
+    loadTerminalBridgeDispatchLedger(terminal.terminalControl)
+  );
   const selectedOptions = {
     ...options,
     expectedBindingToken: selection.snapshot.expected_binding_token,
@@ -13976,78 +13496,6 @@ async function runReconcileBinding(options: Record<string, any>) {
   });
 }
 
-function assertResumeSnapshotMatchesTerminal(
-  snapshot: NativeThreadResumeSnapshot,
-  terminal: ResolvedTerminalConversation
-): void {
-  const workspace = path.resolve(
-    terminal.terminalControl.currentPath ?? cliCwd()
-  );
-  const terminalMatches = snapshot.version === 2
-    ? terminalControlEvidenceMatches(
-        snapshot.terminal_endpoint,
-        terminal.terminalControl
-      )
-    : terminalControlEvidenceMatches(
-        snapshot.terminal_control,
-        terminal.terminalControl
-      );
-  if (
-    (
-      snapshot.version === 1 &&
-      snapshot.terminal_id !== terminal.conversationId
-    ) ||
-    snapshot.agent !== terminal.agent ||
-    path.resolve(snapshot.workspace) !== workspace ||
-    !terminalMatches
-  ) {
-    throw new Error(
-      "resume selection terminal, process, or workspace changed; run /akk threads again"
-    );
-  }
-}
-
-function assertResumeSnapshotActionFingerprint(
-  snapshot: NativeThreadResumeSnapshot,
-  terminal: ResolvedTerminalConversation
-): void {
-  const current = terminalActionFingerprint(
-    loadTerminalBridgeDispatchLedger(terminal.terminalControl)
-  );
-  if (current !== snapshot.terminal_action_fingerprint) {
-    throw new Error(
-      "terminal action history changed after the resume snapshot; run /akk threads again"
-    );
-  }
-}
-
-function assertResumeSnapshotCandidates(
-  snapshot: NativeThreadResumeSnapshot,
-  candidates: readonly NativeThreadCandidate[]
-): void {
-  if (
-    nativeThreadCandidateSnapshotFingerprint(candidates) !==
-      snapshot.candidate_snapshot_fingerprint
-  ) {
-    throw new Error(
-      "resume candidates changed or reordered after the snapshot; run /akk threads again"
-    );
-  }
-  if (!nativeThreadResumeSnapshotRowsMatchCandidates(snapshot, candidates)) {
-    throw new Error(
-      "resume selection rows no longer match the exact candidate snapshot; run /akk threads again"
-    );
-  }
-}
-
-function assertResumeSnapshotNotExpired(
-  snapshot: NativeThreadResumeSnapshot
-): void {
-  if (Date.parse(snapshot.expires_at) <= cliNowMs()) {
-    throw new Error("resume selection snapshot expired; run /akk threads again");
-  }
-}
-
 async function runNativeThreadTransition(
   options: Record<string, any>,
   operation:
@@ -14076,16 +13524,26 @@ async function runNativeThreadTransition(
         );
       }
       if (operation.kind === "resume_thread" && operation.selectionSnapshot) {
-        assertResumeSnapshotNotExpired(operation.selectionSnapshot);
-        assertResumeSnapshotMatchesTerminal(operation.selectionSnapshot, terminal);
-        assertResumeSnapshotActionFingerprint(operation.selectionSnapshot, terminal);
+        assertResumeSnapshotNotExpired(operation.selectionSnapshot, cliNowMs);
+        assertResumeSnapshotMatchesTerminal(
+          operation.selectionSnapshot,
+          terminal,
+          cliCwd
+        );
+        assertResumeSnapshotActionFingerprint(
+          operation.selectionSnapshot,
+          loadTerminalBridgeDispatchLedger(terminal.terminalControl)
+        );
       }
       await mutationDispatchLedger.beforeMutation(scopes, resources, options, terminal);
       if (operation.kind === "resume_thread" && operation.selectionSnapshot) {
         // Recovery may resolve or otherwise rewrite a durable dispatch fence.
         // A snapshot created before that mutation is stale even when the
         // binding and candidate files themselves did not change.
-        assertResumeSnapshotActionFingerprint(operation.selectionSnapshot, terminal);
+        assertResumeSnapshotActionFingerprint(
+          operation.selectionSnapshot,
+          loadTerminalBridgeDispatchLedger(terminal.terminalControl)
+        );
       }
       const snapshot = await currentLifecycleSnapshot(
         options,
@@ -14111,11 +13569,10 @@ async function runNativeThreadTransition(
         );
       }
       if (operation.kind === "resume_thread" && operation.selectionSnapshot) {
-        const guardedCandidates = await resumableThreadCandidates({
-          options,
+        const guardedCandidates = await resumableNativeThreadCandidates({
           terminal,
           currentIdentity: snapshot.identity
-        });
+        }, nativeThreadLifecycleQueryPorts(options));
         assertResumeSnapshotCandidates(
           operation.selectionSnapshot,
           guardedCandidates
@@ -14224,17 +13681,15 @@ async function runNativeThreadTransition(
       const restorableOriginCandidateToken =
         operation.kind === "new_thread" &&
           operation.requireRestorableOrigin
-          ? await requireRestorableLifecycleOrigin({
-              options,
+          ? await requireRestorableLifecycleOriginFromQuery({
               terminal,
               currentIdentity: beforeIdentity,
               currentSession: snapshot.session,
-              storeDir,
               agentVersion: required(
                 stringValue(snapshot.version),
                 "restorable origin requires the exact running agent version"
               )
-            })
+            }, nativeThreadLifecycleQueryPorts({ ...options, storeDir }))
           : undefined;
 
       let candidates: NativeThreadCandidate[] = [];
@@ -14258,11 +13713,10 @@ async function runNativeThreadTransition(
           });
           return;
         }
-        candidates = await resumableThreadCandidates({
-          options,
+        candidates = await resumableNativeThreadCandidates({
           terminal,
           currentIdentity: beforeIdentity
-        });
+        }, nativeThreadLifecycleQueryPorts(options));
         if (operation.selectionSnapshot) {
           // The Codex identity probe and other readiness checks above are
           // asynchronous. Rebind the whole displayed snapshot, not only its
@@ -14291,13 +13745,12 @@ async function runNativeThreadTransition(
           );
         }
         const eligibleCandidate = candidateDecision.candidate;
-        resumeCandidateToken = await revalidateNativeThreadCandidate({
-          options,
+        resumeCandidateToken = await revalidateNativeThreadCandidateFromQuery({
           terminal,
           nativeThreadId: operation.nativeThreadId,
           encodedToken: expectedCandidateToken,
           agentVersion: snapshot.version as string
-        });
+        }, nativeThreadLifecycleQueryPorts(options));
         if (eligibleCandidate.managed_session_id) {
           targetSession = tryLoadManagedSession(
             storeDir,
@@ -14437,12 +13890,11 @@ async function runNativeThreadTransition(
           );
         }
         if (restorableOriginCandidateToken) {
-          assertRestorableOriginSessionRelationship({
+          assertRestorableOriginSessionRelationshipFromQuery({
             agent: terminal.agent,
             nativeThreadId: beforeIdentity.sessionId.toLowerCase(),
-            currentSession: snapshot.session,
-            storeDir
-          });
+            currentSession: snapshot.session
+          }, nativeThreadLifecycleQueryPorts({ ...options, storeDir }));
           await assertNativeThreadHasExclusiveOwnership({
             options,
             agent: terminal.agent,
@@ -14452,8 +13904,7 @@ async function runNativeThreadTransition(
             terminalControl: terminal.terminalControl,
             excludedManagedSessionId: snapshot.session?.session_id
           });
-          await revalidateNativeThreadCandidate({
-            options,
+          await revalidateNativeThreadCandidateFromQuery({
             terminal,
             nativeThreadId: beforeIdentity.sessionId.toLowerCase(),
             encodedToken: restorableOriginCandidateToken,
@@ -14461,7 +13912,7 @@ async function runNativeThreadTransition(
               stringValue(snapshot.version),
               "restorable origin requires the exact running agent version"
             )
-          });
+          }, nativeThreadLifecycleQueryPorts({ ...options, storeDir }));
         }
         if (terminal.agent === "codex") {
           // Candidate discovery and ownership revalidation can take long
@@ -14480,7 +13931,10 @@ async function runNativeThreadTransition(
           }
         }
         if (operation.kind === "resume_thread" && operation.selectionSnapshot) {
-          assertResumeSnapshotNotExpired(operation.selectionSnapshot);
+          assertResumeSnapshotNotExpired(
+            operation.selectionSnapshot,
+            cliNowMs
+          );
         }
         await bridge.send(
           terminal.agent,

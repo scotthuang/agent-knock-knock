@@ -2,8 +2,8 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 31321,
-    "production_physical_loc": 76474,
+    "cli_core_max_physical_loc": 30775,
+    "production_physical_loc": 76569,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -92,6 +92,16 @@
     },
     "mutation-transaction": {
       "selection": "full"
+    },
+    "native-thread-lifecycle-query": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/codex-no-rollout-binding-cli.test.ts",
+        "test/codex-sticky-rollout-lifecycle-cli.test.ts",
+        "test/native-thread-lifecycle-cli.test.ts",
+        "test/native-thread-ownership-cli.test.ts",
+        "test/stale-bound-resume-cli.test.ts"
+      ]
     },
     "native-thread-transition-policy": {
       "selection": "targeted",
@@ -366,6 +376,14 @@
     {
       "path": "src/native-thread-lifecycle-policy.ts",
       "owner": "lifecycle-core"
+    },
+    {
+      "path": "src/native-thread-lifecycle-query-service.ts",
+      "owner": "native-thread-lifecycle-query"
+    },
+    {
+      "path": "src/native-thread-resume-snapshot-policy.ts",
+      "owner": "native-thread-lifecycle-query"
     },
     {
       "path": "src/native-thread-resume-snapshot.ts",
