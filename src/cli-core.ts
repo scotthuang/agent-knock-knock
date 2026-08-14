@@ -427,6 +427,34 @@ import type {
   VerifiedEmptyCodexHandoffBoundary
 } from "./terminal-dispatch-composition.js";
 import {
+  DeferredForegroundApplicationService,
+  deferredForegroundTransferRevision
+} from "./deferred-foreground-application-service.js";
+import type {
+  DeferredForegroundApplicationScope,
+  DeferredForegroundBindingBoundary
+} from "./deferred-foreground-boundary.js";
+import {
+  bindDeferredForegroundApplicationScope,
+  bindDeferredForegroundWriterScope
+} from "./deferred-foreground-capability.js";
+import { DeferredForegroundRecoveryService } from
+  "./deferred-foreground-recovery-service.js";
+import * as deferredRecoveryAdapter from
+  "./deferred-foreground-recovery-cli-adapter.js";
+import { prepareDeferredForegroundBinding } from
+  "./deferred-foreground-preparation-service.js";
+import {
+  assertDeferredForegroundBoundary,
+  deferredForegroundBoundaryProjection,
+  deferredForegroundConcreteBoundary,
+  deferredForegroundTransferMatchesTerminal,
+  projectDeferredForegroundTerminalFacts,
+  type DeferredForegroundBoundaryAdapterPorts
+} from "./deferred-foreground-preparation-cli-adapter.js";
+import * as deferredAuthorityAdapter from
+  "./deferred-foreground-authority-cli-adapter.js";
+import {
   TerminalDispatchExecutionService,
   assertManagedSessionCanStartTurnPolicy,
   codexKnownBeforeIdentityForTransition,
@@ -1942,7 +1970,8 @@ function safeAbortedDeferredRetrySourceSession({
   if (!ledger) {
     return undefined;
   }
-  assertDeferredForegroundResolvedZeroInputLedger({
+  deferredRecoveryAdapter.assertDeferredForegroundResolvedZeroInputLedger(
+    deferredForegroundRecoveryAdapterPorts(), {
     storeDir,
     terminal: { terminalControl },
     transfer,
@@ -7781,440 +7810,52 @@ const HUMAN_OBSERVED_HANDOFF_FINGERPRINT =
     "adopt_external_thread:human_observed:no_terminal_input:v1"
   );
 
-function codexCandidateInventoryHasNoOtherManagedClaim({
-  storeDir,
-  inventory,
-  sourceSessionId,
-  includeDetached = true
-}: {
+function deferredForegroundAuthorityAdapterPorts():
+  deferredAuthorityAdapter.DeferredForegroundAuthorityAdapterPorts {
+  return {
+    turn: {
+      terminalControl: terminalControlFromTakeover,
+      storeDir: managedSessionStoreDirForConversation,
+      turnsForSession: managedTurnsForSession,
+      needsAttention: managedTurnNeedsAttention,
+      readEvents: readExistingEvents
+    },
+    ledger: {
+      load: loadTerminalBridgeDispatchLedger,
+      matchesControl: terminalDispatchRecordMatchesControl,
+      processAnchor: terminalDispatchRecordProcessAnchor
+    },
+    transition: {
+      hasUnresolved: managedSessionHasUnresolvedNativeTransition,
+      hasAny: managedSessionHasAnyNativeTransition
+    }
+  };
+}
+
+function codexCandidateInventoryHasNoOtherManagedClaim(options: {
   storeDir: string;
   inventory: CodexOpenRootRolloutInventory;
   sourceSessionId: string;
   includeDetached?: boolean;
 }): boolean {
-  const candidateIds = new Set(
-    inventory.roots.map((root) => root.sessionId.toLowerCase())
+  return deferredAuthorityAdapter.codexCandidateInventoryHasNoOtherManagedClaim(
+    deferredForegroundAuthorityAdapterPorts(),
+    options
   );
-  return !listManagedSessions(storeDir).some((session) =>
-    session.session_id !== sourceSessionId &&
-    (includeDetached || session.status !== "detached") &&
-    isExactNativeThreadId(session.binding?.native_thread_id) &&
-    candidateIds.has(session.binding!.native_thread_id!.toLowerCase())
-  );
-}
-
-function exactReleasedSafeAbortedCandidateTurn({
-  storeDir,
-  session,
-  turn
-}: {
-  storeDir: string;
-  session: ManagedSessionState;
-  turn: Conversation;
-}): boolean {
-  const binding = session.binding;
-  const takeover = isRecord(turn.native_session_takeover)
-    ? turn.native_session_takeover
-    : undefined;
-  const submission = terminalBridgeSubmission(turn);
-  const terminalControl = terminalControlFromTakeover(takeover);
-  const messageId = stringValue(submission?.message_id);
-  const preparedAt = stringValue(submission?.prepared_at);
-  const abortedAt = stringValue(submission?.aborted_at);
-  if (
-    session.status !== "bound" ||
-    session.agent !== "codex" ||
-    !binding ||
-    !isExactNativeThreadId(binding.native_thread_id) ||
-    !TERMINAL_DISPATCH_RELEASE_STATUSES.has(turn.status) ||
-    managedTurnNeedsAttention(turn) ||
-    isRecord(turn.callback_delivery) ||
-    isRecord(turn.terminal_bridge_completion_claim) ||
-    !takeover ||
-    isRecord(takeover.terminal_bridge_completion_claim) ||
-    !submission ||
-    !terminalControl ||
-    !messageId ||
-    submission.status !== "aborted" ||
-    submission.safe_to_retry !== true ||
-    stringValue(submission.last_proven_stage) !== "prepared" ||
-    !preparedAt ||
-    !abortedAt ||
-    !validTimestampMs(preparedAt) ||
-    !validTimestampMs(abortedAt) ||
-    Date.parse(abortedAt) < Date.parse(preparedAt) ||
-    TERMINAL_INPUT_EVIDENCE_FIELDS.some(
-      (field) => submission[field] !== undefined
-    ) ||
-    stringValue(takeover.terminal_bridge_message_id) !== messageId ||
-    stringValue(takeover.terminal_bridge_request_hash) !==
-      stringValue(submission.request_hash) ||
-    terminalBridgeRequestFingerprint(
-      stringValue(takeover.terminal_bridge_request_text) ?? ""
-    ) !== stringValue(submission.request_hash) ||
-    executorForConversation(turn).kind !== "codex" ||
-    sessionIdForConversation(turn) !== session.session_id ||
-    stringValue(submission.session_id) !== session.session_id ||
-    stringValue(submission.turn_id) !== turnIdForConversation(turn) ||
-    stringValue(submission.executor_kind) !== "codex" ||
-    stringValue(submission.openclaw_session) !== turn.openclaw_session ||
-    stringValue(turn.terminal_binding_id) !== binding.binding_id ||
-    Number(turn.terminal_binding_generation) !== binding.generation ||
-    stringValue(takeover.terminal_binding_id) !== binding.binding_id ||
-    Number(takeover.terminal_binding_generation) !== binding.generation ||
-    stringValue(submission.binding_id) !== binding.binding_id ||
-    Number(submission.binding_generation) !== binding.generation ||
-    stringValue(turn.native_thread_id) !== binding.native_thread_id ||
-    stringValue(takeover.terminal_agent_session_id) !==
-      binding.native_thread_id ||
-    stringValue(submission.native_thread_id) !== binding.native_thread_id ||
-    Number(takeover.terminal_agent_pid) !== binding.native_process.pid ||
-    stringValue(takeover.terminal_agent_process_uuid) !==
-      binding.native_process.process_uuid ||
-    stringValue(takeover.terminal_agent_process_birth) !==
-      binding.native_process.process_birth ||
-    !terminalControlsShareIncarnation(
-      terminalControl,
-      binding.terminal_control
-    ) ||
-    !terminalControlEvidenceMatches(
-      submission.terminal_endpoint ?? terminalControl,
-      binding.terminal_control
-    ) ||
-    path.resolve(turn.workspace) !== path.resolve(session.workspace)
-  ) {
-    return false;
-  }
-  const canonical = pathsForConversation(turn.conversation_id, storeDir);
-  if (
-    path.resolve(stringValue(turn.state_path) ?? "") !==
-      path.resolve(canonical.statePath) ||
-    path.resolve(stringValue(turn.event_log_path) ?? "") !==
-      path.resolve(canonical.logPath) ||
-    path.resolve(managedSessionStoreDirForConversation(turn) ?? "") !==
-      path.resolve(storeDir) ||
-    path.resolve(stringValue(submission.store_dir) ?? "") !==
-      path.resolve(storeDir)
-  ) {
-    return false;
-  }
-  const matchingReceipts = terminalBridgeSubmissionReceipts(turn).filter(
-    (receipt) => stringValue(receipt.message_id) === messageId
-  );
-  return matchingReceipts.length === 1 &&
-    canonicalJson(matchingReceipts[0]) === canonicalJson(submission);
 }
 
 function deferredCandidateSourceTurnHistory(
   storeDir: string,
   session: ManagedSessionState
 ): DeferredForegroundTransferSourceTurnAuthority[] | undefined {
-  const binding = session.binding;
-  if (!binding?.native_thread_id) {
-    return undefined;
-  }
-  const turns = managedTurnsForSession(storeDir, session.session_id);
-  if (turns.some((turn) => {
-    const callbackDelivered =
-      isRecord(turn.callback_delivery) &&
-      turn.callback_delivery.status === "delivered";
-    const explicitlyAbandonedUncertain =
-      exactExplicitlyAbandonedUncertainCandidateTurn({
-        storeDir,
-        session,
-        turn
-      });
-    const safelyAbortedBeforeInput = exactReleasedSafeAbortedCandidateTurn({
-      storeDir,
-      session,
-      turn
-    });
-    return (
-      !TERMINAL_DISPATCH_RELEASE_STATUSES.has(turn.status) ||
-      managedTurnNeedsAttention(turn) ||
-      (
-        isRecord(turn.callback_delivery) &&
-        !callbackDelivered
-      ) ||
-      (
-        Boolean(turn.gateway_method) &&
-        !callbackDelivered &&
-        !explicitlyAbandonedUncertain &&
-        !safelyAbortedBeforeInput
-      ) ||
-      stringValue(turn.terminal_binding_id) !== binding.binding_id ||
-      Number(turn.terminal_binding_generation) !== binding.generation ||
-      (
-        stringValue(turn.native_thread_id) ??
-        stringValue(
-          isRecord(turn.native_session_takeover)
-            ? turn.native_session_takeover.terminal_agent_session_id
-            : undefined
-        )
-      ) !== binding.native_thread_id
-    );
-  })) {
-    return undefined;
-  }
-  return turns
-    .map((turn) => ({
-      turn_id: turnIdForConversation(turn),
-      status: turn.status as DeferredForegroundTransferSourceTurnAuthority["status"],
-      updated_at: required(
-        stringValue(turn.updated_at),
-        `managed Turn ${turnIdForConversation(turn)} updated_at is unavailable`
-      ),
-      binding_id: binding.binding_id,
-      binding_generation: binding.generation,
-      native_thread_id: binding.native_thread_id as string,
-      turn_fingerprint: createHash("sha256")
-        .update(JSON.stringify(turn))
-        .digest("hex")
-    }))
-    .sort((left, right) => left.turn_id.localeCompare(right.turn_id));
-}
-
-function frozenCandidateSourceTurnHistory(
-  storeDir: string,
-  session: ManagedSessionState
-): DeferredForegroundTransferSourceTurnAuthority[] | undefined {
-  const binding = session.binding;
-  if (!binding?.native_thread_id) {
-    return undefined;
-  }
-  const turns = managedTurnsForSession(storeDir, session.session_id);
-  if (turns.some((turn) =>
-    !TERMINAL_DISPATCH_RELEASE_STATUSES.has(turn.status) ||
-    stringValue(turn.terminal_binding_id) !== binding.binding_id ||
-    Number(turn.terminal_binding_generation) !== binding.generation ||
-    (
-      stringValue(turn.native_thread_id) ??
-      stringValue(
-        isRecord(turn.native_session_takeover)
-          ? turn.native_session_takeover.terminal_agent_session_id
-          : undefined
-      )
-    ) !== binding.native_thread_id
-  )) {
-    return undefined;
-  }
-  return turns.map((turn) => ({
-    turn_id: turnIdForConversation(turn),
-    status: turn.status as DeferredForegroundTransferSourceTurnAuthority["status"],
-    updated_at: required(
-      stringValue(turn.updated_at),
-      `managed Turn ${turnIdForConversation(turn)} updated_at is unavailable`
-    ),
-    binding_id: binding.binding_id,
-    binding_generation: binding.generation,
-    native_thread_id: binding.native_thread_id as string,
-    turn_fingerprint: createHash("sha256")
-      .update(JSON.stringify(turn))
-      .digest("hex")
-  })).sort((left, right) => left.turn_id.localeCompare(right.turn_id));
-}
-
-function exactExplicitlyAbandonedUncertainCandidateTurn({
-  storeDir,
-  session,
-  turn
-}: {
-  storeDir: string;
-  session: ManagedSessionState;
-  turn: Conversation;
-}): boolean {
-  return explicitlyAbandonedUncertainCandidateTurnFingerprint({
+  return deferredAuthorityAdapter.deferredCandidateSourceTurnHistory(
+    deferredForegroundAuthorityAdapterPorts(),
     storeDir,
-    session,
-    turn
-  }) !== undefined;
-}
-
-interface ExplicitlyAbandonedCandidateTurnProof {
-  turnId: string;
-  messageId: string;
-  turnFingerprint: string;
-  closeEvent: Record<string, any>;
-  uncertainReceipt: Record<string, any>;
-}
-
-function explicitlyAbandonedUncertainCandidateTurnProof({
-  storeDir,
-  session,
-  turn,
-  ledgerOverride,
-  requireResolvedTopLevel = true
-}: {
-  storeDir: string;
-  session: ManagedSessionState;
-  turn: Conversation;
-  ledgerOverride?: Record<string, any>;
-  requireResolvedTopLevel?: boolean;
-}): ExplicitlyAbandonedCandidateTurnProof | undefined {
-  if (
-    turn.status !== "closed" ||
-    isRecord(turn.callback_delivery) ||
-    isRecord(turn.terminal_bridge_completion_claim) ||
-    !stringValue(turn.closed_at) ||
-    !stringValue(turn.close_reason)
-  ) {
-    return undefined;
-  }
-  const takeover = isRecord(turn.native_session_takeover)
-    ? turn.native_session_takeover
-    : undefined;
-  const submission = terminalBridgeSubmission(turn);
-  const terminalControl = terminalControlFromTakeover(takeover);
-  const messageId = stringValue(submission?.message_id);
-  if (
-    !takeover ||
-    isRecord(takeover.terminal_bridge_completion_claim) ||
-    !terminalControl ||
-    submission?.status !== "uncertain" ||
-    submission.safe_to_retry === true ||
-    !messageId ||
-    stringValue(takeover.terminal_bridge_message_id) !== messageId ||
-    stringValue(submission.session_id) !== session.session_id ||
-    stringValue(submission.turn_id) !== turnIdForConversation(turn)
-  ) {
-    return undefined;
-  }
-  const canonical = pathsForConversation(
-    turn.conversation_id,
-    storeDir
+    session
   );
-  if (
-    path.resolve(stringValue(turn.state_path) ?? "") !==
-      path.resolve(canonical.statePath) ||
-    path.resolve(stringValue(turn.event_log_path) ?? "") !==
-      path.resolve(canonical.logPath) ||
-    path.resolve(managedSessionStoreDirForConversation(turn) ?? "") !==
-      path.resolve(storeDir)
-  ) {
-    return undefined;
-  }
-  let ledger: Record<string, any> | undefined;
-  try {
-    ledger = ledgerOverride ?? loadTerminalBridgeDispatchLedger(terminalControl);
-  } catch {
-    return undefined;
-  }
-  if (
-    !ledger ||
-    !terminalDispatchRecordMatchesControl(ledger, terminalControl) ||
-    (requireResolvedTopLevel &&
-      (ledger.status !== "resolved" ||
-        ledger.reason !== "conversation explicitly closed by request" ||
-        !validTimestampMs(ledger.resolved_at) ||
-        stringValue(ledger.conversation_id) !== turn.conversation_id ||
-        stringValue(ledger.session_id) !== session.session_id ||
-        stringValue(ledger.turn_id) !== turnIdForConversation(turn) ||
-        stringValue(ledger.message_id) !== messageId ||
-        stringValue(ledger.request_hash) !==
-          stringValue(submission.request_hash) ||
-        stringValue(ledger.binding_id) !==
-          stringValue(turn.terminal_binding_id) ||
-        Number(ledger.binding_generation) !==
-          Number(turn.terminal_binding_generation) ||
-        path.resolve(stringValue(ledger.state_path) ?? "") !==
-          path.resolve(canonical.statePath) ||
-        path.resolve(stringValue(ledger.event_log_path) ?? "") !==
-          path.resolve(canonical.logPath) ||
-        path.resolve(stringValue(ledger.store_dir) ?? "") !==
-          path.resolve(storeDir)))
-  ) {
-    return undefined;
-  }
-  let receipt: Record<string, any> | undefined;
-  try {
-    const matchingReceipts = terminalLedgerReceiptHistory(ledger).filter(
-      (candidate) => stringValue(candidate.message_id) === messageId
-    );
-    receipt = matchingReceipts.length === 1
-      ? matchingReceipts[0]
-      : undefined;
-  } catch {
-    return undefined;
-  }
-  if (
-    !receipt ||
-    receipt.status !== "uncertain" ||
-    receipt.safe_to_retry === true ||
-    !validTimestampMs(receipt.uncertain_at) ||
-    !terminalDispatchRecordMatchesControl(receipt, terminalControl) ||
-    stringValue(receipt.conversation_id) !== turn.conversation_id ||
-    stringValue(receipt.session_id) !== session.session_id ||
-    stringValue(receipt.turn_id) !== turnIdForConversation(turn) ||
-    stringValue(receipt.request_hash) !== stringValue(submission.request_hash) ||
-    stringValue(receipt.binding_id) !== stringValue(turn.terminal_binding_id) ||
-    Number(receipt.binding_generation) !==
-      Number(turn.terminal_binding_generation) ||
-    path.resolve(stringValue(receipt.state_path) ?? "") !==
-      path.resolve(canonical.statePath) ||
-    path.resolve(stringValue(receipt.event_log_path) ?? "") !==
-      path.resolve(canonical.logPath) ||
-    path.resolve(stringValue(receipt.store_dir) ?? "") !== path.resolve(storeDir)
-  ) {
-    return undefined;
-  }
-  let closeEvent: Record<string, any> | undefined;
-  try {
-    closeEvent = readExistingEvents(canonical.logPath).find((event) =>
-      event.event === "conversation_closed" &&
-      event.conversation_id === turn.conversation_id &&
-      event.status === "closed" &&
-      event.ts === turn.closed_at &&
-      event.reason === turn.close_reason
-    );
-  } catch {
-    return undefined;
-  }
-  if (!closeEvent) {
-    return undefined;
-  }
-  // Hash the immutable close event and append-only uncertain receipt, not the
-  // mutable top-level terminal ledger that the next dispatch will replace.
-  return {
-    turnId: turnIdForConversation(turn),
-    messageId,
-    turnFingerprint: createHash("sha256")
-      .update(JSON.stringify(turn))
-      .digest("hex"),
-    closeEvent,
-    uncertainReceipt: receipt
-  };
 }
 
-function explicitlyAbandonedUncertainCandidateTurnFingerprint(args: {
-  storeDir: string;
-  session: ManagedSessionState;
-  turn: Conversation;
-}): string | undefined {
-  const proof = explicitlyAbandonedUncertainCandidateTurnProof(args);
-  return proof
-    ? terminalActionFingerprint({
-        kind: "explicitly_abandoned_uncertain_codex_turn",
-        source_session_id: args.session.session_id,
-        source_revision: managedSessionRevision(args.session),
-        source_binding_token: managedSessionBindingToken(args.session),
-        turn_id: proof.turnId,
-        turn_fingerprint: proof.turnFingerprint,
-        close_event: proof.closeEvent,
-        uncertain_receipt: proof.uncertainReceipt
-      })
-    : undefined;
-}
-
-function explicitlyAbandonedCandidateSourceFingerprint({
-  storeDir,
-  session,
-  sourceTurnHistory,
-  dispatchSnapshot,
-  sourceRevision = managedSessionRevision(session),
-  sourceBindingToken = managedSessionBindingToken(session),
-  ledgerOverride,
-  requireResolvedTopLevel = true
-}: {
+function explicitlyAbandonedCandidateSourceFingerprint(options: {
   storeDir: string;
   session: ManagedSessionState;
   sourceTurnHistory: DeferredForegroundTransferSourceTurnAuthority[];
@@ -8224,283 +7865,45 @@ function explicitlyAbandonedCandidateSourceFingerprint({
   ledgerOverride?: Record<string, any>;
   requireResolvedTopLevel?: boolean;
 }): string | undefined {
-  if (dispatchSnapshot.status !== "resolved") {
-    return undefined;
-  }
-  const abandonedTurnProofs = managedTurnsForSession(
-    storeDir,
-    session.session_id
-  ).flatMap((turn) => {
-    const proof = explicitlyAbandonedUncertainCandidateTurnProof({
-        storeDir,
-        session,
-        turn,
-        ledgerOverride,
-        requireResolvedTopLevel
-      });
-    return proof
-      ? [{
-          turn_id: proof.turnId,
-          message_id: proof.messageId,
-          turn_fingerprint: proof.turnFingerprint,
-          close_event: proof.closeEvent,
-          uncertain_receipt: proof.uncertainReceipt
-        }]
-      : [];
-  }).sort((left, right) => left.turn_id.localeCompare(right.turn_id));
-  if (abandonedTurnProofs.length === 0) {
-    return undefined;
-  }
-  return terminalActionFingerprint({
-    kind: "explicitly_abandoned_codex_predecessor",
-    source_session_id: session.session_id,
-    source_revision: sourceRevision,
-    source_binding_token: sourceBindingToken,
-    source_turn_history: sourceTurnHistory,
-    previous_dispatch_snapshot: dispatchSnapshot,
-    abandoned_turns: abandonedTurnProofs
-  });
+  return deferredAuthorityAdapter.explicitlyAbandonedCandidateSourceFingerprint(
+    deferredForegroundAuthorityAdapterPorts(),
+    options
+  );
 }
 
-function assertFrozenExplicitlyAbandonedPredecessorAuthority({
-  storeDir,
-  transfer,
-  terminalControl
-}: {
+function assertFrozenExplicitlyAbandonedPredecessorAuthority(options: {
   storeDir: string;
   transfer: DeferredForegroundTransfer;
   terminalControl: TerminalControlRef;
 }): void {
-  if (
-    transfer.source_rollout_authority !==
-      "explicitly_abandoned_predecessor"
-  ) {
-    return;
-  }
-  const source = loadManagedSession(storeDir, transfer.source_session_id);
-  const sourceAsBound: ManagedSessionState = {
-    ...source,
-    status: "bound",
-    binding: transfer.source_before_binding,
-    last_transition_id: transfer.source_previous_last_transition_id
-  };
-  const history = frozenCandidateSourceTurnHistory(storeDir, sourceAsBound);
-  const ledger = loadTerminalBridgeDispatchLedger(terminalControl);
-  const fingerprint = history && ledger
-    ? explicitlyAbandonedCandidateSourceFingerprint({
-        storeDir,
-        session: sourceAsBound,
-        sourceTurnHistory: history,
-        dispatchSnapshot: {
-          status: transfer.previous_dispatch_status,
-          fingerprint: transfer.previous_dispatch_fingerprint
-        },
-        sourceRevision: transfer.source_expected_revision,
-        sourceBindingToken: transfer.source_binding_token,
-        ledgerOverride: ledger,
-        requireResolvedTopLevel: false
-      })
-    : undefined;
-  if (
-    !history ||
-    JSON.stringify(history) !== JSON.stringify(transfer.source_turn_history) ||
-    fingerprint !== transfer.source_abandonment_fingerprint
-  ) {
-    throw new Error(
-      `deferred foreground transfer ${transfer.transfer_id} lost its exact ` +
-      "explicitly abandoned predecessor authority"
-    );
-  }
-}
-
-function candidateSourceTransitionHistoryIsTerminal(
-  storeDir: string,
-  session: ManagedSessionState
-): boolean {
-  if (managedSessionHasUnresolvedNativeTransition(storeDir, session)) {
-    return false;
-  }
-  if (!session.last_transition_id) {
-    return true;
-  }
-  try {
-    const transition = loadNativeThreadTransition(
-      storeDir,
-      session.last_transition_id
-    );
-    return ["committed", "aborted"].includes(transition.status) &&
-      (
-        transition.source_session_id === session.session_id ||
-        transition.target_session_id === session.session_id
-      );
-  } catch {
-    return false;
-  }
+  deferredAuthorityAdapter.assertFrozenExplicitlyAbandonedPredecessorAuthority(
+    deferredForegroundAuthorityAdapterPorts(),
+    options
+  );
 }
 
 function deferredCodexForegroundDispatchSnapshot(
   terminalControl: TerminalControlRef
 ): DeferredCodexForegroundDispatchSnapshot {
-  const ledger = loadTerminalBridgeDispatchLedger(terminalControl);
-  return deferredCodexForegroundDispatchSnapshotForLedger(
-    terminalControl,
-    ledger
+  return deferredAuthorityAdapter.deferredCodexForegroundDispatchSnapshot(
+    deferredForegroundAuthorityAdapterPorts(),
+    terminalControl
   );
 }
 
-function deferredCodexForegroundDispatchSnapshotForLedger(
-  terminalControl: TerminalControlRef,
-  ledger: Record<string, any> | undefined
-): DeferredCodexForegroundDispatchSnapshot {
-  if (!ledger) {
-    return {
-      status: "none",
-      fingerprint: terminalActionFingerprint({
-        kind: "deferred_codex_foreground_terminal_dispatch",
-        status: "none"
-      })
-    };
-  }
-  const currentAnchor = terminalEndpointFromControlRef(
-    terminalControl
-  ).processAnchorPid;
-  const ledgerAnchor = terminalDispatchRecordProcessAnchor(ledger);
-  if (
-    ledger.status !== "resolved" ||
-    !Number.isSafeInteger(currentAnchor) ||
-    Number(currentAnchor) < 1 ||
-    ledgerAnchor !== currentAnchor ||
-    !terminalDispatchRecordMatchesControl(ledger, terminalControl, {
-      requireCurrentRoute: true,
-      requireProcessAnchor: true
-    })
-  ) {
-    throw new Error(
-      `terminal ${terminalControl.target} does not have exact resolved ` +
-      "dispatch authority"
-    );
-  }
-  const resolvedAt = stringValue(ledger.resolved_at);
-  if (!resolvedAt || !Number.isFinite(Date.parse(resolvedAt))) {
-    throw new Error(
-      `terminal ${terminalControl.target} resolved dispatch receipt has no ` +
-      "valid resolved_at"
-    );
-  }
-  const statePath = stringValue(ledger.state_path);
-  const ledgerStoreDir = stringValue(ledger.store_dir);
-  if (ledgerStoreDir && !path.isAbsolute(ledgerStoreDir)) {
-    throw new Error(
-      `terminal ${terminalControl.target} resolved dispatch receipt has a ` +
-      "nonabsolute Store owner"
-    );
-  }
-  if (statePath) {
-    if (!ledgerStoreDir || !path.isAbsolute(statePath) ||
-      !path.isAbsolute(ledgerStoreDir)) {
-      throw new Error(
-        `terminal ${terminalControl.target} resolved dispatch receipt has ` +
-        "incomplete Store authority"
-      );
-    }
-    const canonicalStatePath = path.resolve(statePath);
-    const canonicalStoreDir = path.resolve(ledgerStoreDir);
-    const canonical = pathsForConversationDir(
-      path.dirname(canonicalStatePath)
-    );
-    if (
-      path.resolve(canonical.statePath) !== canonicalStatePath ||
-      path.resolve(canonical.storeDir) !== canonicalStoreDir
-    ) {
-      throw new Error(
-        `terminal ${terminalControl.target} resolved dispatch receipt has a ` +
-        "noncanonical Store/state owner"
-      );
-    }
-    const conversationId = stringValue(ledger.conversation_id);
-    if (
-      conversationId &&
-      path.resolve(
-        pathsForConversation(conversationId, canonicalStoreDir).statePath
-      ) !== canonicalStatePath
-    ) {
-      throw new Error(
-        `terminal ${terminalControl.target} resolved dispatch receipt has a ` +
-        "mismatched conversation owner"
-      );
-    }
-  }
-  return {
-    status: "resolved",
-    fingerprint: terminalActionFingerprint({
-      kind: "deferred_codex_foreground_terminal_dispatch",
-      status: "resolved",
-      ledger
-    })
-  };
-}
-
-function deferredCodexPreviousDispatchSnapshotMatches({
-  transfer,
-  terminalControl,
-  ledger
-}: {
+function deferredCodexPreviousDispatchSnapshotMatches(options: {
   transfer: DeferredForegroundTransfer;
   terminalControl: TerminalControlRef;
   ledger: Record<string, any> | undefined;
 }): boolean {
-  let snapshot: DeferredCodexForegroundDispatchSnapshot;
-  try {
-    snapshot = deferredCodexForegroundDispatchSnapshotForLedger(
-      terminalControl,
-      ledger
-    );
-  } catch {
-    return false;
-  }
-  return snapshot.status === transfer.previous_dispatch_status &&
-    snapshot.fingerprint === transfer.previous_dispatch_fingerprint;
+  return deferredAuthorityAdapter.deferredCodexPreviousDispatchSnapshotMatches(
+    deferredForegroundAuthorityAdapterPorts(),
+    options
+  );
 }
 
-function tryDeferredCodexForegroundDispatchSnapshot(
-  terminalControl: TerminalControlRef
-): DeferredCodexForegroundDispatchSnapshot | undefined {
-  try {
-    return deferredCodexForegroundDispatchSnapshot(terminalControl);
-  } catch {
-    return undefined;
-  }
-}
-
-type DeferredCodexAuthorityMode =
-  | "list"
-  | "prepare"
-  | "boundary_bound"
-  | "boundary_transitioning";
-
-interface DeferredCodexAuthorityObservation {
-  sourceKind: DeferredForegroundTransferSourceKind;
-  sourceRolloutAuthority: DeferredForegroundTransferSourceRolloutAuthority;
-  sourceTurnHistory?: DeferredForegroundTransferSourceTurnAuthority[];
-  dispatchSnapshot?: DeferredCodexForegroundDispatchSnapshot;
-  sourceAbandonmentFingerprint?: string;
-  exactSource: boolean;
-}
-
-function observeDeferredCodexAuthority({
-  mode,
-  storeDir,
-  context,
-  sourceSession,
-  candidateInventory,
-  abandonment,
-  fixedSourceRolloutAuthority,
-  fixedDispatchSnapshot,
-  sourceRevision,
-  sourceBindingToken,
-  requireUnclaimedCandidate = false
-}: {
-  mode: DeferredCodexAuthorityMode;
+function observeDeferredCodexAuthority(options: {
+  mode: deferredAuthorityAdapter.DeferredCodexAuthorityMode;
   storeDir: string;
   context: CodexSendAuthorityContext;
   sourceSession?: ManagedSessionState;
@@ -8511,111 +7914,11 @@ function observeDeferredCodexAuthority({
   sourceRevision?: number;
   sourceBindingToken?: string;
   requireUnclaimedCandidate?: boolean;
-}): DeferredCodexAuthorityObservation | undefined {
-  let dispatchSnapshot = fixedDispatchSnapshot;
-  if (mode === "list") {
-    dispatchSnapshot = tryDeferredCodexForegroundDispatchSnapshot(
-      context.terminalControl
-    );
-  }
-  const binding = sourceSession?.binding;
-  if (!sourceSession || !binding) return undefined;
-  const sourceKind: DeferredForegroundTransferSourceKind =
-    binding.native_process.rollout
-      ? "candidate_rollout_quiescent"
-      : "status_card_only";
-  const candidateHistoryNeeded = sourceKind ===
-      "candidate_rollout_quiescent" &&
-    (mode !== "list" || candidateInventory !== undefined);
-  const sourceTurnHistory = candidateHistoryNeeded
-    ? mode === "boundary_transitioning"
-      ? frozenCandidateSourceTurnHistory(storeDir, sourceSession)
-      : deferredCandidateSourceTurnHistory(storeDir, sourceSession)
-    : undefined;
-  if (mode === "prepare") {
-    dispatchSnapshot = deferredCodexForegroundDispatchSnapshot(
-      context.terminalControl
-    );
-  }
-  const sourceRollout = binding.native_process.rollout;
-  const explicitlyAbandoned =
-    sourceKind === "candidate_rollout_quiescent" &&
-    (
-      abandonment === "missing_rollout" ||
-      (abandonment === "missing_inventory_rollout" && candidateInventory)
-    ) &&
-    candidateSourceRootAuthorityMatches(
-      candidateInventory?.roots ?? [],
-      binding.native_thread_id,
-      sourceRollout,
-      "explicitly_abandoned_predecessor"
-    );
-  const sourceRolloutAuthority = fixedSourceRolloutAuthority ??
-    (explicitlyAbandoned ? "explicitly_abandoned_predecessor" : "present");
-  const sourceAbandonmentFingerprint =
-    sourceRolloutAuthority === "explicitly_abandoned_predecessor" &&
-      sourceTurnHistory && dispatchSnapshot
-      ? explicitlyAbandonedCandidateSourceFingerprint({
-          storeDir,
-          session: sourceSession,
-          sourceTurnHistory,
-          dispatchSnapshot,
-          sourceRevision,
-          sourceBindingToken,
-          ...(mode === "boundary_transitioning"
-            ? {
-                ledgerOverride: loadTerminalBridgeDispatchLedger(
-                  context.terminalControl
-                ),
-                requireResolvedTopLevel: false
-              }
-            : {})
-        })
-      : undefined;
-  let exactSource = false;
-  if (sourceKind === "status_card_only") {
-    exactSource = Boolean(
-      exactBoundCodexSendSource({
-        kind: "status_card",
-        sourceSession,
-        context
-      }) &&
-      managedTurnsForSession(storeDir, sourceSession.session_id).length === 0 &&
-      !sourceSession.last_transition_id &&
-      !managedSessionHasAnyNativeTransition(storeDir, sourceSession)
-    );
-  } else if (candidateInventory && sourceTurnHistory) {
-    const exactCandidate = (): boolean => exactBoundCodexSendSource({
-      kind: "candidate",
-      sourceSession,
-      context,
-      inventory: candidateInventory,
-      sourceRolloutAuthority
-    });
-    const sourceAuthority = sourceRolloutAuthority === "present" ||
-      Boolean(sourceAbandonmentFingerprint);
-    exactSource = mode === "prepare"
-      ? candidateSourceTransitionHistoryIsTerminal(storeDir, sourceSession) &&
-        exactCandidate() && sourceAuthority
-      : exactCandidate() && sourceAuthority &&
-        (!requireUnclaimedCandidate ||
-          codexCandidateInventoryHasNoOtherManagedClaim({
-            storeDir,
-            inventory: candidateInventory,
-            sourceSessionId: sourceSession.session_id,
-            includeDetached:
-              sourceRolloutAuthority === "explicitly_abandoned_predecessor"
-          })) &&
-        candidateSourceTransitionHistoryIsTerminal(storeDir, sourceSession);
-  }
-  return {
-    sourceKind,
-    sourceRolloutAuthority,
-    sourceTurnHistory,
-    dispatchSnapshot,
-    sourceAbandonmentFingerprint,
-    exactSource
-  };
+}): deferredAuthorityAdapter.DeferredCodexAuthorityObservation | undefined {
+  return deferredAuthorityAdapter.observeDeferredCodexAuthority(
+    deferredForegroundAuthorityAdapterPorts(),
+    options
+  );
 }
 
 async function assertVerifiedEmptyCodexHandoffBoundary({
@@ -8873,208 +8176,119 @@ async function assertVerifiedEmptyCodexTransportBoundary({
   });
 }
 
+function deferredForegroundBoundaryAdapterPorts(
+  options: Record<string, any>,
+  storeDir: string
+): DeferredForegroundBoundaryAdapterPorts {
+  return {
+    processIncarnation: codexProcessIncarnationForPid,
+    inventory: (boundary) => inspectCodexOpenRootRolloutInventory({
+      options,
+      pid: boundary.terminal.pid,
+      cwd: boundary.terminal.terminalControl.currentPath
+    }),
+    nativeIdentity: (boundary) => observeCurrentNativeAgentSessionIdentity({
+      options,
+      agent: "codex",
+      pid: boundary.terminal.pid,
+      cwd: boundary.terminal.terminalControl.currentPath
+    }),
+    authority: ({
+      boundary,
+      sourceAsBound,
+      candidateInventory,
+      expectedSourceStatus
+    }) => observeDeferredCodexAuthority({
+      mode: expectedSourceStatus === "bound"
+        ? "boundary_bound"
+        : "boundary_transitioning",
+      storeDir,
+      context: {
+        terminalId: boundary.terminal.conversationId,
+        terminalControl: boundary.terminal.terminalControl,
+        pid: boundary.terminal.pid,
+        workspace: boundary.terminal.terminalControl.currentPath,
+        liveProcessUuid: boundary.processUuid,
+        liveProcessBirth: boundary.processBirth
+      },
+      sourceSession: sourceAsBound,
+      candidateInventory,
+      abandonment: "never",
+      fixedSourceRolloutAuthority: boundary.sourceRolloutAuthority,
+      fixedDispatchSnapshot: boundary.previousDispatchSnapshot,
+      sourceRevision: boundary.sourceBoundRevision,
+      sourceBindingToken: boundary.sourceBoundBindingToken
+    }),
+    assertNoDispatch: (_scope, boundary) =>
+      assertTerminalIncarnationCanStartTurn(
+        storeDir,
+        boundary.terminal.terminalControl
+      ),
+    dispatchSnapshot: (boundary) =>
+      deferredCodexForegroundDispatchSnapshot(
+        boundary.terminal.terminalControl
+      ),
+    status: async (boundary) => {
+      const status = await createTerminalAgentBridge(options).status(
+        "codex",
+        boundary.terminal.terminalControl,
+        {
+          runtime: terminalRuntimeForLiveIdentity({
+            terminal: boundary.terminal,
+            expectedEmptyNativeSession:
+              boundary.candidateAcceptanceAnchor === undefined,
+            physicalOnly: boundary.candidateAcceptanceAnchor !== undefined
+          })
+        }
+      );
+      return {
+        reachable: status.reachable === true,
+        approvalBlocked: status.approval_state.blocked === true,
+        activityState: status.activity_state,
+        activityReason: status.activity_reason
+      };
+    },
+    assertComposerReady: (boundary) =>
+      assertCodexComposerReadyForAutomatedInput({
+        options,
+        terminalControl: boundary.terminal.terminalControl
+      }),
+    valuesMatch: (left, right) =>
+      JSON.stringify(left) === JSON.stringify(right)
+  };
+}
+
 async function assertDeferredCodexForegroundBindingBoundary({
   options,
+  scope,
   boundary,
   expectedSourceStatus,
   requireNoDispatch,
   requireEmptyComposer
 }: {
   options: Record<string, any>;
+  scope: DeferredForegroundApplicationScope;
   boundary: DeferredCodexForegroundBindingBoundary;
   expectedSourceStatus: "bound" | "transitioning";
   requireNoDispatch: boolean;
   requireEmptyComposer: boolean;
 }): Promise<ManagedSessionState> {
   const storeDir = storeDirFromOptions(options);
-  const source = loadManagedSession(storeDir, boundary.sourceSessionId);
-  const expectedRevision = expectedSourceStatus === "bound"
-    ? boundary.sourceBoundRevision
-    : boundary.sourceReservedRevision;
-  const expectedBindingToken = expectedSourceStatus === "bound"
-    ? boundary.sourceBoundBindingToken
-    : boundary.sourceReservedBindingToken;
-  if (
-    source.status !== expectedSourceStatus ||
-    expectedRevision === undefined ||
-    managedSessionRevision(source) !== expectedRevision ||
-    expectedBindingToken === undefined ||
-    managedSessionBindingToken(source) !== expectedBindingToken
-  ) {
-    throw new Error(
-      "the deferred Codex foreground source changed; refresh AKK list"
-    );
-  }
-  if (
-    source.last_transition_id !== (
-      expectedSourceStatus === "bound"
-        ? boundary.sourcePreviousLastTransitionId
-        : boundary.transferId
-    )
-  ) {
-    throw new Error(
-      "the deferred Codex foreground source transition authority changed"
-    );
-  }
-  const liveIncarnation = codexProcessIncarnationForPid(boundary.terminal.pid);
-  if (
-    liveIncarnation.processUuid !== boundary.processUuid ||
-    liveIncarnation.processBirth !== boundary.processBirth
-  ) {
-    throw new Error(
-      "the deferred Codex foreground process incarnation changed"
-    );
-  }
-  let candidateInventoryForBoundary: CodexOpenRootRolloutInventory | undefined;
-  if (boundary.candidateAcceptanceAnchor) {
-    const inventory = await inspectCodexOpenRootRolloutInventory({
-      options,
-      pid: boundary.terminal.pid,
-      cwd: boundary.terminal.terminalControl.currentPath
-    });
-    candidateInventoryForBoundary = inventory;
-    if (
-      inventory.inventoryFingerprint !==
-        boundary.candidateAcceptanceAnchor.inventory_fingerprint ||
-      !exactCodexCandidateInventoryForDeferredSend({
-        inventory,
-        sourceSession: source,
-        pid: boundary.terminal.pid,
-        workspace: required(
-          boundary.terminal.terminalControl.currentPath,
-          "deferred Codex terminal workspace is unavailable"
-        ),
-        processUuid: boundary.processUuid,
-        processBirth: boundary.processBirth,
-        sourceRolloutAuthority: boundary.sourceRolloutAuthority
-      })
-    ) {
-      throw new Error(
-        "the exact Codex open-root inventory changed; refresh AKK list before sending"
-      );
-    }
-  } else {
-    const observation = await observeCurrentNativeAgentSessionIdentity({
-      options,
-      agent: "codex",
-      pid: boundary.terminal.pid,
-      cwd: boundary.terminal.terminalControl.currentPath
-    });
-    if (observation.status === "unavailable") {
-      throw new Error(
-        `Codex native identity observation is unavailable: ${observation.reason}`
-      );
-    }
-    if (observation.status !== "verified_absent") {
-      throw new Error(
-        `Codex materialized native thread ${observation.identity.sessionId}; ` +
-        "refresh AKK list before sending"
-      );
-    }
-  }
-  const sourceAsBound: ManagedSessionState = {
-    ...source,
-    status: "bound",
-    last_transition_id: boundary.sourcePreviousLastTransitionId
-  };
-  const authority = observeDeferredCodexAuthority({
-    mode: expectedSourceStatus === "bound"
-      ? "boundary_bound"
-      : "boundary_transitioning",
+  return assertDeferredForegroundBoundary({
+    scope,
     storeDir,
-    context: {
-      terminalId: boundary.terminal.conversationId,
-      terminalControl: boundary.terminal.terminalControl,
-      pid: boundary.terminal.pid,
-      workspace: boundary.terminal.terminalControl.currentPath,
-      liveProcessUuid: boundary.processUuid,
-      liveProcessBirth: boundary.processBirth
-    },
-    sourceSession: sourceAsBound,
-    candidateInventory: candidateInventoryForBoundary,
-    abandonment: "never",
-    fixedSourceRolloutAuthority: boundary.sourceRolloutAuthority,
-    fixedDispatchSnapshot: boundary.previousDispatchSnapshot,
-    sourceRevision: boundary.sourceBoundRevision,
-    sourceBindingToken: boundary.sourceBoundBindingToken
+    boundary,
+    applicationBoundary: deferredForegroundBoundaryProjection(boundary),
+    expectedSourceStatus,
+    requireNoDispatch,
+    requireEmptyComposer,
+    ports: deferredForegroundBoundaryAdapterPorts(options, storeDir)
   });
-  if (boundary.sourceKind === "status_card_only") {
-    if (!authority?.exactSource) {
-      throw new Error(
-        "the deferred Codex foreground source is no longer an isolated status-card binding"
-      );
-    }
-  } else {
-    if (
-      !boundary.candidateAcceptanceAnchor ||
-      !authority?.sourceTurnHistory ||
-      JSON.stringify(authority.sourceTurnHistory) !==
-        JSON.stringify(boundary.sourceTurnHistory) ||
-      !authority.exactSource ||
-      (boundary.sourceRolloutAuthority ===
-          "explicitly_abandoned_predecessor" &&
-        (!boundary.sourceAbandonmentFingerprint ||
-          authority.sourceAbandonmentFingerprint !==
-            boundary.sourceAbandonmentFingerprint ||
-          boundary.previousDispatchSnapshot.status !== "resolved"))
-    ) {
-      throw new Error(
-        "the deferred Codex candidate source history or rollout authority changed"
-      );
-    }
-  }
-  if (requireNoDispatch) {
-    assertTerminalIncarnationCanStartTurn(
-      storeDir,
-      boundary.terminal.terminalControl
-    );
-    const currentDispatchSnapshot = deferredCodexForegroundDispatchSnapshot(
-      boundary.terminal.terminalControl
-    );
-    if (
-      currentDispatchSnapshot.status !== boundary.previousDispatchSnapshot.status ||
-      currentDispatchSnapshot.fingerprint !==
-        boundary.previousDispatchSnapshot.fingerprint
-    ) {
-      throw new Error(
-        "the deferred Codex foreground dispatch history changed; refresh AKK list"
-      );
-    }
-  }
-  const status = await createTerminalAgentBridge(options).status(
-    "codex",
-    boundary.terminal.terminalControl,
-    {
-      runtime: terminalRuntimeForLiveIdentity({
-        terminal: boundary.terminal,
-        expectedEmptyNativeSession:
-          boundary.candidateAcceptanceAnchor === undefined,
-        physicalOnly: boundary.candidateAcceptanceAnchor !== undefined
-      })
-    }
-  );
-  if (
-    status.reachable !== true ||
-    status.approval_state.blocked === true ||
-    !["idle", "unknown"].includes(status.activity_state)
-  ) {
-    throw new Error(
-      `terminal ${boundary.terminal.terminalControl.target} is not at a ` +
-      `verified empty Codex prompt (${status.activity_state}: ` +
-      `${status.activity_reason})`
-    );
-  }
-  if (requireEmptyComposer) {
-    await assertCodexComposerReadyForAutomatedInput({
-      options,
-      terminalControl: boundary.terminal.terminalControl
-    });
-  }
-  return source;
 }
 
 async function prepareDeferredCodexForegroundBinding({
   options,
+  scope,
   terminal,
   sourceSession,
   observation,
@@ -9083,6 +8297,7 @@ async function prepareDeferredCodexForegroundBinding({
   allowImplicitFreshAuthority = false
 }: {
   options: Record<string, any>;
+  scope: DeferredForegroundApplicationScope;
   terminal: ResolvedTerminalConversation;
   sourceSession?: ManagedSessionState;
   observation: NativeAgentSessionIdentityObservation;
@@ -9090,1284 +8305,256 @@ async function prepareDeferredCodexForegroundBinding({
   requestText: string;
   allowImplicitFreshAuthority?: boolean;
 }): Promise<DeferredCodexForegroundBindingBoundary | undefined> {
-  const expectedToken = stringValue(options.expectedTerminalToken);
-  const candidateMode = Boolean(candidateInventory?.roots.length);
-  if (
-    terminal.agent !== "codex" ||
-    !sourceSession?.binding ||
-    (observation.status !== "verified_absent" && !candidateMode) ||
-    (!expectedToken && !allowImplicitFreshAuthority)
-  ) {
-    return undefined;
-  }
-  if (
-    allowImplicitFreshAuthority &&
-    (
-      expectedToken !== undefined ||
-      !candidateMode ||
-      !isCompleteNativeRollout(
-        sourceSession.binding.native_process.rollout
-      )
-    )
-  ) {
-    throw new Error(
-      "implicit Codex candidate authority requires one fresh complete " +
-      "nonempty rollout inventory for a rollout-backed source"
-    );
-  }
-  const processUuid = sourceSession.binding.native_process.process_uuid;
-  const processBirth = sourceSession.binding.native_process.process_birth;
-  const workspace = terminal.terminalControl.currentPath;
-  const liveIncarnation = codexProcessIncarnationForPid(terminal.pid);
   const storeDir = storeDirFromOptions(options);
-  const authority = observeDeferredCodexAuthority({
-    mode: "prepare",
-    storeDir,
-    context: {
-      terminalId: terminal.conversationId,
-      terminalControl: terminal.terminalControl,
-      pid: terminal.pid,
-      workspace,
-      liveProcessUuid: liveIncarnation.processUuid,
-      liveProcessBirth: liveIncarnation.processBirth
-    },
+  const prepared = await prepareDeferredForegroundBinding({
+    scope,
+    terminal: projectDeferredForegroundTerminalFacts(terminal),
     sourceSession,
+    nativeIdentityVerifiedAbsent: observation.status === "verified_absent",
     candidateInventory,
-    abandonment: "missing_inventory_rollout"
-  });
-  if (
-    !processUuid ||
-    !processBirth ||
-    !workspace ||
-    !hasCanonicalTerminalEndpoint(terminal.terminalControl) ||
-    !authority?.exactSource ||
-    !authority.dispatchSnapshot
-  ) {
-    return undefined;
-  }
-  if (
-    authority.sourceRolloutAuthority ===
-        "explicitly_abandoned_predecessor" &&
-    !authority.sourceAbandonmentFingerprint
-  ) {
-    return undefined;
-  }
-  const {
-    sourceKind,
-    sourceRolloutAuthority,
-    sourceAbandonmentFingerprint,
-    sourceTurnHistory: candidateSourceTurnHistory,
-    dispatchSnapshot
-  } = authority;
-  const token = deferredCodexForegroundBindingToken({
-    terminalId: terminal.conversationId,
-    terminalControl: terminal.terminalControl,
-    pid: terminal.pid,
-    workspace,
-    processUuid,
-    processBirth,
-    sourceSession,
-    dispatchSnapshot,
-    sourceTurnHistory: candidateSourceTurnHistory,
-    sourceRolloutAuthority,
-    sourceAbandonmentFingerprint,
-    ...(candidateMode ? { candidateInventory } : {})
-  });
-  if (!allowImplicitFreshAuthority && expectedToken !== token) {
-    throw new Error(
-      "deferred Codex foreground binding requires the fresh exact terminal " +
-      "token advertised by AKK list"
-    );
-  }
-  if (allowImplicitFreshAuthority) {
-    runtimeLog("info", "deferred_codex_implicit_candidate_authority", {
-      terminal_id: terminal.conversationId,
-      terminal_target: terminal.terminalControl.target,
-      source_session_id: sourceSession.session_id,
-      inventory_status: candidateInventory?.status,
-      inventory_fingerprint: candidateInventory?.inventoryFingerprint,
-      candidate_count: candidateInventory?.roots.length,
-      authority_scope: "terminal_follow_current",
-      terminal_input_sent: false
-    });
-  }
-  const targetSessionId = createManagedSessionId();
-  const transferId = createDeferredForegroundTransferId();
-  const candidateAcceptanceAnchor = candidateMode
-    ? captureCodexCandidateSetRolloutAcceptanceAnchor({
-        inventory: required(
-          candidateInventory,
-          "Codex candidate inventory is unavailable"
-        ),
-        now: cliNow()
-      })
-    : undefined;
-  const boundary: DeferredCodexForegroundBindingBoundary = {
-    terminal,
-    transferId,
-    targetSessionId,
-    sourceSessionId: sourceSession.session_id,
-    sourceBoundRevision: managedSessionRevision(sourceSession),
-    sourceBoundBindingToken: managedSessionBindingToken(sourceSession),
-    processUuid,
-    processBirth,
-    previousDispatchSnapshot: dispatchSnapshot,
-    sourceKind,
-    sourceRolloutAuthority,
-    ...(sourceAbandonmentFingerprint
-      ? { sourceAbandonmentFingerprint }
-      : {}),
-    ...(sourceSession.last_transition_id
-      ? { sourcePreviousLastTransitionId: sourceSession.last_transition_id }
-      : {}),
-    ...(candidateSourceTurnHistory
-      ? { sourceTurnHistory: candidateSourceTurnHistory }
-      : {}),
-    ...(candidateAcceptanceAnchor ? { candidateAcceptanceAnchor } : {})
-  };
-  await assertDeferredCodexForegroundBindingBoundary({
-    options,
-    boundary,
-    expectedSourceStatus: "bound",
-    requireNoDispatch: true,
-    requireEmptyComposer: true
-  });
-  await assertNativeThreadHasExclusiveOwnership({
-    options,
-    agent: "codex",
-    currentPid: terminal.pid,
-    nativeThreadId: sourceSession.binding.native_thread_id as string,
-    storeDir: storeDirFromOptions(options),
-    terminalControl: terminal.terminalControl,
-    excludedManagedSessionId: sourceSession.session_id
-  });
-  if (
-    candidateInventory &&
-    !codexCandidateInventoryHasNoOtherManagedClaim({
-      storeDir,
-      inventory: candidateInventory,
-      sourceSessionId: sourceSession.session_id,
-      includeDetached:
-        sourceRolloutAuthority === "explicitly_abandoned_predecessor"
-    })
-  ) {
-    throw new Error(
-      "a Codex rollout candidate is already claimed by another Session"
-    );
-  }
-  if (
-    candidateInventory &&
-    sourceRolloutAuthority === "explicitly_abandoned_predecessor"
-  ) {
-    for (const root of candidateInventory.roots) {
-      await assertNativeThreadHasExclusiveOwnership({
+    requestText,
+    expectedTerminalToken: stringValue(options.expectedTerminalToken),
+    allowImplicitFreshAuthority
+  }, {
+    authority: {
+      processIncarnation: codexProcessIncarnationForPid,
+      observeFresh: ({
+        sourceSession,
+        candidateInventory,
+        liveIncarnation
+      }) => observeDeferredCodexAuthority({
+        mode: "prepare",
+        storeDir,
+        context: {
+          terminalId: terminal.conversationId,
+          terminalControl: terminal.terminalControl,
+          pid: terminal.pid,
+          workspace: terminal.terminalControl.currentPath,
+          liveProcessUuid: liveIncarnation.processUuid,
+          liveProcessBirth: liveIncarnation.processBirth
+        },
+        sourceSession,
+        candidateInventory,
+        abandonment: "missing_inventory_rollout"
+      }),
+      revalidate: async (activeScope, boundary) => {
+        await assertDeferredCodexForegroundBindingBoundary({
+          options,
+          scope: activeScope,
+          boundary: deferredForegroundConcreteBoundary(boundary, terminal),
+          expectedSourceStatus: "bound",
+          requireNoDispatch: true,
+          requireEmptyComposer: true
+        });
+      },
+      assertExclusive: (
+        _activeScope,
+        boundary,
+        nativeThreadId,
+        excludedManagedSessionId
+      ) => assertNativeThreadHasExclusiveOwnership({
         options,
         agent: "codex",
-        currentPid: terminal.pid,
-        nativeThreadId: root.sessionId,
+        currentPid: boundary.terminal.pid,
+        nativeThreadId,
         storeDir,
         terminalControl: terminal.terminalControl,
-        excludedManagedSessionId:
-          root.sessionId.toLowerCase() ===
-            sourceSession.binding.native_thread_id?.toLowerCase()
-            ? sourceSession.session_id
-            : undefined
-      });
-    }
-  }
-  // The source semantic proof is about to be replaced by the transfer's own
-  // top-level dispatch generation. Recheck it immediately before publishing
-  // the prepared transfer so every later phase can rely on the immutable
-  // fingerprint plus the Store protocol-5 source-Turn fence.
-  if (sourceRolloutAuthority === "explicitly_abandoned_predecessor") {
-    const freshHistory = deferredCandidateSourceTurnHistory(
-      storeDir,
-      sourceSession
-    );
-    const freshAbandonmentFingerprint = freshHistory
-      ? explicitlyAbandonedCandidateSourceFingerprint({
+        excludedManagedSessionId
+      }),
+      candidateInventoryUnclaimed: ({
+        sourceSession,
+        inventory,
+        includeDetached
+      }) => codexCandidateInventoryHasNoOtherManagedClaim({
+        storeDir,
+        inventory,
+        sourceSessionId: sourceSession.session_id,
+        includeDetached
+      }),
+      abandonmentStillFresh: ({
+        sourceSession,
+        sourceTurnHistory,
+        sourceAbandonmentFingerprint,
+        dispatchSnapshot
+      }) => {
+        const freshHistory = deferredCandidateSourceTurnHistory(
           storeDir,
-          session: sourceSession,
-          sourceTurnHistory: freshHistory,
-          dispatchSnapshot
-        })
-      : undefined;
-    if (
-      JSON.stringify(freshHistory) !==
-        JSON.stringify(candidateSourceTurnHistory) ||
-      freshAbandonmentFingerprint !== sourceAbandonmentFingerprint
-    ) {
-      throw new Error(
-        "the explicitly abandoned Codex predecessor authority changed; refresh AKK list"
-      );
-    }
-  }
-  const existingTransfer = listDeferredForegroundTransfers(storeDir).find(
-    (candidate) =>
-      !FINAL_DEFERRED_TRANSFER_STATUSES.has(candidate.status) &&
-      (
-        candidate.source_session_id === sourceSession.session_id ||
-        (
-          candidate.terminal_id === terminal.conversationId &&
-          terminalControlEvidenceMatches(
-            candidate.terminal_endpoint,
-            terminal.terminalControl
-          )
-        )
-      )
-  );
-  if (existingTransfer) {
-    throw new Error(
-      `deferred foreground transfer ${existingTransfer.transfer_id} is ` +
-      `still ${existingTransfer.status}; refresh AKK list before sending`
-    );
-  }
-  saveDeferredForegroundTransfer(storeDir, {
-    schema: "agent-knock-knock/deferred-foreground-transfer",
-    version: 2,
-    transfer_id: transferId,
-    status: "prepared",
-    input_stage: "none",
-    terminal_id: terminal.conversationId,
-    terminal_endpoint: terminalControlEvidence(terminal.terminalControl),
-    process_pid: terminal.pid,
-    process_uuid: processUuid,
-    process_birth: processBirth,
-    workspace,
-    source_session_id: sourceSession.session_id,
-    source_expected_revision: managedSessionRevision(sourceSession),
-    source_binding_token: managedSessionBindingToken(sourceSession),
-    source_previous_last_transition_id: sourceSession.last_transition_id,
-    source_before_binding: sourceSession.binding,
-    source_kind: sourceKind,
-    ...(sourceRolloutAuthority === "explicitly_abandoned_predecessor"
-      ? { source_rollout_authority: sourceRolloutAuthority }
-      : {}),
-    ...(sourceAbandonmentFingerprint
-      ? { source_abandonment_fingerprint: sourceAbandonmentFingerprint }
-      : {}),
-    ...(candidateSourceTurnHistory
-      ? { source_turn_history: candidateSourceTurnHistory }
-      : {}),
-    target_session_id: targetSessionId,
-    target_expected_revision: null,
-    previous_dispatch_status: dispatchSnapshot.status,
-    previous_dispatch_fingerprint: dispatchSnapshot.fingerprint,
-    request_hash: required(
-      terminalBridgeRequestFingerprint(terminalSubmissionPayload(requestText)),
-      "deferred foreground request hash is unavailable"
-    ),
-    dispatcher_pid: cliPid(),
-    prepared_at: cliNow().toISOString()
-  }, { expectedRevision: null });
-  return boundary;
-}
-
-function deferredForegroundTransferRevision(
-  transfer: DeferredForegroundTransfer
-): number {
-  const revision = Number(transfer.revision);
-  if (!Number.isSafeInteger(revision) || revision < 1) {
-    throw new Error(
-      `deferred foreground transfer ${transfer.transfer_id} has no valid revision`
-    );
-  }
-  return revision;
-}
-
-function assertDeferredForegroundTransferMatchesBoundary({
-  transfer,
-  boundary
-}: {
-  transfer: DeferredForegroundTransfer;
-  boundary: DeferredCodexForegroundBindingBoundary;
-}): void {
-  if (
-    transfer.transfer_id !== boundary.transferId ||
-    transfer.source_session_id !== boundary.sourceSessionId ||
-    transfer.target_session_id !== boundary.targetSessionId ||
-    transfer.source_expected_revision !== boundary.sourceBoundRevision ||
-    transfer.source_binding_token !== boundary.sourceBoundBindingToken ||
-    transfer.previous_dispatch_status !==
-      boundary.previousDispatchSnapshot.status ||
-    transfer.previous_dispatch_fingerprint !==
-      boundary.previousDispatchSnapshot.fingerprint ||
-    (transfer.version === 1
-      ? "status_card_only"
-      : transfer.source_kind) !== boundary.sourceKind ||
-    (transfer.source_rollout_authority ?? "present") !==
-      boundary.sourceRolloutAuthority ||
-    transfer.source_abandonment_fingerprint !==
-      boundary.sourceAbandonmentFingerprint ||
-    JSON.stringify(transfer.source_turn_history) !==
-      JSON.stringify(boundary.sourceTurnHistory) ||
-    transfer.source_previous_last_transition_id !==
-      boundary.sourcePreviousLastTransitionId ||
-    transfer.process_pid !== boundary.terminal.pid ||
-    transfer.process_uuid !== boundary.processUuid ||
-    transfer.process_birth !== boundary.processBirth ||
-    transfer.terminal_id !== boundary.terminal.conversationId ||
-    !terminalControlEvidenceMatches(
-      transfer.terminal_endpoint,
-      boundary.terminal.terminalControl
-    )
-  ) {
-    throw new Error(
-      `deferred foreground transfer ${boundary.transferId} authority changed`
-    );
-  }
-}
-
-function terminalDispatchStoreDirForDeferredRoute({
-  options,
-  boundary,
-  route
-}: {
-  options: Record<string, any>;
-  boundary: DeferredCodexForegroundBindingBoundary;
-  route?: BoundTerminalDispatchRoute;
-}): string {
-  if (!route) {
-    return storeDirFromOptions(options);
-  }
-  return withExactTerminalDispatchRoute(route, {
-    terminalControl: boundary.terminal.terminalControl,
-    terminalKey: terminalBridgeRuntimeKey(
-      boundary.terminal.terminalControl
-    ),
-    storeDir: storeDirFromOptions(options),
-    statePath: route.statePath,
-    logPath: route.logPath
-  }, (exactRoute) => exactRoute.storeDir);
-}
-
-function assertDeferredTransferMatchesTerminalDispatchRoute(
-  transfer: DeferredForegroundTransfer,
-  route?: BoundTerminalDispatchRoute
-): void {
-  if (
-    route &&
-    transfer.state_path !== undefined &&
-    !sameCanonicalStatePath(transfer.state_path, route.statePath)
-  ) {
-    throw new Error(
-      "deferred foreground transfer escaped its exact terminal dispatch Turn"
-    );
-  }
-}
-
-function abortDeferredCodexForegroundTransferBeforeInput({
-  options,
-  boundary,
-  reason,
-  terminalInputNotStartedAt,
-  route
-}: {
-  options: Record<string, any>;
-  boundary: DeferredCodexForegroundBindingBoundary;
-  reason: string;
-  terminalInputNotStartedAt?: string;
-  route?: BoundTerminalDispatchRoute;
-}): void {
-  const storeDir = terminalDispatchStoreDirForDeferredRoute({
-    options, boundary, route
-  });
-  let transfer = loadDeferredForegroundTransfer(storeDir, boundary.transferId);
-  assertDeferredTransferMatchesTerminalDispatchRoute(transfer, route);
-  assertDeferredForegroundTransferMatchesBoundary({ transfer, boundary });
-  if (transfer.status === "abort_resolved") {
-    return;
-  }
-  const provedDispatchDidNotStart =
-    transfer.status === "dispatch_started" &&
-    transfer.input_stage === "dispatch_started" &&
-    terminalInputNotStartedAt !== undefined &&
-    Number.isFinite(Date.parse(terminalInputNotStartedAt));
-  if (transfer.input_stage !== "none" && !provedDispatchDidNotStart) {
-    throw new Error(
-      `deferred foreground transfer ${transfer.transfer_id} may have started ` +
-      "terminal input and cannot restore its source"
-    );
-  }
-  if (![
-    "prepared",
-    "source_reserved",
-    "target_prepared",
-    "dispatch_started",
-    "aborted"
-  ].includes(transfer.status)) {
-    throw new Error(
-      `deferred foreground transfer ${transfer.transfer_id} cannot abort from ` +
-      transfer.status
-    );
-  }
-  // Publish the terminal abort intent before restoring either Session. A crash
-  // after this receipt is completed by the Store-only finalizer below; a later
-  // successful retry may evolve the Sessions only after `abort_resolved` makes
-  // that cleanup receipt permanently self-contained.
-  if (transfer.status !== "aborted") {
-    transfer = saveDeferredForegroundTransfer(storeDir, {
-      ...transfer,
-      status: "aborted",
-      aborted_at: cliNow().toISOString(),
-      ...(provedDispatchDidNotStart
-        ? { terminal_input_not_started_at: terminalInputNotStartedAt }
-        : {}),
-      error: JSON.stringify(textSummary(reason))
-    }, { expectedRevision: deferredForegroundTransferRevision(transfer) });
-  }
-  transfer = finalizeAbortedDeferredCodexForegroundTransferCleanup({
-    storeDir,
-    transfer
-  });
-  runtimeLog("info", "deferred_codex_foreground_transfer_aborted", {
-    transfer_id: transfer.transfer_id,
-    source_session_id: transfer.source_session_id,
-    target_session_id: transfer.target_session_id,
-    terminal_input_sent: false,
-    reason: textSummary(reason)
-  });
-}
-
-function finalizeAbortedDeferredCodexForegroundTransferCleanup({
-  storeDir,
-  transfer
-}: {
-  storeDir: string;
-  transfer: DeferredForegroundTransfer;
-}): DeferredForegroundTransfer {
-  let current = loadDeferredForegroundTransfer(storeDir, transfer.transfer_id);
-  if (current.status === "abort_resolved") {
-    return current;
-  }
-  const provedDispatchDidNotStart =
-    current.input_stage === "dispatch_started" &&
-    current.terminal_input_not_started_at !== undefined &&
-    Number.isFinite(Date.parse(current.terminal_input_not_started_at));
-  if (
-    current.status !== "aborted" ||
-    (current.input_stage !== "none" && !provedDispatchDidNotStart)
-  ) {
-    throw new Error(
-      `deferred foreground transfer ${current.transfer_id} does not carry a ` +
-      "zero-input abort intent"
-    );
-  }
-
-  let target = tryLoadManagedSession(storeDir, current.target_session_id);
-  if (target) {
-    if (
-      target.lineage.transition_id !== current.transfer_id ||
-      target.lineage.previous_session_id !== current.source_session_id ||
-      target.binding?.native_thread_id ||
-      target.binding?.native_process.rollout ||
-      target.last_transition_id !== current.transfer_id ||
-      !current.target_before_binding ||
-      JSON.stringify(target.binding) !==
-        JSON.stringify(current.target_before_binding)
-    ) {
-      throw new Error(
-        `deferred foreground target ${target.session_id} changed before abort cleanup`
-      );
-    }
-    if (target.status === "transitioning") {
-      if (
-        managedSessionRevision(target) !== current.target_prepared_revision ||
-        managedSessionBindingToken(target) !==
-          current.target_prepared_binding_token
-      ) {
-        throw new Error(
-          `deferred foreground target ${target.session_id} changed before abort cleanup`
+          sourceSession
         );
-      }
-      const detachedAt = cliNow().toISOString();
-      target = saveManagedSession(storeDir, {
-        ...target,
-        status: "detached",
-        detached_at: detachedAt,
-        updated_at: detachedAt
-      }, { expectedRevision: managedSessionRevision(target) });
-    } else if (
-      target.status !== "detached" ||
-      managedSessionRevision(target) !==
-        Number(current.target_prepared_revision) + 1 ||
-      managedSessionBindingToken(target) !== managedSessionBindingToken({
-        session_id: current.target_session_id,
-        status: "detached",
-        binding: current.target_before_binding
-      })
-    ) {
-      throw new Error(
-        `deferred foreground target ${target.session_id} cannot finish abort ` +
-        `cleanup from ${target.status}`
-      );
-    }
-  }
-
-  let source = loadManagedSession(storeDir, current.source_session_id);
-  if (
-    source.status === "transitioning" &&
-    source.last_transition_id === current.transfer_id &&
-    managedSessionRevision(source) === current.source_expected_revision + 1 &&
-    managedSessionBindingToken(source) === managedSessionBindingToken({
-      session_id: current.source_session_id,
-      status: "transitioning",
-      binding: current.source_before_binding
-    }) &&
-    JSON.stringify(source.binding) ===
-      JSON.stringify(current.source_before_binding)
-  ) {
-    const restoredAt = cliNow().toISOString();
-    source = saveManagedSession(storeDir, {
-      ...source,
-      status: "bound",
-      last_transition_id: current.source_previous_last_transition_id,
-      updated_at: restoredAt
-    }, { expectedRevision: managedSessionRevision(source) });
-  }
-  const allowedSourceRevisions = current.source_reserved_at
-    ? [current.source_expected_revision + 2]
-    : [
-        current.source_expected_revision,
-        // The source Session CAS precedes publication of source_reserved_at.
-        // This exact +2 state is the idempotent restore after that crash gap.
-        current.source_expected_revision + 2
-      ];
-  if (
-    source.status !== "bound" ||
-    source.last_transition_id !== current.source_previous_last_transition_id ||
-    !allowedSourceRevisions.includes(managedSessionRevision(source)) ||
-    managedSessionBindingToken(source) !== current.source_binding_token ||
-    JSON.stringify(source.binding) !== JSON.stringify(current.source_before_binding)
-  ) {
-    throw new Error(
-      `deferred foreground source ${source.session_id} changed before abort cleanup`
-    );
-  }
-  const completedAt = cliNow().toISOString();
-  current = saveDeferredForegroundTransfer(storeDir, {
-    ...current,
-    status: "abort_resolved",
-    abort_cleanup_completed_at: completedAt,
-    abort_source_after_revision: managedSessionRevision(source),
-    abort_source_after_status: "bound",
-    abort_source_after_binding_token: managedSessionBindingToken(source),
-    abort_source_after_binding: source.binding,
-    abort_target_after_status: target ? "detached" : "absent",
-    ...(target
-      ? {
-          abort_target_after_revision: managedSessionRevision(target),
-          abort_target_after_binding_token: managedSessionBindingToken(target),
-          abort_target_after_binding: target.binding
-        }
-      : {})
-  }, { expectedRevision: deferredForegroundTransferRevision(current) });
-  return current;
-}
-
-async function reserveDeferredCodexForegroundTransfer({
-  options,
-  boundary,
-  targetSession,
-  messageId,
-  turnId,
-  statePath,
-  route
-}: {
-  options: Record<string, any>;
-  boundary: DeferredCodexForegroundBindingBoundary;
-  targetSession: ManagedSessionState;
-  messageId: string;
-  turnId: string;
-  statePath: string;
-  route: BoundTerminalDispatchRoute;
-}): Promise<{
-  createdSession: ManagedSessionState;
-  rollback: (route: BoundTerminalDispatchRoute) => void;
-}> {
-  const storeDir = terminalDispatchStoreDirForDeferredRoute({
-    options, boundary, route
-  });
-  if (!sameCanonicalStatePath(statePath, route.statePath)) {
-    throw new Error(
-      "deferred foreground reservation escaped its exact terminal dispatch Turn"
-    );
-  }
-  let transfer = loadDeferredForegroundTransfer(storeDir, boundary.transferId);
-  assertDeferredTransferMatchesTerminalDispatchRoute(transfer, route);
-  assertDeferredForegroundTransferMatchesBoundary({ transfer, boundary });
-  if (transfer.status !== "prepared" || transfer.input_stage !== "none") {
-    throw new Error(
-      `deferred foreground transfer ${transfer.transfer_id} is already ` +
-      transfer.status
-    );
-  }
-  const source = await assertDeferredCodexForegroundBindingBoundary({
-    options,
-    boundary,
-    expectedSourceStatus: "bound",
-    requireNoDispatch: true,
-    requireEmptyComposer: true
-  });
-  try {
-    const reservedAt = cliNow().toISOString();
-  const reserved = saveManagedSession(storeDir, {
-    ...source,
-    status: "transitioning",
-    last_transition_id: transfer.transfer_id,
-    updated_at: reservedAt
-  }, { expectedRevision: managedSessionRevision(source) });
-  if (cliEnv().AKK_TEST_EXIT_AFTER_DEFERRED_SOURCE_SESSION_RESERVED === "1") {
-    // Crash seam for the only source-reservation window not yet reflected by
-    // source_reserved_at in the transfer receipt. Recovery must prove and
-    // restore the exact transitioning revision without terminal input.
-    cliExit(86);
-  }
-  boundary.sourceReservedRevision = managedSessionRevision(reserved);
-  boundary.sourceReservedBindingToken = managedSessionBindingToken(reserved);
-  transfer = saveDeferredForegroundTransfer(storeDir, {
-    ...transfer,
-    status: "source_reserved",
-    source_reserved_at: reservedAt
-  }, { expectedRevision: deferredForegroundTransferRevision(transfer) });
-  if (cliEnv().AKK_TEST_EXIT_AFTER_DEFERRED_SOURCE_RESERVED === "1") {
-    cliExit(86);
-  }
-  const provisionalTarget: ManagedSessionState = {
-    ...targetSession,
-    status: "transitioning",
-    last_transition_id: transfer.transfer_id
-  };
-  boundary.targetPreparedRevision = 1;
-  boundary.targetPreparedBindingToken = managedSessionBindingToken(
-    provisionalTarget
-  );
-  // Publish the complete target CAS authority before the target itself. A
-  // crash can therefore observe either no target or exactly this revision-1
-  // provisional target; it never leaves an unrecorded Session behind.
-  transfer = saveDeferredForegroundTransfer(storeDir, {
-    ...transfer,
-    status: "target_prepared",
-    target_prepared_at: cliNow().toISOString(),
-    target_prepared_revision: 1,
-    target_prepared_status: "transitioning",
-    target_prepared_last_transition_id: transfer.transfer_id,
-    target_prepared_binding_token: managedSessionBindingToken(provisionalTarget),
-    target_before_binding: provisionalTarget.binding,
-    message_id: messageId,
-    turn_id: turnId,
-    state_path: path.resolve(statePath)
-  }, { expectedRevision: deferredForegroundTransferRevision(transfer) });
-  if (cliEnv().AKK_TEST_EXIT_AFTER_DEFERRED_TARGET_PREPARED === "1") {
-    cliExit(86);
-  }
-  const createdSession = saveManagedSession(storeDir, provisionalTarget, {
-    expectedRevision: null
-  });
-  if (
-    managedSessionRevision(createdSession) !== 1 ||
-    managedSessionBindingToken(createdSession) !==
-      boundary.targetPreparedBindingToken
-  ) {
-    throw new Error(
-      `deferred foreground target ${createdSession.session_id} did not ` +
-      "materialize at its prepared CAS authority"
-    );
-  }
-  runtimeLog("info", "deferred_codex_foreground_source_reserved", {
-    transfer_id: transfer.transfer_id,
-    terminal_id: boundary.terminal.conversationId,
-    source_session_id: source.session_id,
-    native_thread_id: source.binding?.native_thread_id,
-    process_uuid: boundary.processUuid,
-    process_birth: boundary.processBirth,
-    terminal_input_sent: false
-  });
-    return {
-      createdSession,
-      rollback: (rollbackRoute) => {
-        assertTerminalDispatchRouteMatches(rollbackRoute, route);
-        abortDeferredCodexForegroundTransferBeforeInput({
-          options,
-          boundary,
-          reason: "terminal input was proved not to have started",
-          route: rollbackRoute
-        });
-      }
-    };
-  } catch (error) {
-    try {
-      abortDeferredCodexForegroundTransferBeforeInput({
-        options,
-        boundary,
-        reason: error instanceof Error ? error.message : String(error),
-        route
-      });
-    } catch (abortError) {
-      throw new Error(
-        `deferred foreground reservation failed and could not be aborted: ${
-          abortError instanceof Error ? abortError.message : String(abortError)
-        }`,
-        { cause: error }
-      );
-    }
-    throw error;
-  }
-}
-
-function assertDeferredForegroundTargetPreparedAuthority({
-  storeDir,
-  transfer
-}: {
-  storeDir: string;
-  transfer: DeferredForegroundTransfer;
-}): ManagedSessionState {
-  const target = loadManagedSession(storeDir, transfer.target_session_id);
-  if (
-    target.status !== "transitioning" ||
-    target.last_transition_id !== transfer.transfer_id ||
-    managedSessionRevision(target) !== transfer.target_prepared_revision ||
-    managedSessionBindingToken(target) !==
-      transfer.target_prepared_binding_token ||
-    JSON.stringify(target.binding) !==
-      JSON.stringify(transfer.target_before_binding) ||
-    target.lineage.transition_id !== transfer.transfer_id ||
-    target.lineage.previous_session_id !== transfer.source_session_id
-  ) {
-    throw new Error(
-      `deferred foreground target ${transfer.target_session_id} changed ` +
-      "before terminal dispatch"
-    );
-  }
-  return target;
-}
-
-function advanceDeferredCodexForegroundTransferInputStage({
-  options,
-  boundary,
-  stage,
-  at,
-  route
-}: {
-  options: Record<string, any>;
-  boundary: DeferredCodexForegroundBindingBoundary;
-  stage: "text_injected" | "enter_dispatched";
-  at: string;
-  route: BoundTerminalDispatchRoute;
-}): DeferredForegroundTransfer {
-  const storeDir = terminalDispatchStoreDirForDeferredRoute({
-    options, boundary, route
-  });
-  let transfer = loadDeferredForegroundTransfer(storeDir, boundary.transferId);
-  assertDeferredTransferMatchesTerminalDispatchRoute(transfer, route);
-  assertDeferredForegroundTransferMatchesBoundary({ transfer, boundary });
-  assertDeferredForegroundTargetPreparedAuthority({ storeDir, transfer });
-  const source = loadManagedSession(storeDir, transfer.source_session_id);
-  if (
-    source.status !== "transitioning" ||
-    source.last_transition_id !== transfer.transfer_id ||
-    managedSessionRevision(source) !== transfer.source_expected_revision + 1 ||
-    managedSessionBindingToken(source) !== boundary.sourceReservedBindingToken ||
-    JSON.stringify(source.binding) !==
-      JSON.stringify(transfer.source_before_binding)
-  ) {
-    throw new Error(
-      `deferred foreground source ${transfer.source_session_id} changed ` +
-      "during terminal dispatch"
-    );
-  }
-  if (
-    stage === "text_injected" &&
-    (transfer.status !== "dispatch_started" ||
-      transfer.input_stage !== "dispatch_started")
-  ) {
-    throw new Error(
-      `deferred foreground transfer ${transfer.transfer_id} cannot record text ` +
-      `from ${transfer.status}/${transfer.input_stage}`
-    );
-  }
-  if (
-    stage === "enter_dispatched" &&
-    (transfer.status !== "dispatch_started" ||
-      transfer.input_stage !== "text_injected")
-  ) {
-    throw new Error(
-      `deferred foreground transfer ${transfer.transfer_id} cannot record Enter ` +
-      `from ${transfer.status}/${transfer.input_stage}`
-    );
-  }
-  transfer = saveDeferredForegroundTransfer(storeDir, {
-    ...transfer,
-    status: "dispatch_started",
-    input_stage: stage,
-    dispatch_started_at: transfer.dispatch_started_at ?? at,
-    ...(stage === "text_injected"
-      ? { text_injected_at: at }
-      : { enter_dispatched_at: at })
-  }, { expectedRevision: deferredForegroundTransferRevision(transfer) });
-  return transfer;
-}
-
-function beginDeferredCodexForegroundTransferDispatch({
-  options,
-  boundary,
-  at,
-  route
-}: {
-  options: Record<string, any>;
-  boundary: DeferredCodexForegroundBindingBoundary;
-  at: string;
-  route: BoundTerminalDispatchRoute;
-}): DeferredForegroundTransfer {
-  const storeDir = terminalDispatchStoreDirForDeferredRoute({
-    options, boundary, route
-  });
-  let transfer = loadDeferredForegroundTransfer(storeDir, boundary.transferId);
-  assertDeferredTransferMatchesTerminalDispatchRoute(transfer, route);
-  assertDeferredForegroundTransferMatchesBoundary({ transfer, boundary });
-  assertDeferredForegroundTargetPreparedAuthority({ storeDir, transfer });
-  if (transfer.status !== "target_prepared" || transfer.input_stage !== "none") {
-    throw new Error(
-      `deferred foreground transfer ${transfer.transfer_id} cannot begin ` +
-      `dispatch from ${transfer.status}/${transfer.input_stage}`
-    );
-  }
-  transfer = saveDeferredForegroundTransfer(storeDir, {
-    ...transfer,
-    status: "dispatch_started",
-    input_stage: "dispatch_started",
-    dispatch_started_at: at
-  }, { expectedRevision: deferredForegroundTransferRevision(transfer) });
-  return transfer;
-}
-
-function isExactDeferredScrubbedSource({
-  source,
-  transfer
-}: {
-  source: ManagedSessionState;
-  transfer: DeferredForegroundTransfer;
-}): boolean {
-  const before = transfer.source_before_binding;
-  const after = source.binding;
-  return Boolean(
-    source.status === "transitioning" &&
-    source.last_transition_id === transfer.transfer_id &&
-    managedSessionRevision(source) === transfer.source_expected_revision + 2 &&
-    after &&
-    after.binding_id !== before.binding_id &&
-    after.generation === before.generation + 1 &&
-    after.terminal_id === before.terminal_id &&
-    terminalControlsShareIncarnation(
-      after.terminal_control,
-      before.terminal_control
-    ) &&
-    after.native_thread_id === undefined &&
-    after.native_process.rollout === undefined &&
-    after.native_process.pid === transfer.process_pid &&
-    after.native_process.process_uuid === transfer.process_uuid &&
-    after.native_process.process_birth === transfer.process_birth &&
-    after.native_process.evidence ===
-      "deferred_predecessor_binding_scrubbed"
-  );
-}
-
-function isExactDeferredAcceptedTarget({
-  target,
-  transfer,
-  identity
-}: {
-  target: ManagedSessionState;
-  transfer: DeferredForegroundTransfer;
-  identity: NativeAgentSessionIdentity;
-}): boolean {
-  const before = transfer.target_before_binding;
-  const after = target.binding;
-  return Boolean(
-    before &&
-    after &&
-    target.status === "transitioning" &&
-    target.last_transition_id === transfer.transfer_id &&
-    managedSessionRevision(target) ===
-      Number(transfer.target_prepared_revision) + 1 &&
-    after.binding_id === before.binding_id &&
-    after.generation === before.generation &&
-    after.native_thread_id === identity.sessionId &&
-    after.native_process.pid === transfer.process_pid &&
-    after.native_process.process_uuid === identity.processUuid &&
-    after.native_process.process_birth === identity.processBirth &&
-    exactRolloutMatches(after.native_process.rollout, identity.rollout)
-  );
-}
-
-async function commitDeferredCodexForegroundBinding({
-  options,
-  boundary,
-  identity,
-  acceptedAt,
-  route
-}: {
-  options: Record<string, any>;
-  boundary: DeferredCodexForegroundBindingBoundary;
-  identity: NativeAgentSessionIdentity;
-  acceptedAt: string;
-  route?: BoundTerminalDispatchRoute;
-}): Promise<ManagedSessionState> {
-  const storeDir = terminalDispatchStoreDirForDeferredRoute({
-    options, boundary, route
-  });
-  let transfer = loadDeferredForegroundTransfer(storeDir, boundary.transferId);
-  assertDeferredTransferMatchesTerminalDispatchRoute(transfer, route);
-  assertDeferredForegroundTransferMatchesBoundary({ transfer, boundary });
-  assertFrozenExplicitlyAbandonedPredecessorAuthority({
-    storeDir,
-    transfer,
-    terminalControl: boundary.terminal.terminalControl
-  });
-  if (
-    !["dispatch_started", "uncertain"].includes(transfer.status) ||
-    transfer.input_stage === "none" ||
-    identity.processUuid !== transfer.process_uuid ||
-    identity.processBirth !== transfer.process_birth ||
-    !isExactNativeThreadId(identity.sessionId) ||
-    !isCompleteNativeRollout(identity.rollout)
-  ) {
-    throw new Error(
-      `deferred foreground transfer ${transfer.transfer_id} lacks exact ` +
-      "accepted identity authority"
-    );
-  }
-  let source = loadManagedSession(storeDir, transfer.source_session_id);
-  const sourceIsReserved =
-    source.status === "transitioning" &&
-    source.last_transition_id === transfer.transfer_id &&
-    managedSessionRevision(source) === transfer.source_expected_revision + 1 &&
-    managedSessionBindingToken(source) === boundary.sourceReservedBindingToken &&
-    JSON.stringify(source.binding) ===
-      JSON.stringify(transfer.source_before_binding);
-  const sameNativeThread = identity.sessionId.toLowerCase() ===
-    transfer.source_before_binding.native_thread_id?.toLowerCase();
-  const sourceAlreadyScrubbed = sameNativeThread &&
-    isExactDeferredScrubbedSource({ source, transfer });
-  if (!sourceIsReserved && !sourceAlreadyScrubbed) {
-    throw new Error(
-      `deferred foreground source ${source.session_id} changed before commit`
-    );
-  }
-  let target = loadManagedSession(storeDir, transfer.target_session_id);
-  const targetAlreadyAccepted = isExactDeferredAcceptedTarget({
-    target,
-    transfer,
-    identity
-  });
-  if (!targetAlreadyAccepted) {
-    target = assertDeferredForegroundTargetPreparedAuthority({
-      storeDir,
-      transfer
-    });
-  }
-  // Prove there is no third-party Store/process owner before the first
-  // retirement or target-binding CAS. The one permitted existing claim is
-  // the reserved predecessor when Codex reused its status-card UUID.
-  await assertNativeThreadHasExclusiveOwnership({
-    options,
-    agent: "codex",
-    currentPid: transfer.process_pid,
-    nativeThreadId: identity.sessionId,
-    storeDir,
-    terminalControl: boundary.terminal.terminalControl,
-    excludedManagedSessionId: targetAlreadyAccepted
-      ? transfer.target_session_id
-      : sameNativeThread
-        ? transfer.source_session_id
-        : transfer.target_session_id,
-    allowedManagedSessionIds:
-      transfer.source_rollout_authority ===
-          "explicitly_abandoned_predecessor"
-        ? [transfer.source_session_id]
-        : []
-  });
-  const retirement: DeferredForegroundTransfer["source_retirement"] =
-    sameNativeThread
-      ? "binding_scrubbed_same_native_thread"
-      : "binding_retained";
-  if (sameNativeThread && !sourceAlreadyScrubbed) {
-    const scrubbedAt = cliNow();
-    const scrubbedBinding = terminalBindingFrom({
-      terminalId: transfer.source_before_binding.terminal_id,
-      terminalControl: transfer.source_before_binding.terminal_control,
-      pid: transfer.process_pid,
-      processUuid: transfer.process_uuid,
-      processBirth: transfer.process_birth,
-      evidence: "deferred_predecessor_binding_scrubbed",
-      generation: transfer.source_before_binding.generation + 1,
-      now: scrubbedAt
-    });
-    source = saveManagedSession(storeDir, {
-      ...source,
-      binding: scrubbedBinding,
-      updated_at: scrubbedAt.toISOString()
-    }, { expectedRevision: managedSessionRevision(source) });
-    if (cliEnv().AKK_TEST_EXIT_AFTER_DEFERRED_SOURCE_SCRUBBED === "1") {
-      cliExit(86);
-    }
-  }
-  if (!targetAlreadyAccepted) {
-    const acceptedBinding: ManagedTerminalBinding = {
-      ...(target.binding as ManagedTerminalBinding),
-      native_thread_id: identity.sessionId,
-      native_process: {
-        ...(target.binding as ManagedTerminalBinding).native_process,
-        process_uuid: identity.processUuid,
-        process_birth: identity.processBirth,
-        rollout: identity.rollout,
-        evidence: identity.evidence
+        const freshFingerprint = freshHistory
+          ? explicitlyAbandonedCandidateSourceFingerprint({
+              storeDir,
+              session: sourceSession,
+              sourceTurnHistory: freshHistory,
+              dispatchSnapshot
+            })
+          : undefined;
+        return JSON.stringify(freshHistory) ===
+            JSON.stringify(sourceTurnHistory) &&
+          freshFingerprint === sourceAbandonmentFingerprint;
       },
-      last_verified_at: acceptedAt
-    };
-    target = saveManagedSession(storeDir, {
-      ...target,
-      binding: acceptedBinding,
-      updated_at: acceptedAt
-    }, { expectedRevision: managedSessionRevision(target) });
-    if (cliEnv().AKK_TEST_EXIT_AFTER_DEFERRED_TARGET_ACCEPTED === "1") {
-      cliExit(86);
+      transferMatchesTerminal: (transfer) =>
+        deferredForegroundTransferMatchesTerminal(transfer, terminal)
+    },
+    identity: {
+      targetSessionId: createManagedSessionId,
+      transferId: createDeferredForegroundTransferId,
+      captureCandidateAnchor: (inventory, now) =>
+        captureCodexCandidateSetRolloutAcceptanceAnchor({ inventory, now }),
+      bindingToken: ({
+        sourceSession,
+        authority,
+        candidateInventory
+      }) => deferredCodexForegroundBindingToken({
+        terminalId: terminal.conversationId,
+        terminalControl: terminal.terminalControl,
+        pid: terminal.pid,
+        workspace: required(
+          terminal.terminalControl.currentPath,
+          "deferred Codex terminal workspace is unavailable"
+        ),
+        processUuid: sourceSession.binding!.native_process.process_uuid as string,
+        processBirth: sourceSession.binding!.native_process.process_birth as string,
+        sourceSession,
+        dispatchSnapshot: authority.dispatchSnapshot!,
+        candidateInventory,
+        sourceTurnHistory: authority.sourceTurnHistory,
+        sourceRolloutAuthority: authority.sourceRolloutAuthority,
+        sourceAbandonmentFingerprint:
+          authority.sourceAbandonmentFingerprint
+      }),
+      requestHash: (text) => required(
+        terminalBridgeRequestFingerprint(terminalSubmissionPayload(text)),
+        "deferred foreground request hash is unavailable"
+      )
+    },
+    runtime: {
+      now: cliNow,
+      pid: cliPid,
+      log: runtimeLog
     }
-  }
-  const recoveredFromUncertainty = transfer.status === "uncertain";
-  const transportProofAt = transfer.dispatch_started_at ?? acceptedAt;
-  transfer = saveDeferredForegroundTransfer(storeDir, {
-    ...transfer,
-    status: "committed",
-    input_stage: "agent_accepted",
-    dispatch_started_at: transfer.dispatch_started_at ?? transportProofAt,
-    text_injected_at: transfer.text_injected_at ?? transportProofAt,
-    enter_dispatched_at: transfer.enter_dispatched_at ?? transportProofAt,
-    agent_accepted_at: acceptedAt,
-    target_native_thread_id: identity.sessionId,
-    target_accepted_revision: managedSessionRevision(target),
-    target_accepted_status: "transitioning",
-    target_accepted_binding_token: managedSessionBindingToken(target),
-    target_accepted_binding: target.binding,
-    source_pre_retirement_revision: managedSessionRevision(source),
-    source_pre_retirement_status: "transitioning",
-    source_pre_retirement_binding_token: managedSessionBindingToken(source),
-    source_pre_retirement_binding: source.binding,
-    source_retirement: retirement,
-    committed_at: acceptedAt,
-    ...(recoveredFromUncertainty ? { recovered_at: acceptedAt } : {})
-  }, { expectedRevision: deferredForegroundTransferRevision(transfer) });
-  if (cliEnv().AKK_TEST_EXIT_AFTER_DEFERRED_COMMITTED === "1") {
-    cliExit(86);
-  }
-  return resolveCommittedDeferredCodexForegroundTransfer({
-    options,
-    boundary,
-    route
+  });
+  return prepared
+    ? deferredForegroundConcreteBoundary(prepared, terminal)
+    : undefined;
+}
+
+function deferredForegroundApplication(
+  options: Record<string, any>,
+  terminal?: ResolvedTerminalConversation
+): DeferredForegroundApplicationService {
+  const concreteBoundary = (boundary: DeferredForegroundBindingBoundary) =>
+    deferredForegroundConcreteBoundary(
+      boundary,
+      required(
+        terminal,
+        "deferred foreground terminal authority is unavailable"
+      )
+    );
+  return new DeferredForegroundApplicationService({
+    authority: {
+      verifyReservedSource: (scope, boundary) =>
+        assertDeferredCodexForegroundBindingBoundary({
+          options,
+          scope,
+          boundary: concreteBoundary(boundary),
+          expectedSourceStatus: "bound",
+          requireNoDispatch: true,
+          requireEmptyComposer: true
+        }),
+      assertExclusive: (_scope, boundary, request) =>
+        assertNativeThreadHasExclusiveOwnership({
+          options,
+          agent: "codex",
+          currentPid: request.processPid,
+          nativeThreadId: request.nativeThreadId,
+          storeDir: storeDirFromOptions(options),
+          terminalControl: concreteBoundary(boundary).terminal.terminalControl,
+          excludedManagedSessionId: request.excludedManagedSessionId,
+          allowedManagedSessionIds: request.allowedManagedSessionIds
+        }),
+      assertFrozenPredecessor: (_scope, boundary, transfer) =>
+        assertFrozenExplicitlyAbandonedPredecessorAuthority({
+          storeDir: storeDirFromOptions(options),
+          transfer,
+          terminalControl: concreteBoundary(boundary).terminal.terminalControl
+        }),
+      valuesMatch: (left, right) =>
+        JSON.stringify(left) === JSON.stringify(right)
+    },
+    clock: { now: cliNow },
+    runtime: {
+      crashAt: (point) => {
+        const key = {
+          source_session_reserved:
+            "AKK_TEST_EXIT_AFTER_DEFERRED_SOURCE_SESSION_RESERVED",
+          source_reserved: "AKK_TEST_EXIT_AFTER_DEFERRED_SOURCE_RESERVED",
+          target_prepared: "AKK_TEST_EXIT_AFTER_DEFERRED_TARGET_PREPARED",
+          source_scrubbed: "AKK_TEST_EXIT_AFTER_DEFERRED_SOURCE_SCRUBBED",
+          target_accepted: "AKK_TEST_EXIT_AFTER_DEFERRED_TARGET_ACCEPTED",
+          committed: "AKK_TEST_EXIT_AFTER_DEFERRED_COMMITTED",
+          source_detached: "AKK_TEST_EXIT_AFTER_DEFERRED_SOURCE_DETACHED",
+          target_bound: "AKK_TEST_EXIT_AFTER_DEFERRED_TARGET_BOUND"
+        }[point];
+        if (cliEnv()[key] === "1") cliExit(86);
+      },
+      errorReceipt: (reason) => JSON.stringify(textSummary(reason)),
+      summary: textSummary,
+      log: runtimeLog
+    }
   });
 }
 
-async function resolveCommittedDeferredCodexForegroundTransfer({
-  options,
-  boundary,
-  route
-}: {
-  options: Record<string, any>;
-  boundary: DeferredCodexForegroundBindingBoundary;
-  route?: BoundTerminalDispatchRoute;
-}): Promise<ManagedSessionState> {
-  const storeDir = terminalDispatchStoreDirForDeferredRoute({
-    options, boundary, route
-  });
-  let transfer = loadDeferredForegroundTransfer(storeDir, boundary.transferId);
-  assertDeferredTransferMatchesTerminalDispatchRoute(transfer, route);
-  assertDeferredForegroundTransferMatchesBoundary({ transfer, boundary });
-  if (transfer.status === "resolved") {
-    const resolvedTarget = loadManagedSession(storeDir, transfer.target_session_id);
-    if (
-      resolvedTarget.status !== "bound" ||
-      managedSessionRevision(resolvedTarget) !== transfer.target_after_revision ||
-      managedSessionBindingToken(resolvedTarget) !==
-        transfer.target_after_binding_token
-    ) {
-      throw new Error(
-        `resolved deferred target ${resolvedTarget.session_id} changed`
-      );
+function deferredForegroundRecoveryAdapterPorts():
+  deferredRecoveryAdapter.DeferredForegroundRecoveryAdapterPorts {
+  return {
+    native: {
+      processIncarnation: codexProcessIncarnationForPid,
+      inventory: inspectCodexOpenRootRolloutInventory,
+      identity: resolveCurrentNativeAgentSessionIdentity
+    },
+    turn: {
+      terminalControl: terminalControlFromTakeover,
+      storeDir: managedSessionStoreDirForConversation,
+      withIdentity: withNativeAgentSessionIdentity,
+      withSubmission: withTerminalBridgeSubmission
+    },
+    ledger: {
+      load: loadTerminalBridgeDispatchLedger,
+      save: saveTerminalBridgeDispatchLedger,
+      matchesControl: terminalDispatchRecordMatchesControl,
+      bindingFields: terminalBindingLedgerFields,
+      previousSnapshotMatches: deferredCodexPreviousDispatchSnapshotMatches
+    },
+    authority: {
+      assertFrozen: assertFrozenExplicitlyAbandonedPredecessorAuthority,
+      assertTurnIdentity: assertNativeAgentIdentityForTurn
+    },
+    application: {
+      abortBeforeInput: ({
+        options,
+        scope,
+        boundary,
+        reason,
+        terminalInputNotStartedAt
+      }) => deferredForegroundApplication(
+        options,
+        boundary.terminal
+      ).abortBeforeInput({
+        scope,
+        boundary: deferredForegroundBoundaryProjection(boundary),
+        reason,
+        terminalInputNotStartedAt
+      }),
+      commit: ({ options, scope, boundary, identity, acceptedAt }) =>
+        deferredForegroundApplication(options, boundary.terminal).commit({
+          scope,
+          boundary: deferredForegroundBoundaryProjection(boundary),
+          identity,
+          acceptedAt
+        })
     }
-    return resolvedTarget;
-  }
-  if (
-    transfer.status !== "committed" ||
-    !transfer.source_pre_retirement_binding ||
-    !transfer.source_pre_retirement_revision ||
-    !transfer.source_pre_retirement_binding_token ||
-    !transfer.target_accepted_binding ||
-    !transfer.target_accepted_revision ||
-    !transfer.target_accepted_binding_token ||
-    !transfer.target_native_thread_id
-  ) {
-    throw new Error(
-      `deferred foreground transfer ${transfer.transfer_id} is not committed`
-    );
-  }
-  let source = loadManagedSession(storeDir, transfer.source_session_id);
-  if (source.status === "transitioning") {
-    if (
-      source.last_transition_id !== transfer.transfer_id ||
-      managedSessionRevision(source) !== transfer.source_pre_retirement_revision ||
-      managedSessionBindingToken(source) !==
-        transfer.source_pre_retirement_binding_token ||
-      JSON.stringify(source.binding) !==
-        JSON.stringify(transfer.source_pre_retirement_binding)
-    ) {
-      throw new Error(
-        `deferred foreground source ${source.session_id} changed during commit recovery`
-      );
-    }
-    const detachedAt = cliNow().toISOString();
-    source = saveManagedSession(storeDir, {
-      ...source,
-      status: "detached",
-      last_transition_id: transfer.source_previous_last_transition_id,
-      detached_at: detachedAt,
-      updated_at: detachedAt
-    }, { expectedRevision: managedSessionRevision(source) });
-    if (cliEnv().AKK_TEST_EXIT_AFTER_DEFERRED_SOURCE_DETACHED === "1") {
-      cliExit(86);
-    }
-  } else if (
-    source.status !== "detached" ||
-    managedSessionRevision(source) !==
-      transfer.source_pre_retirement_revision + 1 ||
-    managedSessionBindingToken(source) !== managedSessionBindingToken({
-      session_id: source.session_id,
-      status: "detached",
-      binding: transfer.source_pre_retirement_binding
-    }) ||
-    JSON.stringify(source.binding) !==
-      JSON.stringify(transfer.source_pre_retirement_binding)
-  ) {
-    throw new Error(
-      `deferred foreground source ${source.session_id} has no exact retired receipt`
-    );
-  }
-  let target = loadManagedSession(storeDir, transfer.target_session_id);
-  if (target.status === "transitioning") {
-    if (
-      target.last_transition_id !== transfer.transfer_id ||
-      managedSessionRevision(target) !== transfer.target_accepted_revision ||
-      managedSessionBindingToken(target) !==
-        transfer.target_accepted_binding_token ||
-      JSON.stringify(target.binding) !==
-        JSON.stringify(transfer.target_accepted_binding)
-    ) {
-      throw new Error(
-        `deferred foreground target ${target.session_id} changed during commit recovery`
-      );
-    }
-    const boundAt = cliNow().toISOString();
-    target = saveManagedSession(storeDir, {
-      ...target,
-      status: "bound",
-      last_transition_id: undefined,
-      updated_at: boundAt
-    }, { expectedRevision: managedSessionRevision(target) });
-    if (cliEnv().AKK_TEST_EXIT_AFTER_DEFERRED_TARGET_BOUND === "1") {
-      cliExit(86);
-    }
-  } else if (
-    target.status !== "bound" ||
-    managedSessionRevision(target) !== transfer.target_accepted_revision + 1 ||
-    managedSessionBindingToken(target) !== managedSessionBindingToken({
-      session_id: target.session_id,
-      status: "bound",
-      binding: transfer.target_accepted_binding
-    }) ||
-    JSON.stringify(target.binding) !==
-      JSON.stringify(transfer.target_accepted_binding)
-  ) {
-    throw new Error(
-      `deferred foreground target ${target.session_id} has no exact bound receipt`
-    );
-  }
-  await assertNativeThreadHasExclusiveOwnership({
-    options,
-    agent: "codex",
-    currentPid: transfer.process_pid,
-    nativeThreadId: transfer.target_native_thread_id,
-    storeDir,
-    terminalControl: boundary.terminal.terminalControl,
-    excludedManagedSessionId: target.session_id,
-    allowedManagedSessionIds:
-      transfer.source_rollout_authority ===
-          "explicitly_abandoned_predecessor"
-        ? [transfer.source_session_id]
-        : []
-  });
-  transfer = saveDeferredForegroundTransfer(storeDir, {
-    ...transfer,
-    status: "resolved",
-    target_after_revision: managedSessionRevision(target),
-    target_after_status: "bound",
-    target_after_binding_token: managedSessionBindingToken(target),
-    source_after_revision: managedSessionRevision(source),
-    source_after_status: "detached",
-    source_after_binding: source.binding,
-    source_after_binding_token: managedSessionBindingToken(source),
-    resolved_at: cliNow().toISOString()
-  }, { expectedRevision: deferredForegroundTransferRevision(transfer) });
-  runtimeLog("info", "deferred_codex_foreground_transfer_resolved", {
-    transfer_id: transfer.transfer_id,
-    source_session_id: source.session_id,
-    target_session_id: target.session_id,
-    native_thread_id: transfer.target_native_thread_id,
-    source_retirement: transfer.source_retirement
-  });
-  return target;
-}
-
-function markDeferredCodexForegroundTransferUncertain({
-  options,
-  boundary,
-  reason,
-  route
-}: {
-  options: Record<string, any>;
-  boundary: DeferredCodexForegroundBindingBoundary;
-  reason: string;
-  route?: BoundTerminalDispatchRoute;
-}): DeferredForegroundTransfer {
-  const storeDir = terminalDispatchStoreDirForDeferredRoute({
-    options, boundary, route
-  });
-  let transfer = loadDeferredForegroundTransfer(storeDir, boundary.transferId);
-  assertDeferredTransferMatchesTerminalDispatchRoute(transfer, route);
-  assertDeferredForegroundTransferMatchesBoundary({ transfer, boundary });
-  if (["committed", "resolved", "uncertain"].includes(transfer.status)) {
-    return transfer;
-  }
-  if (![
-    "target_prepared",
-    "dispatch_started"
-  ].includes(transfer.status)) {
-    throw new Error(
-      `deferred foreground transfer ${transfer.transfer_id} has no durable ` +
-      "dispatch-start fence"
-    );
-  }
-  transfer = saveDeferredForegroundTransfer(storeDir, {
-    ...transfer,
-    status: "uncertain",
-    input_stage: transfer.input_stage === "none"
-      ? "dispatch_started"
-      : transfer.input_stage,
-    dispatch_started_at:
-      transfer.dispatch_started_at ?? cliNow().toISOString(),
-    uncertain_at: cliNow().toISOString(),
-    error: reason.slice(0, 2000),
-    do_not_retry: true
-  }, { expectedRevision: deferredForegroundTransferRevision(transfer) });
-  return transfer;
+  };
 }
 
 function observedHandoffAuthorityToken({
@@ -12619,6 +10806,10 @@ function nativeThreadLifecycleRecoveryPorts({
   });
   const canonicalOptions = (canonicalStoreDir: string) =>
     Object.freeze({ ...options, storeDir: canonicalStoreDir });
+  const deferredRecoveryRoute = scoped((
+    freshControl,
+    canonicalStoreDir
+  ) => ({ freshControl, canonicalStoreDir }));
   const recoveryProbe = createNativeThreadLifecycleRecoveryProbeAdapter({
     agent: terminal.agent,
     lifecycle: terminal.adapter,
@@ -12716,14 +10907,16 @@ function nativeThreadLifecycleRecoveryPorts({
       }, { expectedTransitionId: transitionId }))
     },
     terminal: {
-      recoverDeferred: scoped((freshControl, canonicalStoreDir) =>
-        withStoreWriterLeaseAsync(canonicalStoreDir, () =>
-          recoverDeferredCodexForegroundTransferWhileWriterLease({
-            options: canonicalOptions(canonicalStoreDir),
-            terminal: freshTerminal(freshControl),
-            storeDir: canonicalStoreDir
-          })
-        )),
+      recoverDeferred: (scopes, resources) => {
+        const route = deferredRecoveryRoute(scopes, resources);
+        return recoverDeferredCodexForegroundTransferWhileWriterLease({
+          options: canonicalOptions(route.canonicalStoreDir),
+          terminal: freshTerminal(route.freshControl),
+          storeDir: route.canonicalStoreDir,
+          scopes,
+          resources
+        });
+      },
       sameTerminalIncarnation: scoped((freshControl, _storeDir, right) =>
         terminalControlsShareIncarnation(freshControl, right)),
       aliasMatches: scoped((
@@ -13124,7 +11317,9 @@ async function runNativeThreadTransition(
           loadTerminalBridgeDispatchLedger(terminal.terminalControl)
         );
       }
-      await mutationDispatchLedger.beforeMutation(scopes, resources, options, terminal);
+      await mutationDispatchLedger.beforeMutation(
+        scopes, resources, options, terminal
+      );
       if (operation.kind === "resume_thread" && operation.selectionSnapshot) {
         // Recovery may resolve or otherwise rewrite a durable dispatch fence.
         // A snapshot created before that mutation is stale even when the
@@ -14216,7 +12411,8 @@ async function runSend(options) {
       rawStoreDir, terminalConversation.terminalControl
     ), async (scopes, resources) => {
       await mutationDispatchLedger.beforeMutation(
-        scopes, resources, options, terminalConversation);
+        scopes, resources, options, terminalConversation
+      );
       // Upgrade legacy Stores before resolving their Session authority. The
       // protocol migration, rather than mutable Turn recency, is the only code
       // allowed to materialize Session records from existing Turns.
@@ -14360,6 +12556,7 @@ async function runSend(options) {
       const deferredCodexForegroundBinding = !handoff.adopted
           ? await prepareDeferredCodexForegroundBinding({
               options,
+              scope: bindDeferredForegroundWriterScope(scopes, resources),
               terminal: terminalConversation,
               sourceSession: claimedSession,
               observation: nativeIdentityObservation,
@@ -14572,21 +12769,35 @@ async function runSend(options) {
                 }, (boundRoute) => boundRoute);
                 let createdSession: ManagedSessionState;
                 if (deferredCodexForegroundBinding) {
+                  const deferredScope =
+                    bindDeferredForegroundApplicationScope(
+                      dispatchScopes,
+                      dispatchResources
+                  );
                   const reserved =
-                    await reserveDeferredCodexForegroundTransfer({
+                    await deferredForegroundApplication(
                       options,
-                      boundary: deferredCodexForegroundBinding,
+                      deferredCodexForegroundBinding.terminal
+                    ).reserve({
+                      scope: deferredScope,
+                      boundary: deferredForegroundBoundaryProjection(
+                        deferredCodexForegroundBinding
+                      ),
                       targetSession:
                         pendingRawAttachSessionCreate as ManagedSessionState,
                       messageId: managed.message.id,
-                      turnId: turnIdForConversation(managed.conversation),
-                      statePath: exactRoute.statePath,
-                      route: exactRoute
+                      turnId: turnIdForConversation(managed.conversation)
                     });
                   createdSession = reserved.createdSession;
                   managedSession = createdSession;
                   pendingRawAttachSessionCreate = undefined;
-                  return reserved.rollback;
+                  return (rollbackRoute) => {
+                    assertTerminalDispatchRouteMatches(
+                      rollbackRoute,
+                      exactRoute
+                    );
+                    reserved.rollback(deferredScope);
+                  };
                 }
                 createdSession = saveManagedSession(exactRoute.storeDir,
                   pendingRawAttachSessionCreate as ManagedSessionState, {
@@ -14731,7 +12942,8 @@ async function runSend(options) {
       );
     }
     await mutationDispatchLedger.beforeMutation(
-      scopes, resources, options, resolvedTerminal);
+      scopes, resources, options, resolvedTerminal
+    );
     // A protocol-1/2 Store materializes authoritative Session records as one
     // atomic migration. Once protocol 3 is active, a missing Session is corrupt
     // state and must not be reconstructed from whichever Turn looks newest.
@@ -16197,7 +14409,7 @@ async function resolveTerminalDispatchSubmissionOwner(
   stagedConversation: Conversation
 ) {
   const {
-    options, executor, allowedPreMaterializationIdentity,
+    transaction, options, executor, allowedPreMaterializationIdentity,
     allowedAdditionalIdentities = [],
     deferredCodexForegroundBinding: deferredBinding
   } = request;
@@ -16207,6 +14419,12 @@ async function resolveTerminalDispatchSubmissionOwner(
     terminalControl, terminalAgentPid, sendTakeover, terminalRequestHash,
     route
   } = prepared;
+  const deferredForegroundScope = deferredBinding
+    ? bindDeferredForegroundApplicationScope(
+        transaction.scopes,
+        transaction.resources
+      )
+    : undefined;
   const ready = (conversation: Conversation, pending = false) => ({
     conversation, deferredCandidateBindingPending: pending
   });
@@ -16298,12 +14516,17 @@ async function resolveTerminalDispatchSubmissionOwner(
         logPath: path.join(path.dirname(bindingStatePath), "events.ndjson")
       }, (exactRoute) => exactRoute);
       if (deferredBinding) {
-        await commitDeferredCodexForegroundBinding({
+        await deferredForegroundApplication(
           options,
-          boundary: deferredBinding,
+          deferredBinding.terminal
+        ).commit({
+          scope: required(
+            deferredForegroundScope,
+            "deferred foreground mutation scope is unavailable"
+          ),
+          boundary: deferredForegroundBoundaryProjection(deferredBinding),
           identity: boundIdentity,
-          acceptedAt: cliNow().toISOString(),
-          route: identityRoute
+          acceptedAt: cliNow().toISOString()
         });
       } else {
         await assertNativeThreadHasExclusiveOwnership({
@@ -16343,21 +14566,19 @@ async function resolveTerminalDispatchSubmissionOwner(
   }
   if (!boundIdentity && deferredBinding) {
     try {
-      const deferredStoreDir = terminalDispatchStoreDirForDeferredRoute({
-        options,
-        boundary: deferredBinding,
-        route
-      });
-      const transfer = loadDeferredForegroundTransfer(
-        deferredStoreDir, deferredBinding.transferId
+      const deferredScope = required(
+        deferredForegroundScope,
+        "deferred foreground mutation scope is unavailable"
       );
-      assertDeferredTransferMatchesTerminalDispatchRoute(transfer, route);
+      const transfer = deferredScope.loadTransfer(deferredBinding.transferId);
       if (["committed", "resolved"].includes(transfer.status)) {
         const recoveredTarget =
-          await resolveCommittedDeferredCodexForegroundTransfer({
+          await deferredForegroundApplication(
             options,
-            boundary: deferredBinding,
-            route
+            deferredBinding.terminal
+          ).resolve({
+            scope: deferredScope,
+            boundary: deferredForegroundBoundaryProjection(deferredBinding)
           });
         const binding = recoveredTarget.binding;
         if (
@@ -16407,11 +14628,16 @@ async function resolveTerminalDispatchSubmissionOwner(
     : "AKK dispatched terminal input but no exact native agent session appeared within the binding window";
   if (deferredBinding) {
     try {
-      markDeferredCodexForegroundTransferUncertain({
+      deferredForegroundApplication(
         options,
-        boundary: deferredBinding,
-        reason: bindingReason,
-        route
+        deferredBinding.terminal
+      ).markUncertain({
+        scope: required(
+          deferredForegroundScope,
+          "deferred foreground mutation scope is unavailable"
+        ),
+        boundary: deferredForegroundBoundaryProjection(deferredBinding),
+        reason: bindingReason
       });
     } catch (error) {
       runtimeLog("error", "deferred_codex_foreground_uncertain_persist_failed", {
@@ -16463,17 +14689,21 @@ async function runTerminalControlSend(
     needsPostSendNativeBinding, preSendRuntime, preSendScreenFingerprint,
     codexRolloutAcceptanceAnchor, claudeTranscriptAnchor, claudeHome
   } = prepared;
+  const deferredForegroundScope = deferredCodexForegroundBinding
+    ? bindDeferredForegroundApplicationScope(
+        transaction.scopes,
+        transaction.resources
+      )
+    : undefined;
   // A newly discovered raw terminal may not have an authoritative Session
   // yet. Commit that Session only after every pre-input terminal and native
   // acceptance check has passed, but before the Turn or dispatch ledger can
   // become durable. This prevents a failed virgin attach from leaving a
   // zero-identity `bound` Session that fences every later control action.
   if (deferredCodexForegroundBinding) {
-    terminalDispatchStoreDirForDeferredRoute({
-      options,
-      boundary: deferredCodexForegroundBinding,
-      route
-    });
+    deferredForegroundScope?.assertBoundary(
+      deferredForegroundBoundaryProjection(deferredCodexForegroundBinding)
+    );
   }
   let rollbackPreTransportAttach =
     await onTerminalPreflightVerified?.(route);
@@ -16504,16 +14734,13 @@ async function runTerminalControlSend(
     if (!deferredCodexForegroundBinding) {
       return false;
     }
-    const deferredStoreDir = terminalDispatchStoreDirForDeferredRoute({
-      options,
-      boundary: deferredCodexForegroundBinding,
-      route
-    });
-    const transfer = loadDeferredForegroundTransfer(
-      deferredStoreDir,
+    const deferredScope = required(
+      deferredForegroundScope,
+      "deferred foreground mutation scope is unavailable"
+    );
+    const transfer = deferredScope.loadTransfer(
       deferredCodexForegroundBinding.transferId
     );
-    assertDeferredTransferMatchesTerminalDispatchRoute(transfer, route);
     if (
       terminalBridgeRuntimeKey(route.terminalControl) !==
         terminalBridgeRuntimeKey(
@@ -16539,15 +14766,17 @@ async function runTerminalControlSend(
                 "terminal-input-not-started result"
               );
             })();
-    abortPreparedDeferredForegroundTurn({
-      storeDir: deferredStoreDir,
+    deferredRecoveryAdapter.abortPreparedDeferredForegroundTurn(
+      deferredForegroundRecoveryAdapterPorts(), {
+      options,
+      scope: deferredScope,
+      storeDir: route.storeDir,
       terminal: {
         ...deferredCodexForegroundBinding.terminal,
         terminalControl: route.terminalControl
       },
       transfer,
       boundary: deferredCodexForegroundBinding,
-      stateLockHeld: true,
       terminalInputNotStartedAt: durableTerminalInputNotStartedAt
     });
     // abortPreparedDeferredForegroundTurn has already made the Turn, ledger,
@@ -16724,24 +14953,42 @@ async function runTerminalControlSend(
               verify: (requireEmptyComposer) =>
                 assertDeferredCodexForegroundBindingBoundary({
                   options,
+                  scope: required(
+                    deferredForegroundScope,
+                    "deferred foreground mutation scope is unavailable"
+                  ),
                   boundary: deferredCodexForegroundBinding,
                   expectedSourceStatus: "transitioning",
                   requireNoDispatch: false,
                   requireEmptyComposer
                 }),
-              begin: (at) => beginDeferredCodexForegroundTransferDispatch({
+              begin: (at) => deferredForegroundApplication(
                 options,
-                boundary: deferredCodexForegroundBinding,
-                at,
-                route
+                deferredCodexForegroundBinding.terminal
+              ).begin({
+                scope: required(
+                  deferredForegroundScope,
+                  "deferred foreground mutation scope is unavailable"
+                ),
+                boundary: deferredForegroundBoundaryProjection(
+                  deferredCodexForegroundBinding
+                ),
+                at
               }),
               advance: (stage, at) =>
-                advanceDeferredCodexForegroundTransferInputStage({
+                deferredForegroundApplication(
                   options,
-                  boundary: deferredCodexForegroundBinding,
+                  deferredCodexForegroundBinding.terminal
+                ).advance({
+                  scope: required(
+                    deferredForegroundScope,
+                    "deferred foreground mutation scope is unavailable"
+                  ),
+                  boundary: deferredForegroundBoundaryProjection(
+                    deferredCodexForegroundBinding
+                  ),
                   stage,
-                  at,
-                  route
+                  at
                 })
             }
           }
@@ -16853,11 +15100,18 @@ async function runTerminalControlSend(
     const errorMessage = error instanceof Error ? error.message : String(error);
     if (deferredCodexForegroundBinding) {
       try {
-        markDeferredCodexForegroundTransferUncertain({
+        deferredForegroundApplication(
           options,
-          boundary: deferredCodexForegroundBinding,
-          reason: errorMessage,
-          route
+          deferredCodexForegroundBinding.terminal
+        ).markUncertain({
+          scope: required(
+            deferredForegroundScope,
+            "deferred foreground mutation scope is unavailable"
+          ),
+          boundary: deferredForegroundBoundaryProjection(
+            deferredCodexForegroundBinding
+          ),
+          reason: errorMessage
         });
       } catch (transferError) {
         runtimeLog("error", "deferred_codex_foreground_uncertain_persist_failed", {
@@ -17393,7 +15647,8 @@ async function reconcileTerminalAcceptanceInMonitor({
     // agent_accepted Turn/ledger that recovery just persisted. Re-prove that
     // exact monotonic authority here, then let this same monitor invocation
     // continue into completion polling without replaying terminal input.
-    const authority = loadDeferredForegroundTurnAuthority({
+    const authority = deferredRecoveryAdapter.loadDeferredForegroundTurnAuthority(
+      deferredForegroundRecoveryAdapterPorts(), {
       storeDir: transferStoreDir,
       terminal,
       transfer
@@ -17405,7 +15660,8 @@ async function reconcileTerminalAcceptanceInMonitor({
         "without an exact terminal dispatch ledger"
       );
     }
-    assertDeferredForegroundLedgerAuthority({
+    deferredRecoveryAdapter.assertDeferredForegroundLedgerAuthority(
+      deferredForegroundRecoveryAdapterPorts(), {
       storeDir: transferStoreDir,
       terminal,
       transfer,
@@ -18755,11 +17011,9 @@ async function reconcileMonitors(
             { timeoutMs: 30000 }
           );
           try {
-            await withStoreWriterLeaseAsync(storeDir, async () => {
-              await recoverDeferredCodexForegroundTransferBeforeMutation({
-                options,
-                terminal: deferredTerminal
-              });
+            await recoverDeferredCodexForegroundTransferBeforeMutation({
+              options,
+              terminal: deferredTerminal
             });
           } finally {
             releaseTerminalLock();
@@ -22734,1243 +20988,6 @@ function terminalSubmissionProofRank(status: string, lastProven?: string): numbe
   return 0;
 }
 
-function deferredCodexBoundaryFromTransfer({
-  terminal,
-  transfer
-}: {
-  terminal: ResolvedTerminalConversation;
-  transfer: DeferredForegroundTransfer;
-}): DeferredCodexForegroundBindingBoundary {
-  const liveIncarnation = codexProcessIncarnationForPid(terminal.pid);
-  if (
-    terminal.agent !== "codex" ||
-    transfer.terminal_id !== terminal.conversationId ||
-    transfer.process_pid !== terminal.pid ||
-    transfer.process_uuid !== liveIncarnation.processUuid ||
-    transfer.process_birth !== liveIncarnation.processBirth ||
-    path.resolve(transfer.workspace) !== path.resolve(
-      terminal.terminalControl.currentPath ?? ""
-    ) ||
-    !terminalControlEvidenceMatches(
-      transfer.terminal_endpoint,
-      terminal.terminalControl
-    )
-  ) {
-    throw new Error(
-      `deferred foreground transfer ${transfer.transfer_id} no longer ` +
-      "matches the exact terminal incarnation"
-    );
-  }
-  return {
-    terminal,
-    transferId: transfer.transfer_id,
-    targetSessionId: transfer.target_session_id,
-    sourceSessionId: transfer.source_session_id,
-    sourceBoundRevision: transfer.source_expected_revision,
-    sourceBoundBindingToken: transfer.source_binding_token,
-    processUuid: transfer.process_uuid,
-    processBirth: transfer.process_birth,
-    previousDispatchSnapshot: {
-      status: transfer.previous_dispatch_status,
-      fingerprint: transfer.previous_dispatch_fingerprint
-    },
-    sourceKind: transfer.version === 1
-      ? "status_card_only"
-      : required(
-          transfer.source_kind,
-          "deferred foreground source kind is unavailable"
-        ),
-    sourceRolloutAuthority: transfer.source_rollout_authority ?? "present",
-    ...(transfer.source_abandonment_fingerprint
-      ? {
-          sourceAbandonmentFingerprint:
-            transfer.source_abandonment_fingerprint
-        }
-      : {}),
-    ...(transfer.source_turn_history
-      ? { sourceTurnHistory: transfer.source_turn_history }
-      : {}),
-    ...(transfer.source_previous_last_transition_id
-      ? {
-          sourcePreviousLastTransitionId:
-            transfer.source_previous_last_transition_id
-        }
-      : {}),
-    sourceReservedRevision: transfer.source_expected_revision + 1,
-    sourceReservedBindingToken: managedSessionBindingToken({
-      session_id: transfer.source_session_id,
-      status: "transitioning",
-      binding: transfer.source_before_binding
-    }),
-    targetPreparedRevision: transfer.target_prepared_revision,
-    targetPreparedBindingToken: transfer.target_prepared_binding_token
-  };
-}
-
-function loadDeferredForegroundTurnAuthority({
-  storeDir,
-  terminal,
-  transfer
-}: {
-  storeDir: string;
-  terminal: ResolvedTerminalConversation;
-  transfer: DeferredForegroundTransfer;
-}): {
-  conversation: Conversation;
-  statePath: string;
-  logPath: string;
-  takeover: Record<string, any>;
-  submission: Record<string, any>;
-  anchor: CodexRolloutAcceptanceAnchor;
-} {
-  const statePath = path.resolve(required(
-    transfer.state_path,
-    "deferred foreground Turn state path is unavailable"
-  ));
-  const canonical = pathsForConversationDir(path.dirname(statePath));
-  if (
-    path.resolve(canonical.storeDir) !== path.resolve(storeDir) ||
-    path.resolve(canonical.statePath) !== statePath
-  ) {
-    throw new Error(
-      `deferred foreground transfer ${transfer.transfer_id} has a noncanonical ` +
-      "Turn state path"
-    );
-  }
-  const conversation = loadState(statePath);
-  const takeover = isRecord(conversation.native_session_takeover)
-    ? conversation.native_session_takeover
-    : undefined;
-  const submission = terminalBridgeSubmission(conversation);
-  const terminalControl = terminalControlFromTakeover(takeover);
-  const anchor = takeover?.codex_rollout_acceptance_anchor;
-  let validatedAnchor: CodexRolloutAcceptanceAnchor | undefined;
-  try {
-    validatedAnchor = validateCodexRolloutAcceptanceAnchor(anchor);
-  } catch {
-    validatedAnchor = undefined;
-  }
-  const exactDeferredAnchor = Boolean(
-    validatedAnchor &&
-    validatedAnchor.process_uuid === transfer.process_uuid &&
-    validatedAnchor.process_birth === transfer.process_birth &&
-    (
-      (
-        validatedAnchor.version === 2 &&
-        validatedAnchor.mode === "pre_materialization" &&
-        validatedAnchor.native_thread_binding === "post_submission" &&
-        validatedAnchor.file_existed === false &&
-        validatedAnchor.offset_bytes === 0 &&
-        validatedAnchor.expected_empty_native_session === true
-      ) ||
-      (
-        validatedAnchor.version === 3 &&
-        validatedAnchor.mode === "candidate_set" &&
-        validatedAnchor.inventory_pid === transfer.process_pid &&
-        path.resolve(validatedAnchor.inventory_cwd ?? "") ===
-          path.resolve(transfer.workspace) &&
-        validatedAnchor.candidate_rollouts.length > 0
-      )
-    )
-  );
-  const target = loadManagedSession(storeDir, transfer.target_session_id);
-  const targetBefore = transfer.target_before_binding;
-  const requestText = stringValue(takeover?.terminal_bridge_request_text);
-  const messageBodyHash = stringValue(submission?.message_body_hash);
-  const executorKind = executorForConversation(conversation).kind;
-  const turnNativeThreadId = stringValue(conversation.native_thread_id);
-  const takeoverNativeThreadId = stringValue(
-    takeover?.terminal_agent_session_id
-  );
-  const submissionNativeThreadId = stringValue(submission?.native_thread_id);
-  const turnRollout = takeover?.terminal_agent_rollout;
-  const committedTargetAuthority = Boolean(
-    ["committed", "resolved"].includes(transfer.status) &&
-    transfer.target_accepted_binding &&
-    (
-      (
-        target.status === "transitioning" &&
-        target.last_transition_id === transfer.transfer_id &&
-        managedSessionRevision(target) === transfer.target_accepted_revision &&
-        managedSessionBindingToken(target) ===
-          transfer.target_accepted_binding_token
-      ) ||
-      (
-        target.status === "bound" &&
-        !target.last_transition_id &&
-        managedSessionRevision(target) ===
-          Number(transfer.target_accepted_revision) + 1 &&
-        managedSessionBindingToken(target) === managedSessionBindingToken({
-          session_id: transfer.target_session_id,
-          status: "bound",
-          binding: transfer.target_accepted_binding
-        })
-      )
-    ) &&
-    JSON.stringify(target.binding) ===
-      JSON.stringify(transfer.target_accepted_binding)
-  );
-  const precommitTargetAuthority = Boolean(
-    !["committed", "resolved"].includes(transfer.status) &&
-    target.status === "transitioning" &&
-    target.last_transition_id === transfer.transfer_id
-  );
-  const prebindingTurn =
-    turnNativeThreadId === undefined &&
-    takeoverNativeThreadId === undefined &&
-    submissionNativeThreadId === undefined &&
-    turnRollout === undefined;
-  let acceptedTurn = false;
-  if (
-    turnNativeThreadId &&
-    takeoverNativeThreadId === turnNativeThreadId &&
-    submissionNativeThreadId === turnNativeThreadId &&
-    isCompleteNativeRollout(turnRollout) &&
-    String(submission?.status) === "agent_accepted"
-  ) {
-    try {
-      validateTerminalSubmissionAcceptanceEvidence(
-        submission?.acceptance_evidence,
-        {
-          source: "codex_rollout",
-          nativeThreadId: turnNativeThreadId,
-          requestHash: transfer.request_hash
-        }
-      );
-      acceptedTurn = true;
-    } catch {
-      acceptedTurn = false;
-    }
-  }
-  if (
-    !takeover ||
-    !submission ||
-    !terminalControl ||
-    !targetBefore ||
-    !terminalControlsShareIncarnation(
-      terminalControl,
-      terminal.terminalControl
-    ) ||
-    !terminalControlEvidenceMatches(
-      takeover.terminal_endpoint ?? terminalControl,
-      terminal.terminalControl
-    ) ||
-    executorKind !== "codex" ||
-    conversation.conversation_id !== transfer.turn_id ||
-    sessionIdForConversation(conversation) !== transfer.target_session_id ||
-    turnIdForConversation(conversation) !== transfer.turn_id ||
-    path.resolve(required(
-      stringValue(conversation.state_path),
-      "deferred foreground Turn state path is missing"
-    )) !== statePath ||
-    path.resolve(
-      pathsForConversation(conversation.conversation_id, storeDir).statePath
-    ) !== statePath ||
-    path.resolve(required(
-      managedSessionStoreDirForConversation(conversation),
-      "deferred foreground Turn Store is missing"
-    )) !== path.resolve(storeDir) ||
-    stringValue(takeover.deferred_foreground_transfer_id) !==
-      transfer.transfer_id ||
-    stringValue(takeover.terminal_bridge_message_id) !== transfer.message_id ||
-    stringValue(submission.session_id) !== transfer.target_session_id ||
-    stringValue(submission.turn_id) !== transfer.turn_id ||
-    stringValue(submission.message_id) !== transfer.message_id ||
-    stringValue(submission.message_type) !== "task" ||
-    stringValue(submission.executor_kind) !== "codex" ||
-    !messageBodyHash ||
-    !/^[0-9a-f]{64}$/u.test(messageBodyHash) ||
-    createHash("sha256").update(String(conversation.user_request)).digest("hex") !==
-      messageBodyHash ||
-    terminalBridgeRequestFingerprint(
-      terminalSubmissionPayload(String(conversation.user_request))
-    ) !== transfer.request_hash ||
-    stringValue(takeover.terminal_bridge_request_hash) !==
-      transfer.request_hash ||
-    stringValue(submission.request_hash) !== transfer.request_hash ||
-    !requestText ||
-    terminalBridgeRequestFingerprint(requestText) !== transfer.request_hash ||
-    path.resolve(required(
-      stringValue(submission.store_dir),
-      "deferred foreground submission Store is missing"
-    )) !== path.resolve(storeDir) ||
-    stringValue(conversation.terminal_binding_id) !== targetBefore.binding_id ||
-    Number(conversation.terminal_binding_generation) !==
-      targetBefore.generation ||
-    stringValue(takeover.terminal_binding_id) !== targetBefore.binding_id ||
-    Number(takeover.terminal_binding_generation) !== targetBefore.generation ||
-    stringValue(submission.binding_id) !== targetBefore.binding_id ||
-    Number(submission.binding_generation) !== targetBefore.generation ||
-    (!prebindingTurn && !acceptedTurn) ||
-    stringValue(takeover.terminal_agent_expected_session_id) !== undefined ||
-    Number(takeover.terminal_agent_pid) !== transfer.process_pid ||
-    stringValue(takeover.terminal_agent_process_uuid) !==
-      transfer.process_uuid ||
-    stringValue(takeover.terminal_agent_process_birth) !==
-      transfer.process_birth ||
-    target.session_id !== transfer.target_session_id ||
-    (!precommitTargetAuthority && !committedTargetAuthority) ||
-    target.lineage.transition_id !== transfer.transfer_id ||
-    target.lineage.previous_session_id !== transfer.source_session_id ||
-    !target.binding ||
-    target.binding.binding_id !== targetBefore.binding_id ||
-    target.binding.generation !== targetBefore.generation ||
-    target.binding.terminal_id !== targetBefore.terminal_id ||
-    !terminalControlsShareIncarnation(
-      target.binding.terminal_control,
-      targetBefore.terminal_control
-    ) ||
-    target.binding.native_process.pid !== transfer.process_pid ||
-    target.binding.native_process.process_uuid !== transfer.process_uuid ||
-    target.binding.native_process.process_birth !== transfer.process_birth ||
-    !exactDeferredAnchor
-  ) {
-    throw new Error(
-      `deferred foreground transfer ${transfer.transfer_id} Turn authority ` +
-      "does not match its exact request/terminal/process fence"
-    );
-  }
-  return {
-    conversation,
-    statePath,
-    logPath: canonical.logPath,
-    takeover,
-    submission,
-    anchor: validatedAnchor as CodexRolloutAcceptanceAnchor
-  };
-}
-
-function assertDeferredForegroundLedgerAuthority({
-  storeDir,
-  terminal,
-  transfer,
-  ledger,
-  statePath,
-  expectedMessageBodyHash
-}: {
-  storeDir: string;
-  terminal: Pick<ResolvedTerminalConversation, "terminalControl">;
-  transfer: DeferredForegroundTransfer;
-  ledger: Record<string, any>;
-  statePath: string;
-  expectedMessageBodyHash?: string;
-}): void {
-  const targetBefore = transfer.target_before_binding;
-  const ledgerMessageBodyHash = stringValue(ledger.message_body_hash);
-  let exactCommittedAcceptance = false;
-  if (
-    ["committed", "resolved"].includes(transfer.status) &&
-    ledger.status === "agent_accepted" &&
-    stringValue(ledger.native_thread_id) === transfer.target_native_thread_id &&
-    ledger.dispatcher_pid === null &&
-    stringValue(ledger.agent_accepted_at) === transfer.agent_accepted_at &&
-    transfer.target_native_thread_id
-  ) {
-    try {
-      validateTerminalSubmissionAcceptanceEvidence(
-        ledger.acceptance_evidence,
-        {
-          source: "codex_rollout",
-          nativeThreadId: transfer.target_native_thread_id,
-          requestHash: transfer.request_hash
-        }
-      );
-      exactCommittedAcceptance = true;
-    } catch {
-      exactCommittedAcceptance = false;
-    }
-  }
-  const exactPostDispatchPending = Boolean(
-    transfer.status === "dispatch_started" &&
-    transfer.input_stage === "enter_dispatched" &&
-    ledger.status === "enter_dispatched" &&
-    ledger.dispatcher_pid === null &&
-    stringValue(ledger.prepared_at) === transfer.prepared_at &&
-    stringValue(ledger.text_injected_at) === transfer.text_injected_at &&
-    stringValue(ledger.enter_dispatched_at) === transfer.enter_dispatched_at &&
-    ledger.agent_accepted_at === undefined &&
-    ledger.not_accepted_at === undefined &&
-    ledger.uncertain_at === undefined &&
-    ledger.acceptance_evidence === undefined &&
-    ledger.safe_to_retry !== true
-  );
-  if (
-    !targetBefore ||
-    terminalDispatchLedgerLooksLifecycle(ledger) ||
-    !terminalDispatchRecordMatchesControl(ledger, terminal.terminalControl) ||
-    stringValue(ledger.deferred_foreground_transfer_id) !==
-      transfer.transfer_id ||
-    stringValue(ledger.generation_id) !== transfer.message_id ||
-    stringValue(ledger.conversation_id) !== transfer.turn_id ||
-    stringValue(ledger.session_id) !== transfer.target_session_id ||
-    stringValue(ledger.turn_id) !== transfer.turn_id ||
-    stringValue(ledger.message_id) !== transfer.message_id ||
-    stringValue(ledger.message_type) !== "task" ||
-    stringValue(ledger.executor_kind) !== "codex" ||
-    !ledgerMessageBodyHash ||
-    !/^[0-9a-f]{64}$/u.test(ledgerMessageBodyHash) ||
-    (expectedMessageBodyHash !== undefined &&
-      ledgerMessageBodyHash !== expectedMessageBodyHash) ||
-    stringValue(ledger.request_hash) !== transfer.request_hash ||
-    stringValue(ledger.binding_id) !== targetBefore.binding_id ||
-    Number(ledger.binding_generation) !== targetBefore.generation ||
-    (
-      exactCommittedAcceptance
-        ? stringValue(ledger.native_thread_id) !==
-            transfer.target_native_thread_id
-        : stringValue(ledger.native_thread_id) !== undefined
-    ) ||
-    path.resolve(required(ledger.state_path, "dispatch state path is missing")) !==
-      statePath ||
-    path.resolve(required(ledger.store_dir, "dispatch Store is missing")) !==
-      path.resolve(storeDir) ||
-    (
-      ledger.status !== "resolved" &&
-      !exactCommittedAcceptance &&
-      !exactPostDispatchPending &&
-      Number(ledger.dispatcher_pid) !== transfer.dispatcher_pid
-    )
-  ) {
-    throw new Error(
-      `deferred foreground transfer ${transfer.transfer_id} dispatch ledger ` +
-      "does not match its exact Turn authority"
-    );
-  }
-}
-
-function assertDeferredForegroundResolvedZeroInputLedger({
-  storeDir,
-  terminal,
-  transfer,
-  ledger,
-  statePath
-}: {
-  storeDir: string;
-  terminal: Pick<ResolvedTerminalConversation, "terminalControl">;
-  transfer: DeferredForegroundTransfer;
-  ledger: Record<string, any>;
-  statePath: string;
-}): void {
-  assertDeferredForegroundLedgerAuthority({
-    storeDir,
-    terminal,
-    transfer,
-    ledger,
-    statePath
-  });
-  const abortedAt = stringValue(ledger.aborted_at);
-  const resolvedAt = stringValue(ledger.resolved_at);
-  if (
-    ledger.status !== "resolved" ||
-    ledger.safe_to_retry !== true ||
-    !abortedAt ||
-    !resolvedAt ||
-    !Number.isFinite(Date.parse(abortedAt)) ||
-    !Number.isFinite(Date.parse(resolvedAt)) ||
-    Date.parse(resolvedAt) < Date.parse(abortedAt) ||
-    DEFERRED_INPUT_EVIDENCE_FIELDS.some((field) => ledger[field] !== undefined)
-  ) {
-    throw new Error(
-      `deferred foreground transfer ${transfer.transfer_id} resolved ledger ` +
-      "does not prove a zero-input abort"
-    );
-  }
-  // Validate the whole history for malformed/duplicate identities, then
-  // require the append-only copy of this exact generation. The top-level
-  // resolved record alone is insufficient because it can later be replaced.
-  terminalLedgerReceiptHistory(ledger);
-  const rawHistory = ledger.terminal_submission_receipts;
-  if (!Array.isArray(rawHistory)) {
-    throw new Error(
-      `deferred foreground transfer ${transfer.transfer_id} resolved ledger ` +
-      "has no append-only abort receipt"
-    );
-  }
-  const ownReceipts = rawHistory.filter((receipt) =>
-    isRecord(receipt) &&
-    stringValue(receipt.message_id) === transfer.message_id
-  );
-  if (ownReceipts.length !== 1) {
-    throw new Error(
-      `deferred foreground transfer ${transfer.transfer_id} resolved ledger ` +
-      "does not have one exact append-only abort receipt"
-    );
-  }
-  const ownReceipt = ownReceipts[0];
-  assertDeferredForegroundLedgerAuthority({
-    storeDir,
-    terminal,
-    transfer,
-    // A receipt uses `aborted`, while the same exact owner fields at the
-    // top-level use `resolved`. Validate its authority in that same domain.
-    ledger: { ...ownReceipt, status: "resolved" },
-    statePath
-  });
-  if (
-    ownReceipt.status !== "aborted" ||
-    ownReceipt.safe_to_retry !== true ||
-    stringValue(ownReceipt.aborted_at) !== abortedAt ||
-    stringValue(ownReceipt.resolved_at) !== resolvedAt ||
-    DEFERRED_INPUT_EVIDENCE_FIELDS.some((field) => ownReceipt[field] !== undefined)
-  ) {
-    throw new Error(
-      `deferred foreground transfer ${transfer.transfer_id} append-only ` +
-      "receipt does not prove a zero-input abort"
-    );
-  }
-}
-
-function deferredCodexDurableInputNotStartedAt(
-  transfer: DeferredForegroundTransfer
-): string | undefined {
-  if (
-    transfer.status !== "dispatch_started" ||
-    transfer.input_stage !== "dispatch_started" ||
-    !transfer.state_path
-  ) {
-    return undefined;
-  }
-  const conversation = loadState(path.resolve(transfer.state_path));
-  const submission = terminalBridgeSubmission(conversation);
-  const abortedAt = stringValue(submission?.aborted_at);
-  if (
-    submission?.status !== "aborted" ||
-    submission.safe_to_retry !== true ||
-    !abortedAt ||
-    !Number.isFinite(Date.parse(abortedAt)) ||
-    stringValue(submission.text_injected_at) !== undefined ||
-    stringValue(submission.enter_dispatched_at) !== undefined ||
-    stringValue(submission.agent_accepted_at) !== undefined
-  ) {
-    return undefined;
-  }
-  return abortedAt;
-}
-
-function abortPreparedDeferredForegroundTurn({
-  storeDir,
-  terminal,
-  transfer,
-  boundary,
-  stateLockHeld = false,
-  terminalInputNotStartedAt
-}: {
-  storeDir: string;
-  terminal: ResolvedTerminalConversation;
-  transfer: DeferredForegroundTransfer;
-  boundary: DeferredCodexForegroundBindingBoundary;
-  stateLockHeld?: boolean;
-  terminalInputNotStartedAt?: string;
-}): void {
-  const dispatchIntentWasProvedNotStarted =
-    transfer.status === "dispatch_started" &&
-    transfer.input_stage === "dispatch_started" &&
-    terminalInputNotStartedAt !== undefined &&
-    Number.isFinite(Date.parse(terminalInputNotStartedAt));
-  if (
-    terminalInputNotStartedAt !== undefined &&
-    !dispatchIntentWasProvedNotStarted
-  ) {
-    throw new Error(
-      `deferred foreground transfer ${transfer.transfer_id} cannot attach ` +
-      "terminal-input-not-started proof to its current stage"
-    );
-  }
-  const observedLedger = loadTerminalBridgeDispatchLedger(
-    terminal.terminalControl
-  );
-  // Before this transfer publishes its own ordinary dispatch ledger, the
-  // terminal may still carry the exact resolved history that was snapshot into
-  // the immutable transfer receipt. Treat only that exact fingerprint (or the
-  // exact persisted `none`) as no new dispatch; every other change must prove
-  // this transfer's own ledger below or fail closed.
-  const previousDispatchStillCurrent =
-    deferredCodexPreviousDispatchSnapshotMatches({
-    transfer,
-    terminalControl: terminal.terminalControl,
-    ledger: observedLedger
-  });
-  if (!previousDispatchStillCurrent && !observedLedger) {
-    throw new Error(
-      `deferred foreground transfer ${transfer.transfer_id} previous dispatch ` +
-      "snapshot disappeared before its own ledger was published"
-    );
-  }
-  const ledger = previousDispatchStillCurrent
-    ? undefined
-    : observedLedger;
-  if (!transfer.state_path) {
-    if (ledger) {
-      throw new Error(
-        `deferred foreground transfer ${transfer.transfer_id} has a dispatch ` +
-        "before its Turn authority was prepared"
-      );
-    }
-    abortDeferredCodexForegroundTransferBeforeInput({
-      options: { storeDir },
-      boundary,
-      reason: "recovered before target Turn preparation"
-    });
-    return;
-  }
-  const statePath = path.resolve(transfer.state_path);
-  const canonical = pathsForConversationDir(path.dirname(statePath));
-  if (
-    path.resolve(canonical.storeDir) !== path.resolve(storeDir) ||
-    path.resolve(canonical.statePath) !== statePath
-  ) {
-    throw new Error(
-      `deferred foreground transfer ${transfer.transfer_id} has a noncanonical ` +
-      "Turn state path"
-    );
-  }
-  if (!fs.existsSync(statePath)) {
-    if (dispatchIntentWasProvedNotStarted) {
-      throw new Error(
-        `deferred foreground transfer ${transfer.transfer_id} lost its Turn ` +
-        "before terminal-input-not-started proof became durable"
-      );
-    }
-    if (ledger) {
-      // runTerminalControlSend publishes the exact prepared terminal ledger
-      // before its Turn state.  A crash in that narrow window still proves
-      // zero input, provided every immutable ledger field matches this
-      // transfer. Resolve that owner before aborting/restoring the Sessions.
-      assertDeferredForegroundLedgerAuthority({
-        storeDir,
-        terminal,
-        transfer,
-        ledger,
-        statePath
-      });
-      if (!["prepared", "resolved"].includes(String(ledger.status))) {
-        throw new Error(
-          `deferred foreground transfer ${transfer.transfer_id} has ` +
-          `${String(ledger.status)} transport evidence but no exact Turn state`
-        );
-      }
-      if (ledger.status === "prepared") {
-        const abortedAt = cliNow().toISOString();
-        saveTerminalBridgeDispatchLedger(terminal.terminalControl, {
-          ...ledger,
-          status: "resolved",
-          aborted_at: abortedAt,
-          safe_to_retry: true,
-          resolved_at: abortedAt,
-          dispatcher_pid: null,
-          reason:
-            "deferred dispatcher exited after ledger prepare and before Turn persistence"
-        });
-      } else {
-        assertDeferredForegroundResolvedZeroInputLedger({
-          storeDir,
-          terminal,
-          transfer,
-          ledger,
-          statePath
-        });
-      }
-      if (
-        cliEnv().AKK_TEST_EXIT_AFTER_DEFERRED_LEDGER_ABORT_WITHOUT_STATE === "1"
-      ) {
-        // The zero-input top-level and append-only ledger receipts are both
-        // durable, while the transfer still fences both Sessions. A second
-        // writer must accept this exact resolved form and finish Store-only
-        // rollback without creating or replaying a Turn.
-        cliExit(86);
-      }
-    }
-    abortDeferredCodexForegroundTransferBeforeInput({
-      options: { storeDir },
-      boundary,
-      reason: ledger
-        ? "recovered exact prepared ledger before target Turn state became durable"
-        : "recovered before target Turn state became durable"
-    });
-    return;
-  }
-  const releaseStateLock = stateLockHeld
-    ? undefined
-    : acquireFileLock(`${statePath}.lock`);
-  try {
-    const authority = loadDeferredForegroundTurnAuthority({
-      storeDir,
-      terminal,
-      transfer
-    });
-    const submissionStatus = String(authority.submission.status);
-    let durableNotStartedAt = terminalInputNotStartedAt;
-    if (!ledger && submissionStatus !== "aborted") {
-      throw new Error(
-        `deferred foreground transfer ${transfer.transfer_id} has prepared Turn ` +
-        "state without its exact terminal ledger"
-      );
-    }
-    if (ledger) {
-      assertDeferredForegroundLedgerAuthority({
-        storeDir,
-        terminal,
-        transfer,
-        ledger,
-        statePath: authority.statePath,
-        expectedMessageBodyHash: stringValue(
-          authority.submission.message_body_hash
-        )
-      });
-      if (!["prepared", "resolved"].includes(String(ledger.status))) {
-        throw new Error(
-          `deferred foreground transfer ${transfer.transfer_id} has ` +
-          `${String(ledger.status)} transport evidence and cannot be aborted`
-        );
-      }
-    }
-    if (dispatchIntentWasProvedNotStarted && submissionStatus === "aborted") {
-      const existingAbortedAt = stringValue(authority.submission.aborted_at);
-      if (
-        authority.submission.safe_to_retry !== true ||
-        !existingAbortedAt ||
-        !Number.isFinite(Date.parse(existingAbortedAt)) ||
-        stringValue(authority.submission.text_injected_at) !== undefined ||
-        stringValue(authority.submission.enter_dispatched_at) !== undefined ||
-        stringValue(authority.submission.agent_accepted_at) !== undefined ||
-        (
-          durableNotStartedAt !== undefined &&
-          durableNotStartedAt !== existingAbortedAt
-        )
-      ) {
-        throw new Error(
-          `deferred foreground transfer ${transfer.transfer_id} has ` +
-          "inconsistent terminal-input-not-started Turn proof"
-        );
-      }
-      durableNotStartedAt = existingAbortedAt;
-    }
-    if (submissionStatus === "prepared") {
-      const abortedAt = durableNotStartedAt ?? cliNow().toISOString();
-      const aborted = withTerminalBridgeSubmission({
-        conversation: {
-          ...authority.conversation,
-          status: "failed",
-          failed_at: abortedAt,
-          failure_reason:
-            "dispatcher exited before the deferred terminal-input boundary",
-          updated_at: abortedAt
-        },
-        messageId: transfer.message_id as string,
-        messageType: "task",
-        requestText: String(
-          authority.takeover.terminal_bridge_request_text ?? ""
-        ),
-        status: "aborted",
-        preparedAt: stringValue(authority.submission.prepared_at) ?? abortedAt,
-        abortedAt,
-        error: "dispatcher exited before terminal input",
-        safeToRetry: true
-      });
-      saveState(authority.statePath, aborted);
-    } else if (submissionStatus !== "aborted") {
-      throw new Error(
-        `deferred foreground transfer ${transfer.transfer_id} Turn has ` +
-        `${submissionStatus} input evidence and cannot be aborted`
-      );
-    }
-    if (
-      dispatchIntentWasProvedNotStarted &&
-      ledger?.status === "resolved" &&
-      (
-        ledger.safe_to_retry !== true ||
-        stringValue(ledger.aborted_at) !== durableNotStartedAt ||
-        stringValue(ledger.text_injected_at) !== undefined ||
-        stringValue(ledger.enter_dispatched_at) !== undefined ||
-        stringValue(ledger.agent_accepted_at) !== undefined
-      )
-    ) {
-      throw new Error(
-        `deferred foreground transfer ${transfer.transfer_id} has ` +
-        "inconsistent terminal-input-not-started ledger proof"
-      );
-    }
-    if (ledger && ledger.status !== "resolved") {
-      const abortedAt = durableNotStartedAt ?? cliNow().toISOString();
-      saveTerminalBridgeDispatchLedger(terminal.terminalControl, {
-        ...ledger,
-        status: "resolved",
-        aborted_at: abortedAt,
-        safe_to_retry: true,
-        resolved_at: abortedAt,
-        dispatcher_pid: null,
-        reason:
-          "deferred dispatcher exited before the durable terminal-input boundary"
-      });
-    }
-  } finally {
-    releaseStateLock?.();
-  }
-  if (
-    cliEnv().AKK_TEST_EXIT_AFTER_DEFERRED_PREINPUT_ABORT_RECEIPTS === "1"
-  ) {
-    // The exact Turn and append-only submission receipt are both terminal,
-    // while the transfer and Sessions are intentionally still fenced. The
-    // next writer must finish only the Store rollback and never send input.
-    cliExit(86);
-  }
-  abortDeferredCodexForegroundTransferBeforeInput({
-    options: { storeDir },
-    boundary,
-    reason: "recovered exact prepared Turn with zero terminal input",
-    terminalInputNotStartedAt
-  });
-}
-
-async function recoverAcceptedDeferredForegroundDispatch({
-  options,
-  storeDir,
-  terminal,
-  transfer,
-  boundary
-}: {
-  options: Record<string, any>;
-  storeDir: string;
-  terminal: ResolvedTerminalConversation;
-  transfer: DeferredForegroundTransfer;
-  boundary: DeferredCodexForegroundBindingBoundary;
-}): Promise<boolean> {
-  const statePath = path.resolve(required(
-    transfer.state_path,
-    "deferred foreground Turn state path is unavailable"
-  ));
-  const releaseStateLock = acquireFileLock(`${statePath}.lock`);
-  try {
-    const authority = loadDeferredForegroundTurnAuthority({
-      storeDir,
-      terminal,
-      transfer
-    });
-    const ledger = loadTerminalBridgeDispatchLedger(terminal.terminalControl);
-    if (!ledger) {
-      throw new Error(
-        `deferred foreground transfer ${transfer.transfer_id} has no exact ` +
-        "terminal dispatch ledger for acceptance recovery"
-      );
-    }
-    assertDeferredForegroundLedgerAuthority({
-      storeDir,
-      terminal,
-      transfer,
-      ledger,
-      statePath: authority.statePath,
-      expectedMessageBodyHash: stringValue(
-        authority.submission.message_body_hash
-      )
-    });
-    assertFrozenExplicitlyAbandonedPredecessorAuthority({
-      storeDir,
-      transfer,
-      terminalControl: terminal.terminalControl
-    });
-    if (!DEFERRED_ACCEPTANCE_RECOVERY_STATUSES.has(String(ledger.status))) {
-      throw new Error(
-        `deferred foreground transfer ${transfer.transfer_id} has invalid ` +
-        `${String(ledger.status)} dispatch evidence for acceptance recovery`
-      );
-    }
-    let identity: NativeAgentSessionIdentity | undefined;
-    let acceptance: TerminalSubmissionAcceptanceEvidence | undefined;
-    if (authority.anchor.version === 3) {
-      const inventory = await inspectCodexOpenRootRolloutInventory({
-        options,
-        pid: transfer.process_pid,
-        cwd: terminal.terminalControl.currentPath
-      });
-      const result = detectCodexCandidateSetRolloutAcceptance({
-        anchor: authority.anchor,
-        currentInventory: inventory,
-        requestHash: transfer.request_hash
-      });
-      if (result.status === "uncertain") {
-        throw new Error(
-          `Codex candidate-set recovery is uncertain (${result.code}): ` +
-          result.reason
-        );
-      }
-      if (result.status === "accepted") {
-        identity = result.identity;
-        acceptance = result.evidence;
-      }
-    } else {
-      identity = await resolveCurrentNativeAgentSessionIdentity({
-        options,
-        agent: "codex",
-        pid: transfer.process_pid,
-        cwd: terminal.terminalControl.currentPath
-      });
-      if (identity) {
-        acceptance = detectCodexRolloutAcceptance({
-          anchor: authority.anchor,
-          currentIdentity: identity,
-          requestHash: transfer.request_hash
-        });
-      }
-    }
-    if (!identity || !acceptance) {
-      return false;
-    }
-    if (ledger.status === "agent_accepted") {
-      validateTerminalSubmissionAcceptanceEvidence(
-        ledger.acceptance_evidence,
-        {
-          source: "codex_rollout",
-          nativeThreadId: identity.sessionId,
-          requestHash: transfer.request_hash
-        }
-      );
-    }
-    const acceptedAt = cliNow().toISOString();
-    const boundConversation = withNativeAgentSessionIdentity(
-      authority.conversation,
-      identity
-    );
-    const acceptedConversation = withTerminalBridgeSubmission({
-      conversation: boundConversation,
-      messageId: transfer.message_id as string,
-      messageType: "task",
-      requestText: String(
-        authority.takeover.terminal_bridge_request_text ?? ""
-      ),
-      status: "agent_accepted",
-      preparedAt:
-        stringValue(authority.submission.prepared_at) ?? transfer.prepared_at,
-      textInjectedAt:
-        stringValue(authority.submission.text_injected_at) ??
-        transfer.text_injected_at ?? transfer.dispatch_started_at,
-      enterDispatchedAt:
-        stringValue(authority.submission.enter_dispatched_at) ??
-        transfer.enter_dispatched_at ?? transfer.dispatch_started_at,
-      agentAcceptedAt: acceptedAt,
-      acceptanceEvidence: acceptance
-    });
-    let acceptedStatePersisted = false;
-    // Persist the strongest exact request receipt before mutating either
-    // Session. A crash after the transfer resolves can then be recovered from
-    // this agent_accepted Turn without replaying terminal input.
-    saveState(authority.statePath, acceptedConversation);
-    acceptedStatePersisted = true;
-    if (cliEnv().AKK_TEST_EXIT_AFTER_DEFERRED_ACCEPTED_TURN === "1") {
-      cliExit(86);
-    }
-    let transferCommitted = false;
-    try {
-      await commitDeferredCodexForegroundBinding({
-        options,
-        boundary,
-        identity,
-        acceptedAt
-      });
-      transferCommitted = true;
-      assertNativeAgentIdentityForTurn({
-        conversation: acceptedConversation,
-        currentIdentity: identity,
-        operation: "recover deferred foreground binding for"
-      });
-      saveTerminalBridgeDispatchLedger(terminal.terminalControl, {
-        ...ledger,
-        ...terminalBindingLedgerFields(acceptedConversation),
-        status: "agent_accepted",
-        generation_id: transfer.message_id,
-        conversation_id: acceptedConversation.conversation_id,
-        session_id: transfer.target_session_id,
-        turn_id: transfer.turn_id,
-        message_id: transfer.message_id,
-        message_type: "task",
-        request_hash: transfer.request_hash,
-        prepared_at: transfer.prepared_at,
-        text_injected_at:
-          transfer.text_injected_at ?? transfer.dispatch_started_at,
-        enter_dispatched_at:
-          transfer.enter_dispatched_at ?? transfer.dispatch_started_at,
-        agent_accepted_at: acceptedAt,
-        acceptance_evidence: acceptance,
-        dispatcher_pid: null,
-        state_path: authority.statePath,
-        event_log_path: authority.logPath,
-        callback_expected: Boolean(acceptedConversation.gateway_method),
-        reason: "recovered exact deferred foreground request acceptance"
-      });
-      return true;
-    } catch (error) {
-      if (transferCommitted && !acceptedStatePersisted) {
-        const uncertainAt = cliNow().toISOString();
-        const reason =
-          "deferred Session transfer resolved but exact Turn identity " +
-          `bookkeeping failed: ${error instanceof Error ? error.message : String(error)}`;
-        const uncertainConversation = withTerminalBridgeSubmission({
-          conversation: {
-            ...authority.conversation,
-            status: "stalled",
-            stalled_at: uncertainAt,
-            stalled_reason: reason,
-            updated_at: uncertainAt
-          },
-          messageId: transfer.message_id as string,
-          messageType: "task",
-          requestText: String(
-            authority.takeover.terminal_bridge_request_text ?? ""
-          ),
-          status: "uncertain",
-          preparedAt:
-            stringValue(authority.submission.prepared_at) ?? transfer.prepared_at,
-          textInjectedAt:
-            stringValue(authority.submission.text_injected_at) ??
-            transfer.text_injected_at ?? transfer.dispatch_started_at,
-          enterDispatchedAt:
-            stringValue(authority.submission.enter_dispatched_at) ??
-            transfer.enter_dispatched_at ?? transfer.dispatch_started_at,
-          uncertainAt,
-          error: reason,
-          lastProvenStage: "enter_dispatched",
-          safeToRetry: false
-        });
-        saveState(authority.statePath, uncertainConversation);
-        saveTerminalBridgeDispatchLedger(terminal.terminalControl, {
-          ...ledger,
-          ...terminalBindingLedgerFields(uncertainConversation),
-          status: "uncertain",
-          uncertain_at: uncertainAt,
-          dispatcher_pid: null,
-          callback_expected: false,
-          reason
-        });
-      } else if (transferCommitted) {
-        // Do not downgrade a durable exact acceptance to the older pre-commit
-        // authority merely because ledger bookkeeping failed. The accepted
-        // receipt remains the monotonic source for later ledger reconciliation,
-        // while the Turn itself is stalled so callback/monitor work cannot
-        // proceed past a failed exact binding assertion.
-        const stalledAt = cliNow().toISOString();
-        const reason =
-          "deferred transfer resolved, but exact accepted Turn bookkeeping " +
-          `failed: ${error instanceof Error ? error.message : String(error)}`;
-        saveState(authority.statePath, {
-          ...acceptedConversation,
-          status: "stalled",
-          stalled_at: stalledAt,
-          stalled_reason: reason,
-          updated_at: stalledAt
-        });
-        try {
-          saveTerminalBridgeDispatchLedger(terminal.terminalControl, {
-            ...ledger,
-            ...terminalBindingLedgerFields(acceptedConversation),
-            status: "uncertain",
-            uncertain_at: stalledAt,
-            last_proven_stage: "agent_accepted",
-            acceptance_evidence: acceptance,
-            dispatcher_pid: null,
-            callback_expected: false,
-            reason
-          });
-        } catch {
-          // The exact accepted Turn above remains authoritative even when the
-          // ledger itself is the bookkeeping failure being reported.
-        }
-        runtimeLog("error", "deferred_acceptance_ledger_bookkeeping_failed", {
-          transfer_id: transfer.transfer_id,
-          turn_id: transfer.turn_id,
-          state_path: authority.statePath,
-          error: error instanceof Error ? error.message : String(error)
-        });
-      }
-      throw error;
-    }
-  } finally {
-    releaseStateLock();
-  }
-}
-
-async function persistCommittedDeferredForegroundTurnAcceptance({
-  options,
-  storeDir,
-  terminal,
-  transfer
-}: {
-  options: Record<string, any>;
-  storeDir: string;
-  terminal: ResolvedTerminalConversation;
-  transfer: DeferredForegroundTransfer;
-}): Promise<{
-  conversation: Conversation;
-  identity: NativeAgentSessionIdentity;
-}> {
-  const current = loadDeferredForegroundTransfer(storeDir, transfer.transfer_id);
-  if (
-    current.status !== "committed" ||
-    !current.target_accepted_binding ||
-    !current.target_native_thread_id ||
-    !current.agent_accepted_at
-  ) {
-    throw new Error(
-      `deferred foreground transfer ${transfer.transfer_id} has no exact ` +
-      "committed acceptance authority"
-    );
-  }
-  const acceptedBinding = current.target_accepted_binding;
-  const rollout = acceptedBinding.native_process.rollout;
-  const processUuid = acceptedBinding.native_process.process_uuid;
-  const processBirth = acceptedBinding.native_process.process_birth;
-  if (
-    acceptedBinding.native_thread_id !== current.target_native_thread_id ||
-    processUuid !== current.process_uuid ||
-    processBirth !== current.process_birth ||
-    !isCompleteNativeRollout(rollout)
-  ) {
-    throw new Error(
-      `deferred foreground transfer ${transfer.transfer_id} committed binding ` +
-      "is incomplete"
-    );
-  }
-  const identity: NativeAgentSessionIdentity = {
-    sessionId: current.target_native_thread_id,
-    processUuid,
-    processBirth,
-    rollout,
-    evidence: acceptedBinding.native_process.evidence
-  };
-  const statePath = path.resolve(required(
-    current.state_path,
-    "deferred foreground Turn state path is unavailable"
-  ));
-  const releaseStateLock = acquireFileLock(`${statePath}.lock`);
-  try {
-    const authority = loadDeferredForegroundTurnAuthority({
-      storeDir,
-      terminal,
-      transfer: current
-    });
-    const ledger = loadTerminalBridgeDispatchLedger(terminal.terminalControl);
-    if (!ledger) {
-      throw new Error(
-        `deferred foreground transfer ${current.transfer_id} has no exact ` +
-        "terminal dispatch ledger for committed recovery"
-      );
-    }
-    assertDeferredForegroundLedgerAuthority({
-      storeDir,
-      terminal,
-      transfer: current,
-      ledger,
-      statePath: authority.statePath,
-      expectedMessageBodyHash: stringValue(
-        authority.submission.message_body_hash
-      )
-    });
-    if (!DEFERRED_ACCEPTANCE_RECOVERY_STATUSES.has(String(ledger.status))) {
-      throw new Error(
-        `deferred foreground transfer ${current.transfer_id} has invalid ` +
-        `${String(ledger.status)} dispatch evidence for committed recovery`
-      );
-    }
-    let acceptance: TerminalSubmissionAcceptanceEvidence | undefined;
-    if (authority.anchor.version === 3) {
-      const inventory = await inspectCodexOpenRootRolloutInventory({
-        options,
-        pid: current.process_pid,
-        cwd: terminal.terminalControl.currentPath
-      });
-      const result = detectCodexCandidateSetRolloutAcceptance({
-        anchor: authority.anchor,
-        currentInventory: inventory,
-        requestHash: current.request_hash
-      });
-      if (result.status === "uncertain") {
-        throw new Error(
-          `Codex committed candidate acceptance is uncertain (${result.code}): ` +
-          result.reason
-        );
-      }
-      if (result.status === "accepted") {
-        if (result.identity.sessionId !== identity.sessionId) {
-          throw new Error(
-            "committed candidate acceptance resolved to a different native thread"
-          );
-        }
-        acceptance = result.evidence;
-      }
-    } else {
-      acceptance = detectCodexRolloutAcceptance({
-        anchor: authority.anchor,
-        currentIdentity: identity,
-        requestHash: current.request_hash
-      });
-    }
-    if (!acceptance) {
-      throw new Error(
-        `deferred foreground transfer ${current.transfer_id} cannot re-prove ` +
-        "its exact request acceptance"
-      );
-    }
-    if (ledger.status === "agent_accepted") {
-      validateTerminalSubmissionAcceptanceEvidence(
-        ledger.acceptance_evidence,
-        {
-          source: "codex_rollout",
-          nativeThreadId: identity.sessionId,
-          requestHash: current.request_hash
-        }
-      );
-    }
-    const acceptedConversation = withTerminalBridgeSubmission({
-      conversation: withNativeAgentSessionIdentity(
-        authority.conversation,
-        identity
-      ),
-      messageId: current.message_id as string,
-      messageType: "task",
-      requestText: String(
-        authority.takeover.terminal_bridge_request_text ?? ""
-      ),
-      status: "agent_accepted",
-      preparedAt:
-        stringValue(authority.submission.prepared_at) ?? current.prepared_at,
-      textInjectedAt:
-        stringValue(authority.submission.text_injected_at) ??
-        current.text_injected_at ?? current.dispatch_started_at,
-      enterDispatchedAt:
-        stringValue(authority.submission.enter_dispatched_at) ??
-        current.enter_dispatched_at ?? current.dispatch_started_at,
-      agentAcceptedAt: current.agent_accepted_at,
-      acceptanceEvidence: acceptance
-    });
-    saveState(authority.statePath, acceptedConversation);
-    saveTerminalBridgeDispatchLedger(terminal.terminalControl, {
-      ...ledger,
-      ...terminalBindingLedgerFields(acceptedConversation),
-      status: "agent_accepted",
-      generation_id: current.message_id,
-      conversation_id: acceptedConversation.conversation_id,
-      session_id: current.target_session_id,
-      turn_id: current.turn_id,
-      message_id: current.message_id,
-      message_type: "task",
-      request_hash: current.request_hash,
-      prepared_at: current.prepared_at,
-      text_injected_at:
-        current.text_injected_at ?? current.dispatch_started_at,
-      enter_dispatched_at:
-        current.enter_dispatched_at ?? current.dispatch_started_at,
-      agent_accepted_at: current.agent_accepted_at,
-      acceptance_evidence: acceptance,
-      dispatcher_pid: null,
-      state_path: authority.statePath,
-      event_log_path: authority.logPath,
-      callback_expected: Boolean(acceptedConversation.gateway_method),
-      reason: "recovered committed deferred foreground request acceptance"
-    });
-    return { conversation: acceptedConversation, identity };
-  } finally {
-    releaseStateLock();
-  }
-}
-
 async function recoverDeferredCodexForegroundTransferBeforeMutation({
   options,
   terminal
@@ -23979,177 +20996,189 @@ async function recoverDeferredCodexForegroundTransferBeforeMutation({
   terminal: ResolvedTerminalConversation;
 }): Promise<void> {
   const storeDir = storeDirFromOptions(options);
-  await withStoreWriterLeaseAsync(storeDir, async () => {
-    await recoverDeferredCodexForegroundTransferWhileWriterLease({
+  const locks = terminalWriterMutationLocks(
+    storeDir,
+    terminal.terminalControl
+  );
+  await withCanonicalMutationLocks({
+    ...locks,
+    // Every caller already owns this exact terminal lock. The no-op adapter
+    // creates the canonical scope without recursively acquiring the raw lock.
+    acquireTerminal: () => () => {}
+  }, (scopes, resources) =>
+    recoverDeferredCodexForegroundTransferWhileWriterLease({
       options,
       terminal,
-      storeDir
-    });
-  });
+      storeDir,
+      scopes,
+      resources
+    })
+  );
+}
+
+async function withDeferredForegroundRecoveryScope<Result>({
+  scopes,
+  resources,
+  transfer,
+  operation
+}: {
+  scopes: CanonicalMutationScopes;
+  resources: CanonicalMutationResources;
+  transfer: DeferredForegroundTransfer;
+  operation(scope: DeferredForegroundApplicationScope): Promise<Result>;
+}): Promise<Result> {
+  if (!transfer.state_path) {
+    return operation(bindDeferredForegroundWriterScope(scopes, resources));
+  }
+  const statePath = path.resolve(transfer.state_path);
+  const paths = pathsForConversationDir(path.dirname(statePath));
+  return withTerminalDispatchStateScope(
+    scopes,
+    resources,
+    statePath,
+    paths.logPath,
+    (stateScopes, stateResources) => operation(
+      bindDeferredForegroundApplicationScope(stateScopes, stateResources)
+    )
+  );
+}
+
+function matchingDeferredForegroundTransfers(
+  scope: DeferredForegroundApplicationScope,
+  terminal: ResolvedTerminalConversation
+): DeferredForegroundTransfer[] {
+  return scope.listTransfers().filter((transfer) =>
+    transfer.terminal_id === terminal.conversationId &&
+    transfer.process_pid === terminal.pid &&
+    terminalControlEvidenceMatches(
+      transfer.terminal_endpoint,
+      terminal.terminalControl
+    )
+  );
 }
 
 async function recoverDeferredCodexForegroundTransferWhileWriterLease({
   options,
   terminal,
-  storeDir
+  storeDir,
+  scopes,
+  resources
 }: {
   options: Record<string, any>;
   terminal: ResolvedTerminalConversation;
   storeDir: string;
+  scopes: CanonicalMutationScopes;
+  resources: CanonicalMutationResources;
 }): Promise<void> {
   options = Object.freeze({ ...options, storeDir });
-  let transfers = listDeferredForegroundTransfers(storeDir);
-  // An abort intent is Store authority: it is finalized without consulting a
-  // live pane, PID, cwd, or process birth. Once the exact cleanup receipt is
-  // durable, later legitimate Session revisions never need to be revalidated
-  // against this historical transfer.
-  for (const aborted of transfers.filter((entry) => entry.status === "aborted")) {
-    finalizeAbortedDeferredCodexForegroundTransferCleanup({
-      storeDir,
-      transfer: aborted
-    });
-  }
-  transfers = listDeferredForegroundTransfers(storeDir);
-  const matching = transfers.filter(
-    (transfer) =>
-      transfer.terminal_id === terminal.conversationId &&
-      transfer.process_pid === terminal.pid &&
-      terminalControlEvidenceMatches(
-        transfer.terminal_endpoint,
-        terminal.terminalControl
-      )
-  );
-  const candidates = matching.filter((transfer) =>
-    !["resolved", "aborted", "abort_resolved"].includes(transfer.status)
-  );
-  if (candidates.length === 0) {
-    return;
-  }
-  if (candidates.length !== 1) {
-    throw new Error(
-      `terminal ${terminal.terminalControl.target} has multiple unresolved ` +
-      "deferred foreground transfers; no terminal input was sent"
-    );
-  }
-  let transfer = candidates[0];
-  const boundary = deferredCodexBoundaryFromTransfer({ terminal, transfer });
-  if (transfer.status === "committed") {
-    const accepted = await persistCommittedDeferredForegroundTurnAcceptance({
-      options,
-      storeDir,
-      terminal,
-      transfer
-    });
-    if (
-      cliEnv().AKK_TEST_EXIT_AFTER_DEFERRED_COMMITTED_ACCEPTANCE_BACKFILL ===
-        "1"
-    ) {
-      // The exact accepted Turn and ledger are durable while both Sessions
-      // remain fenced by the committed transfer. Recovery must accept this
-      // monotonic ledger shape and finish Session resolution without input.
-      cliExit(86);
-    }
-    await resolveCommittedDeferredCodexForegroundTransfer({
-      options,
-      boundary
-    });
-    assertNativeAgentIdentityForTurn({
-      conversation: accepted.conversation,
-      currentIdentity: accepted.identity,
-      operation: "recover committed deferred foreground binding for"
-    });
-    return;
-  }
-  if (["prepared", "source_reserved", "target_prepared"].includes(
-    transfer.status
-  )) {
-    abortPreparedDeferredForegroundTurn({
-      storeDir,
-      terminal,
-      transfer,
-      boundary
-    });
-    return;
-  }
-  if (["dispatch_started", "uncertain"].includes(transfer.status)) {
-    const durableInputNotStartedAt =
-      deferredCodexDurableInputNotStartedAt(transfer);
-    if (durableInputNotStartedAt) {
-      abortPreparedDeferredForegroundTurn({
-        storeDir,
-        terminal,
-        transfer,
-        boundary,
-        terminalInputNotStartedAt: durableInputNotStartedAt
-      });
-      return;
-    }
-    try {
-      if (await recoverAcceptedDeferredForegroundDispatch({
-        options,
-        storeDir,
-        terminal,
-        transfer,
-        boundary
-      })) {
-        return;
-      }
-    } catch (error) {
-      if (isStoreMutationLockTimeout(error)) {
-        throw error;
-      }
-      const durable = loadDeferredForegroundTransfer(
-        storeDir,
-        transfer.transfer_id
-      );
-      if (durable.status === "dispatch_started") {
-        transfer = markDeferredCodexForegroundTransferUncertain({
-          options,
+  const service = new DeferredForegroundRecoveryService({
+    transaction: {
+      writerScope: () => bindDeferredForegroundWriterScope(scopes, resources),
+      withTransferScope: (transfer, operation) =>
+        withDeferredForegroundRecoveryScope({
+          scopes,
+          resources,
+          transfer,
+          operation
+        })
+    },
+    repository: {
+      all: (scope) => scope.listTransfers(),
+      matching: (scope) =>
+        matchingDeferredForegroundTransfers(scope, terminal),
+      load: (scope, transferId) => scope.loadTransfer(transferId),
+      markUncertain: (scope, boundary, reason) =>
+        deferredForegroundApplication(options, terminal).markUncertain({
+          scope,
           boundary,
-          reason:
-            "exact deferred acceptance recovery failed: " +
-            (error instanceof Error ? error.message : String(error))
+          reason
+        })
+    },
+    recovery: {
+      boundary: (transfer) =>
+        deferredForegroundBoundaryProjection(
+          deferredRecoveryAdapter.deferredCodexBoundaryFromTransfer(
+            deferredForegroundRecoveryAdapterPorts(),
+            { terminal, transfer }
+          )
+        ),
+      assertRoute: (scope, transfer, boundary) =>
+        deferredForegroundApplication(options, terminal)
+          .assertTransferAuthority(scope, transfer, boundary),
+      finalizeAbort: (scope, transfer) => {
+        deferredForegroundApplication(options).finalizeAbort(scope, transfer);
+      },
+      persistCommitted: (scope, transfer) =>
+        deferredRecoveryAdapter.persistCommittedDeferredForegroundTurnAcceptance(
+          deferredForegroundRecoveryAdapterPorts(), {
+          options,
+          scope,
+          storeDir,
+          terminal,
+          transfer
+        }),
+      crashAfterCommittedBackfill: () => {
+        if (
+          cliEnv().AKK_TEST_EXIT_AFTER_DEFERRED_COMMITTED_ACCEPTANCE_BACKFILL ===
+            "1"
+        ) {
+          cliExit(86);
+        }
+      },
+      resolveCommitted: async (scope, boundary) => {
+        await deferredForegroundApplication(options, terminal).resolve({
+          scope,
+          boundary
         });
-      }
-      throw new Error(
-        `terminal ${terminal.terminalControl.target} deferred foreground ` +
-        `recovery failed closed: ${error instanceof Error
-          ? error.message
-          : String(error)}`,
-        { cause: error }
-      );
+      },
+      assertAcceptedTurn: (accepted) =>
+        assertNativeAgentIdentityForTurn({
+          conversation: accepted.conversation,
+          currentIdentity: accepted.identity,
+          operation: "recover committed deferred foreground binding for"
+        }),
+      abortPrepared: (scope, transfer, boundary, at) =>
+        deferredRecoveryAdapter.abortPreparedDeferredForegroundTurn(
+          deferredForegroundRecoveryAdapterPorts(), {
+          options,
+          scope,
+          storeDir,
+          terminal,
+          transfer,
+          boundary: deferredForegroundConcreteBoundary(boundary, terminal),
+          terminalInputNotStartedAt: at
+        }),
+      durableInputNotStartedAt: (scope, transfer) =>
+        deferredRecoveryAdapter.deferredCodexDurableInputNotStartedAt(
+          deferredForegroundRecoveryAdapterPorts(),
+          scope,
+          transfer
+        ),
+      recoverAccepted: (scope, transfer, boundary) =>
+        deferredRecoveryAdapter.recoverAcceptedDeferredForegroundDispatch(
+          deferredForegroundRecoveryAdapterPorts(), {
+          options,
+          scope,
+          storeDir,
+          terminal,
+          transfer,
+          boundary: deferredForegroundConcreteBoundary(boundary, terminal)
+        }),
+      pendingAnchorVersion: (scope, transfer) =>
+        deferredRecoveryAdapter.loadDeferredForegroundTurnAuthority(
+          deferredForegroundRecoveryAdapterPorts(), {
+          storeDir,
+          terminal,
+          transfer,
+          scope
+        }).anchor.version
+    },
+    runtime: {
+      terminalTarget: terminal.terminalControl.target,
+      isStoreMutationLockTimeout
     }
-    if (transfer.status !== "uncertain") {
-      const pendingAuthority = loadDeferredForegroundTurnAuthority({
-        storeDir,
-        terminal,
-        transfer
-      });
-      if (pendingAuthority.anchor.version === 3) {
-        // A stable candidate inventory with no exact request match is normal
-        // materialization latency, not ambiguity. Keep the durable Enter and
-        // transfer fences active; monitor/recovery will rescan the same v3
-        // anchor and must never replay terminal input.
-        return;
-      }
-      transfer = markDeferredCodexForegroundTransferUncertain({
-        options,
-        boundary,
-        reason:
-          "dispatcher exited after the conservative terminal-input boundary " +
-          "without exact native request acceptance"
-      });
-    }
-    throw new Error(
-      `terminal ${terminal.terminalControl.target} has deferred foreground ` +
-      `transfer ${transfer.transfer_id} with an uncertain dispatch; do not ` +
-      "retry or resolve its Turn outside dedicated recovery"
-    );
-  }
-  throw new Error(
-    `deferred foreground transfer ${transfer.transfer_id} has unsupported ` +
-    `recovery status ${transfer.status}`
-  );
+  });
+  await service.recover();
 }
 
 interface CodexLatentClearResumeObservation {
