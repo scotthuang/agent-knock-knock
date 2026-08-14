@@ -13,46 +13,6 @@ function readPackageFile(relativePath: string): string {
   return fs.readFileSync(path.join(packageRoot, relativePath), "utf8");
 }
 
-function assertOrdinaryChecksBeforePublish(
-  workflowSource: string,
-  publishMarker: string
-): void {
-  const testsIndex = workflowSource.indexOf("run: npm test");
-  const publishIndex = workflowSource.indexOf(publishMarker);
-
-  assert.notEqual(testsIndex, -1, "workflow must run the ordinary test suite");
-  assert.notEqual(publishIndex, -1, "workflow publish command must remain visible");
-  assert.ok(testsIndex < publishIndex, "ordinary tests must precede publish");
-
-  assert.match(workflowSource, /fetch-depth: 0/u);
-  assert.doesNotMatch(workflowSource, /lifecycle smoke attestation/iu);
-  assert.doesNotMatch(
-    workflowSource,
-    /verify-lifecycle-smoke-evidence\.js/u
-  );
-  assert.doesNotMatch(workflowSource, /--require-matrix/u);
-}
-
-function assertReleaseCommitGuards(workflowSource: string): void {
-  assert.match(
-    workflowSource,
-    /git fetch --no-tags origin "\+refs\/heads\/main:refs\/remotes\/origin\/main"/u
-  );
-  assert.match(
-    workflowSource,
-    /release_commit="\$\(git rev-parse "\$\{GITHUB_REF_NAME\}\^\{commit\}"\)"/u
-  );
-  assert.match(workflowSource, /checkout_commit="\$\(git rev-parse HEAD\)"/u);
-  assert.match(
-    workflowSource,
-    /\[\[ "\$\{checkout_commit\}" != "\$\{release_commit\}" \]\]/u
-  );
-  assert.match(
-    workflowSource,
-    /git merge-base --is-ancestor "\$\{release_commit\}" origin\/main/u
-  );
-}
-
 test("ordinary npm test stays non-live and the explicit live release tier is wired end to end", () => {
   const packageJson = JSON.parse(readPackageFile("package.json"));
   const testScript = String(packageJson.scripts?.test ?? "");
@@ -74,56 +34,13 @@ test("ordinary npm test stays non-live and the explicit live release tier is wir
   assert.match(runner, /"--require-matrix"/u);
 });
 
-test("tag publish workflows keep release provenance guards without requiring live evidence", () => {
-  const releaseWorkflow = readPackageFile(".github/workflows/release.yml");
-  const clawHubWorkflow = readPackageFile(
-    ".github/workflows/clawhub-publish.yml"
-  );
+test("GitHub workflows stay suspended while Issue 126 refactoring is active", () => {
+  const workflowsDirectory = path.join(packageRoot, ".github", "workflows");
+  const workflowFiles = fs.existsSync(workflowsDirectory)
+    ? fs.readdirSync(workflowsDirectory).filter((name) => /\.ya?ml$/u.test(name))
+    : [];
 
-  assertOrdinaryChecksBeforePublish(releaseWorkflow, "npm publish \\");
-  assertOrdinaryChecksBeforePublish(
-    clawHubWorkflow,
-    './node_modules/.bin/clawhub "${publish_args[@]}"'
-  );
-
-  assertReleaseCommitGuards(releaseWorkflow);
-  assertReleaseCommitGuards(clawHubWorkflow);
-  assert.match(releaseWorkflow, /expected_tag="v\$\{package_version\}"/u);
-  assert.match(
-    releaseWorkflow,
-    /\[\[ "\$\{GITHUB_REF_NAME\}" != "\$\{expected_tag\}" \]\]/u
-  );
-  assert.match(
-    clawHubWorkflow,
-    /expected_ref="refs\/tags\/v\$\{package_version\}"/u
-  );
-  assert.match(
-    clawHubWorkflow,
-    /\[\[ "\$\{GITHUB_REF\}" != "\$\{expected_ref\}" \]\]/u
-  );
-
-  assert.match(clawHubWorkflow, /needs: prepare/u);
-  assert.equal(
-    clawHubWorkflow.match(/name: clawhub-package/gu)?.length,
-    2,
-    "ClawHub must download the exact named artifact built by prepare"
-  );
-  assert.match(
-    clawHubWorkflow,
-    /EXPECTED_RELEASE_COMMIT: \$\{\{ needs\.prepare\.outputs\.release_commit \}\}/u
-  );
-  assert.match(
-    clawHubWorkflow,
-    /"\$\{checkout_commit\}" != "\$\{release_commit\}" \|\| "\$\{release_commit\}" != "\$\{EXPECTED_RELEASE_COMMIT\}"/u
-  );
-  assert.match(
-    clawHubWorkflow,
-    /\[\[ "\$\{#packages\[@\]\}" -ne 1 \]\]/u
-  );
-  assert.match(
-    clawHubWorkflow,
-    /--source-commit "\$\{RELEASE_COMMIT\}"/u
-  );
+  assert.deepEqual(workflowFiles, []);
 });
 
 test("live tmux smoke refuses to run without both opt-ins", () => {
