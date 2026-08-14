@@ -1125,6 +1125,126 @@ Existing binding-authority, dispatch-policy, list-renderer, and
 terminal-send boundary witnesses remain in place; this slice changes no action
 name, action order, error string, token field order, Store format, or public
 contract version.
+## Native-thread lifecycle crash recovery and reconciliation
+
+The third native-thread lifecycle slice moves one crash-recovery state machine
+from `recoverLifecycleFenceBeforeMutation` through fail-closed lifecycle-ledger
+reconciliation into `native-thread-lifecycle-recovery-service.ts`. It includes
+human-observed ledger rebuild, prepared rollback, verified roll-forward,
+committed/aborted replay, possible-input quarantine, and operator-authorized
+Claude/Codex identity reconciliation. Ordinary deferred foreground-dispatch
+recovery remains a core-owned state machine behind one scoped call. Verified
+empty recovery, observed external-handoff send/adoption, lifecycle mutation,
+monitor/callback orchestration, and public presentation remain outside this
+service.
+
+Measured against exact head `29446b0649555c4bfca8ee23a4f2f0d9523c9fcf`,
+the slice reduces `src/cli-core.ts` from 27,319 to 26,095 physical lines
+(-1,224, -4.48%) and changes total production TypeScript from 80,554 to
+81,427 (+873, +1.08%). The transparent typed-boundary overhead is 71.3% of
+the core movement. It consists of the four port groups, direct recording
+surface, fresh-route composition, normalized probe facts, and the core-side
+raw terminal adapter; issue #126 does not impose a zero-production-growth
+target. The production graph has 82 modules, 339 static import edges, and zero
+cycles.
+
+The recovery service is 1,834 physical lines and its infrastructure adapter is
+263 lines. The largest function remains the 211-line/c32 reconciliation reducer
+and the highest conservative approximate complexity is c37 in the 186-line
+manual Codex probe reducer. Every function is below the hard 500 LOC/c50 gates.
+The reviewed exceptions to the default 100 LOC/c20 target are:
+
+- reconciliation (211/c32), whose ordered status and catch precedence is one
+  directly recorded state machine;
+- prepared human-observed handoff recovery (116/c21), which keeps its source
+  CAS, identity observation, rollback, and verified checkpoint together;
+- stored ledger/transition comparison (66/c36) and live-terminal/adapter
+  comparison (68/c25), split only at the side-effect boundary so boolean
+  short-circuit order is unchanged;
+- verified after-binding revalidation (143/c36), uncertain manual settlement
+  (140/c15), Claude stable identity probing (115/c27), and Codex stable identity
+  probing (186/c37), whose polling and exact-incarnation precedence remain
+  visible as cohesive reducers;
+- the core-side probe adapter factory (110/c1), which keeps its closed raw
+  capability, bridge preparation, normalization, and ordered observations in
+  one infrastructure boundary while each returned method remains short.
+
+The service imports no CLI core, filesystem/path API, raw lock, raw repository,
+raw JSON persistence, public presenter, `TerminalAgentAdapter`, terminal-agent
+bridge type or value, `any`, or `Record<..., any>`. It contains no raw screen
+excerpt or composer grammar. Its public request contains only fresh terminal
+facts; Store directory and path authority are absent. The four typed port
+groups are scoped authority, persistence, terminal/process evidence, and
+clock/sleep. Core retains terminal then writer lock acquisition, the ordinary
+deferred-recovery implementation, raw transition/Session/ledger repositories,
+terminal bridge and process probes, Store/path canonicalization, CLI logging,
+and JSON output. The core-side recovery adapter exposes only normalized
+status/probe facts and closed plan steps through separately scoped
+`probeThreadLifecycle`, `planThreadLifecycle`, and `observeThreadLifecycle`
+ports; the full terminal adapter is never returned to business code. Before
+either service entry, core projects the fresh resolved terminal into a new
+runtime object with exactly `conversationId`, `agent`, `pid`, and
+`terminalControl`; the broad resolved terminal remains captured only by the
+core ports closure.
+
+Every authority, repository, process, and terminal port call receives the same
+active `CanonicalMutationScopes` and `CanonicalMutationResources`. Before the
+service is entered, core authenticates both scopes, resolves the terminal again
+after lock acquisition, proves the captured and fresh terminal/process
+incarnations match, and captures the canonical writer Store. The shared native
+thread resource adapter repeats those checks for every port call, including
+reads and probes as well as transition, Session, and ledger writes. Thus a
+request cannot retain free terminal-control, Store, cwd, or path authority, and
+released, cross-transaction, wrong-route, or wrong-Store capabilities fail
+before business I/O. Lifecycle ledger construction remains in the core adapter;
+rebuild phases replace their control with the post-lock fresh route and every
+persisted ledger Store must equal the canonical writer resource.
+
+### Recovery order and durable checkpoints
+
+The extraction preserves these existing sequences inside the terminal ->
+writer lock scope:
+
+| Recovery path | Exact effect order retained |
+| --- | --- |
+| Fence entry | authenticate/fresh terminal -> ordinary deferred recovery -> ledger load -> optional rebuild -> lifecycle classification -> reconcile |
+| Missing/resolved human-handoff ledger | transition list -> typed ledger build -> complete transition/terminal/adapter validation -> compare-and-save rebuild ledger -> reload |
+| Live automatic dispatcher | dispatcher process probe -> unchanged ledger; no Store transition read, probe bridge, or write |
+| Wrong Store / unavailable transition | Store comparison or transition load -> fail-closed uncertain-ledger CAS -> reload; a failed fail-closed CAS returns the original ledger |
+| Prepared, zero possible input | ledger/terminal/adapter validation -> exact before-owner proof -> target/source reads and source restoration -> aborted transition CAS -> resolved-ledger CAS -> reload |
+| Verified | after-binding/live identity verification -> exact target-owner proof -> Session commit -> committed transition CAS -> resolved-with-binding ledger CAS -> reload |
+| Committed / aborted replay | live verification and owner/target assertion or before-owner/source restoration -> resolved-ledger CAS -> reload |
+| Dispatching/submitted automatic recovery | uncertain transition CAS -> source quarantine Session CAS -> uncertain-ledger CAS -> reload |
+| Operator-authorized uncertain recovery | exact stable manual probe -> process/rollout assertion -> before rollback, or target verification -> target-owner proof -> Session commit -> committed transition CAS -> resolved-ledger CAS -> reload |
+| Inner recovery failure | source quarantine attempt -> fail-closed uncertain-ledger CAS -> reload/original ledger |
+
+Bridge construction remains at the old probe checkpoints: after the verified
+human-handoff early return, after Claude prepare-time process validation, and
+after the Codex-agent guard but before root/runtime observation. Raw terminal
+status, clear-line, `/status` input, agents rows, resolver, and process-birth
+operations stay in core or its recovery adapter. A Claude sample performs
+agents-row load then lifecycle observation inside one scoped call, and business
+recovery performs terminal status only afterward. A Codex post-`/status` sample
+performs one raw status call and only then raw-screen lifecycle observation
+inside the same scoped adapter call; it returns normalized status plus the
+optional observation. No raw screen or composer decision crosses into the
+service. No new durable checkpoint or retry permission is introduced. Manual
+terminal-close JSON is still emitted by core before the writer and terminal
+scopes are released.
+
+The direct fast recording table fixes five precedence witnesses: live
+dispatcher short-circuit; wrong-Store fail closed before transition load;
+prepared rollback; dispatching possible-input quarantine; and verified
+roll-forward. It asserts the exact transition/Session/ledger phase order, CAS
+expectations, probe-before-plan order, probe preparation point, and
+reference-equal forwarding of the same active scopes/resources on every port
+call. Direct adapter witnesses fix Claude rows -> observe and Codex status ->
+observe order, while the static boundary witness rejects bridge imports, full
+terminal-adapter capability, raw screen excerpts, or composer helpers in the
+service. A runtime-shape witness also fixes the four projected request keys and
+proves that neither `adapter` nor `legacy` survives projection. Existing
+lifecycle recovery, human handoff, no-rollout, lifecycle, and ownership
+integration witnesses remain the retained black-box boundary set.
 
 ## Soft freeze while #126 is active
 
