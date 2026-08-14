@@ -922,6 +922,80 @@ already-invalid dispatch ledger is classified, preserving the prior error
 precedence. Dispatch `state_path` is not observed until the earlier ledger,
 message, control, conversation, Session, and Turn predicates have passed.
 
+## Native-thread transition verification and settlement
+
+The second native-thread lifecycle slice moves the mutation's typed
+verification and settlement seam out of the CLI composition root. Before any
+durable transition is prepared, the verification adapter preserves lifecycle
+eligibility, plan selection, initial idle status, the exact Claude agents-row
+proof, and the single Codex `/status` probe. After core has durably recorded
+`command_submitted`, the settlement service owns stable identity verification,
+verified-transition persistence, the verified crash checkpoint, exclusive
+target ownership, Session commit, committed-transition persistence, resolved
+ledger persistence, and final presentation. Dispatch preparation, composer
+revalidation, terminal input, raw lock acquisition, recovery, handoff, and
+verified-empty reconciliation remain in `cli-core.ts`.
+
+Measured against exact head `a96bfbb2c6d011e4bdbe53f883e01250ad1e4023`,
+the slice reduces `src/cli-core.ts` from 29,281 to 28,610 physical lines
+(-671) and changes total production TypeScript from 77,792 to 78,388 (+596).
+The transparent typed-capability overhead is 88.8% of the core movement. Issue
+#126 has no production-zero-growth requirement; the added lines are the five
+explicit port groups, exact verification adapter, capability-scoped repository
+surface, post-lock terminal/Store resource adapter, and reusable direct evidence
+rather than formatting compression or an unrelated responsibility move.
+
+`runNativeThreadTransition` is 421 LOC/c1, with its transaction callback at
+412 LOC/c44. The settlement service is 331 physical lines; its largest function
+is `settleFailedNativeThreadTransition` at 124 LOC/c9. The verification adapter
+is 707 physical lines; its largest function is
+`verifyNativeThreadTransition` at 201 LOC/c45. Every function remains below the
+hard 500 LOC/c50 gates. Reviewed exceptions to the default 100 LOC/c20 target
+are the cohesive transaction wrapper/callback (421/c1 and 412/c44), core port
+wiring (173/c1), failure settlement (124/c9), verification polling state
+machine (201/c45), and shared known-root reducer (94/c24). Keeping these order
+tables intact makes their fail-closed precedence visible and directly testable.
+The 100-line resource adapter's exported operation is 77 LOC/c1 and its inner
+capability gate is 55 LOC/c14, so it requires no default-threshold exception.
+
+The service imports no filesystem or path API, raw lock, Store directory,
+public JSON, terminal bridge, `any`, or `Record<string, any>`. Core still owns
+argv and public JSON, constructs concrete terminal and Store adapters, acquires
+terminal then writer locks, and invokes the presenter before leaving the
+transaction callback. Every service repository operation receives the same
+authentic `CanonicalMutationScopes` and `CanonicalMutationResources`; the
+capability-gated repositories bind every verification, ownership, transition,
+Session, and ledger operation to both locked resources. Before observation or
+I/O, the adapter verifies active scopes, the post-lock terminal's exact resource
+key and process incarnation, and the captured Store resolving to the active
+canonical writer. Lifecycle ledger
+construction and save form one scoped port; its `store_dir` must strictly equal
+the active writer Store, and persistence uses the post-lock fresh terminal route.
+The lifecycle resource adapter reuses the common mutation pair gate and
+`terminalRuntimeResourceKey`; it imports no terminal-dispatch domain module.
+Agent kind and PID come only from that resolved terminal and are absent from the
+service verification request.
+Lifecycle and dispatch compatibility exports share one adapter-neutral native
+identity fence, matcher, and strict complete-rollout predicate in
+`terminal-binding-authority.ts`. Blank or malformed runtime rollout fields fail
+closed before path comparison and cannot escape as a `TypeError`.
+
+Verified success retains `verify -> verified transition -> crash hook ->
+ownership -> Session commit -> committed transition -> resolved ledger ->
+present`. Failure retains committed-bookkeeping error precedence, verified
+recovery without roll-forward, proven-zero-input abort plus source restoration,
+and possible-input uncertainty plus source quarantine. A five-case recording
+port table asserts those orders, exact scope/resource forwarding, and
+presentation before writer and terminal lock release. The no-rollout identity
+case separately proves that a legitimate status-card or pre-materialization
+observation returns false without reading a missing rollout or throwing. One
+targeted ownership domain retains five native lifecycle integration witnesses.
+Direct resource-adapter cases additionally prove moved-route fresh bytes and
+zero verification/ownership/ledger I/O for wrong incarnation, malformed or
+key-mismatched terminal/writer resources, captured-Store mismatch, and released
+scopes. Adapter cases pin Codex probe/companion ordering, Claude rows-before-status
+ordering, and the no-revalidation callback's original synchronous invocation.
+
 ## Soft freeze while #126 is active
 
 Until the orchestration milestones finish:

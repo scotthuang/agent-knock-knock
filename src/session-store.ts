@@ -10,6 +10,7 @@ import {
   assertManagedSessionId,
   assertManagedSessionState,
   assertNativeThreadTransition,
+  managedSessionRevision,
   managedSessionStorageKey,
   type ManagedSessionState,
   type ManagedTerminalBinding,
@@ -693,6 +694,110 @@ function atomicSaveJson(filePath: string, value: unknown): void {
 function readJsonFile(filePath: string, label: string): unknown {
   return readJsonFileNoFollow(filePath, label);
 }
+
+
+export function commitVerifiedLifecycleTransition(
+  storeDir: string,
+  transition: NativeThreadTransition,
+  now: string
+): ManagedSessionState {
+  const afterBinding = transition.after_binding;
+  if (!afterBinding) {
+    throw new Error("verified lifecycle transition has no after_binding");
+  }
+  const targetExisting = tryLoadManagedSession(
+    storeDir,
+    transition.target_session_id
+  );
+  const targetAlreadyCommitted = Boolean(
+    targetExisting?.status === "bound" &&
+    targetExisting.last_transition_id === transition.transition_id &&
+    targetExisting.agent === transition.agent &&
+    path.resolve(targetExisting.workspace) === path.resolve(transition.workspace) &&
+    JSON.stringify(targetExisting.binding) === JSON.stringify(afterBinding)
+  );
+  if (!targetAlreadyCommitted) {
+    if (
+      (targetExisting?.revision ?? null) !== transition.target_expected_revision
+    ) {
+      throw new Error("lifecycle target Session changed after transition prepare");
+    }
+    if (
+      targetExisting &&
+      (
+        targetExisting.status !== "detached" ||
+        targetExisting.agent !== transition.agent ||
+        path.resolve(targetExisting.workspace) !== path.resolve(transition.workspace) ||
+        targetExisting.binding?.native_thread_id?.toLowerCase() !==
+          afterBinding.native_thread_id?.toLowerCase()
+      )
+    ) {
+      throw new Error(
+        "lifecycle target Session is no longer the detached native thread reserved at prepare"
+      );
+    }
+  }
+  if (
+    transition.source_session_id &&
+    transition.source_session_id !== transition.target_session_id
+  ) {
+    const source = tryLoadManagedSession(storeDir, transition.source_session_id);
+    const reservedSource = Boolean(
+      source &&
+      source.status === "transitioning" &&
+      source.last_transition_id === transition.transition_id &&
+      source.revision === Number(transition.source_expected_revision) + 1
+    );
+    const recoveryQuarantine = Boolean(
+      source &&
+      source.status === "quarantined" &&
+      source.last_transition_id === transition.transition_id &&
+      JSON.stringify(source.binding) ===
+        JSON.stringify(transition.before_binding)
+    );
+    if (source && (reservedSource || recoveryQuarantine)) {
+      saveManagedSession(storeDir, {
+        ...source,
+        status: "detached",
+        detached_at: now,
+        quarantine_reason: undefined,
+        updated_at: now
+      }, { expectedRevision: managedSessionRevision(source) });
+    } else if (
+      source?.status !== "detached" ||
+      source.last_transition_id !== transition.transition_id
+    ) {
+      throw new Error("lifecycle source Session changed before roll-forward");
+    }
+  }
+  if (targetAlreadyCommitted) {
+    return targetExisting as ManagedSessionState;
+  }
+  return saveManagedSession(storeDir, {
+    schema: "agent-knock-knock/session",
+    version: 1,
+    session_id: transition.target_session_id,
+    agent: transition.agent,
+    workspace: transition.workspace,
+    status: "bound",
+    binding: afterBinding,
+    lineage: targetExisting?.lineage ?? {
+      created_by: transition.operation === "adopt_external_thread"
+        ? "human_observed"
+        : transition.operation,
+      previous_session_id: transition.source_session_id,
+      resumed_from_native_thread_id:
+        transition.operation === "resume_thread"
+          ? transition.target_native_thread_id
+          : undefined,
+      transition_id: transition.transition_id
+    },
+    created_at: targetExisting?.created_at ?? now,
+    updated_at: now,
+    last_transition_id: transition.transition_id
+  }, { expectedRevision: transition.target_expected_revision });
+}
+
 
 function validateRecordId(value: string, label: string): void {
   if (

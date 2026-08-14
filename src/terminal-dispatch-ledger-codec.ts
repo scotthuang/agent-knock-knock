@@ -123,7 +123,7 @@ type LifecycleBinding = ManagedTerminalBinding | undefined;
 type PreviousLifecycleLedger = TerminalDispatchLedgerDocument | undefined;
 const previousLifecycleGenerationId = (ledger: PreviousLifecycleLedger): string | undefined =>
   stringValue(ledger?.generation_id) ?? stringValue(ledger?.message_id);
-type NativeThreadLifecycleLedgerPhase =
+export type NativeThreadLifecycleLedgerPhase =
   | { phase: "prepared"; previous: PreviousLifecycleLedger; targetNativeThreadId: string }
   | { phase: "verified"; binding: LifecycleBinding }
   | { phase: "verified_with_previous"; binding: LifecycleBinding; previousGenerationId?: string }

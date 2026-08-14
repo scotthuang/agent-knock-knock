@@ -293,10 +293,28 @@
       "needle": "black-box Codex recovery clears a dispatching composer and rolls exact-before back without replay"
     },
     {
+      "id": "lifecycle-resource-adapter-unit",
+      "path": "test/native-thread-transition-resource-adapter.test.ts",
+      "tier": "fast",
+      "needle": "a same-incarnation route move writes bytes through the fresh terminal"
+    },
+    {
+      "id": "lifecycle-settlement-unit",
+      "path": "test/native-thread-transition-settlement-service.test.ts",
+      "tier": "fast",
+      "needle": "verified settlement preserves scoped commit order and presents before lock release"
+    },
+    {
       "id": "lifecycle-transition-unit",
       "path": "test/native-thread-transition-policy.test.ts",
       "tier": "fast",
       "needle": "transition eligibility preserves binding and capability gate priority"
+    },
+    {
+      "id": "lifecycle-verification-unit",
+      "path": "test/native-thread-transition-verification-adapter.test.ts",
+      "tier": "fast",
+      "needle": "an observed identity without rollout evidence does not match or throw"
     },
     {
       "id": "management-list-executable-boundary",
@@ -533,7 +551,10 @@
         "lifecycle-recovery-boundary"
       ],
       "service_invariant_witnesses": [
-        "lifecycle-transition-unit"
+        "lifecycle-resource-adapter-unit",
+        "lifecycle-settlement-unit",
+        "lifecycle-transition-unit",
+        "lifecycle-verification-unit"
       ],
       "retained_boundary_witnesses": [
         "handoff-boundary",
