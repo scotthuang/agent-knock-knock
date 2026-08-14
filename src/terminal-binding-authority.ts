@@ -166,6 +166,52 @@ export interface TerminalBindingMatchEvidence {
   codexLingeringBeforeMatches?: boolean;
 }
 
+export type ManagedBindingConflictKind =
+  | "stale_process_incarnation"
+  | "live_external_thread_change"
+  | "provisional_orphan"
+  | "unverifiable";
+
+export function classifyTerminalBindingConflict(facts: {
+  session: ManagedSessionState;
+  processRelationship: "same" | "different" | "unverifiable";
+  liveNativeThreadId?: string;
+  statusCardNativeThreadId?: string;
+  managedTurnCount?: number;
+}): ManagedBindingConflictKind {
+  const { session, processRelationship } = facts;
+  const binding = session.binding;
+  if (!binding || processRelationship === "different") {
+    return "stale_process_incarnation";
+  }
+  const boundThreadId = exactThreadId(binding.native_thread_id);
+  const liveThreadId = exactThreadId(facts.liveNativeThreadId);
+  const statusCardThreadId = exactThreadId(facts.statusCardNativeThreadId);
+  if (boundThreadId && statusCardThreadId &&
+    boundThreadId !== statusCardThreadId) {
+    return processRelationship === "same" && (
+      liveThreadId === statusCardThreadId || liveThreadId === boundThreadId
+    ) ? "live_external_thread_change" : "unverifiable";
+  }
+  if (
+    session.lineage.created_by === "attach" &&
+    !session.last_transition_id &&
+    !binding.native_thread_id &&
+    !binding.native_process.rollout &&
+    facts.managedTurnCount === 0
+  ) {
+    return "provisional_orphan";
+  }
+  return processRelationship === "same" &&
+      boundThreadId && liveThreadId && boundThreadId !== liveThreadId
+    ? "live_external_thread_change"
+    : "unverifiable";
+}
+
+function exactThreadId(value: string | undefined): string | undefined {
+  return isExactNativeThreadId(value) ? value.toLowerCase() : undefined;
+}
+
 export type AuthorityDecision =
   | {
       state: "unrelated";
@@ -329,8 +375,8 @@ function codexStatusCardProcessMatchesBinding(
   );
 }
 
-function exactRolloutMatches(
-  left: TerminalNativeRolloutIdentity | undefined,
+export function exactRolloutMatches(
+  left: unknown,
   right: TerminalNativeRolloutIdentity | undefined
 ): boolean {
   return Boolean(
@@ -341,6 +387,26 @@ function exactRolloutMatches(
     left.inode === right.inode &&
     left.path === right.path
   );
+}
+
+export function candidateSourceRootAuthorityMatches(
+  roots: readonly TerminalCodexOpenRootIdentity[],
+  sourceThreadId: string | undefined,
+  sourceRollout: TerminalNativeRolloutIdentity | undefined,
+  authority: "present" | "explicitly_abandoned_predecessor"
+): boolean {
+  const sourceId = exactThreadId(sourceThreadId);
+  if (!sourceId || !completeRollout(sourceRollout)) return false;
+  const sameSource = (root: TerminalCodexOpenRootIdentity): boolean =>
+    root.sessionId.toLowerCase() === sourceId;
+  return authority === "explicitly_abandoned_predecessor"
+    ? !roots.some(sameSource) &&
+      !roots.some((root) =>
+        exactRolloutMatches(root.rollout, sourceRollout)
+      )
+    : roots.some((root) =>
+        sameSource(root) && exactRolloutMatches(root.rollout, sourceRollout)
+      );
 }
 
 function completeRollout(value: unknown): value is TerminalNativeRolloutIdentity {
