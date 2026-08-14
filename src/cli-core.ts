@@ -239,9 +239,18 @@ import {
   type SessionSelectorCandidate
 } from "./session-selector.js";
 import {
+  actionsForManagedSessionBinding,
+  currentTerminalActions,
   listActionContracts,
+  readOnlyListActions,
+  readOnlyManagedTurn,
   renderAvailableListActions,
   renderManagedTurnListEntry,
+  retargetConversationAction,
+  safeTerminalActionsDuringConflict,
+  safeUnavailableManagedTurnActions,
+  sendActionForManagedSession,
+  withoutGenericHandoffSourceClose,
   type AvailableListActionFacts
 } from "./terminal-list-renderer.js";
 import {
@@ -4934,6 +4943,9 @@ function terminalFirstListProjection({
     const rawActions = mutationsAllowed
       ? discoveredRawActions
       : readOnlyListActions(discoveredRawActions);
+    const rawSendAction = isRecord(rawActions.send)
+      ? rawActions.send
+      : {};
     const bindingAwareRawActions = authoritativeSession
       ? actionsForManagedSessionBinding(
           rawActions,
@@ -5562,12 +5574,6 @@ function terminalFirstListProjection({
         authoritativeSession.binding?.native_process.rollout
       )
     );
-    const terminalCanAcceptSend =
-      ownership.state === "none" &&
-      Boolean(
-        deferredCodexForegroundToken ||
-        (!rolloutBackedCodexSession && isRecord(sessionAwareRawActions.send))
-      );
     if (
       ownership.state === "current" &&
       !allRelated.some((conversation) =>
@@ -5656,11 +5662,7 @@ function terminalFirstListProjection({
       .sort(compareManagedConversationRecency);
     const recentConversation = currentTurn ? undefined : sortedDisplayed[0];
     const recentTurnValue = recentConversation
-      ? historicalManagedTurnForTerminal(
-          recentConversation,
-          terminalCanAcceptSend,
-          terminal
-        )
+      ? historicalManagedTurnForTerminal(recentConversation)
       : undefined;
     const recentTurnProjection = recentTurnValue && (
       !mutationsAllowed ||
@@ -5681,12 +5683,7 @@ function terminalFirstListProjection({
         )
       : [];
     const history = historyConversations.map((conversation) => {
-      const turn =
-      historicalManagedTurnForTerminal(
-        conversation,
-        terminalCanAcceptSend,
-        terminal
-      );
+      const turn = historicalManagedTurnForTerminal(conversation);
       return withoutGenericHandoffSourceClose(
         mutationsAllowed &&
           !conversationHasNonterminalDeferredTransfer(conversation)
@@ -5751,10 +5748,10 @@ function terminalFirstListProjection({
             ...(externalHandoffAdoptable
               ? {
                   send: {
-                    ...rawActions.send,
+                    ...rawSendAction,
                     arguments: {
-                      ...(isRecord(rawActions.send.arguments)
-                        ? rawActions.send.arguments
+                      ...(isRecord(rawSendAction.arguments)
+                        ? rawSendAction.arguments
                         : {}),
                       expected_terminal_token:
                         externalHandoffSnapshotToken
@@ -7224,126 +7221,8 @@ function sameCanonicalStatePath(left: unknown, right: unknown): boolean {
   );
 }
 
-function currentTerminalActions(
-  currentTurn: Record<string, any> | undefined
-): Record<string, any> {
-  if (!currentTurn || !isRecord(currentTurn.available_actions)) {
-    return {};
-  }
-  const actions: Record<string, any> = {};
-  for (const action of ["status", "respond", "approve", "cancel", "renew", "retry_callback"]) {
-    if (isRecord(currentTurn.available_actions[action])) {
-      actions[action] = currentTurn.available_actions[action];
-    }
-  }
-  return actions;
-}
-
-function safeTerminalActionsDuringConflict(
-  rawActions: Record<string, any>
-): Record<string, any> {
-  const actions: Record<string, any> = {};
-  for (const action of ["status", "close"]) {
-    if (isRecord(rawActions[action])) {
-      actions[action] = rawActions[action];
-    }
-  }
-  return actions;
-}
-
-function sendActionForManagedSession(
-  action: Record<string, any>,
-  sessionId: string
-): Record<string, any> {
-  const { selector: _selector, ...existingArguments } = isRecord(action.arguments)
-    ? action.arguments
-    : {};
-  return {
-    ...action,
-    arguments: {
-      ...existingArguments,
-      session_id: sessionId
-    }
-  };
-}
-
-function actionsForManagedSessionBinding(
-  actions: Record<string, any>,
-  session: ManagedSessionState
-): Record<string, any> {
-  const token = managedSessionBindingToken(session);
-  const next = { ...actions };
-  for (const actionName of ["new_thread", "resume_thread", "native_inspect"]) {
-    const action = isRecord(next[actionName]) ? next[actionName] : undefined;
-    if (!action) {
-      continue;
-    }
-    next[actionName] = {
-      ...action,
-      arguments: {
-        ...(isRecord(action.arguments) ? action.arguments : {}),
-        expected_binding_token: token
-      }
-    };
-  }
-  return next;
-}
-
-function safeUnavailableManagedTurnActions(
-  actionsValue: Record<string, any>
-): Record<string, any> {
-  const actions: Record<string, any> = {};
-  for (const action of ["status", "retry_callback", "close"]) {
-    if (isRecord(actionsValue[action])) {
-      actions[action] = actionsValue[action];
-    }
-  }
-  return actions;
-}
-
-function readOnlyListActions(
-  actionsValue: Record<string, any>
-): Record<string, any> {
-  return isRecord(actionsValue.status)
-    ? { status: actionsValue.status }
-    : {};
-}
-
-function readOnlyManagedTurn(
-  managedTurn: Record<string, any>
-): Record<string, any> {
-  return {
-    ...managedTurn,
-    available_actions: readOnlyListActions(
-      isRecord(managedTurn.available_actions)
-        ? managedTurn.available_actions
-        : {}
-    )
-  };
-}
-
-function withoutGenericHandoffSourceClose(
-  managedTurn: Record<string, any>,
-  blockingHandoffTurnIds: ReadonlySet<string>
-): Record<string, any> {
-  const conversationId = stringValue(managedTurn.conversation_id);
-  if (!conversationId || !blockingHandoffTurnIds.has(conversationId)) {
-    return managedTurn;
-  }
-  const availableActions = isRecord(managedTurn.available_actions)
-    ? managedTurn.available_actions
-    : {};
-  const { close: _genericClose, ...safeActions } = availableActions;
-  return {
-    ...managedTurn,
-    available_actions: safeActions
-  };
-}
-
 function historicalManagedTurnForTerminal(
-  conversation: Conversation,
-  terminalCanAcceptSend: boolean,
-  terminal: Record<string, any>
+  conversation: Conversation
 ): Record<string, any> {
   const managedTurn = managedTurnListEntry(
     summarizeConversation(conversation),
@@ -7467,37 +7346,6 @@ function currentManagedTurnForTerminal(
         : {}),
       approve: approval
     }
-  };
-}
-
-function retargetConversationAction(
-  action: Record<string, any>,
-  conversationId: string
-): Record<string, any> {
-  const beforeCall = isRecord(action.before_call)
-    ? action.before_call
-    : undefined;
-  return {
-    ...action,
-    arguments: {
-      ...(isRecord(action.arguments) ? action.arguments : {}),
-      turn_id: conversationId,
-      conversation_id: undefined
-    },
-    ...(beforeCall
-      ? {
-          before_call: {
-            ...beforeCall,
-            arguments: {
-              ...(isRecord(beforeCall.arguments)
-                ? beforeCall.arguments
-                : {}),
-              turn_id: conversationId,
-              conversation_id: undefined
-            }
-          }
-        }
-      : {})
   };
 }
 

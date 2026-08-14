@@ -1,10 +1,22 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  actionsForManagedSessionBinding,
+  currentTerminalActions,
   listActionContracts,
+  readOnlyManagedTurn,
   renderAvailableListActions,
-  renderManagedTurnListEntry
+  renderManagedTurnListEntry,
+  retargetConversationAction,
+  safeTerminalActionsDuringConflict,
+  safeUnavailableManagedTurnActions,
+  sendActionForManagedSession,
+  withoutGenericHandoffSourceClose
 } from "../src/terminal-list-renderer.js";
+import {
+  managedSessionBindingToken,
+  type ManagedSessionState
+} from "../src/managed-session.js";
 
 test("raw terminal actions retain their public order and exact selectors", () => {
   const actions = renderAvailableListActions({
@@ -108,5 +120,124 @@ test("the public action contract remains v16 with stable action ordering", () =>
       "retry_callback",
       "close"
     ]
+  );
+});
+
+test("terminal list action policies expose only their exact safe subsets", () => {
+  const actions = {
+    status: { tool: "status" },
+    send: { tool: "send" },
+    respond: { tool: "respond" },
+    approve: { tool: "approve" },
+    cancel: { tool: "cancel" },
+    renew: { tool: "renew" },
+    retry_callback: { tool: "retry" },
+    close: { tool: "close" },
+    malformed: "ignored"
+  };
+
+  assert.deepEqual(Object.keys(currentTerminalActions({
+    available_actions: actions
+  })), ["status", "respond", "approve", "cancel", "renew", "retry_callback"]);
+  assert.deepEqual(
+    Object.keys(safeTerminalActionsDuringConflict(actions)),
+    ["status", "close"]
+  );
+  assert.deepEqual(
+    Object.keys(safeUnavailableManagedTurnActions(actions)),
+    ["status", "retry_callback", "close"]
+  );
+  assert.deepEqual(readOnlyManagedTurn({
+    conversation_id: "turn-1",
+    available_actions: actions
+  }), {
+    conversation_id: "turn-1",
+    available_actions: { status: { tool: "status" } }
+  });
+});
+
+test("managed binding actions are retargeted without weakening snapshot authority", () => {
+  const session: ManagedSessionState = {
+    schema: "agent-knock-knock/session",
+    version: 1,
+    session_id: "session-1",
+    agent: "codex",
+    workspace: "/workspace",
+    status: "detached",
+    lineage: { created_by: "attach" },
+    created_at: "2026-08-14T00:00:00.000Z",
+    updated_at: "2026-08-14T00:00:00.000Z"
+  };
+  const bindingToken = managedSessionBindingToken(session);
+  const bound = actionsForManagedSessionBinding({
+    send: { arguments: { request: "task" } },
+    new_thread: { arguments: { terminal_id: "terminal-1" } },
+    resume_thread: { arguments: { terminal_id: "terminal-1" } },
+    native_inspect: { arguments: { terminal_id: "terminal-1" } }
+  }, session);
+  assert.deepEqual(bound.send, { arguments: { request: "task" } });
+  for (const name of ["new_thread", "resume_thread", "native_inspect"] as const) {
+    assert.deepEqual(bound[name], {
+      arguments: {
+        terminal_id: "terminal-1",
+        expected_binding_token: bindingToken
+      }
+    });
+  }
+
+  assert.deepEqual(sendActionForManagedSession({
+    tool: "agent_knock_knock_send",
+    arguments: { selector: "terminal-1", request: "task" }
+  }, "session-1"), {
+    tool: "agent_knock_knock_send",
+    arguments: { request: "task", session_id: "session-1" }
+  });
+});
+
+test("approval and handoff action rewrites preserve nested command shape", () => {
+  const retargeted = retargetConversationAction({
+    tool: "agent_knock_knock_approve",
+    arguments: {
+      conversation_id: "terminal-1",
+      expected_approval_fingerprint: "fingerprint"
+    },
+    before_call: {
+      tool: "agent_knock_knock_status",
+      arguments: { conversation_id: "terminal-1" }
+    }
+  }, "turn-1");
+  assert.deepEqual(retargeted, {
+    tool: "agent_knock_knock_approve",
+    arguments: {
+      conversation_id: undefined,
+      expected_approval_fingerprint: "fingerprint",
+      turn_id: "turn-1"
+    },
+    before_call: {
+      tool: "agent_knock_knock_status",
+      arguments: {
+        conversation_id: undefined,
+        turn_id: "turn-1"
+      }
+    }
+  });
+
+  const managedTurn = {
+    conversation_id: "turn-1",
+    available_actions: {
+      status: { tool: "status" },
+      close: { tool: "close" }
+    }
+  };
+  assert.deepEqual(
+    withoutGenericHandoffSourceClose(managedTurn, new Set(["turn-1"])),
+    {
+      conversation_id: "turn-1",
+      available_actions: { status: { tool: "status" } }
+    }
+  );
+  assert.equal(
+    withoutGenericHandoffSourceClose(managedTurn, new Set()),
+    managedTurn
   );
 });
