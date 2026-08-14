@@ -313,10 +313,13 @@ import {
 } from "./terminal-monitor-decision-policy.js";
 import * as monitorLaunch from "./terminal-monitor-launch-plan.js";
 import * as monitorOwner from "./terminal-monitor-ownership-policy.js";
+import { terminalMonitorReconciliationEligibility as monitorEligibility } from
+  "./terminal-monitor-reconciliation-eligibility.js";
 import {
   constructTerminalDispatchLedgerDocument,
   decodeTerminalDispatchLedgerDocument,
   nativeThreadLifecycleLedger as lifecycleLedger,
+  sameCanonicalStatePath,
   terminalDispatchLedgerLooksLifecycle,
   terminalDispatchReceiptHistory as terminalLedgerReceiptHistory,
   type TerminalDispatchLedgerDocument
@@ -5922,16 +5925,6 @@ async function resolveTerminalScopedCodexApproval({
       reason: error instanceof Error ? error.message : String(error)
     };
   }
-}
-
-function sameCanonicalStatePath(left: unknown, right: unknown): boolean {
-  const leftPath = stringValue(left);
-  const rightPath = stringValue(right);
-  return Boolean(
-    leftPath &&
-    rightPath &&
-    path.resolve(leftPath) === path.resolve(rightPath)
-  );
 }
 
 function historicalManagedTurnForTerminal(
@@ -20814,156 +20807,28 @@ function prepareCallbackDeliveryReconciliation(input: {
   return callbackOutboxService().reconcileDelivery(input);
 }
 
-function terminalBridgeReconciliationEligibility(conversation) {
-  const nativeTakeover = isRecord(conversation?.native_session_takeover)
-    ? conversation.native_session_takeover
-    : undefined;
-  if (nativeTakeover?.terminal_bridge !== true) {
-    return { eligible: false as const, reason: "not_terminal_bridge" };
+function terminalBridgeReconciliationEligibility(conversation: Conversation) {
+  const eligibility = monitorEligibility(conversation);
+  let step = eligibility.next();
+  while (!step.done) {
+    const request = step.value;
+    step = eligibility.next(request.kind === "control"
+      ? { kind: "control", terminalControl: terminalControlFromTakeover(
+          request.nativeTakeover
+        ) }
+      : request.kind === "dispatch"
+      ? { kind: "dispatch", ledger: loadTerminalBridgeDispatchLedger(request.terminalControl) }
+      : request.kind === "store"
+        ? { kind: "store", storeDir: managedSessionStoreDirForConversation(conversation) }
+        : request.kind === "runtime"
+          ? { kind: "runtime", runtime: terminalRuntimeIdentityForConversation(
+              conversation, request.terminalControl
+            ) }
+          : { kind: "deferred", transfer: loadDeferredForegroundTransfer(
+              request.storeDir, request.transferId
+            ) });
   }
-  if (!isWaitingForAgent(conversation.status)) {
-    return {
-      eligible: false as const,
-      reason: `conversation_status_${String(conversation.status ?? "missing")}`
-    };
-  }
-
-  const terminalMessageId = stringValue(nativeTakeover.terminal_bridge_message_id);
-  const terminalControl = terminalControlFromTakeover(nativeTakeover);
-  if (!terminalMessageId || !terminalControl) {
-    return { eligible: false as const, reason: "terminal_bridge_identity_missing" };
-  }
-  const dispatchLedger =
-    loadTerminalBridgeDispatchLedger(terminalControl);
-  const conversationStatePath = stringValue(conversation.state_path);
-  const conversationStoreDir = managedSessionStoreDirForConversation(
-    conversation
-  );
-  const bindingId = stringValue(conversation.terminal_binding_id);
-  const bindingGeneration = Number(conversation.terminal_binding_generation);
-  if (
-    (
-      !dispatchLedger ||
-      stringValue(dispatchLedger.message_id) !== terminalMessageId ||
-      !terminalDispatchRecordMatchesControl(dispatchLedger, terminalControl) ||
-      stringValue(dispatchLedger.conversation_id) !==
-        conversation.conversation_id ||
-      stringValue(dispatchLedger.session_id) !==
-        sessionIdForConversation(conversation) ||
-      stringValue(dispatchLedger.turn_id) !==
-        turnIdForConversation(conversation) ||
-      !conversationStatePath ||
-      !sameCanonicalStatePath(
-        dispatchLedger.state_path,
-        conversationStatePath
-      ) ||
-      !conversationStoreDir ||
-      path.resolve(stringValue(dispatchLedger.store_dir) ?? "") !==
-        path.resolve(conversationStoreDir) ||
-      (bindingId !== undefined &&
-        stringValue(dispatchLedger.binding_id) !== bindingId) ||
-      (Number.isSafeInteger(bindingGeneration) &&
-        Number(dispatchLedger.binding_generation) !== bindingGeneration) ||
-      ![
-        "prepared",
-        "text_injected",
-        "enter_dispatched",
-        "agent_accepted",
-        "submitted"
-      ].includes(
-        String(dispatchLedger.status)
-      )
-    )
-  ) {
-    return {
-      eligible: false as const,
-      reason: `terminal_dispatch_${String(
-        dispatchLedger?.status ?? "missing_or_generation_replaced"
-      )}`
-    };
-  }
-  const submission = terminalBridgeSubmission(conversation);
-  if (
-    submission &&
-    stringValue(submission.message_id) === terminalMessageId &&
-    ["not_accepted", "uncertain", "aborted"].includes(
-      String(submission.status)
-    )
-  ) {
-    return {
-      eligible: false as const,
-      reason: `terminal_submission_${submission.status}`
-    };
-  }
-  const runtime = terminalRuntimeIdentityForConversation(conversation, terminalControl);
-  if (!Number.isInteger(runtime.pid) || Number(runtime.pid) <= 0 || !stringValue(runtime.cwd)) {
-    return { eligible: false as const, reason: "terminal_agent_identity_missing" };
-  }
-
-  const storeDir = managedSessionStoreDirForConversation(conversation);
-  const deferredTransferId = stringValue(
-    nativeTakeover.deferred_foreground_transfer_id
-  );
-  const deferredTransfer = storeDir && deferredTransferId
-    ? loadDeferredForegroundTransfer(storeDir, deferredTransferId)
-    : undefined;
-  if (
-    deferredTransfer &&
-    !FINAL_DEFERRED_TRANSFER_STATUSES.has(deferredTransfer.status)
-  ) {
-    const anchor = validateCodexRolloutAcceptanceAnchor(
-      nativeTakeover.codex_rollout_acceptance_anchor
-    );
-    if (
-      anchor?.version !== 3 ||
-      deferredTransfer.status !== "dispatch_started" ||
-      submission?.status !== "enter_dispatched" ||
-      deferredTransfer.turn_id !== turnIdForConversation(conversation) ||
-      deferredTransfer.message_id !== terminalMessageId ||
-      deferredTransfer.target_session_id !==
-        sessionIdForConversation(conversation)
-    ) {
-      return {
-        eligible: false as const,
-        reason: `deferred_foreground_transfer_${deferredTransfer.status}`
-      };
-    }
-  }
-
-  const inactivityTimeoutMinutes = Number(
-    nativeTakeover.terminal_bridge_inactivity_timeout_minutes
-  );
-  const hardTimeoutMinutes = Number(nativeTakeover.terminal_bridge_hard_timeout_minutes);
-  const startedAtMs = validTimestampMs(nativeTakeover.terminal_bridge_started_at);
-  const lastActivityAtMs = validTimestampMs(nativeTakeover.terminal_bridge_last_activity_at);
-  const inactivityDeadlineAtMs = validTimestampMs(
-    nativeTakeover.terminal_bridge_inactivity_deadline_at
-  );
-  const hardDeadlineAtMs = validTimestampMs(nativeTakeover.terminal_bridge_hard_deadline_at);
-  if (
-    !Number.isFinite(inactivityTimeoutMinutes) ||
-    inactivityTimeoutMinutes <= 0 ||
-    !Number.isFinite(hardTimeoutMinutes) ||
-    hardTimeoutMinutes <= 0 ||
-    startedAtMs === undefined ||
-    lastActivityAtMs === undefined ||
-    inactivityDeadlineAtMs === undefined ||
-    hardDeadlineAtMs === undefined
-  ) {
-    return { eligible: false as const, reason: "terminal_bridge_deadline_metadata_missing" };
-  }
-
-  return {
-    eligible: true as const,
-    nativeTakeover,
-    terminalMessageId,
-    terminalControl,
-    runtime,
-    inactivityTimeoutMinutes,
-    hardTimeoutMinutes,
-    inactivityDeadlineAtMs,
-    hardDeadlineAtMs
-  };
+  return step.value;
 }
 
 function terminalAgentProcessDisposition(

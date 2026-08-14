@@ -1,3 +1,4 @@
+import path from "node:path";
 import {
   hasCanonicalTerminalEndpoint,
   sameTerminalControlEvidenceIncarnation,
@@ -10,7 +11,8 @@ import type {
   ManagedTerminalBinding,
   NativeThreadTransition
 } from "./managed-session.js";
-import type { TerminalSubmissionAcceptanceEvidence } from "./terminal-submission-acceptance.js";
+import type { TerminalSubmissionAcceptanceEvidence } from
+  "./terminal-submission-acceptance.js";
 import { canonicalJson } from "./canonical-json.js";
 import {
   isRecord,
@@ -19,6 +21,14 @@ import {
 
 export type TerminalDispatchLedgerDocument = Record<string, unknown>;
 export type TerminalDispatchReceipt = Record<string, unknown>;
+
+export function sameCanonicalStatePath(left: unknown, right: unknown): boolean {
+  const leftPath = stringValue(left);
+  const rightPath = stringValue(right);
+  return Boolean(
+    leftPath && rightPath && path.resolve(leftPath) === path.resolve(rightPath)
+  );
+}
 
 export type TerminalOrdinaryDispatchStatus =
   "prepared" | "text_injected" | "enter_dispatched" |

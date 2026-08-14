@@ -171,6 +171,7 @@ test("terminal monitor decision and poll policies select their parity set", asyn
   ];
   for (const changedPath of [
     "src/terminal-monitor-decision-policy.ts",
+    "src/terminal-monitor-reconciliation-eligibility.ts",
     "src/terminal-monitor-poll-policy.ts"
   ]) {
     assert.deepEqual(selection.selectAffectedTests([changedPath], tiers), {
@@ -181,6 +182,28 @@ test("terminal monitor decision and poll policies select their parity set", asyn
       )
     });
   }
+});
+
+test("terminal submission facts select acceptance and monitor parity", async () => {
+  const selection = await loadSelectionModule();
+  const tiers = loadTiers();
+  const expected = [
+    "test/codex-no-rollout-binding-cli.test.ts",
+    "test/shards/agent-cli-dispatch-recovery.test.ts",
+    "test/shards/agent-cli-monitor-recovery.test.ts",
+    "test/shards/agent-cli-session-acceptance.test.ts",
+    "test/shards/agent-cli-terminal-send-gates.test.ts"
+  ];
+  assert.deepEqual(
+    selection.selectAffectedTests(["src/terminal-submission-facts.ts"], tiers),
+    {
+      mode: "targeted",
+      changedPaths: ["src/terminal-submission-facts.ts"],
+      integrationFiles: tiers.integration.filter((testPath) =>
+        expected.includes(testPath)
+      )
+    }
+  );
 });
 
 test("terminal monitor supervision seams select launch and recovery parity", async () => {

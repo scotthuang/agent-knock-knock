@@ -14,6 +14,7 @@ import {
 } from "./terminal-control-ref.js";
 import type { TerminalOrdinaryDispatchStatus } from
   "./terminal-dispatch-ledger-codec.js";
+import { terminalBridgeSubmission } from "./terminal-submission-facts.js";
 import {
   validateTerminalSubmissionAcceptanceEvidence,
   type TerminalSubmissionAcceptanceEvidence
@@ -443,17 +444,7 @@ export function terminalBridgeEnabled(conversation: unknown): boolean {
   return takeover?.terminal_bridge === true;
 }
 
-export function terminalBridgeSubmission(
-  conversation: unknown
-): UnknownRecord | undefined {
-  const record = isRecord(conversation) ? conversation : undefined;
-  const takeover = isRecord(record?.native_session_takeover)
-    ? record.native_session_takeover
-    : undefined;
-  return isRecord(takeover?.terminal_bridge_submission)
-    ? takeover.terminal_bridge_submission
-    : undefined;
-}
+export { terminalBridgeSubmission };
 
 export function terminalBridgeSubmissionReceipts(
   conversation: Conversation
