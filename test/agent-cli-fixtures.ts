@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { performance } from "node:perf_hooks";
 import {
   ensureStoreWritable,
   pathsForConversation
@@ -12,6 +13,17 @@ import {
   saveManagedSession,
   tryLoadManagedSession
 } from "../src/session-store.js";
+import type { ClaudeAgentRow } from "../src/claude-terminal-agent-adapter.js";
+import { CodexStoreAdapter } from "../src/codex-store-adapter.js";
+import {
+  createTerminalControlProviderRegistry,
+  TmuxTerminalControlProvider
+} from "../src/terminal-control-provider.js";
+import {
+  SystemTerminalProcessSource,
+  type ProcessCommandResult
+} from "../src/terminal-process-source.js";
+import { runInProcessCli } from "./in-process-cli-fixtures.js";
 
 export const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 export const testRuntimeDir = fs.mkdtempSync(
@@ -34,7 +46,12 @@ export interface ManagedClaudeTerminalTask {
   logPath: string;
 }
 
-export function startManagedClaudeTerminalTask(options: {
+type AgentCliCommandRunner = (
+  command: string,
+  args: string[]
+) => ProcessCommandResult;
+
+export async function startManagedClaudeTerminalTask(options: {
   fakeBinDir: string;
   workspace: string;
   storeDir: string;
@@ -43,7 +60,7 @@ export function startManagedClaudeTerminalTask(options: {
   claudePid: number;
   claudeSessionId: string;
   message: string;
-}): ManagedClaudeTerminalTask {
+}): Promise<ManagedClaudeTerminalTask> {
   writeFakeProcessTools(options.fakeBinDir, [{
     pid: options.claudePid,
     ppid: 999,
@@ -52,7 +69,7 @@ export function startManagedClaudeTerminalTask(options: {
   }]);
   const openclawBin = path.join(options.fakeBinDir, "openclaw");
   const rawConversationId = `terminal:v2:tmux:claude:${options.terminalTarget}:${options.claudePid}`;
-  const sent = runAgentCli([
+  const sent = await runAgentCliInProcess([
     "send",
     "--conversation",
     rawConversationId,
@@ -196,11 +213,230 @@ export function agentCliTestEnv(
   };
 }
 
-export function runAgentCli(args: string[], env: NodeJS.ProcessEnv = {}) {
-  return spawnSync(process.execPath, [binPath, ...args], {
-    encoding: "utf8",
-    env: agentCliTestEnv(args, env)
+export function runAgentCliInProcess(
+  args: string[],
+  env: NodeJS.ProcessEnv = {}
+) {
+  const commandEnvironment = agentCliTestEnv(args, env);
+  const usesStaticTerminalAdapters = [
+    "--processes-json",
+    "--terminals-json",
+    "--terminal-screens-json"
+  ].some((option) => args.includes(option));
+  const usesStaticClaudeAgentAdapter = args.includes("--claude-agents-json");
+  const usesStaticAgentVersionAdapter = args.includes("--agent-versions-json");
+  const usesStaticCodexSessionAdapter = [
+    "--threads-json",
+    "--processes-json",
+    "--rollouts-json",
+    "--codex-active-session-identities-json"
+  ].some((option) => args.includes(option));
+  const runCommand = (command: string, commandArgs: string[]) => {
+    const completed = spawnSync(command, commandArgs, {
+      encoding: "utf8",
+      env: commandEnvironment
+    });
+    return {
+      status: completed.status,
+      stdout: completed.stdout ?? "",
+      stderr: completed.stderr ?? "",
+      ...(completed.error ? { error: completed.error } : {})
+    };
+  };
+  return runInProcessCli(args, {
+    env: commandEnvironment,
+    cwd: process.cwd(),
+    pid: process.pid,
+    now: () => new Date(),
+    monotonicNowMs: () => performance.now(),
+    sleep: (milliseconds) => new Promise((resolve) => {
+      setTimeout(resolve, milliseconds);
+    }),
+    sleepSync: (milliseconds) => {
+      Atomics.wait(
+        new Int32Array(new SharedArrayBuffer(4)),
+        0,
+        0,
+        milliseconds
+      );
+    },
+    runtimeLog() {},
+    ...(env.PATH !== undefined
+      ? {
+          codexProcessBirthForPid: (pid: number) =>
+            codexProcessBirthWithRunner(runCommand, pid)
+        }
+      : {}),
+    ...(!usesStaticAgentVersionAdapter && env.PATH !== undefined
+      ? {
+          agentVersionForRunningProcess: (
+            agent: "codex" | "claude",
+            pid: number
+          ) => agentVersionWithRunner(runCommand, agent, pid)
+        }
+      : {}),
+    ...(!usesStaticCodexSessionAdapter && env.PATH !== undefined
+      ? {
+          codexLocalSessionAdapter: (options: Record<string, unknown>) =>
+            new CodexStoreAdapter({
+              codexHome: expandedTestPath(options.codexHome),
+              runCommand
+            })
+        }
+      : {}),
+    ...(!usesStaticClaudeAgentAdapter &&
+      !usesStaticTerminalAdapters &&
+      env.PATH !== undefined
+      ? {
+          loadClaudeAgentRows: (
+            _options: Record<string, unknown>,
+            observation: { required?: boolean }
+          ) => loadClaudeAgentRowsWithRunner(runCommand, observation)
+        }
+      : {}),
+    ...(!usesStaticTerminalAdapters && env.PATH !== undefined
+      ? {
+          terminalControlProviderRegistry:
+            createTerminalControlProviderRegistry([
+              new TmuxTerminalControlProvider({
+                commands: ["tmux"],
+                runCommand,
+                socketPaths: []
+              })
+            ]),
+          terminalProcessSource: new SystemTerminalProcessSource({ runCommand })
+        }
+      : {})
   });
+}
+
+function loadClaudeAgentRowsWithRunner(
+  runCommand: AgentCliCommandRunner,
+  observation: { required?: boolean }
+): ClaudeAgentRow[] {
+  const result = runCommand("claude", ["agents", "--json", "--all"]);
+  if (result.error || result.status !== 0) {
+    if (observation.required) {
+      throw new Error(
+        (result.error as NodeJS.ErrnoException | undefined)?.code === "ENOENT"
+          ? "Claude agent session observation is unavailable because the Claude CLI could not be resolved"
+          : "Claude agent session observation failed; refusing to treat the process as a virgin session"
+      );
+    }
+    return [];
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(result.stdout);
+  } catch {
+    if (observation.required) {
+      throw new Error(
+        "Claude agent session observation returned invalid JSON; refusing to treat the process as a virgin session"
+      );
+    }
+    return [];
+  }
+  const rows = Array.isArray(value)
+    ? value
+    : isRecord(value) && Array.isArray(value.agents)
+      ? value.agents
+      : undefined;
+  if (!rows) {
+    if (observation.required) {
+      throw new Error(
+        "Claude agent session observation returned an unsupported result shape; refusing to treat the process as a virgin session"
+      );
+    }
+    return [];
+  }
+  return rows.flatMap((row): ClaudeAgentRow[] => {
+    if (!isRecord(row) || !Number.isInteger(Number(row.pid))) {
+      return [];
+    }
+    return [{
+      pid: Number(row.pid),
+      ...(typeof row.cwd === "string" && row.cwd
+        ? { cwd: row.cwd }
+        : {}),
+      ...(typeof row.kind === "string" && row.kind
+        ? { kind: row.kind }
+        : {}),
+      ...(typeof row.sessionId === "string" && row.sessionId
+        ? { sessionId: row.sessionId }
+        : {}),
+      ...(Number.isSafeInteger(Number(row.startedAt)) && Number(row.startedAt) > 0
+        ? { startedAt: Number(row.startedAt) }
+        : {}),
+      ...(typeof row.status === "string" && row.status
+        ? { status: row.status }
+        : {}),
+      ...(typeof row.waitingFor === "string" && row.waitingFor
+        ? { waitingFor: row.waitingFor }
+        : {})
+    }];
+  });
+}
+
+function codexProcessBirthWithRunner(
+  runCommand: AgentCliCommandRunner,
+  pid: number
+): string {
+  const result = runCommand("ps", ["-o", "lstart=", "-p", String(pid)]);
+  const processBirth = result.stdout.trim();
+  if (result.error || result.status !== 0 || !processBirth) {
+    throw new Error(
+      result.stderr.trim() ||
+      result.error?.message ||
+      `cannot verify Codex process incarnation for pid ${pid}`
+    );
+  }
+  return processBirth;
+}
+
+function agentVersionWithRunner(
+  runCommand: AgentCliCommandRunner,
+  agent: "codex" | "claude",
+  pid: number
+): string | undefined {
+  const result = runCommand("lsof", [
+    "-a",
+    "-p",
+    String(pid),
+    "-d",
+    "txt",
+    "-Fn"
+  ]);
+  if (result.error || result.status !== 0) {
+    return undefined;
+  }
+  const pattern = agent === "codex"
+    ? /\/releases\/(\d+\.\d+\.\d+)(?:-[^/]*)?\/bin\/codex$/u
+    : /\/claude\/versions\/(\d+\.\d+\.\d+)$/u;
+  const versions = [...new Set(
+    result.stdout
+      .split(/\r?\n/u)
+      .filter((line) => line.startsWith("n"))
+      .flatMap((line): string[] => {
+        const match = pattern.exec(line.slice(1));
+        return match ? [match[1]] : [];
+      })
+  )];
+  return versions.length === 1 ? versions[0] : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function expandedTestPath(value: unknown): string | undefined {
+  if (typeof value !== "string" || !value) {
+    return undefined;
+  }
+  return value === "~"
+    ? os.homedir()
+    : value.startsWith("~/")
+      ? path.join(os.homedir(), value.slice(2))
+      : value;
 }
 
 export function runAgentCliAsync(

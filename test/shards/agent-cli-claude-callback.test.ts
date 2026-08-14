@@ -34,7 +34,7 @@ import {
   claudeTerminalStaticArgs,
   claudeAgentRow,
   codexNativeIdentityArgs,
-  runAgentCli,
+  runAgentCliInProcess,
   runAgentCliAsync,
   spawnAgentCliCaptured,
   spawnAgentCliProcess,
@@ -59,7 +59,7 @@ import {
   readJsonLines
 } from "../agent-cli-fixtures.js";
 
-test("hookless Claude tmux approval is bound to a managed callback and sends exactly one C-m", () => {
+test("hookless Claude tmux approval is bound to a managed callback and sends exactly one C-m", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-hookless-approval-"));
   const storeDir = path.join(tempDir, "conversations");
   const claudeHome = path.join(tempDir, ".claude");
@@ -123,7 +123,7 @@ test("hookless Claude tmux approval is bound to a managed callback and sends exa
         call.args[3] === "C-m"
       ).length;
 
-    const rawApproval = runAgentCli([
+    const rawApproval = await runAgentCliInProcess([
       "approve",
       "--conversation",
       rawConversationId,
@@ -137,7 +137,7 @@ test("hookless Claude tmux approval is bound to a managed callback and sends exa
     assert.equal(controlMCount(), 0, "raw Claude terminal control must not send approval keys");
 
     fs.writeFileSync(screenPath, "❯ ");
-    const sent = runAgentCli([
+    const sent = await runAgentCliInProcess([
       "send",
       "--conversation",
       rawConversationId,
@@ -253,7 +253,7 @@ test("hookless Claude tmux approval is bound to a managed callback and sends exa
       claudeSessionId,
       screen: approvalScreen
     });
-    const monitored = runAgentCli([
+    const monitored = await runAgentCliInProcess([
       "monitor",
       "--terminal-bridge",
       "--state",
@@ -350,7 +350,7 @@ test("hookless Claude tmux approval is bound to a managed callback and sends exa
         commands: [["npm", "test"]]
       }]
     };
-    const rejected = runAgentCli([
+    const rejected = await runAgentCliInProcess([
       "approve",
       "--state",
       conversation.state_path,
@@ -391,7 +391,7 @@ test("hookless Claude tmux approval is bound to a managed callback and sends exa
         }
       })
     );
-    const uncertainReplay = runAgentCli([
+    const uncertainReplay = await runAgentCliInProcess([
       "approve",
       "--state",
       uncertainStatePath,
@@ -420,7 +420,7 @@ test("hookless Claude tmux approval is bound to a managed callback and sends exa
         commands: [["npm", "test", "--", "--runInBand"]]
       }]
     };
-    const autoApproved = runAgentCli([
+    const autoApproved = await runAgentCliInProcess([
       "approve",
       "--state",
       conversation.state_path,
@@ -467,7 +467,7 @@ test("hookless Claude tmux approval is bound to a managed callback and sends exa
       false
     );
 
-    const replay = runAgentCli([
+    const replay = await runAgentCliInProcess([
       "approve",
       "--state",
       conversation.state_path,
@@ -505,7 +505,7 @@ test("hookless Claude tmux approval is bound to a managed callback and sends exa
       "claude-hookless-closed",
       (state) => ({ ...state, status: "closed" })
     );
-    const closedReplay = runAgentCli([
+    const closedReplay = await runAgentCliInProcess([
       "approve",
       "--state",
       closedStatePath,
@@ -551,7 +551,7 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
       screenPath,
       `claude-autoapprove\t0\t0\t999\tnode\t${workspace}\n`
     );
-    const task = startManagedClaudeTerminalTask({
+    const task = await startManagedClaudeTerminalTask({
       fakeBinDir,
       workspace,
       storeDir,
@@ -1352,7 +1352,7 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
         call.args[0] === "send-keys" &&
         call.args[3] === "C-m"
       ).length;
-    const retriedBeforeApproval = runAgentCli([
+    const retriedBeforeApproval = await runAgentCliAsync([
       "retry-callback",
       "--state",
       retryBeforeApprovalStatePath
@@ -1469,7 +1469,7 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
         call.args[0] === "send-keys" &&
         call.args[3] === "C-m"
       ).length;
-    const retriedAfterApproval = runAgentCli([
+    const retriedAfterApproval = await runAgentCliAsync([
       "retry-callback",
       "--state",
       retryAfterApprovalStatePath
@@ -1561,7 +1561,7 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
     assignTerminalDispatchOwner(consumedTimeoutStatePath);
     fs.writeFileSync(transcriptPath, pendingTranscript, { mode: 0o600 });
     fs.writeFileSync(screenPath, approvalScreen);
-    const consumedTimeout = runAgentCli([
+    const consumedTimeout = await runAgentCliInProcess([
       "monitor",
       "--terminal-bridge",
       "--state",
@@ -1599,7 +1599,7 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
   }
 });
 
-test("hookless Claude send is refused when no transcript boundary can be bound", () => {
+test("hookless Claude send is refused when no transcript boundary can be bound", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-anchor-required-"));
   const storeDir = path.join(tempDir, "conversations");
   const claudeHome = path.join(tempDir, ".claude-without-projects");
@@ -1630,7 +1630,7 @@ test("hookless Claude send is refused when no transcript boundary can be bound",
       cwd: workspace
     }]);
 
-    const sent = runAgentCli([
+    const sent = await runAgentCliInProcess([
       "send",
       "--conversation",
       `terminal:v2:tmux:claude:${terminalTarget}:${claudePid}`,
@@ -1699,7 +1699,7 @@ test("hookless Claude completion releases the same Session for a repeated reques
       screenPath,
       `claude-work\t0\t0\t999\tnode\t${workspace}\n`
     );
-    const task = startManagedClaudeTerminalTask({
+    const task = await startManagedClaudeTerminalTask({
       fakeBinDir,
       workspace,
       storeDir,
@@ -1836,7 +1836,7 @@ test("hookless Claude completion releases the same Session for a repeated reques
       "agent_accepted"
     );
     fs.writeFileSync(tmuxCallsPath, "");
-    const repeated = runAgentCli([
+    const repeated = await runAgentCliInProcess([
       "send",
       "--session",
       String(task.conversation.session_id),
@@ -1890,7 +1890,7 @@ test("hookless Claude completion releases the same Session for a repeated reques
   }
 });
 
-test("rejected managed Claude send leaves callback state and event log unchanged", () => {
+test("rejected managed Claude send leaves callback state and event log unchanged", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-rejected-send-"));
   const storeDir = path.join(tempDir, "conversations");
   const claudeHome = path.join(tempDir, ".claude");
@@ -1945,7 +1945,7 @@ test("rejected managed Claude send leaves callback state and event log unchanged
       JSON.stringify([claudeAgentRow(claudePid, claudeSessionId, workspace)])
     ];
 
-    const sent = runAgentCli([
+    const sent = await runAgentCliInProcess([
       "send",
       "--conversation",
       rawConversationId,
@@ -1977,7 +1977,7 @@ test("rejected managed Claude send leaves callback state and event log unchanged
       claudeSessionId,
       screen: approvalScreen
     });
-    const monitored = runAgentCli([
+    const monitored = await runAgentCliInProcess([
       "monitor",
       "--terminal-bridge",
       "--state",
@@ -2008,7 +2008,7 @@ test("rejected managed Claude send leaves callback state and event log unchanged
       .filter((event) => event.event === "message");
     fs.writeFileSync(tmuxCallsPath, "");
 
-    const rejected = runAgentCli([
+    const rejected = await runAgentCliInProcess([
       "send",
       "--session",
       conversation.session_id,

@@ -34,7 +34,7 @@ import {
   claudeTerminalStaticArgs,
   claudeAgentRow,
   codexNativeIdentityArgs,
-  runAgentCli,
+  runAgentCliInProcess,
   runAgentCliAsync,
   spawnAgentCliCaptured,
   spawnAgentCliProcess,
@@ -59,7 +59,7 @@ import {
   readJsonLines
 } from "../agent-cli-fixtures.js";
 
-test("terminal bridge monitor callbacks when the completed prompt has scrolled out of the screen excerpt", () => {
+test("terminal bridge monitor callbacks when the completed prompt has scrolled out of the screen excerpt", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-bridge-screen-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -88,7 +88,7 @@ test("terminal bridge monitor callbacks when the completed prompt has scrolled o
     );
 
     const rawConversationId = "terminal:tmux:my-work:0.0:33389";
-    const sent = runAgentCli([
+    const sent = await runAgentCliInProcess([
       "send",
       "--conversation",
       rawConversationId,
@@ -139,7 +139,7 @@ test("terminal bridge monitor callbacks when the completed prompt has scrolled o
       "  gpt-5.6-sol high · ~/github/coven"
     ].join("\n"));
 
-    const monitored = runAgentCli([
+    const monitored = await runAgentCliInProcess([
       "monitor",
       "--terminal-bridge",
       "--state",
@@ -234,7 +234,7 @@ test("terminal approval notification releases the state lock during callback del
     const testEnv = {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     };
-    const sent = runAgentCli([
+    const sent = await runAgentCliInProcess([
       "send",
       "--conversation",
       `terminal:tmux:${terminalTarget}:33389`,
@@ -365,7 +365,7 @@ test("terminal approval notification releases the state lock during callback del
   }
 });
 
-test("terminal bridge monitor callbacks for Codex approval and approve resumes waiting", () => {
+test("terminal bridge monitor callbacks for Codex approval and approve resumes waiting", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-bridge-approval-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -403,7 +403,7 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
     );
 
     const rawConversationId = "terminal:tmux:codex-work:0.1:33389";
-    const sent = runAgentCli([
+    const sent = await runAgentCliInProcess([
       "send",
       "--conversation",
       rawConversationId,
@@ -433,7 +433,7 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
     const statePath = storedPaths.statePath;
     const logPath = storedPaths.logPath;
 
-    const monitored = runAgentCli([
+    const monitored = await runAgentCliInProcess([
       "monitor",
       "--terminal-bridge",
       "--state",
@@ -547,7 +547,7 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
       body: recoveryMessage.body,
       message: recoveryMessage
     })}\n`, { mode: 0o600 });
-    const recoveredNotification = runAgentCli([
+    const recoveredNotification = await runAgentCliInProcess([
       "monitor",
       "--terminal-bridge",
       "--state",
@@ -634,7 +634,7 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
       path.dirname(markerOnlyRecoveryStatePath),
       "events.ndjson"
     );
-    const markerOnlyRecovered = runAgentCli([
+    const markerOnlyRecovered = await runAgentCliInProcess([
       "monitor",
       "--terminal-bridge",
       "--state",
@@ -732,7 +732,7 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
       path.dirname(staleOutboxRecoveryStatePath),
       "events.ndjson"
     );
-    const staleOutboxRecovered = runAgentCli([
+    const staleOutboxRecovered = await runAgentCliInProcess([
       "monitor",
       "--terminal-bridge",
       "--state",
@@ -861,7 +861,7 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
       body: olderSameBodyMessage.body,
       message: olderSameBodyMessage
     })}\n`, { mode: 0o600 });
-    const exhaustedOutboxRecovered = runAgentCli([
+    const exhaustedOutboxRecovered = await runAgentCliInProcess([
       "monitor",
       "--terminal-bridge",
       "--state",
@@ -984,7 +984,7 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
     })}\n`, { mode: 0o600 });
     const openclawCallCountBeforeConflict =
       readJsonLines(openclawCallsPath).length;
-    const conflictingRecovery = runAgentCli([
+    const conflictingRecovery = await runAgentCliInProcess([
       "monitor",
       "--terminal-bridge",
       "--state",
@@ -1029,7 +1029,7 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
     );
 
     fs.writeFileSync(screenPath, approvalScreen.replace("$ npm install", "$ npm install left-pad"));
-    const persistedFingerprintMismatch = runAgentCli([
+    const persistedFingerprintMismatch = await runAgentCliInProcess([
       "approve",
       "--state",
       statePath,
@@ -1050,7 +1050,7 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
     );
     fs.writeFileSync(screenPath, approvalScreen);
 
-    const fingerprintMismatch = runAgentCli([
+    const fingerprintMismatch = await runAgentCliInProcess([
       "approve",
       "--state",
       statePath,
@@ -1084,7 +1084,7 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
         commands: [["pwd"]]
       }]
     };
-    const executorSideRejected = runAgentCli([
+    const executorSideRejected = await runAgentCliInProcess([
       "approve",
       "--state",
       statePath,
@@ -1127,7 +1127,7 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
         commands: [["npm", "install"]]
       }]
     };
-    const approved = runAgentCli([
+    const approved = await runAgentCliInProcess([
       "approve",
       "--state",
       statePath,
@@ -1166,7 +1166,7 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
   }
 });
 
-test("terminal-controlled conversation ids use Codex pid, not tmux pane pid", () => {
+test("terminal-controlled conversation ids use Codex pid, not tmux pane pid", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-pid-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -1186,7 +1186,7 @@ test("terminal-controlled conversation ids use Codex pid, not tmux pane pid", ()
     );
 
     const conversationId = "terminal:tmux:codex-work:0.0:33389";
-    const sent = runAgentCli([
+    const sent = await runAgentCliInProcess([
       "send",
       "--conversation",
       conversationId,
@@ -1231,7 +1231,7 @@ test("terminal-controlled conversation ids use Codex pid, not tmux pane pid", ()
   }
 });
 
-test("status includes terminal-controlled Codex context from rollout history", () => {
+test("status includes terminal-controlled Codex context from rollout history", async () => {
   const rollout = [
     JSON.stringify({
       timestamp: "2026-07-04T00:00:00.000Z",
@@ -1259,7 +1259,7 @@ test("status includes terminal-controlled Codex context from rollout history", (
     })
   ].join("\n");
 
-  const status = runAgentCli([
+  const status = await runAgentCliInProcess([
     "status",
     "--conversation",
     "terminal:tmux:codex-work:0.0:33389",
@@ -1291,7 +1291,7 @@ test("status includes terminal-controlled Codex context from rollout history", (
   assert.deepEqual(parsed.limitations, []);
 });
 
-test("status context prefers Codex title over injected environment context", () => {
+test("status context prefers Codex title over injected environment context", async () => {
   const rollout = [
     JSON.stringify({
       timestamp: "2026-07-04T00:00:00.000Z",
@@ -1311,7 +1311,7 @@ test("status context prefers Codex title over injected environment context", () 
     })
   ].join("\n");
 
-  const status = runAgentCli([
+  const status = await runAgentCliInProcess([
     "status",
     "--conversation",
     "terminal:tmux:codex-work:0.0:33389",

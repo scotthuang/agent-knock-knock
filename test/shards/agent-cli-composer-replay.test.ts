@@ -38,7 +38,7 @@ import {
   claudeTerminalStaticArgs,
   claudeAgentRow,
   codexNativeIdentityArgs,
-  runAgentCli,
+  runAgentCliInProcess,
   runAgentCliAsync,
   spawnAgentCliCaptured,
   spawnAgentCliProcess,
@@ -187,7 +187,7 @@ test("CLI reports a multilingual multiline draft left in Codex after one Enter",
       parsed.conversation.conversation_id,
       runtimeDir
     );
-    const closed = runAgentCli([
+    const closed = await runAgentCliInProcess([
       "close",
       "--state",
       parsed.conversation.state_path,
@@ -209,7 +209,7 @@ test("CLI reports a multilingual multiline draft left in Codex after one Enter",
   }
 });
 
-test("CLI accepts a visually wrapped Codex multiline composer with exactly one Enter", () => {
+test("CLI accepts a visually wrapped Codex multiline composer with exactly one Enter", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-wrapped-composer-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -247,7 +247,7 @@ test("CLI accepts a visually wrapped Codex multiline composer with exactly one E
       screenPath,
       `${tmuxSession}\t0\t1\t${pid}\tnode\t${workspace}\n`
     );
-    const result = runAgentCli([
+    const result = await runAgentCliInProcess([
       "send",
       "--conversation",
       `terminal:tmux:${target}:${pid}`,
@@ -302,7 +302,7 @@ test("CLI accepts a visually wrapped Codex multiline composer with exactly one E
   }
 });
 
-test("modern Claude send requires a session id and process-incarnation timestamp", () => {
+test("modern Claude send requires a session id and process-incarnation timestamp", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-incarnation-"));
   const storeDir = path.join(tempDir, "conversations");
   const workspace = path.join(tempDir, "workspace");
@@ -312,7 +312,7 @@ test("modern Claude send requires a session id and process-incarnation timestamp
   const rawTerminalId = `terminal:v2:tmux:claude:${target}:${pid}`;
   try {
     fs.mkdirSync(workspace, { recursive: true });
-    const sent = runAgentCli([
+    const sent = await runAgentCliInProcess([
       "send",
       "--conversation",
       rawTerminalId,
@@ -488,7 +488,7 @@ test("raw background send durably prepares its terminal submission before tmux a
   }
 });
 
-test("an orphaned prepared submission becomes uncertain without terminal attribution", () => {
+test("an orphaned prepared submission becomes uncertain without terminal attribution", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-submit-orphan-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -517,7 +517,7 @@ test("an orphaned prepared submission becomes uncertain without terminal attribu
       `codex-orphan\t0\t1\t33389\tnode\t${workspace}\n`
     );
 
-    const sent = runAgentCli([
+    const sent = await runAgentCliInProcess([
       "send",
       "--conversation",
       `terminal:tmux:${terminalTarget}:33389`,
@@ -602,7 +602,7 @@ test("an orphaned prepared submission becomes uncertain without terminal attribu
       "› "
     ].join("\n"));
 
-    const monitored = runAgentCli([
+    const monitored = await runAgentCliInProcess([
       "monitor",
       "--terminal-bridge",
       "--state",
@@ -647,7 +647,7 @@ test("an orphaned prepared submission becomes uncertain without terminal attribu
       .filter((call) =>
         call.args[0] === "send-keys" && call.args.at(-1) === "C-m"
       ).length;
-    const conflictingSend = runAgentCli([
+    const conflictingSend = await runAgentCliInProcess([
       "send",
       "--conversation",
       `terminal:tmux:${terminalTarget}:33389`,
@@ -800,7 +800,7 @@ test("a released Turn replays one stable dispatch while a new id starts a new Tu
       .length;
     assert.equal(entersBeforeAcceptedReplay, 1);
 
-    const acceptedReplay = runAgentCli(args, testEnv);
+    const acceptedReplay = await runAgentCliInProcess(args, testEnv);
     assert.equal(
       acceptedReplay.status,
       0,
@@ -880,7 +880,7 @@ test("a released Turn replays one stable dispatch while a new id starts a new Tu
       `${JSON.stringify(transportOnlyLedger, null, 2)}\n`
     );
 
-    const transportOnlyReplay = runAgentCli(args, testEnv);
+    const transportOnlyReplay = await runAgentCliInProcess(args, testEnv);
     assert.equal(
       transportOnlyReplay.status,
       0,
@@ -914,7 +914,7 @@ test("a released Turn replays one stable dispatch while a new id starts a new Tu
         updated_at: legacyClosedAt
       }, null, 2)}\n`
     );
-    const releasedLegacyReplay = runAgentCli(args, testEnv);
+    const releasedLegacyReplay = await runAgentCliInProcess(args, testEnv);
     assert.equal(
       releasedLegacyReplay.status,
       0,
@@ -950,7 +950,7 @@ test("a released Turn replays one stable dispatch while a new id starts a new Tu
       "",
       "› Steer the current task"
     ].join("\n");
-    const recovered = runAgentCli([
+    const recovered = await runAgentCliInProcess([
       "monitor",
       "--terminal-bridge",
       "--state",
@@ -1022,7 +1022,7 @@ test("a released Turn replays one stable dispatch while a new id starts a new Tu
       }, null, 2)}\n`,
       { mode: 0o600 }
     );
-    const closedReplay = runAgentCli(args, testEnv);
+    const closedReplay = await runAgentCliInProcess(args, testEnv);
     assert.equal(
       closedReplay.status,
       0,
@@ -1047,7 +1047,7 @@ test("a released Turn replays one stable dispatch while a new id starts a new Tu
     const conflictingArgs = [...args];
     conflictingArgs[conflictingArgs.indexOf("--message") + 1] =
       "Reuse the same key for different input";
-    const conflictingReplay = runAgentCli(conflictingArgs, testEnv);
+    const conflictingReplay = await runAgentCliInProcess(conflictingArgs, testEnv);
     assert.notEqual(conflictingReplay.status, 0);
     assert.match(
       conflictingReplay.stderr,
@@ -1063,7 +1063,7 @@ test("a released Turn replays one stable dispatch while a new id starts a new Tu
     const retryArgs = [...args];
     retryArgs[retryArgs.indexOf("--message-id") + 1] =
       `msg-openclaw-${"b".repeat(64)}`;
-    const retried = runAgentCli(retryArgs, testEnv);
+    const retried = await runAgentCliInProcess(retryArgs, testEnv);
     assert.equal(retried.status, 0, retried.stderr || retried.stdout);
     const retriedParsed = JSON.parse(retried.stdout);
     assert.equal(
@@ -1100,7 +1100,7 @@ test("a released Turn replays one stable dispatch while a new id starts a new Tu
     historicalCrossStoreArgs[
       historicalCrossStoreArgs.indexOf("--store-dir") + 1
     ] = path.join(tempDir, "other-conversations");
-    const historicalCrossStore = runAgentCli(
+    const historicalCrossStore = await runAgentCliInProcess(
       historicalCrossStoreArgs,
       testEnv
     );
@@ -1138,7 +1138,7 @@ test("a released Turn replays one stable dispatch while a new id starts a new Tu
       { mode: 0o600 }
     );
     fs.renameSync(statePath, `${statePath}.orphaned`);
-    const orphanedReplay = runAgentCli(args, testEnv);
+    const orphanedReplay = await runAgentCliInProcess(args, testEnv);
     assert.notEqual(orphanedReplay.status, 0);
     assert.match(
       orphanedReplay.stderr,
@@ -1163,7 +1163,7 @@ test("a released Turn replays one stable dispatch while a new id starts a new Tu
   }
 });
 
-test("default delegate retries route to the original active receipt before idle discovery", () => {
+test("default delegate retries route to the original active receipt before idle discovery", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-delegate-replay-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -1212,7 +1212,7 @@ test("default delegate retries route to the original active receipt before idle 
     const testEnv = {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     };
-    const first = runAgentCli(args, testEnv);
+    const first = await runAgentCliInProcess(args, testEnv);
     assert.equal(first.status, 0, first.stderr || first.stdout);
     const firstParsed = JSON.parse(first.stdout);
     assert.equal(firstParsed.delivered, true);
@@ -1225,7 +1225,7 @@ test("default delegate retries route to the original active receipt before idle 
     );
 
     fs.writeFileSync(screenPath, "Working on the delegated request\n");
-    const replay = runAgentCli(args, testEnv);
+    const replay = await runAgentCliInProcess(args, testEnv);
     assert.equal(replay.status, 0, replay.stderr || replay.stdout);
     const replayParsed = JSON.parse(replay.stdout);
     assert.equal(replayParsed.replayed, true);

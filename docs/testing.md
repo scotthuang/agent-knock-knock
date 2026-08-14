@@ -340,6 +340,37 @@ machine-readable `terminal-composer-in-process` witness records the imported
 command invariant, while raw/managed send, receipt-fence, crash, lock,
 acceptance, and terminal-input executable witnesses remain process-backed.
 
+## #126 shared agent CLI in-process migration
+
+The seventh migration slice removes the synchronous outer-Node
+`runAgentCli` wrapper from `test/agent-cli-fixtures.ts`. All 197 former call
+sites are classified by behavior. Normal deterministic commands now await the
+shared `runAgentCliInProcess` path, which still executes the production
+`parseCliCommand` to `executeCliCommand` boundary. Across parameterized tests
+and shared fixture calls, 214 of the former 233 dynamic outer CLI starts move
+in process. The remaining 19 dynamic starts use `runAgentCliAsync` because the
+asserted behavior requires an independently dying PID, exit 86, a live monitor
+or handoff singleton, cross-process lock competition, or a detached
+monitor/retry child whose PID is observed.
+
+The shared runner scopes environment, cwd, caller PID, wall and monotonic
+clocks, and sleeps to one imported command. CLI JSON fixtures continue to
+select the production static terminal, process, Codex-session, Claude-agent,
+and version adapters. A command that instead supplies a fake `PATH` receives
+the production `TmuxTerminalControlProvider`, `SystemTerminalProcessSource`,
+and `CodexStoreAdapter` with one command-scoped runner. Fake `tmux`, `ps`,
+`lsof`, and `claude` executables therefore remain real adapter subprocesses;
+their single visible `spawnSync` call site is classified as
+`other_process_or_adapter`, not hidden or counted as an imported CLI.
+
+The 70 affected shard test declarations, the one parameterized native-
+inspection declaration, and all 1,223 assertion call sites remain.
+The static metric becomes 28 included sites (`cli_process` 18 plus the
+unchanged 10 fake-Node sites), a 41.67% reduction from the frozen 48-site
+baseline. The adapter runner raises the diagnostic-only
+`other_process_or_adapter` count from 11 to 12 while deleting the synchronous
+CLI startup site. No production source changes are part of this slice.
+
 ## #108 performance record
 
 The pre-refactor maintainer baseline was 48 files / 683 tests / about 573

@@ -34,7 +34,7 @@ import {
   claudeTerminalStaticArgs,
   claudeAgentRow,
   codexNativeIdentityArgs,
-  runAgentCli,
+  runAgentCliInProcess,
   runAgentCliAsync,
   spawnAgentCliCaptured,
   spawnAgentCliProcess,
@@ -59,7 +59,7 @@ import {
   readJsonLines
 } from "../agent-cli-fixtures.js";
 
-test("terminal receipt fingerprints preserve exact whitespace", () => {
+test("terminal receipt fingerprints preserve exact whitespace", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-exact-receipt-"));
   const firstStoreDir = path.join(tempDir, "first-conversations");
   const secondStoreDir = path.join(tempDir, "second-conversations");
@@ -95,7 +95,7 @@ test("terminal receipt fingerprints preserve exact whitespace", () => {
       storeDir: string,
       nativeSessionId: string,
       processUuid: string
-    ) => runAgentCli([
+    ) => runAgentCliInProcess([
       "send",
       "--conversation",
       rawConversationId,
@@ -115,7 +115,7 @@ test("terminal receipt fingerprints preserve exact whitespace", () => {
       "--disable-terminal-bridge-monitor"
     ], testEnv);
 
-    const first = send(
+    const first = await send(
       "Review:\n  alpha",
       firstStoreDir,
       "55555555-5555-4555-8555-555555555555",
@@ -139,7 +139,7 @@ test("terminal receipt fingerprints preserve exact whitespace", () => {
     );
     fs.writeFileSync(screenPath, "› \n");
 
-    const second = send(
+    const second = await send(
       "Review: alpha",
       secondStoreDir,
       "66666666-6666-4666-8666-666666666666",
@@ -160,7 +160,7 @@ test("terminal receipt fingerprints preserve exact whitespace", () => {
   }
 });
 
-test("a recreated tmux pane does not replay the prior incarnation receipt", () => {
+test("a recreated tmux pane does not replay the prior incarnation receipt", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-pane-incarnation-"));
   const firstStoreDir = path.join(tempDir, "first-conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -187,7 +187,7 @@ test("a recreated tmux pane does not replay the prior incarnation receipt", () =
     const send = (
       panePid: number,
       storeDir: string
-    ) => runAgentCli([
+    ) => runAgentCliInProcess([
       "send",
       "--conversation",
       `terminal:tmux:${terminalTarget}:${panePid}`,
@@ -210,10 +210,10 @@ test("a recreated tmux pane does not replay the prior incarnation receipt", () =
       screenPath,
       `${tmuxSession}\t0\t1\t33389\tnode\t${workspace}\n`
     );
-    const first = send(33389, firstStoreDir);
+    const first = await send(33389, firstStoreDir);
     assert.equal(first.status, 0, first.stderr || first.stdout);
     const firstParsed = JSON.parse(first.stdout);
-    const closed = runAgentCli([
+    const closed = await runAgentCliInProcess([
       "close",
       "--turn",
       firstParsed.turn_id,
@@ -232,7 +232,7 @@ test("a recreated tmux pane does not replay the prior incarnation receipt", () =
       screenPath,
       `${tmuxSession}\t0\t1\t44489\tnode\t${workspace}\n`
     );
-    const second = send(44489, firstStoreDir);
+    const second = await send(44489, firstStoreDir);
     assert.notEqual(second.status, 0);
     assert.match(
       second.stderr,
@@ -252,7 +252,7 @@ test("a recreated tmux pane does not replay the prior incarnation receipt", () =
   }
 });
 
-test("an identical stable dispatch id cannot replay across Store authority", () => {
+test("an identical stable dispatch id cannot replay across Store authority", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-cross-store-replay-"));
   const firstStoreDir = path.join(tempDir, "first-conversations");
   const secondStoreDir = path.join(tempDir, "second-conversations");
@@ -278,7 +278,7 @@ test("an identical stable dispatch id cannot replay across Store authority", () 
     const testEnv = {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     };
-    const send = (storeDir: string) => runAgentCli([
+    const send = (storeDir: string) => runAgentCliInProcess([
       "send",
       "--conversation",
       rawConversationId,
@@ -294,14 +294,14 @@ test("an identical stable dispatch id cannot replay across Store authority", () 
       "--disable-terminal-bridge-monitor"
     ], testEnv);
 
-    const first = send(firstStoreDir);
+    const first = await send(firstStoreDir);
     assert.equal(first.status, 0, first.stderr || first.stdout);
     const entersBefore = readJsonLines(tmuxCallsPath)
       .filter((call) => call.args[0] === "send-keys" && call.args.at(-1) === "C-m")
       .length;
     assert.equal(entersBefore, 1);
 
-    const crossStore = send(secondStoreDir);
+    const crossStore = await send(secondStoreDir);
     assert.notEqual(crossStore.status, 0);
     assert.match(
       crossStore.stderr,
@@ -319,7 +319,7 @@ test("an identical stable dispatch id cannot replay across Store authority", () 
   }
 });
 
-test("an orphaned prepared ledger without owner state is safely abandoned", () => {
+test("an orphaned prepared ledger without owner state is safely abandoned", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-orphan-ledger-"));
   const firstStoreDir = path.join(tempDir, "first-conversations");
   const secondStoreDir = path.join(tempDir, "second-conversations");
@@ -349,7 +349,7 @@ test("an orphaned prepared ledger without owner state is safely abandoned", () =
       storeDir: string,
       nativeSessionId: string,
       processUuid: string
-    ) => runAgentCli([
+    ) => runAgentCliInProcess([
       "send",
       "--conversation",
       rawConversationId,
@@ -369,7 +369,7 @@ test("an orphaned prepared ledger without owner state is safely abandoned", () =
       "--disable-terminal-bridge-monitor"
     ], testEnv);
 
-    const first = send(
+    const first = await send(
       "First task",
       firstStoreDir,
       "11111111-1111-4111-8111-111111111111",
@@ -393,7 +393,7 @@ test("an orphaned prepared ledger without owner state is safely abandoned", () =
     );
     fs.rmSync(firstParsed.conversation.state_path, { force: true });
 
-    const second = send(
+    const second = await send(
       "Second task",
       secondStoreDir,
       "22222222-2222-4222-8222-222222222222",
@@ -414,7 +414,7 @@ test("an orphaned prepared ledger without owner state is safely abandoned", () =
   }
 });
 
-test("stale managed approve and cancel cannot control a newer cross-store generation", () => {
+test("stale managed approve and cancel cannot control a newer cross-store generation", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-stale-control-"));
   const firstStoreDir = path.join(tempDir, "first-conversations");
   const secondStoreDir = path.join(tempDir, "second-conversations");
@@ -444,7 +444,7 @@ test("stale managed approve and cancel cannot control a newer cross-store genera
       storeDir: string,
       nativeSessionId: string,
       processUuid: string
-    ) => runAgentCli([
+    ) => runAgentCliInProcess([
       "send",
       "--conversation",
       rawConversationId,
@@ -464,7 +464,7 @@ test("stale managed approve and cancel cannot control a newer cross-store genera
       "--disable-terminal-bridge-monitor"
     ], testEnv);
 
-    const first = send(
+    const first = await send(
       "First task",
       firstStoreDir,
       "33333333-3333-4333-8333-333333333333",
@@ -487,7 +487,7 @@ test("stale managed approve and cancel cannot control a newer cross-store genera
       }, null, 2)}\n`
     );
 
-    const second = send(
+    const second = await send(
       "Second task",
       secondStoreDir,
       "44444444-4444-4444-8444-444444444444",
@@ -513,7 +513,7 @@ test("stale managed approve and cancel cannot control a newer cross-store genera
       .filter((call) => call.args[0] === "send-keys")
       .length;
 
-    const approved = runAgentCli([
+    const approved = await runAgentCliInProcess([
       "approve",
       "--conversation",
       firstParsed.conversation.conversation_id,
@@ -526,7 +526,7 @@ test("stale managed approve and cancel cannot control a newer cross-store genera
       /Session binding generation is no longer current|does not own the current terminal dispatch generation/u
     );
 
-    const cancelled = runAgentCli([
+    const cancelled = await runAgentCliInProcess([
       "cancel",
       "--conversation",
       firstParsed.conversation.conversation_id,

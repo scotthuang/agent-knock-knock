@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   claudeAgentRow,
-  runAgentCli
+  runAgentCliInProcess
 } from "./agent-cli-fixtures.js";
 import {
   legacyManagedSessionBindingToken,
@@ -24,7 +24,7 @@ import { ensureStoreWritable, listConversations } from "../src/store.js";
 import type { TerminalControlRef } from "../src/terminal-agent-adapter.js";
 
 for (const claudeVersion of ["2.1.218", "2.1.226"] as const) {
-  test(`Claude ${claudeVersion} native status inspection is snapshot-bound, modal-safe, and Store immutable`, () => {
+  test(`Claude ${claudeVersion} native status inspection is snapshot-bound, modal-safe, and Store immutable`, async () => {
   const tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-claude-native-inspect-")
   );
@@ -139,7 +139,7 @@ for (const claudeVersion of ["2.1.218", "2.1.226"] as const) {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     };
 
-    const listed = runAgentCli(["list", "--all", ...commonArgs], environment);
+    const listed = await runAgentCliInProcess(["list", "--all", ...commonArgs], environment);
     assert.equal(listed.status, 0, listed.stderr || listed.stdout);
     const row = JSON.parse(listed.stdout).terminals.find(
       (entry: Record<string, unknown>) => entry.id === terminalId
@@ -172,7 +172,7 @@ for (const claudeVersion of ["2.1.218", "2.1.226"] as const) {
       ...runtimeArgs
     ];
 
-    const stale = runAgentCli(
+    const stale = await runAgentCliInProcess(
       nativeInspectArgs("stale-binding-token"),
       environment
     );
@@ -197,7 +197,7 @@ for (const claudeVersion of ["2.1.218", "2.1.226"] as const) {
       ]
     ] as const) {
       fs.writeFileSync(screenPath, unsafeScreen);
-      const rejected = runAgentCli(
+      const rejected = await runAgentCliInProcess(
         nativeInspectArgs(expectedBindingToken),
         environment
       );
@@ -211,7 +211,7 @@ for (const claudeVersion of ["2.1.218", "2.1.226"] as const) {
         : argument
     );
     fs.writeFileSync(screenPath, initialScreen);
-    const unsupported = runAgentCli(
+    const unsupported = await runAgentCliInProcess(
       ["list", "--all", ...unsupportedArgs],
       environment
     );
@@ -222,7 +222,7 @@ for (const claudeVersion of ["2.1.218", "2.1.226"] as const) {
     assert.equal(unsupportedRow.native_inspection.status, "unsupported");
     assert.equal(unsupportedRow.available_actions.native_inspect, undefined);
 
-    const ambiguousIdentity = runAgentCli(
+    const ambiguousIdentity = await runAgentCliInProcess(
       nativeInspectArgs(expectedBindingToken),
       {
         ...environment,
@@ -238,7 +238,7 @@ for (const claudeVersion of ["2.1.218", "2.1.226"] as const) {
       /agents identity, cwd, or idle state changed/u
     );
 
-    const activeElsewhere = runAgentCli(
+    const activeElsewhere = await runAgentCliInProcess(
       nativeInspectArgs(expectedBindingToken),
       {
         ...environment,
@@ -252,7 +252,7 @@ for (const claudeVersion of ["2.1.218", "2.1.226"] as const) {
     assert.match(activeElsewhere.stderr, /already active in another claude process/u);
     assert.deepEqual(terminalInputCalls(callsPath), []);
 
-    const inspected = runAgentCli(nativeInspectArgs(legacyBindingToken), {
+    const inspected = await runAgentCliInProcess(nativeInspectArgs(legacyBindingToken), {
       ...environment,
       AKK_TEST_TMUX_COMPOSER_AFTER_LITERAL: composerScreen,
       AKK_TEST_TMUX_COMPOSER_AFTER_ENTER: panelScreen,
