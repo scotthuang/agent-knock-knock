@@ -3,11 +3,15 @@ import test from "node:test";
 
 import {
   constructTerminalDispatchLedgerDocument,
+  constructTerminalOrdinaryDispatchLedger,
   decodeTerminalDispatchLedgerDocument,
   mergeTerminalDispatchReceipt,
   terminalDispatchLedgerLooksLifecycle,
   terminalDispatchReceiptCandidate,
-  terminalDispatchReceiptHistory
+  terminalDispatchReceiptHistory,
+  type TerminalOrdinaryDispatchIdentityFields,
+  type TerminalOrdinaryDispatchPhaseFields,
+  type TerminalOrdinaryDispatchPostCallbackFields
 } from "../src/terminal-dispatch-ledger-codec.js";
 import {
   terminalControlEvidence,
@@ -443,6 +447,164 @@ test("safe zero-input abort permits only a chronologically valid retry generatio
     assert.throws(
       () => mergeTerminalDispatchReceipt(previous, invalidRetry),
       /changed immutable binding_id/u
+    );
+  }
+});
+
+test("ordinary dispatch writes preserve every phase key and JSON byte", () => {
+  const bindingFields = {
+    binding_id: "binding-1",
+    binding_generation: 2,
+    native_thread_id: "thread-1",
+    executor_kind: "codex"
+  };
+  const acceptanceEvidence = {
+    source: "codex_rollout" as const,
+    kind: "native_user_turn" as const,
+    nativeThreadId: "thread-1",
+    requestHash: "request-hash",
+    acceptanceId: "acceptance-1",
+    anchorFingerprint: "anchor",
+    evidenceFingerprint: "evidence"
+  };
+  type WriteCase = {
+    name: string;
+    status: TerminalOrdinaryDispatchIdentityFields["status"];
+    phaseFields?: TerminalOrdinaryDispatchPhaseFields;
+    dispatcherPid?: number | null;
+    callbackExpected?: boolean;
+    postCallbackFields?: TerminalOrdinaryDispatchPostCallbackFields;
+  };
+  const identity = (status: WriteCase["status"]):
+    TerminalOrdinaryDispatchIdentityFields => ({
+    status,
+    generation_id: "message-1",
+    conversation_id: "conversation-1",
+    session_id: "session-1",
+    turn_id: "turn-1",
+    message_id: "message-1",
+    message_type: "task" as const,
+    request_hash: "request-hash",
+    prepared_at: "2026-08-14T00:00:01.000Z"
+  });
+  const write = ({
+    status,
+    phaseFields = {},
+    dispatcherPid = 99,
+    callbackExpected = true,
+    postCallbackFields = {}
+  }: WriteCase) => constructTerminalOrdinaryDispatchLedger({
+    bindingFields,
+    identityFields: identity(status),
+    phaseFields,
+    dispatcherPid,
+    statePath: "/store/conversations/turn-1/state.json",
+    eventLogPath: "/store/conversations/turn-1/events.ndjson",
+    callbackExpected,
+    postCallbackFields,
+    previousGenerationId: "message-0"
+  });
+  const expected = ({
+    status,
+    phaseFields = {},
+    dispatcherPid = 99,
+    callbackExpected = true,
+    postCallbackFields = {}
+  }: WriteCase) => ({
+    ...bindingFields,
+    ...identity(status),
+    ...phaseFields,
+    dispatcher_pid: dispatcherPid,
+    state_path: "/store/conversations/turn-1/state.json",
+    event_log_path: "/store/conversations/turn-1/events.ndjson",
+    callback_expected: callbackExpected,
+    ...postCallbackFields,
+    previous_generation_id: "message-0"
+  });
+  const textInjected = "2026-08-14T00:00:02.000Z";
+  const enterDispatched = "2026-08-14T00:00:03.000Z";
+  const uncertainAt = "2026-08-14T00:00:04.000Z";
+  const error = { length: 9, preview: "transport" };
+  const cases: WriteCase[] = [
+    { name: "prepared", status: "prepared" },
+    {
+      name: "text injected",
+      status: "text_injected",
+      phaseFields: { text_injected_at: textInjected }
+    },
+    {
+      name: "enter dispatched",
+      status: "enter_dispatched",
+      phaseFields: {
+        text_injected_at: textInjected,
+        enter_dispatched_at: enterDispatched
+      }
+    },
+    {
+      name: "agent accepted",
+      status: "agent_accepted",
+      phaseFields: {
+        text_injected_at: textInjected,
+        enter_dispatched_at: enterDispatched,
+        agent_accepted_at: uncertainAt,
+        acceptance_evidence: acceptanceEvidence
+      },
+      dispatcherPid: null
+    },
+    {
+      name: "not accepted",
+      status: "not_accepted",
+      phaseFields: {
+        text_injected_at: textInjected,
+        enter_dispatched_at: enterDispatched,
+        not_accepted_at: uncertainAt
+      },
+      dispatcherPid: null
+    },
+    {
+      name: "acceptance uncertain",
+      status: "uncertain",
+      phaseFields: {
+        text_injected_at: textInjected,
+        enter_dispatched_at: enterDispatched,
+        uncertain_at: uncertainAt,
+        error
+      },
+      dispatcherPid: null
+    },
+    {
+      name: "binding uncertain",
+      status: "uncertain",
+      phaseFields: {
+        text_injected_at: textInjected,
+        enter_dispatched_at: enterDispatched,
+        uncertain_at: uncertainAt
+      },
+      callbackExpected: false,
+      postCallbackFields: {
+        native_identity_status: "unresolved_after_submit",
+        error
+      }
+    },
+    {
+      name: "transport uncertain",
+      status: "uncertain",
+      phaseFields: {
+        text_injected_at: textInjected,
+        enter_dispatched_at: enterDispatched,
+        uncertain_at: uncertainAt
+      },
+      postCallbackFields: { error }
+    }
+  ];
+  for (const current of cases) {
+    const actual = write(current);
+    const exact = expected(current);
+    assert.deepEqual(Object.keys(actual), Object.keys(exact), current.name);
+    assert.equal(
+      `${JSON.stringify(actual, null, 2)}\n`,
+      `${JSON.stringify(exact, null, 2)}\n`,
+      current.name
     );
   }
 });
