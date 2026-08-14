@@ -33,7 +33,7 @@ import {
   claudeTerminalStaticArgs,
   claudeAgentRow,
   codexNativeIdentityArgs,
-  runAgentCli,
+  runAgentCliInProcess,
   runAgentCliAsync,
   spawnAgentCliCaptured,
   spawnAgentCliProcess,
@@ -58,7 +58,7 @@ import {
   readJsonLines
 } from "../agent-cli-fixtures.js";
 
-test("v0.8.1 terminal state without native identity metadata remains bound to its live pane", () => {
+test("v0.8.1 terminal state without native identity metadata remains bound to its live pane", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-legacy-terminal-binding-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -88,7 +88,7 @@ test("v0.8.1 terminal state without native identity metadata remains bound to it
     const testEnv = {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     };
-    const sent = runAgentCli([
+    const sent = await runAgentCliInProcess([
       "send",
       "--conversation",
       rawConversationId,
@@ -148,7 +148,7 @@ test("v0.8.1 terminal state without native identity metadata remains bound to it
       reason: "legacy compatibility fixture"
     }, null, 2)}\n`);
 
-    const listed = runAgentCli([
+    const listed = await runAgentCliInProcess([
       "list",
       "--store-dir",
       storeDir,
@@ -190,7 +190,7 @@ test("v0.8.1 terminal state without native identity metadata remains bound to it
   }
 });
 
-test("raw Claude send fails closed when agent observation fails", () => {
+test("raw Claude send fails closed when agent observation fails", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-observer-failure-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -228,7 +228,7 @@ process.exit(7);
       "utf8"
     );
     fs.chmodSync(fakeClaude, 0o755);
-    const sent = runAgentCli([
+    const sent = await runAgentCliInProcess([
       "send",
       "--conversation",
       `terminal:v2:tmux:claude:${terminalTarget}:${claudePid}`,
@@ -255,7 +255,7 @@ process.exit(7);
   }
 });
 
-test("follow-current sends create distinct successor turns and respond stays on its exact turn", () => {
+test("follow-current sends create distinct successor turns and respond stays on its exact turn", async () => {
   const tempDir = fs.mkdtempSync(
     path.join(fs.realpathSync(os.tmpdir()), "akk-session-turn-send-")
   );
@@ -362,7 +362,7 @@ if (args.includes("cwd")) {
     });
     const commonArgs = [...baseCommonArgs];
 
-    const first = runAgentCli([
+    const first = await runAgentCliInProcess([
       "send",
       "--conversation",
       rawTerminalId,
@@ -427,7 +427,7 @@ if (args.includes("cwd")) {
       updated_at: new Date().toISOString()
     };
     fs.writeFileSync(firstStatePath, `${JSON.stringify(firstIdle, null, 2)}\n`);
-    const firstClosed = runAgentCli([
+    const firstClosed = await runAgentCliInProcess([
       "close",
       "--state",
       firstStatePath,
@@ -450,7 +450,7 @@ if (args.includes("cwd")) {
     const keysBeforeWrongType = readJsonLines(tmuxCallsPath).filter(
       (call) => call.args[0] === "send-keys"
     ).length;
-    const wrongType = runAgentCli([
+    const wrongType = await runAgentCliInProcess([
       "send",
       "--session",
       firstParsed.session_id,
@@ -469,7 +469,7 @@ if (args.includes("cwd")) {
       keysBeforeWrongType
     );
 
-    const listedForSecond = runAgentCli([
+    const listedForSecond = await runAgentCliInProcess([
       "list",
       "--store-dir",
       storeDir,
@@ -487,7 +487,7 @@ if (args.includes("cwd")) {
       typeof secondAction.arguments.expected_terminal_token,
       "string"
     );
-    const second = runAgentCli([
+    const second = await runAgentCliInProcess([
       "send",
       "--conversation",
       String(secondAction.arguments.selector),
@@ -521,7 +521,7 @@ if (args.includes("cwd")) {
     const entersBeforeRejectedTurn = readJsonLines(tmuxCallsPath).filter((call) =>
       call.args[0] === "send-keys" && call.args.at(-1) === "C-m"
     ).length;
-    const turnTargetRejected = runAgentCli([
+    const turnTargetRejected = await runAgentCliInProcess([
       "send",
       "--session",
       firstParsed.turn_id,
@@ -587,7 +587,7 @@ if (args.includes("cwd")) {
     const entersBeforeWrongOpenClawOwner = readJsonLines(tmuxCallsPath).filter(
       (call) => call.args[0] === "send-keys" && call.args.at(-1) === "C-m"
     ).length;
-    const wrongOpenClawOwner = runAgentCli([
+    const wrongOpenClawOwner = await runAgentCliInProcess([
       "respond",
       "--turn",
       secondParsed.turn_id,
@@ -620,7 +620,7 @@ if (args.includes("cwd")) {
       (call) => call.args[0] === "send-keys"
     ).length;
     for (const action of ["approve", "cancel"]) {
-      const fenced = runAgentCli([
+      const fenced = await runAgentCliInProcess([
         action,
         "--turn",
         secondParsed.turn_id,
@@ -650,7 +650,7 @@ if (args.includes("cwd")) {
       respondMessageId,
       ...commonArgs
     ];
-    const responded = runAgentCli(respondArgs, testEnv);
+    const responded = await runAgentCliInProcess(respondArgs, testEnv);
     assert.equal(responded.status, 0, responded.stderr || responded.stdout);
     const respondedParsed = JSON.parse(responded.stdout);
     assert.equal(respondedParsed.session_id, secondParsed.session_id);
@@ -687,7 +687,7 @@ if (args.includes("cwd")) {
       ).length,
       3
     );
-    const replayedResponse = runAgentCli(respondArgs, testEnv);
+    const replayedResponse = await runAgentCliInProcess(respondArgs, testEnv);
     assert.equal(
       replayedResponse.status,
       0,
@@ -723,7 +723,7 @@ if (args.includes("cwd")) {
     );
     fs.writeFileSync(screenPath, "› \n");
     const secondRespondMessageId = `msg-openclaw-${"f".repeat(64)}`;
-    const secondResponse = runAgentCli([
+    const secondResponse = await runAgentCliInProcess([
       "respond",
       "--turn",
       secondParsed.turn_id,
@@ -746,7 +746,7 @@ if (args.includes("cwd")) {
       4
     );
 
-    const oldResponseReplay = runAgentCli(respondArgs, testEnv);
+    const oldResponseReplay = await runAgentCliInProcess(respondArgs, testEnv);
     assert.equal(
       oldResponseReplay.status,
       0,
@@ -786,7 +786,7 @@ if (args.includes("cwd")) {
     const keysBeforeIncompleteIdentity = readJsonLines(tmuxCallsPath).filter(
       (call) => call.args[0] === "send-keys"
     ).length;
-    const incompleteCancel = runAgentCli([
+    const incompleteCancel = await runAgentCliInProcess([
       "cancel",
       "--turn",
       secondParsed.turn_id,
@@ -809,7 +809,7 @@ if (args.includes("cwd")) {
   }
 });
 
-test("virgin terminal send is uncertain when no exact native session can be bound", () => {
+test("virgin terminal send is uncertain when no exact native session can be bound", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-native-bind-timeout-"));
   const storeDir = path.join(tempDir, "conversations");
   const workspace = path.join(tempDir, "workspace");
@@ -827,7 +827,7 @@ test("virgin terminal send is uncertain when no exact native session can be boun
       cwd: workspace
     }]);
     const startedAt = Date.now();
-    const sent = runAgentCli([
+    const sent = await runAgentCliInProcess([
       "send",
       "--conversation",
       rawTerminalId,
@@ -904,7 +904,7 @@ test("terminal transport never becomes delivered without native acceptance evide
       conversationStatus: "stalled"
     }
   ] as const) {
-    await t.test(fixture.outcome, () => {
+    await t.test(fixture.outcome, async () => {
       const tempDir = fs.mkdtempSync(
         path.join(os.tmpdir(), `akk-terminal-acceptance-${fixture.outcome}-`)
       );
@@ -916,7 +916,7 @@ test("terminal transport never becomes delivered without native acceptance evide
         `terminal:v2:tmux:codex:${target}:${pid}`;
       try {
         fs.mkdirSync(workspace, { recursive: true });
-        const result = runAgentCli([
+        const result = await runAgentCliInProcess([
           "send",
           "--conversation",
           rawConversationId,
@@ -988,7 +988,7 @@ test("monitor keeps a durable late native ACK when later bookkeeping fails", asy
       expectedLedgerStatus: "agent_accepted"
     }
   ] as const) {
-    await t.test(fixture.name, () => {
+    await t.test(fixture.name, async () => {
       const tempDir = fs.mkdtempSync(
         path.join(os.tmpdir(), `akk-monitor-ack-${fixture.name}-`)
       );
@@ -1020,7 +1020,7 @@ test("monitor keeps a durable late native ACK when later bookkeeping fails", asy
         const testEnv = {
           PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
         };
-        const sent = runAgentCli([
+        const sent = await runAgentCliAsync([
           "send",
           "--conversation",
           `terminal:tmux:${target}:${pid}`,
@@ -1049,7 +1049,7 @@ test("monitor keeps a durable late native ACK when later bookkeeping fails", asy
           path.join(tempDir, ".akk-cli-test-runtime")
         );
 
-        const monitored = runAgentCli([
+        const monitored = await runAgentCliAsync([
           "monitor",
           "--terminal-bridge",
           "--state",

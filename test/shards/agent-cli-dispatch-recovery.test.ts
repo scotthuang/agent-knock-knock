@@ -34,7 +34,7 @@ import {
   claudeTerminalStaticArgs,
   claudeAgentRow,
   codexNativeIdentityArgs,
-  runAgentCli,
+  runAgentCliInProcess,
   runAgentCliAsync,
   spawnAgentCliCaptured,
   spawnAgentCliProcess,
@@ -59,7 +59,7 @@ import {
   readJsonLines
 } from "../agent-cli-fixtures.js";
 
-test("safe-aborted delegate retries refuse a changed Session binding", () => {
+test("safe-aborted delegate retries refuse a changed Session binding", async () => {
   const tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-delegate-safe-abort-binding-")
   );
@@ -110,7 +110,7 @@ test("safe-aborted delegate retries refuse a changed Session binding", () => {
     const testEnv = {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     };
-    const aborted = runAgentCli(args, {
+    const aborted = await runAgentCliInProcess(args, {
       ...testEnv,
       AKK_TEST_TERMINAL_SETUP_FAILURE: "1"
     });
@@ -141,7 +141,7 @@ test("safe-aborted delegate retries refuse a changed Session binding", () => {
       updated_at: new Date().toISOString()
     }, { expectedRevision: managedSession.revision ?? null });
 
-    const listed = runAgentCli([
+    const listed = await runAgentCliInProcess([
       "list",
       "--store-dir",
       storeDir,
@@ -159,7 +159,7 @@ test("safe-aborted delegate retries refuse a changed Session binding", () => {
       "a changed binding cannot advertise fresh follow-current authority"
     );
 
-    const directRetry = runAgentCli([
+    const directRetry = await runAgentCliInProcess([
       "send",
       "--session",
       abortedParsed.session_id,
@@ -179,7 +179,7 @@ test("safe-aborted delegate retries refuse a changed Session binding", () => {
       /rollout-backed managed Session.*strict session_id send[\s\S]*refresh AKK list/iu
     );
 
-    const delegateRetry = runAgentCli(args, testEnv);
+    const delegateRetry = await runAgentCliInProcess(args, testEnv);
     assert.notEqual(delegateRetry.status, 0);
     assert.match(
       delegateRetry.stderr,
@@ -197,7 +197,7 @@ test("safe-aborted delegate retries refuse a changed Session binding", () => {
   }
 });
 
-test("an orphaned terminal dispatch requires its exact listed generation before recovery", () => {
+test("an orphaned terminal dispatch requires its exact listed generation before recovery", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-orphan-recovery-"));
   const storeDir = path.join(tempDir, "conversations");
   const retryStoreDir = path.join(tempDir, "retry-conversations");
@@ -225,7 +225,7 @@ test("an orphaned terminal dispatch requires its exact listed generation before 
     const testEnv = {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     };
-    const sent = runAgentCli([
+    const sent = await runAgentCliInProcess([
       "send",
       "--conversation",
       rawConversationId,
@@ -277,7 +277,7 @@ test("an orphaned terminal dispatch requires its exact listed generation before 
       ...staticTerminalArgs
     ];
 
-    const owned = runAgentCli([
+    const owned = await runAgentCliInProcess([
       ...closeArgs,
       "--expected-message-id",
       messageId
@@ -290,7 +290,7 @@ test("an orphaned terminal dispatch requires its exact listed generation before 
     );
 
     fs.renameSync(statePath, stateBackupPath);
-    const listed = runAgentCli([
+    const listed = await runAgentCliInProcess([
       "list",
       "--store-dir",
       storeDir,
@@ -320,10 +320,10 @@ test("an orphaned terminal dispatch requires its exact listed generation before 
       `/akk close ${rawConversationId} --expected-message-id ${messageId}`
     );
 
-    const missingIdentity = runAgentCli(closeArgs, testEnv);
+    const missingIdentity = await runAgentCliInProcess(closeArgs, testEnv);
     assert.notEqual(missingIdentity.status, 0);
     assert.match(missingIdentity.stderr, /expected-message-id is required/u);
-    const wrongIdentity = runAgentCli([
+    const wrongIdentity = await runAgentCliInProcess([
       ...closeArgs,
       "--expected-message-id",
       "wrong-generation"
@@ -335,7 +335,7 @@ test("an orphaned terminal dispatch requires its exact listed generation before 
       "uncertain"
     );
 
-    const recovered = runAgentCli([
+    const recovered = await runAgentCliInProcess([
       ...closeArgs,
       "--expected-message-id",
       messageId,
@@ -352,7 +352,7 @@ test("an orphaned terminal dispatch requires its exact listed generation before 
       "resolved"
     );
 
-    const retried = runAgentCli([
+    const retried = await runAgentCliInProcess([
       "send",
       "--conversation",
       rawConversationId,
@@ -379,7 +379,7 @@ test("an orphaned terminal dispatch requires its exact listed generation before 
   }
 });
 
-test("a newer raw terminal task cannot replace an active callback boundary", () => {
+test("a newer raw terminal task cannot replace an active callback boundary", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-task-supersede-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -407,7 +407,7 @@ test("a newer raw terminal task cannot replace an active callback boundary", () 
       `codex-work\t0\t1\t33389\tnode\t${workspace}\n`
     );
 
-    const sendTask = (message: string) => runAgentCli([
+    const sendTask = (message: string) => runAgentCliInProcess([
       "send",
       "--conversation",
       rawConversationId,
@@ -432,7 +432,7 @@ test("a newer raw terminal task cannot replace an active callback boundary", () 
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     });
 
-    const first = sendTask("First task");
+    const first = await sendTask("First task");
     assert.equal(first.status, 0, first.stderr || first.stdout);
     const firstParsed = JSON.parse(first.stdout);
     const firstPaths = pathsForConversation(
@@ -442,7 +442,7 @@ test("a newer raw terminal task cannot replace an active callback boundary", () 
     const firstStatePath = firstPaths.statePath;
     const firstLogPath = firstPaths.logPath;
 
-    const second = sendTask("Second task");
+    const second = await sendTask("Second task");
     assert.notEqual(second.status, 0);
     assert.match(
       second.stderr,
@@ -473,7 +473,7 @@ test("a newer raw terminal task cannot replace an active callback boundary", () 
       "› Second task",
       "• Working (5s • esc to interrupt) · /stop to close"
     ].join("\n"));
-    const oldMonitor = runAgentCli([
+    const oldMonitor = await runAgentCliInProcess([
       "monitor",
       "--terminal-bridge",
       "--state",
@@ -561,7 +561,7 @@ test("durable completion must settle before a newer raw task can send", async ()
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     };
 
-    const first = runAgentCli([
+    const first = await runAgentCliInProcess([
       ...baseSendArgs,
       "--message",
       "First durable task"
@@ -617,7 +617,7 @@ test("durable completion must settle before a newer raw task can send", async ()
         }
       })
     ].join("\n");
-    const second = runAgentCli([
+    const second = await runAgentCliInProcess([
       ...baseSendArgs,
       "--message",
       "Second task",
@@ -729,7 +729,7 @@ test("durable completion must settle before a newer raw task can send", async ()
     ].join("\n");
     const ambiguousRolloutA = path.join(tempDir, "ambiguous-a.jsonl");
     const ambiguousRolloutB = path.join(tempDir, "ambiguous-b.jsonl");
-    const third = runAgentCli([
+    const third = await runAgentCliInProcess([
       ...baseSendArgs,
       "--message",
       "Third task",
@@ -791,7 +791,7 @@ test("durable completion must settle before a newer raw task can send", async ()
     assert.match(secondEvents, /terminal_bridge_reconciliation_fenced/);
     assert.doesNotMatch(secondEvents, /terminal_bridge_superseded/);
 
-    const protectedMonitor = runAgentCli([
+    const protectedMonitor = await runAgentCliInProcess([
       "monitor",
       "--terminal-bridge",
       "--state",
@@ -839,7 +839,7 @@ test("durable completion must settle before a newer raw task can send", async ()
   }
 });
 
-test("an active dispatch blocks a replacement before tmux input", () => {
+test("an active dispatch blocks a replacement before tmux input", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-task-send-failure-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -862,7 +862,7 @@ test("an active dispatch blocks a replacement before tmux input", () => {
     const listPanesOutput = `${tmuxSession}\t0\t1\t33389\tnode\t${workspace}\n`;
     writeFakeTmux(fakeBinDir, tmuxCallsPath, screenPath, listPanesOutput);
 
-    const sendTask = (message: string) => runAgentCli([
+    const sendTask = (message: string) => runAgentCliInProcess([
       "send",
       "--conversation",
       rawConversationId,
@@ -881,7 +881,7 @@ test("an active dispatch blocks a replacement before tmux input", () => {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     });
 
-    const first = sendTask("First task");
+    const first = await sendTask("First task");
     assert.equal(first.status, 0, first.stderr || first.stdout);
     const firstParsed = JSON.parse(first.stdout);
     const firstPaths = pathsForConversation(
@@ -892,7 +892,7 @@ test("an active dispatch blocks a replacement before tmux input", () => {
     const firstLogPath = firstPaths.logPath;
 
     writeFakeTmux(fakeBinDir, tmuxCallsPath, screenPath, listPanesOutput, "Second task");
-    const second = sendTask("Second task");
+    const second = await sendTask("Second task");
     assert.notEqual(second.status, 0);
     assert.match(
       second.stderr,
@@ -921,7 +921,7 @@ test("an active dispatch blocks a replacement before tmux input", () => {
   }
 });
 
-test("an uncertain dispatch does not collateral-stall a delivered idle Turn", () => {
+test("an uncertain dispatch does not collateral-stall a delivered idle Turn", async () => {
   const tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-uncertain-idle-release-")
   );
@@ -965,7 +965,7 @@ test("an uncertain dispatch does not collateral-stall a delivered idle Turn", ()
       ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ];
-    const first = runAgentCli([
+    const first = await runAgentCliInProcess([
       "send",
       "--conversation",
       `terminal:tmux:${terminalTarget}:${panePid}`,
@@ -1011,7 +1011,7 @@ test("an uncertain dispatch does not collateral-stall a delivered idle Turn", ()
       updated_at: idleAt
     }, null, 2)}\n`);
 
-    const uncertain = runAgentCli([
+    const uncertain = await runAgentCliInProcess([
       "send",
       "--conversation",
       `terminal:tmux:${terminalTarget}:${panePid}`,
@@ -1040,7 +1040,7 @@ test("an uncertain dispatch does not collateral-stall a delivered idle Turn", ()
       fs.readFileSync(firstLogPath, "utf8"),
       /terminal_bridge_stalled_by_uncertain_dispatch/u
     );
-    const supervised = runAgentCli([
+    const supervised = await runAgentCliInProcess([
       "reconcile-monitors",
       "--store-dir",
       storeDir,
@@ -1063,7 +1063,7 @@ test("an uncertain dispatch does not collateral-stall a delivered idle Turn", ()
   }
 });
 
-test("monitor supervision repairs only an exact legacy idle collateral stall and list actions match runtime blockers", () => {
+test("monitor supervision repairs only an exact legacy idle collateral stall and list actions match runtime blockers", async () => {
   const tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-collateral-stall-repair-")
   );
@@ -1097,7 +1097,7 @@ test("monitor supervision repairs only an exact legacy idle collateral stall and
       screenPath,
       `${tmuxSession}\t0\t1\t${panePid}\tnode\t${workspace}\n`
     );
-    const first = runAgentCli([
+    const first = await runAgentCliInProcess([
       "send",
       "--conversation",
       `terminal:tmux:${terminalTarget}:${panePid}`,
@@ -1341,7 +1341,7 @@ test("monitor supervision repairs only an exact legacy idle collateral stall and
         })
         .sort(([left], [right]) => left.localeCompare(right))
     });
-    const before = runAgentCli([
+    const before = await runAgentCliInProcess([
       "list",
       "--store-dir",
       storeDir,
@@ -1369,7 +1369,7 @@ test("monitor supervision repairs only an exact legacy idle collateral stall and
 
     const beforeRuntimeRejections = substantiveStoreSnapshot();
     const inputsBeforeRuntimeRejections = terminalInputCount();
-    const managedBlocked = runAgentCli([
+    const managedBlocked = await runAgentCliInProcess([
       "send",
       "--session",
       firstState.session_id,
@@ -1393,7 +1393,7 @@ test("monitor supervision repairs only an exact legacy idle collateral stall and
       "managed send must reject before terminal input"
     );
 
-    const rawBlocked = runAgentCli([
+    const rawBlocked = await runAgentCliInProcess([
       "send",
       "--conversation",
       `terminal:v2:tmux:codex:${terminalTarget}:${panePid}`,
@@ -1417,7 +1417,7 @@ test("monitor supervision repairs only an exact legacy idle collateral stall and
       "raw terminal send must reject before terminal input"
     );
 
-    const reconciled = runAgentCli([
+    const reconciled = await runAgentCliInProcess([
       "reconcile-monitors",
       "--store-dir",
       storeDir,
@@ -1462,7 +1462,7 @@ test("monitor supervision repairs only an exact legacy idle collateral stall and
       /terminal_bridge_collateral_stall_repaired/u
     );
 
-    const after = runAgentCli([
+    const after = await runAgentCliInProcess([
       "list",
       "--store-dir",
       storeDir,
@@ -1477,7 +1477,7 @@ test("monitor supervision repairs only an exact legacy idle collateral stall and
     const inputsBeforeRepairedSend = terminalInputCount();
     const repairedMessage =
       "A fresh managed task after exact collateral-stall repair.";
-    const sentAfterRepair = runAgentCli([
+    const sentAfterRepair = await runAgentCliInProcess([
       "send",
       "--conversation",
       `terminal:v2:tmux:codex:${terminalTarget}:${panePid}`,

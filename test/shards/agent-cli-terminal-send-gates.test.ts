@@ -34,7 +34,7 @@ import {
   claudeTerminalStaticArgs,
   claudeAgentRow,
   codexNativeIdentityArgs,
-  runAgentCli,
+  runAgentCliInProcess,
   runAgentCliAsync,
   spawnAgentCliCaptured,
   spawnAgentCliProcess,
@@ -59,7 +59,7 @@ import {
   readJsonLines
 } from "../agent-cli-fixtures.js";
 
-test("raw and managed Codex sends fail closed unless the locked pane is verifiably idle", () => {
+test("raw and managed Codex sends fail closed unless the locked pane is verifiably idle", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-send-idle-gate-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -90,7 +90,7 @@ test("raw and managed Codex sends fail closed unless the locked pane is verifiab
     const baseEnv = {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     };
-    const managed = runAgentCli([
+    const managed = await runAgentCliInProcess([
       "send",
       "--conversation",
       rawConversationId,
@@ -188,7 +188,7 @@ test("raw and managed Codex sends fail closed unless the locked pane is verifiab
           ...nativeIdentityArgs,
           "--disable-terminal-bridge-monitor"
         ];
-        const sent = runAgentCli(sendArgs, scenarioEnv);
+        const sent = await runAgentCliInProcess(sendArgs, scenarioEnv);
 
         assert.notEqual(
           sent.status,
@@ -208,7 +208,7 @@ test("raw and managed Codex sends fail closed unless the locked pane is verifiab
   }
 });
 
-test("raw terminal send rejects a stale agent pid without sending tmux keys", () => {
+test("raw terminal send rejects a stale agent pid without sending tmux keys", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-stale-pid-"));
   const fakeBinDir = path.join(tempDir, "bin");
   const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
@@ -232,7 +232,7 @@ test("raw terminal send rejects a stale agent pid without sending tmux keys", ()
       cwd: workspace
     }]);
 
-    const sent = runAgentCli([
+    const sent = await runAgentCliInProcess([
       "send",
       "--conversation",
       "terminal:v2:tmux:codex:codex-work:0.1:33389",
@@ -253,7 +253,7 @@ test("raw terminal send rejects a stale agent pid without sending tmux keys", ()
   }
 });
 
-test("raw terminal send uses the target pid cwd from partial lsof output", () => {
+test("raw terminal send uses the target pid cwd from partial lsof output", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-partial-lsof-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -311,7 +311,7 @@ test("raw terminal send uses the target pid cwd from partial lsof output", () =>
       ]
     });
 
-    const sent = runAgentCli([
+    const sent = await runAgentCliInProcess([
       "send",
       "--conversation",
       `terminal:v2:tmux:codex:${terminalTarget}:${targetPid}`,
@@ -356,7 +356,7 @@ test("raw terminal send uses the target pid cwd from partial lsof output", () =>
   }
 });
 
-test("raw terminal send fails closed when partial lsof output omits the target pid", () => {
+test("raw terminal send fails closed when partial lsof output omits the target pid", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-missing-lsof-cwd-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -408,7 +408,7 @@ test("raw terminal send fails closed when partial lsof output omits the target p
       ]
     });
 
-    const sent = runAgentCli([
+    const sent = await runAgentCliInProcess([
       "send",
       "--conversation",
       `terminal:v2:tmux:codex:${terminalTarget}:${targetPid}`,
@@ -441,7 +441,7 @@ test("raw terminal send fails closed when partial lsof output omits the target p
   }
 });
 
-test("approve supports terminal-controlled conversation ids without AKK state", () => {
+test("approve supports terminal-controlled conversation ids without AKK state", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-approve-"));
   const fakeBinDir = path.join(tempDir, "bin");
   const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
@@ -467,7 +467,7 @@ test("approve supports terminal-controlled conversation ids without AKK state", 
     );
 
     const conversationId = "terminal:tmux:codex-work:0.1:33389";
-    const status = runAgentCli([
+    const status = await runAgentCliInProcess([
       "status",
       "--conversation",
       conversationId
@@ -481,7 +481,7 @@ test("approve supports terminal-controlled conversation ids without AKK state", 
     assert.equal(statusParsed.terminal_status.reachable, true);
     assert.equal(statusParsed.terminal_status.approval_state.approvable, true);
 
-    const approved = runAgentCli([
+    const approved = await runAgentCliInProcess([
       "approve",
       "--conversation",
       conversationId
@@ -504,7 +504,7 @@ test("approve supports terminal-controlled conversation ids without AKK state", 
   }
 });
 
-test("raw terminal send requires managed background mode while cancel remains direct", () => {
+test("raw terminal send requires managed background mode while cancel remains direct", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-send-"));
   const fakeBinDir = path.join(tempDir, "bin");
   const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
@@ -523,7 +523,7 @@ test("raw terminal send requires managed background mode while cancel remains di
     );
 
     const conversationId = "terminal:tmux:codex-work:0.1:33389";
-    const sent = runAgentCli([
+    const sent = await runAgentCliInProcess([
       "send",
       "--conversation",
       conversationId,
@@ -540,7 +540,7 @@ test("raw terminal send requires managed background mode while cancel remains di
       false
     );
 
-    const cancelled = runAgentCli([
+    const cancelled = await runAgentCliInProcess([
       "cancel",
       "--conversation",
       conversationId
@@ -562,7 +562,7 @@ test("raw terminal send requires managed background mode while cancel remains di
   }
 });
 
-test("background send to raw terminal id creates managed callback conversation", () => {
+test("background send to raw terminal id creates managed callback conversation", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-background-send-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -594,7 +594,7 @@ test("background send to raw terminal id creates managed callback conversation",
     }]);
 
     const rawConversationId = "terminal:tmux:codex-work:0.1:33389";
-    const rejected = runAgentCli([
+    const rejected = await runAgentCliInProcess([
       "send",
       "--conversation",
       rawConversationId,
@@ -613,7 +613,7 @@ test("background send to raw terminal id creates managed callback conversation",
     assert.match(rejected.stderr, /must be a positive number/);
     assert.equal(fs.existsSync(tmuxCallsPath), false);
 
-    const sent = runAgentCli([
+    const sent = await runAgentCliInProcess([
       "send",
       "--conversation",
       rawConversationId,
@@ -705,7 +705,7 @@ test("background send to raw terminal id creates managed callback conversation",
     };
     fs.writeFileSync(statePath, `${JSON.stringify(idleState, null, 2)}\n`);
 
-    const listed = runAgentCli([
+    const listed = await runAgentCliInProcess([
       "list",
       "--reconcile",
       "--store-dir",

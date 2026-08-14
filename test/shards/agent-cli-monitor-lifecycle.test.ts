@@ -34,7 +34,7 @@ import {
   claudeTerminalStaticArgs,
   claudeAgentRow,
   codexNativeIdentityArgs,
-  runAgentCli,
+  runAgentCliInProcess,
   runAgentCliAsync,
   spawnAgentCliCaptured,
   spawnAgentCliProcess,
@@ -59,7 +59,7 @@ import {
   readJsonLines
 } from "../agent-cli-fixtures.js";
 
-test("terminal bridge monitor trusts matching task_complete despite stale working screen text", () => {
+test("terminal bridge monitor trusts matching task_complete despite stale working screen text", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-bridge-monitor-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -87,7 +87,7 @@ test("terminal bridge monitor trusts matching task_complete despite stale workin
     );
 
     const rawConversationId = "terminal:tmux:codex-work:0.1:33389";
-    const sent = runAgentCli([
+    const sent = await runAgentCliInProcess([
       "send",
       "--conversation",
       rawConversationId,
@@ -146,7 +146,7 @@ test("terminal bridge monitor trusts matching task_complete despite stale workin
       })
     ].join("\n");
 
-    const monitored = runAgentCli([
+    const monitored = await runAgentCliInProcess([
       "monitor",
       "--terminal-bridge",
       "--state",
@@ -210,7 +210,7 @@ test("terminal bridge monitor trusts matching task_complete despite stale workin
     const keysBeforeStaleActions = readJsonLines(tmuxCallsPath)
       .filter((call) => call.args[0] === "send-keys")
       .length;
-    const staleApprove = runAgentCli([
+    const staleApprove = await runAgentCliInProcess([
       "approve",
       "--conversation",
       parsed.conversation.conversation_id,
@@ -222,7 +222,7 @@ test("terminal bridge monitor trusts matching task_complete despite stale workin
     ]);
     assert.notEqual(staleApprove.status, 0);
     assert.match(staleApprove.stderr, /conversation is idle/u);
-    const staleCancel = runAgentCli([
+    const staleCancel = await runAgentCliInProcess([
       "cancel",
       "--conversation",
       parsed.conversation.conversation_id,
@@ -240,7 +240,7 @@ test("terminal bridge monitor trusts matching task_complete despite stale workin
     );
 
     fs.writeFileSync(screenPath, "› \n");
-    const followUp = runAgentCli([
+    const followUp = await runAgentCliInProcess([
       "send",
       "--conversation",
       rawConversationId,
@@ -284,7 +284,7 @@ test("terminal bridge monitor trusts matching task_complete despite stale workin
   }
 });
 
-test("terminal bridge searches all same-cwd rollouts for the matching task_complete", () => {
+test("terminal bridge searches all same-cwd rollouts for the matching task_complete", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-cwd-rollouts-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -318,7 +318,7 @@ test("terminal bridge searches all same-cwd rollouts for the matching task_compl
     );
 
     const request = "Summarize the release gate";
-    const sent = runAgentCli([
+    const sent = await runAgentCliInProcess([
       "send",
       "--conversation",
       "terminal:tmux:codex-work:0.1:33389",
@@ -396,7 +396,7 @@ test("terminal bridge searches all same-cwd rollouts for the matching task_compl
       })
     ].join("\n");
 
-    const monitored = runAgentCli([
+    const monitored = await runAgentCliInProcess([
       "monitor",
       "--terminal-bridge",
       "--state",
@@ -470,7 +470,7 @@ test("terminal bridge searches all same-cwd rollouts for the matching task_compl
   }
 });
 
-test("terminal bridge monitor rejects low-confidence assistant and task_complete for a different request", () => {
+test("terminal bridge monitor rejects low-confidence assistant and task_complete for a different request", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-bridge-progress-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -497,7 +497,7 @@ test("terminal bridge monitor rejects low-confidence assistant and task_complete
       `codex-work\t0\t1\t33389\tnode\t${workspace}\n`
     );
 
-    const sent = runAgentCli([
+    const sent = await runAgentCliInProcess([
       "send",
       "--conversation",
       "terminal:tmux:codex-work:0.1:33389",
@@ -552,7 +552,7 @@ test("terminal bridge monitor rejects low-confidence assistant and task_complete
       })
     ].join("\n");
 
-    const monitored = runAgentCli([
+    const monitored = await runAgentCliInProcess([
       "monitor",
       "--terminal-bridge",
       "--state",
@@ -605,7 +605,7 @@ test("terminal bridge monitor rejects low-confidence assistant and task_complete
   }
 });
 
-test("terminal bridge working markers extend inactivity until the hard lifetime", () => {
+test("terminal bridge working markers extend inactivity until the hard lifetime", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-bridge-activity-timeout-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -638,7 +638,7 @@ test("terminal bridge working markers extend inactivity until the hard lifetime"
       `codex-work\t0\t1\t33389\tnode\t${workspace}\n`
     );
 
-    const sent = runAgentCli([
+    const sent = await runAgentCliInProcess([
       "send",
       "--conversation",
       "terminal:tmux:codex-work:0.1:33389",
@@ -676,7 +676,7 @@ test("terminal bridge working markers extend inactivity until the hard lifetime"
     const startedAt = JSON.parse(fs.readFileSync(statePath, "utf8"))
       .native_session_takeover.terminal_bridge_started_at;
 
-    const monitored = runAgentCli([
+    const monitored = await runAgentCliInProcess([
       "monitor",
       "--terminal-bridge",
       "--state",
@@ -730,7 +730,7 @@ test("terminal bridge working markers extend inactivity until the hard lifetime"
   }
 });
 
-test("renew restarts a stalled terminal bridge without input and completion callbacks once", () => {
+test("renew restarts a stalled terminal bridge without input and completion callbacks once", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-bridge-renew-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -757,7 +757,7 @@ test("renew restarts a stalled terminal bridge without input and completion call
       `codex-work\t0\t1\t33389\tnode\t${workspace}\n`
     );
 
-    const sent = runAgentCli([
+    const sent = await runAgentCliInProcess([
       "send",
       "--conversation",
       "terminal:tmux:codex-work:0.1:33389",
@@ -797,7 +797,7 @@ test("renew restarts a stalled terminal bridge without input and completion call
       stalled_notification_message_id: "msg-stalled"
     }, null, 2)}\n`);
 
-    const missingTerminal = runAgentCli([
+    const missingTerminal = await runAgentCliInProcess([
       "renew",
       "--state",
       statePath,
@@ -813,7 +813,7 @@ test("renew restarts a stalled terminal bridge without input and completion call
 
     const sendKeyCountBeforeRenew = readJsonLines(tmuxCallsPath)
       .filter((call) => call.args[0] === "send-keys").length;
-    const renewed = runAgentCli([
+    const renewed = await runAgentCliInProcess([
       "renew",
       "--state",
       statePath,
@@ -896,7 +896,7 @@ test("renew restarts a stalled terminal bridge without input and completion call
       "--rollouts-json",
       JSON.stringify({ [rolloutPath]: rollout })
     ];
-    const monitored = runAgentCli(monitorArgs);
+    const monitored = await runAgentCliInProcess(monitorArgs);
     assert.equal(monitored.status, 0, monitored.stderr || monitored.stdout);
     const monitoredParsed = JSON.parse(monitored.stdout);
     assert.equal(monitoredParsed.delivered, true);
@@ -904,7 +904,7 @@ test("renew restarts a stalled terminal bridge without input and completion call
     assert.equal(monitoredParsed.conversation.status, "idle");
     assert.equal(typeof monitoredParsed.conversation.idle_since, "string");
 
-    const monitoredAgain = runAgentCli(monitorArgs);
+    const monitoredAgain = await runAgentCliInProcess(monitorArgs);
     assert.equal(monitoredAgain.status, 0, monitoredAgain.stderr || monitoredAgain.stdout);
     assert.equal(JSON.parse(monitoredAgain.stdout).reason, "conversation_no_longer_waiting");
     assert.equal(readJsonLines(openclawCallsPath).length, 1);
@@ -946,7 +946,7 @@ test("renew reloads stalled state after pane discovery and cannot overwrite a co
     const testEnv = {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     };
-    const sent = runAgentCli([
+    const sent = await runAgentCliInProcess([
       "send",
       "--conversation",
       `terminal:tmux:${terminalTarget}:33389`,
@@ -1005,7 +1005,7 @@ test("renew reloads stalled state after pane discovery and cannot overwrite a co
         : undefined
     );
 
-    const closed = runAgentCli([
+    const closed = await runAgentCliAsync([
       "close",
       "--conversation",
       conversationId,

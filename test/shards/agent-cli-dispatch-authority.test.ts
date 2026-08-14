@@ -34,7 +34,7 @@ import {
   claudeTerminalStaticArgs,
   claudeAgentRow,
   codexNativeIdentityArgs,
-  runAgentCli,
+  runAgentCliInProcess,
   runAgentCliAsync,
   spawnAgentCliCaptured,
   spawnAgentCliProcess,
@@ -59,7 +59,7 @@ import {
   readJsonLines
 } from "../agent-cli-fixtures.js";
 
-test("an active managed task blocks a follow-up before tmux input", () => {
+test("an active managed task blocks a follow-up before tmux input", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-managed-send-failure-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -84,7 +84,7 @@ test("an active managed task blocks a follow-up before tmux input", () => {
     const testEnv = {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     };
-    const first = runAgentCli([
+    const first = await runAgentCliInProcess([
       "send",
       "--conversation",
       rawConversationId,
@@ -112,7 +112,7 @@ test("an active managed task blocks a follow-up before tmux input", () => {
       listPanesOutput,
       "Second managed task"
     );
-    const second = runAgentCli([
+    const second = await runAgentCliInProcess([
       "send",
       "--conversation",
       rawConversationId,
@@ -161,7 +161,7 @@ test("an active managed task blocks a follow-up before tmux input", () => {
   }
 });
 
-test("managed pre-submit setup failure restores the previous boundary and is retryable", () => {
+test("managed pre-submit setup failure restores the previous boundary and is retryable", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-managed-send-abort-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -191,7 +191,7 @@ test("managed pre-submit setup failure restores the previous boundary and is ret
     const testEnv = {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     };
-    const first = runAgentCli([
+    const first = await runAgentCliInProcess([
       "send",
       "--conversation",
       rawConversationId,
@@ -242,7 +242,7 @@ test("managed pre-submit setup failure restores the previous boundary and is ret
       ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ];
-    const second = runAgentCli(secondArgs, {
+    const second = await runAgentCliInProcess(secondArgs, {
       ...testEnv,
       AKK_TEST_TERMINAL_SETUP_FAILURE: "1"
     });
@@ -295,7 +295,7 @@ test("managed pre-submit setup failure restores the previous boundary and is ret
       secondParsed.conversation.state_path,
       `${JSON.stringify(monitoringState, null, 2)}\n`
     );
-    const monitoredAbort = runAgentCli([
+    const monitoredAbort = await runAgentCliInProcess([
       "monitor",
       "--terminal-bridge",
       "--state",
@@ -333,7 +333,7 @@ test("managed pre-submit setup failure restores the previous boundary and is ret
       secondParsed.conversation.state_path,
       `${JSON.stringify(unsafeMonitoringState, null, 2)}\n`
     );
-    const monitoredUnsafeAbort = runAgentCli([
+    const monitoredUnsafeAbort = await runAgentCliInProcess([
       "monitor",
       "--terminal-bridge",
       "--state",
@@ -378,7 +378,7 @@ test("managed pre-submit setup failure restores the previous boundary and is ret
       ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
     ];
-    const retried = runAgentCli(retryArgs, testEnv);
+    const retried = await runAgentCliInProcess(retryArgs, testEnv);
     assert.equal(retried.status, 0, retried.stderr || retried.stdout);
     const retriedParsed = JSON.parse(retried.stdout);
     assert.equal(retriedParsed.delivered, true);
@@ -393,7 +393,7 @@ test("managed pre-submit setup failure restores the previous boundary and is ret
       entersBefore + 1,
       "a same-key retry after a proven pre-tmux abort dispatches Enter exactly once"
     );
-    const replayedRetry = runAgentCli(retryArgs, testEnv);
+    const replayedRetry = await runAgentCliInProcess(retryArgs, testEnv);
     assert.equal(
       replayedRetry.status,
       0,
@@ -421,7 +421,7 @@ test("managed pre-submit setup failure restores the previous boundary and is ret
       }, null, 2)}\n`
     );
     const unsafeMessageId = `msg-openclaw-${"8".repeat(64)}`;
-    const unsafeAbort = runAgentCli([
+    const unsafeAbort = await runAgentCliInProcess([
       "send",
       "--conversation",
       rawConversationId,
@@ -677,7 +677,7 @@ test("native thread Store authority spans concurrent terminal sends", async () =
   }
 });
 
-test("only the uncertain owner can resolve its fence without moving native Store authority", () => {
+test("only the uncertain owner can resolve its fence without moving native Store authority", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-cross-store-fence-"));
   const firstStoreDir = path.join(tempDir, "first-conversations");
   const secondStoreDir = path.join(tempDir, "second-conversations");
@@ -746,7 +746,7 @@ test("only the uncertain owner can resolve its fence without moving native Store
       "--disable-terminal-bridge-monitor"
     ];
 
-    const first = runAgentCli(
+    const first = await runAgentCliInProcess(
       sendArgs("First cross-store task", firstStoreDir, true),
       testEnv
     );
@@ -766,7 +766,7 @@ test("only the uncertain owner can resolve its fence without moving native Store
       "Second cross-store task",
       true
     );
-    const second = runAgentCli(
+    const second = await runAgentCliInProcess(
       sendArgs("Second cross-store task", secondStoreDir),
       testEnv
     );
@@ -779,7 +779,7 @@ test("only the uncertain owner can resolve its fence without moving native Store
       "waiting_for_agent"
     );
 
-    const oldClosed = runAgentCli([
+    const oldClosed = await runAgentCliInProcess([
       "close",
       "--conversation",
       firstParsed.conversation.conversation_id,
@@ -795,7 +795,7 @@ test("only the uncertain owner can resolve its fence without moving native Store
       true
     );
 
-    const uncertain = runAgentCli(
+    const uncertain = await runAgentCliInProcess(
       sendArgs("Second cross-store task", firstStoreDir),
       testEnv
     );
@@ -808,7 +808,7 @@ test("only the uncertain owner can resolve its fence without moving native Store
     assert.equal(secondParsed.submission_outcome, "uncertain");
     assert.equal(secondParsed.do_not_retry, true);
 
-    const staleClose = runAgentCli([
+    const staleClose = await runAgentCliInProcess([
       "close",
       "--conversation",
       firstParsed.conversation.conversation_id,
@@ -828,7 +828,7 @@ test("only the uncertain owner can resolve its fence without moving native Store
       false
     );
 
-    const blocked = runAgentCli(
+    const blocked = await runAgentCliInProcess(
       sendArgs("Third cross-store task", thirdStoreDir),
       testEnv
     );
@@ -837,7 +837,7 @@ test("only the uncertain owner can resolve its fence without moving native Store
     assert.equal(listManagedSessions(thirdStoreDir).length, 0);
     assert.equal(listConversations(thirdStoreDir).length, 0);
 
-    const ownerClosed = runAgentCli([
+    const ownerClosed = await runAgentCliInProcess([
       "close",
       "--conversation",
       secondParsed.conversation.conversation_id,
@@ -863,7 +863,7 @@ test("only the uncertain owner can resolve its fence without moving native Store
       screenPath,
       listPanesOutput
     );
-    const third = runAgentCli(
+    const third = await runAgentCliInProcess(
       sendArgs("Third cross-store task", firstStoreDir),
       testEnv
     );

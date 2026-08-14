@@ -35,7 +35,7 @@ import {
   claudeTerminalStaticArgs,
   claudeAgentRow,
   codexNativeIdentityArgs,
-  runAgentCli,
+  runAgentCliInProcess,
   runAgentCliAsync,
   spawnAgentCliCaptured,
   spawnAgentCliProcess,
@@ -95,7 +95,7 @@ test("terminal bridge monitor singleton rejects a live owner and reclaims a dead
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
       AKK_LOG_DIR: runtimeLogDir
     };
-    const sent = runAgentCli([
+    const sent = await runAgentCliInProcess([
       "send",
       "--conversation",
       "terminal:tmux:codex-work:0.1:33389",
@@ -214,7 +214,7 @@ test("terminal bridge monitor singleton rejects a live owner and reclaims a dead
       0
     );
 
-    const duplicate = runAgentCli(monitorArgs, testEnv);
+    const duplicate = await runAgentCliAsync(monitorArgs, testEnv);
     assert.equal(duplicate.status, 0, duplicate.stderr || duplicate.stdout);
     const duplicateParsed = JSON.parse(duplicate.stdout);
     assert.equal(duplicateParsed.already_running, true);
@@ -225,7 +225,7 @@ test("terminal bridge monitor singleton rejects a live owner and reclaims a dead
     await waitForChildExit(first);
     assert.equal(fs.existsSync(path.join(path.dirname(statePath), lockFiles[0])), true);
 
-    const reconciled = runAgentCli([
+    const reconciled = await runAgentCliAsync([
       "reconcile-monitors",
       "--store-dir",
       storeDir,
@@ -293,7 +293,7 @@ test("terminal bridge monitor singleton rejects a live owner and reclaims a dead
       eventCount(logPath, "terminal_bridge_monitor_binding_superseded"),
       1
     );
-    const fencedReconciliation = runAgentCli([
+    const fencedReconciliation = await runAgentCliAsync([
       "reconcile-monitors",
       "--store-dir",
       storeDir,
@@ -324,7 +324,7 @@ test("terminal bridge monitor singleton rejects a live owner and reclaims a dead
       () => eventCount(logPath, "terminal_bridge_monitor_started") === 3,
       "monitor to restart after the real supersession fence test"
     );
-    const closed = runAgentCli([
+    const closed = await runAgentCliAsync([
       "close",
       "--state",
       statePath,
@@ -416,7 +416,7 @@ test("terminal bridge monitor singleton rejects a live owner and reclaims a dead
         ) === 1,
       "handoff watchdog to stay alive across the callback state"
     );
-    const duplicateHandoff = runAgentCli(handoffArgs, testEnv);
+    const duplicateHandoff = await runAgentCliAsync(handoffArgs, testEnv);
     assert.equal(
       duplicateHandoff.status,
       0,
@@ -454,7 +454,7 @@ test("terminal bridge monitor singleton rejects a live owner and reclaims a dead
       1,
       "the original watchdog must survive the transient callback state and take over"
     );
-    const handoffClosed = runAgentCli([
+    const handoffClosed = await runAgentCliAsync([
       "close",
       "--state",
       handoffStatePath,
@@ -484,7 +484,7 @@ test("terminal bridge monitor singleton rejects a live owner and reclaims a dead
         path.dirname(completedCallbackStatePath),
         "events.ndjson"
       );
-      const completedCallbackHandoff = runAgentCli([
+      const completedCallbackHandoff = await runAgentCliInProcess([
         "monitor",
         "--terminal-bridge-handoff",
         "--state",
@@ -597,7 +597,7 @@ test("supervised Codex monitor retains detector diagnostics and completes the ex
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     };
     const request = "Prove the exact recovered native completion";
-    const sent = runAgentCli([
+    const sent = await runAgentCliInProcess([
       "send",
       "--conversation",
       "terminal:tmux:codex-work:0.1:33389",
@@ -926,7 +926,7 @@ test("reconcile-monitors launches only recoverable waiting terminal bridges", as
     const testEnv = {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     };
-    const sent = runAgentCli([
+    const sent = await runAgentCliInProcess([
       "send",
       "--conversation",
       "terminal:tmux:codex-work:0.1:33389",
@@ -1003,7 +1003,7 @@ test("reconcile-monitors launches only recoverable waiting terminal bridges", as
 
     const sendKeysBefore = readJsonLines(tmuxCallsPath)
       .filter((call) => call.args[0] === "send-keys").length;
-    const reconciled = runAgentCli([
+    const reconciled = await runAgentCliAsync([
       "reconcile-monitors",
       "--store-dir",
       storeDir,
@@ -1053,7 +1053,7 @@ test("reconcile-monitors launches only recoverable waiting terminal bridges", as
   }
 });
 
-test("callbackless completion crash resumes local settlement without outbox or replay", () => {
+test("callbackless completion crash resumes local settlement without outbox or replay", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-local-completion-recovery-"));
   const storeDir = path.join(tempDir, "store");
   const runtimeDir = path.join(tempDir, ".akk-cli-test-runtime");
@@ -1111,7 +1111,7 @@ test("callbackless completion crash resumes local settlement without outbox or r
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
       AKK_RUNTIME_DIR: runtimeDir
     };
-    const sent = runAgentCli([
+    const sent = await runAgentCliInProcess([
       "send",
       "--conversation",
       "terminal:tmux:codex-local:0.1:43389",
@@ -1221,7 +1221,7 @@ test("callbackless completion crash resumes local settlement without outbox or r
     fs.writeFileSync(screenPath, "› \n");
     const inputCount = readJsonLines(tmuxCallsPath)
       .filter((call) => call.args[0] === "send-keys").length;
-    const crashed = runAgentCli([
+    const crashed = await runAgentCliAsync([
       "monitor",
       "--terminal-bridge",
       "--state",
@@ -1255,7 +1255,7 @@ test("callbackless completion crash resumes local settlement without outbox or r
       "agent_accepted"
     );
 
-    const firstRecovery = runAgentCli([
+    const firstRecovery = await runAgentCliAsync([
       "reconcile-monitors",
       "--store-dir",
       storeDir,
@@ -1277,7 +1277,7 @@ test("callbackless completion crash resumes local settlement without outbox or r
     const ledgerAfterFirst = fs.readFileSync(ledgerPath, "utf8");
     const eventsAfterFirst = fs.readFileSync(logPath, "utf8");
 
-    const secondRecovery = runAgentCli([
+    const secondRecovery = await runAgentCliAsync([
       "reconcile-monitors",
       "--store-dir",
       storeDir,
@@ -1310,7 +1310,7 @@ test("callbackless completion crash resumes local settlement without outbox or r
   }
 });
 
-test("event polling ignores only an unterminated trailing record", () => {
+test("event polling ignores only an unterminated trailing record", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-event-poll-"));
   const logPath = path.join(tempDir, "events.ndjson");
   try {
@@ -1439,7 +1439,7 @@ function persistAnchoredClaudePromptAcceptance(options: {
   return transcriptPath;
 }
 
-test("reconcile-monitors stalls a verified-dead Claude Turn without relaunch or input", () => {
+test("reconcile-monitors stalls a verified-dead Claude Turn without relaunch or input", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-dead-reconcile-"));
   const storeDir = path.join(tempDir, "conversations");
   const runtimeDir = path.join(tempDir, ".akk-cli-test-runtime");
@@ -1465,7 +1465,7 @@ test("reconcile-monitors stalls a verified-dead Claude Turn without relaunch or 
       screenPath,
       `claude-work\t0\t0\t999\tnode\t${workspace}\n`
     );
-    const task = startManagedClaudeTerminalTask({
+    const task = await startManagedClaudeTerminalTask({
       fakeBinDir,
       workspace,
       storeDir,
@@ -1513,7 +1513,7 @@ test("reconcile-monitors stalls a verified-dead Claude Turn without relaunch or 
       JSON.stringify([claudeAgentRow(claudePid, claudeSessionId, workspace)])
     ];
 
-    const first = runAgentCli(reconcileArgs, testEnv);
+    const first = await runAgentCliInProcess(reconcileArgs, testEnv);
     assert.equal(first.status, 0, first.stderr || first.stdout);
     const firstOutput = JSON.parse(first.stdout);
     assert.equal(firstOutput.launched, 0);
@@ -1546,7 +1546,7 @@ test("reconcile-monitors stalls a verified-dead Claude Turn without relaunch or 
 
     const stateAfterFirst = fs.readFileSync(task.statePath, "utf8");
     const eventsAfterFirst = fs.readFileSync(task.logPath, "utf8");
-    const second = runAgentCli(reconcileArgs, testEnv);
+    const second = await runAgentCliInProcess(reconcileArgs, testEnv);
     assert.equal(second.status, 0, second.stderr || second.stdout);
     assert.equal(JSON.parse(second.stdout).launched, 0);
     assert.equal(fs.readFileSync(task.statePath, "utf8"), stateAfterFirst);
@@ -1560,7 +1560,7 @@ test("reconcile-monitors stalls a verified-dead Claude Turn without relaunch or 
   }
 });
 
-test("missing Claude transcript stalls with unverifiable completion evidence", () => {
+test("missing Claude transcript stalls with unverifiable completion evidence", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-dead-missing-"));
   const storeDir = path.join(tempDir, "conversations");
   const runtimeDir = path.join(tempDir, ".akk-cli-test-runtime");
@@ -1586,7 +1586,7 @@ test("missing Claude transcript stalls with unverifiable completion evidence", (
       screenPath,
       `claude-work\t0\t0\t999\tnode\t${workspace}\n`
     );
-    const task = startManagedClaudeTerminalTask({
+    const task = await startManagedClaudeTerminalTask({
       fakeBinDir,
       workspace,
       storeDir,
@@ -1635,7 +1635,7 @@ test("missing Claude transcript stalls with unverifiable completion evidence", (
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     };
 
-    const reconciled = runAgentCli(reconcileArgs, testEnv);
+    const reconciled = await runAgentCliInProcess(reconcileArgs, testEnv);
     assert.equal(reconciled.status, 0, reconciled.stderr || reconciled.stdout);
     const output = JSON.parse(reconciled.stdout);
     assert.equal(output.launched, 0);
@@ -1680,7 +1680,7 @@ test("missing Claude transcript stalls with unverifiable completion evidence", (
 
     const stateAfterFirst = fs.readFileSync(task.statePath, "utf8");
     const eventsAfterFirst = fs.readFileSync(task.logPath, "utf8");
-    const second = runAgentCli(reconcileArgs, testEnv);
+    const second = await runAgentCliInProcess(reconcileArgs, testEnv);
     assert.equal(second.status, 0, second.stderr || second.stdout);
     assert.equal(JSON.parse(second.stdout).launched, 0);
     assert.equal(fs.readFileSync(task.statePath, "utf8"), stateAfterFirst);
@@ -1695,7 +1695,7 @@ test("missing Claude transcript stalls with unverifiable completion evidence", (
   }
 });
 
-test("durable Claude transcript completion wins over verified process death", () => {
+test("durable Claude transcript completion wins over verified process death", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-dead-complete-"));
   const storeDir = path.join(tempDir, "conversations");
   const runtimeDir = path.join(tempDir, ".akk-cli-test-runtime");
@@ -1722,7 +1722,7 @@ test("durable Claude transcript completion wins over verified process death", ()
       screenPath,
       `claude-work\t0\t0\t999\tnode\t${workspace}\n`
     );
-    const task = startManagedClaudeTerminalTask({
+    const task = await startManagedClaudeTerminalTask({
       fakeBinDir,
       workspace,
       storeDir,
@@ -1807,7 +1807,7 @@ test("durable Claude transcript completion wins over verified process death", ()
       cwd: workspace
     }]);
     fs.writeFileSync(tmuxCallsPath, "");
-    const reconciled = runAgentCli([
+    const reconciled = await runAgentCliInProcess([
       "reconcile-monitors",
       "--store-dir",
       storeDir,
@@ -1881,7 +1881,7 @@ test("reconcile-monitors restarts transcript-backed Claude bridges without sendi
       screenPath,
       `claude-work\t0\t0\t999\tnode\t${workspace}\n`
     );
-    const task = startManagedClaudeTerminalTask({
+    const task = await startManagedClaudeTerminalTask({
       fakeBinDir,
       workspace,
       storeDir,
@@ -1904,7 +1904,7 @@ test("reconcile-monitors restarts transcript-backed Claude bridges without sendi
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     };
 
-    const reconciled = runAgentCli([
+    const reconciled = await runAgentCliAsync([
       "reconcile-monitors",
       "--store-dir",
       storeDir,
@@ -1934,7 +1934,7 @@ test("reconcile-monitors restarts transcript-backed Claude bridges without sendi
     );
     assert.doesNotMatch(fs.readFileSync(task.logPath, "utf8"), /claude_hook_/u);
 
-    const closed = runAgentCli([
+    const closed = await runAgentCliAsync([
       "close",
       "--state",
       task.statePath,

@@ -36,7 +36,7 @@ import {
   claudeTerminalStaticArgs,
   claudeAgentRow,
   codexNativeIdentityArgs,
-  runAgentCli,
+  runAgentCliInProcess,
   runAgentCliAsync,
   spawnAgentCliCaptured,
   spawnAgentCliProcess,
@@ -107,7 +107,7 @@ test("managed terminal send cannot overwrite a concurrent terminal cancellation"
     const testEnv = {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     };
-    const managed = runAgentCli([
+    const managed = await runAgentCliInProcess([
       "send",
       "--conversation",
       rawConversationId,
@@ -279,7 +279,7 @@ test("managed terminal close locks terminal before state and prevents queued sen
     const testEnv = {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     };
-    const managed = runAgentCli([
+    const managed = await runAgentCliInProcess([
       "send",
       "--conversation",
       rawConversationId,
@@ -401,7 +401,7 @@ test("managed terminal close locks terminal before state and prevents queued sen
       "a send queued behind close must not write its payload to tmux"
     );
 
-    const approval = runAgentCli([
+    const approval = await runAgentCliInProcess([
       "approve",
       "--turn",
       turnId,
@@ -457,7 +457,7 @@ test("idle cleanup locks and reloads a stale candidate before closing it", async
       command: "codex",
       cwd: workspace
     }]);
-    const created = runAgentCli([
+    const created = await runAgentCliInProcess([
       "send",
       "--conversation",
       "terminal:v2:tmux:codex:codex-work:0.0:33389",
@@ -647,7 +647,7 @@ fs.closeSync = function(fd, ...args) {
   }
 });
 
-test("approve sends y only when the terminal screen shows a primary Codex approval option", () => {
+test("approve sends y only when the terminal screen shows a primary Codex approval option", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-agent-approve-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -723,7 +723,7 @@ test("approve sends y only when the terminal screen shows a primary Codex approv
     }, { expectedRevision: null });
     fs.writeFileSync(screenPath, approvalScreen);
 
-    const listed = runAgentCli([
+    const listed = await runAgentCliInProcess([
       "list",
       "--store-dir",
       storeDir,
@@ -758,7 +758,7 @@ test("approve sends y only when the terminal screen shows a primary Codex approv
       "string"
     );
 
-    const rawStatus = runAgentCli([
+    const rawStatus = await runAgentCliInProcess([
       "status",
       "--conversation",
       rawConversationId
@@ -792,7 +792,7 @@ test("approve sends y only when the terminal screen shows a primary Codex approv
     const approvalKeysBefore = readJsonLines(tmuxCallsPath).filter((call) =>
       call.args[0] === "send-keys" && call.args.at(-1) === "y"
     ).length;
-    const approved = runAgentCli([
+    const approved = await runAgentCliInProcess([
       "approve",
       "--conversation",
       String(approvalAction.arguments.conversation_id),
@@ -829,7 +829,7 @@ test("approve sends y only when the terminal screen shows a primary Codex approv
   }
 });
 
-test("approval scan ignores stale Codex prompts left in terminal scrollback", () => {
+test("approval scan ignores stale Codex prompts left in terminal scrollback", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-agent-stale-approve-"));
   const fakeBinDir = path.join(tempDir, "bin");
   const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
@@ -859,7 +859,7 @@ test("approval scan ignores stale Codex prompts left in terminal scrollback", ()
       `codex-work\t0\t1\t33389\tnode\t${workspace}\n`
     );
     const conversationId = "terminal:v2:tmux:codex:codex-work:0.1:33389";
-    const status = runAgentCli([
+    const status = await runAgentCliInProcess([
       "status",
       "--conversation",
       conversationId
@@ -875,7 +875,7 @@ test("approval scan ignores stale Codex prompts left in terminal scrollback", ()
     assert.equal(statusParsed.terminal_screen.approval.approvable, false);
     assert.equal(statusParsed.terminal_status.activity_state, "working");
 
-    const approved = runAgentCli([
+    const approved = await runAgentCliInProcess([
       "approve",
       "--conversation",
       conversationId
@@ -893,7 +893,7 @@ test("approval scan ignores stale Codex prompts left in terminal scrollback", ()
   }
 });
 
-test("status detects tmux Codex working idle and unknown activity states", () => {
+test("status detects tmux Codex working idle and unknown activity states", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-agent-activity-state-"));
   const fakeBinDir = path.join(tempDir, "bin");
   const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
@@ -918,7 +918,7 @@ test("status detects tmux Codex working idle and unknown activity states", () =>
       "",
       "› Find and fix a bug in @filename"
     ].join("\n"));
-    let status = runAgentCli([
+    let status = await runAgentCliInProcess([
       "status",
       "--conversation",
       conversationId,
@@ -944,7 +944,7 @@ test("status detects tmux Codex working idle and unknown activity states", () =>
       "",
       "› Steer the current task"
     ].join("\n"));
-    status = runAgentCli([
+    status = await runAgentCliInProcess([
       "status",
       "--conversation",
       conversationId
@@ -962,7 +962,7 @@ test("status detects tmux Codex working idle and unknown activity states", () =>
       "",
       "› "
     ].join("\n"));
-    status = runAgentCli([
+    status = await runAgentCliInProcess([
       "status",
       "--conversation",
       conversationId
@@ -978,7 +978,7 @@ test("status detects tmux Codex working idle and unknown activity states", () =>
       "",
       "› "
     ].join("\n"));
-    status = runAgentCli([
+    status = await runAgentCliInProcess([
       "status",
       "--conversation",
       conversationId
@@ -995,7 +995,7 @@ test("status detects tmux Codex working idle and unknown activity states", () =>
       "last command output",
       "no recognizable Codex tui footer"
     ].join("\n"));
-    status = runAgentCli([
+    status = await runAgentCliInProcess([
       "status",
       "--conversation",
       conversationId

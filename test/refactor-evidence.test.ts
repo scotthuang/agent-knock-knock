@@ -41,16 +41,16 @@ test("Phase 1 evidence reproduces startup counts and historical selection", asyn
   });
 
   assert.equal(evidence.testEvidence.subprocess.baselineIncluded, 48);
-  assert.equal(evidence.testEvidence.subprocess.currentIncluded, 29);
-  assert.equal(evidence.testEvidence.subprocess.reductionBasisPoints, 3958);
+  assert.equal(evidence.testEvidence.subprocess.currentIncluded, 28);
+  assert.equal(evidence.testEvidence.subprocess.reductionBasisPoints, 4167);
   assert.equal(evidence.testEvidence.subprocess.targetRequired, false);
   assert.equal(evidence.testEvidence.subprocess.targetMet, false);
   assert.deepEqual(
     evidence.testEvidence.subprocess.currentCounts,
     {
-      cli_process: 19,
+      cli_process: 18,
       fake_node_process: 10,
-      other_process_or_adapter: 11
+      other_process_or_adapter: 12
     }
   );
 
