@@ -138,7 +138,6 @@ import {
   isFreshCodexPostProbeScreen
 } from "./native-thread-lifecycle-policy.js";
 import {
-  decideBindingReconciliation,
   decideNativeThreadTransitionEligibility,
   decideNativeThreadTransitionFailure,
   decideResumeCandidateEligibility,
@@ -272,6 +271,7 @@ import {
   type TerminalScopedCodexApprovalBoundary,
   type TerminalScopedCodexApprovalPromptSnapshot
 } from "./terminal-scoped-approval-authority.js";
+import { reconcileTerminalBinding } from "./terminal-binding-reconciliation-service.js";
 import {
   canonicalMutationResource, capabilityGatedRepositoryOperation,
   capabilityGatedRepositoryPairOperation, withCanonicalMutationLocks
@@ -8487,38 +8487,38 @@ function terminalRuntimeForLiveIdentity({
   };
 }
 
+type ResolvedTerminalClaim = Pick<ResolvedTerminalConversation,
+  "conversationId" | "agent" | "pid" | "terminalControl">;
+
+function managedSessionClaimsResolvedTerminal(
+  session: ManagedSessionState,
+  terminal: ResolvedTerminalClaim
+): boolean {
+  const binding = session.binding!;
+  return session.status === "bound" && binding !== undefined &&
+    session.agent === terminal.agent &&
+    binding.native_process.pid === terminal.pid &&
+    terminalControlAliasMatches(
+      binding.terminal_id,
+      binding.terminal_control,
+      terminal.conversationId,
+      terminal.terminalControl
+    ) && matchesConfiguredWorkspace(
+      session.workspace,
+      terminal.terminalControl.currentPath
+    );
+}
+
 function bindingMatchesLiveTerminal(
   session: ManagedSessionState,
   terminal: ResolvedTerminalConversation,
   identity: NativeAgentSessionIdentity | undefined,
   storeDir: string
 ): boolean {
-  const binding = session.binding;
-  if (!binding || session.status !== "bound") {
+  if (!managedSessionClaimsResolvedTerminal(session, terminal)) {
     return false;
   }
-  if (
-    session.agent !== terminal.agent ||
-    binding.native_process.pid !== terminal.pid
-  ) {
-    return false;
-  }
-  const terminalAliasMatches = terminalControlAliasMatches(
-    binding.terminal_id,
-    binding.terminal_control,
-    terminal.conversationId,
-    terminal.terminalControl
-  );
-  if (!terminalAliasMatches) {
-    return false;
-  }
-  const workspaceMatches = matchesConfiguredWorkspace(
-    session.workspace,
-    terminal.terminalControl.currentPath
-  );
-  if (!workspaceMatches) {
-    return false;
-  }
+  const binding = session.binding!;
 
   let processIncarnation = {
     processUuid: identity?.processUuid,
@@ -8548,8 +8548,8 @@ function bindingMatchesLiveTerminal(
     processIncarnation
   });
   const evidence = {
-    terminalAliasMatches,
-    workspaceMatches
+    terminalAliasMatches: true,
+    workspaceMatches: true
   };
   let decision = decideTerminalBindingMatch(session, observation, evidence);
   if (
@@ -8646,26 +8646,13 @@ function managedBindingConflictKindForResolvedTerminal({
   terminal: ResolvedTerminalConversation;
   identity?: NativeAgentSessionIdentity;
 }): ManagedBindingConflictKind | undefined {
-  const binding = session.binding;
   if (
-    session.status !== "bound" ||
-    !binding ||
-    session.agent !== terminal.agent ||
-    binding.native_process.pid !== terminal.pid ||
-    !terminalControlAliasMatches(
-      binding.terminal_id,
-      binding.terminal_control,
-      terminal.conversationId,
-      terminal.terminalControl
-    ) ||
-    !matchesConfiguredWorkspace(
-      session.workspace,
-      terminal.terminalControl.currentPath
-    ) ||
+    !managedSessionClaimsResolvedTerminal(session, terminal) ||
     bindingMatchesLiveTerminal(session, terminal, identity, storeDir)
   ) {
     return undefined;
   }
+  const binding = session.binding!;
   if (managedSessionOwnerIsConclusivelyInactive({
     session,
     terminal,
@@ -8703,26 +8690,10 @@ function managedBindingConflictKindForResolvedTerminal({
 
 function soleBoundManagedSessionClaimForTerminal(
   storeDir: string,
-  terminal: Pick<
-    ResolvedTerminalConversation,
-    "conversationId" | "agent" | "pid" | "terminalControl"
-  >
+  terminal: ResolvedTerminalClaim
 ): ManagedSessionState | undefined {
   const claims = listManagedSessions(storeDir).filter((session) =>
-    session.status === "bound" &&
-    session.binding &&
-    session.agent === terminal.agent &&
-    session.binding.native_process.pid === terminal.pid &&
-    terminalControlAliasMatches(
-      session.binding.terminal_id,
-      session.binding.terminal_control,
-      terminal.conversationId,
-      terminal.terminalControl
-    ) &&
-    matchesConfiguredWorkspace(
-      session.workspace,
-      terminal.terminalControl.currentPath
-    ) &&
+    managedSessionClaimsResolvedTerminal(session, terminal) &&
     !managedSessionOwnerIsConclusivelyInactive({
       session,
       terminal
@@ -12477,13 +12448,6 @@ function lifecycleBindingToken({
   });
 }
 
-function managedSessionBindingTokens(session: ManagedSessionState): string[] {
-  return [...new Set([
-    managedSessionBindingToken(session),
-    legacyManagedSessionBindingToken(session)
-  ])];
-}
-
 function lifecycleBindingTokens({
   session,
   terminal,
@@ -14692,24 +14656,9 @@ async function runResumeThread(options) {
     "--selection-scope is required for snapshot-bound resume"
   );
   const rawSelectionNumber = options.selectionNumber;
-  if (
-    rawSelectionNumber !== undefined &&
-    (
-      typeof rawSelectionNumber !== "string" ||
-      !/^[1-9][0-9]*$/u.test(rawSelectionNumber)
-    )
-  ) {
-    throw new Error("--selection-number must be a positive integer");
-  }
   const selectionNumber = rawSelectionNumber === undefined
     ? undefined
-    : Number(rawSelectionNumber);
-  if (
-    selectionNumber !== undefined &&
-    !Number.isSafeInteger(selectionNumber)
-  ) {
-    throw new Error("--selection-number must be a positive safe integer");
-  }
+    : positiveSafeInteger(rawSelectionNumber, "--selection-number");
   const selection = resolveNativeThreadResumeSelection({
     runtimeDir: terminalBridgeRuntimeDir(),
     storeDir,
@@ -14743,23 +14692,9 @@ async function runReconcileBinding(options: Record<string, any>) {
     ),
     "--conflicting-session is required"
   );
-  const expectedRevisionValue = required(
-    stringValue(
-      options.expectedSessionRevision ?? options.sessionRevision
-    ),
-    "--expected-session-revision is required"
-  );
-  if (!/^[1-9][0-9]*$/u.test(expectedRevisionValue)) {
-    throw new Error(
-      "--expected-session-revision must be a positive integer"
-    );
-  }
-  const expectedSessionRevision = Number(expectedRevisionValue);
-  if (!Number.isSafeInteger(expectedSessionRevision)) {
-    throw new Error(
-      "--expected-session-revision must be a positive safe integer"
-    );
-  }
+  const expectedSessionRevision = positiveSafeInteger(required(stringValue(
+    options.expectedSessionRevision ?? options.sessionRevision
+  ), "--expected-session-revision is required"), "--expected-session-revision");
   const expectedBindingToken = required(
     stringValue(options.expectedBindingToken),
     "--expected-binding-token is required"
@@ -14768,196 +14703,87 @@ async function runReconcileBinding(options: Record<string, any>) {
     stringValue(options.expectedTerminalToken),
     "--expected-terminal-token is required"
   );
-  return withCanonicalMutationLocks(terminalWriterMutationLocks(
-    storeDir, initiallyResolved.terminalControl
-  ), async (scopes, resources) => {
-      const terminal = await resolveLifecycleTerminal(options);
-      if (
-        terminal.pid !== initiallyResolved.pid ||
-        terminal.conversationId !== initiallyResolved.conversationId ||
-        !terminalControlsShareIncarnation(
-          terminal.terminalControl,
-          initiallyResolved.terminalControl
-        )
-      ) {
-        throw new Error(
-          "terminal identity changed while waiting to reconcile its binding; refresh AKK list"
-        );
-      }
-      await mutationDispatchLedger.beforeMutation(scopes, resources, options, terminal);
-      const dispatchOwnership = terminalDispatchOwnership(
-        terminal.terminalControl
-      );
-      if (dispatchOwnership.state !== "none") {
-        throw new Error(
-          "the terminal acquired an unresolved dispatch after the binding conflict was listed; refresh AKK list"
-        );
-      }
-      const session = mutationManagedSessions.load(
-        scopes, resources, conflictingSessionId
-      );
-      if (
-        session.revision !== expectedSessionRevision ||
-        !managedSessionBindingTokens(session).includes(expectedBindingToken)
-      ) {
-        throw new Error(
-          "managed Session binding changed after it was listed; refresh AKK list"
-        );
-      }
-      const binding = session.binding;
-      if (
-        session.status !== "bound" ||
-        !binding ||
-        session.agent !== terminal.agent ||
-        binding.native_process.pid !== terminal.pid ||
-        !terminalControlAliasMatches(
-          binding.terminal_id,
-          binding.terminal_control,
-          terminal.conversationId,
-          terminal.terminalControl
-        ) ||
-        !matchesConfiguredWorkspace(
-          session.workspace,
-          terminal.terminalControl.currentPath
-        )
-      ) {
-        throw new Error(
-          "the listed managed Session no longer claims this exact terminal"
-        );
-      }
-      const identity = await resolveCurrentNativeAgentSessionIdentity({
+  return reconcileTerminalBinding({
+    initialTerminal: initiallyResolved,
+    conflictingSessionId,
+    expectedSessionRevision,
+    expectedBindingToken,
+    expectedTerminalToken
+  }, {
+    transaction: {
+      locks: terminalWriterMutationLocks(
+        storeDir, initiallyResolved.terminalControl
+      ),
+      recover: (scopes, resources, terminal) =>
+        mutationDispatchLedger.beforeMutation(
+          scopes, resources, options, terminal
+        ),
+      loadSession: mutationManagedSessions.load,
+      saveSession: mutationManagedSessions.save
+    },
+    terminal: {
+      resolve: () => resolveLifecycleTerminal(options),
+      sameIncarnation: terminalControlsShareIncarnation,
+      identity: (terminal) => resolveCurrentNativeAgentSessionIdentity({
         options,
         agent: terminal.agent,
         pid: terminal.pid,
         cwd: terminal.terminalControl.currentPath
-      });
-      const terminalTokens = lifecycleBindingTokens({
-        terminal,
-        identity
-      });
-      if (!terminalTokens.includes(expectedTerminalToken)) {
-        throw new Error(
-          "live terminal identity changed after the conflict was listed; refresh AKK list"
-        );
-      }
-      const bridge = createTerminalAgentBridge(options);
-      if (managedSessionHasUnresolvedNativeTransition(storeDir, session)) {
-        throw new Error(
-          `managed Session ${session.session_id} has an unresolved native-thread transition`
-        );
-      }
-      const blockers = managedTurnsForSession(
-        storeDir,
-        session.session_id
-      ).filter((turn) => SESSION_SEND_BLOCKING_STATUSES.has(turn.status));
-      if (blockers.length > 0) {
-        throw new Error(
-          `managed Session ${session.session_id} still has unresolved Turn ` +
-          `${turnIdForConversation(blockers[0])} (${blockers[0].status})`
-        );
-      }
-      const finalTerminal = await resolveLifecycleTerminal(options);
-      if (
-        finalTerminal.pid !== terminal.pid ||
-        finalTerminal.conversationId !== terminal.conversationId ||
-        !terminalControlsShareIncarnation(
-          finalTerminal.terminalControl,
-          terminal.terminalControl
-        )
-      ) {
-        throw new Error(
-          "terminal identity changed during binding reconciliation; refresh AKK list"
-        );
-      }
-      const finalStatus = await bridge.status(
-        finalTerminal.agent,
-        finalTerminal.terminalControl,
-        {
-          runtime: terminalRuntimeForLiveIdentity({
-            terminal: finalTerminal,
-            physicalOnly: true
-          })
-        }
-      );
-      assertTerminalLifecycleReady({
-        options,
-        terminal: finalTerminal,
-        terminalStatus: finalStatus
-      });
-      const finalIdentity = await resolveCurrentNativeAgentSessionIdentity({
-        options,
-        agent: finalTerminal.agent,
-        pid: finalTerminal.pid,
-        cwd: finalTerminal.terminalControl.currentPath
-      });
-      if (
-        !lifecycleBindingTokens({
-          terminal: finalTerminal,
-          identity: finalIdentity
-        }).includes(expectedTerminalToken)
-      ) {
-        throw new Error(
-          "live terminal identity changed during binding reconciliation; refresh AKK list"
-        );
-      }
-      const finalSession = mutationManagedSessions.load(
-        scopes, resources, conflictingSessionId
-      );
-      if (
-        finalSession.revision !== expectedSessionRevision ||
-        !managedSessionBindingTokens(finalSession).includes(expectedBindingToken)
-      ) {
-        throw new Error(
-          "managed Session binding changed during reconciliation; refresh AKK list"
-        );
-      }
-      const conflictKind = managedBindingConflictKindForResolvedTerminal({
-        storeDir,
-        session: finalSession,
-        terminal: finalTerminal,
-        identity: finalIdentity
-      });
-      const reconciliationDecision = decideBindingReconciliation(conflictKind);
-      if (reconciliationDecision.action === "reject") {
-        throw new Error(
-          reconciliationDecision.reason === "stale_process_incarnation"
-            ? "the stale process incarnation no longer requires explicit reconciliation; refresh AKK list"
-            : reconciliationDecision.reason === "already_exact"
-              ? "the managed Session now exactly matches the live terminal; no reconciliation is needed"
-              : "the managed binding conflict is unverifiable and cannot be detached automatically"
-        );
-      }
-      const reconciledAt = cliNow().toISOString();
-      const detached = mutationManagedSessions.save(scopes, resources, {
-        ...finalSession,
-        status: "detached",
-        detached_at: reconciledAt,
-        updated_at: reconciledAt
-      }, {
-        expectedRevision: expectedSessionRevision
-      });
+      }),
+      prepareStatus: () => {
+        const bridge = createTerminalAgentBridge(options);
+        return (terminal) => bridge.status(terminal.agent, terminal.terminalControl, {
+          runtime: terminalRuntimeForLiveIdentity({ terminal, physicalOnly: true })
+        });
+      },
+      assertReady: (terminal, terminalStatus) =>
+        assertTerminalLifecycleReady({ options, terminal, terminalStatus })
+    },
+    authority: {
+      dispatchIsFree: (terminalControl) =>
+        terminalDispatchOwnership(terminalControl).state === "none",
+      sessionClaimsTerminal: managedSessionClaimsResolvedTerminal,
+      terminalTokenMatches: (terminal, identity, token) =>
+        lifecycleBindingTokens({ terminal, identity }).includes(token),
+      hasUnresolvedTransition: (session) =>
+        managedSessionHasUnresolvedNativeTransition(storeDir, session),
+      blockingTurn: (sessionId) => {
+        const blocker = managedTurnsForSession(storeDir, sessionId)
+          .find((turn) => SESSION_SEND_BLOCKING_STATUSES.has(turn.status));
+        return blocker
+          ? { turnId: turnIdForConversation(blocker), status: blocker.status }
+          : undefined;
+      },
+      conflictKind: (session, terminal, identity) =>
+        managedBindingConflictKindForResolvedTerminal({
+          storeDir, session, terminal, identity
+        })
+    },
+    now: () => cliNow().toISOString(),
+    present: (result) => {
       runtimeLog("info", "managed_binding_reconciled", {
-        terminal_id: terminal.conversationId,
-        terminal_target: terminal.terminalControl.target,
-        session_id: detached.session_id,
-        binding_id: detached.binding?.binding_id,
+        terminal_id: result.terminal.conversationId,
+        terminal_target: result.terminal.terminalControl.target,
+        session_id: result.detached.session_id,
+        binding_id: result.detached.binding?.binding_id,
         previous_revision: expectedSessionRevision,
-        revision: detached.revision,
-        conflict_kind: conflictKind,
+        revision: result.detached.revision,
+        conflict_kind: result.conflictKind,
         terminal_input_sent: false
       });
       printJson({
         status: "reconciled",
         outcome: "detached_conflicting_binding",
-        conflict_kind: conflictKind,
-        terminal_id: terminal.conversationId,
-        session_id: detached.session_id,
-        binding_id: detached.binding?.binding_id,
-        session_revision: detached.revision,
+        conflict_kind: result.conflictKind,
+        terminal_id: result.terminal.conversationId,
+        session_id: result.detached.session_id,
+        binding_id: result.detached.binding?.binding_id,
+        session_revision: result.detached.revision,
         terminal_input_sent: false,
         turn_created: false,
         refresh_required: true
       });
+    }
   });
 }
 
@@ -24359,6 +24185,17 @@ function positiveMinutes(value, optionName: string): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) {
     throw new Error(`${optionName} must be a positive number`);
+  }
+  return parsed;
+}
+
+function positiveSafeInteger(value: unknown, optionName: string): number {
+  if (typeof value !== "string" || !/^[1-9][0-9]*$/u.test(value)) {
+    throw new Error(`${optionName} must be a positive integer`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error(`${optionName} must be a positive safe integer`);
   }
   return parsed;
 }

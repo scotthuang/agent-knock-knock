@@ -39,6 +39,7 @@
     "test/terminal-agent-adapter.test.ts",
     "test/terminal-agent-bridge.test.ts",
     "test/terminal-binding-authority.test.ts",
+    "test/terminal-binding-reconciliation-service.test.ts",
     "test/terminal-control-ref.test.ts",
     "test/terminal-control-provider.test.ts",
     "test/terminal-dispatch-abort.test.ts",
