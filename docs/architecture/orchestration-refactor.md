@@ -114,7 +114,7 @@ must preserve the responsibility and dependency rules.
 | Terminal observation | Typed terminal/process/agent snapshots and normalization | Permission decisions or mutations |
 | Authority and action projection | Binding match/conflict, ownership, selectors, tokens, `available_actions`, handoff decisions | I/O, clocks, filesystem paths, terminal input |
 | Persistence repositories/codecs | Backward-compatible decoding, validation, atomic write primitives, revisions and CAS | Product policy or terminal input |
-| Transaction/lock kernel | Canonical lock acquisition/release; later, capabilities consumed by gated mutation ports | Business decisions, durable effect ordering, command parsing, or agent-specific screen logic |
+| Transaction/lock kernel | Canonical lock acquisition/release and per-transaction capabilities consumed by gated mutation ports | Business decisions, durable effect ordering, command parsing, or agent-specific screen logic |
 | Dispatch service | Send/respond/approve/cancel preparation, exact input stages, acceptance receipt decisions | CLI formatting, callback transport, native-thread lifecycle policy |
 | Lifecycle service | New/resume/adopt/reconcile classifications and transition reducer | Ordinary task submission or callback delivery |
 | Callback/outbox service | Immutable callback message, attempt lease, retry and delivery settlement | Monitor polling or terminal authority projection |
@@ -193,13 +193,13 @@ the left while it already holds a lock to the right.
 - The conversation state lock protects one Turn state/event transaction and its
   compare-before-write checks.
 
-The initial transaction shell only enforces canonical nesting and reverse
-release for migrated call sites. It must not advertise a capability until a
-persistence or terminal port actually requires and validates that token. Later
-repository extraction should introduce per-transaction opaque capabilities at
-those gated ports. Boolean parameters such as `terminalSendLockHeld`,
-`terminalStateLockHeld`, and `storeWriterLeaseHeld` must not be reproduced in
-new services.
+The transaction shell creates fresh opaque terminal, Store-writer, and optional
+conversation-state scopes for every invocation. Capability-gated repositories
+validate that every required scope is authentic, active, and belongs to the
+same transaction. Scopes expire before lock release begins, so a leaked scope
+cannot authorize a later write. Boolean parameters such as
+`terminalSendLockHeld`, `terminalStateLockHeld`, and `storeWriterLeaseHeld` must
+not be reproduced in new services.
 
 Read-only observation must not take mutation locks merely for convenience.
 Before a side effect, the transaction shell re-observes and revalidates exact
@@ -339,11 +339,17 @@ The strongest durable proof is never overwritten by weaker observation. Event
 write failure after a stronger state/ledger commit is reconciled as lagging
 audit, not by downgrading the committed fact.
 
-### Initial transaction-shell write map
+### Transaction capability write map
 
-PR3 first applies the lock shell only to operations that already use the target
-lock order. Their business callbacks remain in `cli-core.ts`; the shell does not
-own these records or effects.
+PR3 applies the kernel only to operations that already use the target lock
+order. Their business callbacks remain in `cli-core.ts`; the kernel owns scope
+authenticity and lifetime, not these records or effects.
+
+| Repository boundary | Required capabilities | Composition adapter retained |
+| --- | --- | --- |
+| Conversation state load / save / event append | state / writer + state / writer + state | existing Store filesystem and JSON functions |
+| Terminal dispatch-ledger load / save / resolve / reconcile | terminal / terminal + writer | existing runtime-ledger filesystem and lifecycle reconciliation functions |
+| Managed Session load / CAS save | writer | existing Session repository functions |
 
 | Operation | Held lock scopes | Durable writes and existing order | Terminal input | Crash/retry direction |
 | --- | --- | --- | --- | --- |
@@ -353,7 +359,11 @@ own these records or effects.
 | `runTerminalDispatchClose` | terminal -> writer | lifecycle reconciliation keeps its existing writes; orphan recovery writes one exact dispatch-ledger generation as `resolved` | definitely zero | advance only toward resolved; refresh is required after the recorded generation changes |
 
 Each callback continues to perform the same observations, compare-before-write
-checks, output, and error text under the same lock scopes. The transaction
+checks, output, and error text under the same lock scopes. Handoff close routes
+its fresh Turn/Session/ledger loads, state save, ledger resolution, and event
+append through the gated repositories. Dispatch close routes its ledger load
+and resolution/reconciliation writes through them; binding reconciliation uses
+the managed-Session adapter for its fresh reads and CAS detach. The transaction
 module supplies no effect DSL and cannot construct Store or protocol state.
 
 ### Initial native-thread transition policy slice
@@ -542,7 +552,7 @@ delivery cost.
 | --- | --- | --- | --- |
 | Terminal binding authority | Exact binding-match decisions and typed list/mutation observations | Fresh terminal/process sampling and mutation revalidation remain in `cli-core.ts` | authority table tests plus list, lifecycle, handoff, and send integration |
 | Verified-dead agent policy | Process-death proof validation, event replay, stall eligibility, completion tri-state | Process/transcript probes and terminal -> writer -> state orchestration remain in the shell | Codex/Claude completion-wins, fail-closed, deferred-transfer, and crash-replay tests |
-| Canonical mutation shell | Canonical acquisition and reverse release for four migrated paths | Business write ordering remains in each caller; no capability token is advertised | acquisition/release/error-precedence tests and control-lock integration |
+| Canonical mutation kernel | Canonical acquisition/release plus fresh terminal, writer, and optional state capabilities for four migrated paths | Business write ordering and raw filesystem/JSON adapters remain in composition | authenticity, lifetime, cross-transaction, lock-order, error-precedence, and control-lock tests |
 | Dispatch policy, zero-input abort reducer, and ledger codec | Pure preflight/abort precedence plus v1/v2 decode, construction, receipt merge, and validation | Ledger path selection, no-follow reads, atomic rename/fsync, Store locks, terminal input, and CLI formatting remain in the shell | reducer tables, codec byte/order tests, replay, receipt-fence, send-gate, and recovery tests; codec changes select the full tier |
 | Lifecycle transition policy | Candidate/target classification and transition phase reduction | Terminal observation, transition CAS, deferred transfer, input, and recovery writes remain in the shell | transition tables and lifecycle/recovery integration |
 | Callback policy, transport, and settlement | Retry decisions; Gateway process adapter; delivery progress/success/failure settlement | CLI composition owns the clock, state transaction, retry launcher, output, and callback preparation | retry matrix, exact transport call ordering, settlement write-order tests, and callback integration |

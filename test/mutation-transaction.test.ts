@@ -1,8 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  capabilityGatedRepositoryOperation,
   withCanonicalMutationLocks,
-  type CanonicalMutationLockPorts
+  type CanonicalMutationLockPorts,
+  type CanonicalMutationScopes,
+  type CanonicalStateMutationScopes,
+  type TerminalMutationScope
 } from "../src/mutation-transaction.js";
 
 function fixture({ withState = true } = {}): {
@@ -69,6 +73,131 @@ test("mutation transaction skips only the absent state scope", async () => {
     "release writer",
     "release terminal"
   ]);
+});
+
+test("every transaction receives fresh unforgeable scopes that expire", async () => {
+  const repository = {
+    load: capabilityGatedRepositoryOperation(
+      ["storeWriter"] as const,
+      (_storeDir: string, sessionId: string) => ({ sessionId })
+    )
+  };
+  let first: CanonicalMutationScopes | undefined;
+  let second: CanonicalMutationScopes | undefined;
+
+  await withCanonicalMutationLocks(
+    fixture({ withState: false }).ports,
+    async (scopes) => {
+      first = scopes;
+      assert.deepEqual(repository.load(scopes, "/store", "session-1"), {
+        sessionId: "session-1"
+      });
+    }
+  );
+  await withCanonicalMutationLocks(
+    fixture({ withState: false }).ports,
+    async (scopes) => {
+      second = scopes;
+    }
+  );
+
+  assert.notEqual(first?.terminal, second?.terminal);
+  assert.notEqual(first?.storeWriter, second?.storeWriter);
+  assert.throws(
+    () => repository.load(first as CanonicalMutationScopes, "/store", "session-1"),
+    /requires active authentic storeWriter scope/u
+  );
+  const forged = Object.freeze({}) as CanonicalMutationScopes["storeWriter"];
+  assert.throws(
+    () => repository.load({ storeWriter: forged }, "/store", "session-1"),
+    /requires active authentic storeWriter scope/u
+  );
+});
+
+test("repository adapters reject mixed transactions and the wrong scope kind", async () => {
+  const repository = {
+    save: capabilityGatedRepositoryOperation(
+      ["terminal", "storeWriter"] as const,
+      (_terminal: string, _document: { status: string }) => undefined
+    )
+  };
+
+  await withCanonicalMutationLocks(fixture({ withState: false }).ports, async (outer) => {
+    await withCanonicalMutationLocks(
+      fixture({ withState: false }).ports,
+      async (inner) => {
+        assert.throws(
+          () => repository.save({
+            terminal: outer.terminal,
+            storeWriter: inner.storeWriter
+          }, "terminal-1", { status: "resolved" }),
+          /scopes belong to different transactions/u
+        );
+        assert.throws(
+          () => repository.save({
+            terminal: inner.storeWriter as unknown as TerminalMutationScope,
+            storeWriter: inner.storeWriter
+          }, "terminal-1", { status: "resolved" }),
+          /requires active authentic terminal scope/u
+        );
+      }
+    );
+  });
+});
+
+test("conversation writes invoke real ports only under active writer and state scopes", async () => {
+  const { events, ports } = fixture();
+  const repository = {
+    load: capabilityGatedRepositoryOperation(["state"] as const, (statePath: string) => {
+      events.push(`load ${statePath}`);
+      return { status: "waiting" };
+    }),
+    save: capabilityGatedRepositoryOperation(
+      ["storeWriter", "state"] as const,
+      (statePath: string, state: { status: string }) => {
+        events.push(`save ${statePath} ${state.status}`);
+      }
+    ),
+    appendEvent: capabilityGatedRepositoryOperation(
+      ["storeWriter", "state"] as const,
+      (logPath: string, event: { event: string }) => {
+        events.push(`append ${logPath} ${event.event}`);
+      }
+    )
+  };
+  let leaked: CanonicalStateMutationScopes | undefined;
+  await withCanonicalMutationLocks({
+    acquireTerminal: ports.acquireTerminal,
+    withStoreWriter: ports.withStoreWriter,
+    acquireState: ports.acquireState!
+  }, async (scopes) => {
+    leaked = scopes;
+    assert.deepEqual(repository.load(scopes, "state.json"), {
+      status: "waiting"
+    });
+    repository.save(scopes, "state.json", { status: "closed" });
+    repository.appendEvent(scopes, "events.ndjson", {
+      event: "conversation_closed"
+    });
+  });
+  assert.deepEqual(events, [
+    "acquire terminal",
+    "acquire writer",
+    "acquire state",
+    "load state.json",
+    "save state.json closed",
+    "append events.ndjson conversation_closed",
+    "release state",
+    "release writer",
+    "release terminal"
+  ]);
+  assert.throws(
+    () => repository.load(
+      leaked as CanonicalStateMutationScopes,
+      "state.json"
+    ),
+    /requires active authentic state scope/u
+  );
 });
 
 test("terminal acquisition errors propagate unchanged without releasing", async () => {

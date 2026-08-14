@@ -299,6 +299,12 @@
       "needle": "normal monitor plan preserves exact argv, timeout precedence, and safe env"
     },
     {
+      "id": "mutation-capability-unit",
+      "path": "test/mutation-transaction.test.ts",
+      "tier": "fast",
+      "needle": "every transaction receives fresh unforgeable scopes that expire"
+    },
+    {
       "id": "mutation-lock-unit",
       "path": "test/mutation-transaction.test.ts",
       "tier": "fast",
@@ -443,11 +449,12 @@
     },
     {
       "id": "mutation-lock-shell",
-      "invariant": "Migrated mutations acquire terminal, writer, then state locks and release in reverse without weakening durable write ownership.",
+      "invariant": "Migrated mutations acquire terminal, writer, then state locks; gated repositories reject forged, expired, wrong-kind, or cross-transaction scopes without weakening durable write ownership.",
       "old_executable_witnesses": [
         "control-lock-boundary"
       ],
       "service_invariant_witnesses": [
+        "mutation-capability-unit",
         "mutation-lock-unit"
       ],
       "retained_boundary_witnesses": [

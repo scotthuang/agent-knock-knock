@@ -272,7 +272,7 @@ import {
   type TerminalScopedCodexApprovalBoundary,
   type TerminalScopedCodexApprovalPromptSnapshot
 } from "./terminal-scoped-approval-authority.js";
-import { withCanonicalMutationLocks } from "./mutation-transaction.js";
+import { capabilityGatedRepositoryOperation, withCanonicalMutationLocks } from "./mutation-transaction.js";
 import {
   beginCallbackRetryPolicy,
   reduceCallbackRetryPolicy,
@@ -338,6 +338,55 @@ const DEFAULT_TERMINAL_ACCEPTANCE_POLL_INTERVAL_MS = 50;
 const CLAUDE_SCREEN_APPROVAL_TTL_MS = 10 * 60 * 1000;
 const CALLBACK_ATTEMPT_LEASE_MS = 2 * 60 * 1000;
 const CALLBACK_RETRY_DELAYS_MS = [5000, 15000, 60000, 60000];
+const TERMINAL_CONTROL_CAPABILITIES = new Set<TerminalControlCapability>([
+  "screen_status",
+  "send_keys",
+  "terminal_approval",
+  "screen_completion",
+  "durable_completion",
+  "terminal_cancel"
+]);
+const TERMINAL_INPUT_EVIDENCE_FIELDS = [
+  "text_injected_at",
+  "enter_dispatched_at",
+  "submitted_at",
+  "agent_accepted_at",
+  "not_accepted_at",
+  "uncertain_at",
+  "acceptance_evidence"
+] as const;
+const gateRepository = capabilityGatedRepositoryOperation;
+const mutationConversationStore = Object.freeze({
+  load: gateRepository(["state"], loadState),
+  save: gateRepository(["storeWriter", "state"], saveState),
+  appendEvent: gateRepository(["storeWriter", "state"], appendEvent)
+});
+const mutationDispatchLedger = Object.freeze({
+  load: gateRepository(["terminal"], loadTerminalBridgeDispatchLedger),
+  save: gateRepository(["terminal", "storeWriter"], saveTerminalBridgeDispatchLedger),
+  resolve: gateRepository(["terminal", "storeWriter"], resolveTerminalBridgeDispatchLedger),
+  reconcile: gateRepository(["terminal", "storeWriter"], reconcileLifecycleDispatchLedger)
+});
+const mutationManagedSessions = Object.freeze({
+  load: gateRepository(["storeWriter"], loadManagedSession),
+  save: gateRepository(["storeWriter"], saveManagedSession)
+});
+function terminalWriterMutationLocks(storeDir: string, terminalControl: TerminalControlRef) {
+  return {
+    acquireTerminal: () =>
+      acquireTerminalBridgeSendLock(storeDir, terminalControl, { timeoutMs: 30000 }),
+    withStoreWriter: <Result>(operation: () => Promise<Result>) =>
+      withStoreWriterLeaseAsync(storeDir, operation)
+  };
+}
+function terminalWriterStateMutationLocks(
+  storeDir: string, terminalControl: TerminalControlRef, statePath: string
+) {
+  return {
+    ...terminalWriterMutationLocks(storeDir, terminalControl),
+    acquireState: () => acquireFileLock(`${statePath}.lock`)
+  };
+}
 const TERMINAL_BRIDGE_SUPERSEDE_STATUSES = new Set<ConversationStatus>([
   "created",
   "running",
@@ -352,6 +401,18 @@ const TERMINAL_DISPATCH_RELEASE_STATUSES = new Set<ConversationStatus>([
   "closed",
   "cancelled"
 ]);
+const ACTIVE_TERMINAL_DISPATCH_STATUSES = new Set([
+  "prepared",
+  "text_injected",
+  "enter_dispatched",
+  "agent_accepted",
+  "dispatching",
+  "submitted",
+  "not_accepted",
+  "uncertain"
+]);
+const RECOVERABLE_TERMINAL_DISPATCH_STATUSES = new Set([...ACTIVE_TERMINAL_DISPATCH_STATUSES, "verified"]);
+const DEFERRED_ACCEPTANCE_RECOVERY_STATUSES = new Set(["prepared", "text_injected", "enter_dispatched", "uncertain", "agent_accepted"]);
 const SESSION_SEND_BLOCKING_STATUSES = new Set<ConversationStatus>([
   "created",
   "running",
@@ -1397,14 +1458,7 @@ function terminalControlFromTakeover(nativeTakeover): TerminalControlRef | undef
     : [];
   const capabilities = storedCapabilities.length > 0
     ? storedCapabilities
-    : [
-        "screen_status",
-        "send_keys",
-        "terminal_approval",
-        "screen_completion",
-        "durable_completion",
-        "terminal_cancel"
-      ] as TerminalControlCapability[];
+    : [...TERMINAL_CONTROL_CAPABILITIES];
   let control: TerminalControlRef;
   if (terminalControl.kind === "tmux") {
     const window = Number(terminalControl.window);
@@ -1765,14 +1819,8 @@ async function migrateLegacyTerminalAgentIdentity({
 }
 
 function isTerminalControlCapability(value: unknown): value is TerminalControlCapability {
-  return typeof value === "string" && [
-    "screen_status",
-    "send_keys",
-    "terminal_approval",
-    "screen_completion",
-    "durable_completion",
-    "terminal_cancel"
-  ].includes(value);
+  return typeof value === "string" &&
+    TERMINAL_CONTROL_CAPABILITIES.has(value as TerminalControlCapability);
 }
 
 function assertSafeAbortedTerminalRetryBinding({
@@ -1891,15 +1939,7 @@ function safeAbortedDeferredRetrySourceSession({
     validTimestampMs(terminalInputNotStartedAt) &&
     Date.parse(terminalInputNotStartedAt) >=
       Date.parse(transferDispatchStartedAt);
-  const forbiddenInputEvidence = [
-    "text_injected_at",
-    "enter_dispatched_at",
-    "submitted_at",
-    "agent_accepted_at",
-    "not_accepted_at",
-    "uncertain_at",
-    "acceptance_evidence"
-  ] as const;
+  const forbiddenInputEvidence = TERMINAL_INPUT_EVIDENCE_FIELDS;
   if (
     transfer.version !== 2 ||
     transfer.status !== "abort_resolved" ||
@@ -6254,16 +6294,7 @@ function terminalDispatchOwnership(
   ) {
     return { state: "none" };
   }
-  if (![
-    "prepared",
-    "text_injected",
-    "enter_dispatched",
-    "agent_accepted",
-    "dispatching",
-    "submitted",
-    "not_accepted",
-    "uncertain"
-  ].includes(String(ledger.status))) {
+  if (!ACTIVE_TERMINAL_DISPATCH_STATUSES.has(String(ledger.status))) {
     return { state: "none" };
   }
   const owner = loadTerminalDispatchLedgerOwner(ledger);
@@ -6292,18 +6323,7 @@ function terminalDispatchOwnership(
   const ledgerMessageId = stringValue(ledger.message_id);
   const ownerMessageId = stringValue(ownerTakeover?.terminal_bridge_message_id);
   if (
-    [
-      "prepared",
-      "text_injected",
-      "enter_dispatched",
-      "agent_accepted",
-      "dispatching",
-      "submitted",
-      "not_accepted",
-      "uncertain"
-    ].includes(
-      String(ledger.status)
-    ) &&
+    ACTIVE_TERMINAL_DISPATCH_STATUSES.has(String(ledger.status)) &&
     ledgerMessageId &&
     ownerMessageId !== ledgerMessageId
   ) {
@@ -9151,15 +9171,9 @@ function exactReleasedSafeAbortedCandidateTurn({
     !validTimestampMs(preparedAt) ||
     !validTimestampMs(abortedAt) ||
     Date.parse(abortedAt) < Date.parse(preparedAt) ||
-    [
-      "text_injected_at",
-      "enter_dispatched_at",
-      "submitted_at",
-      "agent_accepted_at",
-      "not_accepted_at",
-      "uncertain_at",
-      "acceptance_evidence"
-    ].some((field) => submission[field] !== undefined) ||
+    TERMINAL_INPUT_EVIDENCE_FIELDS.some(
+      (field) => submission[field] !== undefined
+    ) ||
     stringValue(takeover.terminal_bridge_message_id) !== messageId ||
     stringValue(takeover.terminal_bridge_request_hash) !==
       stringValue(submission.request_hash) ||
@@ -14734,15 +14748,9 @@ async function runReconcileBinding(options: Record<string, any>) {
     stringValue(options.expectedTerminalToken),
     "--expected-terminal-token is required"
   );
-  return withCanonicalMutationLocks({
-    acquireTerminal: () => acquireTerminalBridgeSendLock(
-      storeDir,
-      initiallyResolved.terminalControl,
-      { timeoutMs: 30000 }
-    ),
-    withStoreWriter: (operation) =>
-      withStoreWriterLeaseAsync(storeDir, operation)
-  }, async () => {
+  return withCanonicalMutationLocks(terminalWriterMutationLocks(
+    storeDir, initiallyResolved.terminalControl
+  ), async (scopes) => {
       const terminal = await resolveLifecycleTerminal(options);
       if (
         terminal.pid !== initiallyResolved.pid ||
@@ -14765,7 +14773,7 @@ async function runReconcileBinding(options: Record<string, any>) {
           "the terminal acquired an unresolved dispatch after the binding conflict was listed; refresh AKK list"
         );
       }
-      const session = loadManagedSession(storeDir, conflictingSessionId);
+      const session = mutationManagedSessions.load(scopes, storeDir, conflictingSessionId);
       if (
         session.revision !== expectedSessionRevision ||
         !managedSessionBindingTokens(session).includes(expectedBindingToken)
@@ -14870,9 +14878,8 @@ async function runReconcileBinding(options: Record<string, any>) {
           "live terminal identity changed during binding reconciliation; refresh AKK list"
         );
       }
-      const finalSession = loadManagedSession(
-        storeDir,
-        conflictingSessionId
+      const finalSession = mutationManagedSessions.load(
+        scopes, storeDir, conflictingSessionId
       );
       if (
         finalSession.revision !== expectedSessionRevision ||
@@ -14899,7 +14906,7 @@ async function runReconcileBinding(options: Record<string, any>) {
         );
       }
       const reconciledAt = cliNow().toISOString();
-      const detached = saveManagedSession(storeDir, {
+      const detached = mutationManagedSessions.save(scopes, storeDir, {
         ...finalSession,
         status: "detached",
         detached_at: reconciledAt,
@@ -24411,15 +24418,9 @@ async function runCancel(options) {
 
 async function runTerminalConversationCancel({ options, conversationId, agent, terminalControl, pid }) {
   const storeDir = storeDirFromOptions(options);
-  await withCanonicalMutationLocks({
-    acquireTerminal: () => acquireTerminalBridgeSendLock(
-      storeDir,
-      terminalControl,
-      { timeoutMs: 30000 }
-    ),
-    withStoreWriter: (operation) =>
-      withStoreWriterLeaseAsync(storeDir, operation)
-  }, async () => {
+  await withCanonicalMutationLocks(
+    terminalWriterMutationLocks(storeDir, terminalControl),
+    async () => {
       assertTerminalHasNoNonterminalDeferredForegroundTransfer({
         storeDir,
         pid,
@@ -24603,17 +24604,10 @@ async function runObservedHandoffClose({
     initialSource.binding.terminal_control,
     { pid: initialSource.binding.native_process.pid }
   );
-  await withCanonicalMutationLocks({
-    acquireTerminal: () => acquireTerminalBridgeSendLock(
-      storeDir,
-      terminal.terminalControl,
-      { timeoutMs: 30000 }
-    ),
-    withStoreWriter: (operation) =>
-      withStoreWriterLeaseAsync(storeDir, operation),
-    acquireState: () => acquireFileLock(`${statePath}.lock`)
-  }, async () => {
-        const conversation = loadState(statePath);
+  await withCanonicalMutationLocks(terminalWriterStateMutationLocks(
+    storeDir, terminal.terminalControl, statePath
+  ), async (scopes) => {
+        const conversation = mutationConversationStore.load(scopes, statePath);
         const turnId = turnIdForConversation(conversation);
         if (
           conversation.conversation_id !== initialConversation.conversation_id ||
@@ -24624,7 +24618,7 @@ async function runObservedHandoffClose({
             "active handoff Turn changed after it was listed; refresh AKK list"
           );
         }
-        const source = loadManagedSession(storeDir, sourceSessionId);
+        const source = mutationManagedSessions.load(scopes, storeDir, sourceSessionId);
         if (
           source.status !== "bound" ||
           !source.binding ||
@@ -24704,9 +24698,7 @@ async function runObservedHandoffClose({
         const expectedMessageId = stringValue(
           takeover?.terminal_bridge_message_id
         ) ?? stringValue(terminalBridgeSubmission(conversation)?.message_id);
-        const ledger = loadTerminalBridgeDispatchLedger(
-          terminal.terminalControl
-        );
+        const ledger = mutationDispatchLedger.load(scopes, terminal.terminalControl);
         const exactDispatchGeneration = Boolean(
           expectedMessageId &&
           ledger &&
@@ -24745,9 +24737,9 @@ async function runObservedHandoffClose({
           disposition: "superseded_by_human_context_switch",
           updated_at: now
         };
-        saveState(statePath, closed);
+        mutationConversationStore.save(scopes, statePath, closed);
         const dispatchResolved = expectedMessageId
-          ? resolveTerminalBridgeDispatchLedger({
+          ? mutationDispatchLedger.resolve(scopes, {
               terminalControl: terminal.terminalControl,
               conversation: closed,
               expectedMessageId,
@@ -24759,7 +24751,7 @@ async function runObservedHandoffClose({
             "active handoff dispatch changed during close; inspect before retrying"
           );
         }
-        appendEvent(logPath, {
+        mutationConversationStore.appendEvent(scopes, logPath, {
           ts: now,
           conversation_id: conversation.conversation_id,
           event: "conversation_closed",
@@ -25200,18 +25192,12 @@ async function runTerminalDispatchClose({
 }): Promise<void> {
   const terminalControl = terminalConversation.terminalControl;
   const storeDir = storeDirFromOptions(options);
-  return withCanonicalMutationLocks({
-    acquireTerminal: () => acquireTerminalBridgeSendLock(
-      storeDir,
-      terminalControl,
-      { timeoutMs: 30000 }
-    ),
-    withStoreWriter: (operation) =>
-      withStoreWriterLeaseAsync(storeDir, operation)
-  }, async () => {
+  return withCanonicalMutationLocks(
+    terminalWriterMutationLocks(storeDir, terminalControl),
+    async (scopes) => {
     let ledger = resolveTerminalDispatchLedgerPaneIncarnation(
       terminalControl,
-      loadTerminalBridgeDispatchLedger(terminalControl)
+      mutationDispatchLedger.load(scopes, terminalControl)
     );
     if (!ledger || ledger.status === "resolved") {
       throw new Error(
@@ -25270,17 +25256,7 @@ async function runTerminalDispatchClose({
         );
       }
     }
-    if (![
-      "prepared",
-      "text_injected",
-      "enter_dispatched",
-      "dispatching",
-      "agent_accepted",
-      "submitted",
-      "not_accepted",
-      "uncertain",
-      "verified"
-    ].includes(ledger.status)) {
+    if (!RECOVERABLE_TERMINAL_DISPATCH_STATUSES.has(ledger.status)) {
       throw new Error(
         `terminal ${terminalControl.target} has an invalid dispatch status: ` +
         String(ledger.status)
@@ -25302,7 +25278,8 @@ async function runTerminalDispatchClose({
           "the current expected-transition-id"
         );
       }
-      ledger = await reconcileLifecycleDispatchLedger(
+      ledger = await mutationDispatchLedger.reconcile(
+        scopes,
         options,
         terminalConversation,
         ledger,
@@ -25371,7 +25348,7 @@ async function runTerminalDispatchClose({
     const reason =
       stringValue(options.reason) ??
       "terminal dispatch explicitly resolved after operator inspection";
-    saveTerminalBridgeDispatchLedger(terminalControl, {
+    mutationDispatchLedger.save(scopes, terminalControl, {
       ...ledger,
       status: "resolved",
       resolved_at: resolvedAt,
@@ -27576,18 +27553,7 @@ function orphanedTerminalDispatchForRecovery(
       : stringValue(ledger?.message_id);
     if (
       !ledger ||
-      ![
-        "prepared",
-        "text_injected",
-        "enter_dispatched",
-        "dispatching",
-        "agent_accepted",
-        "submitted",
-        "not_accepted",
-        "uncertain",
-        "verified"
-      ]
-        .includes(String(ledger.status)) ||
+      !RECOVERABLE_TERMINAL_DISPATCH_STATUSES.has(String(ledger.status)) ||
       !recoveryIdentity ||
       (
         !lifecycle &&
@@ -29314,13 +29280,7 @@ async function recoverAcceptedDeferredForegroundDispatch({
       transfer,
       terminalControl: terminal.terminalControl
     });
-    if (![
-      "prepared",
-      "text_injected",
-      "enter_dispatched",
-      "uncertain",
-      "agent_accepted"
-    ].includes(String(ledger.status))) {
+    if (!DEFERRED_ACCEPTANCE_RECOVERY_STATUSES.has(String(ledger.status))) {
       throw new Error(
         `deferred foreground transfer ${transfer.transfer_id} has invalid ` +
         `${String(ledger.status)} dispatch evidence for acceptance recovery`
@@ -29615,13 +29575,7 @@ async function persistCommittedDeferredForegroundTurnAcceptance({
         authority.submission.message_body_hash
       )
     });
-    if (![
-      "prepared",
-      "text_injected",
-      "enter_dispatched",
-      "uncertain",
-      "agent_accepted"
-    ].includes(String(ledger.status))) {
+    if (!DEFERRED_ACCEPTANCE_RECOVERY_STATUSES.has(String(ledger.status))) {
       throw new Error(
         `deferred foreground transfer ${current.transfer_id} has invalid ` +
         `${String(ledger.status)} dispatch evidence for committed recovery`
