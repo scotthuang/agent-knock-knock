@@ -26,14 +26,14 @@ import {
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 
-test("callback records a structured Claude message before delivery", () => {
+test("callback records a structured Claude message before delivery", async () => {
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-"));
 
   try {
     const created = createCallbackConversation(storeDir, "Callback test");
     const statePath = created.paths.statePath;
 
-    const callback = runCli([
+    const callback = await runCli([
       "callback",
       "--state",
       statePath,
@@ -69,7 +69,7 @@ test("callback records a structured Claude message before delivery", () => {
   }
 });
 
-test("callback does not record duplicate structured messages", () => {
+test("callback does not record duplicate structured messages", async () => {
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-"));
 
   try {
@@ -85,7 +85,7 @@ test("callback does not record duplicate structured messages", () => {
       body: "Duplicate-safe completion."
     });
 
-    const first = runCli([
+    const first = await runCli([
       "callback",
       "--state",
       statePath,
@@ -93,7 +93,7 @@ test("callback does not record duplicate structured messages", () => {
       "--message-json",
       messageJson
     ]);
-    const second = runCli([
+    const second = await runCli([
       "callback",
       "--state",
       statePath,
@@ -250,7 +250,7 @@ test("callback serializes concurrent duplicate messages", async () => {
   }
 });
 
-test("callback can deliver recorded messages through a plugin gateway method", () => {
+test("callback can deliver recorded messages through a plugin gateway method", async () => {
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-"));
   const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-openclaw-"));
   const gatewayCallPath = path.join(fakeBinDir, "gateway-call.json");
@@ -284,7 +284,7 @@ console.log(JSON.stringify({ ok: true }));
       }
     );
 
-    const callback = runCli([
+    const callback = await runCli([
       "callback",
       "--state",
       created.paths.statePath,
@@ -403,7 +403,7 @@ process.exit(1);
   }
 });
 
-test("callback Gateway delivery derives session and turn identities for legacy state", () => {
+test("callback Gateway delivery derives session and turn identities for legacy state", async () => {
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-legacy-identity-"));
   const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-openclaw-legacy-identity-"));
   const gatewayCallPath = path.join(fakeBinDir, "gateway-call.json");
@@ -427,7 +427,7 @@ console.log(JSON.stringify({ ok: true }));
     delete persisted.turn_id;
     saveState(created.paths.statePath, persisted);
 
-    const callback = runCli([
+    const callback = await runCli([
       "callback",
       "--state",
       created.paths.statePath,
@@ -560,7 +560,7 @@ console.log(JSON.stringify({ ok: true }));
       }
     });
 
-    const closed = runCli([
+    const closed = await runCli([
       "close",
       "--state",
       created.paths.statePath,
@@ -577,7 +577,7 @@ console.log(JSON.stringify({ ok: true }));
     const turnUpdatedAt = closed.conversation.updated_at;
 
     fs.writeFileSync(allowDeliveryPath, "yes", "utf8");
-    const retried = runCli([
+    const retried = await runCli([
       "retry-callback",
       "--state",
       created.paths.statePath
@@ -659,7 +659,7 @@ process.exit(1);
     assert.equal(pending.status, "idle");
     assert.equal(pending.callback_delivery.status, "pending");
 
-    const closed = runCli([
+    const closed = await runCli([
       "close",
       "--state",
       created.paths.statePath,
@@ -686,7 +686,7 @@ process.exit(1);
     assert.equal(failed.callback_delivery.status, "failed");
 
     fs.writeFileSync(allowSuccessPath, "yes", "utf8");
-    const retried = runCli([
+    const retried = await runCli([
       "retry-callback",
       "--state",
       created.paths.statePath
@@ -771,7 +771,7 @@ process.exit(1);
   }
 });
 
-test("an immutable callback retry survives a later Session binding generation", () => {
+test("an immutable callback retry survives a later Session binding generation", async () => {
   const storeDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-callback-binding-retry-")
   );
@@ -895,7 +895,7 @@ console.log(JSON.stringify({ ok: true }));
     }, { expectedRevision: managedSession.revision! });
 
     fs.writeFileSync(allowDeliveryPath, "yes", "utf8");
-    const retried = runCli([
+    const retried = await runCli([
       "retry-callback",
       "--state",
       created.paths.statePath
@@ -906,7 +906,7 @@ console.log(JSON.stringify({ ok: true }));
     assert.equal(retried.conversation.callback_delivery.status, "delivered");
     assert.equal(retried.conversation.callback_delivery.attempts, 2);
     assert.equal(retried.conversation.terminal_binding_generation, 1);
-    const duplicate = runCli([
+    const duplicate = await runCli([
       "callback",
       "--state",
       created.paths.statePath,
@@ -999,7 +999,7 @@ console.log(JSON.stringify({ ok: true }));
     assert.equal(failedState.callback_delivery.gateway_token, undefined);
 
     fs.writeFileSync(allowDeliveryPath, "yes", "utf8");
-    const retried = runCli([
+    const retried = await runCli([
       "retry-callback",
       "--state",
       created.paths.statePath
@@ -1094,7 +1094,7 @@ console.log(JSON.stringify({ ok: true }));
     };
     fs.writeFileSync(created.paths.statePath, `${JSON.stringify(seededState, null, 2)}\n`, "utf8");
 
-    const terminalOnlyReconciliation = runCli([
+    const terminalOnlyReconciliation = await runCli([
       "reconcile-monitors",
       "--store-dir",
       storeDir,
@@ -1110,7 +1110,7 @@ console.log(JSON.stringify({ ok: true }));
       "pending"
     );
 
-    const reconciliation = runCli([
+    const reconciliation = await runCli([
       "reconcile-monitors",
       "--store-dir",
       storeDir,
@@ -1129,7 +1129,7 @@ console.log(JSON.stringify({ ok: true }));
     assert.equal(recovered.callback_delivery.status, "delivered");
     assert.equal(recovered.callback_delivery.attempts, 2);
 
-    const redundantReconciliation = runCli([
+    const redundantReconciliation = await runCli([
       "reconcile-monitors",
       "--store-dir",
       storeDir,
@@ -1431,7 +1431,7 @@ console.log(JSON.stringify({ ok: true }));
   }
 });
 
-test("retry settles persisted accepted wake evidence without redelivery", () => {
+test("retry settles persisted accepted wake evidence without redelivery", async () => {
   const storeDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-callback-accepted-recovery-")
   );
@@ -1503,7 +1503,7 @@ process.exit(99);
     appendEvent(created.paths.logPath, messageEvent(message));
     const turnUpdatedAt = semanticState.updated_at;
 
-    const recovered = runCli([
+    const recovered = await runCli([
       "retry-callback",
       "--state",
       created.paths.statePath
@@ -1525,7 +1525,7 @@ process.exit(99);
   }
 });
 
-test("callback delivers chat_send requested by plugin gateway method", () => {
+test("callback delivers chat_send requested by plugin gateway method", async () => {
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-chat-send-"));
   const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-fake-openclaw-"));
   const gatewayCallPath = path.join(fakeBinDir, "calls.ndjson");
@@ -1587,7 +1587,7 @@ if (method === "agent-knock-knock.callback") {
       { openclawSession: "agent:main:main" }
     );
 
-    const callback = runCli([
+    const callback = await runCli([
       "callback",
       "--state",
       created.paths.statePath,
@@ -1653,7 +1653,7 @@ if (method === "agent-knock-knock.callback") {
   }
 });
 
-test("in_flight chat.send is delivered even when agent.wait times out", () => {
+test("in_flight chat.send is delivered even when agent.wait times out", async () => {
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-chat-wait-accepted-"));
   const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-fake-openclaw-"));
   const callsPath = path.join(fakeBinDir, "calls.ndjson");
@@ -1705,7 +1705,7 @@ if (method === "agent-knock-knock.callback") {
       ...JSON.parse(fs.readFileSync(created.paths.statePath, "utf8")),
       gateway_url: configuredGatewayUrl
     });
-    const callback = runCli([
+    const callback = await runCli([
       "callback",
       "--state",
       created.paths.statePath,
@@ -1994,7 +1994,7 @@ test("invalid agent.wait observations cannot roll back an accepted wake", async 
   }
 });
 
-test("callback keeps legacy delivery plans compatible while confirming sessions.send", () => {
+test("callback keeps legacy delivery plans compatible while confirming sessions.send", async () => {
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-legacy-plan-"));
   const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-fake-openclaw-"));
   try {
@@ -2015,7 +2015,7 @@ test("callback keeps legacy delivery plans compatible while confirming sessions.
       "Accept legacy callback plan",
       { openclawSession: "agent:main:main" }
     );
-    const legacyResult = runCli([
+    const legacyResult = await runCli([
       "callback",
       "--state",
       legacy.paths.statePath,
@@ -2055,7 +2055,7 @@ test("callback keeps legacy delivery plans compatible while confirming sessions.
       "Confirm sessions.send callback",
       { openclawSession: "agent:main:main" }
     );
-    const sessionResult = runCli([
+    const sessionResult = await runCli([
       "callback",
       "--state",
       session.paths.statePath,
@@ -2314,15 +2314,8 @@ function runImportedCli(
   });
 }
 
-function runCli(args, env = {}) {
-  const result = spawnSync(process.execPath, [binPath, ...args], {
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      ...env
-    }
-  });
-
+async function runCli(args, env = {}) {
+  const result = await runImportedCli(args, env);
   assert.equal(result.status, 0, result.stderr || result.stdout);
   return JSON.parse(result.stdout);
 }
