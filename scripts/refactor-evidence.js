@@ -254,6 +254,60 @@ function decodeNulPaths(output) {
   return output.split("\0").filter(Boolean);
 }
 
+function readRevisionBlobs(repoRoot, revision, repositoryPaths) {
+  if (repositoryPaths.some((repositoryPath) => /[\r\n]/u.test(repositoryPath))) {
+    fail("revision evidence paths must not contain line breaks");
+  }
+  const result = spawnSync("git", ["cat-file", "--batch"], {
+    cwd: repoRoot,
+    input: `${repositoryPaths.map((repositoryPath) =>
+      `${revision}:${repositoryPath}`).join("\n")}\n`,
+    maxBuffer: 64 * 1024 * 1024
+  });
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    const detail = String(result.stderr ?? "").trim();
+    fail(`batch reading test sources at ${revision} failed${
+      detail ? `: ${detail}` : ""
+    }`);
+  }
+  const output = Buffer.isBuffer(result.stdout)
+    ? result.stdout
+    : Buffer.from(result.stdout ?? "");
+  let offset = 0;
+  const sources = repositoryPaths.map((repositoryPath) => {
+    const headerEnd = output.indexOf(0x0a, offset);
+    if (headerEnd < 0) {
+      fail(`git cat-file omitted the header for ${repositoryPath}`);
+    }
+    const header = output.subarray(offset, headerEnd).toString("utf8");
+    const match = /^([0-9a-f]{40,64}) blob ([0-9]+)$/u.exec(header);
+    if (!match) {
+      fail(`git cat-file returned an invalid header for ${repositoryPath}`);
+    }
+    const size = Number(match[2]);
+    if (!Number.isSafeInteger(size) || size < 0) {
+      fail(`git cat-file returned an invalid size for ${repositoryPath}`);
+    }
+    const sourceStart = headerEnd + 1;
+    const sourceEnd = sourceStart + size;
+    if (sourceEnd >= output.length || output[sourceEnd] !== 0x0a) {
+      fail(`git cat-file returned a truncated blob for ${repositoryPath}`);
+    }
+    offset = sourceEnd + 1;
+    return {
+      path: repositoryPath,
+      source: output.subarray(sourceStart, sourceEnd).toString("utf8")
+    };
+  });
+  if (offset !== output.length) {
+    fail(`git cat-file returned unexpected trailing evidence at ${revision}`);
+  }
+  return sources;
+}
+
 function walkTypeScriptTests(repoRoot, directory = "test") {
   const absoluteDirectory = path.join(repoRoot, directory);
   return fs.readdirSync(absoluteDirectory, { withFileTypes: true })
@@ -278,14 +332,7 @@ function revisionTestSources(repoRoot, revision) {
   )).filter((repositoryPath) => repositoryPath.endsWith(".ts"));
   return {
     revision: resolved,
-    sources: paths.map((repositoryPath) => ({
-      path: repositoryPath,
-      source: checkedGit(
-        repoRoot,
-        ["show", `${resolved}:${repositoryPath}`],
-        `reading ${repositoryPath} at ${resolved}`
-      )
-    }))
+    sources: readRevisionBlobs(repoRoot, resolved, paths)
   };
 }
 
