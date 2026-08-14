@@ -308,7 +308,7 @@ test("virgin Codex binding recovery closes both post-Enter crash windows without
         ...codexNoRolloutStoreArgs(fixture),
         "--terminal-monitors-only"
       ];
-      const recovered = runCliSubprocess(reconcileArgs, fixture.environment);
+      const recovered = await runCli(reconcileArgs, fixture.environment);
       assert.equal(recovered.status, 0, recovered.stderr || recovered.stdout);
 
       const afterTurn = listConversations(fixture.storeDir)[0];
@@ -367,7 +367,7 @@ test("virgin Codex binding recovery closes both post-Enter crash windows without
         "recovery must never replay task text"
       );
 
-      const recoveredAgain = runCliSubprocess(
+      const recoveredAgain = await runCli(
         reconcileArgs,
         fixture.environment
       );
@@ -1976,7 +1976,7 @@ for (const historyCase of [
         assert.equal(abortLedger.enter_dispatched_at, undefined);
         assert.deepEqual(taskInputCalls(fixture), callsBeforeCrash);
 
-        const recoveredWithStaleToken = runCliSubprocess(args, codexNativeAcceptanceEnv(fixture.environment));
+        const recoveredWithStaleToken = await runCli(args, codexNativeAcceptanceEnv(fixture.environment));
         assert.equal(
           recoveredWithStaleToken.status,
           1,
@@ -2004,7 +2004,7 @@ for (const historyCase of [
         assert.deepEqual(taskInputCalls(fixture), callsBeforeCrash);
 
         const refreshedAction = await deferredForegroundSendAction(fixture);
-        const retried = runCliSubprocess(
+        const retried = await runCli(
           deferredForegroundSendArgs(fixture, refreshedAction, message),
           codexNativeAcceptanceEnv(fixture.environment)
         );
@@ -2036,7 +2036,7 @@ for (const historyCase of [
             candidate.status === "waiting_for_agent"
         );
         assert.ok(acceptedTurn);
-        const closed = runCliSubprocess([
+        const closed = await runCli([
           "close",
           "--turn",
           acceptedTurn.turn_id,
@@ -2063,7 +2063,7 @@ for (const historyCase of [
           typeof thirdAction.arguments.expected_terminal_token,
           "string"
         );
-        const third = runCliSubprocess(
+        const third = await runCli(
           deferredForegroundSendArgs(fixture, thirdAction, thirdMessage),
           codexNativeAcceptanceEnv(fixture.environment)
         );
@@ -2157,7 +2157,7 @@ test("a missing deferred Turn survives a second crash after its exact ledger abo
     assert.deepEqual(taskInputCalls(fixture), []);
     assert.deepEqual(listConversations(fixture.storeDir), []);
 
-    const recoveredWithStaleToken = runCliSubprocess(args, codexNativeAcceptanceEnv(fixture.environment));
+    const recoveredWithStaleToken = await runCli(args, codexNativeAcceptanceEnv(fixture.environment));
     assert.equal(
       recoveredWithStaleToken.status,
       1,
@@ -2184,7 +2184,7 @@ test("a missing deferred Turn survives a second crash after its exact ledger abo
     assert.deepEqual(listConversations(fixture.storeDir), []);
 
     const refreshedAction = await deferredForegroundSendAction(fixture);
-    const retried = runCliSubprocess(
+    const retried = await runCli(
       deferredForegroundSendArgs(fixture, refreshedAction, message),
       codexNativeAcceptanceEnv(fixture.environment)
     );
@@ -2197,7 +2197,7 @@ test("a missing deferred Turn survives a second crash after its exact ledger abo
         candidate.status === "waiting_for_agent"
     );
     assert.ok(acceptedTurn);
-    const closed = runCliSubprocess([
+    const closed = await runCli([
       "close",
       "--turn",
       acceptedTurn.turn_id,
@@ -2224,7 +2224,7 @@ test("a missing deferred Turn survives a second crash after its exact ledger abo
       typeof thirdAction.arguments.expected_terminal_token,
       "string"
     );
-    const third = runCliSubprocess(
+    const third = await runCli(
       deferredForegroundSendArgs(fixture, thirdAction, thirdMessage),
       codexNativeAcceptanceEnv(fixture.environment)
     );
@@ -2292,7 +2292,7 @@ for (const crashPoint of [
           Number(originalBinding?.generation) + 1
         );
 
-        const recovered = runCliSubprocess(args, codexNativeAcceptanceEnv(fixture.environment));
+        const recovered = await runCli(args, codexNativeAcceptanceEnv(fixture.environment));
         assertRecoveredTurnBlocksDuplicate(recovered);
         assertResolvedSameUuidDeferredTransfer({
           fixture,
@@ -2338,7 +2338,7 @@ for (const crashPoint of [
         );
         assertSingleTaskInput(fixture, message);
 
-        const recovered = runCliSubprocess(args, codexNativeAcceptanceEnv(fixture.environment));
+        const recovered = await runCli(args, codexNativeAcceptanceEnv(fixture.environment));
         assertRecoveredTurnBlocksDuplicate(recovered);
         assertResolvedSameUuidDeferredTransfer({
           fixture,
@@ -2438,7 +2438,7 @@ test("committed acceptance backfill survives a second recovery crash without rep
     );
     assertSingleTaskInput(fixture, message);
 
-    const recovered = runCliSubprocess(args, codexNativeAcceptanceEnv(fixture.environment));
+    const recovered = await runCli(args, codexNativeAcceptanceEnv(fixture.environment));
     assertRecoveredTurnBlocksDuplicate(recovered);
     assertResolvedSameUuidDeferredTransfer({
       fixture,
@@ -3424,7 +3424,7 @@ test("an accepted deferred Turn recovers before Session commit without replay", 
     );
     assertSingleTaskInput(fixture, message);
 
-    const recovered = runCliSubprocess(args, codexNativeAcceptanceEnv(fixture.environment));
+    const recovered = await runCli(args, codexNativeAcceptanceEnv(fixture.environment));
     assertRecoveredTurnBlocksDuplicate(recovered);
     assertResolvedSameUuidDeferredTransfer({
       fixture,
