@@ -1536,6 +1536,83 @@ control locks, Claude callback, and Session acceptance. They cover replay,
 send/possible-input, approval, lock order, and native acceptance without adding
 lifecycle, close, monitor, or callback ownership to this facade.
 
+## Terminal dispatch repository and recovery
+
+The terminal dispatch recovery slice moves the raw ordinary-ledger repository,
+prepared and lagging crash reconciliation, verified-dead reconciliation, and
+callbackless local-completion settlement out of `cli-core.ts`. Ordinary
+send/respond/approve dispatch, deferred foreground transfer state machines,
+native lifecycle policy, monitor polling and callback transport remain in their
+existing owners. The composition root keeps the narrow callback-outbox
+preparation closure and routes the old helper names through one invocation-safe
+facade.
+
+Measured against exact parent `9156a7d45c28b8d9a428fbd048c46cf2226d56aa`,
+the slice reduces `src/cli-core.ts` from 16,350 to 14,390 physical lines
+(-1,960) and changes total production TypeScript from 86,473 to 87,562 lines
+(+1,089, 55.56% of the core movement). The three-module ownership domain has five
+targeted integration witnesses. Architecture validation reports 98 production
+modules, 515 static import edges, and zero cycles.
+
+The 410-line repository adapter is the sole owner of dispatch-ledger filesystem
+paths, raw bytes, legacy/canonical filenames, the dual lock set, file modes,
+directory fsync, and atomic replace. Its 321-line/c1 factory is a reviewed
+exception to the preferred 100-line function target; its largest inner
+operation is the 73-line/c18 save. The 791-line recovery service exposes exactly
+five typed port groups (`transaction`, `authority`, `evidence`, `state`, and
+`completion`), has a 47-line maximum function and c12 maximum complexity, and
+imports no Node filesystem/path API, CLI core, Store/session persistence, raw
+lock or JSON helper, `Record<..., any>`, full resolved terminal, or terminal
+adapter capability. The 1,848-line CLI transaction adapter owns path projection,
+Session/event reads, Store-writer and state locking, callback preparation, and
+legacy record validation. Its largest function is 77/c17. The reviewed
+complexity exception is the 37-line/c30 exact ledger-receipt predicate; every
+function remains below the hard 500 LOC/c50 gates, and the facade factory is
+24/c1.
+
+Repository compatibility remains fail closed. A canonical terminal acquires
+the canonical and legacy send locks in lexical order and releases them in
+reverse order through an idempotent closure. Reads reject symlinks and non-files
+without following the final path and reject simultaneous canonical/legacy
+owners. A validated legacy ledger is renamed to its canonical owner and the
+directory is synced before the next version-2 replace. Every replace creates a
+0600 exclusive temporary file, writes the exact pretty-JSON-plus-newline bytes,
+fsyncs the file, renames, reapplies 0600, fsyncs the directory, and removes any
+temporary artifact. Receipt history remains append-preserving across migration
+and settlement; a failed conversation/message CAS leaves the original bytes
+unchanged. Restoring a prior durable generation replaces the top-level document
+while retaining its append-only receipt history, so the abandoned generation
+cannot leak a self-referential `previous_generation_id`.
+
+Recovery retains `terminal dispatch lock -> Store writer lease -> Turn state
+lock`. Prepared keep decisions do not sample the clock, and owner mismatch
+returns before Store/binding projection. Prepared recovery resolves only when
+durable evidence proves zero input was possible; text-injected,
+Enter-dispatched, submitted, accepted, and uncertain proof is reconciled
+without terminal replay. Fresh verified-dead recovery applies the basic ledger
+fence first, then short-circuits state, Store, full ledger, receipt, and
+acceptance observations in order. It reuses or observes one process-death proof
+and lets a newly observed durable completion win before writing stall evidence.
+Stall persistence remains `death event -> stalled event -> crash fence -> state
+-> runtime log`. Completion preparation releases the state lock while retaining
+terminal and writer ownership; a failed release is retried by the enclosing
+transaction cleanup before writer and terminal release. Local completion
+verifies the exact claim, detected event,
+message event, accepted submission, and ledger before `resolve ledger -> settled
+event`. Reload, projection, and callback errors still unwind state, writer, then
+terminal ownership.
+
+Direct fast evidence fixes legacy promotion, canonical bytes and 0600 mode,
+receipt preservation, canonical/legacy conflict rejection, dangling-symlink
+rejection, dual-lock cleanup, failed-CAS byte identity, verified-dead completion
+and stall write order, callbackless settlement idempotence, zero-input-only
+prepared resolution, no replay surface, five-port boundary hygiene, and all-lock
+cleanup after a locked reload failure. It also fixes replacement-document
+Object keys and bytes, lazy-observation call counts and reason strings, and a
+release-error retry. Existing dispatch recovery, receipt
+fence, control-lock, monitor recovery, and human-handoff suites remain the
+black-box boundary set.
+
 ## Soft freeze while #126 is active
 
 Until the orchestration milestones finish:
