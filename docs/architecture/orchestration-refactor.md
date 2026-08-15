@@ -1736,6 +1736,66 @@ cover virgin and deferred acceptance, process drift/quarantine, crash recovery,
 uncertainty, Turn construction, and no-replay behavior without assigning
 lifecycle, callback, or generic ledger-recovery ownership to this slice.
 
+## Terminal identity authority CLI composition
+
+The identity-authority slice moves the exact 37-function inventory for terminal
+routing, process-incarnation and verified-dead observation, managed Session
+logical/native identity, Codex companion and pre-materialization fences,
+binding selection/conflict/materialization/reattach, and verified-empty deferred
+authority observation out of `cli-core.ts`. It deliberately leaves submission
+acceptance refinement/persistence/quarantine, current-native-identity polling,
+managed Turn creation, deferred detach/adoption state machines, repository,
+monitor, callback, and lifecycle mutation in their existing owners.
+
+Against exact parent `918812c5b541d5586595c4ea793df370f538d3e4`,
+`src/cli-core.ts` falls from 12,721 to 11,468 physical lines (-1,253). Total
+production TypeScript changes from 88,732 to 89,156 (+424, 33.84 percent of the
+core movement), below the preferred 450-line overhead target. Architecture
+validation reports 50 domains, 104 production modules, 589 static import edges,
+and zero cycles. The factory has four explicit invocation-scoped groups
+(`runtime`, `store`, `authority`, and `environment`) and exports no singleton or
+mutable process-global runtime. The composition root projects provider ports
+directly from `terminalRuntime(options)` and acceptance-owned identity/Session
+ports directly from `terminalAcceptanceCliFacade`; it adds no interim owner.
+
+The 78-line data-only service receives only projected native identity, process
+incarnation, companion, revision, status, and binding-token facts. It imports no
+filesystem/path/process-source, Store, managed Session, resolved terminal, raw
+JSON, lock, or `Record<..., any>` API. It owns only the moved exact-lifecycle
+fallback, deterministic companion uniqueness, and verified-empty snapshot
+comparison. The 1,599-line CLI adapter retains provider/process observation,
+Store reads, one managed-Session CAS reattach write, and explicit terminal
+projection. It reuses `terminal-binding-authority`,
+`terminal-authority-policy`, `terminal-dispatch-execution`, action projection,
+lifecycle verification, submission acceptance, verified-dead policy, and the
+runtime provider rather than copying rollout, fence, token, companion,
+status-card, or transition reducers.
+
+Observation and mutation order remain fail closed. Exact bound-process proof
+short-circuits envelope, binding, then accepted-submission evidence before
+consulting the complete process inventory. Stored status-card identity remains
+preferred only under the committed companion/predecessor fence. Codex process
+birth lookup stays lazy, and Claude still rejects a missing process UUID before
+any fallback. Raw reattach performs exclusive-ownership observation, reloads
+the exact Session, revalidates revision plus binding token, then writes one
+generation-incremented Session CAS. Verified-empty handoff checks the initial
+snapshot, process incarnation, absent native identity, terminal status and
+dispatch readiness, then reloads and revalidates the Session before transition
+and composer gates. No new lock or durable-file order is introduced.
+
+Every new function meets the preferred limits: the maximum adapter span is 95
+lines and the conservative maximum approximate complexity is c17; the service
+is smaller. Direct fast proofs cover malformed/fail-closed facts, deterministic
+companion selection, lazy process-birth lookup, parallel async-execution
+isolation, the four-group factory boundary, and service infrastructure hygiene.
+Five retained focused witnesses cover no-rollout/status-card binding, observed
+handoff/verified-empty authority, native lifecycle identity, Session acceptance,
+and terminal-send gates. The remaining exact-bound completion detector and
+requirement predicate stay with completion/recovery composition; endpoint
+refinement, Store-backed runtime identity, durable request construction, and
+legacy identity migration remain a later minimal identity-facade prerequisite
+rather than being duplicated here.
+
 ## Soft freeze while #126 is active
 
 Until the orchestration milestones finish:
