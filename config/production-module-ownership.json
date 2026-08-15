@@ -2,8 +2,8 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 16350,
-    "production_physical_loc": 86473,
+    "cli_core_max_physical_loc": 14390,
+    "production_physical_loc": 87562,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -268,6 +268,16 @@
         "test/shards/agent-cli-dispatch-recovery.test.ts",
         "test/shards/agent-cli-session-acceptance.test.ts",
         "test/shards/agent-cli-terminal-send-gates.test.ts"
+      ]
+    },
+    "terminal-dispatch-recovery": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/human-handoff-adoption-cli.test.ts",
+        "test/shards/agent-cli-control-locks.test.ts",
+        "test/shards/agent-cli-dispatch-recovery.test.ts",
+        "test/shards/agent-cli-monitor-recovery.test.ts",
+        "test/shards/agent-cli-receipt-fences.test.ts"
       ]
     },
     "terminal-list-application": {
@@ -653,6 +663,18 @@
     {
       "path": "src/terminal-dispatch-receipt.ts",
       "owner": "terminal-dispatch-application"
+    },
+    {
+      "path": "src/terminal-dispatch-recovery-cli-adapter.ts",
+      "owner": "terminal-dispatch-recovery"
+    },
+    {
+      "path": "src/terminal-dispatch-recovery-service.ts",
+      "owner": "terminal-dispatch-recovery"
+    },
+    {
+      "path": "src/terminal-dispatch-repository-cli-adapter.ts",
+      "owner": "terminal-dispatch-recovery"
     },
     {
       "path": "src/terminal-list-cli-adapter.ts",
