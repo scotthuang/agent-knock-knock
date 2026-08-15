@@ -8,20 +8,10 @@ import type {
   ActiveCodexProcess,
   ForkContextPackage
 } from "./codex-session-provider.js";
-import {
-  createCodexTerminalAgentAdapter,
-  detectCodexDurableCompletion
-} from "./codex-terminal-agent-adapter.js";
 import { codexLifecycleBehaviorProfile } from "./codex-lifecycle-compatibility.js";
-import {
-  createClaudeTerminalAgentAdapter,
-  type ClaudeAgentRow
-} from "./claude-terminal-agent-adapter.js";
 import {
   createClaudeThreadLifecycleCandidateProvider,
   detectClaudeTranscriptAcceptance,
-  detectClaudeTranscriptCompletion,
-  detectClaudeTranscriptPendingApproval,
   observeClaudeDeadProcessTranscriptCompletion
 } from "./claude-local-transcript-provider.js";
 import {
@@ -186,19 +176,14 @@ import {
   tryLoadManagedSession
 } from "./session-store.js";
 import {
-  createTerminalControlProviderRegistry as createProviderRegistry,
-  StaticTerminalControlProvider,
   TerminalControlUnavailableError,
-  TmuxTerminalControlProvider,
   type TerminalControlProvider,
   type TerminalControlProviderRegistry
 } from "./terminal-control-provider.js";
-import { HerdrTerminalControlProvider } from "./herdr-terminal-control-provider.js";
 import {
   parseTerminalConversationId,
   type ActiveTerminalProcess,
   type TerminalCompletionEvidence,
-  type TerminalControlCapability,
   type TerminalControlRef,
   type TerminalDurableCompletionRequest,
   type TerminalRuntimeIdentity,
@@ -215,12 +200,6 @@ import {
   terminalRuntimeResourceKey,
   type TerminalControlEvidence
 } from "./terminal-control-ref.js";
-import { createProductionTerminalAgentRegistry } from "./terminal-agent-registry.js";
-import {
-  StaticTerminalProcessSource,
-  SystemTerminalProcessSource,
-  type TerminalProcessSource
-} from "./terminal-process-source.js";
 import {
   exactCodexReadyStyledComposerCapture,
   isExactClaudeNativeInspectionIdleComposer,
@@ -229,6 +208,10 @@ import {
   TerminalInputNotStartedError,
   type ResolvedTerminalConversation
 } from "./terminal-agent-bridge.js";
+import {
+  createTerminalRuntimeCliAdapter,
+  terminalControlFromTakeover
+} from "./terminal-runtime-cli-adapter.js";
 import {
   decideAcceptedTurnDeadAgentStall,
   decideVerifiedDeadAgentProcess,
@@ -404,7 +387,6 @@ import {
 } from "./terminal-dispatch-execution.js";
 import * as dispatchReceipt from "./terminal-dispatch-receipt.js";
 import {
-  cleanProcessText,
   expandHome,
   packageRootDir,
   redactCliOutput,
@@ -463,14 +445,6 @@ const DEFAULT_MONITOR_POLL_INTERVAL_MS = 5000;
 const CLAUDE_SCREEN_APPROVAL_TTL_MS = 10 * 60 * 1000;
 const CALLBACK_ATTEMPT_LEASE_MS = 2 * 60 * 1000;
 const CALLBACK_RETRY_DELAYS_MS = [5000, 15000, 60000, 60000];
-const TERMINAL_CONTROL_CAPABILITIES = new Set<TerminalControlCapability>([
-  "screen_status",
-  "send_keys",
-  "terminal_approval",
-  "screen_completion",
-  "durable_completion",
-  "terminal_cancel"
-]);
 const TERMINAL_INPUT_EVIDENCE_FIELDS = [
   "text_injected_at",
   "enter_dispatched_at",
@@ -874,226 +848,59 @@ async function listActiveSessionsWithTerminalControl(
   );
 }
 
-function createRuntimeTerminalControlProviderRegistry(
-  options
-): TerminalControlProviderRegistry {
-  const injected = cliDependencies<CliCommandOptions>().terminalControlProviderRegistry;
-  if (injected) {
-    return injected;
-  }
-  return createProviderRegistry([
-    options.terminalsJson || options.terminalScreensJson || options.processesJson
-      ? new StaticTerminalControlProvider({
-          panes: options.terminalsJson
-            ? parseJsonOption(options.terminalsJson, "--terminals-json")
-            : [],
-          screens: options.terminalScreensJson
-            ? parseJsonOption(options.terminalScreensJson, "--terminal-screens-json")
-            : {}
+function terminalRuntime(options: CliCommandOptions = {}) {
+  return createTerminalRuntimeCliAdapter({
+    options,
+    dependencies: cliDependencies<CliCommandOptions>(),
+    completion: {
+      detectExactBound: ({ conversation, nativeTakeover, request, runtime }) =>
+        detectExactBoundCodexCompletion({
+          conversation: conversation as Record<string, any>,
+          nativeTakeover: nativeTakeover as Record<string, any> | undefined,
+          request, runtime: runtime as Record<string, any> | undefined, options
+        }),
+      loadCodexContexts: async (nativeTakeover) =>
+        (await loadCodexTerminalContexts({ nativeTakeover, options })).map(
+          ({ context, match, confidence }) => ({
+            context, match,
+            confidence: confidence as "high" | "medium" | "low"
+          })
+        )
+    },
+    identity: {
+      resolveCurrent: (request) =>
+        resolveCurrentNativeAgentSessionIdentity({ options, ...request }),
+      assertRuntime: (input) =>
+        terminalDispatchExecution(options).assertRuntimeIdentity({
+          ...input, currentIdentity: input.currentIdentity as
+            NativeAgentSessionIdentity | undefined
         })
-      : new TmuxTerminalControlProvider(),
-    ...(
-      options.terminalsJson || options.terminalScreensJson || options.processesJson
-        ? []
-        : [new HerdrTerminalControlProvider()]
-    )
-  ]);
-}
-
-function createTerminalControlProvider(
-  options,
-  registry: TerminalControlProviderRegistry =
-    createRuntimeTerminalControlProviderRegistry(options)
-): TerminalControlProvider {
-  return registry.asProvider();
-}
-
-function createTerminalProcessSource(options): TerminalProcessSource {
-  const injected = cliDependencies<CliCommandOptions>().terminalProcessSource;
-  if (injected) {
-    return injected;
-  }
-  if (options.processesJson) {
-    return new StaticTerminalProcessSource(
-      parseJsonOption(options.processesJson, "--processes-json")
-    );
-  }
-  return new SystemTerminalProcessSource();
-}
-
-function loadClaudeAgentRows(
-  options: Record<string, any> = {},
-  observation: { required?: boolean } = {}
-): ClaudeAgentRow[] {
-  const injected = cliDependencies<CliCommandOptions>().loadClaudeAgentRows;
-  if (injected) {
-    return injected(options, observation);
-  }
-  let value: unknown;
-  if (options.claudeAgentsJson !== undefined) {
-    value = typeof options.claudeAgentsJson === "string"
-      ? parseJsonOption(options.claudeAgentsJson, "--claude-agents-json")
-      : options.claudeAgentsJson;
-  } else if (options.processesJson || options.terminalsJson || options.terminalScreensJson) {
-    return [];
-  } else {
-    const claudeExecutable = resolveOptionalExecutable("claude");
-    if (!claudeExecutable) {
-      if (observation.required) {
-        throw new Error(
-          "Claude agent session observation is unavailable because the Claude CLI could not be resolved"
-        );
-      }
-      return [];
-    }
-    const result = spawnSync(claudeExecutable, ["agents", "--json", "--all"], {
-      encoding: "utf8",
-      maxBuffer: 1024 * 1024 * 10,
-      timeout: 10_000
-    });
-    if (result.error || result.status !== 0) {
-      runtimeLog("warn", "claude_agents_list_failed", {
-        status: result.status ?? null,
-        error: result.error?.message,
-        stderr: textSummary(cleanProcessText(result.stderr))
-      });
-      if (observation.required) {
-        throw new Error(
-          "Claude agent session observation failed; refusing to treat the process as a virgin session"
-        );
-      }
-      return [];
-    }
-    try {
-      value = JSON.parse(result.stdout);
-    } catch {
-      runtimeLog("warn", "claude_agents_list_invalid_json", {
-        stdout: textSummary(result.stdout)
-      });
-      if (observation.required) {
-        throw new Error(
-          "Claude agent session observation returned invalid JSON; refusing to treat the process as a virgin session"
-        );
-      }
-      return [];
-    }
-  }
-
-  const rows = Array.isArray(value)
-    ? value
-    : isRecord(value) && Array.isArray(value.agents)
-      ? value.agents
-      : undefined;
-  if (!rows) {
-    if (observation.required) {
-      throw new Error(
-        "Claude agent session observation returned an unsupported result shape; refusing to treat the process as a virgin session"
-      );
-    }
-    return [];
-  }
-  return rows.flatMap((row): ClaudeAgentRow[] => {
-    if (!isRecord(row) || !Number.isInteger(Number(row.pid))) {
-      return [];
-    }
-    return [{
-      pid: Number(row.pid),
-      ...(stringValue(row.cwd) ? { cwd: stringValue(row.cwd) } : {}),
-      ...(stringValue(row.kind) ? { kind: stringValue(row.kind) } : {}),
-      ...(stringValue(row.sessionId) ? { sessionId: stringValue(row.sessionId) } : {}),
-      ...(Number.isSafeInteger(Number(row.startedAt)) && Number(row.startedAt) > 0
-        ? { startedAt: Number(row.startedAt) }
-        : {}),
-      ...(stringValue(row.status) ? { status: stringValue(row.status) } : {}),
-      ...(stringValue(row.waitingFor)
-        ? { waitingFor: stringValue(row.waitingFor) }
-        : {})
-    }];
+    },
+    workspace: { assertConfigured: assertConfiguredWorkspace }
   });
+}
+
+function createRuntimeTerminalControlProviderRegistry(options):
+  TerminalControlProviderRegistry {
+  return terminalRuntime(options).createControlProviderRegistry();
+}
+
+function createTerminalControlProvider(options,
+  registry?: TerminalControlProviderRegistry): TerminalControlProvider {
+  return terminalRuntime(options).createControlProvider(registry);
+}
+
+function createTerminalProcessSource(options) {
+  return terminalRuntime(options).createProcessSource();
+}
+
+function loadClaudeAgentRows(options: CliCommandOptions = {},
+  observation: { required?: boolean } = {}) {
+  return terminalRuntime(options).loadClaudeAgentRows(observation);
 }
 
 function createRuntimeTerminalAgentRegistry(options) {
-  return createProductionTerminalAgentRegistry({
-    overrides: [
-      createCodexTerminalAgentAdapter({
-        async detectDurableCompletion(request: TerminalDurableCompletionRequest) {
-          const runtime = isRecord(request.context) ? request.context : undefined;
-          const conversation = runtime?.conversation;
-          const nativeTakeover = isRecord(runtime?.nativeTakeover)
-            ? runtime?.nativeTakeover
-            : undefined;
-          if (!isRecord(conversation)) {
-            return undefined;
-          }
-          const exactCompletion = detectExactBoundCodexCompletion({
-            conversation,
-            nativeTakeover,
-            request,
-            runtime,
-            options
-          });
-          if (exactCompletion.handled) {
-            return exactCompletion.completion;
-          }
-          const contextMatches = await loadCodexTerminalContexts({
-            nativeTakeover,
-            options
-          });
-          const matches: TerminalCompletionEvidence[] = [];
-          const detectionErrors: string[] = [];
-          for (const contextMatch of contextMatches) {
-            try {
-              const evidence = detectCodexDurableCompletion({
-                ...request,
-                context: contextMatch.context
-              });
-              if (evidence) {
-                matches.push({
-                  ...evidence,
-                  confidence: contextMatch.confidence as "high" | "medium" | "low",
-                  metadata: {
-                    ...evidence.metadata,
-                    context_match: contextMatch.match,
-                    session: contextMatch.context.source
-                  }
-                });
-              }
-            } catch (error) {
-              detectionErrors.push(
-                error instanceof Error ? error.message : String(error)
-              );
-            }
-          }
-          if (detectionErrors.length > 0) {
-            throw new Error(
-              `could not inspect every plausible Codex completion: ${detectionErrors.join("; ")}`
-            );
-          }
-          if (matches.length > 1) {
-            throw new Error(
-              "multiple same-cwd Codex sessions match the managed terminal request"
-            );
-          }
-          return matches[0];
-        }
-      }),
-      createClaudeTerminalAgentAdapter({
-        agentRows: loadClaudeAgentRows(options),
-        detectPendingApproval(request: TerminalDurableCompletionRequest) {
-          return detectClaudeTranscriptPendingApproval(request, {
-            claudeHome: expandHome(options.claudeHome),
-            agentRows: loadClaudeAgentRows(options)
-          });
-        },
-        async detectDurableCompletion(request: TerminalDurableCompletionRequest) {
-          return detectClaudeTranscriptCompletion(request, {
-            claudeHome: expandHome(options.claudeHome),
-            agentRows: loadClaudeAgentRows(options)
-          });
-        }
-      })
-    ]
-  });
+  return terminalRuntime(options).createAgentRegistry();
 }
 
 function detectExactBoundCodexCompletion({
@@ -1214,228 +1021,7 @@ function createTerminalAgentBridge(
   terminalProvider: TerminalControlProvider = createTerminalControlProvider(options),
   registry = createRuntimeTerminalAgentRegistry(options)
 ): TerminalAgentBridge {
-  const processSource = createTerminalProcessSource(options);
-  const dependencies = cliDependencies<CliCommandOptions>();
-  return new TerminalAgentBridge({
-    registry,
-    terminalProvider,
-    ...(dependencies.monotonicNowMs
-      ? { nowMs: dependencies.monotonicNowMs }
-      : {}),
-    ...(dependencies.sleep ? { sleep: dependencies.sleep } : {}),
-    async verifyIdentity({ agent, pid, terminalControl, runtime }) {
-      const adapter = registry.require(agent);
-      const requestedTerminal = terminalProvider.endpoint(terminalControl);
-      const resolvedTerminal = await terminalProvider.resolve(requestedTerminal);
-      const expectedWorkspace =
-        options.workspace ?? resolvedTerminal.route.currentPath ??
-        terminalControl.currentPath;
-      if (!expectedWorkspace) {
-        throw new Error(
-          `refusing terminal access to ${terminalControl.target}; its workspace is unavailable`
-        );
-      }
-      const snapshots = await processSource.listProcessSnapshots(
-        (candidate) => candidate.pid === pid,
-        {
-          includeCwd: true,
-          includeAncestors: true
-        }
-      );
-      const snapshot = snapshots.find((candidate) => candidate.pid === pid);
-      if (!snapshot || !adapter.classifyProcess(snapshot)) {
-        throw new Error(
-          `terminal conversation agent ${agent} with pid ${pid} is no longer active`
-        );
-      }
-      if (!terminalProvider.containsProcess(
-        resolvedTerminal,
-        snapshot,
-        snapshots
-      )) {
-        throw new Error(
-          `terminal conversation agent ${agent} with pid ${pid} no longer belongs to pane ${terminalControl.target}`
-        );
-      }
-      assertConfiguredWorkspace(
-        expectedWorkspace,
-        snapshot.cwd,
-        `terminal access to ${terminalControl.target} by agent process ${pid}`
-      );
-      assertConfiguredWorkspace(
-        expectedWorkspace,
-        resolvedTerminal.route.currentPath,
-        `terminal access to ${terminalControl.target} by terminal endpoint`
-      );
-      const requiresNativeIdentity = Boolean(
-        runtime?.nativeSessionId ||
-        runtime?.nativeProcessUuid ||
-        runtime?.nativeProcessBirth ||
-        runtime?.nativeRollout ||
-        runtime?.requireNativeProcessUuid ||
-        runtime?.requireExactClaudeAgentRow ||
-        runtime?.nativeProcessStartedAt ||
-        runtime?.exactClaudeAgentState ||
-        runtime?.requireNativeRolloutIdentity ||
-        runtime?.expectedNativeSessionId ||
-        runtime?.expectedEmptyNativeSession ||
-        runtime?.allowedPreMaterializationNativeIdentity ||
-        runtime?.allowedAdditionalNativeIdentities?.length
-      );
-      const currentNativeIdentity = requiresNativeIdentity
-        ? await resolveCurrentNativeAgentSessionIdentity({
-            options,
-            agent,
-            pid,
-            cwd: snapshot.cwd ?? resolvedTerminal.route.currentPath,
-            preferredSessionId:
-              runtime?.allowedPreMaterializationNativeIdentity &&
-                (runtime.expectedNativeSessionId ?? runtime.nativeSessionId) &&
-                runtime.allowedPreMaterializationNativeIdentity.sessionId !==
-                  (runtime.expectedNativeSessionId ?? runtime.nativeSessionId)
-                ? (runtime.expectedNativeSessionId ?? runtime.nativeSessionId)
-                : undefined,
-            allowedCompanionIdentity:
-              runtime?.allowedPreMaterializationNativeIdentity,
-            allowedAdditionalIdentities:
-              runtime?.allowedAdditionalNativeIdentities
-          })
-        : undefined;
-      terminalDispatchExecution(options).assertRuntimeIdentity({
-        runtime,
-        currentIdentity: currentNativeIdentity,
-        agent,
-        pid
-      });
-      if (runtime?.requireExactClaudeAgentRow === true) {
-        if (
-          agent !== "claude" ||
-          !Number.isSafeInteger(runtime.nativeProcessStartedAt) ||
-          Number(runtime.nativeProcessStartedAt) <= 0 ||
-          !runtime.nativeSessionId
-        ) {
-          throw new Error(
-            `native ${agent} inspection has an incomplete exact process identity; ` +
-            "refresh list before controlling the terminal"
-          );
-        }
-        const agentRows = loadClaudeAgentRows(options, { required: true });
-        const observation = adapter.observeThreadLifecycle?.({
-          operation: { kind: "new_thread" },
-          phase: "before",
-          pid,
-          processStartedAt: runtime.nativeProcessStartedAt,
-          cwd: snapshot.cwd ?? resolvedTerminal.route.currentPath,
-          agentRows
-        });
-        const exactRows = agentRows.filter((row) => row.pid === pid);
-        const expectedState = runtime.exactClaudeAgentState ?? "idle";
-        const stateMatches = expectedState === "idle"
-          ? observation?.idle === true
-          : (
-              observation?.idle === false &&
-              exactRows.length === 1 &&
-              exactRows[0].status === "waiting" &&
-              exactRows[0].waitingFor === "dialog open"
-            );
-        if (
-          observation?.status !== "observed" ||
-          !stateMatches ||
-          observation.nativeThreadId !== runtime.nativeSessionId
-        ) {
-          throw new Error(
-            `native Claude agents identity, cwd, or idle state changed for process ${pid}; ` +
-            "refresh list before controlling the terminal"
-          );
-        }
-      }
-      return {
-        terminalControl: terminalProvider.toControlRef(
-          resolvedTerminal,
-          terminalControl.capabilities
-        )
-      };
-    }
-  });
-}
-
-function terminalControlFromTakeover(nativeTakeover): TerminalControlRef | undefined {
-  if (!isRecord(nativeTakeover)) {
-    return undefined;
-  }
-  const terminalControl = nativeTakeover["terminal_control"];
-  if (
-    !isRecord(terminalControl) ||
-    !(terminalControl.kind === "tmux" || terminalControl.kind === "herdr")
-  ) {
-    return undefined;
-  }
-  const target = stringValue(terminalControl.target);
-  const session = stringValue(terminalControl.session);
-  const panePid = Number(terminalControl.panePid);
-  if (!target || !session || !Number.isSafeInteger(panePid) || panePid <= 0) {
-    return undefined;
-  }
-  const storedCapabilities = Array.isArray(terminalControl.capabilities)
-    ? terminalControl.capabilities.filter(isTerminalControlCapability)
-    : [];
-  const capabilities = storedCapabilities.length > 0
-    ? storedCapabilities
-    : [...TERMINAL_CONTROL_CAPABILITIES];
-  let control: TerminalControlRef;
-  if (terminalControl.kind === "tmux") {
-    const window = Number(terminalControl.window);
-    const pane = Number(terminalControl.pane);
-    if (!Number.isInteger(window) || !Number.isInteger(pane)) {
-      return undefined;
-    }
-    control = {
-      kind: "tmux",
-      target,
-      session,
-      window,
-      pane,
-      panePid,
-      currentCommand: stringValue(terminalControl.currentCommand),
-      currentPath: stringValue(terminalControl.currentPath),
-      socketPath: stringValue(terminalControl.socketPath),
-      // State written before adapter capabilities were persisted always represented Codex.
-      capabilities
-    };
-  } else {
-    const socketPath = stringValue(terminalControl.socketPath);
-    const workspaceId = stringValue(terminalControl.workspaceId);
-    const tabId = stringValue(terminalControl.tabId);
-    const paneId = stringValue(terminalControl.paneId);
-    const terminalId = stringValue(terminalControl.terminalId);
-    if (!socketPath || !workspaceId || !tabId || !paneId || !terminalId) {
-      return undefined;
-    }
-    control = {
-      kind: "herdr",
-      target,
-      socketPath,
-      session,
-      sessionDir: stringValue(terminalControl.sessionDir),
-      workspaceId,
-      tabId,
-      paneId,
-      terminalId,
-      panePid,
-      currentCommand: stringValue(terminalControl.currentCommand),
-      currentPath: stringValue(terminalControl.currentPath),
-      capabilities
-    };
-  }
-  const endpointEvidence = nativeTakeover["terminal_endpoint"];
-  if (endpointEvidence !== undefined) {
-    try {
-      associateTerminalEndpointEvidence(control, endpointEvidence);
-    } catch {
-      return undefined;
-    }
-  }
-  return control;
+  return terminalRuntime(options).createBridge(terminalProvider, registry);
 }
 
 function terminalEndpointTakeoverFields(
@@ -1684,11 +1270,6 @@ async function migrateLegacyTerminalAgentIdentity({
     });
   }
   return migratedConversation;
-}
-
-function isTerminalControlCapability(value: unknown): value is TerminalControlCapability {
-  return typeof value === "string" &&
-    TERMINAL_CONTROL_CAPABILITIES.has(value as TerminalControlCapability);
 }
 
 function assertSafeAbortedTerminalRetryBinding({
@@ -5597,43 +5178,7 @@ function agentVersionForRunningProcess(
   pid: number,
   options: Record<string, any>
 ): string | undefined {
-  const injected = cliDependencies<CliCommandOptions>().agentVersionForRunningProcess;
-  if (injected) {
-    return injected(agent, pid, options);
-  }
-  const fixture = options.agentVersionsJson
-    ? parseJsonOption(options.agentVersionsJson, "--agent-versions-json")
-    : undefined;
-  if (isRecord(fixture)) {
-    const byPid = stringValue(fixture[String(pid)]);
-    const byAgent = stringValue(fixture[agent]);
-    return byPid ?? byAgent;
-  }
-  const lsof = resolveOptionalExecutable("lsof");
-  if (!lsof) {
-    return undefined;
-  }
-  const result = spawnSync(
-    lsof,
-    ["-a", "-p", String(pid), "-d", "txt", "-Fn"],
-    { encoding: "utf8", timeout: 5000, maxBuffer: 1024 * 1024 }
-  );
-  if (result.error || result.status !== 0) {
-    return undefined;
-  }
-  const paths = String(result.stdout ?? "")
-    .split(/\r?\n/u)
-    .filter((line) => line.startsWith("n"))
-    .map((line) => line.slice(1));
-  const pathVersions = paths.flatMap((executablePath): string[] => {
-    const pattern = agent === "codex"
-      ? /\/releases\/(\d+\.\d+\.\d+)(?:-[^/]*)?\/bin\/codex$/u
-      : /\/claude\/versions\/(\d+\.\d+\.\d+)$/u;
-    const match = pattern.exec(executablePath);
-    return match ? [match[1]] : [];
-  });
-  const versions = [...new Set(pathVersions)];
-  return versions.length === 1 ? versions[0] : undefined;
+  return terminalRuntime(options).agentVersionForRunningProcess(agent, pid);
 }
 
 function assertTerminalLifecycleReady({
