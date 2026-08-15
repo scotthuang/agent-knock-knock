@@ -30,8 +30,10 @@ import type { TerminalNativeIdentity as NativeAgentSessionIdentity } from
 import {
   terminalControlEvidenceMatches
 } from "./terminal-control-ref.js";
-import type { DeferredCodexForegroundBindingBoundary } from
-  "./terminal-dispatch-composition.js";
+import type {
+  DeferredCodexForegroundBindingBoundary,
+  TerminalDispatchTerminal
+} from "./terminal-dispatch-composition.js";
 import { terminalSubmissionPayload } from
   "./terminal-dispatch-execution.js";
 import {
@@ -43,8 +45,6 @@ import {
   terminalBridgeSubmission,
   type TerminalBridgeSubmissionMutation
 } from "./terminal-dispatch-receipt.js";
-import type { ResolvedTerminalConversation } from
-  "./terminal-agent-bridge.js";
 import {
   detectCodexCandidateSetRolloutAcceptance,
   detectCodexRolloutAcceptance,
@@ -181,7 +181,7 @@ interface DeferredForegroundTurnAuthority {
 interface DeferredTurnAuthorityContext {
   ports: DeferredForegroundRecoveryAdapterPorts;
   storeDir: string;
-  terminal: ResolvedTerminalConversation;
+  terminal: TerminalDispatchTerminal;
   transfer: DeferredForegroundTransfer;
   conversation: Conversation;
   statePath: string;
@@ -201,7 +201,7 @@ export function deferredCodexBoundaryFromTransfer(ports: DeferredForegroundRecov
   terminal,
   transfer
 }: {
-  terminal: ResolvedTerminalConversation;
+  terminal: TerminalDispatchTerminal;
   transfer: DeferredForegroundTransfer;
 }): DeferredCodexForegroundBindingBoundary {
   const liveIncarnation = ports.native.processIncarnation(terminal.pid);
@@ -274,7 +274,7 @@ export function loadDeferredForegroundTurnAuthority(
   ports: DeferredForegroundRecoveryAdapterPorts,
   { storeDir, terminal, transfer, scope }: {
   storeDir: string;
-  terminal: ResolvedTerminalConversation;
+  terminal: TerminalDispatchTerminal;
   transfer: DeferredForegroundTransfer;
   scope?: DeferredForegroundApplicationScope;
   }
@@ -613,7 +613,7 @@ export function assertDeferredForegroundLedgerAuthority(ports: DeferredForegroun
   expectedMessageBodyHash
 }: {
   storeDir: string;
-  terminal: Pick<ResolvedTerminalConversation, "terminalControl">;
+  terminal: Pick<TerminalDispatchTerminal, "terminalControl">;
   transfer: DeferredForegroundTransfer;
   ledger: Record<string, any>;
   statePath: string;
@@ -653,7 +653,7 @@ export function assertDeferredForegroundLedgerAuthority(ports: DeferredForegroun
 interface DeferredLedgerAuthorityContext {
   ports: DeferredForegroundRecoveryAdapterPorts;
   storeDir: string;
-  terminal: Pick<ResolvedTerminalConversation, "terminalControl">;
+  terminal: Pick<TerminalDispatchTerminal, "terminalControl">;
   transfer: DeferredForegroundTransfer;
   ledger: Record<string, any>;
   statePath: string;
@@ -768,7 +768,7 @@ export function assertDeferredForegroundResolvedZeroInputLedger(ports: DeferredF
   statePath
 }: {
   storeDir: string;
-  terminal: Pick<ResolvedTerminalConversation, "terminalControl">;
+  terminal: Pick<TerminalDispatchTerminal, "terminalControl">;
   transfer: DeferredForegroundTransfer;
   ledger: Record<string, any>;
   statePath: string;
@@ -876,7 +876,7 @@ interface AbortPreparedDeferredTurnInput {
   options: Record<string, any>;
   scope: DeferredForegroundApplicationScope;
   storeDir: string;
-  terminal: ResolvedTerminalConversation;
+  terminal: TerminalDispatchTerminal;
   transfer: DeferredForegroundTransfer;
   boundary: DeferredCodexForegroundBindingBoundary;
   terminalInputNotStartedAt?: string;
@@ -1233,7 +1233,7 @@ function assertResolvedAbortLedgerProof(
 
 function persistAbortLedger(
   ports: DeferredForegroundRecoveryAdapterPorts,
-  terminal: ResolvedTerminalConversation,
+  terminal: TerminalDispatchTerminal,
   ledger: Record<string, any> | undefined,
   durableNotStartedAt?: string
 ): void {
@@ -1254,7 +1254,7 @@ interface RecoverAcceptedDeferredDispatchInput {
   options: Record<string, any>;
   scope: DeferredForegroundApplicationScope;
   storeDir: string;
-  terminal: ResolvedTerminalConversation;
+  terminal: TerminalDispatchTerminal;
   transfer: DeferredForegroundTransfer;
   boundary: DeferredCodexForegroundBindingBoundary;
 }
@@ -1605,7 +1605,7 @@ interface PersistCommittedAcceptanceInput {
   options: Record<string, any>;
   scope: DeferredForegroundApplicationScope;
   storeDir: string;
-  terminal: ResolvedTerminalConversation;
+  terminal: TerminalDispatchTerminal;
   transfer: DeferredForegroundTransfer;
 }
 
@@ -1773,7 +1773,7 @@ async function observeCommittedAcceptance(
 function saveCommittedAcceptanceLedger(
   ports: DeferredForegroundRecoveryAdapterPorts,
   facts: {
-    terminal: ResolvedTerminalConversation;
+    terminal: TerminalDispatchTerminal;
     transfer: DeferredForegroundTransfer;
     authority: DeferredForegroundTurnAuthority;
     ledger: Record<string, any>;

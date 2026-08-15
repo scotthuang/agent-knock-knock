@@ -2,8 +2,8 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 19901,
-    "production_physical_loc": 84949,
+    "cli_core_max_physical_loc": 16350,
+    "production_physical_loc": 86473,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -221,6 +221,16 @@
         "test/native-thread-lifecycle-cli.test.ts",
         "test/native-thread-lifecycle-recovery-cli.test.ts",
         "test/stale-bound-resume-cli.test.ts"
+      ]
+    },
+    "terminal-command-adapter": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/shards/agent-cli-claude-callback.test.ts",
+        "test/shards/agent-cli-composer-replay.test.ts",
+        "test/shards/agent-cli-control-locks.test.ts",
+        "test/shards/agent-cli-dispatch-authority.test.ts",
+        "test/shards/agent-cli-session-acceptance.test.ts"
       ]
     },
     "terminal-control": {
@@ -595,6 +605,10 @@
     {
       "path": "src/terminal-binding-reconciliation-service.ts",
       "owner": "binding-reconciliation"
+    },
+    {
+      "path": "src/terminal-command-cli-adapter.ts",
+      "owner": "terminal-command-adapter"
     },
     {
       "path": "src/terminal-control-provider.ts",

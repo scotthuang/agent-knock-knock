@@ -814,6 +814,20 @@ test("a released Turn replays one stable dispatch while a new id starts a new Tu
     assert.equal(acceptedReplayParsed.delivery_receipt, "agent_accepted");
     assert.equal(acceptedReplayParsed.message.id, stableMessageId);
     assert.equal(
+      acceptedReplayParsed.message.body,
+      request,
+      "replay must preserve the exact durable message body"
+    );
+    const replayedLogMessages = readJsonLines(logPath)
+      .filter((event) => event.message?.id === stableMessageId)
+      .map((event) => event.message);
+    assert.equal(replayedLogMessages.length, 1);
+    assert.equal(
+      replayedLogMessages[0].body,
+      request,
+      "replay output and the one durable log message must have identical bytes"
+    );
+    assert.equal(
       JSON.parse(fs.readFileSync(dispatchLedgerPath, "utf8")).status,
       "agent_accepted",
       "stable replay repairs a ledger that lagged the authoritative accepted state"
