@@ -11,15 +11,11 @@ import type {
 import { codexLifecycleBehaviorProfile } from "./codex-lifecycle-compatibility.js";
 import {
   createClaudeThreadLifecycleCandidateProvider,
-  detectClaudeTranscriptAcceptance,
   observeClaudeDeadProcessTranscriptCompletion
 } from "./claude-local-transcript-provider.js";
 import {
   captureCodexCandidateSetRolloutAcceptanceAnchor,
-  captureCodexRolloutAcceptanceAnchor,
   detectCodexBoundRolloutCompletion,
-  detectCodexCandidateSetRolloutAcceptance,
-  detectCodexRolloutAcceptance,
   type CodexRolloutAcceptanceAnchor,
   type TerminalSubmissionAcceptanceEvidence,
   validateCodexRolloutAcceptanceAnchor
@@ -48,9 +44,7 @@ import type {
   CodexOpenRootRolloutInventory
 } from "./agent-session-provider.js";
 import {
-  applyMessageToConversation,
   budgetAction,
-  createConversation,
   createMessage,
   effectiveTurnStatus,
   executorForConversation,
@@ -238,7 +232,9 @@ import {
   createTerminalCommandCliFacade
 } from "./terminal-command-cli-adapter.js";
 import {
-  exactRolloutMatches,
+  createTerminalAcceptanceCliFacade
+} from "./terminal-acceptance-cli-adapter.js";
+import {
   type TerminalNativeIdentity as NativeAgentSessionIdentity
 } from "./terminal-binding-authority.js";
 import {
@@ -263,9 +259,6 @@ import {
   type CodexSendAuthorityContext,
   type ManagedBindingConflictKind
 } from "./terminal-authority-policy.js";
-import {
-  compareManagedConversationRecency
-} from "./terminal-action-projection.js";
 import { reconcileTerminalBinding } from "./terminal-binding-reconciliation-service.js";
 import {
   canonicalMutationResource, capabilityGatedRepositoryOperation,
@@ -366,14 +359,11 @@ import {
 import * as deferredAuthorityAdapter from
   "./deferred-foreground-authority-cli-adapter.js";
 import {
-  TerminalDispatchExecutionService,
-  assertManagedSessionCanStartTurnPolicy,
   codexKnownBeforeIdentityForTransition,
   codexLingeringIdentityMatches,
   logicalManagedSessionIdentity,
   managedBindingMatchesLiveTerminal,
   managedSessionOwnerIsInactive,
-  managedTurnMatchesTerminal,
   migratedTerminalBindingMatches,
   nativeThreadTransitionRevision,
   resolvedTerminalProcessIncarnation as resolvedTerminalProcessIncarnationPolicy,
@@ -382,8 +372,7 @@ import {
   terminalSubmissionPayload,
   terminalRuntimeForLiveIdentity as terminalRuntimeForLiveIdentityPolicy,
   terminalRuntimeIdentityBase,
-  type NativeAgentSessionIdentityObservation,
-  type NativeIdentityResolutionRequest
+  type NativeAgentSessionIdentityObservation
 } from "./terminal-dispatch-execution.js";
 import * as dispatchReceipt from "./terminal-dispatch-receipt.js";
 import {
@@ -4400,6 +4389,99 @@ function activeTurnHandoffDecisionToken({
 const originalExpectedTerminalSelector =
   new WeakMap<Record<string, any>, string | undefined>();
 
+const terminalAcceptanceCliFacade = createTerminalAcceptanceCliFacade({
+  native: {
+    codexProvider: (options) => createAgentSessionProvider("codex", options),
+    codexProcessIncarnation: codexProcessIncarnationForPid,
+    assertExclusive: assertNativeThreadHasExclusiveOwnership
+  },
+  terminal: {
+    runtime: (options) => terminalRuntime(options),
+    durableRequest: terminalDurableRequestForConversation,
+    runtimeIdentity: terminalRuntimeIdentityForConversation
+  },
+  authority: {
+    assertTurnCurrent: assertTurnBindingCurrent,
+    terminalControl: terminalControlFromTakeover,
+    isDiscoverableTurn: isDiscoverableTmuxConversation,
+    workspaceMatches: matchesConfiguredWorkspace,
+    isSessionBlockingStatus: (status) =>
+      SESSION_SEND_BLOCKING_STATUSES.has(status)
+  },
+  repository: {
+    acquireStateLock: acquireFileLock,
+    acquireTerminalLock: terminalDispatchRepository.acquire,
+    loadLedger: terminalDispatchRepository.load,
+    saveLedger: terminalDispatchRepository.save,
+    reconcileLedger: terminalDispatchRecovery.reconcilePrepared,
+    bindingFields: terminalDispatchRecovery.bindingFields
+  },
+  deferred: {
+    isFinal: (status) => FINAL_DEFERRED_TRANSFER_STATUSES.has(status),
+    recover: ({ options, terminal }) =>
+      recoverDeferredCodexForegroundTransferBeforeMutation({
+        options,
+        terminal: terminal as ResolvedTerminalConversation
+      }),
+    loadAuthority: (input) =>
+      deferredRecoveryAdapter.loadDeferredForegroundTurnAuthority(
+        deferredForegroundRecoveryAdapterPorts(),
+        input
+      ),
+    assertLedgerAuthority: (input) =>
+      deferredRecoveryAdapter.assertDeferredForegroundLedgerAuthority(
+        deferredForegroundRecoveryAdapterPorts(),
+        input
+      ),
+    loadTransfer: loadDeferredForegroundTransfer
+  }
+});
+
+const terminalDispatchExecution = terminalAcceptanceCliFacade.execution;
+const recoverVirginCodexPostSubmissionBinding =
+  terminalAcceptanceCliFacade.recoverVirgin;
+const reconcileTerminalAcceptanceInMonitor =
+  terminalAcceptanceCliFacade.reconcileMonitor;
+const markTerminalAcceptanceUncertain =
+  terminalAcceptanceCliFacade.markUncertain;
+const inspectCodexOpenRootRolloutInventory =
+  terminalAcceptanceCliFacade.inspectCodexOpenRoots;
+const resolveCurrentNativeAgentSessionIdentity =
+  terminalAcceptanceCliFacade.resolveNativeIdentity;
+const observeCurrentNativeAgentSessionIdentity =
+  terminalAcceptanceCliFacade.observeNativeIdentity;
+const assertNativeAgentIdentityForTurn =
+  terminalAcceptanceCliFacade.assertTurnIdentity;
+const withNativeAgentSessionIdentity =
+  terminalAcceptanceCliFacade.withNativeIdentity;
+function managedSessionStoreDirForConversation(
+  conversation: Conversation
+): string | undefined {
+  return terminalAcceptanceCliFacade.storeDirForConversation(conversation);
+}
+const refineManagedSessionNativeIdentity =
+  terminalAcceptanceCliFacade.refineSessionIdentity;
+const persistManagedSessionNativeIdentity =
+  terminalAcceptanceCliFacade.persistSessionIdentity;
+const quarantineManagedSessionBinding =
+  terminalAcceptanceCliFacade.quarantineSession;
+const managedTurnsForSession = terminalAcceptanceCliFacade.turnsForSession;
+const assertManagedSessionCanStartTurn =
+  terminalAcceptanceCliFacade.assertSessionCanStartTurn;
+const createManagedTerminalTurn = terminalAcceptanceCliFacade.createManagedTurn;
+
+function managedTurnMatchesResolvedTerminal(
+  conversation: Conversation,
+  terminal: ResolvedTerminalConversation,
+  currentIdentity?: NativeAgentSessionIdentity
+): boolean {
+  return terminalAcceptanceCliFacade.turnMatchesTerminal({
+    conversation,
+    terminal,
+    currentIdentity
+  });
+}
+
 const terminalListCliFacade = createTerminalListCliFacade({
   reconciliation: {
     reconcileIdleConversations,
@@ -4414,9 +4496,11 @@ const terminalListCliFacade = createTerminalListCliFacade({
     createTerminalAgentBridge,
     createTerminalControlProvider,
     createTerminalProcessSource,
-    inspectCodexOpenRootRolloutInventory,
+    inspectCodexOpenRootRolloutInventory: (input) =>
+      terminalAcceptanceCliFacade.inspectCodexOpenRoots(input),
     nativeInspectionComposerEmpty,
-    observeCurrentNativeAgentSessionIdentity,
+    observeCurrentNativeAgentSessionIdentity: (input) =>
+      terminalAcceptanceCliFacade.observeNativeIdentity(input),
     terminalStatusForControl
   },
   store: {
@@ -4428,9 +4512,10 @@ const terminalListCliFacade = createTerminalListCliFacade({
     isVerifiedDeadTerminalAgentProcess,
     loadTerminalBridgeDispatchLedger,
     loadTerminalDispatchLedgerOwner,
-    managedSessionStoreDirForConversation:
-      managedSessionStoreDirForConversation,
-    managedTurnsForSession,
+    managedSessionStoreDirForConversation: (conversation) =>
+      terminalAcceptanceCliFacade.storeDirForConversation(conversation),
+    managedTurnsForSession: (storeDir, sessionId) =>
+      terminalAcceptanceCliFacade.turnsForSession(storeDir, sessionId),
     matchesConfiguredWorkspace,
     orphanedTerminalDispatchForRecovery,
     storeDirFromOptions,
@@ -8084,909 +8169,6 @@ function markTerminalBridgeApprovalPromptCleared({
   });
 }
 
-function terminalDispatchExecution(
-  options: Record<string, any>,
-  bridge?: TerminalAgentBridge
-): TerminalDispatchExecutionService {
-  return new TerminalDispatchExecutionService(
-    cliEnv().AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE === "1"
-      ? cliEnv().AKK_TEST_TERMINAL_ACCEPTANCE_OUTCOME ?? "accepted"
-      : undefined,
-    {
-    clock: {
-      now: cliNow,
-      nowMs: cliNowMs,
-      sleep: cliSleep
-    },
-    native: {
-      resolveCodex: ({
-        pid,
-        cwd,
-        preferredSessionId,
-        allowedCompanionIdentity,
-        allowedAdditionalIdentities
-      }) => createAgentSessionProvider("codex", options)
-        .resolveActiveSessionIdentityForPid(
-          pid,
-          cwd,
-          preferredSessionId,
-          allowedCompanionIdentity
-            ? {
-                ...allowedCompanionIdentity,
-                evidence: "managed_transition_before_identity"
-              }
-            : undefined,
-          allowedAdditionalIdentities?.map((identity) => ({
-            ...identity,
-            evidence: "managed_transition_ancestor_identity"
-          }))
-        ),
-      async inspectCodexOpenRoots(pid, cwd) {
-        const provider = createAgentSessionProvider("codex", options);
-        if (!provider.inspectOpenRootRolloutInventoryForPid) {
-          throw new Error(
-            "Codex open-root rollout inventory inspection is unavailable"
-          );
-        }
-        return provider.inspectOpenRootRolloutInventoryForPid(pid, cwd);
-      },
-      claudeRows: () => loadClaudeAgentRows(options, { required: true }),
-      codexProcessIncarnation: codexProcessIncarnationForPid
-    },
-    acceptance: {
-      captureCodex: captureCodexRolloutAcceptanceAnchor,
-      detectCodexCandidates: detectCodexCandidateSetRolloutAcceptance,
-      detectBoundCodex: detectCodexRolloutAcceptance,
-      detectClaude: (conversation, terminalControl) =>
-        detectClaudeTranscriptAcceptance(
-          terminalDurableRequestForConversation(
-            conversation,
-            terminalControl
-          ),
-          {
-            claudeHome: expandHome(options.claudeHome),
-            agentRows: loadClaudeAgentRows(options)
-          }
-        )
-    },
-    terminal: {
-      proveExactDraftStillPresent: (input) =>
-        (bridge ?? createTerminalAgentBridge(options))
-          .proveExactDraftStillPresent(
-            input.executor,
-            input.terminalControl,
-            input.requestText,
-            {
-              scrollbackLines: input.scrollbackLines,
-              runtime: terminalRuntimeIdentityForConversation(
-                input.conversation,
-                input.terminalControl
-              )
-            }
-          )
-    },
-    authority: {
-      assertTurnCurrent: assertTurnBindingCurrent
-    }
-    }
-  );
-}
-
-type VirginCodexBindingRecovery = {
-  conversation: Conversation;
-  state: "not_applicable" | "already_bound" | "pending" | "recovered";
-};
-
-/**
- * Finish the one monotonic binding transaction that a process crash may split
- * after a virgin Codex Turn has durably dispatched Enter.  This is deliberately
- * scoped to the v2 post-submission anchor: legacy/v1 Turns retain their normal
- * binding fences and never gain a new recovery path.
- */
-async function recoverVirginCodexPostSubmissionBinding({
-  options,
-  conversation,
-  statePath,
-  logPath,
-  terminalLockHeld = false
-}: {
-  options: Record<string, any>;
-  conversation: Conversation;
-  statePath: string;
-  logPath: string;
-  terminalLockHeld?: boolean;
-}): Promise<VirginCodexBindingRecovery> {
-  const initialTakeover = isRecord(conversation.native_session_takeover)
-    ? conversation.native_session_takeover
-    : undefined;
-  const initialAnchor = isRecord(
-    initialTakeover?.codex_rollout_acceptance_anchor
-  )
-    ? initialTakeover.codex_rollout_acceptance_anchor
-    : undefined;
-  const initialSubmission = terminalBridgeSubmission(conversation);
-  const initialTerminalControl = terminalControlFromTakeover(initialTakeover);
-  if (
-    executorForConversation(conversation).kind !== "codex" ||
-    initialAnchor?.version !== 2 ||
-    initialAnchor?.native_thread_binding !== "post_submission" ||
-    !initialTerminalControl ||
-    !["enter_dispatched", "agent_accepted"].includes(
-      String(initialSubmission?.status ?? "")
-    )
-  ) {
-    return { conversation, state: "not_applicable" };
-  }
-
-  const storeDir = pathsForConversationDir(path.dirname(statePath)).storeDir;
-  const releaseTerminalLock = terminalLockHeld
-    ? () => {}
-    : acquireTerminalBridgeSendLock(
-        storeDir,
-        initialTerminalControl,
-        { timeoutMs: 30000 }
-      );
-  try {
-    return await withStoreWriterLeaseAsync(storeDir, async () => {
-      const releaseStateLock = acquireFileLock(`${statePath}.lock`);
-      try {
-        const current = loadState(statePath);
-        const takeover = isRecord(current.native_session_takeover)
-          ? current.native_session_takeover
-          : undefined;
-        const anchor = isRecord(takeover?.codex_rollout_acceptance_anchor)
-          ? takeover.codex_rollout_acceptance_anchor
-          : undefined;
-        const submission = terminalBridgeSubmission(current);
-        const terminalControl = terminalControlFromTakeover(takeover);
-        const messageId = stringValue(submission?.message_id);
-        const requestHash = stringValue(takeover?.terminal_bridge_request_hash);
-        const requestText = String(
-          takeover?.terminal_bridge_request_text ?? current.user_request ?? ""
-        );
-        if (
-          executorForConversation(current).kind !== "codex" ||
-          anchor?.version !== 2 ||
-          anchor?.native_thread_binding !== "post_submission" ||
-          !terminalControl ||
-          !terminalControlsShareIncarnation(
-            terminalControl,
-            initialTerminalControl
-          ) ||
-          !messageId ||
-          messageId !== stringValue(takeover?.terminal_bridge_message_id) ||
-          !["enter_dispatched", "agent_accepted"].includes(
-            String(submission?.status ?? "")
-          ) ||
-          !requestHash ||
-          requestHash !== terminalBridgeRequestFingerprint(requestText)
-        ) {
-          return { conversation: current, state: "not_applicable" };
-        }
-
-        const bindingId = stringValue(current.terminal_binding_id);
-        const bindingGeneration = Number(current.terminal_binding_generation);
-        const session = loadManagedSession(
-          storeDir,
-          sessionIdForConversation(current)
-        );
-        const binding = session.binding;
-        const pid = Number(takeover?.terminal_agent_pid);
-        if (
-          !bindingId ||
-          !Number.isSafeInteger(bindingGeneration) ||
-          !Number.isSafeInteger(pid) ||
-          pid <= 1 ||
-          session.agent !== "codex" ||
-          session.status !== "bound" ||
-          !binding ||
-          binding.binding_id !== bindingId ||
-          binding.generation !== bindingGeneration ||
-          binding.native_process.pid !== pid ||
-          !terminalControlsShareIncarnation(
-            binding.terminal_control,
-            terminalControl
-          )
-        ) {
-          throw new Error(
-            "virgin Codex post-submission binding changed before recovery"
-          );
-        }
-
-        const anchorProcessUuid = stringValue(anchor.process_uuid);
-        const anchorProcessBirth = stringValue(anchor.process_birth);
-        const turnProcessUuid = stringValue(
-          takeover?.terminal_agent_process_uuid
-        );
-        const turnProcessBirth = stringValue(
-          takeover?.terminal_agent_process_birth
-        );
-        if (
-          !anchorProcessUuid ||
-          !anchorProcessBirth ||
-          turnProcessUuid !== anchorProcessUuid ||
-          turnProcessBirth !== anchorProcessBirth ||
-          binding.native_process.process_uuid !== anchorProcessUuid ||
-          binding.native_process.process_birth !== anchorProcessBirth
-        ) {
-          throw new Error(
-            "virgin Codex process incarnation changed before binding recovery"
-          );
-        }
-
-        const turnNativeThreadId = stringValue(current.native_thread_id) ??
-          stringValue(takeover?.terminal_agent_session_id);
-        const sessionNativeThreadId = binding.native_thread_id;
-        if (
-          turnNativeThreadId &&
-          sessionNativeThreadId &&
-          turnNativeThreadId !== sessionNativeThreadId
-        ) {
-          throw new Error(
-            "virgin Codex Session and Turn disagree before binding recovery"
-          );
-        }
-        if (turnNativeThreadId && !isCompleteNativeRollout(
-          takeover?.terminal_agent_rollout
-        )) {
-          throw new Error(
-            "virgin Codex Turn has a partial recovered native identity"
-          );
-        }
-        if (sessionNativeThreadId && !binding.native_process.rollout) {
-          throw new Error(
-            "virgin Codex Session has a partial recovered native identity"
-          );
-        }
-        if (turnNativeThreadId && sessionNativeThreadId) {
-          assertTurnBindingCurrent(current, "recover virgin Codex binding for");
-          return { conversation: current, state: "already_bound" };
-        }
-
-        const preferredSessionId = turnNativeThreadId ?? sessionNativeThreadId;
-        const identity = await resolveCurrentNativeAgentSessionIdentity({
-          options,
-          agent: "codex",
-          pid,
-          cwd: terminalControl.currentPath,
-          preferredSessionId
-        });
-        if (!identity) {
-          return { conversation: current, state: "pending" };
-        }
-        if (
-          !isExactNativeThreadId(identity.sessionId) ||
-          identity.processUuid !== anchorProcessUuid ||
-          identity.processBirth !== anchorProcessBirth ||
-          !isCompleteNativeRollout(identity.rollout) ||
-          (preferredSessionId && identity.sessionId !== preferredSessionId) ||
-          (turnNativeThreadId &&
-            !exactRolloutMatches(
-              takeover?.terminal_agent_rollout,
-              identity.rollout
-            )) ||
-          (sessionNativeThreadId &&
-            !exactRolloutMatches(
-              binding.native_process.rollout,
-              identity.rollout
-            ))
-        ) {
-          throw new Error(
-            "virgin Codex native identity changed before binding recovery"
-          );
-        }
-        // When neither side was committed, only the exact native acceptance
-        // record may tell us that this newly materialized UUID belongs to the
-        // dispatched request. If either side was already committed before the
-        // crash, that durable CAS plus a fresh exact identity is sufficient to
-        // finish the other side while acceptance is still being written.
-        if (!turnNativeThreadId && !sessionNativeThreadId) {
-          const acceptance = detectCodexRolloutAcceptance({
-            anchor: anchor as unknown as CodexRolloutAcceptanceAnchor,
-            currentIdentity: identity,
-            requestHash
-          });
-          if (!acceptance) {
-            return { conversation: current, state: "pending" };
-          }
-        }
-
-        await assertNativeThreadHasExclusiveOwnership({
-          options,
-          agent: "codex",
-          currentPid: pid,
-          nativeThreadId: identity.sessionId,
-          storeDir,
-          terminalControl,
-          excludedManagedSessionId: session.session_id
-        });
-        if (!sessionNativeThreadId) {
-          const persistedSession = persistManagedSessionNativeIdentity({
-            conversation: current,
-            terminalControl,
-            identity,
-            storeDir
-          });
-          if (
-            persistedSession?.binding?.native_thread_id !==
-              identity.sessionId ||
-            persistedSession.binding.native_process.process_uuid !==
-              identity.processUuid ||
-            persistedSession.binding.native_process.process_birth !==
-              identity.processBirth ||
-            !exactRolloutMatches(
-              persistedSession.binding.native_process.rollout,
-              identity.rollout
-            )
-          ) {
-            throw new Error(
-              "virgin Codex Session identity was not durably committed during recovery"
-            );
-          }
-        }
-        const recoveredAt = cliNow().toISOString();
-        const recoveredConversation = turnNativeThreadId
-          ? current
-          : {
-              ...withNativeAgentSessionIdentity(current, identity),
-              updated_at: recoveredAt
-            };
-        if (!turnNativeThreadId) {
-          saveState(statePath, recoveredConversation);
-        }
-        assertNativeAgentIdentityForTurn({
-          conversation: recoveredConversation,
-          currentIdentity: identity,
-          operation: "recover virgin Codex binding for"
-        });
-        try {
-          appendEvent(logPath, {
-            ts: recoveredAt,
-            conversation_id: recoveredConversation.conversation_id,
-            event: "virgin_codex_post_submission_binding_recovered",
-            message_id: messageId,
-            native_thread_id: identity.sessionId,
-            terminal_control: terminalControl
-          });
-        } catch (error) {
-          runtimeLog("warn", "virgin_codex_binding_recovery_event_failed", {
-            conversation_id: recoveredConversation.conversation_id,
-            terminal_target: terminalControl.target,
-            error: error instanceof Error ? error.message : String(error)
-          });
-        }
-        return { conversation: recoveredConversation, state: "recovered" };
-      } finally {
-        releaseStateLock();
-      }
-    });
-  } finally {
-    releaseTerminalLock();
-  }
-}
-
-async function detectTerminalSubmissionAcceptance({
-  options,
-  ...request
-}: {
-  options: Record<string, any>;
-  executor: ExecutorKind;
-  conversation: Conversation;
-  terminalControl: TerminalControlRef;
-}): Promise<TerminalSubmissionAcceptanceEvidence | undefined> {
-  return terminalDispatchExecution(options).detectAcceptance(request);
-}
-
-async function reconcileTerminalAcceptanceInMonitor({
-  options,
-  conversation,
-  statePath,
-  logPath,
-  terminalControl,
-  executor,
-  terminalBridge
-}: {
-  options: Record<string, any>;
-  conversation: Conversation;
-  statePath: string;
-  logPath: string;
-  terminalControl: TerminalControlRef;
-  executor: ReturnType<typeof executorForConversation>;
-  terminalBridge: TerminalAgentBridge;
-}): Promise<
-  | { outcome: "accepted"; conversation: Conversation }
-  | { outcome: "pending" }
-  | { outcome: "not_accepted"; conversation: Conversation }
-> {
-  const initialTakeover = isRecord(conversation.native_session_takeover)
-    ? conversation.native_session_takeover
-    : undefined;
-  const deferredTransferId = stringValue(
-    initialTakeover?.deferred_foreground_transfer_id
-  );
-  if (deferredTransferId) {
-    const transferStoreDir = pathsForConversationDir(
-      path.dirname(statePath)
-    ).storeDir;
-    let transfer = loadDeferredForegroundTransfer(
-      transferStoreDir,
-      deferredTransferId
-    );
-    const pid = Number(initialTakeover?.terminal_agent_pid);
-    if (!Number.isSafeInteger(pid) || pid <= 1) {
-      throw new Error(
-        "deferred Codex acceptance monitor lost its exact process identity"
-      );
-    }
-    const terminal = await terminalBridge.resolveStoredTerminal(
-      "codex",
-      pid,
-      terminalControl,
-      { pid }
-    );
-    if (!FINAL_DEFERRED_TRANSFER_STATUSES.has(transfer.status)) {
-      await recoverDeferredCodexForegroundTransferBeforeMutation({
-        options: {
-          ...options,
-          storeDir: transferStoreDir
-        },
-        terminal
-      });
-      transfer = loadDeferredForegroundTransfer(
-        transferStoreDir,
-        deferredTransferId
-      );
-      conversation = loadState(statePath);
-      if (!FINAL_DEFERRED_TRANSFER_STATUSES.has(transfer.status)) {
-        return { outcome: "pending" };
-      }
-    }
-    if (transfer.status === "abort_resolved") {
-      const submission = terminalBridgeSubmission(conversation);
-      if (
-        conversation.conversation_id !== transfer.turn_id ||
-        stringValue(submission?.message_id) !== transfer.message_id ||
-        submission?.status !== "aborted" ||
-        submission.safe_to_retry !== true
-      ) {
-        throw new Error(
-          `deferred foreground transfer ${transfer.transfer_id} resolved its ` +
-          "abort without an exact zero-input Turn receipt"
-        );
-      }
-      return { outcome: "not_accepted", conversation };
-    }
-
-    // Dedicated deferred recovery is authoritative and may have closed the
-    // transfer while this monitor held the terminal lock. Do not fall through
-    // to the generic enter_dispatched reconciler: it would reject the stronger
-    // agent_accepted Turn/ledger that recovery just persisted. Re-prove that
-    // exact monotonic authority here, then let this same monitor invocation
-    // continue into completion polling without replaying terminal input.
-    const authority = deferredRecoveryAdapter.loadDeferredForegroundTurnAuthority(
-      deferredForegroundRecoveryAdapterPorts(), {
-      storeDir: transferStoreDir,
-      terminal,
-      transfer
-    });
-    const ledger = loadTerminalBridgeDispatchLedger(terminal.terminalControl);
-    if (!ledger) {
-      throw new Error(
-        `deferred foreground transfer ${transfer.transfer_id} resolved ` +
-        "without an exact terminal dispatch ledger"
-      );
-    }
-    deferredRecoveryAdapter.assertDeferredForegroundLedgerAuthority(
-      deferredForegroundRecoveryAdapterPorts(), {
-      storeDir: transferStoreDir,
-      terminal,
-      transfer,
-      ledger,
-      statePath: authority.statePath,
-      expectedMessageBodyHash: stringValue(
-        authority.submission.message_body_hash
-      )
-    });
-    const acceptedBinding = transfer.target_accepted_binding;
-    const rollout = acceptedBinding?.native_process.rollout;
-    if (
-      !acceptedBinding ||
-      !transfer.target_native_thread_id ||
-      acceptedBinding.native_thread_id !== transfer.target_native_thread_id ||
-      !isCompleteNativeRollout(rollout)
-    ) {
-      throw new Error(
-        `deferred foreground transfer ${transfer.transfer_id} resolved ` +
-        "without an exact accepted native binding"
-      );
-    }
-    const acceptedIdentity: NativeAgentSessionIdentity = {
-      sessionId: transfer.target_native_thread_id,
-      processUuid: acceptedBinding.native_process.process_uuid,
-      processBirth: acceptedBinding.native_process.process_birth,
-      rollout,
-      evidence: acceptedBinding.native_process.evidence
-    };
-    assertNativeAgentIdentityForTurn({
-      conversation: authority.conversation,
-      currentIdentity: acceptedIdentity,
-      operation: "continue deferred foreground monitor for"
-    });
-    return { outcome: "accepted", conversation: authority.conversation };
-  }
-  let bindingRecovery = await recoverVirginCodexPostSubmissionBinding({
-    options,
-    conversation,
-    statePath,
-    logPath,
-    terminalLockHeld: true
-  });
-  conversation = bindingRecovery.conversation;
-  let evidence = await detectTerminalSubmissionAcceptance({
-    options,
-    executor: executor.kind,
-    conversation,
-    terminalControl
-  });
-  const recoveredAnchor = isRecord(conversation.native_session_takeover) &&
-    isRecord(
-      conversation.native_session_takeover.codex_rollout_acceptance_anchor
-    )
-    ? conversation.native_session_takeover.codex_rollout_acceptance_anchor
-    : undefined;
-  if (
-    evidence &&
-    recoveredAnchor?.version === 2 &&
-    bindingRecovery.state === "not_applicable"
-  ) {
-    throw new Error(
-      "virgin Codex acceptance appeared without a recoverable Session/Turn binding"
-    );
-  }
-  if (
-    evidence &&
-    recoveredAnchor?.version === 2 &&
-    bindingRecovery.state === "pending"
-  ) {
-    // The session_meta and exact user record can land between the first
-    // recovery probe and this acceptance probe. Never persist agent_accepted
-    // until the same evidence has also closed the Session/Turn binding CAS.
-    bindingRecovery = await recoverVirginCodexPostSubmissionBinding({
-      options,
-      conversation,
-      statePath,
-      logPath,
-      terminalLockHeld: true
-    });
-    if (
-      bindingRecovery.state !== "recovered" &&
-      bindingRecovery.state !== "already_bound"
-    ) {
-      return { outcome: "pending" };
-    }
-    conversation = bindingRecovery.conversation;
-    evidence = await detectTerminalSubmissionAcceptance({
-      options,
-      executor: executor.kind,
-      conversation,
-      terminalControl
-    });
-    if (!evidence) {
-      return { outcome: "pending" };
-    }
-  }
-  const submission = terminalBridgeSubmission(conversation);
-  const nativeTakeover = isRecord(conversation.native_session_takeover)
-    ? conversation.native_session_takeover
-    : undefined;
-  const messageId = stringValue(submission?.message_id);
-  if (!messageId) {
-    throw new Error("terminal acceptance monitor lost its exact message identity");
-  }
-  let notAcceptedReason: string | undefined;
-  if (!evidence) {
-    const enterAt = validTimestampMs(submission?.enter_dispatched_at);
-    if (enterAt !== undefined && cliNowMs() - enterAt >= 250) {
-      const requestText = String(
-        nativeTakeover?.terminal_bridge_request_text ?? ""
-      );
-      if (
-        await terminalBridge.proveExactDraftStillPresent(
-          executor.kind,
-          terminalControl,
-          requestText,
-          {
-            scrollbackLines: Number(options.scrollbackLines ?? 240),
-            runtime: terminalRuntimeIdentityForConversation(
-              conversation,
-              terminalControl
-            )
-          }
-        )
-      ) {
-        notAcceptedReason =
-          "the exact managed draft remains in the terminal composer";
-      }
-    }
-    if (!notAcceptedReason) {
-      return { outcome: "pending" };
-    }
-  }
-
-  const resolvedAt = cliNow().toISOString();
-  const writerStoreDir = pathsForConversationDir(
-    path.dirname(statePath)
-  ).storeDir;
-  return await withStoreWriterLeaseAsync(writerStoreDir, async () => {
-    const releaseStateLock = acquireFileLock(`${statePath}.lock`);
-    try {
-      const current = loadState(statePath);
-    const currentSubmission = terminalBridgeSubmission(current);
-    const currentTakeover = isRecord(current.native_session_takeover)
-      ? current.native_session_takeover
-      : undefined;
-    if (
-      current.status !== conversation.status ||
-      stringValue(currentTakeover?.terminal_bridge_message_id) !== messageId ||
-      stringValue(currentSubmission?.message_id) !== messageId ||
-      currentSubmission?.status !== "enter_dispatched"
-    ) {
-      throw new Error(
-        "terminal acceptance generation changed before monitor reconciliation"
-      );
-    }
-    const requestText = String(
-      currentTakeover?.terminal_bridge_request_text ?? current.user_request ?? ""
-    );
-    const nextBase = notAcceptedReason
-      ? {
-          ...current,
-          status: "stalled" as const,
-          stalled_at: resolvedAt,
-          stalled_reason: notAcceptedReason,
-          updated_at: resolvedAt
-        }
-      : current;
-    const acceptedConversation = withTerminalBridgeSubmission({
-      conversation: nextBase,
-      messageId,
-      requestText,
-      status: notAcceptedReason ? "not_accepted" : "agent_accepted",
-      preparedAt:
-        stringValue(currentSubmission.prepared_at) ?? resolvedAt,
-      textInjectedAt: stringValue(currentSubmission.text_injected_at),
-      enterDispatchedAt: stringValue(currentSubmission.enter_dispatched_at),
-      ...(notAcceptedReason
-        ? { notAcceptedAt: resolvedAt }
-        : {
-            agentAcceptedAt: resolvedAt,
-            acceptanceEvidence: evidence as TerminalSubmissionAcceptanceEvidence
-          })
-    });
-    const ledger = reconcilePreparedTerminalDispatchLedger(
-      terminalControl,
-      loadTerminalBridgeDispatchLedger(terminalControl)
-    );
-    if (
-      stringValue(ledger?.message_id) !== messageId ||
-      ledger?.status !== "enter_dispatched"
-    ) {
-      throw new Error(
-        "terminal dispatch ledger changed before acceptance reconciliation"
-      );
-    }
-    saveState(statePath, acceptedConversation);
-    try {
-      if (
-        cliEnv().AKK_TEST_MONITOR_FINAL_TERMINAL_LEDGER_FAILURE === "1"
-      ) {
-        throw new Error(
-          "injected monitor final terminal ledger persistence failure"
-        );
-      }
-      saveTerminalBridgeDispatchLedger(terminalControl, {
-        ...ledger,
-        ...terminalBindingLedgerFields(acceptedConversation),
-        status: notAcceptedReason ? "not_accepted" : "agent_accepted",
-        ...(notAcceptedReason
-          ? { not_accepted_at: resolvedAt }
-          : {
-              agent_accepted_at: resolvedAt,
-              acceptance_evidence: evidence
-            }),
-        dispatcher_pid: null
-      });
-    } catch (error) {
-      runtimeLog("warn", "terminal_acceptance_monitor_ledger_lagging", {
-        conversation_id: acceptedConversation.conversation_id,
-        message_id: messageId,
-        terminal_target: terminalControl.target,
-        durable_submission_status: notAcceptedReason
-          ? "not_accepted"
-          : "agent_accepted",
-        error: error instanceof Error ? error.message : String(error)
-      });
-    }
-    try {
-      if (
-        cliEnv().AKK_TEST_MONITOR_FINAL_EVENT_FAILURE === "1"
-      ) {
-        throw new Error(
-          "injected monitor final acceptance event persistence failure"
-        );
-      }
-      appendEvent(logPath, {
-        ts: resolvedAt,
-        conversation_id: acceptedConversation.conversation_id,
-        event: notAcceptedReason
-          ? "terminal_message_not_accepted"
-          : "terminal_message_agent_accepted",
-        message_id: messageId,
-        terminal_control: terminalControl,
-        do_not_retry: Boolean(notAcceptedReason)
-      });
-    } catch (error) {
-      runtimeLog("warn", "terminal_acceptance_monitor_event_lagging", {
-        conversation_id: acceptedConversation.conversation_id,
-        message_id: messageId,
-        terminal_target: terminalControl.target,
-        durable_submission_status: notAcceptedReason
-          ? "not_accepted"
-          : "agent_accepted",
-        error: error instanceof Error ? error.message : String(error)
-      });
-    }
-      return notAcceptedReason
-        ? { outcome: "not_accepted", conversation: acceptedConversation }
-        : { outcome: "accepted", conversation: acceptedConversation };
-    } finally {
-      releaseStateLock();
-    }
-  });
-}
-
-function markTerminalAcceptanceUncertain({
-  conversation,
-  statePath,
-  logPath,
-  terminalControl,
-  reason
-}: {
-  conversation: Conversation;
-  statePath: string;
-  logPath: string;
-  terminalControl: TerminalControlRef;
-  reason: string;
-}): Conversation {
-  const messageId = stringValue(
-    terminalBridgeSubmission(conversation)?.message_id
-  );
-  const uncertainAt = cliNow().toISOString();
-  const writerStoreDir = pathsForConversationDir(
-    path.dirname(statePath)
-  ).storeDir;
-  return withStoreWriterLease(writerStoreDir, () => {
-    const releaseStateLock = acquireFileLock(`${statePath}.lock`);
-    try {
-      const current = loadState(statePath);
-    const submission = terminalBridgeSubmission(current);
-    const currentMessageId = stringValue(submission?.message_id);
-    if (
-      !messageId ||
-      currentMessageId !== messageId ||
-      !["text_injected", "enter_dispatched"].includes(
-        String(submission?.status)
-      )
-    ) {
-      return current;
-    }
-    const takeover = isRecord(current.native_session_takeover)
-      ? current.native_session_takeover
-      : undefined;
-    const requestText = String(
-      takeover?.terminal_bridge_request_text ?? current.user_request ?? ""
-    );
-    const uncertain = withTerminalBridgeSubmission({
-      conversation: {
-        ...current,
-        status: "stalled" as const,
-        stalled_at: uncertainAt,
-        stalled_reason: reason,
-        updated_at: uncertainAt
-      },
-      messageId,
-      requestText,
-      status: "uncertain",
-      preparedAt: stringValue(submission?.prepared_at) ?? uncertainAt,
-      textInjectedAt: stringValue(submission?.text_injected_at),
-      enterDispatchedAt: stringValue(submission?.enter_dispatched_at),
-      uncertainAt,
-      error: reason,
-      lastProvenStage: submission?.status === "enter_dispatched"
-        ? "enter_dispatched"
-        : "text_injected"
-    });
-    const ledger = loadTerminalBridgeDispatchLedger(terminalControl);
-    if (
-      stringValue(ledger?.message_id) === messageId &&
-      ["text_injected", "enter_dispatched"].includes(String(ledger?.status))
-    ) {
-      saveTerminalBridgeDispatchLedger(terminalControl, {
-        ...ledger,
-        status: "uncertain",
-        uncertain_at: uncertainAt,
-        error: textSummary(reason),
-        dispatcher_pid: null
-      });
-    }
-    saveState(statePath, uncertain);
-    appendEvent(logPath, {
-      ts: uncertainAt,
-      conversation_id: uncertain.conversation_id,
-      event: "terminal_message_acceptance_uncertain",
-      message_id: messageId,
-      terminal_control: terminalControl,
-      error: textSummary(reason),
-      do_not_retry: true
-    });
-      return uncertain;
-    } finally {
-      releaseStateLock();
-    }
-  });
-}
-
-async function inspectCodexOpenRootRolloutInventory({
-  options,
-  pid,
-  cwd
-}: {
-  options: Record<string, any>;
-  pid: number;
-  cwd?: string;
-}): Promise<CodexOpenRootRolloutInventory> {
-  return terminalDispatchExecution(options)
-    .inspectCodexOpenRootInventory(pid, cwd);
-}
-
-async function resolveCurrentNativeAgentSessionIdentity({
-  options,
-  ...request
-}: NativeIdentityResolutionRequest & {
-  options: Record<string, any>;
-}): Promise<NativeAgentSessionIdentity | undefined> {
-  return terminalDispatchExecution(options).resolveCurrentNativeIdentity(
-    request
-  );
-}
-
-async function observeCurrentNativeAgentSessionIdentity(
-  request: NativeIdentityResolutionRequest & {
-    options: Record<string, any>;
-  }
-): Promise<NativeAgentSessionIdentityObservation> {
-  const { options, ...resolution } = request;
-  return terminalDispatchExecution(options).observeCurrentNativeIdentity(
-    resolution
-  );
-}
-
-function assertNativeAgentIdentityForTurn({
-  conversation,
-  currentIdentity,
-  operation
-}: {
-  conversation: Conversation;
-  currentIdentity: NativeAgentSessionIdentity | undefined;
-  operation: string;
-}): void {
-  terminalDispatchExecution({}).assertTurnIdentity({
-    conversation,
-    currentIdentity,
-    operation
-  });
-}
-
 function assertTurnBindingCurrent(
   conversation: Conversation,
   operation: string
@@ -9100,392 +8282,6 @@ function migratedTerminalTurnMatchesSessionBinding({
       ? takeover.terminal_agent_rollout
       : undefined
   });
-}
-
-function withNativeAgentSessionIdentity(
-  conversation: Conversation,
-  identity: NativeAgentSessionIdentity
-): Conversation {
-  return terminalDispatchExecution({}).withNativeIdentity(
-    conversation,
-    identity
-  );
-}
-
-function managedSessionStoreDirForConversation(
-  conversation: Conversation
-): string | undefined {
-  const explicit = stringValue(conversation.store_dir);
-  if (explicit) {
-    return explicit;
-  }
-  const statePath = stringValue(conversation.state_path);
-  return statePath
-    ? pathsForConversationDir(path.dirname(statePath)).storeDir
-    : undefined;
-}
-
-function refineManagedSessionNativeIdentity({
-  storeDir,
-  session,
-  terminalControl,
-  identity
-}: {
-  storeDir: string;
-  session: ManagedSessionState;
-  terminalControl: TerminalControlRef;
-  identity?: NativeAgentSessionIdentity;
-}): ManagedSessionState {
-  const binding = session.binding;
-  if (session.status !== "bound" || !binding) {
-    return session;
-  }
-  if (
-    !terminalControlsShareIncarnation(binding.terminal_control, terminalControl) ||
-    (identity && binding.native_thread_id &&
-      binding.native_thread_id !== identity.sessionId)
-  ) {
-    throw new Error(
-      `managed Session ${session.session_id} changed native identity before send`
-    );
-  }
-  const refinedNativeThreadId = binding.native_thread_id ?? identity?.sessionId;
-  const refinedProcessUuid =
-    binding.native_process.process_uuid ?? identity?.processUuid;
-  const refinedProcessBirth =
-    binding.native_process.process_birth ?? identity?.processBirth;
-  const refinedRollout = binding.native_process.rollout ?? identity?.rollout;
-  const refinedTerminalEndpoint = binding.terminal_endpoint ??
-    (hasCanonicalTerminalEndpoint(terminalControl)
-      ? terminalControlEvidence(terminalControl)
-      : undefined);
-  const changed =
-    refinedNativeThreadId !== binding.native_thread_id ||
-    refinedProcessUuid !== binding.native_process.process_uuid ||
-    refinedProcessBirth !== binding.native_process.process_birth ||
-    JSON.stringify(refinedRollout) !==
-      JSON.stringify(binding.native_process.rollout) ||
-    refinedTerminalEndpoint !== binding.terminal_endpoint;
-  if (!changed) {
-    return session;
-  }
-  const now = cliNow().toISOString();
-  return saveManagedSession(storeDir, {
-    ...session,
-    binding: {
-      ...binding,
-      ...(refinedTerminalEndpoint
-        ? { terminal_endpoint: refinedTerminalEndpoint }
-        : {}),
-      native_thread_id: refinedNativeThreadId,
-      native_process: {
-        ...binding.native_process,
-        process_uuid: refinedProcessUuid,
-        process_birth: refinedProcessBirth,
-        rollout: refinedRollout,
-        evidence: identity?.evidence ?? binding.native_process.evidence
-      },
-      last_verified_at: now
-    },
-    updated_at: now
-  }, {
-    expectedRevision: managedSessionRevision(session)
-  });
-}
-
-function persistManagedSessionNativeIdentity({
-  conversation,
-  terminalControl,
-  identity,
-  storeDir
-}: {
-  conversation: Conversation;
-  terminalControl: TerminalControlRef;
-  identity: NativeAgentSessionIdentity;
-  storeDir: string;
-}): ManagedSessionState | undefined {
-  const bindingId = stringValue(conversation.terminal_binding_id);
-  const bindingGeneration = Number(conversation.terminal_binding_generation);
-  const conversationStoreDir =
-    managedSessionStoreDirForConversation(conversation);
-  if (
-    !bindingId ||
-    !Number.isSafeInteger(bindingGeneration) ||
-    !conversationStoreDir
-  ) {
-    return undefined;
-  }
-  const canonicalStoreDir = path.resolve(storeDir);
-  if (path.resolve(conversationStoreDir) !== canonicalStoreDir) {
-    throw new Error(
-      "managed Session native identity escaped its exact Store writer"
-    );
-  }
-  const sessionId = sessionIdForConversation(conversation);
-  const current = tryLoadManagedSession(canonicalStoreDir, sessionId);
-  if (
-    !current ||
-    current.status !== "bound" ||
-    !current.binding ||
-    current.binding.binding_id !== bindingId ||
-    current.binding.generation !== bindingGeneration ||
-    !terminalControlsShareIncarnation(
-      current.binding.terminal_control,
-      terminalControl
-    )
-  ) {
-    throw new Error(
-      `managed Session ${sessionId} binding changed before native identity commit`
-    );
-  }
-  const expectedNativeThreadId = current.binding.native_thread_id;
-  if (
-    expectedNativeThreadId &&
-    expectedNativeThreadId !== identity.sessionId
-  ) {
-    throw new Error(
-      `managed Session ${sessionId} expected native thread ` +
-      `${expectedNativeThreadId}, observed ${identity.sessionId}`
-    );
-  }
-  const now = cliNow().toISOString();
-  const next: ManagedSessionState = {
-    ...current,
-    binding: {
-      ...current.binding,
-      native_thread_id: identity.sessionId,
-      native_process: {
-        ...current.binding.native_process,
-        process_uuid: identity.processUuid,
-        process_birth: identity.processBirth,
-        rollout: identity.rollout,
-        evidence: identity.evidence
-      },
-      last_verified_at: now
-    },
-    updated_at: now
-  };
-  return saveManagedSession(canonicalStoreDir, next, {
-    expectedRevision: managedSessionRevision(current)
-  });
-}
-
-function quarantineManagedSessionBinding({
-  conversation,
-  reason,
-  storeDir
-}: {
-  conversation: Conversation;
-  reason: string;
-  storeDir: string;
-}): void {
-  const bindingId = stringValue(conversation.terminal_binding_id);
-  const bindingGeneration = Number(conversation.terminal_binding_generation);
-  const conversationStoreDir =
-    managedSessionStoreDirForConversation(conversation);
-  if (
-    !bindingId ||
-    !Number.isSafeInteger(bindingGeneration) ||
-    !conversationStoreDir
-  ) {
-    return;
-  }
-  const canonicalStoreDir = path.resolve(storeDir);
-  if (path.resolve(conversationStoreDir) !== canonicalStoreDir) {
-    throw new Error(
-      "managed Session quarantine escaped its exact Store writer"
-    );
-  }
-  const current = tryLoadManagedSession(
-    canonicalStoreDir,
-    sessionIdForConversation(conversation)
-  );
-  if (
-    !current?.binding ||
-    current.binding.binding_id !== bindingId ||
-    current.binding.generation !== bindingGeneration
-  ) {
-    return;
-  }
-  const now = cliNow().toISOString();
-  saveManagedSession(canonicalStoreDir, {
-    ...current,
-    status: "quarantined",
-    quarantine_reason: reason.slice(0, 2000),
-    updated_at: now
-  }, {
-    expectedRevision: managedSessionRevision(current)
-  });
-}
-
-function managedTurnsForSession(
-  storeDir: string,
-  sessionId: string
-): Conversation[] {
-  return listConversations(storeDir)
-    .filter(isDiscoverableTmuxConversation)
-    .filter((conversation) =>
-      sessionIdForConversation(conversation) === sessionId
-    )
-    .sort(compareManagedConversationRecency);
-}
-
-function assertManagedSessionCanStartTurn(
-  turns: Conversation[]
-): void {
-  assertManagedSessionCanStartTurnPolicy(
-    turns,
-    (conversation) => SESSION_SEND_BLOCKING_STATUSES.has(conversation.status)
-  );
-}
-
-function managedTurnMatchesResolvedTerminal(
-  conversation: Conversation,
-  terminal: ResolvedTerminalConversation,
-  currentIdentity?: NativeAgentSessionIdentity
-): boolean {
-  const takeover = isRecord(conversation.native_session_takeover)
-    ? conversation.native_session_takeover
-    : undefined;
-  const storedControl = terminalControlFromTakeover(takeover);
-  return managedTurnMatchesTerminal({
-    conversation,
-    terminal,
-    currentIdentity,
-    storedControlExists: storedControl !== undefined,
-    terminalIncarnationMatches: Boolean(storedControl &&
-      terminalControlsShareIncarnation(
-        storedControl,
-        terminal.terminalControl
-      )),
-    workspaceMatches: matchesConfiguredWorkspace(
-      conversation.workspace,
-      terminal.terminalControl.currentPath
-    )
-  });
-}
-
-function createManagedTerminalTurn({
-  options,
-  conversationId,
-  agent,
-  pid,
-  messageBody,
-  terminalControl,
-  previousTurn,
-  managedSession,
-  nativeAgentIdentity,
-  deferredForegroundTransferId = undefined as string | undefined
-}) {
-  const workspace = terminalControl.currentPath ?? cliCwd();
-  const storeDir = expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(workspace));
-  const executor = previousTurn
-    ? executorForConversation(previousTurn)
-    : resolveExecutor({
-        kind: agent,
-        session: conversationId
-      });
-  const now = cliNow();
-  const conversation = createConversation({
-    userRequest: String(messageBody),
-    sessionId:
-      managedSession?.session_id ??
-      (previousTurn ? sessionIdForConversation(previousTurn) : undefined),
-    workspace,
-    openclawSession:
-      options.openclawSession ?? previousTurn?.openclaw_session ??
-      "agent:main:main",
-    executorKind: executor.kind,
-    executorSession: executor.session,
-    softLimit: Number(options.softLimit ?? 50),
-    hardLimit: Number(options.hardLimit ?? 100),
-    now
-  });
-  const paths = pathsForConversation(conversation.conversation_id, storeDir);
-  const previousTakeover = previousTurn && isRecord(
-    previousTurn.native_session_takeover
-  )
-    ? previousTurn.native_session_takeover
-    : undefined;
-  const managedNativeProcess = managedSession?.binding?.native_process;
-  const attachedConversation = withStoragePaths({
-    ...conversation,
-    terminal_binding_id: managedSession?.binding?.binding_id,
-    terminal_binding_generation: managedSession?.binding?.generation,
-    native_thread_id:
-      managedSession?.binding?.native_thread_id ??
-      nativeAgentIdentity?.sessionId,
-    executor,
-    status: "idle" as const,
-    idle_since: now.toISOString(),
-    updated_at: now.toISOString(),
-    gateway_url:
-      options.gatewayUrl ?? previousTurn?.gateway_url ??
-      "ws://127.0.0.1:18789",
-    gateway_method: options.gatewayMethod ?? previousTurn?.gateway_method,
-    gateway_session:
-      options.gatewaySession ?? options.openclawSession ??
-      previousTurn?.gateway_session ?? previousTurn?.openclaw_session ??
-      "agent:main:main",
-    openclaw_bin:
-      options.openclawBin ?? previousTurn?.openclaw_bin ??
-      resolveOptionalExecutable("openclaw"),
-    native_session_takeover: {
-      agent,
-      terminal_agent_identity_protocol: 1,
-      native_session_id: conversationId,
-      terminal_agent_pid: pid,
-      terminal_agent_session_id: nativeAgentIdentity?.sessionId,
-      terminal_agent_expected_session_id:
-        managedSession?.binding?.native_thread_id,
-      terminal_binding_id: managedSession?.binding?.binding_id,
-      terminal_binding_generation: managedSession?.binding?.generation,
-      terminal_agent_process_uuid:
-        nativeAgentIdentity?.processUuid ?? managedNativeProcess?.process_uuid,
-      terminal_agent_process_birth:
-        nativeAgentIdentity?.processBirth ?? managedNativeProcess?.process_birth,
-      terminal_agent_rollout:
-        nativeAgentIdentity?.rollout ?? managedNativeProcess?.rollout,
-      terminal_agent_identity_evidence:
-        nativeAgentIdentity?.evidence ?? managedNativeProcess?.evidence,
-      source_cwd: workspace,
-      source_title: `Terminal-controlled ${executor.display_name} ${terminalControl.target}`,
-      strategy: "terminal_control",
-      attached_at:
-        stringValue(previousTakeover?.attached_at) ?? now.toISOString(),
-      takeover_match_kind: previousTurn
-        ? "managed_session_send"
-        : "raw_terminal_send",
-      ...terminalEndpointTakeoverFields(terminalControl),
-      needs_bootstrap: false,
-      terminal_bridge: true,
-      ...(deferredForegroundTransferId
-        ? { deferred_foreground_transfer_id: deferredForegroundTransferId }
-        : {})
-    }
-  }, paths);
-  const message = createMessage({
-    conversation: attachedConversation,
-    id: stringValue(options.messageId),
-    from: "openclaw",
-    to: executor.actor,
-    type: options.type ?? "task",
-    body: String(messageBody),
-    metadata: {
-      executor_kind: executor.kind,
-      executor_session: executor.session,
-      source_conversation_id: conversationId
-    }
-  });
-  const nextConversation = applyMessageToConversation(attachedConversation, message);
-  return {
-    conversation: attachedConversation,
-    nextConversation,
-    statePath: paths.statePath,
-    logPath: paths.logPath,
-    executor,
-    message
-  };
 }
 
 function openClawYieldNextAction({
@@ -13805,16 +12601,6 @@ function isRemoteCompactStreamDisconnect(text) {
     value.includes("stream disconnected") &&
     value.includes("/codex/responses/compact")
   );
-}
-
-function withStoragePaths(conversation, paths) {
-  return {
-    ...conversation,
-    store_dir: paths.storeDir,
-    conversation_dir: paths.conversationDir,
-    event_log_path: paths.logPath,
-    state_path: paths.statePath
-  };
 }
 
 const terminalCommandCliFacade = createTerminalCommandCliFacade({
