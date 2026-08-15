@@ -149,6 +149,28 @@ test("terminal list authority domains select at most five exact witnesses", asyn
   }
 });
 
+test("terminal runtime composition selects five exact provider and identity witnesses", async () => {
+  const selection = await loadSelectionModule();
+  const tiers = loadTiers();
+  const expected = [
+    "test/claude-native-inspection-cli.test.ts",
+    "test/native-thread-lifecycle-cli.test.ts",
+    "test/shards/agent-cli-terminal-send-gates.test.ts",
+    "test/shards/agent-cli-session-acceptance.test.ts",
+    "test/cli-core-import.test.ts"
+  ];
+  assert.deepEqual(
+    selection.selectAffectedTests(["src/terminal-runtime-cli-adapter.ts"], tiers),
+    {
+      mode: "targeted",
+      changedPaths: ["src/terminal-runtime-cli-adapter.ts"],
+      integrationFiles: tiers.integration.filter((testPath) =>
+        expected.includes(testPath)
+      )
+    }
+  );
+});
+
 test("callback outbox policy selects retry, approval, and monitor recovery coverage", async () => {
   const selection = await loadSelectionModule();
   const tiers = loadTiers();

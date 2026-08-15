@@ -75,6 +75,7 @@
     "test/terminal-monitor-poll-policy.test.ts",
     "test/terminal-monitor-seams.test.ts",
     "test/terminal-process-source.test.ts",
+    "test/terminal-runtime-cli-adapter.test.ts",
     "test/terminal-scoped-approval-authority.test.ts",
     "test/terminal-selector-projection-service.test.ts",
     "test/terminal-submission-acceptance.test.ts",

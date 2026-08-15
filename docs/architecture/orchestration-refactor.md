@@ -1613,6 +1613,53 @@ release-error retry. Existing dispatch recovery, receipt
 fence, control-lock, monitor recovery, and human-handoff suites remain the
 black-box boundary set.
 
+## Terminal runtime and provider CLI composition
+
+The runtime/provider slice moves command-scoped terminal-control provider
+selection, process-source selection, Codex/Claude adapter registry composition,
+bridge construction, Claude `agents --json --all` observation, running-agent
+version observation, and provider-owned takeover decoding into
+`terminal-runtime-cli-adapter.ts`. Exact-bound Codex completion policy, native
+identity resolution and assertion, Store-backed runtime identity, durable
+request construction, endpoint refinement, legacy migration, acceptance,
+dispatch, monitor, lifecycle, callback, and deferred foreground work remain in
+their existing owners and enter this adapter only through typed callbacks.
+
+The factory receives five invocation-local groups: options, async-local command
+dependencies, completion callbacks, opaque identity callbacks, and workspace
+validation. It retains no mutable global provider or dependency state. Bridge
+defaults are still evaluated lazily in provider -> agent registry -> process
+source order. Injected providers and sources still win before static fixtures;
+the original option truthiness rules are unchanged. Concrete raw JSON parsing
+and `spawnSync` calls stay in this CLI infrastructure adapter rather than
+crossing a service boundary. Claude keeps the exact
+`agents --json --all` argv, status/error handling, invalid-JSON diagnostics,
+required-observation refusal, and row normalization order. Running-version
+observation keeps injected -> per-PID fixture -> per-agent fixture -> exact
+`lsof` executable-path evidence priority.
+
+Against exact parent `779e2e5d15ff18c5b8d0c5bbb7493e601f06cfb3`, the
+required top runtime movement plus the independent agent-version adapter reduce
+`src/cli-core.ts` from 14,390 to 13,935 physical lines (-455). Production
+TypeScript changes from 87,562 to 87,718 lines (+156, 34.29 percent of the core
+reduction), meeting the preferred overhead target and remaining below the 518
+lines of gross responsibility movement. The graph has 48 domains, 99 modules,
+526 edges, and zero cycles. The generated adapter declaration has no `any`,
+`Record<..., any>`, or `ResolvedTerminalConversation`; the module imports no
+Store, identity-authority, acceptance, dispatch, monitor, lifecycle, callback,
+or deferred module. Every adapter function is below 100 physical lines and
+approximate complexity 20; the maxima are 47 lines and c15.
+
+Direct fast proofs lock factory laziness and instance isolation, exact provider
+-> registry -> process-source getter order, injection/static truthiness,
+exact-bound completion short-circuiting, Claude subprocess argv and fail-closed
+errors, agent-version precedence, and tmux/Herdr takeover decoding. Its targeted
+owner selects five retained CLI witnesses spanning Claude native inspection,
+facade import laziness, lifecycle versioning, send gating, and native Session
+acceptance. The 8,997-line Codex no-rollout fixture is deliberately excluded:
+these narrower witnesses cover this composition boundary without selecting the
+integration tier's dominant runtime for every adapter edit.
+
 ## Soft freeze while #126 is active
 
 Until the orchestration milestones finish:
