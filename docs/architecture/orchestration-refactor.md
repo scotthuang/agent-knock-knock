@@ -1660,6 +1660,82 @@ acceptance. The 8,997-line Codex no-rollout fixture is deliberately excluded:
 these narrower witnesses cover this composition boundary without selecting the
 integration tier's dominant runtime for every adapter edit.
 
+## Native acceptance and managed Turn application
+
+The acceptance slice moves native acceptance composition, virgin Codex
+post-submission binding recovery, monitor acceptance reconciliation, uncertain
+settlement, managed Session identity refinement, managed Turn queries, and
+managed Turn construction out of `cli-core.ts`. The new CLI adapter composes the
+existing `TerminalDispatchExecutionService`, terminal-submission detectors,
+receipt merger, deferred-foreground recovery owner, and terminal-dispatch
+repository/recovery facades. Ordinary ledger locking, reads, and writes are
+projected directly from `terminalDispatchRepository`; prepared reconciliation
+and binding proof are projected directly from `terminalDispatchRecovery`. It
+obtains the command-local terminal runtime lazily and uses its existing Claude
+row and bridge ports instead of rebuilding provider composition. It does not
+copy acceptance scanning, receipt ranking,
+ledger repair, authority tokens, or deferred-transfer reducers.
+
+`TerminalAcceptanceApplicationService` owns the ordered
+recover -> detect -> optional second recovery -> second detect -> exact draft
+proof -> commit decision. `ManagedTurnRecoveryService` owns the monotonic virgin
+binding sequence: validate literal facts, resolve the exact identity, require
+the canonical acceptance detector when neither side was committed, prove
+exclusive ownership, commit Session identity, commit Turn identity, then
+revalidate the Turn. Both services receive at most five typed port groups and
+import no filesystem, path, Store/session repository, raw lock, raw JSON,
+`Record<..., any>`, `ResolvedTerminalConversation`, or terminal adapter
+instances.
+
+The CLI adapter retains the concrete resource discipline. Virgin recovery is
+terminal lock -> Store writer -> Turn state lock; monitor acceptance already
+holds the same terminal lock and therefore enters only writer -> state. Final
+acceptance writes Turn state before best-effort ledger and event bookkeeping,
+while uncertainty retains the legacy ledger -> Turn state -> event durable
+order. An `enter_dispatched` Turn with possible input never enters a replay or
+zero-input abort path: absent acceptance stays pending unless the exact draft
+is still present, in which case it becomes durable `not_accepted` with
+`do_not_retry` authority.
+
+Managed Turn construction retains the original insertion order and exact
+storage-path suffix, binding id/generation, native identity, endpoint evidence,
+message metadata, and optional deferred transfer id. The public adapter
+declaration contains neither `any`, `Record<..., any>`, nor
+`ResolvedTerminalConversation`; deferred operations cross only the structural
+`TerminalDispatchTerminal` carrier.
+
+Measured against exact parent
+`6318a3bbff2ec0aa10baa3ada8313d1eed038bd2`, this slice reduces
+`src/cli-core.ts` from 13,935 to 12,721 physical lines (-1,214) and changes
+production TypeScript from 87,718 to 88,732 lines (+1,014). The typed overhead
+is 83.53 percent of core movement and remains 200 lines below the hard
+movement ceiling; it does not meet the preferred 450-line overhead target, so
+that tradeoff is explicit. The production graph has 49 domains, 102 modules,
+559 static import edges, and zero cycles. `cli-core.ts` retains one production
+importer, and the acceptance owner retains exactly five integration witnesses.
+
+All extracted functions remain below the hard 500-line/c50 gates. The two
+reviewed preferred-target exceptions use the documented nested-function-
+excluding complexity method: `#recoverVirginLocked` is 104 physical lines/c2,
+and `attachManagedTurn` is 75 lines/c23. Every business-service function stays
+below 100 lines and c20.
+
+The direct evidence fixes the critical boundaries:
+
+| Contract | Direct proof | Focused real-CLI proof |
+| --- | --- | --- |
+| Virgin acceptance order and split CAS recovery | recording ports prove detector -> ownership -> Session -> Turn -> revalidation and both one-sided crash continuations | no-rollout binding and Session-acceptance shards |
+| Possible input never replays | application table proves pending without exact draft and `not_accepted` only with exact draft | Session acceptance and terminal-send gates |
+| Terminal -> writer -> state and durable write order | compiled facade wiring checks both lock stacks plus accepted and uncertain writes | monitor-recovery and no-rollout binding |
+| Managed Turn JSON shape | direct exact key/order/binding/message projection | handoff and Session-acceptance shards |
+| Data-only service boundary | declaration/source prohibition test and at-most-five-group typed ports | all five owner witnesses traverse the production facade |
+
+The five focused witnesses are Codex no-rollout binding, human handoff,
+monitor recovery, Session acceptance, and terminal send gates. Together they
+cover virgin and deferred acceptance, process drift/quarantine, crash recovery,
+uncertainty, Turn construction, and no-replay behavior without assigning
+lifecycle, callback, or generic ledger-recovery ownership to this slice.
+
 ## Soft freeze while #126 is active
 
 Until the orchestration milestones finish:

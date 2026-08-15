@@ -2,8 +2,8 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 13935,
-    "production_physical_loc": 87718,
+    "cli_core_max_physical_loc": 12721,
+    "production_physical_loc": 88732,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -189,6 +189,16 @@
     },
     "state-store": {
       "selection": "full"
+    },
+    "terminal-acceptance-application": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/codex-no-rollout-binding-cli.test.ts",
+        "test/human-handoff-adoption-cli.test.ts",
+        "test/shards/agent-cli-monitor-recovery.test.ts",
+        "test/shards/agent-cli-session-acceptance.test.ts",
+        "test/shards/agent-cli-terminal-send-gates.test.ts"
+      ]
     },
     "terminal-action-projection": {
       "selection": "targeted",
@@ -519,6 +529,10 @@
       "owner": "state-store"
     },
     {
+      "path": "src/managed-turn-recovery-service.ts",
+      "owner": "terminal-acceptance-application"
+    },
+    {
       "path": "src/mutation-transaction.ts",
       "owner": "mutation-transaction"
     },
@@ -597,6 +611,14 @@
     {
       "path": "src/store.ts",
       "owner": "state-store"
+    },
+    {
+      "path": "src/terminal-acceptance-application-service.ts",
+      "owner": "terminal-acceptance-application"
+    },
+    {
+      "path": "src/terminal-acceptance-cli-adapter.ts",
+      "owner": "terminal-acceptance-application"
     },
     {
       "path": "src/terminal-action-projection.ts",
