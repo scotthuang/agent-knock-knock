@@ -24,7 +24,8 @@ import {
   type TerminalDurableCompletionRequest,
   type TerminalNativeIdentityFence,
   type TerminalProcessSnapshot,
-  type TerminalRuntimeIdentity
+  type TerminalRuntimeIdentity,
+  type TerminalThreadLifecycleCandidateProvider
 } from "./terminal-agent-adapter.js";
 import { TerminalAgentBridge, type TerminalIdentityVerificationRequest } from
   "./terminal-agent-bridge.js";
@@ -50,7 +51,8 @@ export type TerminalRuntimeCliOptions = Readonly<Record<string, unknown>>;
 type TerminalRuntimeDependencyKey = "terminalControlProviderRegistry" |
   "terminalProcessSource" | "loadClaudeAgentRows" |
   "agentVersionForRunningProcess" | "createAgentSessionProvider" |
-  "codexLocalSessionAdapter" | "monotonicNowMs" | "sleep";
+  "codexLocalSessionAdapter" | "codexThreadLifecycleProvider" |
+  "monotonicNowMs" | "sleep";
 
 export type TerminalRuntimeCliDependencies = Readonly<Pick<
   CliCommandDependencies<TerminalRuntimeCliOptions>, TerminalRuntimeDependencyKey
@@ -98,6 +100,9 @@ export interface TerminalRuntimeCliAdapter {
   createBridge(provider?: TerminalControlProvider,
     registry?: TerminalAgentAdapterRegistry): TerminalAgentBridge;
   createAgentSessionProvider(agent: string): CodingAgentSessionProvider;
+  createThreadLifecycleCandidateProvider(
+    agent: ExecutorKind
+  ): TerminalThreadLifecycleCandidateProvider;
   listActiveSessionsWithTerminalControl(
     provider: CodingAgentSessionProvider,
     terminalProvider?: TerminalControlProvider
@@ -129,6 +134,8 @@ export function createTerminalRuntimeCliAdapter(
   });
   const createAgentSessionProvider = (agent: string) =>
     agentSessionProvider(input, agent);
+  const createThreadLifecycleCandidateProvider = (agent: ExecutorKind) =>
+    threadLifecycleCandidateProvider(input, agent);
   const listActiveSessionsWithTerminalControl = (
     provider: CodingAgentSessionProvider,
     terminalProvider: TerminalControlProvider = createControlProvider()
@@ -136,9 +143,22 @@ export function createTerminalRuntimeCliAdapter(
   return Object.freeze({
     createControlProviderRegistry, createControlProvider, createProcessSource,
     loadClaudeAgentRows, createAgentRegistry, createBridge,
-    createAgentSessionProvider, listActiveSessionsWithTerminalControl,
+    createAgentSessionProvider, createThreadLifecycleCandidateProvider,
+    listActiveSessionsWithTerminalControl,
     agentVersionForRunningProcess: (agent: ExecutorKind, pid: number) =>
       runningAgentVersion(input, agent, pid)
+  });
+}
+
+function threadLifecycleCandidateProvider(
+  input: Pick<CreateTerminalRuntimeCliAdapterInput, "options" | "dependencies">,
+  agent: ExecutorKind
+): TerminalThreadLifecycleCandidateProvider {
+  if (agent !== "codex") {
+    throw new Error(`unsupported thread lifecycle candidate provider: ${agent}`);
+  }
+  return input.dependencies.codexThreadLifecycleProvider ?? new CodexStoreAdapter({
+    codexHome: expandHome(input.options.codexHome as string | undefined)
   });
 }
 

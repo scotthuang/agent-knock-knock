@@ -363,7 +363,7 @@ test("snapshot fingerprints preserve fail-closed evaluation and rollout key orde
   }), false);
 });
 
-test("query runtime stays filesystem-neutral and cli-core resolves Store paths lazily", () => {
+test("query runtime stays filesystem-neutral and the CLI adapter resolves Store paths lazily", () => {
   const querySource = fs.readFileSync(
     path.resolve("src/native-thread-lifecycle-query-service.ts"),
     "utf8"
@@ -382,19 +382,27 @@ test("query runtime stays filesystem-neutral and cli-core resolves Store paths l
     /node:fs|session-store|terminal-agent-bridge|terminal-dispatch-ledger/u
   );
 
-  const coreSource = fs.readFileSync(path.resolve("src/cli-core.ts"), "utf8");
-  const start = coreSource.indexOf("function nativeThreadLifecycleQueryPorts(");
-  const end = coreSource.indexOf(
-    "function verifiedWorkspaceRelationship(",
+  const adapterSource = fs.readFileSync(
+    path.resolve("src/native-thread-lifecycle-cli-adapter.ts"),
+    "utf8"
+  );
+  const start = adapterSource.indexOf(
+    "  queryPorts(options: NativeLifecycleCliOptions):"
+  );
+  const end = adapterSource.indexOf(
+    "  async rootActiveProcesses(",
     start
   );
-  const factory = coreSource.slice(start, end);
+  const factory = adapterSource.slice(start, end);
   assert.match(
     factory,
-    /resolvedStoreDir \?\?= storeDirFromOptions\(options\)/u
+    /resolvedStoreDir \?\?=[\s\S]*this\.ports\.state\.storeDir\(options\)/u
   );
-  assert.doesNotMatch(factory, /path\.resolve\(storeDirFromOptions/u);
-  assert.equal(factory.match(/storeDirFromOptions\(options\)/gu)?.length, 1);
+  assert.doesNotMatch(factory, /path\.resolve\(this\.ports\.state\.storeDir/u);
+  assert.equal(
+    factory.match(/this\.ports\.state\.storeDir\(options\)/gu)?.length,
+    1
+  );
   assert.equal(factory.match(/storeDir\(\)/gu)?.length, 4);
   assert.doesNotMatch(
     factory,

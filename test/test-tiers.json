@@ -31,6 +31,7 @@
     "test/managed-session.test.ts",
     "test/managed-turn-recovery-service.test.ts",
     "test/mutation-transaction.test.ts",
+    "test/native-thread-lifecycle-cli-adapter.test.ts",
     "test/native-thread-lifecycle-policy.test.ts",
     "test/native-thread-lifecycle-query-service.test.ts",
     "test/native-thread-lifecycle-recovery-service.test.ts",

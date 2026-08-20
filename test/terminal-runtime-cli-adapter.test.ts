@@ -137,6 +137,37 @@ test("Codex session providers preserve injection, fixtures, and JSON validation"
   );
 });
 
+test("Codex lifecycle candidate providers preserve their dedicated precedence", () => {
+  const injected = {
+    listThreadLifecycleCandidates: async () => [],
+    revalidateThreadLifecycleCandidate: async () => ({
+      status: "unavailable" as const,
+      reason: "test"
+    })
+  };
+  let injectedReads = 0;
+  const selected = runtime({ codexHome: "/unused" }, {
+    get codexThreadLifecycleProvider() {
+      injectedReads += 1;
+      return injected;
+    }
+  });
+  assert.equal(injectedReads, 0);
+  assert.equal(
+    selected.createThreadLifecycleCandidateProvider("codex"),
+    injected
+  );
+  assert.equal(injectedReads, 1);
+  assert.throws(
+    () => selected.createThreadLifecycleCandidateProvider("claude"),
+    /unsupported thread lifecycle candidate provider: claude/u
+  );
+  const production = runtime({ codexHome: "/tmp/codex-lifecycle" })
+    .createThreadLifecycleCandidateProvider("codex");
+  assert.equal(typeof production.listThreadLifecycleCandidates, "function");
+  assert.equal(typeof production.revalidateThreadLifecycleCandidate, "function");
+});
+
 test("active Session attachment preserves provider, source, and bridge call counts", async () => {
   const active: ActiveCodexProcess = {
     agent: "codex", pid: 101, ppid: 100, command: "codex", kind: "codex_cli",
