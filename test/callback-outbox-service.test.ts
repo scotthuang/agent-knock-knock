@@ -91,6 +91,10 @@ function createHarness(events: Array<Record<string, unknown>> = []) {
       },
       isTerminalBridgeSupersedeStatus() {
         return false;
+      },
+      resolveCompletionDispatch() {
+        order.push("resolve:completion-dispatch");
+        return true;
       }
     },
     retry: {
@@ -124,12 +128,6 @@ function createHarness(events: Array<Record<string, unknown>> = []) {
       },
       runTransaction() {
         throw new Error("nested transaction is not expected in preparation tests");
-      }
-    },
-    terminal: {
-      resolveCompletionDispatch() {
-        order.push("resolve:completion-dispatch");
-        return true;
       }
     }
   };

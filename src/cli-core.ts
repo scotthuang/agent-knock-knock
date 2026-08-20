@@ -56,7 +56,6 @@ import {
   logPathForStatePath,
   loadConversationById,
   loadState,
-  messageEvent,
   pathsForConversationDir,
   saveState,
   STORE_SESSION_AUTHORITY_PROTOCOL,
@@ -250,16 +249,7 @@ import {
   type BoundTerminalDispatchRoute,
   type TerminalDispatchCapabilityRepositories
 } from "./terminal-dispatch-capability.js";
-import {
-  createCallbackOutboxService,
-  deterministicTerminalCallbackMessageId,
-  type CallbackPreparationOptions,
-  type PreparedCallback
-} from "./callback-outbox-service.js";
-import {
-  createOpenClawCallbackTransport,
-  type CallbackProcessDeliveryObservation
-} from "./openclaw-callback-transport.js";
+import { createCallbackCliFacade } from "./callback-cli-adapter.js";
 import {
   decideTerminalMonitorVerifiedDeadCompletion as decideVerifiedDeadAgentCompletion,
   terminalMonitorActivityPersistIntervalMs as terminalBridgeActivityPersistIntervalMs,
@@ -324,7 +314,6 @@ import * as dispatchReceipt from "./terminal-dispatch-receipt.js";
 import {
   expandHome,
   packageRootDir,
-  redactCliOutput,
   resolveOptionalExecutable,
   writeCliJson as printJson
 } from "./cli-command-runtime.js";
@@ -674,9 +663,9 @@ async function dispatchCliCommand(commandName, options) {
   } else if (commandName === "doctor") {
     runDoctor(options);
   } else if (commandName === "callback") {
-    runCallback(options);
+    callbackCliFacade.runCallback(options);
   } else if (commandName === "retry-callback") {
-    runRetryCallback(options);
+    callbackCliFacade.runRetryCallback(options);
   } else if (commandName === "monitor") {
     await runMonitor(options);
   } else {
@@ -1350,6 +1339,29 @@ const {
   deferredCodexPreviousDispatchSnapshotMatches, observeDeferredCodexAuthority,
   assertVerifiedEmptyCodexHandoffBoundary
 } = terminalIdentityAuthority;
+const callbackCliFacade = createCallbackCliFacade({
+  state: { acquireFileLock, loadConversation: loadConversationFromOptions,
+    readEvents: (logPath) => terminalDispatchRecovery.readEvents(logPath),
+    withWriter: withStoreWriterLease },
+  authority: {
+    assertNoDeferredTransfer: (input) =>
+      terminalHandoffCliFacade.assertConversationHasNoNonterminalDeferredForegroundTransfer(input),
+    assertBindingCurrent: assertTurnBindingCurrent,
+    isDispatchReleased: (conversation) => TERMINAL_DISPATCH_RELEASE_STATUSES
+      .has(effectiveTurnStatus(conversation)),
+    isWaitingForAgent,
+    isTerminalBridgeSupersedeStatus: (status) =>
+      TERMINAL_BRIDGE_SUPERSEDE_STATUSES.has(status),
+    resolveCompletionDispatch: ({
+      terminalControl, conversation, expectedMessageId, reason
+    }) => resolveTerminalBridgeDispatchLedger(terminalControl,
+      { conversation, expectedMessageId, reason })
+  },
+  retry: { startMonitor: startCallbackRetryMonitor, isProcessAlive,
+    attemptLeaseMs: CALLBACK_ATTEMPT_LEASE_MS,
+    delaysMs: CALLBACK_RETRY_DELAYS_MS },
+  runtime: { classifyProcessFailure, textSummary }
+});
 const terminalDispatchRecovery = createTerminalDispatchRecoveryCliAdapter({
   repository: terminalDispatchRepository,
   authority: {
@@ -1373,7 +1385,7 @@ const terminalDispatchRecovery = createTerminalDispatchRecoveryCliAdapter({
       completion,
       allowSupersedeRecovery = false,
       completionFingerprint
-    }) => callbackOutboxService().prepareTerminalCompletion({
+    }) => callbackCliFacade.prepareTerminalCompletion({
       options: { ...options, statePath },
       statePath,
       logPath,
@@ -2055,7 +2067,7 @@ const terminalListCliFacade = createTerminalListCliFacade({
   },
   store: {
     callbackRetryDisposition: (delivery) =>
-      callbackOutboxService().retryDisposition(delivery),
+      callbackCliFacade.retryDisposition(delivery),
     codexLingeringBeforeIdentityMatchesSession,
     isActiveStatus,
     isDiscoverableTmuxConversation,
@@ -4567,7 +4579,7 @@ async function reconcileMonitors(
             reason: completionPreparation.reason
           });
         } else {
-          const completionResult = runPreparedCallback(
+          const completionResult = callbackCliFacade.runPrepared(
             completionPreparation.prepared,
             { emit: false }
           );
@@ -4867,7 +4879,7 @@ function prepareCallbackDeliveryReconciliation(input: {
   logPath: string;
   delayMs?: unknown;
 }) {
-  return callbackOutboxService().reconcileDelivery(input);
+  return callbackCliFacade.reconcileDelivery(input);
 }
 
 function terminalBridgeReconciliationEligibility(conversation: Conversation) {
@@ -6054,7 +6066,7 @@ function startCallbackRetryMonitor({
 
 function runCallbackRetryMonitor(options) {
   const statePath = expandHome(required(options.state, "--state is required"));
-  return callbackOutboxService().runRetryMonitor({
+  return callbackCliFacade.runRetryMonitor({
     statePath,
     initialDelayMs: options.callbackRetryDelayMs
   });
@@ -6426,7 +6438,7 @@ function terminalMonitorServicePorts({
               return { ...result, conversation: result.conversation as Conversation };
             },
             prepare: (request) =>
-              callbackOutboxService().prepareApprovalNotification({
+              callbackCliFacade.prepareApprovalNotification({
                 options: { ...options, statePath },
                 statePath,
                 logPath,
@@ -6548,8 +6560,8 @@ function terminalMonitorServicePorts({
           expectedMessageId: input.messageId
         }),
       run: (prepared, callbackOptions) =>
-        runPreparedCallback(prepared, callbackOptions),
-      emit: emitPreparedCallbackResult
+        callbackCliFacade.runPrepared(prepared, callbackOptions),
+      emit: callbackCliFacade.emitPreparedResult
     },
     runtime: monitorRuntimePort(),
     presentation: {
@@ -7030,195 +7042,6 @@ function runTranscript(options) {
   }));
 }
 
-function runCallback(options) {
-  const statePath = expandHome(required(options.state, "--state is required"));
-  runCallbackTransaction({ ...options, statePath });
-}
-
-function runRetryCallback(options) {
-  const { conversation, statePath, logPath } =
-    loadConversationFromOptions(options);
-  const storeDir = pathsForConversationDir(path.dirname(statePath)).storeDir;
-  withStoreWriterLease(storeDir, () => {
-    const fresh = loadState(statePath);
-    assertConversationHasNoNonterminalDeferredForegroundTransfer({
-      storeDir,
-      conversation: fresh,
-      action: "retry callback for"
-    });
-  });
-  const outcome = callbackOutboxService().retry({
-    options: { ...options, statePath },
-    conversation,
-    statePath,
-    logPath
-  });
-  if (outcome.kind === "recovered") {
-    emitPreparedCallbackResult(outcome.result);
-  }
-}
-
-function runCallbackTransaction(options) {
-  let prepared;
-  const callbackStoreDir = pathsForConversationDir(
-    path.dirname(options.statePath)
-  ).storeDir;
-  withStoreWriterLease(callbackStoreDir, () => {
-    const releaseLock = acquireFileLock(`${options.statePath}.lock`);
-    try {
-      prepared = prepareLockedCallback(options);
-    } finally {
-      releaseLock();
-    }
-  });
-  return runPreparedCallback(prepared);
-}
-
-function callbackOutboxService() {
-  return createCallbackOutboxService({
-    state: {
-      load: loadState,
-      save: saveState,
-      readEvents: readExistingEvents,
-      append: appendEvent,
-      appendMessage: (logPath, message) => {
-        appendEvent(logPath, messageEvent(message));
-      },
-      assertWriterCompatible: assertStoreWriterCompatible,
-      withTransaction: (statePath, operation) => {
-        const releaseLock = acquireFileLock(`${statePath}.lock`);
-        try {
-          return operation();
-        } finally {
-          releaseLock();
-        }
-      },
-      storeDirForStatePath: (statePath) =>
-        pathsForConversationDir(path.dirname(statePath)).storeDir,
-      logPathForStatePath
-    },
-    authority: {
-      assertNoDeferredTransfer:
-        assertConversationHasNoNonterminalDeferredForegroundTransfer,
-      assertBindingCurrent: assertTurnBindingCurrent,
-      isDispatchReleased: (conversation) =>
-        TERMINAL_DISPATCH_RELEASE_STATUSES.has(
-          effectiveTurnStatus(conversation)
-        ),
-      isWaitingForAgent,
-      isTerminalBridgeSupersedeStatus: (status) =>
-        TERMINAL_BRIDGE_SUPERSEDE_STATUSES.has(status)
-    },
-    retry: {
-      startMonitor: startCallbackRetryMonitor,
-      isProcessAlive,
-      attemptLeaseMs: CALLBACK_ATTEMPT_LEASE_MS,
-      delaysMs: CALLBACK_RETRY_DELAYS_MS
-    },
-    runtime: {
-      now: cliNow,
-      nowMs: cliNowMs,
-      pid: cliPid,
-      log: runtimeLog,
-      textSummary,
-      sleepSync,
-      crashCheckpoint: () => {
-        if (cliEnv().AKK_TEST_EXIT_AFTER_LOCAL_COMPLETION_STATE === "1") {
-          cliExit(86);
-        }
-      }
-    },
-    delivery: {
-      deliver: (input) => openClawCallbackTransport().deliverCallback(input),
-      runTransaction: runCallbackTransaction
-    },
-    terminal: {
-      resolveCompletionDispatch: ({
-        terminalControl,
-        conversation,
-        expectedMessageId,
-        reason
-      }) => resolveTerminalBridgeDispatchLedger(terminalControl, {
-        conversation,
-        expectedMessageId,
-        reason
-      })
-    }
-  });
-}
-
-function prepareLockedCallback(
-  options: CallbackPreparationOptions
-): PreparedCallback {
-  required(options.messageJson, "--message-json is required");
-  const logPath = expandHome(
-    options.log ?? logPathForStatePath(options.statePath)
-  );
-  return callbackOutboxService().prepare({
-    options,
-    logPath
-  });
-}
-
-function emitPreparedCallbackResult(result): void {
-  printJson({
-    conversation: result.conversation,
-    message: result.message,
-    budget: budgetAction(result.conversation),
-    delivered: result.delivered,
-    duplicate: result.duplicate,
-    ...(result.delivery === undefined ? {} : { delivery: result.delivery })
-  });
-}
-
-function runPreparedCallback(prepared, { emit = true } = {}) {
-  const result = callbackOutboxService().runPrepared(prepared);
-  if (emit) {
-    emitPreparedCallbackResult(result);
-  }
-  return result;
-}
-
-function recordCallbackProcessDelivery({
-  logPath,
-  conversation,
-  message,
-  event,
-  runtimeEvent,
-  delivery,
-  detail = {}
-}: CallbackProcessDeliveryObservation) {
-  appendEvent(logPath, {
-    ts: cliNow().toISOString(),
-    conversation_id: conversation.conversation_id,
-    event,
-    from: message.from,
-    to: "openclaw",
-    round: message.round,
-    ...detail,
-    status: delivery.status,
-    stdout: redactString(delivery.stdout),
-    stderr: redactString(delivery.stderr)
-  });
-  runtimeLog("info", runtimeEvent, {
-    conversation_id: conversation.conversation_id,
-    ...detail,
-    status: delivery.status,
-    failure_kind: classifyProcessFailure(delivery),
-    stdout: textSummary(delivery.stdout),
-    stderr: textSummary(delivery.stderr)
-  });
-}
-
-function openClawCallbackTransport() {
-  return createOpenClawCallbackTransport({
-    now: cliNow,
-    environment: cliEnv,
-    redactConversation: redactCliOutput,
-    recordCallbackProcessDelivery
-  });
-}
-
 function isStoreMutationLockTimeout(error: unknown): boolean {
   return error instanceof StoreLockTimeoutError ||
     (isRecord(error) && error.code === "LOCK_TIMEOUT");
@@ -7266,7 +7089,7 @@ function summarizeConversation(conversation) {
     ? conversation.callback_delivery
     : undefined;
   const callbackDisposition = callbackDelivery
-    ? callbackOutboxService().retryDisposition(callbackDelivery)
+    ? callbackCliFacade.retryDisposition(callbackDelivery)
     : undefined;
   return {
     session_id: sessionIdForConversation(conversation),
@@ -7703,8 +7526,7 @@ function deliverStalledNotification({ statePath, logPath, conversation, message,
 
   const gatewayToken = conversation.gateway_token;
   const gatewayUrl = gatewayToken ? conversation.gateway_url : undefined;
-  const callbackTransport = openClawCallbackTransport();
-  const delivery = callbackTransport.deliverGatewayMethod({
+  const delivery = callbackCliFacade.deliverGatewayMethod({
     method: conversation.gateway_method,
     openclawBin: conversation.openclaw_bin,
     gatewayUrl,
@@ -7744,7 +7566,7 @@ function deliverStalledNotification({ statePath, logPath, conversation, message,
     return;
   }
 
-  const chatSendDelivery = callbackTransport.deliverChatSend({
+  const chatSendDelivery = callbackCliFacade.deliverChatSend({
     openclawBin: conversation.openclaw_bin,
     gatewayUrl,
     token: gatewayToken,
