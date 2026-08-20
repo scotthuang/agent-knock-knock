@@ -906,4 +906,33 @@ test("public contract evidence fails closed on missing witnesses and protocol dr
   duplicateTool.contracts.openclaw_tools.tools[13] =
     duplicateTool.contracts.openclaw_tools.tools[12];
   assert.throws(() => validate(duplicateTool), /OpenClaw tools must equal/u);
+
+  for (const missingAuthority of [
+    "src/openclaw-plugin-command-adapter.ts",
+    "src/openclaw-plugin-schemas.ts"
+  ]) {
+    const missingRole = loadJson("config/public-contract-witnesses.json");
+    missingRole.contracts.openclaw_tools.authority_paths =
+      missingRole.contracts.openclaw_tools.authority_paths.filter(
+        (repositoryPath: string) => repositoryPath !== missingAuthority
+      );
+    assert.throws(
+      () => validate(missingRole),
+      /OpenClaw authority role paths must equal/u
+    );
+  }
+
+  const existingWrongRole = loadJson("config/public-contract-witnesses.json");
+  existingWrongRole.contracts.openclaw_tools.authority_paths =
+    existingWrongRole.contracts.openclaw_tools.authority_paths
+      .map((repositoryPath: string) =>
+        repositoryPath === "src/openclaw-plugin-schemas.ts"
+          ? "src/openclaw-callback-transport.ts"
+          : repositoryPath
+      )
+      .sort();
+  assert.throws(
+    () => validate(existingWrongRole),
+    /OpenClaw authority role paths must equal/u
+  );
 });

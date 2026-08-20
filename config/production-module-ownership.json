@@ -3,7 +3,7 @@
   "version": 1,
   "architecture": {
     "cli_core_max_physical_loc": 2122,
-    "production_physical_loc": 92904,
+    "production_physical_loc": 92980,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -657,8 +657,24 @@
       "owner": "openclaw-doctor"
     },
     {
+      "path": "src/openclaw-plugin-callback-adapter.ts",
+      "owner": "callback-transport"
+    },
+    {
+      "path": "src/openclaw-plugin-command-adapter.ts",
+      "owner": "openclaw-plugin"
+    },
+    {
       "path": "src/openclaw-plugin-helpers.ts",
       "owner": "openclaw-plugin"
+    },
+    {
+      "path": "src/openclaw-plugin-schemas.ts",
+      "owner": "openclaw-plugin"
+    },
+    {
+      "path": "src/openclaw-plugin-supervisor.ts",
+      "owner": "terminal-monitor-supervision"
     },
     {
       "path": "src/openclaw-plugin.ts",

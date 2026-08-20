@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import plugin, {
   createOpenClawPluginForTest
 } from "../src/openclaw-plugin.js";
+import * as openclawPluginRuntime from "../src/openclaw-plugin.js";
 
 type Manifest = {
   description?: string;
@@ -92,6 +93,13 @@ const packageRoot = path.resolve(
   "../.."
 );
 const manifestPath = path.join(packageRoot, "openclaw.plugin.json");
+const skillSource = path.join(
+  packageRoot,
+  "templates",
+  "openclaw-skills",
+  "agent-knock-knock",
+  "SKILL.md"
+);
 
 test("OpenClaw runtime registrations match the published manifest", () => {
   const manifest = readManifest();
@@ -140,6 +148,29 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   const metadataTools = Object.keys(manifest.toolMetadata ?? {});
 
   assert.deepEqual(sorted(registeredTools), sorted(contractedTools));
+  assert.deepEqual(registeredTools, [
+    "agent_knock_knock_list",
+    "agent_knock_knock_list_resumable_threads",
+    "agent_knock_knock_native_inspect",
+    "agent_knock_knock_new_thread",
+    "agent_knock_knock_reconcile_binding",
+    "agent_knock_knock_resume_thread",
+    "agent_knock_knock_status",
+    "agent_knock_knock_send",
+    "agent_knock_knock_respond",
+    "agent_knock_knock_approve",
+    "agent_knock_knock_renew",
+    "agent_knock_knock_retry_callback",
+    "agent_knock_knock_cancel",
+    "agent_knock_knock_close"
+  ]);
+  const schemaBytes = JSON.stringify(
+    registeredTools.map((name) => [name, toolDefinitions.get(name)?.parameters])
+  );
+  assert.equal(
+    createHash("sha256").update(schemaBytes).digest("hex"),
+    "aadc101f10f9779456e2d309a4fca553d96b1978387abf7f0c79a0c960514cfc"
+  );
   assert.deepEqual(sorted(metadataTools), sorted(contractedTools));
   assert.equal(contractedTools.length, 14);
   assert.match(
@@ -206,6 +237,191 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   ).configSchema?.properties ?? {};
   assert.equal("defaultAgent" in configProperties, false);
   assert.equal("workspace" in configProperties, false);
+});
+
+test("OpenClaw split authorities retain approval, lifecycle, and supervisor contracts", () => {
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  const configProperties = manifest.configSchema.properties;
+  assert.equal("workspace" in configProperties, false);
+  const autoApproveRule = configProperties.autoApprove.properties.rules.items;
+  assert.equal(autoApproveRule.required.includes("workspaces"), true);
+  assert.equal(autoApproveRule.properties.workspaces.type, "array");
+  assert.equal(autoApproveRule.properties.workspaces.minItems, 1);
+  assert.equal("maxItems" in autoApproveRule.properties.workspaces, false);
+  assert.equal(autoApproveRule.properties.workspaces.items.type, "string");
+  assert.equal(autoApproveRule.properties.workspaces.items.minLength, 1);
+  assert.equal(configProperties.agentTimeoutMinutes.type, "number");
+  assert.equal(configProperties.agentHardTimeoutMinutes.type, "number");
+  assert.equal(configProperties.agentHardTimeoutMinutes.exclusiveMinimum, 0);
+  assert.equal(manifest.contracts.tools.includes("agent_knock_knock_renew"), true);
+  assert.equal(manifest.toolMetadata.agent_knock_knock_renew.optional, true);
+  assert.equal(manifest.contracts.tools.includes("agent_knock_knock_respond"), true);
+  assert.equal(manifest.toolMetadata.agent_knock_knock_respond.optional, true);
+  assert.equal(manifest.contracts.tools.length, 14);
+  for (const lifecycleTool of [
+    "agent_knock_knock_list_resumable_threads",
+    "agent_knock_knock_native_inspect",
+    "agent_knock_knock_new_thread",
+    "agent_knock_knock_reconcile_binding",
+    "agent_knock_knock_resume_thread"
+  ]) {
+    assert.equal(manifest.contracts.tools.includes(lifecycleTool), true);
+    assert.equal(manifest.toolMetadata[lifecycleTool].optional, true);
+  }
+
+  const schemasSource = fs.readFileSync(
+    path.join(packageRoot, "src", "openclaw-plugin-schemas.ts"),
+    "utf8"
+  );
+  const commandSource = fs.readFileSync(
+    path.join(packageRoot, "src", "openclaw-plugin-command-adapter.ts"),
+    "utf8"
+  );
+  const supervisorSource = fs.readFileSync(
+    path.join(packageRoot, "src", "openclaw-plugin-supervisor.ts"),
+    "utf8"
+  );
+  const entrySource = fs.readFileSync(
+    path.join(packageRoot, "src", "openclaw-plugin.ts"),
+    "utf8"
+  );
+  assert.match(
+    schemasSource,
+    /export const sendParameters =[\s\S]*?agentTimeoutMinutes:[\s\S]*?agentHardTimeoutMinutes:/u
+  );
+  assert.match(
+    schemasSource,
+    /export const approveParameters =[\s\S]*?required: \["expected_approval_fingerprint"\][\s\S]*?anyOf: \[[\s\S]*?required: \["turn_id"\][\s\S]*?required: \["conversation_id"\]/u
+  );
+  assert.match(commandSource, /--expected-approval-fingerprint/u);
+  assert.match(commandSource, /name: "agent_knock_knock_renew"/u);
+  assert.match(commandSource, /name: "agent_knock_knock_new_thread"/u);
+  assert.match(commandSource, /name: "agent_knock_knock_reconcile_binding"/u);
+  assert.match(commandSource, /name: "agent_knock_knock_list_resumable_threads"/u);
+  assert.match(commandSource, /name: "agent_knock_knock_native_inspect"/u);
+  assert.match(commandSource, /name: "agent_knock_knock_resume_thread"/u);
+  assert.match(
+    commandSource,
+    /Managed approval uses exact turn_id[\s\S]*?Claude Code uses no Hooks:[\s\S]*?exact one-time Bash permission screen[\s\S]*?trusted default-disabled plugin configuration[\s\S]*?auto-approve[\s\S]*?durable completion[\s\S]*?local Claude transcript/u
+  );
+  assert.doesNotMatch(
+    commandSource,
+    /structured one-time Hook|pending structured permission/u
+  );
+  assert.doesNotMatch(commandSource, /install-claude-hooks/u);
+  assert.match(
+    supervisorSource,
+    /createMonitorReconciliationService[\s\S]*?agent-knock-knock-monitor-reconciliation/u
+  );
+  assert.match(
+    supervisorSource,
+    /const args = \["reconcile-monitors", "--reason", reason\][\s\S]*?--terminal-monitors-only[\s\S]*?catch \(error\)[\s\S]*?logger\.warn/u
+  );
+  assert.match(
+    entrySource,
+    /registerOpenClawCallbackGateway[\s\S]*?registerOpenClawCommands/u
+  );
+  const skill = fs.readFileSync(skillSource, "utf8");
+  assert.match(skill, /agent_knock_knock_renew/u);
+  assert.match(skill, /agent_knock_knock_list_resumable_threads/u);
+  assert.match(skill, /agent_knock_knock_native_inspect/u);
+});
+
+test("OpenClaw entry runtime and declaration expose only the stable plugin API", () => {
+  assert.deepEqual(Object.keys(openclawPluginRuntime).sort(), [
+    "createOpenClawPluginForTest",
+    "default"
+  ]);
+  const declaration = fs.readFileSync(
+    path.join(packageRoot, "dist", "src", "openclaw-plugin.d.ts"),
+    "utf8"
+  );
+  assert.equal((declaration.match(/\bexport\b/gu) ?? []).length, 2);
+  assert.match(
+    declaration,
+    /export declare function createOpenClawPluginForTest\(/u
+  );
+  assert.match(declaration, /export default plugin;/u);
+});
+
+test("OpenClaw plugin instances keep relay paths and config isolated by API", async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-plugin-instance-isolation-")
+  );
+  const registerInstance = (
+    relayPath: string,
+    storeDir: string,
+    tools: Map<string, ToolDefinition>
+  ): void => {
+    (
+      createOpenClawPluginForTest(relayPath) as unknown as {
+        register(api: Record<string, any>): void;
+      }
+    ).register({
+      pluginConfig: { storeDir },
+      logger: { info() {}, warn() {} },
+      registerGatewayMethod() {},
+      registerService() {},
+      registerCommand() {},
+      registerTool(
+        tool: ToolDefinition | ToolFactory,
+        options?: { name?: string }
+      ) {
+        const definition = typeof tool === "function" ? tool({}) : tool;
+        if (options?.name) {
+          tools.set(options.name, definition);
+        }
+      }
+    });
+  };
+
+  try {
+    const instances = ["left", "right"].map((label) => {
+      const relayPath = path.join(tempDir, `${label}.cjs`);
+      const callsPath = path.join(tempDir, `${label}.ndjson`);
+      fs.writeFileSync(
+        relayPath,
+        [
+          'const fs = require("node:fs");',
+          "const args = process.argv.slice(2);",
+          `fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(args) + "\\n");`,
+          `process.stdout.write(JSON.stringify({ marker: ${JSON.stringify(label)}, conversation_id: "turn-${label}", session_id: "session-${label}", turn_id: "turn-${label}" }));`
+        ].join("\n"),
+        "utf8"
+      );
+      const tools = new Map<string, ToolDefinition>();
+      registerInstance(relayPath, `/stores/${label}`, tools);
+      return { label, callsPath, tools };
+    });
+
+    const results = await Promise.all(instances.map(async (instance) => {
+      const status = instance.tools.get("agent_knock_knock_status");
+      assert.ok(status);
+      return status.execute?.(`status-${instance.label}`, {
+        turn_id: `turn-${instance.label}`
+      });
+    }));
+    assert.deepEqual(
+      results.map((result) => result?.details?.marker),
+      ["left", "right"]
+    );
+    for (const instance of instances) {
+      const calls = fs.readFileSync(instance.callsPath, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as string[]);
+      assert.deepEqual(calls, [[
+        "status",
+        "--reconcile",
+        "--turn",
+        `turn-${instance.label}`,
+        "--store-dir",
+        `/stores/${instance.label}`
+      ]]);
+    }
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("OpenClaw native inspection is a closed status-only terminal action", async () => {
