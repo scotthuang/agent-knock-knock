@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   decideTerminalBindingMatch,
   terminalObservationFromListEntry,
@@ -8,7 +11,13 @@ import {
   type TerminalObservation
 } from "../src/terminal-binding-authority.js";
 import type { ManagedSessionState } from "../src/managed-session.js";
+import { createConversation } from "../src/protocol.js";
+import { saveManagedSession } from "../src/session-store.js";
+import { ensureStoreWritable } from "../src/store.js";
 import type { TerminalControlRef } from "../src/terminal-agent-adapter.js";
+import {
+  createTerminalTurnBindingAuthorityCliAdapter
+} from "../src/terminal-turn-binding-authority-cli-adapter.js";
 
 const THREAD_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaa0101";
 const THREAD_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbb0102";
@@ -562,4 +571,148 @@ test("missing identity states remain distinct diagnostics but grant no authority
       nativeIdentity.status
     );
   }
+});
+
+test("CLI Turn binding authority accepts only the persisted current generation", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-turn-binding-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const storeDir = path.join(root, "store");
+  ensureStoreWritable(storeDir);
+  const control = terminalControl();
+  const sessionId = "session-authority-current";
+  const turnId = "turn-authority-current";
+  saveManagedSession(storeDir, managedSession({
+    session_id: sessionId,
+    workspace: root,
+    binding: {
+      ...managedSession().binding!,
+      terminal_control: control,
+      native_thread_id: THREAD_A
+    }
+  }), { expectedRevision: null });
+  const conversation = {
+    ...createConversation({
+      userRequest: "preserve the exact Turn binding",
+      sessionId,
+      turnId,
+      workspace: root,
+      executorKind: "codex"
+    }),
+    store_dir: storeDir,
+    terminal_binding_id: "binding-authority-a",
+    terminal_binding_generation: 1,
+    native_thread_id: THREAD_A,
+    native_session_takeover: {
+      terminal_control: control,
+      terminal_agent_session_id: THREAD_A
+    }
+  };
+  const calls: string[] = [];
+  const authority = createTerminalTurnBindingAuthorityCliAdapter({
+    storeDirForConversation(value) {
+      calls.push(value.turn_id);
+      return storeDir;
+    }
+  });
+
+  authority.assertCurrent(conversation, "approve");
+  assert.deepEqual(calls, [turnId]);
+
+  let superseded: unknown;
+  assert.throws(
+    () => authority.assertCurrent({
+      ...conversation,
+      terminal_binding_generation: 2
+    }, "approve"),
+    (error) => {
+      superseded = error;
+      return error instanceof Error &&
+        error.message === `cannot approve Turn ${turnId}: its Session binding ` +
+          "generation is no longer current";
+    }
+  );
+  assert.deepEqual(authority.superseded(superseded), {
+    code: "AKK_TURN_BINDING_SUPERSEDED",
+    message: `cannot approve Turn ${turnId}: its Session binding generation ` +
+      "is no longer current"
+  });
+  assert.equal(authority.superseded(new Error("different error")), undefined);
+});
+
+test("CLI Turn binding authority preserves delegated and malformed short-circuits", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-turn-shortcut-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const storeDir = path.join(root, "must-not-be-created");
+  const authority = createTerminalTurnBindingAuthorityCliAdapter({
+    storeDirForConversation: () => storeDir
+  });
+  const delegated = createConversation({
+    userRequest: "delegated Turn",
+    sessionId: "session-delegated",
+    turnId: "turn-delegated",
+    executorKind: "codex"
+  });
+
+  authority.assertCurrent(delegated, "cancel");
+  assert.equal(fs.existsSync(storeDir), false);
+  assert.throws(
+    () => authority.assertCurrent({
+      ...delegated,
+      native_session_takeover: { terminal_control: {} }
+    }, "cancel"),
+    /cannot cancel Turn turn-delegated: its terminal binding is malformed/u
+  );
+  assert.equal(fs.existsSync(storeDir), false);
+});
+
+test("CLI Turn binding authority retains the exact migrated compatibility fence", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-turn-migrated-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const storeDir = path.join(root, "store");
+  ensureStoreWritable(storeDir);
+  const control = terminalControl();
+  const sessionId = "session-authority-migrated";
+  const turnId = "turn-authority-migrated";
+  const migrated = managedSession({
+    session_id: sessionId,
+    workspace: root,
+    lineage: { created_by: "migration" },
+    binding: {
+      ...managedSession().binding!,
+      terminal_control: control,
+      native_thread_id: THREAD_A
+    }
+  });
+  saveManagedSession(storeDir, migrated, { expectedRevision: null });
+  const conversation = {
+    ...createConversation({
+      userRequest: "retain migrated compatibility",
+      sessionId,
+      turnId,
+      workspace: root,
+      executorKind: "codex"
+    }),
+    native_thread_id: THREAD_A,
+    native_session_takeover: {
+      native_session_id: migrated.binding!.terminal_id,
+      terminal_control: control,
+      terminal_agent_pid: migrated.binding!.native_process.pid,
+      terminal_agent_session_id: THREAD_A,
+      terminal_agent_process_uuid: PROCESS_UUID,
+      terminal_agent_process_birth: PROCESS_BIRTH,
+      terminal_agent_rollout: ROLLOUT
+    }
+  };
+  const authority = createTerminalTurnBindingAuthorityCliAdapter({
+    storeDirForConversation: () => storeDir
+  });
+
+  authority.assertCurrent(conversation, "respond");
+  assert.throws(() => authority.assertCurrent({
+    ...conversation,
+    native_session_takeover: {
+      ...conversation.native_session_takeover,
+      terminal_agent_process_birth: "different-birth"
+    }
+  }, "respond"), /Session binding generation is no longer current/u);
 });

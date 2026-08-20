@@ -207,6 +207,7 @@ test("transaction adapter releases state and writer before terminal after reload
     repository,
     authority: {
       terminalControl: () => CONTROL,
+      assertNoDeferredTransfer: () => undefined,
       assertTurnBindingCurrent: () => undefined,
       storeDirForConversation: () => storeDir
     },
@@ -275,6 +276,7 @@ test("prepared owner mismatch observes neither clock nor Store binding facts", a
     repository,
     authority: {
       terminalControl: () => CONTROL,
+      assertNoDeferredTransfer: () => undefined,
       assertTurnBindingCurrent: () => undefined,
       storeDirForConversation: () => {
         storeReads += 1;
@@ -389,6 +391,7 @@ test("prepared recovery replaces the prior durable generation with parent-exact 
       repository,
       authority: {
         terminalControl: () => CONTROL,
+        assertNoDeferredTransfer: () => undefined,
         assertTurnBindingCurrent: () => undefined,
         storeDirForConversation: () => storeDir
       },
@@ -503,6 +506,7 @@ test("verified-dead recovery short-circuits state, ledger, receipts, and accepta
         repository,
         authority: {
           terminalControl: () => CONTROL,
+          assertNoDeferredTransfer: () => undefined,
           assertTurnBindingCurrent: () => {
             calls.binding += 1;
           },
@@ -619,6 +623,7 @@ test("failed state-claim release is retried by the enclosing finally", async (t)
     repository,
     authority: {
       terminalControl: () => CONTROL,
+      assertNoDeferredTransfer: () => undefined,
       assertTurnBindingCurrent: () => {
         throw new Error("binding changed before recovery");
       },
@@ -690,4 +695,81 @@ test("failed state-claim release is retried by the enclosing finally", async (t)
   ]);
   assert.equal(fs.existsSync(stateLockPath), false);
   assert.equal(fs.existsSync(path.join(storeDir, ".akk-writer.lock")), false);
+});
+
+test("managed dispatch owner fence preserves deferred, binding, ledger order", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-managed-owner-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const { storeDir, statePath, logPath } = conversationPaths(root);
+  const conversation = acceptedConversation({ statePath, logPath });
+  const ledger = basicAcceptedLedger({ storeDir, statePath, logPath });
+  writeConversation(statePath, conversation);
+  const calls: string[] = [];
+  let failAt: "deferred" | "binding" | undefined;
+  const repository = {
+    load() {
+      calls.push("ledger");
+      return ledger;
+    }
+  } as unknown as TerminalDispatchRepositoryCliAdapter;
+  const facade = createTerminalDispatchRecoveryCliAdapter({
+    repository,
+    authority: {
+      terminalControl: () => CONTROL,
+      assertNoDeferredTransfer() {
+        calls.push("deferred");
+        if (failAt === "deferred") throw new Error("deferred transfer active");
+      },
+      assertTurnBindingCurrent() {
+        calls.push("binding");
+        if (failAt === "binding") throw new Error("binding superseded");
+      },
+      storeDirForConversation: () => storeDir
+    },
+    observation: {
+      process: async () => ({ status: "unverifiable", reason: "unused" }),
+      completion: async () => ({ status: "unverifiable", reason: "unused" })
+    },
+    completion: {
+      prepare: () => {
+        throw new Error("unused completion preparation");
+      }
+    },
+    runtime: { isProcessAlive: () => false }
+  });
+
+  facade.assertManagedOwner({
+    storeDir,
+    conversation,
+    terminalControl: CONTROL,
+    action: "approve"
+  });
+  assert.deepEqual(calls, ["deferred", "binding", "ledger"]);
+
+  calls.length = 0;
+  failAt = "deferred";
+  assert.throws(() => facade.assertManagedOwner({
+    storeDir,
+    conversation,
+    terminalControl: CONTROL,
+    action: "cancel"
+  }), /deferred transfer active/u);
+  assert.deepEqual(calls, ["deferred"]);
+
+  calls.length = 0;
+  failAt = "binding";
+  assert.throws(() => facade.assertManagedOwner({
+    storeDir,
+    conversation,
+    terminalControl: CONTROL,
+    action: "cancel"
+  }), /binding superseded/u);
+  assert.deepEqual(calls, ["deferred", "binding"]);
+
+  assert.deepEqual(facade.loadOwner(ledger), conversation);
+  assert.equal(facade.loadOwner({ ...ledger, conversation_id: "other" }), undefined);
+  assert.equal(facade.loadOwner({
+    ...ledger,
+    state_path: path.join(root, "missing-state.json")
+  }), undefined);
 });

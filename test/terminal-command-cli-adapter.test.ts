@@ -98,8 +98,7 @@ function facadeDependencies(
     }
   }) as unknown as TerminalCommandPorts;
   return {
-    ports,
-    policy: { terminalDispatchReleaseStatuses: new Set() }
+    ports
   };
 }
 

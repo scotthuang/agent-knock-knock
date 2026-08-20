@@ -4,6 +4,10 @@ import {
   type ManagedSessionState
 } from "./managed-session.js";
 import {
+  isActiveConversationStatus,
+  isWaitingForAgentStatus
+} from "./protocol.js";
+import {
   isRecord,
   nonBlankString as stringValue
 } from "./value-guards.js";
@@ -51,10 +55,10 @@ export function renderManagedTurnListEntry(
     ...(approvalState ? { approval_state: approvalState } : {}),
     commands: {
       respond: task.status === "waiting_for_openclaw",
-      cancel: isWaitingForAgent(task.status),
+      cancel: isWaitingForAgentStatus(task.status),
       close: task.status !== "closed",
       status: true,
-      approve: terminalBridge && isActiveStatus(task.status)
+      approve: terminalBridge && isActiveConversationStatus(task.status)
     }
   };
   const availableActions = renderAvailableListActions(entry, actionFacts);
@@ -700,16 +704,4 @@ function renderCancelListAction(
     arguments: targetArguments,
     requires_user_intent: true
   };
-}
-
-function isActiveStatus(status: unknown): boolean {
-  return !["done", "failed", "closed", "cancelled"].some(
-    (terminalStatus) => terminalStatus === status
-  );
-}
-
-function isWaitingForAgent(status: unknown): boolean {
-  return ["created", "running", "waiting_for_agent", "cancelling"].some(
-    (terminalStatus) => terminalStatus === status
-  );
 }

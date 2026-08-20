@@ -42,6 +42,7 @@ test("production ownership covers every source module and preserves architecture
     assert.equal(ownership.modules[mandatoryPath]?.selection, "full", mandatoryPath);
   }
   assert.equal(ownershipModule.MAX_TARGETED_INTEGRATION_TESTS, 5);
+  assert.equal(ownershipModule.CLI_CORE_HARD_MAX_PHYSICAL_LOC, 8_000);
   for (const [domainName, domain] of Object.entries(ownership.domains) as Array<[
     string,
     { selection: string; integrationTests: readonly string[] }
@@ -67,6 +68,8 @@ test("production ownership covers every source module and preserves architecture
     approximateComplexityExclusive: 50
   });
   assert.equal(architecture.productionFunctionHardViolations, 0);
+  assert.equal(architecture.canonicalStatusPolicies, 6);
+  assert.equal(architecture.cliCoreHardMaxPhysicalLoc, 8_000);
   assert.deepEqual(architecture.productionFunctionDefaultLimits, {
     physicalLocExclusive: 100,
     approximateComplexityExclusive: 20
@@ -134,6 +137,104 @@ test("compiler AST enforces production function hard limits without exceptions",
   );
 });
 
+test("cli-core hard maximum rejects coordinated source and ratchet tampering", async () => {
+  const ownershipModule = await loadOwnershipModule();
+  const ownership = ownershipModule.loadAndValidateProductionModuleOwnership({
+    repoRoot,
+    tiers: loadTiers()
+  });
+  const source = (modulePath: string) =>
+    fs.readFileSync(path.join(repoRoot, modulePath), "utf8");
+  const originalCore = source("src/cli-core.ts");
+  const currentLoc = ownershipModule.physicalLineCount(originalCore);
+  const tamperedLoc = ownershipModule.CLI_CORE_HARD_MAX_PHYSICAL_LOC + 1;
+  const addedLoc = tamperedLoc - currentLoc;
+  assert.ok(addedLoc > 0);
+  const tamperedCore = originalCore +
+    "// coordinated cli-core growth\n".repeat(addedLoc);
+  assert.equal(ownershipModule.physicalLineCount(tamperedCore), tamperedLoc);
+  const tamperedOwnership = {
+    ...ownership,
+    architecture: Object.freeze({
+      ...ownership.architecture,
+      cliCoreMaxPhysicalLoc: tamperedLoc,
+      productionPhysicalLoc:
+        ownership.architecture.productionPhysicalLoc + addedLoc
+    })
+  };
+
+  assert.throws(
+    () => ownershipModule.validateProductionArchitecture({
+      ownership: tamperedOwnership,
+      repoRoot,
+      readSource(modulePath: string) {
+        return modulePath === "src/cli-core.ts"
+          ? tamperedCore
+          : source(modulePath);
+      }
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(
+        error.message,
+        /src\/cli-core\.ts physical LOC exceeds hard maximum 8000 \(actual 8001\)/u
+      );
+      assert.doesNotMatch(error.message, /does not match manifest ratchet/u);
+      return true;
+    }
+  );
+});
+
+test("canonical status policies reject duplicate definitions and inline tables", async () => {
+  const ownershipModule = await loadOwnershipModule();
+  const ownership = ownershipModule.loadAndValidateProductionModuleOwnership({
+    repoRoot,
+    tiers: loadTiers()
+  });
+  const source = (modulePath: string) =>
+    fs.readFileSync(path.join(repoRoot, modulePath), "utf8");
+  const target = "src/runtime-log.ts";
+  const original = source(target);
+  const duplicate = [
+    "function isSessionSendBlockingStatus(_status) { return false; }",
+    "const DUPLICATE_FINAL_DEFERRED = [\"resolved\", \"abort_resolved\"];"
+  ].join("\n") + "\n";
+  const tampered = original + duplicate;
+  const addedLoc = ownershipModule.physicalLineCount(tampered) -
+    ownershipModule.physicalLineCount(original);
+  const tamperedOwnership = {
+    ...ownership,
+    architecture: Object.freeze({
+      ...ownership.architecture,
+      productionPhysicalLoc:
+        ownership.architecture.productionPhysicalLoc + addedLoc
+    })
+  };
+
+  assert.throws(
+    () => ownershipModule.validateProductionArchitecture({
+      ownership: tamperedOwnership,
+      repoRoot,
+      readSource(modulePath: string) {
+        return modulePath === target ? tampered : source(modulePath);
+      }
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(
+        error.message,
+        /canonical status policy isSessionSendBlockingStatus must be defined exactly once/u
+      );
+      assert.match(
+        error.message,
+        /canonical status table deferred_foreground_final must occur exactly once/u
+      );
+      assert.doesNotMatch(error.message, /production physical LOC does not match/u);
+      return true;
+    }
+  );
+});
+
 test("production ownership rejects missing, duplicate, unknown, and stale entries", async () => {
   const ownershipModule = await loadOwnershipModule();
   const productionPaths = ownershipModule.discoverProductionModulePaths(repoRoot);
@@ -174,6 +275,13 @@ test("production ownership rejects missing, duplicate, unknown, and stale entrie
   assert.throws(
     () => validate(overbroadTarget),
     /declares 6 integration tests; maximum is 5/u
+  );
+
+  const raisedCliCoreCeiling = loadManifest();
+  raisedCliCoreCeiling.architecture.cli_core_max_physical_loc = 8_001;
+  assert.throws(
+    () => validate(raisedCliCoreCeiling),
+    /cli_core_max_physical_loc must not exceed hard maximum 8000/u
   );
 
   const missingCore = loadManifest();

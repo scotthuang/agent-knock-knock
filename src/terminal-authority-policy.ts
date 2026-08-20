@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 import type { CodexOpenRootRolloutInventory } from "./agent-session-provider.js";
-import type { ExecutorKind } from "./executors.js";
+import {
+  executorDefinitionForKind,
+  type ExecutorKind
+} from "./executors.js";
 import {
   executorForConversation,
   type Conversation
@@ -23,6 +26,7 @@ import {
   terminalEndpointIdentityKey,
   type TerminalControlRef
 } from "./terminal-control-ref.js";
+import type { TerminalBridgeStatus } from "./terminal-agent-bridge.js";
 import type {
   DeferredForegroundTransferSourceRolloutAuthority,
   DeferredForegroundTransferSourceTurnAuthority
@@ -69,6 +73,32 @@ export interface DeferredCodexForegroundDispatchSnapshot {
 }
 
 export type CodexPreMaterializationIdentity = TerminalNativeIdentityFence;
+
+export function assertSafeTerminalSend(
+  agent: ExecutorKind,
+  terminalStatus: TerminalBridgeStatus | undefined
+): void {
+  const displayName = executorDefinitionForKind(agent).displayName;
+  const approval = isRecord(terminalStatus?.approval_state)
+    ? terminalStatus.approval_state
+    : undefined;
+  if (terminalStatus?.reachable !== true) {
+    throw new Error(`${displayName} terminal status is unavailable`);
+  }
+  if (approval?.blocked === true) {
+    throw new Error(
+      nonBlankString(approval.reason) ??
+        `${displayName} is waiting at a permission dialog`
+    );
+  }
+  if (terminalStatus.activity_state !== "idle") {
+    throw new Error(
+      `${displayName} terminal is ${
+        nonBlankString(terminalStatus.activity_state) ?? "unknown"
+      }, not idle`
+    );
+  }
+}
 
 export interface CodexAllowedCompanionSet {
   primary?: CodexPreMaterializationIdentity;

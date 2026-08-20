@@ -3,6 +3,7 @@ import {
   type ManagedSessionState
 } from "./managed-session.js";
 import {
+  isSessionSendBlockingStatus,
   sessionIdForConversation,
   type Conversation
 } from "./protocol.js";
@@ -332,10 +333,7 @@ export function managedTurnNeedsAttention(facts: {
   status: string;
   callbackDeliveryStatus?: string;
 }): boolean {
-  return [
-    "created", "running", "waiting_for_agent", "waiting_for_openclaw",
-    "stalled", "callback_pending", "callback_failed", "cancelling"
-  ].includes(facts.status) ||
+  return isSessionSendBlockingStatus(facts.status) ||
     ["pending", "failed"].includes(facts.callbackDeliveryStatus ?? "");
 }
 

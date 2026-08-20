@@ -1,19 +1,25 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 
+import { classifyCallbackProcessFailure } from
+  "./callback-outbox-policy.js";
+
 import { validateCodexRolloutAcceptanceAnchor } from
   "./terminal-submission-acceptance.js";
 import {
   listDeferredForegroundTransfers,
   loadDeferredForegroundTransfer
 } from "./deferred-foreground-transfer.js";
+import { isFinalDeferredForegroundTransferStatus } from
+  "./deferred-foreground-transfer-policy.js";
 import {
   executorForConversation,
   createMessage,
+  isSessionSendBlockingStatus,
+  isWaitingForAgentStatus,
   sessionIdForConversation,
   turnIdForConversation,
-  type Conversation,
-  type ConversationStatus
+  type Conversation
 } from "./protocol.js";
 import { executorDefinitionForKind } from "./executors.js";
 import { redactString } from "./runtime-log.js";
@@ -115,18 +121,6 @@ type Release = () => void;
 
 const COLLATERAL_STALL_REASON =
   "a newer terminal submission has an uncertain outcome; inspect the shared terminal pane before continuing";
-const FINAL_DEFERRED_STATUSES = new Set(["resolved", "abort_resolved"]);
-const SEND_BLOCKING_STATUSES = new Set<ConversationStatus>([
-  "created",
-  "running",
-  "waiting_for_agent",
-  "waiting_for_openclaw",
-  "stalled",
-  "callback_pending",
-  "callback_failed",
-  "cancelling"
-]);
-
 export interface TerminalMonitorStateCliDependencies {
   dispatch: {
     repository: TerminalDispatchRepositoryCliAdapter;
@@ -501,7 +495,7 @@ class TerminalMonitorStateCliApplication {
           const transfer = transferId
             ? loadDeferredForegroundTransfer(storeDir, transferId)
             : undefined;
-          if (!transfer || FINAL_DEFERRED_STATUSES.has(transfer.status)) {
+          if (!transfer || isFinalDeferredForegroundTransferStatus(transfer.status)) {
             this.#dependencies.authority.assertBindingCurrent(
               conversation,
               "reconcile monitor for"
@@ -527,7 +521,7 @@ class TerminalMonitorStateCliApplication {
       return initialConversation;
     }
     const transfer = loadDeferredForegroundTransfer(storeDir, transferId);
-    if (FINAL_DEFERRED_STATUSES.has(transfer.status)) {
+    if (isFinalDeferredForegroundTransferStatus(transfer.status)) {
       return initialConversation;
     }
     const control = terminalControlFromTakeover(takeover);
@@ -565,7 +559,7 @@ class TerminalMonitorStateCliApplication {
     transferId: string
   ): void {
     const transfer = loadDeferredForegroundTransfer(storeDir, transferId);
-    if (FINAL_DEFERRED_STATUSES.has(transfer.status)) {
+    if (isFinalDeferredForegroundTransferStatus(transfer.status)) {
       return;
     }
     const takeover = takeoverFor(conversation);
@@ -731,7 +725,7 @@ class TerminalMonitorStateCliApplication {
         terminalControl: (conversation) =>
           terminalControlFromTakeover(takeoverFor(conversation)),
         submission: terminalBridgeSubmission,
-        isWaitingForAgent,
+        isWaitingForAgent: isWaitingForAgentStatus,
         isProcessAlive: this.#dependencies.runtime.isProcessAlive,
         markAcceptanceUncertain: (request) =>
           this.#dependencies.acceptance.markUncertain({
@@ -881,7 +875,7 @@ class TerminalMonitorStateCliApplication {
     for (const listed of listConversations(input.storeDir)) {
       if (
         listed.conversation_id === input.currentConversationId ||
-        !SEND_BLOCKING_STATUSES.has(listed.status)
+        !isSessionSendBlockingStatus(listed.status)
       ) {
         continue;
       }
@@ -904,7 +898,7 @@ class TerminalMonitorStateCliApplication {
         const current = loadState(statePath);
         const currentTakeover = takeoverFor(current);
         if (
-          !SEND_BLOCKING_STATUSES.has(current.status) ||
+          !isSessionSendBlockingStatus(current.status) ||
           currentTakeover?.terminal_bridge !== true ||
           !terminalControlsShareIncarnation(
             terminalControlFromTakeover(currentTakeover),
@@ -1211,7 +1205,7 @@ class TerminalMonitorStateCliApplication {
         .filter((transfer) =>
           transfer.version === 2 &&
           transfer.source_kind === "candidate_rollout_quiescent" &&
-          !FINAL_DEFERRED_STATUSES.has(transfer.status)
+          !isFinalDeferredForegroundTransferStatus(transfer.status)
         )
         .flatMap((transfer) =>
           (transfer.source_turn_history ?? []).map((turn) => turn.turn_id)
@@ -1392,7 +1386,7 @@ class TerminalMonitorStateCliApplication {
   ): boolean {
     const takeover = takeoverFor(conversation);
     const currentControl = terminalControlFromTakeover(takeover);
-    return isWaitingForAgent(conversation.status) &&
+    return isWaitingForAgentStatus(conversation.status) &&
       conversation.conversation_id === input.expectedConversation.conversationId &&
       conversation.status === input.expectedConversation.status &&
       conversation.updated_at === input.expectedConversation.updatedAt &&
@@ -1611,7 +1605,7 @@ class TerminalMonitorStateCliApplication {
       const release = this.#stateFileLock.acquire(`${input.statePath}.lock`);
       try {
         const current = loadState(input.statePath);
-        if (!isWaitingForAgent(current.status)) {
+        if (!isWaitingForAgentStatus(current.status)) {
           return current;
         }
         const expectedTakeover = takeoverFor(input.conversation);
@@ -1804,7 +1798,7 @@ class TerminalMonitorStateCliApplication {
       const release = this.#stateFileLock.acquire(`${input.statePath}.lock`);
       try {
         const conversation = loadState(input.statePath);
-        if (!isWaitingForAgent(conversation.status)) {
+        if (!isWaitingForAgentStatus(conversation.status)) {
           cliRuntimeLog("info", "executor_monitor_finished", {
             conversation_id: conversation.conversation_id,
             status: conversation.status,
@@ -1956,11 +1950,6 @@ function takeoverFor(conversation: Conversation): Record<string, unknown> {
   return isRecord(conversation.native_session_takeover)
     ? conversation.native_session_takeover
     : {};
-}
-
-function isWaitingForAgent(status: ConversationStatus): boolean {
-  return ["created", "running", "waiting_for_agent", "cancelling"]
-    .includes(status);
 }
 
 function unprepared(reason: string): TerminalMonitorLaunchPreparation {
@@ -2182,7 +2171,7 @@ function recordStalledDelivery(
     ...(includeMethod ? { method: input.conversation.gateway_method } : {}),
     message_id: input.message.id,
     status: delivery.status,
-    failure_kind: classifyProcessFailure(delivery),
+    failure_kind: classifyCallbackProcessFailure(delivery),
     stdout: textSummary(delivery.stdout),
     stderr: textSummary(delivery.stderr)
   });
@@ -2210,34 +2199,4 @@ function truncateText(value: unknown, maxLength: number): string {
   return text.length <= maxLength
     ? text
     : `${text.slice(0, Math.max(0, maxLength - 3))}...`;
-}
-
-function classifyProcessFailure(result: CallbackProcessDelivery) {
-  const status = result.status ?? 0;
-  const combined = [result.error?.message, result.stderr, result.stdout]
-    .filter(Boolean).join("\n").toLowerCase();
-  if (!combined && status === 0) return undefined;
-  if (isRemoteCompactStreamDisconnect(combined)) {
-    return "transient_remote_compact_failure";
-  }
-  if (combined.includes("agent needs reconnect") ||
-      combined.includes("internal error")) {
-    return "agent_reconnect_required";
-  }
-  if (combined.includes("permission denied") ||
-      combined.includes("operation not permitted")) return "permission_denied";
-  if (combined.includes("sandbox") || combined.includes("outside workspace")) {
-    return "sandbox_denied";
-  }
-  if (combined.includes("timed out") || combined.includes("timeout")) {
-    return "timeout";
-  }
-  return status !== 0 ? "nonzero_exit" : undefined;
-}
-
-function isRemoteCompactStreamDisconnect(text: unknown): boolean {
-  const value = String(text ?? "").toLowerCase();
-  return value.includes("error running remote compact task") &&
-    value.includes("stream disconnected") &&
-    value.includes("/codex/responses/compact");
 }

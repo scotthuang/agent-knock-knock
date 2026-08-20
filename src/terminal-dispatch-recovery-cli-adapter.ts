@@ -52,6 +52,8 @@ import {
 import type {
   TerminalDispatchRepositoryCliAdapter
 } from "./terminal-dispatch-repository-cli-adapter.js";
+import { isRecoverableTerminalDispatchStatus } from
+  "./terminal-dispatch-policy.js";
 import {
   TerminalDispatchRecoveryService,
   assertVerifiedDeadDispatchAuthorityFacts,
@@ -94,15 +96,15 @@ import {
 } from "./verified-dead-agent-policy.js";
 import { isRecord, nonBlankString } from "./value-guards.js";
 
-const RECOVERABLE_TERMINAL_DISPATCH_STATUSES = new Set([
-  "prepared", "text_injected", "enter_dispatched", "agent_accepted",
-  "dispatching", "submitted", "not_accepted", "uncertain", "verified"
-]);
-
 export interface TerminalDispatchRecoveryCliDependencies {
   repository: TerminalDispatchRepositoryCliAdapter;
   authority: {
     terminalControl(value: unknown): TerminalControlRef | undefined;
+    assertNoDeferredTransfer(input: {
+      storeDir: string;
+      conversation: Conversation;
+      action: "approve" | "cancel";
+    }): void;
     assertTurnBindingCurrent(conversation: Conversation, operation: string): void;
     storeDirForConversation(conversation: Conversation): string | undefined;
   };
@@ -138,6 +140,15 @@ export interface TerminalDispatchRecoveryCliDependencies {
 }
 
 export interface TerminalDispatchRecoveryCliFacade {
+  loadOwner(
+    ledger: TerminalDispatchLedgerDocument
+  ): Conversation | undefined;
+  assertManagedOwner(input: {
+    storeDir: string;
+    conversation: Conversation;
+    terminalControl: TerminalControlRef;
+    action: "approve" | "cancel";
+  }): void;
   assertNativeThreadStoreAuthority(input: {
     terminalControl: TerminalControlRef;
     nativeThreadId: string;
@@ -245,6 +256,8 @@ export function createTerminalDispatchRecoveryCliAdapter(
 ): TerminalDispatchRecoveryCliFacade {
   const application = new TerminalDispatchRecoveryCliApplication(dependencies);
   return Object.freeze({
+    loadOwner: (ledger) => application.loadOwner(ledger),
+    assertManagedOwner: (input) => application.assertManagedOwner(input),
     assertNativeThreadStoreAuthority: (input) =>
       application.assertNativeThreadStoreAuthority(input),
     orphanedForRecovery: (control) => application.orphanedForRecovery(control),
@@ -498,12 +511,12 @@ class TerminalDispatchRecoveryCliApplication {
         : nonBlankString(ledger?.message_id);
       if (
         !ledger ||
-        !RECOVERABLE_TERMINAL_DISPATCH_STATUSES.has(String(ledger.status)) ||
+        !isRecoverableTerminalDispatchStatus(String(ledger.status)) ||
         !recoveryIdentity ||
         (!lifecycle && this.#dependencies.repository.matchesControl(
           ledger, terminalControl, { requireProcessAnchor: false }
         ) && !this.#dependencies.repository.matchesControl(ledger, terminalControl)) ||
-        (!lifecycle && this.#loadLedgerOwner(ledger))
+        (!lifecycle && this.loadOwner(ledger))
       ) return undefined;
       return lifecycle ? { ...ledger, kind: "lifecycle" } : ledger;
     } catch {
@@ -523,7 +536,9 @@ class TerminalDispatchRecoveryCliApplication {
     }
   }
 
-  #loadLedgerOwner(ledger: TerminalDispatchLedgerDocument): Conversation | undefined {
+  loadOwner(
+    ledger: TerminalDispatchLedgerDocument
+  ): Conversation | undefined {
     const statePath = nonBlankString(ledger.state_path);
     if (!statePath) return undefined;
     try {
@@ -533,6 +548,55 @@ class TerminalDispatchRecoveryCliApplication {
         : undefined;
     } catch {
       return undefined;
+    }
+  }
+
+  assertManagedOwner(input: {
+    storeDir: string;
+    conversation: Conversation;
+    terminalControl: TerminalControlRef;
+    action: "approve" | "cancel";
+  }): void {
+    this.#dependencies.authority.assertNoDeferredTransfer({
+      storeDir: input.storeDir,
+      conversation: input.conversation,
+      action: input.action
+    });
+    this.#dependencies.authority.assertTurnBindingCurrent(
+      input.conversation,
+      input.action
+    );
+    const nativeTakeover = takeoverFor(input.conversation);
+    const messageId = nonBlankString(
+      nativeTakeover?.terminal_bridge_message_id
+    );
+    const ledger = this.#dependencies.repository.load(input.terminalControl);
+    if (
+      !messageId || !ledger ||
+      !["submitted", "agent_accepted"].includes(String(ledger.status)) ||
+      nonBlankString(ledger.conversation_id) !==
+        input.conversation.conversation_id ||
+      nonBlankString(ledger.message_id) !== messageId ||
+      (
+        nonBlankString(input.conversation.terminal_binding_id) &&
+        (
+          nonBlankString(ledger.binding_id) !==
+            nonBlankString(input.conversation.terminal_binding_id) ||
+          Number(ledger.binding_generation) !==
+            Number(input.conversation.terminal_binding_generation) ||
+          nonBlankString(ledger.native_thread_id) !==
+            (
+              nonBlankString(input.conversation.native_thread_id) ??
+              nonBlankString(nativeTakeover?.terminal_agent_session_id)
+            )
+        )
+      )
+    ) {
+      throw new Error(
+        `refusing to ${input.action}: this AKK conversation does not own the ` +
+        "current terminal dispatch generation; refresh status and operate on " +
+        "the current task"
+      );
     }
   }
 

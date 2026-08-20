@@ -7,12 +7,87 @@ import {
   createMessage,
   effectiveTurnStatus,
   extractStructuredMessage,
+  isActiveConversationStatus,
+  isSessionSendBlockingStatus,
+  isTerminalBridgeCallbackSupersedeStatus,
+  isTerminalDispatchOwnerReleasedStatus,
+  isWaitingForAgentStatus,
   normalizeLegacyCallbackStatus,
   sessionIdForConversation,
   turnIdForConversation,
   validateMessage,
   validateMessageForConversation
 } from "../src/protocol.js";
+
+test("shared conversation status policies retain list and monitor semantics", () => {
+  const cases: Array<[unknown, boolean, boolean]> = [
+    ["created", true, true],
+    ["running", true, true],
+    ["waiting_for_agent", true, true],
+    ["cancelling", true, true],
+    ["waiting_for_openclaw", true, false],
+    ["idle", true, false],
+    ["stalled", true, false],
+    ["callback_pending", true, false],
+    ["callback_failed", true, false],
+    ["done", false, false],
+    ["failed", false, false],
+    ["closed", false, false],
+    ["cancelled", false, false],
+    [undefined, true, false]
+  ];
+
+  for (const [status, active, waiting] of cases) {
+    assert.equal(isActiveConversationStatus(status), active, String(status));
+    assert.equal(isWaitingForAgentStatus(status), waiting, String(status));
+  }
+});
+
+test("shared terminal conversation policies preserve every status boundary", () => {
+  const cases: Array<[unknown, boolean, boolean, boolean]> = [
+    ["created", true, true, false],
+    ["running", true, true, false],
+    ["waiting_for_agent", true, true, false],
+    ["waiting_for_openclaw", true, true, false],
+    ["stalled", true, true, false],
+    ["callback_pending", true, false, false],
+    ["callback_failed", true, false, false],
+    ["cancelling", true, true, false],
+    ["idle", false, false, true],
+    ["failed", false, false, true],
+    ["closed", false, false, true],
+    ["cancelled", false, false, true],
+    ["done", false, false, false],
+    [undefined, false, false, false],
+    [null, false, false, false],
+    [42, false, false, false],
+    [{}, false, false, false]
+  ];
+
+  for (const [status, blocking, supersede, released] of cases) {
+    assert.equal(isSessionSendBlockingStatus(status), blocking, String(status));
+    assert.equal(
+      isTerminalBridgeCallbackSupersedeStatus(status),
+      supersede,
+      String(status)
+    );
+    assert.equal(
+      isTerminalDispatchOwnerReleasedStatus(status),
+      released,
+      String(status)
+    );
+  }
+
+  const nonCoercible = { toString(): never { throw new Error("coerced"); } };
+  for (const policy of [
+    isSessionSendBlockingStatus,
+    isTerminalBridgeCallbackSupersedeStatus,
+    isTerminalDispatchOwnerReleasedStatus
+  ]) {
+    assert.doesNotThrow(() => policy(nonCoercible));
+    assert.equal(policy(nonCoercible), false);
+  }
+});
 
 test("session and turn ids use local wall-clock time and retain the Store alias", () => {
   withTimezone("Asia/Shanghai", () => {

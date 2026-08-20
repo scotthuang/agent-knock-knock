@@ -15,6 +15,7 @@ import {
   createConversation,
   createMessage,
   executorForConversation,
+  isSessionSendBlockingStatus,
   resolveExecutor,
   sessionIdForConversation,
   type AgentMessage,
@@ -103,6 +104,8 @@ import {
 import type {
   DeferredForegroundTransfer
 } from "./deferred-foreground-transfer.js";
+import { isFinalDeferredForegroundTransferStatus } from
+  "./deferred-foreground-transfer-policy.js";
 import {
   cliCwd,
   cliEnv,
@@ -238,11 +241,9 @@ export interface TerminalAcceptanceCliDependencies {
     terminalControl(value: unknown): TerminalControlRef | undefined;
     isDiscoverableTurn(conversation: Conversation): boolean;
     workspaceMatches(configured: unknown, observed: unknown): boolean;
-    isSessionBlockingStatus(status: Conversation["status"]): boolean;
   };
   repository: TerminalAcceptanceRepositoryPorts;
   deferred: {
-    isFinal(status: string): boolean;
     recover(input: {
       options: TerminalAcceptanceCliOptions;
       terminal: TerminalDispatchTerminal;
@@ -874,14 +875,14 @@ class TerminalAcceptanceCliApplication {
       { pid }
     );
     let conversation = input.conversation;
-    if (!this.#dependencies.deferred.isFinal(transfer.status)) {
+    if (!isFinalDeferredForegroundTransferStatus(transfer.status)) {
       await this.#dependencies.deferred.recover({
         options: { ...input.options, storeDir },
         terminal
       });
       transfer = this.#dependencies.deferred.loadTransfer(storeDir, transferId);
       conversation = loadState(input.statePath);
-      if (!this.#dependencies.deferred.isFinal(transfer.status)) {
+      if (!isFinalDeferredForegroundTransferStatus(transfer.status)) {
         return { outcome: "pending" };
       }
     }
@@ -1367,7 +1368,7 @@ class TerminalAcceptanceCliApplication {
     assertManagedSessionCanStartTurnPolicy(
       turns,
       (conversation) =>
-        this.#dependencies.authority.isSessionBlockingStatus(conversation.status)
+        isSessionSendBlockingStatus(conversation.status)
     );
   }
 

@@ -4,7 +4,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  assertConfiguredWorkspace,
+  canonicalWorkspace,
   expandHome,
+  matchesConfiguredWorkspace,
+  parseJsonOption,
+  positiveMinutes,
+  required,
   resolveExecutable,
   writeCliJson
 } from "../src/cli-command-runtime.js";
@@ -94,4 +100,52 @@ test("PATH and HOME helpers read the active async-local CLI environment", async 
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+test("shared CLI option parsers retain exact coercion and error semantics", () => {
+  assert.equal(positiveMinutes("1.25", "--timeout"), 1.25);
+  assert.throws(
+    () => positiveMinutes(0, "--timeout"),
+    /--timeout must be a positive number/u
+  );
+  assert.equal(required(null, "missing"), null);
+  assert.equal(required(false, "missing"), false);
+  assert.throws(() => required(undefined, "required option"), /required option/u);
+  assert.throws(() => required("", "required option"), /required option/u);
+  assert.deepEqual(parseJsonOption('{"enabled":true}', "--json"), {
+    enabled: true
+  });
+  assert.equal(parseJsonOption(0, "--json"), undefined);
+  assert.throws(
+    () => parseJsonOption("{", "--json"),
+    /--json must be valid JSON/u
+  );
+});
+
+test("workspace helpers compare canonical directories and fail closed", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-workspace-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const workspace = path.join(root, "workspace");
+  const alias = path.join(root, "workspace-alias");
+  const other = path.join(root, "other");
+  const file = path.join(root, "not-a-directory");
+  fs.mkdirSync(workspace);
+  fs.mkdirSync(other);
+  fs.symlinkSync(workspace, alias, "dir");
+  fs.writeFileSync(file, "file", "utf8");
+
+  assert.equal(canonicalWorkspace(alias), fs.realpathSync(workspace));
+  assert.equal(matchesConfiguredWorkspace(undefined, undefined), true);
+  assert.equal(matchesConfiguredWorkspace(alias, workspace), true);
+  assert.equal(matchesConfiguredWorkspace(workspace, other), false);
+  assert.equal(matchesConfiguredWorkspace(workspace, path.join(root, "missing")), false);
+  assert.doesNotThrow(() => assertConfiguredWorkspace(alias, workspace, "send"));
+  assert.throws(
+    () => assertConfiguredWorkspace(workspace, other, "send"),
+    /refusing send; workspace .* does not match expected workspace/u
+  );
+  assert.throws(
+    () => assertConfiguredWorkspace(workspace, file, "send"),
+    /working directory cannot be verified/u
+  );
 });

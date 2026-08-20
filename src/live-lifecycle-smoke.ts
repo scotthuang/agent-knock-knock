@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isSessionSendBlockingStatus } from "./protocol.js";
 import {
   isRecord,
   nonBlankString as stringValue
@@ -202,17 +203,6 @@ const DEFAULT_TIMEOUTS: LifecycleSmokeTimeouts = {
 
 const NATIVE_THREAD_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
-
-const UNRESOLVED_TURN_STATUSES = new Set([
-  "created",
-  "running",
-  "waiting_for_agent",
-  "waiting_for_openclaw",
-  "stalled",
-  "callback_pending",
-  "callback_failed",
-  "cancelling"
-]);
 
 interface TerminalAction {
   terminalId: string;
@@ -1228,7 +1218,7 @@ function assertNoUnresolvedManagedTurns(
       candidate.status,
       "preflight_unresolved_turn"
     );
-    if (UNRESOLVED_TURN_STATUSES.has(status)) {
+    if (isSessionSendBlockingStatus(status)) {
       abort("preflight_unresolved_turn");
     }
   }

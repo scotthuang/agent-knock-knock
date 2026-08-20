@@ -94,12 +94,8 @@ function facadeDependencies(
     } as unknown as TerminalListStoreObservationPorts,
     authority: {} as TerminalListAuthorityPorts,
     policy: {
-      activeTerminalDispatchStatuses: new Set(),
       approvalTtlMs: 60_000,
-      finalDeferredTransferStatuses: new Set(["completed", "failed"]),
       selectorCommands: new Set(["status"]),
-      sessionSendBlockingStatuses: new Set(),
-      terminalDispatchReleaseStatuses: new Set(),
       rememberOriginalExpectedTerminalSelector: () => {
         events.push(`${marker}:selector`);
       }

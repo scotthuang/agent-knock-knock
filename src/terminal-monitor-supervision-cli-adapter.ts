@@ -1,5 +1,5 @@
 import type { CallbackCliFacade } from "./callback-cli-adapter.js";
-import { expandHome } from "./cli-command-runtime.js";
+import { expandHome, positiveMinutes } from "./cli-command-runtime.js";
 import type { Conversation } from "./protocol.js";
 import type { TerminalControlRef } from "./terminal-agent-adapter.js";
 import type { TerminalAgentBridge } from "./terminal-agent-bridge.js";
@@ -1143,12 +1143,4 @@ function required(
 ): string {
   if (value === undefined || value === "") throw new Error(message);
   return value as string;
-}
-
-function positiveMinutes(value: unknown, optionName: string): number {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new Error(`${optionName} must be a positive number`);
-  }
-  return parsed;
 }

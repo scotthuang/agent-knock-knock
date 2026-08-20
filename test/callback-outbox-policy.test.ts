@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   beginCallbackRetryPolicy,
   callbackDeliveryHasAcceptedTransport,
+  classifyCallbackProcessFailure,
   reduceCallbackRetryPolicy,
   type CallbackRetryPolicyState
 } from "../src/callback-outbox-policy.js";
@@ -200,4 +201,28 @@ test("accepted transport detection keeps injection and wake parity", () => {
     injection: { status: "failed" },
     wake: { status: "pending" }
   }), false);
+});
+
+test("callback process failure classification preserves canonical priority", () => {
+  const cases = [
+    [{ status: 0 }, undefined],
+    [{
+      status: 1,
+      stderr: "Error running remote compact task: stream disconnected at " +
+        "/codex/responses/compact; internal error"
+    }, "transient_remote_compact_failure"],
+    [{ status: 1, stdout: "Agent needs reconnect" }, "agent_reconnect_required"],
+    [{
+      status: 1,
+      error: { message: "Permission denied outside workspace sandbox" }
+    }, "permission_denied"],
+    [{ status: 1, stderr: "sandbox rejected this operation" }, "sandbox_denied"],
+    [{ status: 1, stdout: "request timed out" }, "timeout"],
+    [{ status: 7, stderr: "unclassified failure" }, "nonzero_exit"],
+    [{ status: 0, stderr: "warning only" }, undefined]
+  ] as const;
+
+  for (const [observation, expected] of cases) {
+    assert.equal(classifyCallbackProcessFailure(observation), expected);
+  }
 });

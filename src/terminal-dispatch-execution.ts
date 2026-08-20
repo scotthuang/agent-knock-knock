@@ -4,6 +4,7 @@ import type { CodexOpenRootRolloutInventory } from
 import type { ExecutorKind } from "./executors.js";
 import {
   executorForConversation,
+  isTerminalDispatchOwnerReleasedStatus,
   sessionIdForConversation,
   turnIdForConversation,
   type Conversation
@@ -734,12 +735,9 @@ export class TerminalDispatchExecutionService {
   }): TerminalDispatchExecutionPreflight {
     const ledger = input.ledger;
     const owner = input.owner;
-    const ownerReleased = Boolean(owner && [
-      "idle",
-      "failed",
-      "closed",
-      "cancelled"
-    ].includes(owner.status));
+    const ownerReleased = Boolean(
+      owner && isTerminalDispatchOwnerReleasedStatus(owner.status)
+    );
     const continuingSameTurn = Boolean(
       owner && input.continuingTurnResponse &&
       sessionIdForConversation(owner) ===

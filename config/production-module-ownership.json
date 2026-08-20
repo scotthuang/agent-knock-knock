@@ -2,8 +2,8 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 2122,
-    "production_physical_loc": 93303,
+    "cli_core_max_physical_loc": 1556,
+    "production_physical_loc": 93313,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -610,6 +610,10 @@
       "owner": "deferred-foreground-application"
     },
     {
+      "path": "src/deferred-foreground-transfer-policy.ts",
+      "owner": "lifecycle-core"
+    },
+    {
       "path": "src/deferred-foreground-transfer.ts",
       "owner": "lifecycle-core"
     },
@@ -976,6 +980,10 @@
     {
       "path": "src/terminal-submission-facts.ts",
       "owner": "terminal-submission-facts"
+    },
+    {
+      "path": "src/terminal-turn-binding-authority-cli-adapter.ts",
+      "owner": "terminal-identity-authority"
     },
     {
       "path": "src/transcript.ts",

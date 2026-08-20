@@ -11,6 +11,59 @@ export interface CallbackDeliveryOutcome {
   run_observation?: Record<string, unknown>;
 }
 
+export interface CallbackProcessFailureObservation {
+  status?: number | null;
+  stdout?: string;
+  stderr?: string;
+  error?: { message?: string };
+}
+
+export function classifyCallbackProcessFailure(
+  result: CallbackProcessFailureObservation
+): string | undefined {
+  const status = result.status ?? 0;
+  const combined = [
+    result.error?.message,
+    result.stderr,
+    result.stdout
+  ].filter(Boolean).join("\n").toLowerCase();
+  if (!combined && status === 0) {
+    return undefined;
+  }
+  if (isRemoteCompactStreamDisconnect(combined)) {
+    return "transient_remote_compact_failure";
+  }
+  if (
+    combined.includes("agent needs reconnect") ||
+    combined.includes("internal error")
+  ) {
+    return "agent_reconnect_required";
+  }
+  if (
+    combined.includes("permission denied") ||
+    combined.includes("operation not permitted")
+  ) {
+    return "permission_denied";
+  }
+  if (
+    combined.includes("sandbox") ||
+    combined.includes("outside workspace")
+  ) {
+    return "sandbox_denied";
+  }
+  if (combined.includes("timed out") || combined.includes("timeout")) {
+    return "timeout";
+  }
+  return status !== 0 ? "nonzero_exit" : undefined;
+}
+
+function isRemoteCompactStreamDisconnect(text: unknown): boolean {
+  const value = String(text ?? "").toLowerCase();
+  return value.includes("error running remote compact task") &&
+    value.includes("stream disconnected") &&
+    value.includes("/codex/responses/compact");
+}
+
 export interface CallbackDeliveryOptions {
   gatewayMethod?: string;
   openclawBin?: string;

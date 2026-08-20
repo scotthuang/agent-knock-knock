@@ -18,10 +18,10 @@ import {
 } from "./managed-session.js";
 import {
   executorForConversation,
+  isTerminalDispatchOwnerReleasedStatus,
   sessionIdForConversation,
   turnIdForConversation,
-  type Conversation,
-  type ConversationStatus
+  type Conversation
 } from "./protocol.js";
 import {
   listManagedSessions,
@@ -58,12 +58,6 @@ import {
 } from "./terminal-monitor-decision-policy.js";
 import { isRecord, nonBlankString as stringValue } from "./value-guards.js";
 
-const TERMINAL_DISPATCH_RELEASE_STATUSES = new Set<ConversationStatus>([
-  "idle",
-  "failed",
-  "closed",
-  "cancelled"
-]);
 const TERMINAL_INPUT_EVIDENCE_FIELDS = [
   "text_injected_at",
   "enter_dispatched_at",
@@ -174,7 +168,7 @@ function hasExactReleasedAbortEnvelope(
     session.agent !== "codex" ||
     !binding ||
     !isExactNativeThreadId(binding.native_thread_id) ||
-    !TERMINAL_DISPATCH_RELEASE_STATUSES.has(turn.status) ||
+    !isTerminalDispatchOwnerReleasedStatus(turn.status) ||
     ports.turn.needsAttention(turn) ||
     isRecord(turn.callback_delivery) ||
     isRecord(turn.terminal_bridge_completion_claim) ||
@@ -360,7 +354,7 @@ export function deferredCandidateSourceTurnHistory(
       turn
     });
     return (
-      !TERMINAL_DISPATCH_RELEASE_STATUSES.has(turn.status) ||
+      !isTerminalDispatchOwnerReleasedStatus(turn.status) ||
       ports.turn.needsAttention(turn) ||
       (
         isRecord(turn.callback_delivery) &&
@@ -415,7 +409,7 @@ function frozenCandidateSourceTurnHistory(
   }
   const turns = ports.turn.turnsForSession(storeDir, session.session_id);
   if (turns.some((turn) =>
-    !TERMINAL_DISPATCH_RELEASE_STATUSES.has(turn.status) ||
+    !isTerminalDispatchOwnerReleasedStatus(turn.status) ||
     stringValue(turn.terminal_binding_id) !== binding.binding_id ||
     Number(turn.terminal_binding_generation) !== binding.generation ||
     (

@@ -11,6 +11,17 @@ const TERMINAL_LEVEL_BLOCKING_STATUSES = new Set([
   "not_accepted"
 ]);
 
+export function isActiveTerminalDispatchStatus(status: unknown): boolean {
+  return typeof status === "string" && (
+    TERMINAL_LEVEL_BLOCKING_STATUSES.has(status) ||
+    terminalDispatchReceiptStatus(status) !== undefined
+  );
+}
+
+export function isRecoverableTerminalDispatchStatus(status: unknown): boolean {
+  return status === "verified" || isActiveTerminalDispatchStatus(status);
+}
+
 export type TerminalDispatchReceiptStatus =
   | "submitted"
   | "enter_dispatched"

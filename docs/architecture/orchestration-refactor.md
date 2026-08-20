@@ -2468,6 +2468,68 @@ source authority paths, checks a role-specific responsibility signature and
 each required direct import, and rejects missing command/schema roles or an
 existing but incorrect substitute path.
 
+## Final CLI-core facade and ownership closeout
+
+The final closeout moves the remaining reusable authority and I/O helpers out
+of `cli-core.ts` without moving another command state machine. CLI option
+coercion and canonical workspace checks now live in `cli-command-runtime.ts`;
+conversation activity/waiting policy lives in `protocol.ts`; callback process
+failure classification lives in `callback-outbox-policy.ts`; and terminal
+process liveness lives at the existing `ps` boundary in
+`terminal-process-source.ts`. Terminal send safety is owned by
+`terminal-authority-policy.ts`, OpenClaw yield presentation by
+`terminal-dispatch-presenter.ts`, and Codex completion-context reads by the
+status facade. List and monitor consumers reuse those canonical policies rather
+than retaining private copies.
+
+The Store-backed current-Turn fence is exposed through
+`terminal-turn-binding-authority-cli-adapter.ts` under the existing terminal
+identity-authority domain. It preserves Store selection, terminal-control
+validation, writable-Store upgrade, protocol check, authoritative Session read,
+and exact-or-migrated binding comparison order. Dispatch recovery now exposes
+its existing ledger-owner read and managed-owner fence directly. Managed
+approval/cancellation still checks deferred transfer, current binding, and the
+ledger generation in that order; no lock, Store, error, or asynchronous
+boundary is reordered.
+
+Against exact parent `1274306e8e2f1e294910c8719b23de0d74878a31`,
+`src/cli-core.ts` falls from 2,122 to 1,556 physical lines (-566). Total
+production TypeScript changes from 93,303 to 93,313 lines (+10), the typed
+owner/facade overhead for the final extraction. Architecture validation reports
+57 domains, 125 production modules, 809 static import edges, zero cycles, and
+one retained `cli-core.ts` importer. Its public surface remains the stable
+`parseCliCommand` / `executeCliCommand` facade, and `CliCommandOptions` is now
+`Record<string, unknown>` in both source and emitted declarations.
+
+The ownership validator also fixes an independent Issue-level ceiling of 8,000
+physical `cli-core.ts` lines. Manifest validation rejects a configured value
+above 8,000, while architecture validation rejects an actual source above
+8,000 even when a coordinated manifest edit makes the two values equal. The
+exact ratchet remains 1,556; a direct tamper witness raises both source and
+ratchet to 8,001, synchronizes the production total, and still fails on the
+hard ceiling. The combined compiler-AST architecture gate reports zero
+production function hard-limit violations. It also fixes one owner for each of
+the six shared status predicates: conversation release, session-send blocking,
+and callback supersede belong to `protocol.ts`; deferred-transfer finality
+belongs to `deferred-foreground-transfer-policy.ts`; ordinary dispatch activity
+and recovery belong to `terminal-dispatch-policy.ts`. The same compiler-AST
+gate rejects duplicate predicate definitions, duplicate exact inline tables,
+and full active/recoverable tables that bypass their derived policy.
+
+An exact compiler-AST inventory ratchets the 27 remaining top-level functions
+and rejects top-level classes or function-valued variables. A forbidden-owner
+guard prevents terminal-send policy, Turn-binding authority, Codex context
+loading, callback failure classification, process liveness, and status policy
+definitions from returning to the composition root. Direct tests record the
+Turn-generation and migrated compatibility boundary, superseded-error
+projection, delegated/malformed short-circuits, deferred -> binding -> ledger
+ordering and early failure, Codex provider/process/history read order, callback
+classification priority, terminal-send getter/error priority, canonical
+workspace behavior, and process/status policy reuse. Therefore `cli-core.ts`
+contains no send, lifecycle, monitor, or callback state-machine definition; it
+retains only stable parsing/execution, command routing, composition wiring,
+shared lock scopes, and CLI parser/presentation compatibility.
+
 ## Soft freeze while #126 is active
 
 Until the orchestration milestones finish:
