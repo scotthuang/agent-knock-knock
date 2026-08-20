@@ -83,6 +83,7 @@
     "test/terminal-monitor-application-service.test.ts",
     "test/terminal-monitor-decision-policy.test.ts",
     "test/terminal-monitor-reconciliation-eligibility.test.ts",
+    "test/terminal-monitor-state-reconciliation-service.test.ts",
     "test/terminal-monitor-poll-policy.test.ts",
     "test/terminal-monitor-seams.test.ts",
     "test/terminal-process-source.test.ts",

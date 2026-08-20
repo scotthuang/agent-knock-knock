@@ -2081,6 +2081,63 @@ presentation before writer/terminal lock release. Fast and focused lifecycle,
 recovery, ownership, Codex sticky-rollout, and stale-resume witnesses retain
 the real CLI behavior.
 
+## Terminal monitor state and collateral CLI facade
+
+This slice moves the exact 14-function monitor state inventory plus its
+adjacent durable state/fact preparation out of `cli-core.ts`: uncertain-dispatch
+collateral fencing and repair evidence, approval notification persistence and
+clear, activity and detector diagnostics, stalled-state notification,
+callback/local-completion recovery, startup eligibility, and monitor service
+port composition. Process-owner inspection, legacy-owner decisions, watchdog
+supervision, monitor launch, and launch-event presentation remain in
+`cli-core.ts`; the extraction does not absorb the supervision loop.
+
+Against exact parent `240732e4d0a654abb4f88a01020bd93734f0d020`,
+`src/cli-core.ts` falls from 6,212 to 4,547 physical lines (-1,665). Total
+production TypeScript changes from 90,711 to 91,535 lines (+824, 49.49 percent
+of the core movement), so production overhead remains below the moved core.
+Architecture validation reports 54 domains, 115 production modules, 712 static
+import edges, zero cycles, and one retained `cli-core.ts` importer.
+
+`terminal-monitor-state-reconciliation-service.ts` is data-only and has four
+port groups (`state`, `completion`, `callbacks`, and `authority`). It imports no
+filesystem/path API, raw lock, Store, Session, resolved terminal, raw JSON, or
+`Record<..., any>`. Its reconciliation order remains local completion ->
+callback recovery -> terminal-bridge filter -> legacy identity migration ->
+verified-dead settlement -> deferred recovery -> virgin acceptance recovery ->
+binding assertion -> eligibility. Handled local, callback, dead-process, and
+ineligible results stop every later observation.
+
+The CLI adapter has exactly five dependency groups (`dispatch`, `acceptance`,
+`authority`, `callbacks`, and `runtime`). It calls the merged
+`callbackCliFacade`, terminal-dispatch repository/recovery,
+`terminalAcceptanceCliFacade`, `terminalHandoffCliFacade`, and identity
+authority directly; it contains no copied callback, deferred, acceptance, or
+dispatch reducer. Command-selected Store authority is retained for terminal
+send locks, while state-path-derived Store authority is retained for writer
+leases, collateral repair, and verified-dead settlement.
+
+The existing monitor application still samples one poll snapshot for status
+and screen facts. Prepared recovery preserves terminal -> writer -> state lock
+order; presentation stays inside the required lock scope. Approval state is
+saved before its event and outbox preparation, duplicate/recovery reads retain
+their original order, and approval/stalled callback delivery begins only after
+the state and writer locks release. Verified-dead completion calls the canonical
+prepared callback exactly once. Superseded binding remains a non-error skip,
+and the existing raw `LOCK_TIMEOUT` and `StoreLockTimeoutError` routing remains
+with its original owner.
+
+All new functions remain below the hard 500-line/c50 gates. The transparent
+preferred-limit exceptions are the 209-line/c1 service-port composition table,
+the 122-line/c47 fail-closed collateral evidence predicate, and its
+64-line/c22 exact owner predicate; splitting either evidence predicate would
+obscure its ordered short-circuit proof. The data-only service maximum is
+63 lines/c8. Direct fast tests record resource identity and post-scope data,
+exact port/getter/error order, optional zero/null fields, prepared completion
+byte facts, canonical facade wiring, four/five-group declarations, and
+forbidden imports. The five focused CLI witnesses are Claude callback, monitor
+approval context, monitor lifecycle, monitor recovery, and Session acceptance.
+
 ## Soft freeze while #126 is active
 
 Until the orchestration milestones finish:
