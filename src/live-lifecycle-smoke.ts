@@ -792,16 +792,81 @@ async function invoke(
   return await client.invoke(command, args, options);
 }
 
+interface TerminalSnapshotRequirements {
+  requireNewThread: boolean;
+  requireListResumable: boolean;
+  requireSend: boolean;
+  allowUnmanagedCodexNativeProbe: boolean;
+}
+
 function selectTerminalSnapshot(
   value: unknown,
   config: LifecycleScenarioConfig,
-  requirements: {
-    requireNewThread: boolean;
-    requireListResumable: boolean;
-    requireSend: boolean;
-    allowUnmanagedCodexNativeProbe: boolean;
-  }
+  requirements: TerminalSnapshotRequirements
 ): InternalTerminalSnapshot {
+  const selected = selectTerminalRow(value, config);
+  const process = selectTerminalProcess(selected.row, config);
+  const management = selectTerminalManagement(
+    selected.row,
+    config,
+    requirements,
+    process.nativeThreadId
+  );
+  const actions = selectTerminalActions(
+    selected.row,
+    selected.terminalId,
+    requirements,
+    management.sessionId,
+    management.bindingFence
+  );
+  return {
+    agent: config.agent,
+    evidence: {
+      terminal_id: selected.terminalId,
+      agent_pid: process.agentPid,
+      process_uuid: process.processUuid,
+      process_birth: process.processBirth,
+      workspace: process.workspace,
+      session_id: management.sessionId,
+      binding_id: management.bindingId,
+      // An unmanaged pane has a lifecycle fence but no persisted binding yet.
+      // Generation one only exists after a lifecycle operation materializes
+      // the first Session/binding pair.
+      binding_generation: management.bindingGeneration,
+      binding_fence: management.bindingFence,
+      turn_count: management.turnCount,
+      agent_version: process.agentVersion,
+      behavior_profile: process.behaviorProfile
+    },
+    nativeThreadId: process.nativeThreadId,
+    target: selected.target,
+    panePid: selected.panePid,
+    managementState: management.managementState,
+    currentTurn: null,
+    recentTurn: isRecord(management.managed.recent_turn)
+      ? management.managed.recent_turn
+      : management.managed.recent_turn === null
+        ? null
+        : undefined,
+    ...(actions.newThreadAction
+      ? { newThreadAction: actions.newThreadAction }
+      : {}),
+    ...(actions.listResumableAction
+      ? { listResumableAction: actions.listResumableAction }
+      : {}),
+    ...(actions.sendAction ? { sendAction: actions.sendAction } : {})
+  };
+}
+
+function selectTerminalRow(
+  value: unknown,
+  config: LifecycleScenarioConfig
+): {
+  row: Record<string, unknown>;
+  terminalId: string;
+  target: string;
+  panePid: number;
+} {
   const root = recordValue(value, "preflight_terminal_match");
   const terminals = Array.isArray(root.terminals) ? root.terminals : [];
   const matches = terminals.filter((candidate) => {
@@ -841,6 +906,21 @@ function selectTerminalSnapshot(
   ) {
     abort("preflight_terminal_identity");
   }
+  return { row, terminalId, target, panePid };
+}
+
+function selectTerminalProcess(
+  row: Record<string, unknown>,
+  config: LifecycleScenarioConfig
+): {
+  agentPid: number;
+  agentVersion: string;
+  behaviorProfile: string;
+  processUuid: string;
+  processBirth: string | null;
+  workspace: string;
+  nativeThreadId: string | null;
+} {
   const agentPid = positiveInteger(row.pid, "preflight_process_identity");
   const agentVersion = requiredString(
     row.agent_version,
@@ -891,6 +971,31 @@ function selectTerminalSnapshot(
   if (row.activity_state !== "idle") {
     abort("preflight_not_idle");
   }
+  return {
+    agentPid,
+    agentVersion,
+    behaviorProfile,
+    processUuid,
+    processBirth,
+    workspace,
+    nativeThreadId
+  };
+}
+
+function selectTerminalManagement(
+  row: Record<string, unknown>,
+  config: LifecycleScenarioConfig,
+  requirements: TerminalSnapshotRequirements,
+  nativeThreadId: string | null
+): {
+  managed: Record<string, unknown>;
+  managementState: string;
+  sessionId: string | null;
+  turnCount: number;
+  bindingId: string | null;
+  bindingGeneration: number | null;
+  bindingFence: string;
+} {
   const approval = recordValue(row.approval_state, "preflight_approval");
   if (
     approval.scanned !== true ||
@@ -995,7 +1100,28 @@ function selectTerminalSnapshot(
       }
     }
   }
+  return {
+    managed,
+    managementState,
+    sessionId,
+    turnCount,
+    bindingId,
+    bindingGeneration,
+    bindingFence
+  };
+}
 
+function selectTerminalActions(
+  row: Record<string, unknown>,
+  terminalId: string,
+  requirements: TerminalSnapshotRequirements,
+  sessionId: string | null,
+  bindingFence: string
+): {
+  newThreadAction: TerminalAction | undefined;
+  listResumableAction: TerminalAction | undefined;
+  sendAction: TerminalAction | undefined;
+} {
   const actions = recordValue(row.available_actions, "preflight_action");
   const newThreadAction = actionFor(actions, "new_thread", terminalId, {
     bindingToken: true,
@@ -1036,39 +1162,10 @@ function selectTerminalSnapshot(
   ) {
     abort("preflight_action");
   }
-
   return {
-    agent: config.agent,
-    evidence: {
-      terminal_id: terminalId,
-      agent_pid: agentPid,
-      process_uuid: processUuid,
-      process_birth: processBirth,
-      workspace,
-      session_id: sessionId,
-      binding_id: bindingId,
-      // An unmanaged pane has a lifecycle fence but no persisted binding yet.
-      // Generation one only exists after a lifecycle operation materializes
-      // the first Session/binding pair.
-      binding_generation: bindingGeneration,
-      binding_fence: bindingFence,
-      turn_count: turnCount,
-      agent_version: agentVersion,
-      behavior_profile: behaviorProfile
-    },
-    nativeThreadId,
-    target,
-    panePid,
-    managementState,
-    currentTurn: null,
-    recentTurn: isRecord(managed.recent_turn)
-      ? managed.recent_turn
-      : managed.recent_turn === null
-        ? null
-        : undefined,
-    ...(newThreadAction ? { newThreadAction } : {}),
-    ...(listResumableAction ? { listResumableAction } : {}),
-    ...(sendAction ? { sendAction } : {})
+    newThreadAction,
+    listResumableAction,
+    sendAction
   };
 }
 

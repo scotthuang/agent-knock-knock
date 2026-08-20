@@ -69,6 +69,18 @@ export function parseAkkCommand(args: unknown): AkkCommand {
 
   const { token, rest } = takeToken(input);
   const action = token.toLowerCase();
+  const lifecycleCommand = parseAkkLifecycleCommand(action, rest);
+  if (lifecycleCommand) {
+    return lifecycleCommand;
+  }
+  const turnCommand = parseAkkTurnCommand(action, rest);
+  return turnCommand ?? { action: "delegate", request: input };
+}
+
+function parseAkkLifecycleCommand(
+  action: string,
+  rest: string
+): AkkCommand | undefined {
   if (action === "list" || action === "ls" || action === "tasks") {
     return { action: "list" };
   }
@@ -117,9 +129,16 @@ export function parseAkkCommand(args: unknown): AkkCommand {
       terminalId,
       ...(selection
         ? { selection }
-        : {})
+      : {})
     };
   }
+  return undefined;
+}
+
+function parseAkkTurnCommand(
+  action: string,
+  rest: string
+): AkkCommand | undefined {
   if (action === "status" || action === "show") {
     const { token: turnId, rest: extra } = takeToken(rest);
     if (extra.trim()) {
@@ -192,53 +211,56 @@ export function parseAkkCommand(args: unknown): AkkCommand {
     return { action: "retry-callback", turnId };
   }
   if (action === "close" || action === "done") {
-    const usage =
-      "Usage: /akk close <turn-selector> " +
-      "[(--expected-message-id <id> | --expected-transition-id <id>)] [reason]";
-    const { token: turnId, rest: reasonInput } = takeRequiredToken(
-      rest,
-      usage
-    );
-    const recoveryInput = reasonInput.trim();
-    const recoveryFlags = recoveryInput.match(
-      /(?:^|\s)--expected-(?:message|transition)-id(?=\s|$)/gu
-    ) ?? [];
-    if (recoveryFlags.length > 1) {
-      throw new Error(
-        `${usage}; expected-message-id and expected-transition-id are mutually exclusive`
-      );
-    }
-    const recovery =
-      /^--expected-(message|transition)-id\s+(\S+)(?:\s+([\s\S]*))?$/u.exec(
-        recoveryInput
-      );
-    if (recoveryFlags.length === 1 && !recovery) {
-      throw new Error(usage);
-    }
-    const recoveryKind = recovery?.[1];
-    const recoveryId = recovery?.[2];
-    const recoveryReason = recovery?.[3]?.trim();
-    const defaultRecoveryReason = recoveryKind === "transition"
-      ? "Native-thread lifecycle transition recovered from /akk command"
-      : "Orphaned terminal dispatch resolved from /akk command";
-    return {
-      action: "close",
-      turnId,
-      reason:
-        recoveryReason ||
-        (recovery
-          ? defaultRecoveryReason
-          : recoveryInput || "Closed from /akk command"),
-      ...(recoveryKind === "message" && recoveryId
-        ? { expectedMessageId: recoveryId }
-        : {}),
-      ...(recoveryKind === "transition" && recoveryId
-        ? { expectedTransitionId: recoveryId }
-        : {})
-    } as AkkCloseCommand;
+    return parseAkkCloseCommand(rest);
   }
+  return undefined;
+}
 
-  return { action: "delegate", request: input };
+function parseAkkCloseCommand(rest: string): AkkCloseCommand {
+  const usage =
+    "Usage: /akk close <turn-selector> " +
+    "[(--expected-message-id <id> | --expected-transition-id <id>)] [reason]";
+  const { token: turnId, rest: reasonInput } = takeRequiredToken(
+    rest,
+    usage
+  );
+  const recoveryInput = reasonInput.trim();
+  const recoveryFlags = recoveryInput.match(
+    /(?:^|\s)--expected-(?:message|transition)-id(?=\s|$)/gu
+  ) ?? [];
+  if (recoveryFlags.length > 1) {
+    throw new Error(
+      `${usage}; expected-message-id and expected-transition-id are mutually exclusive`
+    );
+  }
+  const recovery =
+    /^--expected-(message|transition)-id\s+(\S+)(?:\s+([\s\S]*))?$/u.exec(
+      recoveryInput
+    );
+  if (recoveryFlags.length === 1 && !recovery) {
+    throw new Error(usage);
+  }
+  const recoveryKind = recovery?.[1];
+  const recoveryId = recovery?.[2];
+  const recoveryReason = recovery?.[3]?.trim();
+  const defaultRecoveryReason = recoveryKind === "transition"
+    ? "Native-thread lifecycle transition recovered from /akk command"
+    : "Orphaned terminal dispatch resolved from /akk command";
+  return {
+    action: "close",
+    turnId,
+    reason:
+      recoveryReason ||
+      (recovery
+        ? defaultRecoveryReason
+        : recoveryInput || "Closed from /akk command"),
+    ...(recoveryKind === "message" && recoveryId
+      ? { expectedMessageId: recoveryId }
+      : {}),
+    ...(recoveryKind === "transition" && recoveryId
+      ? { expectedTransitionId: recoveryId }
+      : {})
+  } as AkkCloseCommand;
 }
 
 export function akkUsageText(): string {

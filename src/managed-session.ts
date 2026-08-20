@@ -522,6 +522,20 @@ export function assertNativeThreadTransition(
   if (!isRecord(value)) {
     throw new Error("native thread transition state must be an object");
   }
+  const observedHandoff = assertNativeThreadTransitionHeader(
+    value,
+    expectedTransitionId,
+    options
+  );
+  assertNativeThreadTransitionIdentity(value);
+  assertNativeThreadTransitionReceipt(value, observedHandoff);
+}
+
+function assertNativeThreadTransitionHeader(
+  value: Record<string, unknown>,
+  expectedTransitionId: string | undefined,
+  options: { allowMissingRevision?: boolean }
+): boolean {
   assertOnlyKeys(value, [
     "schema",
     "version",
@@ -622,6 +636,12 @@ export function assertNativeThreadTransition(
   assertNonEmptyString(value.terminal_id, "native thread transition terminal_id");
   assertExecutorKind(value.agent, "native thread transition agent");
   assertNonEmptyString(value.workspace, "native thread transition workspace");
+  return observedHandoff;
+}
+
+function assertNativeThreadTransitionIdentity(
+  value: Record<string, unknown>
+): void {
   if (value.source_session_id !== undefined) {
     assertManagedSessionId(value.source_session_id);
   }
@@ -764,6 +784,12 @@ export function assertNativeThreadTransition(
   assertNativeThreadTransitionBindingConsistency(
     value as unknown as NativeThreadTransition
   );
+}
+
+function assertNativeThreadTransitionReceipt(
+  value: Record<string, unknown>,
+  observedHandoff: boolean
+): void {
   assertNonEmptyString(value.adapter_version, "native thread transition adapter_version");
   if (
     typeof value.command_fingerprint !== "string" ||

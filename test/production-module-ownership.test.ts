@@ -61,6 +61,17 @@ test("production ownership covers every source module and preserves architecture
   assert.equal(architecture.productionModules, discovered.length);
   assert.ok(architecture.importEdges > 0);
   assert.equal(architecture.importCycles, 0);
+  assert.ok(architecture.productionFunctions > 0);
+  assert.deepEqual(architecture.productionFunctionHardLimits, {
+    physicalLocExclusive: 500,
+    approximateComplexityExclusive: 50
+  });
+  assert.equal(architecture.productionFunctionHardViolations, 0);
+  assert.deepEqual(architecture.productionFunctionDefaultLimits, {
+    physicalLocExclusive: 100,
+    approximateComplexityExclusive: 20
+  });
+  assert.ok(architecture.productionFunctionDefaultViolations.length > 0);
   assert.equal(
     architecture.cliCorePhysicalLoc,
     loadManifest().architecture.cli_core_max_physical_loc
@@ -73,6 +84,53 @@ test("production ownership covers every source module and preserves architecture
   assert.equal(
     ownershipModule.DYNAMIC_IMPORT_POLICY,
     "literal-only-fail-closed"
+  );
+});
+
+test("compiler AST enforces production function hard limits without exceptions", async () => {
+  const ownershipModule = await loadOwnershipModule();
+  const ownership = ownershipModule.loadAndValidateProductionModuleOwnership({
+    repoRoot,
+    tiers: loadTiers()
+  });
+  const originalSource = (modulePath: string) =>
+    fs.readFileSync(path.join(repoRoot, modulePath), "utf8");
+  const tooComplex = [
+    "export function deliberatelyTooComplex(value: boolean) {",
+    ...Array.from(
+      { length: 49 },
+      (_, index) => `  if (value) value = ${index % 2 === 0 ? "false" : "true"};`
+    ),
+    "  return value;",
+    "}"
+  ];
+  const tooLong = [
+    "export function deliberatelyTooLong() {",
+    ...Array.from({ length: 498 }, () => "  void 0;"),
+    "}"
+  ];
+  assert.throws(
+    () => ownershipModule.validateProductionArchitecture({
+      ownership,
+      repoRoot,
+      readSource(modulePath: string) {
+        return modulePath === "src/runtime-log.ts"
+          ? `${[...tooComplex, ...tooLong].join("\n")}\n`
+          : originalSource(modulePath);
+      }
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(
+        error.message,
+        /deliberatelyTooComplex spans 52 LOC with approximate complexity 50/u
+      );
+      assert.match(
+        error.message,
+        /deliberatelyTooLong spans 500 LOC with approximate complexity 1/u
+      );
+      return true;
+    }
   );
 });
 

@@ -218,6 +218,28 @@ export function assertDeferredForegroundTransfer(
   if (!isRecord(value)) {
     throw new Error("deferred foreground transfer must be an object");
   }
+  assertDeferredForegroundTransferHeader(value, expectedTransferId, options);
+  const transfer = value as unknown as DeferredForegroundTransfer;
+  const sourceKind = assertDeferredForegroundTransferSourceHistory(transfer);
+  assertDeferredForegroundTransferSourceBinding(transfer, sourceKind);
+  assertDeferredForegroundTransferTarget(transfer);
+  assertDeferredForegroundTransferPreparation(transfer);
+  const provedTerminalInputNotStarted =
+    assertDeferredForegroundTransferDispatch(transfer);
+  assertDeferredForegroundTransferCommit(transfer);
+  assertDeferredForegroundTransferResolution(transfer);
+  assertDeferredForegroundTransferAbort(
+    transfer,
+    provedTerminalInputNotStarted
+  );
+  assertDeferredForegroundTransferFailure(transfer);
+}
+
+function assertDeferredForegroundTransferHeader(
+  value: Record<string, unknown>,
+  expectedTransferId: string | undefined,
+  options: { allowMissingRevision?: boolean }
+): void {
   assertOnlyKeys(value, [
     "schema",
     "version",
@@ -354,6 +376,11 @@ export function assertDeferredForegroundTransfer(
     "deferred transfer source previous transition"
   );
   assertBinding(value.source_before_binding, "deferred transfer source binding");
+}
+
+function assertDeferredForegroundTransferSourceHistory(
+  value: DeferredForegroundTransfer
+): DeferredForegroundTransferSourceKind {
   const sourceKind = value.version === DEFERRED_FOREGROUND_TRANSFER_LEGACY_VERSION
     ? "status_card_only"
     : value.source_kind;
@@ -447,6 +474,13 @@ export function assertDeferredForegroundTransfer(
       "present deferred source rollout cannot carry abandonment authority"
     );
   }
+  return sourceKind as DeferredForegroundTransferSourceKind;
+}
+
+function assertDeferredForegroundTransferSourceBinding(
+  value: DeferredForegroundTransfer,
+  sourceKind: DeferredForegroundTransferSourceKind
+): void {
   const statusCardSource = sourceKind === "status_card_only";
   const candidateRolloutSource =
     sourceKind === "candidate_rollout_quiescent";
@@ -485,6 +519,11 @@ export function assertDeferredForegroundTransfer(
       "deferred transfer source binding disagrees with terminal/process authority"
     );
   }
+}
+
+function assertDeferredForegroundTransferTarget(
+  value: DeferredForegroundTransfer
+): void {
   assertManagedSessionId(value.target_session_id);
   if (value.target_session_id === value.source_session_id) {
     throw new Error("deferred transfer source and target Sessions must differ");
@@ -590,7 +629,11 @@ export function assertDeferredForegroundTransfer(
   if (value.do_not_retry !== undefined && typeof value.do_not_retry !== "boolean") {
     throw new Error("deferred transfer do_not_retry must be boolean");
   }
+}
 
+function assertDeferredForegroundTransferPreparation(
+  value: DeferredForegroundTransfer
+): void {
   const requiresTargetPrepared = [
     "target_prepared",
     "dispatch_started",
@@ -662,6 +705,11 @@ export function assertDeferredForegroundTransfer(
       "source_reserved deferred transfer cannot carry target evidence"
     );
   }
+}
+
+function assertDeferredForegroundTransferDispatch(
+  value: DeferredForegroundTransfer
+): boolean {
   if (
     ["dispatch_started", "committed", "resolved", "uncertain"].includes(
       String(value.status)
@@ -701,7 +749,12 @@ export function assertDeferredForegroundTransfer(
     );
   }
   assertTimestampOrder(value as unknown as DeferredForegroundTransfer);
+  return provedTerminalInputNotStarted;
+}
 
+function assertDeferredForegroundTransferCommit(
+  value: DeferredForegroundTransfer
+): void {
   const committed = ["committed", "resolved"].includes(String(value.status));
   const committedFields = [
     value.target_native_thread_id,
@@ -770,24 +823,24 @@ export function assertDeferredForegroundTransfer(
       "deferred transfer source pre-retirement binding"
     );
     if (
-      value.target_accepted_binding.native_thread_id !==
+      value.target_accepted_binding!.native_thread_id !==
         value.target_native_thread_id ||
-      value.target_accepted_binding.terminal_id !== value.terminal_id ||
-      value.target_accepted_binding.native_process.pid !== value.process_pid ||
-      value.target_accepted_binding.native_process.process_uuid !==
+      value.target_accepted_binding!.terminal_id !== value.terminal_id ||
+      value.target_accepted_binding!.native_process.pid !== value.process_pid ||
+      value.target_accepted_binding!.native_process.process_uuid !==
         value.process_uuid ||
-      value.target_accepted_binding.native_process.process_birth !==
+      value.target_accepted_binding!.native_process.process_birth !==
         value.process_birth ||
-      JSON.stringify(value.target_accepted_binding.terminal_endpoint) !==
+      JSON.stringify(value.target_accepted_binding!.terminal_endpoint) !==
         JSON.stringify(value.terminal_endpoint) ||
       !bindingIsMonotonicTargetRefinement(
         value.target_before_binding as ManagedTerminalBinding,
-        value.target_accepted_binding
+        value.target_accepted_binding!
       ) ||
       managedSessionBindingToken({
         session_id: value.target_session_id,
         status: "transitioning",
-        binding: value.target_accepted_binding
+        binding: value.target_accepted_binding!
       }) !== value.target_accepted_binding_token ||
       (
         value.target_native_thread_id ===
@@ -796,7 +849,7 @@ export function assertDeferredForegroundTransfer(
               "binding_scrubbed_same_native_thread" ||
             !bindingIsScrubbedSourceReplacement(
               value.source_before_binding,
-              value.source_pre_retirement_binding
+              value.source_pre_retirement_binding!
             )
           : value.source_retirement !== "binding_retained"
             || JSON.stringify(value.source_pre_retirement_binding) !==
@@ -805,7 +858,7 @@ export function assertDeferredForegroundTransfer(
       managedSessionBindingToken({
         session_id: value.source_session_id,
         status: "transitioning",
-        binding: value.source_pre_retirement_binding
+        binding: value.source_pre_retirement_binding!
       }) !== value.source_pre_retirement_binding_token
     ) {
       throw new Error(
@@ -813,6 +866,11 @@ export function assertDeferredForegroundTransfer(
       );
     }
   }
+}
+
+function assertDeferredForegroundTransferResolution(
+  value: DeferredForegroundTransfer
+): void {
   const resolvedFields = [
     value.target_after_revision,
     value.target_after_status,
@@ -884,6 +942,12 @@ export function assertDeferredForegroundTransfer(
       );
     }
   }
+}
+
+function assertDeferredForegroundTransferAbort(
+  value: DeferredForegroundTransfer,
+  provedTerminalInputNotStarted: boolean
+): void {
   if (
     ["aborted", "abort_resolved"].includes(String(value.status))
       ? !value.aborted_at || !(
@@ -1015,6 +1079,11 @@ export function assertDeferredForegroundTransfer(
       "abort cleanup evidence is allowed only on an abort_resolved receipt"
     );
   }
+}
+
+function assertDeferredForegroundTransferFailure(
+  value: DeferredForegroundTransfer
+): void {
   if (
     value.status === "uncertain"
       ? !value.uncertain_at || value.do_not_retry !== true ||

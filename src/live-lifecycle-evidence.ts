@@ -762,55 +762,21 @@ function deriveRelationshipAssertions({
 }): LiveLifecycleRelationshipAssertions {
   const hasAllSnapshots =
     before !== undefined && afterNew !== undefined && afterResume !== undefined;
-  const managedStart = before?.session_materialized === true;
-  const resumeCandidateSessionMatchesStart =
-    before !== undefined && resumeCandidate !== undefined &&
-    (managedStart
-      ? resumeCandidate.managed_session_fingerprint === before.session_fingerprint
-      : before.session_fingerprint === null &&
-        before.binding_fingerprint === null &&
-        before.binding_generation === null &&
-        resumeCandidate.managed_session_fingerprint === null);
-  const resumeSessionRelationshipValid = hasAllSnapshots &&
-    afterNew.session_materialized &&
-    afterResume.session_materialized &&
-    (managedStart
-      ? afterResume.session_fingerprint === before.session_fingerprint
-      : before.session_fingerprint === null &&
-        before.binding_fingerprint === null &&
-        before.binding_generation === null &&
-        afterResume.session_fingerprint !== afterNew.session_fingerprint);
-  const bindingGenerationsExact = hasAllSnapshots &&
-    afterNew.session_materialized &&
-    afterNew.binding_generation === 1 &&
-    afterResume.session_materialized &&
-    (managedStart
-      ? before.binding_generation !== null &&
-        afterResume.binding_generation === before.binding_generation + 1
-      : afterResume.binding_generation === 1);
-  const materializedBindingFingerprints = [before, afterNew, afterResume]
-    .filter((snapshot) => snapshot?.session_materialized === true)
-    .map((snapshot) => snapshot!.binding_fingerprint);
-  const bindingFingerprintsDistinct = hasAllSnapshots &&
-    materializedBindingFingerprints.every((value) => value !== null) &&
-    new Set(materializedBindingFingerprints).size ===
-      materializedBindingFingerprints.length;
-  const sameTmuxPane = hasAllSnapshots &&
-    [before, afterNew, afterResume].every(
-      (snapshot) =>
-        snapshot.tmux_target === tmuxTarget && snapshot.pane_pid === panePid
-    );
-  const sameProcess = hasAllSnapshots &&
-    [before, afterNew, afterResume].every(
-      (snapshot) =>
-        snapshot.agent_pid === before.agent_pid &&
-        snapshot.process_uuid_fingerprint === before.process_uuid_fingerprint &&
-        snapshot.process_birth_fingerprint === before.process_birth_fingerprint
-    );
-  const sameWorkspace = hasAllSnapshots &&
-    [before, afterNew, afterResume].every(
-      (snapshot) => snapshot.workspace_fingerprint === before.workspace_fingerprint
-    );
+  const sessionRelationships = deriveSessionRelationships({
+    before,
+    afterNew,
+    afterResume,
+    resumeCandidate,
+    hasAllSnapshots
+  });
+  const stableRelationships = deriveStableRelationships({
+    before,
+    afterNew,
+    afterResume,
+    tmuxTarget,
+    panePid,
+    hasAllSnapshots
+  });
   return {
     start_idle: before?.idle === true,
     new_idle: afterNew?.idle === true,
@@ -824,9 +790,12 @@ function deriveRelationshipAssertions({
     new_session_differs: before !== undefined && afterNew !== undefined &&
       afterNew.session_materialized &&
       afterNew.session_fingerprint !== before.session_fingerprint,
-    resume_session_relationship_valid: resumeSessionRelationshipValid,
-    binding_generation_relationship_valid: bindingGenerationsExact,
-    binding_fingerprints_distinct: bindingFingerprintsDistinct,
+    resume_session_relationship_valid:
+      sessionRelationships.resumeSessionRelationshipValid,
+    binding_generation_relationship_valid:
+      sessionRelationships.bindingGenerationsExact,
+    binding_fingerprints_distinct:
+      sessionRelationships.bindingFingerprintsDistinct,
     send_bound_to_new_session: send !== undefined && afterNew !== undefined &&
       send.status === "completed" &&
       send.session_fingerprint === afterNew.session_fingerprint &&
@@ -854,10 +823,111 @@ function deriveRelationshipAssertions({
       resumeCandidate.resumable === true &&
       resumeCandidate.active_elsewhere === false &&
       resumeCandidate.fresh_candidate_token_present === true &&
-      resumeCandidateSessionMatchesStart,
-    same_tmux_pane: sameTmuxPane,
-    same_process_incarnation: sameProcess,
-    same_workspace: sameWorkspace
+      sessionRelationships.resumeCandidateSessionMatchesStart,
+    same_tmux_pane: stableRelationships.sameTmuxPane,
+    same_process_incarnation: stableRelationships.sameProcess,
+    same_workspace: stableRelationships.sameWorkspace
+  };
+}
+
+function deriveSessionRelationships({
+  before,
+  afterNew,
+  afterResume,
+  resumeCandidate,
+  hasAllSnapshots
+}: {
+  before?: LiveLifecycleFingerprintSnapshot;
+  afterNew?: LiveLifecycleFingerprintSnapshot;
+  afterResume?: LiveLifecycleFingerprintSnapshot;
+  resumeCandidate?: LiveLifecycleResumeCandidateEvidence;
+  hasAllSnapshots: boolean;
+}): {
+  resumeCandidateSessionMatchesStart: boolean;
+  resumeSessionRelationshipValid: boolean;
+  bindingGenerationsExact: boolean;
+  bindingFingerprintsDistinct: boolean;
+} {
+  const managedStart = before?.session_materialized === true;
+  const resumeCandidateSessionMatchesStart =
+    before !== undefined && resumeCandidate !== undefined &&
+    (managedStart
+      ? resumeCandidate.managed_session_fingerprint === before.session_fingerprint
+      : before.session_fingerprint === null &&
+        before!.binding_fingerprint === null &&
+        before.binding_generation === null &&
+        resumeCandidate.managed_session_fingerprint === null);
+  const resumeSessionRelationshipValid = hasAllSnapshots &&
+    afterNew!.session_materialized &&
+    afterResume!.session_materialized &&
+    (managedStart
+      ? afterResume!.session_fingerprint === before!.session_fingerprint
+      : before!.session_fingerprint === null &&
+        before!.binding_fingerprint === null &&
+        before!.binding_generation === null &&
+        afterResume!.session_fingerprint !== afterNew!.session_fingerprint);
+  const bindingGenerationsExact = hasAllSnapshots &&
+    afterNew!.session_materialized &&
+    afterNew!.binding_generation === 1 &&
+    afterResume!.session_materialized &&
+    (managedStart
+      ? before!.binding_generation !== null &&
+        afterResume!.binding_generation === before.binding_generation + 1
+      : afterResume!.binding_generation === 1);
+  const materializedBindingFingerprints = [before, afterNew, afterResume]
+    .filter((snapshot) => snapshot?.session_materialized === true)
+    .map((snapshot) => snapshot!.binding_fingerprint);
+  const bindingFingerprintsDistinct = hasAllSnapshots &&
+    materializedBindingFingerprints.every((value) => value !== null) &&
+    new Set(materializedBindingFingerprints).size ===
+      materializedBindingFingerprints.length;
+  return {
+    resumeCandidateSessionMatchesStart,
+    resumeSessionRelationshipValid,
+    bindingGenerationsExact,
+    bindingFingerprintsDistinct
+  };
+}
+
+function deriveStableRelationships({
+  before,
+  afterNew,
+  afterResume,
+  tmuxTarget,
+  panePid,
+  hasAllSnapshots
+}: {
+  before?: LiveLifecycleFingerprintSnapshot;
+  afterNew?: LiveLifecycleFingerprintSnapshot;
+  afterResume?: LiveLifecycleFingerprintSnapshot;
+  tmuxTarget: unknown;
+  panePid: unknown;
+  hasAllSnapshots: boolean;
+}): {
+  sameTmuxPane: boolean;
+  sameProcess: boolean;
+  sameWorkspace: boolean;
+} {
+  const sameTmuxPane = hasAllSnapshots &&
+    [before, afterNew, afterResume].every(
+      (snapshot) =>
+        snapshot!.tmux_target === tmuxTarget && snapshot!.pane_pid === panePid
+    );
+  const sameProcess = hasAllSnapshots &&
+    [before, afterNew, afterResume].every(
+      (snapshot) =>
+        snapshot!.agent_pid === before!.agent_pid &&
+        snapshot!.process_uuid_fingerprint === before!.process_uuid_fingerprint &&
+        snapshot!.process_birth_fingerprint === before!.process_birth_fingerprint
+    );
+  const sameWorkspace = hasAllSnapshots &&
+    [before, afterNew, afterResume].every(
+      (snapshot) => snapshot!.workspace_fingerprint === before!.workspace_fingerprint
+    );
+  return {
+    sameTmuxPane,
+    sameProcess,
+    sameWorkspace
   };
 }
 
