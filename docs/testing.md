@@ -62,12 +62,20 @@ npm run test:affected
 npm run test:affected -- --base origin/main
 ```
 
-Known source subsystems map to exact integration-tier manifest entries. A
-changed integration test selects itself, while a changed fast test or
-documentation file needs no additional integration worker. Selection is
-fail-closed: an unreadable Git diff, a stale mapping, an unknown path, or a
-shared CLI dispatch, Store/protocol, terminal-identity, or lifecycle-safety
-path selects `test:full`.
+Known production domains map to no more than five exact integration-tier
+witnesses. A changed integration test selects itself, a known test helper
+selects its transitive integration consumers, and a changed fast test or
+documentation file needs no additional integration worker. An additive
+`test/test-tiers.json` edit narrows only when every new entry is also a changed
+test and the prior tier order is preserved. `package.json` plus
+`package-lock.json` narrow only when their parsed content proves one synchronized
+version-only change. Deletion, tier movement, reordering, dependency or script
+changes, and missing content proof select `test:full`.
+
+Selection remains fail-closed for an unreadable Git diff, a stale ownership
+mapping, an unknown path, exact Store/protocol modules, shared production
+kernels, or selector/architecture authority files. `src/store.ts` and
+`src/protocol.ts` cannot be narrowed by accompanying tests or manifest proof.
 
 This command narrows local feedback only. It does not replace `npm test` for a
 merge, release, or final verification.

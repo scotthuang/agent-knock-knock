@@ -729,22 +729,28 @@ UX, native-ownership, management, selector, Session-binding, deterministic
 dispatch-admission, and 20 normal callback invocations now use the imported
 command service. The multilingual composer not-accepted witness now uses the
 same imported command service while retaining the real tmux adapter and its
-exactly-one-Enter assertion. Together these migrations reduce the current
-value to 29 of 48 baseline sites (39.58%
-reduction). The 60%
-reduction target is still explicitly reported as not met. Its
+exactly-one-Enter assertion. The current static evidence measures 38 of 48
+baseline sites (`cli_process` 18 and `fake_node_process` 20), a 20.83%
+reduction. The ten additional fake-Node probes validate the measurement
+instrumentation itself; the dynamic full-tree ratio remains the final 60%
+gate. That reduction target is still explicitly reported as not met. Its
 `final_threshold.required` flag remains `false` while #126 is in progress; the
 final milestone flips it to `true`, at which point an unmet target is a hard
 validation failure.
 
 Second, the manifest freezes the exact changed paths and subjects of ten
 pre-`v0.12.11` product/test commits and replays them through the current
-affected-test selector. The current selector falls back to the full tier for 9
-of 10 changes (90%); the completion target is at most 2 of 10. The validator
-fails if Git history, a frozen path list, the measured count, or a replay result
-drifts without an explicit manifest review. An unmet completion target is
-reported but does not make this Phase 1 evidence-recording command fail. This
-target has the same `final_threshold.required` switch for the final milestone.
+affected-test selector. Eight changes now select owned integration witnesses;
+the two commits that changed exact `src/store.ts` authority remain full. The
+measured fallback is therefore 2 of 10 (20%), meeting the completion target.
+Every normal production domain is capped at five integration witnesses, while
+unknown paths, `src/store.ts`, `src/protocol.ts`, and shared kernels remain
+full. Known test helpers resolve through an explicit transitive consumer map.
+Tier-manifest additions and synchronized package-version bumps narrow only from
+Git parent/current blob proof; deletion, movement, reordering, dependency
+changes, or an unproved caller object fail closed. The validator fails if Git
+history, a frozen path list, the measured count, or a replay result drifts, and
+`affected_selector_replay.final_threshold.required` is now `true`.
 
 `config/public-contract-witnesses.json` is the machine-readable compatibility
 inventory. It pins the package executable and facade, CLI commands/JSON

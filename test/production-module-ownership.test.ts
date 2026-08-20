@@ -41,6 +41,18 @@ test("production ownership covers every source module and preserves architecture
   for (const mandatoryPath of ownershipModule.MANDATORY_FULL_PRODUCTION_PATHS) {
     assert.equal(ownership.modules[mandatoryPath]?.selection, "full", mandatoryPath);
   }
+  assert.equal(ownershipModule.MAX_TARGETED_INTEGRATION_TESTS, 5);
+  for (const [domainName, domain] of Object.entries(ownership.domains) as Array<[
+    string,
+    { selection: string; integrationTests: readonly string[] }
+  ]>) {
+    if (domain.selection === "targeted") {
+      assert.ok(
+        domain.integrationTests.length <= ownershipModule.MAX_TARGETED_INTEGRATION_TESTS,
+        `${domainName} must keep at most five integration witnesses`
+      );
+    }
+  }
 
   const architecture = ownershipModule.validateProductionArchitecture({
     ownership,
@@ -92,25 +104,33 @@ test("production ownership rejects missing, duplicate, unknown, and stale entrie
   assert.throws(() => validate(staleTest), /is not in the integration tier/u);
 
   const weakenedCore = loadManifest();
-  weakenedCore.domains["cli-runtime"] = {
+  weakenedCore.domains["store-protocol"] = {
     selection: "targeted",
-    integration_tests: ["test/cli-ux.test.ts"]
+    integration_tests: ["test/store.test.ts"]
   };
   assert.throws(() => validate(weakenedCore), /mandatory shared core module/u);
 
+  const overbroadTarget = loadManifest();
+  overbroadTarget.domains["cli-runtime"].integration_tests =
+    integrationTests.slice(0, 6);
+  assert.throws(
+    () => validate(overbroadTarget),
+    /declares 6 integration tests; maximum is 5/u
+  );
+
   const missingCore = loadManifest();
   missingCore.modules = missingCore.modules.filter(
-    (entry: { path: string }) => entry.path !== "src/cli-core.ts"
+    (entry: { path: string }) => entry.path !== "src/protocol.ts"
   );
   assert.throws(
     () => ownershipModule.validateProductionModuleOwnershipManifest({
       manifest: missingCore,
       productionPaths: productionPaths.filter(
-        (modulePath: string) => modulePath !== "src/cli-core.ts"
+        (modulePath: string) => modulePath !== "src/protocol.ts"
       ),
       integrationTests
     }),
-    /required production module is missing from disk: src\/cli-core\.ts/u
+    /required production module is missing from disk: src\/protocol\.ts/u
   );
 
   const cycleEscapeHatch = loadManifest();

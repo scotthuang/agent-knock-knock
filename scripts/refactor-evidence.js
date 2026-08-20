@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import {
+  analyzeRevisionChangeSemantics,
   selectAffectedTests
 } from "./affected-test-selection.js";
 import {
@@ -209,8 +210,8 @@ function assertRepositoryPath(value, label) {
   return repositoryPath;
 }
 
-function assertPathArray(value, label) {
-  const paths = assertUniqueStrings(value, label, { sorted: true });
+function assertPathArray(value, label, { sorted = true } = {}) {
+  const paths = assertUniqueStrings(value, label, { sorted });
   for (const [index, repositoryPath] of paths.entries()) {
     assertRepositoryPath(repositoryPath, `${label}[${index}]`);
   }
@@ -543,7 +544,11 @@ function validateReplayScenario(value, index) {
     assertExactKeys(expected, ["mode"], `${label} expected`);
   } else if (expected.mode === "targeted") {
     assertExactKeys(expected, ["integration_files", "mode"], `${label} expected`);
-    assertPathArray(expected.integration_files, `${label} expected integration_files`);
+    assertPathArray(
+      expected.integration_files,
+      `${label} expected integration_files`,
+      { sorted: false }
+    );
   } else {
     fail(`${label} expected mode must be full or targeted`);
   }
@@ -568,6 +573,12 @@ function validateAffectedReplay(value, { repoRoot, tiers }) {
     threshold.required,
     "affected selector final_threshold required"
   );
+  if (targetMax !== 2) {
+    fail("affected selector final_threshold maximum_full_fallback_count must be 2");
+  }
+  if (targetRequired !== true) {
+    fail("affected selector final_threshold required must be true");
+  }
   const expectedSummary = assertExactKeys(replay.expected, [
     "full_count",
     "full_rate_basis_points",
@@ -625,7 +636,13 @@ function validateAffectedReplay(value, { repoRoot, tiers }) {
       `affected selector scenario ${index} historical paths`
     );
     const selection = selectAffectedTests(changedPaths, tiers, {
-      productionOwnership: ownership
+      productionOwnership: ownership,
+      changeSemantics: analyzeRevisionChangeSemantics({
+        repoRoot,
+        changedPaths,
+        beforeRevision: `${scenario.commit}^`,
+        afterRevision: scenario.commit
+      })
     });
     if (selection.mode !== scenario.expected.mode) {
       fail(

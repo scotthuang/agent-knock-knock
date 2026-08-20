@@ -158,8 +158,14 @@ Selection fails closed to `test:full` when:
 - the Git diff/base cannot be read or resolved;
 - a mapped test is absent from the integration manifest;
 - a changed path is unknown; or
-- shared CLI dispatch, Store/protocol, terminal identity/provider, or lifecycle
-  safety code changes.
+- exact Store/protocol, shared production kernel, selector, or architecture
+  authority changes.
+
+Normal production domains select at most five integration witnesses. Known
+test helpers add their transitive integration consumers. Tier-manifest changes
+require an additive, same-diff content proof, and package plus lockfile changes
+require a synchronized version-only proof; all other manifest semantics remain
+full.
 
 The full tier itself contains the complete fast and integration manifests, so
 the fast tier is never omitted. `test:affected` narrows local feedback only;

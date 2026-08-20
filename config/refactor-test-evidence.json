@@ -42,14 +42,14 @@
   },
   "affected_selector_replay": {
     "final_threshold": {
-      "required": false,
+      "required": true,
       "maximum_full_fallback_count": 2
     },
     "expected": {
       "scenario_count": 10,
-      "full_count": 9,
-      "targeted_count": 1,
-      "full_rate_basis_points": 9000
+      "full_count": 2,
+      "targeted_count": 8,
+      "full_rate_basis_points": 2000
     },
     "scenarios": [
       {
@@ -73,7 +73,21 @@
           "test/test-tiers.json"
         ],
         "expected": {
-          "mode": "full"
+          "mode": "targeted",
+          "integration_files": [
+            "test/codex-no-rollout-binding-cli.test.ts",
+            "test/human-handoff-adoption-cli.test.ts",
+            "test/native-thread-lifecycle-recovery-cli.test.ts",
+            "test/shards/agent-cli-dispatch-recovery.test.ts",
+            "test/shards/agent-cli-dispatch-authority.test.ts",
+            "test/shards/agent-cli-monitor-recovery.test.ts",
+            "test/shards/agent-cli-terminal-send-gates.test.ts",
+            "test/shards/agent-cli-session-acceptance.test.ts",
+            "test/openclaw-plugin-contract.test.ts",
+            "test/cli-core-import.test.ts",
+            "test/management-cli.test.ts",
+            "test/turn-session-binding-cli.test.ts"
+          ]
         }
       },
       {
@@ -89,7 +103,19 @@
           "test/terminal-agent-bridge.test.ts"
         ],
         "expected": {
-          "mode": "full"
+          "mode": "targeted",
+          "integration_files": [
+            "test/codex-no-rollout-binding-cli.test.ts",
+            "test/human-handoff-adoption-cli.test.ts",
+            "test/native-thread-lifecycle-recovery-cli.test.ts",
+            "test/shards/agent-cli-dispatch-recovery.test.ts",
+            "test/shards/agent-cli-dispatch-authority.test.ts",
+            "test/shards/agent-cli-monitor-recovery.test.ts",
+            "test/shards/agent-cli-terminal-send-gates.test.ts",
+            "test/shards/agent-cli-session-acceptance.test.ts",
+            "test/cli-core-import.test.ts",
+            "test/management-cli.test.ts"
+          ]
         }
       },
       {
@@ -121,7 +147,25 @@
           "test/terminal-control-provider.test.ts"
         ],
         "expected": {
-          "mode": "full"
+          "mode": "targeted",
+          "integration_files": [
+            "test/claude-native-inspection-cli.test.ts",
+            "test/codex-no-rollout-binding-cli.test.ts",
+            "test/human-handoff-adoption-cli.test.ts",
+            "test/native-thread-lifecycle-recovery-cli.test.ts",
+            "test/codex-sticky-rollout-lifecycle-cli.test.ts",
+            "test/native-thread-lifecycle-cli.test.ts",
+            "test/shards/agent-cli-claude-callback.test.ts",
+            "test/shards/agent-cli-control-locks.test.ts",
+            "test/shards/agent-cli-dispatch-recovery.test.ts",
+            "test/shards/agent-cli-dispatch-authority.test.ts",
+            "test/shards/agent-cli-monitor-recovery.test.ts",
+            "test/shards/agent-cli-terminal-send-gates.test.ts",
+            "test/shards/agent-cli-session-acceptance.test.ts",
+            "test/openclaw-plugin-contract.test.ts",
+            "test/cli-core-import.test.ts",
+            "test/management-cli.test.ts"
+          ]
         }
       },
       {
@@ -194,7 +238,22 @@
           "test/store.test.ts"
         ],
         "expected": {
-          "mode": "full"
+          "mode": "targeted",
+          "integration_files": [
+            "test/codex-no-rollout-binding-cli.test.ts",
+            "test/human-handoff-adoption-cli.test.ts",
+            "test/native-thread-lifecycle-recovery-cli.test.ts",
+            "test/codex-sticky-rollout-lifecycle-cli.test.ts",
+            "test/native-thread-lifecycle-cli.test.ts",
+            "test/shards/agent-cli-claude-callback.test.ts",
+            "test/shards/agent-cli-composer-replay.test.ts",
+            "test/shards/agent-cli-monitor-recovery.test.ts",
+            "test/shards/agent-cli-terminal-send-gates.test.ts",
+            "test/shards/agent-cli-monitor-lifecycle.test.ts",
+            "test/store.test.ts",
+            "test/cli-core-import.test.ts",
+            "test/management-cli.test.ts"
+          ]
         }
       },
       {
@@ -226,7 +285,28 @@
           "test/shards/agent-cli-terminal-send-gates.test.ts"
         ],
         "expected": {
-          "mode": "full"
+          "mode": "targeted",
+          "integration_files": [
+            "test/claude-native-inspection-cli.test.ts",
+            "test/codex-no-rollout-binding-cli.test.ts",
+            "test/human-handoff-adoption-cli.test.ts",
+            "test/native-thread-lifecycle-recovery-cli.test.ts",
+            "test/shards/agent-cli-claude-callback.test.ts",
+            "test/shards/agent-cli-composer-replay.test.ts",
+            "test/shards/agent-cli-control-locks.test.ts",
+            "test/shards/agent-cli-dispatch-recovery.test.ts",
+            "test/shards/agent-cli-dispatch-authority.test.ts",
+            "test/shards/agent-cli-monitor-recovery.test.ts",
+            "test/shards/agent-cli-receipt-fences.test.ts",
+            "test/shards/agent-cli-terminal-send-gates.test.ts",
+            "test/shards/agent-cli-monitor-lifecycle.test.ts",
+            "test/shards/agent-cli-session-acceptance.test.ts",
+            "test/shards/agent-cli-monitor-approval-context.test.ts",
+            "test/session-selector-cli.test.ts",
+            "test/openclaw-plugin-contract.test.ts",
+            "test/cli-core-import.test.ts",
+            "test/management-cli.test.ts"
+          ]
         }
       },
       {
@@ -249,7 +329,20 @@
           "test/terminal-agent-bridge.test.ts"
         ],
         "expected": {
-          "mode": "full"
+          "mode": "targeted",
+          "integration_files": [
+            "test/claude-native-inspection-cli.test.ts",
+            "test/codex-no-rollout-binding-cli.test.ts",
+            "test/native-thread-lifecycle-cli.test.ts",
+            "test/shards/agent-cli-dispatch-recovery.test.ts",
+            "test/shards/agent-cli-dispatch-authority.test.ts",
+            "test/shards/agent-cli-monitor-recovery.test.ts",
+            "test/shards/agent-cli-terminal-send-gates.test.ts",
+            "test/shards/agent-cli-session-acceptance.test.ts",
+            "test/shards/agent-cli-monitor-approval-context.test.ts",
+            "test/cli-core-import.test.ts",
+            "test/management-cli.test.ts"
+          ]
         }
       },
       {
@@ -284,7 +377,35 @@
           "test/terminal-process-source.test.ts"
         ],
         "expected": {
-          "mode": "full"
+          "mode": "targeted",
+          "integration_files": [
+            "test/claude-native-inspection-cli.test.ts",
+            "test/codex-no-rollout-binding-cli.test.ts",
+            "test/human-handoff-adoption-cli.test.ts",
+            "test/native-thread-lifecycle-recovery-cli.test.ts",
+            "test/native-thread-lifecycle-cli.test.ts",
+            "test/shards/agent-cli-claude-callback.test.ts",
+            "test/shards/agent-cli-composer-replay.test.ts",
+            "test/callback-cli.test.ts",
+            "test/shards/agent-cli-control-locks.test.ts",
+            "test/shards/agent-cli-dispatch-recovery.test.ts",
+            "test/shards/agent-cli-dispatch-authority.test.ts",
+            "test/shards/agent-cli-monitor-recovery.test.ts",
+            "test/shards/agent-cli-receipt-fences.test.ts",
+            "test/shards/agent-cli-terminal-send-gates.test.ts",
+            "test/shards/agent-cli-monitor-lifecycle.test.ts",
+            "test/shards/agent-cli-session-acceptance.test.ts",
+            "test/shards/agent-cli-monitor-approval-context.test.ts",
+            "test/session-selector-cli.test.ts",
+            "test/delegate-cli.test.ts",
+            "test/native-thread-ownership-cli.test.ts",
+            "test/cli-core-import.test.ts",
+            "test/cli-ux.test.ts",
+            "test/codex-store-adapter.test.ts",
+            "test/management-cli.test.ts",
+            "test/turn-session-binding-cli.test.ts",
+            "test/native-lifecycle-command-guard-cli.test.ts"
+          ]
         }
       }
     ]

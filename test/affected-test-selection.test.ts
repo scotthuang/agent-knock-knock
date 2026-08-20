@@ -18,6 +18,52 @@ function loadTiers(): { fast: string[]; integration: string[] } {
   );
 }
 
+function copyReflectedSemantics(source: object): Record<PropertyKey, unknown> {
+  const reflectedCopy = { ...source } as Record<PropertyKey, unknown>;
+  for (const symbol of Object.getOwnPropertySymbols(source)) {
+    const descriptor = Object.getOwnPropertyDescriptor(source, symbol);
+    assert.ok(descriptor);
+    Object.defineProperty(reflectedCopy, symbol, descriptor);
+  }
+  return reflectedCopy;
+}
+
+function walkTypeScriptSources(directory: string): string[] {
+  return fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const absolutePath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      return walkTypeScriptSources(absolutePath);
+    }
+    return entry.isFile() && entry.name.endsWith(".ts")
+      ? [path.relative(repoRoot, absolutePath).split(path.sep).join("/")]
+      : [];
+  });
+}
+
+function directTestSupportConsumers(supportPath: string): string[] {
+  const consumers: string[] = [];
+  for (const importerPath of walkTypeScriptSources(path.join(repoRoot, "test"))) {
+    const source = fs.readFileSync(path.join(repoRoot, importerPath), "utf8");
+    const specifiers = source.matchAll(
+      /(?:\bfrom\s+|\bimport\s*\()(["'])([^"']+)\1/gu
+    );
+    for (const match of specifiers) {
+      if (!match[2].startsWith(".")) {
+        continue;
+      }
+      const resolved = path.posix.normalize(path.posix.join(
+        path.posix.dirname(importerPath),
+        match[2].replace(/\.js$/u, ".ts")
+      ));
+      if (resolved === supportPath) {
+        consumers.push(importerPath);
+        break;
+      }
+    }
+  }
+  return consumers.sort();
+}
+
 test("package exposes the build-once affected-test runner", () => {
   const packageJson = JSON.parse(
     fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")
@@ -40,6 +86,24 @@ test("non-production affected-test map contains only exact integration-tier mani
     for (const testPath of mappedTests) {
       assert.ok(integration.has(testPath), `${testPath} must remain an integration test`);
     }
+  }
+  const fast = new Set(loadTiers().fast);
+  for (const [supportPath, consumers] of Object.entries(
+    selection.testSupportImpactByPath
+  ) as Array<[string, string[]]>) {
+    assert.ok(consumers.length > 0, `${supportPath} must retain a consumer`);
+    for (const consumer of consumers) {
+      assert.ok(
+        integration.has(consumer) || fast.has(consumer) ||
+          Object.hasOwn(selection.testSupportImpactByPath, consumer),
+        `${supportPath} has an unknown consumer ${consumer}`
+      );
+    }
+    assert.deepEqual(
+      [...consumers].sort(),
+      directTestSupportConsumers(supportPath),
+      `${supportPath} consumer ownership must match the current import graph`
+    );
   }
 });
 
@@ -447,29 +511,269 @@ test("an integration test selects itself while fast and documentation changes st
   assert.deepEqual(selection.affectedTestRuns(noChanges), [
     { tier: "fast", files: [] }
   ]);
+  assert.deepEqual(
+    selection.selectAffectedTests([
+      "templates/openclaw-skills/agent-knock-knock/SKILL.md"
+    ], tiers),
+    {
+      mode: "targeted",
+      changedPaths: [
+        "templates/openclaw-skills/agent-knock-knock/SKILL.md"
+      ],
+      integrationFiles: []
+    }
+  );
 });
 
-test("unknown paths and full production domains fail closed", async () => {
+test("normal production domains select at most five witnesses", async () => {
+  const selection = await loadSelectionModule();
+  const tiers = loadTiers();
+  for (const changedPath of [
+    "src/agent-session-provider.ts",
+    "src/cli-core.ts",
+    "src/deferred-foreground-transfer.ts",
+    "src/managed-session.ts",
+    "src/claude-terminal-agent-adapter.ts",
+    "src/herdr-terminal-control-provider.ts",
+    "src/terminal-agent-bridge.ts"
+  ]) {
+    const result = selection.selectAffectedTests([changedPath], tiers);
+    assert.equal(result.mode, "targeted", changedPath);
+    assert.ok(result.integrationFiles.length > 0, changedPath);
+    assert.ok(result.integrationFiles.length <= 5, changedPath);
+  }
+});
+
+test("test support ownership follows exact transitive consumers", async () => {
+  const selection = await loadSelectionModule();
+  const tiers = loadTiers();
+  const directAgentConsumers = selection.selectAffectedTests(
+    ["test/agent-cli-fixtures.ts"],
+    tiers
+  );
+  assert.equal(directAgentConsumers.mode, "targeted");
+  assert.deepEqual(directAgentConsumers.integrationFiles, tiers.integration.filter(
+    (testPath) => selection.testSupportImpactByPath[
+      "test/agent-cli-fixtures.ts"
+    ].includes(testPath)
+  ));
+  assert.deepEqual(
+    selection.selectAffectedTests(["test/codex-sticky-rollout-fixture.ts"], tiers),
+    {
+      mode: "targeted",
+      changedPaths: ["test/codex-sticky-rollout-fixture.ts"],
+      integrationFiles: []
+    }
+  );
+  const commonFixture = selection.selectAffectedTests(
+    ["test/in-process-cli-fixtures.ts"],
+    tiers
+  );
+  assert.equal(commonFixture.mode, "targeted");
+  assert.ok(commonFixture.integrationFiles.length > directAgentConsumers.integrationFiles.length);
+  for (const requiredConsumer of [
+    "test/callback-cli.test.ts",
+    "test/claude-native-inspection-cli.test.ts",
+    "test/native-lifecycle-command-guard-cli.test.ts",
+    "test/shards/agent-cli-terminal-send-gates.test.ts"
+  ]) {
+    assert.ok(commonFixture.integrationFiles.includes(requiredConsumer));
+  }
+});
+
+test("additive tier semantics are content-proven while deletion, movement, and forged proofs fail closed", async () => {
+  const selection = await loadSelectionModule();
+  const tiers = loadTiers();
+  const addedPath = "test/human-handoff-adoption-cli.test.ts";
+  const before = structuredClone(tiers);
+  before.integration = before.integration.filter((testPath) => testPath !== addedPath);
+  const valid = selection.analyzeChangedFileSemantics({
+    changedPaths: ["test/test-tiers.json", addedPath],
+    readBeforePath: (repositoryPath: string) => {
+      if (repositoryPath === "test/test-tiers.json") {
+        return JSON.stringify(before);
+      }
+      throw new Error("new test is absent from the base revision");
+    },
+    readAfterPath: (repositoryPath: string) => repositoryPath ===
+      "test/test-tiers.json" ? JSON.stringify(tiers) : "test('new witness', () => {});",
+    pathExistsBefore: () => false
+  });
+  assert.deepEqual(
+    selection.selectAffectedTests(
+      ["test/test-tiers.json", addedPath],
+      tiers,
+      { changeSemantics: valid }
+    ),
+    {
+      mode: "targeted",
+      changedPaths: [addedPath, "test/test-tiers.json"],
+      integrationFiles: [addedPath]
+    }
+  );
+  assert.equal(selection.selectAffectedTests(
+    ["test/test-tiers.json", addedPath],
+    tiers,
+    { changeSemantics: copyReflectedSemantics(valid) }
+  ).mode, "full", "reflecting every Symbol must not forge a tier proof");
+  const existingFileAddition = selection.analyzeChangedFileSemantics({
+    changedPaths: ["test/test-tiers.json", addedPath],
+    readBeforePath: (repositoryPath: string) => repositoryPath ===
+      "test/test-tiers.json" ? JSON.stringify(before) : "existing test source",
+    readAfterPath: (repositoryPath: string) => repositoryPath ===
+      "test/test-tiers.json" ? JSON.stringify(tiers) : "changed test source",
+    pathExistsBefore: () => true
+  });
+  assert.equal(selection.selectAffectedTests(
+    ["test/test-tiers.json", addedPath],
+    tiers,
+    { changeSemantics: existingFileAddition }
+  ).mode, "full", "a manifest edit cannot bless an already-existing test");
+  const unreadableBase = selection.analyzeChangedFileSemantics({
+    changedPaths: ["test/test-tiers.json", addedPath],
+    readBeforePath: (repositoryPath: string) => repositoryPath ===
+      "test/test-tiers.json" ? JSON.stringify(before) : undefined,
+    readAfterPath: (repositoryPath: string) => repositoryPath ===
+      "test/test-tiers.json" ? JSON.stringify(tiers) : "changed test source",
+    pathExistsBefore: () => {
+      throw new Error("git tree lookup failed");
+    }
+  });
+  assert.equal(selection.selectAffectedTests(
+    ["test/test-tiers.json", addedPath],
+    tiers,
+    { changeSemantics: unreadableBase }
+  ).mode, "full", "a Git read failure must not masquerade as an absent file");
+
+  const unsafeAfterValues = [
+    {
+      ...structuredClone(tiers),
+      integration: tiers.integration.filter((testPath) => testPath !== addedPath)
+    },
+    {
+      ...structuredClone(tiers),
+      integration: [tiers.integration[1], tiers.integration[0], ...tiers.integration.slice(2)]
+    },
+    {
+      fast: [...tiers.fast, addedPath],
+      integration: tiers.integration.filter((testPath) => testPath !== addedPath)
+    }
+  ];
+  for (const after of unsafeAfterValues) {
+    const unsafe = selection.analyzeChangedFileSemantics({
+      changedPaths: ["test/test-tiers.json", addedPath],
+      readBeforePath: () => JSON.stringify(tiers),
+      readAfterPath: () => JSON.stringify(after)
+    });
+    const result = selection.selectAffectedTests(
+      ["test/test-tiers.json", addedPath],
+      tiers,
+      { changeSemantics: unsafe }
+    );
+    assert.equal(result.mode, "full");
+    assert.match(result.reason, /lacks a safe semantic proof/u);
+  }
+
+  const missingChangedPathProof = selection.analyzeChangedFileSemantics({
+    changedPaths: ["test/test-tiers.json"],
+    readBeforePath: () => JSON.stringify(before),
+    readAfterPath: () => JSON.stringify(tiers)
+  });
+  assert.equal(selection.selectAffectedTests(
+    ["test/test-tiers.json"],
+    tiers,
+    { changeSemantics: missingChangedPathProof }
+  ).mode, "full");
+  assert.equal(selection.selectAffectedTests(
+    ["test/test-tiers.json", addedPath],
+    tiers,
+    {
+      changeSemantics: {
+        testTierManifest: {
+          kind: "additive-test-tier-entries",
+          entries: [{ path: addedPath, tier: "integration" }]
+        }
+      }
+    }
+  ).mode, "full", "an unbranded caller proof must not bypass content review");
+});
+
+test("package manifests narrow only for synchronized version-only content", async () => {
+  const selection = await loadSelectionModule();
+  const tiers = loadTiers();
+  const packageAfter = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
+  const lockAfter = JSON.parse(fs.readFileSync(path.join(repoRoot, "package-lock.json"), "utf8"));
+  const packageBefore = structuredClone(packageAfter);
+  const lockBefore = structuredClone(lockAfter);
+  packageBefore.version = "0.12.10";
+  lockBefore.version = "0.12.10";
+  lockBefore.packages[""].version = "0.12.10";
+  const contents = new Map([
+    ["before:package.json", JSON.stringify(packageBefore)],
+    ["before:package-lock.json", JSON.stringify(lockBefore)],
+    ["after:package.json", JSON.stringify(packageAfter)],
+    ["after:package-lock.json", JSON.stringify(lockAfter)]
+  ]);
+  const changedPaths = ["package.json", "package-lock.json"];
+  const valid = selection.analyzeChangedFileSemantics({
+    changedPaths,
+    readBeforePath: (repositoryPath: string) => contents.get(`before:${repositoryPath}`),
+    readAfterPath: (repositoryPath: string) => contents.get(`after:${repositoryPath}`)
+  });
+  assert.deepEqual(selection.selectAffectedTests(changedPaths, tiers, {
+    changeSemantics: valid
+  }), {
+    mode: "targeted",
+    changedPaths: ["package-lock.json", "package.json"],
+    integrationFiles: []
+  });
+  assert.equal(selection.selectAffectedTests(changedPaths, tiers, {
+    changeSemantics: copyReflectedSemantics(valid)
+  }).mode, "full", "reflecting every Symbol must not forge a package proof");
+
+  const dependencyChange = structuredClone(packageAfter);
+  dependencyChange.scripts = {
+    ...dependencyChange.scripts,
+    unsafe_new_script: "node arbitrary.js"
+  };
+  const unsafe = selection.analyzeChangedFileSemantics({
+    changedPaths,
+    readBeforePath: (repositoryPath: string) => contents.get(`before:${repositoryPath}`),
+    readAfterPath: (repositoryPath: string) => repositoryPath === "package.json"
+      ? JSON.stringify(dependencyChange)
+      : contents.get(`after:${repositoryPath}`)
+  });
+  assert.equal(selection.selectAffectedTests(changedPaths, tiers, {
+    changeSemantics: unsafe
+  }).mode, "full");
+  assert.equal(selection.selectAffectedTests(changedPaths, tiers, {
+    changeSemantics: { packageVersion: { kind: "synchronized-package-version-only" } }
+  }).mode, "full", "a forged package proof must remain full");
+  assert.equal(selection.selectAffectedTests(["package.json"], tiers, {
+    changeSemantics: valid
+  }).mode, "full", "an unpaired package manifest must remain full");
+});
+
+test("unknown paths, Store/protocol, and shared authorities fail closed", async () => {
   const selection = await loadSelectionModule();
   const tiers = loadTiers();
   for (const changedPath of [
     "src/new-subsystem.ts",
     "docs/new-generator.js",
-    "src/cli.ts",
-    "src/cli-core.ts",
-    "src/cli-runtime-context.ts",
+    "test/new-fixture.ts",
     "src/store.ts",
     "src/protocol.ts",
-    "src/claude-local-transcript-provider.ts",
-    "src/herdr-terminal-control-provider.ts",
-    "src/terminal-control-provider.ts",
-    "src/native-thread-lifecycle-policy.ts"
+    "src/mutation-transaction.ts",
+    "src/terminal-dispatch-ledger-codec.ts",
+    "scripts/affected-test-selection.js",
+    "config/production-module-ownership.json",
+    "tsconfig.json"
   ]) {
     const result = selection.selectAffectedTests([changedPath], tiers);
     assert.equal(result.mode, "full", changedPath);
     assert.match(
       result.reason,
-      /(?:unmapped changed path|production module has no owner|production domain requires full suite)/u
+      /(?:unmapped changed path|production module has no owner|production domain requires full suite|shared test or architecture configuration changed)/u
     );
   }
 });

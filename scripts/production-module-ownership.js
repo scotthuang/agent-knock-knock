@@ -16,10 +16,15 @@ export const PRODUCTION_OWNERSHIP_SCHEMA =
   "agent-knock-knock/production-module-ownership";
 export const PRODUCTION_OWNERSHIP_VERSION = 1;
 export const DYNAMIC_IMPORT_POLICY = "literal-only-fail-closed";
+export const MAX_TARGETED_INTEGRATION_TESTS = 5;
 export const MANDATORY_FULL_PRODUCTION_PATHS = Object.freeze([
-  "src/cli-core.ts",
+  "src/canonical-json.ts",
+  "src/durable-json-file.ts",
+  "src/mutation-transaction.ts",
   "src/protocol.ts",
-  "src/store.ts"
+  "src/store.ts",
+  "src/terminal-dispatch-ledger-codec.ts",
+  "src/value-guards.ts"
 ]);
 
 const defaultRepoRoot = fileURLToPath(new URL("../", import.meta.url));
@@ -216,6 +221,13 @@ export function validateProductionModuleOwnershipManifest({
         );
       } else {
         selectedTests = definition.integration_tests;
+        if (selectedTests.length > MAX_TARGETED_INTEGRATION_TESTS) {
+          errors.push(
+            `targeted domain ${JSON.stringify(domainName)} declares ` +
+            `${selectedTests.length} integration tests; maximum is ` +
+            `${MAX_TARGETED_INTEGRATION_TESTS}`
+          );
+        }
         const seenTests = new Set();
         for (const testPath of selectedTests) {
           if (typeof testPath !== "string" || !testPath.startsWith("test/")) {
