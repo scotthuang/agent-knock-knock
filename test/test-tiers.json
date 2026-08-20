@@ -80,6 +80,7 @@
     "test/terminal-identity-authority-service.test.ts",
     "test/terminal-list-cli-adapter.test.ts",
     "test/terminal-list-renderer.test.ts",
+    "test/terminal-maintenance-cli-adapter.test.ts",
     "test/terminal-monitor-application-service.test.ts",
     "test/terminal-monitor-decision-policy.test.ts",
     "test/terminal-monitor-reconciliation-eligibility.test.ts",

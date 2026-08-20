@@ -2138,6 +2138,73 @@ byte facts, canonical facade wiring, four/five-group declarations, and
 forbidden imports. The five focused CLI witnesses are Claude callback, monitor
 approval context, monitor lifecycle, monitor recovery, and Session acceptance.
 
+## Maintenance command facade
+
+The renew, raw/managed cancel, observed-handoff close, generic managed close,
+and orphan/lifecycle dispatch-close slice now lives in
+`terminal-maintenance-cli-adapter.ts`. The adapter is a bounded CLI I/O shell;
+it composes the existing terminal identity, acceptance, handoff, list, native
+lifecycle, dispatch repository, and verified-dead recovery authorities rather
+than copying a reducer, receipt, repository, or CAS transition. Monitor
+supervision, monitor reconciliation, startup reconciliation, and ordinary
+delegate/send presentation remain with their existing owners.
+
+Against exact parent `8683b42c248b2310c59165ba712ecc943da3d775`,
+`src/cli-core.ts` falls from 4,547 to 3,419 physical lines (-1,128). Total
+production TypeScript changes from 91,535 to 91,961 lines (+426, 37.77 percent
+of the core movement), meeting the preferred 450-line and hard 650-line
+overhead gates. Architecture validation reports 54 domains, 116 production
+modules, 742 static import edges, zero cycles, and one retained `cli-core.ts`
+importer. The 1,554-line adapter exposes only its factory at runtime and binds
+four invocation-scoped port groups (`runtime`, `identity`, `authority`, and
+`repository`) through async-local context. Its public option surface is
+`Readonly<Record<string, unknown>>`; its source and declaration contain no
+`any`, raw JSON codec, or resolved-terminal capability API.
+
+Renew preserves selector/migration, status, verified-dead and uncertain-submit
+fences before terminal availability, then reloads under its state lock,
+revalidates binding and hard lifetime, persists state before the renewal event,
+and launches/presents only after releasing state. Raw cancel takes terminal
+then writer authority. Managed cancel preserves its distinct authorities:
+the command-selected Store keys only the terminal lock, the state-file lock is
+second, and the state-path-derived Store keys the writer lease third. It
+releases writer -> state -> terminal. Its fresh Turn, terminal incarnation,
+exact dispatch owner, bridge cancellation, event, state, and presentation order
+is unchanged, and presentation stays inside the authenticated transaction.
+
+Observed-handoff close retains terminal -> writer -> state, fresh Turn and
+Session loads, native identity observation, exclusive target ownership, exact
+handoff token and dispatch-generation validation, then Turn save -> ledger
+resolve -> close event -> presentation. Generic close keeps its observed
+handoff fence and verified-dead completion-first recovery, persists the closed
+Turn before dispatch resolution and the append-only close event, and presents
+only after those effects. Orphan/lifecycle dispatch close continues to
+reconcile incarnation and deferred-transfer authority before lifecycle
+recovery or exact message-id resolution. Possible terminal input is never
+retried or downgraded.
+
+Every extracted function remains below the hard 500/c50 gates. The cohesive
+CLI-shell exceptions to the preferred 100/c20 target are:
+
+| Function or nested transaction | LOC / approximate complexity |
+| --- | ---: |
+| `runClose` | 264 / c8 |
+| generic close fresh-state transaction | 205 / c24 |
+| `runRenew` | 192 / c32 |
+| dispatch-close transaction | 184 / c22 |
+| observed-handoff close transaction | 176 / c29 |
+| `assertGenericCloseDoesNotBypassObservedHandoff` | 138 / c19 |
+
+Direct recording tests prove concurrent factory isolation, factory-only
+exports, typed declarations, raw-cancel reverse release, managed-cancel
+terminal/state/writer order with distinct command/state Store keys, every
+acquire/release error priority, and the getter/error/persistence tables for all
+three commands. The five focused files are the maintenance facade, control
+locks, monitor lifecycle, human-handoff adoption, and native lifecycle
+recovery witnesses; together they retain real CLI cancel/close races, renew,
+verified-dead completion, observed handoff, and exact lifecycle ledger
+recovery.
+
 ## Soft freeze while #126 is active
 
 Until the orchestration milestones finish:
