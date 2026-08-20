@@ -487,13 +487,21 @@ test("dynamic completion includes a delayed shell descendant with a stripped env
   const cliPath = path.join(repoRoot, "dist", "src", "cli.js");
   const runId = `probe-${process.pid}-${Date.now()}`;
   const witnessName = "dynamic shell descendant evidence probe";
-  const delayedCli = `(sleep 1.5; ${JSON.stringify(process.execPath)} ` +
-    `${JSON.stringify(cliPath)} --version >/dev/null 2>&1) &`;
+  const readyPath = path.join(traceDirectory, "descendant-ready");
+  const gatePath = path.join(traceDirectory, "release-descendant");
+  const gatedCli = [
+    `: > ${JSON.stringify(readyPath)} || exit 70`,
+    `while [ ! -e ${JSON.stringify(gatePath)} ]; do ` +
+      `[ -d ${JSON.stringify(traceDirectory)} ] || exit 71; ` +
+      "sleep 0.01; done",
+    `exec ${JSON.stringify(process.execPath)} ` +
+      `${JSON.stringify(cliPath)} --version >/dev/null 2>&1`
+  ].join("; ");
   const helper = `
 const { spawn } = require("node:child_process");
 const delayed = spawn(
   "/bin/sh",
-  ["-c", ${JSON.stringify(delayedCli)}],
+  ["-c", ${JSON.stringify(gatedCli)}],
   { detached: true, stdio: "ignore", env: { PATH: process.env.PATH } }
 );
 delayed.unref();
@@ -530,15 +538,49 @@ delayed.unref();
     });
     assert.equal(status, 0, stderr);
 
-    const completionStartedAt = Date.now();
-    const events = await evidenceModule.waitForDynamicSubprocessTreeCompletion({
+    const readyDeadline = Date.now() + 5_000;
+    while (!fs.existsSync(readyPath) && Date.now() < readyDeadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(fs.existsSync(readyPath), true);
+    assert.equal(fs.existsSync(gatePath), false);
+
+    let resolveFirstPoll!: () => void;
+    const firstPoll = new Promise<void>((resolve) => {
+      resolveFirstPoll = resolve;
+    });
+    let completionSettled = false;
+    const completion = evidenceModule.waitForDynamicSubprocessTreeCompletion({
       traceDirectory,
       runId,
       rootProcessGroup: child.pid,
       pollMs: 10,
-      timeoutMs: 5_000
+      timeoutMs: 5_000,
+      sleep: async (milliseconds: number) => {
+        resolveFirstPoll();
+        await new Promise<void>((resolve) =>
+          setTimeout(resolve, milliseconds)
+        );
+      }
     });
-    assert.ok(Date.now() - completionStartedAt >= 1_200);
+    void completion.then(
+      () => { completionSettled = true; },
+      () => { completionSettled = true; }
+    );
+    const firstObservation = await Promise.race([
+      firstPoll.then(() => "poll" as const),
+      completion.then(
+        () => "settled" as const,
+        () => "settled" as const
+      )
+    ]);
+    assert.equal(firstObservation, "poll");
+    assert.equal(completionSettled, false);
+    assert.equal(fs.existsSync(gatePath), false);
+    const gateFd = fs.openSync(gatePath, "wx", 0o600);
+    fs.closeSync(gateFd);
+
+    const events = await completion;
     const summary = evidenceModule.summarizeDynamicSubprocessTrace(events, {
       runId
     });
@@ -588,6 +630,10 @@ delayed.unref();
       new RegExp(secretTestName, "u")
     );
   } finally {
+    if (!fs.existsSync(gatePath)) {
+      const gateFd = fs.openSync(gatePath, "wx", 0o600);
+      fs.closeSync(gateFd);
+    }
     fs.rmSync(traceDirectory, { recursive: true, force: true });
   }
 });
