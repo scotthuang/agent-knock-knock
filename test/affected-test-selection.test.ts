@@ -766,6 +766,7 @@ test("unknown paths, Store/protocol, and shared authorities fail closed", async 
     "src/mutation-transaction.ts",
     "src/terminal-dispatch-ledger-codec.ts",
     "scripts/affected-test-selection.js",
+    "config/test-file-shards.json",
     "config/production-module-ownership.json",
     "tsconfig.json"
   ]) {

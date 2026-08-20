@@ -5,6 +5,161 @@ import { fileURLToPath } from "node:url";
 
 export const repoRoot = fileURLToPath(new URL("../", import.meta.url));
 export const tierManifestPath = path.join(repoRoot, "test", "test-tiers.json");
+export const testFileShardConfigPath = path.join(
+  repoRoot,
+  "config",
+  "test-file-shards.json"
+);
+
+function failShardConfig(message) {
+  throw new Error(`test file shard config ${message}`);
+}
+
+function exactKeys(value, expected, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    failShardConfig(`${label} must be an object`);
+  }
+  const actual = Object.keys(value).sort();
+  const wanted = [...expected].sort();
+  if (JSON.stringify(actual) !== JSON.stringify(wanted)) {
+    failShardConfig(
+      `${label} keys must be exactly ${wanted.join(", ")}`
+    );
+  }
+  return value;
+}
+
+export function validateTestFileShardConfig(value) {
+  const config = exactKeys(
+    value,
+    ["schema", "version", "expansions"],
+    "root"
+  );
+  if (
+    config.schema !== "agent-knock-knock/test-file-shards" ||
+    config.version !== 1 ||
+    !Array.isArray(config.expansions) ||
+    config.expansions.length === 0
+  ) {
+    failShardConfig("must use schema version 1 with non-empty expansions");
+  }
+
+  const canonicalSources = new Set();
+  const globallyUsedCompiledShards = new Set();
+  const expansions = config.expansions.map((unverified, expansionIndex) => {
+    const expansion = exactKeys(
+      unverified,
+      ["canonical_source", "compiled_shards", "declaration_shards"],
+      `expansion ${expansionIndex}`
+    );
+    const canonicalSource = expansion.canonical_source;
+    if (
+      typeof canonicalSource !== "string" ||
+      !/^test\/[a-z0-9][a-z0-9/_-]*\.test\.ts$/u.test(canonicalSource) ||
+      path.posix.normalize(canonicalSource) !== canonicalSource
+    ) {
+      failShardConfig(`expansion ${expansionIndex} canonical_source is invalid`);
+    }
+    if (canonicalSources.has(canonicalSource)) {
+      failShardConfig(`duplicates canonical source ${canonicalSource}`);
+    }
+    canonicalSources.add(canonicalSource);
+
+    if (
+      !Array.isArray(expansion.compiled_shards) ||
+      expansion.compiled_shards.length < 5
+    ) {
+      failShardConfig(
+        `expansion ${canonicalSource} must declare at least five compiled shards`
+      );
+    }
+    const compiledShards = expansion.compiled_shards.map(
+      (compiledShard, shardIndex) => {
+        if (
+          typeof compiledShard !== "string" ||
+          !/^dist\/test\/[a-z0-9][a-z0-9/_.-]*\.shard\.js$/u.test(
+            compiledShard
+          ) ||
+          path.posix.normalize(compiledShard) !== compiledShard
+        ) {
+          failShardConfig(
+            `expansion ${canonicalSource} compiled shard ${shardIndex} is invalid`
+          );
+        }
+        return compiledShard;
+      }
+    );
+    if (new Set(compiledShards).size !== compiledShards.length) {
+      failShardConfig(`expansion ${canonicalSource} repeats a compiled shard`);
+    }
+    for (const compiledShard of compiledShards) {
+      if (globallyUsedCompiledShards.has(compiledShard)) {
+        failShardConfig(`reuses compiled shard ${compiledShard}`);
+      }
+      globallyUsedCompiledShards.add(compiledShard);
+    }
+
+    if (
+      !Array.isArray(expansion.declaration_shards) ||
+      expansion.declaration_shards.length === 0
+    ) {
+      failShardConfig(
+        `expansion ${canonicalSource} must assign every test declaration`
+      );
+    }
+    const declarationShards = expansion.declaration_shards.map(
+      (shardIndex, declarationIndex) => {
+        if (
+          !Number.isSafeInteger(shardIndex) ||
+          shardIndex < 0 ||
+          shardIndex >= compiledShards.length
+        ) {
+          failShardConfig(
+            `expansion ${canonicalSource} declaration ${declarationIndex} ` +
+              "has an invalid shard"
+          );
+        }
+        return shardIndex;
+      }
+    );
+    const usedShards = new Set(declarationShards);
+    if (usedShards.size !== compiledShards.length) {
+      failShardConfig(
+        `expansion ${canonicalSource} must assign at least one declaration ` +
+          "to every compiled shard"
+      );
+    }
+    return Object.freeze({
+      canonicalSource,
+      compiledShards: Object.freeze(compiledShards),
+      declarationShards: Object.freeze(declarationShards)
+    });
+  });
+  return Object.freeze({ expansions: Object.freeze(expansions) });
+}
+
+const testFileShardConfig = validateTestFileShardConfig(JSON.parse(
+  fs.readFileSync(testFileShardConfigPath, "utf8")
+));
+const testFileShardExpansions = new Map(
+  testFileShardConfig.expansions.map((expansion) => [
+    expansion.canonicalSource,
+    expansion.compiledShards
+  ])
+);
+
+export function validateTestFileShardTierOwnership(config, tiers) {
+  const integration = new Set(tiers.integration);
+  const nonIntegrationShardSources = config.expansions
+    .map((expansion) => expansion.canonicalSource)
+    .filter((sourcePath) => !integration.has(sourcePath));
+  if (nonIntegrationShardSources.length > 0) {
+    throw new Error(
+      "test file shard canonical sources must be exact integration-tier " +
+        `manifest entries: ${nonIntegrationShardSources.join(", ")}`
+    );
+  }
+}
 
 function walkTestSources(directory) {
   return fs.readdirSync(directory, { withFileTypes: true })
@@ -41,6 +196,7 @@ export function loadAndValidateTestTiers() {
       missing.length > 0 ? `manifest entries missing from disk: ${missing.join(", ")}` : ""
     ].filter(Boolean).join("; "));
   }
+  validateTestFileShardTierOwnership(testFileShardConfig, { integration });
 
   return { fast, integration, full: classified };
 }
@@ -69,16 +225,23 @@ export function compiledTestFilesForTier(tier, requestedSourcePaths = []) {
   const selected = requestedSourcePaths.length > 0
     ? requestedSourcePaths
     : tiers[tier];
-  return selected.map((sourcePath) => {
-    const compiledPath = path.join(
-      repoRoot,
-      "dist",
-      sourcePath.replace(/^test\//u, "test/").replace(/\.ts$/u, ".js")
-    );
-    if (!fs.existsSync(compiledPath)) {
-      throw new Error(`compiled test is missing: ${path.relative(repoRoot, compiledPath)}`);
-    }
-    return compiledPath;
+  return selected.flatMap((sourcePath) => {
+    const expanded = testFileShardExpansions.get(sourcePath);
+    const compiledRelativePaths = expanded ?? [
+      path.posix.join(
+        "dist",
+        sourcePath.replace(/^test\//u, "test/").replace(/\.ts$/u, ".js")
+      )
+    ];
+    return compiledRelativePaths.map((compiledRelativePath) => {
+      const compiledPath = path.join(repoRoot, compiledRelativePath);
+      if (!fs.existsSync(compiledPath)) {
+        throw new Error(
+          `compiled test is missing: ${path.relative(repoRoot, compiledPath)}`
+        );
+      }
+      return compiledPath;
+    });
   });
 }
 

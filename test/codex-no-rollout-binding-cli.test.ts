@@ -1,10 +1,11 @@
-import test from "node:test";
+import nodeTest, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import {
   executeCliCommand,
   parseCliCommand,
@@ -89,11 +90,113 @@ const EXTERNAL_THREAD_ID = "22222222-2222-4222-8222-222222222222";
 const SECOND_EXTERNAL_THREAD_ID = "33333333-3333-4333-8333-333333333333";
 const FIRST_NATIVE_TURN_ID = "44444444-4444-4444-8444-444444444444";
 const FIXTURE_TMUX_PANE_ID = "%42";
+const SIMULATED_DEAD_CLI_PID = 2_147_483_647;
+
+interface CodexNoRolloutShardExpansion {
+  canonical_source: string;
+  compiled_shards: string[];
+  declaration_shards: number[];
+}
+
+interface TestFileShardConfig {
+  schema: string;
+  version: number;
+  expansions: CodexNoRolloutShardExpansion[];
+}
+
+const shardConfig = JSON.parse(fs.readFileSync(
+  new URL("../../config/test-file-shards.json", import.meta.url),
+  "utf8"
+)) as TestFileShardConfig;
+if (
+  shardConfig.schema !== "agent-knock-knock/test-file-shards" ||
+  shardConfig.version !== 1 ||
+  !Array.isArray(shardConfig.expansions)
+) {
+  throw new Error("Codex no-rollout test shard config is malformed");
+}
+const shardExpansion = shardConfig.expansions.find((candidate) =>
+  candidate.canonical_source ===
+    "test/codex-no-rollout-binding-cli.test.ts"
+);
+if (
+  !shardExpansion ||
+  !Array.isArray(shardExpansion.compiled_shards) ||
+  shardExpansion.compiled_shards.length < 5 ||
+  !Array.isArray(shardExpansion.declaration_shards)
+) {
+  throw new Error("Codex no-rollout canonical test shard expansion is missing");
+}
+const activeShardExpansion: CodexNoRolloutShardExpansion = shardExpansion;
+const shardParameters = new URL(import.meta.url).searchParams;
+const shardQueryValues = shardParameters.getAll("akk-shard");
+if (
+  shardQueryValues.length > 1 ||
+  [...shardParameters.keys()].some((key) => key !== "akk-shard")
+) {
+  throw new Error("Codex no-rollout test shard query is malformed");
+}
+const shardQuery = shardQueryValues[0] ?? null;
+if (shardQuery !== null && !/^(?:0|[1-9][0-9]*)$/u.test(shardQuery)) {
+  throw new Error(`invalid Codex no-rollout test shard ${shardQuery}`);
+}
+const selectedShard = shardQuery === null ? undefined : Number(shardQuery);
+if (
+  selectedShard !== undefined &&
+  (
+    !Number.isSafeInteger(selectedShard) ||
+    selectedShard < 0 ||
+    selectedShard >= activeShardExpansion.compiled_shards.length
+  )
+) {
+  throw new Error(`invalid Codex no-rollout test shard ${shardQuery}`);
+}
+const shardWorkerEntry = process.argv[1]
+  ? path.relative(
+      fileURLToPath(new URL("../../", import.meta.url)),
+      path.resolve(process.argv[1])
+    ).split(path.sep).join("/")
+  : undefined;
+const workerEntryShard = shardWorkerEntry === undefined
+  ? -1
+  : activeShardExpansion.compiled_shards.indexOf(shardWorkerEntry);
+if (
+  (selectedShard === undefined && workerEntryShard !== -1) ||
+  (selectedShard !== undefined && workerEntryShard !== selectedShard)
+) {
+  throw new Error(
+    `Codex no-rollout shard query ${String(selectedShard)} does not match ` +
+      `worker entry ${String(shardWorkerEntry)}`
+  );
+}
+let declaredTestCount = 0;
+
+function test(
+  name: string,
+  body: (context: TestContext) => void | Promise<void>
+): void {
+  const declarationIndex = declaredTestCount;
+  declaredTestCount += 1;
+  const assignedShard =
+    activeShardExpansion.declaration_shards[declarationIndex];
+  if (
+    !Number.isSafeInteger(assignedShard) ||
+    assignedShard < 0 ||
+    assignedShard >= activeShardExpansion.compiled_shards.length
+  ) {
+    throw new Error(
+      `Codex no-rollout test declaration ${declarationIndex} has no valid shard`
+    );
+  }
+  if (selectedShard === undefined || assignedShard === selectedShard) {
+    void nodeTest(name, body);
+  }
+}
 
 test("virgin raw Codex attach atomically refines the Session and Turn binding after send", async () => {
   const fixture = createNoRolloutFixture();
   try {
-    const sent = runCliSubprocess([
+    const sent = await runCli([
       "send",
       "--conversation",
       fixture.terminalId,
@@ -273,7 +376,7 @@ test("virgin Codex binding recovery closes both post-Enter crash windows without
       [crashPoint.env]: "1"
     };
     try {
-      const crashed = runCliSubprocess([
+      const crashed = await runCliCrashCheckpoint([
         "send",
         "--conversation",
         fixture.terminalId,
@@ -392,7 +495,7 @@ test("monitor binds a virgin Codex before accepting evidence that lands between 
   const fixture = createNoRolloutFixture({ rolloutInitiallyAbsent: true });
   const request = "Recover an acceptance record that lands between probes.";
   try {
-    const crashed = runCliSubprocess([
+    const crashed = await runCliCrashCheckpoint([
       "send",
       "--conversation",
       fixture.terminalId,
@@ -758,8 +861,7 @@ test("native New and Resume remain reachable after draft-blocked virgin attaches
     });
     const action = terminal.available_actions.new_thread;
     assert.ok(action, JSON.stringify(terminal.available_actions));
-    // One real process-exit golden proves crash-after-prepared remains fatal.
-    const prepared = runCliSubprocess([
+    const prepared = await runCliCrashCheckpoint([
       "new-thread",
       "--terminal",
       newFixture.terminalId,
@@ -1582,8 +1684,10 @@ for (const [label, acceptedNativeThreadId] of [
  *
  * - The four legacy cases below still execute the production reservation,
  *   Store, dispatch-ledger, cleanup, token-refresh, and later-send paths.
- * - Every crash point remains an executable process boundary so exit 86
- *   terminates before ordinary exception compensation can run.
+ * - Every crash point preserves the exact durable image at exit 86 before
+ *   ordinary exception compensation can run. The source-Session reservation
+ *   case remains the authoritative real-process boundary; the other three use
+ *   the fixture-scoped hard-exit checkpoint described below.
  * - Recovery, retry, close, and later-send steps use the injected command
  *   boundary. All state, ledger, zero-input, single-input, and historical-
  *   liveness assertions stay shared.
@@ -1636,7 +1740,10 @@ for (const crashCase of [
           AKK_SUBPROCESS_EVIDENCE_TEST_NAME: t.name,
           [crashCase.hook]: "1"
         };
-        const crashed = runCliSubprocess(args, crashEnvironment);
+        const crashed = crashCase.testName ===
+          "zero-input deferred source Session reservation before its transfer receipt recovery aborts safely before one refreshed retry"
+          ? runCliSubprocess(args, crashEnvironment)
+          : await runCliCrashCheckpoint(args, crashEnvironment);
         assert.equal(crashed.status, 86, crashed.stderr || crashed.stdout);
 
         const transfer = soleDeferredForegroundTransfer(fixture);
@@ -1785,10 +1892,10 @@ for (const crashCase of [
   );
 }
 
-// These two adjacent historical-ledger variants retain the executable crash
-// boundary and use the in-process invariant boundary for recovery and retry.
-// They uniquely prove that zero-input abort and refreshed retry never mutate
-// an exact resolved predecessor ledger.
+// These two adjacent historical-ledger variants retain the exact durable
+// hard-crash checkpoint and use the imported invariant boundary for recovery
+// and retry. They uniquely prove that zero-input abort and refreshed retry
+// never mutate an exact resolved predecessor ledger.
 for (const crashCase of [
   {
     label: "source Session reservation before receipt",
@@ -1811,7 +1918,7 @@ for (const crashCase of [
       const message = `Send after resolved history and ${crashCase.label}.`;
       try {
         const { source, historicalTurnId } =
-          seedResolvedHistoricalDispatchAndStatusCard(fixture);
+          await seedResolvedHistoricalDispatchAndStatusCard(fixture);
         const historicalLedger = readSoleTerminalDispatchLedger(fixture);
         assert.equal(historicalLedger.status, "resolved");
         assert.ok(historicalLedger.resolved_at);
@@ -1824,7 +1931,7 @@ for (const crashCase of [
 
         const action = await deferredForegroundSendAction(fixture);
         const args = deferredForegroundSendArgs(fixture, action, message);
-        const crashed = runCliSubprocess(args, {
+        const crashed = await runCliCrashCheckpoint(args, {
           ...fixture.environment,
           AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0",
           [crashCase.hook]: "1"
@@ -1929,12 +2036,12 @@ for (const historyCase of [
       const message = `Recover abort receipts after ${historyCase.label}.`;
       try {
         const source = historyCase.seedResolvedHistory
-          ? seedResolvedHistoricalDispatchAndStatusCard(fixture).source
+          ? (await seedResolvedHistoricalDispatchAndStatusCard(fixture)).source
           : persistStatusCardSession(fixture, LIVE_PROCESS_BIRTH);
         const callsBeforeCrash = taskInputCalls(fixture);
         const action = await deferredForegroundSendAction(fixture);
         const args = deferredForegroundSendArgs(fixture, action, message);
-        const crashed = runCliSubprocess(args, {
+        const crashed = await runCliCrashCheckpoint(args, {
           ...fixture.environment,
           AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0",
           AKK_TEST_TERMINAL_SETUP_FAILURE: "1",
@@ -2107,7 +2214,7 @@ test("a missing deferred Turn survives a second crash after its exact ledger abo
     const source = persistStatusCardSession(fixture, LIVE_PROCESS_BIRTH);
     const action = await deferredForegroundSendAction(fixture);
     const args = deferredForegroundSendArgs(fixture, action, message);
-    const afterTargetPrepared = runCliSubprocess(args, {
+    const afterTargetPrepared = await runCliCrashCheckpoint(args, {
       ...fixture.environment,
       AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0",
       AKK_TEST_EXIT_AFTER_DEFERRED_TARGET_PREPARED: "1"
@@ -2130,7 +2237,7 @@ test("a missing deferred Turn survives a second crash after its exact ledger abo
     assert.deepEqual(taskInputCalls(fixture), []);
     assert.deepEqual(listConversations(fixture.storeDir), []);
 
-    const afterLedgerAbort = runCliSubprocess(args, {
+    const afterLedgerAbort = await runCliCrashCheckpoint(args, {
       ...fixture.environment,
       AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0",
       AKK_TEST_EXIT_AFTER_DEFERRED_LEDGER_ABORT_WITHOUT_STATE: "1"
@@ -2269,7 +2376,7 @@ for (const crashPoint of [
         const originalBinding = source.binding;
         const action = await deferredForegroundSendAction(fixture);
         const args = deferredForegroundSendArgs(fixture, action, message);
-        const crashed = runCliSubprocess(args, {
+        const crashed = await runCliCrashCheckpoint(args, {
           ...fixture.environment,
           AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0",
           [crashPoint]: "1"
@@ -2330,7 +2437,7 @@ for (const crashPoint of [
         const originalBinding = source.binding;
         const action = await deferredForegroundSendAction(fixture);
         const args = deferredForegroundSendArgs(fixture, action, message);
-        const crashed = runCliSubprocess(args, {
+        const crashed = await runCliCrashCheckpoint(args, {
           ...fixture.environment,
           AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0",
           [crashPoint]: "1"
@@ -2369,7 +2476,7 @@ test("committed acceptance backfill survives a second recovery crash without rep
     const originalBinding = source.binding;
     const action = await deferredForegroundSendAction(fixture);
     const args = deferredForegroundSendArgs(fixture, action, message);
-    const afterCommit = runCliSubprocess(args, {
+    const afterCommit = await runCliCrashCheckpoint(args, {
       ...fixture.environment,
       AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0",
       AKK_TEST_EXIT_AFTER_DEFERRED_COMMITTED: "1"
@@ -2379,7 +2486,7 @@ test("committed acceptance backfill survives a second recovery crash without rep
     assert.equal(transfer.status, "committed");
     assertSingleTaskInput(fixture, message);
 
-    const afterAcceptanceBackfill = runCliSubprocess(args, {
+    const afterAcceptanceBackfill = await runCliCrashCheckpoint(args, {
       ...fixture.environment,
       AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0",
       AKK_TEST_EXIT_AFTER_DEFERRED_COMMITTED_ACCEPTANCE_BACKFILL: "1"
@@ -2467,7 +2574,7 @@ test("managed approve and cancel cannot bypass committed deferred recovery", asy
     persistStatusCardSession(fixture, LIVE_PROCESS_BIRTH);
     const action = await deferredForegroundSendAction(fixture);
     const args = deferredForegroundSendArgs(fixture, action, message);
-    const committedCrash = runCliSubprocess(
+    const committedCrash = await runCliCrashCheckpoint(
       args,
       {
         ...fixture.environment,
@@ -2480,7 +2587,7 @@ test("managed approve and cancel cannot bypass committed deferred recovery", asy
       86,
       committedCrash.stderr || committedCrash.stdout
     );
-    const targetBoundCrash = runCliSubprocess(
+    const targetBoundCrash = await runCliCrashCheckpoint(
       args,
       {
         ...fixture.environment,
@@ -2737,7 +2844,7 @@ test("human-confirmed Codex approval can target a managed pane with no AKK dispa
     try {
       let session: ManagedSessionState;
       if (dispatchHistory === "resolved") {
-        session = seedResolvedHistoricalDispatchAndStatusCard(fixture).source;
+        session = (await seedResolvedHistoricalDispatchAndStatusCard(fixture)).source;
       } else {
         session = persistStatusCardSession(fixture, LIVE_PROCESS_BIRTH);
       }
@@ -3400,7 +3507,7 @@ test("an accepted deferred Turn recovers before Session commit without replay", 
     const originalBinding = source.binding;
     const action = await deferredForegroundSendAction(fixture);
     const args = deferredForegroundSendArgs(fixture, action, message);
-    const afterEnter = runCliSubprocess(args, {
+    const afterEnter = await runCliCrashCheckpoint(args, {
       ...fixture.environment,
       AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0",
       AKK_TEST_EXIT_AFTER_VIRGIN_ENTER_DISPATCHED: "1"
@@ -3408,7 +3515,7 @@ test("an accepted deferred Turn recovers before Session commit without replay", 
     assert.equal(afterEnter.status, 86, afterEnter.stderr || afterEnter.stdout);
     assertSingleTaskInput(fixture, message);
 
-    const afterAcceptedTurn = runCliSubprocess(args, {
+    const afterAcceptedTurn = await runCliCrashCheckpoint(args, {
       ...fixture.environment,
       AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0",
       AKK_TEST_EXIT_AFTER_DEFERRED_ACCEPTED_TURN: "1"
@@ -3596,7 +3703,7 @@ test("deferred terminal tokens fail closed while an unmanaged no-token send stil
   const unmanaged = createNoRolloutFixture({ rolloutInitiallyAbsent: true });
   const message = "A normal unmanaged selector still needs no handoff token.";
   try {
-    const sent = runCliSubprocess([
+    const sent = await runCli([
       "send",
       "--conversation",
       unmanaged.terminalId,
@@ -6098,7 +6205,7 @@ test("native status inspection is snapshot-bound, settles the slash composer, an
     );
 
     fs.writeFileSync(fixture.screenPath, "Ready\n› ");
-    const inspected = runCliSubprocess(
+    const inspected = await runCli(
       nativeInspectArguments(listed.lifecycle_binding_token),
       fixture.environment
     );
@@ -6441,6 +6548,14 @@ test("native status inspection is withheld and rejects a cached action while man
     }
   }
 });
+
+if (declaredTestCount !== activeShardExpansion.declaration_shards.length) {
+  throw new Error(
+    "Codex no-rollout test shard plan covers " +
+      `${activeShardExpansion.declaration_shards.length} declarations, ` +
+      `but the canonical suite declares ${declaredTestCount}`
+  );
+}
 
 interface NoRolloutFixture {
   tempDir: string;
@@ -7117,11 +7232,11 @@ function soleTerminalDispatchLedgerPath(
   return paths[0];
 }
 
-function seedResolvedHistoricalDispatchAndStatusCard(
+async function seedResolvedHistoricalDispatchAndStatusCard(
   fixture: NoRolloutFixture
-): { source: ManagedSessionState; historicalTurnId: string } {
+): Promise<{ source: ManagedSessionState; historicalTurnId: string }> {
   const historicalMessage = "Create one exact resolved historical dispatch.";
-  const sent = runCliSubprocess([
+  const sent = await runCli([
     "send",
     "--conversation",
     fixture.terminalId,
@@ -7140,7 +7255,7 @@ function seedResolvedHistoricalDispatchAndStatusCard(
   const output = JSON.parse(sent.stdout);
   assert.equal(output.delivered, true, sent.stdout);
   const historicalTurnId = String(output.turn_id);
-  const closed = runCliSubprocess([
+  const closed = await runCli([
     "close",
     "--turn",
     historicalTurnId,
@@ -7760,9 +7875,175 @@ class InProcessCliExit extends Error {
   }
 }
 
+interface FixtureMutableCheckpoint {
+  activeNativeThreadId: string;
+  activeRolloutPath: string;
+  appendAcceptanceOnProbe?: number;
+  deferredAcceptanceRequest?: string;
+  openRootRollouts?: Array<{
+    nativeThreadId: string;
+    rolloutPath: string;
+    fd: string;
+  }>;
+  acceptanceNativeThreadIdsOnEnter?: string[];
+  clockMs: number;
+  runtimeLogCount: number;
+  ttyViewportInspectionCount: number;
+}
+
+interface CapturedInProcessExit {
+  status: number;
+  snapshotRoot: string;
+  snapshotPath: string;
+}
+
+function rewriteSnapshotLockOwners(
+  directory: string,
+  deadPid: number
+): void {
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const entryPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      rewriteSnapshotLockOwners(entryPath, deadPid);
+      continue;
+    }
+    if (!entry.isFile() || !/\.(?:lock|reclaim)$/u.test(entry.name)) {
+      continue;
+    }
+    const contents = fs.readFileSync(entryPath, "utf8").trim();
+    try {
+      const owner = JSON.parse(contents) as Record<string, unknown>;
+      if (owner.pid === process.pid) {
+        fs.writeFileSync(
+          entryPath,
+          `${JSON.stringify({ ...owner, pid: deadPid })}\n`,
+          "utf8"
+        );
+      }
+    } catch {
+      if (Number(contents) === process.pid) {
+        fs.writeFileSync(entryPath, `${deadPid}\n`, "utf8");
+      }
+    }
+  }
+}
+
+function restoreDirectorySnapshot(source: string, destination: string): void {
+  fs.mkdirSync(destination, { recursive: true });
+  const sourceEntries = new Map(
+    fs.readdirSync(source, { withFileTypes: true }).map((entry) => [
+      entry.name,
+      entry
+    ])
+  );
+  for (const destinationEntry of fs.readdirSync(destination, {
+    withFileTypes: true
+  })) {
+    if (!sourceEntries.has(destinationEntry.name)) {
+      fs.rmSync(path.join(destination, destinationEntry.name), {
+        recursive: true,
+        force: true
+      });
+    }
+  }
+  for (const [name, sourceEntry] of sourceEntries) {
+    const sourcePath = path.join(source, name);
+    const destinationPath = path.join(destination, name);
+    const destinationStat = (() => {
+      try {
+        return fs.lstatSync(destinationPath);
+      } catch {
+        return undefined;
+      }
+    })();
+    if (sourceEntry.isDirectory()) {
+      if (destinationStat && !destinationStat.isDirectory()) {
+        fs.rmSync(destinationPath, { recursive: true, force: true });
+      }
+      restoreDirectorySnapshot(sourcePath, destinationPath);
+      continue;
+    }
+    if (sourceEntry.isFile() && destinationStat?.isFile()) {
+      const sourceStat = fs.statSync(sourcePath);
+      fs.copyFileSync(sourcePath, destinationPath);
+      fs.chmodSync(destinationPath, sourceStat.mode);
+      fs.utimesSync(destinationPath, sourceStat.atime, sourceStat.mtime);
+      continue;
+    }
+    if (destinationStat) {
+      fs.rmSync(destinationPath, { recursive: true, force: true });
+    }
+    fs.cpSync(sourcePath, destinationPath, {
+      recursive: sourceEntry.isDirectory(),
+      preserveTimestamps: true
+    });
+  }
+}
+
+function fixtureMutableCheckpoint(
+  fixture: NoRolloutFixture
+): FixtureMutableCheckpoint {
+  return {
+    activeNativeThreadId: fixture.activeNativeThreadId,
+    activeRolloutPath: fixture.activeRolloutPath,
+    ...(fixture.appendAcceptanceOnProbe === undefined
+      ? {}
+      : { appendAcceptanceOnProbe: fixture.appendAcceptanceOnProbe }),
+    ...(fixture.deferredAcceptanceRequest === undefined
+      ? {}
+      : { deferredAcceptanceRequest: fixture.deferredAcceptanceRequest }),
+    ...(fixture.openRootRollouts === undefined
+      ? {}
+      : {
+          openRootRollouts: fixture.openRootRollouts.map((candidate) => ({
+            ...candidate
+          }))
+        }),
+    ...(fixture.acceptanceNativeThreadIdsOnEnter === undefined
+      ? {}
+      : {
+          acceptanceNativeThreadIdsOnEnter:
+            [...fixture.acceptanceNativeThreadIdsOnEnter]
+        }),
+    clockMs: fixture.clockMs,
+    runtimeLogCount: fixture.runtimeLogs.length,
+    ttyViewportInspectionCount: fixture.ttyViewportInspectionPids.length
+  };
+}
+
+function restoreFixtureMutableCheckpoint(
+  fixture: NoRolloutFixture,
+  checkpoint: FixtureMutableCheckpoint
+): void {
+  fixture.activeNativeThreadId = checkpoint.activeNativeThreadId;
+  fixture.activeRolloutPath = checkpoint.activeRolloutPath;
+  if (checkpoint.appendAcceptanceOnProbe === undefined) {
+    delete fixture.appendAcceptanceOnProbe;
+  } else {
+    fixture.appendAcceptanceOnProbe = checkpoint.appendAcceptanceOnProbe;
+  }
+  if (checkpoint.deferredAcceptanceRequest === undefined) {
+    delete fixture.deferredAcceptanceRequest;
+  } else {
+    fixture.deferredAcceptanceRequest = checkpoint.deferredAcceptanceRequest;
+  }
+  fixture.openRootRollouts = checkpoint.openRootRollouts?.map((candidate) => ({
+    ...candidate
+  }));
+  fixture.acceptanceNativeThreadIdsOnEnter =
+    checkpoint.acceptanceNativeThreadIdsOnEnter === undefined
+      ? undefined
+      : [...checkpoint.acceptanceNativeThreadIdsOnEnter];
+  fixture.clockMs = checkpoint.clockMs;
+  fixture.runtimeLogs.length = checkpoint.runtimeLogCount;
+  fixture.ttyViewportInspectionPids.length =
+    checkpoint.ttyViewportInspectionCount;
+}
+
 async function runCli(
   args: string[],
-  env: NodeJS.ProcessEnv
+  env: NodeJS.ProcessEnv,
+  onExit?: (status: number) => never
 ): Promise<CliTestResult> {
   const parsed = parseCliCommand(args);
   const storeDir = String(parsed.options.storeDir ?? "");
@@ -7772,7 +8053,7 @@ async function runCli(
     const result = await executeCliCommand(
       parsed.command,
       parsed.options,
-      inProcessDependencies(fixture, env)
+      inProcessDependencies(fixture, env, onExit)
     );
     return {
       status: result.exitCode,
@@ -7789,9 +8070,63 @@ async function runCli(
 }
 
 /**
- * Deliberate process-contract golden. Most semantics in this file run through
- * executeCliCommand with injected terminal/process/session seams below.
+ * Execute through the imported command and virtual clock, but freeze the exact
+ * durable checkpoint observed by cliExit before ordinary exception unwinding
+ * can compensate it. Restoring that snapshot after the command unwinds models
+ * the state a hard process exit leaves for the next recovery invocation.
  */
+async function runCliCrashCheckpoint(
+  args: string[],
+  env: NodeJS.ProcessEnv
+): Promise<CliTestResult> {
+  const parsed = parseCliCommand(args);
+  const storeDir = String(parsed.options.storeDir ?? "");
+  const fixture = inProcessFixtures.get(storeDir);
+  assert.ok(fixture, `missing in-process fixture for ${storeDir}`);
+  const mutableCheckpoint = fixtureMutableCheckpoint(fixture);
+  const previousCliPid = fixture.cliPid;
+  fixture.cliPid = SIMULATED_DEAD_CLI_PID;
+  let captured: CapturedInProcessExit | undefined;
+  try {
+    const result = await runCli(args, env, (status) => {
+      if (!captured) {
+        const snapshotRoot = fs.mkdtempSync(
+          path.join(os.tmpdir(), "akk-in-process-cli-exit-")
+        );
+        const snapshotPath = path.join(snapshotRoot, "fixture");
+        try {
+          fs.cpSync(fixture.tempDir, snapshotPath, {
+            recursive: true,
+            preserveTimestamps: true
+          });
+          rewriteSnapshotLockOwners(snapshotPath, SIMULATED_DEAD_CLI_PID);
+          captured = { status, snapshotRoot, snapshotPath };
+        } catch (error) {
+          fs.rmSync(snapshotRoot, { recursive: true, force: true });
+          throw error;
+        }
+      }
+      throw new InProcessCliExit(status);
+    });
+    if (!captured) {
+      return result;
+    }
+    restoreDirectorySnapshot(captured.snapshotPath, fixture.tempDir);
+    restoreFixtureMutableCheckpoint(fixture, mutableCheckpoint);
+    return { status: captured.status, stdout: "", stderr: "" };
+  } finally {
+    if (captured) {
+      fs.rmSync(captured.snapshotRoot, { recursive: true, force: true });
+    }
+    if (previousCliPid === undefined) {
+      delete fixture.cliPid;
+    } else {
+      fixture.cliPid = previousCliPid;
+    }
+  }
+}
+
+/** Deliberate crash/exit and detached child-lifecycle process goldens. */
 function runCliSubprocess(args: string[], env: NodeJS.ProcessEnv) {
   return spawnSync(process.execPath, [binPath, ...args], {
     encoding: "utf8",
@@ -8003,7 +8338,8 @@ function createFixtureHerdrProvider(
 
 function inProcessDependencies(
   fixture: NoRolloutFixture,
-  env: NodeJS.ProcessEnv
+  env: NodeJS.ProcessEnv,
+  onExit?: (status: number) => never
 ): CliCommandDependencies {
   // A fixture can invoke the CLI multiple times to simulate a restart. Keep its
   // virtual clock monotonic across those invocations: sleep advances virtual
@@ -8044,9 +8380,9 @@ function inProcessDependencies(
       nowMs += milliseconds;
       fixture.clockMs = nowMs;
     },
-    exit: (status) => {
+    exit: onExit ?? ((status) => {
       throw new InProcessCliExit(status);
-    },
+    }),
     runtimeLog: (level, event, fields) => {
       fixture.runtimeLogs.push({ level, event, fields });
     }

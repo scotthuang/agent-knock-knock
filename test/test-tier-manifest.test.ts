@@ -54,6 +54,71 @@ test("npm test remains full while targeted integration selection fails closed", 
     ]),
     [path.join(repoRoot, "dist", "test", "runtime-log.test.js")]
   );
+  const codexNoRolloutShards = tierUtils.compiledTestFilesForTier(
+    "integration",
+    ["test/codex-no-rollout-binding-cli.test.ts"]
+  );
+  assert.equal(codexNoRolloutShards.length, 8);
+  assert.deepEqual(
+    codexNoRolloutShards,
+    Array.from({ length: 8 }, (_, shardIndex) => path.join(
+      repoRoot,
+      "dist",
+      "test",
+      "shards",
+      `codex-no-rollout-binding-cli-${shardIndex}.shard.js`
+    ))
+  );
+  const shardConfig = JSON.parse(fs.readFileSync(
+    path.join(repoRoot, "config", "test-file-shards.json"),
+    "utf8"
+  ));
+  const validatedShardConfig =
+    tierUtils.validateTestFileShardConfig(shardConfig);
+  assert.equal(shardConfig.expansions[0].declaration_shards.length, 97);
+  assert.throws(
+    () => tierUtils.validateTestFileShardTierOwnership(
+      validatedShardConfig,
+      { integration: ["test/runtime-log.test.ts"] }
+    ),
+    /exact integration-tier manifest entries/u
+  );
+  assert.throws(
+    () => tierUtils.validateTestFileShardConfig({
+      ...shardConfig,
+      expansions: [{
+        ...shardConfig.expansions[0],
+        declaration_shards: [8]
+      }]
+    }),
+    /invalid shard/u
+  );
+  assert.throws(
+    () => tierUtils.validateTestFileShardConfig({
+      ...shardConfig,
+      expansions: [{
+        ...shardConfig.expansions[0],
+        compiled_shards: [
+          ...shardConfig.expansions[0].compiled_shards.slice(0, -1),
+          shardConfig.expansions[0].compiled_shards[0]
+        ]
+      }]
+    }),
+    /repeats a compiled shard/u
+  );
+  assert.throws(
+    () => tierUtils.validateTestFileShardConfig({
+      ...shardConfig,
+      expansions: [
+        shardConfig.expansions[0],
+        {
+          ...shardConfig.expansions[0],
+          canonical_source: "test/runtime-log.test.ts"
+        }
+      ]
+    }),
+    /reuses compiled shard/u
+  );
   assert.throws(
     () => tierUtils.compiledTestFilesForTier("integration", [
       "test/runtime-log.test.ts",
