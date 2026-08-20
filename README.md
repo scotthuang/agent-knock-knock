@@ -4,9 +4,9 @@
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.19-339933)](https://nodejs.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/scotthuang/agent-knock-knock/blob/main/LICENSE)
 
-Agent Knock Knock lets OpenClaw control local Codex and Claude Code through shared tmux or Herdr terminals, so you can take over and hand work back without losing context.
+Most agent orchestrators bring Codex or Claude Code into their own interface. AKK does the reverse: it brings OpenClaw into the live tmux or Herdr terminal where you already work. Human and agent share the same native session, so either can take over at any time without leaving the other on a forked context.
 
-**No hooks. No agent-side plugins. Just share a terminal and stay in control. No YOLO. Automate the trusted. Review the rest.**
+**Stay in the terminal. Stay in control. No hooks. No agent-side plugins. No YOLO.**
 
 ## Quick Start with ClawHub
 
