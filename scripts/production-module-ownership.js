@@ -4,12 +4,23 @@ import { fileURLToPath } from "node:url";
 import { API as TypeScriptApi } from "typescript/unstable/sync";
 import {
   SyntaxKind,
+  isBinaryExpression,
   isCallExpression,
+  isCaseClause,
+  isCatchClause,
+  isConditionalExpression,
+  isDoStatement,
   isExportDeclaration,
   isExternalModuleReference,
+  isForInStatement,
+  isForOfStatement,
+  isForStatement,
+  isFunctionLikeDeclaration,
   isImportDeclaration,
   isImportEqualsDeclaration,
-  isStringLiteralLikeNode
+  isIfStatement,
+  isStringLiteralLikeNode,
+  isWhileStatement
 } from "typescript/unstable/ast";
 
 export const PRODUCTION_OWNERSHIP_SCHEMA =
@@ -17,6 +28,10 @@ export const PRODUCTION_OWNERSHIP_SCHEMA =
 export const PRODUCTION_OWNERSHIP_VERSION = 1;
 export const DYNAMIC_IMPORT_POLICY = "literal-only-fail-closed";
 export const MAX_TARGETED_INTEGRATION_TESTS = 5;
+export const PRODUCTION_FUNCTION_HARD_MAX_LOC = 500;
+export const PRODUCTION_FUNCTION_HARD_MAX_COMPLEXITY = 50;
+export const PRODUCTION_FUNCTION_DEFAULT_MAX_LOC = 100;
+export const PRODUCTION_FUNCTION_DEFAULT_MAX_COMPLEXITY = 20;
 export const MANDATORY_FULL_PRODUCTION_PATHS = Object.freeze([
   "src/canonical-json.ts",
   "src/durable-json-file.ts",
@@ -546,6 +561,81 @@ function importCycles(graph) {
   );
 }
 
+function approximateFunctionComplexity(root, sourceFile) {
+  let complexity = 1;
+  const visit = (node) => {
+    if (node !== root && isFunctionLikeDeclaration(node)) {
+      return;
+    }
+    if (
+      isIfStatement(node) ||
+      isConditionalExpression(node) ||
+      isCatchClause(node) ||
+      isForStatement(node) ||
+      isForInStatement(node) ||
+      isForOfStatement(node) ||
+      isWhileStatement(node) ||
+      isDoStatement(node) ||
+      isCaseClause(node)
+    ) {
+      complexity += 1;
+    }
+    if (
+      isBinaryExpression(node) &&
+      ["&&", "||", "??"].includes(node.operatorToken.getText(sourceFile))
+    ) {
+      complexity += 1;
+    }
+    node.forEachChild(visit);
+  };
+  visit(root.body);
+  return complexity;
+}
+
+function functionMetricName(node, sourceFile) {
+  const ownName = node.name?.getText?.(sourceFile);
+  if (ownName) {
+    return ownName;
+  }
+  const parentName =
+    node.parent?.name?.getText?.(sourceFile) ??
+    node.parent?.propertyName?.getText?.(sourceFile);
+  return parentName || "<anonymous>";
+}
+
+function productionFunctionMetrics(sourceFiles) {
+  const metrics = [];
+  for (const [modulePath, sourceFile] of [...sourceFiles].sort(([left], [right]) =>
+    left.localeCompare(right)
+  )) {
+    const visit = (node) => {
+      if (isFunctionLikeDeclaration(node) && node.body) {
+        const start = sourceFile.getLineAndCharacterOfPosition(
+          node.getStart(sourceFile)
+        );
+        const end = sourceFile.getLineAndCharacterOfPosition(node.end);
+        metrics.push(Object.freeze({
+          modulePath,
+          name: functionMetricName(node, sourceFile),
+          line: start.line + 1,
+          column: start.character + 1,
+          physicalLoc: end.line - start.line + 1,
+          approximateComplexity: approximateFunctionComplexity(node, sourceFile)
+        }));
+      }
+      node.forEachChild(visit);
+    };
+    sourceFile.forEachChild(visit);
+  }
+  return Object.freeze(metrics);
+}
+
+function functionMetricDescription(metric) {
+  return `${metric.modulePath}:${metric.line}:${metric.column} ` +
+    `${metric.name} spans ${metric.physicalLoc} LOC with approximate ` +
+    `complexity ${metric.approximateComplexity}`;
+}
+
 export function validateProductionArchitecture({
   ownership,
   repoRoot = defaultRepoRoot,
@@ -558,6 +648,7 @@ export function validateProductionArchitecture({
   const productionPaths = new Set(Object.keys(ownership.modules));
   const sources = new Map();
   const graph = new Map();
+  let functionMetrics = Object.freeze([]);
   for (const modulePath of [...productionPaths].sort()) {
     let source;
     try {
@@ -598,6 +689,7 @@ export function validateProductionArchitecture({
           }
           graph.set(modulePath, [...dependencies].sort());
         }
+        functionMetrics = productionFunctionMetrics(sourceFiles);
       });
     } catch (error) {
       errors.push(
@@ -664,6 +756,24 @@ export function validateProductionArchitecture({
     );
   }
 
+  const hardFunctionViolations = functionMetrics.filter((metric) =>
+    metric.physicalLoc >= PRODUCTION_FUNCTION_HARD_MAX_LOC ||
+    metric.approximateComplexity >= PRODUCTION_FUNCTION_HARD_MAX_COMPLEXITY
+  );
+  if (hardFunctionViolations.length > 0) {
+    errors.push(
+      `production function hard limits exceeded ` +
+      `(<${PRODUCTION_FUNCTION_HARD_MAX_LOC} LOC and ` +
+      `<${PRODUCTION_FUNCTION_HARD_MAX_COMPLEXITY} approximate complexity): ` +
+      hardFunctionViolations.map(functionMetricDescription).join(", ")
+    );
+  }
+  const defaultFunctionViolations = functionMetrics.filter((metric) =>
+    metric.physicalLoc >= PRODUCTION_FUNCTION_DEFAULT_MAX_LOC ||
+    metric.approximateComplexity >=
+      PRODUCTION_FUNCTION_DEFAULT_MAX_COMPLEXITY
+  );
+
   if (errors.length > 0) {
     throw new Error(`production architecture is invalid: ${errors.join("; ")}`);
   }
@@ -676,6 +786,23 @@ export function validateProductionArchitecture({
     importCycles: cycles.length,
     cliCorePhysicalLoc,
     productionPhysicalLoc,
-    cliCoreImporters: Object.freeze(actualCliCoreImporters)
+    cliCoreImporters: Object.freeze(actualCliCoreImporters),
+    productionFunctions: functionMetrics.length,
+    productionFunctionHardLimits: Object.freeze({
+      physicalLocExclusive: PRODUCTION_FUNCTION_HARD_MAX_LOC,
+      approximateComplexityExclusive:
+        PRODUCTION_FUNCTION_HARD_MAX_COMPLEXITY
+    }),
+    productionFunctionHardViolations: hardFunctionViolations.length,
+    productionFunctionDefaultLimits: Object.freeze({
+      physicalLocExclusive: PRODUCTION_FUNCTION_DEFAULT_MAX_LOC,
+      approximateComplexityExclusive:
+        PRODUCTION_FUNCTION_DEFAULT_MAX_COMPLEXITY
+    }),
+    productionFunctionDefaultViolations: Object.freeze(
+      defaultFunctionViolations.map((metric) =>
+        functionMetricDescription(metric)
+      )
+    )
   });
 }

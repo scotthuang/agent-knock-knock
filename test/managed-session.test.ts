@@ -225,6 +225,23 @@ test("transition schema distinguishes prepared from dispatching uncertainty", ()
   };
   assert.doesNotThrow(() => assertNativeThreadTransition(prepared));
 
+  const stagedFirstError: any = {
+    ...prepared,
+    source_session_id: "session-source",
+    source_expected_revision: 0
+  };
+  Object.defineProperty(stagedFirstError, "adapter_version", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      throw new Error("later receipt getter must not run");
+    }
+  });
+  assert.throws(
+    () => assertNativeThreadTransition(stagedFirstError),
+    /source_expected_revision must be a positive safe integer/u
+  );
+
   const dispatching: NativeThreadTransition = {
     ...prepared,
     status: "dispatching",

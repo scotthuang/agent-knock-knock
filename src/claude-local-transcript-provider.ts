@@ -1234,9 +1234,48 @@ function completionFromRecords(
   };
 }
 
+interface PendingApprovalTurn {
+  promptUuid: string;
+  descendants: TranscriptRecord[];
+  lastDescendant: TranscriptRecord;
+}
+
+interface PendingApprovalToolUse {
+  id: string;
+  name: string;
+  input: Record<string, unknown>;
+  owner: TranscriptRecord;
+  ownerUuid: string;
+  ownerToolUseCount: number;
+}
+
+interface PendingApprovalToolResult {
+  parentUuid?: string;
+  sourceAssistantUuid?: string;
+}
+
 function pendingApprovalFromRecords(
   snapshot: ClaudeTranscriptTurnSnapshot
 ): ClaudeTranscriptPendingApprovalEvidence | undefined {
+  const turn = pendingApprovalTurn(snapshot);
+  if (!turn) {
+    return undefined;
+  }
+  const pending = pendingApprovalToolUse(turn.descendants);
+  if (!pending) {
+    return undefined;
+  }
+  return pendingApprovalEvidence(
+    snapshot,
+    turn.promptUuid,
+    turn.lastDescendant,
+    pending
+  );
+}
+
+function pendingApprovalTurn(
+  snapshot: ClaudeTranscriptTurnSnapshot
+): PendingApprovalTurn | undefined {
   const prompt = matchingManagedPrompt(snapshot);
   if (!prompt) {
     return undefined;
@@ -1323,21 +1362,14 @@ function pendingApprovalFromRecords(
   if (!linearChain || linearChain.length !== descendants.length) {
     return undefined;
   }
+  return { promptUuid, descendants, lastDescendant };
+}
 
-  interface ToolUseState {
-    id: string;
-    name: string;
-    input: Record<string, unknown>;
-    owner: TranscriptRecord;
-    ownerUuid: string;
-    ownerToolUseCount: number;
-  }
-  interface ToolResultState {
-    parentUuid?: string;
-    sourceAssistantUuid?: string;
-  }
-  const toolUses = new Map<string, ToolUseState>();
-  const toolResults = new Map<string, ToolResultState>();
+function pendingApprovalToolUse(
+  descendants: readonly TranscriptRecord[]
+): PendingApprovalToolUse | undefined {
+  const toolUses = new Map<string, PendingApprovalToolUse>();
+  const toolResults = new Map<string, PendingApprovalToolResult>();
   for (const record of descendants) {
     const message = isRecord(record.message) ? record.message : undefined;
     const content = Array.isArray(message?.content) ? message.content : [];
@@ -1402,8 +1434,15 @@ function pendingApprovalFromRecords(
   if (unresolved.length !== 1) {
     return undefined;
   }
+  return unresolved[0];
+}
 
-  const pending = unresolved[0];
+function pendingApprovalEvidence(
+  snapshot: ClaudeTranscriptTurnSnapshot,
+  promptUuid: string,
+  lastDescendant: TranscriptRecord,
+  pending: PendingApprovalToolUse
+): ClaudeTranscriptPendingApprovalEvidence | undefined {
   const pendingMessage = isRecord(pending.owner.message)
     ? pending.owner.message
     : undefined;
