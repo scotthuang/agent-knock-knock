@@ -34,7 +34,8 @@ import {
   claudeTerminalStaticArgs,
   claudeAgentRow,
   codexNativeIdentityArgs,
-  runAgentCliInProcess,
+  runAgentCliInProcess as runAgentCliInProcessReal,
+  runAgentCliInProcessDirect as runAgentCliInProcess,
   runAgentCliAsync,
   spawnAgentCliCaptured,
   spawnAgentCliProcess,
@@ -239,6 +240,13 @@ test("an orphaned terminal dispatch requires its exact listed generation before 
       "--disable-terminal-bridge-monitor"
     ], testEnv);
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    assert.equal(
+      readJsonLines(tmuxCallsPath).some((call) =>
+        call.kind === "direct_terminal_provider"
+      ),
+      true,
+      "the sequential recovery witness must use the direct terminal port"
+    );
     const sentParsed = JSON.parse(sent.stdout);
     const messageId = sentParsed.message.id;
     const statePath = sentParsed.conversation.state_path;
@@ -862,7 +870,7 @@ test("an active dispatch blocks a replacement before tmux input", async () => {
     const listPanesOutput = `${tmuxSession}\t0\t1\t33389\tnode\t${workspace}\n`;
     writeFakeTmux(fakeBinDir, tmuxCallsPath, screenPath, listPanesOutput);
 
-    const sendTask = (message: string) => runAgentCliInProcess([
+    const sendTask = (message: string) => runAgentCliInProcessReal([
       "send",
       "--conversation",
       rawConversationId,

@@ -38,7 +38,7 @@ import {
   claudeTerminalStaticArgs,
   claudeAgentRow,
   codexNativeIdentityArgs,
-  runAgentCliInProcess,
+  runAgentCliInProcessDirect as runAgentCliInProcess,
   runAgentCliAsync,
   spawnAgentCliCaptured,
   spawnAgentCliProcess,
@@ -271,6 +271,13 @@ test("CLI accepts a visually wrapped Codex multiline composer with exactly one E
     });
 
     assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.equal(
+      readJsonLines(tmuxCallsPath).some((call) =>
+        call.kind === "direct_terminal_provider"
+      ),
+      true,
+      "the wrapped-composer witness must use the direct terminal port"
+    );
     const parsed = JSON.parse(result.stdout);
     assert.equal(parsed.delivered, true);
     assert.equal(parsed.delivery_receipt, "agent_accepted");

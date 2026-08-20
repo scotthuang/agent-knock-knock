@@ -2647,6 +2647,87 @@ contains no send, lifecycle, monitor, or callback state-machine definition; it
 retains only stable parsing/execution, command routing, composition wiring,
 shared lock scopes, and CLI parser/presentation compatibility.
 
+## Integration virtual-clock profile remediation
+
+The final profile remediation changes test timing only. Production timeout,
+polling, retry, lock, and composer windows are unchanged. The ordinary
+`runAgentCliInProcess` fixture also remains real-time by default. Selected
+sequential scenarios opt in to `runAgentCliInProcessVirtual`, whose wall and
+monotonic clocks are scoped by an explicit Store, state path, or
+`AKK_RUNTIME_DIR`. Async sleeps advance that clock and yield one `setImmediate`
+turn; sync sleeps only advance it. The fixture records both kinds of request,
+reuses one monotonic clock across calls in the same fixture, and fails fast if
+two commands try to share that clock concurrently.
+
+The highest-volume sequential Codex cases may opt in one step further through
+`runAgentCliInProcessDirect`. That helper still runs the production CLI parser,
+composition, terminal adapters, identity fences, dispatch ledger, and receipt
+state machines. It replaces only the executable fake `tmux`/`ps`/`lsof` ports
+with the existing `MutableRecordingTerminalProvider` and
+`StaticTerminalProcessSource`. `writeFakeTmux` and `writeFakeProcessTools`
+register fixture-scoped panes, screens, and process snapshots; screen capture
+remains live across calls, and direct text/key operations are projected into
+the existing exact input ledger with a `direct_terminal_provider` marker.
+Explicit JSON terminal fixtures retain their own static adapters. The direct
+helper fails before command execution when it sees a capture/send/list gate,
+delay, transport failure, uncertain SIGKILL outcome, or overlapping command.
+It is additionally restricted to a non-empty Codex process fixture. Monitor,
+Claude, empty-process, process-death, and executable-observation scenarios may
+use virtual time where listed below, but never the direct provider seam.
+
+The timing boundary is intentionally narrower than the test boundary:
+
+| Virtual-time scenarios | Real-time boundary retained |
+| --- | --- |
+| Session follow-current/response generations and synthetic acceptance outcomes | v0.8.1 compatibility, Claude observation failure, the real native-binding window, and late-ACK child processes |
+| Sequential dispatch recovery and receipt-fence state machines, using direct terminal/process ports where the executable shim is not the contract | the public active-managed dispatch witness, uncertain transport/SIGKILL recovery, and both concurrent-send witnesses |
+| Wrapped-composer, prepared/orphan receipt, stable replay, and delegate replay semantics | the multilingual composer adapter witness and both gated raw-send process witnesses |
+| Same-cwd/low-confidence monitor decisions, working hard-timeout policy, and sequential renew semantics | one complete Gateway callback path and the gated renew-versus-close race |
+| Fake-process Claude death/transcript reconciliation | monitor singleton, live/dead PID and SIGKILL recovery, supervised/crash recovery, and transcript-monitor restart processes |
+| Idle-gate matrix except injected capture failure, and managed background-conversation projection | capture failure, stale-PID, partial-`lsof`, raw approval, and direct cancel adapter witnesses |
+
+No test name or pre-existing assertion is removed. Receipt bytes, whitespace,
+error priority, no-second-Enter, no-terminal-input, and Store-authority
+assertions remain in their original integration tests. The existing
+`terminal-dispatch-ledger` public-contract mapping continues to pair those
+retained receipt/recovery boundaries with the direct dispatch application,
+ledger codec, receipt, and terminal-acceptance witnesses; no manifest path or
+tier changes merely to claim a timing improvement.
+
+Measure the focused worker cost from a clean exact commit with the repository
+profile reporter. Run the identical command for the parent and candidate, on
+the same host, Node version, compile-cache state, and concurrency:
+
+```sh
+test -z "$(git status --porcelain)"
+npm run build
+test -z "$(git status --porcelain)"
+AKK_PROFILE_CACHE="$(mktemp -d /tmp/akk-126-integration-cache.XXXXXX)"
+AKK_PROFILE_OUTPUT="/tmp/akk-126-integration-$(git rev-parse HEAD).json"
+AKK_TEST_CONCURRENCY=4 \
+NODE_COMPILE_CACHE="$AKK_PROFILE_CACHE" \
+AKK_TEST_REPORTER="$PWD/scripts/test-profile-reporter.js" \
+AKK_TEST_PROFILE_TIER=integration \
+AKK_TEST_PROFILE_COMMIT="$(git rev-parse HEAD)" \
+AKK_TEST_PROFILE_DIRTY=0 \
+AKK_TEST_PROFILE_OUTPUT="$AKK_PROFILE_OUTPUT" \
+node scripts/run-test-tier.js integration \
+  test/shards/agent-cli-session-acceptance.test.ts \
+  test/shards/agent-cli-dispatch-recovery.test.ts \
+  test/shards/agent-cli-dispatch-authority.test.ts \
+  test/shards/agent-cli-composer-replay.test.ts \
+  test/shards/agent-cli-monitor-recovery.test.ts \
+  test/shards/agent-cli-monitor-lifecycle.test.ts \
+  test/shards/agent-cli-terminal-send-gates.test.ts \
+  test/shards/agent-cli-receipt-fences.test.ts
+```
+
+Compare the sum of `files[].duration_ms`, not nested test durations, and reject
+dirty, failed, wrong-SHA, wrong-Node, or wrong-concurrency reports. This section
+does not claim the final performance gate: exact merged-head before/after
+worker time and the repeated fast/full reports belong in the separate final
+evidence update after all remediation branches are stacked.
+
 ## Soft freeze while #126 is active
 
 Until the orchestration milestones finish:
