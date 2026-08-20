@@ -250,14 +250,13 @@ function facade(input: {
       assertNativeThreadStoreAuthority: unexpected,
       orphanedForRecovery: () => undefined
     },
-    terminalList: { isBlockingStatus: () => false },
     output: {
       cwd: () => "/workspace/project",
       print: input.print ?? (() => undefined)
     }
   };
   assert.deepEqual(Object.keys(ports), [
-    "runtime", "identity", "state", "terminalList", "output"
+    "runtime", "identity", "state", "output"
   ]);
   return createNativeThreadLifecycleCliAdapter(ports);
 }

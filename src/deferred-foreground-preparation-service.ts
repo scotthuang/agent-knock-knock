@@ -12,6 +12,8 @@ import {
   type DeferredForegroundTransferSourceRolloutAuthority,
   type DeferredForegroundTransferSourceTurnAuthority
 } from "./deferred-foreground-transfer.js";
+import { isFinalDeferredForegroundTransferStatus } from
+  "./deferred-foreground-transfer-policy.js";
 import {
   managedSessionBindingToken,
   managedSessionRevision,
@@ -323,7 +325,7 @@ function assertNoExistingTransfer(
   ports: DeferredForegroundPreparationPorts
 ): void {
   const existing = request.scope.listTransfers().find((candidate) =>
-    !["resolved", "abort_resolved"].includes(candidate.status) &&
+    !isFinalDeferredForegroundTransferStatus(candidate.status) &&
     (
       candidate.source_session_id === source.session_id ||
       ports.authority.transferMatchesTerminal(candidate)

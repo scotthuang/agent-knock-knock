@@ -119,8 +119,12 @@ import {
   type CanonicalMutationScopes,
   withCanonicalMutationLocks
 } from "./mutation-transaction.js";
-import type { Conversation, ConversationStatus } from "./protocol.js";
-import { turnIdForConversation } from "./protocol.js";
+import {
+  isSessionSendBlockingStatus,
+  isTerminalDispatchOwnerReleasedStatus,
+  turnIdForConversation,
+  type Conversation
+} from "./protocol.js";
 import { nonBlankString as stringValue } from "./value-guards.js";
 
 export type NativeThreadTransitionCliOptions =
@@ -192,7 +196,7 @@ export interface NativeThreadTransitionStatePorts {
     terminalControl: TerminalControlRef): boolean;
   lifecycleLedger: NativeThreadLifecycleLedgerCliAdapter;
   ordinaryOwnerStatus(ledger: TerminalDispatchLedgerDocument):
-    ConversationStatus | undefined;
+    Conversation["status"] | undefined;
   blockingTurns(storeDir: string, terminalControl: TerminalControlRef):
     readonly Conversation[];
   managedTurns(storeDir: string, sessionId: string): readonly Conversation[];
@@ -336,13 +340,6 @@ function createNativeThreadTransitionBindings(
     const status = ports.state.ordinaryOwnerStatus(ledger);
     return status ? { status } : undefined;
   };
-  const TERMINAL_DISPATCH_RELEASE_STATUSES =
-    new Set<ConversationStatus>(["idle", "failed", "closed", "cancelled"]);
-  const SESSION_SEND_BLOCKING_STATUSES =
-    new Set<ConversationStatus>([
-      "created", "running", "waiting_for_agent", "waiting_for_openclaw",
-      "stalled", "callback_pending", "callback_failed", "cancelling"
-    ]);
   const terminalListCliFacade = {
     terminalIncarnationBlockingTurns: ports.state.blockingTurns,
     terminalDispatchOwnership: ports.state.dispatchOwnership,
@@ -406,7 +403,6 @@ function createNativeThreadTransitionBindings(
     resolveTerminalDispatchLedgerPaneIncarnation,
     terminalDispatchRecordMatchesControl,
     saveLifecycleTerminalDispatchLedger, loadTerminalDispatchLedgerOwner,
-    TERMINAL_DISPATCH_RELEASE_STATUSES, SESSION_SEND_BLOCKING_STATUSES,
     terminalListCliFacade, managedTurnsForSession,
     terminalWriterMutationLocks, mutationManagedSessions,
     authenticateLifecycleRecoveryResources, createTerminalAgentBridge,
@@ -529,8 +525,7 @@ function createNativeThreadTransitionCommandApplication(
     loadTerminalBridgeDispatchLedger,
     reconcilePreparedTerminalDispatchLedger,
     resolveTerminalDispatchLedgerPaneIncarnation,
-    loadTerminalDispatchLedgerOwner, TERMINAL_DISPATCH_RELEASE_STATUSES,
-    SESSION_SEND_BLOCKING_STATUSES, terminalListCliFacade,
+    loadTerminalDispatchLedgerOwner, terminalListCliFacade,
     managedTurnsForSession, terminalWriterMutationLocks,
     mutationManagedSessions, createTerminalAgentBridge,
     loadClaudeAgentRows, agentVersionForRunningProcess,
@@ -603,7 +598,7 @@ function assertTerminalLifecycleReady({
   }
   if (ledger && ["submitted", "agent_accepted"].includes(String(ledger.status))) {
     const owner = loadTerminalDispatchLedgerOwner(ledger);
-    if (!owner || !TERMINAL_DISPATCH_RELEASE_STATUSES.has(owner.status)) {
+    if (!owner || !isTerminalDispatchOwnerReleasedStatus(owner.status)) {
       throw new Error(
         `terminal ${terminal.terminalControl.target} still has a submitted operation`
       );
@@ -876,7 +871,7 @@ async function runReconcileBinding(options: NativeThreadTransitionCliOptions) {
         terminalListCliFacade.managedSessionHasUnresolvedNativeTransition(storeDir, session),
       blockingTurn: (sessionId) => {
         const blocker = managedTurnsForSession(storeDir, sessionId)
-          .find((turn) => SESSION_SEND_BLOCKING_STATUSES.has(turn.status));
+          .find((turn) => isSessionSendBlockingStatus(turn.status));
         return blocker
           ? { turnId: turnIdForConversation(blocker), status: blocker.status }
           : undefined;
@@ -1516,7 +1511,7 @@ async function runNativeThreadTransition(
     assertNativeThreadHasExclusiveOwnership,
     assertCodexComposerReadyForAutomatedInput,
     cliNow, cliPid, saveLifecycleTerminalDispatchLedger,
-    managedTurnsForSession, SESSION_SEND_BLOCKING_STATUSES,
+    managedTurnsForSession,
     managedSessionOwnerIsConclusivelyInactive, printJson,
     cliEnv, cliExit, exactLifecycleProcessIdentity
   } = bindings;
@@ -1702,7 +1697,7 @@ async function runNativeThreadTransition(
           const targetBlockers = managedTurnsForSession(
             storeDir,
             eligibleCandidate.managed_session_id
-          ).filter((turn) => SESSION_SEND_BLOCKING_STATUSES.has(turn.status));
+          ).filter((turn) => isSessionSendBlockingStatus(turn.status));
           const targetDecision = decideResumeTargetSession({
             hasUnresolvedTurn: targetBlockers.length > 0,
             loadedSession: targetSession,

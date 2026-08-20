@@ -79,6 +79,78 @@ const LEGACY_CALLBACK_STATUSES = new Set<ConversationStatus>([
   "callback_failed"
 ]);
 
+const FINAL_CONVERSATION_STATUSES = new Set<string>([
+  "done",
+  "failed",
+  "closed",
+  "cancelled"
+]);
+
+const WAITING_FOR_AGENT_STATUSES = new Set<ConversationStatus>([
+  "created",
+  "running",
+  "waiting_for_agent",
+  "cancelling"
+]);
+
+const TERMINAL_BRIDGE_CALLBACK_SUPERSEDE_STATUSES = new Set<ConversationStatus>([
+  "created",
+  "running",
+  "waiting_for_agent",
+  "waiting_for_openclaw",
+  "stalled",
+  "cancelling"
+]);
+
+const TERMINAL_DISPATCH_OWNER_RELEASED_STATUSES = new Set<ConversationStatus>([
+  "idle",
+  "failed",
+  "closed",
+  "cancelled"
+]);
+
+const SESSION_SEND_BLOCKING_STATUSES = new Set<ConversationStatus>([
+  "created",
+  "running",
+  "waiting_for_agent",
+  "waiting_for_openclaw",
+  "stalled",
+  // Valid legacy records are normalized at the Store read boundary. Retaining
+  // them here makes malformed legacy records fail closed.
+  "callback_pending",
+  "callback_failed",
+  "cancelling"
+]);
+
+export function isActiveConversationStatus(status: unknown): boolean {
+  return typeof status !== "string" ||
+    !FINAL_CONVERSATION_STATUSES.has(status);
+}
+
+export function isWaitingForAgentStatus(status: unknown): boolean {
+  return typeof status === "string" &&
+    WAITING_FOR_AGENT_STATUSES.has(status as ConversationStatus);
+}
+
+export function isTerminalBridgeCallbackSupersedeStatus(
+  status: unknown
+): boolean {
+  return typeof status === "string" &&
+    TERMINAL_BRIDGE_CALLBACK_SUPERSEDE_STATUSES.has(
+      status as ConversationStatus
+    );
+}
+
+export function isTerminalDispatchOwnerReleasedStatus(status: unknown): boolean {
+  return typeof status === "string" &&
+    TERMINAL_DISPATCH_OWNER_RELEASED_STATUSES.has(status as ConversationStatus);
+}
+
+export function isSessionSendBlockingStatus(status: unknown): boolean {
+  return typeof status === "string" &&
+    SESSION_SEND_BLOCKING_STATUSES.has(status as ConversationStatus);
+}
+
 /**
  * Resolve the semantic Turn phase for both current and legacy callback state.
  * Invalid legacy records fail closed instead of guessing that a Turn is idle.

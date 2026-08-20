@@ -3,6 +3,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { isFinalDeferredForegroundTransferStatus } from
+  "./deferred-foreground-transfer-policy.js";
 import {
   normalizeLegacyCallbackStatus,
   sessionIdForConversation,
@@ -737,7 +739,7 @@ function assertConversationNotReservedByDeferredSourceHistory(
       );
     }
     if (
-      ["resolved", "abort_resolved"].includes(value.status) ||
+      isFinalDeferredForegroundTransferStatus(value.status) ||
       Number(value.version) < 2 ||
       value.source_kind !== "candidate_rollout_quiescent"
     ) {

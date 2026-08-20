@@ -32,7 +32,11 @@ import {
 } from "./native-thread-resume-snapshot.js";
 import { terminalActionFingerprint } from
   "./native-thread-resume-snapshot-policy.js";
-import { turnIdForConversation, type Conversation } from "./protocol.js";
+import {
+  isSessionSendBlockingStatus,
+  turnIdForConversation,
+  type Conversation
+} from "./protocol.js";
 import {
   listManagedSessions,
   loadNativeThreadTransition
@@ -183,9 +187,6 @@ export interface CreateNativeThreadLifecycleCliAdapterInput {
   };
   identity: NativeLifecycleIdentityPorts;
   state: NativeLifecycleStatePorts;
-  terminalList: {
-    isBlockingStatus(status: Conversation["status"]): boolean;
-  };
   output: {
     cwd(): string;
     print(value: unknown): void;
@@ -344,7 +345,7 @@ class NativeThreadLifecycleCliApplication {
       loadNativeThreadTransition: (id) => loadNativeThreadTransition(storeDir(), id),
       blockingTurns: (sessionId) => this.ports.state
         .managedTurns(storeDir(), sessionId)
-        .filter((turn) => this.ports.terminalList.isBlockingStatus(turn.status))
+        .filter((turn) => isSessionSendBlockingStatus(turn.status))
         .map((turn) => ({ turnId: turnIdForConversation(turn), status: turn.status })),
       assertStoreAuthority: (terminalControl, nativeThreadId) =>
         this.ports.state.assertNativeThreadStoreAuthority({

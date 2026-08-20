@@ -13,6 +13,8 @@ import {
   saveDeferredForegroundTransfer,
   type DeferredForegroundTransfer
 } from "../src/deferred-foreground-transfer.js";
+import { isFinalDeferredForegroundTransferStatus } from
+  "../src/deferred-foreground-transfer-policy.js";
 import {
   managedSessionBindingToken,
   terminalBindingFrom,
@@ -33,6 +35,30 @@ const T7 = "2026-08-12T02:00:07.000Z";
 const T8 = "2026-08-12T02:00:08.000Z";
 const T9 = "2026-08-12T02:00:09.000Z";
 const T10 = "2026-08-12T02:00:10.000Z";
+
+test("deferred foreground final status policy is exhaustive and fail closed", () => {
+  for (const [status, final] of [
+    ["resolved", true],
+    ["abort_resolved", true],
+    ["prepared", false],
+    ["source_reserved", false],
+    ["target_prepared", false],
+    ["dispatch_started", false],
+    ["committed", false],
+    ["aborted", false],
+    ["uncertain", false],
+    [undefined, false],
+    [null, false],
+    [42, false],
+    [{}, false]
+  ] as const) {
+    assert.equal(isFinalDeferredForegroundTransferStatus(status), final, String(status));
+  }
+  const nonCoercible = { toString(): never { throw new Error("coerced"); } };
+  assert.doesNotThrow(() =>
+    isFinalDeferredForegroundTransferStatus(nonCoercible));
+  assert.equal(isFinalDeferredForegroundTransferStatus(nonCoercible), false);
+});
 
 const terminalControl: TerminalControlRef = {
   kind: "herdr" as const,

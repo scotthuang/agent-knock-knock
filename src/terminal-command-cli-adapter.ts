@@ -33,6 +33,7 @@ import {
   createMessage,
   effectiveTurnStatus,
   executorForConversation,
+  isTerminalDispatchOwnerReleasedStatus,
   sessionIdForConversation,
   turnIdForConversation,
   type AgentMessage,
@@ -628,9 +629,6 @@ interface TerminalCommandCliRawPorts {
 
 export interface TerminalCommandCliDependencies {
   ports: TerminalCommandCliRawPorts;
-  policy: {
-    terminalDispatchReleaseStatuses: ReadonlySet<ConversationStatus>;
-  };
 }
 
 export interface TerminalCommandCliFacade {
@@ -797,11 +795,6 @@ const terminalListCliFacade = new Proxy({}, {
       property as keyof TerminalCommandCliRawPorts["terminalList"]
     ]
 }) as TerminalCommandCliRawPorts["terminalList"];
-
-const TERMINAL_DISPATCH_RELEASE_STATUSES = {
-  has: (status: ConversationStatus) =>
-    terminalCommandRuntime().policy.terminalDispatchReleaseStatuses.has(status)
-};
 
 export type { CliCommandExecutionResult };
 
@@ -1017,7 +1010,7 @@ function activeReplayOwnerMismatch(input: {
   const { owner, ledger, ledgerStoreDir, ownerStoreDir, expectation } = input;
   return Boolean(
     !owner ||
-    TERMINAL_DISPATCH_RELEASE_STATUSES.has(owner.status) ||
+    isTerminalDispatchOwnerReleasedStatus(owner.status) ||
     !ledgerStoreDir ||
     !ownerStoreDir ||
     path.resolve(ledgerStoreDir) !== path.resolve(expectation.expectedStoreDir) ||
@@ -1642,7 +1635,7 @@ function replayExactStoredTerminalSubmission({
     stringValue(currentSubmission?.message_id) === messageId;
   if (
     isCurrentSubmission &&
-    !TERMINAL_DISPATCH_RELEASE_STATUSES.has(owner.status)
+    !isTerminalDispatchOwnerReleasedStatus(owner.status)
   ) {
     return false;
   }
@@ -1754,7 +1747,7 @@ function assertNoUnresolvedTerminalBridgeSubmission(
     if (
       candidate.conversation_id === currentConversationId ||
       !submission ||
-      TERMINAL_DISPATCH_RELEASE_STATUSES.has(
+      isTerminalDispatchOwnerReleasedStatus(
         effectiveTurnStatus(candidate)
       ) ||
       ![

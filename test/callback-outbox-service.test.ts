@@ -82,16 +82,6 @@ function createHarness(events: Array<Record<string, unknown>> = []) {
       assertBindingCurrent() {
         order.push("assert:binding");
       },
-      isDispatchReleased() {
-        order.push("observe:released");
-        return false;
-      },
-      isWaitingForAgent(status) {
-        return status === "waiting_for_agent";
-      },
-      isTerminalBridgeSupersedeStatus() {
-        return false;
-      },
       resolveCompletionDispatch() {
         order.push("resolve:completion-dispatch");
         return true;
@@ -173,7 +163,6 @@ test("fresh callback preparation preserves watchdog, event, state, and log order
     "assert:no-deferred",
     "read-events",
     "assert:binding",
-    "observe:released",
     "start:retry-monitor",
     "append:message",
     "append:callback_delivery_pending",
@@ -211,10 +200,65 @@ test("duplicate callback logs without mutating its durable outbox", () => {
     "assert:no-deferred",
     "read-events",
     "assert:binding",
-    "observe:released",
     "log:callback_duplicate"
   ]);
   assert.strictEqual(harness.stored(), harness.conversation);
+});
+
+test("released callback rejection follows binding and short-circuits persistence", () => {
+  const harness = createHarness();
+  (harness.conversation as Conversation).status = "idle";
+  assert.throws(() => harness.service.prepare({
+    options: {
+      statePath: STATE_PATH,
+      messageJson: JSON.stringify(callbackMessage(harness.conversation)),
+      preserveMessageId: true
+    },
+    logPath: LOG_PATH
+  }), /refusing late callback .* for released Turn .* \(idle\)/u);
+  assert.deepEqual(harness.order, [
+    "load",
+    "derive:store-dir",
+    "assert:no-deferred",
+    "read-events",
+    "assert:binding"
+  ]);
+});
+
+test("supersede recovery admits only the dedicated callback status policy", () => {
+  const run = (status: Conversation["status"]) => {
+    const harness = createHarness();
+    (harness.conversation as Conversation).status = status;
+    (harness.conversation as Conversation).native_session_takeover = {
+      terminal_bridge_message_id: "terminal-message-a"
+    };
+    const result = harness.service.prepareTerminalCompletion({
+      options: { statePath: STATE_PATH },
+      statePath: STATE_PATH,
+      logPath: LOG_PATH,
+      conversationId: harness.conversation.conversation_id,
+      actor: "codex",
+      terminalControl: TERMINAL_CONTROL,
+      terminalMessageId: "terminal-message-a",
+      allowSupersedeRecovery: true,
+      completion: {
+        source: "screen",
+        text: "Finished.",
+        timestamp: NOW.toISOString()
+      }
+    });
+    return { harness, result };
+  };
+
+  const superseded = run("waiting_for_openclaw");
+  assert.equal(superseded.result.claimed, true);
+  const legacyCallback = run("callback_pending");
+  assert.deepEqual(legacyCallback.result, {
+    claimed: false,
+    conversation: legacyCallback.harness.conversation,
+    reason: "conversation_no_longer_waiting"
+  });
+  assert.deepEqual(legacyCallback.harness.order, ["acquire", "load", "release"]);
 });
 
 test("callback preparation validates its message before state path derivation", () => {
@@ -321,7 +365,6 @@ test("terminal completion holds the state claim through outbox preparation", () 
     "assert:no-deferred",
     "read-events",
     "assert:binding",
-    "observe:released",
     "append:message",
     "save",
     "log:callback_received",
@@ -400,7 +443,6 @@ test("approval preparation reuses its persisted callback identity", () => {
     "assert:no-deferred",
     "read-events",
     "assert:binding",
-    "observe:released",
     "start:retry-monitor",
     "append:message",
     "append:callback_delivery_pending",

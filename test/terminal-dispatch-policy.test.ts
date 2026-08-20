@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import {
   decideTerminalDispatchPreflight,
   decideTerminalDispatchReplayAcceptance,
+  isActiveTerminalDispatchStatus,
+  isRecoverableTerminalDispatchStatus,
   terminalDispatchPreflightRequiresOwner,
   type TerminalDispatchLedgerFacts,
   type TerminalDispatchOwnerFacts
@@ -26,6 +28,39 @@ const activeOwner = (
   continuingSameTurn: false,
   exactReplay: false,
   ...overrides
+});
+
+test("dispatch status policies preserve active and recoverable boundaries", () => {
+  const cases: Array<[unknown, boolean, boolean]> = [
+    ["prepared", true, true],
+    ["text_injected", true, true],
+    ["enter_dispatched", true, true],
+    ["agent_accepted", true, true],
+    ["dispatching", true, true],
+    ["submitted", true, true],
+    ["not_accepted", true, true],
+    ["uncertain", true, true],
+    ["verified", false, true],
+    ["resolved", false, false],
+    ["aborted", false, false],
+    [undefined, false, false],
+    [null, false, false],
+    [42, false, false],
+    [{}, false, false]
+  ];
+  for (const [status, active, recoverable] of cases) {
+    assert.equal(isActiveTerminalDispatchStatus(status), active, String(status));
+    assert.equal(
+      isRecoverableTerminalDispatchStatus(status),
+      recoverable,
+      String(status)
+    );
+  }
+  const nonCoercible = { toString(): never { throw new Error("coerced"); } };
+  assert.doesNotThrow(() => isActiveTerminalDispatchStatus(nonCoercible));
+  assert.doesNotThrow(() => isRecoverableTerminalDispatchStatus(nonCoercible));
+  assert.equal(isActiveTerminalDispatchStatus(nonCoercible), false);
+  assert.equal(isRecoverableTerminalDispatchStatus(nonCoercible), false);
 });
 
 test("owner reads remain lazy behind lifecycle and receipt-status precedence", () => {

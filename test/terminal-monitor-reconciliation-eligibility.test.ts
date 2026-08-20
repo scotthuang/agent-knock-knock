@@ -291,6 +291,44 @@ function decide(
   return { result: step.value, trace };
 }
 
+test("startup monitor reuses the shared waiting status policy before observations", () => {
+  const cases: Array<[Conversation["status"], boolean]> = [
+    ["created", true],
+    ["running", true],
+    ["waiting_for_agent", true],
+    ["cancelling", true],
+    ["waiting_for_openclaw", false],
+    ["idle", false],
+    ["stalled", false],
+    ["callback_pending", false],
+    ["callback_failed", false],
+    ["failed", false],
+    ["closed", false],
+    ["cancelled", false]
+  ];
+
+  for (const [status, waiting] of cases) {
+    const candidate = fixture({
+      status,
+      takeover: { terminal_bridge_message_id: undefined }
+    });
+    const actual = decide(candidate, waiting ? ["control"] : []);
+    assert.deepEqual(actual.result, waiting
+      ? { eligible: false, reason: "terminal_bridge_identity_missing" }
+      : { eligible: false, reason: `conversation_status_${status}` }, status);
+    assert.deepEqual(actual.trace, waiting ? ["control"] : [], status);
+    assert.deepEqual(candidate.reads, {
+      control: waiting ? 1 : 0,
+      dispatch: 0,
+      store: 0,
+      submission: 0,
+      runtime: 0,
+      deferred: 0,
+      deadline: 0
+    }, status);
+  }
+});
+
 test("startup monitor eligibility preserves candidate priority and lazy short circuits", () => {
   const cases: Array<{
     name: string;

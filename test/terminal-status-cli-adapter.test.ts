@@ -186,8 +186,6 @@ function dependencies(input: {
           items: []
         };
       },
-      isFinalDeferredTransferStatus: (status) =>
-        status === "resolved" || status === "abort_resolved",
       workspaceMatches: (configured, observed) =>
         configured === undefined || configured === observed,
       acquireStateLock: input.acquireStateLock ?? (() => () => undefined),
@@ -387,6 +385,122 @@ test("terminal status preserves selector, JSON, and newest-cwd history order", a
     "confidence", "about", "limitations", "terminal_control",
     "terminal_status", "terminal_screen"
   ]);
+});
+
+test("completion context facade preserves provider and active-process read order", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-status-context-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const events: string[] = [];
+  const codexProvider = provider({
+    getForkContext: async (options) => {
+      events.push(`D:fork:${options.sessionId}:${options.maxMessages}:` +
+        `${options.maxCommands}:${options.maxTextLength}`);
+      return {
+        source: {
+          agent: "codex",
+          sessionId: options.sessionId,
+          cwd: "/workspace/project"
+        },
+        messages: [],
+        commands: [],
+        turns: [],
+        truncated: false
+      };
+    }
+  });
+  const facade = createTerminalStatusCliFacade(dependencies({
+    marker: "D",
+    events,
+    storeDir: path.join(root, "store"),
+    codexProvider,
+    activeProcesses: [{
+      agent: "codex",
+      kind: "codex_cli",
+      pid: 73001,
+      ppid: 1,
+      command: "codex",
+      cwd: "/workspace/project",
+      sessionId: "native-direct",
+      confidence: "high",
+      reason: "exact active process fixture"
+    }]
+  }));
+
+  const matches = await facade.loadCodexCompletionContexts({
+    nativeTakeover: { native_session_id: resolvedTerminal().conversationId },
+    options: {}
+  });
+  assert.deepEqual(events, [
+    "D:provider",
+    "D:provider",
+    "D:active-sessions",
+    "D:fork:native-direct:16:10:4000"
+  ]);
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0]?.match, "process_session_id");
+  assert.equal(matches[0]?.confidence, "high");
+  assert.equal(matches[0]?.process?.sessionId, "native-direct");
+});
+
+test("completion context fallback filters, sorts, and aggregates every candidate", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-status-fallback-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const calls: string[] = [];
+  const startedAtMs = NOW.getTime();
+  const codexProvider = provider({
+    listHistoricalSessions: async () => [
+      {
+        id: "older", cwd: "/workspace/project", archived: false,
+        capability: "full", updatedAtMs: startedAtMs - 1
+      },
+      {
+        id: "missing-time", cwd: "/workspace/project", archived: false,
+        capability: "full"
+      },
+      {
+        id: "newer", cwd: "/workspace/project", archived: false,
+        capability: "full", updatedAtMs: startedAtMs + 1
+      },
+      {
+        id: "foreign", cwd: "/workspace/other", archived: false,
+        capability: "full", updatedAtMs: startedAtMs + 2
+      }
+    ],
+    getForkContext: async (options) => {
+      calls.push(options.sessionId);
+      if (options.sessionId === "newer") {
+        throw new Error("newer context unreadable");
+      }
+      return {
+        source: {
+          agent: "codex",
+          sessionId: options.sessionId,
+          cwd: "/workspace/project"
+        },
+        messages: [],
+        commands: [],
+        turns: [],
+        truncated: false
+      };
+    }
+  });
+  const facade = createTerminalStatusCliFacade(dependencies({
+    marker: "F",
+    events: [],
+    storeDir: path.join(root, "store"),
+    codexProvider,
+    activeProcesses: []
+  }));
+
+  await assert.rejects(facade.loadCodexCompletionContexts({
+    nativeTakeover: {
+      native_session_id: resolvedTerminal().conversationId,
+      terminal_bridge_started_at: NOW.toISOString(),
+      source_cwd: "/workspace/project"
+    },
+    options: {}
+  }), /could not inspect every plausible same-cwd Codex session: newer: newer context unreadable/u);
+  assert.deepEqual(calls, ["newer", "missing-time"]);
 });
 
 test("non-Codex context preserves registry and reachable getter priority", async (t) => {

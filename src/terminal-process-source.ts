@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import process from "node:process";
 import type { TerminalProcessSnapshot } from "./terminal-agent-adapter.js";
 import { parseProcessElapsedSeconds } from "./terminal-process-facts.js";
 
@@ -211,4 +212,27 @@ export function runProcessCommand(command: string, args: string[]): ProcessComma
     stderr: result.stderr,
     error: result.error
   };
+}
+
+/**
+ * Best-effort liveness for an already-selected process. A zombie still owns a
+ * PID but cannot perform work, so it is not a live application owner.
+ */
+export function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return !isZombieProcess(pid);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code === "EPERM";
+  }
+}
+
+function isZombieProcess(pid: number): boolean {
+  const result = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], {
+    encoding: "utf8"
+  });
+  if (result.status !== 0) {
+    return false;
+  }
+  return result.stdout.trim().toUpperCase().startsWith("Z");
 }

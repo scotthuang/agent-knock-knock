@@ -1,12 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  isProcessAlive,
   parseProcessElapsedSeconds,
   StaticTerminalProcessSource,
   SystemTerminalProcessSource,
   type ProcessCommandResult,
   type TerminalProcessSource
 } from "../src/terminal-process-source.js";
+
+test("canonical terminal process liveness accepts self and rejects an absent pid", () => {
+  assert.equal(isProcessAlive(process.pid), true);
+  assert.equal(isProcessAlive(2_147_483_647), false);
+});
 
 test("ps elapsed values parse for selector recency", () => {
   assert.equal(parseProcessElapsedSeconds("00:12"), 12);

@@ -15,6 +15,8 @@ import { bindDeferredForegroundApplicationScope,
 import { createDeferredForegroundTransferId, listDeferredForegroundTransfers,
   loadDeferredForegroundTransfer, type DeferredForegroundTransfer } from
   "./deferred-foreground-transfer.js";
+import { isFinalDeferredForegroundTransferStatus } from
+  "./deferred-foreground-transfer-policy.js";
 import { DeferredForegroundRecoveryService } from "./deferred-foreground-recovery-service.js";
 import * as deferredRecoveryAdapter from "./deferred-foreground-recovery-cli-adapter.js";
 import { prepareDeferredForegroundBinding } from "./deferred-foreground-preparation-service.js";
@@ -75,7 +77,6 @@ type UnknownRecord = Record<string, unknown>;
 const TERMINAL_INPUT_EVIDENCE_FIELDS = ["text_injected_at",
   "enter_dispatched_at", "submitted_at", "agent_accepted_at",
   "not_accepted_at", "uncertain_at", "acceptance_evidence"] as const;
-const FINAL_DEFERRED_TRANSFER_STATUSES = new Set(["resolved", "abort_resolved"]);
 const HUMAN_OBSERVED_HANDOFF_FINGERPRINT = nativeThreadCommandFingerprint("adopt_external_thread:human_observed:no_terminal_input:v1");
 const handoffApplication = new TerminalHandoffApplicationService();
 
@@ -1728,7 +1729,7 @@ function assertConversationHasNoNonterminalDeferredForegroundTransfer({
     (candidate) =>
       candidate.version === 2 &&
       candidate.source_kind === "candidate_rollout_quiescent" &&
-      !FINAL_DEFERRED_TRANSFER_STATUSES.has(candidate.status) &&
+      !isFinalDeferredForegroundTransferStatus(candidate.status) &&
       (candidate.source_turn_history ?? []).some(
         (sourceTurn) => sourceTurn.turn_id === turnId
       )
@@ -1749,7 +1750,7 @@ function assertConversationHasNoNonterminalDeferredForegroundTransfer({
     return;
   }
   const transfer = loadDeferredForegroundTransfer(storeDir, transferId);
-  if (!FINAL_DEFERRED_TRANSFER_STATUSES.has(transfer.status)) {
+  if (!isFinalDeferredForegroundTransferStatus(transfer.status)) {
     throw new Error(
       `cannot ${action} Turn ${turnIdForConversation(conversation)} while ` +
       `deferred foreground transfer ${transfer.transfer_id} is ` +
@@ -1771,7 +1772,7 @@ function assertTerminalHasNoNonterminalDeferredForegroundTransfer({
 }): void {
   const transfer = listDeferredForegroundTransfers(storeDir).find(
     (candidate) =>
-      !FINAL_DEFERRED_TRANSFER_STATUSES.has(candidate.status) &&
+      !isFinalDeferredForegroundTransferStatus(candidate.status) &&
       candidate.process_pid === pid &&
       terminalControlEvidenceMatches(
         candidate.terminal_endpoint,

@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { API as TypeScriptApi } from "typescript/unstable/sync";
 import {
   SyntaxKind,
+  isArrayLiteralExpression,
   isBinaryExpression,
   isCallExpression,
   isCaseClause,
@@ -15,11 +16,13 @@ import {
   isForInStatement,
   isForOfStatement,
   isForStatement,
+  isFunctionDeclaration,
   isFunctionLikeDeclaration,
   isImportDeclaration,
   isImportEqualsDeclaration,
   isIfStatement,
   isStringLiteralLikeNode,
+  isVariableDeclaration,
   isWhileStatement
 } from "typescript/unstable/ast";
 
@@ -28,6 +31,7 @@ export const PRODUCTION_OWNERSHIP_SCHEMA =
 export const PRODUCTION_OWNERSHIP_VERSION = 1;
 export const DYNAMIC_IMPORT_POLICY = "literal-only-fail-closed";
 export const MAX_TARGETED_INTEGRATION_TESTS = 5;
+export const CLI_CORE_HARD_MAX_PHYSICAL_LOC = 8_000;
 export const PRODUCTION_FUNCTION_HARD_MAX_LOC = 500;
 export const PRODUCTION_FUNCTION_HARD_MAX_COMPLEXITY = 50;
 export const PRODUCTION_FUNCTION_DEFAULT_MAX_LOC = 100;
@@ -40,6 +44,65 @@ export const MANDATORY_FULL_PRODUCTION_PATHS = Object.freeze([
   "src/store.ts",
   "src/terminal-dispatch-ledger-codec.ts",
   "src/value-guards.ts"
+]);
+
+export const CANONICAL_STATUS_POLICY_OWNERS = Object.freeze({
+  isActiveTerminalDispatchStatus: "src/terminal-dispatch-policy.ts",
+  isFinalDeferredForegroundTransferStatus:
+    "src/deferred-foreground-transfer-policy.ts",
+  isRecoverableTerminalDispatchStatus: "src/terminal-dispatch-policy.ts",
+  isSessionSendBlockingStatus: "src/protocol.ts",
+  isTerminalBridgeCallbackSupersedeStatus: "src/protocol.ts",
+  isTerminalDispatchOwnerReleasedStatus: "src/protocol.ts"
+});
+
+const CANONICAL_STATUS_TABLE_RULES = Object.freeze([
+  Object.freeze({
+    name: "deferred_foreground_final",
+    owner: "src/deferred-foreground-transfer-policy.ts",
+    statuses: Object.freeze(["abort_resolved", "resolved"]),
+    expectedOccurrences: 1
+  }),
+  Object.freeze({
+    name: "terminal_bridge_callback_supersede",
+    owner: "src/protocol.ts",
+    statuses: Object.freeze([
+      "cancelling", "created", "running", "stalled", "waiting_for_agent",
+      "waiting_for_openclaw"
+    ]),
+    expectedOccurrences: 1
+  }),
+  Object.freeze({
+    name: "terminal_dispatch_owner_released",
+    owner: "src/protocol.ts",
+    statuses: Object.freeze(["cancelled", "closed", "failed", "idle"]),
+    expectedOccurrences: 1
+  }),
+  Object.freeze({
+    name: "session_send_blocking",
+    owner: "src/protocol.ts",
+    statuses: Object.freeze([
+      "callback_failed", "callback_pending", "cancelling", "created",
+      "running", "stalled", "waiting_for_agent", "waiting_for_openclaw"
+    ]),
+    expectedOccurrences: 1
+  }),
+  Object.freeze({
+    name: "active_terminal_dispatch",
+    statuses: Object.freeze([
+      "agent_accepted", "dispatching", "enter_dispatched", "not_accepted",
+      "prepared", "submitted", "text_injected", "uncertain"
+    ]),
+    expectedOccurrences: 0
+  }),
+  Object.freeze({
+    name: "recoverable_terminal_dispatch",
+    statuses: Object.freeze([
+      "agent_accepted", "dispatching", "enter_dispatched", "not_accepted",
+      "prepared", "submitted", "text_injected", "uncertain", "verified"
+    ]),
+    expectedOccurrences: 0
+  })
 ]);
 
 const defaultRepoRoot = fileURLToPath(new URL("../", import.meta.url));
@@ -152,6 +215,11 @@ export function validateProductionModuleOwnershipManifest({
       cliCoreMaxPhysicalLoc < 1
     ) {
       errors.push("architecture cli_core_max_physical_loc must be a positive integer");
+    } else if (cliCoreMaxPhysicalLoc > CLI_CORE_HARD_MAX_PHYSICAL_LOC) {
+      errors.push(
+        "architecture cli_core_max_physical_loc must not exceed hard maximum " +
+        CLI_CORE_HARD_MAX_PHYSICAL_LOC
+      );
     }
     const productionPhysicalLoc =
       manifest.architecture.production_physical_loc;
@@ -636,6 +704,80 @@ function functionMetricDescription(metric) {
     `complexity ${metric.approximateComplexity}`;
 }
 
+function canonicalStatusPolicyInventory(sourceFiles) {
+  const definitions = new Map(
+    Object.keys(CANONICAL_STATUS_POLICY_OWNERS).map((name) => [name, []])
+  );
+  const tableOccurrences = new Map(
+    CANONICAL_STATUS_TABLE_RULES.map((rule) => [rule.name, []])
+  );
+  const tableRulesBySignature = new Map(
+    CANONICAL_STATUS_TABLE_RULES.map((rule) => [rule.statuses.join("\0"), rule])
+  );
+  for (const [modulePath, sourceFile] of sourceFiles) {
+    const visit = (node) => {
+      let definitionName;
+      if (isFunctionDeclaration(node)) {
+        definitionName = node.name?.getText(sourceFile);
+      } else if (isVariableDeclaration(node)) {
+        definitionName = node.name.getText(sourceFile);
+      }
+      if (definitionName && definitions.has(definitionName)) {
+        definitions.get(definitionName).push(modulePath);
+      }
+      if (
+        isArrayLiteralExpression(node) &&
+        node.elements.length > 0 &&
+        node.elements.every(isStringLiteralLikeNode)
+      ) {
+        const signature = [...new Set(node.elements.map((element) => element.text))]
+          .sort()
+          .join("\0");
+        const rule = tableRulesBySignature.get(signature);
+        if (rule) {
+          const start = sourceFile.getLineAndCharacterOfPosition(
+            node.getStart(sourceFile)
+          );
+          tableOccurrences.get(rule.name).push(
+            `${modulePath}:${start.line + 1}`
+          );
+        }
+      }
+      node.forEachChild(visit);
+    };
+    sourceFile.forEachChild(visit);
+  }
+  return { definitions, tableOccurrences };
+}
+
+function canonicalStatusPolicyErrors(inventory) {
+  const errors = [];
+  for (const [name, owner] of Object.entries(CANONICAL_STATUS_POLICY_OWNERS)) {
+    const actual = inventory.definitions.get(name) ?? [];
+    if (actual.length !== 1 || actual[0] !== owner) {
+      errors.push(
+        `canonical status policy ${name} must be defined exactly once by ` +
+        `${owner} (found ${actual.length > 0 ? actual.join(", ") : "none"})`
+      );
+    }
+  }
+  for (const rule of CANONICAL_STATUS_TABLE_RULES) {
+    const actual = inventory.tableOccurrences.get(rule.name) ?? [];
+    const correctOwner = rule.expectedOccurrences === 0 ||
+      (actual.length === 1 && actual[0].startsWith(`${rule.owner}:`));
+    if (actual.length !== rule.expectedOccurrences || !correctOwner) {
+      const expectation = rule.expectedOccurrences === 0
+        ? "must remain derived without an inline exact table"
+        : `must occur exactly once in ${rule.owner}`;
+      errors.push(
+        `canonical status table ${rule.name} ${expectation} ` +
+        `(found ${actual.length > 0 ? actual.join(", ") : "none"})`
+      );
+    }
+  }
+  return errors;
+}
+
 export function validateProductionArchitecture({
   ownership,
   repoRoot = defaultRepoRoot,
@@ -649,6 +791,7 @@ export function validateProductionArchitecture({
   const sources = new Map();
   const graph = new Map();
   let functionMetrics = Object.freeze([]);
+  let canonicalStatusPolicies = 0;
   for (const modulePath of [...productionPaths].sort()) {
     let source;
     try {
@@ -690,6 +833,11 @@ export function validateProductionArchitecture({
           graph.set(modulePath, [...dependencies].sort());
         }
         functionMetrics = productionFunctionMetrics(sourceFiles);
+        const statusInventory = canonicalStatusPolicyInventory(sourceFiles);
+        errors.push(...canonicalStatusPolicyErrors(statusInventory));
+        canonicalStatusPolicies = Object.keys(
+          CANONICAL_STATUS_POLICY_OWNERS
+        ).length;
       });
     } catch (error) {
       errors.push(
@@ -710,11 +858,20 @@ export function validateProductionArchitecture({
   );
   if (cliCoreSource === undefined) {
     errors.push(`${cliCorePath} is required for architecture validation`);
-  } else if (cliCorePhysicalLoc !== ownership.architecture.cliCoreMaxPhysicalLoc) {
-    errors.push(
-      `${cliCorePath} physical LOC does not match manifest ratchet ` +
-      `${ownership.architecture.cliCoreMaxPhysicalLoc} (actual ${cliCorePhysicalLoc})`
-    );
+  } else {
+    if (cliCorePhysicalLoc > CLI_CORE_HARD_MAX_PHYSICAL_LOC) {
+      errors.push(
+        `${cliCorePath} physical LOC exceeds hard maximum ` +
+        `${CLI_CORE_HARD_MAX_PHYSICAL_LOC} (actual ${cliCorePhysicalLoc})`
+      );
+    }
+    if (cliCorePhysicalLoc !== ownership.architecture.cliCoreMaxPhysicalLoc) {
+      errors.push(
+        `${cliCorePath} physical LOC does not match manifest ratchet ` +
+        `${ownership.architecture.cliCoreMaxPhysicalLoc} ` +
+        `(actual ${cliCorePhysicalLoc})`
+      );
+    }
   }
   if (productionPhysicalLoc !== ownership.architecture.productionPhysicalLoc) {
     errors.push(
@@ -784,6 +941,7 @@ export function validateProductionArchitecture({
       0
     ),
     importCycles: cycles.length,
+    cliCoreHardMaxPhysicalLoc: CLI_CORE_HARD_MAX_PHYSICAL_LOC,
     cliCorePhysicalLoc,
     productionPhysicalLoc,
     cliCoreImporters: Object.freeze(actualCliCoreImporters),
@@ -794,6 +952,7 @@ export function validateProductionArchitecture({
         PRODUCTION_FUNCTION_HARD_MAX_COMPLEXITY
     }),
     productionFunctionHardViolations: hardFunctionViolations.length,
+    canonicalStatusPolicies,
     productionFunctionDefaultLimits: Object.freeze({
       physicalLocExclusive: PRODUCTION_FUNCTION_DEFAULT_MAX_LOC,
       approximateComplexityExclusive:

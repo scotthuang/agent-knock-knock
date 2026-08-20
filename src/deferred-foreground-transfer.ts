@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { isTerminalDispatchOwnerReleasedStatus } from "./protocol.js";
 import {
   assertRealDirectory,
   atomicSaveJsonFile,
@@ -417,9 +418,7 @@ function assertDeferredForegroundTransferSourceHistory(
           "updated_at"
         ].join(",") ||
         !isSafeRecordId(turn.turn_id) ||
-        !["idle", "failed", "closed", "cancelled"].includes(
-          String(turn.status)
-        ) ||
+        !isTerminalDispatchOwnerReleasedStatus(String(turn.status)) ||
         !isValidTimestamp(turn.updated_at) ||
         !isSafeRecordId(turn.binding_id) ||
         !isPositiveSafeInteger(turn.binding_generation) ||

@@ -1,7 +1,13 @@
 import path from "node:path";
 import type { DeferredForegroundTransfer } from "./deferred-foreground-transfer.js";
-import { sessionIdForConversation, turnIdForConversation, type Conversation } from
-  "./protocol.js";
+import { isFinalDeferredForegroundTransferStatus } from
+  "./deferred-foreground-transfer-policy.js";
+import {
+  isWaitingForAgentStatus,
+  sessionIdForConversation,
+  turnIdForConversation,
+  type Conversation
+} from "./protocol.js";
 import type { TerminalControlRef, TerminalRuntimeIdentity } from
   "./terminal-agent-adapter.js";
 import { terminalControlEvidenceMatches } from "./terminal-control-ref.js";
@@ -58,9 +64,7 @@ export function* terminalMonitorReconciliationEligibility(
   if (nativeTakeover?.terminal_bridge !== true) {
     return ineligible("not_terminal_bridge");
   }
-  if (![
-    "created", "running", "waiting_for_agent", "cancelling"
-  ].includes(conversation.status)) {
+  if (!isWaitingForAgentStatus(conversation.status)) {
     return ineligible(`conversation_status_${String(conversation.status ?? "missing")}`);
   }
   const terminalMessageId = nonBlankString(nativeTakeover.terminal_bridge_message_id);
@@ -132,7 +136,7 @@ export function* terminalMonitorReconciliationEligibility(
       kind: "deferred", storeDir: deferredStore.storeDir, transferId
     });
     const transfer = deferred.transfer;
-    if (!["resolved", "abort_resolved"].includes(transfer.status) && (
+    if (!isFinalDeferredForegroundTransferStatus(transfer.status) && (
       validateCodexRolloutAcceptanceAnchor(
         nativeTakeover.codex_rollout_acceptance_anchor
       )?.version !== 3 ||

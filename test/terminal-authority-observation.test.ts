@@ -9,6 +9,8 @@ import {
   decideTerminalSendAuthority
 } from "../src/terminal-dispatch-policy.js";
 import type { ManagedSessionState } from "../src/managed-session.js";
+import { assertSafeTerminalSend } from "../src/terminal-authority-policy.js";
+import type { TerminalBridgeStatus } from "../src/terminal-agent-bridge.js";
 
 const THREAD_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaa0101";
 const THREAD_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbb0102";
@@ -222,4 +224,58 @@ test("candidate root authority rejects split proofs and status-card abandonment"
     undefined,
     "explicitly_abandoned_predecessor"
   ), false, "status-card-only sources cannot become abandoned candidates");
+});
+
+test("safe terminal send keeps status getter and rejection priority", () => {
+  const trace: string[] = [];
+  assert.throws(
+    () => assertSafeTerminalSend("codex", undefined),
+    /Codex terminal status is unavailable/u
+  );
+  const unreachable = {
+    provider: "tmux",
+    target: "work:0.0",
+    agent: "codex",
+    capabilities: {},
+    get approval_state() {
+      trace.push("approval");
+      return { blocked: true, reason: "must remain lower priority" };
+    },
+    get reachable() {
+      trace.push("reachable");
+      return false;
+    },
+    get activity_state() {
+      trace.push("activity");
+      return "working";
+    }
+  } as unknown as TerminalBridgeStatus;
+  assert.throws(
+    () => assertSafeTerminalSend("codex", unreachable),
+    /Codex terminal status is unavailable/u
+  );
+  assert.deepEqual(trace, ["approval", "approval", "reachable"]);
+
+  assert.throws(() => assertSafeTerminalSend("claude", {
+    ...unreachable,
+    reachable: true,
+    approval_state: {
+      scanned: true,
+      blocked: true,
+      approvable: true,
+      reason: "approval required"
+    }
+  }), /approval required/u);
+  assert.throws(() => assertSafeTerminalSend("codex", {
+    ...unreachable,
+    reachable: true,
+    approval_state: { scanned: true, blocked: false, approvable: false },
+    activity_state: "working"
+  }), /Codex terminal is working, not idle/u);
+  assert.doesNotThrow(() => assertSafeTerminalSend("codex", {
+    ...unreachable,
+    reachable: true,
+    approval_state: { scanned: true, blocked: false, approvable: false },
+    activity_state: "idle"
+  }));
 });

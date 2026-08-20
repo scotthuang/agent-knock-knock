@@ -88,17 +88,6 @@ function dependencies(events: string[]): CallbackCliDependencies {
       assertBindingCurrent() {
         events.push("assert:binding");
       },
-      isDispatchReleased() {
-        events.push("observe:released");
-        return false;
-      },
-      isWaitingForAgent(status: ConversationStatus) {
-        return ["created", "running", "waiting_for_agent", "cancelling"]
-          .includes(status);
-      },
-      isTerminalBridgeSupersedeStatus() {
-        return false;
-      },
       resolveCompletionDispatch() {
         events.push("resolve:completion-dispatch");
         return true;
@@ -162,7 +151,6 @@ test("callback transaction releases state then writer before presentation", asyn
     "assert:no-deferred",
     "read-events",
     "assert:binding",
-    "observe:released",
     `state:release:${path.basename(stored.statePath)}.lock`,
     "writer:release",
     "output"

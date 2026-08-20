@@ -5,14 +5,16 @@ import {
   effectiveTurnStatus,
   executorForConversation,
   extractStructuredMessage,
+  isTerminalBridgeCallbackSupersedeStatus,
+  isTerminalDispatchOwnerReleasedStatus,
   isTurnPhaseStatus,
+  isWaitingForAgentStatus,
   normalizeLegacyCallbackStatus,
   parseMessageJson,
   turnIdForConversation,
   type AgentMessage,
   type Actor,
   type Conversation,
-  type ConversationStatus,
   type TurnPhaseStatus
 } from "./protocol.js";
 import type {
@@ -170,9 +172,6 @@ export interface CallbackOutboxServicePorts {
       action: string;
     }): void;
     assertBindingCurrent(conversation: Conversation, action: string): void;
-    isDispatchReleased(conversation: Conversation): boolean;
-    isWaitingForAgent(status: ConversationStatus): boolean;
-    isTerminalBridgeSupersedeStatus(status: ConversationStatus): boolean;
     resolveCompletionDispatch(input: {
       terminalControl: TerminalControlRef;
       conversation: Conversation;
@@ -340,7 +339,7 @@ export function createCallbackOutboxService(
       );
     }
     if (
-      ports.authority.isDispatchReleased(conversation) &&
+      isTerminalDispatchOwnerReleasedStatus(effectiveTurnStatus(conversation)) &&
       !duplicateMessage
     ) {
       throw new Error(
@@ -352,10 +351,10 @@ export function createCallbackOutboxService(
       options.recoverTerminalCompletion === true &&
       duplicateMessage &&
       (
-        ports.authority.isWaitingForAgent(conversation.status) ||
+        isWaitingForAgentStatus(conversation.status) ||
         (
           options.allowTerminalCompletionRecoveryStatus === true &&
-          ports.authority.isTerminalBridgeSupersedeStatus(conversation.status)
+          isTerminalBridgeCallbackSupersedeStatus(conversation.status)
         )
       );
     if (
@@ -891,10 +890,10 @@ function claimTerminalCompletion(
       ? conversation.native_session_takeover
       : {};
     if (
-      !ports.authority.isWaitingForAgent(conversation.status) &&
+      !isWaitingForAgentStatus(conversation.status) &&
       !(
         input.allowSupersedeRecovery &&
-        ports.authority.isTerminalBridgeSupersedeStatus(conversation.status)
+        isTerminalBridgeCallbackSupersedeStatus(conversation.status)
       )
     ) {
       return {

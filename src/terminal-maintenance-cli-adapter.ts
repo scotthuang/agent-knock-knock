@@ -11,7 +11,8 @@ import {
 } from "./mutation-transaction.js";
 import {
   budgetAction, executorForConversation, sessionIdForConversation,
-  turnIdForConversation, type Conversation, type ConversationStatus
+  isSessionSendBlockingStatus, turnIdForConversation,
+  type Conversation, type ConversationStatus
 } from "./protocol.js";
 import {
   appendEvent, loadState, logPathForStatePath, pathsForConversationDir,
@@ -34,6 +35,10 @@ import { terminalDispatchLedgerLooksLifecycle,
   "./terminal-dispatch-ledger-codec.js";
 import { loadDeferredForegroundTransfer } from
   "./deferred-foreground-transfer.js";
+import { isFinalDeferredForegroundTransferStatus } from
+  "./deferred-foreground-transfer-policy.js";
+import { isRecoverableTerminalDispatchStatus } from
+  "./terminal-dispatch-policy.js";
 import { decideVerifiedDeadAgentProcess,
   type VerifiedDeadTerminalAgentProcessProof } from
   "./verified-dead-agent-policy.js";
@@ -110,9 +115,6 @@ export type TerminalMaintenanceAuthorityPorts = Pick<TerminalHandoffFacade,
       action: "approve" | "cancel" }): void;
     loadTerminalDispatchLedgerOwner(ledger: TerminalDispatchLedgerDocument):
       Conversation | undefined;
-    isSessionSendBlocking(status: ConversationStatus): boolean;
-    isRecoverableDispatchStatus(status: string): boolean;
-    isFinalDeferredTransferStatus(status: string): boolean;
   };
 type CanonicalStateMutationLockPorts = CanonicalMutationLockPorts & {
   resources: CanonicalStateMutationResources; acquireState: () => () => void;
@@ -253,16 +255,6 @@ const terminalListCliFacade = Object.freeze({
 const nativeThreadLifecycleFacade = Object.freeze({
   assertExclusive: contextualPort("authority", "assertExclusive")
 });
-const SESSION_SEND_BLOCKING_STATUSES = Object.freeze({
-  has: contextualPort("authority", "isSessionSendBlocking")
-});
-const RECOVERABLE_TERMINAL_DISPATCH_STATUSES = Object.freeze({
-  has: contextualPort("authority", "isRecoverableDispatchStatus")
-});
-const FINAL_DEFERRED_TRANSFER_STATUSES = Object.freeze({
-  has: contextualPort("authority", "isFinalDeferredTransferStatus")
-});
-
 const acquireFileLock = contextualPort("repository", "acquireFileLock");
 const acquireTerminalBridgeSendLock =
   contextualPort("repository", "acquireTerminalLock");
@@ -761,7 +753,7 @@ async function runObservedHandoffClose({
         if (
           conversation.conversation_id !== initialConversation.conversation_id ||
           sessionIdForConversation(conversation) !== sourceSessionId ||
-          !SESSION_SEND_BLOCKING_STATUSES.has(conversation.status)
+          !isSessionSendBlockingStatus(conversation.status)
         ) {
           throw new Error(
             "active handoff Turn changed after it was listed; refresh AKK list"
@@ -1210,7 +1202,7 @@ async function assertGenericCloseDoesNotBypassObservedHandoff({
   | VerifiedDeadTerminalAgentProcessProof
   | undefined
 > {
-  if (!SESSION_SEND_BLOCKING_STATUSES.has(conversation.status)) {
+  if (!isSessionSendBlockingStatus(conversation.status)) {
     return;
   }
   const sourceSession = tryLoadManagedSession(
@@ -1397,7 +1389,7 @@ async function runTerminalDispatchClose({
           "does not match its exact Store/terminal transfer"
         );
       }
-      if (!FINAL_DEFERRED_TRANSFER_STATUSES.has(transfer.status)) {
+      if (!isFinalDeferredForegroundTransferStatus(transfer.status)) {
         throw new Error(
           `terminal ${terminalControl.target} dispatch is fenced by deferred ` +
           `foreground transfer ${transfer.transfer_id} (${transfer.status}); ` +
@@ -1405,7 +1397,7 @@ async function runTerminalDispatchClose({
         );
       }
     }
-    if (!RECOVERABLE_TERMINAL_DISPATCH_STATUSES.has(String(ledger.status))) {
+    if (!isRecoverableTerminalDispatchStatus(String(ledger.status))) {
       throw new Error(
         `terminal ${terminalControl.target} has an invalid dispatch status: ` +
         String(ledger.status)

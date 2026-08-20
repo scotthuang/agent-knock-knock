@@ -11,8 +11,12 @@ import { createClaudeTerminalAgentAdapter, type ClaudeAgentRow } from
   "./claude-terminal-agent-adapter.js";
 import { detectClaudeTranscriptCompletion, detectClaudeTranscriptPendingApproval }
   from "./claude-local-transcript-provider.js";
-import { cleanProcessText, expandHome, resolveOptionalExecutable } from
-  "./cli-command-runtime.js";
+import {
+  cleanProcessText,
+  expandHome,
+  parseJsonOption,
+  resolveOptionalExecutable
+} from "./cli-command-runtime.js";
 import { cliRuntimeLog, type CliCommandDependencies } from "./cli-runtime-context.js";
 import type { ExecutorKind } from "./executors.js";
 import { HerdrTerminalControlProvider } from "./herdr-terminal-control-provider.js";
@@ -696,17 +700,6 @@ function isTerminalControlCapability(value: unknown):
   value is TerminalControlCapability {
   return typeof value === "string" &&
     (TERMINAL_CONTROL_CAPABILITIES as readonly string[]).includes(value);
-}
-function parseJsonOption(value: unknown, optionName: string): unknown {
-  if (!value) {
-    return undefined;
-  }
-  try {
-    return JSON.parse(String(value));
-  } catch (error) {
-    throw new Error(`${optionName} must be valid JSON: ${
-      error instanceof Error ? error.message : String(error)}`);
-  }
 }
 function textSummary(text: unknown, maxLength = 240):
   { length: number; preview?: string } {

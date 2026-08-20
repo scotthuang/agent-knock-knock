@@ -35,6 +35,39 @@ export interface TerminalDispatchPresentationPorts {
   summarize(value: unknown): unknown;
 }
 
+export interface OpenClawYieldNextActionInput {
+  conversationId: string;
+  sessionId: string;
+  turnId: string;
+  source: "terminal_control";
+  callbackExpected: boolean;
+}
+
+export function openClawYieldNextAction({
+  conversationId,
+  sessionId,
+  turnId,
+  source,
+  callbackExpected
+}: OpenClawYieldNextActionInput) {
+  const callbackText = callbackExpected
+    ? "The coding agent should report completion, questions, or errors through the existing Agent Knock Knock callback for this conversation."
+    : "No AKK-managed callback is registered for this raw terminal-controlled id; do not wait synchronously. Use AKK status/list later or attach/create an AKK conversation when callback delivery is required.";
+  return {
+    action: "yield" as const,
+    reason:
+      "The requested agent work was handed off asynchronously. End this OpenClaw turn now instead of waiting, polling, or treating the send as a synchronous agent result.",
+    source,
+    conversation_id: conversationId,
+    session_id: sessionId,
+    turn_id: turnId,
+    callback_expected: callbackExpected,
+    do_not:
+      "Do not inspect event logs, process lists, terminal screens, files, stdout, or stderr while waiting unless the user explicitly asks for status.",
+    expected_callback: callbackText
+  };
+}
+
 export function presentTerminalDispatchReplay(
   input: Readonly<{
     owner: Conversation;

@@ -8,6 +8,8 @@ import {
   type DeferredForegroundTransferSourceRolloutAuthority,
   type DeferredForegroundTransferSourceTurnAuthority
 } from "./deferred-foreground-transfer.js";
+import { isFinalDeferredForegroundTransferStatus } from
+  "./deferred-foreground-transfer-policy.js";
 import {
   type ExecutorKind
 } from "./executors.js";
@@ -23,6 +25,8 @@ import {
 } from "./managed-session.js";
 import {
   executorForConversation,
+  isSessionSendBlockingStatus,
+  isTerminalDispatchOwnerReleasedStatus,
   resolveExecutor,
   sessionIdForConversation,
   turnIdForConversation,
@@ -390,12 +394,8 @@ export interface TerminalListAuthorityPorts {
 }
 
 export interface TerminalListPolicyConfiguration {
-  activeTerminalDispatchStatuses: ReadonlySet<string>;
   approvalTtlMs: number;
-  finalDeferredTransferStatuses: ReadonlySet<string>;
   selectorCommands: ReadonlySet<string>;
-  sessionSendBlockingStatuses: ReadonlySet<string>;
-  terminalDispatchReleaseStatuses: ReadonlySet<string>;
   rememberOriginalExpectedTerminalSelector(
     options: TerminalListCliOptions,
     selector: string | undefined
@@ -1439,7 +1439,7 @@ function observeTerminalListBindingAuthority(
         })
       : undefined;
   const blockingHandoffTurns = conflictingSessionTurns.filter((turn) =>
-    terminalListRuntime().sessionSendBlockingStatuses.has(turn.status)
+    isSessionSendBlockingStatus(turn.status)
   );
   const terminalBlockingTurns = terminalControl
     ? terminalIncarnationBlockingTurns(
@@ -1843,7 +1843,7 @@ function observeTerminalHandoffAuthority(
     !(isRecord(terminal.approval_state) &&
       terminal.approval_state.blocked === true) &&
     !conflictingSessionTurns.some((turn) =>
-      terminalListRuntime().sessionSendBlockingStatuses.has(turn.status)
+      isSessionSendBlockingStatus(turn.status)
     ) &&
     terminalBlockingTurns.length === 0 &&
     !managedSessionHasUnresolvedNativeTransition(
@@ -1867,7 +1867,7 @@ function observeTerminalHandoffAuthority(
     !(isRecord(terminal.approval_state) &&
       terminal.approval_state.blocked === true) &&
     !conflictingSessionTurns.some((turn) =>
-      terminalListRuntime().sessionSendBlockingStatuses.has(turn.status)
+      isSessionSendBlockingStatus(turn.status)
     ) &&
     terminalBlockingTurns.length === 0 &&
     !managedSessionHasUnresolvedNativeTransition(
@@ -2348,7 +2348,7 @@ function terminalFirstListProjection({
   const nonterminalDeferredTransfers = listDeferredForegroundTransfers(
     storeDir
   ).filter((transfer) =>
-    !terminalListRuntime().finalDeferredTransferStatuses.has(transfer.status)
+    !isFinalDeferredForegroundTransferStatus(transfer.status)
   );
   const nonterminalDeferredTransferIds = new Set(
     nonterminalDeferredTransfers.map((transfer) => transfer.transfer_id)
@@ -2732,7 +2732,7 @@ function terminalIncarnationBlockingTurns(
         terminalControlForManagedConversation(turn),
         terminalControl
       ) &&
-      terminalListRuntime().sessionSendBlockingStatuses.has(turn.status)
+      isSessionSendBlockingStatus(turn.status)
     )
     .sort(compareManagedConversationRecency);
 }
@@ -2795,7 +2795,7 @@ function terminalDispatchOwnership(
           requireProcessAnchor: false
         }) && !terminalListRuntime().terminalDispatchRecordMatchesControl(ledger, terminalControl)
         ? "stale_process_incarnation"
-        : terminalListRuntime().activeTerminalDispatchStatuses.has(String(ledger.status))
+        : dispatch.isActiveTerminalDispatchStatus(String(ledger.status))
           ? "active"
           : "inactive_status";
   let decision = dispatch.decideTerminalDispatchOwnership(ledgerAuthority);
@@ -2804,7 +2804,7 @@ function terminalDispatchOwnership(
   const ledgerMessageId = stringValue(ledger.message_id);
   const ownerAuthority: dispatch.TerminalDispatchOwnerAuthority = !owner
     ? "unavailable"
-    : terminalListRuntime().terminalDispatchReleaseStatuses.has(owner.status)
+    : isTerminalDispatchOwnerReleasedStatus(owner.status)
       ? "released"
       : !terminalControlsShareIncarnation(
           terminalControlForManagedConversation(owner),
@@ -2892,7 +2892,7 @@ function terminalScopedCodexApprovalBoundary({
       .map((turn) => turnIdForConversation(turn));
   const hasDeferredRecovery = () =>
     listDeferredForegroundTransfers(storeDir).some((transfer) =>
-      !terminalListRuntime().finalDeferredTransferStatuses.has(transfer.status) &&
+      !isFinalDeferredForegroundTransferStatus(transfer.status) &&
       (transfer.source_session_id === session.session_id ||
        transfer.target_session_id === session.session_id ||
        (transfer.terminal_id === terminalId &&

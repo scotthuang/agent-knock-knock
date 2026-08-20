@@ -687,7 +687,7 @@ test("maintenance command wiring preserves validation and durable order", () => 
     "withCanonicalMutationLocks(",
     "mutationDispatchLedger.reconcileIncarnation(",
     "loadDeferredForegroundTransfer(",
-    "RECOVERABLE_TERMINAL_DISPATCH_STATUSES.has(",
+    "isRecoverableTerminalDispatchStatus(String(ledger.status))",
     "terminalDispatchLedgerLooksLifecycle(ledger)",
     "mutationDispatchLedger.reconcile(",
     "loadTerminalDispatchLedgerOwner(ledger)",

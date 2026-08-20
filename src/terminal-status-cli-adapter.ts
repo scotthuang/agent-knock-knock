@@ -3,10 +3,13 @@ import type { CodingAgentSessionProvider } from "./agent-session-provider.js";
 import { buildConversationTrace } from "./conversation-trace.js";
 import type {
   ActiveCodexProcess,
-  CodexSessionSummary
+  CodexSessionSummary,
+  ForkContextPackage
 } from "./codex-session-provider.js";
 import { listDeferredForegroundTransfers } from
   "./deferred-foreground-transfer.js";
+import { isFinalDeferredForegroundTransferStatus } from
+  "./deferred-foreground-transfer-policy.js";
 import type { ExecutorKind } from "./executors.js";
 import { writeCliJson } from "./cli-command-runtime.js";
 import { cliNow, cliRuntimeLog } from "./cli-runtime-context.js";
@@ -20,9 +23,10 @@ import type {
   ResolvedTerminalConversation,
   TerminalBridgeStatus
 } from "./terminal-agent-bridge.js";
-import type {
-  TerminalControlRef,
-  TerminalRuntimeIdentity
+import {
+  parseTerminalConversationId,
+  type TerminalControlRef,
+  type TerminalRuntimeIdentity
 } from "./terminal-agent-adapter.js";
 import {
   codexTerminalContextFromHistory,
@@ -47,7 +51,10 @@ import {
   statePathForConversationId
 } from "./store.js";
 import type { TranscriptEvent } from "./transcript.js";
-import { isRecord } from "./value-guards.js";
+import {
+  isRecord,
+  nonBlankString as stringValue
+} from "./value-guards.js";
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 10080;
 
@@ -152,7 +159,6 @@ export interface TerminalStatusReconciliationPorts {
       conversationId?: string;
     }
   ): Promise<TerminalStatusMonitorReconciliation>;
-  isFinalDeferredTransferStatus(status: string): boolean;
   workspaceMatches(configured: unknown, observed: unknown): boolean;
   acquireStateLock(statePath: string): () => void;
   terminalBridgeEnabled(conversation: Conversation): boolean;
@@ -190,7 +196,18 @@ export interface TerminalStatusCliFacade {
     options: TerminalStatusCliOptions,
     pid: number | undefined
   ): Promise<ActiveCodexProcess | undefined>;
+  loadCodexCompletionContexts(input: {
+    nativeTakeover?: Readonly<Record<string, unknown>>;
+    options: TerminalStatusCliOptions;
+  }): Promise<readonly CodexCompletionContextMatch[]>;
   summarizeConversation(conversation: Conversation): TerminalStatusJsonObject;
+}
+
+export interface CodexCompletionContextMatch {
+  context: ForkContextPackage;
+  process: ActiveCodexProcess | undefined;
+  match: string;
+  confidence: "high" | "medium" | "low";
 }
 
 interface ManagedStatusResult extends TerminalStatusJsonObject {
@@ -227,6 +244,8 @@ export function createTerminalStatusCliFacade(
         dependencies, agent, terminalControl, options, runtime),
     activeCodexProcessForPid: (options, pid) =>
       activeCodexProcessForPid(dependencies, options, pid),
+    loadCodexCompletionContexts: (input) =>
+      loadCodexCompletionContexts(dependencies, input),
     summarizeConversation: (conversation) => summarizeConversation(
       conversation, dependencies.projection)
   });
@@ -500,6 +519,97 @@ async function activeCodexProcessForPid(
   return activeSessions.find((process) => process.pid === pid);
 }
 
+async function loadCodexCompletionContexts(
+  dependencies: TerminalStatusCliDependencies,
+  input: {
+    nativeTakeover?: Readonly<Record<string, unknown>>;
+    options: TerminalStatusCliOptions;
+  }
+): Promise<readonly CodexCompletionContextMatch[]> {
+  const { nativeTakeover, options } = input;
+  const provider = dependencies.observation.createCodexProvider(options);
+  const nativeSessionId = stringValue(nativeTakeover?.native_session_id);
+  const startedAtMs = Date.parse(String(
+    nativeTakeover?.terminal_bridge_started_at ?? ""
+  ));
+  const terminalConversation = parseTerminalConversationId(nativeSessionId);
+  const activeProcess = await activeCodexProcessForPid(
+    dependencies,
+    options,
+    terminalConversation?.pid
+  );
+  const directSessionId = activeProcess?.sessionId ??
+    (terminalConversation ? undefined : nativeSessionId);
+  if (directSessionId) {
+    const context = await provider.getForkContext({
+      sessionId: directSessionId,
+      maxMessages: Number(options.maxMessages ?? 16),
+      maxCommands: Number(options.maxCommands ?? 10),
+      maxTextLength: Number(options.maxTextLength ?? 4000)
+    });
+    if (context) {
+      return [{
+        context,
+        process: activeProcess,
+        match: activeProcess?.sessionId
+          ? "process_session_id"
+          : "native_session_id",
+        confidence: "high"
+      }];
+    }
+  }
+
+  const cwd = activeProcess?.cwd ?? stringValue(nativeTakeover?.source_cwd);
+  if (!cwd) {
+    return [];
+  }
+  const sessions = (await provider.listHistoricalSessions())
+    .filter((session) => session.cwd === cwd)
+    .filter((session) => {
+      if (!Number.isFinite(startedAtMs)) return true;
+      if (session.updatedAtMs === undefined || session.updatedAtMs === null) {
+        return true;
+      }
+      const updatedAtMs = Number(session.updatedAtMs);
+      return !Number.isFinite(updatedAtMs) || updatedAtMs >= startedAtMs;
+    })
+    .sort((left, right) =>
+      Number(right.updatedAtMs ?? 0) - Number(left.updatedAtMs ?? 0));
+  const matches: CodexCompletionContextMatch[] = [];
+  const candidateErrors: string[] = [];
+  for (const session of sessions) {
+    try {
+      const context = await provider.getForkContext({
+        sessionId: session.id,
+        maxMessages: Number(options.maxMessages ?? 16),
+        maxCommands: Number(options.maxCommands ?? 10),
+        maxTextLength: Number(options.maxTextLength ?? 4000)
+      });
+      if (context) {
+        matches.push({
+          context,
+          process: activeProcess,
+          match: sessions.length === 1 ? "cwd" : "cwd_request_hash",
+          confidence: sessions.length === 1 ? "medium" : "low"
+        });
+      }
+    } catch (error) {
+      candidateErrors.push(
+        `${session.id}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+  if (candidateErrors.length > 0) {
+    throw new Error(
+      "could not inspect every plausible same-cwd Codex session: " +
+      candidateErrors.join("; ")
+    );
+  }
+  return matches;
+}
+
 async function codexTerminalStatusContext(
   dependencies: TerminalStatusCliDependencies,
   input: {
@@ -674,8 +784,7 @@ function reservedDeferredSourceTurnIds(
       .filter((transfer) =>
         transfer.version === 2 &&
         transfer.source_kind === "candidate_rollout_quiescent" &&
-        !dependencies.reconciliation.isFinalDeferredTransferStatus(
-          transfer.status))
+        !isFinalDeferredForegroundTransferStatus(transfer.status))
       .flatMap((transfer) =>
         (transfer.source_turn_history ?? []).map((turn) => turn.turn_id))
   );

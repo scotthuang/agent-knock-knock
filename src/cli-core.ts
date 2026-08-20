@@ -1,13 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import type {
-  ActiveCodexProcess,
-  ForkContextPackage
-} from "./codex-session-provider.js";
 import { validateCodexRolloutAcceptanceAnchor } from
   "./terminal-submission-acceptance.js";
 import {
@@ -20,16 +16,12 @@ import { createFileLockCliAdapter } from "./file-lock-cli-adapter.js";
 import {
   budgetAction,
   createMessage,
-  effectiveTurnStatus,
-  executorForConversation,
-  sessionIdForConversation,
-  turnIdForConversation,
+  isActiveConversationStatus,
+  isTerminalDispatchOwnerReleasedStatus,
   type Conversation,
-  type ConversationStatus
 } from "./protocol.js";
 import {
   EXECUTOR_KINDS,
-  executorDefinitionForKind,
   isExecutorKind,
   type ExecutorKind
 } from "./executors.js";
@@ -39,7 +31,6 @@ import {
   appendEvent,
   assertStoreWriterCompatible,
   defaultStoreDir,
-  ensureStoreWritable,
   inspectStoreCompatibility,
   listConversations,
   logPathForStatePath,
@@ -47,22 +38,17 @@ import {
   loadState,
   pathsForConversationDir,
   saveState,
-  STORE_SESSION_AUTHORITY_PROTOCOL,
   StoreLockTimeoutError,
   statePathForConversationId,
   withStoreWriterLease,
   withStoreWriterLeaseAsync
 } from "./store.js";
 import {
-  type ManagedSessionState
-} from "./managed-session.js";
-import {
   probeCodexCurrentThread
 } from "./native-thread-transition-verification-adapter.js";
 import {
   loadManagedSession,
-  saveManagedSession,
-  tryLoadManagedSession
+  saveManagedSession
 } from "./session-store.js";
 import {
   TerminalControlUnavailableError,
@@ -70,7 +56,6 @@ import {
   type TerminalControlProviderRegistry
 } from "./terminal-control-provider.js";
 import {
-  parseTerminalConversationId,
   type TerminalControlRef,
   type TerminalRuntimeIdentity
 } from "./terminal-agent-adapter.js";
@@ -127,12 +112,12 @@ import {
   createTerminalIdentityAuthorityCliAdapter
 } from "./terminal-identity-authority-cli-adapter.js";
 import {
+  createTerminalTurnBindingAuthorityCliAdapter
+} from "./terminal-turn-binding-authority-cli-adapter.js";
+import {
   type TerminalNativeIdentity as NativeAgentSessionIdentity
 } from "./terminal-binding-authority.js";
-import {
-  terminalControlAliasMatches,
-  terminalControlsShareIncarnation
-} from "./terminal-authority-policy.js";
+import { assertSafeTerminalSend } from "./terminal-authority-policy.js";
 import {
   canonicalMutationResource, capabilityGatedRepositoryOperation,
   capabilityGatedRepositoryPairOperation, withCanonicalMutationLocks,
@@ -177,13 +162,21 @@ import {
 } from "./terminal-dispatch-recovery-cli-adapter.js";
 import * as deferredRecoveryAdapter from
   "./deferred-foreground-recovery-cli-adapter.js";
-import {
-  migratedTerminalBindingMatches
-} from "./terminal-dispatch-execution.js";
 import * as dispatchReceipt from "./terminal-dispatch-receipt.js";
+import { openClawYieldNextAction } from
+  "./terminal-dispatch-presenter.js";
+import { classifyCallbackProcessFailure } from
+  "./callback-outbox-policy.js";
+import { isProcessAlive } from "./terminal-process-source.js";
 import {
+  assertConfiguredWorkspace,
+  canonicalWorkspace,
   expandHome,
+  matchesConfiguredWorkspace,
   packageRootDir,
+  parseJsonOption,
+  positiveMinutes,
+  required,
   resolveOptionalExecutable,
   writeCliJson as printJson
 } from "./cli-command-runtime.js";
@@ -234,7 +227,6 @@ const DEFAULT_AGENT_HARD_TIMEOUT_MINUTES = 720;
 const CLAUDE_SCREEN_APPROVAL_TTL_MS = 10 * 60 * 1000;
 const CALLBACK_ATTEMPT_LEASE_MS = 2 * 60 * 1000;
 const CALLBACK_RETRY_DELAYS_MS = [5000, 15000, 60000, 60000];
-const FINAL_DEFERRED_TRANSFER_STATUSES = new Set(["resolved", "abort_resolved"]);
 const gateRepository = capabilityGatedRepositoryOperation;
 const gateRepositoryPair = capabilityGatedRepositoryPairOperation;
 const authenticateLifecycleRecoveryResources = gateRepositoryPair(
@@ -383,20 +375,6 @@ function terminalDispatchCapabilityRepositories({
     }
   });
 }
-const TERMINAL_BRIDGE_SUPERSEDE_STATUSES = new Set<ConversationStatus>([
-  "created",
-  "running",
-  "waiting_for_agent",
-  "waiting_for_openclaw",
-  "stalled",
-  "cancelling"
-]);
-const TERMINAL_DISPATCH_RELEASE_STATUSES = new Set<ConversationStatus>([
-  "idle",
-  "failed",
-  "closed",
-  "cancelled"
-]);
 const nativeThreadLifecycleLedger =
   createNativeThreadLifecycleLedgerCliAdapter({
     repository: terminalDispatchRepository,
@@ -404,34 +382,11 @@ const nativeThreadLifecycleLedger =
       ordinaryOwnerIsReleased: (ledger) => {
         const owner = loadTerminalDispatchLedgerOwner(ledger);
         return Boolean(
-          owner && TERMINAL_DISPATCH_RELEASE_STATUSES.has(owner.status)
+          owner && isTerminalDispatchOwnerReleasedStatus(owner.status)
         );
       }
     }
   });
-const ACTIVE_TERMINAL_DISPATCH_STATUSES = new Set([
-  "prepared",
-  "text_injected",
-  "enter_dispatched",
-  "agent_accepted",
-  "dispatching",
-  "submitted",
-  "not_accepted",
-  "uncertain"
-]);
-const RECOVERABLE_TERMINAL_DISPATCH_STATUSES = new Set([...ACTIVE_TERMINAL_DISPATCH_STATUSES, "verified"]);
-const SESSION_SEND_BLOCKING_STATUSES = new Set<ConversationStatus>([
-  "created",
-  "running",
-  "waiting_for_agent",
-  "waiting_for_openclaw",
-  "stalled",
-  // Valid legacy records are normalized at the Store read boundary. Keeping
-  // these here makes malformed legacy records fail closed.
-  "callback_pending",
-  "callback_failed",
-  "cancelling"
-]);
 const TERMINAL_BRIDGE_UNCERTAIN_COLLATERAL_STALL_REASON =
   "a newer terminal submission has an uncertain outcome; inspect the shared terminal pane before continuing";
 const SESSION_SELECTOR_COMMANDS = new Set([
@@ -462,21 +417,12 @@ const STORE_MUTATION_COMMANDS = new Set([
   "reconcile-binding"
 ]);
 
-export type CliCommandOptions = Record<string, any>;
+export type CliCommandOptions = Record<string, unknown>;
 export type CliCommandDependencies = RuntimeCliCommandDependencies<CliCommandOptions>;
 
 export interface ParsedCliCommand {
   command?: string;
   options: CliCommandOptions;
-}
-
-class TurnBindingSupersededError extends Error {
-  readonly code = "AKK_TURN_BINDING_SUPERSEDED";
-
-  constructor(message: string) {
-    super(message);
-    this.name = "TurnBindingSupersededError";
-  }
 }
 
 export function parseCliCommand(argv: readonly string[]): ParsedCliCommand {
@@ -566,64 +512,6 @@ function preflightStoreWriter(commandName, options): void {
   assertStoreWriterCompatible(storeDir);
 }
 
-function canonicalWorkspace(value: unknown): string {
-  const requested = path.resolve(String(required(value, "--workspace is required")));
-  let canonical: string;
-  let stat: fs.Stats;
-  try {
-    canonical = fs.realpathSync(requested);
-    stat = fs.statSync(canonical);
-  } catch {
-    throw new Error(`--workspace does not exist: ${requested}`);
-  }
-  if (!stat.isDirectory()) {
-    throw new Error(`--workspace must be a directory: ${requested}`);
-  }
-  return canonical;
-}
-
-function matchesConfiguredWorkspace(
-  configuredWorkspace: unknown,
-  candidateWorkspace: unknown
-): boolean {
-  if (configuredWorkspace === undefined) {
-    return true;
-  }
-  if (candidateWorkspace === undefined || candidateWorkspace === null) {
-    return false;
-  }
-  try {
-    return canonicalWorkspace(configuredWorkspace) ===
-      canonicalWorkspace(candidateWorkspace);
-  } catch {
-    return false;
-  }
-}
-
-function assertConfiguredWorkspace(
-  configuredWorkspace: unknown,
-  candidateWorkspace: unknown,
-  subject: string
-): void {
-  if (configuredWorkspace === undefined) {
-    return;
-  }
-  const configured = canonicalWorkspace(configuredWorkspace);
-  let candidate: string;
-  try {
-    candidate = canonicalWorkspace(candidateWorkspace);
-  } catch {
-    throw new Error(
-      `refusing ${subject}; its working directory cannot be verified against expected workspace ${configured}`
-    );
-  }
-  if (candidate !== configured) {
-    throw new Error(
-      `refusing ${subject}; workspace ${candidate} does not match expected workspace ${configured}`
-    );
-  }
-}
-
 function terminalRuntime(options: CliCommandOptions = {}) {
   return createTerminalRuntimeCliAdapter({
     options,
@@ -634,10 +522,14 @@ function terminalRuntime(options: CliCommandOptions = {}) {
           conversation, nativeTakeover, request, runtime
         }),
       loadCodexContexts: async (nativeTakeover) =>
-        (await loadCodexTerminalContexts({ nativeTakeover, options })).map(
+        (await terminalStatusCliFacade.loadCodexCompletionContexts({
+          nativeTakeover,
+          options
+        })).map(
           ({ context, match, confidence }) => ({
-            context, match,
-            confidence: confidence as "high" | "medium" | "low"
+            context,
+            match,
+            confidence
           })
         )
     },
@@ -681,6 +573,7 @@ function createTerminalAgentBridge(
 }
 
 const terminalBridgeEnabled = dispatchReceipt.terminalBridgeEnabled;
+const textSummary = dispatchReceipt.terminalDispatchTextSummary;
 
 function withTerminalBridgeSubmission(
   mutation: dispatchReceipt.TerminalBridgeSubmissionMutation
@@ -702,6 +595,12 @@ const terminalDispatchCompletion = createTerminalDispatchCompletionCliAdapter({
       cliEnv().AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE === "1"
   }
 });
+const terminalTurnBindingAuthority =
+  createTerminalTurnBindingAuthorityCliAdapter({
+    storeDirForConversation: (conversation) =>
+      terminalAcceptanceCliFacade.storeDirForConversation(conversation)
+  });
+const assertTurnBindingCurrent = terminalTurnBindingAuthority.assertCurrent;
 const terminalIdentityAuthority = createTerminalIdentityAuthorityCliAdapter({
   runtime: {
     createBridge: (options) => terminalRuntime(options).createBridge(),
@@ -791,11 +690,6 @@ const callbackCliFacade = createCallbackCliFacade({
     assertNoDeferredTransfer: (input) =>
       terminalHandoffCliFacade.assertConversationHasNoNonterminalDeferredForegroundTransfer(input),
     assertBindingCurrent: assertTurnBindingCurrent,
-    isDispatchReleased: (conversation) => TERMINAL_DISPATCH_RELEASE_STATUSES
-      .has(effectiveTurnStatus(conversation)),
-    isWaitingForAgent,
-    isTerminalBridgeSupersedeStatus: (status) =>
-      TERMINAL_BRIDGE_SUPERSEDE_STATUSES.has(status),
     resolveCompletionDispatch: ({
       terminalControl, conversation, expectedMessageId, reason
     }) => resolveTerminalBridgeDispatchLedger(terminalControl,
@@ -806,12 +700,15 @@ const callbackCliFacade = createCallbackCliFacade({
     isProcessAlive,
     attemptLeaseMs: CALLBACK_ATTEMPT_LEASE_MS,
     delaysMs: CALLBACK_RETRY_DELAYS_MS },
-  runtime: { classifyProcessFailure, textSummary }
+  runtime: { classifyProcessFailure: classifyCallbackProcessFailure, textSummary }
 });
 const terminalDispatchRecovery = createTerminalDispatchRecoveryCliAdapter({
   repository: terminalDispatchRepository,
   authority: {
     terminalControl: terminalControlFromTakeover,
+    assertNoDeferredTransfer: (input) =>
+      terminalHandoffCliFacade
+        .assertConversationHasNoNonterminalDeferredForegroundTransfer(input),
     assertTurnBindingCurrent,
     storeDirForConversation: managedSessionStoreDirForConversation
   },
@@ -846,6 +743,9 @@ const terminalDispatchRecovery = createTerminalDispatchRecoveryCliAdapter({
   },
   runtime: { isProcessAlive }
 });
+const loadTerminalDispatchLedgerOwner = terminalDispatchRecovery.loadOwner;
+const assertManagedTerminalDispatchOwner =
+  terminalDispatchRecovery.assertManagedOwner;
 const terminalBindingLedgerFields = terminalDispatchRecovery.bindingFields;
 const reconcilePreparedTerminalDispatchLedger =
   terminalDispatchRecovery.reconcilePrepared;
@@ -886,9 +786,7 @@ const terminalAcceptanceCliFacade = createTerminalAcceptanceCliFacade({
     assertTurnCurrent: assertTurnBindingCurrent,
     terminalControl: terminalControlFromTakeover,
     isDiscoverableTurn: isDiscoverableTmuxConversation,
-    workspaceMatches: matchesConfiguredWorkspace,
-    isSessionBlockingStatus: (status) =>
-      SESSION_SEND_BLOCKING_STATUSES.has(status)
+    workspaceMatches: matchesConfiguredWorkspace
   },
   repository: {
     acquireStateLock: acquireFileLock,
@@ -899,7 +797,6 @@ const terminalAcceptanceCliFacade = createTerminalAcceptanceCliFacade({
     bindingFields: terminalDispatchRecovery.bindingFields
   },
   deferred: {
-    isFinal: (status) => FINAL_DEFERRED_TRANSFER_STATUSES.has(status),
     recover: ({ options, terminal }) =>
       terminalHandoffCliFacade.recoverDeferredCodexForegroundTransferBeforeMutation({
         options,
@@ -1001,9 +898,6 @@ const nativeThreadLifecycleQueryFacade = createNativeThreadLifecycleCliAdapter({
       terminalDispatchRecovery.assertNativeThreadStoreAuthority(input),
     orphanedForRecovery: (terminalControl) =>
       terminalDispatchRecovery.orphanedForRecovery(terminalControl)
-  },
-  terminalList: {
-    isBlockingStatus: (status) => SESSION_SEND_BLOCKING_STATUSES.has(status)
   },
   output: { cwd: cliCwd, print: printJson }
 });
@@ -1135,8 +1029,6 @@ const terminalStatusCliFacade = createTerminalStatusCliFacade({
   reconciliation: {
     reconcileMonitors: (options, request) =>
       terminalMonitorSupervisionCliFacade.reconcileMonitors(options, request),
-    isFinalDeferredTransferStatus: (status) =>
-      FINAL_DEFERRED_TRANSFER_STATUSES.has(status),
     workspaceMatches: matchesConfiguredWorkspace,
     acquireStateLock: (statePath) => acquireFileLock(`${statePath}.lock`),
     terminalBridgeEnabled
@@ -1176,7 +1068,7 @@ const terminalListCliFacade = createTerminalListCliFacade({
     callbackRetryDisposition: (delivery) =>
       callbackCliFacade.retryDisposition(delivery),
     codexLingeringBeforeIdentityMatchesSession,
-    isActiveStatus,
+    isActiveStatus: isActiveConversationStatus,
     isDiscoverableTmuxConversation,
     isVerifiedDeadTerminalAgentProcess,
     loadTerminalBridgeDispatchLedger,
@@ -1204,12 +1096,8 @@ const terminalListCliFacade = createTerminalListCliFacade({
       terminalHandoffCliFacade.observedHandoffTargetResolution(input)
   },
   policy: {
-    activeTerminalDispatchStatuses: ACTIVE_TERMINAL_DISPATCH_STATUSES,
     approvalTtlMs: CLAUDE_SCREEN_APPROVAL_TTL_MS,
-    finalDeferredTransferStatuses: FINAL_DEFERRED_TRANSFER_STATUSES,
     selectorCommands: SESSION_SELECTOR_COMMANDS,
-    sessionSendBlockingStatuses: SESSION_SEND_BLOCKING_STATUSES,
-    terminalDispatchReleaseStatuses: TERMINAL_DISPATCH_RELEASE_STATUSES,
     rememberOriginalExpectedTerminalSelector: (options, selector) => {
       terminalHandoffCliFacade.rememberOriginalExpectedTerminalSelector(
         options,
@@ -1300,9 +1188,7 @@ const terminalMonitorStateCliFacade = createTerminalMonitorStateCliAdapter({
     isProcessAlive,
     storeDir: storeDirFromOptions,
     print: printJson,
-    bindingSuperseded: (error) => error instanceof TurnBindingSupersededError
-      ? { code: error.code, message: error.message }
-      : undefined,
+    bindingSuperseded: terminalTurnBindingAuthority.superseded,
     approvalTtlMs: CLAUDE_SCREEN_APPROVAL_TTL_MS,
     callbackRetryLimit: CALLBACK_RETRY_DELAYS_MS.length
   }
@@ -1335,7 +1221,8 @@ const terminalMonitorSupervisionCliFacade =
       isProcessAlive,
       storeDir: storeDirFromOptions,
       workspaceMatches: matchesConfiguredWorkspace,
-      bindingSuperseded: (error) => error instanceof TurnBindingSupersededError,
+      bindingSuperseded: (error) =>
+        Boolean(terminalTurnBindingAuthority.superseded(error)),
       print: printJson,
       log: runtimeLog
     }
@@ -1377,13 +1264,7 @@ const terminalMaintenanceCliFacade = createTerminalMaintenanceCliFacade({
     assertExclusive: nativeThreadLifecycleFacade.assertExclusive,
     assertTurnBindingCurrent,
     assertManagedTerminalDispatchOwner,
-    loadTerminalDispatchLedgerOwner,
-    isSessionSendBlocking: (status) =>
-      SESSION_SEND_BLOCKING_STATUSES.has(status),
-    isRecoverableDispatchStatus: (status) =>
-      RECOVERABLE_TERMINAL_DISPATCH_STATUSES.has(status),
-    isFinalDeferredTransferStatus: (status) =>
-      FINAL_DEFERRED_TRANSFER_STATUSES.has(status)
+    loadTerminalDispatchLedgerOwner
   },
   repository: {
     acquireFileLock,
@@ -1417,352 +1298,13 @@ const terminalMaintenanceCliFacade = createTerminalMaintenanceCliFacade({
 function agentVersionForRunningProcess(
   agent: ExecutorKind,
   pid: number,
-  options: Record<string, any>
+  options: CliCommandOptions
 ): string | undefined {
   return terminalRuntime(options).agentVersionForRunningProcess(agent, pid);
 }
 
-
-function assertSafeTerminalSend(
-  agent: ExecutorKind,
-  terminalStatus
-): void {
-  const displayName = executorDefinitionForKind(agent).displayName;
-  const approval = isRecord(terminalStatus?.approval_state)
-    ? terminalStatus.approval_state
-    : undefined;
-  if (terminalStatus?.reachable !== true) {
-    throw new Error(`${displayName} terminal status is unavailable`);
-  }
-  if (approval?.blocked === true) {
-    throw new Error(
-      stringValue(approval.reason) ?? `${displayName} is waiting at a permission dialog`
-    );
-  }
-  if (terminalStatus.activity_state !== "idle") {
-    throw new Error(
-      `${displayName} terminal is ${stringValue(terminalStatus.activity_state) ?? "unknown"}, not idle`
-    );
-  }
-}
-
-function assertTurnBindingCurrent(
-  conversation: Conversation,
-  operation: string
-): void {
-  const storeDir = managedSessionStoreDirForConversation(conversation);
-  if (!storeDir) {
-    return;
-  }
-  const takeover = isRecord(conversation.native_session_takeover)
-    ? conversation.native_session_takeover
-    : undefined;
-  const hasTerminalControl = isRecord(takeover?.terminal_control);
-  // Delegated, non-terminal Turns predate first-class Session authority and
-  // still need to accept their exact callback. Native-thread fencing applies
-  // only to Turns that can cause or receive terminal side effects.
-  if (!hasTerminalControl) {
-    return;
-  }
-  const terminalControl = terminalControlFromTakeover(takeover);
-  if (!terminalControl) {
-    throw new Error(
-      `cannot ${operation} Turn ${turnIdForConversation(conversation)}: its ` +
-      "terminal binding is malformed"
-    );
-  }
-  // Every terminal side effect first upgrades a supported predecessor under
-  // the Store writer lease. This makes the freshly materialized Session
-  // authoritative even for the first callback/control after an upgrade.
-  const manifest = ensureStoreWritable(storeDir);
-  if (manifest.writer_protocol < STORE_SESSION_AUTHORITY_PROTOCOL) {
-    throw new Error(
-      `cannot ${operation} Turn ${turnIdForConversation(conversation)}: ` +
-      "its Store has no protocol-3 Session authority"
-    );
-  }
-  const session = loadManagedSession(
-    storeDir,
-    sessionIdForConversation(conversation)
-  );
-  const bindingId = stringValue(conversation.terminal_binding_id);
-  const bindingGeneration = Number(conversation.terminal_binding_generation);
-  const turnNativeThreadId = stringValue(conversation.native_thread_id) ??
-    stringValue(takeover?.terminal_agent_session_id);
-  const exactModernBinding = Boolean(
-    bindingId &&
-    Number.isSafeInteger(bindingGeneration) &&
-    session.status === "bound" &&
-    session.binding?.binding_id === bindingId &&
-    session.binding.generation === bindingGeneration &&
-    session.binding.native_thread_id === turnNativeThreadId
-  );
-  const compatibleMigratedBinding = Boolean(
-    !bindingId &&
-    !Number.isSafeInteger(bindingGeneration) &&
-    session.lineage.created_by === "migration" &&
-    !session.last_transition_id &&
-    migratedTerminalTurnMatchesSessionBinding({
-      conversation,
-      takeover,
-      terminalControl,
-      session,
-      turnNativeThreadId
-    })
-  );
-  if (!exactModernBinding && !compatibleMigratedBinding) {
-    throw new TurnBindingSupersededError(
-      `cannot ${operation} Turn ${turnIdForConversation(conversation)}: its ` +
-      `Session binding generation is no longer current`
-    );
-  }
-}
-
-function migratedTerminalTurnMatchesSessionBinding({
-  conversation,
-  takeover,
-  terminalControl,
-  session,
-  turnNativeThreadId
-}: {
-  conversation: Conversation;
-  takeover: Record<string, any>;
-  terminalControl: TerminalControlRef;
-  session: ManagedSessionState;
-  turnNativeThreadId?: string;
-}): boolean {
-  const binding = session.binding;
-  const terminalId = stringValue(takeover.native_session_id);
-  return migratedTerminalBindingMatches({
-    session,
-    agent: executorForConversation(conversation).kind,
-    workspaceMatches:
-      path.resolve(session.workspace) === path.resolve(conversation.workspace),
-    terminalId,
-    terminalAliasMatches: Boolean(binding && terminalId &&
-      terminalControlAliasMatches(
-        terminalId,
-        terminalControl,
-        binding.terminal_id,
-        binding.terminal_control
-      )),
-    terminalIncarnationMatches: Boolean(binding &&
-      terminalControlsShareIncarnation(
-        binding.terminal_control,
-        terminalControl
-      )),
-    pid: Number(takeover.terminal_agent_pid),
-    nativeThreadId: turnNativeThreadId,
-    processUuid: stringValue(takeover.terminal_agent_process_uuid),
-    processBirth: stringValue(takeover.terminal_agent_process_birth),
-    rollout: isRecord(takeover.terminal_agent_rollout)
-      ? takeover.terminal_agent_rollout
-      : undefined
-  });
-}
-
-function openClawYieldNextAction({
-  conversationId,
-  sessionId,
-  turnId,
-  source,
-  callbackExpected
-}) {
-  const callbackText = callbackExpected
-    ? "The coding agent should report completion, questions, or errors through the existing Agent Knock Knock callback for this conversation."
-    : "No AKK-managed callback is registered for this raw terminal-controlled id; do not wait synchronously. Use AKK status/list later or attach/create an AKK conversation when callback delivery is required.";
-  return {
-    action: "yield",
-    reason:
-      "The requested agent work was handed off asynchronously. End this OpenClaw turn now instead of waiting, polling, or treating the send as a synchronous agent result.",
-    source,
-    conversation_id: conversationId,
-    session_id: sessionId,
-    turn_id: turnId,
-    callback_expected: callbackExpected,
-    do_not:
-      "Do not inspect event logs, process lists, terminal screens, files, stdout, or stderr while waiting unless the user explicitly asks for status.",
-    expected_callback: callbackText
-  };
-}
-
-
-function positiveMinutes(value, optionName: string): number {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new Error(`${optionName} must be a positive number`);
-  }
-  return parsed;
-}
-
-
-function loadTerminalDispatchLedgerOwner(
-  ledger: Record<string, any>
-): Conversation | undefined {
-  const statePath = stringValue(ledger.state_path);
-  if (!statePath) {
-    return undefined;
-  }
-  try {
-    const conversation = loadState(statePath);
-    if (
-      conversation.conversation_id !==
-        stringValue(ledger.conversation_id)
-    ) {
-      return undefined;
-    }
-    return conversation;
-  } catch {
-    return undefined;
-  }
-}
-
-function assertManagedTerminalDispatchOwner({
-  storeDir,
-  conversation,
-  terminalControl,
-  action
-}: {
-  storeDir: string;
-  conversation: Conversation;
-  terminalControl: TerminalControlRef;
-  action: "approve" | "cancel";
-}): void {
-  assertConversationHasNoNonterminalDeferredForegroundTransfer({
-    storeDir,
-    conversation,
-    action
-  });
-  assertTurnBindingCurrent(conversation, action);
-  const nativeTakeover = isRecord(
-    conversation.native_session_takeover
-  )
-    ? conversation.native_session_takeover
-    : undefined;
-  const messageId = stringValue(
-    nativeTakeover?.terminal_bridge_message_id
-  );
-  const ledger = loadTerminalBridgeDispatchLedger(terminalControl);
-  if (
-    !messageId ||
-    !ledger ||
-    !["submitted", "agent_accepted"].includes(String(ledger.status)) ||
-    stringValue(ledger.conversation_id) !==
-      conversation.conversation_id ||
-    stringValue(ledger.message_id) !== messageId ||
-    (
-      stringValue(conversation.terminal_binding_id) &&
-      (
-        stringValue(ledger.binding_id) !==
-          stringValue(conversation.terminal_binding_id) ||
-        Number(ledger.binding_generation) !==
-          Number(conversation.terminal_binding_generation) ||
-        stringValue(ledger.native_thread_id) !==
-          (
-            stringValue(conversation.native_thread_id) ??
-            stringValue(nativeTakeover?.terminal_agent_session_id)
-          )
-      )
-    )
-  ) {
-    throw new Error(
-      `refusing to ${action}: this AKK conversation does not own the ` +
-      "current terminal dispatch generation; refresh status and operate on " +
-      "the current task"
-    );
-  }
-}
-
-
-
-
-
-
-
 const terminalBridgeRequestFingerprint =
   dispatchReceipt.terminalBridgeRequestFingerprint;
-
-async function loadCodexTerminalContexts({ nativeTakeover, options }) {
-  const provider = terminalRuntime(options).createAgentSessionProvider("codex");
-  const nativeSessionId = stringValue(nativeTakeover?.["native_session_id"]);
-  const startedAtMs = Date.parse(String(nativeTakeover?.["terminal_bridge_started_at"] ?? ""));
-  const terminalConversation = parseTerminalConversationId(nativeSessionId);
-  const activeProcess = await terminalStatusCliFacade.activeCodexProcessForPid(
-    options,
-    terminalConversation?.pid
-  );
-  const directSessionId = activeProcess?.sessionId ?? (terminalConversation ? undefined : nativeSessionId);
-  if (directSessionId) {
-    const context = await provider.getForkContext({
-      sessionId: directSessionId,
-      maxMessages: Number(options.maxMessages ?? 16),
-      maxCommands: Number(options.maxCommands ?? 10),
-      maxTextLength: Number(options.maxTextLength ?? 4000)
-    });
-    if (context) {
-      return [{
-        context,
-        process: activeProcess,
-        match: activeProcess?.sessionId ? "process_session_id" : "native_session_id",
-        confidence: "high"
-      }];
-    }
-  }
-
-  const cwd = activeProcess?.cwd ?? stringValue(nativeTakeover?.["source_cwd"]);
-  if (!cwd) {
-    return [];
-  }
-
-  const sessions = (await provider.listHistoricalSessions())
-    .filter((session) => session.cwd === cwd)
-    .filter((session) => {
-      if (!Number.isFinite(startedAtMs)) {
-        return true;
-      }
-      if (session.updatedAtMs === undefined || session.updatedAtMs === null) {
-        return true;
-      }
-      const updatedAtMs = Number(session.updatedAtMs);
-      return !Number.isFinite(updatedAtMs) || updatedAtMs >= startedAtMs;
-    })
-    .sort((left, right) => Number(right.updatedAtMs ?? 0) - Number(left.updatedAtMs ?? 0));
-  const matches: Array<{
-    context: ForkContextPackage;
-    process: ActiveCodexProcess | undefined;
-    match: string;
-    confidence: string;
-  }> = [];
-  const candidateErrors: string[] = [];
-  for (const session of sessions) {
-    try {
-      const context = await provider.getForkContext({
-        sessionId: session.id,
-        maxMessages: Number(options.maxMessages ?? 16),
-        maxCommands: Number(options.maxCommands ?? 10),
-        maxTextLength: Number(options.maxTextLength ?? 4000)
-      });
-      if (context) {
-        matches.push({
-          context,
-          process: activeProcess,
-          match: sessions.length === 1 ? "cwd" : "cwd_request_hash",
-          confidence: sessions.length === 1 ? "medium" : "low"
-        });
-      }
-    } catch (error) {
-      candidateErrors.push(
-        `${session.id}: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-  }
-  if (candidateErrors.length > 0) {
-    throw new Error(
-      `could not inspect every plausible same-cwd Codex session: ${candidateErrors.join("; ")}`
-    );
-  }
-  return matches;
-}
 
 /**
  * Detached monitors must re-enter through the executable wrapper. The command
@@ -1849,34 +1391,6 @@ function storeDirFromOptions(options) {
   return expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(cliCwd()));
 }
 
-function isActiveStatus(status) {
-  return !["done", "failed", "closed", "cancelled"].includes(status);
-}
-
-function isWaitingForAgent(status) {
-  return ["created", "running", "waiting_for_agent", "cancelling"].includes(status);
-}
-
-function isProcessAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return !isZombieProcess(pid);
-  } catch (error) {
-    return error?.code === "EPERM";
-  }
-}
-
-function isZombieProcess(pid) {
-  const result = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], {
-    encoding: "utf8"
-  });
-  if (result.status !== 0) {
-    return false;
-  }
-
-  return result.stdout.trim().toUpperCase().startsWith("Z");
-}
-
 function parseArgs(argv) {
   const parsed = {};
   for (let index = 0; index < argv.length; index += 1) {
@@ -1900,83 +1414,6 @@ function parseArgs(argv) {
 
 function toCamelCase(value) {
   return value.replace(/-([a-z])/g, (_, char) => char.toUpperCase());
-}
-
-function required(value, message) {
-  if (value === undefined || value === "") {
-    throw new Error(message);
-  }
-
-  return value;
-}
-
-function parseOptionalJson(text) {
-  try {
-    return JSON.parse(String(text));
-  } catch {
-    return undefined;
-  }
-}
-
-function parseJsonOption(value, optionName) {
-  if (!value) {
-    return undefined;
-  }
-
-  try {
-    return JSON.parse(String(value));
-  } catch (error) {
-    throw new Error(`${optionName} must be valid JSON: ${error.message}`);
-  }
-}
-
-function textSummary(text, maxLength = 240) {
-  const value = String(text ?? "");
-  return {
-    length: value.length,
-    preview: value ? value.slice(0, maxLength) : undefined
-  };
-}
-
-function classifyProcessFailure(result) {
-  const status = result?.status ?? 0;
-  const combined = [
-    result?.error?.message,
-    result?.stderr,
-    result?.stdout
-  ].filter(Boolean).join("\n").toLowerCase();
-
-  if (!combined && status === 0) {
-    return undefined;
-  }
-  if (isRemoteCompactStreamDisconnect(combined)) {
-    return "transient_remote_compact_failure";
-  }
-  if (combined.includes("agent needs reconnect") || combined.includes("internal error")) {
-    return "agent_reconnect_required";
-  }
-  if (combined.includes("permission denied") || combined.includes("operation not permitted")) {
-    return "permission_denied";
-  }
-  if (combined.includes("sandbox") || combined.includes("outside workspace")) {
-    return "sandbox_denied";
-  }
-  if (combined.includes("timed out") || combined.includes("timeout")) {
-    return "timeout";
-  }
-  if (status !== 0) {
-    return "nonzero_exit";
-  }
-  return undefined;
-}
-
-function isRemoteCompactStreamDisconnect(text) {
-  const value = String(text ?? "").toLowerCase();
-  return (
-    value.includes("error running remote compact task") &&
-    value.includes("stream disconnected") &&
-    value.includes("/codex/responses/compact")
-  );
 }
 
 const terminalCommandCliFacade = createTerminalCommandCliFacade({
@@ -2066,9 +1503,6 @@ const terminalCommandCliFacade = createTerminalCommandCliFacade({
     verifyCodexPendingManagedSendStatus,
     withTerminalBridgeSubmission,
     withTerminalDispatchStateScope
-  },
-  policy: {
-    terminalDispatchReleaseStatuses: TERMINAL_DISPATCH_RELEASE_STATUSES
   }
 });
 
