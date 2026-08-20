@@ -72,6 +72,7 @@
     "test/terminal-dispatch-recovery-cli-adapter.test.ts",
     "test/terminal-dispatch-recovery-service.test.ts",
     "test/terminal-dispatch-repository-cli-adapter.test.ts",
+    "test/terminal-handoff-cli-adapter.test.ts",
     "test/terminal-identity-authority-service.test.ts",
     "test/terminal-list-cli-adapter.test.ts",
     "test/terminal-list-renderer.test.ts",
