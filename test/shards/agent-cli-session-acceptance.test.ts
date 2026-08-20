@@ -33,7 +33,9 @@ import {
   claudeTerminalStaticArgs,
   claudeAgentRow,
   codexNativeIdentityArgs,
+  agentCliVirtualClockSnapshot,
   runAgentCliInProcess,
+  runAgentCliInProcessDirect as runAgentCliInProcessSequential,
   runAgentCliAsync,
   spawnAgentCliCaptured,
   spawnAgentCliProcess,
@@ -48,6 +50,7 @@ import {
   tmuxPane,
   writeFakeTmux,
   writeFakeProcessTools,
+  registerDirectFakeCodexProcessBirth,
   writeTrackedFakeProcessTools,
   writeFakeOpenClaw,
   writeFakeClaudeAgents,
@@ -338,6 +341,11 @@ if (args.includes("cwd")) {
   )});
 }
 `, { mode: 0o755 });
+    registerDirectFakeCodexProcessBirth(
+      fakeBinDir,
+      codexPid,
+      processBirth
+    );
     const testEnv = {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
       AKK_TEST_CODEX_ACCEPTANCE_ROLLOUT_PATH: originalRolloutPath,
@@ -362,7 +370,7 @@ if (args.includes("cwd")) {
     });
     const commonArgs = [...baseCommonArgs];
 
-    const first = await runAgentCliInProcess([
+    const first = await runAgentCliInProcessSequential([
       "send",
       "--conversation",
       rawTerminalId,
@@ -371,6 +379,13 @@ if (args.includes("cwd")) {
       ...commonArgs
     ], testEnv);
     assert.equal(first.status, 0, first.stderr || first.stdout);
+    assert.equal(
+      readJsonLines(tmuxCallsPath).some((call) =>
+        call.kind === "direct_terminal_provider"
+      ),
+      true,
+      "the sequential session witness must use the direct terminal port"
+    );
     const firstParsed = JSON.parse(first.stdout);
     assert.equal(firstParsed.session_id, firstParsed.conversation.session_id);
     assert.equal(firstParsed.turn_id, firstParsed.conversation.turn_id);
@@ -395,6 +410,9 @@ if (args.includes("cwd")) {
       firstParsed.conversation.native_session_takeover.terminal_agent_rollout.fd,
       "12r"
     );
+    const clockScopeArgs = ["list", "--store-dir", storeDir];
+    const clockAfterFirst = agentCliVirtualClockSnapshot(clockScopeArgs);
+    assert.ok(clockAfterFirst);
 
     const firstStatePath = firstParsed.conversation.state_path;
     const firstIdle = {
@@ -427,7 +445,7 @@ if (args.includes("cwd")) {
       updated_at: new Date().toISOString()
     };
     fs.writeFileSync(firstStatePath, `${JSON.stringify(firstIdle, null, 2)}\n`);
-    const firstClosed = await runAgentCliInProcess([
+    const firstClosed = await runAgentCliInProcessSequential([
       "close",
       "--state",
       firstStatePath,
@@ -450,7 +468,7 @@ if (args.includes("cwd")) {
     const keysBeforeWrongType = readJsonLines(tmuxCallsPath).filter(
       (call) => call.args[0] === "send-keys"
     ).length;
-    const wrongType = await runAgentCliInProcess([
+    const wrongType = await runAgentCliInProcessSequential([
       "send",
       "--session",
       firstParsed.session_id,
@@ -469,7 +487,7 @@ if (args.includes("cwd")) {
       keysBeforeWrongType
     );
 
-    const listedForSecond = await runAgentCliInProcess([
+    const listedForSecond = await runAgentCliInProcessSequential([
       "list",
       "--store-dir",
       storeDir,
@@ -487,7 +505,41 @@ if (args.includes("cwd")) {
       typeof secondAction.arguments.expected_terminal_token,
       "string"
     );
-    const second = await runAgentCliInProcess([
+    const sendsBeforeStaleProcessBirth = readJsonLines(tmuxCallsPath).filter(
+      (call) => call.args[0] === "send-keys"
+    ).length;
+    registerDirectFakeCodexProcessBirth(
+      fakeBinDir,
+      codexPid,
+      "Thu Aug 13 01:00:01 2026"
+    );
+    const staleProcessBirth = await runAgentCliInProcessSequential([
+      "send",
+      "--conversation",
+      String(secondAction.arguments.selector),
+      "--expected-terminal-token",
+      String(secondAction.arguments.expected_terminal_token),
+      "--message",
+      "A stale process incarnation must fail closed",
+      ...commonArgs
+    ], testEnv);
+    assert.notEqual(staleProcessBirth.status, 0);
+    assert.match(
+      staleProcessBirth.stderr,
+      /expected terminal token no longer authorizes/u
+    );
+    assert.equal(
+      readJsonLines(tmuxCallsPath).filter(
+        (call) => call.args[0] === "send-keys"
+      ).length,
+      sendsBeforeStaleProcessBirth
+    );
+    registerDirectFakeCodexProcessBirth(
+      fakeBinDir,
+      codexPid,
+      processBirth
+    );
+    const second = await runAgentCliInProcessSequential([
       "send",
       "--conversation",
       String(secondAction.arguments.selector),
@@ -518,10 +570,31 @@ if (args.includes("cwd")) {
         .filter((entry) => entry.isDirectory()).length,
       2
     );
+    const clockAfterSecond = agentCliVirtualClockSnapshot(clockScopeArgs);
+    assert.ok(clockAfterSecond);
+    const secondCallWaits = clockAfterSecond.requests.slice(
+      clockAfterFirst.requests.length
+    );
+    assert.deepEqual(
+      clockAfterSecond.requests.slice(0, clockAfterFirst.requests.length),
+      clockAfterFirst.requests,
+      "a later command must reuse the same fixture clock and request history"
+    );
+    assert.ok(
+      clockAfterSecond.nowMs >= clockAfterFirst.nowMs,
+      "the shared fixture clock must remain monotonic across commands"
+    );
+    assert.equal(
+      clockAfterSecond.nowMs - clockAfterFirst.nowMs,
+      secondCallWaits.reduce(
+        (total, request) => total + request.milliseconds,
+        0
+      )
+    );
     const entersBeforeRejectedTurn = readJsonLines(tmuxCallsPath).filter((call) =>
       call.args[0] === "send-keys" && call.args.at(-1) === "C-m"
     ).length;
-    const turnTargetRejected = await runAgentCliInProcess([
+    const turnTargetRejected = await runAgentCliInProcessSequential([
       "send",
       "--session",
       firstParsed.turn_id,
@@ -587,7 +660,7 @@ if (args.includes("cwd")) {
     const entersBeforeWrongOpenClawOwner = readJsonLines(tmuxCallsPath).filter(
       (call) => call.args[0] === "send-keys" && call.args.at(-1) === "C-m"
     ).length;
-    const wrongOpenClawOwner = await runAgentCliInProcess([
+    const wrongOpenClawOwner = await runAgentCliInProcessSequential([
       "respond",
       "--turn",
       secondParsed.turn_id,
@@ -620,7 +693,7 @@ if (args.includes("cwd")) {
       (call) => call.args[0] === "send-keys"
     ).length;
     for (const action of ["approve", "cancel"]) {
-      const fenced = await runAgentCliInProcess([
+      const fenced = await runAgentCliInProcessSequential([
         action,
         "--turn",
         secondParsed.turn_id,
@@ -650,7 +723,7 @@ if (args.includes("cwd")) {
       respondMessageId,
       ...commonArgs
     ];
-    const responded = await runAgentCliInProcess(respondArgs, testEnv);
+    const responded = await runAgentCliInProcessSequential(respondArgs, testEnv);
     assert.equal(responded.status, 0, responded.stderr || responded.stdout);
     const respondedParsed = JSON.parse(responded.stdout);
     assert.equal(respondedParsed.session_id, secondParsed.session_id);
@@ -687,7 +760,10 @@ if (args.includes("cwd")) {
       ).length,
       3
     );
-    const replayedResponse = await runAgentCliInProcess(respondArgs, testEnv);
+    const replayedResponse = await runAgentCliInProcessSequential(
+      respondArgs,
+      testEnv
+    );
     assert.equal(
       replayedResponse.status,
       0,
@@ -723,7 +799,7 @@ if (args.includes("cwd")) {
     );
     fs.writeFileSync(screenPath, "› \n");
     const secondRespondMessageId = `msg-openclaw-${"f".repeat(64)}`;
-    const secondResponse = await runAgentCliInProcess([
+    const secondResponse = await runAgentCliInProcessSequential([
       "respond",
       "--turn",
       secondParsed.turn_id,
@@ -746,7 +822,10 @@ if (args.includes("cwd")) {
       4
     );
 
-    const oldResponseReplay = await runAgentCliInProcess(respondArgs, testEnv);
+    const oldResponseReplay = await runAgentCliInProcessSequential(
+      respondArgs,
+      testEnv
+    );
     assert.equal(
       oldResponseReplay.status,
       0,
@@ -786,7 +865,7 @@ if (args.includes("cwd")) {
     const keysBeforeIncompleteIdentity = readJsonLines(tmuxCallsPath).filter(
       (call) => call.args[0] === "send-keys"
     ).length;
-    const incompleteCancel = await runAgentCliInProcess([
+    const incompleteCancel = await runAgentCliInProcessSequential([
       "cancel",
       "--turn",
       secondParsed.turn_id,
@@ -916,7 +995,7 @@ test("terminal transport never becomes delivered without native acceptance evide
         `terminal:v2:tmux:codex:${target}:${pid}`;
       try {
         fs.mkdirSync(workspace, { recursive: true });
-        const result = await runAgentCliInProcess([
+        const result = await runAgentCliInProcessSequential([
           "send",
           "--conversation",
           rawConversationId,
@@ -968,6 +1047,18 @@ test("terminal transport never becomes delivered without native acceptance evide
             .terminal_bridge_submission.last_proven_stage,
           "enter_dispatched"
         );
+        if (fixture.outcome === "pending") {
+          const clock = agentCliVirtualClockSnapshot([
+            "list",
+            "--store-dir",
+            storeDir
+          ]);
+          assert.ok(clock);
+          assert.ok(
+            clock.requests.some((request) => request.kind === "async"),
+            "the virtual fixture must record its acceptance polling waits"
+          );
+        }
       } finally {
         fs.rmSync(tempDir, { recursive: true, force: true });
       }

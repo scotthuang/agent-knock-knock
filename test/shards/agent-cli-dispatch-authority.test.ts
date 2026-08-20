@@ -34,7 +34,8 @@ import {
   claudeTerminalStaticArgs,
   claudeAgentRow,
   codexNativeIdentityArgs,
-  runAgentCliInProcess,
+  runAgentCliInProcess as runAgentCliInProcessReal,
+  runAgentCliInProcessDirect as runAgentCliInProcess,
   runAgentCliAsync,
   spawnAgentCliCaptured,
   spawnAgentCliProcess,
@@ -84,7 +85,8 @@ test("an active managed task blocks a follow-up before tmux input", async () => 
     const testEnv = {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     };
-    const first = await runAgentCliInProcess([
+    // Retain one real-wall public CLI witness for the active managed boundary.
+    const first = await runAgentCliInProcessReal([
       "send",
       "--conversation",
       rawConversationId,
@@ -99,6 +101,13 @@ test("an active managed task blocks a follow-up before tmux input", async () => 
       "--disable-terminal-bridge-monitor"
     ], testEnv);
     assert.equal(first.status, 0, first.stderr || first.stdout);
+    assert.equal(
+      readJsonLines(tmuxCallsPath).some((call) =>
+        call.kind === "direct_terminal_provider"
+      ),
+      false,
+      "the public active-managed witness must retain the executable adapter boundary"
+    );
     const firstParsed = JSON.parse(first.stdout);
     const statePath = firstParsed.conversation.state_path;
     const firstMessageId =
@@ -112,7 +121,7 @@ test("an active managed task blocks a follow-up before tmux input", async () => 
       listPanesOutput,
       "Second managed task"
     );
-    const second = await runAgentCliInProcess([
+    const second = await runAgentCliInProcessReal([
       "send",
       "--conversation",
       rawConversationId,
@@ -206,6 +215,13 @@ test("managed pre-submit setup failure restores the previous boundary and is ret
       "--disable-terminal-bridge-monitor"
     ], testEnv);
     assert.equal(first.status, 0, first.stderr || first.stdout);
+    assert.equal(
+      readJsonLines(tmuxCallsPath).some((call) =>
+        call.kind === "direct_terminal_provider"
+      ),
+      true,
+      "the sequential setup witness must use the direct terminal port"
+    );
     const firstParsed = JSON.parse(first.stdout);
     const managedSessionId = firstParsed.conversation.session_id;
     const statePath = firstParsed.conversation.state_path;
@@ -678,6 +694,7 @@ test("native thread Store authority spans concurrent terminal sends", async () =
 });
 
 test("only the uncertain owner can resolve its fence without moving native Store authority", async () => {
+  const runBoundaryCli = runAgentCliInProcessReal;
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-cross-store-fence-"));
   const firstStoreDir = path.join(tempDir, "first-conversations");
   const secondStoreDir = path.join(tempDir, "second-conversations");
@@ -746,7 +763,7 @@ test("only the uncertain owner can resolve its fence without moving native Store
       "--disable-terminal-bridge-monitor"
     ];
 
-    const first = await runAgentCliInProcess(
+    const first = await runBoundaryCli(
       sendArgs("First cross-store task", firstStoreDir, true),
       testEnv
     );
@@ -766,7 +783,7 @@ test("only the uncertain owner can resolve its fence without moving native Store
       "Second cross-store task",
       true
     );
-    const second = await runAgentCliInProcess(
+    const second = await runBoundaryCli(
       sendArgs("Second cross-store task", secondStoreDir),
       testEnv
     );
@@ -779,7 +796,7 @@ test("only the uncertain owner can resolve its fence without moving native Store
       "waiting_for_agent"
     );
 
-    const oldClosed = await runAgentCliInProcess([
+    const oldClosed = await runBoundaryCli([
       "close",
       "--conversation",
       firstParsed.conversation.conversation_id,
@@ -795,7 +812,7 @@ test("only the uncertain owner can resolve its fence without moving native Store
       true
     );
 
-    const uncertain = await runAgentCliInProcess(
+    const uncertain = await runBoundaryCli(
       sendArgs("Second cross-store task", firstStoreDir),
       testEnv
     );
@@ -808,7 +825,7 @@ test("only the uncertain owner can resolve its fence without moving native Store
     assert.equal(secondParsed.submission_outcome, "uncertain");
     assert.equal(secondParsed.do_not_retry, true);
 
-    const staleClose = await runAgentCliInProcess([
+    const staleClose = await runBoundaryCli([
       "close",
       "--conversation",
       firstParsed.conversation.conversation_id,
@@ -828,7 +845,7 @@ test("only the uncertain owner can resolve its fence without moving native Store
       false
     );
 
-    const blocked = await runAgentCliInProcess(
+    const blocked = await runBoundaryCli(
       sendArgs("Third cross-store task", thirdStoreDir),
       testEnv
     );
@@ -837,7 +854,7 @@ test("only the uncertain owner can resolve its fence without moving native Store
     assert.equal(listManagedSessions(thirdStoreDir).length, 0);
     assert.equal(listConversations(thirdStoreDir).length, 0);
 
-    const ownerClosed = await runAgentCliInProcess([
+    const ownerClosed = await runBoundaryCli([
       "close",
       "--conversation",
       secondParsed.conversation.conversation_id,
@@ -863,7 +880,7 @@ test("only the uncertain owner can resolve its fence without moving native Store
       screenPath,
       listPanesOutput
     );
-    const third = await runAgentCliInProcess(
+    const third = await runBoundaryCli(
       sendArgs("Third cross-store task", firstStoreDir),
       testEnv
     );

@@ -34,7 +34,8 @@ import {
   claudeTerminalStaticArgs,
   claudeAgentRow,
   codexNativeIdentityArgs,
-  runAgentCliInProcess,
+  runAgentCliInProcess as runAgentCliInProcessReal,
+  runAgentCliInProcessVirtual as runAgentCliInProcess,
   runAgentCliAsync,
   spawnAgentCliCaptured,
   spawnAgentCliProcess,
@@ -87,7 +88,8 @@ test("terminal bridge monitor trusts matching task_complete despite stale workin
     );
 
     const rawConversationId = "terminal:tmux:codex-work:0.1:33389";
-    const sent = await runAgentCliInProcess([
+    // Keep one end-to-end real-wall Gateway callback witness in this shard.
+    const sent = await runAgentCliInProcessReal([
       "send",
       "--conversation",
       rawConversationId,
@@ -146,7 +148,7 @@ test("terminal bridge monitor trusts matching task_complete despite stale workin
       })
     ].join("\n");
 
-    const monitored = await runAgentCliInProcess([
+    const monitored = await runAgentCliInProcessReal([
       "monitor",
       "--terminal-bridge",
       "--state",
@@ -210,7 +212,7 @@ test("terminal bridge monitor trusts matching task_complete despite stale workin
     const keysBeforeStaleActions = readJsonLines(tmuxCallsPath)
       .filter((call) => call.args[0] === "send-keys")
       .length;
-    const staleApprove = await runAgentCliInProcess([
+    const staleApprove = await runAgentCliInProcessReal([
       "approve",
       "--conversation",
       parsed.conversation.conversation_id,
@@ -222,7 +224,7 @@ test("terminal bridge monitor trusts matching task_complete despite stale workin
     ]);
     assert.notEqual(staleApprove.status, 0);
     assert.match(staleApprove.stderr, /conversation is idle/u);
-    const staleCancel = await runAgentCliInProcess([
+    const staleCancel = await runAgentCliInProcessReal([
       "cancel",
       "--conversation",
       parsed.conversation.conversation_id,
@@ -240,7 +242,7 @@ test("terminal bridge monitor trusts matching task_complete despite stale workin
     );
 
     fs.writeFileSync(screenPath, "› \n");
-    const followUp = await runAgentCliInProcess([
+    const followUp = await runAgentCliInProcessReal([
       "send",
       "--conversation",
       rawConversationId,
@@ -946,7 +948,8 @@ test("renew reloads stalled state after pane discovery and cannot overwrite a co
     const testEnv = {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     };
-    const sent = await runAgentCliInProcess([
+    // The child-process renewal race below remains on the real clock.
+    const sent = await runAgentCliInProcessReal([
       "send",
       "--conversation",
       `terminal:tmux:${terminalTarget}:33389`,

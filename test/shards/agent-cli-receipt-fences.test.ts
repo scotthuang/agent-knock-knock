@@ -34,7 +34,7 @@ import {
   claudeTerminalStaticArgs,
   claudeAgentRow,
   codexNativeIdentityArgs,
-  runAgentCliInProcess,
+  runAgentCliInProcessDirect as runAgentCliInProcess,
   runAgentCliAsync,
   spawnAgentCliCaptured,
   spawnAgentCliProcess,
@@ -122,6 +122,13 @@ test("terminal receipt fingerprints preserve exact whitespace", async () => {
       "codex-exact-receipt-first"
     );
     assert.equal(first.status, 0, first.stderr || first.stdout);
+    assert.equal(
+      readJsonLines(tmuxCallsPath).some((call) =>
+        call.kind === "direct_terminal_provider"
+      ),
+      true,
+      "the receipt witness must use the direct terminal port"
+    );
     const firstParsed = JSON.parse(first.stdout);
     const firstStatePath = firstParsed.conversation.state_path;
     const firstState = JSON.parse(

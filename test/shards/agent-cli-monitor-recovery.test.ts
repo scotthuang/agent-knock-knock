@@ -35,7 +35,8 @@ import {
   claudeTerminalStaticArgs,
   claudeAgentRow,
   codexNativeIdentityArgs,
-  runAgentCliInProcess,
+  runAgentCliInProcess as runAgentCliInProcessReal,
+  runAgentCliInProcessVirtual as runAgentCliInProcess,
   runAgentCliAsync,
   spawnAgentCliCaptured,
   spawnAgentCliProcess,
@@ -96,7 +97,7 @@ test("terminal bridge monitor singleton rejects a live owner and reclaims a dead
       AKK_LOG_DIR: runtimeLogDir,
       AKK_SUBPROCESS_EVIDENCE_TEST_NAME: t.name
     };
-    const sent = await runAgentCliInProcess([
+    const sent = await runAgentCliInProcessReal([
       "send",
       "--conversation",
       "terminal:tmux:codex-work:0.1:33389",
@@ -485,7 +486,7 @@ test("terminal bridge monitor singleton rejects a live owner and reclaims a dead
         path.dirname(completedCallbackStatePath),
         "events.ndjson"
       );
-      const completedCallbackHandoff = await runAgentCliInProcess([
+      const completedCallbackHandoff = await runAgentCliInProcessReal([
         "monitor",
         "--terminal-bridge-handoff",
         "--state",
@@ -598,7 +599,7 @@ test("supervised Codex monitor retains detector diagnostics and completes the ex
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     };
     const request = "Prove the exact recovered native completion";
-    const sent = await runAgentCliInProcess([
+    const sent = await runAgentCliInProcessReal([
       "send",
       "--conversation",
       "terminal:tmux:codex-work:0.1:33389",
@@ -927,7 +928,7 @@ test("reconcile-monitors launches only recoverable waiting terminal bridges", as
     const testEnv = {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     };
-    const sent = await runAgentCliInProcess([
+    const sent = await runAgentCliInProcessReal([
       "send",
       "--conversation",
       "terminal:tmux:codex-work:0.1:33389",
@@ -1112,7 +1113,7 @@ test("callbackless completion crash resumes local settlement without outbox or r
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
       AKK_RUNTIME_DIR: runtimeDir
     };
-    const sent = await runAgentCliInProcess([
+    const sent = await runAgentCliInProcessReal([
       "send",
       "--conversation",
       "terminal:tmux:codex-local:0.1:43389",
@@ -1474,7 +1475,8 @@ test("reconcile-monitors stalls a verified-dead Claude Turn without relaunch or 
       terminalTarget,
       claudePid,
       claudeSessionId,
-      message: "Leave this accepted Claude task without a live process"
+      message: "Leave this accepted Claude task without a live process",
+      timing: "virtual"
     });
     const ledgerPath = findTerminalDispatchLedgerPath(
       task.conversation.conversation_id,
@@ -1595,7 +1597,8 @@ test("missing Claude transcript stalls with unverifiable completion evidence", a
       terminalTarget,
       claudePid,
       claudeSessionId,
-      message: "Keep the orphan unresolved when its transcript disappears"
+      message: "Keep the orphan unresolved when its transcript disappears",
+      timing: "virtual"
     });
     const ledgerPath = findTerminalDispatchLedgerPath(
       task.conversation.conversation_id,
@@ -1731,7 +1734,8 @@ test("durable Claude transcript completion wins over verified process death", as
       terminalTarget,
       claudePid,
       claudeSessionId,
-      message: request
+      message: request,
+      timing: "virtual"
     });
     const accepted = JSON.parse(fs.readFileSync(task.statePath, "utf8"));
     const anchor = accepted.native_session_takeover.claude_transcript_anchor;

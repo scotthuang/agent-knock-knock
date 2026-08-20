@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -18,13 +19,20 @@ import type { ClaudeAgentRow } from "../src/claude-terminal-agent-adapter.js";
 import { CodexStoreAdapter } from "../src/codex-store-adapter.js";
 import {
   createTerminalControlProviderRegistry,
+  parseTmuxListPanes,
   TmuxTerminalControlProvider
 } from "../src/terminal-control-provider.js";
 import {
+  StaticTerminalProcessSource,
   SystemTerminalProcessSource,
   type ProcessCommandResult
 } from "../src/terminal-process-source.js";
-import { runInProcessCli } from "./in-process-cli-fixtures.js";
+import type { TerminalProcessSnapshot } from "../src/terminal-agent-adapter.js";
+import type { CliCommandDependencies } from "../src/cli-core.js";
+import {
+  MutableRecordingTerminalProvider,
+  runInProcessCli
+} from "./in-process-cli-fixtures.js";
 
 export const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 export const testRuntimeDir = fs.mkdtempSync(
@@ -52,6 +60,35 @@ type AgentCliCommandRunner = (
   args: string[]
 ) => ProcessCommandResult;
 
+interface RegisteredFakeTerminalTools {
+  callsPath?: string;
+  screenPath?: string;
+  listPanesOutput?: string;
+  failSendText?: string;
+  failSendOutcomeUncertain?: boolean;
+  processes?: TerminalProcessSnapshot[];
+  processBirthByPid?: Map<number, string>;
+  commandActive?: boolean;
+}
+
+const registeredFakeTerminalTools = new Map<
+  string,
+  RegisteredFakeTerminalTools
+>();
+
+function registeredFakeTerminalToolState(
+  fakeBinDir: string
+): RegisteredFakeTerminalTools {
+  const key = path.resolve(fakeBinDir);
+  const existing = registeredFakeTerminalTools.get(key);
+  if (existing) {
+    return existing;
+  }
+  const created: RegisteredFakeTerminalTools = {};
+  registeredFakeTerminalTools.set(key, created);
+  return created;
+}
+
 export async function startManagedClaudeTerminalTask(options: {
   fakeBinDir: string;
   workspace: string;
@@ -61,6 +98,7 @@ export async function startManagedClaudeTerminalTask(options: {
   claudePid: number;
   claudeSessionId: string;
   message: string;
+  timing?: "real" | "virtual";
 }): Promise<ManagedClaudeTerminalTask> {
   writeFakeProcessTools(options.fakeBinDir, [{
     pid: options.claudePid,
@@ -70,7 +108,10 @@ export async function startManagedClaudeTerminalTask(options: {
   }]);
   const openclawBin = path.join(options.fakeBinDir, "openclaw");
   const rawConversationId = `terminal:v2:tmux:claude:${options.terminalTarget}:${options.claudePid}`;
-  const sent = await runAgentCliInProcess([
+  const runCli = options.timing === "virtual"
+    ? runAgentCliInProcessVirtual
+    : runAgentCliInProcess;
+  const sent = await runCli([
     "send",
     "--conversation",
     rawConversationId,
@@ -179,10 +220,7 @@ export function codexNativeIdentityArgs(options: {
   ];
 }
 
-export function agentCliTestEnv(
-  args: string[],
-  env: NodeJS.ProcessEnv
-): NodeJS.ProcessEnv {
+function inferredAgentCliRuntimeDir(args: string[]): string | undefined {
   let inferredRuntimeDir: string | undefined;
   const storeIndex = args.indexOf("--store-dir");
   if (storeIndex >= 0 && args[storeIndex + 1]) {
@@ -203,6 +241,14 @@ export function agentCliTestEnv(
       );
     }
   }
+  return inferredRuntimeDir;
+}
+
+export function agentCliTestEnv(
+  args: string[],
+  env: NodeJS.ProcessEnv
+): NodeJS.ProcessEnv {
+  const inferredRuntimeDir = inferredAgentCliRuntimeDir(args);
   return {
     ...process.env,
     AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "1",
@@ -217,6 +263,378 @@ export function agentCliTestEnv(
 export function runAgentCliInProcess(
   args: string[],
   env: NodeJS.ProcessEnv = {}
+) {
+  return runAgentCliInProcessWithTiming(args, env);
+}
+
+export interface AgentCliVirtualSleepRequest {
+  kind: "async" | "sync";
+  milliseconds: number;
+}
+
+export interface AgentCliVirtualClockSnapshot {
+  nowMs: number;
+  requests: AgentCliVirtualSleepRequest[];
+}
+
+class AgentCliVirtualClock {
+  private currentMs: number;
+  private readonly requests: AgentCliVirtualSleepRequest[] = [];
+  private commandActive = false;
+
+  constructor(startMs: number) {
+    this.currentMs = startMs;
+  }
+
+  readonly now = (): Date => new Date(this.currentMs);
+
+  readonly nowMs = (): number => this.currentMs;
+
+  readonly sleep = async (milliseconds: number): Promise<void> => {
+    this.advance("async", milliseconds);
+    // Advancing virtual time must not starve other promises or I/O callbacks
+    // used by an in-process scenario. This yields one event-loop turn without
+    // introducing a wall-clock delay or hidden test concurrency.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  };
+
+  readonly sleepSync = (milliseconds: number): void => {
+    this.advance("sync", milliseconds);
+  };
+
+  snapshot(): AgentCliVirtualClockSnapshot {
+    return {
+      nowMs: this.currentMs,
+      requests: this.requests.map((request) => ({ ...request }))
+    };
+  }
+
+  async run<T>(command: () => Promise<T>): Promise<T> {
+    if (this.commandActive) {
+      throw new Error(
+        "virtual in-process CLI timing does not support concurrent commands in one fixture"
+      );
+    }
+    this.commandActive = true;
+    try {
+      return await command();
+    } finally {
+      this.commandActive = false;
+    }
+  }
+
+  private advance(
+    kind: AgentCliVirtualSleepRequest["kind"],
+    milliseconds: number
+  ): void {
+    const normalized = Number(milliseconds);
+    if (!Number.isFinite(normalized) || normalized < 0) {
+      throw new Error("virtual CLI sleep must be a non-negative finite number");
+    }
+    this.requests.push({ kind, milliseconds: normalized });
+    this.currentMs += normalized;
+  }
+}
+
+const virtualAgentCliClocks = new Map<string, AgentCliVirtualClock>();
+
+function virtualAgentCliClockScope(
+  args: string[],
+  env: NodeJS.ProcessEnv
+): string {
+  const runtimeDir = env.AKK_RUNTIME_DIR ?? inferredAgentCliRuntimeDir(args);
+  if (!runtimeDir) {
+    throw new Error(
+      "virtual in-process CLI timing requires an explicit fixture Store, state path, or AKK_RUNTIME_DIR"
+    );
+  }
+  return path.resolve(runtimeDir);
+}
+
+function virtualAgentCliClock(
+  args: string[],
+  env: NodeJS.ProcessEnv
+): AgentCliVirtualClock {
+  const scope = virtualAgentCliClockScope(args, env);
+  const existing = virtualAgentCliClocks.get(scope);
+  if (existing) {
+    return existing;
+  }
+  const created = new AgentCliVirtualClock(Date.now());
+  virtualAgentCliClocks.set(scope, created);
+  return created;
+}
+
+/**
+ * Explicit deterministic timing for imported CLI scenarios.
+ *
+ * The clock is isolated by the fixture runtime derived from the exact Store,
+ * state path, or AKK_RUNTIME_DIR. Repeated commands for that fixture therefore
+ * retain monotonic wall and composer time. Tests that require external wall
+ * progress, a real lock timeout, process overlap, PID lifecycle, Gateway
+ * delivery, or adapter-process timing must keep using runAgentCliInProcess.
+ */
+export function runAgentCliInProcessVirtual(
+  args: string[],
+  env: NodeJS.ProcessEnv = {}
+) {
+  const clock = virtualAgentCliClock(args, env);
+  return clock.run(() => runAgentCliInProcessWithTiming(args, env, clock));
+}
+
+export function agentCliVirtualClockSnapshot(
+  args: string[],
+  env: NodeJS.ProcessEnv = {}
+): AgentCliVirtualClockSnapshot | undefined {
+  return virtualAgentCliClocks.get(
+    virtualAgentCliClockScope(args, env)
+  )?.snapshot();
+}
+
+class FakePathRecordingTerminalProvider
+  extends MutableRecordingTerminalProvider {
+  constructor(
+    options: ConstructorParameters<typeof MutableRecordingTerminalProvider>[0],
+    private readonly recordList: () => void
+  ) {
+    super(options);
+  }
+
+  override async listTerminals() {
+    this.recordList();
+    return super.listTerminals();
+  }
+}
+
+/**
+ * Explicit direct terminal ports for sequential imported-CLI scenarios.
+ *
+ * `writeFakeTmux` and `writeFakeProcessTools` register the same fixture facts
+ * that their executable shims expose. This runner consumes those facts through
+ * production terminal provider/process-source interfaces, while retaining a
+ * compatible operation ledger for the existing exact input assertions. Tests
+ * for executable adapters, process inventory integrity, terminal failures, or
+ * overlap must keep using the real runner and are rejected here.
+ */
+export function runAgentCliInProcessDirect(
+  args: string[],
+  env: NodeJS.ProcessEnv = {}
+) {
+  const clock = virtualAgentCliClock(args, env);
+  const usesStaticTerminalAdapters = [
+    "--processes-json",
+    "--terminals-json",
+    "--terminal-screens-json"
+  ].some((option) => args.includes(option));
+  if (usesStaticTerminalAdapters) {
+    return clock.run(() =>
+      runAgentCliInProcessWithTiming(args, env, clock)
+    );
+  }
+  const directCommand = directFakeTerminalCommand(
+    args,
+    env,
+    agentCliTestEnv(args, env)
+  );
+  return clock.run(() => directCommand.run(() =>
+    runAgentCliInProcessWithTiming(
+      args,
+      env,
+      clock,
+      directCommand.dependencies
+    )
+  ));
+}
+
+interface DirectFakeTerminalCommand {
+  dependencies: CliCommandDependencies;
+  run<T>(command: () => Promise<T>): Promise<T>;
+}
+
+function directFakeTerminalCommand(
+  args: string[],
+  explicitEnv: NodeJS.ProcessEnv,
+  commandEnvironment: NodeJS.ProcessEnv
+): DirectFakeTerminalCommand {
+  const fakeBinDir = explicitEnv.PATH?.split(path.delimiter)[0];
+  const fixture = fakeBinDir
+    ? registeredFakeTerminalTools.get(path.resolve(fakeBinDir))
+    : undefined;
+  if (!fixture?.listPanesOutput) {
+    throw new Error(
+      "direct in-process CLI requires a writeFakeTmux fixture at the first explicit PATH entry"
+    );
+  }
+  const unsupportedBoundary = [
+    "AKK_TEST_TMUX_CAPTURE_FAIL",
+    "AKK_TEST_TMUX_LIST_GATE_PATH",
+    "AKK_TEST_TMUX_SEND_GATE_PATH"
+  ].find((name) => commandEnvironment[name] !== undefined);
+  if (
+    unsupportedBoundary ||
+    Number(commandEnvironment.AKK_TEST_TMUX_SEND_DELAY_MS ?? 0) > 0 ||
+    fixture.failSendText ||
+    fixture.failSendOutcomeUncertain
+  ) {
+    throw new Error(
+      "direct in-process CLI cannot replace a terminal failure, gate, delay, SIGKILL, or overlap boundary"
+    );
+  }
+
+  const record = (args: string[]) => {
+    if (!fixture.callsPath) {
+      return;
+    }
+    fs.appendFileSync(
+      fixture.callsPath,
+      `${JSON.stringify({ kind: "direct_terminal_provider", args })}\n`,
+      "utf8"
+    );
+  };
+  const readScreen = () =>
+    fixture.screenPath && fs.existsSync(fixture.screenPath)
+      ? fs.readFileSync(fixture.screenPath, "utf8")
+      : "";
+  const writeScreen = (screen: string) => {
+    if (fixture.screenPath) {
+      fs.writeFileSync(fixture.screenPath, screen);
+    }
+  };
+  const provider = new FakePathRecordingTerminalProvider({
+    panes: parseTmuxListPanes(fixture.listPanesOutput),
+    hooks: {
+      capture(operation) {
+        record(["capture-pane", "-p", "-t", operation.target]);
+        return readScreen();
+      },
+      sendText(operation) {
+        record(["send-keys", "-t", operation.target, "-l", operation.text]);
+        const acceptanceRolloutPath =
+          commandEnvironment.AKK_TEST_CODEX_ACCEPTANCE_ROLLOUT_PATH;
+        if (acceptanceRolloutPath) {
+          fs.writeFileSync(
+            `${acceptanceRolloutPath}.pending-input`,
+            operation.text
+          );
+        }
+        if (
+          commandEnvironment.AKK_TEST_TMUX_COMPOSER_FROM_LITERAL === "1"
+        ) {
+          writeScreen(`› ${operation.text}`);
+        }
+        const afterPaste =
+          commandEnvironment.AKK_TEST_TMUX_COMPOSER_AFTER_PASTE;
+        if (afterPaste !== undefined) {
+          writeScreen(afterPaste);
+        }
+      },
+      sendKeys(operation) {
+        record(["send-keys", "-t", operation.target, ...operation.keys]);
+        if (operation.keys.at(-1) !== "C-m") {
+          return;
+        }
+        const afterEnter =
+          commandEnvironment.AKK_TEST_TMUX_COMPOSER_AFTER_ENTER;
+        if (afterEnter !== undefined) {
+          writeScreen(afterEnter);
+        }
+        appendDirectCodexAcceptance(commandEnvironment);
+      }
+    }
+  }, () => record(["list-panes", "<direct-provider>"]));
+  const processes = fixture.processes ?? [];
+  if (
+    processes.length === 0 ||
+    processes.some(
+      (snapshot) => !/(?:^|\s|\/)codex(?:\s|$)/u.test(snapshot.command)
+    )
+  ) {
+    throw new Error(
+      "direct in-process CLI is restricted to non-empty Codex process fixtures"
+    );
+  }
+  const dependencies: CliCommandDependencies = {
+    terminalControlProviderRegistry:
+      createTerminalControlProviderRegistry([provider]),
+    terminalProcessSource: new StaticTerminalProcessSource(processes),
+    codexProcessBirthForPid: (pid) =>
+      fixture.processBirthByPid?.get(pid) ??
+      "Thu Aug  6 10:00:00 2026",
+    ...(!args.includes("--agent-versions-json")
+      ? { agentVersionForRunningProcess: () => undefined }
+      : {}),
+    ...(!args.includes("--claude-agents-json")
+      ? {
+          loadClaudeAgentRows: (_options, observation) => {
+            if (observation.required) {
+              throw new Error(
+                "direct Codex fixture cannot replace required Claude agent observation"
+              );
+            }
+            return [];
+          }
+        }
+      : {})
+  };
+  return {
+    dependencies,
+    async run<T>(command: () => Promise<T>): Promise<T> {
+      if (fixture.commandActive) {
+        throw new Error(
+          "direct in-process CLI does not support concurrent commands in one terminal fixture"
+        );
+      }
+      fixture.commandActive = true;
+      try {
+        return await command();
+      } finally {
+        fixture.commandActive = false;
+      }
+    }
+  };
+}
+
+function appendDirectCodexAcceptance(env: NodeJS.ProcessEnv): void {
+  const rolloutPath = env.AKK_TEST_CODEX_ACCEPTANCE_ROLLOUT_PATH;
+  if (!rolloutPath) {
+    return;
+  }
+  const pendingPath = `${rolloutPath}.pending-input`;
+  if (!fs.existsSync(pendingPath)) {
+    return;
+  }
+  const request = fs.readFileSync(pendingPath, "utf8");
+  const turnId = randomUUID();
+  const timestamp = new Date().toISOString();
+  const records = [
+    {
+      timestamp,
+      type: "event_msg",
+      payload: { type: "task_started", turn_id: turnId }
+    },
+    {
+      timestamp,
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: request }],
+        internal_chat_message_metadata_passthrough: { turn_id: turnId }
+      }
+    }
+  ];
+  fs.appendFileSync(
+    rolloutPath,
+    `${records.map((record) => JSON.stringify(record)).join("\n")}\n`
+  );
+  fs.rmSync(pendingPath, { force: true });
+}
+
+function runAgentCliInProcessWithTiming(
+  args: string[],
+  env: NodeJS.ProcessEnv = {},
+  virtualClock?: AgentCliVirtualClock,
+  dependencyOverrides: CliCommandDependencies = {}
 ) {
   const commandEnvironment = agentCliTestEnv(args, env);
   const usesStaticTerminalAdapters = [
@@ -248,19 +666,19 @@ export function runAgentCliInProcess(
     env: commandEnvironment,
     cwd: process.cwd(),
     pid: process.pid,
-    now: () => new Date(),
-    monotonicNowMs: () => performance.now(),
-    sleep: (milliseconds) => new Promise((resolve) => {
+    now: virtualClock?.now ?? (() => new Date()),
+    monotonicNowMs: virtualClock?.nowMs ?? (() => performance.now()),
+    sleep: virtualClock?.sleep ?? ((milliseconds) => new Promise((resolve) => {
       setTimeout(resolve, milliseconds);
-    }),
-    sleepSync: (milliseconds) => {
+    })),
+    sleepSync: virtualClock?.sleepSync ?? ((milliseconds) => {
       Atomics.wait(
         new Int32Array(new SharedArrayBuffer(4)),
         0,
         0,
         milliseconds
       );
-    },
+    }),
     runtimeLog() {},
     ...(env.PATH !== undefined
       ? {
@@ -307,7 +725,8 @@ export function runAgentCliInProcess(
             ]),
           terminalProcessSource: new SystemTerminalProcessSource({ runCommand })
         }
-      : {})
+      : {}),
+    ...dependencyOverrides
   });
 }
 
@@ -709,6 +1128,13 @@ export function writeFakeTmux(
   failSendText = "",
   failSendOutcomeUncertain = false
 ) {
+  Object.assign(registeredFakeTerminalToolState(fakeBinDir), {
+    callsPath,
+    screenPath,
+    listPanesOutput,
+    failSendText,
+    failSendOutcomeUncertain
+  });
   const fakeTmux = path.join(fakeBinDir, "tmux");
   fs.writeFileSync(
     fakeTmux,
@@ -835,6 +1261,11 @@ export function writeFakeProcessTools(
   fakeBinDir: string,
   processes: Array<{ pid: number; ppid: number; command: string; cwd: string }>
 ) {
+  const fixture = registeredFakeTerminalToolState(fakeBinDir);
+  fixture.processes = processes.map(
+    (entry) => ({ ...entry, elapsed: "00:01" })
+  );
+  fixture.processBirthByPid = undefined;
   const fakePs = path.join(fakeBinDir, "ps");
   const psOutput = [
     "  PID  PPID ELAPSED COMMAND",
@@ -871,6 +1302,30 @@ process.stdout.write(${JSON.stringify(lsofOutput)});
     "utf8"
   );
   fs.chmodSync(fakeLsof, 0o755);
+}
+
+/**
+ * Register the exact process-incarnation fact exposed by a fixture-owned
+ * custom `ps` shim without changing that executable boundary. Direct provider
+ * tests must opt in explicitly whenever they replace writeFakeProcessTools'
+ * default process birth.
+ */
+export function registerDirectFakeCodexProcessBirth(
+  fakeBinDir: string,
+  pid: number,
+  processBirth: string
+): void {
+  const fixture = registeredFakeTerminalToolState(fakeBinDir);
+  if (!fixture.processes?.some((process) => process.pid === pid)) {
+    throw new Error(
+      `direct Codex process birth requires registered process ${pid}`
+    );
+  }
+  if (!processBirth.trim()) {
+    throw new Error("direct Codex process birth must be non-empty");
+  }
+  fixture.processBirthByPid ??= new Map<number, string>();
+  fixture.processBirthByPid.set(pid, processBirth);
 }
 
 export function writeTrackedFakeProcessTools(options: {

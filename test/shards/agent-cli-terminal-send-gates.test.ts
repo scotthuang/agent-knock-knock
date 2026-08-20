@@ -35,6 +35,8 @@ import {
   claudeAgentRow,
   codexNativeIdentityArgs,
   runAgentCliInProcess,
+  runAgentCliInProcessDirect,
+  runAgentCliInProcessVirtual,
   runAgentCliAsync,
   spawnAgentCliCaptured,
   spawnAgentCliProcess,
@@ -90,7 +92,7 @@ test("raw and managed Codex sends fail closed unless the locked pane is verifiab
     const baseEnv = {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     };
-    const managed = await runAgentCliInProcess([
+    const managed = await runAgentCliInProcessDirect([
       "send",
       "--conversation",
       rawConversationId,
@@ -103,6 +105,13 @@ test("raw and managed Codex sends fail closed unless the locked pane is verifiab
       "--disable-terminal-bridge-monitor"
     ], baseEnv);
     assert.equal(managed.status, 0, managed.stderr || managed.stdout);
+    assert.equal(
+      readJsonLines(tmuxCallsPath).some((call) =>
+        call.kind === "direct_terminal_provider"
+      ),
+      true,
+      "the sequential idle-gate witness must use the direct terminal port"
+    );
     const managedParsed = JSON.parse(managed.stdout);
     const managedConversationId = managedParsed.conversation.conversation_id;
     const managedSessionId = managedParsed.conversation.session_id;
@@ -188,7 +197,17 @@ test("raw and managed Codex sends fail closed unless the locked pane is verifiab
           ...nativeIdentityArgs,
           "--disable-terminal-bridge-monitor"
         ];
-        const sent = await runAgentCliInProcess(sendArgs, scenarioEnv);
+        if ("AKK_TEST_TMUX_CAPTURE_FAIL" in scenario.env) {
+          await assert.rejects(
+            async () => runAgentCliInProcessDirect(sendArgs, scenarioEnv),
+            /direct in-process CLI cannot replace a terminal failure/u
+          );
+        }
+        const sent = await (
+          "AKK_TEST_TMUX_CAPTURE_FAIL" in scenario.env
+            ? runAgentCliInProcess
+            : runAgentCliInProcessDirect
+        )(sendArgs, scenarioEnv);
 
         assert.notEqual(
           sent.status,
@@ -201,6 +220,15 @@ test("raw and managed Codex sends fail closed unless the locked pane is verifiab
           false,
           `${scenario.name} ${target.id} must not write terminal keys`
         );
+        if ("AKK_TEST_TMUX_CAPTURE_FAIL" in scenario.env) {
+          assert.equal(
+            readJsonLines(tmuxCallsPath).some((call) =>
+              call.kind === "direct_terminal_provider"
+            ),
+            false,
+            `${scenario.name} ${target.id} must retain the executable adapter boundary`
+          );
+        }
       }
     }
   } finally {
@@ -594,7 +622,7 @@ test("background send to raw terminal id creates managed callback conversation",
     }]);
 
     const rawConversationId = "terminal:tmux:codex-work:0.1:33389";
-    const rejected = await runAgentCliInProcess([
+    const rejected = await runAgentCliInProcessDirect([
       "send",
       "--conversation",
       rawConversationId,
@@ -613,7 +641,7 @@ test("background send to raw terminal id creates managed callback conversation",
     assert.match(rejected.stderr, /must be a positive number/);
     assert.equal(fs.existsSync(tmuxCallsPath), false);
 
-    const sent = await runAgentCliInProcess([
+    const sent = await runAgentCliInProcessDirect([
       "send",
       "--conversation",
       rawConversationId,
@@ -705,7 +733,7 @@ test("background send to raw terminal id creates managed callback conversation",
     };
     fs.writeFileSync(statePath, `${JSON.stringify(idleState, null, 2)}\n`);
 
-    const listed = await runAgentCliInProcess([
+    const listed = await runAgentCliInProcessVirtual([
       "list",
       "--reconcile",
       "--store-dir",
