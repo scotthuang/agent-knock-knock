@@ -2,8 +2,8 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 9868,
-    "production_physical_loc": 89498,
+    "cli_core_max_physical_loc": 8119,
+    "production_physical_loc": 89873,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -298,6 +298,16 @@
         "test/shards/agent-cli-dispatch-recovery.test.ts",
         "test/shards/agent-cli-monitor-recovery.test.ts",
         "test/shards/agent-cli-receipt-fences.test.ts"
+      ]
+    },
+    "terminal-handoff-application": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/codex-no-rollout-binding-cli.test.ts",
+        "test/human-handoff-adoption-cli.test.ts",
+        "test/shards/agent-cli-dispatch-recovery.test.ts",
+        "test/shards/agent-cli-session-acceptance.test.ts",
+        "test/shards/agent-cli-terminal-send-gates.test.ts"
       ]
     },
     "terminal-identity-authority": {
@@ -735,6 +745,18 @@
     {
       "path": "src/terminal-dispatch-repository-cli-adapter.ts",
       "owner": "terminal-dispatch-recovery"
+    },
+    {
+      "path": "src/terminal-handoff-application-service.ts",
+      "owner": "terminal-handoff-application"
+    },
+    {
+      "path": "src/terminal-handoff-cli-adapter.ts",
+      "owner": "terminal-handoff-application"
+    },
+    {
+      "path": "src/terminal-handoff-facts.ts",
+      "owner": "terminal-handoff-application"
     },
     {
       "path": "src/terminal-identity-authority-cli-adapter.ts",

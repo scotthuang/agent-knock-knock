@@ -1902,6 +1902,86 @@ patterns. The four focused witnesses are Claude native inspection,
 native-thread lifecycle, native ownership, and the Codex no-rollout native-
 inspection cases.
 
+## Deferred foreground and observed handoff CLI facade
+
+This slice moves the exact 23-function deferred/verified-empty/observed-handoff
+inventory (1,733 physical function-span lines) out of `cli-core.ts`. It owns
+safe-aborted deferred retry validation, verified-empty detach and transport
+boundaries, deferred preparation/application/recovery composition, observed
+handoff token/selector/target/adoption/transport boundaries, and nonterminal
+transfer guards. Ordinary replay, deferred reducers and repositories,
+submission acceptance, identity authority, lifecycle commands, callbacks,
+monitoring, and `runObservedHandoffClose` remain with their existing owners.
+
+Against exact parent `d4cb4f108ce240a006c7eebb56e2ce5cc9d70c3f`,
+`src/cli-core.ts` falls from 9,868 to 8,119 physical lines (-1,749). Total
+production TypeScript changes from 89,498 to 89,873 (+375), meeting the
+preferred 450-line overhead target and the 1,650–1,850 core-reduction target.
+Architecture validation reports 52 domains, 109 production modules, 643 static
+import edges, zero cycles, and one retained `cli-core.ts` importer. The new
+owner has three modules and exactly five focused integration witnesses.
+
+`terminal-handoff-facts.ts` and `TerminalHandoffApplicationService` own only
+neutral zero-input chronology and ordered authority-thunk evaluation. They
+import no filesystem/path API, Store or Session repository, locks, raw JSON,
+full terminal object, or `Record<..., any>`. The CLI adapter retains concrete
+terminal, Session, ledger, and path translation. Its invocation-local factory
+has exactly five groups (`runtime`, `identity`, `acceptance`, `authority`, and
+`repository`); repository includes the already-authenticated transaction-shell
+operations. `identity` is the actual `terminalIdentityAuthority` facade type,
+not a copied identity port list. Acceptance observation and Turn checks remain
+direct projections of `terminalAcceptanceCliFacade`.
+
+The recovery seam is explicit for downstream lifecycle composition.
+`recoverDeferredCodexForegroundTransferBeforeMutation` is entered while the
+caller owns the exact terminal lock; it creates the canonical transaction scope
+with a no-op terminal acquisition, then acquires the Store writer lease.
+`recoverDeferredCodexForegroundTransferWhileWriterLease` accepts the resulting
+typed canonical scopes/resources, and only `withDeferredForegroundRecoveryScope`
+may add the conversation state capability. Transfers without a state path use
+the writer capability directly. Thus the retained order is terminal -> writer
+-> state, and no service reconstructs a raw lock or held-lock flag. Fresh
+handoff identity/status observation is exposed as the invocation-scoped
+`observedExternalHandoffIdentity`; known roots and companions remain the
+invocation-scoped `terminalIdentityAuthority` operation rather than being
+reconstructed here.
+
+Safe retry remains fail closed. Only an exact `aborted` receipt with
+`safe_to_retry=true`, zero-input chronology, canonical state/log paths, exact
+terminal route and process incarnation, one byte-identical canonical receipt,
+matching request hash, resolved zero-input ledger, and exact restored Session
+CAS authority may retry. A possible-input stage never takes this route.
+Verified-empty detach revalidates the source snapshot and identity boundary
+before its Session CAS. Observed adoption retains the durable order `prepared
+transition -> prepared ledger -> source transitioning -> fresh observation ->
+verified transition -> verified ledger -> Session commit -> committed
+transition -> resolved ledger`. Once the durable transition is verified or
+committed, catch handling rethrows and never downgrades it to uncertain.
+
+The two previously over-complex boundaries are now below the hard gate:
+safe-aborted retry is 148 lines/c9 and observed-handoff transport is 166/c28.
+The reviewed preferred-target exceptions are:
+
+| Function | LOC / approximate complexity |
+| --- | ---: |
+| `maybeAdoptObservedExternalThread` | 322 / c35 |
+| `assertObservedHandoffTransportBoundary` | 166 / c28 |
+| `prepareDeferredCodexForegroundBinding` | 152 / c2 |
+| `safeAbortedDeferredRetrySourceSession` | 148 / c9 |
+| `recoverDeferredCodexForegroundTransferWhileWriterLease` | 123 / c1 |
+| `maybeDetachVerifiedEmptyCodexSource` | 104 / c9 |
+
+Direct fast evidence records parallel factory/capability isolation, selector
+WeakMap isolation, getter and original-error priority, zero-input chronology,
+canonical receipt/hash/route byte ordering, monotonic handoff writes,
+verified-state non-downgrade, terminal/writer/state capability order, neutral
+service imports, and direct identity-facade composition. The five retained
+focused witnesses are Codex no-rollout binding, human handoff adoption,
+dispatch recovery, Session acceptance, and terminal-send gates. They cover the
+real verified-empty, deferred crash/retry, observed adoption, acceptance, and
+pre-input transport paths without assigning lifecycle, callback, monitor, or
+ordinary replay ownership to this facade.
+
 ## Soft freeze while #126 is active
 
 Until the orchestration milestones finish:

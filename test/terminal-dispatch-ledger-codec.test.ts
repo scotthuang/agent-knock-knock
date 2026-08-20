@@ -566,15 +566,21 @@ test("lifecycle phase builder preserves every legacy key and JSON byte", () => {
 });
 
 test("lifecycle builder and scoped save calls retain their exact adjacent CAS", () => {
-  const source = readFileSync("src/cli-core.ts", "utf8");
-  const starts = [...source.matchAll(/lifecycleLedger\(/gu)].map((match) => match.index);
-  const actual = starts.map((start, index) => {
-    const section = source.slice(start, starts[index + 1]);
-    const phase = /phase: "([^"]+)"/u.exec(section)?.[1];
-    const cas = /expectedTransitionId:\s*([^,}\n]+)(?:,\s*expectedStatus:\s*"([^"]+)")?/u
-      .exec(section);
-    return [phase, cas?.[1].trim(), cas?.[2]];
-  }).filter(([phase]) => phase !== undefined);
+  const actual = [
+    "src/terminal-handoff-cli-adapter.ts",
+    "src/cli-core.ts"
+  ].flatMap((sourcePath) => {
+    const source = readFileSync(sourcePath, "utf8");
+    const starts = [...source.matchAll(/lifecycleLedger\(/gu)]
+      .map((match) => match.index);
+    return starts.map((start, index) => {
+      const section = source.slice(start, starts[index + 1]);
+      const phase = /phase: "([^"]+)"/u.exec(section)?.[1];
+      const cas = /expectedTransitionId:\s*([^,}\n]+)(?:,\s*expectedStatus:\s*"([^"]+)")?/u
+        .exec(section);
+      return [phase, cas?.[1].trim(), cas?.[2]];
+    }).filter(([phase]) => phase !== undefined);
+  });
   assert.deepEqual(actual, [
     ["prepared", "null", undefined],
     ["verified", "transitionId", "prepared"],
