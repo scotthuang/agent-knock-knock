@@ -43,7 +43,7 @@ test("package wires the standalone and architecture refactor evidence gates", ()
   assert.match(architectureValidator, /loadAndValidateRefactorEvidence/u);
 });
 
-test("final selector evidence reproduces startup counts and historical selection", async () => {
+test("final refactor evidence reproduces startup counts and historical selection", async () => {
   const evidenceModule = await loadEvidenceModule();
   const evidence = evidenceModule.loadAndValidateRefactorEvidence({
     repoRoot,
@@ -51,16 +51,32 @@ test("final selector evidence reproduces startup counts and historical selection
   });
 
   assert.equal(evidence.testEvidence.subprocess.baselineIncluded, 48);
-  assert.equal(evidence.testEvidence.subprocess.currentIncluded, 38);
-  assert.equal(evidence.testEvidence.subprocess.reductionBasisPoints, 2083);
-  assert.equal(evidence.testEvidence.subprocess.targetRequired, false);
-  assert.equal(evidence.testEvidence.subprocess.targetMet, false);
+  assert.equal(evidence.testEvidence.subprocess.currentIncluded, 19);
+  assert.equal(evidence.testEvidence.subprocess.reductionBasisPoints, 6042);
+  assert.equal(evidence.testEvidence.subprocess.targetRequired, true);
+  assert.equal(evidence.testEvidence.subprocess.targetMet, true);
   assert.deepEqual(
     evidence.testEvidence.subprocess.currentCounts,
     {
-      cli_process: 18,
-      fake_node_process: 20,
-      other_process_or_adapter: 13
+      cli_process: 12,
+      fake_node_process: 7,
+      other_process_or_adapter: 12
+    }
+  );
+  assert.equal(
+    evidence.testEvidence.subprocess.baselineDiagnosticIncluded,
+    0
+  );
+  assert.equal(
+    evidence.testEvidence.subprocess.currentDiagnosticIncluded,
+    10
+  );
+  assert.deepEqual(
+    evidence.testEvidence.subprocess.currentDiagnosticCounts,
+    {
+      cli_process: 0,
+      fake_node_process: 10,
+      other_process_or_adapter: 1
     }
   );
 
@@ -91,11 +107,125 @@ test("final selector evidence reproduces startup counts and historical selection
 
   assert.deepEqual(evidence.publicContracts, {
     contractCount: 4,
-    witnessCount: 60,
-    migrationCount: 10,
+    witnessCount: 65,
+    migrationCount: 11,
     openclawToolCount: 14,
     storeProtocolCount: 5
   });
+});
+
+test("static subprocess evidence isolates only canonical measurement probes and cannot hide product starts", async () => {
+  const evidenceModule = await loadEvidenceModule();
+  const startupCall = ["spawn", "Sync"].join("");
+  const productSource = {
+    path: "test/product-boundary.test.ts",
+    source: `
+import { ${startupCall} } from "node:child_process";
+const cliPath = "dist/src/cli.js";
+const invoke = () => ${startupCall}(process.execPath, [cliPath, "status"]);
+invoke();
+`
+  };
+  const diagnosticSource = {
+    path: "test/refactor-evidence.test.ts",
+    source: `
+import { ${startupCall} } from "node:child_process";
+${startupCall}(process.execPath, ["-e", ""]);
+`
+  };
+  assert.deepEqual(
+    evidenceModule.measureStaticSubprocessStartupSites([
+      productSource,
+      diagnosticSource
+    ]),
+    {
+      product: {
+        cli_process: 1,
+        fake_node_process: 0,
+        other_process_or_adapter: 0
+      },
+      diagnostic: {
+        cli_process: 0,
+        fake_node_process: 1,
+        other_process_or_adapter: 0
+      }
+    }
+  );
+
+  const tiers = loadTiers();
+  const manifest = loadJson("config/refactor-test-evidence.json");
+  const weakenedThreshold = structuredClone(manifest);
+  weakenedThreshold.subprocess_startup_sites.final_threshold
+    .maximum_percent_of_baseline = 41;
+  assert.throws(
+    () => evidenceModule.validateTestEvidenceManifest({
+      manifest: weakenedThreshold,
+      repoRoot,
+      tiers
+    }),
+    /maximum_percent_of_baseline must be 40/u
+  );
+
+  const disabledThreshold = structuredClone(manifest);
+  disabledThreshold.subprocess_startup_sites.final_threshold.required = false;
+  assert.throws(
+    () => evidenceModule.validateTestEvidenceManifest({
+      manifest: disabledThreshold,
+      repoRoot,
+      tiers
+    }),
+    /final_threshold required must be true/u
+  );
+
+  const replacedBaseline = structuredClone(manifest);
+  replacedBaseline.subprocess_startup_sites.baseline.revision = "f".repeat(40);
+  assert.throws(
+    () => evidenceModule.validateTestEvidenceManifest({
+      manifest: replacedBaseline,
+      repoRoot,
+      tiers
+    }),
+    /baseline revision must remain ea592a88d7af4a709e7a7a1b989dd29e61932935/u
+  );
+
+  const broadenedExclusion = structuredClone(manifest);
+  broadenedExclusion.subprocess_startup_sites.measurement
+    .diagnostic_excluded_paths = ["test/callback-cli.test.ts"];
+  assert.throws(
+    () => evidenceModule.validateTestEvidenceManifest({
+      manifest: broadenedExclusion,
+      repoRoot,
+      tiers
+    }),
+    /diagnostic_excluded_paths must equal/u
+  );
+
+  const hiddenDiagnosticStart = structuredClone(manifest);
+  hiddenDiagnosticStart.subprocess_startup_sites.current
+    .diagnostic_counts.fake_node_process -= 1;
+  hiddenDiagnosticStart.subprocess_startup_sites.current
+    .diagnostic_included_total -= 1;
+  assert.throws(
+    () => evidenceModule.validateTestEvidenceManifest({
+      manifest: hiddenDiagnosticStart,
+      repoRoot,
+      tiers
+    }),
+    /current diagnostic counts\.fake_node_process expected 9 but measured 10/u
+  );
+
+  const hiddenProductStart = structuredClone(manifest);
+  hiddenProductStart.subprocess_startup_sites.current
+    .counts.cli_process -= 1;
+  hiddenProductStart.subprocess_startup_sites.current.included_total -= 1;
+  assert.throws(
+    () => evidenceModule.validateTestEvidenceManifest({
+      manifest: hiddenProductStart,
+      repoRoot,
+      tiers
+    }),
+    /current counts\.cli_process expected 11 but measured 12/u
+  );
 });
 
 test("dynamic subprocess evidence freezes the real full-tree measurement and retained boundaries", async () => {

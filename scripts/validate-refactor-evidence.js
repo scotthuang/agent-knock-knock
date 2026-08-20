@@ -26,6 +26,12 @@ try {
       final_threshold_required: subprocess.targetRequired,
       target_met: subprocess.targetMet
     },
+    subprocess_measurement_diagnostics: {
+      baseline: subprocess.baselineDiagnosticIncluded,
+      current: subprocess.currentDiagnosticIncluded,
+      baseline_counts: subprocess.baselineDiagnosticCounts,
+      current_counts: subprocess.currentDiagnosticCounts
+    },
     dynamic_subprocess_starts: {
       baseline_revision: dynamicSubprocess.baseline.revision,
       baseline_outer_cli_starts: "measured_by_full_runtime_attestation",

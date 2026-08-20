@@ -518,8 +518,8 @@ test("Claude manual recovery rolls exact-before back without lifecycle replay", 
   }
 });
 
-test("black-box Claude recovery rolls an exact submitted resume target forward", async () => {
-  const fixture = seededClaudeRecoveryFixture({ execution: "black-box" });
+test("imported Claude recovery rolls an exact submitted resume target forward", async () => {
+  const fixture = seededClaudeRecoveryFixture();
   try {
     fixture.setCurrentIdentity(TARGET_ID);
     const recovered = await fixture.close();
@@ -1294,7 +1294,6 @@ function currentTerminalDispatchLedgerPath(runtimeDir: string): string {
 
 function seededClaudeRecoveryFixture(
   options: {
-    execution?: "in-process" | "black-box";
     verified?: boolean;
   } = {}
 ) {
@@ -1576,16 +1575,8 @@ function seededClaudeRecoveryFixture(
     "--store-dir",
     storeDir
   ];
-  const run = async (args: string[]) => {
-    if (options.execution === "black-box") {
-      return spawnSync(
-        process.execPath,
-        [binPath, ...commandArguments(args)],
-        { encoding: "utf8", env, timeout: 30_000 }
-      );
-    }
-    return runInProcessCli(commandArguments(args), dependencies);
-  };
+  const run = (args: string[]) =>
+    runInProcessCli(commandArguments(args), dependencies);
   return {
     storeDir,
     terminalId,
@@ -1610,11 +1601,7 @@ function seededClaudeRecoveryFixture(
     source: () => listManagedSessions(storeDir).find((session) =>
       session.session_id === sourceSessionId
     )!,
-    literalInputs: () => options.execution === "black-box"
-      ? readCalls(callsPath)
-          .filter((args) => args[0] === "send-keys" && args.includes("-l"))
-          .map((args) => args.at(-1) as string)
-      : terminalProvider.literalInputs(),
+    literalInputs: () => terminalProvider.literalInputs(),
     setAgentsAmbiguous: () => fs.writeFileSync(agentsAmbiguousPath, "1"),
     setSecondOwner: (id: string) => fs.writeFileSync(secondOwnerIdPath, id),
     debug: (result: InProcessCliResult | ReturnType<typeof spawnSync>) => JSON.stringify({
@@ -1623,9 +1610,7 @@ function seededClaudeRecoveryFixture(
       error: result.error?.message,
       stdout: result.stdout,
       stderr: result.stderr,
-      calls: options.execution === "black-box"
-        ? readCalls(callsPath)
-        : terminalProvider.operations,
+      calls: terminalProvider.operations,
       screen: fs.readFileSync(screenPath, "utf8"),
       currentId: fs.readFileSync(currentIdPath, "utf8")
     }, null, 2),

@@ -196,6 +196,12 @@
       "needle": "hookless Claude Gateway auto approval keeps the original monitor through completion"
     },
     {
+      "id": "claude-lifecycle-recovery-in-process",
+      "path": "test/native-thread-lifecycle-recovery-cli.test.ts",
+      "tier": "integration",
+      "needle": "imported Claude recovery rolls an exact submitted resume target forward"
+    },
+    {
       "id": "cli-core-import-boundary",
       "path": "test/cli-core-import.test.ts",
       "tier": "integration",
@@ -286,10 +292,22 @@
       "needle": "a terminal-scoped Codex send adopts an exact unknown human-switched thread"
     },
     {
+      "id": "install-openclaw-in-process",
+      "path": "test/install-openclaw-cli.test.ts",
+      "tier": "integration",
+      "needle": "install-openclaw replaces an existing plugin and installs its skill"
+    },
+    {
       "id": "lifecycle-boundary",
       "path": "test/native-thread-lifecycle-cli.test.ts",
       "tier": "integration",
       "needle": "verified lifecycle target conflict preserves source and later rolls forward without duplicate command, Session, or Turn"
+    },
+    {
+      "id": "lifecycle-evidence-unit",
+      "path": "test/live-lifecycle-evidence.test.ts",
+      "tier": "fast",
+      "needle": "creates redacted, domain-separated evidence and round-trips an annotated-tag attestation"
     },
     {
       "id": "lifecycle-recovery-boundary",
@@ -320,6 +338,18 @@
       "path": "test/native-thread-transition-verification-adapter.test.ts",
       "tier": "fast",
       "needle": "an observed identity without rollout evidence does not match or throw"
+    },
+    {
+      "id": "lifecycle-verifier-in-process",
+      "path": "test/live-lifecycle-verifier.test.ts",
+      "tier": "integration",
+      "needle": "validates evidence, writes a private annotated-tag message, and round-trips it"
+    },
+    {
+      "id": "live-smoke-guard-in-process",
+      "path": "test/live-smoke-guards.test.ts",
+      "tier": "integration",
+      "needle": "live tmux smoke refuses to run without both opt-ins"
     },
     {
       "id": "management-list-executable-boundary",
@@ -541,7 +571,6 @@
         "cli-runtime-unit"
       ],
       "retained_boundary_witnesses": [
-        "cli-core-import-boundary",
         "cli-output-boundary",
         "cli-runtime-log-redaction-boundary",
         "management-list-executable-boundary"
@@ -602,6 +631,38 @@
       "retained_boundary_witnesses": [
         "control-lock-boundary",
         "dispatch-recovery-boundary"
+      ]
+    },
+    {
+      "id": "static-subprocess-final",
+      "invariant": "Former outer CLI and fake-Node cases now enter the same imported command, verifier, guard, lifecycle, and callback authorities while retained executable witnesses still prove argv and OS exit, crash 86, lock competition, live PID recovery, Gateway delivery, and terminal/process adapters.",
+      "old_executable_witnesses": [
+        "callback-cli-in-process",
+        "claude-callback-boundary",
+        "claude-lifecycle-recovery-in-process",
+        "cli-core-import-boundary",
+        "install-openclaw-in-process",
+        "lifecycle-verifier-in-process",
+        "live-smoke-guard-in-process"
+      ],
+      "service_invariant_witnesses": [
+        "callback-policy-unit",
+        "callback-service-unit",
+        "callback-settlement-unit",
+        "callback-transport-unit",
+        "cli-runtime-unit",
+        "lifecycle-evidence-unit",
+        "lifecycle-verification-unit",
+        "terminal-binding-unit"
+      ],
+      "retained_boundary_witnesses": [
+        "callback-cli-boundary",
+        "claude-callback-boundary",
+        "cli-output-boundary",
+        "lifecycle-recovery-boundary",
+        "openclaw-plugin-boundary",
+        "store-protocol-cli-boundary",
+        "terminal-send-boundary"
       ]
     },
     {

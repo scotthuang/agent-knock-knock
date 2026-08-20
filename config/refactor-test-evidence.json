@@ -13,6 +13,9 @@
         "spawnSync"
       ],
       "lookahead_characters": 500,
+      "diagnostic_excluded_paths": [
+        "test/refactor-evidence.test.ts"
+      ],
       "included_categories": [
         "cli_process",
         "fake_node_process"
@@ -25,18 +28,30 @@
         "fake_node_process": 10,
         "other_process_or_adapter": 10
       },
+      "diagnostic_counts": {
+        "cli_process": 0,
+        "fake_node_process": 0,
+        "other_process_or_adapter": 0
+      },
+      "diagnostic_included_total": 0,
       "included_total": 48
     },
     "current": {
       "counts": {
-        "cli_process": 18,
-        "fake_node_process": 20,
-        "other_process_or_adapter": 13
+        "cli_process": 12,
+        "fake_node_process": 7,
+        "other_process_or_adapter": 12
       },
-      "included_total": 38
+      "diagnostic_counts": {
+        "cli_process": 0,
+        "fake_node_process": 10,
+        "other_process_or_adapter": 1
+      },
+      "diagnostic_included_total": 10,
+      "included_total": 19
     },
     "final_threshold": {
-      "required": false,
+      "required": true,
       "maximum_percent_of_baseline": 40
     }
   },
@@ -398,6 +413,7 @@
             "test/shards/agent-cli-monitor-approval-context.test.ts",
             "test/session-selector-cli.test.ts",
             "test/delegate-cli.test.ts",
+            "test/install-openclaw-cli.test.ts",
             "test/native-thread-ownership-cli.test.ts",
             "test/cli-core-import.test.ts",
             "test/cli-ux.test.ts",
