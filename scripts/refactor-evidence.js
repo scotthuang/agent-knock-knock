@@ -37,6 +37,12 @@ const INCLUDED_STARTUP_CATEGORIES = Object.freeze([
   "fake_node_process"
 ]);
 const LOOKAHEAD_CHARACTERS = 500;
+const STATIC_SUBPROCESS_DIAGNOSTIC_PATHS = Object.freeze([
+  "test/refactor-evidence.test.ts"
+]);
+const STATIC_SUBPROCESS_BASELINE_REVISION =
+  "ea592a88d7af4a709e7a7a1b989dd29e61932935";
+const STATIC_SUBPROCESS_MAXIMUM_PERCENT_OF_BASELINE = 40;
 
 const PUBLIC_COMMANDS = Object.freeze([
   "delegate",
@@ -113,6 +119,7 @@ const MIGRATION_IDS = Object.freeze([
   "lifecycle-transition",
   "monitor-seams",
   "mutation-lock-shell",
+  "static-subprocess-final",
   "terminal-binding-authority",
   "terminal-dispatch-ledger",
   "terminal-dispatch-policy",
@@ -388,6 +395,26 @@ export function countStaticSubprocessStartupSites(sources) {
   return counts;
 }
 
+/**
+ * Keep tests for the measurement implementation visible without crediting
+ * those self-probes as product-test migration. The exact same fixed partition
+ * is applied to the immutable baseline and to the current worktree.
+ */
+export function measureStaticSubprocessStartupSites(sources) {
+  const diagnosticPaths = new Set(STATIC_SUBPROCESS_DIAGNOSTIC_PATHS);
+  const productSources = [];
+  const diagnosticSources = [];
+  for (const source of sources) {
+    (diagnosticPaths.has(source.path)
+      ? diagnosticSources
+      : productSources).push(source);
+  }
+  return {
+    product: countStaticSubprocessStartupSites(productSources),
+    diagnostic: countStaticSubprocessStartupSites(diagnosticSources)
+  };
+}
+
 function validateCounts(value, label) {
   const counts = assertExactKeys(value, STARTUP_CATEGORIES, label);
   for (const category of STARTUP_CATEGORIES) {
@@ -423,6 +450,7 @@ function validateSubprocessEvidence(value, repoRoot) {
   ], "test evidence subprocess_startup_sites");
   const measurement = assertExactKeys(evidence.measurement, [
     "call_expressions",
+    "diagnostic_excluded_paths",
     "included_categories",
     "kind",
     "lookahead_characters",
@@ -445,28 +473,65 @@ function validateSubprocessEvidence(value, repoRoot) {
     INCLUDED_STARTUP_CATEGORIES,
     "subprocess measurement included_categories"
   );
+  assertExactArray(
+    measurement.diagnostic_excluded_paths,
+    STATIC_SUBPROCESS_DIAGNOSTIC_PATHS,
+    "subprocess measurement diagnostic_excluded_paths"
+  );
   if (measurement.lookahead_characters !== LOOKAHEAD_CHARACTERS) {
     fail(`subprocess measurement lookahead_characters must be ${LOOKAHEAD_CHARACTERS}`);
   }
 
   const baseline = assertExactKeys(evidence.baseline, [
     "counts",
+    "diagnostic_counts",
+    "diagnostic_included_total",
     "included_total",
     "revision"
   ], "subprocess baseline");
   const revision = assertString(baseline.revision, "subprocess baseline revision");
+  if (revision !== STATIC_SUBPROCESS_BASELINE_REVISION) {
+    fail(
+      "subprocess baseline revision must remain " +
+      STATIC_SUBPROCESS_BASELINE_REVISION
+    );
+  }
   const baselineCounts = validateCounts(baseline.counts, "subprocess baseline counts");
+  const baselineDiagnosticCounts = validateCounts(
+    baseline.diagnostic_counts,
+    "subprocess baseline diagnostic counts"
+  );
   if (baseline.included_total !== includedStartupTotal(baselineCounts)) {
     fail("subprocess baseline included_total does not match its category counts");
+  }
+  if (baseline.diagnostic_included_total !==
+      includedStartupTotal(baselineDiagnosticCounts)) {
+    fail(
+      "subprocess baseline diagnostic_included_total does not match its " +
+      "diagnostic category counts"
+    );
   }
 
   const current = assertExactKeys(evidence.current, [
     "counts",
+    "diagnostic_counts",
+    "diagnostic_included_total",
     "included_total"
   ], "subprocess current");
   const currentCounts = validateCounts(current.counts, "subprocess current counts");
+  const currentDiagnosticCounts = validateCounts(
+    current.diagnostic_counts,
+    "subprocess current diagnostic counts"
+  );
   if (current.included_total !== includedStartupTotal(currentCounts)) {
     fail("subprocess current included_total does not match its category counts");
+  }
+  if (current.diagnostic_included_total !==
+      includedStartupTotal(currentDiagnosticCounts)) {
+    fail(
+      "subprocess current diagnostic_included_total does not match its " +
+      "diagnostic category counts"
+    );
   }
 
   const target = assertExactKeys(evidence.final_threshold, [
@@ -477,13 +542,19 @@ function validateSubprocessEvidence(value, repoRoot) {
     target.maximum_percent_of_baseline,
     "subprocess final_threshold maximum_percent_of_baseline"
   );
-  if (targetPercent > 100) {
-    fail("subprocess final_threshold maximum_percent_of_baseline must be <= 100");
+  if (targetPercent !== STATIC_SUBPROCESS_MAXIMUM_PERCENT_OF_BASELINE) {
+    fail(
+      "subprocess final_threshold maximum_percent_of_baseline must be " +
+      STATIC_SUBPROCESS_MAXIMUM_PERCENT_OF_BASELINE
+    );
   }
   const targetRequired = assertBoolean(
     target.required,
     "subprocess final_threshold required"
   );
+  if (targetRequired !== true) {
+    fail("subprocess final_threshold required must be true");
+  }
 
   const historical = revisionTestSources(repoRoot, revision);
   if (historical.revision !== revision) {
@@ -492,15 +563,35 @@ function validateSubprocessEvidence(value, repoRoot) {
       `(resolved ${historical.revision})`
     );
   }
-  const measuredBaseline = countStaticSubprocessStartupSites(historical.sources);
-  const measuredCurrent = countStaticSubprocessStartupSites(
+  const measuredBaseline = measureStaticSubprocessStartupSites(
+    historical.sources
+  );
+  const measuredCurrent = measureStaticSubprocessStartupSites(
     worktreeTestSources(repoRoot)
   );
-  assertCounts(measuredBaseline, baselineCounts, "subprocess baseline counts");
-  assertCounts(measuredCurrent, currentCounts, "subprocess current counts");
+  assertCounts(
+    measuredBaseline.product,
+    baselineCounts,
+    "subprocess baseline counts"
+  );
+  assertCounts(
+    measuredBaseline.diagnostic,
+    baselineDiagnosticCounts,
+    "subprocess baseline diagnostic counts"
+  );
+  assertCounts(
+    measuredCurrent.product,
+    currentCounts,
+    "subprocess current counts"
+  );
+  assertCounts(
+    measuredCurrent.diagnostic,
+    currentDiagnosticCounts,
+    "subprocess current diagnostic counts"
+  );
 
-  const baselineIncluded = includedStartupTotal(measuredBaseline);
-  const currentIncluded = includedStartupTotal(measuredCurrent);
+  const baselineIncluded = includedStartupTotal(measuredBaseline.product);
+  const currentIncluded = includedStartupTotal(measuredCurrent.product);
   const currentPercentBasisPoints = baselineIncluded === 0
     ? (currentIncluded === 0 ? 0 : 10_001)
     : Math.round((currentIncluded * 10_000) / baselineIncluded);
@@ -512,9 +603,15 @@ function validateSubprocessEvidence(value, repoRoot) {
   });
   return {
     baselineRevision: historical.revision,
-    baselineCounts: measuredBaseline,
+    baselineCounts: measuredBaseline.product,
+    baselineDiagnosticCounts: measuredBaseline.diagnostic,
+    baselineDiagnosticIncluded:
+      includedStartupTotal(measuredBaseline.diagnostic),
     baselineIncluded,
-    currentCounts: measuredCurrent,
+    currentCounts: measuredCurrent.product,
+    currentDiagnosticCounts: measuredCurrent.diagnostic,
+    currentDiagnosticIncluded:
+      includedStartupTotal(measuredCurrent.diagnostic),
     currentIncluded,
     reductionBasisPoints: baselineIncluded === 0
       ? 0

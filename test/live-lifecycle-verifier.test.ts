@@ -3,8 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync, type SpawnSyncReturns } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   create,
   parseAttestation,
@@ -23,6 +22,9 @@ const VERIFIER = path.join(
   PACKAGE_ROOT,
   "scripts",
   "verify-lifecycle-smoke-evidence.js"
+);
+const { runLifecycleSmokeEvidenceVerifier } = await import(
+  pathToFileURL(VERIFIER).href
 );
 const PACKAGE_NAME = "@scotthuang/agent-knock-knock";
 const PACKAGE_VERSION = "0.10.0";
@@ -400,16 +402,26 @@ function makeTempDirectory(t: test.TestContext): string {
   return directory;
 }
 
-function runVerifier(arguments_: string[]): SpawnSyncReturns<string> {
-  return spawnSync(process.execPath, [VERIFIER, ...arguments_], {
-    cwd: PACKAGE_ROOT,
-    encoding: "utf8",
-    env: { ...process.env }
+interface VerifierResult {
+  status: number;
+  signal: null;
+  stdout: string;
+  stderr: string;
+  error?: Error;
+}
+
+function runVerifier(arguments_: string[]): VerifierResult {
+  let stdout = "";
+  let stderr = "";
+  const status = runLifecycleSmokeEvidenceVerifier(arguments_, {
+    stdout: { write: (chunk: unknown) => { stdout += String(chunk); } },
+    stderr: { write: (chunk: unknown) => { stderr += String(chunk); } }
   });
+  return { status, signal: null, stdout, stderr };
 }
 
 function assertVerifierStatus(
-  result: SpawnSyncReturns<string>,
+  result: VerifierResult,
   expected: number
 ): void {
   assert.equal(

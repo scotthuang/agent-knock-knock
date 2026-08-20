@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { runInProcessCli } from "./in-process-cli-fixtures.js";
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 const packageRoot = path.resolve(path.dirname(binPath), "../..");
@@ -15,7 +15,7 @@ const skillSource = path.join(
   "SKILL.md"
 );
 
-test("install-openclaw replaces an existing plugin and installs its skill", () => {
+test("install-openclaw replaces an existing plugin and installs its skill", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-install-openclaw-"));
   const callsPath = path.join(tempDir, "calls.ndjson");
   const fakeOpenClaw = path.join(tempDir, "openclaw");
@@ -23,7 +23,7 @@ test("install-openclaw replaces an existing plugin and installs its skill", () =
 
   try {
     writeFakeOpenClaw(fakeOpenClaw, callsPath);
-    const result = runCli([
+    const result = await runCli([
       "install-openclaw",
       "--openclaw-bin",
       fakeOpenClaw,
@@ -57,7 +57,7 @@ test("install-openclaw replaces an existing plugin and installs its skill", () =
   }
 });
 
-test("install-openclaw confirms the trusted local source when OpenClaw requires force", () => {
+test("install-openclaw confirms the trusted local source when OpenClaw requires force", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-install-openclaw-trust-"));
   const callsPath = path.join(tempDir, "calls.ndjson");
   const fakeOpenClaw = path.join(tempDir, "openclaw");
@@ -65,7 +65,7 @@ test("install-openclaw confirms the trusted local source when OpenClaw requires 
 
   try {
     writeFakeOpenClaw(fakeOpenClaw, callsPath, "trust_required");
-    const result = runCli([
+    const result = await runCli([
       "install-openclaw",
       "--openclaw-bin",
       fakeOpenClaw,
@@ -95,7 +95,7 @@ test("install-openclaw confirms the trusted local source when OpenClaw requires 
   }
 });
 
-test("install-openclaw without a top-level workspace preserves approval rules and is ready", () => {
+test("install-openclaw without a top-level workspace preserves approval rules and is ready", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-install-openclaw-verify-"));
   const callsPath = path.join(tempDir, "calls.ndjson");
   const configPath = path.join(tempDir, "plugin-config.json");
@@ -135,7 +135,7 @@ test("install-openclaw without a top-level workspace preserves approval rules an
     writeVersionExecutable(fakeTmux, "tmux 3.5a");
     writeVersionExecutable(fakeClaude, "2.1.218 (Claude Code)");
 
-    const result = runCli([
+    const result = await runCli([
       "install-openclaw",
       "--openclaw-bin",
       fakeOpenClaw,
@@ -186,7 +186,7 @@ test("install-openclaw without a top-level workspace preserves approval rules an
   }
 });
 
-test("install-openclaw never claims readiness while a restart is pending", () => {
+test("install-openclaw never claims readiness while a restart is pending", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-install-openclaw-pending-"));
   const callsPath = path.join(tempDir, "calls.ndjson");
   const configPath = path.join(tempDir, "plugin-config.json");
@@ -200,7 +200,7 @@ test("install-openclaw never claims readiness while a restart is pending", () =>
       callsPath,
       configPath
     });
-    const result = runCli([
+    const result = await runCli([
       "install-openclaw",
       "--openclaw-bin",
       fakeOpenClaw,
@@ -223,12 +223,12 @@ test("install-openclaw never claims readiness while a restart is pending", () =>
   }
 });
 
-test("install-openclaw skill-only can synchronize the skill without OpenClaw", () => {
+test("install-openclaw skill-only can synchronize the skill without OpenClaw", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-install-skill-"));
   const skillDest = path.join(tempDir, "skills", "agent-knock-knock", "SKILL.md");
 
   try {
-    const result = runCli([
+    const result = await runCli([
       "install-openclaw",
       "--skill-only",
       "--no-restart",
@@ -354,13 +354,9 @@ function readCalls(filePath: string): string[][] {
     .map((line) => JSON.parse(line));
 }
 
-function runCli(args: string[], env: NodeJS.ProcessEnv = {}) {
-  const result = spawnSync(process.execPath, [binPath, ...args], {
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      ...env
-    }
+async function runCli(args: string[], env: NodeJS.ProcessEnv = {}) {
+  const result = await runInProcessCli(args, {
+    env: { ...process.env, ...env }
   });
 
   assert.equal(result.status, 0, result.stderr || result.stdout);

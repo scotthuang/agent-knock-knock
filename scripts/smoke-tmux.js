@@ -5,82 +5,89 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-const options = parseArgs(process.argv.slice(2));
-if (
-  process.env.AKK_RUN_LIVE_TMUX_SMOKE !== "1" ||
-  options.confirmLive !== true
-) {
-  fail(
-    "Refusing to send a real tmux turn. Set AKK_RUN_LIVE_TMUX_SMOKE=1 and pass --confirm-live."
-  );
+export function assertLiveTmuxSmokeOptIn(argv, env) {
+  const options = parseArgs(argv);
+  if (
+    env.AKK_RUN_LIVE_TMUX_SMOKE !== "1" ||
+    options.confirmLive !== true
+  ) {
+    fail(
+      "Refusing to send a real tmux turn. Set AKK_RUN_LIVE_TMUX_SMOKE=1 and pass --confirm-live."
+    );
+  }
+  return options;
 }
 
-const target = requiredString(options.target, "--target is required");
-const expectedPanePid = Number(requiredString(
-  options.expectedPanePid,
-  "--expected-pane-pid is required"
-));
-if (!Number.isSafeInteger(expectedPanePid) || expectedPanePid <= 1) {
-  fail("--expected-pane-pid must be a positive integer");
-}
-const agent = String(options.agent ?? "codex").toLowerCase();
-if (!["codex", "claude"].includes(agent)) {
-  fail("--agent must be codex or claude");
-}
+function main(argv, env) {
+  const options = assertLiveTmuxSmokeOptIn(argv, env);
 
-const packageRoot = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  ".."
-);
-const cliPath = path.join(packageRoot, "dist", "src", "cli.js");
-const list = runCli(cliPath, ["list", "--terminal-debug"]);
-const candidates = Array.isArray(list.terminals)
-  ? list.terminals
-  : [];
-const matches = candidates.filter((candidate) =>
-  candidate?.agent === agent &&
-  candidate?.terminal_control?.target === target &&
-  Number(candidate?.terminal_control?.panePid) === expectedPanePid
-);
-if (matches.length !== 1) {
-  fail(
-    `Expected one ${agent} terminal at ${target} with pane PID ${expectedPanePid}; found ${matches.length}.`
-  );
-}
-const selected = matches[0];
-if (
-  selected.activity_state !== "idle" ||
-  selected.available_actions?.send?.arguments?.selector !== selected.id
-) {
-  fail(
-    `Refusing to send: ${target} is not a verified idle, actionable ${agent} pane.`
-  );
-}
+  const target = requiredString(options.target, "--target is required");
+  const expectedPanePid = Number(requiredString(
+    options.expectedPanePid,
+    "--expected-pane-pid is required"
+  ));
+  if (!Number.isSafeInteger(expectedPanePid) || expectedPanePid <= 1) {
+    fail("--expected-pane-pid must be a positive integer");
+  }
+  const agent = String(options.agent ?? "codex").toLowerCase();
+  if (!["codex", "claude"].includes(agent)) {
+    fail("--agent must be codex or claude");
+  }
 
-const nonce = randomUUID();
-const message = String(
-  options.message ??
-    `AKK live tmux smoke ${nonce}: reply with the nonce only and do not modify files.`
-);
-process.stderr.write(
-  `LIVE TMUX SMOKE: sending one real turn to ${target} (pane PID ${expectedPanePid}).\n`
-);
-const result = runCli(cliPath, [
-  "send",
-  "--conversation",
-  String(selected.id),
-  "--message",
-  message,
-  "--background"
-]);
-process.stdout.write(`${JSON.stringify({
-  ok: true,
-  agent,
-  target,
-  pane_pid: expectedPanePid,
-  conversation_id: result.conversation?.conversation_id ?? selected.id,
-  nonce
-}, null, 2)}\n`);
+  const packageRoot = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    ".."
+  );
+  const cliPath = path.join(packageRoot, "dist", "src", "cli.js");
+  const list = runCli(cliPath, ["list", "--terminal-debug"]);
+  const candidates = Array.isArray(list.terminals)
+    ? list.terminals
+    : [];
+  const matches = candidates.filter((candidate) =>
+    candidate?.agent === agent &&
+    candidate?.terminal_control?.target === target &&
+    Number(candidate?.terminal_control?.panePid) === expectedPanePid
+  );
+  if (matches.length !== 1) {
+    fail(
+      `Expected one ${agent} terminal at ${target} with pane PID ${expectedPanePid}; found ${matches.length}.`
+    );
+  }
+  const selected = matches[0];
+  if (
+    selected.activity_state !== "idle" ||
+    selected.available_actions?.send?.arguments?.selector !== selected.id
+  ) {
+    fail(
+      `Refusing to send: ${target} is not a verified idle, actionable ${agent} pane.`
+    );
+  }
+
+  const nonce = randomUUID();
+  const message = String(
+    options.message ??
+      `AKK live tmux smoke ${nonce}: reply with the nonce only and do not modify files.`
+  );
+  process.stderr.write(
+    `LIVE TMUX SMOKE: sending one real turn to ${target} (pane PID ${expectedPanePid}).\n`
+  );
+  const result = runCli(cliPath, [
+    "send",
+    "--conversation",
+    String(selected.id),
+    "--message",
+    message,
+    "--background"
+  ]);
+  process.stdout.write(`${JSON.stringify({
+    ok: true,
+    agent,
+    target,
+    pane_pid: expectedPanePid,
+    conversation_id: result.conversation?.conversation_id ?? selected.id,
+    nonce
+  }, null, 2)}\n`);
+}
 
 function runCli(cliPath, args) {
   const result = spawnSync(process.execPath, [cliPath, ...args], {
@@ -138,4 +145,11 @@ function requiredString(value, message) {
 
 function fail(message) {
   throw new Error(message);
+}
+
+if (
+  process.argv[1] !== undefined &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  main(process.argv.slice(2), process.env);
 }

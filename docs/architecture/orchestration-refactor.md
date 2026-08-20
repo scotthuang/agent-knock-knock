@@ -729,14 +729,13 @@ UX, native-ownership, management, selector, Session-binding, deterministic
 dispatch-admission, and 20 normal callback invocations now use the imported
 command service. The multilingual composer not-accepted witness now uses the
 same imported command service while retaining the real tmux adapter and its
-exactly-one-Enter assertion. The current static evidence measures 38 of 48
-baseline sites (`cli_process` 18 and `fake_node_process` 20), a 20.83%
-reduction. The ten additional fake-Node probes validate the measurement
-instrumentation itself; the dynamic full-tree ratio remains the final 60%
-gate. That reduction target is still explicitly reported as not met. Its
-`final_threshold.required` flag remains `false` while #126 is in progress; the
-final milestone flips it to `true`, at which point an unmet target is a hard
-validation failure.
+exactly-one-Enter assertion. The final slice also imports redundant callback,
+installer, verifier/guard, Claude recovery, and nested approval wrappers. The
+product-test value is now 19 of 48 baseline sites, a 60.42% reduction, and its
+`final_threshold.required` flag is `true`. Measurement self-tests are reported
+separately (baseline zero; current ten included fake-Node probes) under one
+fixed diagnostic path applied to both revisions; they cannot dilute the
+product migration ratio.
 
 Second, the manifest freezes the exact changed paths and subjects of ten
 pre-`v0.12.11` product/test commits and replays them through the current
@@ -755,7 +754,7 @@ history, a frozen path list, the measured count, or a replay result drifts, and
 `config/public-contract-witnesses.json` is the machine-readable compatibility
 inventory. It pins the package executable and facade, CLI commands/JSON
 witnesses, list action contract v16, all 14 OpenClaw tools, Store format 1 and
-writer protocols 1 through 5, and ten mappings from old executable tests to
+writer protocols 1 through 5, and eleven mappings from old executable tests to
 focused service invariants and retained boundary witnesses. Every authority and
 witness path must exist, each witness must remain in its declared test tier and
 contain its named assertion, and unknown or missing manifest fields fail

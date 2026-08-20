@@ -45,6 +45,7 @@ export const testSupportImpactByPath = Object.freeze({
     "test/codex-sticky-rollout-fixture.ts",
     "test/delegate-cli.test.ts",
     "test/human-handoff-adoption-cli.test.ts",
+    "test/install-openclaw-cli.test.ts",
     "test/management-cli.test.ts",
     "test/native-lifecycle-command-guard-cli.test.ts",
     "test/native-thread-lifecycle-recovery-cli.test.ts",

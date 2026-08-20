@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import {
   applyMessageToConversation,
   createConversation,
@@ -726,7 +726,7 @@ process.exit(1);
       "Reject payload substitution after callback claim",
       { agent: "codex", openclawSession: "agent:main:main" }
     );
-    const initial = runCallbackExpectFailure(
+    const initial = await runCallbackExpectFailure(
       created.paths.statePath,
       fakeOpenClaw
     );
@@ -866,7 +866,7 @@ console.log(JSON.stringify({ ok: true }));
       }
     });
 
-    const initial = runCallbackExpectFailure(
+    const initial = await runCallbackExpectFailure(
       created.paths.statePath,
       fakeOpenClaw
     );
@@ -1402,12 +1402,11 @@ console.log(JSON.stringify({ ok: true }));
     assert.equal(typeof claimed.callback_delivery.attempt_id, "string");
     assert.equal(typeof claimed.callback_delivery.attempt_pid, "number");
 
-    const loser = spawnSync(process.execPath, [
-      binPath,
+    const loser = await runImportedCli([
       "retry-callback",
       "--state",
       created.paths.statePath
-    ], { encoding: "utf8", env: evidenceEnvironment });
+    ], evidenceEnvironment);
     assert.notEqual(loser.status, 0);
     assert.match(loser.stderr, /attempt 2[^\n]*in flight/iu);
 
@@ -1755,7 +1754,7 @@ if (method === "agent-knock-knock.callback") {
   }
 });
 
-test("started chat.send stays delivered when agent.wait reports timeout", () => {
+test("started chat.send stays delivered when agent.wait reports timeout", async () => {
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-chat-wait-timeout-"));
   const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-fake-openclaw-"));
   try {
@@ -1778,7 +1777,7 @@ test("started chat.send stays delivered when agent.wait reports timeout", () => 
       "Timeout callback run",
       { openclawSession: "agent:main:main" }
     );
-    const result = runCallbackExpectSuccess(
+    const result = await runCallbackExpectSuccess(
       created.paths.statePath,
       fakeOpenClaw
     );
@@ -1795,7 +1794,7 @@ test("started chat.send stays delivered when agent.wait reports timeout", () => 
   }
 });
 
-test("agent.wait error cannot roll back an accepted callback wake", () => {
+test("agent.wait error cannot roll back an accepted callback wake", async () => {
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-chat-wait-error-"));
   const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-fake-openclaw-"));
   try {
@@ -1823,7 +1822,7 @@ test("agent.wait error cannot roll back an accepted callback wake", () => {
       "Failed callback run",
       { openclawSession: "agent:main:main" }
     );
-    const result = runCallbackExpectSuccess(
+    const result = await runCallbackExpectSuccess(
       created.paths.statePath,
       fakeOpenClaw
     );
@@ -1845,7 +1844,7 @@ test("agent.wait error cannot roll back an accepted callback wake", () => {
   }
 });
 
-test("callback rejects a mismatched chat.send acknowledgement before acceptance", () => {
+test("callback rejects a mismatched chat.send acknowledgement before acceptance", async () => {
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-run-id-"));
   const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-fake-openclaw-"));
   try {
@@ -1869,7 +1868,7 @@ test("callback rejects a mismatched chat.send acknowledgement before acceptance"
       "Reject mismatched chat.send runId",
       { openclawSession: "agent:main:main" }
     );
-    const result = runCallbackExpectFailure(
+    const result = await runCallbackExpectFailure(
       created.paths.statePath,
       fakeOpenClaw
     );
@@ -1883,7 +1882,7 @@ test("callback rejects a mismatched chat.send acknowledgement before acceptance"
   }
 });
 
-test("durably enqueued injection stays delivered when wake acknowledgement is invalid", () => {
+test("durably enqueued injection stays delivered when wake acknowledgement is invalid", async () => {
   const storeDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-callback-injection-accepted-")
   );
@@ -1912,7 +1911,7 @@ test("durably enqueued injection stays delivered when wake acknowledgement is in
       "Keep durable injection accepted",
       { openclawSession: "agent:main:main" }
     );
-    const result = runCallbackExpectSuccess(
+    const result = await runCallbackExpectSuccess(
       created.paths.statePath,
       fakeOpenClaw
     );
@@ -1951,7 +1950,7 @@ test("invalid agent.wait observations cannot roll back an accepted wake", async 
   ];
 
   for (const testCase of cases) {
-    await t.test(testCase.name, () => {
+    await t.test(testCase.name, async () => {
       const storeDir = fs.mkdtempSync(
         path.join(os.tmpdir(), "akk-callback-wait-invalid-")
       );
@@ -1979,7 +1978,7 @@ test("invalid agent.wait observations cannot roll back an accepted wake", async 
           `Ignore invalid agent.wait ${testCase.name}`,
           { openclawSession: "agent:main:main" }
         );
-        const result = runCallbackExpectSuccess(
+        const result = await runCallbackExpectSuccess(
           created.paths.statePath,
           fakeOpenClaw
         );
@@ -2085,7 +2084,7 @@ test("callback keeps legacy delivery plans compatible while confirming sessions.
   }
 });
 
-test("callback fails closed for malformed or incomplete gateway delivery plans", () => {
+test("callback fails closed for malformed or incomplete gateway delivery plans", async () => {
   const cases = [
     {
       name: "malformed JSON",
@@ -2152,7 +2151,10 @@ test("callback fails closed for malformed or incomplete gateway delivery plans",
         `Reject ${testCase.name}`,
         { openclawSession: "agent:main:main" }
       );
-      const result = runCallbackExpectFailure(created.paths.statePath, fakeOpenClaw);
+      const result = await runCallbackExpectFailure(
+        created.paths.statePath,
+        fakeOpenClaw
+      );
       assert.match(result.stderr, testCase.error);
       const state = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
       assert.equal(state.callback_delivery.status, "failed");
@@ -2255,21 +2257,17 @@ if (method === "agent-knock-knock.callback") {
   return fakeOpenClaw;
 }
 
-function runCallbackExpectFailure(statePath, fakeOpenClaw) {
-  const result = spawnSync(
-    process.execPath,
-    [binPath, ...callbackDeliveryArgs(statePath, fakeOpenClaw)],
-    { encoding: "utf8" }
+async function runCallbackExpectFailure(statePath, fakeOpenClaw) {
+  const result = await runImportedCli(
+    callbackDeliveryArgs(statePath, fakeOpenClaw)
   );
   assert.notEqual(result.status, 0);
   return result;
 }
 
-function runCallbackExpectSuccess(statePath, fakeOpenClaw) {
-  const result = spawnSync(
-    process.execPath,
-    [binPath, ...callbackDeliveryArgs(statePath, fakeOpenClaw)],
-    { encoding: "utf8" }
+async function runCallbackExpectSuccess(statePath, fakeOpenClaw) {
+  const result = await runImportedCli(
+    callbackDeliveryArgs(statePath, fakeOpenClaw)
   );
   assert.equal(result.status, 0, result.stderr || result.stdout);
   return JSON.parse(result.stdout);

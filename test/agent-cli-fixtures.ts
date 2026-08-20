@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { performance } from "node:perf_hooks";
+import { pathToFileURL } from "node:url";
 import {
   ensureStoreWritable,
   pathsForConversation
@@ -1000,6 +1001,10 @@ export function writeAutoApprovingFakeOpenClaw(options: {
   completionAppend: string;
 }): string {
   const fakeOpenClaw = path.join(options.fakeBinDir, "openclaw");
+  const cliCoreUrl = new URL(
+    "./cli-core.js",
+    pathToFileURL(options.cliPath)
+  ).href;
   const updaterSource = `
 const fs = require("node:fs");
 Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 150);
@@ -1020,7 +1025,36 @@ fs.appendFileSync(
     fakeOpenClaw,
     `#!/usr/bin/env node
 const fs = require("node:fs");
-const { spawn, spawnSync } = require("node:child_process");
+const { spawn } = require("node:child_process");
+class ImportedCliExit extends Error {
+  constructor(code) {
+    super("CLI requested exit " + code);
+    this.code = code;
+  }
+}
+async function runImportedCli(argv) {
+  const { executeCliCommand, parseCliCommand } = await import(
+    ${JSON.stringify(cliCoreUrl)}
+  );
+  const { command, options } = parseCliCommand(argv);
+  try {
+    const result = await executeCliCommand(command, options, {
+      env: process.env,
+      exit: (code) => { throw new ImportedCliExit(code); }
+    });
+    return { status: result.exitCode, stdout: result.stdout, stderr: "" };
+  } catch (error) {
+    if (error instanceof ImportedCliExit) {
+      return { status: error.code, stdout: "", stderr: "" };
+    }
+    return {
+      status: 1,
+      stdout: "",
+      stderr: String(error && error.message || error) + "\\n"
+    };
+  }
+}
+async function main() {
 const args = process.argv.slice(2);
 fs.appendFileSync(
   ${JSON.stringify(options.callsPath)},
@@ -1039,8 +1073,7 @@ if (
     process.exit(2);
   }
   const fingerprint = message.metadata.approval_fingerprint;
-  const approved = spawnSync(process.execPath, [
-    ${JSON.stringify(options.cliPath)},
+  const approved = await runImportedCli([
     "approve",
     "--state",
     params.statePath,
@@ -1055,10 +1088,7 @@ if (
     ${JSON.stringify(options.claudeHome)},
     "--claude-agents-json",
     ${JSON.stringify(JSON.stringify(options.claudeAgents))}
-  ], {
-    encoding: "utf8",
-    env: process.env
-  });
+  ]);
   fs.appendFileSync(
     ${JSON.stringify(options.callsPath)},
     JSON.stringify({
@@ -1088,6 +1118,11 @@ if (
   process.exit(0);
 }
 process.stdout.write(JSON.stringify({ ok: true }) + "\\n");
+}
+main().catch((error) => {
+  process.stderr.write(String(error && error.message || error) + "\\n");
+  process.exitCode = 2;
+});
 `,
     "utf8"
   );

@@ -29,17 +29,20 @@ const USAGE = `Usage:
 
 class UsageError extends Error {}
 
-function main(argv) {
+export function runLifecycleSmokeEvidenceVerifier(
+  argv,
+  { stdout = process.stdout, stderr = process.stderr } = {}
+) {
   let options;
   try {
     options = parseArguments(argv);
   } catch {
-    printUsageError();
+    printUsageError(stderr);
     return EXIT_USAGE;
   }
 
   if (options.help) {
-    process.stdout.write(USAGE);
+    stdout.write(USAGE);
     return 0;
   }
 
@@ -82,12 +85,12 @@ function main(argv) {
         ""
       ].join("\n");
       writePrivateRegularFile(options.outputPath, tagMessage);
-      process.stdout.write(
+      stdout.write(
         `Live lifecycle attestation written: passed digest=${evidence.digest}\n`
       );
     } else {
       const agents = Object.keys(evidence.matrix).sort().join(",");
-      process.stdout.write(
+      stdout.write(
         `Live lifecycle evidence passed: version=${evidence.package.version} ` +
           `commit=${evidence.source.commit} matrix=${agents} digest=${evidence.digest}\n`
       );
@@ -95,11 +98,11 @@ function main(argv) {
     return 0;
   } catch (error) {
     if (error instanceof UsageError) {
-      printUsageError();
+      printUsageError(stderr);
       return EXIT_USAGE;
     }
     const code = safeFailureCode(error);
-    process.stderr.write(`Live lifecycle evidence verification failed [${code}].\n`);
+    stderr.write(`Live lifecycle evidence verification failed [${code}].\n`);
     return EXIT_VALIDATION;
   }
 }
@@ -299,9 +302,9 @@ function safeFailureCode(error) {
     : "verification_failed";
 }
 
-function printUsageError() {
-  process.stderr.write("Invalid lifecycle evidence verifier arguments.\n");
-  process.stderr.write(USAGE);
+function printUsageError(stderr) {
+  stderr.write("Invalid lifecycle evidence verifier arguments.\n");
+  stderr.write(USAGE);
 }
 
 class CliValidationError extends Error {
@@ -311,4 +314,9 @@ class CliValidationError extends Error {
   }
 }
 
-process.exitCode = main(process.argv.slice(2));
+if (
+  process.argv[1] !== undefined &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  process.exitCode = runLifecycleSmokeEvidenceVerifier(process.argv.slice(2));
+}

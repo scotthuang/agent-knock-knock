@@ -379,6 +379,38 @@ baseline. The adapter runner raises the diagnostic-only
 `other_process_or_adapter` count from 11 to 12 while deleting the synchronous
 CLI startup site. No production source changes are part of this slice.
 
+## #126 final static subprocess gate
+
+The final static slice removes nine more real product-test startup call sites.
+It does not merge start helpers, move a start to an uncounted file, change the
+lookahead, drop a test, or alter concurrency. Each migrated case still enters
+the same production parser/command or domain authority:
+
+| Former executable case | Imported invariant | Retained real boundary |
+| --- | --- | --- |
+| Callback success/failure helpers and the retry loser | Callback policy, immutable attempt claim, transport acceptance, and settlement | Async retry winner, callback CLI/Gateway concurrency, and fake OpenClaw children |
+| `install-openclaw` outer CLI | Parser, installer filesystem effects, trust fallback, verification, readiness, and JSON projection | Real fake-OpenClaw, tmux, and Claude executables plus the doctor argv/OS-exit witness |
+| Lifecycle evidence verifier wrapper | Exact argument policy, bounded reads, private output, redaction, validation codes, and tag round-trip through an injected IO port | Release-script wiring and the retained executable argv/OS-exit witness |
+| Live tmux opt-in refusal | The same exported two-factor guard called by the executable entry | Live script keeps the guard before discovery/input; doctor retains executable exit projection |
+| CLI-core import probe | An isolated Worker proves no argv inspection, output, exit, or import side effect | Doctor and runtime-log tests retain real CLI argv, stdout/stderr, OS exit, and environment routing |
+| Duplicate Claude recovery wrapper | Exact lifecycle identity, CAS, and no-replay settlement through injected terminal/process seams | Codex black-box recovery remains executable and crash/lifecycle suites retain status 86 |
+| Single auto-approval nested CLI | The real fake-Gateway child imports `parseCliCommand`/`executeCliCommand` for the nested approval | Sequential nested approval remains process-backed; Gateway, monitor, and callback children remain real |
+
+`config/public-contract-witnesses.json` records this table as the
+`static-subprocess-final` old-case → service-invariant → retained-boundary
+mapping. The product-test count is now 19 of the immutable 48-site baseline
+(`cli_process` 12, `fake_node_process` 7), or 39.58%, so the static
+`final_threshold.required` gate is enabled. Store/file-lock competition,
+crash-86, live monitor PID recovery, callback Gateway, tmux/ps/lsof/Claude
+adapter, and real Herdr capability probes remain process-backed.
+
+The measurement implementation's own CJS/ESM and process-tree probes are
+reported separately: the baseline has zero diagnostic starts and the current
+tree has 10 included fake-Node diagnostic starts plus one
+`other_process_or_adapter` fork. The one canonical diagnostic path is applied
+to both revisions and is fixed by validation; it cannot be widened to hide a
+product-test start.
+
 ## #126 dynamic subprocess reduction attestation
 
 The static call-site count above remains a cheap architecture diagnostic. It
@@ -464,11 +496,11 @@ background CLI with an explicit stripped environment. A second CJS/ESM matrix
 covers every sync and async launch API plus promisified `execFile`, exact
 call-ID deduplication, and stripped-environment propagation; an overlapping
 sync/concurrent-writer probe prevents shared-trace PID inference from returning.
-Those probes transparently
-add ten fake-Node source sites to the diagnostic scope, so its included count
-is now 38 of 48 (`cli_process` 18 and `fake_node_process` 20);
-one fork probe is classified separately as `other_process_or_adapter`, and the
-dynamic full-tree ratio, not these measurement-only probes, is the final 60% gate.
+Those probes transparently add ten fake-Node source sites to the separately
+reported diagnostic scope; one fork probe is classified as
+`other_process_or_adapter`. They do not increase either revision's product
+migration numerator, and the same canonical partition is applied to baseline
+and current. The dynamic full-tree ratio remains the final runtime 60% gate.
 It validates the already-active preload without recursively starting its probe
 while the outer dynamic attestation runs, avoiding a measurement of the
 measurement itself. The expensive two-revision full attestation remains an
