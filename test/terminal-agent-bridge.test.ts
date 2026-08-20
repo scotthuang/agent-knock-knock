@@ -754,6 +754,9 @@ test("Codex multiline send proves an exact draft across visual composer wraps", 
 });
 
 test("Codex multiline send rejects mutated content across visual composer wraps", async () => {
+  const originalSettleTimeoutMs = 2_000;
+  let nowMs = 0;
+  const requestedSleepMs: number[] = [];
   const request = [
     "请核对这次投递，并保持下面内容逐字不变。",
     "实际 resume 仍用完整 UUID + fresh tokens。"
@@ -778,8 +781,14 @@ test("Codex multiline send rejects mutated content across visual composer wraps"
   const bridge = new TerminalAgentBridge({
     registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
     terminalProvider: provider,
-    async verifyIdentity() {}
+    async verifyIdentity() {},
+    nowMs: () => nowMs,
+    async sleep(milliseconds) {
+      requestedSleepMs.push(milliseconds);
+      nowMs += milliseconds;
+    }
   });
+  const startedAt = nowMs;
 
   await assert.rejects(
     () => bridge.send(
@@ -790,6 +799,12 @@ test("Codex multiline send rejects mutated content across visual composer wraps"
     ),
     /did not become exact/u
   );
+  assert.ok(requestedSleepMs.length > 0);
+  assert.equal(
+    requestedSleepMs.reduce((total, milliseconds) => total + milliseconds, 0),
+    nowMs - startedAt
+  );
+  assert.ok(nowMs - startedAt > originalSettleTimeoutMs);
   assert.equal(
     provider.operations.some((operation) =>
       operation.kind === "keys" && operation.keys.includes("C-m")
@@ -799,6 +814,10 @@ test("Codex multiline send rejects mutated content across visual composer wraps"
 });
 
 test("Codex multiline settle starts only after the exact composer materializes", async () => {
+  const materializeAfterMs = 90;
+  const suppressionWindowMs = 121;
+  let nowMs = 0;
+  const requestedSleepMs: number[] = [];
   const request = "延迟出现的第一行\nDelayed second line.";
   class DelayedComposerProvider extends RecordingTerminalProvider {
     materializedAt?: number;
@@ -810,15 +829,16 @@ test("Codex multiline settle starts only after the exact composer materializes",
       options: { socketPath?: string } = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
-      setTimeout(() => {
-        this.materializedAt = performance.now();
-        this.setScreen(target, [
-          "Ready",
-          "› 延迟出现的第一行",
-          "  Delayed second line.",
-          "gpt-5.6-sol high · /repo"
-        ].join("\n"));
-      }, 90);
+    }
+
+    materialize(target: TerminalEndpointRef | string): void {
+      this.materializedAt = nowMs;
+      this.setScreen(target, [
+        "Ready",
+        "› 延迟出现的第一行",
+        "  Delayed second line.",
+        "gpt-5.6-sol high · /repo"
+      ].join("\n"));
     }
 
     override async sendKeys(
@@ -827,7 +847,7 @@ test("Codex multiline settle starts only after the exact composer materializes",
       options: { socketPath?: string } = {}
     ): Promise<void> {
       if (keys.includes("C-m")) {
-        this.enterDispatchedAt = performance.now();
+        this.enterDispatchedAt = nowMs;
       }
       await super.sendKeys(target, keys, options);
     }
@@ -837,7 +857,20 @@ test("Codex multiline settle starts only after the exact composer materializes",
   const bridge = new TerminalAgentBridge({
     registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
     terminalProvider: provider,
-    async verifyIdentity() {}
+    async verifyIdentity() {},
+    nowMs: () => nowMs,
+    async sleep(milliseconds) {
+      requestedSleepMs.push(milliseconds);
+      const beforeSleep = nowMs;
+      nowMs += milliseconds;
+      if (
+        provider.materializedAt === undefined &&
+        beforeSleep < materializeAfterMs &&
+        nowMs >= materializeAfterMs
+      ) {
+        provider.materialize(PANE.target);
+      }
+    }
   });
   await bridge.send(
     "codex",
@@ -848,9 +881,18 @@ test("Codex multiline settle starts only after the exact composer materializes",
 
   assert.ok(provider.materializedAt !== undefined);
   assert.ok(provider.enterDispatchedAt !== undefined);
+  assert.ok(requestedSleepMs.length > 0);
+  assert.equal(
+    requestedSleepMs.reduce((total, milliseconds) => total + milliseconds, 0),
+    nowMs
+  );
+  assert.equal(provider.materializedAt, materializeAfterMs);
   assert.ok(
     provider.enterDispatchedAt - provider.materializedAt >= 120,
     "Enter must cross the suppression window after Codex consumes the full paste"
+  );
+  assert.ok(
+    provider.enterDispatchedAt - provider.materializedAt >= suppressionWindowMs
   );
   assert.equal(
     provider.operations.filter((operation) =>
@@ -861,6 +903,9 @@ test("Codex multiline settle starts only after the exact composer materializes",
 });
 
 test("unchanged multilingual multiline composer after one Enter is proven not accepted", async () => {
+  const suppressionWindowMs = 121;
+  let nowMs = 0;
+  const requestedSleepMs: number[] = [];
   const request = "第一行：保留精确内容\nSecond line with  two spaces.";
   class UnchangedComposerProvider extends RecordingTerminalProvider {
     override async sendText(
@@ -882,14 +927,22 @@ test("unchanged multilingual multiline composer after one Enter is proven not ac
   const bridge = new TerminalAgentBridge({
     registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
     terminalProvider: provider,
-    async verifyIdentity() {}
+    async verifyIdentity() {},
+    nowMs: () => nowMs,
+    async sleep(milliseconds) {
+      requestedSleepMs.push(milliseconds);
+      nowMs += milliseconds;
+    }
   });
+  const sendStartedAt = nowMs;
   await bridge.send(
     "codex",
     terminalControl(codexTerminalAgentAdapter),
     request,
     { runtime: { pid: 110 } }
   );
+  const sendCompletedAt = nowMs;
+  assert.ok(sendCompletedAt - sendStartedAt >= suppressionWindowMs);
   assert.equal(
     provider.operations.filter((operation) =>
       operation.kind === "keys" && operation.keys.includes("C-m")
@@ -902,6 +955,11 @@ test("unchanged multilingual multiline composer after one Enter is proven not ac
     request,
     { runtime: { pid: 110 } }
   ), true);
+  assert.ok(nowMs > sendCompletedAt);
+  assert.equal(
+    requestedSleepMs.reduce((total, milliseconds) => total + milliseconds, 0),
+    nowMs - sendStartedAt
+  );
 });
 
 test("Claude exact-draft proof only accepts the complete bottom composer frame", async () => {
@@ -4521,6 +4579,7 @@ test("native inspection error stages cannot regress after text injection", async
 });
 
 test("native status inspection requires an unambiguous bounded pre-Enter evidence inventory", async () => {
+  const originalPreEnterWindowMs = 120;
   for (const observation of [
     {
       status: "missing" as const,
@@ -4554,12 +4613,20 @@ test("native status inspection requires an unambiguous bounded pre-Enter evidenc
         return observation;
       }
     };
+    let nowMs = 0;
+    const requestedSleepMs: number[] = [];
     const provider = new NativeStatusProvider([PANE]);
     const bridge = new TerminalAgentBridge({
       registry: createTerminalAgentAdapterRegistry([inventoryAdapter]),
       terminalProvider: provider,
-      async verifyIdentity() {}
+      async verifyIdentity() {},
+      nowMs: () => nowMs,
+      async sleep(milliseconds) {
+        requestedSleepMs.push(milliseconds);
+        nowMs += milliseconds;
+      }
     });
+    const startedAt = nowMs;
     await assert.rejects(
       bridge.submitNativeInspection(
         "codex",
@@ -4575,6 +4642,15 @@ test("native status inspection requires an unambiguous bounded pre-Enter evidenc
         return true;
       }
     );
+    assert.ok(requestedSleepMs.length > 0);
+    assert.equal(
+      requestedSleepMs.reduce(
+        (total, milliseconds) => total + milliseconds,
+        0
+      ),
+      nowMs - startedAt
+    );
+    assert.ok(nowMs - startedAt >= originalPreEnterWindowMs);
     assert.equal(
       provider.operations.some((operation) => operation.kind === "keys"),
       false

@@ -277,6 +277,39 @@ function decodeNulPaths(output) {
   return output.split("\0").filter(Boolean);
 }
 
+function readCommitSummaryAndPaths(repoRoot, commit) {
+  const recordSeparator = "\0\0\n";
+  const output = checkedGit(
+    repoRoot,
+    [
+      "show",
+      "--format=%H%x00%s%x00",
+      "--name-only",
+      "-z",
+      "--no-renames",
+      commit,
+      "--"
+    ],
+    `reading immutable summary and changed paths for ${commit}`
+  );
+  const separatorIndex = output.indexOf(recordSeparator);
+  if (separatorIndex < 0 ||
+      output.indexOf(recordSeparator, separatorIndex + recordSeparator.length) >= 0) {
+    fail(`git returned an invalid summary/path boundary for ${commit}`);
+  }
+  const header = output.slice(0, separatorIndex).split("\0");
+  if (header.length !== 2 || !/^[0-9a-f]{40,64}$/u.test(header[0])) {
+    fail(`git returned an invalid immutable summary for ${commit}`);
+  }
+  return {
+    commit: header[0],
+    subject: header[1],
+    paths: decodeNulPaths(
+      output.slice(separatorIndex + recordSeparator.length)
+    ).sort()
+  };
+}
+
 function readRevisionBlobs(repoRoot, revision, repositoryPaths) {
   if (repositoryPaths.some((repositoryPath) => /[\r\n]/u.test(repositoryPath))) {
     fail("revision evidence paths must not contain line breaks");
@@ -698,45 +731,27 @@ function validateAffectedReplay(value, { repoRoot, tiers }) {
   let targetedCount = 0;
   const results = [];
   for (const [index, scenario] of scenarios.entries()) {
-    const resolved = resolveCommit(repoRoot, scenario.commit);
-    if (resolved !== scenario.commit) {
+    const historical = readCommitSummaryAndPaths(repoRoot, scenario.commit);
+    if (historical.commit !== scenario.commit) {
       fail(`affected selector scenario ${index} commit is not immutable`);
     }
-    const subject = checkedGit(
-      repoRoot,
-      ["show", "-s", "--format=%s", scenario.commit],
-      `reading subject for ${scenario.commit}`
-    ).trim();
-    if (subject !== scenario.subject) {
+    if (historical.subject !== scenario.subject) {
       fail(
         `affected selector scenario ${index} subject expected ` +
-        `${JSON.stringify(scenario.subject)} but found ${JSON.stringify(subject)}`
+        `${JSON.stringify(scenario.subject)} but found ` +
+        `${JSON.stringify(historical.subject)}`
       );
     }
-    const changedPaths = decodeNulPaths(checkedGit(
-      repoRoot,
-      [
-        "diff-tree",
-        "--no-commit-id",
-        "--name-only",
-        "--no-renames",
-        "-r",
-        "-z",
-        scenario.commit,
-        "--"
-      ],
-      `reading changed paths for ${scenario.commit}`
-    )).sort();
     assertExactArray(
-      changedPaths,
+      historical.paths,
       scenario.paths,
       `affected selector scenario ${index} historical paths`
     );
-    const selection = selectAffectedTests(changedPaths, tiers, {
+    const selection = selectAffectedTests(historical.paths, tiers, {
       productionOwnership: ownership,
       changeSemantics: analyzeRevisionChangeSemantics({
         repoRoot,
-        changedPaths,
+        changedPaths: historical.paths,
         beforeRevision: `${scenario.commit}^`,
         afterRevision: scenario.commit
       })
