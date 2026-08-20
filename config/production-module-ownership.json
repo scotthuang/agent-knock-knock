@@ -10,7 +10,14 @@
   },
   "domains": {
     "agent-session-core": {
-      "selection": "full"
+      "selection": "targeted",
+      "integration_tests": [
+        "test/claude-native-inspection-cli.test.ts",
+        "test/codex-no-rollout-binding-cli.test.ts",
+        "test/human-handoff-adoption-cli.test.ts",
+        "test/native-thread-lifecycle-recovery-cli.test.ts",
+        "test/shards/agent-cli-monitor-recovery.test.ts"
+      ]
     },
     "approval-policy": {
       "selection": "targeted",
@@ -48,7 +55,14 @@
       ]
     },
     "cli-runtime": {
-      "selection": "full"
+      "selection": "targeted",
+      "integration_tests": [
+        "test/codex-no-rollout-binding-cli.test.ts",
+        "test/management-cli.test.ts",
+        "test/shards/agent-cli-monitor-recovery.test.ts",
+        "test/shards/agent-cli-terminal-send-gates.test.ts",
+        "test/cli-core-import.test.ts"
+      ]
     },
     "codex-storage": {
       "selection": "targeted",
@@ -105,18 +119,38 @@
       ]
     },
     "lifecycle-core": {
-      "selection": "full"
+      "selection": "targeted",
+      "integration_tests": [
+        "test/codex-no-rollout-binding-cli.test.ts",
+        "test/human-handoff-adoption-cli.test.ts",
+        "test/codex-sticky-rollout-lifecycle-cli.test.ts",
+        "test/native-thread-lifecycle-cli.test.ts",
+        "test/native-thread-lifecycle-recovery-cli.test.ts"
+      ]
     },
     "lifecycle-smoke": {
-      "selection": "full"
+      "selection": "targeted",
+      "integration_tests": [
+        "test/live-lifecycle-verifier.test.ts",
+        "test/live-smoke-guards.test.ts"
+      ]
     },
     "mutation-transaction": {
       "selection": "full"
     },
-    "native-thread-lifecycle-query": {
+    "native-thread-lifecycle-cli": {
       "selection": "targeted",
       "integration_tests": [
         "test/claude-native-inspection-cli.test.ts",
+        "test/codex-no-rollout-binding-cli.test.ts",
+        "test/native-thread-lifecycle-cli.test.ts",
+        "test/native-thread-ownership-cli.test.ts",
+        "test/stale-bound-resume-cli.test.ts"
+      ]
+    },
+    "native-thread-lifecycle-query": {
+      "selection": "targeted",
+      "integration_tests": [
         "test/codex-no-rollout-binding-cli.test.ts",
         "test/codex-sticky-rollout-lifecycle-cli.test.ts",
         "test/native-thread-lifecycle-cli.test.ts",
@@ -189,6 +223,16 @@
       ]
     },
     "state-store": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/codex-no-rollout-binding-cli.test.ts",
+        "test/human-handoff-adoption-cli.test.ts",
+        "test/management-cli.test.ts",
+        "test/native-thread-lifecycle-recovery-cli.test.ts",
+        "test/turn-session-binding-cli.test.ts"
+      ]
+    },
+    "store-protocol": {
       "selection": "full"
     },
     "terminal-acceptance-application": {
@@ -212,7 +256,14 @@
       ]
     },
     "terminal-agent-core": {
-      "selection": "full"
+      "selection": "targeted",
+      "integration_tests": [
+        "test/claude-native-inspection-cli.test.ts",
+        "test/codex-no-rollout-binding-cli.test.ts",
+        "test/native-thread-lifecycle-cli.test.ts",
+        "test/shards/agent-cli-monitor-approval-context.test.ts",
+        "test/shards/agent-cli-terminal-send-gates.test.ts"
+      ]
     },
     "terminal-authority-policy": {
       "selection": "targeted",
@@ -245,7 +296,14 @@
       ]
     },
     "terminal-control": {
-      "selection": "full"
+      "selection": "targeted",
+      "integration_tests": [
+        "test/claude-native-inspection-cli.test.ts",
+        "test/codex-no-rollout-binding-cli.test.ts",
+        "test/human-handoff-adoption-cli.test.ts",
+        "test/native-thread-lifecycle-cli.test.ts",
+        "test/shards/agent-cli-monitor-recovery.test.ts"
+      ]
     },
     "terminal-delegate-adapter": {
       "selection": "targeted",
@@ -281,7 +339,14 @@
       ]
     },
     "terminal-dispatch-core": {
-      "selection": "full"
+      "selection": "targeted",
+      "integration_tests": [
+        "test/codex-no-rollout-binding-cli.test.ts",
+        "test/shards/agent-cli-dispatch-authority.test.ts",
+        "test/shards/agent-cli-dispatch-recovery.test.ts",
+        "test/shards/agent-cli-session-acceptance.test.ts",
+        "test/shards/agent-cli-terminal-send-gates.test.ts"
+      ]
     },
     "terminal-dispatch-ledger": {
       "selection": "full"
@@ -598,7 +663,7 @@
     },
     {
       "path": "src/native-thread-lifecycle-cli-adapter.ts",
-      "owner": "native-thread-lifecycle-query"
+      "owner": "native-thread-lifecycle-cli"
     },
     {
       "path": "src/native-thread-lifecycle-ledger-cli-adapter.ts",
@@ -682,7 +747,7 @@
     },
     {
       "path": "src/protocol.ts",
-      "owner": "state-store"
+      "owner": "store-protocol"
     },
     {
       "path": "src/runtime-log.ts",
@@ -698,7 +763,7 @@
     },
     {
       "path": "src/store.ts",
-      "owner": "state-store"
+      "owner": "store-protocol"
     },
     {
       "path": "src/terminal-acceptance-application-service.ts",

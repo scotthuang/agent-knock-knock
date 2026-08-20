@@ -43,7 +43,7 @@ test("package wires the standalone and architecture refactor evidence gates", ()
   assert.match(architectureValidator, /loadAndValidateRefactorEvidence/u);
 });
 
-test("Phase 1 evidence reproduces startup counts and historical selection", async () => {
+test("final selector evidence reproduces startup counts and historical selection", async () => {
   const evidenceModule = await loadEvidenceModule();
   const evidence = evidenceModule.loadAndValidateRefactorEvidence({
     repoRoot,
@@ -65,22 +65,28 @@ test("Phase 1 evidence reproduces startup counts and historical selection", asyn
   );
 
   assert.equal(evidence.testEvidence.affectedReplay.scenario_count, 10);
-  assert.equal(evidence.testEvidence.affectedReplay.full_count, 9);
-  assert.equal(evidence.testEvidence.affectedReplay.targeted_count, 1);
+  assert.equal(evidence.testEvidence.affectedReplay.full_count, 2);
+  assert.equal(evidence.testEvidence.affectedReplay.targeted_count, 8);
   assert.equal(
     evidence.testEvidence.affectedReplay.full_rate_basis_points,
-    9000
+    2000
   );
-  assert.equal(evidence.testEvidence.affectedReplay.targetRequired, false);
-  assert.equal(evidence.testEvidence.affectedReplay.targetMet, false);
+  assert.equal(evidence.testEvidence.affectedReplay.targetRequired, true);
+  assert.equal(evidence.testEvidence.affectedReplay.targetMet, true);
   assert.deepEqual(
     evidence.testEvidence.affectedReplay.results.filter(
-      (result: { mode: string }) => result.mode === "targeted"
+      (result: { mode: string }) => result.mode === "full"
     ),
-    [{
-      commit: "95bbed33d62bae946bb5163f4478141cdecf3acc",
-      mode: "targeted"
-    }]
+    [
+      {
+        commit: "d9e1a4cacde8e9cc65b44dd6bfae27ad2a877033",
+        mode: "full"
+      },
+      {
+        commit: "d0804039b5e1efd35ca1c716eb85019e48e7380f",
+        mode: "full"
+      }
+    ]
   );
 
   assert.deepEqual(evidence.publicContracts, {
@@ -852,26 +858,39 @@ test("one required flag turns an unmet final threshold into a hard failure", asy
 
 test("test evidence schema rejects incomplete or unreviewed top-level fields", async () => {
   const evidenceModule = await loadEvidenceModule();
+  const validate = (manifest: any) =>
+    evidenceModule.validateTestEvidenceManifest({
+      manifest,
+      repoRoot,
+      tiers: loadTiers()
+    });
   const missing = loadJson("config/refactor-test-evidence.json");
   delete missing.affected_selector_replay;
   assert.throws(
-    () => evidenceModule.validateTestEvidenceManifest({
-      manifest: missing,
-      repoRoot,
-      tiers: loadTiers()
-    }),
+    () => validate(missing),
     /missing keys: affected_selector_replay/u
   );
 
   const unknown = loadJson("config/refactor-test-evidence.json");
   unknown.unreviewed_escape_hatch = true;
   assert.throws(
-    () => evidenceModule.validateTestEvidenceManifest({
-      manifest: unknown,
-      repoRoot,
-      tiers: loadTiers()
-    }),
+    () => validate(unknown),
     /unexpected keys: unreviewed_escape_hatch/u
+  );
+
+  const optionalSelector = loadJson("config/refactor-test-evidence.json");
+  optionalSelector.affected_selector_replay.final_threshold.required = false;
+  assert.throws(
+    () => validate(optionalSelector),
+    /affected selector final_threshold required must be true/u
+  );
+
+  const looseSelector = loadJson("config/refactor-test-evidence.json");
+  looseSelector.affected_selector_replay.final_threshold
+    .maximum_full_fallback_count = 100;
+  assert.throws(
+    () => validate(looseSelector),
+    /affected selector final_threshold maximum_full_fallback_count must be 2/u
   );
 });
 
