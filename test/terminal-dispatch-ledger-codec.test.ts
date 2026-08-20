@@ -568,7 +568,8 @@ test("lifecycle phase builder preserves every legacy key and JSON byte", () => {
 test("lifecycle builder and scoped save calls retain their exact adjacent CAS", () => {
   const actual = [
     "src/terminal-handoff-cli-adapter.ts",
-    "src/cli-core.ts"
+    "src/cli-core.ts",
+    "src/native-thread-transition-application.ts"
   ].flatMap((sourcePath) => {
     const source = readFileSync(sourcePath, "utf8");
     const starts = [...source.matchAll(/lifecycleLedger\(/gu)]

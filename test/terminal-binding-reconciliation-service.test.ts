@@ -218,7 +218,10 @@ function fixture(options: {
       presented = result;
       if (options.presenterError) throw options.presenterError;
     }
-  } satisfies BindingReconciliationPorts;
+  } satisfies BindingReconciliationPorts<
+    ResolvedTerminalConversation,
+    TerminalBridgeStatus
+  >;
   return {
     events,
     store,

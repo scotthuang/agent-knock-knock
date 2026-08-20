@@ -2,8 +2,8 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 7941,
-    "production_physical_loc": 89933,
+    "cli_core_max_physical_loc": 6483,
+    "production_physical_loc": 90578,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -575,6 +575,10 @@
       "owner": "native-thread-lifecycle-query"
     },
     {
+      "path": "src/native-thread-lifecycle-ledger-cli-adapter.ts",
+      "owner": "native-thread-transition-settlement"
+    },
+    {
       "path": "src/native-thread-lifecycle-policy.ts",
       "owner": "lifecycle-core"
     },
@@ -597,6 +601,10 @@
     {
       "path": "src/native-thread-resume-snapshot.ts",
       "owner": "lifecycle-core"
+    },
+    {
+      "path": "src/native-thread-transition-application.ts",
+      "owner": "native-thread-transition-settlement"
     },
     {
       "path": "src/native-thread-transition-policy.ts",

@@ -14,30 +14,49 @@ import {
   decideBindingReconciliation,
   type ManagedBindingConflictKind
 } from "./native-thread-transition-policy.js";
-import type {
-  ResolvedTerminalConversation,
-  TerminalBridgeStatus
-} from "./terminal-agent-bridge.js";
+import type { ExecutorKind } from "./executors.js";
+import type { TerminalControlRef } from "./terminal-control-ref.js";
 import type { TerminalNativeIdentity } from "./terminal-binding-authority.js";
 
-type Terminal = ResolvedTerminalConversation;
+export interface BindingReconciliationTerminalFacts {
+  readonly conversationId: string;
+  readonly agent: ExecutorKind;
+  readonly pid: number;
+  readonly terminalControl: TerminalControlRef;
+}
+
+export interface BindingReconciliationStatusFacts {
+  readonly reachable: boolean;
+  readonly activity_state: string;
+  readonly activity_reason: string;
+  readonly approval_state: Readonly<{ blocked: boolean }>;
+}
+
 type Identity = TerminalNativeIdentity | undefined;
 type ScopeArgs = [CanonicalMutationScopes, CanonicalMutationResources];
 type Scoped<Args extends unknown[], Result> = (...args: [...ScopeArgs, ...Args]) => Result;
 type TurnBlocker = Readonly<{ turnId: string; status: ConversationStatus }>;
-export type BindingReconciliationRequest = Readonly<{
+export type BindingReconciliationRequest<
+  Terminal extends BindingReconciliationTerminalFacts =
+    BindingReconciliationTerminalFacts
+> = Readonly<{
   initialTerminal: Terminal;
   conflictingSessionId: string;
   expectedSessionRevision: number;
   expectedBindingToken: string;
   expectedTerminalToken: string;
 }>;
-export type BindingReconciliationResult = Readonly<{
+export type BindingReconciliationResult<
+  Terminal extends BindingReconciliationTerminalFacts =
+    BindingReconciliationTerminalFacts
+> = Readonly<{
   terminal: Terminal;
   detached: ManagedSessionState;
   conflictKind: ManagedBindingConflictKind;
 }>;
-type BindingTransactionPort = Readonly<{
+type BindingTransactionPort<
+  Terminal extends BindingReconciliationTerminalFacts
+> = Readonly<{
   locks: CanonicalMutationLockPorts;
   recover: Scoped<[Terminal], Promise<void>>;
   loadSession: Scoped<[string], ManagedSessionState>;
@@ -46,14 +65,24 @@ type BindingTransactionPort = Readonly<{
     ManagedSessionState
   >;
 }>;
-type BindingTerminalPort = Readonly<{
+type BindingTerminalPort<
+  Terminal extends BindingReconciliationTerminalFacts,
+  Status extends BindingReconciliationStatusFacts
+> = Readonly<{
   resolve: () => Promise<Terminal>;
   sameIncarnation: (left: unknown, right: unknown) => boolean;
   identity: (terminal: Terminal) => Promise<Identity>;
-  prepareStatus: () => (terminal: Terminal) => Promise<TerminalBridgeStatus>;
-  assertReady: (terminal: Terminal, status: TerminalBridgeStatus) => void;
+  prepareStatus: () => (
+    terminal: Terminal
+  ) => Promise<Status>;
+  assertReady: (
+    terminal: Terminal,
+    status: Status
+  ) => void;
 }>;
-type BindingAuthorityPort = Readonly<{
+type BindingAuthorityPort<
+  Terminal extends BindingReconciliationTerminalFacts
+> = Readonly<{
   dispatchIsFree: (control: Terminal["terminalControl"]) => boolean;
   sessionClaimsTerminal: (session: ManagedSessionState, terminal: Terminal) => boolean;
   terminalTokenMatches: (terminal: Terminal, identity: Identity, token: string) => boolean;
@@ -63,12 +92,17 @@ type BindingAuthorityPort = Readonly<{
     session: ManagedSessionState, terminal: Terminal, identity: Identity
   ) => ManagedBindingConflictKind | undefined;
 }>;
-export type BindingReconciliationPorts = Readonly<{
-  transaction: BindingTransactionPort;
-  terminal: BindingTerminalPort;
-  authority: BindingAuthorityPort;
+export type BindingReconciliationPorts<
+  Terminal extends BindingReconciliationTerminalFacts =
+    BindingReconciliationTerminalFacts,
+  Status extends BindingReconciliationStatusFacts =
+    BindingReconciliationStatusFacts
+> = Readonly<{
+  transaction: BindingTransactionPort<Terminal>;
+  terminal: BindingTerminalPort<Terminal, Status>;
+  authority: BindingAuthorityPort<Terminal>;
   now: () => string;
-  present: (result: BindingReconciliationResult) => void;
+  present: (result: BindingReconciliationResult<Terminal>) => void;
 }>;
 const REJECTION_MESSAGES = {
   stale_process_incarnation: "the stale process incarnation no longer requires explicit reconciliation; refresh AKK list",
@@ -80,7 +114,14 @@ function requireCondition(condition: boolean, message: string): void {
     throw new Error(message);
   }
 }
-function sameTerminal(port: BindingTerminalPort, candidate: Terminal, expected: Terminal): boolean {
+function sameTerminal<Terminal extends BindingReconciliationTerminalFacts>(
+  port: Pick<
+    BindingTerminalPort<Terminal, BindingReconciliationStatusFacts>,
+    "sameIncarnation"
+  >,
+  candidate: Terminal,
+  expected: Terminal
+): boolean {
   return candidate.pid === expected.pid &&
     candidate.conversationId === expected.conversationId &&
     port.sameIncarnation(candidate.terminalControl, expected.terminalControl);
@@ -91,9 +132,12 @@ function sessionTokenMatches(session: ManagedSessionState, expected: string): bo
     legacyManagedSessionBindingToken(session)
   ].includes(expected);
 }
-export async function reconcileTerminalBinding(
-  request: BindingReconciliationRequest,
-  ports: BindingReconciliationPorts
+export async function reconcileTerminalBinding<
+  Terminal extends BindingReconciliationTerminalFacts,
+  Status extends BindingReconciliationStatusFacts
+>(
+  request: BindingReconciliationRequest<Terminal>,
+  ports: BindingReconciliationPorts<Terminal, Status>
 ): Promise<void> {
   const { authority, terminal, transaction } = ports;
   return withCanonicalMutationLocks(transaction.locks, async (scopes, resources) => {

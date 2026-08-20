@@ -2029,6 +2029,58 @@ ordinary and recovered single emission, retry, completion/approval preparation,
 transport acceptance, and monitor consumption without duplicating callback
 authority.
 
+## Native lifecycle transition application
+
+This slice moves the exact 13-function native lifecycle transition inventory
+(1,344 physical function-span lines) out of `cli-core.ts`. The new
+`native-thread-transition-application.ts` owns new-thread, exact resume,
+binding reconciliation, pre-mutation lifecycle recovery, transition
+settlement composition, and terminal-ready verification. The separate
+`native-thread-lifecycle-ledger-cli-adapter.ts` owns exact lifecycle ledger CAS
+against the existing terminal-dispatch repository. Candidate query,
+verification, settlement, recovery, ledger codec, identity, acceptance, and
+Session repositories remain with their existing owners; no reducer or
+repository is copied.
+
+Against exact parent `98e3566f0e15e4a6ff0ffff6efa85cdde532ee77`,
+`src/cli-core.ts` falls from 7,941 to 6,483 physical lines (-1,458). Total
+production TypeScript changes from 89,933 to 90,578 (+645), inside the hard
+650-line overhead gate. Architecture validation reports 52 domains, 112
+production modules, 669 static import edges, zero cycles, and one retained
+`cli-core.ts` importer.
+
+The invocation-local CLI bounded I/O shell composes exactly five port groups
+(`runtime`, `lifecycle`, `state`, `authority`, and `mutation`). It extends the
+existing lifecycle query facade at the CLI composition root. Observed handoff
+identity and writer-scope deferred recovery call the merged terminal-handoff
+facade directly; verified-empty detach and transport continue through that
+same facade. Recovery services receive only projected terminal facts plus scoped
+capabilities. Binding reconciliation likewise receives data-only terminal and
+status facts, while the CLI adapter retains the exact runtime terminal needed
+for subsequent infrastructure calls.
+
+The mutation sequence remains terminal lock -> Store writer lease. A fresh
+terminal route is re-resolved after both capabilities are authenticated.
+Resume snapshot expiry, action fingerprint, and the complete candidate set are
+revalidated before persistence and again at their mutation-adjacent fences.
+The durable order remains prepared transition -> prepared ledger -> source
+transitioning -> dispatching transition/ledger -> input -> submitted
+transition/ledger -> verification -> verified transition -> target ownership
+-> Session commit -> committed transition -> resolved ledger -> presentation.
+Presentation therefore remains inside both locks. Only a
+`TerminalInputNotStartedError` with no text-injection observation can take the
+zero-input abort path; possible input remains uncertain, quarantined, and
+do-not-retry.
+
+Compiler-AST evidence covers every function-like declaration in the new
+application. The maximum span is 445 physical lines and maximum approximate
+complexity is c44, below the hard 500/c50 gates. Direct tests record exact
+ledger load/authority/save precedence, scoped recovery resources, verified
+commit and uncertain failure order, resolved-ledger-before-presentation, and
+presentation before writer/terminal lock release. Fast and focused lifecycle,
+recovery, ownership, Codex sticky-rollout, and stale-resume witnesses retain
+the real CLI behavior.
+
 ## Soft freeze while #126 is active
 
 Until the orchestration milestones finish:
