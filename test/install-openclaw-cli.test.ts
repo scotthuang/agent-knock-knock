@@ -7,70 +7,13 @@ import { spawnSync } from "node:child_process";
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 const packageRoot = path.resolve(path.dirname(binPath), "../..");
-const skillSource = path.join(packageRoot, "templates", "openclaw-skills", "agent-knock-knock", "SKILL.md");
-
-test("OpenClaw contract removes the top-level workspace and keeps rule-scoped approval workspaces", () => {
-  const manifest = JSON.parse(fs.readFileSync(path.join(packageRoot, "openclaw.plugin.json"), "utf8"));
-  const configProperties = manifest.configSchema.properties;
-  assert.equal("workspace" in configProperties, false);
-  const autoApproveRule =
-    configProperties.autoApprove.properties.rules.items;
-  assert.equal(autoApproveRule.required.includes("workspaces"), true);
-  assert.equal(autoApproveRule.properties.workspaces.type, "array");
-  assert.equal(autoApproveRule.properties.workspaces.minItems, 1);
-  assert.equal("maxItems" in autoApproveRule.properties.workspaces, false);
-  assert.equal(autoApproveRule.properties.workspaces.items.type, "string");
-  assert.equal(autoApproveRule.properties.workspaces.items.minLength, 1);
-  assert.equal(manifest.configSchema.properties.agentTimeoutMinutes.type, "number");
-  assert.equal(manifest.configSchema.properties.agentHardTimeoutMinutes.type, "number");
-  assert.equal(manifest.configSchema.properties.agentHardTimeoutMinutes.exclusiveMinimum, 0);
-  assert.equal(manifest.contracts.tools.includes("agent_knock_knock_renew"), true);
-  assert.equal(manifest.toolMetadata.agent_knock_knock_renew.optional, true);
-  assert.equal(manifest.contracts.tools.includes("agent_knock_knock_respond"), true);
-  assert.equal(manifest.toolMetadata.agent_knock_knock_respond.optional, true);
-  assert.equal(manifest.contracts.tools.length, 14);
-  for (const lifecycleTool of [
-    "agent_knock_knock_list_resumable_threads",
-    "agent_knock_knock_native_inspect",
-    "agent_knock_knock_new_thread",
-    "agent_knock_knock_reconcile_binding",
-    "agent_knock_knock_resume_thread"
-  ]) {
-    assert.equal(manifest.contracts.tools.includes(lifecycleTool), true);
-    assert.equal(manifest.toolMetadata[lifecycleTool].optional, true);
-  }
-
-  const pluginSource = fs.readFileSync(path.join(packageRoot, "src", "openclaw-plugin.ts"), "utf8");
-  assert.match(pluginSource, /const sendParameters =[\s\S]*?agentTimeoutMinutes:[\s\S]*?agentHardTimeoutMinutes:/u);
-  assert.match(
-    pluginSource,
-    /const approveParameters =[\s\S]*?required: \["expected_approval_fingerprint"\][\s\S]*?anyOf: \[[\s\S]*?required: \["turn_id"\][\s\S]*?required: \["conversation_id"\]/u
-  );
-  assert.match(pluginSource, /--expected-approval-fingerprint/u);
-  assert.match(pluginSource, /name: "agent_knock_knock_renew"/u);
-  assert.match(pluginSource, /name: "agent_knock_knock_new_thread"/u);
-  assert.match(pluginSource, /name: "agent_knock_knock_reconcile_binding"/u);
-  assert.match(pluginSource, /name: "agent_knock_knock_list_resumable_threads"/u);
-  assert.match(pluginSource, /name: "agent_knock_knock_native_inspect"/u);
-  assert.match(pluginSource, /name: "agent_knock_knock_resume_thread"/u);
-  assert.match(
-    pluginSource,
-    /Managed approval uses exact turn_id[\s\S]*?Claude Code uses no Hooks:[\s\S]*?exact one-time Bash permission screen[\s\S]*?trusted default-disabled plugin configuration[\s\S]*?auto-approve[\s\S]*?durable completion[\s\S]*?local Claude transcript/u
-  );
-  assert.doesNotMatch(pluginSource, /structured one-time Hook|pending structured permission/u);
-  assert.doesNotMatch(pluginSource, /install-claude-hooks/u);
-  assert.match(pluginSource, /createMonitorReconciliationService[\s\S]*?agent-knock-knock-monitor-reconciliation/u);
-  assert.match(pluginSource, /const args = \["reconcile-monitors", "--reason", reason\][\s\S]*?--terminal-monitors-only[\s\S]*?catch \(error\)[\s\S]*?logger\.warn/u);
-  assert.match(fs.readFileSync(skillSource, "utf8"), /agent_knock_knock_renew/u);
-  assert.match(
-    fs.readFileSync(skillSource, "utf8"),
-    /agent_knock_knock_list_resumable_threads/u
-  );
-  assert.match(
-    fs.readFileSync(skillSource, "utf8"),
-    /agent_knock_knock_native_inspect/u
-  );
-});
+const skillSource = path.join(
+  packageRoot,
+  "templates",
+  "openclaw-skills",
+  "agent-knock-knock",
+  "SKILL.md"
+);
 
 test("install-openclaw replaces an existing plugin and installs its skill", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-install-openclaw-"));

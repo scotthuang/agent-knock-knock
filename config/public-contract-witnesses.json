@@ -94,6 +94,11 @@
       ],
       "authority_paths": [
         "openclaw.plugin.json",
+        "src/openclaw-plugin-callback-adapter.ts",
+        "src/openclaw-plugin-command-adapter.ts",
+        "src/openclaw-plugin-helpers.ts",
+        "src/openclaw-plugin-schemas.ts",
+        "src/openclaw-plugin-supervisor.ts",
         "src/openclaw-plugin.ts"
       ],
       "witnesses": [

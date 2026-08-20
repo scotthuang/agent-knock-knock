@@ -94,6 +94,18 @@ const OPENCLAW_TOOLS = Object.freeze([
   "agent_knock_knock_close",
   "agent_knock_knock_approve"
 ]);
+const OPENCLAW_AUTHORITY_ROLES = Object.freeze({
+  manifest: "openclaw.plugin.json",
+  callback_adapter: "src/openclaw-plugin-callback-adapter.ts",
+  command_adapter: "src/openclaw-plugin-command-adapter.ts",
+  command_helpers: "src/openclaw-plugin-helpers.ts",
+  tool_schemas: "src/openclaw-plugin-schemas.ts",
+  monitor_supervisor: "src/openclaw-plugin-supervisor.ts",
+  plugin_entry: "src/openclaw-plugin.ts"
+});
+const OPENCLAW_AUTHORITY_PATHS = Object.freeze(
+  Object.values(OPENCLAW_AUTHORITY_ROLES).sort()
+);
 const MIGRATION_IDS = Object.freeze([
   "callback-outbox",
   "cli-runtime",
@@ -744,6 +756,215 @@ function assertSourcePattern(repoRoot, repositoryPath, pattern, label) {
   }
 }
 
+function assertDirectNamedImport(
+  repoRoot,
+  repositoryPath,
+  moduleSpecifier,
+  expectedNames,
+  label
+) {
+  const source = readRepositoryFile(repoRoot, repositoryPath);
+  const clauses = [...source.matchAll(
+    /import\s*\{([\s\S]*?)\}\s*from\s*"([^"]+)";/gu
+  )].filter((match) => match[2] === moduleSpecifier);
+  if (clauses.length !== 1) {
+    fail(
+      `${label} must have one direct named import from ${moduleSpecifier} ` +
+      `in ${repositoryPath}`
+    );
+  }
+  const importedNames = clauses[0][1].split(",").map((binding) =>
+    binding.trim().replace(/^type\s+/u, "").split(/\s+as\s+/u)[0]
+  ).filter(Boolean);
+  for (const expectedName of expectedNames) {
+    if (!importedNames.includes(expectedName)) {
+      fail(
+        `${label} must directly import ${expectedName} from ` +
+        `${moduleSpecifier} in ${repositoryPath}`
+      );
+    }
+  }
+}
+
+function validateOpenClawAuthorityRoles(authorityPaths, repoRoot) {
+  assertExactArray(
+    authorityPaths,
+    OPENCLAW_AUTHORITY_PATHS,
+    "OpenClaw authority role paths"
+  );
+  validateAuthorityPaths(
+    authorityPaths,
+    "OpenClaw authority_paths",
+    repoRoot
+  );
+
+  const roles = OPENCLAW_AUTHORITY_ROLES;
+  const schemas = readRepositoryFile(repoRoot, roles.tool_schemas);
+  assertExactArray(
+    [...schemas.matchAll(/^export const ([A-Za-z]+Parameters) =/gmu)]
+      .map((match) => match[1]),
+    [
+      "sendParameters",
+      "respondParameters",
+      "listParameters",
+      "listResumableThreadsParameters",
+      "nativeInspectParameters",
+      "newThreadParameters",
+      "reconcileBindingParameters",
+      "resumeThreadParameters",
+      "renewParameters",
+      "retryCallbackParameters",
+      "statusParameters",
+      "cancelParameters",
+      "closeParameters",
+      "approveParameters"
+    ],
+    "OpenClaw schema role exports"
+  );
+  assertDirectNamedImport(
+    repoRoot,
+    roles.tool_schemas,
+    "./executors.js",
+    ["EXECUTOR_KINDS"],
+    "OpenClaw schema role"
+  );
+
+  assertSourcePattern(
+    repoRoot,
+    roles.command_helpers,
+    /export const AKK_CALLBACK_METHOD[\s\S]*?export function parseAkkCommand\s*\([\s\S]*?export function buildAkkCommandCliArgs\s*\([\s\S]*?export function resolvePluginStoreDir\s*\(/u,
+    "OpenClaw command-helper role"
+  );
+  assertDirectNamedImport(
+    repoRoot,
+    roles.command_helpers,
+    "./value-guards.js",
+    ["recordValue"],
+    "OpenClaw command-helper role"
+  );
+
+  assertSourcePattern(
+    repoRoot,
+    roles.command_adapter,
+    /const relayPathByApi = new WeakMap[\s\S]*?export function registerOpenClawCommands\s*\([\s\S]*?export function runCli\s*\([\s\S]*?export function runCliAsync\s*\(/u,
+    "OpenClaw command-adapter role"
+  );
+  assertDirectNamedImport(
+    repoRoot,
+    roles.command_adapter,
+    "./openclaw-plugin-schemas.js",
+    [
+      "approveParameters",
+      "cancelParameters",
+      "closeParameters",
+      "listParameters",
+      "listResumableThreadsParameters",
+      "nativeInspectParameters",
+      "newThreadParameters",
+      "reconcileBindingParameters",
+      "renewParameters",
+      "respondParameters",
+      "resumeThreadParameters",
+      "retryCallbackParameters",
+      "sendParameters",
+      "statusParameters"
+    ],
+    "OpenClaw command-adapter role"
+  );
+  assertDirectNamedImport(
+    repoRoot,
+    roles.command_adapter,
+    "./openclaw-plugin-helpers.js",
+    ["AKK_CALLBACK_METHOD", "parseAkkCommand", "resolvePluginStoreDir"],
+    "OpenClaw command-adapter role"
+  );
+
+  assertSourcePattern(
+    repoRoot,
+    roles.callback_adapter,
+    /export function registerOpenClawCallbackGateway\s*\([\s\S]*?async function handleCallback\s*\([\s\S]*?function buildCallbackDeliveryPlan\s*\(/u,
+    "OpenClaw callback-adapter role"
+  );
+  assertDirectNamedImport(
+    repoRoot,
+    roles.callback_adapter,
+    "./approval-policy.js",
+    ["attemptAutoApproval"],
+    "OpenClaw callback-adapter role"
+  );
+  assertDirectNamedImport(
+    repoRoot,
+    roles.callback_adapter,
+    "./openclaw-plugin-command-adapter.js",
+    ["runCli"],
+    "OpenClaw callback-adapter role"
+  );
+  assertDirectNamedImport(
+    repoRoot,
+    roles.callback_adapter,
+    "./openclaw-plugin-helpers.js",
+    ["AKK_CALLBACK_METHOD"],
+    "OpenClaw callback-adapter role"
+  );
+
+  assertSourcePattern(
+    repoRoot,
+    roles.monitor_supervisor,
+    /export const MONITOR_SUPERVISOR_INTERVAL_MS[\s\S]*?export function createMonitorReconciliationService\s*\([\s\S]*?agent-knock-knock-monitor-reconciliation/u,
+    "OpenClaw monitor-supervisor role"
+  );
+  assertDirectNamedImport(
+    repoRoot,
+    roles.monitor_supervisor,
+    "./openclaw-plugin-command-adapter.js",
+    ["pushOptional", "runCli", "runCliAsync"],
+    "OpenClaw monitor-supervisor role"
+  );
+  assertDirectNamedImport(
+    repoRoot,
+    roles.monitor_supervisor,
+    "./openclaw-plugin-helpers.js",
+    ["resolvePluginStoreDir"],
+    "OpenClaw monitor-supervisor role"
+  );
+
+  assertSourcePattern(
+    repoRoot,
+    roles.plugin_entry,
+    /function createPlugin\s*\([\s\S]*?definePluginEntry\s*\([\s\S]*?export function createOpenClawPluginForTest\s*\([\s\S]*?export default plugin;/u,
+    "OpenClaw plugin-entry role"
+  );
+  const entrySource = readRepositoryFile(repoRoot, roles.plugin_entry);
+  if ((entrySource.match(/^export\s/gmu) ?? []).length !== 2) {
+    fail("OpenClaw plugin-entry role must expose only default and test factory");
+  }
+  assertDirectNamedImport(
+    repoRoot,
+    roles.plugin_entry,
+    "./openclaw-plugin-callback-adapter.js",
+    ["registerOpenClawCallbackGateway"],
+    "OpenClaw plugin-entry role"
+  );
+  assertDirectNamedImport(
+    repoRoot,
+    roles.plugin_entry,
+    "./openclaw-plugin-command-adapter.js",
+    [
+      "bindOpenClawRelayPath",
+      "defaultOpenClawRelayPath",
+      "registerOpenClawCommands"
+    ],
+    "OpenClaw plugin-entry role"
+  );
+  assertDirectNamedImport(
+    repoRoot,
+    roles.plugin_entry,
+    "./openclaw-plugin-supervisor.js",
+    ["createMonitorReconciliationService", "MONITOR_SUPERVISOR_INTERVAL_MS"],
+    "OpenClaw plugin-entry role"
+  );
+}
+
 function validatePublicContracts(value, {
   repoRoot,
   witnesses,
@@ -839,11 +1060,7 @@ function validatePublicContracts(value, {
     fail("OpenClaw plugin id or slash command changed");
   }
   assertExactArray(openclaw.tools, OPENCLAW_TOOLS, "OpenClaw tools");
-  validateAuthorityPaths(
-    openclaw.authority_paths,
-    "OpenClaw authority_paths",
-    repoRoot
-  );
+  validateOpenClawAuthorityRoles(openclaw.authority_paths, repoRoot);
   validateWitnessReferences(
     openclaw.witnesses,
     "OpenClaw witnesses",

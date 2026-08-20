@@ -2368,6 +2368,101 @@ skip. The five
 focused CLI witnesses are CLI UX, management, control locks, monitor recovery,
 and terminal-send gates.
 
+## OpenClaw plugin boundary split
+
+Against exact parent `96b5dbdf775ed55ef0efb9391ab2618167a08966`, the
+2,830-line `openclaw-plugin.ts` monolith becomes a 67-line composition entry
+(-2,763). The complete plugin family, including the unchanged 1,068-line
+helper, moves from 3,898 to 3,974 lines (+76). Total production TypeScript
+moves from 92,904 to 92,980 lines, so adapter overhead is 2.75 percent of the
+entry movement and remains below both the preferred 250-line and hard 500-line
+budgets. The graph moves from 119 to 123 production modules and from 772 to 783
+static import edges, with zero cycles and the same sole `cli-core.ts` importer.
+The affected ownership groups contain four OpenClaw plugin modules, two
+callback-transport modules, and four monitor-supervision modules.
+
+The split assigns one explicit role to every authority path:
+
+- `openclaw-plugin-schemas.ts` owns the 14 tool JSON schemas and their exact
+  property, `required`, `not`, `anyOf`, and `allOf` insertion order.
+- `openclaw-plugin-command-adapter.ts` owns `/akk` parsing/formatting,
+  registration and tool mapping, argv construction, synchronous/asynchronous
+  CLI result/error priority, message identity, and the per-API relay-path
+  `WeakMap`.
+- `openclaw-plugin-callback-adapter.ts` owns callback identity and target
+  agreement, automatic approval, injection, delivery planning, and shortcut
+  text.
+- `openclaw-plugin-supervisor.ts` owns startup reconciliation and the
+  non-overlapping immediate/timer/start/stop monitor-supervision loop.
+- `openclaw-plugin.ts` owns only `definePluginEntry` composition, stable plugin
+  metadata, ordered registration wiring, the default export, and
+  `createOpenClawPluginForTest`.
+- `openclaw-plugin-helpers.ts` remains the canonical parser/formatter/store-dir
+  helper owner; no helper was copied into a new module.
+
+The static dependency graph is deliberately one-way:
+
+```text
+openclaw-plugin entry
+  |-> callback adapter -> command adapter -> schemas -> executors
+  |                    \-> helpers -> value guards
+  |-> supervisor -------> command adapter
+  |                    \-> helpers
+  \-> command adapter ---> helpers
+```
+
+Neither callback nor supervisor is imported by command, schemas, or helpers,
+and no split module imports the entry. The entry still binds the relay path
+before registering the callback, then registers callback -> supervisor ->
+slash command/tools in the original observable order. The merged status and
+terminal-monitor-supervision facades remain unchanged and retain their newer
+configuration, process ownership, and documentation authorities.
+
+| Old monolith boundary | Preserved invariant | New authority and proof boundary |
+| --- | --- | --- |
+| 14 inline schema objects | byte-identical JSON, tool order, descriptions, required/exclusion semantics | schemas module; 12,657-byte schema SHA-256 contract and exact 14-tool registration witness |
+| `/akk` plus tool registration/CLI execution | argv/env/cwd/stdout/stderr/exit/JSON/error and getter priority | command adapter; OpenClaw contract argv/result/error and Resume snapshot witnesses |
+| callback gateway block | modern/legacy Session/Turn identity agreement, auto-approval, injection/delivery/shortcut order | callback adapter; callback injection, mismatch, approval, and per-API isolation witnesses |
+| monitor reconciliation service | immediate startup, non-overlap, timer reschedule, stop/drain, catch-and-warn routing | supervisor module; recording supervisor timer witness |
+| plugin factory and metadata | id/name/description, Gateway scope/error code, registration order, instance-local snapshots | 67-line entry; runtime and declaration expose only `default` and `createOpenClawPluginForTest` |
+
+This is a source-ownership change only. It adds or removes no lock, Store or
+durable JSON/event write, subprocess boundary, timer, Gateway method, or
+Gateway restart. The existing `spawnSync`/`spawn` calls and their exact argv,
+environment, working-directory, output, timeout, and error rules only moved to
+the command adapter; static subprocess startup evidence remains 38 sites. The
+single supervisor `setTimeout` loop only moved files, and no install or restart
+path is called by plugin registration. Multiple plugin definitions retain
+separate resume caches, while the existing per-API `WeakMap` keeps relay path
+and plugin config isolated.
+
+All newly extracted or moved slice functions remain below the hard
+500-line/c50 gates. The unchanged canonical `openclaw-plugin-helpers.ts` is not
+counted in this slice gate: its existing `parseAkkCommand` remains 188 lines/c58
+and is retained for the final global complexity closure. The cohesive preferred
+100-line/c20 exceptions in this slice are transparent and recorded below;
+splitting the registration table or the ordered decision/format paths further
+would obscure schema/action order or fail-closed precedence without reducing
+authority.
+
+| Function or table | LOC / approximate complexity |
+| --- | ---: |
+| `registerOpenClawCommands` | 398 / c1 |
+| `runDelegate` | 178 / c45 |
+| `handleAkkLifecycleCommand` | 165 / c30 |
+| `runCliAsync` | 100 / c1 |
+| callback `handleCallback` | 105 / c15 |
+| `handleAkkCommand` | 90 / c22 |
+| `formatSendCommandResult` | 84 / c28 |
+| `formatStatusCommandResult` | 59 / c27 |
+| `runSendRequest` | 93 / c21 |
+
+The entry maximum is 37 lines/c3 and the supervisor maximum is 97 lines/c12.
+Machine-readable public-contract evidence freezes the exact manifest plus six
+source authority paths, checks a role-specific responsibility signature and
+each required direct import, and rejects missing command/schema roles or an
+existing but incorrect substitute path.
+
 ## Soft freeze while #126 is active
 
 Until the orchestration milestones finish:
