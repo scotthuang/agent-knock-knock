@@ -10,15 +10,12 @@ import type {
 } from "./codex-session-provider.js";
 import { validateCodexRolloutAcceptanceAnchor } from
   "./terminal-submission-acceptance.js";
-import { buildConversationTrace } from "./conversation-trace.js";
 import {
   isRecord,
   nonBlankString as stringValue
 } from "./value-guards.js";
-import {
-  listDeferredForegroundTransfers,
-  loadDeferredForegroundTransfer
-} from "./deferred-foreground-transfer.js";
+import { loadDeferredForegroundTransfer } from
+  "./deferred-foreground-transfer.js";
 import { createFileLockCliAdapter } from "./file-lock-cli-adapter.js";
 import {
   budgetAction,
@@ -101,6 +98,12 @@ import {
 import {
   createTerminalListCliFacade
 } from "./terminal-list-cli-adapter.js";
+import {
+  createTerminalStatusCliFacade
+} from "./terminal-status-cli-adapter.js";
+import {
+  isDiscoverableTmuxConversation
+} from "./terminal-status-facts.js";
 import {
   createTerminalCommandCliFacade
 } from "./terminal-command-cli-adapter.js";
@@ -226,7 +229,6 @@ const terminalDispatchRecordMatchesControl =
 const terminalDispatchRecordProcessAnchor =
   terminalDispatchRepository.processAnchor;
 
-const DEFAULT_IDLE_TIMEOUT_MINUTES = 10080;
 const DEFAULT_AGENT_TIMEOUT_MINUTES = 60;
 const DEFAULT_AGENT_HARD_TIMEOUT_MINUTES = 720;
 const CLAUDE_SCREEN_APPROVAL_TTL_MS = 10 * 60 * 1000;
@@ -510,7 +512,7 @@ async function dispatchCliCommand(commandName, options) {
   } else if (commandName === "list") {
     await terminalListCliFacade.runList(options);
   } else if (commandName === "status") {
-    await runStatus(options);
+    await terminalStatusCliFacade.runStatus(options);
   } else if (commandName === "send") {
     await terminalCommandCliFacade.runSend(options);
   } else if (commandName === "new-thread" || commandName === "clear-thread") {
@@ -1107,9 +1109,49 @@ const codexLatentClearResumeObservation =
 const nativeInspectionComposerEmpty =
   nativeThreadLifecycleFacade.nativeInspectionComposerEmpty;
 
+const terminalStatusCliFacade = createTerminalStatusCliFacade({
+  selection: {
+    statusStoreSelection,
+    resolveTerminalConversation: resolveTerminalConversationFromOptions,
+    assertExpectedTerminalSelector: ({ options, terminal }) =>
+      terminalHandoffCliFacade.assertExpectedHandoffTokenUsesExactTerminalSelector({
+        options,
+        terminal
+      }),
+    loadConversation: loadConversationFromOptions,
+    terminalControlFromTakeover,
+    terminalRuntimeIdentity: terminalRuntimeIdentityForConversation
+  },
+  observation: {
+    readEvents: readExistingEvents,
+    createCodexProvider: (options) =>
+      terminalRuntime(options).createAgentSessionProvider("codex"),
+    listActiveCodexSessions: (options, provider) =>
+      terminalRuntime(options).listActiveSessionsWithTerminalControl(provider),
+    createTerminalBridge: createTerminalAgentBridge,
+    terminalAdapter: (options, agent) =>
+      createRuntimeTerminalAgentRegistry(options).require(agent)
+  },
+  reconciliation: {
+    reconcileMonitors: (options, request) =>
+      terminalMonitorSupervisionCliFacade.reconcileMonitors(options, request),
+    isFinalDeferredTransferStatus: (status) =>
+      FINAL_DEFERRED_TRANSFER_STATUSES.has(status),
+    workspaceMatches: matchesConfiguredWorkspace,
+    acquireStateLock: (statePath) => acquireFileLock(`${statePath}.lock`),
+    terminalBridgeEnabled
+  },
+  projection: {
+    callbackRetryDisposition: (delivery) =>
+      callbackCliFacade.retryDisposition(delivery),
+    textSummary
+  }
+});
+
 const terminalListCliFacade = createTerminalListCliFacade({
   reconciliation: {
-    reconcileIdleConversations,
+    reconcileIdleConversations:
+      terminalStatusCliFacade.reconcileIdleConversations,
     reconcileMonitors: (options, request) =>
       terminalMonitorSupervisionCliFacade.reconcileMonitors(options, request)
   },
@@ -1127,7 +1169,8 @@ const terminalListCliFacade = createTerminalListCliFacade({
     nativeInspectionComposerEmpty,
     observeCurrentNativeAgentSessionIdentity: (input) =>
       terminalAcceptanceCliFacade.observeNativeIdentity(input),
-    terminalStatusForControl
+    terminalStatusForControl:
+      terminalStatusCliFacade.terminalStatusForControl
   },
   store: {
     callbackRetryDisposition: (delivery) =>
@@ -1146,7 +1189,7 @@ const terminalListCliFacade = createTerminalListCliFacade({
     orphanedTerminalDispatchForRecovery:
       terminalDispatchRecovery.orphanedForRecovery,
     storeDirFromOptions,
-    summarizeConversation,
+    summarizeConversation: terminalStatusCliFacade.summarizeConversation,
     terminalBridgeEnabled,
     terminalBridgeSubmission,
     terminalControlFromTakeover,
@@ -1379,234 +1422,6 @@ function agentVersionForRunningProcess(
   return terminalRuntime(options).agentVersionForRunningProcess(agent, pid);
 }
 
-
-async function runStatus(options) {
-  const explicitStatePath = options.state
-    ? expandHome(String(options.state))
-    : undefined;
-  const storeDir = explicitStatePath
-    ? pathsForConversationDir(path.dirname(explicitStatePath)).storeDir
-    : storeDirFromOptions(options);
-  const reconciliationConversationId =
-    stringValue(options.turn ?? options.conversation ?? options.conversationId) ??
-    (explicitStatePath
-      ? path.basename(
-          pathsForConversationDir(path.dirname(explicitStatePath))
-            .conversationDir
-        )
-      : undefined);
-  const reconciliation = options.reconcile === true
-    ? await reconcileStoreForStatus(
-        storeDir,
-        options,
-        reconciliationConversationId
-      )
-    : {
-        status: "disabled",
-        reason: "standalone status is read-only unless --reconcile is supplied"
-      };
-  const terminalConversation = await resolveTerminalConversationFromOptions(options);
-  if (terminalConversation) {
-    assertExpectedHandoffTokenUsesExactTerminalSelector({
-      options,
-      terminal: terminalConversation
-    });
-    const terminalStatus = await terminalStatusForControl(
-      terminalConversation.agent,
-      terminalConversation.terminalControl,
-      options,
-      {
-        pid: terminalConversation.pid,
-        cwd: terminalConversation.terminalControl.currentPath,
-        conversationId: terminalConversation.conversationId,
-        terminalTarget: terminalConversation.terminalControl.target
-      }
-    );
-    const context = await terminalStatusContext(
-      terminalConversation,
-      terminalStatus,
-      options
-    );
-    printJson({
-      conversation_id: terminalConversation.conversationId,
-      source: "terminal_control",
-      agent: terminalConversation.agent,
-      store: inspectStoreCompatibility(storeDir),
-      reconciliation,
-      ...context,
-      terminal_control: terminalConversation.terminalControl,
-      terminal_status: terminalStatus,
-      terminal_screen: terminalStatus.screen
-    });
-    runtimeLog("info", "terminal_status_read", {
-      conversation_id: terminalConversation.conversationId,
-      terminal_target: terminalConversation.terminalControl.target,
-      reachable: terminalStatus.reachable
-    });
-    return;
-  }
-
-  const loaded = loadConversationFromOptions(options);
-  const { statePath, logPath } = loaded;
-  const conversation = loaded.conversation;
-  const events = readExistingEvents(logPath);
-  const result: Record<string, any> = {
-    conversation,
-    store: inspectStoreCompatibility(storeDir),
-    reconciliation,
-    summary: summarizeConversation(conversation),
-    confidence: "high",
-    about: managedConversationAbout(conversation, events),
-    limitations: [],
-    state_path: statePath,
-    event_log_path: logPath,
-    budget: budgetAction(conversation),
-    recent_events: events.slice(-10).map(summarizeEvent)
-  };
-  if (options.trace) {
-    result.trace = buildConversationTrace(conversation, events, logPath);
-  }
-  const terminalControl = terminalControlFromTakeover(
-    isRecord(conversation.native_session_takeover) ? conversation.native_session_takeover : undefined
-  );
-  if (terminalControl) {
-    const executor = executorForConversation(conversation);
-    result.terminal_control = terminalControl;
-    result.terminal_status = await terminalStatusForControl(
-      executor.kind,
-      terminalControl,
-      options,
-      terminalRuntimeIdentityForConversation(conversation, terminalControl)
-    );
-    result.terminal_screen = result.terminal_status.screen;
-    result.about = managedConversationAbout(
-      conversation,
-      events,
-      result.terminal_status
-    );
-    result.limitations = result.terminal_status.reachable === false
-      ? ["terminal status unavailable"]
-      : [];
-  } else {
-    result.limitations = ["terminal control metadata is unavailable"];
-  }
-  printJson(result);
-  runtimeLog("info", "task_status_read", {
-    conversation_id: conversation.conversation_id,
-    status: conversation.status,
-    state_path: statePath,
-    event_log_path: logPath,
-    recent_event_count: Math.min(events.length, 10),
-    trace: Boolean(options.trace)
-  });
-}
-
-async function reconcileStoreForStatus(storeDir, options, conversationId) {
-  try {
-    ensureStoreWritable(storeDir);
-  } catch (error) {
-    if (isRecord(error) && error.code === "AKK_STORE_INCOMPATIBLE") {
-      return {
-        status: "skipped",
-        reason: error instanceof Error ? error.message : String(error),
-        store: inspectStoreCompatibility(storeDir)
-      };
-    }
-    throw error;
-  }
-  const monitors = await terminalMonitorSupervisionCliFacade.reconcileMonitors(options, {
-    includeCallbackRecovery: false,
-    reason: "status_reconciliation",
-    conversationId
-  });
-  const idle = reconcileIdleConversations(
-    storeDir,
-    options,
-    cliNow(),
-    conversationId
-  );
-  return {
-    status: "completed",
-    checked: Math.max(idle.checked, monitors.checked),
-    changed: idle.closed + monitors.launched + monitors.repaired,
-    closed: idle.closed,
-    repaired: monitors.repaired,
-    collateral_stalls_checked: monitors.collateral_stalls_checked,
-    collateral_stalls_skipped: monitors.collateral_stalls_skipped,
-    collateral_stall_repairs: monitors.items.filter((item) =>
-      item.status === "repaired"
-    ),
-    monitors_launched: monitors.launched,
-    monitors_already_running: monitors.already_running,
-    skipped: idle.skipped + monitors.skipped,
-    errors: monitors.errors,
-    idle_timeout_minutes: idle.idle_timeout_minutes
-  };
-}
-
-async function terminalStatusContext(
-  terminalConversation: ResolvedTerminalConversation,
-  terminalStatus: Record<string, any>,
-  options
-): Promise<{
-  confidence: string;
-  about: string;
-  limitations: string[];
-}> {
-  if (terminalConversation.agent === "codex") {
-    try {
-      const process = await activeCodexProcessForPid(
-        options,
-        terminalConversation.pid
-      );
-      const description = await codexTerminalStatusContext({
-        id: terminalConversation.conversationId,
-        process,
-        options,
-        terminalControl: terminalConversation.terminalControl,
-        terminalStatus
-      });
-      return {
-        confidence: description.confidence,
-        about: description.about,
-        limitations: description.limitations
-      };
-    } catch {
-      return {
-        confidence: "low",
-        about: terminalStatus.reachable
-          ? `Codex is attached through ${terminalConversation.terminalControl.kind}:${terminalConversation.terminalControl.target}.`
-          : "Codex terminal status is unavailable.",
-        limitations: [
-          "Codex historical session context is unavailable; live terminal status remains authoritative."
-        ]
-      };
-    }
-  }
-  const adapter =
-    createRuntimeTerminalAgentRegistry(options).require(terminalConversation.agent);
-  return {
-    confidence: terminalStatus.reachable ? "medium" : "low",
-    about: terminalStatus.reachable
-      ? `${adapter.displayName} is attached through ${terminalConversation.terminalControl.kind}:${terminalConversation.terminalControl.target}.`
-      : `${adapter.displayName} terminal status is unavailable.`,
-    limitations: [
-      "Historical session context is not available for this terminal adapter."
-    ]
-  };
-}
-
-async function terminalStatusForControl(
-  agent: ExecutorKind,
-  terminalControl: TerminalControlRef,
-  options,
-  runtime?: TerminalRuntimeIdentity
-) {
-  return createTerminalAgentBridge(options).status(agent, terminalControl, {
-    scrollbackLines: Number(options.scrollbackLines ?? 120),
-    runtime
-  });
-}
 
 function assertSafeTerminalSend(
   agent: ExecutorKind,
@@ -1872,7 +1687,10 @@ async function loadCodexTerminalContexts({ nativeTakeover, options }) {
   const nativeSessionId = stringValue(nativeTakeover?.["native_session_id"]);
   const startedAtMs = Date.parse(String(nativeTakeover?.["terminal_bridge_started_at"] ?? ""));
   const terminalConversation = parseTerminalConversationId(nativeSessionId);
-  const activeProcess = await activeCodexProcessForPid(options, terminalConversation?.pid);
+  const activeProcess = await terminalStatusCliFacade.activeCodexProcessForPid(
+    options,
+    terminalConversation?.pid
+  );
   const directSessionId = activeProcess?.sessionId ?? (terminalConversation ? undefined : nativeSessionId);
   if (directSessionId) {
     const context = await provider.getForkContext({
@@ -2009,327 +1827,26 @@ function loadConversationFromOptions(options) {
   };
 }
 
+function statusStoreSelection(options) {
+  const explicitStatePath = options.state
+    ? expandHome(String(options.state))
+    : undefined;
+  const storeDir = explicitStatePath
+    ? pathsForConversationDir(path.dirname(explicitStatePath)).storeDir
+    : storeDirFromOptions(options);
+  const reconciliationConversationId =
+    stringValue(options.turn ?? options.conversation ?? options.conversationId) ??
+    (explicitStatePath
+      ? path.basename(
+          pathsForConversationDir(path.dirname(explicitStatePath))
+            .conversationDir
+        )
+      : undefined);
+  return { storeDir, reconciliationConversationId };
+}
+
 function storeDirFromOptions(options) {
   return expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(cliCwd()));
-}
-
-function summarizeConversation(conversation) {
-  const executor = executorForConversation(conversation);
-  const callbackDelivery = isRecord(conversation.callback_delivery)
-    ? conversation.callback_delivery
-    : undefined;
-  const callbackDisposition = callbackDelivery
-    ? callbackCliFacade.retryDisposition(callbackDelivery)
-    : undefined;
-  return {
-    session_id: sessionIdForConversation(conversation),
-    turn_id: turnIdForConversation(conversation),
-    conversation_id: conversation.conversation_id,
-    agent: executor.kind,
-    executor,
-    session: executor.session,
-    status: conversation.status,
-    request: conversation.user_request,
-    workspace: conversation.workspace,
-    openclaw_session: conversation.openclaw_session,
-    response_rounds_used: conversation.response_rounds_used,
-    soft_limit: conversation.soft_limit,
-    hard_limit: conversation.hard_limit,
-    created_at: conversation.created_at,
-    updated_at: conversation.updated_at,
-    idle_since: conversation.idle_since,
-    closed_at: conversation.closed_at,
-    ...(callbackDelivery
-      ? {
-          callback_delivery: {
-            status: callbackDelivery.status,
-            attempts: callbackDelivery.attempts,
-            attempt_state: callbackDisposition?.state,
-            attempt_pid: callbackDelivery.attempt_pid,
-            lease_expires_at: callbackDelivery.attempt_lease_expires_at,
-            next_attempt_at: callbackDelivery.next_attempt_at,
-            last_error: callbackDelivery.last_error === undefined
-              ? undefined
-              : textSummary(String(callbackDelivery.last_error))
-          }
-        }
-      : {}),
-    state_path: conversation.state_path,
-    event_log_path: conversation.event_log_path
-  };
-}
-
-function isDiscoverableTmuxConversation(conversation): boolean {
-  if (!isRecord(conversation)) {
-    return false;
-  }
-  if (!isRecord(conversation.executor)) {
-    return false;
-  }
-  const kind = stringValue(conversation.executor.kind)?.toLowerCase();
-  return (
-    kind !== undefined &&
-    isExecutorKind(kind) &&
-    conversation.executor.transport === "tmux"
-  );
-}
-
-function persistedExecutorLogFields(conversation): {
-  agent: string;
-  executor_session?: string;
-} {
-  if (isDiscoverableTmuxConversation(conversation)) {
-    const executor = executorForConversation(conversation);
-    return {
-      agent: executor.kind,
-      executor_session: executor.session
-    };
-  }
-  const rawExecutor = isRecord(conversation?.executor)
-    ? conversation.executor
-    : {};
-  return {
-    agent: stringValue(rawExecutor.kind) ?? "unsupported",
-    executor_session: stringValue(rawExecutor.session)
-  };
-}
-
-function summarizeEvent(event) {
-  return {
-    ts: event.ts,
-    event: event.event,
-    from: event.from,
-    to: event.to,
-    type: event.type,
-    status: event.status,
-    round: event.round,
-    body: typeof event.body === "string" ? event.body.slice(0, 500) : undefined
-  };
-}
-
-async function activeCodexProcessForPid(options, pid: number | undefined): Promise<ActiveCodexProcess | undefined> {
-  if (!Number.isInteger(pid)) {
-    return undefined;
-  }
-  const provider = terminalRuntime(options).createAgentSessionProvider("codex");
-  const activeSessions = await terminalRuntime(options)
-    .listActiveSessionsWithTerminalControl(provider);
-  return activeSessions.find((process) => process.pid === pid);
-}
-
-async function codexTerminalStatusContext({
-  id,
-  process,
-  options,
-  terminalControl,
-  terminalStatus
-}: {
-  id: string;
-  process?: ActiveCodexProcess;
-  options: Record<string, any>;
-  terminalControl?: TerminalControlRef;
-  terminalStatus?: Record<string, any>;
-}) {
-  const provider = terminalRuntime(options).createAgentSessionProvider("codex");
-  const directSessionId = process?.sessionId;
-  if (directSessionId) {
-    const context = await provider.getForkContext({
-      sessionId: directSessionId,
-      maxMessages: Number(options.maxMessages ?? 16),
-      maxCommands: Number(options.maxCommands ?? 10),
-      maxTextLength: Number(options.maxTextLength ?? 1200)
-    });
-    if (context) {
-      return codexTerminalContextFromHistory({
-        id,
-        confidence: "high",
-        match: "session_id",
-        process,
-        context,
-        terminalControl,
-        terminalStatus,
-        limitations: []
-      });
-    }
-  }
-
-  const cwd = process?.cwd ?? terminalControl?.currentPath;
-  const sessions = (await provider.listHistoricalSessions())
-    .filter((session) => session.cwd === cwd)
-    .sort((left, right) => Number(right.updatedAtMs ?? 0) - Number(left.updatedAtMs ?? 0));
-  if (sessions.length > 0) {
-    const selected = sessions[0];
-    const context = await provider.getForkContext({
-      sessionId: selected.id,
-      maxMessages: Number(options.maxMessages ?? 16),
-      maxCommands: Number(options.maxCommands ?? 10),
-      maxTextLength: Number(options.maxTextLength ?? 1200)
-    });
-    if (context) {
-      return codexTerminalContextFromHistory({
-        id,
-        confidence: sessions.length === 1 ? "medium" : "low",
-        match: sessions.length === 1 ? "cwd" : "cwd_latest",
-        process,
-        context,
-        terminalControl,
-        terminalStatus,
-        limitations: sessions.length === 1
-          ? ["Codex session inferred from matching cwd because the active process did not expose a session id."]
-          : [`Codex session inferred from the most recent of ${sessions.length} sessions with the same cwd.`],
-        candidates: sessions.slice(0, 5).map((session) => ({
-          session_id: session.id,
-          cwd: session.cwd,
-          title: session.title ?? session.preview ?? session.firstUserMessage,
-          updated_at_ms: session.updatedAtMs,
-          capability: session.capability
-        }))
-      });
-    }
-  }
-
-  return {
-    conversation_id: id,
-    source: "terminal_control",
-    confidence: "screen_only",
-    match: "terminal_screen",
-    about: screenOnlyAbout({ process, terminalStatus }),
-    evidence: {
-      process,
-      terminal_control: terminalControl,
-      terminal_status: terminalStatus
-    },
-    limitations: [
-      "No exact Codex session id was available.",
-      cwd ? "No matching Codex rollout history was found for this cwd." : "No process cwd was available for Codex history matching.",
-      "Summary is limited to active process metadata and the visible terminal screen."
-    ]
-  };
-}
-
-function codexTerminalContextFromHistory({
-  id,
-  confidence,
-  match,
-  process,
-  context,
-  terminalControl,
-  terminalStatus,
-  limitations,
-  candidates
-}: {
-  id: string;
-  confidence: "high" | "medium" | "low";
-  match: string;
-  process?: ActiveCodexProcess;
-  context: ForkContextPackage;
-  terminalControl?: TerminalControlRef;
-  terminalStatus?: Record<string, any>;
-  limitations: string[];
-  candidates?: Record<string, any>[];
-}) {
-  return {
-    conversation_id: id,
-    source: "terminal_control",
-    confidence,
-    match,
-    about: rolloutAbout(context, terminalStatus),
-    codex_session: context.source,
-    evidence: {
-      process,
-      terminal_control: terminalControl,
-      terminal_status: terminalStatus,
-      initial_request: bestSessionIntent(context),
-      title: context.source.title,
-      recent_messages: visibleRolloutMessages(context).slice(-8),
-      recent_commands: context.commands.slice(-8),
-      candidates
-    },
-    limitations
-  };
-}
-
-function managedConversationAbout(conversation, events, terminalStatus?: Record<string, any>): string {
-  const request = truncateText(String(conversation.user_request ?? "").trim(), 220);
-  const recent = recentMessageEvidence(events).at(-1)?.body;
-  const parts = [
-    request ? `Initial request: ${request}` : undefined,
-    recent ? `Latest visible message: ${truncateText(recent, 180)}` : undefined,
-    terminalStatus?.activity_state ? `Current terminal state: ${terminalStatus.activity_state}.` : undefined
-  ].filter(Boolean);
-  return parts.length > 0 ? parts.join(" ") : "No durable task content is available for this AKK-managed session.";
-}
-
-function rolloutAbout(context: ForkContextPackage, terminalStatus?: Record<string, any>): string {
-  const title = truncateText(String(context.source.title ?? "").trim(), 180);
-  const intent = bestSessionIntent(context);
-  const latestAssistant = [...visibleRolloutMessages(context)].reverse().find((message) => message.role === "assistant")?.text;
-  const latestCommand = context.commands.at(-1)?.command;
-  const parts = [
-    intent ? `Initial request: ${truncateText(intent, 220)}` : title ? `Codex title: ${title}` : undefined,
-    latestAssistant ? `Latest visible progress: ${truncateText(latestAssistant, 180)}` : undefined,
-    latestCommand ? `Recent command: ${truncateText(latestCommand, 140)}` : undefined,
-    terminalStatus?.activity_state ? `Current terminal state: ${terminalStatus.activity_state}.` : undefined
-  ].filter(Boolean);
-  return parts.length > 0 ? parts.join(" ") : "Codex history was found, but it did not include enough visible message content to summarize the session.";
-}
-
-function screenOnlyAbout({ process, terminalStatus }: { process?: ActiveCodexProcess; terminalStatus?: Record<string, any> }): string {
-  const activity = terminalStatus?.activity_reason ?? terminalStatus?.activity_state;
-  const excerpt = terminalStatus?.screen?.excerpt;
-  const parts = [
-    process?.cwd ? `This Codex process is running in ${process.cwd}.` : undefined,
-    activity ? `Terminal activity: ${truncateText(String(activity), 180)}` : undefined,
-    excerpt ? `Visible screen: ${truncateText(String(excerpt), 220)}` : undefined
-  ].filter(Boolean);
-  return parts.length > 0 ? parts.join(" ") : "Only active process metadata is available; no Codex conversation history or terminal screen content could be read.";
-}
-
-function bestSessionIntent(context: ForkContextPackage): string | undefined {
-  const firstUser = visibleRolloutMessages(context).find((message) => message.role === "user")?.text;
-  if (firstUser) {
-    return firstUser;
-  }
-  const title = cleanIntentText(context.source.title);
-  if (title) {
-    return title;
-  }
-  return undefined;
-}
-
-function visibleRolloutMessages(context: ForkContextPackage) {
-  return context.messages.filter((message) => !isEnvironmentContextMessage(message.text));
-}
-
-function cleanIntentText(value: string | undefined): string | undefined {
-  const text = String(value ?? "").replace(/\s+/g, " ").trim();
-  return text && !isEnvironmentContextMessage(text) ? text : undefined;
-}
-
-function isEnvironmentContextMessage(value: string | undefined): boolean {
-  return /^\s*<environment_context[\s>]/u.test(String(value ?? ""));
-}
-
-function recentMessageEvidence(events) {
-  return events
-    .filter((event) => event.event === "message" && typeof event.body === "string")
-    .slice(-8)
-    .map((event) => ({
-      ts: event.ts,
-      from: event.from,
-      to: event.to,
-      type: event.type,
-      round: event.round,
-      body: truncateText(event.body, 800)
-    }));
-}
-
-function truncateText(value, maxLength) {
-  const text = String(value ?? "").replace(/\s+/g, " ").trim();
-  if (text.length <= maxLength) {
-    return text;
-  }
-  return `${text.slice(0, Math.max(0, maxLength - 3))}...`;
 }
 
 function isActiveStatus(status) {
@@ -2359,136 +1876,6 @@ function isZombieProcess(pid) {
 
   return result.stdout.trim().toUpperCase().startsWith("Z");
 }
-
-function reconcileIdleConversations(
-  storeDir,
-  options: Record<string, any> = {},
-  now = cliNow(),
-  conversationId?: string
-) {
-  const timeoutMinutes = Number(options.idleTimeoutMinutes ?? DEFAULT_IDLE_TIMEOUT_MINUTES);
-  if (!Number.isFinite(timeoutMinutes) || timeoutMinutes <= 0) {
-    return {
-      checked: 0,
-      closed: 0,
-      skipped: 0,
-      idle_timeout_minutes: timeoutMinutes
-    };
-  }
-
-  ensureStoreWritable(storeDir);
-  const conversations = listConversations(storeDir).filter((conversation) =>
-    (conversationId === undefined || conversation.conversation_id === conversationId) &&
-    matchesConfiguredWorkspace(options.workspace, conversation.workspace)
-  );
-  const reservedSourceTurnIds = new Set(
-    listDeferredForegroundTransfers(storeDir)
-      .filter((transfer) =>
-        transfer.version === 2 &&
-        transfer.source_kind === "candidate_rollout_quiescent" &&
-        !FINAL_DEFERRED_TRANSFER_STATUSES.has(transfer.status)
-      )
-      .flatMap((transfer) =>
-        (transfer.source_turn_history ?? []).map((turn) => turn.turn_id)
-      )
-  );
-  let closed = 0;
-  let skipped = 0;
-  for (const listedConversation of conversations) {
-    if (listedConversation.status !== "idle" || !listedConversation.idle_since) {
-      continue;
-    }
-
-    const listedIdleSinceMs = Date.parse(listedConversation.idle_since);
-    if (!Number.isFinite(listedIdleSinceMs)) {
-      continue;
-    }
-    if (now.getTime() - listedIdleSinceMs < timeoutMinutes * 60 * 1000) {
-      continue;
-    }
-    if (
-      reservedSourceTurnIds.has(
-        turnIdForConversation(listedConversation)
-      )
-    ) {
-      skipped += 1;
-      continue;
-    }
-
-    const statePath = listedConversation.state_path ??
-      statePathForConversationId(listedConversation.conversation_id, storeDir);
-    let releaseStateLock: (() => void) | undefined;
-    try {
-      releaseStateLock = acquireFileLock(`${statePath}.lock`);
-    } catch (error) {
-      if (isRecord(error) && error.code === "LOCK_TIMEOUT") {
-        skipped += 1;
-        continue;
-      }
-      throw error;
-    }
-    try {
-      const conversation = loadState(statePath);
-      if (conversation.status !== "idle" || !conversation.idle_since) {
-        continue;
-      }
-
-      const idleSinceMs = Date.parse(conversation.idle_since);
-      if (!Number.isFinite(idleSinceMs)) {
-        continue;
-      }
-
-      const terminalBridge = terminalBridgeEnabled(conversation) &&
-        isRecord(conversation.native_session_takeover) &&
-        typeof conversation.native_session_takeover.terminal_bridge_message_id === "string";
-      if (now.getTime() - idleSinceMs < timeoutMinutes * 60 * 1000) {
-        continue;
-      }
-
-      const logPath = conversation.event_log_path ?? logPathForStatePath(statePath);
-      const closeReason = `idle timeout after ${timeoutMinutes} minutes`;
-      const closedConversation = {
-        ...conversation,
-        status: "closed" as const,
-        closed_at: now.toISOString(),
-        close_reason: closeReason,
-        updated_at: now.toISOString()
-      };
-      delete closedConversation.idle_since;
-      saveState(statePath, closedConversation);
-      appendEvent(logPath, {
-        ts: now.toISOString(),
-        conversation_id: conversation.conversation_id,
-        event: "conversation_closed",
-        status: "closed",
-        reason: closedConversation.close_reason,
-        idle_timeout_minutes: timeoutMinutes,
-        terminal_bridge: terminalBridge
-      });
-      const executorLogFields = persistedExecutorLogFields(conversation);
-      runtimeLog("info", "idle_conversation_closed", {
-        conversation_id: conversation.conversation_id,
-        ...executorLogFields,
-        state_path: statePath,
-        event_log_path: logPath,
-        idle_since: conversation.idle_since,
-        idle_timeout_minutes: timeoutMinutes,
-        reason: closedConversation.close_reason
-      });
-      closed += 1;
-    } finally {
-      releaseStateLock();
-    }
-  }
-
-  return {
-    checked: conversations.length,
-    closed,
-    skipped,
-    idle_timeout_minutes: timeoutMinutes
-  };
-}
-
 
 function parseArgs(argv) {
   const parsed = {};
