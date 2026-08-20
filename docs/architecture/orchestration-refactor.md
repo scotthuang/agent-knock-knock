@@ -1796,6 +1796,57 @@ refinement, Store-backed runtime identity, durable request construction, and
 legacy identity migration remain a later minimal identity-facade prerequisite
 rather than being duplicated here.
 
+## Terminal runtime prerequisites and exact completion authority
+
+The follow-up prerequisite slice closes that deliberately deferred inventory.
+The single exact-bound Codex completion detector and requirement predicate now
+live in `terminal-dispatch-completion-cli-adapter.ts`; neither the raw dispatch
+repository nor recovery adapter imports it. The detector retains
+accepted-submission -> exact-required -> Codex-source -> exact-anchor -> bound
+rollout detection order, while its synthetic-acceptance switch is read lazily
+from the invocation-local CLI environment. Exact completion still uses the one
+`detectCodexBoundRolloutCompletion` implementation and preserves request-hash
+fallback, byte identity, diagnostics, pending behavior, and completion metadata.
+
+Endpoint refinement, Store-backed runtime identity, durable request projection,
+and legacy terminal-agent identity migration are now methods of the existing
+identity facade. The earlier temporary `runtimeIdentity` and `durableRequest`
+callback ports are gone. A fifth typed completion group supplies only the exact
+requirement predicate. Runtime identity still checks binding id, generation,
+native thread, PID, terminal incarnation, and committed Codex companion fences
+before expanding its authority. Durable requests continue to prefer takeover
+request text and metadata. Endpoint refinement associates and saves only
+canonical evidence for the same terminal incarnation.
+
+Legacy migration is split into observation, locked persistence, and reporting
+functions. Only provider/process observation is downgraded to a warning. The
+state lock still encloses reload, revalidation, and save; every path releases it
+in `finally`. A successful save is followed, outside that lock, by durable event
+append and then runtime logging. Save and event failures propagate. The runtime
+facade also owns Codex Session-provider selection and active-Session terminal
+attachment, preserving injected-provider and injected-adapter precedence,
+fixture truthiness and JSON parsing, production Store fallback, and the original
+provider/process-source/bridge construction counts.
+
+Against exact parent `6c83f9efe5b3201c584db3ad2b50cd9e120310ad`,
+`src/cli-core.ts` falls from 11,468 to 11,066 physical lines (-402). Production
+TypeScript changes from 89,156 to 89,264 lines (+108, 26.87 percent of the core
+reduction), below the preferred 160-line overhead target and the 240-line hard
+cap. Architecture validation reports 51 domains, 105 production modules, 596
+static import edges, and zero cycles. The three changed facade declarations
+contain no `any`, `Record<..., any>`, or `ResolvedTerminalConversation`. New
+functions are below 55 physical lines and approximate c20; the expanded identity
+facade retains its pre-existing 95-line/c17 maxima, below both hard limits.
+
+Direct fast proofs cover dynamic synthetic environment lookup; accepted, source,
+anchor, and real byte-detector order; exact binding/generation/thread/PID/
+incarnation and companion fences; takeover-first durable requests; canonical
+endpoint save; observation-only warning behavior; lock/reload/save/unlock/event/
+log order; save and event error propagation; provider injection, fixture
+truthiness, JSON validation, and active provider/source/bridge call counts. Four
+targeted integration witnesses retain exact monitor recovery, Session acceptance,
+terminal send gates, and import-time facade wiring.
+
 ## Soft freeze while #126 is active
 
 Until the orchestration milestones finish:

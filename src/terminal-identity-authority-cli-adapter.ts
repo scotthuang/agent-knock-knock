@@ -5,7 +5,7 @@ import type { CodexOpenRootRolloutInventory } from "./agent-session-provider.js"
 import { observeClaudeDeadProcessTranscriptCompletion } from
   "./claude-local-transcript-provider.js";
 import { expandHome, resolveOptionalExecutable } from "./cli-command-runtime.js";
-import { cliDependencies } from "./cli-runtime-context.js";
+import { cliDependencies, cliRuntimeLog } from "./cli-runtime-context.js";
 import type { DeferredForegroundTransfer,
   DeferredForegroundTransferSourceRolloutAuthority,
   DeferredForegroundTransferSourceTurnAuthority } from
@@ -22,23 +22,27 @@ import { listManagedSessions, loadManagedSession, loadNativeThreadTransition,
   saveManagedSession, tryLoadManagedSession } from "./session-store.js";
 import { listConversations } from "./store.js";
 import type { TerminalCompletionEvidence, TerminalControlRef,
-  TerminalDurableCompletionRequest, TerminalRuntimeIdentity } from
+  TerminalDurableCompletionRequest, TerminalRuntimeIdentity,
+  ActiveTerminalProcess, TerminalAgentAdapter,
+  TerminalAgentAdapterRegistry } from
   "./terminal-agent-adapter.js";
+import { parseTerminalConversationId } from "./terminal-agent-adapter.js";
 import { exactCodexReadyStyledComposerCapture,
-  type ResolvedTerminalConversation, type TerminalAgentBridge,
-  type TerminalBridgeStatus } from "./terminal-agent-bridge.js";
+  type TerminalAgentBridge, type TerminalBridgeStatus } from
+  "./terminal-agent-bridge.js";
 import type { TerminalControlProvider } from "./terminal-control-provider.js";
 import type { TerminalProcessSource } from "./terminal-process-source.js";
 import { knownNativeThreadCompanionSet } from
   "./native-thread-transition-verification-adapter.js";
 import { codexComposerVisible } from
   "./native-thread-lifecycle-recovery-adapter.js";
-import { hasCanonicalTerminalEndpoint, terminalControlEvidence } from
-  "./terminal-control-ref.js";
+import { associateTerminalEndpointEvidence, hasCanonicalTerminalEndpoint,
+  terminalControlEvidence } from "./terminal-control-ref.js";
 import { codexIdentityFence, decideManagedBindingConflict,
   exactBoundCodexSendSource, isCodexStatusCardEvidence,
   isCompleteNativeRollout, processIncarnationRelationship,
   terminalControlAliasMatches, terminalControlsShareIncarnation,
+  withCodexCompanionFences,
   type CodexAllowedCompanionSet, type CodexPreMaterializationIdentity,
   type CodexSendAuthorityContext, type ManagedBindingConflictKind } from
   "./terminal-authority-policy.js";
@@ -51,6 +55,7 @@ import { codexKnownBeforeIdentityForTransition, codexLingeringIdentityMatches,
   resolvedTerminalProcessIncarnation as resolvedTerminalProcessIncarnationPolicy,
   selectBoundManagedSessionForTerminal, selectSoleBoundManagedSessionClaim,
   terminalRuntimeForLiveIdentity as terminalRuntimeForLiveIdentityPolicy,
+  terminalRuntimeIdentityBase,
   type NativeAgentSessionIdentityObservation,
   type NativeIdentityResolutionRequest } from "./terminal-dispatch-execution.js";
 import type { DeferredCodexForegroundDispatchSnapshot,
@@ -71,6 +76,15 @@ import { isRecord, nonBlankString as stringValue } from "./value-guards.js";
 
 export type TerminalIdentityCliOptions = Readonly<Record<string, unknown>>;
 
+export interface TerminalIdentityTerminal {
+  conversationId: string;
+  agent: ExecutorKind;
+  pid: number;
+  legacy: boolean;
+  adapter: TerminalAgentAdapter;
+  terminalControl: TerminalControlRef;
+}
+
 interface NativeThreadOwnershipRequest {
   options: TerminalIdentityCliOptions; agent: ExecutorKind;
   currentPid: number; nativeThreadId: string; storeDir: string;
@@ -80,7 +94,7 @@ interface NativeThreadOwnershipRequest {
 }
 
 interface CodexProbeRequest {
-  options: TerminalIdentityCliOptions; terminal: ResolvedTerminalConversation;
+  options: TerminalIdentityCliOptions; terminal: TerminalIdentityTerminal;
   currentIdentity?: NativeAgentSessionIdentity;
   runtimeOverride: TerminalRuntimeIdentity;
 }
@@ -90,16 +104,16 @@ interface CompletionObservationInput {
 }
 interface ManagedOwnerInput {
   session: ManagedSessionState;
-  terminal: Pick<ResolvedTerminalConversation, "agent" | "pid">;
+  terminal: Pick<TerminalIdentityTerminal, "agent" | "pid">;
   identity?: NativeAgentSessionIdentity;
 }
 interface ManagedIdentityContextInput {
   storeDir: string;
-  terminal: Pick<ResolvedTerminalConversation,
+  terminal: Pick<TerminalIdentityTerminal,
     "conversationId" | "agent" | "pid" | "terminalControl">;
 }
 interface KnownRootSetInput {
-  storeDir: string; terminal: ResolvedTerminalConversation;
+  storeDir: string; terminal: TerminalIdentityTerminal;
   transition: NativeThreadTransition;
 }
 interface ComposerReadyInput {
@@ -111,11 +125,8 @@ export interface TerminalIdentityRuntimePorts {
   createBridge(options: TerminalIdentityCliOptions): TerminalAgentBridge;
   createControlProvider(options: TerminalIdentityCliOptions): TerminalControlProvider;
   createProcessSource(options: TerminalIdentityCliOptions): TerminalProcessSource;
-  requiresExactBoundCodexCompletion(conversation: Conversation): boolean;
-  runtimeIdentity(conversation: Conversation,
-    terminalControl: TerminalControlRef): TerminalRuntimeIdentity;
-  durableRequest(conversation: Conversation,
-    terminalControl: TerminalControlRef): TerminalDurableCompletionRequest;
+  createAgentRegistry(options: TerminalIdentityCliOptions):
+    TerminalAgentAdapterRegistry;
   observeNativeIdentity(request: NativeIdentityResolutionRequest &
     { options: TerminalIdentityCliOptions }):
     Promise<NativeAgentSessionIdentityObservation>;
@@ -129,7 +140,7 @@ export interface TerminalIdentityStorePorts {
   storeDirForConversation(conversation: Conversation): string | undefined;
   turnsForSession(storeDir: string, sessionId: string): Conversation[];
   turnMatchesTerminal(conversation: Conversation,
-    terminal: ResolvedTerminalConversation,
+    terminal: TerminalIdentityTerminal,
     identity?: NativeAgentSessionIdentity): boolean;
   isDiscoverableTurn(conversation: Conversation): boolean;
   readEvents(logPath: string): TerminalDispatchLedgerDocument[];
@@ -140,6 +151,16 @@ export interface TerminalIdentityStorePorts {
     options?: { requireCurrentRoute?: boolean;
       requireProcessAnchor?: boolean }): boolean;
   ledgerProcessAnchor(ledger: TerminalDispatchLedgerDocument): number | undefined;
+  acquireStateLock(statePath: string): () => void;
+  loadTurn(statePath: string): Conversation;
+  saveTurn(statePath: string, conversation: Conversation): void;
+  appendEvent(logPath: string, event: Readonly<{
+    event: string; [key: string]: unknown;
+  }>): void;
+}
+
+export interface TerminalIdentityCompletionPorts {
+  requiresExactBoundCodexCompletion(conversation: Conversation): boolean;
 }
 
 export interface TerminalIdentityAuthorityPorts {
@@ -174,6 +195,7 @@ export interface CreateTerminalIdentityAuthorityCliAdapterInput {
   store: TerminalIdentityStorePorts;
   authority: TerminalIdentityAuthorityPorts;
   environment: TerminalIdentityEnvironmentPorts;
+  completion: TerminalIdentityCompletionPorts;
 }
 
 export function createTerminalIdentityAuthorityCliAdapter(
@@ -182,7 +204,17 @@ export function createTerminalIdentityAuthorityCliAdapter(
   return Object.freeze({
     resolveTerminalConversationFromOptions: (options: TerminalIdentityCliOptions) =>
       resolveTerminalConversationFromOptions(ports, options),
-    exactLifecycleProcessIdentity: (terminal: ResolvedTerminalConversation,
+    refineTerminalTurnEndpoint: (input: EndpointRefinementInput) =>
+      refineTerminalTurnEndpoint(ports, input),
+    terminalRuntimeIdentityForConversation: (conversation: Conversation,
+      terminalControl: TerminalControlRef) =>
+      terminalRuntimeIdentityForConversation(ports, conversation, terminalControl),
+    terminalDurableRequestForConversation: (conversation: Conversation,
+      terminalControl: TerminalControlRef) =>
+      terminalDurableRequestForConversation(ports, conversation, terminalControl),
+    migrateLegacyTerminalAgentIdentity: (input: LegacyIdentityMigrationInput) =>
+      migrateLegacyTerminalAgentIdentity(ports, input),
+    exactLifecycleProcessIdentity: (terminal: TerminalIdentityTerminal,
       identity: NativeAgentSessionIdentity) =>
       exactLifecycleProcessIdentity(terminal, identity),
     codexProcessBirthForLifecycle,
@@ -213,7 +245,7 @@ export function createTerminalIdentityAuthorityCliAdapter(
       terminal: ResolvedTerminalClaim) =>
       managedSessionClaimsResolvedTerminal(ports, session, terminal),
     bindingMatchesLiveTerminal: (session: ManagedSessionState,
-      terminal: ResolvedTerminalConversation, identity:
+      terminal: TerminalIdentityTerminal, identity:
       NativeAgentSessionIdentity | undefined, storeDir: string) =>
       bindingMatchesLiveTerminal(ports, session, terminal, identity, storeDir),
     boundManagedSessionForTerminal: (input: BoundManagedSessionInput) =>
@@ -257,10 +289,243 @@ export function createTerminalIdentityAuthorityCliAdapter(
   });
 }
 
+interface EndpointRefinementInput {
+  conversation: Conversation;
+  statePath: string;
+  terminalControl: TerminalControlRef;
+}
+
+function refineTerminalTurnEndpoint(
+  ports: CreateTerminalIdentityAuthorityCliAdapterInput,
+  input: EndpointRefinementInput
+): Conversation {
+  const takeover = isRecord(input.conversation.native_session_takeover)
+    ? input.conversation.native_session_takeover
+    : undefined;
+  const storedControl = ports.store.terminalControlFromTakeover(takeover);
+  if (
+    !takeover ||
+    !storedControl ||
+    takeover.terminal_endpoint !== undefined ||
+    !hasCanonicalTerminalEndpoint(input.terminalControl)
+  ) {
+    return input.conversation;
+  }
+  if (!terminalControlsShareIncarnation(storedControl, input.terminalControl)) {
+    throw new Error(
+      `cannot refine Turn ${turnIdForConversation(input.conversation)} terminal ` +
+      "endpoint after its terminal incarnation changed"
+    );
+  }
+  const terminalEndpoint = terminalControlEvidence(input.terminalControl);
+  associateTerminalEndpointEvidence(storedControl, terminalEndpoint);
+  const refined: Conversation = {
+    ...input.conversation,
+    native_session_takeover: { ...takeover, terminal_endpoint: terminalEndpoint }
+  };
+  ports.store.saveTurn(input.statePath, refined);
+  return refined;
+}
+
+function terminalRuntimeIdentityForConversation(
+  ports: CreateTerminalIdentityAuthorityCliAdapterInput,
+  conversation: Conversation,
+  terminalControl: TerminalControlRef
+): TerminalRuntimeIdentity {
+  const runtime = terminalRuntimeIdentityBase(conversation, terminalControl);
+  if (executorForConversation(conversation).kind !== "codex") {
+    return runtime;
+  }
+  const storeDir = ports.store.storeDirForConversation(conversation);
+  if (!storeDir) {
+    return runtime;
+  }
+  const managedSession = tryLoadManagedSession(
+    storeDir,
+    sessionIdForConversation(conversation)
+  );
+  const binding = managedSession?.binding;
+  const expectedThreadId = runtime.nativeSessionId ?? runtime.expectedNativeSessionId;
+  if (
+    !managedSession || managedSession.agent !== "codex" ||
+    managedSession.status !== "bound" || !binding ||
+    binding.binding_id !== stringValue(conversation.terminal_binding_id) ||
+    binding.generation !== Number(conversation.terminal_binding_generation) ||
+    binding.native_thread_id !== expectedThreadId ||
+    binding.native_process.pid !== runtime.pid ||
+    !terminalControlsShareIncarnation(binding.terminal_control, terminalControl)
+  ) {
+    return runtime;
+  }
+  return withCodexCompanionFences(runtime,
+    codexAllowedCompanionSetForManagedSession({ storeDir, session: managedSession }));
+}
+
+function terminalDurableRequestForConversation(
+  ports: CreateTerminalIdentityAuthorityCliAdapterInput,
+  conversation: Conversation,
+  terminalControl: TerminalControlRef
+): TerminalDurableCompletionRequest {
+  const nativeTakeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const runtime = terminalRuntimeIdentityForConversation(
+    ports, conversation, terminalControl);
+  return {
+    sessionId: runtime.sessionId,
+    cwd: stringValue(nativeTakeover?.source_cwd),
+    requestText: String(
+      nativeTakeover?.terminal_bridge_request_text ?? conversation.user_request ?? ""
+    ),
+    requestHash: stringValue(nativeTakeover?.terminal_bridge_request_hash),
+    startedAt: stringValue(nativeTakeover?.terminal_bridge_started_at),
+    context: { conversation, nativeTakeover, ...runtime }
+  };
+}
+
+interface LegacyIdentityMigrationInput {
+  conversation: Conversation;
+  statePath: string;
+  logPath: string;
+  options: TerminalIdentityCliOptions;
+}
+
+async function migrateLegacyTerminalAgentIdentity(
+  ports: CreateTerminalIdentityAuthorityCliAdapterInput,
+  input: LegacyIdentityMigrationInput
+): Promise<Conversation> {
+  const nativeTakeover = isRecord(input.conversation.native_session_takeover)
+    ? input.conversation.native_session_takeover
+    : undefined;
+  const terminalControl = ports.store.terminalControlFromTakeover(nativeTakeover);
+  if (!nativeTakeover || !terminalControl || hasRuntimePid(
+    terminalRuntimeIdentityForConversation(ports, input.conversation, terminalControl)
+  )) {
+    return input.conversation;
+  }
+  const nativeSessionId = stringValue(nativeTakeover.native_session_id);
+  if (executorForConversation(input.conversation).kind !== "codex" ||
+      !nativeSessionId || parseTerminalConversationId(nativeSessionId)) {
+    return input.conversation;
+  }
+  const matchedProcess = await observeLegacyTerminalAgentProcess(
+    ports, input, terminalControl, nativeSessionId);
+  if (!matchedProcess) {
+    return input.conversation;
+  }
+  const result = persistLegacyTerminalAgentIdentity(
+    ports, input, terminalControl, nativeSessionId, matchedProcess);
+  if (result.migrated) {
+    reportLegacyTerminalAgentIdentityMigration(
+      ports, input.logPath, result.conversation, terminalControl,
+      nativeSessionId, matchedProcess);
+  }
+  return result.conversation;
+}
+
+function hasRuntimePid(runtime: TerminalRuntimeIdentity): boolean {
+  return Number.isInteger(runtime.pid) && Number(runtime.pid) > 0;
+}
+
+async function observeLegacyTerminalAgentProcess(
+  ports: CreateTerminalIdentityAuthorityCliAdapterInput,
+  input: LegacyIdentityMigrationInput,
+  terminalControl: TerminalControlRef,
+  nativeSessionId: string
+): Promise<ActiveTerminalProcess | undefined> {
+  try {
+    const adapter = ports.runtime.createAgentRegistry(input.options).require("codex");
+    const snapshots = await ports.runtime.createProcessSource(input.options)
+      .listProcessSnapshots(
+        (snapshot) => adapter.classifyProcess(snapshot) !== undefined,
+        { includeAncestors: true }
+      );
+    const terminalProvider = ports.runtime.createControlProvider(input.options);
+    const resolvedTerminal = await terminalProvider.resolve(
+      terminalProvider.endpoint(terminalControl));
+    const candidates = snapshots.flatMap((snapshot): ActiveTerminalProcess[] => {
+      const classified = adapter.classifyProcess(snapshot);
+      return classified ? [{ ...classified, agent: "codex" }] : [];
+    });
+    const matches = candidates.filter((candidate) =>
+      candidate.sessionId === nativeSessionId &&
+      terminalProvider.containsProcess(resolvedTerminal, candidate, snapshots));
+    return matches.length === 1 ? matches[0] : undefined;
+  } catch (error) {
+    cliRuntimeLog("warn", "legacy_terminal_agent_identity_migration_failed", {
+      conversation_id: input.conversation.conversation_id,
+      terminal_target: terminalControl.target,
+      reason: error instanceof Error ? error.message : String(error)
+    });
+    return undefined;
+  }
+}
+
+function persistLegacyTerminalAgentIdentity(
+  ports: CreateTerminalIdentityAuthorityCliAdapterInput,
+  input: LegacyIdentityMigrationInput,
+  terminalControl: TerminalControlRef,
+  nativeSessionId: string,
+  matchedProcess: ActiveTerminalProcess
+): { conversation: Conversation; migrated: boolean } {
+  const releaseLock = ports.store.acquireStateLock(input.statePath);
+  try {
+    const current = ports.store.loadTurn(input.statePath);
+    const currentTakeover = isRecord(current.native_session_takeover)
+      ? current.native_session_takeover
+      : undefined;
+    const currentControl = ports.store.terminalControlFromTakeover(currentTakeover);
+    if (!currentTakeover || !currentControl || hasRuntimePid(
+      terminalRuntimeIdentityForConversation(ports, current, currentControl)
+    ) || currentTakeover.native_session_id !== nativeSessionId ||
+      !terminalControlsShareIncarnation(currentControl, terminalControl)) {
+      return { conversation: current, migrated: false };
+    }
+    const migratedAt = ports.environment.now().toISOString();
+    const conversation: Conversation = {
+      ...current,
+      native_session_takeover: {
+        ...currentTakeover,
+        terminal_agent_pid: matchedProcess.pid,
+        terminal_agent_session_id: matchedProcess.sessionId,
+        terminal_agent_identity_migrated_at: migratedAt
+      },
+      updated_at: migratedAt
+    };
+    ports.store.saveTurn(input.statePath, conversation);
+    return { conversation, migrated: true };
+  } finally {
+    releaseLock();
+  }
+}
+
+function reportLegacyTerminalAgentIdentityMigration(
+  ports: CreateTerminalIdentityAuthorityCliAdapterInput,
+  logPath: string,
+  conversation: Conversation,
+  terminalControl: TerminalControlRef,
+  nativeSessionId: string,
+  matchedProcess: ActiveTerminalProcess
+): void {
+  ports.store.appendEvent(logPath, {
+    ts: ports.environment.now().toISOString(),
+    conversation_id: conversation.conversation_id,
+    event: "terminal_agent_identity_migrated",
+    terminal_target: terminalControl.target,
+    terminal_agent_pid: matchedProcess.pid,
+    native_session_id: nativeSessionId
+  });
+  cliRuntimeLog("info", "terminal_agent_identity_migrated", {
+    conversation_id: conversation.conversation_id,
+    terminal_target: terminalControl.target,
+    terminal_agent_pid: matchedProcess.pid
+  });
+}
+
 async function resolveTerminalConversationFromOptions(
   ports: CreateTerminalIdentityAuthorityCliAdapterInput,
   options: TerminalIdentityCliOptions
-): Promise<ResolvedTerminalConversation | undefined> {
+): Promise<TerminalIdentityTerminal | undefined> {
   return ports.runtime.createBridge(options).resolveConversationId(
     stringValue(
       options.session ??
@@ -272,7 +537,7 @@ async function resolveTerminalConversationFromOptions(
 }
 
 function exactLifecycleProcessIdentity(
-  terminal: ResolvedTerminalConversation,
+  terminal: TerminalIdentityTerminal,
   identity: NativeAgentSessionIdentity
 ): NativeAgentSessionIdentity {
   const codexIncarnation = terminal.agent === "codex" &&
@@ -362,7 +627,7 @@ function observeExactCodexDeadProcessRolloutCompletion(
     : undefined;
   if (
     submission?.status !== "agent_accepted" ||
-    !ports.runtime.requiresExactBoundCodexCompletion(conversation) ||
+    !ports.completion.requiresExactBoundCodexCompletion(conversation) ||
     acceptanceEvidence?.source !== "codex_rollout" ||
     !anchor
   ) {
@@ -371,8 +636,10 @@ function observeExactCodexDeadProcessRolloutCompletion(
       reason: "Codex has no exact accepted rollout authority for the dead process"
     };
   }
-  const runtime = ports.runtime.runtimeIdentity(conversation, terminalControl);
-  const request = ports.runtime.durableRequest(conversation, terminalControl);
+  const runtime = terminalRuntimeIdentityForConversation(
+    ports, conversation, terminalControl);
+  const request = terminalDurableRequestForConversation(
+    ports, conversation, terminalControl);
   const result = detectCodexBoundRolloutCompletion({
     anchor: anchor as unknown as CodexRolloutAcceptanceAnchor,
     acceptanceEvidence:
@@ -454,7 +721,8 @@ async function observeDurableCompletionBeforeDeadStall(
       }
       const submission = terminalBridgeSubmission(conversation);
       return observeClaudeDeadProcessTranscriptCompletion(
-        ports.runtime.durableRequest(conversation, terminalControl),
+        terminalDurableRequestForConversation(
+          ports, conversation, terminalControl),
         {
           claudeHome: expandHome(
             options.claudeHome as string | undefined
@@ -647,7 +915,7 @@ async function observeBoundTerminalAgentProcess(
 }
 
 function resolvedTerminalProcessIncarnation(
-  terminal: Pick<ResolvedTerminalConversation, "agent" | "pid">,
+  terminal: Pick<TerminalIdentityTerminal, "agent" | "pid">,
   identity?: NativeAgentSessionIdentity
 ): { processUuid?: string; processBirth?: string } {
   return resolvedTerminalProcessIncarnationPolicy({
@@ -872,7 +1140,7 @@ async function assertCodexComposerReadyForAutomatedInput(
 
 interface VerifyPendingManagedSendInput {
   options: TerminalIdentityCliOptions;
-  terminal: ResolvedTerminalConversation;
+  terminal: TerminalIdentityTerminal;
   session: ManagedSessionState;
   logicalIdentity?: NativeAgentSessionIdentity;
   allowedPreMaterializationIdentity?: CodexPreMaterializationIdentity;
@@ -964,7 +1232,7 @@ function terminalRuntimeForLiveIdentity(input: {
   });
 }
 
-type ResolvedTerminalClaim = Pick<ResolvedTerminalConversation,
+type ResolvedTerminalClaim = Pick<TerminalIdentityTerminal,
   "conversationId" | "agent" | "pid" | "terminalControl">;
 
 function managedSessionClaimsResolvedTerminal(
@@ -990,7 +1258,7 @@ function managedSessionClaimsResolvedTerminal(
 function bindingMatchesLiveTerminal(
   ports: CreateTerminalIdentityAuthorityCliAdapterInput,
   session: ManagedSessionState,
-  terminal: ResolvedTerminalConversation,
+  terminal: TerminalIdentityTerminal,
   identity: NativeAgentSessionIdentity | undefined,
   storeDir: string
 ): boolean {
@@ -1034,7 +1302,7 @@ function bindingMatchesLiveTerminal(
 }
 
 interface BoundManagedSessionInput {
-  storeDir: string; terminal: ResolvedTerminalConversation;
+  storeDir: string; terminal: TerminalIdentityTerminal;
   identity?: NativeAgentSessionIdentity;
 }
 
@@ -1078,7 +1346,7 @@ function boundManagedSessionForTerminal(
 
 interface ManagedBindingConflictInput {
   storeDir: string; session: ManagedSessionState;
-  terminal: ResolvedTerminalConversation;
+  terminal: TerminalIdentityTerminal;
   identity?: NativeAgentSessionIdentity;
 }
 
@@ -1151,7 +1419,7 @@ function soleBoundManagedSessionClaimForTerminal(
 
 interface CreateBoundManagedSessionInput {
   sessionId: string;
-  terminal: ResolvedTerminalConversation;
+  terminal: TerminalIdentityTerminal;
   identity?: NativeAgentSessionIdentity;
   nativeThreadId?: string;
   evidence?: string;
@@ -1203,7 +1471,7 @@ function createBoundManagedSession(
 
 interface MaterializeManagedSessionInput {
   options: TerminalIdentityCliOptions;
-  terminal: ResolvedTerminalConversation;
+  terminal: TerminalIdentityTerminal;
   identity?: NativeAgentSessionIdentity;
 }
 
@@ -1261,7 +1529,7 @@ function materializeCurrentManagedSession(
 }
 
 interface ReattachManagedSessionInput {
-  options: TerminalIdentityCliOptions; terminal: ResolvedTerminalConversation;
+  options: TerminalIdentityCliOptions; terminal: TerminalIdentityTerminal;
   identity: NativeAgentSessionIdentity;
   storeDir: string;
 }

@@ -63,6 +63,7 @@
     "test/terminal-dispatch-abort.test.ts",
     "test/terminal-dispatch-application.test.ts",
     "test/terminal-dispatch-capability.test.ts",
+    "test/terminal-dispatch-completion-cli-adapter.test.ts",
     "test/terminal-dispatch-execution.test.ts",
     "test/terminal-dispatch-ledger-codec.test.ts",
     "test/terminal-dispatch-policy.test.ts",
