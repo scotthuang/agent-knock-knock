@@ -4,6 +4,7 @@
     "test/approval-policy.test.ts",
     "test/canonical-json.test.ts",
     "test/callback-outbox-policy.test.ts",
+    "test/callback-cli-adapter.test.ts",
     "test/callback-outbox-service.test.ts",
     "test/callback-outbox-settlement.test.ts",
     "test/claude-local-transcript-provider.test.ts",

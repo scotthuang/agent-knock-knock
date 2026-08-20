@@ -173,6 +173,12 @@ export interface CallbackOutboxServicePorts {
     isDispatchReleased(conversation: Conversation): boolean;
     isWaitingForAgent(status: ConversationStatus): boolean;
     isTerminalBridgeSupersedeStatus(status: ConversationStatus): boolean;
+    resolveCompletionDispatch(input: {
+      terminalControl: TerminalControlRef;
+      conversation: Conversation;
+      expectedMessageId: string;
+      reason: string;
+    }): boolean;
   };
   retry: {
     startMonitor(input: {
@@ -199,14 +205,6 @@ export interface CallbackOutboxServicePorts {
   delivery: {
     deliver(input: DeliverCallbackInput): CallbackDeliveryOutcome;
     runTransaction(options: CallbackPreparationOptions): CallbackExecutionResult;
-  };
-  terminal: {
-    resolveCompletionDispatch(input: {
-      terminalControl: TerminalControlRef;
-      conversation: Conversation;
-      expectedMessageId: string;
-      reason: string;
-    }): boolean;
   };
 }
 
@@ -859,7 +857,7 @@ function prepareTerminalCompletion(
   if (!transaction.claimed) {
     return transaction;
   }
-  if (!ports.terminal.resolveCompletionDispatch({
+  if (!ports.authority.resolveCompletionDispatch({
     terminalControl: input.terminalControl,
     conversation: transaction.conversation,
     expectedMessageId: input.terminalMessageId,

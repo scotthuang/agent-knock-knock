@@ -1982,6 +1982,53 @@ real verified-empty, deferred crash/retry, observed adoption, acceptance, and
 pre-input transport paths without assigning lifecycle, callback, monitor, or
 ordinary replay ownership to this facade.
 
+## Callback CLI and outbox composition facade
+
+The callback CLI slice moves the exact nine-function command, transaction,
+outbox-composition, prepared-result presentation, process-delivery recording,
+and OpenClaw transport inventory out of `cli-core.ts`. The new
+`callback-cli-adapter.ts` remains raw CLI infrastructure: it delegates every
+callback transition to the existing callback outbox service, settlement,
+policy, and OpenClaw transport owners and introduces no callback state machine.
+The outbox service boundary changes only mechanically from six port groups to
+five by placing `resolveCompletionDispatch` beside the other authority ports.
+
+Against exact parent `0c2d4258094f47302bc8265eb98d4a05f5b44305`,
+`src/cli-core.ts` falls from 8,119 to 7,941 physical lines (-178). Total
+production TypeScript changes from 89,873 to 89,933 lines (+60, 33.71 percent
+of the core movement), meeting the preferred 60-line overhead target and the
+120-line hard cap. Architecture validation reports 52 domains, 110 production
+modules, 651 static import edges, and zero cycles. The 240-line adapter has four
+invocation-scoped groups (`state`, `authority`, `retry`, and `runtime`), exports
+only its factory at runtime, and uses async-local binding rather than mutable
+process-global configuration. Its declaration contains no `any`,
+`Record<..., any>`, or resolved-terminal capability.
+
+The transaction chronology is unchanged. A normal callback holds writer then
+state authority through required-message validation and outbox preparation,
+releases state then writer, and only then performs delivery and presentation.
+A manual retry loads its selected Turn, takes writer authority, reloads the
+fresh Turn, applies the canonical handoff facade's nonterminal-transfer fence,
+releases the writer, and only then enters accepted recovery or retry delivery.
+Settlement keeps its existing state transaction. Delivery never holds either
+outer lock. Fresh preparation retains message-before-path/Store validation and
+the existing message/event/monitor/state/runtime-log sequence; progress,
+accepted transport, success, failure, and bounded retry remain owned by the
+unchanged outbox service and settlement. Accepted transport followed by an
+observation error still settles as delivered. Process delivery still appends
+the redacted durable event before its redacted runtime log.
+
+All adapter functions stay within the preferred limits (maximum 34 physical
+lines and approximate c2, excluding nested function bodies). Direct recording
+tests prove writer/state release before presentation, fresh deferred fencing
+before retry, accepted-transport recovery, nested facade isolation, compiled
+lock and redaction order, the four-group boundary, factory-only exports, and
+declaration prohibitions. The focused real-CLI witnesses remain callback CLI,
+Claude callback, monitor approval context, and monitor recovery; they exercise
+ordinary and recovered single emission, retry, completion/approval preparation,
+transport acceptance, and monitor consumption without duplicating callback
+authority.
+
 ## Soft freeze while #126 is active
 
 Until the orchestration milestones finish:
