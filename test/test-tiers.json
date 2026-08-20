@@ -64,6 +64,7 @@
     "test/terminal-command-cli-adapter.test.ts",
     "test/terminal-control-ref.test.ts",
     "test/terminal-control-provider.test.ts",
+    "test/terminal-delegate-cli-adapter.test.ts",
     "test/terminal-dispatch-abort.test.ts",
     "test/terminal-dispatch-application.test.ts",
     "test/terminal-dispatch-capability.test.ts",
