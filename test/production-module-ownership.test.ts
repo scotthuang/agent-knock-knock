@@ -126,6 +126,10 @@ test("compiler AST enforces production function hard limits without exceptions",
       assert.ok(error instanceof Error);
       assert.match(
         error.message,
+        /production function hard limits reached \(<500 LOC and <50 approximate complexity\)/u
+      );
+      assert.match(
+        error.message,
         /deliberatelyTooComplex spans 52 LOC with approximate complexity 50/u
       );
       assert.match(

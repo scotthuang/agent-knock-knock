@@ -226,3 +226,36 @@ test("facade delegates possible-input and approval uncertainty without releasing
     "approval presentation must finish before the terminal lock is released"
   );
 });
+
+test("terminal dispatch composition exposes a narrow unknown-valued options boundary", () => {
+  const source = fs.readFileSync(
+    new URL("../../src/terminal-dispatch-composition.ts", import.meta.url),
+    "utf8"
+  );
+  const declaration = fs.readFileSync(
+    new URL("../src/terminal-dispatch-composition.d.ts", import.meta.url),
+    "utf8"
+  );
+  const expectedProperties = [
+    "agentHardTimeoutMinutes",
+    "agentTimeoutMinutes",
+    "claudeHome",
+    "scrollbackLines",
+    "terminalAcceptancePollIntervalMs",
+    "terminalAcceptanceTimeoutMs"
+  ];
+  for (const [label, text] of [["source", source], ["declaration", declaration]]) {
+    assert.doesNotMatch(text, /\bany\b|Record<[^>]*\bany\b/u, label);
+    const start = text.indexOf("export interface TerminalControlSendOptions");
+    const end = text.indexOf("export interface TerminalControlSendRequest", start);
+    assert.notEqual(start, -1, `${label} options boundary is present`);
+    assert.notEqual(end, -1, `${label} request follows its options boundary`);
+    const boundary = text.slice(start, end);
+    assert.match(boundary, /extends Record<string, unknown>/u, label);
+    assert.deepEqual(
+      [...boundary.matchAll(/^\s+(\w+)\?:/gmu)].map((match) => match[1]),
+      expectedProperties,
+      `${label} options list`
+    );
+  }
+});

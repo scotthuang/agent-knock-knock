@@ -61,12 +61,21 @@ export interface DeferredCodexForegroundBindingBoundary {
   targetPreparedBindingToken?: string;
 }
 
+export interface TerminalControlSendOptions extends Record<string, unknown> {
+  agentHardTimeoutMinutes?: number | string;
+  agentTimeoutMinutes?: number | string;
+  claudeHome?: string;
+  scrollbackLines?: number | string;
+  terminalAcceptancePollIntervalMs?: number | string;
+  terminalAcceptanceTimeoutMs?: number | string;
+}
+
 export interface TerminalControlSendRequest {
   transaction: {
     scopes: CanonicalStateMutationScopes;
     resources: CanonicalStateMutationResources;
   };
-  options: Record<string, any>;
+  options: TerminalControlSendOptions;
   conversation: Conversation;
   nextConversation: Conversation;
   executor: Executor;
