@@ -792,6 +792,40 @@ require a reviewed manifest diff; changing only a number to conceal a failed
 measurement does not pass because the validator reproduces it from source and
 Git history.
 
+### Codex no-rollout process-contract consolidation
+
+The canonical integration witness
+`test/codex-no-rollout-binding-cli.test.ts` still declares the same 97 named
+tests with their original assertions. `config/test-file-shards.json` assigns
+every declaration to exactly one of eight worker entrypoints. Test-tier
+selection, production ownership, affected-test selection, public-contract
+evidence, and dynamic subprocess evidence continue to name the canonical path;
+the tier runner expands that one path to every compiled shard and fails closed
+for a missing, duplicate, unused, out-of-range, or uncompiled shard. A targeted
+canonical selection also rejects a shard query that does not match its actual
+worker entry, so it can never execute only a subset while claiming the whole
+witness.
+
+Repeated executable invocations now use the same imported parser/command
+boundary and fixture-scoped virtual clock as the surrounding invariant tests.
+For injected exit checkpoints, the fixture freezes the exact durable filesystem
+image at `cliExit`, rewrites active lock ownership to the simulated dead CLI
+PID, and restores files without changing surviving rollout inodes before the
+next recovery command. Ordinary exception compensation after the injected exit
+therefore cannot forge the crash state, while recovery still proves lock
+reclamation, descriptor identity, exact CAS state, and zero replay.
+
+| Former repeated executable role | Same retained invariant | Authoritative real-process witness |
+| --- | --- | --- |
+| Virgin attach, terminal send, and status variants | Exact parser/command routing, terminal text plus one Enter, acceptance binding, and no Store mutation | `doctor exits non-zero when required package files are missing` in `cli-ux.test.ts` retains argv/exit; `raw background send durably prepares its terminal submission before tmux accepts it` in the composer-replay shard retains real terminal-adapter input |
+| Deferred preparation, commit, acceptance-backfill, and recovery crash variants | Exact durable image at every named `cliExit(86)` checkpoint; subsequent recovery retains Session/Turn/ledger/transfer state and never replays input | `zero-input deferred source Session reservation before its transfer receipt recovery aborts safely before one refreshed retry` retains the real Store crash and exit-86 boundary used by dynamic evidence |
+| Startup candidate-monitor reconciliation | Exact pending Turn is accepted and completed once, its transfer and dispatch ledger resolve, and no callback state appears | `startup reconciliation relaunches one pending candidate monitor without replay` retains detached monitor PID launch, liveness, and process exit |
+
+The no-rollout suite retains two explicit `runCliSubprocess` call sites for its
+unique Store-crash and detached-monitor process boundaries. Consolidation does not
+shorten a production timeout, raise test concurrency, remove a test or
+assertion, or replace the separate OpenClaw callback process boundaries.
+
 ## Callback/outbox application service
 
 The callback milestone now has one typed application boundary for generic

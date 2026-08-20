@@ -14,6 +14,12 @@ const PRELOAD_ENV = "AKK_SUBPROCESS_EVIDENCE_PRELOAD";
 const ORIGIN_TEST_ENV = "AKK_SUBPROCESS_EVIDENCE_ORIGIN_TEST";
 const ORIGIN_TEST_NAME_ENV = "AKK_SUBPROCESS_EVIDENCE_TEST_NAME";
 const PARENT_CALL_ID_ENV = "AKK_SUBPROCESS_EVIDENCE_PARENT_CALL_ID";
+const TEST_FILE_SHARD_CONFIG_PATH = path.join(
+  __dirname,
+  "..",
+  "config",
+  "test-file-shards.json"
+);
 const PATCHED = Symbol.for("agent-knock-knock.dynamic-subprocess-evidence");
 const TRACE_SCHEMA = "agent-knock-knock/subprocess-trace";
 const TRACE_VERSION = 1;
@@ -31,6 +37,8 @@ const METHODS = [
 const EVIDENCE_TEST_NAMES = new Set([
   "doctor exits non-zero when required package files are missing",
   "raw background send durably prepares its terminal submission before tmux accepts it",
+  // The current preload measures both revisions, so the immutable baseline's
+  // three now-consolidated crash witnesses must remain valid trace origins.
   "zero-input deferred source Session reservation before its transfer receipt recovery aborts safely before one refreshed retry",
   "zero-input deferred source reservation recovery aborts safely before one refreshed retry",
   "zero-input deferred target preparation recovery aborts safely before one refreshed retry",
@@ -40,6 +48,38 @@ const EVIDENCE_TEST_NAMES = new Set([
   "terminal bridge monitor singleton rejects a live owner and reclaims a dead owner",
   "dynamic shell descendant evidence probe"
 ]);
+const testFileShardConfig = JSON.parse(
+  fs.readFileSync(TEST_FILE_SHARD_CONFIG_PATH, "utf8")
+);
+if (
+  testFileShardConfig.schema !== "agent-knock-knock/test-file-shards" ||
+  testFileShardConfig.version !== 1 ||
+  !Array.isArray(testFileShardConfig.expansions)
+) {
+  throw new Error("dynamic subprocess evidence test shard config is malformed");
+}
+const canonicalTestByCompiledShard = new Map();
+for (const expansion of testFileShardConfig.expansions) {
+  if (
+    !expansion ||
+    typeof expansion.canonical_source !== "string" ||
+    !Array.isArray(expansion.compiled_shards)
+  ) {
+    throw new Error("dynamic subprocess evidence test shard expansion is malformed");
+  }
+  for (const compiledShard of expansion.compiled_shards) {
+    if (
+      typeof compiledShard !== "string" ||
+      canonicalTestByCompiledShard.has(compiledShard)
+    ) {
+      throw new Error("dynamic subprocess evidence test shard path is invalid");
+    }
+    canonicalTestByCompiledShard.set(
+      compiledShard,
+      expansion.canonical_source
+    );
+  }
+}
 
 function nonEmpty(value) {
   return typeof value === "string" && value.length > 0 ? value : undefined;
@@ -119,6 +159,10 @@ function isCliPath(value) {
 
 function testPathFromEntry(value) {
   const entry = repositoryEntry(value);
+  const canonicalShardSource = canonicalTestByCompiledShard.get(entry);
+  if (canonicalShardSource) {
+    return canonicalShardSource;
+  }
   const match = /^dist\/(test\/.+\.test)\.js$/u.exec(entry ?? "");
   return match ? `${match[1]}.ts` : null;
 }
