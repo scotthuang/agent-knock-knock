@@ -2311,6 +2311,63 @@ The configured focused integration witnesses remain exactly five shards:
 delivery, approval, monitor lifecycle, singleton/restart recovery, and
 Session-acceptance behavior through the real CLI boundary.
 
+## Status CLI facade and data-only facts
+
+The standalone status read, explicit status reconciliation, terminal context,
+Codex history projection, managed Turn summary, discoverability fact, and idle
+timeout reconciliation now live in `terminal-status-cli-adapter.ts` and
+`terminal-status-facts.ts`. The CLI adapter is the bounded Store/runtime I/O
+shell. The facts module is data-only and imports no filesystem/path API, Store,
+Session repository, lock, raw JSON codec, or `Record<..., any>`. List,
+terminal-command, identity, and runtime-completion composition use the same
+exported fact or typed facade operation; no selector, terminal action, monitor,
+or callback authority is copied.
+
+Against exact parent `afa09955b0c5bd528aaaa69cf4d4f92ed1f44079`,
+`src/cli-core.ts` falls from 2,735 to 2,122 physical lines (-613). This is the
+bounded fallback slice: the remaining shared state/path selection and runtime
+completion context stay at the composition root rather than absorbing
+maintenance, transcript, or monitor supervision merely to increase movement.
+Total production TypeScript changes from 92,432 to 92,904 lines (+472, 77.00
+percent of the core movement), below the hard 500-line overhead cap though not
+the preferred 300-line target. Architecture validation reports 55 domains, 119
+production modules, 772 static import edges, zero cycles, and one retained
+`cli-core.ts` importer.
+
+The adapter exposes only its factory at runtime and has four invocation-scoped
+port groups (`selection`, `observation`, `reconciliation`, and `projection`).
+It directly reuses the invocation-local CLI clock/output/log and the existing
+Store and trace infrastructure appropriate to a bounded CLI adapter. Default
+`status` performs no writable-Store assertion, state lock, save, event append,
+idle close, or monitor reconciliation. Only exact `--reconcile` first asserts
+the Store writable, then calls the narrow monitor-reconciliation port, then
+runs idle reconciliation and aggregates the two results.
+
+Terminal-control status retains selector-token fencing before bridge status,
+then historical context, JSON presentation, and the redacted runtime log.
+Managed status retains events -> summary/about/recent evidence -> optional
+trace -> terminal status ordering and its exact insertion order. Codex history
+prefers the active process session id, otherwise sorts matching-cwd sessions by
+descending update time, and finally reports screen-only evidence. Claude keeps
+the adapter display name and explicit historical-context limitation. Public
+options remain unknown-valued and the emitted declaration contains no `any` or
+resolved capability object.
+
+Idle reconciliation still observes the listed snapshot before acquiring the
+state lock, skips nonterminal candidate-rollout source Turns, treats raw
+`LOCK_TIMEOUT` as a skip, reloads the fresh Turn under lock, and rechecks fresh
+idle age. A close remains save -> append-only event -> runtime log, with the
+state lock released in `finally`. All 51 extracted function-like declarations
+meet the preferred 100/c20 target: adapter maxima are 60 lines and c12; facts
+maxima are 48 lines and c8. Direct tests cover concurrent factory isolation,
+factory-only exports and declarations, zero-write default status, parent-exact
+managed continuation and screen getter timing, non-Codex getter/error priority,
+terminal and managed JSON order, newest-cwd Codex fallback and default bounds,
+exact monitor aggregation, fresh idle locking/log getter order, and lock-timeout
+skip. The five
+focused CLI witnesses are CLI UX, management, control locks, monitor recovery,
+and terminal-send gates.
+
 ## Soft freeze while #126 is active
 
 Until the orchestration milestones finish:
