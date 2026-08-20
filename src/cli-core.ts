@@ -8,10 +8,6 @@ import type {
   ActiveCodexProcess,
   ForkContextPackage
 } from "./codex-session-provider.js";
-import { codexLifecycleBehaviorProfile } from "./codex-lifecycle-compatibility.js";
-import {
-  observeClaudeDeadProcessTranscriptCompletion
-} from "./claude-local-transcript-provider.js";
 import { validateCodexRolloutAcceptanceAnchor } from
   "./terminal-submission-acceptance.js";
 import { buildConversationTrace } from "./conversation-trace.js";
@@ -21,9 +17,7 @@ import {
 } from "./value-guards.js";
 import {
   listDeferredForegroundTransfers,
-  loadDeferredForegroundTransfer,
-  type DeferredForegroundTransferSourceRolloutAuthority,
-  type DeferredForegroundTransferSourceTurnAuthority
+  loadDeferredForegroundTransfer
 } from "./deferred-foreground-transfer.js";
 import { createFileLockCliAdapter } from "./file-lock-cli-adapter.js";
 import {
@@ -49,7 +43,6 @@ import {
   appendEvent,
   assertStoreWriterCompatible,
   defaultStoreDir,
-  ensureDir,
   ensureStoreWritable,
   inspectStoreCompatibility,
   listConversations,
@@ -65,80 +58,14 @@ import {
   withStoreWriterLeaseAsync
 } from "./store.js";
 import {
-  createManagedSessionId,
-  createNativeThreadTransitionId,
-  isExactNativeThreadId,
-  managedSessionBindingToken,
-  managedSessionRevision,
-  nativeThreadCommandFingerprint,
-  terminalBindingFrom,
-  type ManagedSessionState,
-  type NativeThreadCandidate,
-  type NativeThreadTransition
+  type ManagedSessionState
 } from "./managed-session.js";
 import {
-  assertNativeThreadHasExclusiveOwnership as assertNativeThreadHasExclusiveOwnershipFromQuery,
-  assertRestorableOriginSessionRelationship as assertRestorableOriginSessionRelationshipFromQuery,
-  requireRestorableLifecycleOrigin as requireRestorableLifecycleOriginFromQuery,
-  resumableNativeThreadCandidates,
-  revalidateNativeThreadCandidate as revalidateNativeThreadCandidateFromQuery,
-} from "./native-thread-lifecycle-query-service.js";
-import {
-  decideResumeCandidateEligibility,
-  decideResumeTargetSession,
-  prepareNativeThreadTransition,
-  reduceNativeThreadTransitionPhase
-} from "./native-thread-transition-policy.js";
-import {
-  settleFailedNativeThreadTransition,
-  settleVerifiedNativeThreadTransition,
-  type NativeThreadTransitionSettlementPorts
-} from "./native-thread-transition-settlement-service.js";
-import {
-  reconcileLifecycleDispatchLedger as reconcileLifecycleDispatchLedgerService,
-  recoverLifecycleFenceBeforeMutation as recoverLifecycleFenceBeforeMutationService,
-  type CodexCompanionSet as LifecycleRecoveryCodexCompanionSet,
-  type NativeThreadLifecycleRecoveryAuthority,
-  type NativeThreadLifecycleRecoveryPorts
-} from "./native-thread-lifecycle-recovery-service.js";
-import {
-  codexComposerVisible,
-  createNativeThreadLifecycleRecoveryProbeAdapter,
-  lifecycleRecoveryRuntime,
-  lifecycleRecoveryTerminalFacts
-} from "./native-thread-lifecycle-recovery-adapter.js";
-import {
-  nativeThreadTransitionResourceBoundOperation
-} from "./native-thread-transition-resource-adapter.js";
-import {
-  assertResumedNativeThreadMatchesCandidate as assertResumedCodexRolloutMatchesCandidate,
-  knownNativeThreadCompanionSet,
-  nativeThreadCandidateFileIdentity as codexCandidateFileIdentity,
-  prepareNativeThreadVerification,
-  probeCodexCurrentThread,
-  verifyNativeThreadTransition as verifyNativeThreadTransitionWithRuntime,
-  type NativeThreadVerificationAdapterPorts
+  probeCodexCurrentThread
 } from "./native-thread-transition-verification-adapter.js";
 import {
-  createNativeThreadResumeSnapshot,
-  resolveNativeThreadResumeSelection,
-  saveNativeThreadResumeSnapshot
-} from "./native-thread-resume-snapshot.js";
-import {
-  assertResumeSnapshotActionFingerprint,
-  assertResumeSnapshotCandidates,
-  assertResumeSnapshotMatchesTerminal,
-  assertResumeSnapshotNotExpired,
-  terminalActionFingerprint,
-  type NativeThreadResumeSnapshot
-} from "./native-thread-resume-snapshot-policy.js";
-import {
-  commitVerifiedLifecycleTransition,
-  listNativeThreadTransitions,
   loadManagedSession,
-  loadNativeThreadTransition,
   saveManagedSession,
-  saveNativeThreadTransition,
   tryLoadManagedSession
 } from "./session-store.js";
 import {
@@ -148,26 +75,14 @@ import {
 } from "./terminal-control-provider.js";
 import {
   parseTerminalConversationId,
-  type ActiveTerminalProcess,
-  type TerminalCompletionEvidence,
   type TerminalControlRef,
-  type TerminalDurableCompletionRequest,
-  type TerminalRuntimeIdentity,
-  type TerminalThreadLifecycleCandidateToken
+  type TerminalRuntimeIdentity
 } from "./terminal-agent-adapter.js";
 import {
-  hasCanonicalTerminalEndpoint,
-  sameTerminalControlIncarnation,
-  terminalControlEvidence,
-  terminalControlEvidenceMatches,
-  terminalEndpointFromControlRef,
-  terminalRuntimeResourceKey,
-  type TerminalControlEvidence
+  terminalControlEvidenceMatches
 } from "./terminal-control-ref.js";
 import {
-  exactCodexReadyStyledComposerCapture,
   TerminalAgentBridge,
-  TerminalInputNotStartedError,
   type ResolvedTerminalConversation
 } from "./terminal-agent-bridge.js";
 import {
@@ -177,18 +92,7 @@ import {
 import { createTerminalDispatchCompletionCliAdapter } from
   "./terminal-dispatch-completion-cli-adapter.js";
 import {
-  decideAcceptedTurnDeadAgentStall,
   decideVerifiedDeadAgentProcess,
-  isVerifiedDeadAgentProcessDisposition,
-  reconcileVerifiedDeadAgentAuthority,
-  selectVerifiedDeadAgentEvent,
-  validateStoredVerifiedDeadAgentAuthority,
-  validateVerifiedDeadAgentEventAuthority,
-  verifiedDeadTerminalAgentProcessEvidenceId,
-  type BoundTerminalAgentProcessObservation,
-  type VerifiedDeadAgentAuthorityContext,
-  type VerifiedDeadAgentAuthorityDecision,
-  type VerifiedDeadAgentCompletionObservation,
   type VerifiedDeadTerminalAgentProcessProof
 } from "./verified-dead-agent-policy.js";
 import {
@@ -210,28 +114,22 @@ import {
   createNativeThreadLifecycleCliAdapter
 } from "./native-thread-lifecycle-cli-adapter.js";
 import {
+  createNativeThreadLifecycleLedgerCliAdapter
+} from "./native-thread-lifecycle-ledger-cli-adapter.js";
+import {
+  createNativeThreadTransitionApplication
+} from "./native-thread-transition-application.js";
+import {
   createTerminalIdentityAuthorityCliAdapter
 } from "./terminal-identity-authority-cli-adapter.js";
 import {
   type TerminalNativeIdentity as NativeAgentSessionIdentity
 } from "./terminal-binding-authority.js";
 import {
-  decideManagedBindingConflict,
-  codexCompanionsExcludingPreferred,
-  isCodexStatusCardEvidence,
   isCompleteNativeRollout,
-  nativeIdentityMatchesCodexPreMaterialization,
-  processIncarnationRelationship,
-  selectRootTerminalProcesses,
   terminalControlAliasMatches,
-  terminalControlsShareIncarnation,
-  withCodexCompanionFences,
-  type CodexAllowedCompanionSet,
-  type CodexPreMaterializationIdentity,
-  type CodexSendAuthorityContext,
-  type ManagedBindingConflictKind
+  terminalControlsShareIncarnation
 } from "./terminal-authority-policy.js";
-import { reconcileTerminalBinding } from "./terminal-binding-reconciliation-service.js";
 import {
   canonicalMutationResource, capabilityGatedRepositoryOperation,
   capabilityGatedRepositoryPairOperation, withCanonicalMutationLocks,
@@ -251,7 +149,6 @@ import {
 } from "./terminal-dispatch-capability.js";
 import { createCallbackCliFacade } from "./callback-cli-adapter.js";
 import {
-  decideTerminalMonitorVerifiedDeadCompletion as decideVerifiedDeadAgentCompletion,
   terminalMonitorActivityPersistIntervalMs as terminalBridgeActivityPersistIntervalMs,
   terminalMonitorApprovalCandidate as terminalBridgeApprovalCandidate,
   terminalMonitorDeadlineAt as deadlineAt,
@@ -276,10 +173,7 @@ import {
 import { terminalMonitorReconciliationEligibility as monitorEligibility } from
   "./terminal-monitor-reconciliation-eligibility.js";
 import {
-  nativeThreadLifecycleLedger as lifecycleLedger,
-  sameCanonicalStatePath,
   terminalDispatchLedgerLooksLifecycle,
-  terminalDispatchReceiptHistory as terminalLedgerReceiptHistory,
   type TerminalDispatchLedgerDocument
 } from "./terminal-dispatch-ledger-codec.js";
 import {
@@ -288,27 +182,11 @@ import {
 import {
   createTerminalDispatchRecoveryCliAdapter
 } from "./terminal-dispatch-recovery-cli-adapter.js";
-import type {
-  DeferredCodexForegroundDispatchSnapshot,
-  TerminalDispatchTerminal
-} from "./terminal-dispatch-composition.js";
 import * as deferredRecoveryAdapter from
   "./deferred-foreground-recovery-cli-adapter.js";
-import * as deferredAuthorityAdapter from
-  "./deferred-foreground-authority-cli-adapter.js";
 import {
-  codexKnownBeforeIdentityForTransition,
-  codexLingeringIdentityMatches,
-  logicalManagedSessionIdentity,
-  managedBindingMatchesLiveTerminal,
-  managedSessionOwnerIsInactive,
   migratedTerminalBindingMatches,
-  nativeThreadTransitionRevision,
-  resolvedTerminalProcessIncarnation as resolvedTerminalProcessIncarnationPolicy,
-  selectBoundManagedSessionForTerminal,
-  selectSoleBoundManagedSessionClaim,
-  terminalSubmissionPayload,
-  terminalRuntimeForLiveIdentity as terminalRuntimeForLiveIdentityPolicy
+  terminalSubmissionPayload
 } from "./terminal-dispatch-execution.js";
 import * as dispatchReceipt from "./terminal-dispatch-receipt.js";
 import {
@@ -349,7 +227,6 @@ const readFileLockOwner = cliFileLock.owner;
 const terminalDispatchRepository =
   createTerminalDispatchRepositoryCliAdapter();
 const acquireTerminalBridgeSendLock = terminalDispatchRepository.acquire;
-const terminalBridgeRuntimeDir = terminalDispatchRepository.runtimeDir;
 const terminalBridgeRuntimeKey = terminalDispatchRepository.runtimeKey;
 const loadTerminalBridgeDispatchLedger = terminalDispatchRepository.load;
 const saveTerminalBridgeDispatchLedger = terminalDispatchRepository.save;
@@ -392,8 +269,12 @@ const mutationDispatchLedger = Object.freeze({
   reconcileIncarnation: gateRepository(["terminal", "storeWriter"], "terminal",
     (terminalControl: TerminalControlRef) => resolveTerminalDispatchLedgerPaneIncarnation(
       terminalControl, loadTerminalBridgeDispatchLedger(terminalControl))),
-  reconcile: reconcileLifecycleDispatchLedgerScoped,
-  beforeMutation: recoverLifecycleFenceBeforeMutationScoped
+  reconcile: (...args: Parameters<
+    typeof nativeThreadLifecycleFacade.reconcileLedger
+  >) => nativeThreadLifecycleFacade.reconcileLedger(...args),
+  beforeMutation: (...args: Parameters<
+    typeof nativeThreadLifecycleFacade.recoverBeforeMutation
+  >) => nativeThreadLifecycleFacade.recoverBeforeMutation(...args)
 });
 const mutationManagedSessions = Object.freeze({
   load: gateRepository(["storeWriter"], "storeWriter", loadManagedSession),
@@ -528,6 +409,18 @@ const TERMINAL_DISPATCH_RELEASE_STATUSES = new Set<ConversationStatus>([
   "closed",
   "cancelled"
 ]);
+const nativeThreadLifecycleLedger =
+  createNativeThreadLifecycleLedgerCliAdapter({
+    repository: terminalDispatchRepository,
+    authority: {
+      ordinaryOwnerIsReleased: (ledger) => {
+        const owner = loadTerminalDispatchLedgerOwner(ledger);
+        return Boolean(
+          owner && TERMINAL_DISPATCH_RELEASE_STATUSES.has(owner.status)
+        );
+      }
+    }
+  });
 const ACTIVE_TERMINAL_DISPATCH_STATUSES = new Set([
   "prepared",
   "text_injected",
@@ -635,15 +528,15 @@ async function dispatchCliCommand(commandName, options) {
   } else if (commandName === "send") {
     await terminalCommandCliFacade.runSend(options);
   } else if (commandName === "new-thread" || commandName === "clear-thread") {
-    await runNewThread(options);
+    await nativeThreadLifecycleFacade.runNewThread(options);
   } else if (commandName === "list-resumable-threads" || commandName === "threads") {
     await runListResumableThreads(options);
   } else if (commandName === "native-inspect" || commandName === "native-status") {
     await runNativeInspect(options);
   } else if (commandName === "resume-thread") {
-    await runResumeThread(options);
+    await nativeThreadLifecycleFacade.runResumeThread(options);
   } else if (commandName === "reconcile-binding") {
-    await runReconcileBinding(options);
+    await nativeThreadLifecycleFacade.runReconcileBinding(options);
   } else if (commandName === "respond") {
     await terminalCommandCliFacade.runRespond(options);
   } else if (commandName === "approve") {
@@ -773,11 +666,6 @@ function terminalRuntime(options: CliCommandOptions = {}) {
   });
 }
 
-function createRuntimeTerminalControlProviderRegistry(options):
-  TerminalControlProviderRegistry {
-  return terminalRuntime(options).createControlProviderRegistry();
-}
-
 function createTerminalControlProvider(options,
   registry?: TerminalControlProviderRegistry): TerminalControlProvider {
   return terminalRuntime(options).createControlProvider(registry);
@@ -803,20 +691,6 @@ function createTerminalAgentBridge(
 ): TerminalAgentBridge {
   return terminalRuntime(options).createBridge(terminalProvider, registry);
 }
-
-function terminalEndpointTakeoverFields(
-  terminalControl: TerminalControlRef
-): { terminal_control: TerminalControlRef; terminal_endpoint?: TerminalControlEvidence } {
-  return {
-    terminal_control: terminalControl,
-    ...(hasCanonicalTerminalEndpoint(terminalControl)
-      ? { terminal_endpoint: terminalControlEvidence(terminalControl) }
-      : {})
-  };
-}
-
-
-
 
 function stableDelegateTerminalRoute({
   options,
@@ -1242,8 +1116,6 @@ function withTerminalBridgeSubmission(
   });
 }
 
-const terminalAcceptanceEvidenceForConversation =
-  dispatchReceipt.terminalAcceptanceEvidenceForConversation;
 const terminalBridgeSubmission = dispatchReceipt.terminalBridgeSubmission;
 const terminalBridgeSubmissionReceipts = dispatchReceipt
   .terminalBridgeSubmissionReceipts;
@@ -1268,7 +1140,10 @@ const terminalIdentityAuthority = createTerminalIdentityAuthorityCliAdapter({
       terminal: request.terminal,
       currentIdentity: request.currentIdentity,
       runtimeOverride: request.runtimeOverride
-    }, nativeThreadVerificationAdapterPorts(request.options, request.terminal))
+    }, nativeThreadLifecycleFacade.verificationPorts(
+      request.options,
+      request.terminal
+    ))
   },
   store: {
     terminalControlFromTakeover, storeDir: storeDirFromOptions,
@@ -1294,8 +1169,11 @@ const terminalIdentityAuthority = createTerminalIdentityAuthorityCliAdapter({
     assertTurnBindingCurrent,
     assertManagedSessionCanStartTurn: (turns) =>
       terminalAcceptanceCliFacade.assertSessionCanStartTurn(turns),
-    assertNativeThreadHasExclusiveOwnership, assertSafeTerminalSend,
-    assertTerminalLifecycleReady,
+    assertNativeThreadHasExclusiveOwnership: (input) =>
+      nativeThreadLifecycleFacade.assertExclusive(input),
+    assertSafeTerminalSend,
+    assertTerminalLifecycleReady: (input) =>
+      nativeThreadLifecycleFacade.assertTerminalReady(input),
     provisionalManagedBindingTurnCount: (storeDir, session) =>
       terminalListCliFacade.provisionalManagedBindingTurnCount(storeDir, session),
     managedTurnNeedsAttention: (turn) =>
@@ -1316,28 +1194,17 @@ const terminalIdentityAuthority = createTerminalIdentityAuthorityCliAdapter({
 const {
   resolveTerminalConversationFromOptions, refineTerminalTurnEndpoint,
   terminalRuntimeIdentityForConversation, terminalDurableRequestForConversation,
-  migrateLegacyTerminalAgentIdentity, exactLifecycleProcessIdentity,
-  codexProcessBirthForLifecycle, codexProcessIncarnationForPid,
+  migrateLegacyTerminalAgentIdentity, codexProcessIncarnationForPid,
   observeDurableCompletionBeforeDeadStall, observeBoundTerminalAgentProcess,
-  resolvedTerminalProcessIncarnation, managedSessionOwnerIsConclusivelyInactive,
-  codexKnownBeforeIdentityForManagedSession,
   codexLingeringBeforeIdentityMatchesSession, logicalIdentityForManagedSession,
-  codexAllowedCompanionIdentityForManagedSession,
   codexAllowedCompanionSetForManagedSession, codexManagedIdentityResolutionContext,
-  codexKnownRootSetForLifecycleTransition, codexPreMaterializationIdentityForManagedSession,
+  codexPreMaterializationIdentityForManagedSession,
   assertCodexComposerReadyForAutomatedInput, verifyCodexPendingManagedSendStatus,
-  terminalRuntimeForLiveIdentity, managedSessionClaimsResolvedTerminal,
-  bindingMatchesLiveTerminal, boundManagedSessionForTerminal,
+  terminalRuntimeForLiveIdentity, bindingMatchesLiveTerminal,
   managedBindingConflictKindForResolvedTerminal,
   soleBoundManagedSessionClaimForTerminal, createBoundManagedSession,
   materializeCurrentManagedSession, reattachManagedSessionForNativeIdentity,
-  deferredForegroundAuthorityAdapterPorts, codexCandidateInventoryHasNoOtherManagedClaim,
-  deferredCandidateSourceTurnHistory,
-  explicitlyAbandonedCandidateSourceFingerprint,
-  assertFrozenExplicitlyAbandonedPredecessorAuthority,
-  deferredCodexForegroundDispatchSnapshot,
-  deferredCodexPreviousDispatchSnapshotMatches, observeDeferredCodexAuthority,
-  assertVerifiedEmptyCodexHandoffBoundary
+  observeDeferredCodexAuthority
 } = terminalIdentityAuthority;
 const callbackCliFacade = createCallbackCliFacade({
   state: { acquireFileLock, loadConversation: loadConversationFromOptions,
@@ -1883,7 +1750,8 @@ const terminalAcceptanceCliFacade = createTerminalAcceptanceCliFacade({
     codexProvider: (options) =>
       terminalRuntime(options).createAgentSessionProvider("codex"),
     codexProcessIncarnation: codexProcessIncarnationForPid,
-    assertExclusive: assertNativeThreadHasExclusiveOwnership
+    assertExclusive: (input) =>
+      nativeThreadLifecycleFacade.assertExclusive(input)
   },
   terminal: {
     runtime: (options) => terminalRuntime(options),
@@ -1942,8 +1810,6 @@ const observeCurrentNativeAgentSessionIdentity =
   terminalAcceptanceCliFacade.observeNativeIdentity;
 const assertNativeAgentIdentityForTurn =
   terminalAcceptanceCliFacade.assertTurnIdentity;
-const withNativeAgentSessionIdentity =
-  terminalAcceptanceCliFacade.withNativeIdentity;
 function managedSessionStoreDirForConversation(
   conversation: Conversation
 ): string | undefined {
@@ -1960,19 +1826,7 @@ const assertManagedSessionCanStartTurn =
   terminalAcceptanceCliFacade.assertSessionCanStartTurn;
 const createManagedTerminalTurn = terminalAcceptanceCliFacade.createManagedTurn;
 
-function managedTurnMatchesResolvedTerminal(
-  conversation: Conversation,
-  terminal: ResolvedTerminalConversation,
-  currentIdentity?: NativeAgentSessionIdentity
-): boolean {
-  return terminalAcceptanceCliFacade.turnMatchesTerminal({
-    conversation,
-    terminal,
-    currentIdentity
-  });
-}
-
-const nativeThreadLifecycleFacade = createNativeThreadLifecycleCliAdapter({
+const nativeThreadLifecycleQueryFacade = createNativeThreadLifecycleCliAdapter({
   runtime: {
     forOptions: (options) => terminalRuntime(options),
     sleep: cliSleep
@@ -2030,15 +1884,102 @@ const nativeThreadLifecycleFacade = createNativeThreadLifecycleCliAdapter({
   output: { cwd: cliCwd, print: printJson }
 });
 
-const resolveLifecycleTerminal =
-  nativeThreadLifecycleFacade.resolveLifecycleTerminal;
-const nativeThreadLifecycleQueryPorts = nativeThreadLifecycleFacade.queryPorts;
-const currentLifecycleSnapshot = nativeThreadLifecycleFacade.currentSnapshot;
-const lifecycleBindingTokens = nativeThreadLifecycleFacade.lifecycleBindingTokens;
+const nativeThreadTransitionApplication =
+  createNativeThreadTransitionApplication({
+    runtime: {
+      now: cliNow,
+      nowMs: cliNowMs,
+      pid: cliPid,
+      cwd: cliCwd,
+      sleep: cliSleep,
+      env: (name) => cliEnv()[name],
+      exit: cliExit,
+      log: runtimeLog,
+      print: printJson,
+      summarizeError: textSummary
+    },
+    lifecycle: {
+      facade: nativeThreadLifecycleQueryFacade,
+      runtime: (options) => terminalRuntime(options),
+      resolveIdentity: (input) =>
+        terminalAcceptanceCliFacade.resolveNativeIdentity(input),
+      runtimeForIdentity: (input) =>
+        terminalIdentityAuthority.terminalRuntimeForLiveIdentity(input),
+      exactIdentity: (terminal, identity) =>
+        terminalIdentityAuthority.exactLifecycleProcessIdentity(
+          terminal,
+          identity
+        ),
+      assertComposerReady: (input) =>
+        terminalIdentityAuthority.assertCodexComposerReadyForAutomatedInput(
+          input
+        )
+    },
+    state: {
+      storeDir: storeDirFromOptions,
+      runtimeDir: terminalDispatchRepository.runtimeDir,
+      loadLedger: terminalDispatchRepository.load,
+      reconcilePrepared: terminalDispatchRecovery.reconcilePrepared,
+      reconcileIncarnation: terminalDispatchRepository.reconcileIncarnation,
+      recordMatchesControl: terminalDispatchRepository.matchesControl,
+      lifecycleLedger: nativeThreadLifecycleLedger,
+      ordinaryOwnerStatus: (ledger) =>
+        loadTerminalDispatchLedgerOwner(ledger)?.status,
+      blockingTurns: (storeDir, terminalControl) =>
+        terminalListCliFacade.terminalIncarnationBlockingTurns(
+          storeDir,
+          terminalControl
+        ),
+      managedTurns: (storeDir, sessionId) =>
+        terminalAcceptanceCliFacade.turnsForSession(storeDir, sessionId),
+      hasUnresolvedTransition: (storeDir, session) =>
+        terminalListCliFacade.managedSessionHasUnresolvedNativeTransition(
+          storeDir,
+          session
+        ),
+      dispatchOwnership: (terminalControl) =>
+        terminalListCliFacade.terminalDispatchOwnership(terminalControl)
+    },
+    authority: {
+      sessionClaimsTerminal: (session, terminal) =>
+        terminalIdentityAuthority.managedSessionClaimsResolvedTerminal(
+          session,
+          terminal
+        ),
+      conflictKind: (input) =>
+        terminalIdentityAuthority
+          .managedBindingConflictKindForResolvedTerminal(input),
+      ownerIsInactive: (input) =>
+        terminalIdentityAuthority
+          .managedSessionOwnerIsConclusivelyInactive(input),
+      observeExternal: (input) =>
+        terminalHandoffCliFacade.observedExternalHandoffIdentity(input),
+      recoverDeferred: (input) => terminalHandoffCliFacade
+        .recoverDeferredCodexForegroundTransferWhileWriterLease(input),
+      knownRoots: (input) =>
+        terminalIdentityAuthority.codexKnownRootSetForLifecycleTransition(
+          input
+        ),
+      codexProcessBirth: (pid) =>
+        terminalIdentityAuthority.codexProcessBirthForLifecycle(pid),
+      processAlive: isProcessAlive,
+      workspaceMatches: matchesConfiguredWorkspace
+    },
+    mutation: {
+      locks: terminalWriterMutationLocks,
+      authenticate: authenticateLifecycleRecoveryResources,
+      loadSession: mutationManagedSessions.load,
+      saveSession: mutationManagedSessions.save
+    }
+  });
+
+const nativeThreadLifecycleFacade = Object.freeze({
+  ...nativeThreadLifecycleQueryFacade,
+  ...nativeThreadTransitionApplication
+});
+
 const runListResumableThreads = nativeThreadLifecycleFacade.runList;
 const runNativeInspect = nativeThreadLifecycleFacade.runInspect;
-const assertSameNativeInspectionTerminal =
-  nativeThreadLifecycleFacade.assertSameInspectionTerminal;
 const codexLatentClearResumeObservation =
   nativeThreadLifecycleFacade.codexLatentClearResumeObservation;
 const nativeInspectionComposerEmpty =
@@ -2135,9 +2076,10 @@ const terminalHandoffCliFacade = createTerminalHandoffCliFacade({
     assertSessionCanStartTurn:
       terminalAcceptanceCliFacade.assertSessionCanStartTurn,
     turnsForSession: terminalAcceptanceCliFacade.turnsForSession,
-    assertTerminalReady: assertTerminalLifecycleReady,
+    assertTerminalReady: nativeThreadLifecycleFacade.assertTerminalReady,
     assertSafeSend: assertSafeTerminalSend,
-    assertExclusive: assertNativeThreadHasExclusiveOwnership
+    assertExclusive: (input) =>
+      nativeThreadLifecycleFacade.assertExclusive(input)
   },
   repository: {
     storeDirForConversation: terminalAcceptanceCliFacade.storeDirForConversation,
@@ -2147,7 +2089,7 @@ const terminalHandoffCliFacade = createTerminalHandoffCliFacade({
     bindingFields: terminalBindingLedgerFields,
     withNativeIdentity: terminalAcceptanceCliFacade.withNativeIdentity,
     withSubmission: withTerminalBridgeSubmission,
-    saveLifecycleLedger: saveLifecycleTerminalDispatchLedger,
+    saveLifecycleLedger: nativeThreadLifecycleLedger.save,
     mutationLocks: terminalWriterMutationLocks,
     withStateScope: withTerminalDispatchStateScope
   }
@@ -2170,8 +2112,7 @@ const {
   observedHandoffAuthorityToken,
   observedHandoffTargetResolution,
   prepareDeferredCodexForegroundBinding,
-  recoverDeferredCodexForegroundTransferBeforeMutation,
-  recoverDeferredCodexForegroundTransferWhileWriterLease
+  recoverDeferredCodexForegroundTransferBeforeMutation
 } = terminalHandoffCliFacade;
 
 function agentVersionForRunningProcess(
@@ -2182,1343 +2123,6 @@ function agentVersionForRunningProcess(
   return terminalRuntime(options).agentVersionForRunningProcess(agent, pid);
 }
 
-function assertTerminalLifecycleReady({
-  options,
-  terminal,
-  terminalStatus
-}: {
-  options: Record<string, any>;
-  terminal: TerminalDispatchTerminal;
-  terminalStatus: Awaited<ReturnType<TerminalAgentBridge["status"]>>;
-}): void {
-  if (
-    terminalStatus.reachable !== true ||
-    terminalStatus.activity_state !== "idle" ||
-    terminalStatus.approval_state.blocked === true
-  ) {
-    throw new Error(
-      `terminal ${terminal.terminalControl.target} is not at a verified idle prompt ` +
-      `(${terminalStatus.activity_state}: ${terminalStatus.activity_reason})`
-    );
-  }
-  const blockers = terminalListCliFacade.terminalIncarnationBlockingTurns(
-    storeDirFromOptions(options),
-    terminal.terminalControl
-  );
-  if (blockers.length > 0) {
-    throw new Error(
-      `terminal ${terminal.terminalControl.target} still has unresolved Turn ` +
-      `${turnIdForConversation(blockers[0])} (${blockers[0].status})`
-    );
-  }
-  const ledger = resolveTerminalDispatchLedgerPaneIncarnation(
-    terminal.terminalControl,
-    reconcilePreparedTerminalDispatchLedger(
-      terminal.terminalControl,
-      loadTerminalBridgeDispatchLedger(terminal.terminalControl)
-    )
-  );
-  if (
-    terminalDispatchLedgerLooksLifecycle(ledger) &&
-    ledger?.status !== "resolved"
-  ) {
-    throw new Error(
-      `terminal ${terminal.terminalControl.target} has unresolved lifecycle ` +
-      `transition ${stringValue(ledger?.transition_id) ?? "with invalid identity"}`
-    );
-  }
-  if (
-    ledger &&
-    [
-      "prepared",
-      "text_injected",
-      "enter_dispatched",
-      "dispatching",
-      "not_accepted",
-      "uncertain"
-    ].includes(String(ledger.status))
-  ) {
-    throw new Error(
-      `terminal ${terminal.terminalControl.target} has an unresolved ` +
-      `${String(ledger.kind ?? "turn")} operation (${String(ledger.status)})`
-    );
-  }
-  if (ledger && ["submitted", "agent_accepted"].includes(String(ledger.status))) {
-    const owner = loadTerminalDispatchLedgerOwner(ledger);
-    if (!owner || !TERMINAL_DISPATCH_RELEASE_STATUSES.has(owner.status)) {
-      throw new Error(
-        `terminal ${terminal.terminalControl.target} still has a submitted operation`
-      );
-    }
-  }
-}
-
-function nativeThreadVerificationAdapterPorts(
-  options: Record<string, any>,
-  terminal: ResolvedTerminalConversation
-): NativeThreadVerificationAdapterPorts {
-  return {
-    createBridge: () => createTerminalAgentBridge(options),
-    loadClaudeAgentRows: () =>
-      loadClaudeAgentRows(options, { required: true }),
-    runningVersion: () => agentVersionForRunningProcess(
-      terminal.agent,
-      terminal.pid,
-      options
-    ),
-    runtimeForIdentity: (identity) =>
-      terminalRuntimeForLiveIdentity({ terminal, identity }),
-    emptyRuntime: () => terminalRuntimeForLiveIdentity({
-      terminal,
-      expectedEmptyNativeSession: true
-    }),
-    physicalRuntime: () => terminalRuntimeForLiveIdentity({
-      terminal,
-      physicalOnly: true
-    }),
-    resolveIdentity: (
-      preferredSessionId,
-      allowedCompanionIdentity,
-      allowedAdditionalIdentities
-    ) => resolveCurrentNativeAgentSessionIdentity({
-      options,
-      agent: terminal.agent,
-      pid: terminal.pid,
-      cwd: terminal.terminalControl.currentPath,
-      preferredSessionId,
-      allowedCompanionIdentity,
-      allowedAdditionalIdentities: [...allowedAdditionalIdentities]
-    }),
-    sleep: cliSleep
-  };
-}
-
-async function assertNativeThreadHasExclusiveOwnership({
-  options,
-  agent,
-  currentPid,
-  nativeThreadId,
-  storeDir,
-  terminalControl,
-  excludedManagedSessionId,
-  allowedManagedSessionIds = []
-}: {
-  options: Record<string, any>;
-  agent: ExecutorKind;
-  currentPid: number;
-  nativeThreadId: string;
-  storeDir: string;
-  terminalControl: TerminalControlRef;
-  excludedManagedSessionId?: string;
-  allowedManagedSessionIds?: string[];
-}): Promise<void> {
-  await nativeThreadLifecycleFacade.assertExclusive({
-    options, agent, currentPid, nativeThreadId, storeDir, terminalControl,
-    excludedManagedSessionId, allowedManagedSessionIds
-  });
-}
-
-async function assertLifecycleTargetHasExclusiveOwnership({
-  options,
-  terminal,
-  transition,
-  storeDir
-}: {
-  options: Record<string, any>;
-  terminal: ResolvedTerminalConversation;
-  transition: NativeThreadTransition;
-  storeDir: string;
-}): Promise<void> {
-  const afterBinding = transition.after_binding;
-  const nativeThreadId = afterBinding?.native_thread_id;
-  if (
-    !afterBinding ||
-    !nativeThreadId ||
-    !isExactNativeThreadId(nativeThreadId) ||
-    afterBinding.native_process.pid !== terminal.pid ||
-    !terminalControlAliasMatches(
-      afterBinding.terminal_id,
-      afterBinding.terminal_control,
-      terminal.conversationId,
-      terminal.terminalControl
-    )
-  ) {
-    throw new Error(
-      "cannot exclude the current lifecycle process without an exact after_binding"
-    );
-  }
-  await assertNativeThreadHasExclusiveOwnership({
-    options,
-    agent: transition.agent,
-    currentPid: terminal.pid,
-    nativeThreadId,
-    storeDir,
-    terminalControl: terminal.terminalControl,
-    excludedManagedSessionId: transition.target_session_id
-  });
-}
-
-async function runNewThread(options) {
-  const requireRestorableOrigin = options.requireRestorableOrigin;
-  if (
-    requireRestorableOrigin !== undefined &&
-    requireRestorableOrigin !== true
-  ) {
-    throw new Error("--require-restorable-origin does not take a value");
-  }
-  return runNativeThreadTransition(options, {
-    kind: "new_thread",
-    requireRestorableOrigin: requireRestorableOrigin === true
-  });
-}
-
-async function runResumeThread(options) {
-  const exactNativeThreadId = stringValue(
-    options.nativeThread ?? options.nativeThreadId
-  );
-  const hasSnapshotSelection = Boolean(
-    options.selectionSnapshot ||
-    options.selectionNumber ||
-    options.selectionShortId ||
-    options.selectionHandle
-  );
-  if (exactNativeThreadId && hasSnapshotSelection) {
-    throw new Error(
-      "--native-thread cannot be combined with a snapshot-bound selection"
-    );
-  }
-  if (exactNativeThreadId) {
-    if (!isExactNativeThreadId(exactNativeThreadId)) {
-      throw new Error("--native-thread must be a complete native thread UUID");
-    }
-    return runNativeThreadTransition(options, {
-      kind: "resume_thread",
-      nativeThreadId: exactNativeThreadId.toLowerCase()
-    });
-  }
-  if (!hasSnapshotSelection) {
-    throw new Error(
-      "--native-thread or a snapshot-bound resume selection is required"
-    );
-  }
-  const terminal = await resolveLifecycleTerminal(options);
-  const storeDir = storeDirFromOptions(options);
-  const selectionScope = required(
-    stringValue(options.selectionScope),
-    "--selection-scope is required for snapshot-bound resume"
-  );
-  const rawSelectionNumber = options.selectionNumber;
-  const selectionNumber = rawSelectionNumber === undefined
-    ? undefined
-    : positiveSafeInteger(rawSelectionNumber, "--selection-number");
-  const selection = resolveNativeThreadResumeSelection({
-    runtimeDir: terminalBridgeRuntimeDir(),
-    storeDir,
-    terminalId: terminal.conversationId,
-    selectionScope,
-    snapshotId: stringValue(options.selectionSnapshot),
-    selectionNumber,
-    shortId: stringValue(options.selectionShortId),
-    selectionHandle: stringValue(options.selectionHandle)
-  });
-  assertResumeSnapshotMatchesTerminal(selection.snapshot, terminal, cliCwd);
-  assertResumeSnapshotActionFingerprint(
-    selection.snapshot,
-    loadTerminalBridgeDispatchLedger(terminal.terminalControl)
-  );
-  const selectedOptions = {
-    ...options,
-    expectedBindingToken: selection.snapshot.expected_binding_token,
-    candidateToken: selection.row.candidate_token
-  };
-  return runNativeThreadTransition(selectedOptions, {
-    kind: "resume_thread",
-    nativeThreadId: selection.row.native_thread_id.toLowerCase(),
-    selectionSnapshot: selection.snapshot
-  });
-}
-
-async function runReconcileBinding(options: Record<string, any>) {
-  const initiallyResolved = await resolveLifecycleTerminal(options);
-  const storeDir = storeDirFromOptions(options);
-  const conflictingSessionId = required(
-    stringValue(
-      options.conflictingSession ?? options.conflictingSessionId
-    ),
-    "--conflicting-session is required"
-  );
-  const expectedSessionRevision = positiveSafeInteger(required(stringValue(
-    options.expectedSessionRevision ?? options.sessionRevision
-  ), "--expected-session-revision is required"), "--expected-session-revision");
-  const expectedBindingToken = required(
-    stringValue(options.expectedBindingToken),
-    "--expected-binding-token is required"
-  );
-  const expectedTerminalToken = required(
-    stringValue(options.expectedTerminalToken),
-    "--expected-terminal-token is required"
-  );
-  return reconcileTerminalBinding({
-    initialTerminal: initiallyResolved,
-    conflictingSessionId,
-    expectedSessionRevision,
-    expectedBindingToken,
-    expectedTerminalToken
-  }, {
-    transaction: {
-      locks: terminalWriterMutationLocks(
-        storeDir, initiallyResolved.terminalControl
-      ),
-      recover: (scopes, resources, terminal) =>
-        mutationDispatchLedger.beforeMutation(
-          scopes, resources, options, terminal
-        ),
-      loadSession: mutationManagedSessions.load,
-      saveSession: mutationManagedSessions.save
-    },
-    terminal: {
-      resolve: () => resolveLifecycleTerminal(options),
-      sameIncarnation: terminalControlsShareIncarnation,
-      identity: (terminal) => resolveCurrentNativeAgentSessionIdentity({
-        options,
-        agent: terminal.agent,
-        pid: terminal.pid,
-        cwd: terminal.terminalControl.currentPath
-      }),
-      prepareStatus: () => {
-        const bridge = createTerminalAgentBridge(options);
-        return (terminal) => bridge.status(terminal.agent, terminal.terminalControl, {
-          runtime: terminalRuntimeForLiveIdentity({ terminal, physicalOnly: true })
-        });
-      },
-      assertReady: (terminal, terminalStatus) =>
-        assertTerminalLifecycleReady({ options, terminal, terminalStatus })
-    },
-    authority: {
-      dispatchIsFree: (terminalControl) =>
-        terminalListCliFacade.terminalDispatchOwnership(terminalControl).state === "none",
-      sessionClaimsTerminal: managedSessionClaimsResolvedTerminal,
-      terminalTokenMatches: (terminal, identity, token) =>
-        lifecycleBindingTokens({ terminal, identity }).includes(token),
-      hasUnresolvedTransition: (session) =>
-        terminalListCliFacade.managedSessionHasUnresolvedNativeTransition(storeDir, session),
-      blockingTurn: (sessionId) => {
-        const blocker = managedTurnsForSession(storeDir, sessionId)
-          .find((turn) => SESSION_SEND_BLOCKING_STATUSES.has(turn.status));
-        return blocker
-          ? { turnId: turnIdForConversation(blocker), status: blocker.status }
-          : undefined;
-      },
-      conflictKind: (session, terminal, identity) =>
-        managedBindingConflictKindForResolvedTerminal({
-          storeDir, session, terminal, identity
-        })
-    },
-    now: () => cliNow().toISOString(),
-    present: (result) => {
-      runtimeLog("info", "managed_binding_reconciled", {
-        terminal_id: result.terminal.conversationId,
-        terminal_target: result.terminal.terminalControl.target,
-        session_id: result.detached.session_id,
-        binding_id: result.detached.binding?.binding_id,
-        previous_revision: expectedSessionRevision,
-        revision: result.detached.revision,
-        conflict_kind: result.conflictKind,
-        terminal_input_sent: false
-      });
-      printJson({
-        status: "reconciled",
-        outcome: "detached_conflicting_binding",
-        conflict_kind: result.conflictKind,
-        terminal_id: result.terminal.conversationId,
-        session_id: result.detached.session_id,
-        binding_id: result.detached.binding?.binding_id,
-        session_revision: result.detached.revision,
-        terminal_input_sent: false,
-        turn_created: false,
-        refresh_required: true
-      });
-    }
-  });
-}
-
-type NativeThreadTransitionOperation =
-  | { kind: "new_thread"; requireRestorableOrigin: boolean }
-  | {
-      kind: "resume_thread";
-      nativeThreadId: string;
-      selectionSnapshot?: NativeThreadResumeSnapshot;
-    };
-
-async function freshLifecycleRecoveryTerminal(
-  scopes: CanonicalMutationScopes,
-  resources: CanonicalMutationResources,
-  options: Record<string, any>,
-  capturedTerminal: ResolvedTerminalConversation
-): Promise<Readonly<{
-  terminal: ResolvedTerminalConversation;
-  storeDir: string;
-}>> {
-  const active = authenticateLifecycleRecoveryResources(scopes, resources);
-  const terminal = await createTerminalAgentBridge(options).resolveStoredTerminal(
-    capturedTerminal.agent,
-    capturedTerminal.pid,
-    active.terminalControl,
-    { pid: capturedTerminal.pid }
-  );
-  assertSameNativeInspectionTerminal(
-    capturedTerminal,
-    terminal,
-    "while waiting for lifecycle recovery"
-  );
-  if (
-    !terminalControlsShareIncarnation(
-      active.terminalControl,
-      terminal.terminalControl
-    )
-  ) {
-    throw new Error(
-      "terminal process incarnation changed while waiting for lifecycle recovery"
-    );
-  }
-  return { terminal, storeDir: active.storeDir };
-}
-
-function nativeThreadLifecycleRecoveryPorts({
-  options,
-  terminal,
-  storeDir
-}: {
-  options: Record<string, any>;
-  terminal: ResolvedTerminalConversation;
-  storeDir: string;
-}): NativeThreadLifecycleRecoveryPorts {
-  const scoped = <Args extends unknown[], Result>(operation: (
-    freshControl: TerminalControlRef,
-    canonicalStoreDir: string,
-    ...args: Args
-  ) => Result) => nativeThreadTransitionResourceBoundOperation({
-    freshTerminal: terminal.terminalControl,
-    capturedStoreDir: storeDir
-  }, operation);
-  const scopedStore = <Args extends unknown[], Result>(operation: (
-    canonicalStoreDir: string,
-    ...args: Args
-  ) => Result) => scoped((
-    _freshControl,
-    canonicalStoreDir,
-    ...args: Args
-  ) => operation(canonicalStoreDir, ...args));
-  const freshTerminal = (freshControl: TerminalControlRef) => ({
-    ...terminal,
-    terminalControl: freshControl
-  });
-  const canonicalOptions = (canonicalStoreDir: string) =>
-    Object.freeze({ ...options, storeDir: canonicalStoreDir });
-  const deferredRecoveryRoute = scoped((
-    freshControl,
-    canonicalStoreDir
-  ) => ({ freshControl, canonicalStoreDir }));
-  const recoveryProbe = createNativeThreadLifecycleRecoveryProbeAdapter({
-    agent: terminal.agent,
-    lifecycle: terminal.adapter,
-    createBridge: (canonicalStoreDir) =>
-      createTerminalAgentBridge(canonicalOptions(canonicalStoreDir)),
-    runtime: (freshControl, context) => lifecycleRecoveryRuntime(
-      terminalRuntimeForLiveIdentity({
-        terminal: freshTerminal(freshControl),
-        expectedEmptyNativeSession: context.kind === "codex_recovery",
-        physicalOnly: context.kind === "physical"
-      }),
-      context
-    ),
-    loadClaudeRows: (canonicalStoreDir) => loadClaudeAgentRows(
-      canonicalOptions(canonicalStoreDir),
-      { required: true }
-    )
-  });
-  const ledgerDocument = (
-    freshControl: TerminalControlRef,
-    canonicalStoreDir: string,
-    transition: NativeThreadTransition,
-    phase: Parameters<typeof lifecycleLedger>[2]
-  ) => lifecycleLedger(
-    transition,
-    canonicalStoreDir,
-    phase.phase === "rebuild"
-      ? { ...phase, control: freshControl }
-      : phase
-  );
-  return {
-    authority: {
-      bind: scoped((freshControl) => ({ terminalControl: freshControl }))
-    },
-    persistence: {
-      listNativeThreadTransitions: scopedStore(listNativeThreadTransitions),
-      loadManagedSession: scopedStore(loadManagedSession),
-      tryLoadManagedSession: scopedStore(tryLoadManagedSession),
-      loadNativeThreadTransition: scopedStore(loadNativeThreadTransition),
-      saveManagedSession: scopedStore(saveManagedSession),
-      saveNativeThreadTransition: scopedStore(saveNativeThreadTransition),
-      commitVerified: scopedStore(commitVerifiedLifecycleTransition),
-      loadLedger: scoped((freshControl) =>
-        loadTerminalBridgeDispatchLedger(freshControl)),
-      buildLedger: scoped((
-        freshControl,
-        canonicalStoreDir,
-        transition,
-        phase
-      ) => ledgerDocument(
-        freshControl,
-        canonicalStoreDir,
-        transition,
-        phase
-      )),
-      saveLedger: scoped((
-        freshControl,
-        canonicalStoreDir,
-        transition,
-        phase,
-        expectation
-      ) => {
-        const ledger = ledgerDocument(
-          freshControl,
-          canonicalStoreDir,
-          transition,
-          phase
-        );
-        if (ledger.store_dir !== canonicalStoreDir) {
-          throw new Error(
-            "lifecycle recovery ledger Store differs from its writer capability"
-          );
-        }
-        saveLifecycleTerminalDispatchLedger(
-          freshControl,
-          ledger,
-          expectation
-        );
-      }),
-      saveFailClosedLedger: scoped((
-        freshControl,
-        _canonicalStoreDir,
-        ledger,
-        transitionId,
-        now,
-        reason
-      ) => saveLifecycleTerminalDispatchLedger(freshControl, {
-        ...ledger,
-        kind: "lifecycle",
-        generation_id: transitionId,
-        transition_id: transitionId,
-        status: "uncertain",
-        uncertain_at: now,
-        reason: reason.slice(0, 2000)
-      }, { expectedTransitionId: transitionId }))
-    },
-    terminal: {
-      recoverDeferred: (scopes, resources) => {
-        const route = deferredRecoveryRoute(scopes, resources);
-        return recoverDeferredCodexForegroundTransferWhileWriterLease({
-          options: canonicalOptions(route.canonicalStoreDir),
-          terminal: freshTerminal(route.freshControl),
-          storeDir: route.canonicalStoreDir,
-          scopes,
-          resources
-        });
-      },
-      sameTerminalIncarnation: scoped((freshControl, _storeDir, right) =>
-        terminalControlsShareIncarnation(freshControl, right)),
-      aliasMatches: scoped((
-        freshControl,
-        _storeDir,
-        storedTerminalId,
-        storedControl,
-        currentTerminalId
-      ) => terminalControlAliasMatches(
-        storedTerminalId,
-        storedControl,
-        currentTerminalId,
-        freshControl
-      )),
-      workspaceMatches: scoped((freshControl, _storeDir, expected) =>
-        matchesConfiguredWorkspace(expected, freshControl.currentPath)),
-      resolveIdentity: scoped((
-        freshControl,
-        canonicalStoreDir,
-        preferredSessionId,
-        companions: LifecycleRecoveryCodexCompanionSet
-      ) => resolveCurrentNativeAgentSessionIdentity({
-        options: canonicalOptions(canonicalStoreDir),
-        agent: terminal.agent,
-        pid: terminal.pid,
-        cwd: freshControl.currentPath,
-        preferredSessionId,
-        allowedCompanionIdentity: companions.primary,
-        allowedAdditionalIdentities: companions.additional
-      })),
-      observeExternalHandoff: scoped((
-        freshControl,
-        canonicalStoreDir,
-        sourceSession,
-        resolvedIdentity
-      ) => observedExternalHandoffIdentity({
-        options: canonicalOptions(canonicalStoreDir),
-        terminal: freshTerminal(freshControl),
-        sourceSession,
-        resolvedIdentity
-      }).then((observed) => observed.identity)),
-      assertExclusive: scoped((
-        freshControl,
-        canonicalStoreDir,
-        nativeThreadId,
-        excludedManagedSessionId
-      ) => assertNativeThreadHasExclusiveOwnership({
-        options: canonicalOptions(canonicalStoreDir),
-        agent: terminal.agent,
-        currentPid: terminal.pid,
-        nativeThreadId,
-        storeDir: canonicalStoreDir,
-        terminalControl: freshControl,
-        excludedManagedSessionId
-      })),
-      assertTargetExclusive: scoped((
-        freshControl,
-        canonicalStoreDir,
-        transition
-      ) => assertLifecycleTargetHasExclusiveOwnership({
-        options: canonicalOptions(canonicalStoreDir),
-        terminal: freshTerminal(freshControl),
-        transition,
-        storeDir: canonicalStoreDir
-      })),
-      exactIdentity: scoped((freshControl, _storeDir, identity) =>
-        exactLifecycleProcessIdentity(freshTerminal(freshControl), identity)),
-      isProcessAlive: scoped((_freshControl, _storeDir, pid) =>
-        isProcessAlive(pid)),
-      recordedStoreMatches: scoped((
-        _freshControl,
-        canonicalStoreDir,
-        recordedStoreDir
-      ) => path.resolve(recordedStoreDir) === canonicalStoreDir),
-      recordMatchesControl: scoped((freshControl, _storeDir, ledger) =>
-        terminalDispatchRecordMatchesControl(ledger, freshControl)),
-      runningVersion: scoped((_freshControl, canonicalStoreDir) =>
-        agentVersionForRunningProcess(
-          terminal.agent,
-          terminal.pid,
-          canonicalOptions(canonicalStoreDir)
-        )),
-      probeThreadLifecycle: scoped((_freshControl, _storeDir, version) =>
-        recoveryProbe.probe(version)),
-      planThreadLifecycle: scoped((_freshControl, _storeDir, operation, facts) =>
-        recoveryProbe.plan(operation, facts)),
-      observeThreadLifecycle: scoped((freshControl, canonicalStoreDir, request) =>
-        recoveryProbe.observe(freshControl, canonicalStoreDir, request)),
-      prepareProbeBridge: scoped((_freshControl, canonicalStoreDir) =>
-        recoveryProbe.prepare(canonicalStoreDir)),
-      status: scoped((freshControl, _storeDir, context, scrollbackLines) =>
-        recoveryProbe.status(freshControl, context, scrollbackLines)),
-      clearInputLine: scoped((freshControl, _storeDir, context) =>
-        recoveryProbe.clearInputLine(freshControl, context)),
-      submitCodexStatusProbe: scoped((
-        freshControl,
-        _storeDir,
-        version,
-        context
-      ) => recoveryProbe.submitCodexStatusProbe(
-        freshControl,
-        version,
-        context
-      )),
-      assertResumedCodexCandidate: scoped((
-        _freshControl,
-        _storeDir,
-        identity,
-        expected
-      ) => assertResumedCodexRolloutMatchesCandidate(identity, expected)),
-      codexKnownRoots: scoped((
-        freshControl,
-        canonicalStoreDir,
-        transition
-      ) => codexKnownRootSetForLifecycleTransition({
-        storeDir: canonicalStoreDir,
-        terminal: freshTerminal(freshControl),
-        transition
-      })),
-      codexCompanionsExcludingPreferred: scoped((
-        _freshControl,
-        _storeDir,
-        roots,
-        preferredSessionId
-      ) => codexCompanionsExcludingPreferred(roots, preferredSessionId)),
-      codexProcessBirth: scoped(() =>
-        codexProcessBirthForLifecycle(terminal.pid)),
-      nativeIdentityMatches: scoped((
-        _freshControl,
-        _storeDir,
-        identity,
-        expected
-      ) => nativeIdentityMatchesCodexPreMaterialization(identity, expected))
-    },
-    runtime: {
-      now: cliNow,
-      sleep: cliSleep
-    }
-  };
-}
-
-async function recoverLifecycleFenceBeforeMutationScoped(
-  scopes: CanonicalMutationScopes,
-  resources: CanonicalMutationResources,
-  options: Record<string, any>,
-  capturedTerminal: ResolvedTerminalConversation
-): Promise<void> {
-  const fresh = await freshLifecycleRecoveryTerminal(
-    scopes,
-    resources,
-    options,
-    capturedTerminal
-  );
-  const serviceTerminal = lifecycleRecoveryTerminalFacts(fresh.terminal);
-  await recoverLifecycleFenceBeforeMutationService(
-    { terminal: serviceTerminal },
-    scopes,
-    resources,
-    nativeThreadLifecycleRecoveryPorts({
-      options,
-      terminal: fresh.terminal,
-      storeDir: fresh.storeDir
-    })
-  );
-}
-
-async function reconcileLifecycleDispatchLedgerScoped(
-  scopes: CanonicalMutationScopes,
-  resources: CanonicalMutationResources,
-  options: Record<string, any>,
-  capturedTerminal: ResolvedTerminalConversation,
-  ledger: TerminalDispatchLedgerDocument,
-  authority: NativeThreadLifecycleRecoveryAuthority = { kind: "automatic" }
-): Promise<TerminalDispatchLedgerDocument> {
-  const fresh = await freshLifecycleRecoveryTerminal(
-    scopes,
-    resources,
-    options,
-    capturedTerminal
-  );
-  const serviceTerminal = lifecycleRecoveryTerminalFacts(fresh.terminal);
-  return reconcileLifecycleDispatchLedgerService(
-    { terminal: serviceTerminal, ledger, authority },
-    scopes,
-    resources,
-    nativeThreadLifecycleRecoveryPorts({
-      options,
-      terminal: fresh.terminal,
-      storeDir: fresh.storeDir
-    })
-  );
-}
-
-function nativeThreadTransitionSettlementPorts({
-  options,
-  operation,
-  terminal,
-  storeDir,
-  targetSession,
-  targetSessionId,
-  sourceBefore,
-  beforeIdentity,
-  verificationPorts
-}: {
-  options: Record<string, any>;
-  operation: NativeThreadTransitionOperation;
-  terminal: ResolvedTerminalConversation;
-  storeDir: string;
-  targetSession?: ManagedSessionState;
-  targetSessionId: string;
-  sourceBefore?: ManagedSessionState;
-  beforeIdentity: NativeAgentSessionIdentity;
-  verificationPorts: NativeThreadVerificationAdapterPorts;
-}): NativeThreadTransitionSettlementPorts {
-  const scoped = <Args extends unknown[], Result>(operation: (
-    freshTerminal: TerminalControlRef,
-    canonicalStoreDir: string,
-    ...args: Args
-  ) => Result) => nativeThreadTransitionResourceBoundOperation({
-    freshTerminal: terminal.terminalControl,
-    capturedStoreDir: storeDir
-  }, operation);
-  return {
-    persistence: {
-      saveLedger: scoped((
-        freshTerminal,
-        canonicalStoreDir,
-        value,
-        phase,
-        expectation
-      ) => {
-        const ledger = lifecycleLedger(value, canonicalStoreDir, phase);
-        if (ledger.store_dir !== canonicalStoreDir) {
-          throw new Error(
-            "lifecycle dispatch ledger Store differs from its writer capability"
-          );
-        }
-        saveLifecycleTerminalDispatchLedger(
-          freshTerminal,
-          ledger,
-          expectation
-        );
-      }),
-      loadTransition: scoped((_freshTerminal, canonicalStoreDir, id) =>
-        loadNativeThreadTransition(canonicalStoreDir, id)),
-      saveTransition: scoped((
-        _freshTerminal,
-        canonicalStoreDir,
-        value,
-        expectation
-      ) => saveNativeThreadTransition(
-        canonicalStoreDir,
-        value,
-        expectation
-      )),
-      saveSession: scoped((
-        _freshTerminal,
-        canonicalStoreDir,
-        value,
-        expectation
-      ) => saveManagedSession(canonicalStoreDir, value, expectation)),
-      commitVerified: scoped((
-        _freshTerminal,
-        canonicalStoreDir,
-        value,
-        verifiedAt
-      ) => commitVerifiedLifecycleTransition(
-        canonicalStoreDir,
-        value,
-        verifiedAt
-      ))
-    },
-    effects: {
-      finalizeIdentity: (observed, durableTransition, verifiedAt) => {
-        const identity = exactLifecycleProcessIdentity(terminal, observed);
-        if (
-          terminal.agent === "codex" &&
-          operation.kind === "resume_thread"
-        ) {
-          assertResumedCodexRolloutMatchesCandidate(
-            identity,
-            durableTransition.target_candidate_file_identity
-          );
-        }
-        return {
-          identity,
-          binding: terminalBindingFrom({
-            terminalId: terminal.conversationId,
-            terminalControl: terminal.terminalControl,
-            pid: terminal.pid,
-            nativeThreadId: identity.sessionId,
-            processUuid: identity.processUuid,
-            processBirth: identity.processBirth,
-            rollout: identity.rollout,
-            evidence: identity.evidence,
-            generation: (targetSession?.binding?.generation ?? 0) + 1,
-            now: verifiedAt
-          })
-        };
-      },
-      assertTargetOwnership: scoped((
-        _freshTerminal,
-        canonicalStoreDir,
-        durableTransition
-      ) =>
-        assertLifecycleTargetHasExclusiveOwnership({
-          options,
-          terminal,
-          transition: durableTransition,
-          storeDir: canonicalStoreDir
-        })),
-      targetConflictWorkspace: () =>
-        terminal.terminalControl.currentPath ?? cliCwd()
-    },
-    runtime: {
-      now: cliNow,
-      crashAfterVerified: () => {
-        if (cliEnv().AKK_TEST_EXIT_AFTER_LIFECYCLE_VERIFIED === "1") {
-          cliExit(87);
-        }
-      },
-      injectTargetConflict: () =>
-        cliEnv().AKK_TEST_INJECT_LIFECYCLE_TARGET_CONFLICT === "1",
-      errorProvesInputNotStarted: (error) =>
-        error instanceof TerminalInputNotStartedError,
-      summarizeError: textSummary
-    },
-    verification: scoped((_freshTerminal, _canonicalStoreDir, request) =>
-      verifyNativeThreadTransitionWithRuntime(
-        request,
-        terminal,
-        verificationPorts
-      )),
-    present: (result) => {
-      if (result.status === "committed") {
-        printJson({
-          status: "committed",
-          transition_id: result.transition.transition_id,
-          operation: operation.kind,
-          terminal_id: terminal.conversationId,
-          previous_session_id: sourceBefore?.session_id ?? null,
-          session_id: targetSessionId,
-          previous_native_thread_id:
-            beforeIdentity.sessionId ??
-            sourceBefore?.binding?.native_thread_id ??
-            null,
-          native_thread_id: result.identity.sessionId,
-          binding_id: result.binding.binding_id,
-          binding_generation: result.binding.generation,
-          binding_token: managedSessionBindingToken(result.committedTarget),
-          turn_created: false
-        });
-        return;
-      }
-      printJson({
-        status: result.status,
-        transition_id: result.transitionId,
-        operation: operation.kind,
-        terminal_id: terminal.conversationId,
-        do_not_retry: true,
-        turn_created: false,
-        reason: result.reason
-      });
-    }
-  };
-}
-
-async function runNativeThreadTransition(
-  options: Record<string, any>,
-  operation: NativeThreadTransitionOperation
-  ) {
-  const initiallyResolved = await resolveLifecycleTerminal(options);
-  const storeDir = storeDirFromOptions(options);
-  return withCanonicalMutationLocks(terminalWriterMutationLocks(
-    storeDir, initiallyResolved.terminalControl
-  ), async (scopes, resources) => {
-      const terminal = await resolveLifecycleTerminal(options);
-      if (
-        terminal.pid !== initiallyResolved.pid ||
-        !terminalControlsShareIncarnation(
-          terminal.terminalControl,
-          initiallyResolved.terminalControl
-        )
-      ) {
-        throw new Error(
-          "terminal identity changed while waiting for lifecycle control; refresh list"
-        );
-      }
-      if (operation.kind === "resume_thread" && operation.selectionSnapshot) {
-        assertResumeSnapshotNotExpired(operation.selectionSnapshot, cliNowMs);
-        assertResumeSnapshotMatchesTerminal(
-          operation.selectionSnapshot,
-          terminal,
-          cliCwd
-        );
-        assertResumeSnapshotActionFingerprint(
-          operation.selectionSnapshot,
-          loadTerminalBridgeDispatchLedger(terminal.terminalControl)
-        );
-      }
-      await mutationDispatchLedger.beforeMutation(
-        scopes, resources, options, terminal
-      );
-      if (operation.kind === "resume_thread" && operation.selectionSnapshot) {
-        // Recovery may resolve or otherwise rewrite a durable dispatch fence.
-        // A snapshot created before that mutation is stale even when the
-        // binding and candidate files themselves did not change.
-        assertResumeSnapshotActionFingerprint(
-          operation.selectionSnapshot,
-          loadTerminalBridgeDispatchLedger(terminal.terminalControl)
-        );
-      }
-      const snapshot = await currentLifecycleSnapshot(
-        options,
-        terminal,
-        { materialize: true }
-      );
-      const expectedToken = required(
-        stringValue(options.expectedBindingToken),
-        "--expected-binding-token is required"
-      );
-      const verificationPorts = nativeThreadVerificationAdapterPorts(
-        options,
-        terminal
-      );
-      const selectionSnapshot = operation.kind === "resume_thread"
-        ? operation.selectionSnapshot
-        : undefined;
-      const preparedVerification = await prepareNativeThreadVerification({
-        operation,
-        expectedBindingToken: expectedToken,
-        bindingTokens: snapshot.bindingTokens,
-        capabilities: snapshot.capabilities,
-        beforeIdentity: snapshot.identity,
-        physicalBeforeIdentity: snapshot.runtimeIdentity,
-        allowedCompanionIdentity: snapshot.codexCompanions.primary,
-        allowedAdditionalIdentities: snapshot.codexCompanions.additional
-      }, terminal, {
-        ...verificationPorts,
-        plan: () => nativeThreadLifecycleFacade.agentAdapter(
-          options,
-          terminal.agent
-        ).planThreadLifecycle?.(
-          operation,
-          snapshot.capabilities
-        ),
-        assertReady: (status) =>
-          assertTerminalLifecycleReady({ options, terminal, terminalStatus: status }),
-        ...(selectionSnapshot
-          ? {
-              revalidateSelectionSnapshot: async () => {
-                const candidates = await resumableNativeThreadCandidates({
-                  terminal,
-                  currentIdentity: snapshot.identity
-                }, nativeThreadLifecycleQueryPorts(options));
-                assertResumeSnapshotCandidates(
-                  selectionSnapshot,
-                  candidates
-                );
-              }
-            }
-          : {}),
-        finalizeIdentity: (identity) =>
-          exactLifecycleProcessIdentity(terminal, identity)
-      });
-      const {
-        bridge,
-        plan,
-        beforeIdentity,
-        beforeRuntime
-      } = preparedVerification;
-
-      const restorableOriginCandidateToken =
-        operation.kind === "new_thread" &&
-          operation.requireRestorableOrigin
-          ? await requireRestorableLifecycleOriginFromQuery({
-              terminal,
-              currentIdentity: beforeIdentity,
-              currentSession: snapshot.session,
-              agentVersion: required(
-                stringValue(snapshot.version),
-                "restorable origin requires the exact running agent version"
-              )
-            }, nativeThreadLifecycleQueryPorts({ ...options, storeDir }))
-          : undefined;
-
-      let candidates: NativeThreadCandidate[] = [];
-      let targetSession: ManagedSessionState | undefined;
-      let resumeCandidateToken:
-        | TerminalThreadLifecycleCandidateToken
-        | undefined;
-      if (operation.kind === "resume_thread") {
-        const expectedCandidateToken = required(
-          stringValue(options.candidateToken),
-          "--candidate-token is required"
-        );
-        if (beforeIdentity.sessionId === operation.nativeThreadId) {
-          printJson({
-            status: "already_active",
-            no_op: true,
-            terminal_id: terminal.conversationId,
-            session_id: snapshot.session?.session_id ?? null,
-            native_thread_id: operation.nativeThreadId,
-            binding_token: snapshot.bindingToken
-          });
-          return;
-        }
-        candidates = await resumableNativeThreadCandidates({
-          terminal,
-          currentIdentity: beforeIdentity
-        }, nativeThreadLifecycleQueryPorts(options));
-        if (operation.selectionSnapshot) {
-          // The Codex identity probe and other readiness checks above are
-          // asynchronous. Rebind the whole displayed snapshot, not only its
-          // selected UUID, after those checks and before any lifecycle state
-          // is persisted.
-          assertResumeSnapshotCandidates(
-            operation.selectionSnapshot,
-            candidates
-          );
-        }
-        const candidate = candidates.find((entry) =>
-          entry.native_thread_id === operation.nativeThreadId
-        );
-        const candidateDecision = decideResumeCandidateEligibility({
-          candidate,
-          expectedCandidateToken
-        });
-        if (candidateDecision.action === "reject") {
-          throw new Error(
-            candidateDecision.reason === "candidate_not_found"
-              ? `native thread ${operation.nativeThreadId} is not a verified same-workspace candidate`
-              : candidateDecision.reason === "candidate_not_resumable"
-                ? `native thread ${operation.nativeThreadId} cannot be resumed: ` +
-                  `${candidate?.unavailable_reason ?? "unavailable"}`
-                : "resume candidate changed after it was listed; refresh resumable threads and retry"
-          );
-        }
-        const eligibleCandidate = candidateDecision.candidate;
-        resumeCandidateToken = await revalidateNativeThreadCandidateFromQuery({
-          terminal,
-          nativeThreadId: operation.nativeThreadId,
-          encodedToken: expectedCandidateToken,
-          agentVersion: snapshot.version as string
-        }, nativeThreadLifecycleQueryPorts(options));
-        if (eligibleCandidate.managed_session_id) {
-          targetSession = tryLoadManagedSession(
-            storeDir,
-            eligibleCandidate.managed_session_id
-          );
-          const targetBlockers = managedTurnsForSession(
-            storeDir,
-            eligibleCandidate.managed_session_id
-          ).filter((turn) => SESSION_SEND_BLOCKING_STATUSES.has(turn.status));
-          const targetDecision = decideResumeTargetSession({
-            hasUnresolvedTurn: targetBlockers.length > 0,
-            loadedSession: targetSession,
-            boundOwnerConclusivelyInactive: Boolean(
-              targetBlockers.length === 0 && targetSession?.status === "bound" &&
-              managedSessionOwnerIsConclusivelyInactive({
-                session: targetSession,
-                terminal,
-                identity: beforeIdentity
-              })
-            )
-          });
-          if (
-            targetDecision.action === "reject" &&
-            targetDecision.reason === "unresolved_turn"
-          ) {
-            throw new Error(
-              `target Session ${eligibleCandidate.managed_session_id} has unresolved Turn ` +
-              `${turnIdForConversation(targetBlockers[0])}`
-            );
-          }
-          if (targetDecision.action === "reject") {
-            throw new Error(
-              `target Session ${eligibleCandidate.managed_session_id} is still bound to a live or unverifiable process`
-            );
-          }
-          if (
-            targetDecision.action === "detach_stale_binding" &&
-            targetSession
-          ) {
-            const detachedAt = cliNow().toISOString();
-            targetSession = saveManagedSession(storeDir, {
-              ...targetSession,
-              status: "detached",
-              detached_at: detachedAt,
-              updated_at: detachedAt
-            }, { expectedRevision: managedSessionRevision(targetSession) });
-          }
-        }
-      }
-
-      const now = cliNow();
-      const transitionId = createNativeThreadTransitionId();
-      const targetSessionId = targetSession?.session_id ??
-        createManagedSessionId(now);
-      const sourceBefore = snapshot.session;
-      const previousLedger = loadTerminalBridgeDispatchLedger(
-        terminal.terminalControl
-      );
-      let transition = prepareNativeThreadTransition({
-        transitionId,
-        operation,
-        terminalId: terminal.conversationId,
-        agent: terminal.agent,
-        workspace: terminal.terminalControl.currentPath ?? cliCwd(),
-        source: sourceBefore
-          ? {
-              state: sourceBefore,
-              revision: managedSessionRevision(sourceBefore)
-            }
-          : undefined,
-        targetSessionId,
-        target: targetSession
-          ? {
-              state: targetSession,
-              revision: managedSessionRevision(targetSession)
-            }
-          : undefined,
-        candidateFileIdentity:
-          terminal.agent === "codex" && operation.kind === "resume_thread"
-            ? codexCandidateFileIdentity(resumeCandidateToken)
-            : undefined,
-        beforeIdentity,
-        beforeProcessUuid: beforeIdentity.processUuid as string,
-        beforeBinding: snapshot.session?.binding,
-        adapterVersion: snapshot.version as string,
-        commandFingerprint: nativeThreadCommandFingerprint(
-          JSON.stringify(plan.steps)
-        ),
-        dispatcherPid: cliPid(),
-        preparedAt: now.toISOString()
-      });
-      transition = saveNativeThreadTransition(storeDir, transition, {
-        expectedRevision: null
-      });
-      saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
-        lifecycleLedger(transition, storeDir,
-          { phase: "command_prepared", previous: previousLedger }), {
-        expectedTransitionId: null
-      });
-
-      const settlementPorts = nativeThreadTransitionSettlementPorts({
-        options,
-        operation,
-        terminal,
-        storeDir,
-        targetSession,
-        targetSessionId,
-        sourceBefore,
-        beforeIdentity,
-        verificationPorts
-      });
-
-      let inputStarted = false;
-      let sourceTransitioning: ManagedSessionState | undefined;
-      try {
-        if (
-          cliEnv().AKK_TEST_EXIT_AFTER_LIFECYCLE_PREPARED === "1"
-        ) {
-          cliExit(86);
-        }
-        if (sourceBefore) {
-          sourceTransitioning = saveManagedSession(storeDir, {
-            ...sourceBefore,
-            status: "transitioning",
-            last_transition_id: transitionId,
-            updated_at: now.toISOString()
-          }, { expectedRevision: managedSessionRevision(sourceBefore) });
-        }
-        const dispatchingAt = cliNow().toISOString();
-        transition = reduceNativeThreadTransitionPhase(transition, {
-          type: "dispatch_started",
-          at: dispatchingAt
-        });
-        transition = saveNativeThreadTransition(storeDir, transition, {
-          expectedRevision: nativeThreadTransitionRevision(transition)
-        });
-        saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
-          lifecycleLedger(transition, storeDir,
-            { phase: "command_dispatching", previous: previousLedger }), {
-          expectedTransitionId: transitionId,
-          expectedStatus: "prepared"
-        });
-        const transitionStep = plan.steps.find((step) =>
-          step.kind === "transition"
-        );
-        if (!transitionStep || transitionStep.effect !== "thread_transition") {
-          throw new Error(
-            "the adapter lifecycle plan has no exact transition step"
-          );
-        }
-        if (restorableOriginCandidateToken) {
-          assertRestorableOriginSessionRelationshipFromQuery({
-            agent: terminal.agent,
-            nativeThreadId: beforeIdentity.sessionId.toLowerCase(),
-            currentSession: snapshot.session
-          }, nativeThreadLifecycleQueryPorts({ ...options, storeDir }));
-          await assertNativeThreadHasExclusiveOwnership({
-            options,
-            agent: terminal.agent,
-            currentPid: terminal.pid,
-            nativeThreadId: beforeIdentity.sessionId.toLowerCase(),
-            storeDir,
-            terminalControl: terminal.terminalControl,
-            excludedManagedSessionId: snapshot.session?.session_id
-          });
-          await revalidateNativeThreadCandidateFromQuery({
-            terminal,
-            nativeThreadId: beforeIdentity.sessionId.toLowerCase(),
-            encodedToken: restorableOriginCandidateToken,
-            agentVersion: required(
-              stringValue(snapshot.version),
-              "restorable origin requires the exact running agent version"
-            )
-          }, nativeThreadLifecycleQueryPorts({ ...options, storeDir }));
-        }
-        if (terminal.agent === "codex") {
-          // Candidate discovery and ownership revalidation can take long
-          // enough for a human to start typing after the /status probe. Keep
-          // this check immediately adjacent to the terminal mutation.
-          try {
-            await assertCodexComposerReadyForAutomatedInput({
-              options,
-              terminalControl: terminal.terminalControl
-            });
-          } catch (error) {
-            throw new TerminalInputNotStartedError(
-              error instanceof Error ? error.message : String(error),
-              { cause: error }
-            );
-          }
-        }
-        if (operation.kind === "resume_thread" && operation.selectionSnapshot) {
-          assertResumeSnapshotNotExpired(
-            operation.selectionSnapshot,
-            cliNowMs
-          );
-        }
-        await bridge.send(
-          terminal.agent,
-          terminal.terminalControl,
-          transitionStep.command,
-          {
-            runtime: beforeRuntime,
-            onTransportStage(event) {
-              if (event.stage === "text_injected") {
-                inputStarted = true;
-              }
-            }
-          }
-        );
-        const submittedAt = cliNow().toISOString();
-        transition = reduceNativeThreadTransitionPhase(transition, {
-          type: "submission_recorded",
-          at: submittedAt
-        });
-        transition = saveNativeThreadTransition(storeDir, transition, {
-          expectedRevision: nativeThreadTransitionRevision(transition)
-        });
-        saveLifecycleTerminalDispatchLedger(terminal.terminalControl,
-          lifecycleLedger(transition, storeDir,
-            { phase: "command_submitted", previous: previousLedger }), {
-          expectedTransitionId: transitionId,
-          expectedStatus: "dispatching"
-        });
-
-        await settleVerifiedNativeThreadTransition({
-          transition,
-          verification: {
-            operation,
-            plan,
-            beforeIdentity,
-            physicalBeforeIdentity: snapshot.runtimeIdentity,
-            allowedCompanionIdentity: snapshot.codexCompanions.primary,
-            allowedAdditionalIdentities:
-              snapshot.codexCompanions.additional,
-            initialScreenDigest: preparedVerification.initialScreenDigest
-          }
-        }, scopes, resources, settlementPorts);
-      } catch (error) {
-        await settleFailedNativeThreadTransition({
-          transitionId,
-          inputStarted,
-          sourceBefore,
-          sourceTransitioning
-        }, error, scopes, resources, settlementPorts);
-      }
-  });
-}
 
 async function runStatus(options) {
   const explicitStatePath = options.state
@@ -5004,17 +3608,6 @@ function positiveMinutes(value, optionName: string): number {
   return parsed;
 }
 
-function positiveSafeInteger(value: unknown, optionName: string): number {
-  if (typeof value !== "string" || !/^[1-9][0-9]*$/u.test(value)) {
-    throw new Error(`${optionName} must be a positive integer`);
-  }
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed)) {
-    throw new Error(`${optionName} must be a positive safe integer`);
-  }
-  return parsed;
-}
-
 async function runCancel(options) {
   const terminalConversation = await resolveTerminalConversationFromOptions(options);
   if (terminalConversation) {
@@ -5321,7 +3914,7 @@ async function runObservedHandoffClose({
             "handoff target Session changed after it was listed; refresh AKK list"
           );
         }
-        await assertNativeThreadHasExclusiveOwnership({
+        await nativeThreadLifecycleFacade.assertExclusive({
           options,
           agent: terminal.agent,
           currentPid: terminal.pid,
@@ -6604,58 +5197,6 @@ function tryAcquireTerminalBridgeMonitorLock(statePath: string, terminalMessageI
   }
 }
 
-function saveLifecycleTerminalDispatchLedger(
-  terminalControl: TerminalControlRef,
-  ledger: Record<string, unknown>,
-  options: {
-    expectedTransitionId: string | null;
-    expectedStatus?: string;
-  }
-): void {
-  if (
-    ledger.kind !== "lifecycle" ||
-    !stringValue(ledger.transition_id) ||
-    stringValue(ledger.generation_id) !== stringValue(ledger.transition_id)
-  ) {
-    throw new Error("lifecycle dispatch ledger requires one transition identity");
-  }
-  const current = loadTerminalBridgeDispatchLedger(terminalControl);
-  if (options.expectedTransitionId === null) {
-    if (current && current.status !== "resolved") {
-      const releasedOrdinaryOwner = current.kind !== "lifecycle"
-        ? loadTerminalDispatchLedgerOwner(current)
-        : undefined;
-      if (
-        !releasedOrdinaryOwner ||
-        !TERMINAL_DISPATCH_RELEASE_STATUSES.has(releasedOrdinaryOwner.status)
-      ) {
-        throw new Error(
-          `terminal ${terminalControl.target} dispatch generation changed before lifecycle prepare`
-        );
-      }
-    }
-  } else if (
-    current?.kind !== "lifecycle" ||
-    stringValue(current.transition_id) !== options.expectedTransitionId ||
-    stringValue(current.generation_id) !== options.expectedTransitionId
-  ) {
-    throw new Error(
-      `terminal ${terminalControl.target} lifecycle transition identity changed; ` +
-      "refresh list before recovery"
-    );
-  }
-  if (
-    options.expectedStatus !== undefined &&
-    String(current?.status) !== options.expectedStatus
-  ) {
-    throw new Error(
-      `terminal ${terminalControl.target} lifecycle status changed from ` +
-      `${options.expectedStatus} to ${String(current?.status)}`
-    );
-  }
-  saveTerminalBridgeDispatchLedger(terminalControl, ledger);
-}
-
 function loadTerminalDispatchLedgerOwner(
   ledger: Record<string, any>
 ): Conversation | undefined {
@@ -7833,7 +6374,8 @@ const terminalCommandCliFacade = createTerminalCommandCliFacade({
     assertManagedSessionCanStartTurn,
     assertManagedTerminalDispatchOwner,
     assertNativeAgentIdentityForTurn,
-    assertNativeThreadHasExclusiveOwnership,
+    assertNativeThreadHasExclusiveOwnership: (input) =>
+      nativeThreadLifecycleFacade.assertExclusive(input),
     assertObservedHandoffTransportBoundary,
     assertSafeAbortedTerminalRetryBinding,
     assertSafeTerminalSend,

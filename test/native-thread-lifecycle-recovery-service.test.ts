@@ -512,24 +512,27 @@ test("lifecycle recovery keeps raw terminal capability outside the service", () 
   assert.equal(statuses.length, 2);
   assert.ok(observations.every((position, index) => position < statuses[index]));
 
-  const core = fs.readFileSync("src/cli-core.ts", "utf8");
+  const application = fs.readFileSync(
+    "src/native-thread-transition-application.ts",
+    "utf8"
+  );
   assert.equal(
-    [...core.matchAll(
+    [...application.matchAll(
       /const serviceTerminal = lifecycleRecoveryTerminalFacts\(fresh\.terminal\);/gu
     )].length,
     2
   );
   assert.equal(
-    [...core.matchAll(/\{ terminal: serviceTerminal(?:,| \})/gu)].length,
+    [...application.matchAll(/\{ terminal: serviceTerminal(?:,| \})/gu)].length,
     2
   );
   assert.doesNotMatch(
-    core,
+    application,
     /(?:recoverLifecycleFenceBeforeMutationService|reconcileLifecycleDispatchLedgerService)\(\s*\{\s*terminal:\s*fresh\.terminal/gu
   );
 });
 
-test("core-side lifecycle request projection strips the runtime adapter", () => {
+test("application-side lifecycle request projection strips the runtime adapter", () => {
   const projected = lifecycleRecoveryTerminalFacts({
     ...TERMINAL,
     legacy: false,
