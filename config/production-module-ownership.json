@@ -2,8 +2,8 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 6483,
-    "production_physical_loc": 90578,
+    "cli_core_max_physical_loc": 6212,
+    "production_physical_loc": 90711,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -246,6 +246,12 @@
     },
     "terminal-control": {
       "selection": "full"
+    },
+    "terminal-delegate-adapter": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/delegate-cli.test.ts"
+      ]
     },
     "terminal-dispatch-abort": {
       "selection": "targeted",
@@ -705,6 +711,10 @@
     {
       "path": "src/terminal-control-ref.ts",
       "owner": "terminal-control"
+    },
+    {
+      "path": "src/terminal-delegate-cli-adapter.ts",
+      "owner": "terminal-delegate-adapter"
     },
     {
       "path": "src/terminal-dispatch-abort.ts",

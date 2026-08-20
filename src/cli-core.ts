@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -25,7 +25,6 @@ import {
   createMessage,
   effectiveTurnStatus,
   executorForConversation,
-  resolveExecutor,
   sessionIdForConversation,
   turnIdForConversation,
   type Conversation,
@@ -110,6 +109,8 @@ import {
 } from "./terminal-acceptance-cli-adapter.js";
 import { createTerminalHandoffCliFacade } from
   "./terminal-handoff-cli-adapter.js";
+import { createTerminalDelegateCliFacade } from
+  "./terminal-delegate-cli-adapter.js";
 import {
   createNativeThreadLifecycleCliAdapter
 } from "./native-thread-lifecycle-cli-adapter.js";
@@ -126,7 +127,6 @@ import {
   type TerminalNativeIdentity as NativeAgentSessionIdentity
 } from "./terminal-binding-authority.js";
 import {
-  isCompleteNativeRollout,
   terminalControlAliasMatches,
   terminalControlsShareIncarnation
 } from "./terminal-authority-policy.js";
@@ -185,8 +185,7 @@ import {
 import * as deferredRecoveryAdapter from
   "./deferred-foreground-recovery-cli-adapter.js";
 import {
-  migratedTerminalBindingMatches,
-  terminalSubmissionPayload
+  migratedTerminalBindingMatches
 } from "./terminal-dispatch-execution.js";
 import * as dispatchReceipt from "./terminal-dispatch-receipt.js";
 import {
@@ -520,7 +519,7 @@ async function dispatchCliCommand(commandName, options) {
   } else if (commandName === "version" || commandName === "--version" || commandName === "-v") {
     printVersion();
   } else if (commandName === "delegate") {
-    await runDelegate(options);
+    await terminalDelegateCliFacade.runDelegate(options);
   } else if (commandName === "list") {
     await terminalListCliFacade.runList(options);
   } else if (commandName === "status") {
@@ -692,293 +691,6 @@ function createTerminalAgentBridge(
   return terminalRuntime(options).createBridge(terminalProvider, registry);
 }
 
-function stableDelegateTerminalRoute({
-  options,
-  request,
-  workspace,
-  requestedAgent
-}: {
-  options: Record<string, any>;
-  request: string;
-  workspace?: string;
-  requestedAgent?: ExecutorKind;
-}):
-  | { kind: "terminal"; conversationId: string; workspace: string }
-  | { kind: "session"; sessionId: string; workspace: string }
-  | undefined {
-  const messageId = stringValue(options.messageId);
-  if (!messageId) {
-    return undefined;
-  }
-  const storeDir = path.resolve(storeDirFromOptions(options));
-  const requestHash = terminalBridgeRequestFingerprint(
-    terminalSubmissionPayload(request)
-  );
-  const bodyHash = createHash("sha256").update(request).digest("hex");
-  const requestedOpenClawSession = stringValue(options.openclawSession);
-  const matches = listConversations(storeDir).flatMap((owner) =>
-    terminalBridgeSubmissionReceipts(owner)
-      .filter((receipt) => stringValue(receipt.message_id) === messageId)
-      .map((receipt) => ({ owner, receipt }))
-  );
-  if (matches.length === 0) {
-    return undefined;
-  }
-  const routed = matches.map(({ owner, receipt }) => {
-    const ownerStoreDir = managedSessionStoreDirForConversation(owner);
-    const takeover = isRecord(owner.native_session_takeover)
-      ? owner.native_session_takeover
-      : undefined;
-    const terminalControl = terminalControlFromTakeover(takeover);
-    const conversationId = stringValue(takeover?.native_session_id);
-    let eventMessages: Record<string, any>[] = [];
-    const eventLogPath = stringValue(owner.event_log_path);
-    if (eventLogPath) {
-      try {
-        eventMessages = readNdjsonLog(eventLogPath)
-          .filter((event) =>
-            isRecord(event.message) && event.message.id === messageId
-          )
-          .map((event) => event.message as Record<string, any>);
-      } catch {
-        eventMessages = [];
-      }
-    }
-    if (eventMessages.length > 1) {
-      throw new Error(
-        `terminal idempotency key ${messageId} has duplicate durable messages`
-      );
-    }
-    const eventMessage = eventMessages[0];
-    const messageType = stringValue(receipt.message_type) ??
-      (isRecord(eventMessage) ? stringValue(eventMessage.type) : undefined);
-    const storedBodyHash = stringValue(receipt.message_body_hash) ??
-      (isRecord(eventMessage) && typeof eventMessage.body === "string"
-        ? createHash("sha256").update(eventMessage.body).digest("hex")
-        : undefined);
-    const ownerWorkspace = canonicalWorkspace(owner.workspace);
-    if (
-      !ownerStoreDir ||
-      path.resolve(ownerStoreDir) !== storeDir ||
-      (stringValue(receipt.store_dir) !== undefined &&
-        path.resolve(String(receipt.store_dir)) !== storeDir) ||
-      !terminalControl ||
-      !conversationId ||
-      stringValue(receipt.request_hash) !== requestHash ||
-      messageType !== "task" ||
-      storedBodyHash !== bodyHash ||
-      (requestedOpenClawSession &&
-        (stringValue(receipt.openclaw_session) ?? owner.openclaw_session) !==
-          requestedOpenClawSession) ||
-      (requestedAgent && executorForConversation(owner).kind !== requestedAgent) ||
-      (workspace && ownerWorkspace !== workspace)
-    ) {
-      throw new Error(
-        `terminal idempotency key ${messageId} does not match its original ` +
-        "delegate request boundary; no terminal input was sent"
-      );
-    }
-    return {
-      owner,
-      receipt,
-      conversationId,
-      workspace: ownerWorkspace,
-      terminalControl
-    };
-  });
-  const authoritative = routed.filter(({ receipt }) =>
-    !(receipt.status === "aborted" && receipt.safe_to_retry === true)
-  );
-  if (authoritative.length > 1) {
-    throw new Error(
-      `terminal idempotency key ${messageId} has multiple durable delegate receipts`
-    );
-  }
-  const firstRoute = routed[0];
-  if (
-    !firstRoute ||
-    routed.some((entry) =>
-      entry.conversationId !== firstRoute.conversationId ||
-      !terminalControlsShareIncarnation(
-        entry.terminalControl,
-        firstRoute.terminalControl
-      )
-    )
-  ) {
-    throw new Error(
-      `terminal idempotency key ${messageId} has conflicting terminal routes`
-    );
-  }
-  const selected = authoritative[0] ?? routed.at(-1);
-  if (!selected) {
-    return undefined;
-  }
-  if (
-    selected.receipt.status === "aborted" &&
-    selected.receipt.safe_to_retry === true
-  ) {
-    const ownerControl = terminalControlFromTakeover(
-      isRecord(selected.owner.native_session_takeover)
-        ? selected.owner.native_session_takeover
-        : undefined
-    );
-    if (!ownerControl) {
-      throw new Error(
-        `terminal idempotency key ${messageId} has no durable terminal route`
-      );
-    }
-    const retrySession = assertSafeAbortedTerminalRetryBinding({
-      owner: selected.owner,
-      receipt: selected.receipt,
-      storeDir,
-      terminalControl: ownerControl,
-      messageId
-    });
-    if (!retrySession) {
-      throw new Error(
-        `terminal idempotency key ${messageId} has no restored retry Session`
-      );
-    }
-    if (
-      retrySession.agent === "codex" &&
-      isCompleteNativeRollout(retrySession.binding?.native_process.rollout)
-    ) {
-      // A safe-aborted retry has proved that the original binding is unchanged,
-      // but one open Codex rollout still does not prove the TUI foreground.
-      // Preserve the stable terminal route so runSend captures fresh implicit
-      // candidate authority and retries through the v3 transfer instead of the
-      // forbidden strict Session path.
-      return {
-        kind: "terminal",
-        conversationId: selected.conversationId,
-        workspace: selected.workspace
-      };
-    }
-    return {
-      kind: "session",
-      sessionId: retrySession.session_id,
-      workspace: selected.workspace
-    };
-  }
-  return {
-    kind: "terminal",
-    conversationId: selected.conversationId,
-    workspace: selected.workspace
-  };
-}
-
-async function runDelegate(options) {
-  const request = required(options.request, "--request is required");
-  const workspace = options.workspace === undefined
-    ? undefined
-    : canonicalWorkspace(options.workspace);
-  const requestedAgent = options.agent === undefined
-    ? undefined
-    : resolveExecutor({ kind: options.agent }).kind;
-  const stableRoute = stableDelegateTerminalRoute({
-    options,
-    request,
-    workspace,
-    requestedAgent
-  });
-  if (stableRoute) {
-    await terminalCommandCliFacade.runSend(stableRoute.kind === "session"
-      ? {
-          ...options,
-          session: stableRoute.sessionId,
-          conversation: undefined,
-          message: request,
-          workspace: stableRoute.workspace,
-          background: true
-        }
-      : {
-          ...options,
-          conversation: stableRoute.conversationId,
-          session: undefined,
-          message: request,
-          workspace: stableRoute.workspace,
-          background: true
-        });
-    return;
-  }
-  const scan = await terminalListCliFacade.buildTerminalListGroup({
-    options: {
-      ...options,
-      workspace,
-      noApprovalScan: false
-    },
-    agentFilter: requestedAgent,
-    statusFilter: undefined
-  });
-  if (scan.summary.error) {
-    throw new Error(`terminal discovery failed: ${scan.summary.error}`);
-  }
-
-  const scopedCandidates = workspace === undefined
-    ? scan.terminalControlled
-    : scan.terminalControlled.filter((candidate) => {
-        try {
-          return canonicalWorkspace(candidate.workspace) === workspace;
-        } catch {
-          return false;
-        }
-      });
-  const eligible = scopedCandidates.filter((candidate) => {
-    if (candidate.activity_state !== "idle") {
-      return false;
-    }
-    const terminalControl = isRecord(candidate.terminal_control)
-      ? candidate.terminal_control as unknown as TerminalControlRef
-      : undefined;
-    return !terminalControl || terminalListCliFacade.terminalDispatchOwnership(terminalControl).state === "none";
-  });
-  if (eligible.length === 0) {
-    const observed = scopedCandidates.length > 0
-      ? ` Found ${scopedCandidates.length} matching pane(s), but none is idle.`
-      : "";
-    const requestedExecutor = requestedAgent
-      ? executorDefinitionForKind(requestedAgent)
-      : undefined;
-    const workspaceDetail = workspace
-      ? ` in ${workspace}`
-      : "";
-    throw new Error(
-      `No idle ${requestedExecutor?.displayName ?? "Codex or Claude Code"} pane is available${workspaceDetail}.${observed} ` +
-      `Start ${requestedAgent ?? "codex or claude"} inside tmux or Herdr${workspaceDetail}, wait until it is idle, then retry.`
-    );
-  }
-  if (eligible.length > 1) {
-    const candidates = eligible
-      .map((candidate) => {
-        const identity =
-          `${candidate.agent}, ${candidate.terminal_control?.target ?? candidate.id}`;
-        return workspace
-          ? `${candidate.short_ref} (${identity})`
-          : `${candidate.short_ref} (${identity}, ${candidate.workspace ?? "workspace unknown"})`;
-      })
-      .join(", ");
-    const scope = requestedAgent
-      ? executorDefinitionForKind(requestedAgent).displayName
-      : "coding-agent";
-    const ambiguity = workspace
-      ? `match ${workspace}`
-      : "are available across workspaces";
-    throw new Error(
-      `Multiple idle ${scope} panes ${ambiguity}: ${candidates}. ` +
-      "Use /akk codex: <task>, /akk claude: <task>, or /akk @short-ref: <message> to choose one explicitly."
-    );
-  }
-
-  const selectedWorkspace = canonicalWorkspace(eligible[0].workspace);
-  await terminalCommandCliFacade.runSend({
-    ...options,
-    conversation: eligible[0].id,
-    message: request,
-    workspace: selectedWorkspace,
-    background: true
-  });
-}
-
 function spawnDetachedTerminalMonitor(
   plan?: monitorLaunch.DetachedTerminalMonitorPlan
 ) {
@@ -1117,8 +829,6 @@ function withTerminalBridgeSubmission(
 }
 
 const terminalBridgeSubmission = dispatchReceipt.terminalBridgeSubmission;
-const terminalBridgeSubmissionReceipts = dispatchReceipt
-  .terminalBridgeSubmissionReceipts;
 const terminalDispatchCompletion = createTerminalDispatchCompletionCliAdapter({
   environment: {
     syntheticTerminalAcceptanceAllowed: () =>
@@ -6450,6 +6160,25 @@ const terminalCommandCliFacade = createTerminalCommandCliFacade({
   policy: {
     terminalDispatchReleaseStatuses: TERMINAL_DISPATCH_RELEASE_STATUSES
   }
+});
+
+const terminalDelegateCliFacade = createTerminalDelegateCliFacade({
+  runtime: {
+    canonicalWorkspace,
+    required,
+    storeDir: storeDirFromOptions
+  },
+  repository: {
+    listConversations,
+    readEvents: readNdjsonLog,
+    storeDirForConversation: managedSessionStoreDirForConversation
+  },
+  authority: { assertSafeAbortedTerminalRetryBinding },
+  terminalList: {
+    buildTerminalListGroup: terminalListCliFacade.buildTerminalListGroup,
+    terminalDispatchOwnership: terminalListCliFacade.terminalDispatchOwnership
+  },
+  terminalCommand: { runSend: terminalCommandCliFacade.runSend }
 });
 
 function usage() {
