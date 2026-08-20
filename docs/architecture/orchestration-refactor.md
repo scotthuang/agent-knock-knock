@@ -2088,9 +2088,11 @@ adjacent durable state/fact preparation out of `cli-core.ts`: uncertain-dispatch
 collateral fencing and repair evidence, approval notification persistence and
 clear, activity and detector diagnostics, stalled-state notification,
 callback/local-completion recovery, startup eligibility, and monitor service
-port composition. Process-owner inspection, legacy-owner decisions, watchdog
-supervision, monitor launch, and launch-event presentation remain in
-`cli-core.ts`; the extraction does not absorb the supervision loop.
+port composition. The state facade deliberately does not absorb process-owner
+inspection, legacy-owner decisions, watchdog supervision, monitor launch, or
+launch-event presentation. Those responsibilities now belong to the subsequent
+terminal monitor supervision facade documented below, rather than
+`cli-core.ts`.
 
 Against exact parent `240732e4d0a654abb4f88a01020bd93734f0d020`,
 `src/cli-core.ts` falls from 6,212 to 4,547 physical lines (-1,665). Total
@@ -2124,8 +2126,10 @@ saved before its event and outbox preparation, duplicate/recovery reads retain
 their original order, and approval/stalled callback delivery begins only after
 the state and writer locks release. Verified-dead completion calls the canonical
 prepared callback exactly once. Superseded binding remains a non-error skip,
-and the existing raw `LOCK_TIMEOUT` and `StoreLockTimeoutError` routing remains
-with its original owner.
+the subsequent supervision facade directly classifies raw `LOCK_TIMEOUT` for
+only its handoff and singleton process locks, and state/application deferral
+retains typed `StoreLockTimeoutError` plus the existing raw
+terminal/conversation timeout path.
 
 All new functions remain below the hard 500-line/c50 gates. The transparent
 preferred-limit exceptions are the 209-line/c1 service-port composition table,
@@ -2145,9 +2149,11 @@ and orphan/lifecycle dispatch-close slice now lives in
 `terminal-maintenance-cli-adapter.ts`. The adapter is a bounded CLI I/O shell;
 it composes the existing terminal identity, acceptance, handoff, list, native
 lifecycle, dispatch repository, and verified-dead recovery authorities rather
-than copying a reducer, receipt, repository, or CAS transition. Monitor
-supervision, monitor reconciliation, startup reconciliation, and ordinary
-delegate/send presentation remain with their existing owners.
+than copying a reducer, receipt, repository, or CAS transition. The subsequent
+terminal monitor supervision facade owns monitor process supervision, monitor
+reconciliation, and startup reconciliation. Maintenance routes its monitor
+start and lock-version facts through that typed facade; ordinary delegate/send
+presentation remains with its existing owner.
 
 Against exact parent `8683b42c248b2310c59165ba712ecc943da3d775`,
 `src/cli-core.ts` falls from 4,547 to 3,419 physical lines (-1,128). Total
@@ -2155,7 +2161,7 @@ production TypeScript changes from 91,535 to 91,961 lines (+426, 37.77 percent
 of the core movement), meeting the preferred 450-line and hard 650-line
 overhead gates. Architecture validation reports 54 domains, 116 production
 modules, 742 static import edges, zero cycles, and one retained `cli-core.ts`
-importer. The 1,554-line adapter exposes only its factory at runtime and binds
+importer. The now 1,555-line adapter exposes only its factory at runtime and binds
 four invocation-scoped port groups (`runtime`, `identity`, `authority`, and
 `repository`) through async-local context. Its public option surface is
 `Readonly<Record<string, unknown>>`; its source and declaration contain no
@@ -2204,6 +2210,106 @@ locks, monitor lifecycle, human-handoff adoption, and native lifecycle
 recovery witnesses; together they retain real CLI cancel/close races, renew,
 verified-dead completion, observed handoff, and exact lifecycle ledger
 recovery.
+
+## Terminal monitor supervision CLI facade
+
+This slice moves 16 named monitor process-supervision functions spanning 706
+physical function-span lines, plus the
+`DEFAULT_MONITOR_POLL_INTERVAL_MS` constant, out of `cli-core.ts` into
+`terminal-monitor-supervision-cli-adapter.ts`:
+`spawnDetachedTerminalMonitor`,
+`startTerminalBridgeMonitorForConversation`,
+`ensureTerminalBridgeMonitorAfterApproval`, `runReconcileMonitors`,
+`reconcileMonitors`, `latestTerminalBridgeMonitorLaunchPid`,
+`prepareTerminalBridgeMonitorReconciliation`, `runMonitor`,
+`startCallbackRetryMonitor`, `runCallbackRetryMonitor`,
+`runTerminalBridgeMonitorHandoff`, `runTerminalBridgeMonitor`,
+`runTerminalBridgeMonitorWithLock`, `activeTerminalBridgeMonitorOwner`,
+`terminalBridgeMonitorLockOwner`, and
+`tryAcquireTerminalBridgeMonitorLock`. The adapter owns only the detached
+process shell, current/legacy process-owner supervision, watchdog retries,
+singleton monitor locks, launch presentation, and CLI command routing. Monitor
+state, acceptance, callback, deferred handoff, terminal-dispatch repository,
+and terminal runtime behavior continue through their canonical facades and
+services; no reducer or persistence protocol is copied.
+
+Against exact parent `cc69f520207e276a4f3a55b0a32dfeb179ea8095`,
+`src/cli-core.ts` falls from 3,419 to 2,735 physical lines (-684). Total
+production TypeScript changes from 91,961 to 92,432 lines (+471), below the
+hard 500-line overhead gate and below the moved core. Architecture validation
+reports 54 domains, 117 production modules, 750 static import edges, zero
+cycles, and one retained `cli-core.ts` importer. The adapter exposes only its
+factory at runtime. Every function remains within the preferred limits; the
+compiler-AST maximum is 59 physical lines and approximate c8.
+
+The invocation-local boundary has exactly five port groups: `state`,
+`callbacks`, `authority`, `io`, and `runtime`. `state` directly reuses
+`terminalMonitorStateCliFacade` for service execution, deferral, collateral
+repair, startup reconciliation, eligibility, and fresh launch preparation.
+The callback-retry command branch delegates directly to `callbackCliFacade`
+without acquiring a supervision lock. A normal callback reached through an
+owned monitor retains its message-generation singleton owner, but the existing
+callback/state adapters release state and writer locks before actual delivery.
+`authority` performs legacy identity migration and constructs the terminal
+bridge lazily.
+`io` binds detached spawn, the existing file-lock adapter, Store reads/events,
+and transcript reads. `runtime` supplies only invocation-scoped clock,
+environment, workspace, process-liveness, logging, and presentation facts.
+`loadTerminalDispatchLedgerOwner` and `assertManagedTerminalDispatchOwner`
+remain with dispatch/maintenance composition and were not moved into monitor
+supervision.
+
+Startup reconciliation retains the durable observation order: collateral and
+state-facade reconciliation first (local completion -> callback recovery ->
+migration -> verified-dead -> deferred -> virgin -> binding -> eligibility),
+then current owner before legacy owner, fresh launch preparation, detached
+spawn, and only after successful spawn the exit/launch events, runtime log, and
+counters. A failed or disabled spawn records no launch event. The approval path
+also observes the exact generation owner, prepares the process plan, spawns,
+and only then records reuse, watchdog, or launch presentation.
+
+The watchdog acquires its generation-specific handoff lock and performs a
+fresh Turn load on every retry; it never caches status, generation, owner, or
+launch preparation across sleeps. The owned monitor acquires its
+message-generation singleton lock before invoking
+`runTerminalMonitorWithStoreDeferral` and releases it in `finally`. Supervision
+directly classifies raw `LOCK_TIMEOUT` only while acquiring the handoff and
+message-generation singleton process locks. State/application deferral
+continues to classify typed Store timeouts and retains the existing raw
+terminal/conversation timeout path. The monitor configuration and terminal
+bridge remain lazy, so a replaced generation exits before timeout validation
+or effect initialization. Live owners stop duplicate launch, and dead owners
+are reclaimed by the canonical file-lock adapter. The monitor application
+service is the sole emitter of the `terminal_bridge_monitor_started` event and
+runtime log; command, receipt, and maintenance owners may still persist the
+separate `terminal_bridge_monitor_started_at` state field.
+
+Maintenance remains the owner of renew/cancel/close durable transitions. Renew
+persists state and its renewal event under the state lock, releases that lock,
+then calls the supervision facade's typed `startMonitor`; its persisted
+`terminal_bridge_monitor_lock_version` now comes from the same facade. This
+keeps the cross-module durable order state -> renewal event -> state-lock
+release -> spawn -> launch event. Cancel and close lock stacks and their
+dispatch authority are unchanged.
+
+The old black-box paths now have direct invariant witnesses:
+
+| Old behavior path | New direct invariant | Direct witness |
+| --- | --- | --- |
+| monitor plan, approval launch, and process isolation | entry/environment/cwd/spawn/unref order, secret stripping, current-owner reuse, spawn failure without an event, and parallel factory isolation | `terminal-monitor-supervision-cli-adapter.test.ts` |
+| renew starts monitoring after its durable state transition | maintenance uses typed `startMonitor` and the supervision-owned lock version without changing renewal/cancel lock order | `terminal-maintenance-cli-adapter.test.ts` |
+| startup state and collateral recovery precede process ownership | the existing state facade returns a data-only handled/candidate result before owner or launch observations | `terminal-monitor-state-reconciliation-service.test.ts` |
+| monitor generation and Store contention | generation replacement precedes lazy configuration/bridge construction, while Store timeout deferral does not duplicate monitor start | `terminal-monitor-application-service.test.ts` |
+| live/dead singleton ownership and startup restart | current and legacy owners stop duplicate launch, while the canonical lock shell reclaims an exact dead owner | `terminal-monitor-supervision-cli-adapter.test.ts` and `file-lock-cli-adapter.test.ts` |
+
+The configured focused integration witnesses remain exactly five shards:
+`test/shards/agent-cli-claude-callback.test.ts`,
+`test/shards/agent-cli-monitor-approval-context.test.ts`,
+`test/shards/agent-cli-monitor-lifecycle.test.ts`,
+`test/shards/agent-cli-monitor-recovery.test.ts`, and
+`test/shards/agent-cli-session-acceptance.test.ts`. They retain callback
+delivery, approval, monitor lifecycle, singleton/restart recovery, and
+Session-acceptance behavior through the real CLI boundary.
 
 ## Soft freeze while #126 is active
 

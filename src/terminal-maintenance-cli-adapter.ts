@@ -39,7 +39,6 @@ import { decideVerifiedDeadAgentProcess,
   "./verified-dead-agent-policy.js";
 import { terminalMonitorDeadlineAt as deadlineAt } from
   "./terminal-monitor-decision-policy.js";
-import * as monitorOwner from "./terminal-monitor-ownership-policy.js";
 import { writeCliJson as printJson } from "./cli-command-runtime.js";
 import { cliCwd, cliEnv, cliExit, cliNow, cliNowMs,
   cliRuntimeLog as runtimeLog } from "./cli-runtime-context.js";
@@ -76,6 +75,7 @@ type TerminalListFacade = ReturnType<typeof createTerminalListCliFacade>;
 export interface TerminalMaintenanceRuntimePorts {
   readonly defaultAgentTimeoutMinutes: number;
   readonly defaultAgentHardTimeoutMinutes: number;
+  readonly monitorLockVersion: number;
   loadConversation(options: TerminalMaintenanceCliOptions): LoadedConversation;
   storeDir(options: TerminalMaintenanceCliOptions): string;
   createControlProvider(options: TerminalMaintenanceCliOptions):
@@ -427,7 +427,8 @@ async function runRenew(options: TerminalMaintenanceCliOptions): Promise<void> {
       status: "waiting_for_agent" as const,
       native_session_takeover: {
         ...currentTakeover,
-        terminal_bridge_monitor_lock_version: monitorOwner.LOCK_VERSION,
+        terminal_bridge_monitor_lock_version:
+          terminalMaintenanceRuntime().dependencies.runtime.monitorLockVersion,
         terminal_bridge_monitor_started_at: now,
         terminal_bridge_last_activity_at: now,
         terminal_bridge_inactivity_timeout_minutes: inactivityTimeoutMinutes,
