@@ -156,14 +156,12 @@ import {
   terminalMonitorDeadlineAt as deadlineAt,
   validTerminalMonitorTimestampMs as validTimestampMs
 } from "./terminal-monitor-decision-policy.js";
-import * as monitorLaunch from "./terminal-monitor-launch-plan.js";
-import * as monitorOwner from "./terminal-monitor-ownership-policy.js";
-import {
-  runTerminalMonitorWithStoreDeferral
-} from "./terminal-monitor-application-service.js";
 import {
   createTerminalMonitorStateCliAdapter
 } from "./terminal-monitor-state-cli-adapter.js";
+import {
+  createTerminalMonitorSupervisionCliAdapter
+} from "./terminal-monitor-supervision-cli-adapter.js";
 import {
   terminalDispatchLedgerLooksLifecycle,
   type TerminalDispatchLedgerDocument
@@ -213,8 +211,6 @@ const cliFileLock = createFileLockCliAdapter({
   sleepSync
 });
 const acquireFileLock = cliFileLock.acquire;
-const staleFileLock = cliFileLock.stale;
-const readFileLockOwner = cliFileLock.owner;
 const terminalDispatchRepository =
   createTerminalDispatchRepositoryCliAdapter();
 const acquireTerminalBridgeSendLock = terminalDispatchRepository.acquire;
@@ -233,7 +229,6 @@ const terminalDispatchRecordProcessAnchor =
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 10080;
 const DEFAULT_AGENT_TIMEOUT_MINUTES = 60;
 const DEFAULT_AGENT_HARD_TIMEOUT_MINUTES = 720;
-const DEFAULT_MONITOR_POLL_INTERVAL_MS = 5000;
 const CLAUDE_SCREEN_APPROVAL_TTL_MS = 10 * 60 * 1000;
 const CALLBACK_ATTEMPT_LEASE_MS = 2 * 60 * 1000;
 const CALLBACK_RETRY_DELAYS_MS = [5000, 15000, 60000, 60000];
@@ -537,7 +532,7 @@ async function dispatchCliCommand(commandName, options) {
   } else if (commandName === "renew") {
     await terminalMaintenanceCliFacade.runRenew(options);
   } else if (commandName === "reconcile-monitors") {
-    await runReconcileMonitors(options);
+    await terminalMonitorSupervisionCliFacade.runReconcileMonitors(options);
   } else if (commandName === "close") {
     await terminalMaintenanceCliFacade.runClose(options);
   } else if (commandName === "transcript") {
@@ -551,7 +546,7 @@ async function dispatchCliCommand(commandName, options) {
   } else if (commandName === "retry-callback") {
     callbackCliFacade.runRetryCallback(options);
   } else if (commandName === "monitor") {
-    await runMonitor(options);
+    await terminalMonitorSupervisionCliFacade.runMonitor(options);
   } else {
     usage();
     setCliExitCode(commandName ? 1 : 0);
@@ -683,128 +678,6 @@ function createTerminalAgentBridge(
   return terminalRuntime(options).createBridge(terminalProvider, registry);
 }
 
-function spawnDetachedTerminalMonitor(
-  plan?: monitorLaunch.DetachedTerminalMonitorPlan
-) {
-  if (!plan) {
-    return undefined;
-  }
-  const child = spawn(process.execPath, plan.args, {
-    detached: true,
-    stdio: "ignore",
-    cwd: cliCwd(),
-    env: plan.environment
-  });
-  child.unref();
-  return child;
-}
-
-function startTerminalBridgeMonitorForConversation({ conversation, statePath, logPath, options }) {
-  return spawnDetachedTerminalMonitor(
-    monitorLaunch.planLaunch({
-      conversation,
-      statePath,
-      logPath,
-      options,
-      entryPath: cliEntryPath(),
-      environment: cliEnv()
-    })
-  );
-}
-
-function ensureTerminalBridgeMonitorAfterApproval({
-  conversation,
-  statePath,
-  logPath,
-  terminalControl,
-  options,
-  reason = "approval_resolved"
-}) {
-  const nativeTakeover = isRecord(conversation.native_session_takeover)
-    ? conversation.native_session_takeover
-    : undefined;
-  const terminalMessageId = stringValue(
-    nativeTakeover?.terminal_bridge_message_id
-  );
-  const activeMonitor = terminalMessageId
-    ? activeTerminalBridgeMonitorOwner(statePath, terminalMessageId)
-    : undefined;
-  const launchPlan = monitorLaunch.planAfterApproval({
-    conversation,
-    statePath,
-    logPath,
-    options,
-    entryPath: cliEntryPath(),
-    environment: cliEnv(),
-    activeMonitorPresent: activeMonitor !== undefined
-  });
-  const launchedMonitor = spawnDetachedTerminalMonitor(launchPlan.monitor);
-  const handoffWatchdog = spawnDetachedTerminalMonitor(launchPlan.handoff);
-  const monitorPid = activeMonitor?.ownerPid ?? launchedMonitor?.pid;
-  const { agentTimeoutMinutes, agentHardTimeoutMinutes } =
-    monitorLaunch.terminalMonitorTimeoutPlan({ conversation, options });
-  if (activeMonitor) {
-    appendEvent(logPath, {
-      ts: cliNow().toISOString(),
-      conversation_id: conversation.conversation_id,
-      event: "terminal_bridge_monitor_reused",
-      pid: activeMonitor.ownerPid ?? null,
-      terminal_control: terminalControl,
-      reason,
-      agent_timeout_minutes: agentTimeoutMinutes,
-      agent_hard_timeout_minutes: agentHardTimeoutMinutes
-    });
-    runtimeLog("info", "terminal_bridge_monitor_reused", {
-      conversation_id: conversation.conversation_id,
-      monitor_pid: activeMonitor.ownerPid ?? null,
-      terminal_target: terminalControl.target,
-      reason
-    });
-    if (handoffWatchdog) {
-      appendEvent(logPath, {
-        ts: cliNow().toISOString(),
-        conversation_id: conversation.conversation_id,
-        event: "terminal_bridge_monitor_handoff_watchdog_launch",
-        pid: handoffWatchdog.pid ?? null,
-        monitor_owner_pid: activeMonitor.ownerPid ?? null,
-        terminal_bridge_message_id: terminalMessageId,
-        terminal_control: terminalControl,
-        reason
-      });
-      runtimeLog("info", "terminal_bridge_monitor_handoff_watchdog_launch", {
-        conversation_id: conversation.conversation_id,
-        watchdog_pid: handoffWatchdog.pid ?? null,
-        monitor_owner_pid: activeMonitor.ownerPid ?? null,
-        terminal_target: terminalControl.target,
-        reason
-      });
-    }
-  } else if (launchedMonitor) {
-    appendEvent(logPath, {
-      ts: cliNow().toISOString(),
-      conversation_id: conversation.conversation_id,
-      event: "terminal_bridge_monitor_launch",
-      pid: launchedMonitor.pid ?? null,
-      terminal_control: terminalControl,
-      reason,
-      agent_timeout_minutes: agentTimeoutMinutes,
-      agent_hard_timeout_minutes: agentHardTimeoutMinutes
-    });
-    runtimeLog("info", "terminal_bridge_monitor_launch", {
-      conversation_id: conversation.conversation_id,
-      monitor_pid: launchedMonitor.pid ?? null,
-      terminal_target: terminalControl.target,
-      reason
-    });
-  }
-  return {
-    activeMonitor,
-    launchedMonitor,
-    handoffWatchdog,
-    monitorPid
-  };
-}
-
 const terminalBridgeEnabled = dispatchReceipt.terminalBridgeEnabled;
 
 function withTerminalBridgeSubmission(
@@ -926,7 +799,9 @@ const callbackCliFacade = createCallbackCliFacade({
     }) => resolveTerminalBridgeDispatchLedger(terminalControl,
       { conversation, expectedMessageId, reason })
   },
-  retry: { startMonitor: startCallbackRetryMonitor, isProcessAlive,
+  retry: { startMonitor: (input) =>
+    terminalMonitorSupervisionCliFacade.startCallbackRetryMonitor(input),
+    isProcessAlive,
     attemptLeaseMs: CALLBACK_ATTEMPT_LEASE_MS,
     delaysMs: CALLBACK_RETRY_DELAYS_MS },
   runtime: { classifyProcessFailure, textSummary }
@@ -1235,7 +1110,8 @@ const nativeInspectionComposerEmpty =
 const terminalListCliFacade = createTerminalListCliFacade({
   reconciliation: {
     reconcileIdleConversations,
-    reconcileMonitors
+    reconcileMonitors: (options, request) =>
+      terminalMonitorSupervisionCliFacade.reconcileMonitors(options, request)
   },
   discovery: {
     agentVersionForRunningProcess,
@@ -1388,16 +1264,51 @@ const terminalMonitorStateCliFacade = createTerminalMonitorStateCliAdapter({
     callbackRetryLimit: CALLBACK_RETRY_DELAYS_MS.length
   }
 });
+const terminalMonitorSupervisionCliFacade =
+  createTerminalMonitorSupervisionCliAdapter({
+    state: terminalMonitorStateCliFacade,
+    callbacks: callbackCliFacade,
+    authority: {
+      migrateIdentity: migrateLegacyTerminalAgentIdentity,
+      createBridge: createTerminalAgentBridge
+    },
+    io: {
+      spawn,
+      locks: cliFileLock,
+      exists: fs.existsSync,
+      loadState,
+      listConversations,
+      readEvents: readExistingEvents,
+      appendEvent,
+      logPathForStatePath
+    },
+    runtime: {
+      executablePath: () => process.execPath,
+      entryPath: cliEntryPath,
+      cwd: cliCwd,
+      environment: cliEnv,
+      now: cliNow,
+      sleepSync,
+      isProcessAlive,
+      storeDir: storeDirFromOptions,
+      workspaceMatches: matchesConfiguredWorkspace,
+      bindingSuperseded: (error) => error instanceof TurnBindingSupersededError,
+      print: printJson,
+      log: runtimeLog
+    }
+  });
 
 const terminalMaintenanceCliFacade = createTerminalMaintenanceCliFacade({
   runtime: {
     defaultAgentTimeoutMinutes: DEFAULT_AGENT_TIMEOUT_MINUTES,
     defaultAgentHardTimeoutMinutes: DEFAULT_AGENT_HARD_TIMEOUT_MINUTES,
+    monitorLockVersion: terminalMonitorSupervisionCliFacade.monitorLockVersion,
     loadConversation: loadConversationFromOptions,
     storeDir: storeDirFromOptions,
     createControlProvider: createTerminalControlProvider,
     createBridge: createTerminalAgentBridge,
-    startMonitor: startTerminalBridgeMonitorForConversation,
+    startMonitor: (input) => terminalMonitorSupervisionCliFacade
+      .startTerminalBridgeMonitorForConversation(input),
     positiveMinutes,
     textSummary
   },
@@ -1603,7 +1514,7 @@ async function reconcileStoreForStatus(storeDir, options, conversationId) {
     }
     throw error;
   }
-  const monitors = await reconcileMonitors(options, {
+  const monitors = await terminalMonitorSupervisionCliFacade.reconcileMonitors(options, {
     includeCallbackRecovery: false,
     reason: "status_reconciliation",
     conversationId
@@ -1861,266 +1772,6 @@ function openClawYieldNextAction({
 }
 
 
-async function runReconcileMonitors(options) {
-  const reason = stringValue(options.reason) ?? "startup_reconciliation";
-  printJson(await reconcileMonitors(options, {
-    includeCallbackRecovery:
-      options.terminalMonitorsOnly !== true &&
-      reason !== "monitor_supervision",
-    reason,
-    conversationId: undefined
-  }));
-}
-
-async function reconcileMonitors(
-  options,
-  {
-    includeCallbackRecovery,
-    reason,
-    conversationId
-  }: {
-    includeCallbackRecovery: boolean;
-    reason: string;
-    conversationId?: string;
-  }
-) {
-  const storeDir = storeDirFromOptions(options);
-  const collateralStalls = await terminalMonitorStateCliFacade
-    .reconcileCollateral(storeDir, conversationId);
-  const conversations = listConversations(storeDir).filter((conversation) =>
-    conversationId === undefined || conversation.conversation_id === conversationId
-  );
-  const items: Record<string, unknown>[] = [...collateralStalls.items];
-  const repairedConversationIds = new Set(
-    collateralStalls.items
-      .filter((item) => item.status === "repaired")
-      .map((item) => stringValue(item.conversation_id))
-      .filter((id): id is string => id !== undefined)
-  );
-  let ignored = 0;
-  let launched = 0;
-  let alreadyRunning = 0;
-  let skipped = 0;
-  let errors = collateralStalls.errors.length;
-
-  for (const listedConversation of conversations) {
-    if (repairedConversationIds.has(listedConversation.conversation_id)) {
-      ignored += 1;
-      continue;
-    }
-    if (
-      !matchesConfiguredWorkspace(
-        options.workspace,
-        listedConversation.workspace
-      )
-    ) {
-      ignored += 1;
-      continue;
-    }
-    const { statePath, logPath } = terminalMonitorStateCliFacade.statePaths(
-      listedConversation,
-      storeDir
-    );
-
-    try {
-      const state = await terminalMonitorStateCliFacade.reconcileState({
-        options,
-        storeDir,
-        listed: listedConversation,
-        paths: { statePath, logPath },
-        includeCallbackRecovery
-      });
-      if (state.kind === "ignored") {
-        ignored += 1;
-        continue;
-      }
-      if (state.kind === "handled") {
-        if (state.counter === "launched") launched += 1;
-        else if (state.counter === "alreadyRunning") alreadyRunning += 1;
-        else skipped += 1;
-        items.push({ ...state.item });
-        continue;
-      }
-      const initialConversation = state.conversation;
-      const initialEligibility = state.eligibility;
-
-      const previousMonitorPid = latestTerminalBridgeMonitorLaunchPid(logPath);
-      const unexpectedMonitorExit = previousMonitorPid !== undefined &&
-        !isProcessAlive(previousMonitorPid);
-
-      const activeOwner = activeTerminalBridgeMonitorOwner(
-        statePath,
-        initialEligibility.terminalMessageId
-      );
-      const currentOwnership = monitorOwner.decideCurrent({
-        currentOwnerPresent: activeOwner !== undefined,
-        currentOwnerPid: activeOwner?.ownerPid,
-        monitorLockVersion:
-          initialEligibility.nativeTakeover.terminal_bridge_monitor_lock_version
-      });
-      const ownership = currentOwnership.action === "inspect_legacy"
-        ? (() => {
-            const legacyLaunchPid = latestTerminalBridgeMonitorLaunchPid(logPath);
-            return monitorOwner.decideLegacy({
-              latestLaunchPid: legacyLaunchPid,
-              launchProcessAlive: legacyLaunchPid !== undefined &&
-                isProcessAlive(legacyLaunchPid)
-            });
-          })()
-        : currentOwnership;
-      if (ownership.action === "stop") {
-        if (ownership.item.status === "already_running") {
-          alreadyRunning += 1;
-        } else {
-          skipped += 1;
-        }
-        items.push({
-          conversation_id: initialConversation.conversation_id,
-          ...ownership.item
-        });
-        continue;
-      }
-
-      const prepared = prepareTerminalBridgeMonitorReconciliation({
-        statePath,
-        expectedMessageId: initialEligibility.terminalMessageId
-      });
-      if (!prepared.prepared) {
-        if (prepared.alreadyRunning) {
-          alreadyRunning += 1;
-          items.push({
-            conversation_id: initialConversation.conversation_id,
-            status: "already_running",
-            reason: prepared.reason,
-            monitor_owner_pid: prepared.ownerPid ?? null
-          });
-        } else {
-          skipped += 1;
-          items.push({
-            conversation_id: initialConversation.conversation_id,
-            status: "skipped",
-            reason: prepared.reason
-          });
-        }
-        continue;
-      }
-
-      const monitor = startTerminalBridgeMonitorForConversation({
-        conversation: prepared.conversation,
-        statePath,
-        logPath,
-        options
-      });
-      if (!monitor) {
-        skipped += 1;
-        items.push({
-          conversation_id: prepared.conversation.conversation_id,
-          status: "skipped",
-          reason: "terminal_bridge_monitor_launch_disabled"
-        });
-        continue;
-      }
-
-      const launchedAt = cliNow().toISOString();
-      const launchReason = unexpectedMonitorExit
-        ? "unexpected_exit_recovery"
-        : reason;
-      if (unexpectedMonitorExit) {
-        appendEvent(logPath, {
-          ts: launchedAt,
-          conversation_id: prepared.conversation.conversation_id,
-          event: "terminal_bridge_monitor_exit_observed",
-          previous_monitor_pid: previousMonitorPid,
-          terminal_control: prepared.terminalControl,
-          reason: "monitor_owner_process_missing",
-          observed_by: reason
-        });
-        runtimeLog("warn", "terminal_bridge_monitor_exit_observed", {
-          conversation_id: prepared.conversation.conversation_id,
-          previous_monitor_pid: previousMonitorPid,
-          terminal_target: prepared.terminalControl.target,
-          observed_by: reason
-        });
-      }
-      appendEvent(logPath, {
-        ts: launchedAt,
-        conversation_id: prepared.conversation.conversation_id,
-        event: "terminal_bridge_monitor_launch",
-        pid: monitor.pid ?? null,
-        terminal_control: prepared.terminalControl,
-        reason: launchReason,
-        agent_timeout_minutes: prepared.inactivityTimeoutMinutes,
-        agent_hard_timeout_minutes: prepared.hardTimeoutMinutes
-      });
-      runtimeLog("info", "terminal_bridge_monitor_reconciled", {
-        conversation_id: prepared.conversation.conversation_id,
-        monitor_pid: monitor.pid ?? null,
-        terminal_target: prepared.terminalControl.target
-      });
-      launched += 1;
-      items.push({
-        conversation_id: prepared.conversation.conversation_id,
-        status: "launched",
-        reason: launchReason,
-        monitor_pid: monitor.pid ?? null,
-        ...(unexpectedMonitorExit
-          ? { previous_monitor_pid: previousMonitorPid }
-          : {})
-      });
-    } catch (error) {
-      if (error instanceof TurnBindingSupersededError) {
-        skipped += 1;
-        items.push({
-          conversation_id: listedConversation.conversation_id,
-          status: "skipped",
-          reason: "session_binding_superseded"
-        });
-        continue;
-      }
-      errors += 1;
-      items.push({
-        conversation_id: listedConversation.conversation_id,
-        status: "error",
-        reason: error instanceof Error ? error.message : String(error)
-      });
-    }
-  }
-
-  return {
-    reconciled: true,
-    store_dir: storeDir,
-    checked: conversations.length,
-    repaired: collateralStalls.repaired,
-    collateral_stalls_checked: collateralStalls.checked,
-    collateral_stalls_skipped: collateralStalls.skipped,
-    ignored,
-    launched,
-    already_running: alreadyRunning,
-    skipped,
-    errors,
-    items
-  };
-}
-
-function latestTerminalBridgeMonitorLaunchPid(logPath: string): number | undefined {
-  try {
-    return monitorOwner.latestLaunchPid(readExistingEvents(logPath));
-  } catch {
-    return undefined;
-  }
-}
-
-function prepareTerminalBridgeMonitorReconciliation(input: {
-  statePath: string;
-  expectedMessageId: string;
-  requireWaitingForAgentStatus?: boolean;
-}) {
-  return terminalMonitorStateCliFacade.prepareLaunch({
-    ...input,
-    activeOwner: activeTerminalBridgeMonitorOwner,
-    monitorLockVersion: monitorOwner.LOCK_VERSION
-  });
-}
 function positiveMinutes(value, optionName: string): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -2129,345 +1780,6 @@ function positiveMinutes(value, optionName: string): number {
   return parsed;
 }
 
-
-async function runMonitor(options) {
-  if (options.callbackRetry) {
-    return runCallbackRetryMonitor(options);
-  }
-  if (options.terminalBridgeHandoff) {
-    return runTerminalBridgeMonitorHandoff(options);
-  }
-  if (options.terminalBridge) {
-    return await runTerminalBridgeMonitor(options);
-  }
-  throw new Error(
-    "monitor requires --terminal-bridge, --terminal-bridge-handoff, or --callback-retry"
-  );
-}
-
-function startCallbackRetryMonitor({
-  statePath,
-  delayMs = CALLBACK_RETRY_DELAYS_MS[0]
-}) {
-  const normalizedDelayMs = Math.max(
-    0,
-    Number.isFinite(Number(delayMs)) ? Number(delayMs) : CALLBACK_RETRY_DELAYS_MS[0]
-  );
-  return spawnDetachedTerminalMonitor({
-    args: [
-      cliEntryPath(),
-      "monitor",
-      "--callback-retry",
-      "--state",
-      statePath,
-      "--callback-retry-delay-ms",
-      String(normalizedDelayMs)
-    ],
-    environment: monitorLaunch.withoutGatewayTokens(cliEnv())
-  })!;
-}
-
-function runCallbackRetryMonitor(options) {
-  const statePath = expandHome(required(options.state, "--state is required"));
-  return callbackCliFacade.runRetryMonitor({
-    statePath,
-    initialDelayMs: options.callbackRetryDelayMs
-  });
-}
-
-function runTerminalBridgeMonitorHandoff(options) {
-  const statePath = expandHome(required(options.state, "--state is required"));
-  const logPath = expandHome(options.log ?? logPathForStatePath(statePath));
-  const expectedMessageId = required(
-    options.expectedTerminalMessageId,
-    "--expected-terminal-message-id is required"
-  );
-  const configuredPollIntervalMs = Number(
-    options.monitorHandoffPollIntervalMs
-  );
-  const pollIntervalMs = Math.max(
-    50,
-    Number.isFinite(configuredPollIntervalMs)
-      ? configuredPollIntervalMs
-      : 100
-  );
-  const handoffLockPath = monitorOwner.handoffLockPath(
-    statePath,
-    expectedMessageId
-  );
-  let releaseHandoffLock: (() => void) | undefined;
-  try {
-    releaseHandoffLock = acquireFileLock(handoffLockPath, { timeoutMs: 0 });
-  } catch (error) {
-    if (!isRecord(error) || error.code !== "LOCK_TIMEOUT") {
-      throw error;
-    }
-    printJson({
-      monitored: false,
-      terminal_bridge: true,
-      handoff_watchdog: false,
-      already_running: true,
-      reason: "terminal_bridge_monitor_handoff_watchdog_already_running"
-    });
-    return;
-  }
-
-  try {
-    const startedConversation = loadState(statePath);
-    appendEvent(logPath, {
-      ts: cliNow().toISOString(),
-      conversation_id: startedConversation.conversation_id,
-      event: "terminal_bridge_monitor_handoff_watchdog_started",
-      terminal_bridge_message_id: expectedMessageId
-    });
-    while (true) {
-      const conversation = loadState(statePath);
-      const nativeTakeover = isRecord(conversation.native_session_takeover)
-        ? conversation.native_session_takeover
-        : undefined;
-      const currentMessageId = stringValue(
-        nativeTakeover?.terminal_bridge_message_id
-      );
-      if (currentMessageId !== expectedMessageId) {
-        appendEvent(logPath, {
-          ts: cliNow().toISOString(),
-          conversation_id: conversation.conversation_id,
-          event: "terminal_bridge_monitor_handoff_watchdog_finished",
-          terminal_bridge_message_id: expectedMessageId,
-          current_terminal_bridge_message_id: currentMessageId,
-          reason: "terminal_bridge_task_replaced"
-        });
-        return;
-      }
-      if (conversation.status === "waiting_for_openclaw") {
-        sleepSync(pollIntervalMs);
-        continue;
-      }
-      if (conversation.status !== "waiting_for_agent") {
-        appendEvent(logPath, {
-          ts: cliNow().toISOString(),
-          conversation_id: conversation.conversation_id,
-          event: "terminal_bridge_monitor_handoff_watchdog_finished",
-          terminal_bridge_message_id: expectedMessageId,
-          status: conversation.status,
-          reason: "conversation_no_longer_waiting_for_agent"
-        });
-        return;
-      }
-
-      const eligibility = terminalMonitorStateCliFacade.eligibility(conversation);
-      if (!eligibility.eligible) {
-        appendEvent(logPath, {
-          ts: cliNow().toISOString(),
-          conversation_id: conversation.conversation_id,
-          event: "terminal_bridge_monitor_handoff_watchdog_finished",
-          terminal_bridge_message_id: expectedMessageId,
-          reason: eligibility.reason
-        });
-        return;
-      }
-      const activeOwner = activeTerminalBridgeMonitorOwner(
-        statePath,
-        expectedMessageId
-      );
-      if (activeOwner) {
-        sleepSync(pollIntervalMs);
-        continue;
-      }
-
-      const prepared = prepareTerminalBridgeMonitorReconciliation({
-        statePath,
-        expectedMessageId,
-        requireWaitingForAgentStatus: true
-      });
-      if (!prepared.prepared) {
-        if (prepared.alreadyRunning) {
-          sleepSync(pollIntervalMs);
-          continue;
-        }
-        appendEvent(logPath, {
-          ts: cliNow().toISOString(),
-          conversation_id: conversation.conversation_id,
-          event: "terminal_bridge_monitor_handoff_watchdog_finished",
-          terminal_bridge_message_id: expectedMessageId,
-          reason: prepared.reason
-        });
-        return;
-      }
-
-      const monitor = startTerminalBridgeMonitorForConversation({
-        conversation: prepared.conversation,
-        statePath,
-        logPath,
-        options
-      });
-      if (!monitor) {
-        appendEvent(logPath, {
-          ts: cliNow().toISOString(),
-          conversation_id: prepared.conversation.conversation_id,
-          event: "terminal_bridge_monitor_handoff_watchdog_finished",
-          terminal_bridge_message_id: expectedMessageId,
-          reason: "terminal_bridge_monitor_launch_disabled"
-        });
-        return;
-      }
-      const launchedAt = cliNow().toISOString();
-      appendEvent(logPath, {
-        ts: launchedAt,
-        conversation_id: prepared.conversation.conversation_id,
-        event: "terminal_bridge_monitor_launch",
-        pid: monitor.pid ?? null,
-        terminal_control: prepared.terminalControl,
-        terminal_bridge_message_id: expectedMessageId,
-        reason: "approval_handoff_reconciliation",
-        agent_timeout_minutes: prepared.inactivityTimeoutMinutes,
-        agent_hard_timeout_minutes: prepared.hardTimeoutMinutes
-      });
-      runtimeLog("info", "terminal_bridge_monitor_handoff_reconciled", {
-        conversation_id: prepared.conversation.conversation_id,
-        monitor_pid: monitor.pid ?? null,
-        terminal_target: prepared.terminalControl.target,
-        terminal_bridge_message_id: expectedMessageId
-      });
-      printJson({
-        conversation: prepared.conversation,
-        monitored: true,
-        terminal_bridge: true,
-        handoff_watchdog: true,
-        launched: true,
-        monitor_pid: monitor.pid ?? null,
-        reason: "approval_handoff_reconciliation"
-      });
-      return;
-    }
-  } finally {
-    releaseHandoffLock();
-  }
-}
-
-async function runTerminalBridgeMonitor(options) {
-  const statePath = expandHome(required(options.state, "--state is required"));
-  const logPath = expandHome(options.log ?? logPathForStatePath(statePath));
-  const conversation = loadState(statePath);
-  const nativeTakeover = isRecord(conversation.native_session_takeover)
-    ? conversation.native_session_takeover
-    : undefined;
-  const terminalMessageId = stringValue(nativeTakeover?.terminal_bridge_message_id) ?? "missing-message-id";
-  const monitorLock = tryAcquireTerminalBridgeMonitorLock(statePath, terminalMessageId);
-  if (!monitorLock.acquired) {
-    runtimeLog("info", "terminal_bridge_monitor_already_running", {
-      conversation_id: conversation.conversation_id,
-      terminal_bridge_message_id: terminalMessageId,
-      monitor_owner_pid: monitorLock.ownerPid
-    });
-    printJson({
-      conversation,
-      monitored: false,
-      terminal_bridge: true,
-      already_running: true,
-      reason: "terminal_bridge_monitor_already_running",
-      monitor_owner_pid: monitorLock.ownerPid ?? null
-    });
-    return;
-  }
-
-  const lifecycle = { startedRecorded: false };
-  try {
-    await runTerminalMonitorWithStoreDeferral({
-      initialConversation: conversation,
-      terminalMessageId,
-      run: () => runTerminalBridgeMonitorWithLock(
-        options,
-        lifecycle,
-        terminalMessageId
-      ),
-      ports: terminalMonitorStateCliFacade.deferralPorts({ statePath, logPath })
-    });
-  } finally {
-    monitorLock.release();
-  }
-}
-
-async function runTerminalBridgeMonitorWithLock(
-  options,
-  lifecycle: { startedRecorded: boolean },
-  expectedTerminalMessageId: string
-) {
-  const statePath = expandHome(required(options.state, "--state is required"));
-  const logPath = expandHome(options.log ?? logPathForStatePath(statePath));
-  const pollIntervalMs = Math.max(
-    50,
-    Number(options.pollIntervalMs ?? DEFAULT_MONITOR_POLL_INTERVAL_MS)
-  );
-  const initialConversation = await migrateLegacyTerminalAgentIdentity({
-    conversation: loadState(statePath),
-    statePath,
-    logPath,
-    options
-  });
-  const initialTakeover = isRecord(initialConversation.native_session_takeover)
-    ? initialConversation.native_session_takeover
-    : undefined;
-  let terminalBridge: TerminalAgentBridge | undefined;
-  const bridge = () => terminalBridge ??= createTerminalAgentBridge(options);
-  await terminalMonitorStateCliFacade.runService({
-    options,
-    statePath,
-    logPath,
-    initialConversation,
-    expectedTerminalMessageId,
-    lifecycle,
-    configuration: () => {
-      const timeoutMinutes = Number(
-        options.agentTimeoutMinutes ??
-          initialTakeover?.terminal_bridge_inactivity_timeout_minutes ??
-          DEFAULT_AGENT_TIMEOUT_MINUTES
-      );
-      const hardTimeoutMinutes = positiveMinutes(
-        options.agentHardTimeoutMinutes ??
-          initialTakeover?.terminal_bridge_hard_timeout_minutes ??
-          DEFAULT_AGENT_HARD_TIMEOUT_MINUTES,
-        "--agent-hard-timeout-minutes"
-      );
-      return { pollIntervalMs, timeoutMinutes, hardTimeoutMinutes };
-    },
-    terminalBridge: bridge
-  });
-}
-
-function activeTerminalBridgeMonitorOwner(
-  statePath: string,
-  terminalMessageId: string
-): { lockPath: string; ownerPid?: number } | undefined {
-  const lockPath = monitorOwner.lockPath(statePath, terminalMessageId);
-  if (!fs.existsSync(lockPath) || staleFileLock(lockPath)) {
-    return undefined;
-  }
-  return terminalBridgeMonitorLockOwner(lockPath);
-}
-
-function terminalBridgeMonitorLockOwner(lockPath: string) {
-  return { lockPath, ownerPid: readFileLockOwner(lockPath).pid };
-}
-
-function tryAcquireTerminalBridgeMonitorLock(statePath: string, terminalMessageId: string) {
-  const lockPath = monitorOwner.lockPath(statePath, terminalMessageId);
-  try {
-    return {
-      acquired: true as const,
-      lockPath,
-      release: acquireFileLock(lockPath, { timeoutMs: 0 })
-    };
-  } catch (error) {
-    if (isRecord(error) && error.code === "LOCK_TIMEOUT") {
-      return {
-        acquired: false as const,
-        ...terminalBridgeMonitorLockOwner(lockPath)
-      };
-    }
-    throw error;
-  }
-}
 
 function loadTerminalDispatchLedgerOwner(
   ledger: Record<string, any>
@@ -3305,7 +2617,9 @@ const terminalCommandCliFacade = createTerminalCommandCliFacade({
     createTerminalAgentBridge,
     deferredForegroundApplication,
     deferredForegroundRecoveryAdapterPorts,
-    ensureTerminalBridgeMonitorAfterApproval,
+    ensureTerminalBridgeMonitorAfterApproval: (input) =>
+      terminalMonitorSupervisionCliFacade
+        .ensureTerminalBridgeMonitorAfterApproval(input),
     exactSafeAbortedRecoveredSessionMatches,
     inspectCodexOpenRootRolloutInventory,
     isDiscoverableTmuxConversation,
@@ -3339,7 +2653,9 @@ const terminalCommandCliFacade = createTerminalCommandCliFacade({
     soleBoundManagedSessionClaimForTerminal,
     stallOtherTerminalBridgeConversationsForUncertainDispatch: (input) =>
       terminalMonitorStateCliFacade.stallOther(input),
-    startTerminalBridgeMonitorForConversation,
+    startTerminalBridgeMonitorForConversation: (input) =>
+      terminalMonitorSupervisionCliFacade
+        .startTerminalBridgeMonitorForConversation(input),
     storeDirFromOptions,
     terminalBindingLedgerFields,
     terminalBridgeEnabled,
