@@ -2,8 +2,8 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 6212,
-    "production_physical_loc": 90711,
+    "cli_core_max_physical_loc": 4547,
+    "production_physical_loc": 91535,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -361,6 +361,16 @@
         "test/shards/agent-cli-monitor-lifecycle.test.ts",
         "test/shards/agent-cli-session-acceptance.test.ts",
         "test/shards/agent-cli-monitor-approval-context.test.ts"
+      ]
+    },
+    "terminal-monitor-state": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/shards/agent-cli-claude-callback.test.ts",
+        "test/shards/agent-cli-monitor-approval-context.test.ts",
+        "test/shards/agent-cli-monitor-lifecycle.test.ts",
+        "test/shards/agent-cli-monitor-recovery.test.ts",
+        "test/shards/agent-cli-session-acceptance.test.ts"
       ]
     },
     "terminal-monitor-supervision": {
@@ -823,6 +833,14 @@
     {
       "path": "src/terminal-monitor-reconciliation-eligibility.ts",
       "owner": "terminal-monitor-policy"
+    },
+    {
+      "path": "src/terminal-monitor-state-cli-adapter.ts",
+      "owner": "terminal-monitor-state"
+    },
+    {
+      "path": "src/terminal-monitor-state-reconciliation-service.ts",
+      "owner": "terminal-monitor-state"
     },
     {
       "path": "src/terminal-process-facts.ts",
