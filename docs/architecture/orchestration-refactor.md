@@ -1,6 +1,24 @@
 # Orchestration refactor architecture baseline
 
-Status: accepted starting point for [issue #126](https://github.com/scotthuang/agent-knock-knock/issues/126)
+Status: architecture implementation and enforceable static gates are complete
+at the current closeout;
+[issue #126](https://github.com/scotthuang/agent-knock-knock/issues/126)
+remains open for longitudinal acceptance. The final timed
+fast/integration/full profile, dynamic subprocess runtime attestation, and one
+local OpenClaw install are separate pending final-evidence steps; this status
+does not claim they have run.
+
+The four remaining criteria require observations after the refactor:
+
+- at least 70% of normal product changes no longer modify `cli-core.ts`;
+- at least 80% of normal affected-test loops complete in 60 seconds or less;
+- five post-refactor product changes reduce median ready-to-release lead time
+  by at least 40%; and
+- repeated full-suite flaky failures remain below 1%.
+
+The frozen ten-change selector replay proves selector behavior, and a
+point-in-time suite profile proves only that measured revision. Neither can
+substitute for these four longitudinal samples.
 
 Snapshot: `main@ea592a88d7af4a709e7a7a1b989dd29e61932935` / `v0.12.11`, measured 2026-08-14
 
@@ -519,13 +537,20 @@ before/after-text failure classification, late acceptance and bounded pending
 results, native identity outcomes, and Turn revalidation.
 
 Raw terminal input, public CLI/OpenClaw JSON, acceptance adapter construction,
-and authority composition remain in `cli-core.ts`. The 82-line
-`terminal-dispatch-composition.ts` file is explicitly a temporary CLI
-infrastructure type bridge owned by `terminal-dispatch-core`, not an
-application service: it still names a concrete resolved terminal type and the
-legacy `Record<string, any>` options bag. PR7 must eliminate that bridge while
-moving the remaining composition facade; neither type is exposed by the PR4C
-execution, application, or capability services.
+and authority composition remain in `cli-core.ts`. At the PR4C slice, the
+82-line `terminal-dispatch-composition.ts` file was explicitly recorded as a
+temporary CLI-infrastructure type bridge owned by `terminal-dispatch-core`,
+not an application service: it still named a concrete resolved terminal type
+and the legacy `Record<string, any>` options bag, with PR7 assigned to remove
+that leakage while moving the remaining facade.
+
+The final PR7 decision keeps `TerminalDispatchTerminal` as a structural
+CLI-infrastructure carrier only and eliminates the untyped options bag through
+the six-field, unknown-valued `TerminalControlSendOptions` boundary. Business
+services still receive explicit terminal fact projections, authenticated
+routes, repositories, and typed ports; neither the structural carrier nor the
+CLI options object crosses an execution, application, capability, or deferred
+foreground service boundary.
 
 The `terminal-dispatch-application` owner retains exactly five affected
 integration witnesses: Codex no-rollout binding, dispatch recovery, receipt
@@ -621,9 +646,10 @@ bypass an unfinished safety boundary.
 
 Every PR records before/after metrics, responsibility movement, dependency
 edges, lock order, durable write points, and the focused tests that protect the
-moved boundary. No newly extracted function exceeds 500 physical lines or
-approximate complexity 50 without a documented exception; the normal target is
-under 100 lines and complexity under 20.
+moved boundary. Every production function must stay strictly below 500
+physical lines and approximate complexity 50; reaching either boundary fails
+the zero-allowlist hard gate. The normal target is under 100 lines and
+complexity under 20.
 
 The completion target remains:
 
@@ -1460,9 +1486,12 @@ declaration contains neither `any`, `Record<..., any>`, nor
 `ResolvedTerminalConversation`. Every callback has explicit parameters and
 results. `TerminalDispatchTerminal` is only a structural, CLI-infrastructure
 carrier for `conversationId`, `agent`, `pid`, and `terminalControl`; it does
-not claim to remove extra properties from the runtime object. The existing
-`TerminalControlSendRequest` options record and concrete deferred adapters are
-infra-local legacy bridges, not business-service requests.
+not claim to remove extra properties from the runtime object.
+`TerminalControlSendRequest` now uses a six-field
+`TerminalControlSendOptions extends Record<string, unknown>` boundary covering
+only the timeout, polling, scrollback, and Claude-home values read by dispatch.
+The structural terminal carrier and concrete deferred adapters remain
+CLI-infrastructure values, not business-service requests.
 
 Every actual deferred business-service request still crosses the explicit
 `projectDeferredForegroundTerminalFacts()` literal projection. The direct
@@ -2435,11 +2464,13 @@ This is a source-ownership change only. It adds or removes no lock, Store or
 durable JSON/event write, subprocess boundary, timer, Gateway method, or
 Gateway restart. The existing `spawnSync`/`spawn` calls and their exact argv,
 environment, working-directory, output, timeout, and error rules only moved to
-the command adapter; static subprocess startup evidence remains 38 sites. The
-single supervisor `setTimeout` loop only moved files, and no install or restart
-path is called by plugin registration. Multiple plugin definitions retain
-separate resume caches, while the existing per-API `WeakMap` keeps relay path
-and plugin config isolated.
+the command adapter. At this exact plugin-split slice, static subprocess
+startup evidence remained 38 included sites; that is a historical slice metric,
+not the final result. The later static closeout establishes 19 of 48 baseline
+sites. The single supervisor `setTimeout` loop only moved files, and no install
+or restart path is called by plugin registration. Multiple plugin definitions
+retain separate resume caches, while the existing per-API `WeakMap` keeps
+relay path and plugin config isolated.
 
 All newly extracted or moved slice functions remain below the hard
 500-line/c50 gates. The unchanged canonical `openclaw-plugin-helpers.ts` is not
@@ -2467,6 +2498,50 @@ Machine-readable public-contract evidence freezes the exact manifest plus six
 source authority paths, checks a role-specific responsibility signature and
 each required direct import, and rejects missing command/schema roles or an
 existing but incorrect substitute path.
+
+## #195 production function hard-gate closeout
+
+PR #195 compares exact parent
+`68e0e399152f5569ef0572b914da308acea36423` with exact candidate
+`256614ede43188c7cf29594b5afe14331ff9b909`. The compiler-AST measurement
+counts every production function, method, accessor, constructor, function
+expression, and arrow function with a body, excluding nested function bodies
+from the enclosing function's complexity.
+
+| Metric | Parent | Candidate | Delta |
+| --- | ---: | ---: | ---: |
+| Production physical LOC | 92,980 | 93,303 | +323 |
+| Production functions | 4,019 | 4,044 | +25 |
+| Largest function / maximum complexity | 834 / c190 | 484 / c49 | strictly below 500 / c50 |
+| Hard-limit violations under the final rule | 6 | 0 | -6 |
+| Production modules / import edges / cycles | 123 / 783 / 0 | 123 / 783 / 0 | unchanged |
+| Static subprocess sites / affected full fallback | 19 of 48 / 2 of 10 | 19 of 48 / 2 of 10 | unchanged |
+
+The six mechanical splits preserve evaluation, short-circuit, getter, and
+first-error order:
+
+| Parent hard violation | Parent LOC / complexity | Candidate private stages | Candidate stage maxima |
+| --- | ---: | --- | ---: |
+| `pendingApprovalFromRecords` | 237 / c50 | turn selection, tool-use agreement, evidence projection | 91 / c22 |
+| `assertDeferredForegroundTransfer` | 834 / c190 | header, source history/binding, target, preparation, dispatch, commit, resolution, abort, failure | 142 / c37 |
+| `deriveRelationshipAssertions` | 121 / c60 | Session relationships and stable relationships | 90 / c36 |
+| `selectTerminalSnapshot` | 279 / c64 | row, process, management, and action selection | 128 / c28 |
+| `assertNativeThreadTransition` | 327 / c71 | header, identity, receipt, and binding consistency | 146 / c29 |
+| `parseAkkCommand` | 188 / c58 | lifecycle, Turn, and close parsing | 80 / c24 |
+
+The gate is strict `<500` LOC and `<50` approximate complexity: a function
+that reaches 500 or c50 fails. There is no exception field or allowlist. The
+default `<100`/`<20` inventory remains visible for review but is not silently
+treated as a hard failure. This closeout changes no module ownership or import
+direction, lock scope or order, durable write or recovery phase, subprocess
+boundary, public command/tool/schema/JSON contract, Store protocol, or runtime
+export.
+
+Exact-candidate validation covered typecheck, build, architecture, refactor
+evidence, and diff checks; 186 relevant direct tests, 1,001 fast tests, and
+five targeted integration files passed. Two independent exact-head reviews
+returned GO. No full suite, install, package, publish, or GitHub Actions run was
+part of PR #195.
 
 ## Final CLI-core facade and ownership closeout
 
@@ -2500,6 +2575,14 @@ owner/facade overhead for the final extraction. Architecture validation reports
 one retained `cli-core.ts` importer. Its public surface remains the stable
 `parseCliCommand` / `executeCliCommand` facade, and `CliCommandOptions` is now
 `Record<string, unknown>` in both source and emitted declarations.
+
+The final typed-boundary cleanup adds nine interface-only production lines to
+remove the last `TerminalControlSendRequest` `Record<string, any>` bridge. The
+closeout production ratchet is therefore 93,322 physical lines;
+`cli-core.ts` remains 1,556 lines and the graph remains 125 modules, 809 edges,
+and zero cycles. Direct source and emitted-declaration guards freeze the six
+option properties and reject any reintroduction of raw `any` in the composition
+boundary.
 
 The ownership validator also fixes an independent Issue-level ceiling of 8,000
 physical `cli-core.ts` lines. Manifest validation rejects a configured value

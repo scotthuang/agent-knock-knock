@@ -919,7 +919,7 @@ export function validateProductionArchitecture({
   );
   if (hardFunctionViolations.length > 0) {
     errors.push(
-      `production function hard limits exceeded ` +
+      `production function hard limits reached ` +
       `(<${PRODUCTION_FUNCTION_HARD_MAX_LOC} LOC and ` +
       `<${PRODUCTION_FUNCTION_HARD_MAX_COMPLEXITY} approximate complexity): ` +
       hardFunctionViolations.map(functionMetricDescription).join(", ")
