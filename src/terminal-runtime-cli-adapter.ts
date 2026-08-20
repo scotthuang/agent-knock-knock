@@ -1,5 +1,10 @@
 import { spawnSync } from "node:child_process";
+import type { CodingAgentSessionProvider } from "./agent-session-provider.js";
 import type { ForkContextPackage } from "./codex-session-provider.js";
+import type { ActiveCodexProcess } from "./codex-session-provider.js";
+import { CodexLocalSessionProvider, InlineCodexLocalSessionAdapter } from
+  "./codex-local-session-provider.js";
+import { CodexStoreAdapter } from "./codex-store-adapter.js";
 import { createCodexTerminalAgentAdapter, detectCodexDurableCompletion } from
   "./codex-terminal-agent-adapter.js";
 import { createClaudeTerminalAgentAdapter, type ClaudeAgentRow } from
@@ -44,7 +49,8 @@ const TERMINAL_CONTROL_CAPABILITIES = ["screen_status", "send_keys",
 export type TerminalRuntimeCliOptions = Readonly<Record<string, unknown>>;
 type TerminalRuntimeDependencyKey = "terminalControlProviderRegistry" |
   "terminalProcessSource" | "loadClaudeAgentRows" |
-  "agentVersionForRunningProcess" | "monotonicNowMs" | "sleep";
+  "agentVersionForRunningProcess" | "createAgentSessionProvider" |
+  "codexLocalSessionAdapter" | "monotonicNowMs" | "sleep";
 
 export type TerminalRuntimeCliDependencies = Readonly<Pick<
   CliCommandDependencies<TerminalRuntimeCliOptions>, TerminalRuntimeDependencyKey
@@ -91,6 +97,11 @@ export interface TerminalRuntimeCliAdapter {
   createAgentRegistry(): TerminalAgentAdapterRegistry;
   createBridge(provider?: TerminalControlProvider,
     registry?: TerminalAgentAdapterRegistry): TerminalAgentBridge;
+  createAgentSessionProvider(agent: string): CodingAgentSessionProvider;
+  listActiveSessionsWithTerminalControl(
+    provider: CodingAgentSessionProvider,
+    terminalProvider?: TerminalControlProvider
+  ): Promise<ActiveCodexProcess[]>;
   agentVersionForRunningProcess(agent: ExecutorKind, pid: number): string | undefined;
 }
 
@@ -116,12 +127,86 @@ export function createTerminalRuntimeCliAdapter(
   ) => terminalAgentBridge(input, {
     terminalProvider, registry, processSource: createProcessSource(), loadClaudeAgentRows
   });
+  const createAgentSessionProvider = (agent: string) =>
+    agentSessionProvider(input, agent);
+  const listActiveSessionsWithTerminalControl = (
+    provider: CodingAgentSessionProvider,
+    terminalProvider: TerminalControlProvider = createControlProvider()
+  ) => attachActiveSessions(input, provider, terminalProvider);
   return Object.freeze({
     createControlProviderRegistry, createControlProvider, createProcessSource,
     loadClaudeAgentRows, createAgentRegistry, createBridge,
+    createAgentSessionProvider, listActiveSessionsWithTerminalControl,
     agentVersionForRunningProcess: (agent: ExecutorKind, pid: number) =>
       runningAgentVersion(input, agent, pid)
   });
+}
+
+function agentSessionProvider(
+  input: Pick<CreateTerminalRuntimeCliAdapterInput, "options" | "dependencies">,
+  agent: string
+): CodingAgentSessionProvider {
+  if (agent !== "codex") {
+    throw new Error(`unsupported agent session provider: ${agent as string}`);
+  }
+  const injected = input.dependencies.createAgentSessionProvider;
+  if (injected) {
+    return injected(agent, input.options);
+  }
+  const injectedAdapter = input.dependencies.codexLocalSessionAdapter;
+  if (injectedAdapter) {
+    return new CodexLocalSessionProvider(
+      typeof injectedAdapter === "function"
+        ? injectedAdapter(input.options)
+        : injectedAdapter
+    );
+  }
+  if (
+    input.options.threadsJson ||
+    input.options.processesJson ||
+    input.options.rolloutsJson ||
+    input.options.codexActiveSessionIdentitiesJson
+  ) {
+    return new CodexLocalSessionProvider(new InlineCodexLocalSessionAdapter({
+      threads: parseJsonOption(input.options.threadsJson, "--threads-json") as
+        ConstructorParameters<typeof InlineCodexLocalSessionAdapter>[0]["threads"],
+      processes: parseJsonOption(input.options.processesJson, "--processes-json") as
+        ConstructorParameters<typeof InlineCodexLocalSessionAdapter>[0]["processes"],
+      rollouts: parseJsonOption(input.options.rolloutsJson, "--rollouts-json") as
+        ConstructorParameters<typeof InlineCodexLocalSessionAdapter>[0]["rollouts"],
+      activeSessionIdentities: parseJsonOption(
+        input.options.codexActiveSessionIdentitiesJson,
+        "--codex-active-session-identities-json"
+      ) as ConstructorParameters<typeof InlineCodexLocalSessionAdapter>[0][
+        "activeSessionIdentities"
+      ]
+    }));
+  }
+  return new CodexLocalSessionProvider(new CodexStoreAdapter({
+    codexHome: expandHome(input.options.codexHome as string | undefined)
+  }));
+}
+
+async function attachActiveSessions(
+  input: CreateTerminalRuntimeCliAdapterInput,
+  provider: CodingAgentSessionProvider,
+  terminalProvider: TerminalControlProvider
+): Promise<ActiveCodexProcess[]> {
+  const activeSessions = await provider.listActiveSessions();
+  const activePids = new Set(activeSessions.map((session) => session.pid));
+  const processTree = activePids.size > 0
+    ? await processSource(input).listProcessSnapshots(
+        (snapshot) => activePids.has(snapshot.pid),
+        { includeCwd: false, includeAncestors: true }
+      )
+    : [];
+  return terminalAgentBridge(input, {
+    terminalProvider,
+    registry: terminalAgentRegistry(input,
+      (observation = {}) => claudeAgentRows(input, observation)),
+    processSource: processSource(input),
+    loadClaudeAgentRows: (observation = {}) => claudeAgentRows(input, observation)
+  }).attachProcesses(provider.agent, activeSessions, { processTree });
 }
 function controlProviderRegistry({ options, dependencies }: Pick<
   CreateTerminalRuntimeCliAdapterInput,

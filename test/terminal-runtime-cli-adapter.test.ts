@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { CodingAgentSessionProvider } from
+  "../src/agent-session-provider.js";
+import type { ActiveCodexProcess } from "../src/codex-session-provider.js";
 import { runCliCommandExecution } from "../src/cli-runtime-context.js";
 import {
   createTerminalRuntimeCliAdapter,
@@ -105,6 +108,84 @@ test("injected and static terminal observations preserve precedence and truthine
     () => runtime({ terminalsJson: "{" }).createControlProviderRegistry(),
     /--terminals-json must be valid JSON/u
   );
+});
+
+test("Codex session providers preserve injection, fixtures, and JSON validation", async () => {
+  const injected = agentSessionProvider([]);
+  let injectedReads = 0;
+  const selected = runtime({ threadsJson: "not-json" }, {
+    get createAgentSessionProvider() {
+      injectedReads += 1;
+      return () => injected;
+    }
+  });
+  assert.equal(injectedReads, 0);
+  assert.equal(selected.createAgentSessionProvider("codex"), injected);
+  assert.equal(injectedReads, 1);
+  assert.throws(() => selected.createAgentSessionProvider("claude"),
+    /unsupported agent session provider: claude/u);
+
+  const fixture = runtime({
+    threadsJson: "[]", processesJson: "[]", rolloutsJson: "{}",
+    codexActiveSessionIdentitiesJson: "{}"
+  }).createAgentSessionProvider("codex");
+  assert.deepEqual(await fixture.listHistoricalSessions(), []);
+  assert.deepEqual(await fixture.listActiveSessions(), []);
+  assert.throws(
+    () => runtime({ threadsJson: "{" }).createAgentSessionProvider("codex"),
+    /--threads-json must be valid JSON/u
+  );
+});
+
+test("active Session attachment preserves provider, source, and bridge call counts", async () => {
+  const active: ActiveCodexProcess = {
+    agent: "codex", pid: 101, ppid: 100, command: "codex", kind: "codex_cli",
+    sessionId: "native-101", confidence: "high", reason: "test"
+  };
+  let providerCalls = 0;
+  let sourceGets = 0;
+  let sourceCalls = 0;
+  const provider = agentSessionProvider([active], () => { providerCalls += 1; });
+  const processSource = new StaticTerminalProcessSource([
+    { pid: 100, ppid: 1, command: "tmux: server" },
+    { pid: 101, ppid: 100, command: "codex" }
+  ]);
+  const countedSource = {
+    async listProcessSnapshots(...args: Parameters<
+      StaticTerminalProcessSource["listProcessSnapshots"]
+    >) {
+      sourceCalls += 1;
+      return processSource.listProcessSnapshots(...args);
+    }
+  };
+  const terminalProvider = new StaticTerminalControlProvider({ panes: [{
+    kind: "tmux", target: "%1", session: "work", window: 0, pane: 1,
+    panePid: 100, currentPath: "/workspace"
+  }] });
+  const dependencies: TerminalRuntimeCliDependencies = {
+    get terminalProcessSource() {
+      sourceGets += 1;
+      return countedSource;
+    }
+  };
+  const attached = await runtime(
+    { claudeAgentsJson: [] }, dependencies
+  ).listActiveSessionsWithTerminalControl(provider, terminalProvider);
+  assert.equal(providerCalls, 1);
+  assert.equal(sourceGets, 2);
+  assert.equal(sourceCalls, 1);
+  assert.equal(attached[0].terminalControl?.target, "%1");
+
+  providerCalls = 0;
+  sourceGets = 0;
+  sourceCalls = 0;
+  await runtime(
+    { claudeAgentsJson: [] }, dependencies
+  ).listActiveSessionsWithTerminalControl(
+    agentSessionProvider([], () => { providerCalls += 1; }), terminalProvider);
+  assert.equal(providerCalls, 1);
+  assert.equal(sourceGets, 1);
+  assert.equal(sourceCalls, 0);
 });
 
 test("Codex completion keeps exact-bound priority before fallback context reads", async () => {
@@ -270,3 +351,27 @@ test("agent versions and provider-owned takeover facts stay data-only", async (t
     terminal_endpoint: {}
   }), undefined);
 });
+
+function agentSessionProvider(
+  active: ActiveCodexProcess[],
+  onList: () => void = () => undefined
+): CodingAgentSessionProvider {
+  return {
+    agent: "codex",
+    getCapabilities: async () => ({
+      historicalSessions: "full", forkContext: "full",
+      activeSessions: "process_scan", takeover: "plan_only", reasons: []
+    }),
+    listHistoricalSessions: async () => [],
+    listActiveSessions: async () => { onList(); return active; },
+    resolveActiveSessionIdentityForPid: async () => undefined,
+    inspectOpenRootRolloutInventoryForPid: async () => ({
+      schema: "agent-knock-knock/codex-open-root-rollout-inventory",
+      version: 1, status: "verified_absent", pid: 1,
+      processUuid: "none", processBirth: "none", roots: [],
+      inventoryFingerprint: "none"
+    }),
+    getSession: async () => undefined,
+    getForkContext: async () => undefined
+  };
+}

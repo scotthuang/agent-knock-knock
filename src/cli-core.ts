@@ -15,15 +15,8 @@ import {
 } from "./claude-local-transcript-provider.js";
 import {
   captureCodexCandidateSetRolloutAcceptanceAnchor,
-  detectCodexBoundRolloutCompletion,
-  type CodexRolloutAcceptanceAnchor,
-  type TerminalSubmissionAcceptanceEvidence,
   validateCodexRolloutAcceptanceAnchor
 } from "./terminal-submission-acceptance.js";
-import {
-  CodexLocalSessionProvider,
-  InlineCodexLocalSessionAdapter
-} from "./codex-local-session-provider.js";
 import { CodexStoreAdapter } from "./codex-store-adapter.js";
 import { buildConversationTrace } from "./conversation-trace.js";
 import { canonicalJson } from "./canonical-json.js";
@@ -185,7 +178,6 @@ import {
   type TerminalThreadLifecycleCandidateToken
 } from "./terminal-agent-adapter.js";
 import {
-  associateTerminalEndpointEvidence,
   hasCanonicalTerminalEndpoint,
   sameTerminalControlIncarnation,
   terminalControlEvidence,
@@ -206,6 +198,8 @@ import {
   createTerminalRuntimeCliAdapter,
   terminalControlFromTakeover
 } from "./terminal-runtime-cli-adapter.js";
+import { createTerminalDispatchCompletionCliAdapter } from
+  "./terminal-dispatch-completion-cli-adapter.js";
 import {
   decideAcceptedTurnDeadAgentStall,
   decideVerifiedDeadAgentProcess,
@@ -374,7 +368,6 @@ import {
   selectSoleBoundManagedSessionClaim,
   terminalSubmissionPayload,
   terminalRuntimeForLiveIdentity as terminalRuntimeForLiveIdentityPolicy,
-  terminalRuntimeIdentityBase,
   type NativeAgentSessionIdentityObservation
 } from "./terminal-dispatch-execution.js";
 import * as dispatchReceipt from "./terminal-dispatch-receipt.js";
@@ -820,36 +813,14 @@ function assertConfiguredWorkspace(
   }
 }
 
-async function listActiveSessionsWithTerminalControl(
-  provider,
-  options,
-  terminalProvider: TerminalControlProvider = createTerminalControlProvider(options)
-): Promise<ActiveCodexProcess[]> {
-  const activeSessions = await provider.listActiveSessions();
-  const activePids = new Set(activeSessions.map((session) => session.pid));
-  const processTree = activePids.size > 0
-    ? await createTerminalProcessSource(options).listProcessSnapshots(
-        (snapshot) => activePids.has(snapshot.pid),
-        { includeCwd: false, includeAncestors: true }
-      )
-    : [];
-  return createTerminalAgentBridge(options, terminalProvider).attachProcesses(
-    provider.agent,
-    activeSessions,
-    { processTree }
-  );
-}
-
 function terminalRuntime(options: CliCommandOptions = {}) {
   return createTerminalRuntimeCliAdapter({
     options,
     dependencies: cliDependencies<CliCommandOptions>(),
     completion: {
       detectExactBound: ({ conversation, nativeTakeover, request, runtime }) =>
-        detectExactBoundCodexCompletion({
-          conversation: conversation as Record<string, any>,
-          nativeTakeover: nativeTakeover as Record<string, any> | undefined,
-          request, runtime: runtime as Record<string, any> | undefined, options
+        terminalDispatchCompletion.detectExactBoundCodexCompletion({
+          conversation, nativeTakeover, request, runtime
         }),
       loadCodexContexts: async (nativeTakeover) =>
         (await loadCodexTerminalContexts({ nativeTakeover, options })).map(
@@ -895,119 +866,6 @@ function createRuntimeTerminalAgentRegistry(options) {
   return terminalRuntime(options).createAgentRegistry();
 }
 
-function detectExactBoundCodexCompletion({
-  conversation,
-  nativeTakeover,
-  request,
-  runtime,
-  options
-}: {
-  conversation: Record<string, any>;
-  nativeTakeover?: Record<string, any>;
-  request: TerminalDurableCompletionRequest;
-  runtime?: Record<string, any>;
-  options: Record<string, any>;
-}): { handled: boolean; completion?: TerminalCompletionEvidence } {
-  const submission = terminalBridgeSubmission(conversation);
-  const acceptanceEvidence = isRecord(submission?.acceptance_evidence)
-    ? submission.acceptance_evidence
-    : undefined;
-  const anchor = isRecord(nativeTakeover?.codex_rollout_acceptance_anchor)
-    ? nativeTakeover.codex_rollout_acceptance_anchor
-    : undefined;
-  if (submission?.status !== "agent_accepted") {
-    return { handled: false };
-  }
-  const exactRequired = requiresExactBoundCodexCompletion(conversation);
-  if (!exactRequired) {
-    return { handled: false };
-  }
-  if (acceptanceEvidence?.source !== "codex_rollout") {
-    throw new Error(
-      "[codex_exact_bound_rollout:invalid_acceptance_evidence] " +
-      "the accepted modern Codex Turn has no exact rollout acceptance evidence"
-    );
-  }
-  if (!anchor) {
-    throw new Error(
-      "[codex_exact_bound_rollout:invalid_anchor] " +
-      "the accepted modern Codex Turn has no exact rollout byte anchor"
-    );
-  }
-
-  const nativeRollout = isRecord(runtime?.nativeRollout)
-    ? runtime.nativeRollout
-    : undefined;
-  const result = detectCodexBoundRolloutCompletion({
-    anchor: anchor as unknown as CodexRolloutAcceptanceAnchor,
-    acceptanceEvidence:
-      acceptanceEvidence as unknown as TerminalSubmissionAcceptanceEvidence,
-    currentIdentity: {
-      sessionId:
-        stringValue(runtime?.nativeSessionId) ??
-        stringValue(runtime?.sessionId) ??
-        "",
-      processUuid: stringValue(runtime?.nativeProcessUuid),
-      processBirth: stringValue(runtime?.nativeProcessBirth),
-      ...(nativeRollout
-        ? {
-            rollout: {
-              fd: String(nativeRollout.fd ?? ""),
-              device: String(nativeRollout.device ?? ""),
-              inode: String(nativeRollout.inode ?? ""),
-              path: String(nativeRollout.path ?? "")
-            }
-          }
-        : {})
-    },
-    requestHash:
-      stringValue(request.requestHash) ??
-      stringValue(nativeTakeover?.terminal_bridge_request_hash) ??
-      ""
-  });
-  if (result.status === "failure") {
-    throw new Error(
-      `[codex_exact_bound_rollout:${result.diagnostics.code}] ${
-        result.diagnostics.detail ?? "the exact bound rollout is not safely inspectable"
-      }`
-    );
-  }
-  if (result.status === "pending") {
-    return { handled: true };
-  }
-  return {
-    handled: true,
-    completion: {
-      ...result.completion,
-      metadata: {
-        ...result.completion.metadata,
-        context_match: "exact_bound_rollout",
-        detector_code: result.diagnostics.code
-      }
-    }
-  };
-}
-
-function requiresExactBoundCodexCompletion(
-  conversation: Record<string, any>
-): boolean {
-  const nativeTakeover = isRecord(conversation.native_session_takeover)
-    ? conversation.native_session_takeover
-    : undefined;
-  const submission = terminalBridgeSubmission(conversation);
-  if (submission?.status !== "agent_accepted") {
-    return false;
-  }
-  const hasExactArtifacts =
-    isRecord(nativeTakeover?.codex_rollout_acceptance_anchor) &&
-    isRecord(submission.acceptance_evidence) &&
-    submission.acceptance_evidence.source === "codex_rollout";
-  const modernProductionTurn =
-    Number(nativeTakeover?.terminal_agent_identity_protocol) === 1 &&
-    cliEnv().AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE !== "1";
-  return hasExactArtifacts || modernProductionTurn;
-}
-
 function createTerminalAgentBridge(
   options,
   terminalProvider: TerminalControlProvider = createTerminalControlProvider(options),
@@ -1025,243 +883,6 @@ function terminalEndpointTakeoverFields(
       ? { terminal_endpoint: terminalControlEvidence(terminalControl) }
       : {})
   };
-}
-
-/**
- * Add canonical endpoint evidence to a verified v0.11.x Turn without changing
- * its public route-shaped terminal id or provider-owned control payload.
- * Callers must already hold the terminal, Store-writer, and Turn state locks.
- */
-function refineTerminalTurnEndpoint({
-  conversation,
-  statePath,
-  terminalControl
-}: {
-  conversation: Conversation;
-  statePath: string;
-  terminalControl: TerminalControlRef;
-}): Conversation {
-  const takeover = isRecord(conversation.native_session_takeover)
-    ? conversation.native_session_takeover
-    : undefined;
-  const storedControl = terminalControlFromTakeover(takeover);
-  if (
-    !takeover ||
-    !storedControl ||
-    takeover.terminal_endpoint !== undefined ||
-    !hasCanonicalTerminalEndpoint(terminalControl)
-  ) {
-    return conversation;
-  }
-  if (!terminalControlsShareIncarnation(storedControl, terminalControl)) {
-    throw new Error(
-      `cannot refine Turn ${turnIdForConversation(conversation)} terminal ` +
-      "endpoint after its terminal incarnation changed"
-    );
-  }
-  const terminalEndpoint = terminalControlEvidence(terminalControl);
-  // Validate that the additive evidence agrees with the exact legacy route
-  // before making it durable. This also restores the in-memory association on
-  // the old provider-owned control object.
-  associateTerminalEndpointEvidence(storedControl, terminalEndpoint);
-  const refined: Conversation = {
-    ...conversation,
-    native_session_takeover: {
-      ...takeover,
-      terminal_endpoint: terminalEndpoint
-    }
-  };
-  saveState(statePath, refined);
-  return refined;
-}
-
-function terminalRuntimeIdentityForConversation(
-  conversation: Conversation,
-  terminalControl: TerminalControlRef
-): TerminalRuntimeIdentity {
-  const runtime = terminalRuntimeIdentityBase(conversation, terminalControl);
-  if (executorForConversation(conversation).kind !== "codex") {
-    return runtime;
-  }
-  const storeDir = managedSessionStoreDirForConversation(conversation);
-  if (!storeDir) {
-    return runtime;
-  }
-  const managedSession = tryLoadManagedSession(
-    storeDir,
-    sessionIdForConversation(conversation)
-  );
-  const binding = managedSession?.binding;
-  const expectedThreadId = runtime.nativeSessionId ??
-    runtime.expectedNativeSessionId;
-  if (
-    !managedSession ||
-    managedSession.agent !== "codex" ||
-    managedSession.status !== "bound" ||
-    !binding ||
-    binding.binding_id !== stringValue(conversation.terminal_binding_id) ||
-    binding.generation !== Number(conversation.terminal_binding_generation) ||
-    binding.native_thread_id !== expectedThreadId ||
-    binding.native_process.pid !== runtime.pid ||
-    !terminalControlsShareIncarnation(binding.terminal_control, terminalControl)
-  ) {
-    return runtime;
-  }
-  return withCodexCompanionFences(
-    runtime,
-    codexAllowedCompanionSetForManagedSession({
-      storeDir,
-      session: managedSession
-    })
-  );
-}
-
-function terminalDurableRequestForConversation(
-  conversation,
-  terminalControl: TerminalControlRef
-): TerminalDurableCompletionRequest {
-  const nativeTakeover = isRecord(conversation?.native_session_takeover)
-    ? conversation.native_session_takeover
-    : undefined;
-  const runtime = terminalRuntimeIdentityForConversation(conversation, terminalControl);
-  const requestText = String(
-    nativeTakeover?.terminal_bridge_request_text ?? conversation?.user_request ?? ""
-  );
-  return {
-    sessionId: runtime.sessionId,
-    cwd: stringValue(nativeTakeover?.source_cwd),
-    requestText,
-    requestHash: stringValue(nativeTakeover?.terminal_bridge_request_hash),
-    startedAt: stringValue(nativeTakeover?.terminal_bridge_started_at),
-    context: {
-      conversation,
-      nativeTakeover,
-      ...runtime
-    }
-  };
-}
-
-async function migrateLegacyTerminalAgentIdentity({
-  conversation,
-  statePath,
-  logPath,
-  options
-}) {
-  const nativeTakeover = isRecord(conversation?.native_session_takeover)
-    ? conversation.native_session_takeover
-    : undefined;
-  const terminalControl = terminalControlFromTakeover(nativeTakeover);
-  if (!nativeTakeover || !terminalControl) {
-    return conversation;
-  }
-  const runtime = terminalRuntimeIdentityForConversation(conversation, terminalControl);
-  if (Number.isInteger(runtime.pid) && Number(runtime.pid) > 0) {
-    return conversation;
-  }
-
-  const executor = executorForConversation(conversation);
-  const nativeSessionId = stringValue(nativeTakeover.native_session_id);
-  if (
-    executor.kind !== "codex" ||
-    !nativeSessionId ||
-    parseTerminalConversationId(nativeSessionId)
-  ) {
-    return conversation;
-  }
-
-  let matchedProcess: ActiveTerminalProcess | undefined;
-  try {
-    const registry = createRuntimeTerminalAgentRegistry(options);
-    const adapter = registry.require("codex");
-    const snapshots = await createTerminalProcessSource(options).listProcessSnapshots(
-      (snapshot) => adapter.classifyProcess(snapshot) !== undefined,
-      { includeAncestors: true }
-    );
-    const terminalProvider = createTerminalControlProvider(options);
-    const resolvedTerminal = await terminalProvider.resolve(
-      terminalProvider.endpoint(terminalControl)
-    );
-
-    const candidates = snapshots.flatMap((snapshot): ActiveTerminalProcess[] => {
-      const classified = adapter.classifyProcess(snapshot);
-      return classified ? [{ ...classified, agent: "codex" }] : [];
-    });
-    const matches = candidates.filter((candidate) =>
-      candidate.sessionId === nativeSessionId &&
-      terminalProvider.containsProcess(resolvedTerminal, candidate, snapshots)
-    );
-    if (matches.length !== 1) {
-      return conversation;
-    }
-    matchedProcess = matches[0];
-  } catch (error) {
-    runtimeLog("warn", "legacy_terminal_agent_identity_migration_failed", {
-      conversation_id: conversation.conversation_id,
-      terminal_target: terminalControl.target,
-      reason: error instanceof Error ? error.message : String(error)
-    });
-    return conversation;
-  }
-  if (!matchedProcess) {
-    return conversation;
-  }
-
-  const releaseLock = acquireFileLock(`${statePath}.lock`);
-  let migratedConversation = conversation;
-  let migrated = false;
-  try {
-    const current = loadState(statePath);
-    const currentTakeover = isRecord(current.native_session_takeover)
-      ? current.native_session_takeover
-      : undefined;
-    const currentControl = terminalControlFromTakeover(currentTakeover);
-    if (!currentTakeover || !currentControl) {
-      return current;
-    }
-    const currentRuntime = terminalRuntimeIdentityForConversation(current, currentControl);
-    if (Number.isInteger(currentRuntime.pid) && Number(currentRuntime.pid) > 0) {
-      return current;
-    }
-    if (
-      currentTakeover.native_session_id !== nativeSessionId ||
-      !terminalControlsShareIncarnation(currentControl, terminalControl)
-    ) {
-      return current;
-    }
-
-    const migratedAt = cliNow().toISOString();
-    migratedConversation = {
-      ...current,
-      native_session_takeover: {
-        ...currentTakeover,
-        terminal_agent_pid: matchedProcess.pid,
-        terminal_agent_session_id: matchedProcess.sessionId,
-        terminal_agent_identity_migrated_at: migratedAt
-      },
-      updated_at: migratedAt
-    };
-    saveState(statePath, migratedConversation);
-    migrated = true;
-  } finally {
-    releaseLock();
-  }
-
-  if (migrated) {
-    appendEvent(logPath, {
-      ts: cliNow().toISOString(),
-      conversation_id: migratedConversation.conversation_id,
-      event: "terminal_agent_identity_migrated",
-      terminal_target: terminalControl.target,
-      terminal_agent_pid: matchedProcess.pid,
-      native_session_id: nativeSessionId
-    });
-    runtimeLog("info", "terminal_agent_identity_migrated", {
-      conversation_id: migratedConversation.conversation_id,
-      terminal_target: terminalControl.target,
-      terminal_agent_pid: matchedProcess.pid
-    });
-  }
-  return migratedConversation;
 }
 
 function assertSafeAbortedTerminalRetryBinding({
@@ -1961,6 +1582,12 @@ const terminalAcceptanceEvidenceForConversation =
 const terminalBridgeSubmission = dispatchReceipt.terminalBridgeSubmission;
 const terminalBridgeSubmissionReceipts = dispatchReceipt
   .terminalBridgeSubmissionReceipts;
+const terminalDispatchCompletion = createTerminalDispatchCompletionCliAdapter({
+  environment: {
+    syntheticTerminalAcceptanceAllowed: () =>
+      cliEnv().AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE === "1"
+  }
+});
 const terminalIdentityAuthority = createTerminalIdentityAuthorityCliAdapter({
   runtime: {
     createBridge: (options) => terminalRuntime(options).createBridge(),
@@ -1968,9 +1595,8 @@ const terminalIdentityAuthority = createTerminalIdentityAuthorityCliAdapter({
       terminalRuntime(options).createControlProvider(),
     createProcessSource: (options) =>
       terminalRuntime(options).createProcessSource(),
-    requiresExactBoundCodexCompletion,
-    runtimeIdentity: terminalRuntimeIdentityForConversation,
-    durableRequest: terminalDurableRequestForConversation,
+    createAgentRegistry: (options) =>
+      terminalRuntime(options).createAgentRegistry(),
     observeNativeIdentity: (request) =>
       terminalAcceptanceCliFacade.observeNativeIdentity(request),
     probeCodexCurrentThread: (request) => probeCodexCurrentThread({
@@ -1993,7 +1619,11 @@ const terminalIdentityAuthority = createTerminalIdentityAuthorityCliAdapter({
     readEvents: (logPath) => readExistingEvents(logPath),
     loadLedger: loadTerminalBridgeDispatchLedger,
     ledgerMatchesControl: terminalDispatchRecordMatchesControl,
-    ledgerProcessAnchor: terminalDispatchRecordProcessAnchor
+    ledgerProcessAnchor: terminalDispatchRecordProcessAnchor,
+    acquireStateLock: (statePath) => acquireFileLock(`${statePath}.lock`),
+    loadTurn: loadState,
+    saveTurn: saveState,
+    appendEvent
   },
   authority: {
     assertTurnBindingCurrent,
@@ -2012,10 +1642,16 @@ const terminalIdentityAuthority = createTerminalIdentityAuthorityCliAdapter({
       terminalListCliFacade.managedSessionHasAnyNativeTransition(storeDir, session)
   },
   environment: { cwd: cliCwd, now: cliNow, isProcessAlive,
-    workspaceMatches: matchesConfiguredWorkspace }
+    workspaceMatches: matchesConfiguredWorkspace },
+  completion: {
+    requiresExactBoundCodexCompletion:
+      terminalDispatchCompletion.requiresExactBoundCodexCompletion
+  }
 });
 const {
-  resolveTerminalConversationFromOptions, exactLifecycleProcessIdentity,
+  resolveTerminalConversationFromOptions, refineTerminalTurnEndpoint,
+  terminalRuntimeIdentityForConversation, terminalDurableRequestForConversation,
+  migrateLegacyTerminalAgentIdentity, exactLifecycleProcessIdentity,
   codexProcessBirthForLifecycle, codexProcessIncarnationForPid,
   observeDurableCompletionBeforeDeadStall, observeBoundTerminalAgentProcess,
   resolvedTerminalProcessIncarnation, managedSessionOwnerIsConclusivelyInactive,
@@ -3138,7 +2774,8 @@ const originalExpectedTerminalSelector =
 
 const terminalAcceptanceCliFacade = createTerminalAcceptanceCliFacade({
   native: {
-    codexProvider: (options) => createAgentSessionProvider("codex", options),
+    codexProvider: (options) =>
+      terminalRuntime(options).createAgentSessionProvider("codex"),
     codexProcessIncarnation: codexProcessIncarnationForPid,
     assertExclusive: assertNativeThreadHasExclusiveOwnership
   },
@@ -10227,7 +9864,7 @@ function persistTerminalBridgeDetectorDiagnostic({
 }
 
 async function loadCodexTerminalContexts({ nativeTakeover, options }) {
-  const provider = createAgentSessionProvider("codex", options);
+  const provider = terminalRuntime(options).createAgentSessionProvider("codex");
   const nativeSessionId = stringValue(nativeTakeover?.["native_session_id"]);
   const startedAtMs = Date.parse(String(nativeTakeover?.["terminal_bridge_started_at"] ?? ""));
   const terminalConversation = parseTerminalConversationId(nativeSessionId);
@@ -10659,8 +10296,9 @@ async function activeCodexProcessForPid(options, pid: number | undefined): Promi
   if (!Number.isInteger(pid)) {
     return undefined;
   }
-  const provider = createAgentSessionProvider("codex", options);
-  const activeSessions = await listActiveSessionsWithTerminalControl(provider, options);
+  const provider = terminalRuntime(options).createAgentSessionProvider("codex");
+  const activeSessions = await terminalRuntime(options)
+    .listActiveSessionsWithTerminalControl(provider);
   return activeSessions.find((process) => process.pid === pid);
 }
 
@@ -10677,7 +10315,7 @@ async function codexTerminalStatusContext({
   terminalControl?: TerminalControlRef;
   terminalStatus?: Record<string, any>;
 }) {
-  const provider = createAgentSessionProvider("codex", options);
+  const provider = terminalRuntime(options).createAgentSessionProvider("codex");
   const directSessionId = process?.sessionId;
   if (directSessionId) {
     const context = await provider.getForkContext({
@@ -11238,46 +10876,6 @@ function parseOptionalJson(text) {
   } catch {
     return undefined;
   }
-}
-
-function createAgentSessionProvider(agent, options) {
-  if (agent !== "codex") {
-    throw new Error(`unsupported agent session provider: ${agent}`);
-  }
-
-  const injected = cliDependencies<CliCommandOptions>().createAgentSessionProvider;
-  if (injected) {
-    return injected(agent, options);
-  }
-  const injectedAdapter = cliDependencies<CliCommandOptions>().codexLocalSessionAdapter;
-  if (injectedAdapter) {
-    return new CodexLocalSessionProvider(
-      typeof injectedAdapter === "function"
-        ? injectedAdapter(options)
-        : injectedAdapter
-    );
-  }
-
-  if (
-    options.threadsJson ||
-    options.processesJson ||
-    options.rolloutsJson ||
-    options.codexActiveSessionIdentitiesJson
-  ) {
-    return new CodexLocalSessionProvider(new InlineCodexLocalSessionAdapter({
-      threads: parseJsonOption(options.threadsJson, "--threads-json"),
-      processes: parseJsonOption(options.processesJson, "--processes-json"),
-      rollouts: parseJsonOption(options.rolloutsJson, "--rollouts-json"),
-      activeSessionIdentities: parseJsonOption(
-        options.codexActiveSessionIdentitiesJson,
-        "--codex-active-session-identities-json"
-      )
-    }));
-  }
-
-  return new CodexLocalSessionProvider(new CodexStoreAdapter({
-    codexHome: expandHome(options.codexHome)
-  }));
 }
 
 function codexThreadLifecycleProvider(

@@ -2,8 +2,8 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 11468,
-    "production_physical_loc": 89156,
+    "cli_core_max_physical_loc": 11066,
+    "production_physical_loc": 89264,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -262,6 +262,15 @@
         "test/shards/agent-cli-receipt-fences.test.ts",
         "test/shards/agent-cli-session-acceptance.test.ts",
         "test/shards/agent-cli-terminal-send-gates.test.ts"
+      ]
+    },
+    "terminal-dispatch-completion": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/shards/agent-cli-monitor-recovery.test.ts",
+        "test/shards/agent-cli-session-acceptance.test.ts",
+        "test/shards/agent-cli-terminal-send-gates.test.ts",
+        "test/cli-core-import.test.ts"
       ]
     },
     "terminal-dispatch-core": {
@@ -681,6 +690,10 @@
     {
       "path": "src/terminal-dispatch-capability.ts",
       "owner": "terminal-dispatch-application"
+    },
+    {
+      "path": "src/terminal-dispatch-completion-cli-adapter.ts",
+      "owner": "terminal-dispatch-completion"
     },
     {
       "path": "src/terminal-dispatch-composition.ts",
