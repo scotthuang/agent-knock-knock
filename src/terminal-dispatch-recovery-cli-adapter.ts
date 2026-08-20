@@ -94,6 +94,11 @@ import {
 } from "./verified-dead-agent-policy.js";
 import { isRecord, nonBlankString } from "./value-guards.js";
 
+const RECOVERABLE_TERMINAL_DISPATCH_STATUSES = new Set([
+  "prepared", "text_injected", "enter_dispatched", "agent_accepted",
+  "dispatching", "submitted", "not_accepted", "uncertain", "verified"
+]);
+
 export interface TerminalDispatchRecoveryCliDependencies {
   repository: TerminalDispatchRepositoryCliAdapter;
   authority: {
@@ -133,6 +138,14 @@ export interface TerminalDispatchRecoveryCliDependencies {
 }
 
 export interface TerminalDispatchRecoveryCliFacade {
+  assertNativeThreadStoreAuthority(input: {
+    terminalControl: TerminalControlRef;
+    nativeThreadId: string;
+    storeDir: string;
+  }): void;
+  orphanedForRecovery(
+    terminalControl: TerminalControlRef
+  ): TerminalDispatchLedgerDocument | undefined;
   bindingFields(conversation: Conversation): TerminalDispatchLedgerDocument;
   reconcilePrepared(
     terminalControl: TerminalControlRef,
@@ -232,6 +245,9 @@ export function createTerminalDispatchRecoveryCliAdapter(
 ): TerminalDispatchRecoveryCliFacade {
   const application = new TerminalDispatchRecoveryCliApplication(dependencies);
   return Object.freeze({
+    assertNativeThreadStoreAuthority: (input) =>
+      application.assertNativeThreadStoreAuthority(input),
+    orphanedForRecovery: (control) => application.orphanedForRecovery(control),
     bindingFields: (conversation) => application.bindingFields(conversation),
     reconcilePrepared: (control, ledger) =>
       application.reconcilePrepared(control, ledger),
@@ -426,6 +442,98 @@ class TerminalDispatchRecoveryCliApplication {
 
   bindingFields(conversation: Conversation): TerminalDispatchLedgerDocument {
     return { ...this.#bindingFacts(conversation) };
+  }
+
+  assertNativeThreadStoreAuthority(input: {
+    terminalControl: TerminalControlRef;
+    nativeThreadId: string;
+    storeDir: string;
+  }): void {
+    const ledger = this.#dependencies.repository.reconcileIncarnation(
+      input.terminalControl,
+      this.#dependencies.repository.load(input.terminalControl)
+    );
+    if (!ledger) return;
+    if (!this.#dependencies.repository.matchesControl(
+      ledger, input.terminalControl, { requireProcessAnchor: false }
+    )) {
+      throw new Error(
+        `terminal ${input.terminalControl.target} dispatch ledger selector is invalid`
+      );
+    }
+    const binding = isRecord(ledger.binding) ? ledger.binding : undefined;
+    const authorityIds = new Set([
+      nonBlankString(ledger.native_thread_id),
+      nonBlankString(binding?.native_thread_id),
+      nonBlankString(ledger.before_native_thread_id),
+      nonBlankString(ledger.target_native_thread_id)
+    ].filter((value): value is string => Boolean(value))
+      .map((value) => value.toLowerCase()));
+    const nativeThreadId = input.nativeThreadId.toLowerCase();
+    if (!authorityIds.has(nativeThreadId)) return;
+    const authorityStoreDir = this.#ledgerStoreDir(ledger);
+    if (!authorityStoreDir) {
+      throw new Error(
+        `terminal ${input.terminalControl.target} has native-thread authority ` +
+        `${nativeThreadId} whose Store cannot be verified`
+      );
+    }
+    if (path.resolve(authorityStoreDir) !== path.resolve(input.storeDir)) {
+      throw new Error(
+        `terminal ${input.terminalControl.target} native thread ` +
+        `${nativeThreadId} is authoritative in another Store ` +
+        `${path.resolve(authorityStoreDir)}`
+      );
+    }
+  }
+
+  orphanedForRecovery(
+    terminalControl: TerminalControlRef
+  ): TerminalDispatchLedgerDocument | undefined {
+    try {
+      const ledger = this.#dependencies.repository.load(terminalControl);
+      const lifecycle = terminalDispatchLedgerLooksLifecycle(ledger);
+      const recoveryIdentity = lifecycle
+        ? nonBlankString(ledger?.transition_id)
+        : nonBlankString(ledger?.message_id);
+      if (
+        !ledger ||
+        !RECOVERABLE_TERMINAL_DISPATCH_STATUSES.has(String(ledger.status)) ||
+        !recoveryIdentity ||
+        (!lifecycle && this.#dependencies.repository.matchesControl(
+          ledger, terminalControl, { requireProcessAnchor: false }
+        ) && !this.#dependencies.repository.matchesControl(ledger, terminalControl)) ||
+        (!lifecycle && this.#loadLedgerOwner(ledger))
+      ) return undefined;
+      return lifecycle ? { ...ledger, kind: "lifecycle" } : ledger;
+    } catch {
+      return undefined;
+    }
+  }
+
+  #ledgerStoreDir(ledger: TerminalDispatchLedgerDocument): string | undefined {
+    const stored = nonBlankString(ledger.store_dir);
+    if (stored) return stored;
+    const statePath = nonBlankString(ledger.state_path);
+    if (!statePath) return undefined;
+    try {
+      return pathsForConversationDir(path.dirname(path.resolve(statePath))).storeDir;
+    } catch {
+      return undefined;
+    }
+  }
+
+  #loadLedgerOwner(ledger: TerminalDispatchLedgerDocument): Conversation | undefined {
+    const statePath = nonBlankString(ledger.state_path);
+    if (!statePath) return undefined;
+    try {
+      const conversation = loadState(statePath);
+      return conversation.conversation_id === nonBlankString(ledger.conversation_id)
+        ? conversation
+        : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   isVerifiedDead(conversation: Conversation | Record<string, any>): boolean {

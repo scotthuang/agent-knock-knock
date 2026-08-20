@@ -1847,6 +1847,61 @@ truthiness, JSON validation, and active provider/source/bridge call counts. Four
 targeted integration witnesses retain exact monitor recovery, Session acceptance,
 terminal send gates, and import-time facade wiring.
 
+## Native lifecycle context, listing, and inspection CLI composition
+
+The native-lifecycle Vertical A slice moves the exact 21-function inventory for
+binding tokens, lifecycle terminal resolution, query-port composition,
+workspace and exclusive-ownership observation, current lifecycle snapshots,
+resumable-thread listing, and the closed native status inspection out of
+`cli-core.ts`. It also moves terminal Store-authority and orphan projections
+behind the typed dispatch-recovery facade and keeps Codex latent-clear parsing,
+composer checks, and candidate-provider precedence in one command-scoped CLI
+adapter. Native new/resume/reconcile transition, recovery, verification,
+settlement, deferred handoff, acceptance, callback, and monitor state machines
+remain in their existing owners.
+
+Against exact parent `81feac294d5a62ea8309c6e96a66c042ebf239b8`,
+`src/cli-core.ts` falls from 11,066 to 9,868 physical lines (-1,198). Total
+production TypeScript changes from 89,264 to 89,498 (+234, 19.53 percent of the
+core movement), below the preferred 350-line and hard 550-line overhead limits.
+Architecture validation reports 51 domains, 106 production modules, 615 static
+import edges, and zero cycles. The factory has exactly five explicit,
+invocation-scoped groups (`runtime`, `identity`, `state`, `terminalList`, and
+`output`) and exports no mutable singleton. Codex lifecycle-candidate selection
+delegates directly to the runtime facade's dedicated provider factory, retaining
+the invocation-local override before production Store fallback.
+
+`currentSnapshot` is the only lifecycle snapshot sequencer. It resolves the
+claimed Codex companion context through `terminalIdentityAuthority`, observes
+the current native identity through `terminalAcceptanceCliFacade`, selects or
+materializes the managed Session, refines it through the acceptance owner when
+requested, derives the logical identity and companion set through the identity
+facade, performs exclusive ownership before returning a frozen data-only
+snapshot, and never returns a terminal adapter. Vertical B requests adapter
+behavior separately through the facade, so no full terminal or executable
+capability leaks into snapshot facts.
+
+Native inspection retains the exact safety boundary: the terminal lock remains
+held through output presentation; `/status` is the only accepted plan; Enter is
+dispatched exactly once; a fresh terminal, binding token, agent version,
+identity, ownership, readiness, and composer are revalidated immediately before
+Enter; two consecutive fresh observations with the same evidence fingerprint
+are required; modal dismissal revalidates the same facts immediately before its
+single key sequence; and final status plus empty-composer proof precedes output.
+Only a pre-input `NativeInspectionSubmissionError` remains safely retryable;
+possible input and every post-Enter uncertainty retain the do-not-retry result.
+
+The TypeScript compiler AST inventory contains 68 functions in the new adapter;
+every one stays below the preferred limits (maximum 64 physical lines and
+approximate complexity c14). Direct evidence
+fixes canonical and legacy binding-token bytes plus double getter order,
+snapshot sequencing and exact data-only keys, one-Enter/two-observation/final-
+revalidation ordering with lock-held presentation, parallel async provider
+isolation, the five-group factory boundary, and declaration/core forbidden
+patterns. The four focused witnesses are Claude native inspection,
+native-thread lifecycle, native ownership, and the Codex no-rollout native-
+inspection cases.
+
 ## Soft freeze while #126 is active
 
 Until the orchestration milestones finish:
