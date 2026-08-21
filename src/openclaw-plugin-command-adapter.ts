@@ -852,7 +852,8 @@ function formatStatusCommandResult(result) {
     `session: ${sessionId}`,
     `turn: ${turnId}`,
     `agent: ${summary.agent ?? summary.executor?.kind ?? terminalStatus.agent ?? "unknown"}`,
-    `status: ${summary.status ?? terminalStatus.activity_state ?? "unknown"}`
+    `turn status: ${summary.status ?? result.conversation_status ?? result.status ?? "not managed"}`,
+    `terminal activity: ${terminalStatus.activity_state ?? "unavailable"}`
   ];
   if (callbackDelivery) {
     const callbackParts = [

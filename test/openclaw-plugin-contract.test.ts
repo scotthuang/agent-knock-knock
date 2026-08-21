@@ -1878,6 +1878,10 @@ test("OpenClaw status includes purpose context and a bounded terminal screen", a
   about: "Review the current branch",
   confidence: "high",
   limitations: ["history is bounded"],
+  terminal_status: {
+    agent: "codex",
+    activity_state: "working"
+  },
   terminal_screen: {
     excerpt: "Running focused tests"
   }
@@ -1927,6 +1931,15 @@ process.stdout.write(JSON.stringify(result));`,
     assert.match(slashResult?.text ?? "", /terminal screen:\nRunning focused tests/u);
     assert.match(slashResult?.text ?? "", /^session: session-status$/mu);
     assert.match(slashResult?.text ?? "", /^turn: managed-terminal-1$/mu);
+    assert.match(
+      slashResult?.text ?? "",
+      /^turn status: waiting_for_agent$/mu
+    );
+    assert.match(
+      slashResult?.text ?? "",
+      /^terminal activity: working$/mu
+    );
+    assert.doesNotMatch(slashResult?.text ?? "", /^status:/mu);
     assert.match(
       slashResult?.text ?? "",
       /^callback: pending, attempt 2, in flight, next retry 2026-08-06T12:30:00\.000Z$/mu
