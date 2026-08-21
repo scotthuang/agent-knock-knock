@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.12.12 - 2026-08-21
+
+### Added
+
+- Add exact native lifecycle and status compatibility for Codex `0.148.0` and Claude Code `2.1.237`, while retaining the previously verified profiles.
+- Report exact native-profile support in CLI and OpenClaw doctor output without blocking ordinary terminal work for an otherwise available but unprofiled coding-agent executable.
+
+### Changed
+
+- Decompose the orchestration runtime into typed, ownership-checked domain facades and services while preserving action contract 16, Store writer protocol 5, public CLI/OpenClaw contracts, lock ordering, and durable-write ordering.
+- Strengthen architecture enforcement with bounded production functions, canonical status authorities, targeted affected-test selection, and reproducible refactor evidence.
+- Clarify the TUI-first handoff model and make fast tests the normal development/local-install gate while reserving the full release suite for actual npm and ClawHub publication.
+
+### Security
+
+- Keep adjacent unknown Codex and Claude Code versions fail-closed for native inspection and lifecycle operations, and enforce one-way Claude transcript resume compatibility across verified profiles.
+- Preserve exact terminal identity, binding, approval, acceptance, callback, retry, and uncertainty fences across the internal architecture refactor.
+
 ## 0.12.11 - 2026-08-14
 
 ### Fixed
