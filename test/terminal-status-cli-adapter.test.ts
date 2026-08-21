@@ -21,6 +21,8 @@ import type {
   ResolvedTerminalConversation,
   TerminalBridgeStatus
 } from "../src/terminal-agent-bridge.js";
+import { terminalWatchDiscoveryHint } from
+  "../src/terminal-list-renderer.js";
 import {
   appendEvent,
   loadState,
@@ -113,6 +115,11 @@ function dependencies(input: {
   terminalControlFromTakeover?: TerminalStatusCliDependencies["selection"]["terminalControlFromTakeover"];
   terminalAdapter?: TerminalStatusCliDependencies["observation"]["terminalAdapter"];
   bridgeStatus?: TerminalBridgeStatus;
+  watchAuthorityEvents?: string[];
+  watchActionAvailable?: boolean;
+  listActivityState?: TerminalBridgeStatus["activity_state"];
+  listActivityReason?: string;
+  terminalListObservation?: TerminalStatusCliDependencies["watchAuthority"]["terminalListObservation"];
 }): TerminalStatusCliDependencies {
   const loaded = input.loaded ?? conversation(input.marker);
   const statePath = path.join(input.storeDir, `${input.marker}.state.json`);
@@ -190,6 +197,24 @@ function dependencies(input: {
         configured === undefined || configured === observed,
       acquireStateLock: input.acquireStateLock ?? (() => () => undefined),
       terminalBridgeEnabled: input.terminalBridgeEnabled ?? (() => false)
+    },
+    watchAuthority: {
+      async terminalListObservation(options, terminalId) {
+        input.watchAuthorityEvents?.push("list-observation");
+        if (input.terminalListObservation) {
+          return input.terminalListObservation(options, terminalId);
+        }
+        const observedStatus = input.bridgeStatus ?? terminalStatus();
+        const activityState = input.listActivityState ??
+          observedStatus.activity_state;
+        return {
+          activityState,
+          activityReason: input.listActivityReason ??
+            observedStatus.activity_reason,
+          watchActionAvailable: input.watchActionAvailable ??
+            ["working", "awaiting_approval"].includes(activityState)
+        };
+      }
     },
     projection: {
       callbackRetryDisposition: () => ({ state: "unavailable" }),
@@ -385,6 +410,265 @@ test("terminal status preserves selector, JSON, and newest-cwd history order", a
     "confidence", "about", "limitations", "terminal_control",
     "terminal_status", "terminal_screen"
   ]);
+});
+
+test("raw status uses one durable list observation for activity and Watch discovery", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-status-watch-hint-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const canonicalTerminalId = resolvedTerminal().conversationId;
+  const terminal = {
+    ...resolvedTerminal(),
+    conversationId: "terminal:tmux:status:0.0:73001",
+    legacy: true
+  };
+  const authorityEvents: string[] = [];
+  const events: string[] = [];
+  const durableStatus: TerminalBridgeStatus = {
+    ...terminalStatus(),
+    activity_state: "working",
+    activity_reason:
+      "Codex rollout contains an exact unfinished human-started task"
+  };
+  const facade = createTerminalStatusCliFacade(dependencies({
+    marker: "W",
+    events,
+    storeDir: path.join(root, "store"),
+    terminal,
+    bridgeStatus: {
+      ...terminalStatus(),
+      activity_state: "idle",
+      activity_reason: "visible composer looked idle"
+    },
+    watchAuthorityEvents: authorityEvents,
+    terminalListObservation: async (options, terminalId) => {
+      assert.equal(options.conversation, terminal.conversationId);
+      assert.equal(terminalId, canonicalTerminalId);
+      return {
+        activityState: "working",
+        activityReason:
+          "Codex rollout contains an exact unfinished human-started task",
+        watchActionAvailable: true,
+        terminalStatus: durableStatus
+      };
+    }
+  }));
+
+  const result = await runStatus(facade, {
+    conversation: terminal.conversationId
+  });
+  const output = JSON.parse(result.stdout);
+
+  assert.equal(output.terminal_status.activity_state, "working");
+  assert.equal(
+    output.terminal_status.activity_reason,
+    "Codex rollout contains an exact unfinished human-started task"
+  );
+  assert.equal(output.terminal_screen.excerpt, "ready");
+  assert.equal(
+    events.some((event) => event.startsWith("W:terminal-status:")),
+    false,
+    "the exact list observation must supply the one shared screen snapshot"
+  );
+  assert.deepEqual(
+    output.terminal_watch_hint,
+    terminalWatchDiscoveryHint(canonicalTerminalId)
+  );
+  assert.deepEqual(authorityEvents, [
+    "list-observation"
+  ]);
+
+  const awaitingApproval = createTerminalStatusCliFacade(dependencies({
+    marker: "A",
+    events: [],
+    storeDir: path.join(root, "awaiting-store"),
+    terminal,
+    bridgeStatus: {
+      ...terminalStatus(),
+      activity_state: "awaiting_approval",
+      activity_reason: "approval is required"
+    }
+  }));
+  const awaitingResult = await runStatus(awaitingApproval, {
+    conversation: terminal.conversationId
+  });
+  assert.deepEqual(
+    JSON.parse(awaitingResult.stdout).terminal_watch_hint,
+    terminalWatchDiscoveryHint(canonicalTerminalId)
+  );
+
+  const unsupported = createTerminalStatusCliFacade(dependencies({
+    marker: "U",
+    events: [],
+    storeDir: path.join(root, "unsupported-store"),
+    terminal,
+    bridgeStatus: {
+      ...terminalStatus(),
+      activity_state: "awaiting_approval",
+      activity_reason: "approval is required"
+    },
+    watchActionAvailable: false
+  }));
+  const unsupportedResult = await runStatus(unsupported, {
+    conversation: terminal.conversationId
+  });
+  assert.equal(
+    Object.hasOwn(JSON.parse(unsupportedResult.stdout), "terminal_watch_hint"),
+    false
+  );
+});
+
+test("raw status suppresses Watch discovery for managed, conflicted, watched, and idle terminals", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-status-watch-gates-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const terminal = resolvedTerminal();
+  const fixtures = [
+    {
+      name: "managed",
+      activity: "working",
+      expectedEvents: ["list-observation"]
+    },
+    {
+      name: "managed-owner",
+      activity: "working",
+      expectedEvents: ["list-observation"]
+    },
+    {
+      name: "conflict",
+      activity: "working",
+      expectedEvents: ["list-observation"]
+    },
+    {
+      name: "active-watch",
+      activity: "working",
+      expectedEvents: ["list-observation"]
+    },
+    {
+      name: "idle",
+      activity: "idle",
+      expectedEvents: ["list-observation"]
+    }
+  ];
+
+  for (const fixture of fixtures) {
+    const authorityEvents: string[] = [];
+    const facade = createTerminalStatusCliFacade(dependencies({
+      marker: fixture.name,
+      events: [],
+      storeDir: path.join(root, fixture.name),
+      terminal,
+      bridgeStatus: {
+        ...terminalStatus(),
+        activity_state: fixture.activity as TerminalBridgeStatus["activity_state"]
+      },
+      watchAuthorityEvents: authorityEvents,
+      watchActionAvailable: false
+    }));
+    const result = await runStatus(facade, {
+      conversation: terminal.conversationId
+    });
+    assert.equal(
+      Object.hasOwn(JSON.parse(result.stdout), "terminal_watch_hint"),
+      false,
+      fixture.name
+    );
+    assert.deepEqual(authorityEvents, fixture.expectedEvents, fixture.name);
+  }
+});
+
+test("raw status fails closed when authoritative list observation fails", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-status-list-fail-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const terminal = resolvedTerminal();
+  const authorityEvents: string[] = [];
+  const logs: string[] = [];
+  const facade = createTerminalStatusCliFacade(dependencies({
+    marker: "F",
+    events: [],
+    storeDir: path.join(root, "store"),
+    terminal,
+    bridgeStatus: {
+      ...terminalStatus(),
+      activity_state: "idle",
+      activity_reason: "visible composer looked idle"
+    },
+    watchAuthorityEvents: authorityEvents,
+    terminalListObservation: async () => {
+      throw new Error("authoritative list scan failed");
+    }
+  }));
+
+  const result = await runStatus(facade, {
+    conversation: terminal.conversationId
+  }, logs);
+  const output = JSON.parse(result.stdout);
+
+  assert.equal(output.terminal_status.activity_state, "unknown");
+  assert.equal(
+    output.terminal_status.activity_reason,
+    "durable terminal activity evidence is unavailable: " +
+      "authoritative list scan failed"
+  );
+  assert.equal(Object.hasOwn(output, "terminal_watch_hint"), false);
+  assert.deepEqual(authorityEvents, ["list-observation"]);
+  assert.ok(logs.includes("terminal_list_observation_unavailable"));
+});
+
+test("raw status fails closed when authoritative list observation is absent", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-status-list-absent-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const terminal = resolvedTerminal();
+  const facade = createTerminalStatusCliFacade(dependencies({
+    marker: "A",
+    events: [],
+    storeDir: path.join(root, "store"),
+    terminal,
+    bridgeStatus: {
+      ...terminalStatus(),
+      activity_state: "idle",
+      activity_reason: "visible composer looked idle"
+    },
+    terminalListObservation: async () => undefined
+  }));
+
+  const result = await runStatus(facade, {
+    conversation: terminal.conversationId
+  });
+  const output = JSON.parse(result.stdout);
+
+  assert.equal(output.terminal_status.activity_state, "unknown");
+  assert.equal(
+    output.terminal_status.activity_reason,
+    "durable terminal activity evidence is unavailable"
+  );
+  assert.equal(Object.hasOwn(output, "terminal_watch_hint"), false);
+});
+
+test("managed status never consults or emits Terminal Watch discovery", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-managed-status-watch-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const authorityEvents: string[] = [];
+  const loaded: Conversation = {
+    ...conversation("managed-watch"),
+    native_session_takeover: {}
+  };
+  const facade = createTerminalStatusCliFacade(dependencies({
+    marker: "M",
+    events: [],
+    storeDir: path.join(root, "store"),
+    loaded,
+    bridgeStatus: {
+      ...terminalStatus(),
+      activity_state: "working",
+      activity_reason: "managed agent is active"
+    },
+    terminalControlFromTakeover: () => resolvedTerminal().terminalControl,
+    watchAuthorityEvents: authorityEvents
+  }));
+
+  const result = await runStatus(facade, {});
+  const output = JSON.parse(result.stdout);
+  assert.equal(Object.hasOwn(output, "terminal_watch_hint"), false);
+  assert.deepEqual(authorityEvents, []);
 });
 
 test("completion context facade preserves provider and active-process read order", async (t) => {

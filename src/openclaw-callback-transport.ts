@@ -103,7 +103,7 @@ export interface OpenClawCallbackTransport {
   deliverChatSend(input: DeliverChatSendInput): CallbackProcessDelivery;
 }
 
-interface CallbackWakeAcknowledgement {
+export interface CallbackWakeAcknowledgement {
   runId: string;
   status: CallbackWakeAcknowledgementStatus;
 }
@@ -242,7 +242,7 @@ function parseGatewayCallbackDeliveryPlan(
   return { chatSendParams, sessionSendParams };
 }
 
-function parseChatSendAcknowledgement(
+export function parseChatSendAcknowledgement(
   text: unknown,
   expectedRunId: string
 ): CallbackWakeAcknowledgement {

@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Add durable Terminal Watch for exact human-started Codex and Claude Code tasks, with restart-safe OpenClaw callbacks for approval, completion, failure, timeout, invalidation, and cancellation.
+- Add `agent_knock_knock_watch` / `agent_knock_knock_unwatch`, `/akk watch` / `/akk unwatch`, and watch-aware list/status output without creating an AKK Session or Turn or sending terminal input.
+
+### Fixed
+
+- Derive Watch and Send authority from exact terminal IDs inside the trusted plugin/CLI boundary, so OpenClaw models never need to copy opaque tokens or fingerprints.
+- Keep Watch activity authoritative when Codex's transient screen markers look idle, support large historical rollouts with incremental checkpoints, and isolate corrupt historical Watch records without starving healthy watches or callbacks.
+- Restore follow-current Send across tmux route renumbering, stale legacy dispatch ledgers, long-lived Sessions with released earlier binding epochs, and interrupted v1-to-v2 ledger migration without replaying terminal input.
+
+### Changed
+
+- Advance the action contract to 18 and expand the OpenClaw plugin contract to 16 tools. Model-facing actions now carry semantic IDs only; opaque freshness and confirmation authority remains private to the plugin and CLI. Store writer protocol remains 5; Terminal Watch uses its own schema-v1 aggregate.
+
+### Security
+
+- Pin each Watch to exact terminal, process, native-task, runtime-version, rollout/transcript file, and privacy-safe request-hash evidence; drift fails closed and approval observations never authorize automatic input.
+- Revalidate private Send, lifecycle, handoff, reconciliation, and approval authority under canonical terminal and Store locks; stale, split, replayed, cross-session, or callback-mismatched evidence sends zero terminal input.
+
 ## 0.12.12 - 2026-08-21
 
 ### Added

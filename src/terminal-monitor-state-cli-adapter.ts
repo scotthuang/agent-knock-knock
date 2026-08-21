@@ -2026,7 +2026,6 @@ function terminalBridgeApprovalInstructions(input: {
   const keyDescription = keys.length > 0
     ? keys.join(" then ")
     : nonBlankString(approval.key) ?? "the detected approve key sequence";
-  const fingerprint = nonBlankString(approval.fingerprint);
   const promptKind = nonBlankString(approval.prompt_kind);
   const command = nonBlankString(approval.command);
   const toolName = nonBlankString(approval.tool_name);
@@ -2041,7 +2040,6 @@ function terminalBridgeApprovalInstructions(input: {
     agentName,
     label,
     keyDescription,
-    fingerprint,
     promptKind,
     command,
     toolName,
@@ -2059,7 +2057,6 @@ function approvalInstructionLines(input: {
   agentName: string;
   label: string;
   keyDescription: string;
-  fingerprint?: string;
   promptKind?: string;
   command?: string;
   toolName?: string;
@@ -2068,10 +2065,11 @@ function approvalInstructionLines(input: {
   excerpt: string;
   directReview: boolean;
 }): Array<string | undefined> {
+  const turnId = turnIdForConversation(input.conversation);
   return [
     `${input.agentName} is waiting for approval in a terminal-controlled AKK session.`,
     "",
-    `Conversation: ${input.conversation.conversation_id}`,
+    `Turn: ${turnId}`,
     `Terminal: ${input.terminalControl.kind}:${input.terminalControl.target}`,
     `Approval option: ${input.label} (${input.keyDescription})`,
     input.promptKind ? `Request kind: ${input.promptKind}` : undefined,
@@ -2089,24 +2087,16 @@ function approvalInstructionLines(input: {
       ? `Before asking for approval, have the user personally inspect the live ${input.terminalControl.kind} pane ${input.terminalControl.target}.`
       : undefined,
     input.directReview
-      ? "This hookless callback intentionally omits raw command details; do not approve from the hash or summary alone."
+      ? "This hookless callback intentionally omits raw command details; do not approve from the summary alone."
       : undefined,
     input.directReview ? "" : undefined,
     `Ask the user whether to approve or deny this ${input.agentName} request.`,
     "",
-    "If the user approves, call `agent_knock_knock_approve` with:",
-    `- conversation_id: ${input.conversation.conversation_id}`,
-    `- expected_approval_fingerprint: ${input.fingerprint ?? "(missing; refresh status before approval)"}`,
-    "",
-    "Equivalent user command: `AKK approve " + input.conversation.conversation_id +
-      (input.fingerprint
-        ? ` --expected-approval-fingerprint ${input.fingerprint}`
-        : "") + "`",
+    "If the user approves, call `agent_knock_knock_approve` with only:",
+    `- turn_id: ${turnId}`,
     "",
     "If the user denies or wants to stop this request, call `agent_knock_knock_cancel` with:",
-    `- conversation_id: ${input.conversation.conversation_id}`,
-    "",
-    "Equivalent user command: `AKK cancel " + input.conversation.conversation_id + "`",
+    `- turn_id: ${turnId}`,
     "",
     "Do not use raw tmux, shell, or manual key presses for this approval. Do not approve without explicit user confirmation."
   ];

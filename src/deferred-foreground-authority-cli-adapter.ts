@@ -14,6 +14,7 @@ import {
   isExactNativeThreadId,
   managedSessionBindingToken,
   managedSessionRevision,
+  managedSessionStatesFromConversations,
   type ManagedSessionState
 } from "./managed-session.js";
 import {
@@ -337,8 +338,11 @@ export function deferredCandidateSourceTurnHistory(
   if (!binding?.native_thread_id) {
     return undefined;
   }
-  const turns = ports.turn.turnsForSession(storeDir, session.session_id);
-  if (turns.some((turn) => {
+  const turns = currentCandidateBindingTurns(
+    binding,
+    ports.turn.turnsForSession(storeDir, session.session_id)
+  );
+  if (!turns || turns.some((turn) => {
     const callbackDelivered =
       isRecord(turn.callback_delivery) &&
       turn.callback_delivery.status === "delivered";
@@ -365,17 +369,7 @@ export function deferredCandidateSourceTurnHistory(
         !callbackDelivered &&
         !explicitlyAbandonedUncertain &&
         !safelyAbortedBeforeInput
-      ) ||
-      stringValue(turn.terminal_binding_id) !== binding.binding_id ||
-      Number(turn.terminal_binding_generation) !== binding.generation ||
-      (
-        stringValue(turn.native_thread_id) ??
-        stringValue(
-          isRecord(turn.native_session_takeover)
-            ? turn.native_session_takeover.terminal_agent_session_id
-            : undefined
-        )
-      ) !== binding.native_thread_id
+      )
     );
   })) {
     return undefined;
@@ -407,19 +401,12 @@ function frozenCandidateSourceTurnHistory(
   if (!binding?.native_thread_id) {
     return undefined;
   }
-  const turns = ports.turn.turnsForSession(storeDir, session.session_id);
-  if (turns.some((turn) =>
-    !isTerminalDispatchOwnerReleasedStatus(turn.status) ||
-    stringValue(turn.terminal_binding_id) !== binding.binding_id ||
-    Number(turn.terminal_binding_generation) !== binding.generation ||
-    (
-      stringValue(turn.native_thread_id) ??
-      stringValue(
-        isRecord(turn.native_session_takeover)
-          ? turn.native_session_takeover.terminal_agent_session_id
-          : undefined
-      )
-    ) !== binding.native_thread_id
+  const turns = currentCandidateBindingTurns(
+    binding,
+    ports.turn.turnsForSession(storeDir, session.session_id)
+  );
+  if (!turns || turns.some((turn) =>
+    !isTerminalDispatchOwnerReleasedStatus(turn.status)
   )) {
     return undefined;
   }
@@ -437,6 +424,114 @@ function frozenCandidateSourceTurnHistory(
       .update(JSON.stringify(turn))
       .digest("hex")
   })).sort((left, right) => left.turn_id.localeCompare(right.turn_id));
+}
+
+function candidateTurnNativeThreadId(turn: Conversation): string | undefined {
+  return stringValue(turn.native_thread_id) ??
+    stringValue(
+      isRecord(turn.native_session_takeover)
+        ? turn.native_session_takeover.terminal_agent_session_id
+        : undefined
+    );
+}
+
+function candidateTurnMatchesCurrentBinding(
+  turn: Conversation,
+  binding: ManagedTerminalBinding
+): boolean {
+  return stringValue(turn.terminal_binding_id) === binding.binding_id &&
+    Number(turn.terminal_binding_generation) === binding.generation &&
+    candidateTurnNativeThreadId(turn) === binding.native_thread_id;
+}
+
+function candidateTurnHasStrictEarlierBinding(
+  turn: Conversation,
+  binding: ManagedTerminalBinding
+): boolean {
+  const turnBindingId = stringValue(turn.terminal_binding_id);
+  const turnBindingGeneration = Number(turn.terminal_binding_generation);
+  const turnNativeThreadId = stringValue(turn.native_thread_id);
+  const takeover = isRecord(turn.native_session_takeover)
+    ? turn.native_session_takeover
+    : undefined;
+  if (
+    turnBindingId &&
+    Number.isSafeInteger(turnBindingGeneration) &&
+    turnBindingGeneration >= 1 &&
+    isExactNativeThreadId(turnNativeThreadId)
+  ) {
+    const nestedBindingId = stringValue(takeover?.terminal_binding_id);
+    const nestedBindingGeneration = takeover?.terminal_binding_generation ===
+        undefined
+      ? undefined
+      : Number(takeover.terminal_binding_generation);
+    const nestedNativeThreadIds = [
+      takeover?.terminal_agent_expected_session_id,
+      takeover?.terminal_agent_session_id
+    ].filter((value) => value !== undefined);
+    if (
+      (takeover?.terminal_binding_id !== undefined &&
+        nestedBindingId !== turnBindingId) ||
+      (nestedBindingGeneration !== undefined &&
+        nestedBindingGeneration !== turnBindingGeneration) ||
+      nestedNativeThreadIds.some(
+        (value) => stringValue(value) !== turnNativeThreadId
+      )
+    ) {
+      return false;
+    }
+    return turnBindingId !== binding.binding_id &&
+      turnBindingGeneration < binding.generation;
+  }
+  const hasNoPersistedBindingIdentity =
+    turn.terminal_binding_id === undefined &&
+    turn.terminal_binding_generation === undefined &&
+    turn.native_thread_id === undefined &&
+    takeover?.terminal_binding_id === undefined &&
+    takeover?.terminal_binding_generation === undefined;
+  if (!hasNoPersistedBindingIdentity) {
+    return false;
+  }
+  try {
+    const migrated = managedSessionStatesFromConversations([turn])[0];
+    const migratedBinding = migrated?.status === "bound"
+      ? migrated.binding
+      : undefined;
+    return Boolean(
+      migratedBinding &&
+      migratedBinding.binding_id !== binding.binding_id &&
+      migratedBinding.generation < binding.generation &&
+      isExactNativeThreadId(migratedBinding.native_thread_id)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Keep the mutable authority fingerprint scoped to the current binding epoch.
+ * A released Turn from a strictly earlier binding epoch no longer owns current
+ * terminal input. Its callback and notification recovery remain independent
+ * concerns; any ambiguous binding or non-released Turn still fails closed.
+ */
+function currentCandidateBindingTurns(
+  binding: ManagedTerminalBinding,
+  turns: Conversation[]
+): Conversation[] | undefined {
+  const current: Conversation[] = [];
+  for (const turn of turns) {
+    if (candidateTurnMatchesCurrentBinding(turn, binding)) {
+      current.push(turn);
+      continue;
+    }
+    if (
+      !isTerminalDispatchOwnerReleasedStatus(turn.status) ||
+      !candidateTurnHasStrictEarlierBinding(turn, binding)
+    ) {
+      return undefined;
+    }
+  }
+  return current;
 }
 
 function exactExplicitlyAbandonedUncertainCandidateTurn(
@@ -893,7 +988,7 @@ function deferredCodexForegroundDispatchSnapshotForLedger(
     Number(currentAnchor) < 1 ||
     ledgerAnchor !== currentAnchor ||
     !ports.ledger.matchesControl(ledger, terminalControl, {
-      requireCurrentRoute: true,
+      requireCurrentRoute: false,
       requireProcessAnchor: true
     })
   ) {

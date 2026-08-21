@@ -64,7 +64,8 @@ import {
 } from "./terminal-control-ref.js";
 import {
   TerminalAgentBridge,
-  type ResolvedTerminalConversation
+  type ResolvedTerminalConversation,
+  type TerminalBridgeStatus
 } from "./terminal-agent-bridge.js";
 import {
   createTerminalRuntimeCliAdapter,
@@ -81,11 +82,16 @@ import {
   runInstallOpenClaw
 } from "./install-doctor-command-adapter.js";
 import {
-  createTerminalListCliFacade
+  createTerminalListCliFacade,
+  type TerminalListCliOptions
 } from "./terminal-list-cli-adapter.js";
 import {
   createTerminalStatusCliFacade
 } from "./terminal-status-cli-adapter.js";
+import { exactTerminalWatchAction } from "./terminal-list-renderer.js";
+import {
+  createTerminalWatchCliAdapter
+} from "./terminal-watch-cli-adapter.js";
 import {
   isDiscoverableTmuxConversation
 } from "./terminal-status-facts.js";
@@ -407,6 +413,9 @@ const STORE_MUTATION_COMMANDS = new Set([
   "cancel",
   "renew",
   "reconcile-monitors",
+  "reconcile-watches",
+  "watch-terminal",
+  "unwatch-terminal",
   "close",
   "callback",
   "retry-callback",
@@ -457,6 +466,12 @@ async function dispatchCliCommand(commandName, options) {
     await terminalDelegateCliFacade.runDelegate(options);
   } else if (commandName === "list") {
     await terminalListCliFacade.runList(options);
+  } else if (commandName === "watch-terminal") {
+    await terminalWatchCliFacade.runWatch(options);
+  } else if (commandName === "watch-status") {
+    terminalWatchCliFacade.runWatchStatus(options);
+  } else if (commandName === "unwatch-terminal") {
+    await terminalWatchCliFacade.runUnwatch(options);
   } else if (commandName === "status") {
     await terminalStatusCliFacade.runStatus(options);
   } else if (commandName === "send") {
@@ -481,6 +496,8 @@ async function dispatchCliCommand(commandName, options) {
     await terminalMaintenanceCliFacade.runRenew(options);
   } else if (commandName === "reconcile-monitors") {
     await terminalMonitorSupervisionCliFacade.runReconcileMonitors(options);
+  } else if (commandName === "reconcile-watches") {
+    await terminalWatchCliFacade.runReconcileWatches(options);
   } else if (commandName === "close") {
     await terminalMaintenanceCliFacade.runClose(options);
   } else if (commandName === "transcript") {
@@ -1033,6 +1050,64 @@ const terminalStatusCliFacade = createTerminalStatusCliFacade({
     acquireStateLock: (statePath) => acquireFileLock(`${statePath}.lock`),
     terminalBridgeEnabled
   },
+  watchAuthority: {
+    terminalListObservation: async (options, terminalId) => {
+      const observation = await terminalListCliFacade.observeExactTerminal({
+        options: options as TerminalListCliOptions,
+        terminalId
+      });
+      if (observation.state === "unavailable") {
+        return {
+          activityState: "unknown",
+          activityReason:
+            observation.reason ?? "authoritative terminal observation is unavailable",
+          watchActionAvailable: false
+        };
+      }
+      if (observation.state !== "available") {
+        return {
+          activityState: "unknown",
+          activityReason:
+            "the exact terminal is no longer available for authoritative observation",
+          watchActionAvailable: false
+        };
+      }
+      const terminal = observation.terminal;
+      const rawTerminal = observation.rawTerminal;
+      const activityState = terminal.activity_state;
+      const activityReason = stringValue(terminal.activity_reason);
+      if (
+        (
+          activityState !== "awaiting_approval" &&
+          activityState !== "working" &&
+          activityState !== "idle" &&
+          activityState !== "unknown"
+        ) ||
+        !activityReason
+      ) {
+        return {
+          activityState: "unknown",
+          activityReason:
+            "authoritative terminal activity evidence is incomplete",
+          watchActionAvailable: false
+        };
+      }
+      return {
+        activityState,
+        activityReason,
+        watchActionAvailable: Boolean(
+          exactTerminalWatchAction(terminal, terminalId)
+        ),
+        ...(isRecord(rawTerminal._terminal_status_snapshot)
+          ? {
+              terminalStatus:
+                rawTerminal._terminal_status_snapshot as unknown as
+                  TerminalBridgeStatus
+            }
+          : {})
+      };
+    }
+  },
   projection: {
     callbackRetryDisposition: (delivery) =>
       callbackCliFacade.retryDisposition(delivery),
@@ -1073,6 +1148,13 @@ const terminalListCliFacade = createTerminalListCliFacade({
     isVerifiedDeadTerminalAgentProcess,
     loadTerminalBridgeDispatchLedger,
     loadTerminalDispatchLedgerOwner,
+    listTerminalWatches: (storeDir, options) =>
+      terminalWatchCliFacade.listPublicWatches(storeDir, options),
+    scanTerminalWatchesForExactObservation: (storeDir, options) =>
+      terminalWatchCliFacade.scanPublicWatchesForExactObservation(
+        storeDir,
+        options
+      ),
     managedSessionStoreDirForConversation: (conversation) =>
       terminalAcceptanceCliFacade.storeDirForConversation(conversation),
     managedTurnsForSession: (storeDir, sessionId) =>
@@ -1105,6 +1187,27 @@ const terminalListCliFacade = createTerminalListCliFacade({
       );
     }
   }
+});
+
+const terminalWatchCliFacade = createTerminalWatchCliAdapter({
+  acquireFileLock,
+  acquireTerminalLock: (storeDir, terminalControl) =>
+    acquireTerminalBridgeSendLock(storeDir, terminalControl, {
+      timeoutMs: 30_000
+    }),
+  observeExactTerminal: terminalListCliFacade.observeExactTerminal,
+  loadClaudeAgentRows,
+  now: cliNow,
+  randomUUID,
+  storeDirFromOptions,
+  terminalDispatchOwnership: (terminalControl) =>
+    terminalListCliFacade.terminalDispatchOwnership(terminalControl),
+  terminalIncarnationBlockingTurns: (storeDir, terminalControl) =>
+    terminalListCliFacade.terminalIncarnationBlockingTurns(
+      storeDir,
+      terminalControl
+    ),
+  printJson
 });
 
 const terminalHandoffCliFacade = createTerminalHandoffCliFacade({
@@ -1532,6 +1635,10 @@ function usage() {
   agent-knock-knock --version
   agent-knock-knock delegate --request <text> [--agent ${agentList}] [--workspace <path>] [--store-dir <dir>]
   agent-knock-knock list [--store-dir <dir>] [--agent ${agentList}] [--status <status>] [--all] [--reconcile] [--no-approval-scan] [--terminal-debug]
+  agent-knock-knock watch-terminal --terminal <exact-terminal-id> --openclaw-session <session> [--hard-timeout-minutes <minutes>] [--store-dir <dir>] [--openclaw-bin <path>]
+  agent-knock-knock watch-status --watch <terminal-watch-id> [--store-dir <dir>]
+  agent-knock-knock unwatch-terminal --watch <terminal-watch-id> [--store-dir <dir>]
+  agent-knock-knock reconcile-watches [--store-dir <dir>]
   agent-knock-knock status [--turn <turn-id|selector>] [--conversation <selector>] [--store-dir <dir>] [--reconcile] [--trace]
   agent-knock-knock send [--session <session-id|selector>] [--conversation <selector>] --message <text> [--expected-terminal-token <token>] [--type task] [--agent-timeout-minutes <minutes>] [--agent-hard-timeout-minutes <minutes>]
   agent-knock-knock new-thread --terminal <exact-terminal-id> --expected-binding-token <token>

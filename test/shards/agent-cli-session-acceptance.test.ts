@@ -61,6 +61,48 @@ import {
   readJsonLines
 } from "../agent-cli-fixtures.js";
 
+function exactCodexNativeIdentityArgs(options: {
+  pid: number;
+  sessionId: string;
+  processUuid: string;
+  rolloutPath: string;
+}): string[] {
+  const rolloutPath = fs.realpathSync(options.rolloutPath);
+  const stat = fs.statSync(rolloutPath);
+  return [
+    "--codex-active-session-identities-json",
+    JSON.stringify({
+      [options.pid]: {
+        sessionId: options.sessionId,
+        processUuid: options.processUuid,
+        processBirth: options.processUuid,
+        rollout: {
+          fd: "12r",
+          device: String(stat.dev),
+          inode: String(stat.ino),
+          path: rolloutPath
+        }
+      }
+    })
+  ];
+}
+
+function appendCodexTaskCompletion(
+  exactRolloutPath: string,
+  nativeTurnId: string,
+  message: string
+): void {
+  fs.appendFileSync(exactRolloutPath, `${JSON.stringify({
+    timestamp: new Date().toISOString(),
+    type: "event_msg",
+    payload: {
+      type: "task_complete",
+      turn_id: nativeTurnId,
+      last_agent_message: message
+    }
+  })}\n`);
+}
+
 test("v0.8.1 terminal state without native identity metadata remains bound to its live pane", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-legacy-terminal-binding-"));
   const storeDir = path.join(tempDir, "conversations");
@@ -71,17 +113,32 @@ test("v0.8.1 terminal state without native identity metadata remains bound to it
   const terminalTarget = `akk-legacy-binding-${process.pid}:0.1`;
   const rawConversationId =
     `terminal:v2:tmux:codex:${terminalTarget}:33389`;
-  const nativeIdentityArgs = codexNativeIdentityArgs({
-    pid: 33389,
-    sessionId,
-    processUuid: "codex-legacy-binding-process",
-    rolloutPath: path.join(tempDir, "codex-legacy-binding-rollout.jsonl")
-  });
+  const legacyRolloutPath = path.join(
+    tempDir,
+    "codex-legacy-binding-rollout.jsonl"
+  );
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
     fs.writeFileSync(screenPath, "› \n");
+    fs.writeFileSync(legacyRolloutPath, `${JSON.stringify({
+      timestamp: "2026-08-13T00:00:00.000Z",
+      type: "session_meta",
+      payload: {
+        id: sessionId,
+        cwd: workspace,
+        originator: "codex-tui",
+        source: "cli",
+        cli_version: "0.147.0"
+      }
+    })}\n`, { mode: 0o600 });
+    const nativeIdentityArgs = exactCodexNativeIdentityArgs({
+      pid: 33389,
+      sessionId,
+      processUuid: "codex-legacy-binding-process",
+      rolloutPath: legacyRolloutPath
+    });
     writeFakeTmux(
       fakeBinDir,
       tmuxCallsPath,
@@ -413,6 +470,15 @@ if (args.includes("cwd")) {
     const clockScopeArgs = ["list", "--store-dir", storeDir];
     const clockAfterFirst = agentCliVirtualClockSnapshot(clockScopeArgs);
     assert.ok(clockAfterFirst);
+
+    const firstNativeTurnId = firstParsed.conversation.native_session_takeover
+      .terminal_bridge_submission.acceptance_evidence.acceptanceId;
+    assert.equal(typeof firstNativeTurnId, "string");
+    appendCodexTaskCompletion(
+      originalRolloutPath,
+      firstNativeTurnId,
+      "First session turn completed."
+    );
 
     const firstStatePath = firstParsed.conversation.state_path;
     const firstIdle = {

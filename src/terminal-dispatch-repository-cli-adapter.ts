@@ -25,7 +25,8 @@ import {
   terminalControlEvidence,
   terminalControlEvidenceMatches,
   terminalEndpointFromControlRef,
-  terminalRuntimeResourceKey
+  terminalRuntimeResourceKey,
+  tmuxTerminalRouteKey
 } from "./terminal-control-ref.js";
 import {
   constructTerminalDispatchLedgerDocument,
@@ -80,6 +81,191 @@ export interface TerminalDispatchRepositoryCliAdapter {
   processAnchor(
     ledger: TerminalDispatchLedgerDocument
   ): number | undefined;
+}
+
+function terminalDispatchLedgerMatchesControl(
+  ledger: TerminalDispatchLedgerDocument | undefined,
+  terminalControl: TerminalControlRef,
+  options: {
+    requireCurrentRoute?: boolean;
+    requireProcessAnchor?: boolean;
+  } = {}
+): boolean {
+  if (!ledger) return false;
+  const evidence = ledger.terminal_endpoint !== undefined
+    ? ledger.terminal_endpoint
+    : ledger.terminal_control;
+  return terminalControlEvidenceMatches(evidence, terminalControl, options);
+}
+
+function terminalDispatchLedgerProcessAnchor(
+  ledger: TerminalDispatchLedgerDocument
+): number | undefined {
+  const evidence = isRecord(ledger.terminal_endpoint)
+    ? ledger.terminal_endpoint
+    : isRecord(ledger.terminal_control)
+      ? ledger.terminal_control
+      : undefined;
+  const panePid = Number(
+    evidence?.process_anchor_pid ?? evidence?.pane_pid ?? evidence?.panePid
+  );
+  return Number.isSafeInteger(panePid) && panePid > 0 ? panePid : undefined;
+}
+
+function serializedTerminalControl(
+  terminalControl: TerminalControlRef
+): TerminalDispatchLedgerDocument {
+  return {
+    kind: terminalControl.kind,
+    target: terminalControl.target,
+    socket_path: terminalControl.socketPath ?? null,
+    pane_pid: terminalControl.panePid ?? null,
+    current_path: terminalControl.currentPath ?? null,
+    ...(terminalControl.kind === "herdr"
+      ? {
+          session: terminalControl.session,
+          session_dir: terminalControl.sessionDir ?? null,
+          workspace_id: terminalControl.workspaceId,
+          tab_id: terminalControl.tabId,
+          pane_id: terminalControl.paneId,
+          terminal_id: terminalControl.terminalId
+        }
+      : {})
+  };
+}
+
+/**
+ * Recover the only v1 document that can legitimately exist at a canonical
+ * path: the durable image left after the legacy-path rename and before its v2
+ * rewrite. The canonical filename supplies stable resource identity, while
+ * the self-key, provider endpoint, and exact process anchor prove that the v1
+ * bytes still own the current tmux incarnation. No legacy-path document is
+ * eligible for this route-insensitive recovery.
+ */
+function normalizeInterruptedCanonicalV1(
+  ledger: TerminalDispatchLedgerDocument,
+  terminalControl: TerminalControlRef
+): TerminalDispatchLedgerDocument | undefined {
+  if (
+    ledger.version !== 1 ||
+    terminalControl.kind !== "tmux" ||
+    !hasCanonicalTerminalEndpoint(terminalControl)
+  ) {
+    return undefined;
+  }
+  const storedControl = isRecord(ledger.terminal_control)
+    ? ledger.terminal_control
+    : undefined;
+  const storedTarget = nonBlankString(storedControl?.target);
+  const storedSocketValue = storedControl?.socket_path;
+  const storedSocket = storedSocketValue === null
+    ? undefined
+    : nonBlankString(storedSocketValue);
+  const storedAnchor = storedControl?.pane_pid;
+  const currentEndpoint = terminalEndpointFromControlRef(terminalControl);
+  const currentAnchor = currentEndpoint.processAnchorPid;
+  if (
+    storedControl?.kind !== "tmux" ||
+    !storedTarget ||
+    !(storedSocketValue === null || storedSocket !== undefined) ||
+    storedSocket !== terminalControl.socketPath ||
+    typeof storedAnchor !== "number" ||
+    !Number.isSafeInteger(storedAnchor) ||
+    storedAnchor <= 0 ||
+    !Number.isSafeInteger(currentAnchor) ||
+    currentAnchor === undefined ||
+    currentAnchor <= 0 ||
+    storedAnchor !== currentAnchor
+  ) {
+    return undefined;
+  }
+  const storedRouteControl: TerminalControlRef = {
+    kind: "tmux",
+    target: storedTarget,
+    socketPath: storedSocket,
+    session: storedTarget.split(":", 1)[0] ?? storedTarget,
+    window: 0,
+    pane: 0,
+    panePid: storedAnchor,
+    capabilities: []
+  };
+  if (
+    nonBlankString(ledger.terminal_key) !==
+      terminalRuntimeResourceKey(storedRouteControl, { legacy: true })
+  ) {
+    return undefined;
+  }
+  const historicalEndpoint = {
+    ...terminalControlEvidence(terminalControl),
+    route_key: tmuxTerminalRouteKey(
+      currentEndpoint.identity.endpointKey,
+      storedTarget,
+      storedSocket
+    ),
+    target: storedTarget,
+    socket_path: storedSocket ?? null,
+    pane_pid: storedAnchor,
+    current_path: storedControl.current_path ?? null
+  };
+  return constructTerminalDispatchLedgerDocument({
+    previousLedger: ledger,
+    incomingLedger: ledger,
+    version: 2,
+    terminalKey: terminalRuntimeResourceKey(terminalControl),
+    // Keep the route that actually accepted the input for one read-only
+    // recovery projection. The next save advances only the top-level owner to
+    // the current route while its historical receipt remains attributable to
+    // this exact old route.
+    terminalControl: { ...storedControl },
+    terminalEndpoint: historicalEndpoint
+  });
+}
+
+function decodeLocatedTerminalDispatchLedger(
+  source: string,
+  options: {
+    filePath: string;
+    terminalControl: TerminalControlRef;
+    legacyTerminalKey: string;
+    canonicalTerminalKey: string;
+    allowInterruptedCanonicalV1: boolean;
+  }
+): TerminalDispatchLedgerDocument {
+  let ledger: TerminalDispatchLedgerDocument;
+  try {
+    ledger = decodeTerminalDispatchLedgerDocument(source, {
+      ledgerPath: options.filePath,
+      terminalControl: options.terminalControl,
+      legacyTerminalKey: options.legacyTerminalKey,
+      canonicalTerminalKey: options.canonicalTerminalKey
+    });
+  } catch (error) {
+    if (!options.allowInterruptedCanonicalV1) throw error;
+    const parsed: unknown = JSON.parse(source);
+    if (!isRecord(parsed)) throw error;
+    const normalized = normalizeInterruptedCanonicalV1(
+      parsed,
+      options.terminalControl
+    );
+    if (!normalized) throw error;
+    return normalized;
+  }
+  if (
+    ledger.version !== 1 ||
+    !options.allowInterruptedCanonicalV1
+  ) {
+    return ledger;
+  }
+  const normalized = normalizeInterruptedCanonicalV1(
+    ledger,
+    options.terminalControl
+  );
+  if (!normalized) {
+    throw new Error(
+      `terminal dispatch ledger is invalid: ${options.filePath}`
+    );
+  }
+  return normalized;
 }
 
 /**
@@ -174,13 +360,6 @@ export function createTerminalDispatchRepositoryCliAdapter():
     return path.join(ledgerDir, `terminal-dispatch-${key}.json`);
   }
 
-  function ledgerPaths(terminalControl: TerminalControlRef): string[] {
-    return [...new Set([
-      ledgerPath(terminalControl),
-      ledgerPath(terminalControl, { legacy: true })
-    ])];
-  }
-
   function pathExistsNoFollow(candidate: string): boolean {
     try {
       fs.lstatSync(candidate);
@@ -191,74 +370,239 @@ export function createTerminalDispatchRepositoryCliAdapter():
     }
   }
 
-  function load(
-    terminalControl: TerminalControlRef
-  ): TerminalDispatchLedgerDocument | undefined {
-    const existingPaths = ledgerPaths(terminalControl).filter(
-      pathExistsNoFollow
-    );
-    if (existingPaths.length === 0) return undefined;
-    if (existingPaths.length > 1) {
-      throw new Error(
-        "terminal dispatch ledger has conflicting canonical and legacy owners: " +
-          existingPaths.join(", ")
-      );
-    }
-    const filePath = existingPaths[0];
+  interface LocatedLedger {
+    filePath: string;
+    location: "canonical" | "legacy";
+    ledger: TerminalDispatchLedgerDocument;
+    source: string;
+  }
+
+  type LedgerOwnerClassification =
+    | "current_owner"
+    | "stale_history"
+    | "ambiguous_conflict";
+
+  type DualLedgerClassification =
+    | {
+        classification: "current_owner";
+        owner: LocatedLedger;
+        staleCanonical?: LocatedLedger;
+      }
+    | { classification: "stale_history" }
+    | { classification: "ambiguous_conflict" };
+
+  interface LedgerSelection {
+    selected?: LocatedLedger;
+    staleCanonical?: LocatedLedger;
+  }
+
+  function readLedger(
+    terminalControl: TerminalControlRef,
+    filePath: string,
+    location: LocatedLedger["location"]
+  ): LocatedLedger {
     const stat = fs.lstatSync(filePath);
     if (stat.isSymbolicLink() || !stat.isFile()) {
       throw new Error(
         `terminal dispatch ledger is not a regular file: ${filePath}`
       );
     }
-    return decodeTerminalDispatchLedgerDocument(
-      fs.readFileSync(filePath, "utf8"),
-      {
-        ledgerPath: filePath,
+    const source = fs.readFileSync(filePath, "utf8");
+    return {
+      filePath,
+      location,
+      ledger: decodeLocatedTerminalDispatchLedger(source, {
+        filePath,
         terminalControl,
         legacyTerminalKey: legacyRuntimeKey(terminalControl),
-        canonicalTerminalKey: runtimeKey(terminalControl)
-      }
+        canonicalTerminalKey: runtimeKey(terminalControl),
+        allowInterruptedCanonicalV1:
+          location === "canonical" &&
+          filePath === ledgerPath(terminalControl) &&
+          hasCanonicalTerminalEndpoint(terminalControl)
+      }),
+      source
+    };
+  }
+
+  function anchorRelation(
+    ledger: TerminalDispatchLedgerDocument,
+    terminalControl: TerminalControlRef
+  ): "same" | "different" | "unknown" {
+    const ledgerAnchor = terminalDispatchLedgerProcessAnchor(ledger);
+    const currentAnchor = terminalEndpointFromControlRef(
+      terminalControl
+    ).processAnchorPid;
+    if (ledgerAnchor === undefined || currentAnchor === undefined) {
+      return "unknown";
+    }
+    return ledgerAnchor === currentAnchor ? "same" : "different";
+  }
+
+  function canonicalLedgerMatchesCurrentIncarnation(
+    ledger: TerminalDispatchLedgerDocument,
+    terminalControl: TerminalControlRef
+  ): boolean {
+    return ledger.version === 2 &&
+      anchorRelation(ledger, terminalControl) === "same" &&
+      terminalControlEvidenceMatches(
+        ledger.terminal_endpoint,
+        terminalControl,
+        { requireProcessAnchor: true }
+      );
+  }
+
+  function classifyOwner(
+    located: LocatedLedger,
+    terminalControl: TerminalControlRef
+  ): LedgerOwnerClassification {
+    if (
+      (located.location === "canonical" && located.ledger.version !== 2) ||
+      (located.location === "legacy" && located.ledger.version !== 1)
+    ) {
+      return "ambiguous_conflict";
+    }
+    const relation = anchorRelation(located.ledger, terminalControl);
+    if (relation === "different") return "stale_history";
+    if (relation === "unknown") return "ambiguous_conflict";
+    if (
+      located.location === "canonical" &&
+      !canonicalLedgerMatchesCurrentIncarnation(
+        located.ledger,
+        terminalControl
+      )
+    ) {
+      return "ambiguous_conflict";
+    }
+    return "current_owner";
+  }
+
+  function classifyDualLedgers(
+    canonical: LocatedLedger,
+    legacy: LocatedLedger,
+    terminalControl: TerminalControlRef
+  ): DualLedgerClassification {
+    const canonicalAnchor = terminalDispatchLedgerProcessAnchor(
+      canonical.ledger
     );
+    const legacyAnchor = terminalDispatchLedgerProcessAnchor(legacy.ledger);
+    if (
+      canonicalAnchor === undefined ||
+      legacyAnchor === undefined ||
+      canonicalAnchor === legacyAnchor
+    ) {
+      return { classification: "ambiguous_conflict" };
+    }
+    const canonicalClassification = classifyOwner(canonical, terminalControl);
+    const legacyClassification = classifyOwner(legacy, terminalControl);
+    if (
+      canonicalClassification === "current_owner" &&
+      legacyClassification === "stale_history"
+    ) {
+      return { classification: "current_owner", owner: canonical };
+    }
+    if (
+      canonicalClassification === "stale_history" &&
+      legacyClassification === "current_owner"
+    ) {
+      return {
+        classification: "current_owner",
+        owner: legacy,
+        staleCanonical: canonical
+      };
+    }
+    if (
+      canonicalClassification === "stale_history" &&
+      legacyClassification === "stale_history"
+    ) {
+      return { classification: "stale_history" };
+    }
+    return { classification: "ambiguous_conflict" };
+  }
+
+  function conflictingOwnersError(paths: readonly string[]): Error {
+    return new Error(
+      "terminal dispatch ledger has conflicting canonical and legacy owners: " +
+        paths.join(", ")
+    );
+  }
+
+  function selectLedger(
+    terminalControl: TerminalControlRef
+  ): LedgerSelection {
+    const canonicalPath = ledgerPath(terminalControl);
+    const legacyPath = ledgerPath(terminalControl, { legacy: true });
+    if (canonicalPath === legacyPath) {
+      return {
+        selected: pathExistsNoFollow(canonicalPath)
+          ? readLedger(terminalControl, canonicalPath, "canonical")
+          : undefined
+      };
+    }
+    const canonicalExists = pathExistsNoFollow(canonicalPath);
+    const legacyExists = pathExistsNoFollow(legacyPath);
+    if (!canonicalExists && !legacyExists) return {};
+
+    const canonical = canonicalExists
+      ? readLedger(terminalControl, canonicalPath, "canonical")
+      : undefined;
+    const legacy = legacyExists
+      ? readLedger(terminalControl, legacyPath, "legacy")
+      : undefined;
+    if (canonical && legacy) {
+      const classification = classifyDualLedgers(
+        canonical,
+        legacy,
+        terminalControl
+      );
+      if (classification.classification === "current_owner") {
+        return {
+          selected: classification.owner,
+          staleCanonical: classification.staleCanonical
+        };
+      }
+      if (classification.classification === "stale_history") return {};
+      throw conflictingOwnersError([canonicalPath, legacyPath]);
+    }
+    if (canonical) return { selected: canonical };
+    if (
+      legacy &&
+      hasCanonicalTerminalEndpoint(terminalControl)
+    ) {
+      const relation = anchorRelation(legacy.ledger, terminalControl);
+      if (relation === "different") {
+        // The selector has been reused by a different terminal process. Keep
+        // the old artifact as history, but it is not an owner of the current
+        // stable endpoint and must never be promoted into its canonical path.
+        return {};
+      }
+      if (relation === "unknown") {
+        throw new Error(
+          "terminal dispatch legacy owner has no exact process anchor: " +
+            legacyPath
+        );
+      }
+    }
+    return { selected: legacy };
+  }
+
+  function load(
+    terminalControl: TerminalControlRef
+  ): TerminalDispatchLedgerDocument | undefined {
+    return selectLedger(terminalControl).selected?.ledger;
   }
 
   function save(
     terminalControl: TerminalControlRef,
     ledger: TerminalDispatchLedgerDocument
   ): void {
-    const previousLedger = load(terminalControl);
-    const existingPaths = ledgerPaths(terminalControl).filter(
-      pathExistsNoFollow
-    );
-    let filePath = existingPaths[0] ?? ledgerPath(terminalControl);
+    const selection = selectLedger(terminalControl);
+    const selected = selection.selected;
+    const previousLedger = selected?.ledger;
+    let filePath = selected?.filePath ?? ledgerPath(terminalControl);
     const canonicalPath = ledgerPath(terminalControl);
     const legacyPath = ledgerPath(terminalControl, { legacy: true });
-    ensureDir(path.dirname(canonicalPath));
-    if (
-      hasCanonicalTerminalEndpoint(terminalControl) &&
-      filePath === legacyPath &&
-      legacyPath !== canonicalPath
-    ) {
-      if (pathExistsNoFollow(canonicalPath)) {
-        throw new Error(
-          "terminal dispatch ledger has conflicting canonical and legacy owners: " +
-            `${canonicalPath}, ${legacyPath}`
-        );
-      }
-      fs.renameSync(legacyPath, canonicalPath);
-      fsyncDirectory(path.dirname(canonicalPath));
-      filePath = canonicalPath;
-    }
     const preserveLegacyFormat = !hasCanonicalTerminalEndpoint(terminalControl);
-    ensureDir(path.dirname(filePath));
-    if (pathExistsNoFollow(filePath)) {
-      const stat = fs.lstatSync(filePath);
-      if (stat.isSymbolicLink() || !stat.isFile()) {
-        throw new Error(
-          `terminal dispatch ledger is not a regular file: ${filePath}`
-        );
-      }
-    }
     const useCanonicalFormat =
       hasCanonicalTerminalEndpoint(terminalControl) && !preserveLegacyFormat;
     const nextLedger = constructTerminalDispatchLedgerDocument({
@@ -268,27 +612,53 @@ export function createTerminalDispatchRepositoryCliAdapter():
       terminalKey: preserveLegacyFormat
         ? legacyRuntimeKey(terminalControl)
         : runtimeKey(terminalControl),
-      terminalControl: {
-        kind: terminalControl.kind,
-        target: terminalControl.target,
-        socket_path: terminalControl.socketPath ?? null,
-        pane_pid: terminalControl.panePid ?? null,
-        current_path: terminalControl.currentPath ?? null,
-        ...(terminalControl.kind === "herdr"
-          ? {
-              session: terminalControl.session,
-              session_dir: terminalControl.sessionDir ?? null,
-              workspace_id: terminalControl.workspaceId,
-              tab_id: terminalControl.tabId,
-              pane_id: terminalControl.paneId,
-              terminal_id: terminalControl.terminalId
-            }
-          : {})
-      },
+      terminalControl: serializedTerminalControl(terminalControl),
       ...(useCanonicalFormat
         ? { terminalEndpoint: terminalControlEvidence(terminalControl) }
         : {})
     });
+    ensureDir(path.dirname(canonicalPath));
+    if (
+      hasCanonicalTerminalEndpoint(terminalControl) &&
+      selected?.location === "legacy" &&
+      filePath === legacyPath &&
+      legacyPath !== canonicalPath
+    ) {
+      if (pathExistsNoFollow(canonicalPath)) {
+        const staleCanonical = selection.staleCanonical;
+        const currentCanonical = readLedger(
+          terminalControl,
+          canonicalPath,
+          "canonical"
+        );
+        if (
+          !staleCanonical ||
+          currentCanonical.source !== staleCanonical.source
+        ) {
+          throw conflictingOwnersError([canonicalPath, legacyPath]);
+        }
+      }
+      const currentLegacy = readLedger(
+        terminalControl,
+        legacyPath,
+        "legacy"
+      );
+      if (currentLegacy.source !== selected.source) {
+        throw conflictingOwnersError([canonicalPath, legacyPath]);
+      }
+      fs.renameSync(legacyPath, canonicalPath);
+      fsyncDirectory(path.dirname(canonicalPath));
+      filePath = canonicalPath;
+    }
+    ensureDir(path.dirname(filePath));
+    if (pathExistsNoFollow(filePath)) {
+      const stat = fs.lstatSync(filePath);
+      if (stat.isSymbolicLink() || !stat.isFile()) {
+        throw new Error(
+          `terminal dispatch ledger is not a regular file: ${filePath}`
+        );
+      }
+    }
     const temporaryPath = `${filePath}.${cliPid()}.${randomUUID()}.tmp`;
     atomicReplacePrivateJsonFile(filePath, nextLedger, {
       temporaryPath,
@@ -337,35 +707,6 @@ export function createTerminalDispatchRepositoryCliAdapter():
     return true;
   }
 
-  function matchesControl(
-    ledger: TerminalDispatchLedgerDocument | undefined,
-    terminalControl: TerminalControlRef,
-    options: {
-      requireCurrentRoute?: boolean;
-      requireProcessAnchor?: boolean;
-    } = {}
-  ): boolean {
-    if (!ledger) return false;
-    const evidence = ledger.terminal_endpoint !== undefined
-      ? ledger.terminal_endpoint
-      : ledger.terminal_control;
-    return terminalControlEvidenceMatches(evidence, terminalControl, options);
-  }
-
-  function processAnchor(
-    ledger: TerminalDispatchLedgerDocument
-  ): number | undefined {
-    const evidence = isRecord(ledger.terminal_endpoint)
-      ? ledger.terminal_endpoint
-      : isRecord(ledger.terminal_control)
-        ? ledger.terminal_control
-        : undefined;
-    const panePid = Number(
-      evidence?.process_anchor_pid ?? evidence?.pane_pid ?? evidence?.panePid
-    );
-    return Number.isSafeInteger(panePid) && panePid > 0 ? panePid : undefined;
-  }
-
   function reconcileIncarnation(
     terminalControl: TerminalControlRef,
     ledger?: TerminalDispatchLedgerDocument
@@ -373,14 +714,14 @@ export function createTerminalDispatchRepositoryCliAdapter():
     if (!ledger || ledger.status === "resolved") return ledger;
     if (terminalDispatchLedgerLooksLifecycle(ledger)) return ledger;
     if (
-      !matchesControl(ledger, terminalControl, {
+      !terminalDispatchLedgerMatchesControl(ledger, terminalControl, {
         requireProcessAnchor: false
       }) ||
-      matchesControl(ledger, terminalControl)
+      terminalDispatchLedgerMatchesControl(ledger, terminalControl)
     ) {
       return ledger;
     }
-    const previousAnchor = processAnchor(ledger);
+    const previousAnchor = terminalDispatchLedgerProcessAnchor(ledger);
     const currentAnchor = terminalEndpointFromControlRef(
       terminalControl
     ).processAnchorPid;
@@ -404,7 +745,7 @@ export function createTerminalDispatchRepositoryCliAdapter():
     restore,
     resolve,
     reconcileIncarnation,
-    matchesControl,
-    processAnchor
+    matchesControl: terminalDispatchLedgerMatchesControl,
+    processAnchor: terminalDispatchLedgerProcessAnchor
   });
 }

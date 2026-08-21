@@ -3,11 +3,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   applySessionAuthorityToDispatch,
+  decideTerminalWatchExternalTaskAuthority,
   decideTerminalSendAuthority,
   decideTerminalSessionAuthorityConflict,
   managedTurnNeedsAttention,
   selectTerminalAvailableActions,
   type TerminalActionSet,
+  type TerminalDispatchOwnership,
   type TerminalSendAuthorityFacts
 } from "../src/terminal-action-projection.js";
 import {
@@ -38,7 +40,11 @@ import {
 } from "../src/managed-session.js";
 import type { CodexOpenRootRolloutInventory } from
   "../src/agent-session-provider.js";
-import type { TerminalControlRef } from "../src/terminal-control-ref.js";
+import {
+  createTerminalEndpointRef,
+  tmuxTerminalRouteKey,
+  type TerminalControlRef
+} from "../src/terminal-control-ref.js";
 import {
   createConversation,
   executorForConversation,
@@ -321,6 +327,50 @@ test("available actions preserve legacy insertion order and approval-last rule",
   };
   assert.equal(JSON.stringify(actual), JSON.stringify(legacy));
   assert.deepEqual(Object.keys(actual), Object.keys(legacy));
+});
+
+test("Terminal Watch external-task authority fails closed for every managed ownership path", () => {
+  type Turn = { id: string };
+  type Conflict = { reason: string };
+  const blockingTurn: Turn = { id: "turn-blocking" };
+  const currentTurn: Turn = { id: "turn-current" };
+  const conflict: Conflict = { reason: "dispatch owner is unresolved" };
+  const decide = (
+    blocker: Turn | undefined,
+    dispatchOwnership: TerminalDispatchOwnership<Turn, Conflict>
+  ) => decideTerminalWatchExternalTaskAuthority({
+    blockingTurn: blocker,
+    dispatchOwnership
+  });
+
+  assert.deepEqual(decide(undefined, { state: "none" }), {
+    state: "external_task"
+  });
+  assert.deepEqual(decide(undefined, {
+    state: "current",
+    conversation: currentTurn
+  }), {
+    state: "managed_turn",
+    conversation: currentTurn
+  });
+  assert.deepEqual(decide(undefined, {
+    state: "conflict",
+    conflict
+  }), {
+    state: "dispatch_conflict",
+    conflict
+  });
+
+  for (const dispatchOwnership of [
+    { state: "none" } as const,
+    { state: "current", conversation: currentTurn } as const,
+    { state: "conflict", conflict } as const
+  ]) {
+    assert.deepEqual(decide(blockingTurn, dispatchOwnership), {
+      state: "managed_turn",
+      conversation: blockingTurn
+    });
+  }
 });
 
 test("Session authority conflict wins without consulting dispatch mismatch", () => {
@@ -659,4 +709,67 @@ test("authority token hashes preserve exact legacy JSON field order", () => {
     ledger_message_id: handoffFacts.ledgerMessageId,
     ledger_status: handoffFacts.ledgerStatus
   }));
+});
+
+test("a fresh terminal route invalidates an earlier canonical deferred send token", () => {
+  const endpointKey = "socket:/private/tmp/tmux-501/default";
+  const routeControl = (target: string): TerminalControlRef => {
+    const [sessionName = target, route = "0.0"] = target.split(":", 2);
+    const [windowText = "0", paneText = "0"] = route.split(".", 2);
+    const terminalControl: TerminalControlRef = {
+      ...control,
+      target,
+      socketPath: "/private/tmp/tmux-501/default",
+      session: sessionName,
+      window: Number(windowText),
+      pane: Number(paneText)
+    };
+    createTerminalEndpointRef({
+      identity: {
+        providerKind: "tmux",
+        endpointKey,
+        resourceKey: "pane-id:%3"
+      },
+      route: {
+        routeKey: tmuxTerminalRouteKey(
+          endpointKey,
+          target,
+          terminalControl.socketPath
+        ),
+        label: target,
+        currentCommand: terminalControl.currentCommand,
+        currentPath: terminalControl.currentPath
+      },
+      processAnchorPid: terminalControl.panePid,
+      capabilities: terminalControl.capabilities,
+      providerRef: terminalControl
+    });
+    return terminalControl;
+  };
+  const listed = routeControl("work:0.1");
+  const renumbered = routeControl("work:0.0");
+  const movedAgain = routeControl("work:2.0");
+  assert.equal(terminalControlsShareIncarnation(listed, renumbered), true);
+  assert.equal(terminalControlsShareIncarnation(renumbered, movedAgain), true);
+
+  const source = session();
+  const dispatchSnapshot = {
+    status: "resolved" as const,
+    fingerprint: "b".repeat(64)
+  };
+  const token = (terminalControl: TerminalControlRef) =>
+    deferredCodexForegroundBindingToken({
+      terminalId:
+        `terminal:v2:tmux:codex:${terminalControl.target}:4100`,
+      terminalControl,
+      pid: 4_100,
+      workspace: "/repo",
+      processUuid: "codex-pid:4100:birth:12345",
+      processBirth: "12345",
+      sourceSession: source,
+      dispatchSnapshot
+    });
+
+  assert.notEqual(token(listed), token(renumbered));
+  assert.notEqual(token(renumbered), token(movedAgain));
 });

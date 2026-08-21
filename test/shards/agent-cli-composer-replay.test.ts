@@ -1196,6 +1196,7 @@ test("default delegate retries route to the original active receipt before idle 
   const terminalTarget = `${tmuxSession}:0.1`;
   const codexPid = 33429;
   const nativeSessionId = "77777777-7777-4777-8777-777777777777";
+  const rolloutPath = path.join(tempDir, "codex-delegate-replay.jsonl");
   const stableMessageId = `msg-openclaw-${"7".repeat(64)}`;
   const request = "Run the default delegate request exactly once";
 
@@ -1203,6 +1204,22 @@ test("default delegate retries route to the original active receipt before idle 
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
     fs.writeFileSync(screenPath, "› \n");
+    fs.writeFileSync(
+      rolloutPath,
+      `${JSON.stringify({
+        timestamp: "2026-08-21T00:00:00.000Z",
+        type: "session_meta",
+        payload: {
+          id: nativeSessionId,
+          cwd: workspace,
+          originator: "codex-tui",
+          source: "cli",
+          cli_version: "0.148.0"
+        }
+      })}\n`,
+      { mode: 0o600 }
+    );
+    const rolloutStat = fs.statSync(rolloutPath);
     writeFakeTmux(
       fakeBinDir,
       tmuxCallsPath,
@@ -1223,11 +1240,19 @@ test("default delegate retries route to the original active receipt before idle 
       "agent:test:delegate-replay",
       "--openclaw-bin",
       "/usr/bin/true",
-      ...codexNativeIdentityArgs({
-        pid: codexPid,
-        sessionId: nativeSessionId,
-        processUuid: "codex-delegate-replay-process",
-        rolloutPath: path.join(tempDir, "codex-delegate-replay.jsonl")
+      "--codex-active-session-identities-json",
+      JSON.stringify({
+        [codexPid]: {
+          sessionId: nativeSessionId,
+          processUuid: "codex-delegate-replay-process",
+          processBirth: "codex-delegate-replay-process",
+          rollout: {
+            fd: "12r",
+            device: String(rolloutStat.dev),
+            inode: String(rolloutStat.ino),
+            path: rolloutPath
+          }
+        }
       }),
       "--disable-terminal-bridge-monitor"
     ];

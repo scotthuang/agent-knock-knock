@@ -74,17 +74,44 @@ test("safe-aborted delegate retries refuse a changed Session binding", async () 
   const codexPid = 33430;
   const stableMessageId = `msg-openclaw-${"6".repeat(64)}`;
   const request = "Retry only inside the original Session binding";
-  const nativeIdentityArgs = codexNativeIdentityArgs({
-    pid: codexPid,
-    sessionId,
-    processUuid: "codex-delegate-safe-abort-process",
-    rolloutPath: path.join(tempDir, "codex-delegate-safe-abort.jsonl")
-  });
+  const nativeProcessUuid = "codex-delegate-safe-abort-process";
+  const exactRolloutPath = path.join(
+    tempDir,
+    "codex-delegate-safe-abort.jsonl"
+  );
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
     fs.writeFileSync(screenPath, "› \n");
+    fs.writeFileSync(exactRolloutPath, `${JSON.stringify({
+      timestamp: "2026-08-13T00:00:00.000Z",
+      type: "session_meta",
+      payload: {
+        id: sessionId,
+        cwd: workspace,
+        originator: "codex-tui",
+        source: "cli",
+        cli_version: "0.147.0"
+      }
+    })}\n`, { mode: 0o600 });
+    const exactRolloutStat = fs.statSync(exactRolloutPath);
+    const nativeIdentityArgs = [
+      "--codex-active-session-identities-json",
+      JSON.stringify({
+        [codexPid]: {
+          sessionId,
+          processUuid: nativeProcessUuid,
+          processBirth: nativeProcessUuid,
+          rollout: {
+            fd: "12r",
+            device: String(exactRolloutStat.dev),
+            inode: String(exactRolloutStat.ino),
+            path: fs.realpathSync(exactRolloutPath)
+          }
+        }
+      })
+    ];
     writeFakeTmux(
       fakeBinDir,
       tmuxCallsPath,

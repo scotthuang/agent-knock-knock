@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   actionsForManagedSessionBinding,
   currentTerminalActions,
+  exactTerminalWatchAction,
   listActionContracts,
   readOnlyManagedTurn,
   renderAvailableListActions,
@@ -101,13 +102,15 @@ test("managed Turn rendering consumes only sampled list facts", () => {
   );
 });
 
-test("the public action contract remains v16 with stable action ordering", () => {
+test("the public action contract v18 exposes semantic arguments only", () => {
   const contracts = listActionContracts();
-  assert.equal(contracts.version, 16);
+  assert.equal(contracts.version, 18);
   assert.deepEqual(
     Object.keys(contracts.actions as object),
     [
       "send",
+      "watch",
+      "unwatch",
       "new_thread",
       "list_resumable_threads",
       "native_inspect",
@@ -122,6 +125,117 @@ test("the public action contract remains v16 with stable action ordering", () =>
       "close"
     ]
   );
+  assert.deepEqual(
+    (contracts.actions as Record<string, any>).status.target_arguments,
+    { exactly_one_of: ["turn_id", "conversation_id", "watch_id"] }
+  );
+  assert.deepEqual(
+    (contracts.actions as Record<string, any>).status.required,
+    []
+  );
+  const encoded = JSON.stringify(contracts);
+  for (const forbidden of [
+    "expected_terminal_token",
+    "expected_binding_token",
+    "candidate_token",
+    "expected_handoff_token",
+    "expected_approval_fingerprint",
+    "binding_token",
+    "lifecycle_binding_token"
+  ]) {
+    assert.equal(encoded.includes(forbidden), false, forbidden);
+  }
+  const actions = contracts.actions as Record<string, any>;
+  assert.deepEqual(actions.send.managed_scopes.terminal_follow_current, {
+    target_arguments: ["terminal_id"],
+    follows_current_terminal: true
+  });
+  assert.deepEqual(actions.new_thread.required, ["terminal_id"]);
+  assert.deepEqual(actions.native_inspect.required, [
+    "terminal_id",
+    "inspection"
+  ]);
+  assert.deepEqual(actions.resume_thread.required, [
+    "terminal_id",
+    "native_thread_id"
+  ]);
+  assert.deepEqual(actions.reconcile_binding.required, [
+    "terminal_id",
+    "conflicting_session_id"
+  ]);
+  assert.deepEqual(actions.approve.target_arguments, {
+    exactly_one_of: ["turn_id", "terminal_id"]
+  });
+  assert.deepEqual(actions.close.optional, [
+    "reason",
+    "expected_message_id",
+    "expected_transition_id"
+  ]);
+});
+
+test("raw active terminals expose only an exact prefilled watch action", () => {
+  const working = renderAvailableListActions({
+    id: "terminal:v2:tmux:codex:work:0.0:1234",
+    source: "terminal",
+    agent: "codex",
+    activity_state: "working",
+    lifecycle_binding_token: "fresh-binding-token",
+    approval_state: { blocked: false },
+    commands: { watch: true }
+  });
+  assert.deepEqual(working.watch, {
+    tool: "agent_knock_knock_watch",
+    arguments: {
+      terminal_id: "terminal:v2:tmux:codex:work:0.0:1234"
+    },
+    requires_user_intent: true,
+    use:
+      "Monitor this human-started external task and notify OpenClaw when it " +
+      "needs attention or finishes, instead of polling. Do not use Terminal " +
+      "Watch for an AKK-managed Turn. Call agent_knock_knock_watch with this " +
+      "exact terminal_id; AKK refreshes and revalidates current observation " +
+      "authority internally."
+  });
+  assert.equal(exactTerminalWatchAction({
+    available_actions: working
+  }, "terminal:v2:tmux:codex:work:0.0:1234"),
+  working.watch);
+  assert.equal(exactTerminalWatchAction({
+    available_actions: working
+  }, "terminal:v2:tmux:codex:work:0.0:9999"),
+  undefined);
+
+  const awaitingApproval = renderAvailableListActions({
+    id: "terminal:v2:tmux:claude:work:0.1:5678",
+    source: "terminal",
+    agent: "claude",
+    activity_state: "awaiting_approval",
+    lifecycle_binding_token: "approval-binding-token",
+    approval_state: { blocked: true },
+    commands: { watch: true }
+  });
+  assert.equal(Object.hasOwn(awaitingApproval, "watch"), true);
+
+  for (const entry of [
+    {
+      id: "terminal:v2:tmux:codex:work:0.0:1234",
+      source: "terminal",
+      activity_state: "idle",
+      lifecycle_binding_token: "fresh-binding-token",
+      commands: { watch: true }
+    },
+    {
+      id: "terminal:v2:tmux:codex:work:0.0:1234",
+      source: "terminal",
+      activity_state: "working",
+      commands: { watch: true }
+    }
+  ]) {
+    assert.equal(
+      Object.hasOwn(renderAvailableListActions(entry), "watch"),
+      false
+    );
+  }
 });
 
 test("terminal list action policies expose only their exact safe subsets", () => {

@@ -253,6 +253,30 @@ test("auto approval CLI arguments carry the trusted policy for executor-side rev
     "--auto-approval-policy-json",
     JSON.stringify(policy)
   ]);
+  assert.deepEqual(autoApprovalCliArgs({
+    statePath: "/tmp/task/state.json",
+    candidate,
+    decision,
+    policy,
+    callbackAuthority: {
+      conversationId: "turn-callback",
+      sessionId: "session-callback",
+      turnId: "turn-callback",
+      messageId: "message-callback",
+      openclawSession: "agent:main:callback"
+    }
+  })?.slice(-10), [
+    "--expected-callback-conversation-id",
+    "turn-callback",
+    "--expected-callback-session-id",
+    "session-callback",
+    "--expected-callback-turn-id",
+    "turn-callback",
+    "--expected-callback-message-id",
+    "message-callback",
+    "--expected-callback-openclaw-session",
+    "agent:main:callback"
+  ]);
 });
 
 test("auto approval callback executes only a matching trusted policy", () => {

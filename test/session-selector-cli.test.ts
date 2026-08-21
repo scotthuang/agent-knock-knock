@@ -394,6 +394,10 @@ test("legacy unsupported executors do not break live terminal short refs", async
 
   try {
     fs.mkdirSync(workspace, { recursive: true });
+    const nativeIdentity = materializeIdleCodexIdentity({
+      workspace,
+      codexPid
+    });
     saveState(legacyPaths.statePath, {
       conversation_id: "task-legacy-cursor",
       user_request: "Historical Cursor task",
@@ -482,18 +486,18 @@ test("legacy unsupported executors do not break live terminal short refs", async
     assert.equal("delegated" in managedOnly, false);
     assert.equal("tasks" in managedOnly, false);
 
-    const listed = await runCli([
+    const listed = await runCliWithCodexInventory([
       "list",
       "--all",
       "--store-dir",
       storeDir,
       ...runtimeArgs
-    ]);
+    ], { codexPid, nativeIdentity, workspace });
     assert.deepEqual(listed.unavailable_managed_turns, []);
     assert.equal(listed.terminals.length, 1);
     assert.match(listed.terminals[0].short_ref, /^@[0-9a-f]{10}$/u);
 
-    const sent = await runCli([
+    const sent = await runCliWithCodexInventory([
       "send",
       "--conversation",
       listed.terminals[0].short_ref,
@@ -512,7 +516,7 @@ test("legacy unsupported executors do not break live terminal short refs", async
       "/usr/bin/true",
       "--disable-terminal-bridge-monitor",
       ...runtimeArgs
-    ]);
+    ], { codexPid, nativeIdentity, workspace });
     assert.equal(
       sent.conversation.native_session_takeover.native_session_id,
       listed.terminals[0].id
@@ -544,6 +548,10 @@ test("an unsupported legacy record without a dispatch ledger does not hide its t
 
   try {
     fs.mkdirSync(workspace, { recursive: true });
+    const nativeIdentity = materializeIdleCodexIdentity({
+      workspace,
+      codexPid
+    });
     saveState(legacyPaths.statePath, {
       conversation_id: "task-active-legacy-cursor",
       user_request: "Active historical Cursor task",
@@ -580,13 +588,13 @@ test("an unsupported legacy record without a dispatch ledger does not hide its t
       event_log_path: legacyPaths.logPath
     } as any);
 
-    const listed = await runCli([
+    const listed = await runCliWithCodexInventory([
       "list",
       "--all",
       "--store-dir",
       storeDir,
       ...runtimeArgs
-    ]);
+    ], { codexPid, nativeIdentity, workspace });
     assert.equal(listed.terminals.length, 1);
     assert.equal(listed.terminals[0].management_state, "unmanaged");
     assert.deepEqual(listed.terminals[0].managed, {
@@ -605,7 +613,7 @@ test("an unsupported legacy record without a dispatch ledger does not hide its t
     );
     assert.deepEqual(listed.unavailable_managed_turns, []);
 
-    const sent = await runCli([
+    const sent = await runCliWithCodexInventory([
       "send",
       "--conversation",
       "only",
@@ -624,7 +632,7 @@ test("an unsupported legacy record without a dispatch ledger does not hide its t
       "/usr/bin/true",
       "--disable-terminal-bridge-monitor",
       ...runtimeArgs
-    ]);
+    ], { codexPid, nativeIdentity, workspace });
     assert.equal(
       sent.conversation.native_session_takeover.native_session_id,
       listed.terminals[0].id
@@ -1173,18 +1181,28 @@ test("multiple idle turns stay terminal history while the pane advertises a fenc
       undefined
     );
 
-    const restarted = await runCli([
+    const restartedPid = codexPid + 1;
+    const restartedNativeIdentity = materializeIdleCodexIdentity({
+      workspace,
+      codexPid: restartedPid
+    });
+
+    const restarted = await runCliWithCodexInventory([
       "list",
       "--store-dir",
       storeDir,
       ...codexTerminalStaticArgs({
         workspace,
         terminalTarget,
-        codexPid: codexPid + 1,
+        codexPid: restartedPid,
         screen: "› \u001b[2mReady for the next task\u001b[22m\n\ngpt-5.6-sol high · /repo",
         ...stableTerminalIdentity
       })
-    ]);
+    ], {
+      codexPid: restartedPid,
+      nativeIdentity: restartedNativeIdentity,
+      workspace
+    });
     assert.equal(
       restarted.terminals[0].managed.recent_turn.conversation_id,
       newer.conversation.conversation_id
@@ -1195,7 +1213,8 @@ test("multiple idle turns stay terminal history while the pane advertises a fenc
     );
     assert.notEqual(
       restarted.terminals[0].available_actions.send,
-      undefined
+      undefined,
+      JSON.stringify(restarted.terminals[0], null, 2)
     );
     assert.deepEqual(
       restarted.terminals[0].available_actions.send.arguments,
@@ -1595,6 +1614,29 @@ function codexNativeIdentityFixture(options: {
     },
     evidence: "static_exact_fixture"
   };
+}
+
+function materializeIdleCodexIdentity(options: {
+  workspace: string;
+  codexPid: number;
+}): Record<string, any> {
+  const identity = codexNativeIdentityFixture(options);
+  fs.mkdirSync(path.dirname(identity.rollout.path), { recursive: true });
+  fs.writeFileSync(identity.rollout.path, `${JSON.stringify({
+    timestamp: "2026-07-28T00:00:00.000Z",
+    type: "session_meta",
+    payload: {
+      id: identity.sessionId,
+      cwd: options.workspace,
+      originator: "codex-tui",
+      source: "cli",
+      cli_version: "0.147.0"
+    }
+  })}\n`, { mode: 0o600 });
+  const stat = fs.statSync(identity.rollout.path);
+  identity.rollout.device = String(stat.dev);
+  identity.rollout.inode = String(stat.ino);
+  return identity;
 }
 
 function claudeTerminalStaticArgs(options: {

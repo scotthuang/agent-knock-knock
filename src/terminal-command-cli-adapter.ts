@@ -78,6 +78,7 @@ import {
 } from "./terminal-control-ref.js";
 import {
   TerminalInputNotStartedError,
+  type TerminalApprovalAuthorizationContext,
   type TerminalAgentBridge,
   type TerminalBridgeStatus
 } from "./terminal-agent-bridge.js";
@@ -200,6 +201,11 @@ export interface TerminalCommandCliOptions {
   conversation?: string;
   conversationId?: string;
   expectedApprovalFingerprint?: string;
+  expectedCallbackConversationId?: string;
+  expectedCallbackMessageId?: string;
+  expectedCallbackOpenclawSession?: string;
+  expectedCallbackSessionId?: string;
+  expectedCallbackTurnId?: string;
   expectedTerminalToken?: string;
   logDir?: string;
   message?: string;
@@ -2951,6 +2957,11 @@ async function runApprove(options) {
 
   const loaded = loadConversationFromOptions(options);
   const { statePath, logPath } = loaded;
+  assertAutoApprovalCallbackRoute({
+    options,
+    conversation: loaded.conversation,
+    statePath
+  });
   const conversation = await migrateLegacyTerminalAgentIdentity({
     ...loaded,
     options
@@ -2962,7 +2973,14 @@ async function runApprove(options) {
   if (!terminalControl) {
     throw new Error(`conversation ${conversation.conversation_id} is not controlled through a terminal`);
   }
-  if (!["waiting_for_agent", "waiting_for_openclaw"].includes(conversation.status)) {
+  const autoApproved = options.autoApproved === true;
+  const callbackAuthority = autoApprovalCallbackAuthorityFromOptions(options);
+  if (
+    !["waiting_for_agent", "waiting_for_openclaw"].includes(
+      conversation.status
+    ) &&
+    !(autoApproved && callbackAuthority)
+  ) {
     throw new Error(
       `cannot approve ${conversation.conversation_id}; conversation is ${conversation.status}`
     );
@@ -2975,7 +2993,6 @@ async function runApprove(options) {
   const suppliedExpectedFingerprint = stringValue(options.expectedApprovalFingerprint);
   const expectedFingerprint = suppliedExpectedFingerprint ??
     stringValue(monitoredApproval?.fingerprint);
-  const autoApproved = options.autoApproved === true;
   const claudeScreenApproval = executor.kind === "claude";
   if (claudeScreenApproval) {
     const monitoredState = isRecord(monitoredApproval?.approval_state)
@@ -3000,6 +3017,7 @@ async function runApprove(options) {
     );
     if (
       autoApproved &&
+      callbackAuthority === undefined &&
       monitoredApproval === undefined &&
       pendingDispatch === undefined &&
       conversation.status === "waiting_for_agent" &&
@@ -3029,73 +3047,78 @@ async function runApprove(options) {
       });
       return;
     }
-    const notifiedAt = validTimestampMs(monitoredApproval?.notified_at);
-    if (
-      conversation.status !== "waiting_for_openclaw" ||
-      monitoredState?.decision_mode !== "keys" ||
-      !stringValue(monitoredApproval?.fingerprint)
-    ) {
-      printJson({
-        conversation,
-        approved: false,
-        blocked: true,
-        reason: "Claude screen approval requires a current managed-turn approval notification",
-        terminal_control: terminalControl
-      });
-      return;
-    }
-    if (
-      notifiedAt === undefined ||
-      cliNowMs() - notifiedAt > CLAUDE_SCREEN_APPROVAL_TTL_MS
-    ) {
-      printJson({
-        conversation,
-        approved: false,
-        blocked: true,
-        reason: "Claude screen approval expired; inspect and resolve the terminal manually",
-        terminal_control: terminalControl
-      });
-      return;
-    }
-    if (
-      !suppliedExpectedFingerprint ||
-      expectedFingerprint !== monitoredApproval?.fingerprint
-    ) {
-      printJson({
-        conversation,
-        approved: false,
-        blocked: true,
-        reason: "Claude screen approval requires the latest notified fingerprint",
-        terminal_control: terminalControl
-      });
-      return;
-    }
-    if (
-      pendingDispatch?.state === "reserved" &&
-      pendingDispatch.terminal_bridge_message_id ===
-        nativeTakeover?.terminal_bridge_message_id
-    ) {
-      printJson({
-        conversation,
-        approved: false,
-        blocked: true,
-        reason: "a previous Claude approval dispatch has an uncertain outcome; inspect and resolve the terminal manually",
-        terminal_control: terminalControl
-      });
-      return;
-    }
-    if (
-      expectedFingerprint ===
-      stringValue(nativeTakeover?.terminal_bridge_last_approval_fingerprint)
-    ) {
-      printJson({
-        conversation,
-        approved: false,
-        blocked: true,
-        reason: "Claude screen approval fingerprint was already consumed",
-        terminal_control: terminalControl
-      });
-      return;
+    // A provenance-bound callback whose approval is already absent must reach
+    // the terminal+state lock.  Only the persisted callback message and the
+    // locked consumed-approval receipt may classify it as an idempotent replay.
+    if (callbackAuthority === undefined || monitoredApproval !== undefined) {
+      const notifiedAt = validTimestampMs(monitoredApproval?.notified_at);
+      if (
+        conversation.status !== "waiting_for_openclaw" ||
+        monitoredState?.decision_mode !== "keys" ||
+        !stringValue(monitoredApproval?.fingerprint)
+      ) {
+        printJson({
+          conversation,
+          approved: false,
+          blocked: true,
+          reason: "Claude screen approval requires a current managed-turn approval notification",
+          terminal_control: terminalControl
+        });
+        return;
+      }
+      if (
+        notifiedAt === undefined ||
+        cliNowMs() - notifiedAt > CLAUDE_SCREEN_APPROVAL_TTL_MS
+      ) {
+        printJson({
+          conversation,
+          approved: false,
+          blocked: true,
+          reason: "Claude screen approval expired; inspect and resolve the terminal manually",
+          terminal_control: terminalControl
+        });
+        return;
+      }
+      if (
+        !suppliedExpectedFingerprint ||
+        expectedFingerprint !== monitoredApproval?.fingerprint
+      ) {
+        printJson({
+          conversation,
+          approved: false,
+          blocked: true,
+          reason: "Claude screen approval requires the latest notified fingerprint",
+          terminal_control: terminalControl
+        });
+        return;
+      }
+      if (
+        pendingDispatch?.state === "reserved" &&
+        pendingDispatch.terminal_bridge_message_id ===
+          nativeTakeover?.terminal_bridge_message_id
+      ) {
+        printJson({
+          conversation,
+          approved: false,
+          blocked: true,
+          reason: "a previous Claude approval dispatch has an uncertain outcome; inspect and resolve the terminal manually",
+          terminal_control: terminalControl
+        });
+        return;
+      }
+      if (
+        expectedFingerprint ===
+        stringValue(nativeTakeover?.terminal_bridge_last_approval_fingerprint)
+      ) {
+        printJson({
+          conversation,
+          approved: false,
+          blocked: true,
+          reason: "Claude screen approval fingerprint was already consumed",
+          terminal_control: terminalControl
+        });
+        return;
+      }
     }
   }
   return runManagedApprovalDispatch({
@@ -3104,6 +3127,39 @@ async function runApprove(options) {
     terminalControl, executor, monitoredApproval, expectedFingerprint,
     autoApproved, claudeScreenApproval
   });
+}
+
+function approvalPolicyCandidateForInspection({
+  agent,
+  currentTerminalControl,
+  inspection,
+  fingerprint
+}: Pick<
+  TerminalApprovalAuthorizationContext,
+  "agent" | "inspection" | "fingerprint"
+> & {
+  currentTerminalControl: TerminalControlRef;
+}): ApprovalCandidate {
+  const evidence = inspection.approval.approvable
+    ? inspection.approval.policyEvidence
+    : undefined;
+  return {
+    agent,
+    kind: evidence?.kind ?? inspection.approval.promptKind ?? "unknown",
+    decisionMode: inspection.approval.approvable
+      ? inspection.approval.action.mode ?? "keys"
+      : undefined,
+    command: evidence?.command ?? inspection.approval.command,
+    cwd: evidence?.cwd ?? inspection.approval.cwd ?? currentTerminalControl.currentPath,
+    fingerprint: fingerprint ?? "",
+    terminalTarget: currentTerminalControl.target,
+    ...(evidence?.source === "claude_transcript"
+      ? {
+          evidenceSource: "claude_transcript" as const,
+          evidenceFingerprint: evidence.evidenceFingerprint
+        }
+      : {})
+  };
 }
 
 async function runManagedApprovalDispatch({
@@ -3129,33 +3185,6 @@ async function runManagedApprovalDispatch({
     ? parseJsonOption(options.autoApprovalPolicyJson, "--auto-approval-policy-json")
     : undefined;
   let executorPolicyDecision;
-  const policyCandidateForInspection = ({
-    agent,
-    currentTerminalControl,
-    inspection,
-    fingerprint
-  }): ApprovalCandidate => {
-    const evidence = inspection.approval.approvable
-      ? inspection.approval.policyEvidence
-      : undefined;
-    return {
-      agent,
-      kind: evidence?.kind ?? inspection.approval.promptKind ?? "unknown",
-      decisionMode: inspection.approval.approvable
-        ? inspection.approval.action.mode ?? "keys"
-        : undefined,
-      command: evidence?.command ?? inspection.approval.command,
-      cwd: evidence?.cwd ?? inspection.approval.cwd ?? currentTerminalControl.currentPath,
-      fingerprint: fingerprint ?? "",
-      terminalTarget: currentTerminalControl.target,
-      ...(evidence?.source === "claude_transcript"
-        ? {
-            evidenceSource: "claude_transcript" as const,
-            evidenceFingerprint: evidence.evidenceFingerprint
-          }
-        : {})
-    };
-  };
   const releaseTerminalLock = acquireTerminalBridgeSendLock(
     storeDirFromOptions(options),
     terminalControl,
@@ -3191,17 +3220,44 @@ async function runManagedApprovalDispatch({
     const currentApproval = isRecord(currentTakeover?.terminal_bridge_approval)
       ? currentTakeover.terminal_bridge_approval
       : undefined;
+    const callbackAuthorityState = assertAutoApprovalCallbackAuthority({
+      options,
+      conversation: currentConversation,
+      statePath,
+      takeover: currentTakeover,
+      approval: currentApproval,
+      expectedFingerprint
+    });
     if (
-      currentConversation.status !== conversation.status ||
-      currentTakeover?.terminal_bridge_message_id !== nativeTakeover?.terminal_bridge_message_id ||
       !currentControl ||
       !terminalControlsShareIncarnation(currentControl, terminalControl) ||
       (
-        claudeScreenApproval &&
-        currentApproval?.fingerprint !== monitoredApproval?.fingerprint
+        callbackAuthorityState !== "already_approved" &&
+        (
+          currentConversation.status !== conversation.status ||
+          currentTakeover?.terminal_bridge_message_id !==
+            nativeTakeover?.terminal_bridge_message_id ||
+          (
+            claudeScreenApproval &&
+            currentApproval?.fingerprint !== monitoredApproval?.fingerprint
+          )
+        )
       )
     ) {
       throw new Error("approval state changed while waiting for terminal control; refresh status and retry");
+    }
+    lockedConversation = currentConversation;
+    if (callbackAuthorityState === "already_approved") {
+      releaseApprovalStateLock();
+      printJson({
+        conversation: lockedConversation,
+        approved: false,
+        already_approved: true,
+        blocked: false,
+        reason: "automatic approval callback was already handled",
+        terminal_control: currentControl
+      });
+      return;
     }
     assertManagedTerminalDispatchOwner({
       storeDir: writerStoreDir,
@@ -3209,7 +3265,6 @@ async function runManagedApprovalDispatch({
       terminalControl: currentControl,
       action: "approve"
     });
-    lockedConversation = currentConversation;
     const currentRuntimeIdentity = terminalRuntimeIdentityForConversation(
       currentConversation,
       currentControl
@@ -3235,7 +3290,7 @@ async function runManagedApprovalDispatch({
                   reason: "automatic approval requires an executor-side policy"
                 };
               }
-              const candidate = policyCandidateForInspection({
+              const candidate = approvalPolicyCandidateForInspection({
                 agent,
                 currentTerminalControl,
                 inspection,
@@ -3279,7 +3334,7 @@ async function runManagedApprovalDispatch({
                 }
                 const freshPolicyDecision = evaluateApprovalPolicy({
                   policy: autoApprovalPolicy,
-                  candidate: policyCandidateForInspection({
+                  candidate: approvalPolicyCandidateForInspection({
                     agent: executor.kind,
                     currentTerminalControl: dispatchControl,
                     inspection,
@@ -3588,6 +3643,181 @@ async function runManagedApprovalDispatch({
     } finally {
       releaseApprovalTerminalLock();
     }
+  }
+}
+
+function assertAutoApprovalCallbackAuthority(input: {
+  options: Record<string, any>;
+  conversation: Conversation;
+  statePath: string;
+  takeover: Record<string, unknown> | undefined;
+  approval: Record<string, unknown> | undefined;
+  expectedFingerprint?: string;
+}): "not_callback" | "current" | "already_approved" {
+  if (input.options.autoApproved !== true) {
+    return "not_callback";
+  }
+  const expected = autoApprovalCallbackAuthorityFromOptions(input.options);
+  if (!expected) {
+    return "not_callback";
+  }
+  assertAutoApprovalCallbackRoute({
+    options: input.options,
+    conversation: input.conversation,
+    statePath: input.statePath
+  });
+  const delivery = isRecord(input.conversation.callback_delivery)
+    ? input.conversation.callback_delivery
+    : undefined;
+  const callbackMessage = isRecord(delivery?.message)
+    ? delivery.message
+    : undefined;
+  const callbackMetadata = isRecord(callbackMessage?.metadata)
+    ? callbackMessage.metadata
+    : undefined;
+  const callbackCandidate = isRecord(callbackMetadata?.approval_candidate)
+    ? callbackMetadata.approval_candidate
+    : undefined;
+  const callbackTerminalStatus = isRecord(callbackMetadata?.terminal_status)
+    ? callbackMetadata.terminal_status
+    : undefined;
+  const callbackApprovalState = isRecord(callbackTerminalStatus?.approval_state)
+    ? callbackTerminalStatus.approval_state
+    : undefined;
+  const persistedApprovalState = isRecord(input.approval?.approval_state)
+    ? input.approval.approval_state
+    : undefined;
+  const callbackFingerprints = [
+    stringValue(callbackMetadata?.approval_fingerprint),
+    stringValue(callbackCandidate?.fingerprint),
+    stringValue(callbackApprovalState?.fingerprint)
+  ];
+  const commonAuthorityMismatch =
+    delivery?.kind !== "approval_notification" ||
+      stringValue(callbackMessage?.id) !== expected.messageId ||
+      stringValue(callbackMessage?.conversation_id) !== expected.conversationId ||
+      stringValue(callbackMessage?.session_id) !== expected.sessionId ||
+      stringValue(callbackMessage?.turn_id) !== expected.turnId ||
+      !input.expectedFingerprint ||
+      !/^[a-f0-9]{64}$/u.test(input.expectedFingerprint) ||
+      callbackFingerprints.some((value) => value !== input.expectedFingerprint) ||
+      input.takeover?.terminal_bridge !== true;
+  if (commonAuthorityMismatch) {
+    throw new Error(
+      "automatic approval callback no longer matches the locked Turn state; refresh status and retry"
+    );
+  }
+  if (input.approval) {
+    const currentFingerprints = [
+      stringValue(input.approval.fingerprint),
+      stringValue(persistedApprovalState?.fingerprint)
+    ];
+    if (input.conversation.status !== "waiting_for_openclaw" ||
+        currentFingerprints.some((value) => value !== input.expectedFingerprint) ||
+        stringValue(input.approval.callback_message_id) !== expected.messageId) {
+      throw new Error(
+        "automatic approval callback no longer matches the locked Turn state; refresh status and retry"
+      );
+    }
+    return "current";
+  }
+  if (
+    input.takeover?.terminal_bridge_approval !== undefined ||
+    input.takeover?.terminal_bridge_approval_dispatch !== undefined ||
+    !isPostApprovalCallbackReplayStatus(input.conversation.status) ||
+    stringValue(input.takeover?.terminal_bridge_message_id) !==
+      expected.messageId ||
+    stringValue(input.takeover?.terminal_bridge_last_approval_message_id) !==
+      expected.messageId ||
+    stringValue(input.takeover?.terminal_bridge_last_approval_fingerprint) !==
+      input.expectedFingerprint ||
+    validTimestampMs(
+      input.takeover?.terminal_bridge_approval_resolved_at
+    ) === undefined
+  ) {
+    throw new Error(
+      "automatic approval callback no longer matches the locked Turn receipt; refresh status and retry"
+    );
+  }
+  return "already_approved";
+}
+
+function isPostApprovalCallbackReplayStatus(
+  status: ConversationStatus
+): boolean {
+  return [
+    "waiting_for_agent",
+    "running",
+    "idle",
+    "stalled",
+    "callback_pending",
+    "callback_failed",
+    "failed",
+    "closed",
+    "cancelled",
+    "cancelling"
+  ].includes(status);
+}
+
+function autoApprovalCallbackAuthorityFromOptions(
+  options: Record<string, any>
+): {
+  conversationId: string;
+  sessionId: string;
+  turnId: string;
+  messageId: string;
+  openclawSession: string;
+} | undefined {
+  const candidate = {
+    conversationId: stringValue(options.expectedCallbackConversationId),
+    sessionId: stringValue(options.expectedCallbackSessionId),
+    turnId: stringValue(options.expectedCallbackTurnId),
+    messageId: stringValue(options.expectedCallbackMessageId),
+    openclawSession: stringValue(options.expectedCallbackOpenclawSession)
+  };
+  const values = Object.values(candidate);
+  if (values.every((value) => value === undefined)) {
+    return undefined;
+  }
+  if (values.some((value) => value === undefined)) {
+    throw new Error(
+      "automatic approval callback identity is incomplete; no approval key was sent"
+    );
+  }
+  return candidate as {
+    conversationId: string;
+    sessionId: string;
+    turnId: string;
+    messageId: string;
+    openclawSession: string;
+  };
+}
+
+function assertAutoApprovalCallbackRoute(input: {
+  options: Record<string, any>;
+  conversation: Conversation;
+  statePath: string;
+}): void {
+  if (input.options.autoApproved !== true) {
+    return;
+  }
+  const expected = autoApprovalCallbackAuthorityFromOptions(input.options);
+  if (!expected) {
+    return;
+  }
+  const storedOpenClawSession = stringValue(
+    input.conversation.gateway_session ?? input.conversation.openclaw_session
+  );
+  if (
+    input.conversation.conversation_id !== expected.conversationId ||
+    sessionIdForConversation(input.conversation) !== expected.sessionId ||
+    turnIdForConversation(input.conversation) !== expected.turnId ||
+    !sameCanonicalStatePath(input.conversation.state_path, input.statePath) ||
+    storedOpenClawSession !== expected.openclawSession
+  ) {
+    throw new Error(
+      "automatic approval callback does not match the selected Turn state; no state was changed"
+    );
   }
 }
 

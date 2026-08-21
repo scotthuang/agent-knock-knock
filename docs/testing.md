@@ -10,13 +10,20 @@ duplicated, or unclassified.
 
 | Command | Purpose | When to run |
 | --- | --- | --- |
-| `npm run test:fast` | Deterministic unit/component tests without test-level child processes | Every development loop |
-| `npm run test:integration` | CLI subprocess, monitor, SQLite, Store locking, lifecycle, installer, and compatibility fixtures | For the changed subsystem |
-| `npm run test:affected` | Complete fast tier plus mapped integration tests; unknown or shared-core changes run the full tier | Local branch and worktree feedback |
-| `npm run test:full` | The exact union of fast and integration tests | Before every PR merge and release |
-| `npm test` | Compatibility alias for `test:full` | Existing automation and maintainer habits |
-| `npm run test:release` | Full suite, isolated OpenClaw compatibility matrix, ClawHub runtime validation, and ClawHub publish dry-run | Release-relevant changes |
-| `npm run test:release:live` | The release tier plus credentialed native Codex and Claude lifecycle smoke/attestation | Only with dedicated prepared tmux panes |
+| `npm run test:fast` | Deterministic unit/component tests without test-level child processes | Every development, debugging, refactoring, review, and local-install loop |
+| `npm run test:integration` | CLI subprocess, monitor, SQLite, Store locking, lifecycle, installer, and compatibility fixtures | Release-gate component; do not run during ordinary development or local verification |
+| `npm run test:affected` | Complete fast tier plus mapped integration tests; unknown or shared-core changes run the full tier | Maintainer/release diagnostics only; not an ordinary development command |
+| `npm run test:full` | The exact union of fast and integration tests | Immediate pre-publication gate for an actual npm or ClawHub release |
+| `npm test` | Compatibility alias for `test:full` | Same release-only boundary as `test:full` |
+| `npm run test:release` | Full suite, isolated OpenClaw compatibility matrix, ClawHub runtime validation, and ClawHub publish dry-run | Immediate pre-publication gate for an actual npm or ClawHub release |
+| `npm run test:release:live` | The release tier plus credentialed native Codex and Claude lifecycle smoke/attestation | Optional release-time diagnostic with dedicated prepared tmux panes |
+
+During normal development, debugging, refactoring, review, local installation,
+and local verification, run only `npm run test:fast`. Type checking, builds,
+architecture/evidence validators, installation, and non-test health checks may be
+run when relevant, but they do not authorize a broader test tier. Run the
+full/release suite only immediately before an actual npm or ClawHub
+publication. A local OpenClaw install is not a package release.
 
 The live release tier can make authenticated coding-agent turns. It is never
 selected by `npm test` or `test:release`; opting in is an explicit operational
@@ -77,14 +84,18 @@ mapping, an unknown path, exact Store/protocol modules, shared production
 kernels, or selector/architecture authority files. `src/store.ts` and
 `src/protocol.ts` cannot be narrowed by accompanying tests or manifest proof.
 
-This command narrows local feedback only. It does not replace `npm test` for a
-merge, release, or final verification.
+This selector remains documented for release-maintainer diagnostics. Under the
+normal-development policy above, use `npm run test:fast` instead; an actual
+publication uses the complete full/release gate rather than treating affected
+selection as sufficient evidence.
 
 ## Targeted integration map
 
-Always run `test:fast` first. Then select the integration files below; paths are
-source paths under `test/` and the tier runner handles their compiled `dist`
-paths.
+The map below records which integration witnesses own each subsystem. It is for
+release-gate triage and failure diagnosis, not permission to run integration
+tests during ordinary development or local installation. In those workflows,
+run only `npm run test:fast`. Paths are source paths under `test/`, and the tier
+runner handles their compiled `dist` paths.
 
 Pass one or more exact manifest paths after `--` to run only those integration
 files. The runner rejects duplicates, unknown paths, and files from the fast
@@ -132,11 +143,42 @@ manifest entries; use these names directly rather than a shell wildcard:
 | Session/Turn acceptance and bookkeeping | `test/shards/agent-cli-session-acceptance.test.ts` |
 | Raw and managed terminal send gates | `test/shards/agent-cli-terminal-send-gates.test.ts` |
 
-The mapping narrows feedback; it does not replace the full-suite requirement.
+The mapping diagnoses a release gate; it never replaces the complete
+pre-publication full/release suite.
 Safety fences from #87, native lifecycle smoke tooling from #88, Store upgrade
 paths, Codex 0.146.0/0.146.1/0.147.0/0.148.0, OpenClaw boundaries, and verified
 Claude Code 2.1.218/2.1.226/2.1.237 schemas
 remain covered.
+
+## #206 Terminal Watch fast contract
+
+The fast tier owns the deterministic Terminal Watch contract:
+
+| Fast witness | Contract proved |
+| --- | --- |
+| `test/terminal-watch-store.test.ts` | Owner-private atomic schema-v1 records under `terminal-watches/`, strict load/list validation, revision CAS, direct provider-anchor persistence and validation, and `writer -> per-watch` lock order |
+| `test/terminal-watch-service.test.ts` | Restart/list recovery, timeout and terminal settlement, approval dedupe without automatic approval, exact observation fences, callback claim-crash recovery, retry, and deterministic idempotency |
+| `test/terminal-submission-acceptance.test.ts`, `test/claude-local-transcript-provider.test.ts` | Exact Codex rollout and Claude current-turn transcript anchors; process, native identity, file, boundary, version, truncation, successor, and ambiguity drift fail closed |
+| `test/terminal-watch-cli-adapter.test.ts`, `test/terminal-watch-callback-cli-adapter.test.ts` | Human-started active-task capture, `watch_id` projection, no terminal input or Session/Turn ownership, privacy-safe callback transport, and restart-safe delivery metadata |
+| `test/terminal-list-renderer.test.ts`, `test/openclaw-plugin-helpers.test.ts`, `test/quickstart-docs.test.ts` | Fresh `available_actions.watch`, Watch status/unwatch routing and formatting, action-contract v18 semantic-ID-only projection, and the documented TUI → fresh list → Watch workflow |
+
+The current public surface has 16 OpenClaw tools. Terminal Watch adds the
+`watch-terminal`, `watch-status`, `unwatch-terminal`, and `reconcile-watches`
+CLI entries. OpenClaw's supervisor coordinates managed-monitor and Watch
+reconciliation in the same non-overlapping lifecycle but with independent error
+boundaries, so either side can make progress when the other fails. The
+process-level plugin contract remains in the integration tier and is exercised
+only as part of an authorized pre-publication full/release gate.
+
+The v18 fast contract also proves that structured model actions expose semantic
+IDs only: Watch uses `terminal_id`; send uses mutually exclusive `session_id` or
+`terminal_id`; native inspection, new, resume, and reconcile use their documented
+terminal/session/thread IDs; and approve or handoff retains explicit-confirmation
+behavior without projecting opaque tokens, fingerprints, revisions, binding
+IDs/generations, or handoff-only live-native-UUID fences. The semantic
+`native_thread_id` remains public for resume. The plugin/CLI still derives and
+revalidates those private fences under lock. This is an action-contract change
+only; Store format remains 1 and writer protocol remains 5.
 
 ## Profiling
 
@@ -236,8 +278,8 @@ static-terminal, and synthetic-acceptance behavior. The six record-only
 
 | Former executable cases | Imported service invariant | Retained real boundary |
 | --- | --- | --- |
-| Ten management list/status invocations | Exact JSON projection, trace redaction, static terminal observation, and action-contract v16 | Standalone executable list/status in `store-protocol-cli`, copied-distribution CLI output/exit |
-| Thirty-four selector, status, send, respond, and approve invocations | Deterministic ambiguity failures, canonical ownership, cross-Store fencing, and exact selector/token routing | Codex binding and terminal-send executable suites with real terminal observation/input |
+| Ten management list/status invocations | Exact JSON projection, trace redaction, static terminal observation, and action-contract v18 | Standalone executable list/status in `store-protocol-cli`, copied-distribution CLI output/exit |
+| Thirty-four selector, status, send, respond, and approve invocations | Deterministic ambiguity failures, canonical ownership, cross-Store fencing, semantic-ID routing, and private fence derivation | Codex binding and terminal-send executable suites with real terminal observation/input |
 | Six record-only callback binding invocations | Protocol-3 Session presence, generation, process evidence, route-rename, and protocol-2 compatibility | Callback executable argv/exit, Gateway, retry, and concurrency suites |
 
 The static metric removes one CLI startup site from each migrated file, moving

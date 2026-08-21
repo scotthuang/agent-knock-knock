@@ -160,7 +160,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       hidden_turn_count: 0,
       session_count: 0
     });
-    assert.equal(listed.action_contracts.version, 16);
+    assert.equal(listed.action_contracts.version, 18);
     assert.match(
       listed.action_contracts.instructions.join("\n"),
       /Treat terminals\[\] as the primary resource/u
@@ -171,11 +171,11 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     );
     assert.match(
       listed.action_contracts.instructions.join("\n"),
-      /terminal selector only[\s\S]*explicitly named by the user[\s\S]*prefilled[\s\S]*never infer/u
+      /user-explicit raw terminal selector[\s\S]*discovery choice[\s\S]*exact terminal_id prefilled[\s\S]*never infer/u
     );
     assert.match(
       listed.action_contracts.instructions.join("\n"),
-      /verified, idle human native-thread switch[\s\S]*expected_terminal_token[\s\S]*atomically adopts/u
+      /verified, idle human native-thread switch[\s\S]*atomically adopts/u
     );
     assert.match(
       listed.action_contracts.instructions.join("\n"),
@@ -183,7 +183,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     );
     assert.match(
       listed.action_contracts.instructions.join("\n"),
-      /rollout-backed managed Codex pane[\s\S]*exact selector plus expected_terminal_token[\s\S]*one materialized rollout does not prove the current (?:Codex )?TUI foreground thread/u
+      /rollout-backed managed Codex pane[\s\S]*exact terminal_id[\s\S]*one materialized rollout does not prove the current (?:Codex )?TUI foreground thread/u
     );
     assert.match(
       listed.action_contracts.instructions.join("\n"),
@@ -207,7 +207,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     );
     assert.match(
       listed.action_contracts.instructions.join("\n"),
-      /Approval fingerprint v2[\s\S]*unredacted exact prompt-region digest[\s\S]*Whole-screen digests and scrollback excerpts are diagnostic only[\s\S]*without exact prompt-region evidence is not approvable/u
+      /Manual approval binds the exact prompt[\s\S]*prompt authority private[\s\S]*complete exact evidence is not approvable/u
     );
     assert.deepEqual(
       listed.action_contracts.field_semantics.process_state,
@@ -234,7 +234,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     );
     assert.match(
       listed.action_contracts.field_semantics.managed.session_id,
-      /continuing agent context[\s\S]*ordinary-send target only when (?:the listed send action|available_actions\.send) (?:explicitly )?prefills it[\s\S]*rollout-backed Codex uses selector\/token instead/u
+      /continuing agent context[\s\S]*ordinary-send target only when (?:the listed send action|available_actions\.send) (?:explicitly )?prefills it[\s\S]*rollout-backed Codex uses the listed follow-current terminal action instead/u
     );
     assert.deepEqual(
       listed.action_contracts.field_semantics.available_actions,
@@ -269,15 +269,15 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     );
     assert.match(
       listed.action_contracts.actions.send.status_card_only_deferred_scope,
-      /listed selector\/token send[\s\S]*strict managed controls[\s\S]*callback authority remain unavailable[\s\S]*must not be retried automatically/u
+      /listed follow-current send[\s\S]*strict managed controls[\s\S]*callback authority remain unavailable[\s\S]*must not be retried automatically/u
     );
     assert.match(
       listed.action_contracts.actions.send.candidate_rollout_deferred_scope,
-      /complete nonempty candidate inventory[\s\S]*one rollout is materialized[\s\S]*does not prove the current TUI foreground thread[\s\S]*predecessor Turn history stays read-only[\s\S]*unique post-anchor request acceptance[\s\S]*\/clear resume hint is diagnostic only[\s\S]*not token or routing authority[\s\S]*Same-UUID and different-UUID results keep separate Session lineages[\s\S]*never retried blindly[\s\S]*Explicit close[\s\S]*append-only receipt[\s\S]*absent old rollout[\s\S]*never synthesizes callback delivery/u
+      /complete nonempty candidate inventory[\s\S]*one rollout is materialized[\s\S]*does not prove the current TUI foreground thread[\s\S]*predecessor Turn history stays read-only[\s\S]*unique post-anchor request acceptance[\s\S]*\/clear resume hint is diagnostic only[\s\S]*not routing authority[\s\S]*Same-UUID and different-UUID results keep separate Session lineages[\s\S]*never retried blindly[\s\S]*Explicit close[\s\S]*append-only receipt[\s\S]*absent old rollout[\s\S]*never synthesizes callback delivery/u
     );
     assert.match(
       listed.action_contracts.actions.send.ordinary_use,
-      /session_id never follows the pane[\s\S]*unavailable for rollout-backed Codex Sessions[\s\S]*selector\/token action[\s\S]*unique exact rollout/u
+      /session_id never follows the pane[\s\S]*unavailable for rollout-backed Codex Sessions[\s\S]*listed follow-current action[\s\S]*unique exact rollout/u
     );
     assert.deepEqual(
       listed.action_contracts.field_semantics.handoff_decision,
@@ -305,6 +305,8 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       Object.keys(listed.action_contracts.actions),
       [
         "send",
+        "watch",
+        "unwatch",
         "new_thread",
         "list_resumable_threads",
         "native_inspect",
@@ -325,7 +327,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     );
     assert.equal(
       listed.action_contracts.actions.send.initial_attach_target_argument,
-      "selector"
+      "terminal_id"
     );
     assert.deepEqual(
       listed.action_contracts.actions.send.managed_scopes,
@@ -335,33 +337,29 @@ test("list exposes physical tmux terminals with the terminal-first action contra
           follows_current_terminal: false
         },
         terminal_follow_current: {
-          target_arguments: ["selector", "expected_terminal_token"],
+          target_arguments: ["terminal_id"],
           follows_current_terminal: true
         }
       }
     );
     assert.match(
       listed.action_contracts.actions.send.initial_attach_scope,
-      /explicitly named by the user[\s\S]*unmanaged raw-terminal row[\s\S]*never infer/u
+      /terminal_id prefilled by an unmanaged raw-terminal row[\s\S]*selector explicitly named by the user/u
     );
     assert.deepEqual(
       listed.action_contracts.actions.send.required,
       ["request"]
     );
     assert.equal(
-      listed.action_contracts.actions.approve.fingerprint_contract,
-      "v2_prompt_region"
-    );
-    assert.match(
-      listed.action_contracts.actions.approve.fingerprint_authority,
-      /unredacted exact prompt-region digest[\s\S]*whole-screen digests and scrollback excerpts are diagnostic only/u
+      listed.action_contracts.actions.approve.approval_authority,
+      "private_server_bound_reviewed_prompt"
     );
     assert.equal(
       listed.action_contracts.actions.approve.missing_prompt_region_evidence,
       "not_approvable"
     );
     assert.equal(
-      listed.action_contracts.actions.send.optional.includes("selector"),
+      listed.action_contracts.actions.send.optional.includes("terminal_id"),
       true
     );
     assert.deepEqual(
@@ -372,10 +370,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       listed.action_contracts.actions.reconcile_binding.required,
       [
         "terminal_id",
-        "conflicting_session_id",
-        "expected_session_revision",
-        "expected_binding_token",
-        "expected_terminal_token"
+        "conflicting_session_id"
       ]
     );
     assert.equal(
@@ -384,7 +379,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     );
     assert.deepEqual(
       listed.action_contracts.actions.native_inspect.required,
-      ["terminal_id", "inspection", "expected_binding_token"]
+      ["terminal_id", "inspection"]
     );
     assert.equal(
       listed.action_contracts.actions.native_inspect.mutates_store,
@@ -392,8 +387,6 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     );
     for (const action of [
       "respond",
-      "status",
-      "approve",
       "cancel",
       "renew",
       "retry_callback",
@@ -409,7 +402,15 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       listed.action_contracts.actions.respond.compatibility_target_argument,
       undefined
     );
-    for (const action of ["status", "approve", "cancel", "close"]) {
+    assert.deepEqual(
+      listed.action_contracts.actions.status.target_arguments,
+      { exactly_one_of: ["turn_id", "conversation_id", "watch_id"] }
+    );
+    assert.deepEqual(
+      listed.action_contracts.actions.approve.target_arguments,
+      { exactly_one_of: ["turn_id", "terminal_id"] }
+    );
+    for (const action of ["status", "cancel", "close"]) {
       assert.equal(
         listed.action_contracts.actions[action].compatibility_target_argument,
         "conversation_id",
@@ -417,9 +418,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       );
       assert.match(
         listed.action_contracts.actions[action].compatibility_scope,
-        action === "approve"
-          ? /raw-terminal or manual terminal-scoped Codex approval action[\s\S]*never construct/u
-          : /unmanaged raw-terminal row[\s\S]*never construct/u,
+        /unmanaged raw-terminal row[\s\S]*never construct/u,
         `${action} must forbid invented raw-terminal selectors`
       );
     }
@@ -440,8 +439,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       [
         "reason",
         "expected_message_id",
-        "expected_transition_id",
-        "expected_handoff_token"
+        "expected_transition_id"
       ]
     );
     const approvalActions = terminal.available_actions;

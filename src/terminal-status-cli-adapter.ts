@@ -24,10 +24,12 @@ import type {
   TerminalBridgeStatus
 } from "./terminal-agent-bridge.js";
 import {
+  formatTerminalConversationId,
   parseTerminalConversationId,
   type TerminalControlRef,
   type TerminalRuntimeIdentity
 } from "./terminal-agent-adapter.js";
+import { terminalWatchDiscoveryHint } from "./terminal-list-renderer.js";
 import {
   codexTerminalContextFromHistory,
   isDiscoverableTmuxConversation,
@@ -164,10 +166,25 @@ export interface TerminalStatusReconciliationPorts {
   terminalBridgeEnabled(conversation: Conversation): boolean;
 }
 
+export interface TerminalStatusWatchHintAuthorityPorts {
+  terminalListObservation(
+    options: TerminalStatusCliOptions,
+    terminalId: string
+  ): Promise<TerminalStatusListObservation | undefined>;
+}
+
+export interface TerminalStatusListObservation {
+  activityState: TerminalBridgeStatus["activity_state"];
+  activityReason: string;
+  watchActionAvailable: boolean;
+  terminalStatus?: TerminalBridgeStatus;
+}
+
 export interface TerminalStatusCliDependencies {
   selection: TerminalStatusSelectionPorts;
   observation: TerminalStatusObservationPorts;
   reconciliation: TerminalStatusReconciliationPorts;
+  watchAuthority: TerminalStatusWatchHintAuthorityPorts;
   projection: TerminalStatusSummaryPorts;
 }
 
@@ -290,19 +307,34 @@ async function runTerminalControlStatus(
     options,
     terminal: terminalConversation
   });
-  const terminalStatus = await facade.terminalStatusForControl(
-    terminalConversation.agent,
-    terminalConversation.terminalControl,
+  const terminalId = exactTerminalId(terminalConversation);
+  const terminalListObservation = await authoritativeTerminalListObservation({
+    dependencies,
     options,
-    {
-      pid: terminalConversation.pid,
-      cwd: terminalConversation.terminalControl.currentPath,
-      conversationId: terminalConversation.conversationId,
-      terminalTarget: terminalConversation.terminalControl.target
-    }
-  );
+    terminalId
+  });
+  const terminalStatus = terminalListObservation?.terminalStatus ??
+    terminalStatusWithOptionalListActivity(
+      await facade.terminalStatusForControl(
+        terminalConversation.agent,
+        terminalConversation.terminalControl,
+        options,
+        {
+          pid: terminalConversation.pid,
+          cwd: terminalConversation.terminalControl.currentPath,
+          conversationId: terminalConversation.conversationId,
+          terminalTarget: terminalConversation.terminalControl.target
+        }
+      ),
+      terminalListObservation
+    );
   const context = await terminalStatusContext(
     dependencies, facade, terminalConversation, terminalStatus, options);
+  const terminalWatchHint = await terminalWatchHintForRawTerminal({
+    dependencies,
+    terminalId,
+    terminalListObservation
+  });
   writeCliJson({
     conversation_id: terminalConversation.conversationId,
     source: "terminal_control",
@@ -312,12 +344,110 @@ async function runTerminalControlStatus(
     ...context,
     terminal_control: terminalConversation.terminalControl,
     terminal_status: terminalStatus,
-    terminal_screen: terminalStatus.screen
+    terminal_screen: terminalStatus.screen,
+    ...(terminalWatchHint
+      ? { terminal_watch_hint: terminalWatchHint }
+      : {})
   });
   cliRuntimeLog("info", "terminal_status_read", {
     conversation_id: terminalConversation.conversationId,
     terminal_target: terminalConversation.terminalControl.target,
     reachable: terminalStatus.reachable
+  });
+}
+
+function terminalStatusWithOptionalListActivity(
+  terminalStatus: TerminalBridgeStatus,
+  observation: TerminalStatusListObservation | undefined
+): TerminalBridgeStatus {
+  return observation
+    ? terminalStatusWithListActivity(terminalStatus, observation)
+    : terminalStatus;
+}
+
+function terminalStatusWithListActivity(
+  terminalStatus: TerminalBridgeStatus,
+  observation: TerminalStatusListObservation
+): TerminalBridgeStatus {
+  const descriptors = Object.getOwnPropertyDescriptors(terminalStatus);
+  descriptors.activity_state = {
+    configurable: true,
+    enumerable: true,
+    value: observation.activityState,
+    writable: true
+  };
+  descriptors.activity_reason = {
+    configurable: true,
+    enumerable: true,
+    value: observation.activityReason,
+    writable: true
+  };
+  return Object.create(
+    Object.getPrototypeOf(terminalStatus),
+    descriptors
+  ) as TerminalBridgeStatus;
+}
+
+async function authoritativeTerminalListObservation(input: {
+  dependencies: TerminalStatusCliDependencies;
+  options: TerminalStatusCliOptions;
+  terminalId: string;
+}): Promise<TerminalStatusListObservation | undefined> {
+  try {
+    const observation = await input.dependencies.watchAuthority.terminalListObservation(
+      input.options,
+      input.terminalId
+    );
+    return observation ?? {
+      activityState: "unknown",
+      activityReason:
+        "durable terminal activity evidence is unavailable",
+      watchActionAvailable: false
+    };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    cliRuntimeLog("warn", "terminal_list_observation_unavailable", {
+      terminal_id: input.terminalId,
+      reason
+    });
+    return {
+      activityState: "unknown",
+      activityReason:
+        `durable terminal activity evidence is unavailable: ${reason}`,
+      watchActionAvailable: false
+    };
+  }
+}
+
+async function terminalWatchHintForRawTerminal(input: {
+  dependencies: TerminalStatusCliDependencies;
+  terminalId: string;
+  terminalListObservation?: TerminalStatusListObservation;
+}): Promise<Record<string, unknown> | undefined> {
+  try {
+    if (input.terminalListObservation?.watchActionAvailable !== true) {
+      return undefined;
+    }
+    return terminalWatchDiscoveryHint(
+      input.terminalId
+    );
+  } catch (error) {
+    cliRuntimeLog("warn", "terminal_watch_hint_unavailable", {
+      terminal_id: input.terminalId,
+      reason: error instanceof Error ? error.message : String(error)
+    });
+    return undefined;
+  }
+}
+
+function exactTerminalId(
+  terminal: ResolvedTerminalConversation
+): string {
+  return formatTerminalConversationId({
+    agent: terminal.agent,
+    target: terminal.terminalControl.target,
+    pid: terminal.pid,
+    kind: terminal.terminalControl.kind
   });
 }
 

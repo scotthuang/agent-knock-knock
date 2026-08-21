@@ -517,7 +517,7 @@ function approvalMetadata(
       fingerprint: input.fingerprint
     }),
     approve_command:
-      `AKK approve ${conversation.conversation_id} --expected-approval-fingerprint ${input.fingerprint}`,
+      `AKK approve ${conversation.conversation_id}`,
     deny_command: `AKK cancel ${conversation.conversation_id}`,
     approve_tool: "agent_knock_knock_approve",
     deny_tool: "agent_knock_knock_cancel"

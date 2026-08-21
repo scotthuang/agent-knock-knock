@@ -47,6 +47,9 @@ const STATIC_SUBPROCESS_MAXIMUM_PERCENT_OF_BASELINE = 40;
 const PUBLIC_COMMANDS = Object.freeze([
   "delegate",
   "list",
+  "watch-terminal",
+  "watch-status",
+  "unwatch-terminal",
   "status",
   "send",
   "new-thread",
@@ -62,6 +65,7 @@ const PUBLIC_COMMANDS = Object.freeze([
   "cancel",
   "renew",
   "reconcile-monitors",
+  "reconcile-watches",
   "close",
   "transcript",
   "install-openclaw",
@@ -72,6 +76,8 @@ const PUBLIC_COMMANDS = Object.freeze([
 ]);
 const PUBLIC_ACTIONS = Object.freeze([
   "send",
+  "watch",
+  "unwatch",
   "new_thread",
   "list_resumable_threads",
   "native_inspect",
@@ -87,6 +93,8 @@ const PUBLIC_ACTIONS = Object.freeze([
 ]);
 const OPENCLAW_TOOLS = Object.freeze([
   "agent_knock_knock_list",
+  "agent_knock_knock_watch",
+  "agent_knock_knock_unwatch",
   "agent_knock_knock_list_resumable_threads",
   "agent_knock_knock_native_inspect",
   "agent_knock_knock_new_thread",
@@ -936,6 +944,8 @@ function validateOpenClawAuthorityRoles(authorityPaths, repoRoot) {
       "sendParameters",
       "respondParameters",
       "listParameters",
+      "watchParameters",
+      "unwatchParameters",
       "listResumableThreadsParameters",
       "nativeInspectParameters",
       "newThreadParameters",
@@ -996,7 +1006,9 @@ function validateOpenClawAuthorityRoles(authorityPaths, repoRoot) {
       "resumeThreadParameters",
       "retryCallbackParameters",
       "sendParameters",
-      "statusParameters"
+      "statusParameters",
+      "unwatchParameters",
+      "watchParameters"
     ],
     "OpenClaw command-adapter role"
   );
@@ -1046,7 +1058,7 @@ function validateOpenClawAuthorityRoles(authorityPaths, repoRoot) {
     repoRoot,
     roles.monitor_supervisor,
     "./openclaw-plugin-command-adapter.js",
-    ["pushOptional", "runCli", "runCliAsync"],
+    ["pushOptional", "runCliAsync"],
     "OpenClaw monitor-supervisor role"
   );
   assertDirectNamedImport(
@@ -1155,8 +1167,8 @@ function validatePublicContracts(value, {
     "version",
     "witnesses"
   ], "list action contract");
-  if (actions.version !== 16) {
-    fail("list action contract version must remain 16");
+  if (actions.version !== 18) {
+    fail("list action contract version must remain 18");
   }
   assertExactArray(actions.actions, PUBLIC_ACTIONS, "list action names");
   validateAuthorityPaths(
@@ -1173,8 +1185,8 @@ function validatePublicContracts(value, {
   assertSourcePattern(
     repoRoot,
     "src/terminal-list-renderer.ts",
-    /version:\s*16\b/u,
-    "list action contract version 16"
+    /version:\s*18\b/u,
+    "list action contract version 18"
   );
 
   const openclaw = assertExactKeys(contracts.openclaw_tools, [
@@ -1213,6 +1225,8 @@ function validatePublicContracts(value, {
     "format_version",
     "protocol_witnesses",
     "session_authority_protocol",
+    "terminal_watch_schema",
+    "terminal_watch_version",
     "upgradeable_writer_protocols",
     "witnesses"
   ], "Store protocol contract");
@@ -1220,6 +1234,10 @@ function validatePublicContracts(value, {
       store.current_writer_protocol !== 5 ||
       store.session_authority_protocol !== 3) {
     fail("Store format/writer/session-authority protocol contract changed");
+  }
+  if (store.terminal_watch_schema !== "agent-knock-knock/terminal-watch" ||
+      store.terminal_watch_version !== 1) {
+    fail("Terminal Watch schema contract changed");
   }
   assertExactArray(
     store.upgradeable_writer_protocols,
@@ -1264,6 +1282,18 @@ function validatePublicContracts(value, {
     .test(storeSource)) {
     fail("Store upgradeable writer protocol set changed");
   }
+  assertSourcePattern(
+    repoRoot,
+    "src/terminal-watch-store.ts",
+    /export const TERMINAL_WATCH_SCHEMA = "agent-knock-knock\/terminal-watch" as const;/u,
+    "Terminal Watch schema v1 name"
+  );
+  assertSourcePattern(
+    repoRoot,
+    "src/terminal-watch-store.ts",
+    /export const TERMINAL_WATCH_VERSION = 1 as const;/u,
+    "Terminal Watch schema v1 version"
+  );
 }
 
 function validateMigrationMappings(value, { witnesses, usedWitnesses }) {

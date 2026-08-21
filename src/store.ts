@@ -30,6 +30,7 @@ const STORE_SESSIONS_DIRECTORY = "sessions";
 const STORE_TRANSITIONS_DIRECTORY = "transitions";
 export const STORE_DEFERRED_FOREGROUND_TRANSFERS_DIRECTORY =
   "deferred-foreground-transfers";
+export const STORE_TERMINAL_WATCHES_DIRECTORY = "terminal-watches";
 const STORE_WRITER_LOCK_FILE = ".akk-writer.lock";
 const STORE_MANIFEST_TEMP_PREFIX = `.${STORE_MANIFEST_FILE}.`;
 const STORE_MANIFEST_TEMP_SUFFIX = ".tmp";
@@ -1190,7 +1191,8 @@ function ensureStoreDir(storeDir: string, currentConversationDir: string): void 
     if (
       (entry.name === STORE_SESSIONS_DIRECTORY ||
         entry.name === STORE_TRANSITIONS_DIRECTORY ||
-        entry.name === STORE_DEFERRED_FOREGROUND_TRANSFERS_DIRECTORY) &&
+        entry.name === STORE_DEFERRED_FOREGROUND_TRANSFERS_DIRECTORY ||
+        entry.name === STORE_TERMINAL_WATCHES_DIRECTORY) &&
       entry.isDirectory()
     ) {
       return true;
