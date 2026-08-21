@@ -832,14 +832,15 @@ test("adapter capabilities advertise semantic terminal behavior explicitly", () 
 });
 
 test("verified Codex lifecycle profiles use closed status-clear-status steps", () => {
-  for (const version of ["0.146.0", "0.146.1", "0.147.0"]) {
+  for (const version of ["0.146.0", "0.146.1", "0.147.0", "0.148.0"]) {
     const profile = probeCodexThreadLifecycle(version);
     assert.equal(profile.status, "supported");
     assert.equal(profile.behaviorProfile, `codex-tui-${version}`);
   }
 
-  const capabilities = probeCodexThreadLifecycle("0.147.0");
+  const capabilities = probeCodexThreadLifecycle("0.148.0");
   assert.equal(probeCodexThreadLifecycle("0.146.2").status, "unsupported");
+  assert.equal(probeCodexThreadLifecycle("0.148.1").status, "unsupported");
   assert.equal(probeCodexThreadLifecycle(undefined).status, "unknown");
 
   const fresh = planCodexThreadLifecycle(
@@ -889,7 +890,7 @@ test("verified Codex lifecycle profiles use closed status-clear-status steps", (
 });
 
 test("verified Codex native inspection profiles expose one closed read-only status plan", () => {
-  for (const version of ["0.146.0", "0.146.1", "0.147.0"]) {
+  for (const version of ["0.146.0", "0.146.1", "0.147.0", "0.148.0"]) {
     const capabilities = probeCodexNativeInspection(version);
     assert.equal(capabilities.status, "supported");
     assert.equal(capabilities.statusInspection, true);
@@ -921,7 +922,7 @@ test("verified Codex native inspection profiles expose one closed read-only stat
     statusInspection: false,
     reason: "the running Codex version could not be verified"
   });
-  const unsupported = probeCodexNativeInspection("0.146.2");
+  const unsupported = probeCodexNativeInspection("0.148.1");
   assert.equal(unsupported.status, "unsupported");
   assert.equal(unsupported.statusInspection, false);
   assert.throws(
@@ -932,6 +933,52 @@ test("verified Codex native inspection profiles expose one closed read-only stat
     claudeTerminalAgentAdapter.probeNativeInspection?.("2.1.226").status,
     "supported"
   );
+});
+
+test("Codex 0.148.0 native inspection parses the current status card", () => {
+  const nativeThreadId = "22222222-2222-4222-8222-222222222222";
+  const screen = [
+    "› /status",
+    "",
+    "╭─────────────────────────────────────────────────────────────────────────────╮",
+    "│  >_ OpenAI Codex (v0.148.0)                                                   │",
+    "│                                                                             │",
+    "│ Visit https://chatgpt.com/codex/settings/usage for up-to-date               │",
+    "│ information on rate limits and credits                                      │",
+    "│                                                                             │",
+    "│  Model:              gpt-5.6-sol high                                       │",
+    "│  Directory:          /repo                                                  │",
+    "│  Permissions:        Custom (workspace with network access)                 │",
+    "│  Agents.md:          /repo/AGENTS.md                                        │",
+    "│  Account:            owner@example.com (Pro)                                │",
+    "│  Collaboration mode: Default                                                │",
+    `│  Session:            ${nativeThreadId}                         │`,
+    "│  Limits:             data not available yet                                 │",
+    "╰─────────────────────────────────────────────────────────────────────────────╯",
+    "",
+    "› "
+  ].join("\n");
+
+  const observed = observeCodexNativeInspection({
+    operation: { kind: "status" },
+    screen,
+    expectedNativeThreadId: nativeThreadId,
+    expectedAgentVersion: "0.148.0"
+  });
+  assert.equal(observed.status, "observed");
+  assert.equal(observed.nativeThreadId, nativeThreadId);
+  assert.equal(observed.observedAgentVersion, "0.148.0");
+  assert.deepEqual(observed.result?.fields, [
+    { name: "Model", value: "gpt-5.6-sol high" },
+    { name: "Directory", value: "/repo" },
+    { name: "Permissions", value: "Custom (workspace with network access)" },
+    { name: "Agents.md", value: "/repo/AGENTS.md" },
+    { name: "Account", value: "[REDACTED]" },
+    { name: "Collaboration mode", value: "Default" },
+    { name: "Session", value: nativeThreadId },
+    { name: "Limits", value: "data not available yet" }
+  ]);
+  assert.doesNotMatch(observed.result?.excerpt ?? "", /owner@example\.com/u);
 });
 
 test("Codex native inspection observer requires the newest fresh exact status card", () => {
@@ -1139,7 +1186,7 @@ test("Codex native status parsing fails closed on ambiguous, malformed, and unsu
   assert.equal(
     observeCodexNativeInspection({
       operation: { kind: "status" },
-      screen: card([`│ Session: ${nativeThreadId} │`], "0.146.2")
+      screen: card([`│ Session: ${nativeThreadId} │`], "0.148.1")
     }).status,
     "mismatch"
   );

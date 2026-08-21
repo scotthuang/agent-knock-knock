@@ -400,7 +400,7 @@ function claudeNativeStatusPanel(
     "",
     `  Version:             ${version}`,
     `  Session ID:          ${nativeThreadId}`,
-    ...(version === "2.1.226"
+    ...(["2.1.226", "2.1.237"].includes(version)
       ? ["  Session kind:        interactive"]
       : []),
     "  cwd:                 /repo",
@@ -3197,7 +3197,7 @@ test("closed Codex status probe crosses a Herdr-style paste window before exactl
   });
   const result = await bridge.submitCodexStatusProbe(
     terminalControl(codexTerminalAgentAdapter),
-    "0.147.0",
+    "0.148.0",
     { runtime: { pid: 110 } }
   );
 
@@ -3283,7 +3283,7 @@ test("Codex status freshness baseline matches the returned 240-line observation 
 
   const submission = await bridge.submitCodexStatusProbe(
     terminalControl(codexTerminalAgentAdapter),
-    "0.147.0",
+    "0.148.0",
     { runtime: { pid: 110 } }
   );
   const legacyDepth = await bridge.status(
@@ -3323,7 +3323,7 @@ test("closed Codex status probe rejects a proven narrow viewport before text", a
   await assert.rejects(
     bridge.submitCodexStatusProbe(
       terminalControl(codexTerminalAgentAdapter),
-      "0.147.0",
+      "0.148.0",
       { runtime: { pid: 110 } }
     ),
     (error: unknown) => {
@@ -3357,7 +3357,7 @@ test("generic Codex native inspection shares the pre-text viewport gate", async 
     bridge.submitNativeInspection(
       "codex",
       terminalControl(codexTerminalAgentAdapter),
-      codexStatusInspectionPlan("0.147.0"),
+      codexStatusInspectionPlan("0.148.0"),
       { runtime: { pid: 110 } }
     ),
     (error: unknown) => {
@@ -3393,7 +3393,7 @@ test("Codex status sends no text when an available viewport inspector returns un
   await assert.rejects(
     bridge.submitCodexStatusProbe(
       terminalControl(codexTerminalAgentAdapter),
-      "0.147.0",
+      "0.148.0",
       { runtime: { pid: 110 } }
     ),
     (error: unknown) => {
@@ -3454,7 +3454,7 @@ test("closed Codex status probe diagnoses a truncated popup and sends no Enter",
   await assert.rejects(
     bridge.submitCodexStatusProbe(
       terminalControl(codexTerminalAgentAdapter),
-      "0.147.0",
+      "0.148.0",
       { runtime: { pid: 110 } }
     ),
     (error: unknown) => {
@@ -3509,7 +3509,7 @@ test("Codex status rechecks viewport after beforeEnter and sends no Enter after 
   await assert.rejects(
     bridge.submitCodexStatusProbe(
       terminalControl(codexTerminalAgentAdapter),
-      "0.147.0",
+      "0.148.0",
       {
         runtime: { pid: 110 },
         beforeEnter() {
@@ -3588,7 +3588,7 @@ test("Codex status catches composer drift during the final viewport proof", asyn
   await assert.rejects(
     bridge.submitCodexStatusProbe(
       terminalControl(codexTerminalAgentAdapter),
-      "0.147.0",
+      "0.148.0",
       { runtime: { pid: 110 } }
     ),
     (error: unknown) => {
@@ -3746,121 +3746,122 @@ test("native status inspection can settle against an injected monotonic clock", 
   );
 });
 
-test("Claude 2.1.226 native status uses its own stable composer and one modal dismissal", async () => {
-  const nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0";
-  const idleScreen = [
-    "────────────────────────────────────────────────",
-    "❯ ",
-    "────────────────────────────────────────────────",
-    "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents"
-  ].join("\n");
-  class ClaudeNativeStatusProvider extends RecordingTerminalProvider {
-    textInjectedAt?: number;
-    enterDispatchedAt?: number;
+test("Claude 2.1.226 and 2.1.237 use their exact stable composer and modal dismissal", async () => {
+  for (const version of ["2.1.226", "2.1.237"]) {
+    const nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0";
+    const idleScreen = [
+      "────────────────────────────────────────────────",
+      "❯ ",
+      "────────────────────────────────────────────────",
+      "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents"
+    ].join("\n");
+    class ClaudeNativeStatusProvider extends RecordingTerminalProvider {
+      textInjectedAt?: number;
+      enterDispatchedAt?: number;
 
-    override async sendText(
-      target: TerminalEndpointRef | string,
-      text: string,
-      options: { socketPath?: string } = {}
-    ): Promise<void> {
-      await super.sendText(target, text, options);
-      this.textInjectedAt = performance.now();
-      this.setScreen(target, claudeNativeComposerScreen(text));
-    }
+      override async sendText(
+        target: TerminalEndpointRef | string,
+        text: string,
+        options: { socketPath?: string } = {}
+      ): Promise<void> {
+        await super.sendText(target, text, options);
+        this.textInjectedAt = performance.now();
+        this.setScreen(target, claudeNativeComposerScreen(text));
+      }
 
-    override async sendKeys(
-      target: TerminalEndpointRef | string,
-      keys: readonly string[],
-      options: { socketPath?: string } = {}
-    ): Promise<void> {
-      await super.sendKeys(target, keys, options);
-      if (keys.includes("C-m")) {
-        this.enterDispatchedAt = performance.now();
-        this.setScreen(
-          target,
-          claudeNativeStatusPanel(nativeThreadId, "2.1.226")
-        );
-      } else if (keys.includes("Escape")) {
-        this.setScreen(target, idleScreen);
+      override async sendKeys(
+        target: TerminalEndpointRef | string,
+        keys: readonly string[],
+        options: { socketPath?: string } = {}
+      ): Promise<void> {
+        await super.sendKeys(target, keys, options);
+        if (keys.includes("C-m")) {
+          this.enterDispatchedAt = performance.now();
+          this.setScreen(
+            target,
+            claudeNativeStatusPanel(nativeThreadId, version)
+          );
+        } else if (keys.includes("Escape")) {
+          this.setScreen(target, idleScreen);
+        }
       }
     }
+
+    const adapter = createClaudeTerminalAgentAdapter();
+    const provider = new ClaudeNativeStatusProvider([PANE], {
+      [PANE.target]: idleScreen
+    });
+    let identityChecks = 0;
+    const bridge = new TerminalAgentBridge({
+      registry: createTerminalAgentAdapterRegistry([adapter]),
+      terminalProvider: provider,
+      async verifyIdentity() {
+        identityChecks += 1;
+      }
+    });
+    const plan = claudeStatusInspectionPlan(version);
+    const submission = await bridge.submitNativeInspection(
+      "claude",
+      terminalControl(adapter),
+      plan,
+      { runtime: { pid: 110 } }
+    );
+    assert.equal(submission.agent, "claude");
+    assert.equal(submission.enterCount, 1);
+    assert.equal(submission.materialization.kind, "exact_slash_popup");
+    assert.ok(submission.materialization.stableForMs >= 80);
+    assert.ok(provider.textInjectedAt !== undefined);
+    assert.ok(provider.enterDispatchedAt !== undefined);
+    assert.ok(provider.enterDispatchedAt - provider.textInjectedAt >= 79);
+
+    const request = {
+      operation: plan.operation,
+      previousScreenFingerprint: submission.preEnterScreenDigest,
+      preEnterEvidenceInventory: submission.preEnterEvidenceInventory,
+      expectedNativeThreadId: nativeThreadId,
+      expectedAgentVersion: version,
+      expectedCwd: "/repo"
+    };
+    const observed = await bridge.observeNativeInspection(
+      "claude",
+      terminalControl(adapter),
+      request,
+      { runtime: { pid: 110 } }
+    );
+    assert.equal(observed.observation.status, "observed");
+    assert.equal("screen" in observed, false);
+    const dismissal = await bridge.dismissNativeInspection(
+      "claude",
+      terminalControl(adapter),
+      plan,
+      request,
+      observed.observation.evidenceFingerprint!,
+      { runtime: { pid: 110 } }
+    );
+    assert.equal(dismissal.dismissCount, 1);
+    assert.deepEqual(dismissal.keys, ["Escape"]);
+    assert.equal(identityChecks >= 7, true);
+    assert.deepEqual(
+      provider.operations.filter((operation) => operation.kind === "keys"),
+      [
+        {
+          kind: "keys",
+          target: PANE.target,
+          keys: ["C-m"],
+          socketPath: PANE.socketPath
+        },
+        {
+          kind: "keys",
+          target: PANE.target,
+          keys: ["Escape"],
+          socketPath: PANE.socketPath
+        }
+      ]
+    );
   }
-
-  const adapter = createClaudeTerminalAgentAdapter();
-  const provider = new ClaudeNativeStatusProvider([PANE], {
-    [PANE.target]: idleScreen
-  });
-  let identityChecks = 0;
-  const bridge = new TerminalAgentBridge({
-    registry: createTerminalAgentAdapterRegistry([adapter]),
-    terminalProvider: provider,
-    async verifyIdentity() {
-      identityChecks += 1;
-    }
-  });
-  const plan = claudeStatusInspectionPlan("2.1.226");
-  const submission = await bridge.submitNativeInspection(
-    "claude",
-    terminalControl(adapter),
-    plan,
-    { runtime: { pid: 110 } }
-  );
-  assert.equal(submission.agent, "claude");
-  assert.equal(submission.enterCount, 1);
-  assert.equal(submission.materialization.kind, "exact_slash_popup");
-  assert.ok(submission.materialization.stableForMs >= 80);
-  assert.ok(provider.textInjectedAt !== undefined);
-  assert.ok(provider.enterDispatchedAt !== undefined);
-  assert.ok(provider.enterDispatchedAt - provider.textInjectedAt >= 79);
-
-  const request = {
-    operation: plan.operation,
-    previousScreenFingerprint: submission.preEnterScreenDigest,
-    preEnterEvidenceInventory: submission.preEnterEvidenceInventory,
-    expectedNativeThreadId: nativeThreadId,
-    expectedAgentVersion: "2.1.226",
-    expectedCwd: "/repo"
-  };
-  const observed = await bridge.observeNativeInspection(
-    "claude",
-    terminalControl(adapter),
-    request,
-    { runtime: { pid: 110 } }
-  );
-  assert.equal(observed.observation.status, "observed");
-  assert.equal("screen" in observed, false);
-  const dismissal = await bridge.dismissNativeInspection(
-    "claude",
-    terminalControl(adapter),
-    plan,
-    request,
-    observed.observation.evidenceFingerprint!,
-    { runtime: { pid: 110 } }
-  );
-  assert.equal(dismissal.dismissCount, 1);
-  assert.deepEqual(dismissal.keys, ["Escape"]);
-  assert.equal(identityChecks >= 7, true);
-  assert.deepEqual(
-    provider.operations.filter((operation) => operation.kind === "keys"),
-    [
-      {
-        kind: "keys",
-        target: PANE.target,
-        keys: ["C-m"],
-        socketPath: PANE.socketPath
-      },
-      {
-        kind: "keys",
-        target: PANE.target,
-        keys: ["Escape"],
-        socketPath: PANE.socketPath
-      }
-    ]
-  );
 });
 
-test("Claude 2.1.226 native status accepts its exact 80-column truncated popup", async () => {
-  const adapter = createClaudeTerminalAgentAdapter();
+test("current Claude native status profiles accept their exact 80-column popup", async () => {
   class NarrowClaudeProvider extends RecordingTerminalProvider {
     override async sendText(
       target: TerminalEndpointRef | string,
@@ -3871,23 +3872,26 @@ test("Claude 2.1.226 native status accepts its exact 80-column truncated popup",
       this.setScreen(target, claudeNarrowNativeComposerScreen(text));
     }
   }
-  const provider = new NarrowClaudeProvider([PANE]);
-  const bridge = new TerminalAgentBridge({
-    registry: createTerminalAgentAdapterRegistry([adapter]),
-    terminalProvider: provider,
-    async verifyIdentity() {}
-  });
-  const result = await bridge.submitNativeInspection(
-    "claude",
-    terminalControl(adapter),
-    claudeStatusInspectionPlan("2.1.226"),
-    { runtime: { pid: 110 } }
-  );
-  assert.equal(result.materialization.kind, "exact_slash_popup");
-  assert.equal(result.enterCount, 1);
+  for (const version of ["2.1.226", "2.1.237"]) {
+    const adapter = createClaudeTerminalAgentAdapter();
+    const provider = new NarrowClaudeProvider([PANE]);
+    const bridge = new TerminalAgentBridge({
+      registry: createTerminalAgentAdapterRegistry([adapter]),
+      terminalProvider: provider,
+      async verifyIdentity() {}
+    });
+    const result = await bridge.submitNativeInspection(
+      "claude",
+      terminalControl(adapter),
+      claudeStatusInspectionPlan(version),
+      { runtime: { pid: 110 } }
+    );
+    assert.equal(result.materialization.kind, "exact_slash_popup");
+    assert.equal(result.enterCount, 1);
+  }
 });
 
-test("Claude 2.1.226 native status rejects a non-prefix truncated popup", async () => {
+test("Claude 2.1.237 native status rejects a non-prefix truncated popup", async () => {
   const adapter = createClaudeTerminalAgentAdapter();
   class DriftedNarrowClaudeProvider extends RecordingTerminalProvider {
     private capturesAfterInjection = 0;
@@ -3925,7 +3929,7 @@ test("Claude 2.1.226 native status rejects a non-prefix truncated popup", async 
     bridge.submitNativeInspection(
       "claude",
       terminalControl(adapter),
-      claudeStatusInspectionPlan("2.1.226"),
+      claudeStatusInspectionPlan("2.1.237"),
       { runtime: { pid: 110 } }
     ),
     (error: unknown) => {
@@ -4242,7 +4246,7 @@ test("native status inspection accepts an exact current slash popup only at a pr
   );
 });
 
-test("Codex 0.147.0 native status requires its exact ordered two-row slash popup", async () => {
+test("Codex 0.147.0 and 0.148.0 require their exact ordered two-row slash popup", async () => {
   class CurrentPopupProvider extends RecordingTerminalProvider {
     override async sendText(
       target: TerminalEndpointRef | string,
@@ -4269,28 +4273,30 @@ test("Codex 0.147.0 native status requires its exact ordered two-row slash popup
         ...codexTerminalAgentAdapter.inspectScreen(options),
         activity: {
           state: "idle" as const,
-          reason: "verified 0.147.0 slash popup is current and idle"
+          reason: "verified version-scoped slash popup is current and idle"
         }
       };
     }
   };
-  const provider = new CurrentPopupProvider([PANE]);
-  const bridge = new TerminalAgentBridge({
-    registry: createTerminalAgentAdapterRegistry([idlePopupAdapter]),
-    terminalProvider: provider,
-    async verifyIdentity() {}
-  });
-  const result = await bridge.submitNativeInspection(
-    "codex",
-    terminalControl(codexTerminalAgentAdapter),
-    codexStatusInspectionPlan("0.147.0"),
-    { runtime: { pid: 110 } }
-  );
-  assert.equal(result.materialization.kind, "exact_slash_popup");
-  assert.equal(result.enterCount, 1);
+  for (const version of ["0.147.0", "0.148.0"]) {
+    const provider = new CurrentPopupProvider([PANE]);
+    const bridge = new TerminalAgentBridge({
+      registry: createTerminalAgentAdapterRegistry([idlePopupAdapter]),
+      terminalProvider: provider,
+      async verifyIdentity() {}
+    });
+    const result = await bridge.submitNativeInspection(
+      "codex",
+      terminalControl(codexTerminalAgentAdapter),
+      codexStatusInspectionPlan(version),
+      { runtime: { pid: 110 } }
+    );
+    assert.equal(result.materialization.kind, "exact_slash_popup");
+    assert.equal(result.enterCount, 1);
+  }
 });
 
-test("Codex 0.147.0 native status refuses an incomplete two-row popup", async () => {
+test("Codex 0.148.0 native status refuses an incomplete two-row popup", async () => {
   class IncompleteCurrentPopupProvider extends RecordingTerminalProvider {
     private capturesAfterInjection = 0;
 
@@ -4340,7 +4346,7 @@ test("Codex 0.147.0 native status refuses an incomplete two-row popup", async ()
     bridge.submitNativeInspection(
       "codex",
       terminalControl(codexTerminalAgentAdapter),
-      codexStatusInspectionPlan("0.147.0"),
+      codexStatusInspectionPlan("0.148.0"),
       { runtime: { pid: 110 } }
     ),
     (error: unknown) => {

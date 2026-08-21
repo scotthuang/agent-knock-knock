@@ -169,7 +169,7 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
   assert.equal(
     createHash("sha256").update(schemaBytes).digest("hex"),
-    "aadc101f10f9779456e2d309a4fca553d96b1978387abf7f0c79a0c960514cfc"
+    "bba56c0aaf95296929c1a1ddd452be187945a2eb84e8793201c312f26d271702"
   );
   assert.deepEqual(sorted(metadataTools), sorted(contractedTools));
   assert.equal(contractedTools.length, 14);
@@ -2951,6 +2951,19 @@ test("/akk doctor leaves the Gateway event loop free for its health check", asyn
   const server = http.createServer((_request, response) => {
     response.end(JSON.stringify({
       ok: true,
+      checks: [{
+        command: "codex",
+        available: true,
+        version: "0.148.0",
+        native_profile_supported: true,
+        native_profile: "codex-tui-0.148.0"
+      }, {
+        command: "claude",
+        available: true,
+        version: "2.1.237",
+        native_profile_supported: true,
+        native_profile: "claude-code-2.1.237-native-status"
+      }],
       capabilities: {
         tmux: { checked: true, status: "ready" }
       },
@@ -3013,6 +3026,14 @@ request.on("error", () => process.exit(4));
         sessionKey: "agent:main:main"
       });
       assert.match(result?.text ?? "", /AKK doctor: ready/u);
+      assert.match(
+        result?.text ?? "",
+        /Codex: 0\.148\.0 \(native profile codex-tui-0\.148\.0\)/u
+      );
+      assert.match(
+        result?.text ?? "",
+        /Claude Code: 2\.1\.237 \(native profile claude-code-2\.1\.237-native-status\)/u
+      );
       assert.notEqual(result?.isError, true);
     } finally {
       if (previousUrl === undefined) {

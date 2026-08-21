@@ -61,8 +61,8 @@ test("doctor probes both terminal transports and their supported coding agents",
     openclaw: writeFakeExecutable(tempDir, "openclaw", `process.stdout.write("2026.7.1-2");`),
     tmux: writeFakeExecutable(tempDir, "tmux", `process.stdout.write("tmux 3.5a");`),
     herdr: writeFakeExecutable(tempDir, "herdr", `process.stdout.write("herdr 0.8.0");`),
-    codex: writeFakeExecutable(tempDir, "codex", `process.stdout.write("0.107.0");`),
-    claude: writeFakeExecutable(tempDir, "claude", `process.stdout.write("2.1.218");`)
+    codex: writeFakeExecutable(tempDir, "codex", `process.stdout.write("0.148.0");`),
+    claude: writeFakeExecutable(tempDir, "claude", `process.stdout.write("2.1.237");`)
   };
 
   try {
@@ -72,6 +72,19 @@ test("doctor probes both terminal transports and their supported coding agents",
       ["openclaw", "tmux", "herdr", "codex", "claude"]
     );
     assert.equal(probes.every((probe) => probe.status === "ok"), true);
+    assert.equal(
+      probes.find((probe) => probe.command === "codex")?.native_profile,
+      "codex-tui-0.148.0"
+    );
+    assert.equal(
+      probes.find((probe) => probe.command === "claude")?.native_profile,
+      "claude-code-2.1.237-native-status"
+    );
+    assert.equal(
+      probes.filter((probe) => ["codex", "claude"].includes(probe.command))
+        .every((probe) => probe.native_profile_supported === true),
+      true
+    );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

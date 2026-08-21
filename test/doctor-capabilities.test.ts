@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  doctorCodingAgentNativeProfile,
   evaluateDoctorCapabilities,
   runDoctorCapabilityProbes
 } from "../src/doctor-capabilities.js";
@@ -27,6 +28,33 @@ test("doctor accepts a tmux installation with either supported coding agent", ()
   assert.deepEqual(result.available_transports, ["tmux"]);
   assert.equal(result.mode, "tmux");
   assert.equal(result.readiness, "ready");
+});
+
+test("doctor recognizes exact native profiles without gating ordinary readiness", () => {
+  assert.equal(
+    doctorCodingAgentNativeProfile("codex", "0.148.0"),
+    "codex-tui-0.148.0"
+  );
+  assert.equal(
+    doctorCodingAgentNativeProfile("claude", "2.1.237"),
+    "claude-code-2.1.237-native-status"
+  );
+  assert.equal(doctorCodingAgentNativeProfile("codex", "0.148.1"), undefined);
+  assert.equal(doctorCodingAgentNativeProfile("claude", "2.1.238"), undefined);
+
+  const result = evaluateDoctorCapabilities([
+    { command: "node", available: true, version_supported: true },
+    { command: "openclaw", available: true, status: "ok" },
+    { command: "tmux", available: true, status: "ok" },
+    {
+      command: "codex",
+      available: true,
+      status: "ok",
+      native_profile_supported: false
+    }
+  ]);
+  assert.equal(result.readiness, "ready");
+  assert.deepEqual(result.tmux.agents, ["codex"]);
 });
 
 test("doctor accepts exact Herdr 0.8.0 as the only terminal transport", () => {

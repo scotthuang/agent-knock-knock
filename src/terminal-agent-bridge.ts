@@ -35,7 +35,7 @@ import {
   type TerminalProviderCapability
 } from "./terminal-control-ref.js";
 
-// Verified Codex profiles through 0.147.0 keep Enter in paste/newline mode for
+// Verified Codex profiles through 0.148.0 keep Enter in paste/newline mode for
 // 120ms after burst input. Cross that boundary rather than landing on it, and
 // also require observable composer stability instead of treating this delay
 // alone as acceptance.
@@ -62,6 +62,10 @@ const CODEX_NATIVE_STATUS_POPUP_BY_PROFILE: Readonly<
   "codex-tui-0.147.0": [
     "  /status      show current session configuration and token usage",
     "  /statusline  configure which items appear in the status line"
+  ],
+  "codex-tui-0.148.0": [
+    "  /status      show current session configuration and token usage",
+    "  /statusline  configure which items appear in the status line"
   ]
 };
 // Codex's verified `/status` profiles are exercised against its canonical
@@ -74,7 +78,8 @@ const CODEX_NATIVE_STATUS_MIN_VIEWPORT_BY_PROFILE: Readonly<
 > = {
   "codex-tui-0.146.0": 80,
   "codex-tui-0.146.1": 80,
-  "codex-tui-0.147.0": 80
+  "codex-tui-0.147.0": 80,
+  "codex-tui-0.148.0": 80
 };
 const CLAUDE_NATIVE_STATUS_POPUP_BY_PROFILE: Readonly<
   Record<string, readonly string[]>
@@ -90,7 +95,29 @@ const CLAUDE_NATIVE_STATUS_POPUP_BY_PROFILE: Readonly<
     "/statusline Set up Claude Code's status line UI",
     "/ide Manage IDE integrations and show status",
     "/usage Show session cost, plan usage, and activity stats"
+  ],
+  "claude-code-2.1.237-native-status": [
+    "/status Show Claude Code status including version, model, account, API connectivity, and tool statuses",
+    "/statusline Set up Claude Code's status line UI",
+    "/ide Manage IDE integrations and show status",
+    "/usage Show session cost, plan usage, and activity stats"
   ]
+};
+const CLAUDE_NATIVE_STATUS_SETTLE_BY_PROFILE: Readonly<
+  Record<string, { minimumStableMs: number; maximumSettleMs: number }>
+> = {
+  "claude-code-2.1.218-native-status": {
+    minimumStableMs: 80,
+    maximumSettleMs: 2_000
+  },
+  "claude-code-2.1.226-native-status": {
+    minimumStableMs: 80,
+    maximumSettleMs: 5_000
+  },
+  "claude-code-2.1.237-native-status": {
+    minimumStableMs: 80,
+    maximumSettleMs: 5_000
+  }
 };
 const CODEX_LARGE_PASTE_CHAR_THRESHOLD = 1_000;
 
@@ -2539,11 +2566,7 @@ function assertClosedStatusInspectionPlan(
     CLAUDE_NATIVE_STATUS_POPUP_BY_PROFILE[plan.behaviorProfile] !== undefined;
   const expectedSettle = codexProfile
     ? { minimumStableMs: CODEX_PASTE_ENTER_SETTLE_MS, maximumSettleMs: 2_000 }
-    : plan.behaviorProfile === "claude-code-2.1.218-native-status"
-      ? { minimumStableMs: 80, maximumSettleMs: 2_000 }
-      : plan.behaviorProfile === "claude-code-2.1.226-native-status"
-        ? { minimumStableMs: 80, maximumSettleMs: 5_000 }
-        : undefined;
+    : CLAUDE_NATIVE_STATUS_SETTLE_BY_PROFILE[plan.behaviorProfile];
   const exactPresentation = codexProfile
     ? plan.expectedResult.presentation === "inline" &&
       plan.expectedResult.dismissal === undefined &&

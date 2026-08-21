@@ -1,4 +1,6 @@
 import { spawnSync } from "node:child_process";
+import { claudeNativeInspectionBehaviorProfile } from "./claude-lifecycle-compatibility.js";
+import { codexLifecycleBehaviorProfile } from "./codex-lifecycle-compatibility.js";
 
 export type DoctorMode = "tmux";
 
@@ -23,6 +25,8 @@ export interface DoctorCommandCheck {
   command: string;
   available: boolean;
   version_supported?: boolean;
+  native_profile_supported?: boolean;
+  native_profile?: string;
   status?: DoctorProbeStatus;
 }
 
@@ -106,6 +110,21 @@ const DEFAULT_PROBE_EXECUTABLES: Readonly<Record<DoctorProbeCommand, string>> = 
 export const DOCTOR_PROBE_COMMANDS = Object.freeze(
   Object.keys(PROBE_ARGUMENTS) as DoctorProbeCommand[]
 );
+
+/**
+ * Return the exact native lifecycle/status profile verified for a coding-agent
+ * version. This diagnostic never controls general doctor readiness: unknown
+ * versions may still support ordinary terminal work while native lifecycle and
+ * inspection remain fail closed.
+ */
+export function doctorCodingAgentNativeProfile(
+  command: "codex" | "claude",
+  version: string | undefined
+): string | undefined {
+  return command === "codex"
+    ? codexLifecycleBehaviorProfile(version)
+    : claudeNativeInspectionBehaviorProfile(version);
+}
 
 /**
  * Run a bounded, non-interactive version probe for one doctor dependency.
@@ -310,12 +329,22 @@ function buildProbeResult({
   exitCode?: number | null;
   signal?: NodeJS.Signals | null;
 }): DoctorCommandProbe {
+  const nativeProfile =
+    (command === "codex" || command === "claude") && status === "ok"
+      ? doctorCodingAgentNativeProfile(command, version)
+      : undefined;
   return {
     command,
     executable,
     args,
     status,
     available: status === "ok",
+    ...(command === "codex" || command === "claude"
+      ? {
+          native_profile_supported: nativeProfile !== undefined,
+          ...(nativeProfile ? { native_profile: nativeProfile } : {})
+        }
+      : {}),
     ...(command === "herdr"
       ? {
           version_supported:
