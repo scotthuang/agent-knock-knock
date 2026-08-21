@@ -40,7 +40,11 @@ import {
 } from "../src/managed-session.js";
 import type { CodexOpenRootRolloutInventory } from
   "../src/agent-session-provider.js";
-import type { TerminalControlRef } from "../src/terminal-control-ref.js";
+import {
+  createTerminalEndpointRef,
+  tmuxTerminalRouteKey,
+  type TerminalControlRef
+} from "../src/terminal-control-ref.js";
 import {
   createConversation,
   executorForConversation,
@@ -705,4 +709,67 @@ test("authority token hashes preserve exact legacy JSON field order", () => {
     ledger_message_id: handoffFacts.ledgerMessageId,
     ledger_status: handoffFacts.ledgerStatus
   }));
+});
+
+test("a fresh terminal route invalidates an earlier canonical deferred send token", () => {
+  const endpointKey = "socket:/private/tmp/tmux-501/default";
+  const routeControl = (target: string): TerminalControlRef => {
+    const [sessionName = target, route = "0.0"] = target.split(":", 2);
+    const [windowText = "0", paneText = "0"] = route.split(".", 2);
+    const terminalControl: TerminalControlRef = {
+      ...control,
+      target,
+      socketPath: "/private/tmp/tmux-501/default",
+      session: sessionName,
+      window: Number(windowText),
+      pane: Number(paneText)
+    };
+    createTerminalEndpointRef({
+      identity: {
+        providerKind: "tmux",
+        endpointKey,
+        resourceKey: "pane-id:%3"
+      },
+      route: {
+        routeKey: tmuxTerminalRouteKey(
+          endpointKey,
+          target,
+          terminalControl.socketPath
+        ),
+        label: target,
+        currentCommand: terminalControl.currentCommand,
+        currentPath: terminalControl.currentPath
+      },
+      processAnchorPid: terminalControl.panePid,
+      capabilities: terminalControl.capabilities,
+      providerRef: terminalControl
+    });
+    return terminalControl;
+  };
+  const listed = routeControl("work:0.1");
+  const renumbered = routeControl("work:0.0");
+  const movedAgain = routeControl("work:2.0");
+  assert.equal(terminalControlsShareIncarnation(listed, renumbered), true);
+  assert.equal(terminalControlsShareIncarnation(renumbered, movedAgain), true);
+
+  const source = session();
+  const dispatchSnapshot = {
+    status: "resolved" as const,
+    fingerprint: "b".repeat(64)
+  };
+  const token = (terminalControl: TerminalControlRef) =>
+    deferredCodexForegroundBindingToken({
+      terminalId:
+        `terminal:v2:tmux:codex:${terminalControl.target}:4100`,
+      terminalControl,
+      pid: 4_100,
+      workspace: "/repo",
+      processUuid: "codex-pid:4100:birth:12345",
+      processBirth: "12345",
+      sourceSession: source,
+      dispatchSnapshot
+    });
+
+  assert.notEqual(token(listed), token(renumbered));
+  assert.notEqual(token(renumbered), token(movedAgain));
 });

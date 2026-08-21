@@ -893,7 +893,7 @@ function deferredCodexForegroundDispatchSnapshotForLedger(
     Number(currentAnchor) < 1 ||
     ledgerAnchor !== currentAnchor ||
     !ports.ledger.matchesControl(ledger, terminalControl, {
-      requireCurrentRoute: true,
+      requireCurrentRoute: false,
       requireProcessAnchor: true
     })
   ) {

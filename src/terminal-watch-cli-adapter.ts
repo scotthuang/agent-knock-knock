@@ -790,7 +790,20 @@ function requiredString(value: unknown, label: string): string {
 function requiredSha256(value: unknown, label: string): string {
   const result = requiredString(value, label);
   if (!/^[a-f0-9]{64}$/u.test(result)) {
-    throw new Error(`${label} must be an exact SHA-256 token`);
+    const characters = Array.from(result);
+    const invalidCharacterCount = characters.filter(
+      (character) => !/^[a-f0-9]$/u.test(character)
+    ).length;
+    throw new Error(
+      `${label} is invalid: received ${characters.length} characters; ` +
+      "invalid-character count outside lowercase ASCII hexadecimal " +
+      `[a-f0-9]: ${invalidCharacterCount}. It must be exactly 64 lowercase ` +
+      "ASCII " +
+      "hexadecimal characters. Do not retry this Watch command with the " +
+      "same arguments. Refresh AKK list and copy the current terminal's " +
+      "entire available_actions.watch.arguments object verbatim; do not " +
+      "retype, shorten, summarize, or use ... or …."
+    );
   }
   return result;
 }

@@ -117,9 +117,11 @@ export const watchParameters = {
     },
     expected_binding_token: {
       type: "string",
-      minLength: 1,
+      minLength: 64,
+      maxLength: 64,
+      pattern: "^[a-f0-9]{64}$",
       description:
-        "Fresh compare-and-swap token prefilled by this terminal's current watch action. Never guess, construct, or reuse it after terminal state changes."
+        "Fresh 64-character lowercase hexadecimal compare-and-swap token prefilled by this terminal's current watch action. Forward that action's entire arguments object verbatim. Never retype, shorten, summarize, construct, or replace any characters with ... or …; if the complete arguments are unavailable, refresh agent_knock_knock_list instead of calling Watch."
     },
     hardTimeoutMinutes: {
       type: "number",

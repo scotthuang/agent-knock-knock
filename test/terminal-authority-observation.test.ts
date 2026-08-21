@@ -8,12 +8,106 @@ import {
   decideTerminalDispatchOwnership,
   decideTerminalSendAuthority
 } from "../src/terminal-dispatch-policy.js";
+import {
+  deferredCodexForegroundDispatchSnapshot,
+  type DeferredForegroundAuthorityAdapterPorts
+} from "../src/deferred-foreground-authority-cli-adapter.js";
 import type { ManagedSessionState } from "../src/managed-session.js";
 import { assertSafeTerminalSend } from "../src/terminal-authority-policy.js";
 import type { TerminalBridgeStatus } from "../src/terminal-agent-bridge.js";
+import {
+  createTerminalEndpointRef,
+  terminalControlEvidence,
+  terminalControlEvidenceMatches,
+  tmuxTerminalRouteKey,
+  type TerminalControlRef
+} from "../src/terminal-control-ref.js";
 
 const THREAD_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaa0101";
 const THREAD_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbb0102";
+const TMUX_SOCKET = "/private/tmp/tmux-501/default";
+
+function canonicalTmuxControl({
+  target,
+  paneId = "%3",
+  panePid = 4_584
+}: {
+  target: string;
+  paneId?: string;
+  panePid?: number;
+}): TerminalControlRef {
+  const [session = target, route = "0.0"] = target.split(":", 2);
+  const [windowText = "0", paneText = "0"] = route.split(".", 2);
+  const control: TerminalControlRef = {
+    kind: "tmux",
+    target,
+    socketPath: TMUX_SOCKET,
+    session,
+    window: Number(windowText),
+    pane: Number(paneText),
+    panePid,
+    currentCommand: "codex",
+    currentPath: "/repo",
+    capabilities: ["screen_status", "send_keys"]
+  };
+  const endpointKey = `socket:${TMUX_SOCKET}`;
+  createTerminalEndpointRef({
+    identity: {
+      providerKind: "tmux",
+      endpointKey,
+      resourceKey: `pane-id:${paneId}`
+    },
+    route: {
+      routeKey: tmuxTerminalRouteKey(endpointKey, target, TMUX_SOCKET),
+      label: target,
+      currentCommand: control.currentCommand,
+      currentPath: control.currentPath
+    },
+    processAnchorPid: panePid,
+    capabilities: control.capabilities,
+    providerRef: control
+  });
+  return control;
+}
+
+function deferredAuthorityPorts(
+  ledger: Record<string, any> | undefined
+): DeferredForegroundAuthorityAdapterPorts {
+  return {
+    turn: {
+      terminalControl: () => undefined,
+      storeDir: () => undefined,
+      turnsForSession: () => [],
+      needsAttention: () => false,
+      readEvents: () => []
+    },
+    ledger: {
+      load: () => ledger,
+      matchesControl: (candidate, control, options) =>
+        terminalControlEvidenceMatches(
+          candidate?.terminal_endpoint ?? candidate?.terminal_control,
+          control,
+          options
+        ),
+      processAnchor: (candidate) => {
+        const evidence = candidate.terminal_endpoint ??
+          candidate.terminal_control;
+        const anchor = Number(
+          evidence?.process_anchor_pid ??
+          evidence?.pane_pid ??
+          evidence?.panePid
+        );
+        return Number.isSafeInteger(anchor) && anchor > 0
+          ? anchor
+          : undefined;
+      }
+    },
+    transition: {
+      hasUnresolved: () => false,
+      hasAny: () => false
+    }
+  };
+}
 
 function session(
   id: string,
@@ -149,6 +243,105 @@ test("dispatch ownership stages ledger and owner observations lazily", () => {
     assert.equal("basis" in fixture.decision
       ? fixture.decision.basis
       : undefined, fixture.basis, fixture.name);
+  }
+});
+
+test("resolved canonical dispatch authority survives a route-only tmux renumber", () => {
+  const before = canonicalTmuxControl({ target: "workspace:0.1" });
+  const after = canonicalTmuxControl({ target: "workspace:0.0" });
+  const movedAgain = canonicalTmuxControl({ target: "workspace:2.0" });
+  const ledger = {
+    status: "resolved",
+    resolved_at: "2026-08-21T02:00:00.000Z",
+    terminal_endpoint: terminalControlEvidence(before),
+    terminal_control: {
+      kind: before.kind,
+      target: before.target,
+      socket_path: before.socketPath,
+      pane_pid: before.panePid,
+      current_path: before.currentPath
+    }
+  };
+
+  const snapshot = deferredCodexForegroundDispatchSnapshot(
+    deferredAuthorityPorts(ledger),
+    after
+  );
+  const snapshotAfterAnotherMove = deferredCodexForegroundDispatchSnapshot(
+    deferredAuthorityPorts(ledger),
+    movedAgain
+  );
+
+  assert.equal(snapshot.status, "resolved");
+  assert.match(snapshot.fingerprint, /^[0-9a-f]{64}$/u);
+  assert.deepEqual(snapshotAfterAnotherMove, snapshot);
+  assert.equal(
+    (ledger.terminal_endpoint as Record<string, any>).target,
+    "workspace:0.1",
+    "read-only authority must not rewrite the historical dispatch route"
+  );
+});
+
+test("resolved dispatch route tolerance remains closed to noncanonical and changed authority", () => {
+  const before = canonicalTmuxControl({ target: "workspace:0.1" });
+  const after = canonicalTmuxControl({ target: "workspace:0.0" });
+  const resolved = {
+    status: "resolved",
+    resolved_at: "2026-08-21T02:00:00.000Z",
+    terminal_endpoint: terminalControlEvidence(before)
+  };
+  const fixtures = [
+    {
+      name: "active ledger",
+      ledger: { ...resolved, status: "agent_accepted" },
+      control: after
+    },
+    {
+      name: "uncertain ledger",
+      ledger: { ...resolved, status: "uncertain" },
+      control: after
+    },
+    {
+      name: "different stable pane",
+      ledger: resolved,
+      control: canonicalTmuxControl({
+        target: "workspace:0.0",
+        paneId: "%4"
+      })
+    },
+    {
+      name: "different process anchor",
+      ledger: resolved,
+      control: canonicalTmuxControl({
+        target: "workspace:0.0",
+        panePid: before.panePid + 1
+      })
+    },
+    {
+      name: "legacy route-only evidence",
+      ledger: {
+        status: "resolved",
+        resolved_at: "2026-08-21T02:00:00.000Z",
+        terminal_control: {
+          kind: "tmux",
+          target: before.target,
+          socket_path: before.socketPath,
+          pane_pid: before.panePid
+        }
+      },
+      control: after
+    }
+  ];
+
+  for (const fixture of fixtures) {
+    assert.throws(
+      () => deferredCodexForegroundDispatchSnapshot(
+        deferredAuthorityPorts(fixture.ledger),
+        fixture.control
+      ),
+      /does not have exact resolved dispatch authority/u,
+      fixture.name
+    );
   }
 });
 

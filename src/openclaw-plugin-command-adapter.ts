@@ -110,7 +110,7 @@ export function registerOpenClawCommands(
   registerCliTool(api, {
     name: "agent_knock_knock_watch",
     description:
-      "Start one durable Terminal Watch for the exact supported human-started task already active in a listed Codex or Claude Code terminal. Call only from that terminal row's current watch action and preserve its exact terminal_id and expected_binding_token. This observes external work, creates no AKK Session or Turn, sends no terminal input, and never adopts or blocks the human's terminal task.",
+      "Start one durable Terminal Watch for the exact supported human-started task already active in a listed Codex or Claude Code terminal. Call only from that terminal row's current watch action and forward its entire arguments object verbatim; never retype, shorten, summarize, or replace any characters with ... or …. If the complete action is unavailable, refresh agent_knock_knock_list instead of calling Watch. This observes external work, creates no AKK Session or Turn, sends no terminal input, and never adopts or blocks the human's terminal task.",
     parameters: watchParameters,
     normalizeTurnIdentity: false,
     buildArgs: (params, toolContext) => {
@@ -123,10 +123,7 @@ export function registerOpenClawCommands(
         "--terminal",
         requiredString(params.terminal_id, "terminal_id"),
         "--expected-binding-token",
-        requiredString(
-          params.expected_binding_token,
-          "expected_binding_token"
-        )
+        requiredWatchBindingToken(params.expected_binding_token)
       ];
       pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
       pushOptional(
@@ -2040,6 +2037,30 @@ function requiredString(value, name) {
     throw new Error(`${name} is required`);
   }
   return value;
+}
+
+function requiredWatchBindingToken(value) {
+  if (typeof value !== "string") {
+    throw new Error("expected_binding_token is required");
+  }
+  if (/^[a-f0-9]{64}$/u.test(value)) {
+    return value;
+  }
+  const characters = Array.from(value);
+  const invalidCharacterCount = characters.filter(
+    (character) => !/^[a-f0-9]$/u.test(character)
+  ).length;
+  throw new Error(
+    "expected_binding_token is invalid: received " +
+    `${characters.length} characters; invalid-character count outside ` +
+    `lowercase ASCII hexadecimal [a-f0-9]: ${invalidCharacterCount}. ` +
+    "It must be exactly " +
+    "64 lowercase ASCII hexadecimal characters. Do not retry " +
+    "agent_knock_knock_watch with the same arguments. Refresh " +
+    "agent_knock_knock_list and forward the current terminal's entire " +
+    "available_actions.watch.arguments object verbatim; do not retype, " +
+    "shorten, summarize, or use ... or …."
+  );
 }
 
 function parseJson(text) {

@@ -228,6 +228,51 @@ test("Terminal Watch CLI rejects stale binding authority before persistence", as
   assert.equal(fs.existsSync(path.join(fixture.storeDir, "terminal-watches")), false);
 });
 
+test("Terminal Watch CLI rejects abbreviated binding tokens before scanning without echoing them", async (t) => {
+  const fixture = createFixture(t);
+  const abbreviatedToken = "a".repeat(6) + "…" + "b".repeat(6);
+  let scans = 0;
+  const facade = createTerminalWatchCliAdapter({
+    acquireFileLock: () => () => {},
+    acquireTerminalLock: () => () => {},
+    buildTerminalListGroup: async () => {
+      scans += 1;
+      return { terminalControlled: [fixture.terminal] };
+    },
+    loadClaudeAgentRows: () => [],
+    now: fixture.now,
+    randomUUID: () => "00000000-0000-4000-8000-000000000212",
+    storeDirFromOptions: () => fixture.storeDir,
+    terminalDispatchOwnership: () => ({ state: "none" }),
+    terminalIncarnationBlockingTurns: () => [],
+    printJson: () => {}
+  });
+
+  await assert.rejects(
+    facade.runWatch({
+      terminal: fixture.terminal.id as string,
+      expectedBindingToken: abbreviatedToken,
+      openclawSession: "agent:main:main"
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /received 13 characters/u);
+      assert.match(error.message, /invalid-character count.*: 1/u);
+      assert.match(error.message, /exactly 64 lowercase ASCII hexadecimal/u);
+      assert.match(error.message, /Do not retry this Watch command with the same arguments/u);
+      assert.match(error.message, /Refresh AKK list/u);
+      assert.match(error.message, /entire available_actions\.watch\.arguments object verbatim/u);
+      assert.equal(error.message.includes(abbreviatedToken), false);
+      return true;
+    }
+  );
+  assert.equal(scans, 0);
+  assert.equal(
+    fs.existsSync(path.join(fixture.storeDir, "terminal-watches")),
+    false
+  );
+});
+
 test("Terminal Watch rechecks managed Turn authority while holding the terminal lock", async (t) => {
   const fixture = createFixture(t);
   const events: string[] = [];

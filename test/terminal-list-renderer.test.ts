@@ -155,7 +155,11 @@ test("raw active terminals expose only an exact prefilled watch action", () => {
     use:
       "Monitor this human-started external task and notify OpenClaw when it " +
       "needs attention or finishes, instead of polling. Do not use Terminal " +
-      "Watch for an AKK-managed Turn."
+      "Watch for an AKK-managed Turn. Forward this action's entire arguments " +
+      "object verbatim to agent_knock_knock_watch; do not retype, shorten, " +
+      "summarize, or change any character, and never replace content with ... " +
+      "or …. If the complete arguments are unavailable, refresh AKK list and " +
+      "do not call Watch."
   });
   assert.equal(exactTerminalWatchAction({
     available_actions: working

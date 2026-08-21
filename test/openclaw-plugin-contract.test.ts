@@ -171,7 +171,7 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
   assert.equal(
     createHash("sha256").update(schemaBytes).digest("hex"),
-    "a41317f70c10e325c6b1f5ba366eda63329ceccf860a11ca07e4f9cdb606307d"
+    "b2b22e475342c8a4c07f08c7541b7b76d3840755039813e26696808c9454bd8e"
   );
   assert.deepEqual(sorted(metadataTools), sorted(contractedTools));
   assert.equal(contractedTools.length, 16);
@@ -1613,6 +1613,7 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
   const fakeCli = path.join(tempDir, "controls.cjs");
   const callsPath = path.join(tempDir, "calls.ndjson");
   const tools = new Map<string, ToolDefinition>();
+  const watchBindingToken = "a".repeat(64);
   let command:
     | { handler?: (context: { args: string; sessionKey: string }) => Promise<any> }
     | undefined;
@@ -1684,6 +1685,19 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
       "expected_binding_token"
     ]);
     assert.equal(watchTool.parameters?.additionalProperties, false);
+    const watchBindingTokenSchema =
+      watchTool.parameters?.properties?.expected_binding_token;
+    assert.equal(watchBindingTokenSchema?.minLength, 64);
+    assert.equal(watchBindingTokenSchema?.maxLength, 64);
+    assert.equal(watchBindingTokenSchema?.pattern, "^[a-f0-9]{64}$");
+    assert.match(
+      String(watchBindingTokenSchema?.description ?? ""),
+      /entire arguments object verbatim.*\.\.\..*…/u
+    );
+    assert.match(
+      watchTool.description ?? "",
+      /entire arguments object verbatim.*refresh agent_knock_knock_list/u
+    );
     const unwatchTool = tools.get("agent_knock_knock_unwatch");
     assert.ok(unwatchTool, "agent_knock_knock_unwatch must be registered");
     assert.deepEqual(unwatchTool.parameters?.required, ["watch_id"]);
@@ -1897,6 +1911,30 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
       );
     }
 
+    const abbreviatedWatchToken = "a".repeat(6) + "…" + "b".repeat(6);
+    await assert.rejects(
+      () => watchTool.execute!("abbreviated-watch-token", {
+        terminal_id: "terminal:v2:tmux:codex:work:0.0:1234",
+        expected_binding_token: abbreviatedWatchToken
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /received 13 characters/u);
+        assert.match(error.message, /invalid-character count.*: 1/u);
+        assert.match(error.message, /exactly 64 lowercase ASCII hexadecimal/u);
+        assert.match(error.message, /Do not retry agent_knock_knock_watch with the same arguments/u);
+        assert.match(error.message, /Refresh agent_knock_knock_list/u);
+        assert.match(error.message, /entire available_actions\.watch\.arguments object verbatim/u);
+        assert.equal(error.message.includes(abbreviatedWatchToken), false);
+        return true;
+      }
+    );
+    assert.equal(
+      fs.existsSync(callsPath),
+      false,
+      "invalid Watch authority must fail before the CLI process is spawned"
+    );
+
     await tools.get("agent_knock_knock_status")?.execute?.("status", {
       turn_id: "turn-status"
     });
@@ -1905,7 +1943,7 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
     });
     await watchTool.execute?.("watch", {
       terminal_id: "terminal:v2:tmux:codex:work:0.0:1234",
-      expected_binding_token: "watch-binding-token",
+      expected_binding_token: watchBindingToken,
       hardTimeoutMinutes: 30
     });
     await unwatchTool.execute?.("unwatch", {
@@ -2010,7 +2048,7 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
       "--terminal",
       "terminal:v2:tmux:codex:work:0.0:1234",
       "--expected-binding-token",
-      "watch-binding-token",
+      watchBindingToken,
       "--hard-timeout-minutes",
       "30",
       "--openclaw-session",
