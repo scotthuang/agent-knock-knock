@@ -1,6 +1,5 @@
 import {
   pushOptional,
-  runCli,
   runCliAsync
 } from "./openclaw-plugin-command-adapter.js";
 import { resolvePluginStoreDir } from "./openclaw-plugin-helpers.js";
@@ -29,6 +28,12 @@ export function createMonitorReconciliationService(
     pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
     return args;
   };
+  const watchReconciliationArgs = (reason: string): string[] => {
+    const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+    const args = ["reconcile-watches", "--reason", reason];
+    pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
+    return args;
+  };
   const report = (result: Record<string, unknown>, reason: string): void => {
     if (
       reason === "startup_reconciliation" ||
@@ -42,6 +47,24 @@ export function createMonitorReconciliationService(
         `agent-knock-knock ${label}: ` +
         `checked=${result.checked ?? 0} launched=${result.launched ?? 0} ` +
         `already_running=${result.already_running ?? 0} skipped=${result.skipped ?? 0} ` +
+        `errors=${result.errors ?? 0}`
+      );
+    }
+  };
+  const reportWatches = (
+    result: Record<string, unknown>,
+    reason: string
+  ): void => {
+    if (
+      reason === "startup_reconciliation" ||
+      Number(result.changed ?? 0) > 0 ||
+      Number(result.callbacks_delivered ?? 0) > 0 ||
+      Number(result.errors ?? 0) > 0
+    ) {
+      api.logger.info?.(
+        `agent-knock-knock Terminal Watch ${reason}: ` +
+        `checked=${result.checked ?? 0} changed=${result.changed ?? 0} ` +
+        `callbacks_delivered=${result.callbacks_delivered ?? 0} ` +
         `errors=${result.errors ?? 0}`
       );
     }
@@ -72,6 +95,44 @@ export function createMonitorReconciliationService(
         `agent-knock-knock monitor supervision deferred after error: ${message}`
       );
     }
+    try {
+      const watches = await runCliAsync(
+        api,
+        watchReconciliationArgs("watch_supervision")
+      );
+      reportWatches(watches, "watch_supervision");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      api.logger.warn?.(
+        `agent-knock-knock Terminal Watch supervision deferred after error: ${message}`
+      );
+    }
+  };
+  const reconcileStartup = async (): Promise<void> => {
+    try {
+      const result = await runCliAsync(
+        api,
+        reconciliationArgs("startup_reconciliation")
+      );
+      report(result, "startup_reconciliation");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      api.logger.warn?.(
+        `agent-knock-knock monitor reconciliation skipped after startup error: ${message}`
+      );
+    }
+    try {
+      const watches = await runCliAsync(
+        api,
+        watchReconciliationArgs("startup_reconciliation")
+      );
+      reportWatches(watches, "startup_reconciliation");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      api.logger.warn?.(
+        `agent-knock-knock Terminal Watch reconciliation skipped after startup error: ${message}`
+      );
+    }
   };
 
   return {
@@ -81,19 +142,10 @@ export function createMonitorReconciliationService(
         return;
       }
       stopped = false;
-      try {
-        const result = runCli(
-          api,
-          reconciliationArgs("startup_reconciliation")
-        );
-        report(result, "startup_reconciliation");
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        api.logger.warn?.(
-          `agent-knock-knock monitor reconciliation skipped after startup error: ${message}`
-        );
-      }
-      schedule();
+      inFlight = reconcileStartup().finally(() => {
+        inFlight = undefined;
+        schedule();
+      });
     },
     async stop() {
       stopped = true;

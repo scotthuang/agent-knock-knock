@@ -15,16 +15,18 @@ AKK models shared work as:
 
 ```text
 tmux terminal / verified process incarnation
-└─ native Codex or Claude Code session
-   └─ AKK session (session_id)
-      ├─ Turn (turn_id)
-      └─ Turn (turn_id)
+├─ native Codex or Claude Code session
+│  └─ AKK session (session_id)
+│     ├─ Turn (turn_id)
+│     └─ Turn (turn_id)
+└─ Terminal Watch schema v1 (watch_id + exact human-task anchor)
 ```
 
 - The terminal is the physical pane and coding-agent process incarnation.
 - The native session is the continuing context owned by Codex or Claude Code.
 - The AKK `session_id` identifies the continuing context. It is an ordinary-send target only when the current listed action explicitly prefills the `session_exact` scope; a rollout-backed Codex pane instead uses the listed `terminal_follow_current` selector/token action.
 - A `turn_id` identifies exactly one accepted dispatch through its final monitor and callback state.
+- A `watch_id` identifies an observation-only aggregate for one task that the human started directly in the TUI. It is never a Session, Turn, dispatch receipt, or terminal owner.
 - A terminal binding generation identifies one verified terminal-to-native-thread attachment. Native lifecycle transitions advance it even though they create no Turn.
 
 Human-friendly selectors such as `only`, `codex`, `claude`, terminal IDs, and `@short-ref` are list/discovery inputs. Callers use only the exact current listed send action: either `session_exact` with `session_id`, or `terminal_follow_current` with its full selector and fresh token. A `turn_id` remains the target for managed controls. An unmanaged raw-terminal row may publish its own exact compatibility selector for status or recovery controls; callers must use only the prefilled action and never construct that selector.
@@ -41,6 +43,24 @@ Human-friendly selectors such as `only`, `codex`, `claude`, terminal IDs, and `@
 An ordinary send never targets a completed or historical `turn_id`. If the current Turn is `waiting_for_openclaw` because the coding agent asked a question, OpenClaw uses `respond(turn_id, answer)`; that answer remains inside the same Turn.
 
 If no eligible terminal exists, AKK stops and returns an actionable setup message. It does not launch an invisible replacement agent.
+
+## Human-Started Terminal Watch
+
+Terminal Watch is the observation-only path for a task already started by the human in the visible Codex or Claude Code TUI:
+
+1. The human starts the task directly in the TUI; AKK did not submit it.
+2. While the exact task is working or awaiting approval, obtain a fresh `/akk list` and use only that terminal row's advertised `available_actions.watch`. Preserve the complete `terminal_id` and `expected_binding_token`; never construct or reuse either value.
+3. `agent_knock_knock_watch`, or `/akk watch <exact-terminal-id>` after its own fresh action lookup, creates one durable schema-v1 `TerminalWatch` and returns its `watch_id`.
+4. Status and cancellation target only that ID: `agent_knock_knock_status({watch_id})`, `/akk status <watch-id>`, `agent_knock_knock_unwatch({watch_id})`, or `/akk unwatch <watch-id>`.
+5. Startup and periodic supervision observe and settle the same Watch, then deliver its durable notification outbox to the originating OpenClaw session.
+
+The aggregate records a revision, exact terminal endpoint and process incarnation, native thread/task identity, agent/version behavior profile, a privacy-safe provider anchor, OpenClaw route, timestamps/deadline, lifecycle status, last activity, approval fingerprint, optional settlement, and notification receipts. It lives independently from Session/Turn state. Creating, observing, querying, or cancelling it never sends terminal input; adopts, claims, reserves, or blocks a task; creates a Session or Turn; or grants callback authority to a managed Turn.
+
+Codex anchors bind the exact rollout file identity and the human task's request/turn byte boundaries. Claude anchors bind the exact transcript file identity, root prompt, and current-turn byte boundaries. Both also bind terminal, process, native thread, workspace, and exact supported behavior profile. An exact durable completion already written to the anchored task wins; while it remains pending, a replacement, truncation, successor task, changed boundary or fingerprint, process/thread/endpoint drift, unsupported profile, missing evidence, or ambiguity produces `invalidated` rather than following whatever is currently visible.
+
+An approval observation appends at most one notification per exact fingerprint and leaves the Watch active. It never sends approval keys and never enters automatic approval; a human must inspect and decide in the TUI. Completion, failure, timeout, invalidation, or explicit `unwatch` settles once and enqueues one terminal notification. Deterministic notification IDs and idempotency keys, append-only receipts, claim leases, and retry timestamps make callback recovery crash-safe: transport is at-least-once, while the idempotency key makes the logical notification effectively at-most-once.
+
+The current OpenClaw surface has 16 registered tools and emits list action-contract v17. Its Watch tools map to four internal CLI entries: `watch-terminal`, `watch-status`, `unwatch-terminal`, and `reconcile-watches`. These entries are an internal adapter boundary, not alternate raw terminal controls.
 
 ## Native Thread Transitions
 
@@ -99,14 +119,19 @@ AKK revalidates that identity before sending tasks, interrupt keys, or approval 
 
 Approval authorization is prompt-scoped. An adapter must isolate one complete bounded approval region and keep its exact unredacted bytes local; AKK fingerprints that region with the terminal/process identity, one-time decision, prompt kind, working directory, reason/detail, and request evidence. The whole terminal capture digest and redacted excerpt are diagnostic only. Output outside the prompt may continue scrolling across authorization and dispatch reservation without invalidating the reviewed approval, while any prompt-region, option/highlight, command/secret, kind, process, cwd, reason, or request-evidence change fails closed before an approval key is sent. Missing or ambiguous prompt-region evidence is never downgraded to whole-screen or parsed-display authority. Pre-v16 whole-screen fingerprints and approval tokens that embed them are stale and require fresh `list`/`status` evidence.
 
-The OpenClaw plugin supervises eligible terminal monitors independently of
-interactive commands. It reconciles every five seconds, distinguishes a
-transient Store-lock timeout from a proven binding supersession, and preserves
-the Turn's exactly-once completion claim across monitor replacement. Codex
-completion first scans the exact accepted native turn in the rollout bound to
-the Turn; it does not fall back to another same-workspace rollout after that
-exact detector reports an identity or integrity failure. Detector limitations
-are retained in the Turn event history for diagnosis.
+The OpenClaw plugin supervises eligible terminal monitors and Terminal Watches
+independently of interactive commands. At startup and in one non-overlapping
+five-second cycle, it runs managed-Turn monitor reconciliation and Terminal
+Watch reconciliation as separate coordination steps with separate error
+boundaries; a failure in either step does not starve the other. Managed monitor
+reconciliation distinguishes a transient Store-lock timeout from proven binding
+supersession and preserves the Turn's exactly-once completion claim across
+monitor replacement. Watch reconciliation restores observation and retries its
+durable idempotent callback outbox. Codex managed completion first scans the
+exact accepted native turn in the rollout bound to the Turn; it does not fall
+back to another same-workspace rollout after that exact detector reports an
+identity or integrity failure. Detector limitations are retained in the Turn
+event history for diagnosis.
 
 ## Human Handoff
 

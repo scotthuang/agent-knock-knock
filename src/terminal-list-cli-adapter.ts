@@ -337,6 +337,10 @@ export interface TerminalListStoreObservationPorts {
   loadTerminalDispatchLedgerOwner(
     ledger: TerminalDispatchLedgerDocument
   ): Conversation | undefined;
+  listTerminalWatches?(
+    storeDir: string,
+    options?: { includeAll?: boolean }
+  ): JsonObject[];
   managedSessionStoreDirForConversation(conversation: Conversation): string | undefined;
   managedTurnsForSession(storeDir: string, sessionId: string): Conversation[];
   matchesConfiguredWorkspace(configured: unknown, observed: unknown): boolean;
@@ -582,22 +586,47 @@ async function runList(options: TerminalListCliOptions) {
     statusFilter,
     mutationsAllowed: store.writable === true
   });
+  const observedTerminalWatches = terminalListRuntime().listTerminalWatches?.(
+    storeDir,
+    { includeAll }
+  ) ?? [];
+  const terminalWatches = options.managedOnly
+    ? []
+    : observedTerminalWatches
+      .filter((watch) => !agentFilter || watch.agent === agentFilter)
+      .filter((watch) => terminalListRuntime().matchesConfiguredWorkspace(
+        options.workspace,
+        watch.workspace
+      ))
+      .filter((watch) => !statusFilter || watch.status === statusFilter);
+  const activeWatchedTerminals = new Set(
+    observedTerminalWatches
+      .filter((watch) => watch.status === "active")
+      .map((watch) => stringValue(watch.terminal_id))
+      .filter((terminalId): terminalId is string => terminalId !== undefined)
+  );
+  const terminals = projection.terminals.map((terminal) =>
+    activeWatchedTerminals.has(stringValue(terminal.id) ?? "")
+      ? withoutAvailableAction(terminal, "watch")
+      : terminal
+  );
 
   printJson({
     store_dir: storeDir,
     store,
     reconciliation,
     action_contracts: listActionContracts(),
-    terminals: projection.terminals,
+    terminals,
+    terminal_watches: terminalWatches,
     unavailable_managed_turns: projection.unavailableManagedTurns,
     terminal_scan: {
       ...terminalScan.summary,
-      terminal_count: projection.terminals.length
+      terminal_count: terminals.length
     }
   });
   runtimeLog("info", "terminals_listed", {
     store_dir: storeDir,
-    terminal_count: projection.terminals.length,
+    terminal_count: terminals.length,
     unavailable_managed_turn_count: projection.unavailableManagedTurns.length,
     terminal_scan_error: terminalScan.summary.error,
     include_all: includeAll,
@@ -605,6 +634,16 @@ async function runList(options: TerminalListCliOptions) {
     status_filter: statusFilter,
     reconciliation
   });
+}
+
+function withoutAvailableAction(
+  terminal: JsonObject,
+  action: string
+): JsonObject {
+  if (!isRecord(terminal.available_actions)) return terminal;
+  const actions = { ...terminal.available_actions };
+  delete actions[action];
+  return { ...terminal, available_actions: actions };
 }
 
 async function reconcileStoreForList(storeDir, options) {
@@ -1013,6 +1052,16 @@ async function terminalControlledListEntry(
                 nativeAgentIdentity.processUuid
               )
         ) &&
+        orphanedDispatch === undefined &&
+        !terminalHasBlockingTurn,
+      watch:
+        lifecycleCapability.status === "supported" &&
+        (terminalState.activity_state === "working" ||
+          terminalState.activity_state === "awaiting_approval") &&
+        Boolean(nativeAgentIdentity?.sessionId) &&
+        (session.agent !== "codex" || Boolean(nativeAgentIdentity?.rollout)) &&
+        Boolean(nativeProcessUuid) &&
+        Boolean(nativeProcessBirth) &&
         orphanedDispatch === undefined &&
         !terminalHasBlockingTurn
     }

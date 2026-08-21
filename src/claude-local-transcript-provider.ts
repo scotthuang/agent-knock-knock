@@ -61,6 +61,57 @@ export interface CaptureClaudeTranscriptAnchorOptions {
   now?: Date;
 }
 
+/**
+ * Durable identity for one already-running root Claude task started by the
+ * human in the TUI. The prompt is represented only by its exact SHA-256 digest
+ * and native UUID; raw prompt content is never retained in this anchor.
+ */
+export interface ClaudeHumanStartedActiveTaskAnchor {
+  schema: "agent-knock-knock/claude-human-started-active-task-anchor";
+  version: 1;
+  session_id: string;
+  cwd: string;
+  pid: number;
+  agent_started_at_ms: number;
+  captured_at: string;
+  relative_path: string;
+  device: string;
+  inode: string;
+  prompt_uuid: string;
+  request_hash: string;
+  claude_version: string;
+  transcript_file_id: string;
+  turn_start_offset_bytes: number;
+  observed_end_offset_bytes: number;
+  anchor_fingerprint: string;
+}
+
+export interface CaptureClaudeHumanStartedActiveTaskOptions
+  extends CaptureClaudeTranscriptAnchorOptions {
+  maxTurnBytes?: number;
+}
+
+export interface ObserveClaudeHumanStartedActiveTaskOptions
+  extends DetectClaudeTranscriptCompletionOptions {
+  anchor: ClaudeHumanStartedActiveTaskAnchor;
+}
+
+export type ClaudeHumanStartedActiveTaskObservation =
+  | {
+      status: "pending";
+      observedEndOffsetBytes: number;
+    }
+  | {
+      status: "completed";
+      completion: TerminalCompletionEvidence & {
+        outcome: "success" | "failure";
+      };
+    }
+  | {
+      status: "invalidated";
+      reason: string;
+    };
+
 export interface DetectClaudeTranscriptCompletionOptions {
   claudeHome?: string;
   agentRows: readonly ClaudeAgentRow[];
@@ -128,6 +179,11 @@ interface TranscriptRecord {
   [key: string]: unknown;
 }
 
+interface TranscriptRecordAtOffset {
+  record: TranscriptRecord;
+  offsetBytes: number;
+}
+
 interface OpenTranscript {
   fd: number;
   stat: fs.Stats;
@@ -139,7 +195,8 @@ interface ClaudeTranscriptTurnSnapshot {
   sessionId: string;
   cwd: string;
   expectedRequestHash: string;
-  expectedPromptText: string;
+  expectedPromptText?: string;
+  expectedPromptUuid?: string;
   records: readonly TranscriptRecord[];
   transcriptFileId: string;
   observedEndOffsetBytes: number;
@@ -651,6 +708,378 @@ export function captureClaudeTranscriptAnchor(
   }
 }
 
+/** Capture the latest exact, unfinished root prompt in a live Claude process. */
+export function captureClaudeHumanStartedActiveTaskAnchor(
+  options: CaptureClaudeHumanStartedActiveTaskOptions
+): ClaudeHumanStartedActiveTaskAnchor | undefined {
+  const sessionId = nonEmptyString(options.sessionId);
+  const cwd = nonEmptyString(options.cwd);
+  const pid = positiveInteger(options.pid);
+  if (!sessionId || !cwd || pid === undefined || !CLAUDE_SESSION_ID_PATTERN.test(sessionId)) {
+    return undefined;
+  }
+  const agent = exactInteractiveAgent(options.agentRows, pid);
+  const agentStartedAtMs = positiveInteger(agent?.startedAt);
+  if (
+    !agent ||
+    agentStartedAtMs === undefined ||
+    agent.sessionId !== sessionId ||
+    normalizePath(agent.cwd) !== normalizePath(cwd) ||
+    !isActiveClaudeAgentState(agent)
+  ) {
+    return undefined;
+  }
+
+  const projectsRoot = projectsRootPath(
+    path.resolve(options.claudeHome ?? defaultClaudeHome())
+  );
+  if (!isRealDirectory(projectsRoot)) {
+    return undefined;
+  }
+  const opened = locateTranscript(projectsRoot, sessionId);
+  if (!opened) {
+    return undefined;
+  }
+  try {
+    const before = opened.stat;
+    const maxBytes = positiveClaudeByteLimit(options.maxTurnBytes);
+    if (before.size === 0) {
+      return undefined;
+    }
+    if (!fileEndsWithNewline(opened.fd, before.size)) {
+      return undefined;
+    }
+    const recordEntries = readBoundedCompleteJsonlTail(
+      opened.fd,
+      before.size,
+      maxBytes
+    );
+    const records = recordEntries.map((entry) => entry.record);
+    const after = fs.fstatSync(opened.fd);
+    if (!sameStableTranscriptFile(before, after)) {
+      return undefined;
+    }
+    const promptEntry = latestClaudeRootHumanPromptEntry(recordEntries);
+    if (!promptEntry) {
+      if (before.size > maxBytes) {
+        throw new Error("Claude active task exceeded the bounded local read limit");
+      }
+      return undefined;
+    }
+    const prompt = promptEntry.record;
+    assertSupportedRecord(prompt, sessionId, cwd);
+    const promptUuid = uuidValue(prompt.uuid);
+    const promptText = userPromptText(prompt);
+    const requestHash = exactRequestFingerprint(promptText);
+    const claudeVersion = nonEmptyString(prompt.version);
+    if (!promptUuid || !promptText || !requestHash || !claudeVersion) {
+      throw new Error("Claude active root prompt has no exact supported identity");
+    }
+    const device = String(before.dev);
+    const inode = String(before.ino);
+    const fileId = transcriptFileId(sessionId, `${device}:${inode}`);
+    const transcriptAnchor: ClaudeTranscriptAnchor = {
+      schema_version: CLAUDE_TRANSCRIPT_ANCHOR_VERSION,
+      session_id: sessionId,
+      cwd: path.resolve(cwd),
+      pid,
+      agent_started_at_ms: agentStartedAtMs,
+      captured_at: (options.now ?? new Date()).toISOString(),
+      relative_path: opened.relativePath,
+      offset_bytes: 0,
+      file_existed: true,
+      device,
+      inode
+    };
+    const snapshot: ClaudeTranscriptTurnSnapshot = {
+      anchor: transcriptAnchor,
+      sessionId,
+      cwd,
+      expectedRequestHash: requestHash,
+      expectedPromptUuid: promptUuid,
+      records,
+      transcriptFileId: fileId,
+      observedEndOffsetBytes: before.size
+    };
+    if (completionFromRecords(snapshot, {
+      requireVerifiableCompletionSignal: false
+    })) {
+      return undefined;
+    }
+    if (!pendingApprovalTurn(snapshot)) {
+      throw new Error(
+        "Claude active root prompt has no unique unfinished foreground chain"
+      );
+    }
+    const base = {
+      schema: "agent-knock-knock/claude-human-started-active-task-anchor" as const,
+      version: 1 as const,
+      session_id: sessionId,
+      cwd: path.resolve(cwd),
+      pid,
+      agent_started_at_ms: agentStartedAtMs,
+      captured_at: transcriptAnchor.captured_at,
+      relative_path: opened.relativePath,
+      device,
+      inode,
+      prompt_uuid: promptUuid,
+      request_hash: requestHash,
+      claude_version: claudeVersion,
+      transcript_file_id: fileId,
+      turn_start_offset_bytes: promptEntry.offsetBytes,
+      observed_end_offset_bytes: before.size
+    };
+    return {
+      ...base,
+      anchor_fingerprint: sha256Hex(JSON.stringify(base))
+    };
+  } finally {
+    fs.closeSync(opened.fd);
+  }
+}
+
+/** Observe only the exact root prompt named by a human-started task anchor. */
+export function observeClaudeHumanStartedActiveTask(
+  options: ObserveClaudeHumanStartedActiveTaskOptions
+): ClaudeHumanStartedActiveTaskObservation {
+  try {
+    const anchor = validateClaudeHumanStartedActiveTaskAnchor(options.anchor);
+    const projectsRoot = projectsRootPath(
+      path.resolve(options.claudeHome ?? defaultClaudeHome())
+    );
+    if (!isRealDirectory(projectsRoot)) {
+      throw new Error("Claude transcript projects directory is unavailable");
+    }
+    const opened = openAnchoredTranscript(
+      projectsRoot,
+      claudeTranscriptAnchorForHumanStartedTask(anchor)
+    );
+    if (!opened) {
+      throw new Error("the anchored Claude transcript is unavailable");
+    }
+    try {
+      const before = opened.stat;
+      if (
+        String(before.dev) !== anchor.device ||
+        String(before.ino) !== anchor.inode ||
+        before.size < anchor.observed_end_offset_bytes ||
+        before.size <= anchor.turn_start_offset_bytes
+      ) {
+        throw new Error("Claude active-task transcript identity changed after capture");
+      }
+      const bytesToRead = before.size - anchor.turn_start_offset_bytes;
+      if (bytesToRead > positiveClaudeByteLimit(options.maxTurnBytes)) {
+        throw new Error("Claude active task exceeded the bounded local read limit");
+      }
+      const records = readCompleteJsonlRecordEntries(
+        opened.fd,
+        anchor.turn_start_offset_bytes,
+        bytesToRead,
+        { allowTrailingPartial: true }
+      ).map((entry) => entry.record);
+      const after = fs.fstatSync(opened.fd);
+      if (!sameStableTranscriptFile(before, after)) {
+        assertObservableClaudeActiveTaskAgent(options.agentRows, anchor);
+        return {
+          status: "pending",
+          observedEndOffsetBytes: after.size
+        };
+      }
+      const snapshot: ClaudeTranscriptTurnSnapshot = {
+        anchor: claudeTranscriptAnchorForHumanStartedTask(anchor),
+        sessionId: anchor.session_id,
+        cwd: anchor.cwd,
+        expectedRequestHash: anchor.request_hash,
+        expectedPromptUuid: anchor.prompt_uuid,
+        records,
+        transcriptFileId: anchor.transcript_file_id,
+        observedEndOffsetBytes: before.size
+      };
+      const prompt = matchingManagedPrompt(snapshot);
+      if (!prompt || nonEmptyString(prompt.version) !== anchor.claude_version) {
+        throw new Error("Claude anchored root prompt identity changed");
+      }
+      const promptIndex = records.indexOf(prompt);
+      const hasLaterHumanPrompt = records.some((record, index) =>
+        index > promptIndex && isClaudeRootHumanPrompt(record)
+      );
+      const completion = completionFromRecords(snapshot, {
+        requireVerifiableCompletionSignal: false
+      });
+      if (completion) {
+        if (completion.outcome !== "success" && completion.outcome !== "failure") {
+          throw new Error("Claude active-task completion has no exact outcome");
+        }
+        return {
+          status: "completed",
+          completion: completion as TerminalCompletionEvidence & {
+            outcome: "success" | "failure";
+          }
+        };
+      }
+      if (hasLaterHumanPrompt) {
+        throw new Error(
+          "a later Claude human prompt appeared before the anchored task completed"
+        );
+      }
+      assertObservableClaudeActiveTaskAgent(options.agentRows, anchor);
+      if (!pendingApprovalTurn(snapshot)) {
+        throw new Error(
+          "Claude anchored task no longer has a unique unfinished foreground chain"
+        );
+      }
+      return {
+        status: "pending",
+        observedEndOffsetBytes: before.size
+      };
+    } finally {
+      fs.closeSync(opened.fd);
+    }
+  } catch (error) {
+    return {
+      status: "invalidated",
+      reason: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+function validateClaudeHumanStartedActiveTaskAnchor(
+  value: unknown
+): ClaudeHumanStartedActiveTaskAnchor {
+  if (
+    !isRecord(value) ||
+    value.schema !==
+      "agent-knock-knock/claude-human-started-active-task-anchor" ||
+    value.version !== 1
+  ) {
+    throw new Error("Claude human-started active-task anchor is invalid");
+  }
+  const allowedKeys = new Set([
+    "schema", "version", "session_id", "cwd", "pid", "agent_started_at_ms",
+    "captured_at", "relative_path", "device", "inode", "prompt_uuid",
+    "request_hash", "claude_version", "transcript_file_id",
+    "turn_start_offset_bytes", "observed_end_offset_bytes", "anchor_fingerprint"
+  ]);
+  if (Object.keys(value).some((key) => !allowedKeys.has(key))) {
+    throw new Error("Claude human-started active-task anchor has unsupported fields");
+  }
+  const sessionId = uuidValue(value.session_id);
+  const promptUuid = uuidValue(value.prompt_uuid);
+  const cwd = nonEmptyString(value.cwd);
+  const pid = positiveInteger(value.pid);
+  const startedAt = positiveInteger(value.agent_started_at_ms);
+  const relativePath = nonEmptyString(value.relative_path);
+  const device = nonEmptyString(value.device);
+  const inode = nonEmptyString(value.inode);
+  const turnStartOffset = nonNegativeInteger(value.turn_start_offset_bytes);
+  const observedEndOffset = positiveInteger(value.observed_end_offset_bytes);
+  if (
+    !sessionId ||
+    sessionId !== value.session_id ||
+    !promptUuid ||
+    promptUuid !== value.prompt_uuid ||
+    !cwd ||
+    !path.isAbsolute(cwd) ||
+    path.resolve(cwd) !== cwd ||
+    pid === undefined ||
+    startedAt === undefined ||
+    validTimestampMs(value.captured_at) === undefined ||
+    !relativePath ||
+    turnStartOffset === undefined ||
+    observedEndOffset === undefined ||
+    turnStartOffset >= observedEndOffset ||
+    !decimalFileIdentity(device) ||
+    !decimalFileIdentity(inode) ||
+    !/^[0-9a-f]{64}$/u.test(String(value.request_hash)) ||
+    !isCompatibleClaudeVersion(value.claude_version) ||
+    !/^[0-9a-f]{24}$/u.test(String(value.transcript_file_id)) ||
+    !/^[0-9a-f]{64}$/u.test(String(value.anchor_fingerprint))
+  ) {
+    throw new Error("Claude human-started active-task anchor identity is invalid");
+  }
+  const { anchor_fingerprint: _anchorFingerprint, ...base } = value;
+  if (sha256Hex(JSON.stringify(base)) !== value.anchor_fingerprint) {
+    throw new Error("Claude human-started active-task anchor fingerprint does not match");
+  }
+  const expectedFileId = transcriptFileId(
+    sessionId,
+    `${device}:${inode}`
+  );
+  if (expectedFileId !== value.transcript_file_id) {
+    throw new Error("Claude human-started active-task transcript identity is invalid");
+  }
+  return value as unknown as ClaudeHumanStartedActiveTaskAnchor;
+}
+
+function claudeTranscriptAnchorForHumanStartedTask(
+  anchor: ClaudeHumanStartedActiveTaskAnchor
+): ClaudeTranscriptAnchor {
+  return {
+    schema_version: CLAUDE_TRANSCRIPT_ANCHOR_VERSION,
+    session_id: anchor.session_id,
+    cwd: anchor.cwd,
+    pid: anchor.pid,
+    agent_started_at_ms: anchor.agent_started_at_ms,
+    captured_at: anchor.captured_at,
+    relative_path: anchor.relative_path,
+    offset_bytes: 0,
+    file_existed: true,
+    device: anchor.device,
+    inode: anchor.inode
+  };
+}
+
+function latestClaudeRootHumanPromptEntry(
+  entries: readonly TranscriptRecordAtOffset[]
+): TranscriptRecordAtOffset | undefined {
+  return [...entries].reverse().find((entry) =>
+    isClaudeRootHumanPrompt(entry.record)
+  );
+}
+
+function isClaudeRootHumanPrompt(record: TranscriptRecord): boolean {
+  return record.type === "user" &&
+    isRecord(record.message) &&
+    record.message.role === "user" &&
+    record.isSidechain !== true &&
+    nonEmptyString(record.agentId) === undefined &&
+    userPromptText(record) !== undefined;
+}
+
+function isActiveClaudeAgentState(agent: ClaudeAgentRow): boolean {
+  return agent.status === "working" ||
+    agent.status === "busy" ||
+    (agent.status === "waiting" && agent.waitingFor === "dialog open");
+}
+
+function isObservableClaudeAgentState(agent: ClaudeAgentRow): boolean {
+  return agent.status === "idle" || isActiveClaudeAgentState(agent);
+}
+
+function assertObservableClaudeActiveTaskAgent(
+  rows: readonly ClaudeAgentRow[],
+  anchor: ClaudeHumanStartedActiveTaskAnchor
+): void {
+  const agent = exactInteractiveAgent(rows, anchor.pid);
+  if (
+    !agent ||
+    agent.startedAt !== anchor.agent_started_at_ms ||
+    agent.sessionId !== anchor.session_id ||
+    normalizePath(agent.cwd) !== normalizePath(anchor.cwd) ||
+    !isObservableClaudeAgentState(agent)
+  ) {
+    throw new Error("Claude process identity changed after active-task capture");
+  }
+}
+
+function positiveClaudeByteLimit(value: number | undefined): number {
+  const result = value ?? CLAUDE_TRANSCRIPT_MAX_TURN_BYTES;
+  if (!Number.isSafeInteger(result) || result <= 0) {
+    throw new Error("Claude active-task byte limit is invalid");
+  }
+  return result;
+}
+
 /**
  * Detects one completed Claude Code turn from the append-only local transcript.
  * The detector intentionally fails closed on identity, schema, rotation, prompt,
@@ -981,6 +1410,10 @@ function matchingManagedPrompt(
 ): TranscriptRecord | undefined {
   const promptCandidates = snapshot.records.filter((record) => {
     const promptText = userPromptText(record);
+    const exactPromptIdentity = snapshot.expectedPromptUuid
+      ? uuidValue(record.uuid) === snapshot.expectedPromptUuid
+      : snapshot.expectedPromptText !== undefined &&
+        exactPromptText(promptText) === snapshot.expectedPromptText;
     return record.type === "user" &&
       isRecord(record.message) &&
       record.message.role === "user" &&
@@ -990,7 +1423,7 @@ function matchingManagedPrompt(
       normalizePath(record.cwd) === normalizePath(snapshot.cwd) &&
       validTimestampMs(record.timestamp) !== undefined &&
       promptText !== undefined &&
-      exactPromptText(promptText) === snapshot.expectedPromptText &&
+      exactPromptIdentity &&
       exactRequestFingerprint(promptText) === snapshot.expectedRequestHash;
   });
   if (promptCandidates.length === 0) {
@@ -1347,10 +1780,14 @@ function pendingApprovalTurn(
   )) {
     return undefined;
   }
-  if (descendants.some((record) =>
-    hasTurnCompletionSignal(record) ||
-    record.subtype === "stop_hook_summary"
-  )) {
+  if (descendants.some((record) => record.subtype === "stop_hook_summary")) {
+    return undefined;
+  }
+  const completionSignals = descendants.filter(hasTurnCompletionSignal);
+  if (
+    completionSignals.length > 0 &&
+    !isPendingClaudeTurnDurationAppend(descendants, completionSignals)
+  ) {
     return undefined;
   }
 
@@ -1363,6 +1800,35 @@ function pendingApprovalTurn(
     return undefined;
   }
   return { promptUuid, descendants, lastDescendant };
+}
+
+function isPendingClaudeTurnDurationAppend(
+  descendants: readonly TranscriptRecord[],
+  completionSignals: readonly TranscriptRecord[]
+): boolean {
+  if (completionSignals.length === 0 || hasUnresolvedToolUse(descendants)) {
+    return false;
+  }
+  const messageIds = new Set<string>();
+  for (const candidate of completionSignals) {
+    const message = isRecord(candidate.message) ? candidate.message : undefined;
+    const messageId = uuidValue(message?.id);
+    if (
+      candidate.type !== "assistant" ||
+      candidate.isApiErrorMessage === true ||
+      message?.role !== "assistant" ||
+      message.stop_reason !== "end_turn" ||
+      uuidValue(candidate.uuid) === undefined ||
+      !messageId
+    ) {
+      return false;
+    }
+    messageIds.add(messageId);
+  }
+  const finalSignal = completionSignals.at(-1);
+  return messageIds.size === 1 &&
+    finalSignal === descendants.at(-1) &&
+    finalSignal !== undefined;
 }
 
 function pendingApprovalToolUse(
@@ -1682,6 +2148,30 @@ function readCompleteJsonlRecords(
   offset: number,
   length: number
 ): TranscriptRecord[] {
+  return readCompleteJsonlRecordEntries(fd, offset, length)
+    .map((entry) => entry.record);
+}
+
+function readBoundedCompleteJsonlTail(
+  fd: number,
+  endOffset: number,
+  maxBytes: number
+): TranscriptRecordAtOffset[] {
+  const offset = Math.max(0, endOffset - maxBytes);
+  return readCompleteJsonlRecordEntries(fd, offset, endOffset - offset, {
+    allowLeadingPartial: offset > 0
+  });
+}
+
+function readCompleteJsonlRecordEntries(
+  fd: number,
+  offset: number,
+  length: number,
+  options: {
+    allowLeadingPartial?: boolean;
+    allowTrailingPartial?: boolean;
+  } = {}
+): TranscriptRecordAtOffset[] {
   const buffer = Buffer.allocUnsafe(length);
   let readTotal = 0;
   while (readTotal < length) {
@@ -1700,13 +2190,47 @@ function readCompleteJsonlRecords(
   if (readTotal !== length) {
     throw new Error("Claude transcript changed while it was being read");
   }
-  if (buffer.length === 0 || buffer[buffer.length - 1] !== 0x0a) {
+  if (buffer.length === 0) {
     return [];
   }
+  let start = 0;
+  if (
+    options.allowLeadingPartial === true &&
+    offset > 0 &&
+    byteAt(fd, offset - 1) !== 0x0a
+  ) {
+    const firstNewline = buffer.indexOf(0x0a);
+    if (firstNewline < 0) {
+      return [];
+    }
+    start = firstNewline + 1;
+  }
+  let end = buffer.length;
+  if (buffer[end - 1] !== 0x0a) {
+    if (options.allowTrailingPartial !== true) {
+      return [];
+    }
+    const lastNewline = buffer.lastIndexOf(0x0a);
+    if (lastNewline < start) {
+      return [];
+    }
+    end = lastNewline + 1;
+  }
 
-  const text = buffer.subarray(0, buffer.length - 1).toString("utf8");
-  const records: TranscriptRecord[] = [];
-  for (const line of text.split("\n")) {
+  const records: TranscriptRecordAtOffset[] = [];
+  let lineStart = start;
+  while (lineStart < end) {
+    const newline = buffer.indexOf(0x0a, lineStart);
+    if (newline < 0 || newline >= end) {
+      break;
+    }
+    let lineBuffer = buffer.subarray(lineStart, newline);
+    const recordOffset = offset + lineStart;
+    lineStart = newline + 1;
+    if (lineBuffer.at(-1) === 0x0d) {
+      lineBuffer = lineBuffer.subarray(0, lineBuffer.length - 1);
+    }
+    const line = lineBuffer.toString("utf8");
     if (!line.trim()) {
       continue;
     }
@@ -1719,9 +2243,16 @@ function readCompleteJsonlRecords(
     if (!isRecord(parsed)) {
       throw new Error("Claude transcript contains a non-object JSONL record");
     }
-    records.push(parsed);
+    records.push({ record: parsed, offsetBytes: recordOffset });
   }
   return records;
+}
+
+function byteAt(fd: number, offset: number): number | undefined {
+  const buffer = Buffer.allocUnsafe(1);
+  return fs.readSync(fd, buffer, 0, 1, offset) === 1
+    ? buffer[0]
+    : undefined;
 }
 
 function descendantRecords(

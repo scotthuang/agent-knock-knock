@@ -23,6 +23,7 @@ export type TerminalActionName =
   | "cancel"
   | "renew"
   | "retry_callback"
+  | "watch"
   | "close";
 
 export type TerminalActionSet<Action> = Partial<{

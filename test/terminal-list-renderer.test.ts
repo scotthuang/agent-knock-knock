@@ -101,13 +101,15 @@ test("managed Turn rendering consumes only sampled list facts", () => {
   );
 });
 
-test("the public action contract remains v16 with stable action ordering", () => {
+test("the public action contract v17 includes durable Terminal Watch", () => {
   const contracts = listActionContracts();
-  assert.equal(contracts.version, 16);
+  assert.equal(contracts.version, 17);
   assert.deepEqual(
     Object.keys(contracts.actions as object),
     [
       "send",
+      "watch",
+      "unwatch",
       "new_thread",
       "list_resumable_threads",
       "native_inspect",
@@ -122,6 +124,66 @@ test("the public action contract remains v16 with stable action ordering", () =>
       "close"
     ]
   );
+  assert.deepEqual(
+    (contracts.actions as Record<string, any>).status.target_arguments,
+    { exactly_one_of: ["turn_id", "conversation_id", "watch_id"] }
+  );
+  assert.deepEqual(
+    (contracts.actions as Record<string, any>).status.required,
+    []
+  );
+});
+
+test("raw active terminals expose only an exact prefilled watch action", () => {
+  const working = renderAvailableListActions({
+    id: "terminal:v2:tmux:codex:work:0.0:1234",
+    source: "terminal",
+    agent: "codex",
+    activity_state: "working",
+    lifecycle_binding_token: "fresh-binding-token",
+    approval_state: { blocked: false },
+    commands: { watch: true }
+  });
+  assert.deepEqual(working.watch, {
+    tool: "agent_knock_knock_watch",
+    arguments: {
+      terminal_id: "terminal:v2:tmux:codex:work:0.0:1234",
+      expected_binding_token: "fresh-binding-token"
+    },
+    requires_user_intent: true
+  });
+
+  const awaitingApproval = renderAvailableListActions({
+    id: "terminal:v2:tmux:claude:work:0.1:5678",
+    source: "terminal",
+    agent: "claude",
+    activity_state: "awaiting_approval",
+    lifecycle_binding_token: "approval-binding-token",
+    approval_state: { blocked: true },
+    commands: { watch: true }
+  });
+  assert.equal(Object.hasOwn(awaitingApproval, "watch"), true);
+
+  for (const entry of [
+    {
+      id: "terminal:v2:tmux:codex:work:0.0:1234",
+      source: "terminal",
+      activity_state: "idle",
+      lifecycle_binding_token: "fresh-binding-token",
+      commands: { watch: true }
+    },
+    {
+      id: "terminal:v2:tmux:codex:work:0.0:1234",
+      source: "terminal",
+      activity_state: "working",
+      commands: { watch: true }
+    }
+  ]) {
+    assert.equal(
+      Object.hasOwn(renderAvailableListActions(entry), "watch"),
+      false
+    );
+  }
 });
 
 test("terminal list action policies expose only their exact safe subsets", () => {

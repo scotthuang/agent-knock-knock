@@ -91,6 +91,31 @@ Omitting the resume selection lists exact verified candidates. You may use the c
 
 AKK Turn status and the coding agent's native status are separate. `/akk status` and `agent_knock_knock_status` inspect AKK-managed state and a bounded current screen; they never type `/status`. For native status, start from `/akk list` and use only an advertised `native_inspect` action through `agent_knock_knock_native_inspect`, preserving its exact `terminal_id`, `inspection="status"`, and `expected_binding_token`. Supported profiles are Codex 0.146.0/0.146.1/0.147.0/0.148.0 and Claude Code 2.1.218/2.1.226/2.1.237. Claude's modal Status panel is parsed and dismissed before the action proves the original idle composer. The action creates no Session, Turn, receipt, monitor, or callback. `/usage`, `/cost`, `/stats`, `/usage-credits`, `/model`, `/compact`, and arbitrary slash commands remain unavailable. Bare Codex `/usage` is not read-only automation: it opens a menu whose later Enter can select an account-side usage-limit reset.
 
+## 5. Watch work you started in the TUI
+
+You can start a task yourself by typing it directly in the Codex or Claude Code TUI, then let OpenClaw observe it without handing the task to AKK. While that exact task is actively working or awaiting approval, send a fresh:
+
+```text
+/akk list
+```
+
+Proceed only if that terminal row advertises `available_actions.watch`. For a structured tool call, copy the complete `watch` action unchanged, including its exact `terminal_id` and `expected_binding_token`. For the slash form, copy that row's exact terminal ID; `/akk watch` performs its own fresh list/action check before creating the Watch:
+
+```text
+/akk watch <exact-terminal-id>
+```
+
+The result contains a durable `watch_id`. Use that ID—not a `session_id`, `turn_id`, terminal selector, or short reference—to inspect or stop observation:
+
+```text
+/akk status <watch-id>
+/akk unwatch <watch-id>
+```
+
+Terminal Watch schema v1 is independent of managed Sessions and Turns. It sends no terminal input and does not adopt, claim, reserve, or block the task; `unwatch` only marks the Watch cancelled and does not interrupt the TUI. An approval event is notification-only: inspect and approve or deny it yourself in the live TUI. Terminal Watch never invokes an approval action or participates in `autoApprove`.
+
+The Watch remains pinned to the exact terminal endpoint, process incarnation, native task, and privacy-safe Codex rollout or Claude transcript boundary captured at creation. An exact durable completion already written to that anchor wins; otherwise a replaced process, switched native thread, moved/replaced/truncated evidence file, changed boundary, or ambiguous successor invalidates the Watch instead of following current work. Its schema-v1 record, outcome, and notification outbox are durable, so startup and periodic supervision can resume observation and retry an idempotent callback after AKK, OpenClaw, or the Gateway restarts.
+
 ## Optional: Enable natural-language routing
 
 Direct `/akk ...` commands work without changing the OpenClaw tool policy. To let OpenClaw decide to use AKK from a natural-language request, grant the optional `agent-knock-knock` tools in the applicable policy.
@@ -123,4 +148,4 @@ Do not run `install-openclaw` after a ClawHub install. The two commands are alte
 
 ## Permissions and monitoring
 
-AKK keeps the coding agent's own permission settings. Trusted, exact `autoApprove` rules may approve a supported prompt; each rule can authorize multiple canonical roots through `autoApprove.rules[].workspaces`. Those entries are the only workspace boundary for automatic approval and do not limit pane discovery or manual control. Everything else remains manual. If monitoring stalls while the same Turn is still live, inspect `/akk status only` and use `/akk renew only <minutes>` to resume monitoring without sending terminal input.
+AKK keeps the coding agent's own permission settings. Trusted, exact `autoApprove` rules may approve a supported managed-Turn prompt; each rule can authorize multiple canonical roots through `autoApprove.rules[].workspaces`. Those entries are the only workspace boundary for automatic approval and do not limit pane discovery or manual control. Terminal Watch approval notifications are never eligible for automatic approval. Everything else remains manual. If monitoring stalls while the same managed Turn is still live, inspect `/akk status only` and use `/akk renew only <minutes>` to resume monitoring without sending terminal input.

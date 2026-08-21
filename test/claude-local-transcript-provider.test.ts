@@ -5,12 +5,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  captureClaudeHumanStartedActiveTaskAnchor,
   captureClaudeTranscriptAnchor,
   detectClaudeTranscriptAcceptance,
   detectClaudeTranscriptCompletion,
   detectClaudeTranscriptPendingApproval,
   listClaudeHistoricalSessions,
   listClaudeThreadLifecycleCandidates,
+  observeClaudeHumanStartedActiveTask,
   observeClaudeDeadProcessTranscriptCompletion,
   revalidateClaudeThreadLifecycleCandidate,
   type ClaudeTranscriptAnchor
@@ -28,6 +30,289 @@ const STARTED_AT = "2026-07-24T02:00:00.000Z";
 const CAPTURED_AT = "2026-07-24T02:00:00.100Z";
 const PROMPT_AT = "2026-07-24T02:00:00.200Z";
 const COMPLETED_AT = "2026-07-24T02:00:00.400Z";
+
+test("captures and completes one exact human-started Claude task without persisting its prompt", (t) => {
+  const fixture = createFixture(t);
+  const request = "Human started this exact Claude task";
+  const records = fixture.normalizeRecords(turnRecords({
+    request,
+    assistantText: "Human-started task done",
+    ids: 6000
+  }));
+  fixture.agentRows[0] = { ...fixture.agentRows[0], status: "working" };
+  fixture.writeRaw(jsonLine(records[0]));
+
+  const anchor = captureClaudeHumanStartedActiveTaskAnchor({
+    sessionId: fixture.sessionId,
+    cwd: fixture.workspace,
+    pid: PID,
+    claudeHome: fixture.claudeHome,
+    agentRows: fixture.agentRows,
+    now: new Date(CAPTURED_AT)
+  });
+  assert.ok(anchor);
+  assert.equal(anchor.prompt_uuid, uuid(6000));
+  assert.equal(anchor.request_hash, fingerprint(request));
+  assert.equal(anchor.turn_start_offset_bytes, 0);
+  assert.equal(JSON.stringify(anchor).includes(request), false);
+  assert.equal(observeClaudeHumanStartedActiveTask({
+    anchor,
+    claudeHome: fixture.claudeHome,
+    agentRows: fixture.agentRows
+  }).status, "pending");
+
+  const laterPrompt = fixture.normalizeRecords([userRecord({
+    uuid: uuid(6010),
+    request: "A later task must not erase completion",
+    timestamp: "2026-07-24T02:00:00.500Z",
+    parentUuid: uuid(6003)
+  })]);
+  fixture.appendRaw([...records.slice(1), ...laterPrompt].map(jsonLine).join(""));
+  fixture.agentRows.splice(0);
+  const observed = observeClaudeHumanStartedActiveTask({
+    anchor,
+    claudeHome: fixture.claudeHome,
+    agentRows: fixture.agentRows
+  });
+  assert.equal(observed.status, "completed");
+  if (observed.status === "completed") {
+    assert.equal(observed.completion.outcome, "success");
+    assert.equal(observed.completion.text, "Human-started task done");
+    assert.equal(observed.completion.metadata?.prompt_uuid, uuid(6000));
+  }
+});
+
+test("human-started Claude watch keeps the end-turn append gap pending", (t) => {
+  const fixture = createFixture(t, 73);
+  const records = fixture.normalizeRecords(turnRecords({
+    request: "Observe the canonical completion append gap",
+    assistantText: "The duration record arrived later",
+    ids: 6400,
+    sessionId: fixture.sessionId
+  }));
+  fixture.agentRows[0] = { ...fixture.agentRows[0], status: "working" };
+  fixture.writeRaw(jsonLine(records[0]));
+  const anchor = captureClaudeHumanStartedActiveTaskAnchor({
+    sessionId: fixture.sessionId,
+    cwd: fixture.workspace,
+    pid: PID,
+    claudeHome: fixture.claudeHome,
+    agentRows: fixture.agentRows
+  });
+  assert.ok(anchor);
+
+  fixture.appendRaw(jsonLine(records[1]));
+  const capturedDuringGap = captureClaudeHumanStartedActiveTaskAnchor({
+    sessionId: fixture.sessionId,
+    cwd: fixture.workspace,
+    pid: PID,
+    claudeHome: fixture.claudeHome,
+    agentRows: fixture.agentRows
+  });
+  assert.equal(capturedDuringGap?.prompt_uuid, anchor.prompt_uuid);
+  assert.equal(observeClaudeHumanStartedActiveTask({
+    anchor,
+    claudeHome: fixture.claudeHome,
+    agentRows: fixture.agentRows
+  }).status, "pending");
+  fixture.appendRaw(records.slice(2, -1).map(jsonLine).join(""));
+  assert.equal(observeClaudeHumanStartedActiveTask({
+    anchor,
+    claudeHome: fixture.claudeHome,
+    agentRows: fixture.agentRows
+  }).status, "pending");
+
+  const agent = fixture.agentRows[0];
+  assert.ok(agent);
+  fixture.agentRows.splice(0);
+  assert.equal(observeClaudeHumanStartedActiveTask({
+    anchor,
+    claudeHome: fixture.claudeHome,
+    agentRows: fixture.agentRows
+  }).status, "invalidated");
+  fixture.agentRows.push(agent);
+
+  fixture.appendRaw(jsonLine(records[records.length - 1]));
+  fixture.agentRows.splice(0);
+  const completed = observeClaudeHumanStartedActiveTask({
+    anchor,
+    claudeHome: fixture.claudeHome,
+    agentRows: fixture.agentRows
+  });
+  assert.equal(completed.status, "completed");
+  if (completed.status === "completed") {
+    assert.equal(completed.completion.text, "The duration record arrived later");
+  }
+});
+
+test("human-started Claude watch bounds only the anchored turn in a long transcript", (t) => {
+  const fixture = createFixture(t, 74);
+  const maxTurnBytes = 4 * 1024;
+  const historicalLine = jsonLine({
+    type: "mode",
+    historical_padding: "x".repeat(maxTurnBytes * 2)
+  });
+  const records = fixture.normalizeRecords(turnRecords({
+    request: "Watch only this small tail turn",
+    assistantText: "Small tail completed",
+    ids: 6500,
+    sessionId: fixture.sessionId
+  }));
+  fixture.agentRows[0] = { ...fixture.agentRows[0], status: "working" };
+  fixture.writeRaw(`${historicalLine}${jsonLine(records[0])}`);
+
+  const anchor = captureClaudeHumanStartedActiveTaskAnchor({
+    sessionId: fixture.sessionId,
+    cwd: fixture.workspace,
+    pid: PID,
+    claudeHome: fixture.claudeHome,
+    agentRows: fixture.agentRows,
+    maxTurnBytes
+  });
+  assert.ok(anchor);
+  assert.equal(
+    anchor.turn_start_offset_bytes,
+    Buffer.byteLength(historicalLine)
+  );
+  assert.ok(fs.statSync(fixture.transcriptPath).size > maxTurnBytes);
+
+  fixture.appendRaw(records.slice(1).map(jsonLine).join(""));
+  fixture.agentRows.splice(0);
+  const completed = observeClaudeHumanStartedActiveTask({
+    anchor,
+    claudeHome: fixture.claudeHome,
+    agentRows: fixture.agentRows,
+    maxTurnBytes
+  });
+  assert.equal(completed.status, "completed");
+  if (completed.status === "completed") {
+    assert.equal(completed.completion.text, "Small tail completed");
+  }
+});
+
+test("human-started Claude observation returns exact failure and rejects later prompts or process drift", (t) => {
+  const failed = createFixture(t, 70);
+  const failureRequest = "Human task that reaches a terminal API error";
+  const failurePrompt = failed.normalizeRecords([userRecord({
+    uuid: uuid(6100),
+    request: failureRequest,
+    timestamp: PROMPT_AT,
+    parentUuid: null,
+    sessionId: failed.sessionId
+  })]);
+  failed.agentRows[0] = { ...failed.agentRows[0], status: "busy" };
+  failed.writeRaw(failurePrompt.map(jsonLine).join(""));
+  const failureAnchor = captureClaudeHumanStartedActiveTaskAnchor({
+    sessionId: failed.sessionId,
+    cwd: failed.workspace,
+    pid: PID,
+    claudeHome: failed.claudeHome,
+    agentRows: failed.agentRows
+  });
+  assert.ok(failureAnchor);
+  failed.append([apiErrorRecord({
+    uuid: uuid(6101),
+    parentUuid: uuid(6100),
+    text: "API Error: unavailable",
+    error: "server_error"
+  })]);
+  failed.agentRows[0] = { ...failed.agentRows[0], status: "idle" };
+  const failure = observeClaudeHumanStartedActiveTask({
+    anchor: failureAnchor,
+    claudeHome: failed.claudeHome,
+    agentRows: failed.agentRows
+  });
+  assert.equal(failure.status, "completed");
+  if (failure.status === "completed") {
+    assert.equal(failure.completion.outcome, "failure");
+    assert.equal(failure.completion.metadata?.error, "server_error");
+  }
+
+  const superseded = createFixture(t, 71);
+  superseded.agentRows[0] = {
+    ...superseded.agentRows[0],
+    status: "waiting",
+    waitingFor: "dialog open"
+  };
+  superseded.write([userRecord({
+    uuid: uuid(6200),
+    request: "Original human task",
+    timestamp: PROMPT_AT,
+    parentUuid: null,
+    sessionId: superseded.sessionId
+  })]);
+  const anchor = captureClaudeHumanStartedActiveTaskAnchor({
+    sessionId: superseded.sessionId,
+    cwd: superseded.workspace,
+    pid: PID,
+    claudeHome: superseded.claudeHome,
+    agentRows: superseded.agentRows
+  });
+  assert.ok(anchor);
+  assert.equal(observeClaudeHumanStartedActiveTask({
+    anchor,
+    claudeHome: superseded.claudeHome,
+    agentRows: [{
+      ...superseded.agentRows[0],
+      startedAt: AGENT_STARTED_AT_MS + 1
+    }]
+  }).status, "invalidated");
+
+  superseded.append([userRecord({
+    uuid: uuid(6201),
+    request: "Later human task",
+    timestamp: COMPLETED_AT,
+    parentUuid: uuid(6200),
+    sessionId: superseded.sessionId
+  })]);
+  const later = observeClaudeHumanStartedActiveTask({
+    anchor,
+    claudeHome: superseded.claudeHome,
+    agentRows: superseded.agentRows
+  });
+  assert.equal(later.status, "invalidated");
+  if (later.status === "invalidated") {
+    assert.match(later.reason, /later Claude human prompt/u);
+  }
+});
+
+test("human-started Claude observation rejects transcript file replacement", (t) => {
+  const fixture = createFixture(t, 72);
+  fixture.agentRows[0] = { ...fixture.agentRows[0], status: "working" };
+  fixture.write([userRecord({
+    uuid: uuid(6300),
+    request: "Task anchored to one private transcript inode",
+    timestamp: PROMPT_AT,
+    parentUuid: null,
+    sessionId: fixture.sessionId
+  })]);
+  const anchor = captureClaudeHumanStartedActiveTaskAnchor({
+    sessionId: fixture.sessionId,
+    cwd: fixture.workspace,
+    pid: PID,
+    claudeHome: fixture.claudeHome,
+    agentRows: fixture.agentRows
+  });
+  assert.ok(anchor);
+
+  fs.renameSync(fixture.transcriptPath, `${fixture.transcriptPath}.replaced`);
+  fixture.write([userRecord({
+    uuid: uuid(6300),
+    request: "Task anchored to one private transcript inode",
+    timestamp: PROMPT_AT,
+    parentUuid: null,
+    sessionId: fixture.sessionId
+  })]);
+  const observed = observeClaudeHumanStartedActiveTask({
+    anchor,
+    claudeHome: fixture.claudeHome,
+    agentRows: fixture.agentRows
+  });
+  assert.equal(observed.status, "invalidated");
+  if (observed.status === "invalidated") {
+    assert.match(observed.reason, /transcript identity changed/u);
+  }
+});
 
 test("Claude lifecycle candidates are root-interactive and carry a revalidated file token", (t) => {
   const fixture = createFixture(t);

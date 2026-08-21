@@ -31,6 +31,8 @@ export type AkkCommand =
   | { action: "help" }
   | { action: "doctor" }
   | { action: "list" }
+  | { action: "watch"; terminalId: string }
+  | { action: "unwatch"; watchId: string }
   | { action: "list-resumable-threads"; terminalId: string }
   | { action: "new-thread"; terminalId: string }
   | {
@@ -38,7 +40,8 @@ export type AkkCommand =
       terminalId: string;
       selection?: AkkResumeSelection;
     }
-  | { action: "status"; turnId?: string }
+  | { action: "status"; turnId?: string; watchId?: never }
+  | { action: "status"; watchId: string; turnId?: never }
   | { action: "send"; selector: string; message: string }
   | { action: "respond"; turnId: string; message: string }
   | {
@@ -89,6 +92,23 @@ function parseAkkLifecycleCommand(
       throw new Error("Usage: /akk doctor");
     }
     return { action: "doctor" };
+  }
+  if (action === "watch") {
+    const usage = "Usage: /akk watch <exact-terminal-id>";
+    const { token: terminalId, rest: extra } = takeRequiredToken(rest, usage);
+    assertExactTerminalId(terminalId, usage);
+    if (extra.trim()) {
+      throw new Error(usage);
+    }
+    return { action: "watch", terminalId };
+  }
+  if (action === "unwatch") {
+    const usage = "Usage: /akk unwatch <watch-id>";
+    const { token: watchId, rest: extra } = takeRequiredToken(rest, usage);
+    if (extra.trim() || !isTerminalWatchId(watchId)) {
+      throw new Error(usage);
+    }
+    return { action: "unwatch", watchId };
   }
   if (action === "threads" || action === "list-resumable-threads") {
     const usage = "Usage: /akk threads <exact-terminal-id>";
@@ -142,9 +162,13 @@ function parseAkkTurnCommand(
   if (action === "status" || action === "show") {
     const { token: turnId, rest: extra } = takeToken(rest);
     if (extra.trim()) {
-      throw new Error("Usage: /akk status [turn-selector]");
+      throw new Error(
+        "Usage: /akk status [turn-selector|terminal-watch-id]"
+      );
     }
-    return { action: "status", turnId: turnId || undefined };
+    return turnId && isTerminalWatchId(turnId)
+      ? { action: "status", watchId: turnId }
+      : { action: "status", turnId: turnId || undefined };
   }
   if (action === "describe" || action === "summary" || action === "about") {
     throw new Error(
@@ -271,12 +295,14 @@ export function akkUsageText(): string {
     "/akk claude: <request>",
     "/akk <session-selector>: <message>",
     "/akk list",
+    "/akk watch <exact-terminal-id>",
+    "/akk unwatch <watch-id>",
     "/akk threads <exact-terminal-id>",
     "/akk new-thread <exact-terminal-id>",
     "/akk clear-thread <exact-terminal-id>",
     "/akk resume-thread <exact-terminal-id> [uuid|previous|number|@short-id|snapshot-handle]",
     "/akk doctor",
-    "/akk status [turn-selector]",
+    "/akk status [turn-selector|terminal-watch-id]",
     "/akk respond <turn-selector>: <answer>",
     "/akk approve <turn-selector> --expected-approval-fingerprint <fingerprint>",
     "/akk cancel <turn-selector>"
@@ -285,8 +311,13 @@ export function akkUsageText(): string {
 
 export function formatAkkListCommandResult(result: Record<string, unknown>): string {
   const terminals = arrayValue(result.terminals);
+  const terminalWatches = arrayValue(result.terminal_watches);
   const unavailableManagedTurns = arrayValue(result.unavailable_managed_turns);
-  if (terminals.length === 0 && unavailableManagedTurns.length === 0) {
+  if (
+    terminals.length === 0 &&
+    terminalWatches.length === 0 &&
+    unavailableManagedTurns.length === 0
+  ) {
     return "AKK found no live terminals or unavailable managed turns.";
   }
 
@@ -307,10 +338,14 @@ export function formatAkkListCommandResult(result: Record<string, unknown>): str
       "new_thread",
       "resume_thread"
     ].some((name) => Object.hasOwn(availableActions, name));
+    const hasWatchAction = Object.hasOwn(availableActions, "watch");
     return [
       `- ${formatTerminalLine(terminal)}`,
       ...(hasLifecycleAction && terminalId
         ? [`  lifecycle terminal_id: ${terminalId}`]
+        : []),
+      ...(hasWatchAction && terminalId
+        ? [`  watch terminal_id: ${terminalId}`]
         : []),
       ...(sessionId || sessionShortRef
         ? [`  AKK session: ${sessionShortRef ?? sessionId}`]
@@ -349,10 +384,22 @@ export function formatAkkListCommandResult(result: Record<string, unknown>): str
     ];
   });
 
+  const watchLines = terminalWatches.slice(0, 20).flatMap((watch) => [
+    `- ${formatTerminalWatchLine(watch)}`,
+    ...formatAvailableActions("  actions", watch)
+  ]);
+
+  const heading = terminalWatches.length > 0
+    ? `AKK terminals (${terminals.length} live, ${terminalWatches.length} terminal watches, ${unavailableManagedTurns.length} unavailable managed turns):`
+    : `AKK terminals (${terminals.length} live, ${unavailableManagedTurns.length} unavailable managed turns):`;
+
   return [
-    `AKK terminals (${terminals.length} live, ${unavailableManagedTurns.length} unavailable managed turns):`,
+    heading,
     ...(terminalLines.length > 0
       ? ["live terminals:", ...terminalLines]
+      : []),
+    ...(watchLines.length > 0
+      ? ["terminal watches:", ...watchLines]
       : []),
     ...(unavailableManagedTurns.length > 0
       ? [
@@ -365,6 +412,56 @@ export function formatAkkListCommandResult(result: Record<string, unknown>): str
           )
         ]
       : [])
+  ].join("\n");
+}
+
+export function formatAkkWatchCommandResult(
+  result: Record<string, unknown>
+): string {
+  const watch = terminalWatchRecord(result);
+  return [
+    "AKK Terminal Watch started:",
+    `watch: ${nonEmptyString(watch.watch_id) ?? "unknown"}`,
+    `terminal: ${nonEmptyString(watch.terminal_id) ?? "unknown"}`,
+    `agent: ${nonEmptyString(watch.agent) ?? "unknown"}`,
+    `status: ${nonEmptyString(watch.status) ?? "watching"}`,
+    "AKK did not send or adopt this task; it is observing work the human started in the terminal."
+  ].join("\n");
+}
+
+export function formatAkkUnwatchCommandResult(
+  result: Record<string, unknown>
+): string {
+  const watch = terminalWatchRecord(result);
+  return [
+    "AKK Terminal Watch stopped:",
+    `watch: ${nonEmptyString(watch.watch_id) ?? "unknown"}`,
+    `status: ${nonEmptyString(watch.status) ?? "cancelled"}`,
+    "The terminal and its task were not interrupted."
+  ].join("\n");
+}
+
+export function formatAkkWatchStatusCommandResult(
+  result: Record<string, unknown>
+): string {
+  const watch = terminalWatchRecord(result);
+  const settlement = recordValue(watch.settlement) ?? {};
+  const reason = nonEmptyString(settlement.reason_code) ??
+    nonEmptyString(watch.reason);
+  const completionText = nonEmptyString(settlement.completion_text);
+  return [
+    "AKK Terminal Watch status:",
+    `watch: ${nonEmptyString(watch.watch_id) ?? "unknown"}`,
+    `terminal: ${nonEmptyString(watch.terminal_id) ?? "unknown"}`,
+    `agent: ${nonEmptyString(watch.agent) ?? "unknown"}`,
+    `status: ${nonEmptyString(watch.status) ?? "unknown"}`,
+    ...(reason
+      ? [`reason: ${reason}`]
+      : []),
+    ...(completionText
+      ? [`completion: ${truncateText(completionText, 500)}`]
+      : []),
+    "This is observed external work; AKK did not send or adopt the task."
   ].join("\n");
 }
 
@@ -623,6 +720,32 @@ export function buildAkkCommandCliArgs(
         ["--store-dir", storeDir],
         ["--idle-timeout-minutes", idleTimeoutMinutes]
       );
+    case "watch": {
+      const openclawSession =
+        nonEmptyString(context.sessionKey) ??
+        "agent:main:main";
+      return withOptionalArgs(
+        [
+          "watch-terminal",
+          "--terminal",
+          command.terminalId,
+          "--expected-binding-token",
+          requiredExpectedBindingToken(context.expectedBindingToken)
+        ],
+        ["--store-dir", storeDir],
+        [
+          "--hard-timeout-minutes",
+          finiteNumberString(config.agentHardTimeoutMinutes)
+        ],
+        ["--openclaw-session", openclawSession],
+        ["--openclaw-bin", nonEmptyString(config.openclawBin)]
+      );
+    }
+    case "unwatch":
+      return withOptionalArgs(
+        ["unwatch-terminal", "--watch", command.watchId],
+        ["--store-dir", storeDir]
+      );
     case "list-resumable-threads":
       return withOptionalArgs(
         [
@@ -724,6 +847,12 @@ export function buildAkkCommandCliArgs(
         ["--codex-home", codexHome]
       );
     case "status":
+      if (command.watchId) {
+        return withOptionalArgs(
+          ["watch-status", "--watch", command.watchId],
+          ["--store-dir", storeDir]
+        );
+      }
       return withOptionalArgs(
         [
           "status",
@@ -815,6 +944,10 @@ export function buildAkkCommandCliArgs(
         ["--store-dir", storeDir]
       );
   }
+}
+
+function isTerminalWatchId(value: string): boolean {
+  return /^terminal-watch-[A-Za-z0-9._:-]+$/u.test(value);
 }
 
 function parseSelectorMessage(
@@ -997,6 +1130,14 @@ function arrayValue(value: unknown): Record<string, unknown>[] {
     : [];
 }
 
+function terminalWatchRecord(
+  result: Record<string, unknown>
+): Record<string, unknown> {
+  return recordValue(result.watch) ??
+    recordValue(result.terminal_watch) ??
+    result;
+}
+
 function finiteNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value)
     ? value
@@ -1042,6 +1183,17 @@ function formatManagedTurnLine(turn: Record<string, unknown>): string {
   ].filter(Boolean).join(" | ");
 }
 
+function formatTerminalWatchLine(watch: Record<string, unknown>): string {
+  return [
+    nonEmptyString(watch.short_ref) ??
+      nonEmptyString(watch.watch_id) ??
+      "unknown",
+    nonEmptyString(watch.agent) ?? "agent",
+    nonEmptyString(watch.status) ?? "unknown",
+    nonEmptyString(watch.terminal_id)
+  ].filter(Boolean).join(" | ");
+}
+
 function formatAvailableActions(
   label: string,
   resource: Record<string, unknown>
@@ -1052,6 +1204,8 @@ function formatAvailableActions(
   }
   const displayedActions = new Set([
     "send",
+    "watch",
+    "unwatch",
     "respond",
     "status",
     "approve",

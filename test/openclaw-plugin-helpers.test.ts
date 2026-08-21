@@ -9,10 +9,18 @@ import {
   formatAkkRespondCommandResult,
   formatAkkThreadsCommandResult,
   formatAkkThreadTransitionCommandResult,
+  formatAkkUnwatchCommandResult,
+  formatAkkWatchCommandResult,
+  formatAkkWatchStatusCommandResult,
   isAkkNativeSubmissionAccepted,
   parseAkkCommand,
   resolvePluginStoreDir
 } from "../src/openclaw-plugin-helpers.js";
+import {
+  statusParameters,
+  unwatchParameters,
+  watchParameters
+} from "../src/openclaw-plugin-schemas.js";
 
 const exactTerminalId = "terminal:v2:tmux:codex:work:0.0:1234";
 const currentNativeThreadId = "11111111-1111-4111-8111-111111111111";
@@ -58,6 +66,8 @@ test("/akk help lists the supported tmux executors", () => {
   assert.match(usage, /\/akk claude: <request>/);
   assert.match(usage, /\/akk <session-selector>: <message>/);
   assert.match(usage, /\/akk doctor/);
+  assert.match(usage, /\/akk watch <exact-terminal-id>/);
+  assert.match(usage, /\/akk unwatch <watch-id>/);
   assert.match(usage, /\/akk respond <turn-selector>: <answer>/);
   assert.match(usage, /\/akk approve <turn-selector>/);
   assert.match(usage, /\/akk threads <exact-terminal-id>/);
@@ -69,6 +79,47 @@ test("/akk help lists the supported tmux executors", () => {
     /\/akk (?:status|respond|approve|cancel)[^\n]*session-selector/u
   );
   assert.doesNotMatch(usage, /\/akk (?:describe|send|renew|retry-callback|close)\b/u);
+});
+
+test("/akk watch and unwatch require authoritative exact identities", () => {
+  assert.deepEqual(parseAkkCommand(`watch ${exactTerminalId}`), {
+    action: "watch",
+    terminalId: exactTerminalId
+  });
+  assert.deepEqual(parseAkkCommand("unwatch terminal-watch-durable-1"), {
+    action: "unwatch",
+    watchId: "terminal-watch-durable-1"
+  });
+  assert.throws(
+    () => parseAkkCommand("watch @terminal1"),
+    /exact-terminal-id/u
+  );
+  assert.throws(
+    () => parseAkkCommand("unwatch terminal-watch-durable-1 extra"),
+    /Usage: \/akk unwatch/u
+  );
+});
+
+test("Terminal Watch tool schemas require exact and mutually exclusive targets", () => {
+  assert.deepEqual(watchParameters.required, [
+    "terminal_id",
+    "expected_binding_token"
+  ]);
+  assert.equal(
+    watchParameters.properties.terminal_id.pattern,
+    "^terminal:v[0-9]+:\\S+$"
+  );
+  assert.deepEqual(unwatchParameters.required, ["watch_id"]);
+  assert.deepEqual(statusParameters.anyOf, [
+    { required: ["turn_id"] },
+    { required: ["conversation_id"] },
+    { required: ["watch_id"] }
+  ]);
+  assert.deepEqual(statusParameters.not.anyOf, [
+    { required: ["turn_id", "conversation_id"] },
+    { required: ["turn_id", "watch_id"] },
+    { required: ["conversation_id", "watch_id"] }
+  ]);
 });
 
 test("/akk native-thread commands require exact identities and keep clear as an alias", () => {
@@ -264,6 +315,71 @@ test("/akk lifecycle CLI arguments use a fresh internal binding token", () => {
       { expectedBindingToken: "binding-token-without-candidate" }
     ),
     /candidate token is required/u
+  );
+});
+
+test("/akk Terminal Watch CLI arguments preserve observation authority", () => {
+  assert.deepEqual(
+    buildAkkCommandCliArgs(
+      parseAkkCommand(`watch ${exactTerminalId}`),
+      {
+        storeDir: "/private/akk-store",
+        openclawBin: "/opt/openclaw",
+        agentHardTimeoutMinutes: 45
+      },
+      {
+        sessionKey: "agent:test:main",
+        expectedBindingToken: "watch-binding-token"
+      }
+    ),
+    [
+      "watch-terminal",
+      "--terminal",
+      exactTerminalId,
+      "--expected-binding-token",
+      "watch-binding-token",
+      "--store-dir",
+      "/private/akk-store",
+      "--hard-timeout-minutes",
+      "45",
+      "--openclaw-session",
+      "agent:test:main",
+      "--openclaw-bin",
+      "/opt/openclaw"
+    ]
+  );
+  assert.deepEqual(
+    buildAkkCommandCliArgs(
+      parseAkkCommand("unwatch terminal-watch-durable-1"),
+      { storeDir: "/private/akk-store" }
+    ),
+    [
+      "unwatch-terminal",
+      "--watch",
+      "terminal-watch-durable-1",
+      "--store-dir",
+      "/private/akk-store"
+    ]
+  );
+  assert.deepEqual(
+    buildAkkCommandCliArgs(
+      parseAkkCommand("status terminal-watch-durable-1"),
+      { storeDir: "/private/akk-store" }
+    ),
+    [
+      "watch-status",
+      "--watch",
+      "terminal-watch-durable-1",
+      "--store-dir",
+      "/private/akk-store"
+    ]
+  );
+  assert.throws(
+    () => buildAkkCommandCliArgs(
+      parseAkkCommand(`watch ${exactTerminalId}`),
+      {}
+    ),
+    /expected binding token is required/u
   );
 });
 
@@ -793,6 +909,76 @@ test("/akk list renders each live terminal once with its managed-turn context", 
   assert.match(text, /older managed turns: 2/u);
   assert.doesNotMatch(text, /managed-1/u);
   assert.doesNotMatch(text, /delegated|terminal-controlled/u);
+});
+
+test("/akk list renders watchable terminals and durable watch rows", () => {
+  const text = formatAkkListCommandResult({
+    terminals: [{
+      id: exactTerminalId,
+      short_ref: "@terminal1",
+      agent: "codex",
+      process_state: "active",
+      activity_state: "working",
+      terminal_control: { target: "work:0.0" },
+      available_actions: {
+        watch: {
+          arguments: {
+            terminal_id: exactTerminalId,
+            expected_binding_token: "watch-binding-token"
+          }
+        }
+      }
+    }],
+    terminal_watches: [{
+      watch_id: "terminal-watch-durable-1",
+      agent: "codex",
+      status: "watching",
+      terminal_id: exactTerminalId,
+      available_actions: {
+        status: { arguments: { watch_id: "terminal-watch-durable-1" } },
+        unwatch: { arguments: { watch_id: "terminal-watch-durable-1" } }
+      }
+    }],
+    unavailable_managed_turns: []
+  });
+
+  assert.match(text, /1 live, 1 terminal watches/u);
+  assert.match(text, new RegExp(`watch terminal_id: ${exactTerminalId.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}`, "u"));
+  assert.match(text, /terminal actions: watch/u);
+  assert.match(text, /terminal watches:/u);
+  assert.match(text, /terminal-watch-durable-1 \| codex \| watching/u);
+  assert.match(text, /actions: status, unwatch/u);
+});
+
+test("Terminal Watch command summaries preserve external-work attribution", () => {
+  const started = formatAkkWatchCommandResult({
+    watch_id: "terminal-watch-durable-1",
+    terminal_id: exactTerminalId,
+    agent: "claude",
+    status: "watching"
+  });
+  assert.match(started, /Terminal Watch started/u);
+  assert.match(started, /did not send or adopt this task/u);
+
+  const status = formatAkkWatchStatusCommandResult({
+    watch: {
+      watch_id: "terminal-watch-durable-1",
+      terminal_id: exactTerminalId,
+      agent: "claude",
+      status: "awaiting_approval"
+    }
+  });
+  assert.match(status, /Terminal Watch status/u);
+  assert.match(status, /observed external work/u);
+
+  const stopped = formatAkkUnwatchCommandResult({
+    terminal_watch: {
+      watch_id: "terminal-watch-durable-1",
+      status: "cancelled"
+    }
+  });
+  assert.match(stopped, /Terminal Watch stopped/u);
+  assert.match(stopped, /not interrupted/u);
 });
 
 test("/akk list exposes the exact orphaned terminal dispatch recovery command", () => {

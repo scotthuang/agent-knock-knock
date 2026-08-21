@@ -14,6 +14,9 @@ import {
   formatAkkRespondCommandResult,
   formatAkkThreadsCommandResult,
   formatAkkThreadTransitionCommandResult,
+  formatAkkUnwatchCommandResult,
+  formatAkkWatchCommandResult,
+  formatAkkWatchStatusCommandResult,
   isAkkNativeSubmissionAccepted,
   isAkkThreadTransitionSuccess,
   parseAkkCommand,
@@ -33,7 +36,9 @@ import {
   resumeThreadParameters,
   retryCallbackParameters,
   sendParameters,
-  statusParameters
+  statusParameters,
+  unwatchParameters,
+  watchParameters
 } from "./openclaw-plugin-schemas.js";
 
 const MAX_DISPLAYED_RESUME_SNAPSHOTS = 512;
@@ -56,14 +61,14 @@ export function registerOpenClawCommands(
 ): void {
   api.registerCommand?.({
     name: "akk",
-    description: "Send coding work through existing Codex or Claude Code shared terminals, inspect managed turns, and explicitly start, clear, list, or resume native threads.",
+    description: "Send coding work through existing Codex or Claude Code shared terminals, inspect managed Turns, observe human-started work with durable Terminal Watch, and explicitly start, clear, list, or resume native threads.",
     acceptsArgs: true,
     requireAuth: true,
     nativeProgressMessages: {
       default: "AKK is handling the request..."
     },
     agentPromptGuidance: [
-      "Use /akk <task> when exactly one eligible idle coding-agent terminal pane should receive new work. Use /akk codex: <task>, /akk claude: <task>, or another selector returned by /akk list to target an existing pane. Use session_id only when the current list action prefills it. A rollout-backed Codex pane instead uses terminal_follow_current: an exact list-prefilled terminal selector plus expected_terminal_token, or an explicitly named/uniquely selected pane whose equivalent fresh candidate authority AKK derives under its terminal lock. AKK sends the ordinary task once within the complete exact rollout inventory and binds only the uniquely accepting native thread. Never infer or reuse a listed token. Use /akk threads, /akk new-thread or clear-thread, and /akk resume-thread only with an exact full terminal_id returned by /akk list; these switch native context without creating a Turn. Resume numbers and short IDs are bound to the last displayed snapshot, while previous is available only from the latest verified committed transition. For native Codex or Claude status, use only an advertised agent_knock_knock_native_inspect action; agent_knock_knock_status inspects AKK Turn state and does not execute /status. AKK never starts a coding-agent process."
+      "Use /akk <task> when exactly one eligible idle coding-agent terminal pane should receive new work. Use /akk codex: <task>, /akk claude: <task>, or another selector returned by /akk list to target an existing pane. Use session_id only when the current list action prefills it. A rollout-backed Codex pane instead uses terminal_follow_current: an exact list-prefilled terminal selector plus expected_terminal_token, or an explicitly named/uniquely selected pane whose equivalent fresh candidate authority AKK derives under its terminal lock. AKK sends the ordinary task once within the complete exact rollout inventory and binds only the uniquely accepting native thread. Never infer or reuse a listed token. Use /akk watch only from a currently advertised watch action to observe one human-started active task; it sends no input and creates no Session or Turn. Use /akk threads, /akk new-thread or clear-thread, and /akk resume-thread only with an exact full terminal_id returned by /akk list; these switch native context without creating a Turn. Resume numbers and short IDs are bound to the last displayed snapshot, while previous is available only from the latest verified committed transition. For native Codex or Claude status, use only an advertised agent_knock_knock_native_inspect action; agent_knock_knock_status inspects AKK Turn or Terminal Watch state and does not execute /status. AKK never starts a coding-agent process."
     ],
     handler: async (ctx) => handleAkkCommand(
       api,
@@ -74,7 +79,7 @@ export function registerOpenClawCommands(
 
   registerCliTool(api, {
     name: "agent_knock_knock_list",
-    description: "List existing Codex and Claude Code tmux or Herdr panes as the primary terminals[] resources. Each terminal may include managed.current_turn or managed.recent_turn; all=true also includes older managed.history and retained unavailable history. By default, unavailable_managed_turns contains attention-needed records whose pane is unavailable. A live human thread switch remains management_state=conflict and exposes handoff_state as adoptable or blocked without mutating the Store. Use only each row's available_actions and authoritative prefilled arguments, except for two explicit-confirmation nested recovery paths: handoff_decision.choices.take_over_current.action and blocking_turns[].recovery_action. The latter is only for collateral blockers; an active handoff source Turn remains exclusively snapshot-fenced by handoff_decision. Refresh list immediately after either nested action. A session_exact session-scoped send targets session_id only when that action is listed and never redirects to the pane's replacement context. A rollout-backed Codex row instead advertises terminal_follow_current as a terminal-scoped follow-current send with its exact selector and expected_terminal_token; AKK pins the complete exact rollout inventory, sends the task once, and binds only the unique exact acceptor. Explicit discovery selectors remain compatible and derive equivalent fresh candidate authority under the terminal lock. respond targets the exact in-flight turn; native_inspect runs only a closed, exact-version Codex or Claude status profile with the current terminal/binding token; read-only thread listing targets the exact terminal, while new/resume mutations also require the current binding token and create no Turn; reconcile_binding remains a low-level conflict recovery action; managed controls target the exact turn; a raw terminal row may prefill its own compatibility selector for status or recovery controls. Never construct identifiers or tokens. AKK revalidates every terminal side effect and never starts a coding-agent process.",
+    description: "List existing Codex and Claude Code tmux or Herdr panes as the primary terminals[] resources, plus durable terminal_watches[] records. Each terminal may include managed.current_turn or managed.recent_turn; all=true also includes older managed.history and retained unavailable history. By default, unavailable_managed_turns contains attention-needed records whose pane is unavailable. A live human thread switch remains management_state=conflict and exposes handoff_state as adoptable or blocked without mutating the Store. Use only each row's available_actions and authoritative prefilled arguments, except for two explicit-confirmation nested recovery paths: handoff_decision.choices.take_over_current.action and blocking_turns[].recovery_action. The latter is only for collateral blockers; an active handoff source Turn remains exclusively snapshot-fenced by handoff_decision. Refresh list immediately after either nested action. A watch action observes one exact human-started active task without terminal input, Session, or Turn ownership. A session_exact session-scoped send targets session_id only when that action is listed and never redirects to the pane's replacement context. A rollout-backed Codex row instead advertises terminal_follow_current as a terminal-scoped follow-current send with its exact selector and expected_terminal_token; AKK pins the complete exact rollout inventory, sends the task once, and binds only the unique exact acceptor. Explicit discovery selectors remain compatible and derive equivalent fresh candidate authority under the terminal lock. respond targets the exact in-flight turn; native_inspect runs only a closed, exact-version Codex or Claude status profile with the current terminal/binding token; read-only thread listing targets the exact terminal, while new/resume mutations also require the current binding token and create no Turn; reconcile_binding remains a low-level conflict recovery action; managed controls target the exact turn; a raw terminal row may prefill its own compatibility selector for status or recovery controls. Never construct identifiers or tokens. AKK revalidates every terminal side effect and never starts a coding-agent process.",
     parameters: listParameters,
     buildArgs: (params) => {
       const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
@@ -96,6 +101,58 @@ export function registerOpenClawCommands(
       if (params.terminalDebug === true) {
         args.push("--terminal-debug");
       }
+      return args;
+    }
+  });
+
+  registerCliTool(api, {
+    name: "agent_knock_knock_watch",
+    description:
+      "Start one durable Terminal Watch for the exact supported human-started task already active in a listed Codex or Claude Code terminal. Call only from that terminal row's current watch action and preserve its exact terminal_id and expected_binding_token. This observes external work, creates no AKK Session or Turn, sends no terminal input, and never adopts or blocks the human's terminal task.",
+    parameters: watchParameters,
+    normalizeTurnIdentity: false,
+    buildArgs: (params, toolContext) => {
+      const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+      const openclawSession =
+        stringValue(toolContext?.sessionKey) ??
+        "agent:main:main";
+      const args = [
+        "watch-terminal",
+        "--terminal",
+        requiredString(params.terminal_id, "terminal_id"),
+        "--expected-binding-token",
+        requiredString(
+          params.expected_binding_token,
+          "expected_binding_token"
+        )
+      ];
+      pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
+      pushOptional(
+        args,
+        "--hard-timeout-minutes",
+        numberString(params.hardTimeoutMinutes) ??
+          numberString(config.agentHardTimeoutMinutes)
+      );
+      pushOptional(args, "--openclaw-session", openclawSession);
+      pushOptional(args, "--openclaw-bin", stringValue(config.openclawBin));
+      return args;
+    }
+  });
+
+  registerCliTool(api, {
+    name: "agent_knock_knock_unwatch",
+    description:
+      "Stop one exact durable Terminal Watch by its authoritative watch_id. This cancels observation only; it sends no terminal input and does not interrupt, adopt, or otherwise mutate the human's coding-agent task.",
+    parameters: unwatchParameters,
+    normalizeTurnIdentity: false,
+    buildArgs: (params) => {
+      const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+      const args = [
+        "unwatch-terminal",
+        "--watch",
+        requiredString(params.watch_id, "watch_id")
+      ];
+      pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
       return args;
     }
   });
@@ -253,7 +310,7 @@ export function registerOpenClawCommands(
       label: "AKK Status",
       name: "agent_knock_knock_status",
       description:
-        "Inspect one exact AKK-managed turn by its authoritative turn_id, or use only a raw terminal row's own prefilled compatibility selector. The deprecated conversation_id remains a legacy Turn alias and the list-prefilled raw-terminal input; never construct it. Returns live state, a bounded terminal screen, and available purpose/context with confidence and limitations. AKK never starts a coding agent.",
+        "Inspect one exact AKK-managed Turn by its authoritative turn_id, one durable Terminal Watch by its authoritative watch_id, or use only a raw terminal row's own prefilled compatibility selector. These targets are mutually exclusive. The deprecated conversation_id remains a legacy Turn alias and the list-prefilled raw-terminal input; never construct it. Watch status describes observed external work and never claims AKK sent or adopted the task. AKK never starts a coding agent.",
       parameters: statusParameters,
       async execute(_toolCallId, params) {
         const result = runCli(
@@ -535,6 +592,9 @@ async function handleAkkCommand(
       };
     }
     const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+    if (parsed.action === "watch") {
+      return handleAkkWatchCommand(api, ctx, parsed, config);
+    }
     if (
       parsed.action === "list-resumable-threads" ||
       parsed.action === "new-thread" ||
@@ -567,6 +627,8 @@ async function handleAkkCommand(
         };
       case "list":
         return { text: formatAkkListCommandResult(result) };
+      case "unwatch":
+        return { text: formatAkkUnwatchCommandResult(result) };
       case "status":
         return { text: formatStatusCommandResult(result) };
       case "send":
@@ -599,6 +661,55 @@ async function handleAkkCommand(
       isError: true
     };
   }
+}
+
+function handleAkkWatchCommand(api, ctx, parsed, config) {
+  const discoveryArgs = buildAkkCommandCliArgs(
+    { action: "list" },
+    config
+  );
+  if (!discoveryArgs) {
+    throw new Error("could not build Terminal Watch discovery command");
+  }
+  const discovery = runCli(api, discoveryArgs);
+  const terminal = Array.isArray(discovery.terminals)
+    ? discovery.terminals.find((entry) =>
+        isRecord(entry) && stringValue(entry.id) === parsed.terminalId
+      )
+    : undefined;
+  if (!isRecord(terminal)) {
+    throw new Error(
+      `terminal ${parsed.terminalId} is not present in the current AKK list`
+    );
+  }
+  const actions = isRecord(terminal.available_actions)
+    ? terminal.available_actions
+    : undefined;
+  const watchAction = isRecord(actions?.watch)
+    ? actions.watch
+    : undefined;
+  const actionArguments = isRecord(watchAction?.arguments)
+    ? watchAction.arguments
+    : undefined;
+  if (stringValue(actionArguments?.terminal_id) !== parsed.terminalId) {
+    throw new Error(
+      `terminal ${parsed.terminalId} does not currently advertise an exact watch action`
+    );
+  }
+  const expectedBindingToken = requiredString(
+    actionArguments?.expected_binding_token,
+    "expected_binding_token from the current watch action"
+  );
+  const mutationArgs = buildAkkCommandCliArgs(parsed, config, {
+    sessionKey: ctx.sessionKey,
+    expectedBindingToken
+  });
+  if (!mutationArgs) {
+    throw new Error("could not build Terminal Watch command");
+  }
+  return {
+    text: formatAkkWatchCommandResult(runCli(api, mutationArgs))
+  };
 }
 
 async function handleAkkLifecycleCommand(
@@ -832,6 +943,16 @@ function executorDisplayName(kind) {
 }
 
 function formatStatusCommandResult(result) {
+  if (
+    stringValue(result.watch_id) ||
+    (isRecord(result.watch) && stringValue(result.watch.watch_id)) ||
+    (
+      isRecord(result.terminal_watch) &&
+      stringValue(result.terminal_watch.watch_id)
+    )
+  ) {
+    return formatAkkWatchStatusCommandResult(result);
+  }
   const summary = result.summary ?? result.conversation ?? result ?? {};
   const terminalStatus = isRecord(result.terminal_status) ? result.terminal_status : {};
   const rawCallbackDelivery = isRecord(result.conversation?.callback_delivery)
@@ -1138,6 +1259,28 @@ function publicTurnIdentity(result) {
 
 function buildStatusCliArgs(api, params) {
   const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+  if (Object.hasOwn(params, "watch_id")) {
+    if (
+      Object.hasOwn(params, "turn_id") ||
+      Object.hasOwn(params, "conversation_id")
+    ) {
+      throw new Error(
+        "status accepts exactly one of turn_id, conversation_id, or watch_id"
+      );
+    }
+    const watchId = requiredString(params.watch_id, "watch_id");
+    const watchArgs = [
+      "watch-status",
+      "--watch",
+      watchId
+    ];
+    pushOptional(
+      watchArgs,
+      "--store-dir",
+      resolvePluginStoreDir(config)
+    );
+    return watchArgs;
+  }
   const args = [
     "status",
     "--reconcile"

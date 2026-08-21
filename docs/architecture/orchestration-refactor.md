@@ -2761,3 +2761,106 @@ signal, not a semantic correctness score.
 The JSON baseline is immutable for this snapshot. Future PRs append their own
 before/after measurements or replace the documented current baseline while
 retaining this commit as the historical comparison point.
+
+## Issue #206 addendum — durable observation of human-started work
+
+Issue #206 adds Terminal Watch as a new aggregate beside, not inside, the
+managed Session/Turn architecture. The v16 action-contract and 14-tool sections
+above remain immutable historical snapshots; the current public delta is list
+action-contract v17 and 16 registered OpenClaw tools.
+
+### Aggregate and persistence boundary
+
+`TerminalWatch` schema v1 represents one task that a human started directly in
+a Codex or Claude Code TUI. It is not a Conversation, Session, Turn, dispatch
+receipt, monitor owner, or terminal-input authority. Creating or reconciling it
+does not send input, adopt or claim the work, reserve the terminal, block later
+human activity, or create callback authority for a managed Turn.
+
+Each strict record contains `watch_id`, revision, agent, exact terminal endpoint
+and process incarnation, native thread/task identity, workspace, binding token,
+exact version/behavior profile, a privacy-safe provider anchor, originating
+OpenClaw session/binary, creation/update/deadline timestamps, status, last
+activity, optional approval fingerprint and terminal settlement, and an
+append-only notification outbox. Status is one of `active`, `completed`,
+`failed`, `timed_out`, `invalidated`, or `cancelled`. The files live at
+`<store>/terminal-watches/<watch_id>.json`, with a `0700` directory, `0600`
+owner-private atomic JSON, strict path/symlink/shape validation, and revision
+CAS. The independent namespace is admitted by the Store root allowlist without
+changing Store format 1 or writer protocol 5.
+
+Codex anchors losslessly retain the exact rollout device/inode/path, native
+task, request hash, version, task-start/user-message/observed-end byte offsets,
+capture time, and evidence fingerprint. Claude anchors retain the exact
+transcript relative path/device/inode/file identity, root prompt, request hash,
+version, current-turn/observed-end byte offsets, capture time, and fingerprint.
+The terminal identity independently binds endpoint/incarnation, PID/process
+birth, native thread, workspace, binding token, and exact behavior profile. The
+Store can reconstruct either provider anchor without raw prompt or command text.
+
+### State, locking, and callback recovery
+
+The user flow is human TUI start → fresh `/akk list` → copy only the advertised
+`terminals[].available_actions.watch` action → create Watch → address it only by
+`watch_id` for status or unwatch. The creation path revalidates the complete
+`terminal_id`/`expected_binding_token`, captures one unique active-task anchor,
+then creates with expected revision `null`. All mutations acquire the canonical
+Store writer lease before the per-Watch file lock. Observation occurs outside
+that write scope; settlement reloads under `writer -> watch`, checks the exact
+terminal and anchor fingerprints plus deadline, and commits one CAS transition.
+Concurrent cancellation, timeout, settlement, or another observer therefore
+cannot overwrite a newer revision.
+
+The observation reducer yields `pending`, `approval`, `completed`, `failed`, or
+`invalidated`. Any endpoint, process, native-thread/task, provider file,
+offset/boundary, version/profile, request, or fingerprint drift—and any missing,
+truncated, replaced, successor, unsupported, or ambiguous evidence—fails closed
+as invalidated rather than following current terminal work. `unwatch` settles
+only the aggregate as cancelled and never touches the TUI.
+
+Approval appends one notification per exact fingerprint while leaving the Watch
+active. It carries metadata only, never raw prompt/command text; Terminal Watch
+has no approval execution port and cannot participate in automatic approval.
+Completed/failed observations may retain only provider-redacted bounded
+completion text (maximum 4,000 characters) plus optional completion identity and
+timestamp. Every terminal outcome appends exactly one outcome notification.
+
+Notification IDs derive deterministically from Watch, kind, and evidence
+fingerprint; the transport idempotency key derives from Watch plus notification.
+Delivery first persists a leased claim, performs transport outside the lock,
+then CAS-settles success or retry metadata. A process crash leaves an expiring
+claim that startup/periodic reconciliation can reclaim. This is crash-safe
+at-least-once transport with effective at-most-once logical delivery when the
+OpenClaw transport honors the idempotency key. One Watch's observation or
+delivery failure is recorded in its reconciliation item and does not stop the
+remaining Watches.
+
+### Public wiring and supervision
+
+The 16-tool OpenClaw surface adds `agent_knock_knock_watch` and
+`agent_knock_knock_unwatch`; the existing status tool accepts exactly one of a
+managed Turn target, compatibility selector, or `watch_id`. List projects
+active Watches in `terminal_watches[]` and advertises `watch` only for an exact,
+supported terminal currently classified as working or awaiting approval. Slash
+routing is `/akk watch <exact-terminal-id>`, `/akk status <watch-id>`, and
+`/akk unwatch <watch-id>`. The internal CLI boundary has exactly four entries:
+
+```text
+watch-terminal --terminal <exact-terminal-id> --expected-binding-token <token> ...
+watch-status --watch <watch-id> ...
+unwatch-terminal --watch <watch-id> ...
+reconcile-watches ...
+```
+
+The existing non-overlapping OpenClaw supervisor now coordinates two independent
+steps at startup and every five seconds: managed-Turn monitor reconciliation and
+Terminal Watch reconciliation. Each has its own error boundary, so a failure in
+one cannot starve the other. Watch reconciliation observes active aggregates,
+settles deadlines/outcomes, and drains eligible durable notifications; it does
+not mutate Session/Turn state or replay terminal input.
+
+The deterministic fast witnesses cover provider-anchor drift, Store privacy and
+CAS, service restart/dedupe/timeout/claim-crash/retry behavior, callback
+projection, list/action v17, slash/tool routing, and documentation. Per the
+repository test policy, integration/full/release tests remain reserved for the
+immediate pre-publication gate of an actual npm or ClawHub release.

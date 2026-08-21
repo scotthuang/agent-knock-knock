@@ -12,6 +12,9 @@
       "commands": [
         "delegate",
         "list",
+        "watch-terminal",
+        "watch-status",
+        "unwatch-terminal",
         "status",
         "send",
         "new-thread",
@@ -27,6 +30,7 @@
         "cancel",
         "renew",
         "reconcile-monitors",
+        "reconcile-watches",
         "close",
         "transcript",
         "install-openclaw",
@@ -48,9 +52,11 @@
       ]
     },
     "list_action": {
-      "version": 16,
+      "version": 17,
       "actions": [
         "send",
+        "watch",
+        "unwatch",
         "new_thread",
         "list_resumable_threads",
         "native_inspect",
@@ -68,7 +74,7 @@
         "src/terminal-list-renderer.ts"
       ],
       "witnesses": [
-        "action-v16-unit",
+        "action-v17-unit",
         "management-list-in-process",
         "openclaw-plugin-boundary"
       ]
@@ -78,6 +84,8 @@
       "slash_command": "akk",
       "tools": [
         "agent_knock_knock_list",
+        "agent_knock_knock_watch",
+        "agent_knock_knock_unwatch",
         "agent_knock_knock_list_resumable_threads",
         "agent_knock_knock_native_inspect",
         "agent_knock_knock_new_thread",
@@ -109,6 +117,8 @@
       "format_version": 1,
       "current_writer_protocol": 5,
       "session_authority_protocol": 3,
+      "terminal_watch_schema": "agent-knock-knock/terminal-watch",
+      "terminal_watch_version": 1,
       "upgradeable_writer_protocols": [
         1,
         2,
@@ -117,7 +127,8 @@
       ],
       "authority_paths": [
         "src/session-store.ts",
-        "src/store.ts"
+        "src/store.ts",
+        "src/terminal-watch-store.ts"
       ],
       "protocol_witnesses": [
         {
@@ -142,16 +153,17 @@
         }
       ],
       "witnesses": [
-        "store-protocol-cli-boundary"
+        "store-protocol-cli-boundary",
+        "terminal-watch-store-unit"
       ]
     }
   },
   "witnesses": [
     {
-      "id": "action-v16-unit",
+      "id": "action-v17-unit",
       "path": "test/terminal-list-renderer.test.ts",
       "tier": "fast",
-      "needle": "the public action contract remains v16 with stable action ordering"
+      "needle": "the public action contract v17 includes durable Terminal Watch"
     },
     {
       "id": "callback-cli-boundary",
@@ -526,6 +538,12 @@
       "needle": "raw and managed Codex sends fail closed unless the locked pane is verifiably idle"
     },
     {
+      "id": "terminal-watch-store-unit",
+      "path": "test/terminal-watch-store.test.ts",
+      "tier": "fast",
+      "needle": "terminal Watch Store persists private atomic records and lists them"
+    },
+    {
       "id": "turn-session-binding-in-process",
       "path": "test/turn-session-binding-cli.test.ts",
       "tier": "integration",
@@ -728,13 +746,13 @@
     },
     {
       "id": "terminal-list-renderer",
-      "invariant": "The imported command service and pure renderer preserve action-contract v16 ordering, exact selectors, ambiguity failures, and read-only projection for CLI and OpenClaw.",
+      "invariant": "The imported command service and pure renderer preserve action-contract v17 ordering, exact selectors, Terminal Watch authority, ambiguity failures, and read-only projection for CLI and OpenClaw.",
       "old_executable_witnesses": [
         "management-list-in-process",
         "session-selector-in-process"
       ],
       "service_invariant_witnesses": [
-        "action-v16-unit"
+        "action-v17-unit"
       ],
       "retained_boundary_witnesses": [
         "codex-binding-boundary",

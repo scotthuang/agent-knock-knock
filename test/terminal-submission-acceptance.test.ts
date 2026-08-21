@@ -10,10 +10,12 @@ import type {
 } from "../src/agent-session-provider.js";
 import {
   captureCodexCandidateSetRolloutAcceptanceAnchor,
+  captureCodexHumanStartedActiveTaskAnchor,
   captureCodexRolloutAcceptanceAnchor,
   detectCodexBoundRolloutCompletion,
   detectCodexCandidateSetRolloutAcceptance,
   detectCodexRolloutAcceptance,
+  observeCodexHumanStartedActiveTask,
   validateTerminalSubmissionAcceptanceEvidence,
   type CodexRolloutIdentity
 } from "../src/terminal-submission-acceptance.js";
@@ -23,6 +25,197 @@ import { terminalSubmissionReplayReceipt } from
 const SESSION_ID = "019ee559-7bb8-7fd1-970c-0f7b6978c44e";
 const REQUEST = "请检查第一行\nThen verify the second line.";
 const REQUEST_HASH = createHash("sha256").update(REQUEST).digest("hex");
+
+test("captures and completes one exact human-started Codex task without persisting its prompt", () => {
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  const fixture = codexFixture(acceptedTurnRecords(REQUEST, 901));
+  const currentIdentity = {
+    sessionId: SESSION_ID,
+    processUuid,
+    processBirth,
+    rollout: fixture.identity
+  };
+  try {
+    const anchor = captureCodexHumanStartedActiveTaskAnchor({
+      currentIdentity,
+      now: new Date("2026-08-07T01:00:01.500Z")
+    });
+    assert.ok(anchor);
+    assert.equal(anchor.turn_id, turnId(901));
+    assert.equal(anchor.request_hash, REQUEST_HASH);
+    assert.equal(anchor.codex_version, "0.147.0");
+    assert.equal(JSON.stringify(anchor).includes(REQUEST), false);
+    assert.equal(
+      observeCodexHumanStartedActiveTask({ anchor, currentIdentity }).status,
+      "pending"
+    );
+
+    appendRecords(fixture.path, [
+      taskCompleteRecord(901, "Human task done"),
+      ...acceptedTurnRecords("A later task must not erase completion", 906)
+    ]);
+    const observed = observeCodexHumanStartedActiveTask({
+      anchor,
+      currentIdentity
+    });
+    assert.equal(observed.status, "completed");
+    if (observed.status === "completed") {
+      assert.equal(observed.completion.outcome, "success");
+      assert.equal(observed.completion.id, turnId(901));
+      assert.equal(observed.completion.text, "Human task done");
+    }
+    assert.equal(
+      observeCodexHumanStartedActiveTask({
+        anchor,
+        currentIdentity: {
+          ...currentIdentity,
+          processBirth: `${processBirth} replaced after completion`
+        }
+      }).status,
+      "completed",
+      "durable exact completion must win over later process drift"
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("completed historical Codex prompts cannot poison the unique active task", () => {
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  const historicalWithoutTurnId = {
+    timestamp: "2026-08-07T00:59:59.100Z",
+    type: "response_item",
+    payload: {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "completed legacy prompt" }]
+    }
+  };
+  const historicalUnsupportedContent = {
+    timestamp: "2026-08-07T00:59:59.200Z",
+    type: "response_item",
+    payload: {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_image", image_url: "data:image/png;base64,AA==" }],
+      internal_chat_message_metadata_passthrough: { turn_id: turnId(899) }
+    }
+  };
+  const fixture = codexFixture([
+    {
+      type: "event_msg",
+      payload: { type: "task_started", turn_id: turnId(898) }
+    },
+    historicalWithoutTurnId,
+    taskCompleteRecord(898, "legacy task completed"),
+    {
+      type: "event_msg",
+      payload: { type: "task_started", turn_id: turnId(899) }
+    },
+    historicalUnsupportedContent,
+    taskCompleteRecord(899, "multimodal task completed"),
+    ...acceptedTurnRecords(REQUEST, 900)
+  ]);
+  try {
+    const anchor = captureCodexHumanStartedActiveTaskAnchor({
+      currentIdentity: {
+        sessionId: SESSION_ID,
+        processUuid,
+        processBirth,
+        rollout: fixture.identity
+      }
+    });
+    assert.ok(anchor);
+    assert.equal(anchor.turn_id, turnId(900));
+    assert.equal(anchor.request_hash, REQUEST_HASH);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("human-started Codex anchors fail closed on ambiguity, identity or file drift, and a later task", () => {
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  const ambiguous = codexFixture([
+    ...acceptedTurnRecords("First active task", 902),
+    ...acceptedTurnRecords("Second active task", 903)
+  ]);
+  try {
+    assert.throws(
+      () => captureCodexHumanStartedActiveTaskAnchor({
+        currentIdentity: {
+          sessionId: SESSION_ID,
+          processUuid,
+          processBirth,
+          rollout: ambiguous.identity
+        }
+      }),
+      /multiple unmatched active tasks/u
+    );
+  } finally {
+    ambiguous.cleanup();
+  }
+
+  const fixture = codexFixture(acceptedTurnRecords(REQUEST, 904));
+  const currentIdentity = {
+    sessionId: SESSION_ID,
+    processUuid,
+    processBirth,
+    rollout: fixture.identity
+  };
+  try {
+    const anchor = captureCodexHumanStartedActiveTaskAnchor({ currentIdentity });
+    assert.ok(anchor);
+    assert.equal(observeCodexHumanStartedActiveTask({
+      anchor,
+      currentIdentity: {
+        ...currentIdentity,
+        processBirth: `${processBirth} drifted`
+      }
+    }).status, "invalidated");
+
+    appendRecords(fixture.path, acceptedTurnRecords("Later human task", 905));
+    const observed = observeCodexHumanStartedActiveTask({
+      anchor,
+      currentIdentity
+    });
+    assert.equal(observed.status, "invalidated");
+    if (observed.status === "invalidated") {
+      assert.match(observed.reason, /later Codex human task/u);
+    }
+  } finally {
+    fixture.cleanup();
+  }
+
+  const replaced = codexFixture(acceptedTurnRecords("Inode-bound task", 907));
+  const replacedIdentity = {
+    sessionId: SESSION_ID,
+    processUuid,
+    processBirth,
+    rollout: replaced.identity
+  };
+  try {
+    const anchor = captureCodexHumanStartedActiveTaskAnchor({
+      currentIdentity: replacedIdentity
+    });
+    assert.ok(anchor);
+    const contents = fs.readFileSync(replaced.path);
+    fs.renameSync(replaced.path, `${replaced.path}.replaced`);
+    fs.writeFileSync(replaced.path, contents, { mode: 0o600 });
+    const observed = observeCodexHumanStartedActiveTask({
+      anchor,
+      currentIdentity: replacedIdentity
+    });
+    assert.equal(observed.status, "invalidated");
+    if (observed.status === "invalidated") {
+      assert.match(observed.reason, /descriptor identity does not match/u);
+    }
+  } finally {
+    replaced.cleanup();
+  }
+});
 
 test("candidate-set Codex acceptance uses the exact existing-root offset through completion", () => {
   const firstId = SESSION_ID;

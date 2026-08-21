@@ -103,6 +103,47 @@ export const listParameters = {
   }
 };
 
+export const watchParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["terminal_id", "expected_binding_token"],
+  properties: {
+    terminal_id: {
+      type: "string",
+      minLength: 1,
+      pattern: "^terminal:v[0-9]+:\\S+$",
+      description:
+        "Exact full terminal_id from the same current watch action as expected_binding_token. The task must already have been started by the human in this terminal."
+    },
+    expected_binding_token: {
+      type: "string",
+      minLength: 1,
+      description:
+        "Fresh compare-and-swap token prefilled by this terminal's current watch action. Never guess, construct, or reuse it after terminal state changes."
+    },
+    hardTimeoutMinutes: {
+      type: "number",
+      exclusiveMinimum: 0,
+      description:
+        "Optional maximum lifetime for observing this external terminal task."
+    }
+  }
+};
+
+export const unwatchParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["watch_id"],
+  properties: {
+    watch_id: {
+      type: "string",
+      minLength: 1,
+      description:
+        "Authoritative Terminal Watch id returned by watch or prefilled by list/status."
+    }
+  }
+};
+
 export const listResumableThreadsParameters = {
   type: "object",
   additionalProperties: false,
@@ -300,10 +341,17 @@ export const retryCallbackParameters = {
 export const statusParameters = {
   type: "object",
   additionalProperties: false,
-  not: { required: ["turn_id", "conversation_id"] },
+  not: {
+    anyOf: [
+      { required: ["turn_id", "conversation_id"] },
+      { required: ["turn_id", "watch_id"] },
+      { required: ["conversation_id", "watch_id"] }
+    ]
+  },
   anyOf: [
     { required: ["turn_id"] },
-    { required: ["conversation_id"] }
+    { required: ["conversation_id"] },
+    { required: ["watch_id"] }
   ],
   properties: {
     turn_id: {
@@ -315,6 +363,12 @@ export const statusParameters = {
       deprecated: true,
       description:
         "Deprecated legacy Turn alias, or the exact raw-terminal selector prefilled by that terminal row's available status action. Managed Turn status must use turn_id; never construct or guess a raw-terminal selector."
+    },
+    watch_id: {
+      type: "string",
+      minLength: 1,
+      description:
+        "Authoritative Terminal Watch id prefilled by a current watch row. This inspects externally started work and is mutually exclusive with Turn targets."
     },
     idleTimeoutMinutes: {
       type: "number"

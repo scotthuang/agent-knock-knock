@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Add durable Terminal Watch for exact human-started Codex and Claude Code tasks, with restart-safe OpenClaw callbacks for approval, completion, failure, timeout, invalidation, and cancellation.
+- Add `agent_knock_knock_watch` / `agent_knock_knock_unwatch`, `/akk watch` / `/akk unwatch`, and watch-aware list/status output without creating an AKK Session or Turn or sending terminal input.
+
+### Changed
+
+- Advance the action contract to 17 and expand the OpenClaw plugin contract to 16 tools. Store writer protocol remains 5; Terminal Watch uses its own schema-v1 aggregate.
+
+### Security
+
+- Pin each Watch to exact terminal, process, native-task, runtime-version, rollout/transcript file, and privacy-safe request-hash evidence; drift fails closed and approval observations never authorize automatic input.
+
 ## 0.12.12 - 2026-08-21
 
 ### Added

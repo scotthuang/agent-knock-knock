@@ -2,8 +2,8 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 1556,
-    "production_physical_loc": 93413,
+    "cli_core_max_physical_loc": 1586,
+    "production_physical_loc": 98447,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -483,6 +483,13 @@
         "test/shards/agent-cli-monitor-recovery.test.ts",
         "test/shards/agent-cli-session-acceptance.test.ts",
         "test/shards/agent-cli-terminal-send-gates.test.ts"
+      ]
+    },
+    "terminal-watch": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/management-cli.test.ts",
+        "test/openclaw-plugin-contract.test.ts"
       ]
     },
     "transcript": {
@@ -984,6 +991,22 @@
     {
       "path": "src/terminal-turn-binding-authority-cli-adapter.ts",
       "owner": "terminal-identity-authority"
+    },
+    {
+      "path": "src/terminal-watch-callback-cli-adapter.ts",
+      "owner": "terminal-watch"
+    },
+    {
+      "path": "src/terminal-watch-cli-adapter.ts",
+      "owner": "terminal-watch"
+    },
+    {
+      "path": "src/terminal-watch-service.ts",
+      "owner": "terminal-watch"
+    },
+    {
+      "path": "src/terminal-watch-store.ts",
+      "owner": "terminal-watch"
     },
     {
       "path": "src/transcript.ts",

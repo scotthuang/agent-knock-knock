@@ -107,9 +107,9 @@ test("final refactor evidence reproduces startup counts and historical selection
 
   assert.deepEqual(evidence.publicContracts, {
     contractCount: 4,
-    witnessCount: 65,
+    witnessCount: 66,
     migrationCount: 11,
-    openclawToolCount: 14,
+    openclawToolCount: 16,
     storeProtocolCount: 5
   });
 });
@@ -1097,9 +1097,18 @@ test("public contract evidence fails closed on missing witnesses and protocol dr
     /Store format\/writer\/session-authority protocol contract changed/u
   );
 
+  const terminalWatchSchemaDrift =
+    loadJson("config/public-contract-witnesses.json");
+  terminalWatchSchemaDrift.contracts.store_protocols.terminal_watch_version = 2;
+  assert.throws(
+    () => validate(terminalWatchSchemaDrift),
+    /Terminal Watch schema contract changed/u
+  );
+
   const duplicateTool = loadJson("config/public-contract-witnesses.json");
-  duplicateTool.contracts.openclaw_tools.tools[13] =
-    duplicateTool.contracts.openclaw_tools.tools[12];
+  const duplicateTools = duplicateTool.contracts.openclaw_tools.tools;
+  duplicateTools[duplicateTools.length - 1] =
+    duplicateTools[duplicateTools.length - 2];
   assert.throws(() => validate(duplicateTool), /OpenClaw tools must equal/u);
 
   for (const missingAuthority of [

@@ -87,6 +87,9 @@ import {
   createTerminalStatusCliFacade
 } from "./terminal-status-cli-adapter.js";
 import {
+  createTerminalWatchCliAdapter
+} from "./terminal-watch-cli-adapter.js";
+import {
   isDiscoverableTmuxConversation
 } from "./terminal-status-facts.js";
 import {
@@ -407,6 +410,9 @@ const STORE_MUTATION_COMMANDS = new Set([
   "cancel",
   "renew",
   "reconcile-monitors",
+  "reconcile-watches",
+  "watch-terminal",
+  "unwatch-terminal",
   "close",
   "callback",
   "retry-callback",
@@ -457,6 +463,12 @@ async function dispatchCliCommand(commandName, options) {
     await terminalDelegateCliFacade.runDelegate(options);
   } else if (commandName === "list") {
     await terminalListCliFacade.runList(options);
+  } else if (commandName === "watch-terminal") {
+    await terminalWatchCliFacade.runWatch(options);
+  } else if (commandName === "watch-status") {
+    terminalWatchCliFacade.runWatchStatus(options);
+  } else if (commandName === "unwatch-terminal") {
+    await terminalWatchCliFacade.runUnwatch(options);
   } else if (commandName === "status") {
     await terminalStatusCliFacade.runStatus(options);
   } else if (commandName === "send") {
@@ -481,6 +493,8 @@ async function dispatchCliCommand(commandName, options) {
     await terminalMaintenanceCliFacade.runRenew(options);
   } else if (commandName === "reconcile-monitors") {
     await terminalMonitorSupervisionCliFacade.runReconcileMonitors(options);
+  } else if (commandName === "reconcile-watches") {
+    await terminalWatchCliFacade.runReconcileWatches(options);
   } else if (commandName === "close") {
     await terminalMaintenanceCliFacade.runClose(options);
   } else if (commandName === "transcript") {
@@ -1073,6 +1087,8 @@ const terminalListCliFacade = createTerminalListCliFacade({
     isVerifiedDeadTerminalAgentProcess,
     loadTerminalBridgeDispatchLedger,
     loadTerminalDispatchLedgerOwner,
+    listTerminalWatches: (storeDir, options) =>
+      terminalWatchCliFacade.listPublicWatches(storeDir, options),
     managedSessionStoreDirForConversation: (conversation) =>
       terminalAcceptanceCliFacade.storeDirForConversation(conversation),
     managedTurnsForSession: (storeDir, sessionId) =>
@@ -1105,6 +1121,16 @@ const terminalListCliFacade = createTerminalListCliFacade({
       );
     }
   }
+});
+
+const terminalWatchCliFacade = createTerminalWatchCliAdapter({
+  acquireFileLock,
+  buildTerminalListGroup: terminalListCliFacade.buildTerminalListGroup,
+  loadClaudeAgentRows,
+  now: cliNow,
+  randomUUID,
+  storeDirFromOptions,
+  printJson
 });
 
 const terminalHandoffCliFacade = createTerminalHandoffCliFacade({
@@ -1532,6 +1558,10 @@ function usage() {
   agent-knock-knock --version
   agent-knock-knock delegate --request <text> [--agent ${agentList}] [--workspace <path>] [--store-dir <dir>]
   agent-knock-knock list [--store-dir <dir>] [--agent ${agentList}] [--status <status>] [--all] [--reconcile] [--no-approval-scan] [--terminal-debug]
+  agent-knock-knock watch-terminal --terminal <exact-terminal-id> --expected-binding-token <token> --openclaw-session <session> [--hard-timeout-minutes <minutes>] [--store-dir <dir>] [--openclaw-bin <path>]
+  agent-knock-knock watch-status --watch <terminal-watch-id> [--store-dir <dir>]
+  agent-knock-knock unwatch-terminal --watch <terminal-watch-id> [--store-dir <dir>]
+  agent-knock-knock reconcile-watches [--store-dir <dir>]
   agent-knock-knock status [--turn <turn-id|selector>] [--conversation <selector>] [--store-dir <dir>] [--reconcile] [--trace]
   agent-knock-knock send [--session <session-id|selector>] [--conversation <selector>] --message <text> [--expected-terminal-token <token>] [--type task] [--agent-timeout-minutes <minutes>] [--agent-hard-timeout-minutes <minutes>]
   agent-knock-knock new-thread --terminal <exact-terminal-id> --expected-binding-token <token>

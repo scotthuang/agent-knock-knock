@@ -150,6 +150,8 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   assert.deepEqual(sorted(registeredTools), sorted(contractedTools));
   assert.deepEqual(registeredTools, [
     "agent_knock_knock_list",
+    "agent_knock_knock_watch",
+    "agent_knock_knock_unwatch",
     "agent_knock_knock_list_resumable_threads",
     "agent_knock_knock_native_inspect",
     "agent_knock_knock_new_thread",
@@ -169,10 +171,10 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
   assert.equal(
     createHash("sha256").update(schemaBytes).digest("hex"),
-    "bba56c0aaf95296929c1a1ddd452be187945a2eb84e8793201c312f26d271702"
+    "a41317f70c10e325c6b1f5ba366eda63329ceccf860a11ca07e4f9cdb606307d"
   );
   assert.deepEqual(sorted(metadataTools), sorted(contractedTools));
-  assert.equal(contractedTools.length, 14);
+  assert.equal(contractedTools.length, 16);
   assert.match(
     manifest.description ?? "",
     /exact-version native status inspection/u
@@ -206,6 +208,8 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
   assert.equal(contractedTools.includes("agent_knock_knock_send"), true);
   assert.equal(contractedTools.includes("agent_knock_knock_respond"), true);
+  assert.equal(contractedTools.includes("agent_knock_knock_watch"), true);
+  assert.equal(contractedTools.includes("agent_knock_knock_unwatch"), true);
   assert.equal(
     contractedTools.includes("agent_knock_knock_list_resumable_threads"),
     true
@@ -257,7 +261,14 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
   assert.equal(manifest.toolMetadata.agent_knock_knock_renew.optional, true);
   assert.equal(manifest.contracts.tools.includes("agent_knock_knock_respond"), true);
   assert.equal(manifest.toolMetadata.agent_knock_knock_respond.optional, true);
-  assert.equal(manifest.contracts.tools.length, 14);
+  assert.equal(manifest.contracts.tools.length, 16);
+  for (const terminalWatchTool of [
+    "agent_knock_knock_watch",
+    "agent_knock_knock_unwatch"
+  ]) {
+    assert.equal(manifest.contracts.tools.includes(terminalWatchTool), true);
+    assert.equal(manifest.toolMetadata[terminalWatchTool].optional, true);
+  }
   for (const lifecycleTool of [
     "agent_knock_knock_list_resumable_threads",
     "agent_knock_knock_native_inspect",
@@ -281,6 +292,10 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
     path.join(packageRoot, "src", "openclaw-plugin-supervisor.ts"),
     "utf8"
   );
+  const terminalListSource = fs.readFileSync(
+    path.join(packageRoot, "src", "terminal-list-cli-adapter.ts"),
+    "utf8"
+  );
   const entrySource = fs.readFileSync(
     path.join(packageRoot, "src", "openclaw-plugin.ts"),
     "utf8"
@@ -295,6 +310,8 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
   );
   assert.match(commandSource, /--expected-approval-fingerprint/u);
   assert.match(commandSource, /name: "agent_knock_knock_renew"/u);
+  assert.match(commandSource, /name: "agent_knock_knock_watch"/u);
+  assert.match(commandSource, /name: "agent_knock_knock_unwatch"/u);
   assert.match(commandSource, /name: "agent_knock_knock_new_thread"/u);
   assert.match(commandSource, /name: "agent_knock_knock_reconcile_binding"/u);
   assert.match(commandSource, /name: "agent_knock_knock_list_resumable_threads"/u);
@@ -316,6 +333,22 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
   assert.match(
     supervisorSource,
     /const args = \["reconcile-monitors", "--reason", reason\][\s\S]*?--terminal-monitors-only[\s\S]*?catch \(error\)[\s\S]*?logger\.warn/u
+  );
+  assert.match(
+    supervisorSource,
+    /const args = \["reconcile-watches", "--reason", reason\][\s\S]*?monitor supervision deferred after error[\s\S]*?watchReconciliationArgs\("watch_supervision"\)[\s\S]*?Terminal Watch supervision deferred after error/u
+  );
+  assert.match(
+    supervisorSource,
+    /const reconcileStartup = async[\s\S]*?runCliAsync\([\s\S]*?reconciliationArgs\("startup_reconciliation"\)[\s\S]*?runCliAsync\([\s\S]*?watchReconciliationArgs\("startup_reconciliation"\)[\s\S]*?inFlight = reconcileStartup\(\)/u
+  );
+  assert.match(
+    terminalListSource,
+    /watch:[\s\S]*?session\.agent !== "codex" \|\| Boolean\(nativeAgentIdentity\?\.rollout\)/u
+  );
+  assert.match(
+    terminalListSource,
+    /const activeWatchedTerminals = new Set\(\s*observedTerminalWatches[\s\S]*?withoutAvailableAction\(terminal, "watch"\)/u
   );
   assert.match(
     entrySource,
@@ -1337,22 +1370,24 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
     );
     assert.equal(calls[6]?.[0], "reconcile-monitors");
     assert.equal(calls[6]?.includes("--workspace"), false);
+    assert.equal(calls[7]?.[0], "reconcile-watches");
+    assert.equal(calls[7]?.includes("--workspace"), false);
     assert.notEqual(
-      optionValue(calls[7] ?? [], "--message-id"),
+      optionValue(calls[8] ?? [], "--message-id"),
       expectedToolCall1MessageId,
       "the same tool call id in another OpenClaw Session must be isolated"
     );
     assert.notEqual(
-      optionValue(calls[8] ?? [], "--message-id"),
+      optionValue(calls[9] ?? [], "--message-id"),
       expectedToolCall1MessageId,
       "send and respond must have separate idempotency domains"
     );
     assert.notEqual(
-      optionValue(calls[9] ?? [], "--message-id"),
+      optionValue(calls[10] ?? [], "--message-id"),
       expectedToolCall1MessageId,
       "a new OpenClaw conversation incarnation must not replay an old receipt"
     );
-    assert.deepEqual(calls[10]?.slice(0, 5), [
+    assert.deepEqual(calls[11]?.slice(0, 5), [
       "send",
       "--conversation",
       followCurrentTerminalId,
@@ -1360,7 +1395,7 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
       "terminal-token-current"
     ]);
     assert.equal(
-      optionValue(calls[10] ?? [], "--message"),
+      optionValue(calls[11] ?? [], "--message"),
       "Continue in the human-selected terminal context"
     );
   } finally {
@@ -1376,6 +1411,8 @@ test("OpenClaw monitor supervisor reconciles repeatedly without overlap and stop
   const fakeCli = path.join(tempDir, "supervisor.cjs");
   const callsPath = path.join(tempDir, "calls.ndjson");
   const activePath = path.join(tempDir, "active");
+  const startupReadyPath = path.join(tempDir, "startup-ready");
+  const startupGatePath = path.join(tempDir, "startup-gate");
   let service: {
     start?(): void;
     stop?(): void | Promise<void>;
@@ -1392,6 +1429,14 @@ test("OpenClaw monitor supervisor reconciles repeatedly without overlap and stop
         "if (fs.existsSync(activePath)) { fs.appendFileSync(callsPath, JSON.stringify({ phase: 'overlap', args }) + '\\n'); }",
         "fs.writeFileSync(activePath, String(process.pid));",
         "fs.appendFileSync(callsPath, JSON.stringify({ phase: 'start', args }) + '\\n');",
+        `if (args[0] === "reconcile-monitors" && args.includes("startup_reconciliation")) {`,
+        `  fs.writeFileSync(${JSON.stringify(startupReadyPath)}, "ready");`,
+        "  const deadline = Date.now() + 1000;",
+        `  while (!fs.existsSync(${JSON.stringify(startupGatePath)}) && Date.now() < deadline) {`,
+        "    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);",
+        "  }",
+        `  if (!fs.existsSync(${JSON.stringify(startupGatePath)})) process.exit(88);`,
+        "}",
         "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 80);",
         "fs.rmSync(activePath, { force: true });",
         "fs.appendFileSync(callsPath, JSON.stringify({ phase: 'end', args }) + '\\n');",
@@ -1419,12 +1464,24 @@ test("OpenClaw monitor supervisor reconciles repeatedly without overlap and stop
 
     assert.equal(typeof service?.start, "function");
     assert.equal(typeof service?.stop, "function");
+    const startupBeganAt = Date.now();
     service?.start?.();
+    assert.equal(
+      Date.now() - startupBeganAt < 500,
+      true,
+      "Terminal Watch startup reconciliation must not block the Gateway event loop"
+    );
+    const readyDeadline = Date.now() + 1_000;
+    while (!fs.existsSync(startupReadyPath) && Date.now() < readyDeadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(fs.existsSync(startupReadyPath), true);
+    fs.writeFileSync(startupGatePath, "continue");
     const deadline = Date.now() + 2_000;
     while (
       (!fs.existsSync(callsPath) ||
         readSupervisorCalls(callsPath).filter((entry) => entry.phase === "start")
-          .length < 2) &&
+          .length < 4) &&
       Date.now() < deadline
     ) {
       await new Promise<void>((resolve) => setTimeout(resolve, 10));
@@ -1432,7 +1489,7 @@ test("OpenClaw monitor supervisor reconciles repeatedly without overlap and stop
     await service?.stop?.();
     const stoppedCalls = readSupervisorCalls(callsPath);
     assert.equal(
-      stoppedCalls.filter((entry) => entry.phase === "start").length >= 2,
+      stoppedCalls.filter((entry) => entry.phase === "start").length >= 4,
       true
     );
     assert.equal(
@@ -1440,10 +1497,18 @@ test("OpenClaw monitor supervisor reconciles repeatedly without overlap and stop
       false
     );
     const starts = stoppedCalls.filter((entry) => entry.phase === "start");
+    assert.equal(starts[0]?.args[0], "reconcile-monitors");
+    assert.equal(starts[1]?.args[0], "reconcile-watches");
+    assert.equal(starts[2]?.args[0], "reconcile-monitors");
+    assert.equal(starts[3]?.args[0], "reconcile-watches");
     assert.equal(optionAfter(starts[0]?.args ?? [], "--reason"), "startup_reconciliation");
-    assert.equal(optionAfter(starts[1]?.args ?? [], "--reason"), "monitor_supervision");
+    assert.equal(optionAfter(starts[1]?.args ?? [], "--reason"), "startup_reconciliation");
+    assert.equal(optionAfter(starts[2]?.args ?? [], "--reason"), "monitor_supervision");
+    assert.equal(optionAfter(starts[3]?.args ?? [], "--reason"), "watch_supervision");
     assert.equal(starts[0]?.args.includes("--terminal-monitors-only"), false);
-    assert.equal(starts[1]?.args.includes("--terminal-monitors-only"), true);
+    assert.equal(starts[1]?.args.includes("--terminal-monitors-only"), false);
+    assert.equal(starts[2]?.args.includes("--terminal-monitors-only"), true);
+    assert.equal(starts[3]?.args.includes("--terminal-monitors-only"), false);
     const countAfterStop = stoppedCalls.length;
     await new Promise<void>((resolve) => setTimeout(resolve, 100));
     assert.equal(readSupervisorCalls(callsPath).length, countAfterStop);
@@ -1451,6 +1516,96 @@ test("OpenClaw monitor supervisor reconciles repeatedly without overlap and stop
     await service?.stop?.();
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+test("OpenClaw supervisor isolates managed monitor and Terminal Watch failures", async () => {
+  const runFailureCase = async (
+    failingCommand: "reconcile-monitors" | "reconcile-watches"
+  ): Promise<void> => {
+    const tempDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), `akk-plugin-supervisor-${failingCommand}-`)
+    );
+    const fakeCli = path.join(tempDir, "supervisor-failure.cjs");
+    const callsPath = path.join(tempDir, "calls.ndjson");
+    const warnings: string[] = [];
+    let service: {
+      start?(): void;
+      stop?(): void | Promise<void>;
+    } | undefined;
+
+    try {
+      fs.writeFileSync(
+        fakeCli,
+        [
+          'const fs = require("node:fs");',
+          "const args = process.argv.slice(2);",
+          `fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(args) + "\\n");`,
+          `if (args[0] === ${JSON.stringify(failingCommand)}) { process.stderr.write("injected failure"); process.exit(9); }`,
+          "process.stdout.write(JSON.stringify({ checked: 1, launched: 0, already_running: 1, skipped: 0, changed: 0, callbacks_delivered: 0, errors: 0 }));"
+        ].join("\n"),
+        "utf8"
+      );
+
+      (
+        createOpenClawPluginForTest(fakeCli, {
+          monitorSupervisorIntervalMs: 20
+        }) as unknown as {
+          register(api: Record<string, any>): void;
+        }
+      ).register({
+        pluginConfig: {},
+        logger: {
+          info() {},
+          warn(message: string) {
+            warnings.push(message);
+          }
+        },
+        registerGatewayMethod() {},
+        registerService(value: typeof service) {
+          service = value;
+        },
+        registerCommand() {},
+        registerTool() {}
+      });
+
+      service?.start?.();
+      const deadline = Date.now() + 2_000;
+      while (
+        (!fs.existsSync(callsPath) ||
+          fs.readFileSync(callsPath, "utf8").trim().split("\n").length < 4) &&
+        Date.now() < deadline
+      ) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      }
+      await service?.stop?.();
+      const calls = fs.readFileSync(callsPath, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as string[]);
+      assert.deepEqual(calls.slice(0, 4).map((args) => args[0]), [
+        "reconcile-monitors",
+        "reconcile-watches",
+        "reconcile-monitors",
+        "reconcile-watches"
+      ]);
+      assert.equal(
+        warnings.some((message) =>
+          failingCommand === "reconcile-monitors"
+            ? message.includes("monitor supervision deferred") ||
+              message.includes("monitor reconciliation skipped")
+            : message.includes("Terminal Watch supervision deferred") ||
+              message.includes("Terminal Watch reconciliation skipped")
+        ),
+        true
+      );
+    } finally {
+      await service?.stop?.();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  };
+
+  await runFailureCase("reconcile-monitors");
+  await runFailureCase("reconcile-watches");
 });
 
 test("OpenClaw controls distinguish managed turns from list-prefilled raw terminals", async () => {
@@ -1505,8 +1660,36 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
       }
     });
 
+    const statusTool = tools.get("agent_knock_knock_status");
+    assert.ok(statusTool, "agent_knock_knock_status must be registered");
+    assert.ok(statusTool.parameters?.properties?.turn_id);
+    assert.ok(statusTool.parameters?.properties?.conversation_id);
+    assert.ok(statusTool.parameters?.properties?.watch_id);
+    assert.deepEqual(statusTool.parameters?.anyOf, [
+      { required: ["turn_id"] },
+      { required: ["conversation_id"] },
+      { required: ["watch_id"] }
+    ]);
+    assert.deepEqual(statusTool.parameters?.not, {
+      anyOf: [
+        { required: ["turn_id", "conversation_id"] },
+        { required: ["turn_id", "watch_id"] },
+        { required: ["conversation_id", "watch_id"] }
+      ]
+    });
+    const watchTool = tools.get("agent_knock_knock_watch");
+    assert.ok(watchTool, "agent_knock_knock_watch must be registered");
+    assert.deepEqual(watchTool.parameters?.required, [
+      "terminal_id",
+      "expected_binding_token"
+    ]);
+    assert.equal(watchTool.parameters?.additionalProperties, false);
+    const unwatchTool = tools.get("agent_knock_knock_unwatch");
+    assert.ok(unwatchTool, "agent_knock_knock_unwatch must be registered");
+    assert.deepEqual(unwatchTool.parameters?.required, ["watch_id"]);
+    assert.equal(unwatchTool.parameters?.additionalProperties, false);
+
     for (const name of [
-      "agent_knock_knock_status",
       "agent_knock_knock_approve",
       "agent_knock_knock_renew",
       "agent_knock_knock_retry_callback",
@@ -1670,6 +1853,13 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
         name
       );
     }
+    await assert.rejects(
+      () => statusTool.execute!("ambiguous-watch-target", {
+        turn_id: "turn-modern",
+        watch_id: "terminal-watch-modern"
+      }),
+      /exactly one of turn_id, conversation_id, or watch_id/u
+    );
 
     const sendTool = tools.get("agent_knock_knock_send");
     const respondTool = tools.get("agent_knock_knock_respond");
@@ -1709,6 +1899,17 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
 
     await tools.get("agent_knock_knock_status")?.execute?.("status", {
       turn_id: "turn-status"
+    });
+    await statusTool.execute?.("watch-status", {
+      watch_id: "terminal-watch-status"
+    });
+    await watchTool.execute?.("watch", {
+      terminal_id: "terminal:v2:tmux:codex:work:0.0:1234",
+      expected_binding_token: "watch-binding-token",
+      hardTimeoutMinutes: 30
+    });
+    await unwatchTool.execute?.("unwatch", {
+      watch_id: "terminal-watch-status"
     });
     await tools.get("agent_knock_knock_approve")?.execute?.("approve", {
       conversation_id: "legacy-turn",
@@ -1771,6 +1972,14 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
       .map((line) => JSON.parse(line) as string[]);
     assert.deepEqual(calls.map((args) => args.slice(0, 4)), [
       ["status", "--reconcile", "--turn", "turn-status"],
+      ["watch-status", "--watch", "terminal-watch-status"],
+      [
+        "watch-terminal",
+        "--terminal",
+        "terminal:v2:tmux:codex:work:0.0:1234",
+        "--expected-binding-token"
+      ],
+      ["unwatch-terminal", "--watch", "terminal-watch-status"],
       ["approve", "--conversation", "legacy-turn", "--expected-approval-fingerprint"],
       [
         "approve",
@@ -1796,6 +2005,22 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
         "--reason"
       ]
     ]);
+    assert.deepEqual(calls[2], [
+      "watch-terminal",
+      "--terminal",
+      "terminal:v2:tmux:codex:work:0.0:1234",
+      "--expected-binding-token",
+      "watch-binding-token",
+      "--hard-timeout-minutes",
+      "30",
+      "--openclaw-session",
+      "agent:main:main"
+    ]);
+    assert.deepEqual(calls[3], [
+      "unwatch-terminal",
+      "--watch",
+      "terminal-watch-status"
+    ]);
     assert.deepEqual(calls.at(-3), [
       "close",
       "--turn",
@@ -1805,7 +2030,7 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
       "--expected-handoff-token",
       "handoff-current"
     ]);
-    assert.deepEqual(calls[2], [
+    assert.deepEqual(calls[5], [
       "approve",
       "--conversation",
       "terminal:v2:tmux:codex:work:0.0:1234",
