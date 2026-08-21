@@ -21,7 +21,8 @@ const SESSION_ID = "11111111-1111-4111-8111-111111111111";
 const PID = 42421;
 const AGENT_STARTED_AT_MS = 1784870000000;
 const VERSION = "2.1.218";
-const CURRENT_VERSION = "2.1.226";
+const PREVIOUS_VERSION = "2.1.226";
+const CURRENT_VERSION = "2.1.237";
 const LEGACY_VERSION = "2.1.198";
 const STARTED_AT = "2026-07-24T02:00:00.000Z";
 const CAPTURED_AT = "2026-07-24T02:00:00.100Z";
@@ -86,17 +87,19 @@ test("Claude lifecycle candidates are root-interactive and carry a revalidated f
     }).status,
     "changed"
   );
-  assert.throws(
-    () => listClaudeHistoricalSessions({
-      cwd: fixture.workspace,
-      claudeHome: fixture.claudeHome,
-      agentVersion: "2.1.219"
-    }),
-    /supported exact versions: 2\.1\.218, 2\.1\.226/u
-  );
+  for (const agentVersion of ["2.1.219", "2.1.238"]) {
+    assert.throws(
+      () => listClaudeHistoricalSessions({
+        cwd: fixture.workspace,
+        claudeHome: fixture.claudeHome,
+        agentVersion
+      }),
+      /supported exact versions: 2\.1\.218, 2\.1\.226, 2\.1\.237/u
+    );
+  }
 });
 
-test("Claude 2.1.226 revalidates a 2.1.218 historical session with a v2 token", (t) => {
+test("Claude resume compatibility is one-way across 2.1.218, 2.1.226, and 2.1.237", (t) => {
   const fixture = createFixture(t);
   fixture.write(turnRecords({
     request: "Historical 2.1.218 request",
@@ -146,6 +149,55 @@ test("Claude 2.1.226 revalidates a 2.1.218 historical session with a v2 token", 
     })[0].candidateToken.version,
     1
   );
+  const previousCompatibilityCandidate = listClaudeThreadLifecycleCandidates({
+    cwd: fixture.workspace,
+    claudeHome: fixture.claudeHome,
+    agentVersion: PREVIOUS_VERSION
+  })[0];
+  assert.equal(previousCompatibilityCandidate.sourceAgentVersion, VERSION);
+  assert.equal(previousCompatibilityCandidate.candidateToken.version, 2);
+  assert.equal(
+    revalidateClaudeThreadLifecycleCandidate(
+      previousCompatibilityCandidate.candidateToken,
+      {
+        cwd: fixture.workspace,
+        claudeHome: fixture.claudeHome,
+        agentVersion: PREVIOUS_VERSION
+      }
+    ).status,
+    "valid"
+  );
+
+  const previous = createFixture(t, 225);
+  previous.write(turnRecords({
+    request: "Historical 2.1.226 request",
+    assistantText: "Historical 2.1.226 answer",
+    sessionId: previous.sessionId,
+    version: PREVIOUS_VERSION
+  }));
+  const previousCandidate = listClaudeThreadLifecycleCandidates({
+    cwd: previous.workspace,
+    claudeHome: previous.claudeHome,
+    agentVersion: CURRENT_VERSION
+  })[0];
+  assert.equal(previousCandidate.sourceAgentVersion, PREVIOUS_VERSION);
+  assert.equal(previousCandidate.candidateToken.version, 2);
+  assert.equal(
+    revalidateClaudeThreadLifecycleCandidate(previousCandidate.candidateToken, {
+      cwd: previous.workspace,
+      claudeHome: previous.claudeHome,
+      agentVersion: CURRENT_VERSION
+    }).status,
+    "valid"
+  );
+  assert.deepEqual(
+    listClaudeThreadLifecycleCandidates({
+      cwd: previous.workspace,
+      claudeHome: previous.claudeHome,
+      agentVersion: VERSION
+    }),
+    []
+  );
 
   const newer = createFixture(t, 226);
   newer.write(turnRecords({
@@ -158,14 +210,22 @@ test("Claude 2.1.226 revalidates a 2.1.218 historical session with a v2 token", 
     listClaudeThreadLifecycleCandidates({
       cwd: newer.workspace,
       claudeHome: newer.claudeHome,
+      agentVersion: PREVIOUS_VERSION
+    }),
+    []
+  );
+  assert.deepEqual(
+    listClaudeThreadLifecycleCandidates({
+      cwd: newer.workspace,
+      claudeHome: newer.claudeHome,
       agentVersion: VERSION
     }),
     []
   );
 });
 
-test("Claude 2.1.226 transcript supports lifecycle, acceptance, completion, and approval evidence", (t) => {
-  const fixture = createFixture(t, 226);
+test("Claude 2.1.237 transcript supports lifecycle, acceptance, completion, and approval evidence", (t) => {
+  const fixture = createFixture(t, 237);
   const request = "Verify the exact current Claude transcript profile";
   const anchor = fixture.capture();
   fixture.write(turnRecords({
@@ -203,7 +263,7 @@ test("Claude 2.1.226 transcript supports lifecycle, acceptance, completion, and 
     "valid"
   );
 
-  const pending = createFixture(t, 227);
+  const pending = createFixture(t, 238);
   const pendingRequest = "Inspect the current Claude approval schema";
   const pendingAnchor = pending.capture();
   pending.write(pendingBashRecords({

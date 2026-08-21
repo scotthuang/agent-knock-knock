@@ -122,7 +122,7 @@ export function registerOpenClawCommands(
   registerCliTool(api, {
     name: "agent_knock_knock_native_inspect",
     description:
-      "Execute one closed, exact-version native status inspection in an exact Codex or Claude Code terminal without ordinary Turn delivery. Call only from that terminal row's current native_inspect action and preserve its exact terminal_id, inspection=status, and expected_binding_token. Supported profiles are Codex 0.146.0/0.146.1/0.147.0 and Claude Code 2.1.218/2.1.226; Claude's exact Status panel is parsed and safely dismissed before success. Arbitrary slash commands, /usage, /cost, /stats, /usage-credits, /model, and /compact remain unavailable. Bare Codex /usage opens an interactive menu whose later Enter can select an account-side usage-limit reset. This creates no AKK Session, Turn, receipt, monitor, or callback. agent_knock_knock_status is different: it inspects AKK Turn state and the bounded current screen without executing native /status.",
+      "Execute one closed, exact-version native status inspection in an exact Codex or Claude Code terminal without ordinary Turn delivery. Call only from that terminal row's current native_inspect action and preserve its exact terminal_id, inspection=status, and expected_binding_token. Supported profiles are Codex 0.146.0/0.146.1/0.147.0/0.148.0 and Claude Code 2.1.218/2.1.226/2.1.237; Claude's exact Status panel is parsed and safely dismissed before success. Arbitrary slash commands, /usage, /cost, /stats, /usage-credits, /model, and /compact remain unavailable. Bare Codex /usage opens an interactive menu whose later Enter can select an account-side usage-limit reset. This creates no AKK Session, Turn, receipt, monitor, or callback. agent_knock_knock_status is different: it inspects AKK Turn state and the bounded current screen without executing native /status.",
     parameters: nativeInspectParameters,
     normalizeTurnIdentity: false,
     buildArgs: (params) => {
@@ -895,6 +895,25 @@ function formatDoctorCommandResult(result) {
   const capabilities = isRecord(result.capabilities) ? result.capabilities : {};
   const tmux = isRecord(capabilities.tmux) ? capabilities.tmux : {};
   const herdr = isRecord(capabilities.herdr) ? capabilities.herdr : {};
+  const dependencyChecks = Array.isArray(result.checks)
+    ? result.checks.filter(isRecord)
+    : [];
+  const codingAgentLines = ([
+    ["Codex", "codex"],
+    ["Claude Code", "claude"]
+  ] as const).map(([label, command]) => {
+    const check = dependencyChecks.find((entry) => entry.command === command);
+    const version = typeof check?.version === "string"
+      ? check.version
+      : "unavailable";
+    const nativeProfile = check?.native_profile_supported === true &&
+      typeof check.native_profile === "string"
+      ? `native profile ${check.native_profile}`
+      : check?.available === true
+        ? "native lifecycle/status unverified"
+        : "unavailable";
+    return `${label}: ${version} (${nativeProfile})`;
+  });
   const openclaw = isRecord(result.openclaw) ? result.openclaw : {};
   const checks = Array.isArray(openclaw.checks) ? openclaw.checks : [];
   const failures = checks
@@ -914,6 +933,7 @@ function formatDoctorCommandResult(result) {
     `AKK doctor: ${result.ok === true ? "ready" : "needs attention"}`,
     `tmux: ${tmux.status ?? "unknown"}`,
     `Herdr: ${herdr.status ?? "unknown"}`,
+    ...codingAgentLines,
     `OpenClaw package: ${openclaw.package_ready === true ? "ready" : "not ready"}`,
     `Gateway: ${openclaw.gateway_ready === true ? "healthy" : "unavailable"}`,
     ...(failures.length > 0 ? [`check: ${failures.join(", ")}`] : []),

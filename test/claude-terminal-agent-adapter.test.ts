@@ -74,7 +74,7 @@ test("classifies only direct interactive Claude CLI processes", () => {
 });
 
 test("verified Claude versions expose distinct closed modal native status plans", () => {
-  for (const version of ["2.1.218", "2.1.226"]) {
+  for (const version of ["2.1.218", "2.1.226", "2.1.237"]) {
     const capability = probeClaudeNativeInspection(version);
     assert.equal(capability.status, "supported");
     assert.equal(capability.statusInspection, true);
@@ -94,7 +94,7 @@ test("verified Claude versions expose distinct closed modal native status plans"
         composer: {
           kind: "exact",
           minimumStableMs: 80,
-          maximumSettleMs: version === "2.1.226" ? 5_000 : 2_000
+          maximumSettleMs: version === "2.1.218" ? 2_000 : 5_000
         },
         expectedResult: {
           kind: "native_status",
@@ -112,7 +112,7 @@ test("verified Claude versions expose distinct closed modal native status plans"
     statusInspection: false,
     reason: "the running Claude Code version could not be verified"
   });
-  for (const version of ["2.1.217", "2.1.219", "2.1.227"]) {
+  for (const version of ["2.1.217", "2.1.219", "2.1.227", "2.1.238"]) {
     const unsupported = probeClaudeNativeInspection(version);
     assert.equal(unsupported.status, "unsupported");
     assert.equal(unsupported.statusInspection, false);
@@ -205,72 +205,76 @@ test("Claude native inspection requires a fresh exact current Status panel", () 
   }
 });
 
-test("Claude 2.1.226 status inspection accepts only its exact Session-kind panel", () => {
-  const nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0";
-  const screen = claudeStatusPanel(nativeThreadId, "2.1.226");
-  const observed = observeClaudeNativeInspection({
-    operation: { kind: "status" },
-    screen,
-    preEnterEvidenceInventory: [],
-    expectedNativeThreadId: nativeThreadId,
-    expectedAgentVersion: "2.1.226",
-    expectedCwd: "/repo"
+for (const version of ["2.1.226", "2.1.237"] as const) {
+  test(`Claude ${version} status inspection accepts only its exact Session-kind panel`, () => {
+    const nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0";
+    const screen = claudeStatusPanel(nativeThreadId, version);
+    const observed = observeClaudeNativeInspection({
+      operation: { kind: "status" },
+      screen,
+      preEnterEvidenceInventory: [],
+      expectedNativeThreadId: nativeThreadId,
+      expectedAgentVersion: version,
+      expectedCwd: "/repo"
+    });
+    assert.equal(observed.status, "observed");
+    assert.equal(observed.observedAgentVersion, version);
+    assert.equal(
+      observed.result?.fields.find((field) =>
+        field.name === "Session kind"
+      )?.value,
+      "interactive"
+    );
+
+    const oldProfileWithNewField = claudeStatusPanel(
+      nativeThreadId,
+      "2.1.218"
+    ).replace(
+      "  cwd:",
+      "  Session kind:        interactive\n  cwd:"
+    );
+    assert.equal(
+      observeClaudeNativeInspection({
+        operation: { kind: "status" },
+        screen: oldProfileWithNewField,
+        expectedNativeThreadId: nativeThreadId,
+        expectedAgentVersion: "2.1.218",
+        expectedCwd: "/repo"
+      }).status,
+      "ambiguous"
+    );
+
+    const newProfileWithoutRequiredField = screen.replace(
+      "  Session kind:        interactive\n",
+      ""
+    );
+    assert.equal(
+      observeClaudeNativeInspection({
+        operation: { kind: "status" },
+        screen: newProfileWithoutRequiredField,
+        expectedNativeThreadId: nativeThreadId,
+        expectedAgentVersion: version,
+        expectedCwd: "/repo"
+      }).status,
+      "ambiguous"
+    );
+
+    const newProfileWithWrongSessionKind = screen.replace(
+      "  Session kind:        interactive",
+      "  Session kind:        background"
+    );
+    assert.equal(
+      observeClaudeNativeInspection({
+        operation: { kind: "status" },
+        screen: newProfileWithWrongSessionKind,
+        expectedNativeThreadId: nativeThreadId,
+        expectedAgentVersion: version,
+        expectedCwd: "/repo"
+      }).status,
+      "ambiguous"
+    );
   });
-  assert.equal(observed.status, "observed");
-  assert.equal(observed.observedAgentVersion, "2.1.226");
-  assert.equal(
-    observed.result?.fields.find((field) => field.name === "Session kind")?.value,
-    "interactive"
-  );
-
-  const oldProfileWithNewField = claudeStatusPanel(
-    nativeThreadId,
-    "2.1.218"
-  ).replace(
-    "  cwd:",
-    "  Session kind:        interactive\n  cwd:"
-  );
-  assert.equal(
-    observeClaudeNativeInspection({
-      operation: { kind: "status" },
-      screen: oldProfileWithNewField,
-      expectedNativeThreadId: nativeThreadId,
-      expectedAgentVersion: "2.1.218",
-      expectedCwd: "/repo"
-    }).status,
-    "ambiguous"
-  );
-
-  const newProfileWithoutRequiredField = screen.replace(
-    "  Session kind:        interactive\n",
-    ""
-  );
-  assert.equal(
-    observeClaudeNativeInspection({
-      operation: { kind: "status" },
-      screen: newProfileWithoutRequiredField,
-      expectedNativeThreadId: nativeThreadId,
-      expectedAgentVersion: "2.1.226",
-      expectedCwd: "/repo"
-    }).status,
-    "ambiguous"
-  );
-
-  const newProfileWithWrongSessionKind = screen.replace(
-    "  Session kind:        interactive",
-    "  Session kind:        background"
-  );
-  assert.equal(
-    observeClaudeNativeInspection({
-      operation: { kind: "status" },
-      screen: newProfileWithWrongSessionKind,
-      expectedNativeThreadId: nativeThreadId,
-      expectedAgentVersion: "2.1.226",
-      expectedCwd: "/repo"
-    }).status,
-    "ambiguous"
-  );
-});
+}
 
 test("Claude native status parser fails closed on stale, malformed, and historical panels", () => {
   const nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0";
@@ -1089,13 +1093,14 @@ test("Claude terminal capabilities expose durable completion only with a configu
 });
 
 test("verified Claude lifecycle plans are exact-version and UUID scoped", () => {
-  for (const version of ["2.1.218", "2.1.226"]) {
+  for (const version of ["2.1.218", "2.1.226", "2.1.237"]) {
     const profile = probeClaudeThreadLifecycle(version);
     assert.equal(profile.status, "supported");
     assert.equal(profile.behaviorProfile, `claude-code-${version}`);
   }
-  const capabilities = probeClaudeThreadLifecycle("2.1.226");
+  const capabilities = probeClaudeThreadLifecycle("2.1.237");
   assert.equal(probeClaudeThreadLifecycle("2.1.219").status, "unsupported");
+  assert.equal(probeClaudeThreadLifecycle("2.1.238").status, "unsupported");
   assert.equal(probeClaudeThreadLifecycle(undefined).status, "unknown");
   assert.deepEqual(
     planClaudeThreadLifecycle({ kind: "new_thread" }, capabilities).steps,
@@ -1241,7 +1246,7 @@ function claudeStatusPanel(
     `  Version:             ${version}`,
     "  Session name:        /rename to add a name",
     `  Session ID:          ${nativeThreadId}`,
-    ...(version === "2.1.226"
+    ...(version === "2.1.226" || version === "2.1.237"
       ? ["  Session kind:        interactive"]
       : []),
     "  cwd:                 /repo",
