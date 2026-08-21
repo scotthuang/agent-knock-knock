@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   actionsForManagedSessionBinding,
   currentTerminalActions,
+  exactTerminalWatchAction,
   listActionContracts,
   readOnlyManagedTurn,
   renderAvailableListActions,
@@ -150,8 +151,20 @@ test("raw active terminals expose only an exact prefilled watch action", () => {
       terminal_id: "terminal:v2:tmux:codex:work:0.0:1234",
       expected_binding_token: "fresh-binding-token"
     },
-    requires_user_intent: true
+    requires_user_intent: true,
+    use:
+      "Monitor this human-started external task and notify OpenClaw when it " +
+      "needs attention or finishes, instead of polling. Do not use Terminal " +
+      "Watch for an AKK-managed Turn."
   });
+  assert.equal(exactTerminalWatchAction({
+    available_actions: working
+  }, "terminal:v2:tmux:codex:work:0.0:1234", "fresh-binding-token"),
+  working.watch);
+  assert.equal(exactTerminalWatchAction({
+    available_actions: working
+  }, "terminal:v2:tmux:codex:work:0.0:1234", "stale-binding-token"),
+  undefined);
 
   const awaitingApproval = renderAvailableListActions({
     id: "terminal:v2:tmux:claude:work:0.1:5678",

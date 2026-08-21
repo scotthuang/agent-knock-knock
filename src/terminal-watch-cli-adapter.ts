@@ -8,6 +8,15 @@ import {
 } from "./claude-local-transcript-provider.js";
 import type { ExecutorKind } from "./executors.js";
 import {
+  turnIdForConversation,
+  type Conversation
+} from "./protocol.js";
+import {
+  decideTerminalWatchExternalTaskAuthority,
+  type TerminalDispatchOwnership
+} from "./terminal-action-projection.js";
+import { exactTerminalWatchAction } from "./terminal-list-renderer.js";
+import {
   captureCodexHumanStartedActiveTaskAnchor,
   observeCodexHumanStartedActiveTask,
   type CodexHumanStartedActiveTaskAnchor,
@@ -64,6 +73,10 @@ interface TerminalWatchScan {
 
 export interface TerminalWatchCliDependencies {
   acquireFileLock(lockPath: string): () => void;
+  acquireTerminalLock(
+    storeDir: string,
+    terminalControl: TerminalControlRef
+  ): () => void;
   buildTerminalListGroup(request: {
     options: TerminalWatchCliOptions;
     agentFilter?: ExecutorKind;
@@ -76,6 +89,13 @@ export interface TerminalWatchCliDependencies {
   now(): Date;
   randomUUID(): string;
   storeDirFromOptions(options: TerminalWatchCliOptions): string;
+  terminalDispatchOwnership(
+    terminalControl: TerminalControlRef
+  ): TerminalDispatchOwnership<Conversation, Record<string, unknown>>;
+  terminalIncarnationBlockingTurns(
+    storeDir: string,
+    terminalControl: TerminalControlRef
+  ): Conversation[];
   printJson(value: unknown): void;
   callback?: TerminalWatchCallbackCliAdapter;
 }
@@ -139,45 +159,94 @@ export function createTerminalWatchCliAdapter(
       options.openclawSession,
       "--openclaw-session"
     );
-    const terminal = await exactWatchableTerminal(
+    const storeDir = dependencies.storeDirFromOptions(options);
+    const initiallyObservedTerminal = await exactTerminalForWatch(
       terminalId,
       expectedBindingToken,
       options,
       dependencies
     );
-    const agent = terminalAgent(terminal);
-    const anchor = captureTerminalWatchAnchor(
-      agent,
-      terminal,
-      options,
-      dependencies
+    const initialTerminalControl = terminalControlForWatch(
+      initiallyObservedTerminal
     );
-    if (!anchor) {
-      throw new Error(
-        "the exact terminal has no unique supported human-started active task"
-      );
-    }
-    const watchService = serviceFor(options);
-    const watch = watchService.create({
-      agent,
-      terminal: terminalWatchIdentity(
-        terminal,
-        agent,
+    const releaseTerminal = dependencies.acquireTerminalLock(
+      storeDir,
+      initialTerminalControl
+    );
+    let watch: TerminalWatch;
+    try {
+      const terminal = await exactTerminalForWatch(
+        terminalId,
         expectedBindingToken,
-        dependencies.loadClaudeAgentRows(options)
-      ),
-      anchor,
-      openclaw_session: openclawSession,
-      openclaw_bin: stringValue(options.openclawBin) ?? "openclaw",
-      timeout_ms: positiveMinutes(
-        options.hardTimeoutMinutes,
-        DEFAULT_TERMINAL_WATCH_HARD_TIMEOUT_MINUTES
-      ) * 60_000,
-      approval_fingerprint: approvalFingerprint(terminal),
-      approval_reason_code: approvalFingerprint(terminal)
-        ? "terminal_waiting_for_approval"
-        : undefined
-    });
+        options,
+        dependencies
+      );
+      const terminalControl = terminalControlForWatch(terminal);
+      if (!sameTerminalControlEvidenceIncarnation(
+        initialTerminalControl,
+        terminalControl
+      )) {
+        throw new Error(
+          "terminal binding changed while AKK acquired authority; refresh " +
+          "AKK list and retry"
+        );
+      }
+      assertExternalTerminalWatchAuthority(
+        storeDir,
+        terminalControl,
+        dependencies
+      );
+      const watchService = serviceFor(options);
+      const existing = watchService.list().find((candidate) =>
+        candidate.status === "active" &&
+        candidate.terminal.terminal_id === terminalId
+      );
+      if (existing) {
+        throw new Error(
+          `terminal ${terminalId} is already monitored by Terminal Watch ` +
+          `${existing.watch_id}; use watch-status instead of creating another`
+        );
+      }
+      assertExactPublicWatchAction(
+        terminal,
+        terminalId,
+        expectedBindingToken
+      );
+      const agent = terminalAgent(terminal);
+      const anchor = captureTerminalWatchAnchor(
+        agent,
+        terminal,
+        options,
+        dependencies
+      );
+      if (!anchor) {
+        throw new Error(
+          "the exact terminal has no unique supported human-started active task"
+        );
+      }
+      watch = watchService.create({
+        agent,
+        terminal: terminalWatchIdentity(
+          terminal,
+          agent,
+          expectedBindingToken,
+          dependencies.loadClaudeAgentRows(options)
+        ),
+        anchor,
+        openclaw_session: openclawSession,
+        openclaw_bin: stringValue(options.openclawBin) ?? "openclaw",
+        timeout_ms: positiveMinutes(
+          options.hardTimeoutMinutes,
+          DEFAULT_TERMINAL_WATCH_HARD_TIMEOUT_MINUTES
+        ) * 60_000,
+        approval_fingerprint: approvalFingerprint(terminal),
+        approval_reason_code: approvalFingerprint(terminal)
+          ? "terminal_waiting_for_approval"
+          : undefined
+      });
+    } finally {
+      releaseTerminal();
+    }
     dependencies.printJson({ watch: publicTerminalWatch(watch) });
   }
 
@@ -217,7 +286,7 @@ export function createTerminalWatchCliAdapter(
   });
 }
 
-async function exactWatchableTerminal(
+async function exactTerminalForWatch(
   terminalId: string,
   expectedBindingToken: string,
   options: TerminalWatchCliOptions,
@@ -233,16 +302,72 @@ async function exactWatchableTerminal(
     );
   }
   const terminal = matches[0];
-  const commands = isRecord(terminal.commands) ? terminal.commands : {};
-  if (commands.watch !== true) {
-    throw new Error("the exact terminal is not currently watchable");
-  }
   if (stringValue(terminal.lifecycle_binding_token) !== expectedBindingToken) {
     throw new Error(
       "terminal binding changed after it was listed; refresh AKK list and retry"
     );
   }
   return terminal;
+}
+
+function assertExactPublicWatchAction(
+  terminal: Record<string, unknown>,
+  terminalId: string,
+  expectedBindingToken: string
+): void {
+  if (!exactTerminalWatchAction(
+    terminal,
+    terminalId,
+    expectedBindingToken
+  )) {
+    throw new Error(
+      "the exact terminal is not currently watchable; refresh AKK list and " +
+      "use only its current available_actions.watch"
+    );
+  }
+}
+
+function terminalControlForWatch(
+  terminal: Record<string, unknown>
+): TerminalControlRef {
+  if (!isRecord(terminal.terminal_control)) {
+    throw new Error("the exact terminal has no terminal control authority");
+  }
+  return terminal.terminal_control as unknown as TerminalControlRef;
+}
+
+function assertExternalTerminalWatchAuthority(
+  storeDir: string,
+  terminalControl: TerminalControlRef,
+  dependencies: TerminalWatchCliDependencies
+): void {
+  const blockingTurn = dependencies.terminalIncarnationBlockingTurns(
+    storeDir,
+    terminalControl
+  )[0];
+  const authority = decideTerminalWatchExternalTaskAuthority({
+    blockingTurn,
+    dispatchOwnership: blockingTurn
+      ? { state: "none" }
+      : dependencies.terminalDispatchOwnership(terminalControl)
+  });
+  if (authority.state === "external_task") {
+    return;
+  }
+  if (authority.state === "managed_turn") {
+    const turn = authority.conversation;
+    throw new Error(
+      `Terminal Watch is unavailable: this task already belongs to AKK Turn ` +
+      `${turnIdForConversation(turn)} (${turn.status}) and is covered by the ` +
+      "managed Turn monitor/callback path. Use AKK status for that Turn."
+    );
+  }
+  const reason = stringValue(authority.conflict.reason) ??
+    "terminal dispatch ownership is conflicted";
+  throw new Error(
+    `Terminal Watch is unavailable because AKK cannot prove this is external ` +
+    `work: ${reason}. Refresh AKK list and resolve the ownership conflict.`
+  );
 }
 
 function captureTerminalWatchAnchor(

@@ -105,6 +105,8 @@ Proceed only if that terminal row advertises `available_actions.watch`. For a st
 /akk watch <exact-terminal-id>
 ```
 
+Terminal Watch is only for human-started external work. If the terminal already has an active AKK-managed Turn, list and status do not offer Watch and a direct Watch attempt is rejected; use that Turn's existing monitor, status, and callback path instead.
+
 The result contains a durable `watch_id`. Use that ID—not a `session_id`, `turn_id`, terminal selector, or short reference—to inspect or stop observation:
 
 ```text

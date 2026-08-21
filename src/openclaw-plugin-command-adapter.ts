@@ -10,8 +10,10 @@ import {
   AKK_CALLBACK_METHOD,
   akkUsageText,
   buildAkkCommandCliArgs,
+  akkWatchUnavailableMessage,
   formatAkkListCommandResult,
   formatAkkRespondCommandResult,
+  formatAkkTerminalWatchHint,
   formatAkkThreadsCommandResult,
   formatAkkThreadTransitionCommandResult,
   formatAkkUnwatchCommandResult,
@@ -691,10 +693,17 @@ function handleAkkWatchCommand(api, ctx, parsed, config) {
   const actionArguments = isRecord(watchAction?.arguments)
     ? watchAction.arguments
     : undefined;
-  if (stringValue(actionArguments?.terminal_id) !== parsed.terminalId) {
-    throw new Error(
-      `terminal ${parsed.terminalId} does not currently advertise an exact watch action`
-    );
+  if (
+    watchAction?.tool !== "agent_knock_knock_watch" ||
+    stringValue(actionArguments?.terminal_id) !== parsed.terminalId
+  ) {
+    throw new Error(akkWatchUnavailableMessage(
+      terminal,
+      Array.isArray(discovery.terminal_watches)
+        ? discovery.terminal_watches
+        : [],
+      parsed.terminalId
+    ));
   }
   const expectedBindingToken = requiredString(
     actionArguments?.expected_binding_token,
@@ -974,7 +983,8 @@ function formatStatusCommandResult(result) {
     `turn: ${turnId}`,
     `agent: ${summary.agent ?? summary.executor?.kind ?? terminalStatus.agent ?? "unknown"}`,
     `turn status: ${summary.status ?? result.conversation_status ?? result.status ?? "not managed"}`,
-    `terminal activity: ${terminalStatus.activity_state ?? "unavailable"}`
+    `terminal activity: ${terminalStatus.activity_state ?? "unavailable"}`,
+    ...formatAkkTerminalWatchHint(result)
   ];
   if (callbackDelivery) {
     const callbackParts = [

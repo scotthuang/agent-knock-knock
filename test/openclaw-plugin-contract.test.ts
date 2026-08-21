@@ -2164,6 +2164,7 @@ process.stdout.write(JSON.stringify(result));`,
       slashResult?.text ?? "",
       /^terminal activity: working$/mu
     );
+    assert.doesNotMatch(slashResult?.text ?? "", /AKK Watch available/u);
     assert.doesNotMatch(slashResult?.text ?? "", /^status:/mu);
     assert.match(
       slashResult?.text ?? "",

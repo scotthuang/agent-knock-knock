@@ -72,6 +72,8 @@ AKK is local-first. It has no hosted control plane or telemetry and does not cha
 
 AKK can also observe work that a human started directly in the Codex or Claude Code TUI. While that task is actively working or awaiting approval, refresh `/akk list` and use only the exact `watch` action advertised by that terminal row. The structured action carries the current `terminal_id` and `expected_binding_token`; the slash form is `/akk watch <exact-terminal-id>` and performs the same fresh-action check. It returns a durable `watch_id`, which is the only target for `/akk status <watch-id>` or `/akk unwatch <watch-id>`.
 
+Terminal Watch is only for human-started external work. If that terminal already has an active AKK-managed Turn, list and status do not offer Watch and a direct Watch attempt is rejected; use the Turn's existing monitor, status, and callback path instead.
+
 A Terminal Watch is a separate schema-v1 aggregate, not an AKK Session or Turn. It sends no terminal input, does not adopt, claim, reserve, or block the human's task, and never auto-approves anything. An approval observation only notifies OpenClaw; the human must inspect and decide in the TUI. The Watch is pinned to the exact terminal/process/native-task identity and a privacy-safe Codex rollout or Claude transcript anchor. An exact durable completion already written to that anchor wins; otherwise any process, thread, endpoint, file, boundary, or fingerprint drift invalidates the Watch instead of following a successor task. Its settlement and notification outbox survive AKK or OpenClaw restarts, with leased retry and deterministic callback idempotency.
 
 ### Terminal, native session, AKK session, and Turn

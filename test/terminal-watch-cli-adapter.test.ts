@@ -7,6 +7,7 @@ import { createTerminalWatchCliAdapter } from
   "../src/terminal-watch-cli-adapter.js";
 import type { TerminalWatchCallbackInput } from
   "../src/terminal-watch-callback-cli-adapter.js";
+import type { Conversation } from "../src/protocol.js";
 
 const THREAD_ID = "019f0000-0000-7000-8000-000000000206";
 const TASK_ID = "019f0000-0000-7000-8000-000000000207";
@@ -14,6 +15,7 @@ const TOKEN = "a".repeat(64);
 
 test("Terminal Watch CLI observes one exact human-started Codex task and delivers its completion", async (t) => {
   const fixture = createFixture(t);
+  assert.equal("commands" in fixture.terminal, false);
   const printed: unknown[] = [];
   const callbacks: TerminalWatchCallbackInput[] = [];
   let terminals = [{
@@ -27,6 +29,7 @@ test("Terminal Watch CLI observes one exact human-started Codex task and deliver
   }];
   const facade = createTerminalWatchCliAdapter({
     acquireFileLock: () => () => {},
+    acquireTerminalLock: () => () => {},
     buildTerminalListGroup: async () => ({
       terminalControlled: terminals
     }),
@@ -34,6 +37,8 @@ test("Terminal Watch CLI observes one exact human-started Codex task and deliver
     now: fixture.now,
     randomUUID: () => "00000000-0000-4000-8000-000000000206",
     storeDirFromOptions: () => fixture.storeDir,
+    terminalDispatchOwnership: () => ({ state: "none" }),
+    terminalIncarnationBlockingTurns: () => [],
     printJson: (value) => printed.push(value),
     callback: {
       deliver(input) {
@@ -99,11 +104,14 @@ test("exact durable completion wins when the terminal switches before reconcilia
   let terminals = [fixture.terminal];
   const facade = createTerminalWatchCliAdapter({
     acquireFileLock: () => () => {},
+    acquireTerminalLock: () => () => {},
     buildTerminalListGroup: async () => ({ terminalControlled: terminals }),
     loadClaudeAgentRows: () => [],
     now: fixture.now,
     randomUUID: () => "00000000-0000-4000-8000-000000000208",
     storeDirFromOptions: () => fixture.storeDir,
+    terminalDispatchOwnership: () => ({ state: "none" }),
+    terminalIncarnationBlockingTurns: () => [],
     printJson: (value) => printed.push(value),
     callback: {
       deliver(input) {
@@ -152,6 +160,7 @@ test("unwatch persists cancellation and leaves callback delivery to supervision"
   const callbacks: TerminalWatchCallbackInput[] = [];
   const facade = createTerminalWatchCliAdapter({
     acquireFileLock: () => () => {},
+    acquireTerminalLock: () => () => {},
     buildTerminalListGroup: async () => ({
       terminalControlled: [fixture.terminal]
     }),
@@ -159,6 +168,8 @@ test("unwatch persists cancellation and leaves callback delivery to supervision"
     now: fixture.now,
     randomUUID: () => "00000000-0000-4000-8000-000000000209",
     storeDirFromOptions: () => fixture.storeDir,
+    terminalDispatchOwnership: () => ({ state: "none" }),
+    terminalIncarnationBlockingTurns: () => [],
     printJson: (value) => printed.push(value),
     callback: {
       deliver(input) {
@@ -189,6 +200,7 @@ test("Terminal Watch CLI rejects stale binding authority before persistence", as
   const fixture = createFixture(t);
   const facade = createTerminalWatchCliAdapter({
     acquireFileLock: () => () => {},
+    acquireTerminalLock: () => () => {},
     buildTerminalListGroup: async () => ({
       terminalControlled: [fixture.terminal]
     }),
@@ -196,6 +208,8 @@ test("Terminal Watch CLI rejects stale binding authority before persistence", as
     now: fixture.now,
     randomUUID: () => "00000000-0000-4000-8000-000000000206",
     storeDirFromOptions: () => fixture.storeDir,
+    terminalDispatchOwnership: () => ({ state: "none" }),
+    terminalIncarnationBlockingTurns: () => [],
     printJson: () => {},
     callback: {
       deliver(input) {
@@ -212,6 +226,97 @@ test("Terminal Watch CLI rejects stale binding authority before persistence", as
     /binding changed/u
   );
   assert.equal(fs.existsSync(path.join(fixture.storeDir, "terminal-watches")), false);
+});
+
+test("Terminal Watch rechecks managed Turn authority while holding the terminal lock", async (t) => {
+  const fixture = createFixture(t);
+  const events: string[] = [];
+  let scans = 0;
+  let ownershipReads = 0;
+  const facade = createTerminalWatchCliAdapter({
+    acquireFileLock: () => () => {},
+    acquireTerminalLock: () => {
+      events.push("terminal-lock:acquired");
+      return () => events.push("terminal-lock:released");
+    },
+    buildTerminalListGroup: async () => {
+      scans += 1;
+      events.push(`scan:${scans}`);
+      return { terminalControlled: [fixture.terminal] };
+    },
+    loadClaudeAgentRows: () => [],
+    now: fixture.now,
+    randomUUID: () => "00000000-0000-4000-8000-000000000210",
+    storeDirFromOptions: () => fixture.storeDir,
+    terminalDispatchOwnership: () => {
+      ownershipReads += 1;
+      return { state: "none" };
+    },
+    terminalIncarnationBlockingTurns: () => {
+      events.push("managed-authority:checked");
+      return scans >= 2 ? [managedTurn()] : [];
+    },
+    printJson: () => {}
+  });
+
+  await assert.rejects(
+    facade.runWatch({
+      terminal: fixture.terminal.id as string,
+      expectedBindingToken: TOKEN,
+      openclawSession: "agent:main:main"
+    }),
+    /already belongs to AKK Turn turn-managed-206 \(running\).*managed Turn monitor\/callback.*AKK status/u
+  );
+  assert.deepEqual(events, [
+    "scan:1",
+    "terminal-lock:acquired",
+    "scan:2",
+    "managed-authority:checked",
+    "terminal-lock:released"
+  ]);
+  assert.equal(ownershipReads, 0);
+  assert.equal(
+    fs.existsSync(path.join(fixture.storeDir, "terminal-watches")),
+    false
+  );
+});
+
+test("Terminal Watch rejects a stale or forged public Watch action", async (t) => {
+  const fixture = createFixture(t);
+  const terminal = structuredClone(fixture.terminal);
+  record(record(terminal.available_actions).watch).arguments = {
+    terminal_id: terminal.id,
+    expected_binding_token: "b".repeat(64)
+  };
+  let released = false;
+  const facade = createTerminalWatchCliAdapter({
+    acquireFileLock: () => () => {},
+    acquireTerminalLock: () => () => {
+      released = true;
+    },
+    buildTerminalListGroup: async () => ({ terminalControlled: [terminal] }),
+    loadClaudeAgentRows: () => [],
+    now: fixture.now,
+    randomUUID: () => "00000000-0000-4000-8000-000000000211",
+    storeDirFromOptions: () => fixture.storeDir,
+    terminalDispatchOwnership: () => ({ state: "none" }),
+    terminalIncarnationBlockingTurns: () => [],
+    printJson: () => {}
+  });
+
+  await assert.rejects(
+    facade.runWatch({
+      terminal: fixture.terminal.id as string,
+      expectedBindingToken: TOKEN,
+      openclawSession: "agent:main:main"
+    }),
+    /current available_actions\.watch/u
+  );
+  assert.equal(released, true);
+  assert.equal(
+    fs.existsSync(path.join(fixture.storeDir, "terminal-watches")),
+    false
+  );
 });
 
 function createFixture(t: test.TestContext) {
@@ -302,9 +407,38 @@ function createFixture(t: test.TestContext) {
         currentPath: root,
         capabilities: ["screen_status", "durable_completion"]
       },
-      commands: { watch: true }
+      available_actions: {
+        watch: {
+          tool: "agent_knock_knock_watch",
+          arguments: {
+            terminal_id: "terminal:v2:watch-fixture",
+            expected_binding_token: TOKEN
+          },
+          requires_user_intent: true,
+          use: "Monitor this human-started external task."
+        }
+      }
     }
   };
+}
+
+function managedTurn(): Conversation {
+  return {
+    session_id: "session-managed-206",
+    turn_id: "turn-managed-206",
+    conversation_id: "turn-managed-206",
+    user_request: "managed request",
+    openclaw_session: "agent:main:main",
+    claude_session: "",
+    executor: { kind: "codex" },
+    workspace: "/tmp/managed-watch",
+    status: "running",
+    response_rounds_used: 0,
+    soft_limit: 10,
+    hard_limit: 20,
+    created_at: "2026-08-21T00:00:00.000Z",
+    updated_at: "2026-08-21T00:00:01.000Z"
+  } as Conversation;
 }
 
 function record(value: unknown): Record<string, any> {

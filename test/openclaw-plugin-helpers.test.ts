@@ -3,10 +3,12 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import {
   AKK_CALLBACK_METHOD,
+  akkWatchUnavailableMessage,
   akkUsageText,
   buildAkkCommandCliArgs,
   formatAkkListCommandResult,
   formatAkkRespondCommandResult,
+  formatAkkTerminalWatchHint,
   formatAkkThreadsCommandResult,
   formatAkkThreadTransitionCommandResult,
   formatAkkUnwatchCommandResult,
@@ -898,6 +900,7 @@ test("/akk list renders each live terminal once with its managed-turn context", 
 
   assert.match(text, /AKK terminals \(1 live, 0 unavailable managed turns\)/u);
   assert.match(text, /@terminal1 \| codex \| active \| idle \| tmux work:0\.0/u);
+  assert.doesNotMatch(text, /AKK Watch available:/u);
   assert.match(text, /AKK session: @session1/u);
   assert.match(text, new RegExp(`lifecycle terminal_id: ${exactTerminalId.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}`, "u"));
   assert.match(
@@ -943,8 +946,18 @@ test("/akk list renders watchable terminals and durable watch rows", () => {
   });
 
   assert.match(text, /1 live, 1 terminal watches/u);
-  assert.match(text, new RegExp(`watch terminal_id: ${exactTerminalId.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}`, "u"));
+  assert.match(
+    text,
+    new RegExp(
+      `AKK Watch available: /akk watch ${exactTerminalId.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}`,
+      "u"
+    )
+  );
   assert.match(text, /terminal actions: watch/u);
+  assert.match(
+    text,
+    /monitor this human-started task and receive attention\/completion callbacks without polling/u
+  );
   assert.match(text, /terminal watches:/u);
   assert.match(text, /terminal-watch-durable-1 \| codex \| watching/u);
   assert.match(text, /actions: status, unwatch/u);
@@ -979,6 +992,64 @@ test("Terminal Watch command summaries preserve external-work attribution", () =
   });
   assert.match(stopped, /Terminal Watch stopped/u);
   assert.match(stopped, /not interrupted/u);
+});
+
+test("status Watch guidance requires an explicit non-authoritative hint", () => {
+  assert.deepEqual(formatAkkTerminalWatchHint({
+    source: "terminal_control",
+    terminal_status: { activity_state: "working" }
+  }), []);
+  assert.deepEqual(formatAkkTerminalWatchHint({
+    terminal_watch_hint: {
+      kind: "terminal_watch_discovery",
+      terminal_id: exactTerminalId,
+      command: `/akk watch ${exactTerminalId}`,
+      available_action_required: true,
+      instruction:
+        "Refresh agent_knock_knock_list and use only the current watch action."
+    }
+  }), [
+    `AKK Watch available: /akk watch ${exactTerminalId}`,
+    "next: Refresh agent_knock_knock_list and use only the current watch action."
+  ]);
+  assert.deepEqual(formatAkkTerminalWatchHint({
+    terminal_watch_hint: {
+      kind: "terminal_watch_discovery",
+      command: `/akk watch ${exactTerminalId}`,
+      available_action_required: false,
+      instruction: "Do not trust this malformed hint."
+    },
+    terminal_status: { activity_state: "working" }
+  }), []);
+});
+
+test("forced Watch calls explain managed Turn, conflict, and existing Watch authority", () => {
+  assert.match(akkWatchUnavailableMessage({
+    managed: {
+      current_turn: {
+        turn_id: "turn-managed-watch",
+        status: "waiting_for_agent"
+      }
+    }
+  }, [], exactTerminalId),
+  /already belongs to AKK Turn turn-managed-watch \(waiting_for_agent\).*managed Turn monitor\/callback.*AKK status/u);
+
+  assert.match(akkWatchUnavailableMessage({
+    management_conflict: { reason: "two durable owners disagree" }
+  }, [], exactTerminalId),
+  /cannot be watched.*cannot prove it is external work.*two durable owners disagree/u);
+
+  assert.match(akkWatchUnavailableMessage({}, [{
+    watch_id: "terminal-watch-existing",
+    terminal_id: exactTerminalId,
+    status: "active"
+  }], exactTerminalId),
+  /already monitored by Terminal Watch terminal-watch-existing.*watch-status/u);
+
+  assert.match(
+    akkWatchUnavailableMessage({}, [], exactTerminalId),
+    /refresh AKK list.*available_actions\.watch/u
+  );
 });
 
 test("/akk list exposes the exact orphaned terminal dispatch recovery command", () => {

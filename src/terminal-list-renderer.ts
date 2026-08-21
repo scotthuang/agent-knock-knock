@@ -14,6 +14,11 @@ import {
 
 type JsonRecord = Record<string, unknown>;
 
+const TERMINAL_WATCH_ACTION_USE =
+  "Monitor this human-started external task and notify OpenClaw when it " +
+  "needs attention or finishes, instead of polling. Do not use Terminal " +
+  "Watch for an AKK-managed Turn.";
+
 export interface AvailableListActionFacts {
   terminalBridgeReady: boolean;
   managedApprovalPending: boolean;
@@ -553,8 +558,42 @@ function appendTerminalWatchAction(input: {
       terminal_id: input.id,
       expected_binding_token: input.lifecycleBindingToken
     },
-    requires_user_intent: true
+    requires_user_intent: true,
+    use: TERMINAL_WATCH_ACTION_USE
   };
+}
+
+export function terminalWatchDiscoveryHint(terminalId: string): JsonRecord {
+  return {
+    kind: "terminal_watch_discovery",
+    terminal_id: terminalId,
+    command: `/akk watch ${terminalId}`,
+    available_action_required: true,
+    instruction:
+      "Refresh agent_knock_knock_list and use only this terminal's current " +
+      "available_actions.watch. Terminal Watch is only for human-started " +
+      "external work, never an AKK-managed Turn."
+  };
+}
+
+export function exactTerminalWatchAction(
+  entry: unknown,
+  terminalId: string,
+  expectedBindingToken: string
+): JsonRecord | undefined {
+  if (!isRecord(entry) || !isRecord(entry.available_actions)) {
+    return undefined;
+  }
+  const watch = isRecord(entry.available_actions.watch)
+    ? entry.available_actions.watch
+    : undefined;
+  const args = isRecord(watch?.arguments) ? watch.arguments : undefined;
+  return watch?.tool === "agent_knock_knock_watch" &&
+    watch.requires_user_intent === true &&
+    args?.terminal_id === terminalId &&
+    args?.expected_binding_token === expectedBindingToken
+    ? watch
+    : undefined;
 }
 
 const CURRENT_TURN_ACTIONS = [

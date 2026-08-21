@@ -19,6 +19,10 @@ import {
   turnIdForConversation,
   type Conversation
 } from "./protocol.js";
+import {
+  decideTerminalWatchExternalTaskAuthority,
+  type TerminalDispatchOwnership
+} from "./terminal-action-projection.js";
 import type {
   ResolvedTerminalConversation,
   TerminalBridgeStatus
@@ -28,6 +32,7 @@ import {
   type TerminalControlRef,
   type TerminalRuntimeIdentity
 } from "./terminal-agent-adapter.js";
+import { terminalWatchDiscoveryHint } from "./terminal-list-renderer.js";
 import {
   codexTerminalContextFromHistory,
   isDiscoverableTmuxConversation,
@@ -164,10 +169,32 @@ export interface TerminalStatusReconciliationPorts {
   terminalBridgeEnabled(conversation: Conversation): boolean;
 }
 
+interface TerminalStatusDispatchOwnership {
+  state: "none" | "current" | "conflict";
+  conversation?: Conversation;
+  conflict?: Record<string, unknown>;
+}
+
+export interface TerminalStatusWatchHintAuthorityPorts {
+  terminalDispatchOwnership(
+    terminalControl: TerminalControlRef
+  ): TerminalStatusDispatchOwnership;
+  terminalIncarnationBlockingTurns(
+    storeDir: string,
+    terminalControl: TerminalControlRef
+  ): Conversation[];
+  hasActiveTerminalWatch(storeDir: string, terminalId: string): boolean;
+  hasWatchAction(
+    options: TerminalStatusCliOptions,
+    terminalId: string
+  ): Promise<boolean>;
+}
+
 export interface TerminalStatusCliDependencies {
   selection: TerminalStatusSelectionPorts;
   observation: TerminalStatusObservationPorts;
   reconciliation: TerminalStatusReconciliationPorts;
+  watchAuthority: TerminalStatusWatchHintAuthorityPorts;
   projection: TerminalStatusSummaryPorts;
 }
 
@@ -303,6 +330,13 @@ async function runTerminalControlStatus(
   );
   const context = await terminalStatusContext(
     dependencies, facade, terminalConversation, terminalStatus, options);
+  const terminalWatchHint = await terminalWatchHintForRawTerminal({
+    dependencies,
+    options,
+    storeDir,
+    terminalConversation,
+    terminalStatus
+  });
   writeCliJson({
     conversation_id: terminalConversation.conversationId,
     source: "terminal_control",
@@ -312,13 +346,87 @@ async function runTerminalControlStatus(
     ...context,
     terminal_control: terminalConversation.terminalControl,
     terminal_status: terminalStatus,
-    terminal_screen: terminalStatus.screen
+    terminal_screen: terminalStatus.screen,
+    ...(terminalWatchHint
+      ? { terminal_watch_hint: terminalWatchHint }
+      : {})
   });
   cliRuntimeLog("info", "terminal_status_read", {
     conversation_id: terminalConversation.conversationId,
     terminal_target: terminalConversation.terminalControl.target,
     reachable: terminalStatus.reachable
   });
+}
+
+async function terminalWatchHintForRawTerminal(input: {
+  dependencies: TerminalStatusCliDependencies;
+  options: TerminalStatusCliOptions;
+  storeDir: string;
+  terminalConversation: ResolvedTerminalConversation;
+  terminalStatus: TerminalBridgeStatus;
+}): Promise<Record<string, unknown> | undefined> {
+  if (
+    input.terminalStatus.activity_state !== "working" &&
+    input.terminalStatus.activity_state !== "awaiting_approval"
+  ) {
+    return undefined;
+  }
+  const { watchAuthority } = input.dependencies;
+  try {
+    const blockingTurn = watchAuthority.terminalIncarnationBlockingTurns(
+      input.storeDir,
+      input.terminalConversation.terminalControl
+    )[0];
+    const authority = decideTerminalWatchExternalTaskAuthority({
+      blockingTurn,
+      dispatchOwnership: blockingTurn
+        ? { state: "none" }
+        : exactTerminalWatchDispatchOwnership(
+            watchAuthority.terminalDispatchOwnership(
+              input.terminalConversation.terminalControl
+            )
+          )
+    });
+    if (
+      authority.state !== "external_task" ||
+      watchAuthority.hasActiveTerminalWatch(
+        input.storeDir,
+        input.terminalConversation.conversationId
+      ) ||
+      !await watchAuthority.hasWatchAction(
+        input.options,
+        input.terminalConversation.conversationId
+      )
+    ) {
+      return undefined;
+    }
+    return terminalWatchDiscoveryHint(
+      input.terminalConversation.conversationId
+    );
+  } catch (error) {
+    cliRuntimeLog("warn", "terminal_watch_hint_unavailable", {
+      terminal_id: input.terminalConversation.conversationId,
+      reason: error instanceof Error ? error.message : String(error)
+    });
+    return undefined;
+  }
+}
+
+function exactTerminalWatchDispatchOwnership(
+  ownership: TerminalStatusDispatchOwnership
+): TerminalDispatchOwnership<Conversation, Record<string, unknown>> {
+  if (ownership.state === "none") {
+    return { state: "none" };
+  }
+  if (ownership.state === "current" && ownership.conversation) {
+    return { state: "current", conversation: ownership.conversation };
+  }
+  return {
+    state: "conflict",
+    conflict: ownership.conflict ?? {
+      reason: "terminal dispatch ownership is incomplete"
+    }
+  };
 }
 
 async function runManagedConversationStatus(

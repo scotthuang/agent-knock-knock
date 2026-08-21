@@ -3,11 +3,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   applySessionAuthorityToDispatch,
+  decideTerminalWatchExternalTaskAuthority,
   decideTerminalSendAuthority,
   decideTerminalSessionAuthorityConflict,
   managedTurnNeedsAttention,
   selectTerminalAvailableActions,
   type TerminalActionSet,
+  type TerminalDispatchOwnership,
   type TerminalSendAuthorityFacts
 } from "../src/terminal-action-projection.js";
 import {
@@ -321,6 +323,50 @@ test("available actions preserve legacy insertion order and approval-last rule",
   };
   assert.equal(JSON.stringify(actual), JSON.stringify(legacy));
   assert.deepEqual(Object.keys(actual), Object.keys(legacy));
+});
+
+test("Terminal Watch external-task authority fails closed for every managed ownership path", () => {
+  type Turn = { id: string };
+  type Conflict = { reason: string };
+  const blockingTurn: Turn = { id: "turn-blocking" };
+  const currentTurn: Turn = { id: "turn-current" };
+  const conflict: Conflict = { reason: "dispatch owner is unresolved" };
+  const decide = (
+    blocker: Turn | undefined,
+    dispatchOwnership: TerminalDispatchOwnership<Turn, Conflict>
+  ) => decideTerminalWatchExternalTaskAuthority({
+    blockingTurn: blocker,
+    dispatchOwnership
+  });
+
+  assert.deepEqual(decide(undefined, { state: "none" }), {
+    state: "external_task"
+  });
+  assert.deepEqual(decide(undefined, {
+    state: "current",
+    conversation: currentTurn
+  }), {
+    state: "managed_turn",
+    conversation: currentTurn
+  });
+  assert.deepEqual(decide(undefined, {
+    state: "conflict",
+    conflict
+  }), {
+    state: "dispatch_conflict",
+    conflict
+  });
+
+  for (const dispatchOwnership of [
+    { state: "none" } as const,
+    { state: "current", conversation: currentTurn } as const,
+    { state: "conflict", conflict } as const
+  ]) {
+    assert.deepEqual(decide(blockingTurn, dispatchOwnership), {
+      state: "managed_turn",
+      conversation: blockingTurn
+    });
+  }
 });
 
 test("Session authority conflict wins without consulting dispatch mismatch", () => {

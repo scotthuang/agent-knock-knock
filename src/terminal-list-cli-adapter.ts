@@ -85,7 +85,8 @@ import {
   selectManagedTerminalHistory,
   selectTerminalAvailableActions,
   type ConflictingManagedSessionClaim,
-  type TerminalActionSet
+  type TerminalActionSet,
+  type TerminalDispatchOwnership
 } from "./terminal-action-projection.js";
 import {
   childProcessIdsForRoot,
@@ -236,11 +237,10 @@ interface TerminalListScan {
   };
 }
 
-interface TerminalDispatchOwnershipResult {
-  state: "none" | "current" | "conflict";
-  conversation?: Conversation;
-  conflict?: JsonObject;
-}
+type TerminalDispatchOwnershipResult = TerminalDispatchOwnership<
+  Conversation,
+  JsonObject
+>;
 
 type TerminalScopedCodexApprovalResolution =
   | { state: "unmanaged" }

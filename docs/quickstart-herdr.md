@@ -28,6 +28,8 @@ AKK enumerates every running local Herdr session, identifies a terminal by its s
 
 To observe a task that you started directly in the Herdr Codex or Claude Code TUI, wait until it is actively working or awaiting approval, run a fresh `/akk list`, and use only that terminal row's advertised `watch` action. A structured caller copies its exact `terminal_id` and `expected_binding_token`; the slash form copies the exact terminal ID into `/akk watch <exact-terminal-id>` and rechecks the current action. The result's `watch_id` is the sole target for `/akk status <watch-id>` and `/akk unwatch <watch-id>`.
 
+Terminal Watch is only for human-started external work. If the terminal already has an active AKK-managed Turn, list and status do not offer Watch and a direct Watch attempt is rejected; use that Turn's existing monitor, status, and callback path instead.
+
 This creates an independent Terminal Watch schema-v1 record, not an AKK Session or Turn. It sends no input and does not adopt, claim, reserve, block, or interrupt the human's task. Approval is notification-only and must be decided in the live TUI; Terminal Watch cannot auto-approve. Its exact Herdr endpoint, process/native-task identity, and privacy-safe rollout or transcript anchor fail closed on any identity, file, boundary, or fingerprint drift. Durable settlement and callback-outbox state let OpenClaw supervision recover and retry an idempotent notification after restart.
 
 Herdr's raw `pane send-text` command is not used for task delivery. AKK uses the Unix-socket `pane.send_input` method so multiline text follows Herdr's bracketed-paste-aware path, persists the text-injected stage, resolves the stable terminal again, and then dispatches one separate Enter.

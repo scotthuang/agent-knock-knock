@@ -86,6 +86,8 @@ Do not treat ordinary send as native clear, new-session, fork, branch, side thre
 
 Terminal Watch is only for one task that the human started directly in the live TUI. The required sequence is human starts the task in Codex or Claude Code → fresh `agent_knock_knock_list` or `/akk list` while it is working or awaiting approval → copy only that row's complete advertised `watch` action → retain the returned `watch_id` for status or unwatch. The slash form `/akk watch <exact-terminal-id>` performs its own fresh list lookup and requires that exact row to still advertise `watch`.
 
+Never suggest or call Terminal Watch for an active AKK-managed Turn. List and status omit the Watch prompt for that Turn, and a direct Watch attempt is rejected; use its existing managed monitor, status, and callback path instead.
+
 The Watch is an independent durable schema-v1 aggregate, not a Conversation, Session, Turn, dispatch receipt, monitor owner, or terminal-input authority. It neither sends input nor adopts, claims, reserves, blocks, interrupts, or continues the human's task. `unwatch` marks only the Watch `cancelled`; it does not press a key or stop the coding agent.
 
 Its authority is the exact terminal endpoint and process incarnation, native thread/task, supported agent behavior profile, and privacy-safe provider anchor captured at creation. Codex binds the exact rollout file plus the current human task's request/turn byte boundaries. Claude binds the exact transcript file, root prompt, and current-turn byte boundaries. Process, endpoint, native-thread, file identity, truncation/replacement, boundary, successor-task, version, fingerprint, missing-evidence, or ambiguity drift invalidates the Watch. Never follow the pane's current task or reconstruct a new anchor.

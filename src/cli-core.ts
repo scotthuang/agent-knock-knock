@@ -81,11 +81,13 @@ import {
   runInstallOpenClaw
 } from "./install-doctor-command-adapter.js";
 import {
-  createTerminalListCliFacade
+  createTerminalListCliFacade,
+  type TerminalListCliOptions
 } from "./terminal-list-cli-adapter.js";
 import {
   createTerminalStatusCliFacade
 } from "./terminal-status-cli-adapter.js";
+import { exactTerminalWatchAction } from "./terminal-list-renderer.js";
 import {
   createTerminalWatchCliAdapter
 } from "./terminal-watch-cli-adapter.js";
@@ -1047,6 +1049,33 @@ const terminalStatusCliFacade = createTerminalStatusCliFacade({
     acquireStateLock: (statePath) => acquireFileLock(`${statePath}.lock`),
     terminalBridgeEnabled
   },
+  watchAuthority: {
+    terminalDispatchOwnership: (terminalControl) =>
+      terminalListCliFacade.terminalDispatchOwnership(terminalControl),
+    terminalIncarnationBlockingTurns: (storeDir, terminalControl) =>
+      terminalListCliFacade.terminalIncarnationBlockingTurns(
+        storeDir,
+        terminalControl
+      ),
+    hasActiveTerminalWatch: (storeDir, terminalId) =>
+      terminalWatchCliFacade.listPublicWatches(storeDir).some(
+        (watch) => stringValue(watch.terminal_id) === terminalId
+      ),
+    hasWatchAction: async (options, terminalId) => {
+      const scan = await terminalListCliFacade.buildTerminalListGroup({
+        options: options as TerminalListCliOptions
+      });
+      const matches = scan.terminalControlled.filter(
+        (terminal) => stringValue(terminal.id) === terminalId
+      );
+      if (matches.length !== 1) return false;
+      const terminal = matches[0];
+      const token = stringValue(terminal.lifecycle_binding_token);
+      return Boolean(
+        token && exactTerminalWatchAction(terminal, terminalId, token)
+      );
+    }
+  },
   projection: {
     callbackRetryDisposition: (delivery) =>
       callbackCliFacade.retryDisposition(delivery),
@@ -1125,11 +1154,22 @@ const terminalListCliFacade = createTerminalListCliFacade({
 
 const terminalWatchCliFacade = createTerminalWatchCliAdapter({
   acquireFileLock,
+  acquireTerminalLock: (storeDir, terminalControl) =>
+    acquireTerminalBridgeSendLock(storeDir, terminalControl, {
+      timeoutMs: 30_000
+    }),
   buildTerminalListGroup: terminalListCliFacade.buildTerminalListGroup,
   loadClaudeAgentRows,
   now: cliNow,
   randomUUID,
   storeDirFromOptions,
+  terminalDispatchOwnership: (terminalControl) =>
+    terminalListCliFacade.terminalDispatchOwnership(terminalControl),
+  terminalIncarnationBlockingTurns: (storeDir, terminalControl) =>
+    terminalListCliFacade.terminalIncarnationBlockingTurns(
+      storeDir,
+      terminalControl
+    ),
   printJson
 });
 

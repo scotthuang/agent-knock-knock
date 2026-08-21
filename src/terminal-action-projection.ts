@@ -178,6 +178,44 @@ export type TerminalDispatchOwnership<Turn, Conflict extends object> =
   | { state: "current"; conversation: Turn }
   | { state: "conflict"; conflict: Conflict };
 
+export type TerminalWatchExternalTaskAuthority<Turn, Conflict extends object> =
+  | { state: "external_task" }
+  | { state: "managed_turn"; conversation: Turn }
+  | { state: "dispatch_conflict"; conflict: Conflict };
+
+/**
+ * Terminal Watch is only for work started outside AKK. A durable blocking
+ * Turn wins even when its dispatch ledger is temporarily absent, while a
+ * current or conflicted dispatch owner must also fail closed.
+ */
+export function decideTerminalWatchExternalTaskAuthority<
+  Turn,
+  Conflict extends object
+>({
+  blockingTurn,
+  dispatchOwnership
+}: {
+  blockingTurn?: Turn;
+  dispatchOwnership: TerminalDispatchOwnership<Turn, Conflict>;
+}): TerminalWatchExternalTaskAuthority<Turn, Conflict> {
+  if (blockingTurn) {
+    return { state: "managed_turn", conversation: blockingTurn };
+  }
+  if (dispatchOwnership.state === "current") {
+    return {
+      state: "managed_turn",
+      conversation: dispatchOwnership.conversation
+    };
+  }
+  if (dispatchOwnership.state === "conflict") {
+    return {
+      state: "dispatch_conflict",
+      conflict: dispatchOwnership.conflict
+    };
+  }
+  return { state: "external_task" };
+}
+
 interface TerminalSessionDispatchMismatchConflict {
   reason: string;
   owner_session_id?: string;

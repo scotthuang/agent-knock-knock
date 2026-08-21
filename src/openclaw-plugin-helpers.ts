@@ -345,7 +345,7 @@ export function formatAkkListCommandResult(result: Record<string, unknown>): str
         ? [`  lifecycle terminal_id: ${terminalId}`]
         : []),
       ...(hasWatchAction && terminalId
-        ? [`  watch terminal_id: ${terminalId}`]
+        ? [`  AKK Watch available: /akk watch ${terminalId} — monitor this human-started task and receive attention/completion callbacks without polling.`]
         : []),
       ...(sessionId || sessionShortRef
         ? [`  AKK session: ${sessionShortRef ?? sessionId}`]
@@ -463,6 +463,62 @@ export function formatAkkWatchStatusCommandResult(
       : []),
     "This is observed external work; AKK did not send or adopt the task."
   ].join("\n");
+}
+
+export function formatAkkTerminalWatchHint(
+  result: Record<string, unknown>
+): string[] {
+  const hint = recordValue(result.terminal_watch_hint);
+  if (
+    hint?.kind !== "terminal_watch_discovery" ||
+    hint.available_action_required !== true
+  ) {
+    return [];
+  }
+  const command = nonEmptyString(hint.command);
+  const instruction = nonEmptyString(hint.instruction);
+  if (!command || !instruction) {
+    return [];
+  }
+  return [
+    `AKK Watch available: ${command}`,
+    `next: ${instruction}`
+  ];
+}
+
+export function akkWatchUnavailableMessage(
+  terminal: Record<string, unknown>,
+  terminalWatches: unknown[],
+  terminalId: string
+): string {
+  const managed = recordValue(terminal.managed);
+  const currentTurn = recordValue(managed?.current_turn);
+  if (currentTurn) {
+    const turnId = nonEmptyString(currentTurn.turn_id) ??
+      nonEmptyString(currentTurn.conversation_id) ?? "unknown";
+    const status = nonEmptyString(currentTurn.status) ?? "unknown";
+    return `terminal ${terminalId} already belongs to AKK Turn ${turnId} ` +
+      `(${status}) and is covered by the managed Turn monitor/callback path; ` +
+      "use AKK status for that Turn instead of Terminal Watch";
+  }
+  const managementConflict = recordValue(terminal.management_conflict);
+  if (managementConflict) {
+    const reason = nonEmptyString(managementConflict.reason) ??
+      "terminal ownership is conflicted";
+    return `terminal ${terminalId} cannot be watched because AKK cannot ` +
+      `prove it is external work: ${reason}`;
+  }
+  const activeWatch = terminalWatches
+    .map(recordValue)
+    .find((watch) =>
+      watch?.status === "active" && watch.terminal_id === terminalId
+    );
+  if (activeWatch) {
+    return `terminal ${terminalId} is already monitored by Terminal Watch ` +
+      `${nonEmptyString(activeWatch.watch_id) ?? "unknown"}; use watch-status`;
+  }
+  return `terminal ${terminalId} does not currently advertise an exact ` +
+    "watch action; refresh AKK list and use only available_actions.watch";
 }
 
 export function formatAkkRespondCommandResult(
